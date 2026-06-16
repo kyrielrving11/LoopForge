@@ -61,18 +61,6 @@ tests/
 - Global vault: `~/.promptcraft/global_vault.json` — hydrate.py auto-merges.
 - Use `checkpoint.py --global` for cross-project entries; `hydrate.py --no-global` to opt out.
 
-## Next: Agent Architecture
-
-The current Skills architecture runs prompt engineering inside the main agent's
-context (~30% overhead). The planned evolution is a dedicated PromptCraft
-sub-agent with its own context. See `docs/AGENT_ARCHITECTURE.md` for the
-complete design. Implementation phases:
-1. Agent system prompt + registration
-2. Dispatcher skill (lightweight main-agent glue)
-3. Protocol refinement
-4. Migration + compatibility
-5. Advanced features (batch, templates, proactive suggestions)
-
 ## Memory
 
 Persistent project memory at: `C:\Users\Dell\.claude\projects\C--Users-Dell-Desktop-PromptCraft-Skills\memory\`

@@ -67,7 +67,7 @@ PromptCraft/
 
 ---
 
-## 工作流（更新版）
+## 工作流
 
 加载 `prompt-craft` 后自动执行：
 
@@ -121,17 +121,16 @@ python hydrate.py --query "审计合约" --no-global
 
 ## 安装使用
 
-将 `skills/` 下的 4 个 Skill 目录复制到你的项目或用户 Skills 目录
-（如 CodeBuddy 的 `.codebuddy/skills/`）：
+将 `skills/` 下的 4 个 Skill 目录复制到你的项目或用户 Skills 目录：
 
 ```
-your-project/.codebuddy/skills/prompt-craft/
-your-project/.codebuddy/skills/prompt-memory/
-your-project/.codebuddy/skills/prompt-techniques/
-your-project/.codebuddy/skills/prompt-review/
+your-project/.codex/skills/prompt-craft/
+your-project/.codex/skills/prompt-memory/
+your-project/.codex/skills/prompt-techniques/
+your-project/.codex/skills/prompt-review/
 ```
 
-脚本默认以 `.promptcraft/` 为 vault 根目录，`.codebuddy/skills/prompt-memory/scripts/`
+脚本默认以 `.promptcraft/` 为 vault 根目录，`.codex/skills/prompt-memory/scripts/`
 为脚本路径。可通过 `--vault` / `--prompts-dir` 覆盖。
 
 在 CodeBuddy / Codex / Claude Code 对话中：
@@ -163,11 +162,6 @@ AI 自动执行完整工作流。
 - 双存储：JSON 快速检索元数据，`.md` 保存完整可读 Prompt
 - 联邦：全局 vault 跨项目约束，项目 vault 本地决策
 - 丰富的技术参考——含设计规则、JSON 模板、案例生成规则
-
-## 版本
-
-**v2.1** — v2.0 Skills Edition + 多项目联邦 + 查询扩展 + 执行反馈闭环。
-42 个单元测试。详见 git 提交历史。
 
 ## 许可证
 

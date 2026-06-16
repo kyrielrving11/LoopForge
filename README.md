@@ -68,7 +68,7 @@ Global vault (cross-project): `~/.promptcraft/global_vault.json`
 
 ---
 
-## The Pipeline (Updated)
+## The Pipeline 
 
 Loading `prompt-craft` triggers an automatic pipeline:
 
@@ -125,17 +125,17 @@ python hydrate.py --query "audit contract" --no-global
 ## Install & Use
 
 Copy the 4 Skill directories from `skills/` into your project or user
-Skills directory (e.g. `.codebuddy/skills/` for CodeBuddy):
+Skills directory (e.g. `.codex/skills/` for CodeBuddy):
 
 ```
-your-project/.codebuddy/skills/prompt-craft/
-your-project/.codebuddy/skills/prompt-memory/
-your-project/.codebuddy/skills/prompt-techniques/
-your-project/.codebuddy/skills/prompt-review/
+your-project/.codex/skills/prompt-craft/
+your-project/.codex/skills/prompt-memory/
+your-project/.codex/skills/prompt-techniques/
+your-project/.codex/skills/prompt-review/
 ```
 
 The scripts default to `.promptcraft/` as the vault root and
-`.codebuddy/skills/prompt-memory/scripts/` as the scripts path. Override via
+`.codex/skills/prompt-memory/scripts/` as the scripts path. Override via
 `--vault` / `--prompts-dir` flags.
 
 Then, in a CodeBuddy / Codex / Claude Code chat:
@@ -167,11 +167,6 @@ The AI automatically runs the full pipeline.
 - Dual storage: JSON for fast metadata search, `.md` for complete prompt readability
 - Federation: global vault for cross-project constraints, project vault for local decisions
 - Rich technique references — design rules, JSON templates, case generation rules
-
-## Version
-
-**v2.1** — v2.0 Skills Edition + multi-project federation + query expansion +
-execution feedback loop. 42 unit tests. See git history for full changelog.
 
 ## License
 

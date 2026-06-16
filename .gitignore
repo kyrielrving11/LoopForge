@@ -1,2 +1,6 @@
 # PromptCraft generated files
 .promptcraft/
+
+# Python
+__pycache__/
+*.pyc

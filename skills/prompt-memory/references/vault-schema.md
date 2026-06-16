@@ -26,10 +26,40 @@ prompt checkpoints. Each entry represents one version of a prompt for a given ta
 | `user_intent` | string | yes | The user's original task goal in their own words. |
 | `hard_constraints` | array of strings | no | Non-negotiable constraints derived during prompt engineering. |
 | `key_decisions` | array of strings | no | Key technique/routing decisions made during prompt construction. |
-| `generated_prompt` | string | no | **The complete generated prompt text**, stored in full without truncation. Use `hydrate.py --full` to retrieve it alongside search results. |
-| `generated_prompt_preview` | string (≤200 chars) | auto | Auto-generated truncated preview of `generated_prompt`. Included in `--full` results for quick identification. |
+| `generated_prompt` | string | no | **(Logical field — not stored inline in JSON)**. The complete prompt text lives in the `.md` file pointed to by `md_path`. Retrieve it via `hydrate.py --full` or when score exceeds the auto-full threshold. |
+| `md_path` | string | no | Relative path to the `.md` file containing the complete prompt (e.g. `prompts/smart-contract-audit/v1.md`). Set by checkpoint.py when `generated_prompt` is provided. |
+| `generated_prompt_preview` | string (≤200 chars) | auto | Truncated preview of the full prompt (first 200 chars). Stored inline in JSON for quick identification without reading the `.md` file. |
 | `execution_feedback` | string | no | User feedback on how well the prompt performed (e.g. "F1=94%"). |
 | `tags` | array of strings | no | Freeform tags for categorization and semantic search. |
+| `summary` | object | no | LLM-generated structured summary. Stores conclusions without exposing raw prompt text. See Summary Schema below. |
+
+### Summary Sub-Schema
+
+When present, `summary` is a nested JSON object with the following fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `goal` | string | One-sentence task objective. |
+| `technique` | string | Technique used (e.g. `zero-shot`, `tree-of-thought`). |
+| `importance` | string | Memory tier: `GLOBAL`, `STAGE`, `WORKING`, or `REFERENCE`. |
+| `what_was_done` | array of strings | Key actions completed. |
+| `key_decisions` | array of strings | Design decisions, boundaries, trade-offs finalized. |
+| `hard_constraints_added` | array of strings | New long-term constraints added in this session (de-duplicated against global `hard_constraints`). |
+| `rejected_directions` | array of strings | Explicitly abandoned approaches — prevents re-discussion in future sessions. |
+| `important_outputs` | array of strings | Reusable artifacts produced (file paths, modules, test results). |
+| `open_questions` | array of strings | Unresolved issues requiring user or future-session attention. |
+| `summary_text` | string | 2-3 sentence natural-language summary of what was achieved. |
+
+**Compaction rules** applied during summary generation:
+1. Store only task-level assets — no full chat logs or casual exchanges.
+2. `summary_text` must summarize real takeaways; do not rephrase `goal`.
+3. `key_decisions` only records finalized design, boundaries, trade-offs, or interface contracts.
+4. `important_outputs` only records reusable artifacts.
+5. `hard_constraints_added` only records newly added long-term constraints, de-duplicated against the global `hard_constraints` list.
+6. `rejected_directions` records explicitly abandoned approaches to prevent redundant discussion.
+7. `open_questions` records issues still needing resolution from the user or future sessions.
+8. If no key decisions were made, use an empty array `[]` for `key_decisions`.
+9. **Never expose raw prompt text** in any summary field — the summary is for retrieval only; the full prompt exists in the `.md` file.
 
 ## Version Lifecycle
 
@@ -49,11 +79,45 @@ When performing semantic search, the following fields are scored with keyword ov
 | Field | Weight |
 |-------|--------|
 | `user_intent` | ×2.0 |
+| `summary.summary_text` | ×2.0 |
 | `tags` | ×2.0 |
+| `summary.goal` | ×1.5 |
 | `hard_constraints` | ×1.0 |
 | `key_decisions` | ×1.0 |
+| `summary.key_decisions` | ×1.0 |
+| `summary.hard_constraints_added` | ×1.0 |
+| `summary.what_was_done` | ×0.8 |
 | `execution_feedback` | ×0.5 |
+| `summary.important_outputs` | ×0.5 |
+| `summary.open_questions` | ×0.5 |
+| `summary.rejected_directions` | ×0.5 |
 
-`generated_prompt` and `generated_prompt_preview` are NOT included in default search results
-to keep context injection under ~500 tokens. Use `hydrate.py --query "..." --full` to include
-the complete prompt text when you need to reuse a previously saved prompt.
+## Retrieval Privacy
+
+By default, hydrate.py returns only the `summary` object (no raw prompt text). The full
+`generated_prompt` is injected only when:
+
+| Condition | Behavior |
+|-----------|----------|
+| `score > 0.75` | Auto-inject full prompt alongside summary (configurable via `--auto-full-threshold`) |
+| `--full` | Force-inject full prompt regardless of score |
+| Default (score ≤ 0.75) | Return summary only — no prompt preview |
+
+This ensures historical prompt text is protected unless there is strong semantic relevance.
+
+## GLOBAL Entry Injection
+
+Entries marked `summary.importance: "GLOBAL"` are treated specially by `hydrate.py`:
+
+- **Always returned**: GLOBAL entries appear in every query result under the `global_entries`
+  key, regardless of their Jaccard score against the query. They ignore `--task-id` and
+  `--skill` filters.
+- **Auto-full still applies**: If a GLOBAL entry's score exceeds the auto-full threshold
+  (or `--full` is set), its complete prompt is injected alongside the summary — same as
+  regular entries.
+- **Deduplicated**: If a GLOBAL entry would also appear in the top-k regular results, it
+  is placed in `global_entries` only and excluded from `results`.
+
+This ensures long-term cross-task constraints (e.g. "all contracts must pass Slither",
+"zero external dependencies") are injected into every session's context, regardless of
+how the user phrases their current query.

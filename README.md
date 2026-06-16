@@ -23,7 +23,7 @@ brief you hand it.
 
 ```
 PromptCraft/
-├── .codebuddy/skills/
+├── skills/
 │   ├── prompt-craft/          # Core workflow: route → build → save → execute
 │   │   ├── SKILL.md           #   6-step workflow + LLM router system prompt
 │   │   └── references/        #   routing matrix + build checklist
@@ -37,12 +37,11 @@ PromptCraft/
 │   └── prompt-review/         # Prompt quality audit & improvement
 │       ├── SKILL.md
 │       └── references/        #   review checklist
-├── .promptcraft/              # Runtime storage (dual-storage architecture)
+├── .promptcraft/              # Runtime storage (dual-storage architecture, created on first use)
 │   ├── prompt_vault.json      #   lightweight metadata index (~200 tokens/entry)
 │   └── prompts/               #   complete prompt archive
 │       └── <task_id>/
 │           └── v1.md          #   full prompt (Markdown, human-readable)
-├── examples/
 ├── LICENSE
 └── README.md / README.zh-CN.md
 ```
@@ -78,8 +77,8 @@ Step 5: Action selection
 
 ## Install & Use
 
-Copy the 4 Skill directories from `.codebuddy/skills/` into your project or user
-Skills directory:
+Copy the 4 Skill directories from `skills/` into your project or user
+Skills directory (e.g. `.codebuddy/skills/` for CodeBuddy, or your tool's equivalent):
 
 ```
 your-project/.codebuddy/skills/prompt-craft/
@@ -87,6 +86,10 @@ your-project/.codebuddy/skills/prompt-memory/
 your-project/.codebuddy/skills/prompt-techniques/
 your-project/.codebuddy/skills/prompt-review/
 ```
+
+The scripts default to `.promptcraft/` as the vault root and
+`.codebuddy/skills/prompt-memory/scripts/` as the scripts path. Override via
+`--vault` / `--prompts-dir` flags if your layout differs.
 
 Then, in a CodeBuddy / Codex chat:
 

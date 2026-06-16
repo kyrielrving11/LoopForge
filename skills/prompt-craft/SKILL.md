@@ -22,6 +22,14 @@ All state is persisted to `.promptcraft/prompt_vault.json` via the
 Load `prompt-memory` alongside this skill. Load `prompt-techniques` references
 on demand (Step 2). Do NOT pre-load all technique files.
 
+### Script Paths
+
+The paths below assume the standard install layout (`.codebuddy/skills/`).
+If your skills are installed at a different location, adjust accordingly:
+- **Installed**: `python .codebuddy/skills/prompt-memory/scripts/hydrate.py`
+- **In this repo**: `python skills/prompt-memory/scripts/hydrate.py`
+- **Custom**: use `--vault` and `--prompts-dir` flags on both scripts.
+
 ---
 
 ## Step 0: Boot Check — Load History
@@ -32,9 +40,32 @@ If `.promptcraft/prompt_vault.json` exists, execute:
 python .codebuddy/skills/prompt-memory/scripts/hydrate.py --query "<user's current task description>" --top-k 3
 ```
 
-This returns compact results (no prompt text) — inject the returned
-`hard_constraints`, `key_decisions`, and `execution_feedback` into the current
-context.
+The response contains two groups:
+
+### `global_entries` — Always Inject (Unconditional)
+
+Entries marked `summary.importance: "GLOBAL"` are **always returned** regardless of query
+match. These represent cross-task long-term constraints — they MUST be injected into the
+current session context unconditionally:
+
+- **`hard_constraints`** — add to the base constraint set for every new prompt built in
+  this session.
+- **`summary.hard_constraints_added`** — merge into the global constraint baseline; these
+  were explicitly vetted as long-term rules.
+- **`summary.key_decisions`** — carry forward as established design boundaries.
+- **`summary.summary_text`** — inject as background context so the LLM knows what prior
+  sessions decided at the global level.
+- **`summary.rejected_directions`** — avoid re-discussing these approaches.
+
+### `results` — Top-K by Relevance
+
+This returns compact results **with LLM-generated summaries** (no raw prompt text). Inject the
+returned `summary` (goal, technique, key_decisions, hard_constraints_added, rejected_directions,
+etc.), `hard_constraints`, and `execution_feedback` into the current context.
+
+**When score > 0.75**, hydrate.py auto-injects the full `generated_prompt` alongside the summary.
+This means a strongly related past task will have its complete prompt available without the user
+needing to ask — but the raw text is protected for weakly related entries.
 
 If the user explicitly asks to **reuse a previously saved prompt**, use `--full`:
 
@@ -42,7 +73,7 @@ If the user explicitly asks to **reuse a previously saved prompt**, use `--full`
 python .codebuddy/skills/prompt-memory/scripts/hydrate.py --query "<task description>" --full --top-k 1
 ```
 
-This returns the complete `generated_prompt` text alongside metadata.
+This returns the complete `generated_prompt` text alongside metadata and summary.
 
 If no vault exists, skip to Step 1.
 
@@ -66,15 +97,16 @@ the best technique from the skill library.
 - zero-shot: Simple code explanation, formatting, rename variables (low load, high continuity).
 - few-shot: Standard CRUD modules, routine unit tests (medium load, fixed patterns).
 - zero-shot-cot: Multi-step reasoning without examples (medium-high load).
-- few-shot-cot: Reasoning relay when examples exist (high load, continuous).
+- few-shot-cot: Reasoning relay when user has provided complete reasoning examples — input→reasoning→output triples (high load, continuous).
 - step-back: Vague errors, messy legacy refactoring — abstract principles first (high load, independent).
-- least-to-most: Large multi-step modules — decompose into ordered sub-tasks (high load, continuous).
+- least-to-most: Large multi-step modules that decompose into 4-6 ordered subproblems with clear dependencies — user has NOT provided reasoning examples (high load, continuous).
 - tree-of-thought: Core algorithms, crypto/signature verification, Assembly ops (high risk, strong independence, high load).
 
 【Reasoning Steps】
 1. Independence analysis: Is this a modification of existing context (continuous) or a completely new, self-contained feature (independent)?
 2. Cognitive load evaluation: Does this involve low-level EVM, concurrency, security auditing (high), standard CRUD (medium), or simple changes (low)?
-3. Select the best match. Read references/technique-routing-matrix.md for detailed decision table.
+3. For Continuous + High: check whether the user has provided reasoning examples from prior context. If yes → few-shot-cot. If the task naturally decomposes into ordered subproblems (e.g. compiler stages, data pipeline) → least-to-most. If both → prefer few-shot-cot. If neither → fall back to zero-shot-cot.
+4. Select the best match. Read references/technique-routing-matrix.md for detailed decision table.
 
 【If Independent + High Cognitive Load】
 Actively ignore prior conversation content unrelated to the current task.
@@ -208,6 +240,75 @@ Execute checkpoint.py to persist. Write the payload to a temp JSON file (method 
 python .codebuddy/skills/prompt-memory/scripts/checkpoint.py --input /path/to/temp_entry.json
 ```
 
+### Step 4.0: Generate LLM Summary (before checkpoint)
+
+**Before** calling checkpoint.py, you MUST generate a structured summary of the constructed
+prompt. Read the complete `generated_prompt` and produce a summary JSON following the rules below.
+The summary MUST NOT contain raw prompt text — it stores conclusions, not excerpts.
+
+**Summary Schema (10 fields):**
+
+```json
+{
+  "goal": "一句话任务目标",
+  "technique": "使用的技法",
+  "importance": "GLOBAL|STAGE|WORKING|REFERENCE",
+  "what_was_done": ["已完成的关键动作"],
+  "key_decisions": ["已确定的设计/边界/取舍"],
+  "hard_constraints_added": ["新增的长期强约束（已和全局hard_constraints去重）"],
+  "rejected_directions": ["明确否定的路线"],
+  "important_outputs": ["可复用产物路径或名称"],
+  "open_questions": ["仍需解决的问题"],
+  "summary_text": "2-3句自然语言摘要，总结真实沉淀"
+}
+```
+
+**Compaction Rules (9 rules — must follow):**
+
+1. 只保存任务级资产，不保存完整聊天记录或临时寒暄。
+2. `summary_text` 必须概括真实沉淀，不要简单复读 `goal`。
+3. `key_decisions` 只记录已经确定的设计、边界、取舍或接口约定。
+4. `important_outputs` 只记录可复用产物（文件路径、模块名、测试结论等）。
+5. `hard_constraints_added` 只记录本次新增的长期强约束，必须与全局 `hard_constraints` 去重。若没有新增，使用空数组 `[]`。
+6. `rejected_directions` 记录明确否定的路线，避免后续会话重复讨论。
+7. `open_questions` 记录仍需用户或后续阶段解决的问题。
+8. 如果没有关键决策，`key_decisions` 使用空数组 `[]`。
+9. **任何字段都不能包含原始提示词文本** — summary 仅用于检索，完整提示词存在 `.md` 文件中。
+
+**importance 分级参考：**
+
+| 级别 | 含义 | 示例 |
+|------|------|------|
+| `GLOBAL` | 跨任务长期约束，后续所有任务都应知晓。**标记为 GLOBAL 的条目将在每次 hydrate.py 查询时无条件返回。** | "必须零外部依赖"、"所有合约须过 Slither" |
+| `STAGE` | 当前任务范围内的关键决策 | "采用 5×5 风险矩阵作为统一评分标准" |
+| `WORKING` | 施工中，仍有调整空间 | "先完成 Module A 再扩展 Module B" |
+| `REFERENCE` | 可查阅但不注入上下文 | "参考了 OWASP 智能合约 Top 10" |
+
+Include the summary in the checkpoint payload as the `summary` field. Example temp entry:
+
+```json
+{
+  "task_id": "smart-contract-audit",
+  "user_intent": "审计 ERC-20 合约的权限控制逻辑",
+  "generated_prompt": "<complete enhanced prompt text>",
+  "skill_used": "tree-of-thought",
+  "hard_constraints": ["零外部依赖", "必须通过 Slither"],
+  "key_decisions": ["采用 5×5 风险矩阵"],
+  "summary": {
+    "goal": "审计 ERC-20 合约的权限控制逻辑，检测增发/销毁/转移权漏洞",
+    "technique": "tree-of-thought",
+    "importance": "GLOBAL",
+    "what_was_done": ["构造3个多签绕过攻击场景", "逐分支评分"],
+    "key_decisions": ["采用5×5风险矩阵作为统一评分标准"],
+    "hard_constraints_added": ["必须通过 Slither"],
+    "rejected_directions": ["不采用模糊测试（Gas成本过高）"],
+    "important_outputs": ["漏洞清单v1"],
+    "open_questions": [],
+    "summary_text": "通过ToT多分支分析，检出3个高危权限漏洞。核心决策是统一用5×5风险矩阵评分，否定了模糊测试方案因为Gas不可控。"
+  }
+}
+```
+
 The payload MUST include:
 - `task_id` (required) — kebab-case identifier
 - `user_intent` (required) — the user's original task goal
@@ -215,10 +316,11 @@ The payload MUST include:
 - `skill_used` — the selected technique
 - `hard_constraints` — non-negotiable rules
 - `key_decisions` — key decisions made during construction
+- `summary` (recommended) — LLM-generated structured summary from Step 4.0
 
 checkpoint.py will:
 1. Write `generated_prompt` → `.promptcraft/prompts/<task_id>/<version_tag>.md`
-2. Store only `md_path` + `generated_prompt_preview` (200 chars) in the JSON index
+2. Store `md_path` + `generated_prompt_preview` (200 chars) + `summary` in the JSON index
 
 **Version bump for existing task:**
 

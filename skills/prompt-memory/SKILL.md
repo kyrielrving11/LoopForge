@@ -34,6 +34,29 @@ search against the vault and returns only `is_active` versions of matching tasks
 By default returns compact results (metadata only, ~500 tokens). Use `--full` to
 include the complete generated prompt text for reuse.
 
+**Query response structure:**
+
+```json
+{
+  "status": "ok",
+  "query": "<search text>",
+  "auto_full_threshold": 0.75,
+  "global_entries": [...],   // GLOBAL entries — always returned regardless of query match
+  "results": [...],          // Top-k scored entries (excluding those already in global_entries)
+  "total_active_tasks": 42
+}
+```
+
+**`global_entries`** contains all active entries whose `summary.importance` is `"GLOBAL"`.
+These represent cross-task long-term constraints and are returned unconditionally —
+they ignore `--task-id` / `--skill` filters and are not subject to the top-k cutoff.
+The caller MUST inject GLOBAL entries' `hard_constraints`, `summary.key_decisions`,
+`summary.hard_constraints_added`, and `summary.summary_text` into every session context.
+
+Each entry in both groups carries:
+- `"global": true/false` — whether it came from the GLOBAL pool.
+- `"auto_full": true/false` — whether the full prompt was auto-injected (score > threshold).
+
 Also supports:
 - `--rollback-to <v1>` to switch the active version for a task.
 - `--list-versions` to inspect a task's full version chain.

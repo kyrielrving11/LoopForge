@@ -75,6 +75,12 @@
 
 ## Dynamic Sample Persistence
 
+> **Status: Future feature — not yet implemented.** The `persist_sample: true` flag
+> and sample library described below are a planned enhancement. Currently, samples
+> live only within the session — they are not persisted across sessions by any
+> script. The checkpoint.py + hydrate.py vault stores prompts and summaries, not
+> raw input→output examples.
+
 当用户明确要求"把这个例子保存下来""加入样例库"或 payload 设置 `persist_sample: true` 时，将本轮示例追加到样本库。追加条目应包含：
 
 - 任务、角色、输出格式、待处理内容占位和约束。
@@ -133,7 +139,7 @@
 
 **B. 输入→输出映射规则总结框**：一个 ASCII 框图，汇总所有示例中提取的通用规则。
 
-格式范本：
+格式范本（来自 MCP 黄金标准 `prompt_02_vital_signs`）：
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐

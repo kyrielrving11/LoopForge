@@ -25,7 +25,7 @@ task along two dimensions:
 |:---|:---|:---|:---|
 | Continuous | Low | `zero-shot` | Lightweight fixes; don't disturb context. |
 | Continuous | Medium | `few-shot` | Reuse established patterns from the session. |
-| Continuous | High | `few-shot-cot` | Reasoning relay — carry forward prior insights. |
+| Continuous | High | `few-shot-cot` or `least-to-most` | **few-shot-cot**: user has provided reasoning examples (input→reasoning→output triples) from prior context — carry forward prior insights as a reasoning relay. **least-to-most**: the task itself decomposes naturally into 4-6 ordered subproblems with clear dependencies, but the user has NOT provided reasoning examples. If both conditions are true, prefer `few-shot-cot`. |
 | Independent | Low | `zero-shot` | Fresh start, simple task. |
 | Independent | Medium | `few-shot` or `zero-shot-cot` | Pattern-based or light reasoning as appropriate. |
 | Independent | High | `tree-of-thought` | Explore multiple candidate paths; prune weak ones. Use `step-back` instead if the task requires abstracting principles first before branching. |
@@ -36,6 +36,11 @@ task along two dimensions:
   flush. Erring on the side of keeping context is safer.
 - **If cognitive load is borderline (medium/high)**: Round up to High for tasks
   involving any of: security, money, concurrency, user data, or irreversibility.
+- **Continuous + High — choosing between `few-shot-cot` and `least-to-most`**:
+  - Does the user's prior context contain complete reasoning examples (input→reasoning→output triples)? → `few-shot-cot`
+  - Can the task be cleanly decomposed into 4-6 ordered subproblems (e.g. compiler stages, data pipeline, multi-step module)? → `least-to-most`
+  - If both conditions hold, prefer `few-shot-cot` (leverage existing examples first).
+  - If neither holds (no examples, no natural decomposition), fall back to `zero-shot-cot` and note the downgrade reason.
 - **If the user explicitly requests a technique**: Use it directly — skip the matrix.
 - **If no vault exists**: Skip Step 0, proceed directly to routing.
 

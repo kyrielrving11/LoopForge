@@ -1,4 +1,4 @@
-"""Workpace-anchored prompt memory: save prompt contexts.
+"""Workspace-anchored prompt memory: save prompt contexts.
 
 Dual storage:
   - .promptcraft/prompts/<task_id>/<version_tag>.md  ← complete prompt (Markdown, human-readable)
@@ -25,7 +25,7 @@ from pathlib import Path
 _REQUIRED_KEYS = {"task_id", "user_intent"}
 _OPTIONAL_KEYS = {
     "skill_used", "stage", "hard_constraints", "key_decisions",
-    "generated_prompt", "execution_feedback", "tags",
+    "generated_prompt", "execution_feedback", "tags", "summary",
 }
 
 DEFAULT_VAULT = Path(".promptcraft/prompt_vault.json")
@@ -43,12 +43,22 @@ def _truncate(text: str, max_chars: int = MAX_PREVIEW_CHARS) -> str:
 
 
 def _read_vault(path: Path) -> dict:
+    """Read the vault file with graceful error handling."""
     if not path.exists():
         return {"version": "1", "entries": []}
-    with path.open("r", encoding="utf-8") as f:
-        data = json.load(f)
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        print(json.dumps({"status": "warning", "message": f"Vault is corrupted ({exc}). Starting with empty vault."}))
+        return {"version": "1", "entries": []}
+    if not isinstance(data, dict):
+        print(json.dumps({"status": "warning", "message": "Vault is not a JSON object. Starting with empty vault."}))
+        return {"version": "1", "entries": []}
     if not isinstance(data.get("entries"), list):
         data["entries"] = []
+    # Filter out malformed entries (non-dict)
+    data["entries"] = [e for e in data["entries"] if isinstance(e, dict)]
     data.setdefault("version", "1")
     return data
 
@@ -88,17 +98,46 @@ def _write_prompt_md(prompts_dir: Path, task_id: str, version_tag: str, content:
     return str(md_path.as_posix())
 
 
+def _list_field(payload: dict, key: str) -> list[str]:
+    value = payload.get(key, [])
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if str(v).strip()]
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+    return []
+
+
 def _build_entry(payload: dict, vault: dict, prompts_dir: Path, version_of: str | None) -> dict:
     _validate_entry(payload)
 
     full_prompt = str(payload.get("generated_prompt", "")).strip()
+    task_id = str(payload["task_id"]).strip()
+
+    # ── Validate version_of matches task_id ──
+    if version_of and version_of != task_id:
+        raise ValueError(
+            f"--version-of target '{version_of}' does not match payload task_id '{task_id}'. "
+            f"Use --version-of {task_id} to create a new version, or omit --version-of for a new task."
+        )
+
+    # ── Determine version_tag and parent_version ──
+    if version_of:
+        active = _find_active(vault, task_id)
+        count = _count_versions(vault, task_id)
+        version_tag = f"v{count + 1}"
+        parent_version = active["version_tag"] if active else None
+    else:
+        count = _count_versions(vault, task_id)
+        version_tag = f"v{count + 1}" if count > 0 else "v1"
+        parent_version = None
 
     entry = {
         "id": str(uuid.uuid4()),
-        "task_id": str(payload["task_id"]).strip(),
-        "version_tag": "v1",
+        "task_id": task_id,
+        "version_tag": version_tag,
         "is_active": True,
-        "parent_version": None,
+        "parent_version": parent_version,
         "timestamp": _utc_now(),
         "skill_used": str(payload.get("skill_used", "")).strip(),
         "user_intent": str(payload.get("user_intent", "")).strip(),
@@ -109,42 +148,23 @@ def _build_entry(payload: dict, vault: dict, prompts_dir: Path, version_of: str 
         "tags": _list_field(payload, "tags"),
     }
 
-    # Write full prompt to .md file, store only the path reference
-    if full_prompt:
-        entry["md_path"] = _write_prompt_md(prompts_dir, entry["task_id"], entry["version_tag"], full_prompt)
+    # Store LLM-generated summary if present
+    summary = payload.get("summary")
+    if isinstance(summary, dict):
+        entry["summary"] = summary
 
-    task_id = entry["task_id"]
+    # Write full prompt to .md file once (uses final version_tag)
+    if full_prompt:
+        entry["md_path"] = _write_prompt_md(prompts_dir, task_id, version_tag, full_prompt)
+
+    # ── Deactivate prior versions and append to vault ──
     if version_of and version_of == task_id:
-        active = _find_active(vault, task_id)
-        count = _count_versions(vault, task_id)
-        entry["version_tag"] = f"v{count + 1}"
-        entry["parent_version"] = active["version_tag"] if active else None
-        # Re-write md_path with the correct version_tag
-        if full_prompt:
-            entry["md_path"] = _write_prompt_md(prompts_dir, entry["task_id"], entry["version_tag"], full_prompt)
         for e in vault["entries"]:
             if e.get("task_id") == task_id:
                 e["is_active"] = False
-        vault["entries"].append(entry)
-    else:
-        count = _count_versions(vault, task_id)
-        entry["version_tag"] = f"v{count + 1}" if count > 0 else "v1"
-        # Re-write md_path with correct version_tag (in case count > 0)
-        if full_prompt:
-            entry["md_path"] = _write_prompt_md(prompts_dir, entry["task_id"], entry["version_tag"], full_prompt)
-        vault["entries"].append(entry)
+    vault["entries"].append(entry)
 
     return entry
-
-
-def _list_field(payload: dict, key: str) -> list[str]:
-    value = payload.get(key, [])
-    if isinstance(value, list):
-        return [str(v).strip() for v in value if str(v).strip()]
-    if isinstance(value, str):
-        text = value.strip()
-        return [text] if text else []
-    return []
 
 
 def main() -> None:

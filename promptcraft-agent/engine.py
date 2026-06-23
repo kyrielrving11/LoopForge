@@ -4,29 +4,27 @@ The Engine manages the lifecycle of prompt iterations within a session.
 It is the "QueryEngine" equivalent for PromptCraft — it decides whether to
 continue refining, stop with success, or escalate via circuit breaker.
 
-v3: Engine now orchestrates Tools (Personalization / Prompt Build / Feedback
-Collect / Pattern Analysis / Skill Advisor) via the ToolRegistry. Legacy
-builder.py is still used by PromptBuildTool.
+v3: Engine orchestrates Tools (Personalization / PromptBuild / PatternAnalysis
+/ SkillAdvisor) via the ToolRegistry. Feedback collection is inline.
 
 Cf. Claude Code's QueryEngine vs query() separation.
 
-=== HOTSPOT OWNERSHIP (1296 lines — largest file in the project) ===
+=== HOTSPOT OWNERSHIP ===
 
 Belongs here:
   - Lifecycle orchestration: the 5 public invoke_* methods (one per mode)
   - Mode routing: mapping user intent → tool selection
   - Feedback pipeline: quality scoring → buffer → vault persistence → analysis trigger
-  - Vault I/O: _persist_feedback_to_vault, _run_aggregate_query, _flush_feedback_buffer
+  - Vault I/O: _persist_feedback_to_vault, _flush_feedback_buffer, _run_aggregate_query
   - Circuit breaker coordination: _guard_tool_execution, _should_break
   - Batch processing: invoke_batch, _batch_response_to_loop
+  - EngineContext + EngineMetrics (merged from context.py)
 
 Does NOT belong here (add to these files instead):
   - Tool implementations → promptcraft-agent/tools/*.py
   - Protocol / schema definitions → promptcraft-agent/protocol.py
   - Execution boundary guards → promptcraft-agent/boundary.py
   - HealthReport logic → promptcraft-agent/health_report.py
-  - Circuit breaker state machine → promptcraft-agent/circuit_breaker.py
-  - Shared context container → promptcraft-agent/context.py
 
 Tests: tests/test_engine_modes.py (19 tests for 5 invoke_* + maybe_silent_analyze)
 """
@@ -41,33 +39,88 @@ from pathlib import Path
 from typing import Any
 
 from protocol import (
-    AgentLoopResult, AgentStatus, ConflictDetail,
+    AgentLoopResult, AgentStatus, Analysis, ConflictDetail,
     ContinueReason, FeedbackResponse, Mode, PromptCraftRequest,
     PromptCraftResponse, SessionState, StalledResponse,
 )
 from builder import score_quality
-from context import EngineContext, EngineMetrics
-from health_report import compute_health, HealthReport
-from circuit_breaker import CircuitBreaker, BreakerState
+from health_report import HealthReport
+from boundary import CircuitBreaker, BreakerState
 from tools import ToolRegistry, ToolResult
 from tools.personalization import PersonalizationTool
 from tools.prompt_build import PromptBuildTool
-from tools.feedback_collect import FeedbackCollectTool
 from tools.pattern_analysis import PatternAnalysisTool
 from tools.skill_advisor import SkillAdvisorTool
 
 
-# ── Helpers ─────────────────────────────────────────────────────────────────────
+# ── Engine Metrics ────────────────────────────────────────────────────────────
 
-def _get_attr(obj: Any, name: str, default: Any = None) -> Any:
-    """Read an attribute or dict key, returning default if neither works."""
-    if obj is None:
-        return default
-    if hasattr(obj, name):
-        return getattr(obj, name)
-    if isinstance(obj, dict):
-        return obj.get(name, default)
-    return default
+@dataclass
+class EngineMetrics:
+    """Observability counters for silent/non-blocking operations.
+
+    Silent failures (subprocess timeouts, vault write errors, cache misses)
+    are tracked here so the HealthReport can surface degradation without
+    breaking the fail-closed contract.
+
+    All counters are monotonic within a session.
+    """
+    vault_write_errors: int = 0
+    vault_write_timeouts: int = 0
+    vault_write_bytes: int = 0
+    silent_analysis_errors: int = 0
+    subprocess_timeouts: int = 0
+    hydrate_cache_misses: int = 0
+    feedback_buffer_flushes: int = 0
+    feedback_buffer_max_size: int = 0
+    session_start: float = 0.0
+
+    FEEDBACK_FLUSH_INTERVAL = 5
+
+
+# ── Engine Context ────────────────────────────────────────────────────────────
+
+@dataclass
+class EngineContext:
+    """Per-session context shared across all Tools in one Engine session.
+
+    Three layers:
+      Layer 1 — Hydration: vault data, loaded per-session with cache control
+      Layer 2 — Intermediate products: Tool outputs passed to downstream Tools
+      Layer 3 — Accumulation: grows across invocations within the session
+    """
+    hydrate_results: dict[str, Any] | None = None
+    hydrate_mode: str = ""
+    _hydrate_cache_key: str = ""
+    _hydrate_dirty: bool = False
+
+    overlay_config: "OverlayConfig | None" = None
+    pattern_report: "PatternReport | None" = None
+    skill_advice: "SkillAdvice | None" = None
+    proactive_signals: list[str] = field(default_factory=list)
+
+    feedback_signals: list[dict[str, Any]] = field(default_factory=list)
+    analysis_count: int = 0
+
+    skills_dir: str = "skills"
+
+    def invalidate_hydrate(self) -> None:
+        self._hydrate_dirty = True
+        self._hydrate_cache_key = ""
+
+    def is_hydrate_fresh(self, cache_key: str = "") -> bool:
+        if self._hydrate_dirty:
+            return False
+        if self.hydrate_results is None:
+            return False
+        if cache_key and self._hydrate_cache_key != cache_key:
+            return False
+        return True
+
+    def cache_hydrate(self, results: dict[str, Any], cache_key: str) -> None:
+        self.hydrate_results = results
+        self._hydrate_cache_key = cache_key
+        self._hydrate_dirty = False
 
 
 # ── Engine ─────────────────────────────────────────────────────────────────────
@@ -105,13 +158,19 @@ class PromptCraftEngine:
     # Session metrics — observability counters for silent failures
     _metrics: EngineMetrics | None = field(default=None, repr=False)
 
+    # Last task processed — used for lightweight vault probing in maybe_silent_analyze
+    _last_task: str | None = field(default=None, repr=False)
+
+    # Vault hints cache — avoids re-probing on every call
+    _vault_hints: list[str] | None = field(default=None, repr=False)
+    _vault_hints_task: str | None = field(default=None, repr=False)
+
     def _get_registry(self) -> ToolRegistry:
-        """Lazy-init the tool registry with all five tools in priority order."""
+        """Lazy-init the tool registry with all four tools in priority order."""
         if self._registry is None:
             self._registry = ToolRegistry()
-            # Priority order: Personalization > Feedback > Pattern > Advisor > Build (fallback)
+            # Priority order: Personalization > Pattern > Advisor > Build (fallback)
             self._registry.register(PersonalizationTool())
-            self._registry.register(FeedbackCollectTool())
             self._registry.register(PatternAnalysisTool())
             self._registry.register(SkillAdvisorTool())
             self._registry.register(PromptBuildTool())  # Last = fallback
@@ -201,6 +260,7 @@ class PromptCraftEngine:
 
         # ── Lazy initialisation ──
         self._ensure_init(request)
+        self._last_task = request.task
 
         # ── Hydrate caching (progressive cost model, cf. Claude Code memoization) ──
         if hydrate_results is not None:
@@ -251,9 +311,6 @@ class PromptCraftEngine:
         if tool.name == "personalization":
             self._store_overlay_config(result)
 
-        elif tool.name == "feedback_collect":
-            return self._handle_feedback_post_tool(request, result)
-
         elif tool.name == "prompt_build":
             self._track_quality_from_tool_result(result)
 
@@ -274,10 +331,9 @@ class PromptCraftEngine:
         """Extract technique and constraints from PromptBuild ToolResult for tracking."""
         if not result.ok or not result.data:
             return
-        analysis = result.data.get("analysis", {})
-        metadata = result.data.get("metadata", {})
-        self.state.last_technique = analysis.get("technique", "")
-        for c in metadata.get("hard_constraints", []):
+        data = result.data
+        self.state.last_technique = data.get("technique", "")
+        for c in data.get("global_constraints", []):
             self._seen_constraints.add(c)
         self.state.call_count += 1
         self.state.continue_reason = (
@@ -363,6 +419,57 @@ class PromptCraftEngine:
                 ),
             )
 
+        if tool_name == "prompt_build":
+            # Technique selected — LLM sub-agent generates the prompt
+            technique = data.get("technique", "zero-shot")
+            ref_file = data.get("reference_file", "")
+            task = data.get("task", "")
+            global_constraints = data.get("global_constraints", [])
+            past_feedback = data.get("past_feedback", {})
+            tech_stack = data.get("tech_stack", "")
+
+            # Build an instruction for the LLM sub-agent
+            lines = [
+                "## PromptCraft Build — Technique Selected",
+                "",
+                f"**Technique**: `{technique}`",
+                f"**Rationale**: {data.get('rationale', '')}",
+                f"**Reference file**: `{ref_file}`",
+                f"**Task**: {task}",
+            ]
+            if tech_stack:
+                lines.append(f"**Tech stack**: {tech_stack}")
+            if global_constraints:
+                lines.append(f"\n### GLOBAL Constraints (must be injected into section 7)")
+                for c in global_constraints:
+                    lines.append(f"- {c}")
+            if past_feedback:
+                lines.append(f"\n### Past Feedback on Similar Tasks")
+                for tid, fb in past_feedback.items():
+                    lines.append(f"- `{tid}`: score={fb.get('score')}, technique={fb.get('technique')}")
+            lines.append("")
+            lines.append("### Next Step (LLM sub-agent)")
+            lines.append(f"1. Read the technique reference: `{ref_file}`")
+            lines.append("2. Study the technique's rules for 8-section structure")
+            lines.append("3. Generate the complete 8-section prompt applying the technique")
+            lines.append("4. Inject GLOBAL constraints into section 7 (硬约束)")
+            lines.append("5. Run checkpoint.py to persist the prompt to vault")
+            lines.append("6. Return the complete prompt to the main agent")
+
+            return AgentLoopResult(
+                status=AgentStatus.OK,
+                response=PromptCraftResponse(
+                    status=AgentStatus.OK,
+                    prompt="\n".join(lines),
+                    analysis=Analysis(
+                        technique=technique,
+                        rationale=data.get("rationale", ""),
+                        independence=data.get("independence", ""),
+                        cognitive_load=data.get("cognitive_load", ""),
+                    ),
+                ),
+            )
+
         # Fallback: pass through as a response
         prompt_text = data.get("prompt", "")
         return AgentLoopResult(
@@ -386,8 +493,20 @@ class PromptCraftEngine:
         quality scoring → buffer accumulation → vault persistence →
         pattern analysis trigger → circuit breaker → response.
         """
-        # Handle both ExecutionFeedback dataclass and plain dict (from JSON)
-        fb = request.feedback
+        # Normalise feedback: JSON deserialises to dict, but internal callers
+        # may pass ExecutionFeedback dataclass. Convert to dict once at boundary.
+        raw_fb = request.feedback
+        fb: dict | None = None
+        if raw_fb is not None:
+            if hasattr(raw_fb, "success"):
+                fb = {
+                    "success": raw_fb.success,
+                    "constraint_violations": getattr(raw_fb, "constraint_violations", []),
+                    "manual_fixes_needed": getattr(raw_fb, "manual_fixes_needed", ""),
+                }
+            elif isinstance(raw_fb, dict):
+                fb = raw_fb
+
         quality = score_quality(fb) if fb else (
             tool_result.data.get("quality_score", 0) if tool_result.data else 0
         )
@@ -414,10 +533,9 @@ class PromptCraftEngine:
             "overlay_used": getattr(request, "overlay_used", []),
         }
         if fb:
-            # Handle both dataclass (attribute access) and dict (key access)
-            signal["success"] = _get_attr(fb, "success")
-            signal["violations"] = _get_attr(fb, "constraint_violations", [])
-            signal["manual_fixes"] = _get_attr(fb, "manual_fixes_needed", "")
+            signal["success"] = fb.get("success")
+            signal["violations"] = fb.get("constraint_violations", [])
+            signal["manual_fixes"] = fb.get("manual_fixes_needed", "")
         self.state.feedback_buffer.append(signal)
         if self._ctx is not None:
             self._ctx.feedback_signals.append(signal)
@@ -702,12 +820,70 @@ class PromptCraftEngine:
 
     # ── Silent analysis ─────────────────────────────────────────────────────
 
+    def _probe_vault_hints(self, task: str) -> list[str]:
+        """Run a cheap vault query to find similar past tasks.
+
+        Unlike the full aggregate query (which requires >=10 records), this
+        lightweight probe works with any amount of vault data. Cache results
+        per task to avoid repeated subprocess overhead.
+
+        Returns list of short hint strings like "similar->solidity-audit q=4.2".
+        """
+        # Cache hit: same task as last probe
+        if self._vault_hints is not None and self._vault_hints_task == task[:60]:
+            return self._vault_hints
+
+        self._vault_hints_task = task[:60]
+        hints: list[str] = []
+
+        hydrate_script = Path("skills/prompt-memory/scripts/hydrate.py")
+        if not hydrate_script.exists():
+            engine_dir = Path(__file__).resolve().parent.parent
+            hydrate_script = engine_dir / "skills/prompt-memory/scripts/hydrate.py"
+            if not hydrate_script.exists():
+                self._vault_hints = hints
+                return hints
+
+        try:
+            proc = subprocess.run(
+                [
+                    sys.executable, str(hydrate_script),
+                    "--query", task[:120],
+                    "--top-k", "3",
+                ],
+                capture_output=True, text=True, timeout=8,
+            )
+            if proc.returncode == 0:
+                data = json.loads(proc.stdout)
+                results = data.get("results", [])
+                for r in results:
+                    score = r.get("score", 0)
+                    if score >= 0.25:  # Lower threshold than the 0.3 trigger gate
+                        task_type = r.get("task_type", "") or r.get("user_intent", "")
+                        if not task_type:
+                            entry = r.get("entry", {})
+                            task_type = entry.get("task_type", "") or entry.get("user_intent", "")
+                        quality = r.get("avg_quality", 0) or r.get("quality_score", 0)
+                        if task_type and score >= 0.25:
+                            q_str = f" q={quality:.1f}" if quality else ""
+                            hints.append(f"similar->{task_type[:30]}{q_str}")
+        except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError):
+            pass
+
+        self._vault_hints = hints
+        return hints
+
     def maybe_silent_analyze(self) -> HealthReport:
         """Run pattern analysis silently, return HealthReport.
 
-        Called after every mode invocation. If ≥10 records are in the buffer,
+        Called after every mode invocation. If >=10 records are in the buffer,
         runs pattern analysis and stores the report in context (vault side
         effects only — nothing returned to main agent except the HealthReport).
+
+        Even when below the 10-record threshold, runs a lightweight vault probe
+        (cheap hydrate query) to surface similar past tasks as proactive hints.
+        The main agent sees these hints in the health line and can decide to
+        invoke overlay/build if they look useful.
 
         Returns:
             HealthReport with analysis_ran_this_time set to True if analysis
@@ -724,6 +900,11 @@ class PromptCraftEngine:
         # ── Flush any remaining buffered feedback before analysis ──
         if hasattr(self, '_feedback_write_buffer') and self._feedback_write_buffer:
             self._flush_feedback_buffer()
+
+        # ── Lightweight vault probe (always runs, even below threshold) ──
+        vault_hints: list[str] = []
+        if self._last_task:
+            vault_hints = self._probe_vault_hints(self._last_task)
 
         # Run analysis if threshold met
         if len(buffer) >= 10:
@@ -742,6 +923,7 @@ class PromptCraftEngine:
             analysis_ran=analysis_ran,
             proactive_signals=proactive,
             metrics=metrics,
+            vault_hints=vault_hints,
         )
 
     # ── Overlay (public) ────────────────────────────────────────────────────
@@ -757,6 +939,7 @@ class PromptCraftEngine:
         constraints as an overlay to prepend to the Skill's instructions.
         """
         self._ensure_init(request)
+        self._last_task = request.task
         if not request.skill_name:
             return AgentLoopResult(
                 status=AgentStatus.ERROR,
@@ -798,6 +981,7 @@ class PromptCraftEngine:
         Returns PatternReport or an error if insufficient data.
         """
         self._ensure_init(request)
+        self._last_task = request.task
         # Try to trigger analysis — _maybe_trigger_analysis handles both
         # same-session and cross-session data sources.
         result = self._maybe_trigger_analysis()
@@ -877,6 +1061,7 @@ class PromptCraftEngine:
         (same data pipeline as _handle_analyze), then advisor.
         """
         self._ensure_init(request)
+        self._last_task = request.task
         # If no pattern report yet, run analysis first
         if self._ctx is None or self._ctx.pattern_report is None:
             analysis_result = self._maybe_trigger_analysis()
@@ -1115,6 +1300,7 @@ class PromptCraftEngine:
         PromptBuildTool in the ToolRegistry.
         """
         self._ensure_init(request)
+        self._last_task = request.task
         registry = self._get_registry()
         tool = registry.get("prompt_build")
         if tool is None:
@@ -1147,32 +1333,91 @@ class PromptCraftEngine:
     ) -> AgentLoopResult:
         """Feedback mode: collect execution feedback and persist to vault.
 
-        Routes through FeedbackCollectTool, then post-processes through
-        the feedback pipeline: quality scoring → buffer → vault persistence →
-        circuit breaker check.
+        Extracts explicit feedback signals from the request and implicit
+        signals from context, then runs the feedback pipeline: quality
+        scoring → buffer → vault persistence → circuit breaker check.
         """
         self._ensure_init(request)
-        registry = self._get_registry()
-        tool = registry.get("feedback_collect")
-        if tool is None:
+        self._last_task = request.task
+
+        # ── Layer 5: Circuit breaker check ──
+        if not self._breaker.before_tool_call():
+            return AgentLoopResult(
+                status=AgentStatus.STALLED,
+                stalled=StalledResponse(
+                    blocker="circuit_breaker_open",
+                    question_for_main_agent=(
+                        "PromptCraft's circuit breaker is OPEN — too many "
+                        "consecutive denials. Wait for cooldown or investigate."
+                    ),
+                ),
+            )
+
+        # ── Validate: feedback payload is required ──
+        fb = request.feedback
+        if fb is None and not (self._ctx and self._ctx.feedback_signals):
+            self._breaker.after_denial()
             return AgentLoopResult(
                 status=AgentStatus.ERROR,
                 response=PromptCraftResponse(
                     status=AgentStatus.ERROR,
-                    error="FeedbackCollectTool not registered.",
+                    error="Feedback mode requires a feedback payload.",
                 ),
             )
-        # Layer 2 + 5: guard
-        denied = self._guard_tool_execution(tool, request)
-        if denied is not None:
-            return denied
 
-        result = tool.call(request, self._ctx)
-        if result.ok:
-            self._breaker.after_success()
-        else:
+        # ── Extract explicit feedback signal ──
+        signals: list[dict[str, Any]] = []
+        if fb is not None:
+            success = fb.success if hasattr(fb, "success") else (
+                fb.get("success") if isinstance(fb, dict) else None
+            )
+            violations = (
+                fb.constraint_violations if hasattr(fb, "constraint_violations")
+                else (fb.get("constraint_violations", []) if isinstance(fb, dict) else [])
+            )
+            fixes = (
+                fb.manual_fixes_needed if hasattr(fb, "manual_fixes_needed")
+                else (fb.get("manual_fixes_needed", "") if isinstance(fb, dict) else "")
+            )
+            signals.append({
+                "signal_type": "explicit",
+                "description": (
+                    f"success={success}, violations={violations}, fixes={fixes}"
+                ),
+                "task_type": request.task[:80] if request.task else "",
+                "skill_used": getattr(request, "skill_name", None),
+                "overlay_used": getattr(request, "overlay_used", []),
+            })
+
+        # ── Collect implicit signals from context ──
+        if self._ctx:
+            for sig in self._ctx.feedback_signals:
+                if isinstance(sig, dict):
+                    signals.append(sig)
+
+        if not signals:
             self._breaker.after_denial()
-        return self._handle_feedback_post_tool(request, result)
+            return AgentLoopResult(
+                status=AgentStatus.ERROR,
+                response=PromptCraftResponse(
+                    status=AgentStatus.ERROR,
+                    error="No feedback signals to collect.",
+                ),
+            )
+
+        self._breaker.after_success()
+
+        # Build ToolResult-compatible object for _handle_feedback_post_tool
+        tool_result = ToolResult(data={
+            "signals": signals,
+            "count": len(signals),
+            "vault_payload": {
+                "task_type": request.task[:80] if request.task else "",
+                "skill_used": getattr(request, "skill_name", None),
+                "signals": signals,
+            },
+        })
+        return self._handle_feedback_post_tool(request, tool_result)
 
     # ── Review handler ─────────────────────────────────────────────────────
 

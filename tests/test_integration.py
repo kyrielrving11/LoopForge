@@ -64,8 +64,8 @@ class TestBuildToFeedbackLoop(unittest.TestCase):
             context=Context(tech_stack="Python FastAPI"),
         )
         build_result = self.engine.invoke_build(build_req)
-        self.assertIn("角色", build_result.response.prompt)
-        self.assertIn("任务", build_result.response.prompt)
+        self.assertIn("Technique Selected", build_result.response.prompt)
+        self.assertIn("Reference file", build_result.response.prompt)
 
         # 2. Feedback: record execution (simulated partial success)
         feedback_req = PromptCraftRequest(

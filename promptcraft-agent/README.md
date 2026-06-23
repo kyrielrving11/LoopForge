@@ -13,12 +13,10 @@ structured JSON protocol.
 
 ```
 promptcraft-agent/
-├── system_prompt.md      # 7-layer progressive system prompt template
-├── build_prompt.py       # Injects runtime variables into the template
 ├── protocol.py           # I/O schemas (Request, Response, Stalled, etc.)
 ├── builder.py            # Single-build pipeline (stateless)
 ├── engine.py             # Outer loop — iteration lifecycle manager
-├── loop.py               # Agent Loop orchestrator (entry point)
+├── subagent_adapter.py   # Unified entry point (stdin/stdout protocol)
 └── README.md             # This file
 ```
 
@@ -35,17 +33,14 @@ domain (prompt quality vs tool execution).
 ## Quick Start
 
 ```bash
-# Build the system prompt
-python promptcraft-agent/build_prompt.py --skills-dir skills
+# Run the sub-agent adapter (the unified entry point)
+echo '{"task":"audit a smart contract for reentrancy","mode":"build"}' | python promptcraft-agent/subagent_adapter.py
 
-# Run the Agent Loop from CLI
-echo '{"task":"audit a smart contract for reentrancy","mode":"full"}' | python promptcraft-agent/loop.py
-
-# With explicit parameters
-python promptcraft-agent/loop.py --task "build a REST API" --mode full --tech-stack "Python, FastAPI"
+# With explicit parameters (use subagent_adapter.py — the unified CLI)
+echo '{"task":"build a REST API","mode":"build","context":{"tech_stack":"Python, FastAPI"}}' | python promptcraft-agent/subagent_adapter.py
 
 # Run with PRD context
-python promptcraft-agent/loop.py --task "implement user management" --prd ./docs/prd.md
+echo '{"task":"implement user management","mode":"build","context":{"prd":"docs/prd.md"}}' | python promptcraft-agent/subagent_adapter.py
 ```
 
 ## The Agent Loop
@@ -58,7 +53,7 @@ Main Agent                    PromptCraft Agent              Vault
     │                               ├─ hydrate ──────────────→│
     │                               │←─ history + feedback ───┤
     │                               ├─ route technique        │
-    │                               ├─ build 8-section prompt │
+    │                               ├─ build structured prompt │
     │                               ├─ checkpoint ───────────→│
     │←─ PromptCraftResponse ───────┤                         │
     │                               │                         │

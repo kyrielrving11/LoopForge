@@ -51,17 +51,6 @@ class Technique(str, Enum):
     TREE_OF_THOUGHT = "tree-of-thought"
 
 
-class Independence(str, Enum):
-    CONTINUOUS  = "continuous"
-    INDEPENDENT = "independent"
-
-
-class CognitiveLoad(str, Enum):
-    LOW    = "low"
-    MEDIUM = "medium"
-    HIGH   = "high"
-
-
 class AgentStatus(str, Enum):
     """Top-level response status."""
     OK      = "ok"
@@ -299,20 +288,6 @@ class OverlayConfig:
 
 
 @dataclass
-class FeedbackSignal:
-    """One observed user behaviour after a Skill or prompt executed.
-
-    Supports explicit feedback ("missing Gas check") and implicit signals
-    (user followed up with another query, edited the prompt manually, etc.)
-    """
-    signal_type: str            # "explicit" | "implicit_followup" | "implicit_edit" | "implicit_skip"
-    description: str            # What happened
-    task_type: str = ""         # e.g. "solidity_audit"
-    skill_used: str | None = None
-    overlay_used: list[str] = field(default_factory=list)
-
-
-@dataclass
 class PatternReport:
     """Output of PatternAnalysisTool — aggregate insights from N executions."""
     total_executions: int = 0
@@ -334,49 +309,6 @@ class SkillAdvice:
     suggestion: str             # Natural-language suggestion for the user
     data_support: str           # Evidence backing the suggestion
     draft_content: str | None = None  # Optional: raw text for /create-skill
-
-
-# ── Memory Module schemas (v3 memory system) ─────────────────────────────────────
-
-@dataclass
-class VaultFeedbackRecord:
-    """One execution feedback record persisted to vault for cross-session aggregation.
-
-    Unlike FeedbackSignal (which captures a single observed behaviour),
-    this is the complete record that Pattern Analysis aggregates over.
-    """
-    task_id: str
-    task_type: str = ""              # e.g. "solidity_audit", "api_design"
-    skill_used: str | None = None
-    technique: str | None = None
-    quality_score: int = 0           # 1-5
-    signals: list[str] = field(default_factory=list)  # "explicit", "implicit_edit", etc.
-    overlay_used: list[str] = field(default_factory=list)
-    what_worked: list[str] = field(default_factory=list)
-    what_failed: list[str] = field(default_factory=list)
-    improvement_notes: str = ""
-    timestamp: str = ""              # ISO 8601
-
-
-@dataclass
-class AggregateQuery:
-    """Input to hydrate.py --aggregate mode."""
-    group_by: str = "task_type"      # "task_type" | "skill_used" | "technique"
-    min_records: int = 10            # Only return groups with >= N records
-    min_quality: int | None = None   # Optional: filter by minimum quality_score
-    task_type_filter: str | None = None
-
-
-@dataclass
-class AggregateResult:
-    """One group in an aggregate query result."""
-    group_key: str                   # e.g. "solidity_audit"
-    total_records: int
-    avg_quality: float
-    high_freq_overlays: list[dict]   # [{overlay, count, pct}]
-    low_quality_ratio: float         # pct of records with score < 3
-    latest_timestamp: str = ""
-    gate: str = ""                   # "pattern_ready" | "evolution_ready" | "creation_ready" | "insufficient"
 
 
 # ── Sub-agent output (unified — what flows back to the main agent) ─────────────

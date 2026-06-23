@@ -47,17 +47,22 @@ class TestInvokeBuild(unittest.TestCase):
     def setUp(self):
         self.engine = create_engine()
 
-    def test_build_returns_8_section_prompt(self):
+    def test_build_returns_technique_selection(self):
+        """Build mode now returns technique selection + LLM instructions,
+        not a pre-generated 8-section prompt."""
         r = PromptCraftRequest(task="build a REST API", mode=Mode.FULL)
         result = self.engine.invoke_build(r)
         self.assertEqual(result.status, AgentStatus.OK)
         prompt = result.response.prompt
-        self.assertIn("角色", prompt)
-        self.assertIn("任务", prompt)
-        self.assertIn("输入", prompt)
-        self.assertIn("输出格式", prompt)
-        self.assertIn("硬约束", prompt)
-        self.assertIn("生成要求", prompt)
+        self.assertIn("Technique Selected", prompt)
+        self.assertIn("Reference file", prompt)
+        self.assertIn("Next Step", prompt)
+        self.assertIn("Generate the complete 8-section prompt", prompt)
+        # Analysis should contain the selected technique
+        self.assertIsNotNone(result.response.analysis)
+        self.assertIn(result.response.analysis.technique,
+                      ["zero-shot", "few-shot", "zero-shot-cot", "few-shot-cot",
+                       "step-back", "least-to-most", "tree-of-thought"])
 
     def test_build_tracks_state(self):
         r = PromptCraftRequest(task="test", mode=Mode.FULL)
@@ -163,7 +168,7 @@ class TestBackwardCompatInvoke(unittest.TestCase):
         r = PromptCraftRequest(task="test", mode=Mode.FULL)
         result = self.engine.invoke(r)
         self.assertEqual(result.status, AgentStatus.OK)
-        self.assertIn("角色", result.response.prompt)
+        self.assertIn("Technique Selected", result.response.prompt)
 
     def test_invoke_overlay_mode(self):
         r = PromptCraftRequest(

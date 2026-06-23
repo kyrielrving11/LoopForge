@@ -70,7 +70,7 @@ class TestRouteToEngine(unittest.TestCase):
         r = PromptCraftRequest(task="build API", mode=Mode.FULL)
         result = _route_to_engine(self.engine, r)
         self.assertEqual(result.status, AgentStatus.OK)
-        self.assertIn("角色", result.response.prompt)
+        self.assertIn("Technique Selected", result.response.prompt)
 
     def test_route_analyze_insufficient_data(self):
         r = PromptCraftRequest(task="analyze", mode=Mode.ANALYZE)

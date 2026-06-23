@@ -79,6 +79,9 @@ class HealthReport:
     # ── Proactive awareness (vault context without changing passive model) ──
     proactive_signals: list[str] = field(default_factory=list)
 
+    # ── Lightweight vault hints (available even below 10-record threshold) ──
+    vault_hints: list[str] = field(default_factory=list)
+
     # ── Session metrics (observability) ──
     metrics: Any | None = None   # EngineMetrics from engine session
 
@@ -91,6 +94,7 @@ class HealthReport:
             [PC: 8 records, STALLED, action=stalled_needs_human]
             [PC: 12 records, BREAKER=OPEN, action=stalled_needs_human]
             [PC: 10 records, errs=3, action=run_analysis]
+            [PC: 5 records | hint: similar→solidity-audit q=4.2, normal]
         """
         # Metrics degradation suffix
         degradation = ""
@@ -105,10 +109,15 @@ class HealthReport:
         if self.proactive_signals:
             signal_part = f", signals={len(self.proactive_signals)}"
 
+        # Build hint suffix from vault_hints (available even below threshold)
+        hint_part = ""
+        if self.vault_hints:
+            hint_part = " | hint: " + "; ".join(self.vault_hints[:2])
+
         if self.recommended_action == "none":
-            line = f"[PC: {self.feedback_buffer_size} records{degradation}{signal_part}, normal]"
+            line = f"[PC: {self.feedback_buffer_size} records{degradation}{signal_part}{hint_part}, normal]"
             if breaker_state and breaker_state != "CLOSED":
-                line = f"[PC: {self.feedback_buffer_size} records{degradation}{signal_part}, breaker={breaker_state}, normal]"
+                line = f"[PC: {self.feedback_buffer_size} records{degradation}{signal_part}{hint_part}, breaker={breaker_state}, normal]"
             return line
         parts = [f"[PC: {self.feedback_buffer_size} records"]
         if breaker_state and breaker_state != "CLOSED":
@@ -119,6 +128,8 @@ class HealthReport:
             parts.append(degradation.strip(", "))
         if self.proactive_signals:
             parts.append(f"signals={len(self.proactive_signals)}")
+        if self.vault_hints:
+            parts.append("hint: " + "; ".join(self.vault_hints[:2]))
         parts.append(f"action={self.recommended_action}]")
         return ", ".join(parts)
 
@@ -132,6 +143,7 @@ class HealthReport:
         analysis_ran: bool = False,
         proactive_signals: list[str] | None = None,
         metrics: Any | None = None,
+        vault_hints: list[str] | None = None,
     ) -> "HealthReport":
         """Compute HealthReport from vault state.
 
@@ -143,6 +155,9 @@ class HealthReport:
             analysis_ran: True if silent analysis was triggered this call.
             proactive_signals: Optional proactive signals from pattern analysis.
             metrics: Optional EngineMetrics for observability degradation signals.
+            vault_hints: Optional lightweight vault hints — available even
+                         below the 10-record threshold. Each hint is a short
+                         actionable string like "similar→solidity-audit q=4.2".
 
         Returns:
             HealthReport with threshold checks applied.
@@ -150,6 +165,7 @@ class HealthReport:
         n = len(feedback_buffer)
 
         p_signals = proactive_signals or []
+        v_hints = vault_hints or []
 
         # Fast path: insufficient data
         if n < ANALYSIS_THRESHOLD:
@@ -159,6 +175,7 @@ class HealthReport:
                 recommended_action="none",
                 summary=f"Normal operation. {n} feedback records accumulated.",
                 proactive_signals=p_signals,
+                vault_hints=v_hints,
                 metrics=metrics,
             )
 
@@ -168,6 +185,7 @@ class HealthReport:
             analysis_ran_this_time=analysis_ran,
             pattern_detected=True,
             proactive_signals=p_signals,
+            vault_hints=v_hints,
             metrics=metrics,
         )
 
@@ -186,6 +204,7 @@ class HealthReport:
                     "Circuit breaker: 3 consecutive executions without improvement."
                 )
                 report.proactive_signals = p_signals
+                report.vault_hints = v_hints
                 return report
 
         # ── Creation ready (>=30 records) ──
@@ -197,6 +216,7 @@ class HealthReport:
                 "Consider creating a new Skill."
             )
             report.proactive_signals = p_signals
+            report.vault_hints = v_hints
             return report
 
         # ── Evolution ready (>=20 records + >=65% consistency) ──
@@ -210,6 +230,7 @@ class HealthReport:
                     "Skill evolution suggested."
                 )
                 report.proactive_signals = p_signals
+                report.vault_hints = v_hints
                 return report
 
         # ── Pattern detected but not ready for evolution ──
@@ -219,6 +240,7 @@ class HealthReport:
             "Run analysis for detailed insights."
         )
         report.proactive_signals = p_signals
+        report.vault_hints = v_hints
         return report
 
 
@@ -274,7 +296,7 @@ def compute_health(
 ) -> HealthReport:
     """Backward-compatible wrapper around HealthReport.compute().
 
-    Used by engine.py and loop.py which pass integer counts rather
+    Used by engine.py which passes integer counts rather
     than raw feedback buffer dicts.
 
     Prefer HealthReport.compute() for new code.
@@ -287,4 +309,7 @@ def compute_health(
             entry["quality_score"] = quality_trend[i]
         synthetic.append(entry)
 
-    return HealthReport.compute(synthetic)
+    return HealthReport.compute(
+        synthetic,
+        analysis_ran=(analysis_count > 0),
+    )

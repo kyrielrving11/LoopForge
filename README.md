@@ -8,9 +8,9 @@ and skills: generation, personalisation, execution feedback, pattern analysis,
 and evolution suggestions — backed by a persistent vault that improves across
 sessions and projects.
 
-> **v2.6** — Sub-agent architecture with 6 modes, 5-layer execution boundary,
-> dual-storage vault, batch processing, proactive signals, vault-hydrate
-> preflight gating, query expansion, vault pruning, engine metrics, and 182 tests. Python stdlib only.
+> **v2.8** — LLM-driven prompt generation: Python selects the technique,
+> the LLM sub-agent reads the technique reference and generates the prompt.
+> 4-engine tool system, 5-layer execution boundary, 178 tests. Python stdlib only.
 
 ---
 
@@ -19,37 +19,44 @@ sessions and projects.
 ```
 Main Agent (Claude Code / Codex)
   │
-  ├─ promptcraft-bridge (trigger Skill)  ← when_to_use + vault hydrate preflight
-  │     └─ delegates to PromptCraft sub-agent when warranted
-  │
-  └─ PromptCraft Sub-Agent (isolated context)
+  └─ PromptCraft Sub-Agent (LLM — isolated context)
         │
-        ├─ subagent_adapter.py   ← unified entry, 6-mode routing
-        ├─ engine.py             ← lifecycle manager + circuit breaker
-        ├─ boundary.py           ← 5-layer defence-in-depth
-        ├─ circuit_breaker.py    ← denial tracking, 3-state machine
-        └─ tools/                ← 5 specialised engines
-              personalization / prompt_build / feedback_collect
-              / pattern_analysis / skill_advisor
+        ├─ Python layer (data & safety)
+        │   ├─ builder.py           ← technique router (keyword heuristic)
+        │   ├─ engine.py            ← lifecycle + vault I/O + circuit breaker
+        │   ├─ boundary.py          ← 5-layer defence-in-depth
+        │   └─ tools/               ← pattern_analysis / skill_advisor
+        │
+        └─ LLM layer (generation)
+            ├─ Read technique reference .md
+            ├─ Generate structured prompt (adaptive sections)
+            └─ Generate Skill overlay
 ```
+
+**Design:** Python handles classification + data + safety. The LLM handles
+creative prompt writing — it reads technique reference files and applies
+them to the task. This split keeps Python lean (no string-template prompt
+generation) and lets the LLM do what it does best.
 
 ## Six Modes
 
 | Mode | Trigger | Returns |
 |------|---------|---------|
-| **overlay** | Matching Skill + vault history | Domain-filtered constraints for Skill enhancement |
-| **build** | No Skill + high-risk task, or vault baseline needed | Full 8-section structured prompt |
+| **build** | No Skill + high-risk task | Technique selection → LLM reads reference → generates structured prompt |
+| **overlay** | Matching Skill + vault history | Domain-filtered constraints → LLM generates overlay for Skill |
 | **feedback** | After execution | Quality score + improvement notes |
 | **analyze** | Health report signals `->analyze` | Pattern report from accumulated data |
 | **advise** | Health report signals `->advise` | Skill evolution/creation suggestions |
 | **batch** | Multiple tasks | BatchSummary + per-item results |
 
-**Triggering model**: `when_to_use` (LLM semantic gating) → cheap vault hydrate
-(`hydrate.py --query <task> --top 3`) → if relevant history or high-risk keywords
-→ invoke overlay/build. Otherwise skip PromptCraft. No assess sub-agent round-trip.
+**Build/Overlay flow**: Python pre-processor selects technique + gathers vault
+context → LLM sub-agent reads the technique reference file → LLM generates
+the complete prompt/overlay → checkpoint to vault → return to main agent.
 
-Every response includes a compact **Health Report**: `[PC: 15 records, normal]`
-and `proactive_signals` — vault context hints (similar tasks, common pitfalls).
+**Feedback/Analyze/Advise flow**: Python handles everything (data processing).
+
+Every response includes a compact **Health Report**: `[PC: 5 records | hint: similar→solidity-audit q=4.2, normal]`
+— vault hints are available even below the 10-record analysis threshold.
 
 ## Quick Start
 
@@ -69,8 +76,8 @@ echo '{"task":"write a hello function","mode":"build"}' \
   | python promptcraft-agent/subagent_adapter.py
 ```
 
-The sub-agent is now available as `promptcraft` in Claude Code. Trigger it
-explicitly or let the `promptcraft-bridge` skill auto-invoke it for complex tasks.
+The sub-agent is now available as `promptcraft` in Claude Code. Auto-trigger
+rules in CLAUDE.md handle invocation for complex tasks.
 
 ## Execution Boundary (5-Layer Defence-in-Depth)
 
@@ -82,8 +89,9 @@ threat model is **knowledge pollution**, not shell injection.
 | 1 — Input | Injection detection, mode consistency | System-override patterns, mode-protocol mismatch |
 | 2 — Tool | Per-tool safety attributes + `check_permissions()` | **MODIFIES_SKILLS** (bypass-immune) |
 | 3 — Vault | Size cap (8KB), rate limit (50/session), dedup, GLOBAL quality ≥4 | Exceeding caps, GLOBAL with low quality |
+| 3.5 — Root Config | Write gating for CLAUDE.md, agents/*.md, settings.json | Sub-agent writes to root config → WARN |
 | 4 — Output | Schema enforcement, sensitive-data scan, size cap | Schema violation, payload overflow |
-| 5 — Breaker | Denial tracking, 3-state machine | 3 consecutive denials → OPEN (5 min cooldown) |
+| 5 — Breaker | Denial tracking, 3-state machine (CLOSED/HALF_OPEN/OPEN) | 3 consecutive denials → OPEN (5 min cooldown) |
 
 **Key rule:** `MODIFIES_SKILLS = False` for all tools. Skill modification is
 bypass-immune — PromptCraft only suggests, the main agent executes.
@@ -94,21 +102,16 @@ bypass-immune — PromptCraft only suggests, the main agent executes.
 PromptCraft/
 ├── promptcraft-agent/
 │   ├── subagent_adapter.py    # Unified entry point, 6-mode routing
-│   ├── engine.py              # Lifecycle manager, 5 invoke_* methods
-│   ├── builder.py             # Single-build pipeline (8-section prompt)
+│   ├── engine.py              # Lifecycle manager + vault I/O + circuit breaker
+│   ├── builder.py             # Technique router (keyword heuristic) + quality scoring
 │   ├── protocol.py            # I/O schemas, 6 Mode values
 │   ├── health_report.py       # HealthReport + threshold gating
-│   ├── context.py             # EngineContext — 3-layer state container
-│   ├── boundary.py            # 5-layer execution boundary guards
-│   ├── circuit_breaker.py     # 3-state circuit breaker
-│   ├── loop.py                # CLI entry point
-│   ├── system_prompt.md       # 7-layer progressive system prompt
+│   ├── boundary.py            # 5-layer execution boundary + circuit breaker
 │   ├── AGENT.md               # Claude Code sub-agent definition
-│   └── tools/                 # Five-engine tool system
+│   └── tools/                 # 4-engine tool system
 │       ├── base.py            # Tool base + safety attributes
 │       ├── personalization.py # Skill overlay injection
-│       ├── prompt_build.py    # Full prompt generation (fallback)
-│       ├── feedback_collect.py # Explicit + implicit feedback
+│       ├── prompt_build.py    # Technique selector (prepares context for LLM)
 │       ├── pattern_analysis.py # Aggregate pattern discovery
 │       └── skill_advisor.py   # Evolution/creation suggestions
 ├── skills/
@@ -116,9 +119,7 @@ PromptCraft/
 │   │   ├── scripts/           #   checkpoint.py + hydrate.py
 │   │   └── references/        #   vault schema
 │   ├── prompt-techniques/     # Catalog of 7 techniques
-│   │   └── references/        #   zero-shot through tree-of-thought
-│   └── promptcraft-bridge/    # Trigger-only Skill → sub-agent delegation
-│       └── references/        #   when-to-invoke heuristics
+│   │   └── references/        #   LLM reads these to generate prompts
 ├── tests/
 │   ├── test_scripts.py        # checkpoint, hydrate, federation, freshness
 │   ├── test_health_report.py  # thresholds, stall, consistency, proactive
@@ -126,23 +127,29 @@ PromptCraft/
 │   ├── test_engine_modes.py   # 5 invoke_* + silent analyze + batch
 │   ├── test_integration.py    # full closed-loop workflows
 │   └── test_boundary.py       # 5-layer guards, breaker, tools, batch input
-├── .claude/agents/            # Sub-agent registration
-├── CLAUDE.md                  # Project conventions
+├── .claude/agents/            # Sub-agent registration + system prompt
+├── CLAUDE.md                  # Project conventions + auto-trigger rules
 └── README.md / README.zh-CN.md
 ```
 
 ## Key Features
 
+- **LLM-Driven Prompt Generation**: Python selects the technique via keyword
+  heuristic; the LLM sub-agent reads the technique reference file and generates
+  a structured prompt adaptive to task complexity. No hardcoded string templates.
 - **Sub-Agent Architecture**: Isolated context, vault-backed persistence,
-  cross-session improvement — wakes via trigger Skill with vault-hydrate preflight
+  cross-session improvement — auto-trigger rules in CLAUDE.md with vault-hydrate preflight
+- **Auto-Trigger Rules**: CLAUDE.md includes 6 behavioural trigger conditions
+  (correction spirals, intent flips, repeated errors, requirement accumulation,
+  task verbs) — zero-cost pattern matching, false-positive cost is minimal
+- **Proactive Vault Hints**: Health Report surfaces similar past tasks even
+  below the 10-record analysis threshold (`hint: similar→solidity-audit q=4.2`)
 - **Batch Processing**: Process multiple tasks in one call — hydrate once,
   group by Skill match, execute in parallel (max 4 workers)
-- **Proactive Signals**: Every response includes vault-aware context hints
-  (similar tasks, common pitfalls) without changing the passive-trigger model
-- **5-Layer Execution Boundary**: Defence-in-depth adapted from Claude Code
-  for a sub-agent's actual threat model (knowledge pollution, not shell injection)
+- **5-Layer Execution Boundary**: Defence-in-depth with root-config write gating
+  (Layer 3.5) — sub-agent cannot silently modify CLAUDE.md or settings.json
 - **Circuit Breaker**: 3-state machine (CLOSED → OPEN → HALF_OPEN) with
-  denial tracking and automatic cooldown
+  denial tracking and automatic cooldown, merged into boundary.py
 - **Multi-Project Federation**: Two-tier vault — global (`~/.promptcraft/`)
   + project (`./.promptcraft/`)
 - **Query Expansion**: Synonym-based query expansion with cross-language
@@ -175,6 +182,8 @@ PromptCraft/
 
 ## Design Principles
 
+- **Python classifies, LLM generates** — technique selection is keyword heuristic
+  (fast, zero-cost); prompt writing is LLM-driven (reads references, applies technique)
 - **Enhance, don't replace** — Skills own the workflow, PromptCraft provides overlay
 - **Fail-closed** — guards deny when uncertain; MODIFIES_SKILLS is bypass-immune
 - **Health Report only** — internal vault state is never exposed to the main agent

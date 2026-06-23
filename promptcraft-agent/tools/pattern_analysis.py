@@ -96,13 +96,13 @@ class PatternAnalysisTool(Tool):
                 "Top task types: " + ", ".join(f"{t}({c}x)" for t, c in top_types)
             )
 
-        # ── Proactive signals: vault-aware context for the main agent ──
-        proactive = self._suggest_proactive(records, hydrate_results)
+        # ── Proactive signals ──
+        proactive = self._suggest_proactive(records, low_quality, hydrate_results)
 
         return tool_ok(
             total_executions=total,
             high_freq_overlays=high_freq,
-            missing_constraints=[],  # Filled by deeper analysis later
+            missing_constraints=[],
             low_quality_task_types=low_quality,
             proactive_signals=proactive,
             summary=" ".join(parts),
@@ -111,16 +111,12 @@ class PatternAnalysisTool(Tool):
     def _suggest_proactive(
         self,
         records: list[dict[str, Any]],
+        low_quality_types: list[str],
         hydrate_results: dict[str, Any] | None = None,
     ) -> list[str]:
-        """Generate proactive signals based on vault context matching.
-
-        Returns human-readable signal strings the main agent can inspect.
-        Does NOT change the passive-call model — signals are informational.
-        """
+        """Generate proactive signal strings from already-aggregated data."""
         signals: list[str] = []
 
-        # 1. Relevant history: how many related vault entries exist
         if hydrate_results and hydrate_results.get("results"):
             n = len(hydrate_results["results"])
             if n > 0:
@@ -128,28 +124,15 @@ class PatternAnalysisTool(Tool):
                     f"{n} relevant vault entries available — consult for prior patterns."
                 )
 
-        # 2. Similar task types found in records
         task_types = {r.get("task_type", "") for r in records if r.get("task_type")}
         if task_types:
             signals.append(
                 f"Previous tasks of type: {', '.join(sorted(task_types)[:3])}"
             )
 
-        # 3. Common pitfalls from low-quality task types
-        quality_by_type: dict[str, list[int]] = {}
-        for r in records:
-            tt = r.get("task_type", "unknown")
-            score = r.get("quality_score")
-            if score is not None:
-                quality_by_type.setdefault(tt, []).append(score)
-
-        low_types = [
-            tt for tt, scores in quality_by_type.items()
-            if sum(scores) / len(scores) < 3
-        ]
-        if low_types:
+        if low_quality_types:
             signals.append(
-                f"Historically low-quality task types: {', '.join(low_types[:3])}"
+                f"Historically low-quality task types: {', '.join(low_quality_types[:3])}"
             )
 
         return signals

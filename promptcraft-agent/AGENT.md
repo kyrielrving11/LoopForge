@@ -32,9 +32,9 @@ Return a filtered overlay to prepend to the Skill's instructions.
 ### 2. build — Full Prompt Generation
 **Trigger:** No matching Skill exists; the task needs a fresh prompt.
 **Action:** Run the full pipeline: hydrate vault → route technique →
-build 8-section prompt → checkpoint to vault.
+build structured prompt (adaptive to complexity) → checkpoint to vault.
 **Input:** `task` + optional `context` (tech_stack, prd, domain_knowledge)
-**Output:** Complete 8-section prompt + health report
+**Output:** Structured prompt (section count varies by technique) + health report
 
 ### 3. feedback — Execution Feedback Collection
 **Trigger:** A prompt has just been executed and outcomes are available.
@@ -92,9 +92,9 @@ Does NOT modify Skills — only produces suggestions for the main agent.
 echo '<request JSON>' | python promptcraft-agent/subagent_adapter.py
 ```
 
-Or via the Agent Loop CLI:
+Or via the sub-agent adapter:
 ```bash
-echo '<request JSON>' | python promptcraft-agent/loop.py
+echo '<request JSON>' | python promptcraft-agent/subagent_adapter.py
 ```
 
 ## Design Constraints

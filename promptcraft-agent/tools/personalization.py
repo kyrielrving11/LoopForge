@@ -68,49 +68,16 @@ class PersonalizationTool(Tool):
             preferences=preferences,
         )
 
-    # Domain synonym map — expands tag matching beyond literal substring overlap.
-    # Cf. Claude Code's semantic recall: "deploy" should find "CI/CD".
-    _SYNONYMS: dict[str, list[str]] = {
-        "solidity":   ["smart-contract", "evm", "contract", "foundry", "hardhat"],
-        "audit":      ["security", "review", "check", "vulnerability", "crypto"],
-        "testing":    ["test", "unit-test", "integration-test", "coverage", "fuzz"],
-        "api":        ["rest", "graphql", "endpoint", "route", "http"],
-        "database":   ["sql", "nosql", "storage", "migration", "schema", "index"],
-        "rust":       ["cargo", "wasm", "systems-programming"],
-        "python":     ["django", "flask", "fastapi", "pytest"],
-        "typescript": ["javascript", "node", "react", "next", "frontend"],
-        "devops":     ["docker", "kubernetes", "ci-cd", "deploy", "infra"],
-        "cli":        ["terminal", "shell", "bash", "command-line"],
-    }
-
     def _tags_match(self, skill_name: str, tags: list[str]) -> bool:
-        """Match tags against skill_name using direct overlap + synonym expansion.
+        """Match tags against skill_name via direct substring overlap.
 
         Example: skill_name="solidity-audit" matches tags ["solidity", "audit"]
-        (direct overlap). Also matches ["smart-contract", "security"] (synonyms).
+        because both substrings appear in the name.
         """
         if not tags:
             return False
         name_lower = skill_name.lower().replace("-", " ").replace("_", " ")
-        name_words = set(name_lower.split())
-
-        for tag in tags:
-            tag_lower = tag.lower()
-            # Direct match: tag or its word appears in skill name
-            if tag_lower in name_lower or tag_lower in name_words:
-                return True
-
-            # Forward: tag is a key → check if any of its synonyms match
-            forward_synonyms = self._SYNONYMS.get(tag_lower, [])
-            if any(s in name_lower for s in forward_synonyms):
-                return True
-
-            # Reverse: tag IS a synonym of some key → check if the key matches
-            for key, syns in self._SYNONYMS.items():
-                if tag_lower in syns and (key in name_lower or key in name_words):
-                    return True
-
-        return False
+        return any(tag.lower() in name_lower for tag in tags)
 
     def prompt(self) -> str:
         return (

@@ -1,13 +1,10 @@
-"""PromptCraft Agent — Prompt Build Tool.
+"""PromptCraft Agent — Prompt Build Tool (technique selector).
 
-The fallback pipeline: when no Skill matches the task, this tool runs
-the complete prompt-engineering workflow:
+This tool selects the best prompt-engineering technique via keyword heuristic
+and returns the technique name + reference file path + vault context.
 
-  hydrate → route → build 8-section → checkpoint → return
-
-It wraps the existing builder.py pipeline — all technique selection and
-section assembly logic lives there. This tool is the "兜底" (safety net)
-for tasks without pre-existing Skills.
+The LLM sub-agent then reads the selected reference file and generates
+the actual 8-section prompt — Python does NOT generate prompt text.
 """
 
 from __future__ import annotations
@@ -23,60 +20,80 @@ _AGENT_DIR = Path(__file__).resolve().parent.parent
 if str(_AGENT_DIR) not in sys.path:
     sys.path.insert(0, str(_AGENT_DIR))
 
-from builder import build  # noqa: E402
+from builder import route_technique, extract_global_constraints, TECHNIQUE_REFERENCE  # noqa: E402
 
 
 class PromptBuildTool(Tool):
-    """Full prompt-engineering pipeline for tasks without a matching Skill."""
+    """Select technique and prepare context for LLM-driven prompt generation.
+
+    Does NOT generate prompts — that's the LLM sub-agent's job.
+    """
 
     name = "prompt_build"
-    description = "Generate a structured 8-section prompt when no Skill exists."
+    description = "Select prompt-engineering technique and prepare context for LLM generation."
 
     # Safety: reads skills (for technique refs), writes to vault (checkpoint)
     WRITES_TO_VAULT = True
     READS_SKILLS = True
 
     def check_permissions(self, input: dict[str, Any], context: Any = None) -> Any:
-        from protocol import tool_permission_allow
+        from protocol import tool_permission_allow, tool_permission_deny
         task = input.get("task", "")
         if not task or len(str(task).strip()) < 3:
-            from protocol import tool_permission_deny
             return tool_permission_deny("Task too short for prompt build.")
-        # PromptBuild never modifies Skill files — the hard boundary holds
         return tool_permission_allow()
 
     def is_applicable(self, request: Any, context: dict[str, Any] | None = None) -> bool:
-        # This is the fallback — it applies when no more-specific tool has claimed
-        # the request. The registry checks tools in priority order; this one runs
-        # last (registered last).
+        # Fallback — runs last when no other tool has claimed the request
         return True
 
     def call(self, request: Any, context: Any = None) -> ToolResult:
         hydrate_results = context.hydrate_results if context else None
 
         try:
-            result = build(request, hydrate_results)
+            analysis = route_technique(request.task, request.context)
         except Exception as exc:
-            return tool_error(f"PromptBuildTool failed: {exc}")
+            return tool_error(f"Technique routing failed: {exc}")
+
+        technique = analysis.technique
+        ref_file = TECHNIQUE_REFERENCE.get(technique, "")
+
+        global_constraints = extract_global_constraints(hydrate_results)
+        # Also extract per-result constraints for self-awareness
+        past_feedback: dict[str, Any] = {}
+        if hydrate_results:
+            for result in hydrate_results.get("results", []):
+                score = result.get("feedback", {}).get("quality_score")
+                if score is not None:
+                    past_feedback[result.get("task_id", "")] = {
+                        "score": score,
+                        "technique": result.get("technique", ""),
+                        "notes": result.get("feedback", {}).get("improvement_notes", ""),
+                    }
+
+        tech_stack = (
+            getattr(request.context, "tech_stack", "")
+            if request.context else ""
+        )
 
         return tool_ok(
-            prompt=result.response.prompt,
-            analysis={
-                "technique": result.response.analysis.technique if result.response.analysis else "",
-                "rationale": result.response.analysis.rationale if result.response.analysis else "",
-            },
-            metadata={
-                "task_id": result.response.metadata.task_id if result.response.metadata else "",
-                "technique": result.technique,
-                "hard_constraints": result.hard_constraints,
-                "key_decisions": result.key_decisions,
-            },
+            technique=technique,
+            rationale=analysis.rationale,
+            independence=analysis.independence,
+            cognitive_load=analysis.cognitive_load,
+            reference_file=ref_file,
+            task=request.task,
+            tech_stack=tech_stack,
+            global_constraints=global_constraints,
+            past_feedback=past_feedback,
+            mode="build",
         )
 
     def prompt(self) -> str:
         return (
             "- **Prompt Build**: When no existing Skill covers the user's task, "
-            "use this tool to generate a structured prompt from scratch. "
-            "It analyses the task, selects the best prompt-engineering technique, "
-            "and returns a complete 8-section prompt ready for execution."
+            "use this tool to select the best prompt-engineering technique and "
+            "prepare context. Then read the technique reference file and generate "
+            "the complete 8-section prompt yourself (you are the LLM — you write "
+            "the prompt, not Python)."
         )

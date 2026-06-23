@@ -15,13 +15,10 @@ from boundary import (
     guard_input, guard_output, guard_vault_write, guard_batch_input,
     GuardResult, allow, deny,
     VAULT_ENTRY_MAX_SIZE, GLOBAL_WRITE_MIN_QUALITY,
-)
-from circuit_breaker import (
-    CircuitBreaker, BreakerState, BreakerLimits,
+    CircuitBreaker, BreakerState,
 )
 from tools.personalization import PersonalizationTool
 from tools.prompt_build import PromptBuildTool
-from tools.feedback_collect import FeedbackCollectTool
 from tools.pattern_analysis import PatternAnalysisTool
 from tools.skill_advisor import SkillAdvisorTool
 
@@ -153,7 +150,7 @@ class TestCircuitBreaker(unittest.TestCase):
 
     def test_initial_state_closed(self):
         cb = CircuitBreaker()
-        self.assertEqual(cb._state.state, BreakerState.CLOSED)
+        self.assertEqual(cb.state, BreakerState.CLOSED)
 
     def test_before_tool_call_returns_true_when_closed(self):
         cb = CircuitBreaker()
@@ -163,16 +160,16 @@ class TestCircuitBreaker(unittest.TestCase):
         cb = CircuitBreaker()
         cb.after_denial()
         cb.after_denial()
-        self.assertEqual(cb._state.consecutive_denials, 2)
+        self.assertEqual(cb._consecutive_denials, 2)
         cb.after_success()
-        self.assertEqual(cb._state.consecutive_denials, 0)
+        self.assertEqual(cb._consecutive_denials, 0)
 
     def test_three_consecutive_denials_open_circuit(self):
         cb = CircuitBreaker()
         for _ in range(3):
             self.assertTrue(cb.before_tool_call())
             cb.after_denial()
-        self.assertEqual(cb._state.state, BreakerState.OPEN)
+        self.assertEqual(cb.state, BreakerState.OPEN)
 
     def test_open_circuit_blocks_calls(self):
         cb = CircuitBreaker()
@@ -182,25 +179,23 @@ class TestCircuitBreaker(unittest.TestCase):
         self.assertFalse(cb.before_tool_call())
 
     def test_half_open_after_cooldown(self):
-        limits = BreakerLimits(cooldown_seconds=0)  # Instant cooldown
-        cb = CircuitBreaker(limits=limits)
+        cb = CircuitBreaker(cooldown_seconds=0)  # Instant cooldown
         for _ in range(3):
             cb.before_tool_call()
             cb.after_denial()
-        self.assertEqual(cb._state.state, BreakerState.OPEN)
+        self.assertEqual(cb.state, BreakerState.OPEN)
         # Cooldown is 0, so next call transitions to HALF_OPEN
         self.assertTrue(cb.before_tool_call())
-        self.assertEqual(cb._state.state, BreakerState.HALF_OPEN)
+        self.assertEqual(cb.state, BreakerState.HALF_OPEN)
 
     def test_probe_success_closes_circuit(self):
-        limits = BreakerLimits(cooldown_seconds=0)
-        cb = CircuitBreaker(limits=limits)
+        cb = CircuitBreaker(cooldown_seconds=0)
         for _ in range(3):
             cb.before_tool_call()
             cb.after_denial()
         cb.before_tool_call()  # HALF_OPEN
         cb.after_success()
-        self.assertEqual(cb._state.state, BreakerState.CLOSED)
+        self.assertEqual(cb.state, BreakerState.CLOSED)
 
     def test_low_quality_tracking(self):
         cb = CircuitBreaker()
@@ -213,7 +208,7 @@ class TestCircuitBreaker(unittest.TestCase):
         for _ in range(4):
             cb.after_low_quality()
         cb.reset_quality_stall()
-        self.assertEqual(cb._state.consecutive_low_quality, 0)
+        self.assertEqual(cb._consecutive_low_quality, 0)
 
     def test_vault_write_tracking(self):
         cb = CircuitBreaker()
@@ -222,8 +217,7 @@ class TestCircuitBreaker(unittest.TestCase):
         self.assertFalse(cb.can_write_vault())
 
     def test_max_tool_calls_trips_breaker(self):
-        limits = BreakerLimits(max_total_tool_calls=3)
-        cb = CircuitBreaker(limits=limits)
+        cb = CircuitBreaker(max_tool_calls=3)
         cb.after_success()
         cb.after_success()
         self.assertTrue(cb.before_tool_call())  # 3rd allowed
@@ -256,7 +250,7 @@ class TestToolSafetyAttributes(unittest.TestCase):
 
     def test_no_tool_modifies_skills(self):
         """MODIFIES_SKILLS is False for all tools — bypass-immune hard deny."""
-        for cls in [PersonalizationTool, PromptBuildTool, FeedbackCollectTool,
+        for cls in [PersonalizationTool, PromptBuildTool,
                      PatternAnalysisTool, SkillAdvisorTool]:
             t = cls()
             self.assertFalse(t.MODIFIES_SKILLS,
@@ -273,11 +267,6 @@ class TestToolSafetyAttributes(unittest.TestCase):
         self.assertFalse(t.READ_ONLY)
         self.assertTrue(t.WRITES_TO_VAULT)
         self.assertTrue(t.READS_SKILLS)
-
-    def test_feedback_collect_writes_vault(self):
-        t = FeedbackCollectTool()
-        self.assertTrue(t.WRITES_TO_VAULT)
-        self.assertFalse(t.READS_SKILLS)
 
     def test_pattern_analysis_read_and_write(self):
         t = PatternAnalysisTool()
@@ -315,21 +304,6 @@ class TestToolCheckPermissions(unittest.TestCase):
     def test_prompt_build_denies_short_task(self):
         t = PromptBuildTool()
         perm = t.check_permissions({"task": "ab"})
-        self.assertEqual(perm.action, "deny")
-
-    def test_feedback_collect_denies_no_data(self):
-        t = FeedbackCollectTool()
-        perm = t.check_permissions({})
-        self.assertEqual(perm.action, "deny")
-
-    def test_feedback_collect_allows_with_feedback(self):
-        t = FeedbackCollectTool()
-        perm = t.check_permissions({"feedback": {"success": True}})
-        self.assertEqual(perm.action, "allow")
-
-    def test_feedback_collect_rejects_invalid_score(self):
-        t = FeedbackCollectTool()
-        perm = t.check_permissions({"feedback": {}, "quality_score": 99})
         self.assertEqual(perm.action, "deny")
 
     def test_pattern_analysis_always_allows(self):

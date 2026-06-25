@@ -1,0 +1,44 @@
+{
+  "version": "1",
+  "constraints": {
+    "retire_window": 3,
+    "max_active": 12
+  },
+  "summary": {
+    "window": 5,
+    "health_check_interval": 1
+  },
+  "recompile_triggers": {
+    "l1": ["new_constraints", "repeated_failure", "repair_signal"],
+    "l2": ["goal_id_changed", "plan_source_provided", "strategy_collapse", "severe_alignment_drop"]
+  },
+  "technique": {
+    "fallback_chain": {
+      "zero-shot": "few-shot",
+      "few-shot": "zero-shot-cot",
+      "zero-shot-cot": "few-shot-cot",
+      "few-shot-cot": "tree-of-thought",
+      "step-back": "least-to-most",
+      "least-to-most": "tree-of-thought",
+      "tree-of-thought": "tree-of-thought"
+    },
+    "adaptive_quality_threshold": 3,
+    "adaptive_consecutive_rounds": 2,
+    "routing_table": {
+      "continuous_low": "zero-shot",
+      "independent_low": "zero-shot",
+      "continuous_medium": "few-shot",
+      "independent_medium": "zero-shot-cot",
+      "continuous_high": "few-shot-cot",
+      "independent_high": "tree-of-thought"
+    }
+  },
+  "engine": {
+    "feedback_flush_interval": 5,
+    "max_circuit_breaker": 3
+  },
+  "backend": {
+    "vault_path": ".promptcraft/prompt_vault.json",
+    "global_vault_path": "~/.promptcraft/global_vault.json"
+  }
+}

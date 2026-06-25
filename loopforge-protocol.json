@@ -1,0 +1,640 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://loopforge.dev/loopforge-protocol.json",
+  "title": "LoopForge Protocol",
+  "description": "JSON Schema for the LoopForge loop-compile protocol. Defines the wire format for all 3 modes (loop_compile, feedback, review) and internal types. Language-agnostic — reference implementation in TypeScript.",
+  "type": "object",
+  "$defs": {
+    "Mode": {
+      "type": "string",
+      "enum": [
+        "loop_compile",
+        "feedback",
+        "review",
+        "build"
+      ],
+      "description": "LoopForge-loop_compile — TypeScript protocol definitions.\n\nAll types exchanged between the Main Agent and LoopForge flow through\nthese interfaces. This is the contract layer — no implementation logic.\n\nv1.0: 19 types — loop_compile + build + feedback + review + rolling_summary."
+    },
+    "AgentStatus": {
+      "type": "string",
+      "enum": [
+        "ok",
+        "error",
+        "stalled"
+      ]
+    },
+    "Technique": {
+      "type": "string",
+      "enum": [
+        "zero-shot",
+        "few-shot",
+        "zero-shot-cot",
+        "few-shot-cot",
+        "step-back",
+        "least-to-most",
+        "tree-of-thought"
+      ]
+    },
+    "Analysis": {
+      "type": "object",
+      "properties": {
+        "technique": {
+          "type": "string"
+        },
+        "rationale": {
+          "type": "string"
+        },
+        "independence": {
+          "type": "string"
+        },
+        "cognitive_load": {
+          "type": "string"
+        },
+        "reference_file": {
+          "type": "string"
+        },
+        "was_rotated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "technique",
+        "rationale",
+        "independence",
+        "cognitive_load",
+        "reference_file",
+        "was_rotated"
+      ]
+    },
+    "VaultConfig": {
+      "type": "object",
+      "properties": {
+        "project_vault": {
+          "type": "string"
+        },
+        "global_vault": {
+          "type": "string"
+        },
+        "skills_dir": {
+          "type": "string"
+        },
+        "no_global": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "project_vault",
+        "global_vault",
+        "skills_dir",
+        "no_global"
+      ]
+    },
+    "ExecutionFeedback": {
+      "type": "object",
+      "properties": {
+        "output": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "constraint_violations": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "manual_fixes_needed": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "output",
+        "success",
+        "constraint_violations",
+        "manual_fixes_needed"
+      ]
+    },
+    "LoopForgeRequest": {
+      "type": "object",
+      "properties": {
+        "task": {
+          "type": "string"
+        },
+        "mode": {
+          "$ref": "#/$defs/Mode"
+        },
+        "vault_config": {
+          "$ref": "#/$defs/VaultConfig"
+        },
+        "feedback": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExecutionFeedback"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "skill_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "task_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "task",
+        "mode",
+        "vault_config"
+      ],
+      "additionalProperties": true
+    },
+    "LoopObjective": {
+      "type": "object",
+      "properties": {
+        "objective": {
+          "type": "string"
+        },
+        "success_criteria": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "hard_constraints": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "created_at_round": {
+          "type": "number"
+        },
+        "loop_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "objective",
+        "success_criteria",
+        "hard_constraints",
+        "created_at_round",
+        "loop_id"
+      ]
+    },
+    "LoopHealth": {
+      "type": "object",
+      "properties": {
+        "goal_alignment": {
+          "type": "number"
+        },
+        "constraint_integrity": {
+          "type": "number"
+        },
+        "drift_detected": {
+          "type": "boolean"
+        },
+        "strategy_stability": {
+          "type": "boolean"
+        },
+        "task_continuity": {
+          "type": "number"
+        },
+        "escalation_recommended": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "goal_alignment",
+        "constraint_integrity",
+        "drift_detected",
+        "strategy_stability",
+        "task_continuity",
+        "escalation_recommended"
+      ]
+    },
+    "RollingSummary": {
+      "type": "object",
+      "properties": {
+        "quality_trajectory": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          }
+        },
+        "trajectory_direction": {
+          "type": "string"
+        },
+        "what_worked": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "recurring_issues": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "key_lessons": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "rounds_sampled": {
+          "type": "number"
+        },
+        "generated_at_round": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "quality_trajectory",
+        "trajectory_direction",
+        "what_worked",
+        "recurring_issues",
+        "key_lessons",
+        "rounds_sampled",
+        "generated_at_round"
+      ]
+    },
+    "TaskAlignment": {
+      "type": "object",
+      "properties": {
+        "is_aligned": {
+          "type": "boolean"
+        },
+        "alignment_score": {
+          "type": "number"
+        },
+        "warning": {
+          "type": "string"
+        },
+        "escalation": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "is_aligned",
+        "alignment_score",
+        "warning",
+        "escalation"
+      ]
+    },
+    "LoopRoundResult": {
+      "type": "object",
+      "properties": {
+        "round": {
+          "type": "number"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "output_summary": {
+          "type": "string"
+        },
+        "constraint_violations": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "manual_fixes_needed": {
+          "type": "string"
+        },
+        "quality_score": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "round",
+        "success",
+        "output_summary",
+        "constraint_violations",
+        "manual_fixes_needed",
+        "quality_score"
+      ]
+    },
+    "LoopCompileRequest": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string"
+        },
+        "loop_id": {
+          "type": "string"
+        },
+        "round": {
+          "type": "number"
+        },
+        "goal_id": {
+          "type": "string"
+        },
+        "task": {
+          "type": "string"
+        },
+        "domain": {
+          "type": "string"
+        },
+        "next_task_proposal": {
+          "type": "string"
+        },
+        "loop_objective": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LoopObjective"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "plan_source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "constraints_from_plan": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "new_since_last_round": {
+          "type": "string"
+        },
+        "last_round_result": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LoopRoundResult"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "force_level": {
+          "type": "string"
+        },
+        "health_check_interval": {
+          "type": "number"
+        },
+        "vault_config": {
+          "$ref": "#/$defs/VaultConfig"
+        }
+      },
+      "required": [
+        "mode",
+        "loop_id",
+        "round",
+        "goal_id",
+        "task",
+        "domain",
+        "next_task_proposal",
+        "constraints_from_plan",
+        "new_since_last_round",
+        "force_level",
+        "health_check_interval",
+        "vault_config"
+      ]
+    },
+    "LoopCompileResponse": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "recompile_level": {
+          "type": "string"
+        },
+        "diff_from_previous": {
+          "type": "string"
+        },
+        "lineage": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "constraints_active": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "constraints_retired": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "technique_used": {
+          "type": "string"
+        },
+        "reference_file": {
+          "type": "string"
+        },
+        "loop_id": {
+          "type": "string"
+        },
+        "round": {
+          "type": "number"
+        },
+        "goal_id": {
+          "type": "string"
+        },
+        "goal_text_hash": {
+          "type": "string"
+        },
+        "loop_objective": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LoopObjective"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "loop_health": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LoopHealth"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "task_alignment": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskAlignment"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rolling_summary": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RollingSummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "suggested_next_task": {
+          "type": "string"
+        },
+        "plan_source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "prompt",
+        "recompile_level",
+        "diff_from_previous",
+        "lineage",
+        "constraints_active",
+        "constraints_retired",
+        "technique_used",
+        "reference_file",
+        "loop_id",
+        "round",
+        "goal_id",
+        "goal_text_hash",
+        "suggested_next_task",
+        "warnings",
+        "error"
+      ]
+    },
+    "LoopForgeResponse": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "$ref": "#/$defs/AgentStatus"
+        },
+        "prompt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "analysis": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Analysis"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "status"
+      ]
+    },
+    "SessionState": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string"
+        },
+        "call_count": {
+          "type": "number"
+        },
+        "quality_trend": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          }
+        },
+        "current_version": {
+          "type": "string"
+        },
+        "last_technique": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "circuit_breaker_count": {
+          "type": "number"
+        },
+        "feedback_buffer": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "required": [
+        "task_id",
+        "call_count",
+        "quality_trend",
+        "current_version",
+        "circuit_breaker_count",
+        "feedback_buffer"
+      ]
+    },
+    "AgentLoopResult": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "$ref": "#/$defs/AgentStatus"
+        },
+        "response": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LoopForgeResponse"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "status"
+      ]
+    }
+  }
+}

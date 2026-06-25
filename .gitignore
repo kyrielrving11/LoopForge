@@ -1,9 +1,9 @@
-# PromptCraft generated files
+# LoopForge generated files
 .promptcraft/
 
-# Claude Code
-settings.local.json
+# Node.js
+node_modules/
+*.tgz
 
-# Python
-__pycache__/
-*.pyc
+# Compiled test output
+dist/tests/

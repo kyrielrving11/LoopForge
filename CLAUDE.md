@@ -37,7 +37,6 @@ loopforge/src/
 
 ## Key Rules
 
-- Never add Python files. The Python reference implementation was deleted — TypeScript is the sole implementation.
 - `loopforge-protocol.json` is auto-generated. Edit `protocol.ts` and run `npm run build`.
 - Schema gen runs on every build; the test suite validates the generated schema.
 - The project is the npm package. All commands run from `loopforge/`.

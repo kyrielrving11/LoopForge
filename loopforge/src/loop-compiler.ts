@@ -26,7 +26,7 @@ import {
   type RollingSummary,
   type TaskAlignment,
 } from "./protocol.js";
-import { routeTechnique, routeTechniqueAdaptive } from "./builder.js";
+import { routeTechniqueAdaptive } from "./builder.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Repair cue detection
@@ -1091,7 +1091,7 @@ export function compileL2(
 
   let constraints = [...request.constraints_from_plan];
   if (loopObjective) {
-    constraints = [...new Set([...constraints, ...loopObjective.hard_constraints])];
+    constraints = [...new Set([...constraints, ...loopObjective.hard_constraints, ...loopObjective.success_criteria])];
   }
 
   // ── Route to technique-specific specialist (v1.1 deep integration) ──

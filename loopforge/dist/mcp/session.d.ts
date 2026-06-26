@@ -48,7 +48,18 @@ export declare class SessionManager {
     create(input: StartInput): AdvanceResult;
     get(sessionId: string): McpSession | undefined;
     delete(sessionId: string): boolean;
+    /** Persist session state to vault for cross-process recovery.
+     *  Uses upsert: removes any previous session_state entry for this loop,
+     *  then appends a new one with current state. */
+    save(session: McpSession): void;
+    /** Resume a loop from vault state.
+     *  Reconstructs the session and compiles the prompt for the next round.
+     *  Returns null if no session_state entry exists for this loopId. */
+    resume(loopId: string): AdvanceResult | null;
     list(): McpSessionSummary[];
+    /** Get loop health for a loop (in-memory or vault).
+     *  Computes goal alignment, constraint integrity, drift, strategy stability. */
+    getHealth(loopId: string): Record<string, unknown> | null;
     /** Core cycle: extract self-eval → record feedback → check stop → compile next. */
     advance(sessionId: string, output: string): AdvanceResult;
     /** Replay timeline for a session — creates ReplayBackend from the stored backend. */

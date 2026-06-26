@@ -230,6 +230,7 @@ export function scanLineageMd(loopId, vaultPath) {
 // ═══════════════════════════════════════════════════════════════════════════
 export class FSBackend {
     vaultPath;
+    // v2: federation — global vault for cross-project constraints (not yet implemented)
     globalVaultPath;
     constructor(vaultPath = ".promptcraft/prompt_vault.json", globalVaultPath = "~/.promptcraft/global_vault.json") {
         this.vaultPath = vaultPath;

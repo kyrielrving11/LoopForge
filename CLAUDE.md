@@ -13,7 +13,7 @@ cognitive stability across long-horizon agent loops.
 ```bash
 cd loopforge
 npm run build    # tsc + generate JSON Schema
-npm test         # tsc + schema gen + 178 tests (node:test)
+npm test         # tsc + schema gen + 92 tests (node:test)
 npx tsc --noEmit # type-check only
 ```
 
@@ -35,8 +35,8 @@ loopforge/src/
     interface.ts       # VaultBackend interface (9 methods)
     fs.ts              # FSBackend — JSON vault + Markdown lineage dual-write
   mcp/
-    session.ts         # SessionManager — Map<id, {engine, round, ...}> + advance() (~230 lines)
-    tools.ts           # 6 tool defs + handlers: start/next/status/stop/list/replay (~190 lines)
+    session.ts         # SessionManager — Map<id, {engine, round, ...}> + advance/save/resume/getHealth (~370 lines)
+    tools.ts           # 8 tool defs + handlers: start/next/status/stop/list/replay/resume/health (~250 lines)
     server.ts          # JSON-RPC over stdio — initialize/tools/list/tools/call (~100 lines)
   mcp-server.ts        # MCP server entry point (#!/usr/bin/env node)
   skills/

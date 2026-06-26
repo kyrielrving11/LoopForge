@@ -6,8 +6,8 @@
 为长程 Agent Loop 编译每轮迭代的提示词 —— 具备结构化记忆、约束继承、
 漂移纠正和增量重编译（L0/L1/L2）能力。
 
-> **v1.3** — `npm install loopforge`。MCP 服务器 + Perception-Skill + CLI + 库 API。
-> 零运行时依赖。178 测试。Node.js ≥18。
+> **v1.3.1** — `npm install loopforge`。MCP 服务器（8 工具）+ Perception-Skill + CLI + 库 API。
+> 零运行时依赖。92 测试。Node.js ≥18。
 
 ---
 
@@ -48,6 +48,9 @@ npx loopforge replay audit
 
 # 对比两轮
 npx loopforge diff audit 1 3
+
+# v1.3.1: 从 vault 恢复循环（进程重启后继续）
+npx loopforge resume audit
 
 # Vault 健康状态
 npx loopforge status
@@ -119,6 +122,7 @@ AI 宿主（Claude Code / Codex）
   → [Agent 执行 + 自评]
   → loopforge_next → 编译后的第 2 轮 prompt
   → ... 循环直到 prompt=null（task_complete / circuit_breaker / max_rounds / stalled）
+  → 进程重启后：loopforge_resume → 从上次保存的轮次继续（v1.3.1）
 ```
 
 每轮编译提示词末尾嵌入 4 字段自评 JSON：
@@ -142,12 +146,14 @@ AI 宿主（Claude Code / Codex）
 |------|------|------|
 | `loopforge_start` | `task`、`maxRounds?`、`constraints?`、`domain?` | `sessionId`、第 1 轮 `prompt` |
 | `loopforge_next` | `sessionId`、`output`（含自评块） | 下一轮 `prompt` 或 `null` + `stopReason` |
-| `loopforge_status` | `sessionId` | `round`、`qualityTrajectory`、`status` |
+| `loopforge_status` | `sessionId` | `round`、`qualityTrajectory`、`status`、`technique` |
 | `loopforge_stop` | `sessionId` | `roundsCompleted`、最终轨迹 |
-| `loopforge_list` | — | `sessions[]` |
+| `loopforge_list` | — | `sessions[]`（内存 + vault 持久化会话） |
 | `loopforge_replay` | `sessionId` | `timeline[]` |
+| `loopforge_resume` | `loopId` | 下一轮 `prompt` 或 `null` + `stopReason`（v1.3.1） |
+| `loopforge_health` | `loopId` | 目标对齐、约束完整性、漂移、策略稳定性（v1.3.1） |
 
-停止原因：`task_complete` | `circuit_breaker` | `max_rounds` | `stalled`
+停止原因：`task_complete` | `circuit_breaker` | `max_rounds` | `stalled` | `stopped`
 
 ---
 
@@ -189,6 +195,7 @@ loopforge run '<json>'             # v1.2: 自主循环 — 心跳/超时/stall 
 loopforge replay <loop-id>         # 循环时间线 — 轮次、质量、技术
 loopforge diff <loop-id> <a> <b>   # 两轮逐字段对比
 loopforge review <loop-id> <rN>    # 存储提示词结构审计
+loopforge resume <loop-id>          # v1.3.1: 从 vault 恢复循环状态
 loopforge status                   # Vault 健康摘要
 ```
 
@@ -196,7 +203,9 @@ loopforge status                   # Vault 健康摘要
 
 ## 核心特性
 
-- **MCP 服务器（v1.3）** — 6 个工具，JSON-RPC over stdio：`start`、`next`、`status`、`stop`、`list`、`replay`。零配置接入 Claude Code 和 Codex。
+- **MCP 服务器（v1.3）** — 8 个工具，JSON-RPC over stdio：`start`、`next`、`status`、`stop`、`list`、`replay`、`resume`、`health`。零配置接入 Claude Code 和 Codex。
+- **会话恢复（v1.3.1）** — 会话自动保存到 vault。`loopforge_resume` 在进程重启后恢复循环状态 — 不再从第 1 轮重新开始。
+- **验收标准强制执行（v1.3.1）** — `loop_objective.success_criteria` 合并到活跃约束系统 — 像硬约束一样被追踪、退役、违规检查。
 - **Perception-Skill（v1.3）** — 平台无关的 Agent Skill。复制粘贴即可在任意 MCP-capable 宿主中启用自主 `/loop` 工作流。
 - **Loop Runtime（v1.2）** — 事件驱动自主循环，内置心跳监控、单轮超时、stall 检测、优雅退出。`run({ task, execute })` 函数——仅 2 个必填字段。
 - **心跳 & 超时** — 每轮心跳（可配置间隔）+ 超时 + stall 检测。支持 interactive 模式用于人机协同。
@@ -225,7 +234,7 @@ LoopForge/
 │   ├── skills/
 │   │   └── perception/          # Perception-Skill：Agent 的 /loop 工作流指令
 │   │       └── SKILL.md
-│   └── tests/                   # 178 测试（Node.js 内置 runner）
+│   └── tests/                   # 92 测试（Node.js 内置 runner）
 ├── skills/
 │   └── prompt-techniques/       # 技巧参考文件（运行时读取）
 │       └── references/          # zero-shot, few-shot, cot, step-back, least-to-most, tot

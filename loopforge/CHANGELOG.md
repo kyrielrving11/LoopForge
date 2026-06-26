@@ -1,5 +1,34 @@
 # Changelog
 
+## v1.3.1 (2026-06-27)
+
+Session recovery, success criteria enforcement, and MCP tool expansion.
+
+### Session Durability
+- **`save()` / `resume()` in SessionManager** — session state persisted to vault as `session_state` entries (upsert per loop). Process restart → `resume(loopId)` reconstructs session from vault lineage and compiles the next round's prompt.
+- **Auto-save in `create()` and `advance()`** — every state change (compile, stop, stall, task_complete) writes to vault automatically.
+- **`loopforge resume <loop-id>` CLI command** — restore loop from vault and print the next-round prompt.
+
+### MCP Tool Expansion (6 → 8 tools)
+- **`loopforge_resume`** — resume a loop from vault after process restart. Returns next-round prompt or stopReason.
+- **`loopforge_health`** — standalone loop health check: goal alignment, constraint integrity, drift detection, strategy stability, task continuity.
+- **`loopforge_list`** — now scans vault for persisted sessions in addition to in-memory sessions. Shows all loops available for resume after a restart.
+
+### Success Criteria as Hard Constraints
+- `compileL2()` now merges `loop_objective.success_criteria` into `constraints_active` alongside `hard_constraints`. Success criteria are tracked, retired, and checked for violations like any other constraint — no longer decorative text.
+
+### Bug Fix
+- **`last_technique` was never written** — `loopforge_status` always returned `null` for `technique`. Fixed: `invokeLoopCompile` now writes `this.state.last_technique = response.technique_used`.
+
+### Code Hygiene
+- Removed 5 unused imports across `cli.ts`, `loop-compiler.ts`, `backends/fs.ts`.
+- Deleted 48 stale build artifacts (36 in `src/`, 12 orphan files in `dist/`).
+- Added `.gitignore` patterns for `src/**/*.{js,d.ts,js.map,d.ts.map}`.
+- Annotated `globalVaultPath` and `global_vault_path` as `v2: federation (not yet implemented)`.
+
+### New Tests
+- 10 new tests: success criteria → constraints_active, session persistence (save/resume round-trip, stopped/stalled states), MCP resume/health/list-vault handlers, status technique fix.
+
 ## v1.3.0 (2026-06-26)
 
 MCP Server — Model Context Protocol integration for AI coding agents.

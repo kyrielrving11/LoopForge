@@ -460,6 +460,8 @@ Every response includes a compact health line: `[PC: N records, normal]`
 | v3.5.1  | 2025-06   | Feedback→lineage quality backfill, loop-aware task_ids |
 | v1.0    | 2026-06   | TypeScript reference implementation — VaultBackend abstraction, Replay Engine, Policy externalization, JSON Schema, CLI + Library API |
 | v1.2    | 2026-06   | Loop Runtime — event-driven autonomous loop driver with heartbeat, round timeout, stall detection, graceful shutdown. `run({ task, execute })` convenience function with 2 required fields. Removed hook-stop and autonomous.ts. |
+| v1.3    | 2026-06   | MCP Server — JSON-RPC over stdio, 6 tools (start/next/status/stop/list/replay), Perception-Skill, SessionManager with advance() cycle |
+| v1.3.1  | 2026-06   | Session durability (save/resume from vault), success criteria as hard constraints, 2 new MCP tools (resume/health), `loopforge_list` scans vault |
 
 **Compatibility:** Protocol additions are backward-compatible (new fields with defaults).
 Removals follow a deprecation cycle: mark deprecated → 2 versions → remove.

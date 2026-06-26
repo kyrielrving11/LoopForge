@@ -2,3 +2,8 @@ node_modules/
 *.tgz
 .promptcraft/
 dist/tests/
+# Prevent stale build artifacts in source tree
+src/**/*.js
+src/**/*.d.ts
+src/**/*.js.map
+src/**/*.d.ts.map

@@ -36,6 +36,9 @@ round (e.g. "audit the entire codebase and fix every issue").
 │  3. loopforge_next(sessionId, output)                │
 │     → if prompt: go to step 2                        │
 │     → if prompt=null: loop ended, read stopReason    │
+│                                                      │
+│  After restart: loopforge_resume(loopId)             │
+│     → picks up from last saved round                 │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -104,10 +107,12 @@ If the result has a non-null `prompt`, execute it and repeat from Step 2.
 |------|-------------|-----------|------------|
 | `loopforge_start` | Beginning of every loop | `task`, `maxRounds?`, `constraints?` | `sessionId`, round 1 `prompt` |
 | `loopforge_next` | After executing every round | `sessionId`, `output` (with eval block) | next `prompt` or `null` + `stopReason` |
-| `loopforge_status` | Mid-loop checkpoint, user asks "how's it going" | `sessionId` | `round`, `qualityTrajectory`, `status` |
+| `loopforge_status` | Mid-loop checkpoint, user asks "how's it going" | `sessionId` | `round`, `qualityTrajectory`, `status`, `technique` |
 | `loopforge_stop` | User wants to abort, fatal error | `sessionId` | `roundsCompleted`, final trajectory |
-| `loopforge_list` | User asks "what loops are running" | — | `sessions[]` |
+| `loopforge_list` | User asks "what loops are running" | — | `sessions[]` (includes vault-persisted) |
 | `loopforge_replay` | After loop ends, user asks "show me what happened" | `sessionId` | `timeline[]` with all rounds |
+| `loopforge_resume` | Resume a loop after process restart | `loopId` | next `prompt` or `null` + `stopReason` |
+| `loopforge_health` | Check loop health mid-run | `loopId` | goal alignment, constraint integrity, drift, strategy |
 
 ## Quality Signals (Read the Room)
 
@@ -142,6 +147,9 @@ The prompt changes between rounds based on your trajectory. Pay attention to:
    narrow scope between rounds. Trust it — it sees the trajectory.
 5. **Call loopforge_next within the same turn.** Don't leave a round hanging
    across conversation turns. The MCP server is in-memory.
+6. **After process restart, use loopforge_resume.** The session state is saved
+   to vault every round. Call `loopforge_resume` with the original `loopId` to
+   pick up where you left off — no need to restart from round 1.
 
 ## Example
 

@@ -322,6 +322,32 @@ describe("Loop Compiler — L2 Full Recompile", () => {
     assert.ok(response.loop_objective !== null);
   });
 
+  it("merges success_criteria into constraints_active alongside hard_constraints", () => {
+    const req = makeLoopCompileRequest({
+      round: 1,
+      loop_id: "test",
+      task: "Audit ERC20 token",
+      constraints_from_plan: ["check ownership"],
+      loop_objective: makeLoopObjective({
+        objective: "Find all vulnerabilities",
+        success_criteria: ["All tests pass", "No高危漏洞"],
+        hard_constraints: ["No external deps"],
+        loop_id: "test",
+      }),
+    });
+    const response = compileL2(req, null);
+    assert.ok(response.constraints_active.includes("check ownership"));
+    assert.ok(response.constraints_active.includes("No external deps"));
+    assert.ok(response.constraints_active.includes("All tests pass"));
+    assert.ok(response.constraints_active.includes("No高危漏洞"));
+    // All three sources should be merged without duplicates
+    assert.equal(
+      response.constraints_active.length,
+      4,
+      "Expected 4 unique constraints: 1 plan + 1 hard + 2 success",
+    );
+  });
+
   it("auto-generates loop objective at round 1 when none provided", () => {
     const req = makeLoopCompileRequest({
       round: 1,

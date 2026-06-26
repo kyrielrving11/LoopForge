@@ -11,9 +11,8 @@ import {
   mkdirSync,
   readdirSync,
   existsSync,
-  statSync,
 } from "node:fs";
-import { resolve, dirname, join } from "node:path";
+import { resolve, dirname } from "node:path";
 import { homedir } from "node:os";
 import type { VaultBackend, VaultEntry } from "./interface.js";
 
@@ -276,6 +275,7 @@ export function scanLineageMd(
 
 export class FSBackend implements VaultBackend {
   private readonly vaultPath: string;
+  // v2: federation — global vault for cross-project constraints (not yet implemented)
   private readonly globalVaultPath: string;
 
   constructor(

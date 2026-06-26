@@ -47,6 +47,7 @@ export interface RuntimePolicy {
 
 export interface BackendPolicy {
   vault_path: string;
+  // v2: federation — global vault for cross-project constraints (not yet implemented)
   global_vault_path: string;
 }
 

@@ -102,6 +102,26 @@ export declare const TOOL_SCHEMAS: ({
         };
         required: never[];
     };
+} | {
+    name: string;
+    description: string;
+    inputSchema: {
+        type: "object";
+        properties: {
+            loopId: {
+                type: "string";
+                description: string;
+            };
+            task?: undefined;
+            maxRounds?: undefined;
+            domain?: undefined;
+            planSource?: undefined;
+            constraints?: undefined;
+            sessionId?: undefined;
+            output?: undefined;
+        };
+        required: string[];
+    };
 })[];
 export type ToolHandler = (mgr: SessionManager, input: Record<string, unknown>) => Record<string, unknown>;
 export declare const TOOL_HANDLERS: Record<string, ToolHandler>;

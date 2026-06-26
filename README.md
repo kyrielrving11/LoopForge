@@ -6,8 +6,8 @@
 with structured memory, constraint inheritance, and drift correction — maintains
 cognitive stability across long-horizon agent loops.
 
-> **v1.3** — `npm install loopforge`. MCP server + Perception-Skill + CLI + library API.
-> Zero runtime dependencies. 178 tests. Node.js ≥18.
+> **v1.3.1** — `npm install loopforge`. MCP server (8 tools) + Perception-Skill + CLI + library API.
+> Zero runtime dependencies. 92 tests. Node.js ≥18.
 
 ---
 
@@ -48,6 +48,9 @@ npx loopforge replay audit
 
 # Diff two rounds
 npx loopforge diff audit 1 3
+
+# Resume a loop from vault after restart (v1.3.1)
+npx loopforge resume audit
 
 # Vault health
 npx loopforge status
@@ -118,6 +121,7 @@ AI Host (Claude Code / Codex)
   → [Agent executes + self-eval]
   → loopforge_next → compiled Round 2 prompt
   → ... loop until prompt=null (task_complete / circuit_breaker / max_rounds / stalled)
+  → Process restart: loopforge_resume → pick up from last saved round (v1.3.1)
 ```
 
 The self-evaluation is a 4-field JSON block embedded in every compiled prompt:
@@ -141,12 +145,14 @@ Each field is consumed by specific downstream functions — nothing decorative.
 |------|-------|--------|
 | `loopforge_start` | `task`, `maxRounds?`, `constraints?`, `domain?` | `sessionId`, round 1 `prompt` |
 | `loopforge_next` | `sessionId`, `output` (with eval block) | next `prompt` or `null` + `stopReason` |
-| `loopforge_status` | `sessionId` | `round`, `qualityTrajectory`, `status` |
+| `loopforge_status` | `sessionId` | `round`, `qualityTrajectory`, `status`, `technique` |
 | `loopforge_stop` | `sessionId` | `roundsCompleted`, final trajectory |
-| `loopforge_list` | — | `sessions[]` |
+| `loopforge_list` | — | `sessions[]` (in-memory + vault-persisted) |
 | `loopforge_replay` | `sessionId` | `timeline[]` |
+| `loopforge_resume` | `loopId` | next `prompt` or `null` + `stopReason` (v1.3.1) |
+| `loopforge_health` | `loopId` | goal alignment, constraint integrity, drift, strategy stability (v1.3.1) |
 
-Stop reasons: `task_complete` | `circuit_breaker` | `max_rounds` | `stalled`
+Stop reasons: `task_complete` | `circuit_breaker` | `max_rounds` | `stalled` | `stopped`
 
 ---
 
@@ -189,6 +195,7 @@ loopforge run '<json>'             # v1.2: Autonomous loop with heartbeat/timeou
 loopforge replay <loop-id>         # Loop timeline — rounds, quality, technique per round
 loopforge diff <loop-id> <a> <b>   # Field-level diff between two rounds
 loopforge review <loop-id> <rN>    # Structural prompt audit
+loopforge resume <loop-id>          # v1.3.1: Resume loop from vault state
 loopforge status                   # Vault health summary
 ```
 
@@ -196,7 +203,9 @@ loopforge status                   # Vault health summary
 
 ## Key Features
 
-- **MCP Server (v1.3)** — 6 tools over JSON-RPC stdio: `start`, `next`, `status`, `stop`, `list`, `replay`. Zero-config integration with Claude Code and Codex.
+- **MCP Server (v1.3)** — 8 tools over JSON-RPC stdio: `start`, `next`, `status`, `stop`, `list`, `replay`, `resume`, `health`. Zero-config integration with Claude Code and Codex.
+- **Session Recovery (v1.3.1)** — Sessions auto-saved to vault. `loopforge_resume` restores loop state after process restart — no more starting from round 1.
+- **Success Criteria Enforcement (v1.3.1)** — `loop_objective.success_criteria` merged into active constraints — tracked, retired, and violation-checked like hard constraints.
 - **Perception-Skill (v1.3)** — Platform-agnostic agent skill. Copy-and-paste into any MCP-capable host to enable autonomous `/loop` workflows.
 - **Loop Runtime (v1.2)** — Event-driven autonomous loop with heartbeat monitoring, round timeout, stall detection, and graceful shutdown. Single `run({ task, execute })` function — 2 required fields.
 - **Heartbeat & Timeout** — Per-round heartbeat (configurable interval) with timeout + stall detection. Interactive mode for human-in-the-loop scenarios.
@@ -225,7 +234,7 @@ LoopForge/
 │   ├── skills/
 │   │   └── perception/          # Perception-Skill: agent instructions for /loop workflows
 │   │       └── SKILL.md
-│   └── tests/                   # 178 tests (Node.js built-in runner)
+│   └── tests/                   # 92 tests (Node.js built-in runner)
 ├── skills/
 │   └── prompt-techniques/       # Technique reference files (read at runtime)
 │       └── references/          # zero-shot, few-shot, cot, step-back, least-to-most, tot

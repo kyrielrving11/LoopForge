@@ -4,8 +4,6 @@
  * v1.2 — npm install loopforge
  */
 
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { createEngine, LoopForgeEngine } from "./engine.js";
 import { FSBackend } from "./backends/fs.js";
 import { ReplayBackend } from "./replay.js";
@@ -14,6 +12,7 @@ import {
   makeExecutionFeedback,
 } from "./protocol.js";
 import { LoopRuntime } from "./runtime.js";
+import { SessionManager } from "./mcp/session.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Constants
@@ -37,6 +36,7 @@ Usage:
   loopforge replay <loop-id>      Show loop timeline
   loopforge diff <loop-id> <a> <b> Diff two rounds
   loopforge review <loop-id> <rN> Audit stored prompt
+  loopforge resume <loop-id>      Resume loop from vault state
   loopforge status                Vault health summary
 
 Flags:
@@ -54,6 +54,7 @@ const CMD_HELP: Record<string, string> = {
   replay:  "loopforge replay <loop-id> — show timeline: round, recompile level, quality, technique, task.",
   diff:    "loopforge diff <loop-id> <round-a> <round-b> — field-level comparison between two rounds.",
   review:  "loopforge review <loop-id> <round-num> — structural audit of a stored prompt.",
+  resume:  "loopforge resume <loop-id> — restore session from vault and compile the next round's prompt.\n  Requires a session_state entry saved by a previous loopforge run or MCP session.",
   status:  "loopforge status — vault health: entry counts, active loops.",
 };
 
@@ -394,6 +395,45 @@ async function cmdRun(
   }
 }
 
+function cmdResume(loopId?: string): void {
+  if (loopId === "--help" || loopId === "-h") {
+    showHelp("resume");
+    return;
+  }
+  if (!loopId) die("resume requires a loop-id");
+
+  const backend = new FSBackend();
+  const mgr = new SessionManager(backend);
+  const result = mgr.resume(loopId);
+
+  if (!result) {
+    console.log(
+      `No saved session found for loop "${loopId}". ` +
+      "Start the loop first with 'loopforge run' or 'loopforge start' (MCP).",
+    );
+    return;
+  }
+
+  if (result.prompt === null) {
+    console.log(
+      `Loop "${loopId}" is ${result.stopReason}. ` +
+      `Last round: ${result.round}. No further prompts to compile.`,
+    );
+    return;
+  }
+
+  console.log(
+    `=== LoopForge Resume: ${loopId} — Round ${result.round} ` +
+    `| Level: ${(result.level ?? "l2").toUpperCase()} ` +
+    `| Technique: ${result.technique ?? "zero-shot"} ===\n`,
+  );
+  console.log(result.prompt);
+  if (result.warnings?.length) {
+    console.log("\n### Resume Warnings");
+    for (const w of result.warnings) console.log(`- ⚠️ ${w}`);
+  }
+}
+
 function cmdStatus(): void {
   const backend = new FSBackend();
   const vault = backend.readVault();
@@ -467,6 +507,9 @@ async function main(): Promise<void> {
       break;
     case "review":
       cmdReview(args[1], args[2]);
+      break;
+    case "resume":
+      cmdResume(args[1]);
       break;
     case "status":
       if (args[1] === "--help" || args[1] === "-h") showHelp("status");

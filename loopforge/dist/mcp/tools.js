@@ -111,6 +111,34 @@ export const TOOL_SCHEMAS = [
             required: ["sessionId"],
         },
     },
+    {
+        name: "loopforge_resume",
+        description: "Resume a loop from vault state after process restart. Returns the compiled prompt for the next round, or null with a stopReason if the loop is already complete.",
+        inputSchema: {
+            type: "object",
+            properties: {
+                loopId: {
+                    type: "string",
+                    description: "Loop ID to resume. Must have a saved session_state entry from a previous start/run.",
+                },
+            },
+            required: ["loopId"],
+        },
+    },
+    {
+        name: "loopforge_health",
+        description: "Check the health of a loop: goal alignment, constraint integrity, drift detection, strategy stability, and task continuity. Works for both active in-memory sessions and vault-persisted loops.",
+        inputSchema: {
+            type: "object",
+            properties: {
+                loopId: {
+                    type: "string",
+                    description: "Loop ID to check health for.",
+                },
+            },
+            required: ["loopId"],
+        },
+    },
 ];
 export const TOOL_HANDLERS = {
     loopforge_start(mgr, input) {
@@ -186,6 +214,24 @@ export const TOOL_HANDLERS = {
             return { error: `session not found: ${sessionId}` };
         const timeline = mgr.replayTimeline(sessionId) ?? [];
         return { sessionId, loopId: session.loopId, timeline };
+    },
+    loopforge_resume(mgr, input) {
+        const loopId = String(input.loopId ?? "");
+        if (!loopId)
+            return { error: "loopId is required" };
+        const result = mgr.resume(loopId);
+        if (!result)
+            return { error: `no saved session found for loop "${loopId}"` };
+        return { ...result };
+    },
+    loopforge_health(mgr, input) {
+        const loopId = String(input.loopId ?? "");
+        if (!loopId)
+            return { error: "loopId is required" };
+        const health = mgr.getHealth(loopId);
+        if (!health)
+            return { error: `no data found for loop "${loopId}"` };
+        return health;
     },
 };
 //# sourceMappingURL=tools.js.map

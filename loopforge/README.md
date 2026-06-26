@@ -51,9 +51,11 @@ const result = engine.invokeLoopCompile({
 loopforge init                     # Init vault
 loopforge compile '<json>'         # Compile prompt (or pipe via stdin)
 loopforge feedback '<json>'        # Record feedback
+loopforge run '<json>'              # Autonomous loop (v1.2)
 loopforge replay <loop-id>         # Loop timeline
 loopforge diff <loop-id> <a> <b>   # Diff two rounds
 loopforge review <loop-id> <rN>    # Audit stored prompt
+loopforge resume <loop-id>          # Resume loop from vault (v1.3.1)
 loopforge status                   # Vault health
 ```
 

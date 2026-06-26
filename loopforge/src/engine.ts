@@ -740,6 +740,11 @@ export class LoopForgeEngine {
     // Persist lineage to vault
     this.persistLoopLineage(response, lcr);
 
+    // Track technique for status queries
+    if (this.state) {
+      this.state.last_technique = response.technique_used;
+    }
+
     return {
       status: AgentStatus.OK,
       response: {

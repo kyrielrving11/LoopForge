@@ -7,11 +7,12 @@
 
 import { randomUUID } from "node:crypto";
 import { LoopForgeEngine, extractSelfEvaluation, heuristicSelfEvaluation } from "../engine.js";
+import { checkLoopHealth } from "../loop-compiler.js";
 import { getPolicy } from "../policy.js";
-import { Mode, makeVaultConfig } from "../protocol.js";
+import { Mode, makeLoopCompileRequest, makeVaultConfig } from "../protocol.js";
 import { ReplayBackend } from "../replay.js";
 import { FSBackend } from "../backends/fs.js";
-import type { VaultBackend } from "../backends/interface.js";
+import type { VaultBackend, VaultEntry } from "../backends/interface.js";
 import type { LoopForgeRequest, SelfEvaluation } from "../protocol.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -137,6 +138,9 @@ export class SessionManager {
     };
     this.sessions.set(sessionId, session);
 
+    // Persist to vault for cross-process recovery
+    this.save(session);
+
     return {
       sessionId,
       round: 1,
@@ -160,13 +164,198 @@ export class SessionManager {
     return true;
   }
 
+  /** Persist session state to vault for cross-process recovery.
+   *  Uses upsert: removes any previous session_state entry for this loop,
+   *  then appends a new one with current state. */
+  save(session: McpSession): void {
+    if (!this.backend) return;
+
+    // Upsert: remove old session_state entries for this loop
+    const vault = this.backend.readVault();
+    const entries = (vault.entries as VaultEntry[]) || [];
+    vault.entries = entries.filter(
+      (e: VaultEntry) =>
+        !(e.task_type === "session_state" && e.loop_id === session.loopId),
+    );
+    this.backend.writeVault(vault);
+
+    // Append fresh session state
+    this.backend.appendEntry({
+      task_id: `loop:${session.loopId}:session`,
+      task_type: "session_state",
+      timestamp: new Date().toISOString(),
+      loop_id: session.loopId,
+      task: session.task,
+      loop_lineage: {
+        session_id: session.sessionId,
+        current_round: session.currentRound,
+        max_rounds: session.maxRounds,
+        quality_trajectory: session.qualityTrajectory,
+        status: session.status,
+        created_at: session.createdAt,
+      },
+    });
+  }
+
+  /** Resume a loop from vault state.
+   *  Reconstructs the session and compiles the prompt for the next round.
+   *  Returns null if no session_state entry exists for this loopId. */
+  resume(loopId: string): AdvanceResult | null {
+    if (!this.backend) return null;
+
+    const entries = this.backend.queryEntries({
+      prefix: `loop:${loopId}:session`,
+    });
+    const sessionEntry = entries.find(
+      (e) => e.task_type === "session_state",
+    );
+    if (!sessionEntry) return null;
+
+    const lineage = (sessionEntry.loop_lineage ?? {}) as Record<
+      string,
+      unknown
+    >;
+    const status = (lineage.status as string) ?? "running";
+    const currentRound = (lineage.current_round as number) ?? 1;
+    const qualityTrajectory =
+      (lineage.quality_trajectory as number[]) ?? [];
+    const task = (sessionEntry.task as string) ?? "";
+    const maxRounds =
+      (lineage.max_rounds as number) ?? getPolicy().runtime.max_rounds;
+
+    // If the loop was already stopped or stalled, return immediately
+    if (status !== "running") {
+      return {
+        sessionId: "",
+        round: currentRound,
+        prompt: null,
+        stopReason: status,
+      };
+    }
+
+    // Reconstruct session with a fresh engine
+    const engine = new LoopForgeEngine("skills", this.backend);
+    const sessionId = randomUUID();
+    const session: McpSession = {
+      sessionId,
+      loopId,
+      task,
+      engine,
+      currentRound,
+      maxRounds,
+      qualityTrajectory,
+      status: "running",
+      createdAt: (lineage.created_at as number) ?? Date.now(),
+    };
+    this.sessions.set(sessionId, session);
+
+    // Compile the next round's prompt from vault lineage
+    const request = buildLoopRequest(session);
+    const result = engine.invokeLoopCompile(
+      request as unknown as LoopForgeRequest,
+    );
+
+    return {
+      sessionId,
+      round: currentRound,
+      prompt: result.response?.prompt ?? null,
+      technique: result.response?.analysis?.technique ?? "zero-shot",
+      level: parseLevel(result.response?.analysis?.rationale),
+      quality: 0,
+      warnings: parseWarnings(result.response?.prompt ?? null),
+    };
+  }
+
   list(): McpSessionSummary[] {
-    return [...this.sessions.values()].map((s) => ({
-      sessionId: s.sessionId,
-      loopId: s.loopId,
-      round: s.currentRound,
-      status: s.status,
-    }));
+    const seen = new Set<string>();
+    const result: McpSessionSummary[] = [];
+
+    // In-memory sessions first (take priority)
+    for (const s of this.sessions.values()) {
+      seen.add(s.loopId);
+      result.push({
+        sessionId: s.sessionId,
+        loopId: s.loopId,
+        round: s.currentRound,
+        status: s.status,
+      });
+    }
+
+    // Merge vault-persisted sessions not already in memory
+    if (this.backend) {
+      const vault = this.backend.readVault();
+      const entries = (vault.entries as VaultEntry[]) ?? [];
+      for (const e of entries) {
+        if (e.task_type !== "session_state") continue;
+        const lid = e.loop_id ?? "";
+        if (!lid || seen.has(lid)) continue;
+        seen.add(lid);
+        const lineage = (e.loop_lineage ?? {}) as Record<string, unknown>;
+        result.push({
+          sessionId: "",
+          loopId: lid,
+          round: (lineage.current_round as number) ?? 1,
+          status: ((lineage.status as string) || "running") as McpSession["status"],
+        });
+      }
+    }
+
+    return result;
+  }
+
+  /** Get loop health for a loop (in-memory or vault).
+   *  Computes goal alignment, constraint integrity, drift, strategy stability. */
+  getHealth(loopId: string): Record<string, unknown> | null {
+    // Find the task — check in-memory sessions first, then vault
+    let task = "";
+    let goalId = loopId;
+
+    for (const s of this.sessions.values()) {
+      if (s.loopId === loopId) {
+        task = s.task;
+        if (s.engine.state?.task_id) {
+          goalId = s.engine.state.task_id;
+        }
+        break;
+      }
+    }
+
+    // Fall back to vault for task
+    if (!task && this.backend) {
+      const entries = this.backend.queryEntries({
+        prefix: `loop:${loopId}:session`,
+      });
+      const sessionEntry = entries.find(
+        (e) => e.task_type === "session_state",
+      );
+      if (sessionEntry) {
+        task = (sessionEntry.task as string) ?? "";
+      }
+    }
+
+    if (!task) return null;
+
+    // Hydrate vault context
+    const engine = new LoopForgeEngine("skills", this.backend);
+    const vaultContext = engine.hydrateLoopContext(loopId);
+
+    // Build a minimal request for health check
+    const request = makeLoopCompileRequest({
+      task,
+      loop_id: loopId,
+      goal_id: goalId,
+      round: 1, // round doesn't matter for health check
+    });
+
+    const health = checkLoopHealth(loopId, request, vaultContext);
+    return {
+      loopId,
+      goal_alignment: health.goal_alignment,
+      constraint_integrity: health.constraint_integrity,
+      drift_detected: health.drift_detected,
+      strategy_stability: health.strategy_stability,
+      task_continuity: health.task_continuity,
+    };
   }
 
   /** Core cycle: extract self-eval → record feedback → check stop → compile next. */
@@ -185,6 +374,7 @@ export class SessionManager {
     // Guard: if both extraction methods returned null, stop
     if (!selfEval) {
       session.status = "stalled";
+      this.save(session);
       return { sessionId, round: session.currentRound, prompt: null, stopReason: "stalled", quality: 0 };
     }
 
@@ -197,18 +387,22 @@ export class SessionManager {
     // 3. Stop conditions (extraction-first order — see memory)
     if (extractionFailed) {
       session.status = "stalled";
+      this.save(session);
       return { sessionId, round: session.currentRound, prompt: null, stopReason: "stalled", quality };
     }
     if (!selfEval.should_continue) {
       session.status = "stopped";
+      this.save(session);
       return { sessionId, round: session.currentRound, prompt: null, stopReason: "task_complete", quality };
     }
     if (session.engine.shouldBreak()) {
       session.status = "stopped";
+      this.save(session);
       return { sessionId, round: session.currentRound, prompt: null, stopReason: "circuit_breaker", quality };
     }
     if (session.currentRound >= session.maxRounds) {
       session.status = "stopped";
+      this.save(session);
       return { sessionId, round: session.currentRound, prompt: null, stopReason: "max_rounds", quality };
     }
 
@@ -216,6 +410,8 @@ export class SessionManager {
     session.currentRound++;
     const request = buildLoopRequest(session, selfEval, quality);
     const result = session.engine.invokeLoopCompile(request as unknown as LoopForgeRequest);
+
+    this.save(session);
 
     return {
       sessionId,

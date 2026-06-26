@@ -838,7 +838,7 @@ export function compileL2(request, vaultContext) {
     }
     let constraints = [...request.constraints_from_plan];
     if (loopObjective) {
-        constraints = [...new Set([...constraints, ...loopObjective.hard_constraints])];
+        constraints = [...new Set([...constraints, ...loopObjective.hard_constraints, ...loopObjective.success_criteria])];
     }
     // ── Route to technique-specific specialist (v1.1 deep integration) ──
     let prompt;

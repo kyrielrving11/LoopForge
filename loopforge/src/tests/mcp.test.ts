@@ -179,6 +179,139 @@ describe("MCP — multi-round lifecycle", () => {
   });
 });
 
+describe("MCP — session persistence (save / resume)", () => {
+  let backend: MemoryBackend;
+  let mgr: SessionManager;
+
+  beforeEach(() => {
+    resetPolicy();
+    backend = new MemoryBackend();
+    mgr = new SessionManager(backend);
+  });
+
+  it("create() persists session to vault as session_state entry", () => {
+    const r1 = mgr.create({ task: "Test task", loopId: "persist-test" });
+    assert.ok(r1.prompt !== null);
+
+    const entries = backend.queryEntries({ prefix: "loop:persist-test:session" });
+    const sessionEntry = entries.find((e) => e.task_type === "session_state");
+    assert.ok(sessionEntry !== undefined);
+    assert.equal(sessionEntry!.loop_id, "persist-test");
+    const lineage = sessionEntry!.loop_lineage as Record<string, unknown>;
+    assert.equal(lineage.current_round, 1);
+    assert.equal(lineage.status, "running");
+  });
+
+  it("advance() updates session_state after each round", () => {
+    const r1 = mgr.create({ task: "Test task", loopId: "advance-persist" });
+    const sessionId = r1.sessionId;
+
+    // Advance round 1 → compiles round 2
+    const r2 = mgr.advance(sessionId, agentOutput({
+      success: true, shouldContinue: true,
+    }));
+    assert.ok(r2.prompt !== null);
+    assert.equal(r2.round, 2);
+
+    const entries = backend.queryEntries({ prefix: "loop:advance-persist:session" });
+    const sessionEntry = entries.find((e) => e.task_type === "session_state");
+    assert.ok(sessionEntry !== undefined);
+    const lineage = sessionEntry!.loop_lineage as Record<string, unknown>;
+    assert.equal(lineage.current_round, 2);
+    const qt = lineage.quality_trajectory as number[];
+    assert.ok(qt.length >= 1, "quality trajectory should have at least 1 entry");
+  });
+
+  it("advance() saves stopped status when task_complete", () => {
+    const r1 = mgr.create({ task: "Test task", loopId: "complete-persist" });
+    const sessionId = r1.sessionId;
+
+    mgr.advance(sessionId, agentOutput({
+      success: true, shouldContinue: false,
+    }));
+
+    const entries = backend.queryEntries({ prefix: "loop:complete-persist:session" });
+    const sessionEntry = entries.find((e) => e.task_type === "session_state");
+    assert.ok(sessionEntry !== undefined);
+    const lineage = sessionEntry!.loop_lineage as Record<string, unknown>;
+    assert.equal(lineage.status, "stopped");
+  });
+
+  it("advance() saves stalled status when no eval block", () => {
+    const r1 = mgr.create({ task: "Test task", loopId: "stall-persist" });
+    const sessionId = r1.sessionId;
+
+    mgr.advance(sessionId, agentOutputNoEval("Just some text"));
+
+    const entries = backend.queryEntries({ prefix: "loop:stall-persist:session" });
+    const sessionEntry = entries.find((e) => e.task_type === "session_state");
+    assert.ok(sessionEntry !== undefined);
+    const lineage = sessionEntry!.loop_lineage as Record<string, unknown>;
+    assert.equal(lineage.status, "stalled");
+  });
+
+  it("resume() returns prompt for next round after create", () => {
+    // Create session → simulates process dying after round 1 compile
+    const r1 = mgr.create({ task: "Test task", loopId: "resume-after-create" });
+    assert.ok(r1.prompt !== null);
+
+    // New SessionManager (simulating process restart)
+    const mgr2 = new SessionManager(backend);
+    const resumed = mgr2.resume("resume-after-create");
+    assert.ok(resumed !== null, "resume should return a result");
+    assert.ok(resumed!.prompt !== null, "resume should return a compiled prompt");
+    assert.equal(resumed!.round, 1, "should compile round 1 again");
+  });
+
+  it("resume() recovers mid-loop state after advance", () => {
+    // Create and advance one round → simulates process dying after round 2 compile
+    const r1 = mgr.create({ task: "Test task", loopId: "resume-mid" });
+    const r2 = mgr.advance(r1.sessionId, agentOutput({
+      success: true, shouldContinue: true,
+    }));
+    assert.equal(r2.round, 2);
+    assert.ok(r2.prompt !== null);
+
+    // New SessionManager (process restart)
+    const mgr2 = new SessionManager(backend);
+    const resumed = mgr2.resume("resume-mid");
+    assert.ok(resumed !== null);
+    assert.equal(resumed!.round, 2, "should pick up at round 2");
+    assert.ok(resumed!.prompt !== null);
+    assert.ok(resumed!.prompt!.length > 0);
+  });
+
+  it("resume() returns stopped result for completed loop", () => {
+    const r1 = mgr.create({ task: "Test task", loopId: "resume-done" });
+    mgr.advance(r1.sessionId, agentOutput({
+      success: true, shouldContinue: false,
+    }));
+
+    const mgr2 = new SessionManager(backend);
+    const resumed = mgr2.resume("resume-done");
+    assert.ok(resumed !== null);
+    assert.equal(resumed!.prompt, null);
+    assert.ok(resumed!.stopReason === "stopped" || resumed!.stopReason === "task_complete");
+  });
+
+  it("resume() returns null for unknown loop", () => {
+    const mgr2 = new SessionManager(backend);
+    const result = mgr2.resume("nonexistent-loop");
+    assert.equal(result, null);
+  });
+
+  it("save() upserts — only one session_state entry per loop", () => {
+    mgr.create({ task: "Test task", loopId: "upsert-test" });
+    // Create another session for the same loop (simulating multiple sessions)
+    const mgr2 = new SessionManager(backend);
+    mgr2.create({ task: "Test task", loopId: "upsert-test" });
+
+    const entries = backend.queryEntries({ prefix: "loop:upsert-test:session" });
+    const sessionEntries = entries.filter((e) => e.task_type === "session_state");
+    assert.equal(sessionEntries.length, 1, "should only have one session_state entry per loop");
+  });
+});
+
 describe("MCP — status / list / stop / replay", () => {
   let backend: MemoryBackend;
   let mgr: SessionManager;
@@ -251,5 +384,93 @@ describe("MCP — status / list / stop / replay", () => {
     assert.ok(timeline.length >= 1, "timeline should have entries");
     assert.equal(typeof timeline[0].round, "number");
     assert.equal(typeof timeline[0].technique_used, "string");
+  });
+});
+
+describe("MCP — resume / list-vault / health", () => {
+  let backend: MemoryBackend;
+  let mgr: SessionManager;
+
+  beforeEach(() => {
+    resetPolicy();
+    backend = new MemoryBackend();
+    mgr = new SessionManager(backend);
+  });
+
+  it("loopforge_resume returns prompt via MCP handler", () => {
+    // Create session → save persists to vault
+    const start = TOOL_HANDLERS.loopforge_start(mgr, {
+      task: "Resume handler test",
+      loopId: "resume-hdl-test",
+    });
+    assert.ok("sessionId" in start);
+
+    // Simulate new SessionManager (process restart)
+    const mgr2 = new SessionManager(backend);
+    const result = TOOL_HANDLERS.loopforge_resume(mgr2, {
+      loopId: "resume-hdl-test",
+    });
+    assert.ok("prompt" in result, `expected prompt, got: ${JSON.stringify(result)}`);
+    assert.ok(result.prompt !== null);
+  });
+
+  it("loopforge_resume returns error for unknown loop", () => {
+    const result = TOOL_HANDLERS.loopforge_resume(mgr, {
+      loopId: "nonexistent",
+    });
+    assert.ok("error" in result);
+  });
+
+  it("loopforge_list includes vault-persisted sessions after restart", () => {
+    // Create a session on mgr → saved to vault
+    TOOL_HANDLERS.loopforge_start(mgr, {
+      task: "Vault list test",
+      loopId: "vault-list-loop",
+    });
+
+    // Fresh SessionManager (process restart)
+    const mgr2 = new SessionManager(backend);
+    const result = TOOL_HANDLERS.loopforge_list(mgr2, {});
+    const sessions = result.sessions as Array<Record<string, unknown>>;
+
+    const found = sessions.find((s) => s.loopId === "vault-list-loop");
+    assert.ok(found !== undefined, "vault-persisted session should appear in list");
+  });
+
+  it("loopforge_health returns health data for a started loop", () => {
+    TOOL_HANDLERS.loopforge_start(mgr, {
+      task: "Health test task",
+      loopId: "health-test",
+      constraints: ["Must use TypeScript"],
+    });
+
+    const result = TOOL_HANDLERS.loopforge_health(mgr, {
+      loopId: "health-test",
+    });
+    assert.ok("goal_alignment" in result, `expected goal_alignment, got: ${JSON.stringify(result)}`);
+    assert.ok("constraint_integrity" in result);
+    assert.ok("drift_detected" in result);
+    assert.ok("strategy_stability" in result);
+    assert.ok("task_continuity" in result);
+  });
+
+  it("loopforge_health returns error for unknown loop", () => {
+    const result = TOOL_HANDLERS.loopforge_health(mgr, {
+      loopId: "nonexistent",
+    });
+    assert.ok("error" in result);
+  });
+
+  it("loopforge_status shows technique after compiling", () => {
+    const start = TOOL_HANDLERS.loopforge_start(mgr, {
+      task: "Technique status test",
+      loopId: "technique-status",
+    });
+    const sessionId = String(start.sessionId);
+
+    const status = TOOL_HANDLERS.loopforge_status(mgr, { sessionId });
+    const technique = status.technique as string;
+    assert.ok(typeof technique === "string", "technique should be a string");
+    assert.ok(technique.length > 0, "technique should not be empty");
   });
 });

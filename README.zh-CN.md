@@ -6,12 +6,27 @@
 为长程 Agent Loop 编译每轮迭代的提示词 —— 具备结构化记忆、约束继承、
 漂移纠正和增量重编译（L0/L1/L2）能力。
 
-> **v1.1** — `npm install loopforge`。CLI + 库 API。零运行时依赖。
-> 150 测试。Node.js ≥18。
+> **v1.3** — `npm install loopforge`。MCP 服务器 + Perception-Skill + CLI + 库 API。
+> 零运行时依赖。178 测试。Node.js ≥18。
 
 ---
 
 ## 快速开始
+
+### MCP + Skill（推荐）
+
+```bash
+npm install -g loopforge
+claude mcp add loopforge -- npx loopforge-mcp
+# 安装 Perception-Skill，获取多轮循环指令
+mkdir -p ~/.claude/skills/perception
+cp "$(npm root -g)/loopforge/skills/perception/SKILL.md" ~/.claude/skills/perception/
+```
+
+然后在 Claude Code / Codex 中：`/loop "审计 ERC20 代币"` — Perception-Skill
+将通过 MCP 工具自动管理完整的循环生命周期。
+
+### CLI
 
 ```bash
 npm install loopforge
@@ -22,13 +37,8 @@ npx loopforge init
 # 编译提示词（loop_compile 模式）
 npx loopforge compile '{"task":"审计 ERC20 代币","loop_id":"audit","round":1,"goal_id":"audit"}'
 
-# v1.1: 自主循环 — 通过 Claude Code Hook，Agent 自己驱动自己
-# 第1步：将 Stop hook 配置复制到 .claude/settings.json
-# 第2步：启动循环
-npx loopforge compile '{"task":"审计 ERC20","loop_id":"audit","round":1,"goal_id":"audit"}'
-
-# Hook 在每轮结束后自动继续 — 无需人工参与
-# 任务完成？Agent 自动停止。漂移检测？熔断器触发。
+# v1.2: 自主循环 — 交互式模式（每轮粘贴 Agent 输出）
+npx loopforge run '{"task":"审计 ERC20 代币","loop_id":"audit-erc20"}'
 
 # 记录反馈（手动模式）
 npx loopforge feedback '{"loop_id":"audit","round":1,"success":true,"score":4}'
@@ -43,8 +53,9 @@ npx loopforge diff audit 1 3
 npx loopforge status
 ```
 
+### 库 API
+
 ```typescript
-// 库 API
 import { createEngine, ReplayBackend, FSBackend } from "loopforge";
 
 const engine = createEngine();
@@ -56,26 +67,32 @@ const result = engine.invokeLoopCompile({
   goal_id: "audit",
 });
 
-console.log(result.response?.full_prompt);
-console.log(result.response?.health_line);
+console.log(result.response?.prompt);
+console.log(result.status); // "ok" | "error" | "stalled"
 ```
 
 ```typescript
-// v1.1: 自主循环 — 反馈环无人工参与
-import { createEngine, runAutonomousLoop } from "loopforge";
+// v1.2: 自主循环 — 2 个必填字段，其他全自动
+import { run } from "loopforge";
 
-const engine = createEngine();
-const result = await runAutonomousLoop(engine, {
+const result = await run({
   task: "审计 ERC20 代币安全漏洞",
-  loopId: "audit-erc20",
-  maxRounds: 10,
-}, async (prompt, round) => {
-  // 你的 AI 执行器 — Claude API、CLI agent 等
-  return await callAiApi(prompt);
+  execute: async (prompt) => {
+    // 你的 AI 执行器 — Claude API、CLI agent 等
+    return await callAiApi(prompt);
+  },
 });
 
 console.log(`完成 ${result.roundsCompleted} 轮: ${result.stopReason}`);
 console.log(`质量轨迹: ${result.qualityTrajectory}`);
+```
+
+```typescript
+// v1.3: MCP 服务器 — 嵌入任意 MCP-capable 宿主
+import { McpServer, SessionManager } from "loopforge";
+
+const server = new McpServer();
+server.start(); // JSON-RPC over stdio
 ```
 
 ---
@@ -93,6 +110,17 @@ LoopForge 编译提示词（嵌入自评指令）
         → ... 循环直到任务完成或熔断
 ```
 
+**MCP 集成方式（v1.3）：**
+
+```
+AI 宿主（Claude Code / Codex）
+  → Perception-Skill 在 /loop 时激活
+  → loopforge_start → 编译后的第 1 轮 prompt
+  → [Agent 执行 + 自评]
+  → loopforge_next → 编译后的第 2 轮 prompt
+  → ... 循环直到 prompt=null（task_complete / circuit_breaker / max_rounds / stalled）
+```
+
 每轮编译提示词末尾嵌入 4 字段自评 JSON：
 
 ```json
@@ -105,6 +133,29 @@ LoopForge 编译提示词（嵌入自评指令）
 ```
 
 每个字段都有明确的下游消费者——没有装饰字段。
+
+---
+
+## MCP 工具（v1.3）
+
+| 工具 | 输入 | 输出 |
+|------|------|------|
+| `loopforge_start` | `task`、`maxRounds?`、`constraints?`、`domain?` | `sessionId`、第 1 轮 `prompt` |
+| `loopforge_next` | `sessionId`、`output`（含自评块） | 下一轮 `prompt` 或 `null` + `stopReason` |
+| `loopforge_status` | `sessionId` | `round`、`qualityTrajectory`、`status` |
+| `loopforge_stop` | `sessionId` | `roundsCompleted`、最终轨迹 |
+| `loopforge_list` | — | `sessions[]` |
+| `loopforge_replay` | `sessionId` | `timeline[]` |
+
+停止原因：`task_complete` | `circuit_breaker` | `max_rounds` | `stalled`
+
+---
+
+## Perception-Skill
+
+一个平台无关的 Agent Skill（`skills/perception/SKILL.md`），教会任意 AI Agent
+如何使用 LoopForge MCP 工具进行自主多轮循环。复制到 Agent 的 skill 目录即可
+— 兼容 Claude Code、Codex 及任何支持 MCP 的宿主。
 
 ---
 
@@ -134,8 +185,7 @@ LoopForge 编译提示词（嵌入自评指令）
 loopforge init                     # 初始化 .promptcraft vault
 loopforge compile '<json>'         # 编译提示词（支持 stdin 管道）
 loopforge feedback '<json>'        # 记录执行反馈
-loopforge run '<json>'             # v1.1: 自主循环（编译 → 提取 → 重复）
-loopforge hook-stop               # Claude Code Stop hook — 自动继续循环
+loopforge run '<json>'             # v1.2: 自主循环 — 心跳/超时/stall 检测
 loopforge replay <loop-id>         # 循环时间线 — 轮次、质量、技术
 loopforge diff <loop-id> <a> <b>   # 两轮逐字段对比
 loopforge review <loop-id> <rN>    # 存储提示词结构审计
@@ -146,7 +196,10 @@ loopforge status                   # Vault 健康摘要
 
 ## 核心特性
 
-- **自主循环（v1.1）** — Agent 每轮通过结构化 JSON 块自我评估。反馈环无人工参与。Claude Code Stop hook（`npx loopforge hook-stop`）每轮结束后自动继续。
+- **MCP 服务器（v1.3）** — 6 个工具，JSON-RPC over stdio：`start`、`next`、`status`、`stop`、`list`、`replay`。零配置接入 Claude Code 和 Codex。
+- **Perception-Skill（v1.3）** — 平台无关的 Agent Skill。复制粘贴即可在任意 MCP-capable 宿主中启用自主 `/loop` 工作流。
+- **Loop Runtime（v1.2）** — 事件驱动自主循环，内置心跳监控、单轮超时、stall 检测、优雅退出。`run({ task, execute })` 函数——仅 2 个必填字段。
+- **心跳 & 超时** — 每轮心跳（可配置间隔）+ 超时 + stall 检测。支持 interactive 模式用于人机协同。
 - **自评提取** — 解析 Agent 输出中的 `---loopforge-eval` 块。结构化提取失败时降级为启发式推断。
 - **L0/L1/L2 增量重编译** — 4 门控硬路由：force_level → 首轮/plan_source → goal_id 稳定性 → 失败/约束信号
 - **Loop Objective 锚定** — 首轮自动生成稳定目标锚点，每轮校验
@@ -157,7 +210,7 @@ loopforge status                   # Vault 健康摘要
 - **策略外置** — 所有可调参数在 `loop_policy.json` — 约束窗口、技术链、触发条件
 - **可插拔后端** — `VaultBackend` 接口；默认 `FSBackend`（JSON + Markdown 双写）
 - **Task Alignment** — 校验下一轮任务 vs Loop Objective — 建议级漂移检测
-- **熔断器** — 连续 3 轮无改善 → STALLED
+- **熔断器** — 连续 3 轮无改善 → STALLED。独立的 executor 连续失败熔断。
 - **零依赖** — 仅 Node.js 标准库，TypeScript strict mode
 
 ---
@@ -167,9 +220,12 @@ loopforge status                   # Vault 健康摘要
 ```
 LoopForge/
 ├── loopforge/              # TypeScript 包
-│   ├── src/                     # adapter, autonomous, builder, cli, engine, loop-compiler, policy, protocol, replay, backends
+│   ├── src/                     # adapter, builder, cli, engine, loop-compiler, policy, protocol, replay, runtime, backends, mcp
 │   ├── dist/                    # 编译产物 + 类型声明
-│   └── tests/                   # 150 测试（Node.js 内置 runner）
+│   ├── skills/
+│   │   └── perception/          # Perception-Skill：Agent 的 /loop 工作流指令
+│   │       └── SKILL.md
+│   └── tests/                   # 178 测试（Node.js 内置 runner）
 ├── skills/
 │   └── prompt-techniques/       # 技巧参考文件（运行时读取）
 │       └── references/          # zero-shot, few-shot, cot, step-back, least-to-most, tot
@@ -185,10 +241,10 @@ LoopForge/
 
 | 导入路径 | 用途 |
 |----------|------|
-| `loopforge` | `handle()`、`createEngine()`、全部类型 |
+| `loopforge` | `run()`、`handle()`、`createEngine()`、`LoopRuntime`、`McpServer`、`SessionManager`、全部类型 |
 | `loopforge/compiler` | `compileLoop()`、`decideLevel()`、`compileL2()`、`buildSelfEvalBlock()` |
 | `loopforge/replay` | `ReplayBackend` — `getRound()`、`replay()`、`timeline()`、`diff()` |
-| `loopforge/autonomous` | `runOneRound()`、`runAutonomousLoop()` — v1.1 自主循环驱动器 |
+| `loopforge/mcp` | `McpServer`、`SessionManager` — JSON-RPC 传输 + session 生命周期 |
 
 ---
 

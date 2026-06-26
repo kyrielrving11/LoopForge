@@ -24,6 +24,13 @@ export interface EnginePolicy {
     feedback_flush_interval: number;
     max_circuit_breaker: number;
 }
+export interface RuntimePolicy {
+    max_rounds: number;
+    round_timeout_ms: number;
+    heartbeat_interval_ms: number;
+    stall_grace_ms: number;
+    max_consecutive_errors: number;
+}
 export interface BackendPolicy {
     vault_path: string;
     global_vault_path: string;
@@ -35,6 +42,7 @@ export interface LoopPolicy {
     recompile_triggers: RecompileTriggersPolicy;
     technique: TechniquePolicy;
     engine: EnginePolicy;
+    runtime: RuntimePolicy;
     backend: BackendPolicy;
 }
 export declare const DEFAULT_POLICY: LoopPolicy;

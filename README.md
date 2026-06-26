@@ -6,12 +6,27 @@
 with structured memory, constraint inheritance, and drift correction — maintains
 cognitive stability across long-horizon agent loops.
 
-> **v1.1** — `npm install loopforge`. CLI + library API. Zero runtime dependencies.
-> 150 tests. Node.js ≥18.
+> **v1.3** — `npm install loopforge`. MCP server + Perception-Skill + CLI + library API.
+> Zero runtime dependencies. 178 tests. Node.js ≥18.
 
 ---
 
 ## Quick Start
+
+### MCP + Skill (recommended)
+
+```bash
+npm install -g loopforge
+claude mcp add loopforge -- npx loopforge-mcp
+# Copy the Perception-Skill for multi-round loop instructions
+mkdir -p ~/.claude/skills/perception
+cp "$(npm root -g)/loopforge/skills/perception/SKILL.md" ~/.claude/skills/perception/
+```
+
+Then in Claude Code / Codex: `/loop "Audit ERC20 token"` — the Perception-Skill
+handles the full loop lifecycle via MCP tools.
+
+### CLI
 
 ```bash
 npm install loopforge
@@ -22,13 +37,8 @@ npx loopforge init
 # Compile a prompt (loop_compile mode)
 npx loopforge compile '{"task":"Audit ERC20 token","loop_id":"audit","round":1,"goal_id":"audit"}'
 
-# v1.1: Autonomous loop via Claude Code hook — agent drives itself
-# Step 1: Copy the Stop hook config to .claude/settings.json
-# Step 2: Start a loop
-npx loopforge compile '{"task":"Audit ERC20","loop_id":"audit","round":1,"goal_id":"audit"}'
-
-# The hook auto-continues after each round — no human needed.
-# Task complete? Agent stops. Drift detected? Circuit breaker triggers.
+# v1.2: Autonomous loop — interactive mode (paste agent output each round)
+npx loopforge run '{"task":"Audit ERC20 token","loop_id":"audit-erc20"}'
 
 # Record feedback (manual mode)
 npx loopforge feedback '{"loop_id":"audit","round":1,"success":true,"score":4}'
@@ -43,8 +53,9 @@ npx loopforge diff audit 1 3
 npx loopforge status
 ```
 
+### Library API
+
 ```typescript
-// Library API
 import { createEngine, ReplayBackend, FSBackend } from "loopforge";
 
 const engine = createEngine();
@@ -56,33 +67,39 @@ const result = engine.invokeLoopCompile({
   goal_id: "audit",
 });
 
-console.log(result.response?.full_prompt);
-console.log(result.response?.health_line);
+console.log(result.response?.prompt);
+console.log(result.status); // "ok" | "error" | "stalled"
 ```
 
 ```typescript
-// v1.1: Autonomous loop — no human in the feedback loop
-import { createEngine, runAutonomousLoop } from "loopforge";
+// v1.2: Autonomous loop — 2 required fields, everything else automatic
+import { run } from "loopforge";
 
-const engine = createEngine();
-const result = await runAutonomousLoop(engine, {
+const result = await run({
   task: "Audit ERC20 token for security vulnerabilities",
-  loopId: "audit-erc20",
-  maxRounds: 10,
-}, async (prompt, round) => {
-  // Your AI executor here — Claude API, CLI agent, etc.
-  return await callAiApi(prompt);
+  execute: async (prompt) => {
+    // Your AI executor — Claude API, CLI agent, etc.
+    return await callAiApi(prompt);
+  },
 });
 
 console.log(`Completed ${result.roundsCompleted} rounds: ${result.stopReason}`);
 console.log(`Quality trajectory: ${result.qualityTrajectory}`);
 ```
 
+```typescript
+// v1.3: MCP server — embed in any MCP-capable host
+import { McpServer, SessionManager } from "loopforge";
+
+const server = new McpServer();
+server.start(); // JSON-RPC over stdio
+```
+
 ---
 
 ## How It Works
 
-LoopForge closes the agent feedback loop.  The agent self-evaluates:
+LoopForge closes the agent feedback loop. The agent self-evaluates:
 
 ```
 LoopForge compiles prompt (with self-eval instructions)
@@ -90,6 +107,17 @@ LoopForge compiles prompt (with self-eval instructions)
     → LoopForge auto-extracts feedback → vault
       → LoopForge compiles next prompt (L0/L1/L2 auto-decided)
         → ... loop until task complete or circuit breaker
+```
+
+**MCP integration (v1.3):**
+
+```
+AI Host (Claude Code / Codex)
+  → Perception-Skill activates on /loop
+  → loopforge_start → compiled Round 1 prompt
+  → [Agent executes + self-eval]
+  → loopforge_next → compiled Round 2 prompt
+  → ... loop until prompt=null (task_complete / circuit_breaker / max_rounds / stalled)
 ```
 
 The self-evaluation is a 4-field JSON block embedded in every compiled prompt:
@@ -104,6 +132,30 @@ The self-evaluation is a 4-field JSON block embedded in every compiled prompt:
 ```
 
 Each field is consumed by specific downstream functions — nothing decorative.
+
+---
+
+## MCP Tools (v1.3)
+
+| Tool | Input | Output |
+|------|-------|--------|
+| `loopforge_start` | `task`, `maxRounds?`, `constraints?`, `domain?` | `sessionId`, round 1 `prompt` |
+| `loopforge_next` | `sessionId`, `output` (with eval block) | next `prompt` or `null` + `stopReason` |
+| `loopforge_status` | `sessionId` | `round`, `qualityTrajectory`, `status` |
+| `loopforge_stop` | `sessionId` | `roundsCompleted`, final trajectory |
+| `loopforge_list` | — | `sessions[]` |
+| `loopforge_replay` | `sessionId` | `timeline[]` |
+
+Stop reasons: `task_complete` | `circuit_breaker` | `max_rounds` | `stalled`
+
+---
+
+## Perception-Skill
+
+A platform-agnostic agent skill (`skills/perception/SKILL.md`) that teaches
+any AI agent how to use LoopForge MCP tools for autonomous multi-round loops.
+Copy it to your agent's skill directory — works with Claude Code, Codex, and
+any MCP-capable host.
 
 ---
 
@@ -133,8 +185,7 @@ Each field is consumed by specific downstream functions — nothing decorative.
 loopforge init                     # Initialize .promptcraft vault
 loopforge compile '<json>'         # Compile a loop prompt (or pipe JSON via stdin)
 loopforge feedback '<json>'        # Record execution feedback
-loopforge run '<json>'             # v1.1: Autonomous loop (compile → extract → repeat)
-loopforge hook-stop               # Claude Code Stop hook — auto-continue loop
+loopforge run '<json>'             # v1.2: Autonomous loop with heartbeat/timeout/stall detection
 loopforge replay <loop-id>         # Loop timeline — rounds, quality, technique per round
 loopforge diff <loop-id> <a> <b>   # Field-level diff between two rounds
 loopforge review <loop-id> <rN>    # Structural prompt audit
@@ -145,7 +196,10 @@ loopforge status                   # Vault health summary
 
 ## Key Features
 
-- **Autonomous Loop (v1.1)** — Agent self-evaluates each round via structured JSON block. No human in the feedback loop. Claude Code Stop hook (`npx loopforge hook-stop`) auto-continues after every round.
+- **MCP Server (v1.3)** — 6 tools over JSON-RPC stdio: `start`, `next`, `status`, `stop`, `list`, `replay`. Zero-config integration with Claude Code and Codex.
+- **Perception-Skill (v1.3)** — Platform-agnostic agent skill. Copy-and-paste into any MCP-capable host to enable autonomous `/loop` workflows.
+- **Loop Runtime (v1.2)** — Event-driven autonomous loop with heartbeat monitoring, round timeout, stall detection, and graceful shutdown. Single `run({ task, execute })` function — 2 required fields.
+- **Heartbeat & Timeout** — Per-round heartbeat (configurable interval) with timeout + stall detection. Interactive mode for human-in-the-loop scenarios.
 - **Self-Evaluation Extraction** — Parses `---loopforge-eval` blocks from agent output. Falls back to heuristic extraction for graceful degradation.
 - **L0/L1/L2 Incremental Recompilation** — 4-gate hard router: force_level → first-call/plan_source → goal_id stability → failure/constraint
 - **Loop Objective Anchoring** — Auto-generated stable reference at round 1, checked every round
@@ -156,7 +210,7 @@ loopforge status                   # Vault health summary
 - **Policy Externalization** — All tunables in `loop_policy.json` — constraint windows, technique chains, triggers
 - **Pluggable Backends** — `VaultBackend` interface; `FSBackend` (JSON + Markdown dual-write) ships by default
 - **Task Alignment** — Validates proposed next-task against Loop Objective — advisory drift detection
-- **Circuit Breaker** — 3 consecutive no-improvement rounds → STALLED
+- **Circuit Breaker** — 3 consecutive no-improvement rounds → STALLED. Separate executor-failure breaker.
 - **Zero Dependencies** — Node.js stdlib only. TypeScript strict mode.
 
 ---
@@ -166,9 +220,12 @@ loopforge status                   # Vault health summary
 ```
 LoopForge/
 ├── loopforge/              # TypeScript package
-│   ├── src/                     # adapter, autonomous, builder, cli, engine, loop-compiler, policy, protocol, replay, backends
+│   ├── src/                     # adapter, builder, cli, engine, loop-compiler, policy, protocol, replay, runtime, backends, mcp
 │   ├── dist/                    # Compiled JS + type declarations
-│   └── tests/                   # 150 tests (Node.js built-in runner)
+│   ├── skills/
+│   │   └── perception/          # Perception-Skill: agent instructions for /loop workflows
+│   │       └── SKILL.md
+│   └── tests/                   # 178 tests (Node.js built-in runner)
 ├── skills/
 │   └── prompt-techniques/       # Technique reference files (read at runtime)
 │       └── references/          # zero-shot, few-shot, cot, step-back, least-to-most, tot
@@ -184,10 +241,10 @@ LoopForge/
 
 | Import | Purpose |
 |--------|---------|
-| `loopforge` | `handle()`, `createEngine()`, all types |
+| `loopforge` | `run()`, `handle()`, `createEngine()`, `LoopRuntime`, `McpServer`, `SessionManager`, all types |
 | `loopforge/compiler` | `compileLoop()`, `decideLevel()`, `compileL2()`, `buildSelfEvalBlock()` |
 | `loopforge/replay` | `ReplayBackend` — `getRound()`, `replay()`, `timeline()`, `diff()` |
-| `loopforge/autonomous` | `runOneRound()`, `runAutonomousLoop()` — v1.1 autonomous loop driver |
+| `loopforge/mcp` | `McpServer`, `SessionManager` — JSON-RPC transport + session lifecycle |
 
 ---
 

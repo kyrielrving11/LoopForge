@@ -1,4 +1,4 @@
-# LoopForge Protocol Specification v1.0
+# LoopForge Protocol Specification v1.2
 
 **Language-agnostic loop cognition protocol for AI coding agents.**
 
@@ -6,7 +6,7 @@ LoopForge is a Loop-Time Intelligence Layer — a per-iteration prompt compiler
 that maintains cognitive stability across long-horizon agent loops through
 structured memory, constraint inheritance, and drift correction.
 
-This document defines the protocol. Reference implementation: TypeScript (v1.0).
+This document defines the protocol. Reference implementation: TypeScript (v1.2).
 
 ---
 
@@ -459,6 +459,7 @@ Every response includes a compact health line: `[PC: N records, normal]`
 | v3.5    | 2025-06   | Constraint retirement, rolling summary, adaptive technique routing |
 | v3.5.1  | 2025-06   | Feedback→lineage quality backfill, loop-aware task_ids |
 | v1.0    | 2026-06   | TypeScript reference implementation — VaultBackend abstraction, Replay Engine, Policy externalization, JSON Schema, CLI + Library API |
+| v1.2    | 2026-06   | Loop Runtime — event-driven autonomous loop driver with heartbeat, round timeout, stall detection, graceful shutdown. `run({ task, execute })` convenience function with 2 required fields. Removed hook-stop and autonomous.ts. |
 
 **Compatibility:** Protocol additions are backward-compatible (new fields with defaults).
 Removals follow a deprecation cycle: mark deprecated → 2 versions → remove.
@@ -479,15 +480,15 @@ Main Agent (Claude Code / CLI)
 └──────────────┬──────────────────────┘
                │
                ▼
-┌─────────────────────────────────────┐
-│         engine.ts                    │  ← Lifecycle, circuit breaker,
-│         (invokeLoopCompile,          │     metrics, resolveBackend
-│          invokeFeedback,             │
-│          invokeBuild)                │
-└──────┬──────────────┬───────────────┘
-       │              │
-       ▼              ▼
-┌──────────────┐  ┌───────────────────┐
+┌─────────────────────────────────────┐     ┌──────────────────────┐
+│         engine.ts                    │     │    runtime.ts (v1.2) │
+│         (invokeLoopCompile,          │     │    LoopRuntime       │
+│          invokeFeedback,             │◄────│    + run()           │
+│          invokeBuild)                │     │                      │
+└──────┬──────────────┬───────────────┘     │  heartbeat, timeout, │
+       │              │                      │  stall, SIGINT,      │
+       ▼              ▼                      │  executor-failure    │
+┌──────────────┐  ┌───────────────────┐     └──────────────────────┘
 │ loop-compiler│  │ backends/fs.ts    │
 │ .ts          │  │ (FSBackend)       │
 │ (pure funcs) │  │                   │
@@ -512,3 +513,144 @@ Main Agent (Claude Code / CLI)
 │  .json)      │     │                │
 └──────────────┘     └────────────────┘
 ```
+
+---
+
+## 16. Loop Runtime (v1.2)
+
+The Loop Runtime is an event-driven autonomous loop driver that wraps the
+compilation engine with heartbeat monitoring, timeout/stall detection, and
+graceful shutdown. It replaces the passive `autonomous.ts` (v1.1) with an
+active driver that manages the entire loop lifecycle.
+
+### Concepts
+
+| Term | Definition |
+|------|-----------|
+| **Executor** | The user-provided function `(prompt, ctx) => Promise<string>` that calls an AI agent |
+| **Heartbeat** | A timer that fires at `heartbeat_interval_ms`, checks round elapsed time, and emits health events |
+| **Round timeout** | When a round exceeds `round_timeout_ms`, `ctx.signal.aborted` is set to `true` so the executor can abort |
+| **Stall** | Timeout + `stall_grace_ms` elapsed with no response — the runtime status becomes `STALLED` |
+| **Executor failure** | `max_consecutive_errors` consecutive `execute()` throws — stops the loop |
+
+### Primary API
+
+```typescript
+import { run } from "loopforge";
+
+const result = await run({
+  task: "Audit ERC20 token for security vulnerabilities",
+  execute: async (prompt, ctx) => await callAiApi(prompt),
+});
+// result: { success, stopReason, roundsCompleted, qualityTrajectory }
+```
+
+Only `task` and `execute` are required. All other fields have sensible defaults
+from `loop_policy.json`.
+
+### Advanced API (EventEmitter)
+
+```typescript
+import { LoopRuntime } from "loopforge";
+
+const rt = new LoopRuntime({
+  task: "Audit ERC20 token",
+  execute: myAgent,
+  maxRounds: 10,
+  roundTimeoutMs: 300_000,
+});
+
+rt.on("round:start", (info) => console.log("Round", info.round));
+rt.on("round:complete", (info) => console.log("Quality", info.quality));
+rt.on("timeout", (info) => console.warn("Timeout round", info.round));
+rt.on("done", (result) => console.log("Stopped:", result.stopReason));
+
+const result = await rt.start();
+```
+
+### Events
+
+| Event | Payload | When |
+|-------|---------|------|
+| `start` | — | Loop begins |
+| `round:start` | `RoundStartInfo` | Each round's prompt is compiled |
+| `round:complete` | `RoundCompleteInfo` | Agent output received and evaluated |
+| `heartbeat` | `HeartbeatInfo` | Every `heartbeat_interval_ms` during a round |
+| `timeout` | `TimeoutInfo` | Round exceeds `round_timeout_ms` |
+| `health:warning` | `HealthWarning` | Approaching timeout (≥80%) |
+| `stalled` | `{ reason, lastRound, elapsedMs, message }` | Timeout + grace period exceeded |
+| `stop` | — | `stop()` called (SIGINT/SIGTERM or manual) |
+| `done` | `RunResult` | Loop terminates |
+
+### Stop Reasons
+
+| Reason | Meaning |
+|--------|---------|
+| `task_complete` | Agent returned `should_continue: false` with valid structured self-eval |
+| `circuit_breaker` | Quality trend is non-increasing for `max_circuit_breaker` rounds |
+| `max_rounds` | `maxRounds` reached |
+| `stalled` | Timeout + grace period elapsed, or heuristic extraction could not parse agent output |
+| `stopped` | Manual `stop()` call (SIGINT, SIGTERM, or programmatic) |
+| `executor_failure` | `max_consecutive_errors` consecutive `execute()` exceptions |
+
+### Lifecycle
+
+```
+IDLE → start() → RUNNING → (loop) → STOPPED/STALLED
+                       ↓
+                    stop()
+```
+
+- **IDLE**: Initial state. `start()` transitions to RUNNING.
+- **RUNNING**: Main loop active. Heartbeat fires, rounds execute.
+- **STALLED**: Heartbeat detected timeout + grace period exceeded. Loop stops.
+- **STOPPED**: Loop ended normally or via `stop()`.
+
+### Configuration
+
+All runtime parameters are externalized in `loop_policy.json` under `runtime`:
+
+```json
+{
+  "runtime": {
+    "max_rounds": 20,
+    "round_timeout_ms": 600000,
+    "heartbeat_interval_ms": 30000,
+    "stall_grace_ms": 300000,
+    "max_consecutive_errors": 3
+  }
+}
+```
+
+Per-invocation overrides are passed via `RuntimeConfig` fields with the same names
+(camelCase: `maxRounds`, `roundTimeoutMs`, etc.).
+
+### Interactive Mode
+
+When `interactive: true`, the heartbeat still emits events but timeout/stall logic
+is disabled. This is used by the CLI `loopforge run` command, where a human
+pastes agent output each round.
+
+```bash
+loopforge run '{"task":"Audit ERC20","loop_id":"audit","interactive":true}'
+```
+
+### Self-Evaluation Contract
+
+The executor MUST return output containing a structured self-evaluation block:
+
+```
+---loopforge-eval
+{
+  "success": true,
+  "output_summary": "<what was DONE this round>",
+  "constraint_violations": [],
+  "should_continue": false
+}
+---end-loopforge-eval
+```
+
+If the block is missing or invalid JSON, the runtime falls back to heuristic
+extraction (keyword scanning). Heuristic extraction always stops the loop
+(`stopReason: stalled`) because the confidence is too low to continue
+autonomously.

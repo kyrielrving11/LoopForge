@@ -37,6 +37,13 @@
     "feedback_flush_interval": 5,
     "max_circuit_breaker": 3
   },
+  "runtime": {
+    "max_rounds": 20,
+    "round_timeout_ms": 600000,
+    "heartbeat_interval_ms": 30000,
+    "stall_grace_ms": 300000,
+    "max_consecutive_errors": 3
+  },
   "backend": {
     "vault_path": ".promptcraft/prompt_vault.json",
     "global_vault_path": "~/.promptcraft/global_vault.json"

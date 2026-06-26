@@ -13,7 +13,7 @@
         "review",
         "build"
       ],
-      "description": "LoopForge-loop_compile — TypeScript protocol definitions.\n\nAll types exchanged between the Main Agent and LoopForge flow through\nthese interfaces. This is the contract layer — no implementation logic.\n\nv1.0: 19 types — loop_compile + build + feedback + review + rolling_summary."
+      "description": "LoopForge-loop_compile — TypeScript protocol definitions.\n\nAll types exchanged between the Main Agent and LoopForge flow through\nthese interfaces. This is the contract layer — no implementation logic.\n\nv1.2: 28 types — 4 enums + 23 interfaces + 1 type alias."
     },
     "AgentStatus": {
       "type": "string",
@@ -661,6 +661,241 @@
       },
       "required": [
         "status"
+      ]
+    },
+    "RuntimeStatus": {
+      "type": "string",
+      "enum": [
+        "idle",
+        "running",
+        "stopped",
+        "stalled"
+      ]
+    },
+    "RoundContext": {
+      "type": "object",
+      "properties": {
+        "round": {
+          "type": "number"
+        },
+        "signal": {
+          "type": "string"
+        },
+        "reportProgress": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "round",
+        "signal",
+        "reportProgress"
+      ]
+    },
+    "StopReason": {
+      "type": "string",
+      "enum": [
+        "task_complete",
+        "circuit_breaker",
+        "max_rounds",
+        "stalled",
+        "stopped",
+        "executor_failure"
+      ]
+    },
+    "RoundStartInfo": {
+      "type": "object",
+      "properties": {
+        "round": {
+          "type": "number"
+        },
+        "level": {
+          "type": "string"
+        },
+        "technique": {
+          "type": "string"
+        },
+        "prompt": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "round",
+        "level",
+        "technique",
+        "prompt"
+      ]
+    },
+    "RoundCompleteInfo": {
+      "type": "object",
+      "properties": {
+        "round": {
+          "type": "number"
+        },
+        "quality": {
+          "type": "number"
+        },
+        "selfEval": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SelfEvaluation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "durationMs": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "round",
+        "quality",
+        "durationMs"
+      ]
+    },
+    "HeartbeatInfo": {
+      "type": "object",
+      "properties": {
+        "round": {
+          "type": "number"
+        },
+        "elapsedMs": {
+          "type": "number"
+        },
+        "sinceProgressMs": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "round",
+        "elapsedMs",
+        "sinceProgressMs"
+      ]
+    },
+    "TimeoutInfo": {
+      "type": "object",
+      "properties": {
+        "round": {
+          "type": "number"
+        },
+        "elapsedMs": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "round",
+        "elapsedMs"
+      ]
+    },
+    "HealthWarning": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "message"
+      ]
+    },
+    "RuntimeConfig": {
+      "type": "object",
+      "properties": {
+        "task": {
+          "type": "string"
+        },
+        "execute": {
+          "description": "Function signature: AgentExecutor. Omitted from JSON Schema."
+        },
+        "loopId": {
+          "type": "string"
+        },
+        "goalId": {
+          "type": "string"
+        },
+        "maxRounds": {
+          "type": "number"
+        },
+        "roundTimeoutMs": {
+          "type": "number"
+        },
+        "heartbeatIntervalMs": {
+          "type": "number"
+        },
+        "stallGraceMs": {
+          "type": "number"
+        },
+        "maxConsecutiveErrors": {
+          "type": "number"
+        },
+        "interactive": {
+          "type": "boolean"
+        },
+        "healthCheckInterval": {
+          "type": "number"
+        },
+        "planSource": {
+          "type": "string"
+        },
+        "constraintsFromPlan": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "domain": {
+          "type": "string"
+        },
+        "onRoundStart": {
+          "type": "string"
+        },
+        "onRoundComplete": {
+          "type": "string"
+        },
+        "onHeartbeat": {
+          "type": "string"
+        },
+        "onTimeout": {
+          "type": "string"
+        },
+        "onHealthWarning": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "task",
+        "execute"
+      ]
+    },
+    "RunResult": {
+      "type": "object",
+      "properties": {
+        "success": {
+          "type": "boolean"
+        },
+        "stopReason": {
+          "$ref": "#/$defs/StopReason"
+        },
+        "roundsCompleted": {
+          "type": "number"
+        },
+        "qualityTrajectory": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          }
+        }
+      },
+      "required": [
+        "success",
+        "stopReason",
+        "roundsCompleted",
+        "qualityTrajectory"
       ]
     }
   }

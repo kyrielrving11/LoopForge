@@ -3,7 +3,7 @@
  * All types exchanged between the Main Agent and LoopForge flow through
  * these interfaces. This is the contract layer — no implementation logic.
  *
- * v1.0: 19 types — loop_compile + build + feedback + review + rolling_summary.
+ * v1.2: 28 types — 4 enums + 23 interfaces + 1 type alias.
  */
 // ── Enums ──────────────────────────────────────────────────────────────────
 export var Mode;
@@ -179,6 +179,14 @@ export function makeSessionState(taskId) {
         feedback_buffer: [],
     };
 }
+// ── Runtime types (v1.2) ──────────────────────────────────────────────────────
+export var RuntimeStatus;
+(function (RuntimeStatus) {
+    RuntimeStatus["IDLE"] = "idle";
+    RuntimeStatus["RUNNING"] = "running";
+    RuntimeStatus["STOPPED"] = "stopped";
+    RuntimeStatus["STALLED"] = "stalled";
+})(RuntimeStatus || (RuntimeStatus = {}));
 // ── Serialisation helpers ───────────────────────────────────────────────────
 export function toDict(obj) {
     const result = {};

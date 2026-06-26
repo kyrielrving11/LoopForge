@@ -3,7 +3,7 @@
  * All types exchanged between the Main Agent and LoopForge flow through
  * these interfaces. This is the contract layer — no implementation logic.
  *
- * v1.0: 19 types — loop_compile + build + feedback + review + rolling_summary.
+ * v1.2: 28 types — 4 enums + 23 interfaces + 1 type alias.
  */
 export declare enum Mode {
     LOOP_COMPILE = "loop_compile",
@@ -182,6 +182,73 @@ export declare function makeSessionState(taskId: string): SessionState;
 export interface AgentLoopResult {
     status: AgentStatus;
     response: LoopForgeResponse | null;
+}
+export declare enum RuntimeStatus {
+    IDLE = "idle",
+    RUNNING = "running",
+    STOPPED = "stopped",
+    STALLED = "stalled"
+}
+export interface RoundContext {
+    round: number;
+    signal: {
+        aborted: boolean;
+    };
+    reportProgress: (message: string) => void;
+}
+export type AgentExecutor = (prompt: string, ctx: RoundContext) => Promise<string>;
+export type StopReason = "task_complete" | "circuit_breaker" | "max_rounds" | "stalled" | "stopped" | "executor_failure";
+export interface RoundStartInfo {
+    round: number;
+    level: string;
+    technique: string;
+    prompt: string;
+}
+export interface RoundCompleteInfo {
+    round: number;
+    quality: number;
+    selfEval: SelfEvaluation | null;
+    durationMs: number;
+}
+export interface HeartbeatInfo {
+    round: number;
+    elapsedMs: number;
+    sinceProgressMs: number;
+}
+export interface TimeoutInfo {
+    round: number;
+    elapsedMs: number;
+}
+export interface HealthWarning {
+    type: string;
+    message: string;
+}
+export interface RuntimeConfig {
+    task: string;
+    execute: AgentExecutor;
+    loopId?: string;
+    goalId?: string;
+    maxRounds?: number;
+    roundTimeoutMs?: number;
+    heartbeatIntervalMs?: number;
+    stallGraceMs?: number;
+    maxConsecutiveErrors?: number;
+    interactive?: boolean;
+    healthCheckInterval?: number;
+    planSource?: string;
+    constraintsFromPlan?: string[];
+    domain?: string;
+    onRoundStart?: (info: RoundStartInfo) => void;
+    onRoundComplete?: (info: RoundCompleteInfo) => void;
+    onHeartbeat?: (info: HeartbeatInfo) => void;
+    onTimeout?: (info: TimeoutInfo) => void;
+    onHealthWarning?: (warning: HealthWarning) => void;
+}
+export interface RunResult {
+    success: boolean;
+    stopReason: StopReason;
+    roundsCompleted: number;
+    qualityTrajectory: number[];
 }
 export declare function toDict(obj: Record<string, unknown>): Record<string, unknown>;
 export declare function makeTaskId(taskDescription: string): string;

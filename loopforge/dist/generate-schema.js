@@ -136,9 +136,21 @@ function convertTypeNode(typeNode, checker) {
             const declarations = sym.getDeclarations();
             if (declarations?.length) {
                 const decl = declarations[0];
-                if (ts.isInterfaceDeclaration(decl) ||
-                    ts.isEnumDeclaration(decl) ||
-                    ts.isTypeAliasDeclaration(decl)) {
+                if (ts.isInterfaceDeclaration(decl) || ts.isEnumDeclaration(decl)) {
+                    return { $ref: `#/$defs/${decl.name.text}` };
+                }
+                if (ts.isTypeAliasDeclaration(decl)) {
+                    // Function type aliases (e.g. AgentExecutor) can't be represented
+                    // in JSON Schema — return a descriptive placeholder instead of
+                    // a dangling $ref to a non-existent definition.
+                    if (decl.type.kind === ts.SyntaxKind.FunctionType ||
+                        (ts.isUnionTypeNode(decl.type) &&
+                            decl.type.types.some((t) => t.kind === ts.SyntaxKind.FunctionType))) {
+                        return {
+                            description: `Function signature: ${name}. Omitted from JSON Schema.`,
+                        };
+                    }
+                    // Non-function type alias — $ref to definition
                     return { $ref: `#/$defs/${decl.name.text}` };
                 }
             }
@@ -258,7 +270,47 @@ function generateSchema() {
         else if (ts.isInterfaceDeclaration(stmt)) {
             defs[stmt.name.text] = convertInterface(stmt, checker);
         }
-        // Skip functions, variables, type aliases, etc.
+        else if (ts.isTypeAliasDeclaration(stmt)) {
+            // Process type alias: skip function types, convert string unions
+            const aliasType = stmt.type;
+            if (aliasType.kind === ts.SyntaxKind.FunctionType) {
+                continue; // Function signatures can't be represented in JSON Schema
+            }
+            if (ts.isUnionTypeNode(aliasType)) {
+                // Check if it's a union of string literals (like StopReason)
+                const allStrings = aliasType.types.every((t) => ts.isLiteralTypeNode(t) &&
+                    ts.isStringLiteral(t.literal));
+                if (allStrings) {
+                    const enumValues = aliasType.types.map((t) => {
+                        const lit = t;
+                        if (ts.isStringLiteral(lit.literal))
+                            return lit.literal.text;
+                        return lit.literal.getText();
+                    });
+                    defs[stmt.name.text] = {
+                        type: "string",
+                        enum: enumValues,
+                    };
+                    continue;
+                }
+                // Union that includes function types → skip
+                if (aliasType.types.some((t) => t.kind === ts.SyntaxKind.FunctionType)) {
+                    continue;
+                }
+            }
+            // Other type aliases — try to convert
+            try {
+                const converted = convertTypeNode(stmt.type, checker);
+                if (converted.$ref) {
+                    // It's just a reference to another type, skip (duplicate)
+                    continue;
+                }
+                defs[stmt.name.text] = converted;
+            }
+            catch {
+                // If conversion fails, skip — better a missing def than a broken schema
+            }
+        }
     }
     const schema = {
         $schema: "https://json-schema.org/draft/2020-12/schema",

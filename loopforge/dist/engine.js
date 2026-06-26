@@ -8,7 +8,7 @@
 import { randomUUID } from "node:crypto";
 import { getPolicy } from "./policy.js";
 import { FSBackend, readLineageMd } from "./backends/fs.js";
-import { AgentStatus, makeAnalysis, makeExecutionFeedback, makeLoopCompileRequest, makeLoopObjective, makeLoopRoundResult, makeSelfEvaluation, makeSessionState, makeTaskId, SELF_EVAL_REGEX, } from "./protocol.js";
+import { AgentStatus, Mode, makeAnalysis, makeExecutionFeedback, makeLoopCompileRequest, makeLoopObjective, makeLoopRoundResult, makeSelfEvaluation, makeSessionState, makeTaskId, makeVaultConfig, SELF_EVAL_REGEX, } from "./protocol.js";
 import { routeTechnique } from "./builder.js";
 import { scoreQuality } from "./builder.js";
 import { compileLoop } from "./loop-compiler.js";
@@ -443,7 +443,7 @@ export class LoopForgeEngine {
      *  Call this BEFORE invokeLoopCompile for the next round so that
      *  hydrateLoopContext picks up the latest quality scores. */
     autoFeedback(selfEval, loopId, round, task) {
-        this.ensureInit({ task, mode: "feedback", vault_config: {}, feedback: null, skill_name: null, task_id: null });
+        this.ensureInit({ task, mode: Mode.FEEDBACK, vault_config: makeVaultConfig(), feedback: null, skill_name: null, task_id: null });
         const fb = makeExecutionFeedback({
             output: selfEval.output_summary,
             success: selfEval.success,

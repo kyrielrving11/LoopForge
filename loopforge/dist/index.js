@@ -1,6 +1,6 @@
 /** LoopForge — Loop-Time Intelligence Layer for AI coding agents.
  *
- * TypeScript reference implementation v1.1.
+ * TypeScript reference implementation v1.3.
  *
  * Usage:
  *   import { handle, LoopForgeEngine, ReplayBackend, compileLoop } from "loopforge";
@@ -12,11 +12,17 @@
  *   const engine = createEngine();
  *   const response = engine.invokeLoopCompile(request);
  *
- *   // v1.1: Autonomous loop
- *   import { runAutonomousLoop } from "loopforge";
- *   const result = await runAutonomousLoop(engine, config, async (prompt, round) => {
- *     return await callAiApi(prompt); // your AI executor
+ *   // v1.2: Autonomous loop
+ *   import { run } from "loopforge";
+ *   const result = await run({
+ *     task: "Audit ERC20 token",
+ *     execute: async (prompt) => await callAiApi(prompt),
  *   });
+ *
+ *   // v1.3: MCP server
+ *   import { McpServer, SessionManager } from "loopforge";
+ *   const server = new McpServer();
+ *   server.start();
  */
 // Protocol types
 export { Mode, AgentStatus, Technique, makeAnalysis, makeVaultConfig, makeExecutionFeedback, makeSelfEvaluation, makeLoopObjective, makeLoopHealth, makeRollingSummary, makeTaskAlignment, makeLoopRoundResult, makeLoopCompileRequest, makeLoopCompileResponse, makeSessionState, makeTaskId, toDict, SELF_EVAL_REGEX, } from "./protocol.js";
@@ -31,8 +37,12 @@ export { compileLoop, decideLevel, compileL2, alignTask, checkLoopHealth, comput
 export { ReplayBackend } from "./replay.js";
 // Engine
 export { LoopForgeEngine, createEngine, extractSelfEvaluation, heuristicSelfEvaluation, } from "./engine.js";
-// Autonomous loop (v1.1)
-export { runOneRound, runAutonomousLoop, } from "./autonomous.js";
+// Runtime (v1.2)
+export { LoopRuntime, run } from "./runtime.js";
+export { RuntimeStatus } from "./protocol.js";
 // Adapter
 export { handle, main } from "./adapter.js";
+// MCP (v1.3)
+export { McpServer } from "./mcp/server.js";
+export { SessionManager } from "./mcp/session.js";
 //# sourceMappingURL=index.js.map

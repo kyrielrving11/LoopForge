@@ -5,5 +5,8 @@
 node_modules/
 *.tgz
 
+# Agent config (local preferences)
+.claude/settings.json
+
 # Compiled test output
 dist/tests/

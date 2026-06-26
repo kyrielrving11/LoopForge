@@ -12,6 +12,7 @@ import { FSBackend, readLineageMd } from "./backends/fs.js";
 import type { VaultBackend, VaultEntry } from "./backends/interface.js";
 import {
   AgentStatus,
+  Mode,
   makeAnalysis,
   makeExecutionFeedback,
   makeLoopCompileRequest,
@@ -20,6 +21,7 @@ import {
   makeSelfEvaluation,
   makeSessionState,
   makeTaskId,
+  makeVaultConfig,
   SELF_EVAL_REGEX,
   type AgentLoopResult,
   type ExecutionFeedback,
@@ -553,7 +555,7 @@ export class LoopForgeEngine {
     round: number,
     task: string,
   ): number {
-    this.ensureInit({ task, mode: "feedback" as never, vault_config: {} as never, feedback: null, skill_name: null, task_id: null });
+    this.ensureInit({ task, mode: Mode.FEEDBACK, vault_config: makeVaultConfig(), feedback: null, skill_name: null, task_id: null });
 
     const fb: ExecutionFeedback = makeExecutionFeedback({
       output: selfEval.output_summary,

@@ -37,6 +37,14 @@ export interface EnginePolicy {
   max_circuit_breaker: number;
 }
 
+export interface RuntimePolicy {
+  max_rounds: number;
+  round_timeout_ms: number;
+  heartbeat_interval_ms: number;
+  stall_grace_ms: number;
+  max_consecutive_errors: number;
+}
+
 export interface BackendPolicy {
   vault_path: string;
   global_vault_path: string;
@@ -49,6 +57,7 @@ export interface LoopPolicy {
   recompile_triggers: RecompileTriggersPolicy;
   technique: TechniquePolicy;
   engine: EnginePolicy;
+  runtime: RuntimePolicy;
   backend: BackendPolicy;
 }
 
@@ -99,6 +108,13 @@ export const DEFAULT_POLICY: LoopPolicy = {
   engine: {
     feedback_flush_interval: 5,
     max_circuit_breaker: 3,
+  },
+  runtime: {
+    max_rounds: 20,
+    round_timeout_ms: 600_000,
+    heartbeat_interval_ms: 30_000,
+    stall_grace_ms: 300_000,
+    max_consecutive_errors: 3,
   },
   backend: {
     vault_path: ".promptcraft/prompt_vault.json",

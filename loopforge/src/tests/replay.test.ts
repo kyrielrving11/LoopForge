@@ -2,56 +2,8 @@
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { ReplayBackend } from "../replay.js";
-import type { VaultBackend, VaultEntry } from "../backends/interface.js";
-
-/** In-memory backend for testing — implements VaultBackend without filesystem. */
-class MemoryBackend implements VaultBackend {
-  entries: VaultEntry[] = [];
-  markdownFiles = new Map<string, string>();
-  markdownScans = new Map<string, VaultEntry[]>();
-
-  readVault(): Record<string, unknown> {
-    return { entries: this.entries };
-  }
-  writeVault(data: Record<string, unknown>): void {
-    this.entries = (data.entries as VaultEntry[]) || [];
-  }
-  queryEntries(opts?: {
-    prefix?: string;
-    taskIdPattern?: string;
-    feedbackOnly?: boolean;
-  }): VaultEntry[] {
-    return this.entries.filter((entry) => {
-      const taskId = String(entry.task_id ?? "");
-      if (opts?.feedbackOnly && !taskId.endsWith(":feedback")) return false;
-      if (!opts?.feedbackOnly && taskId.endsWith(":feedback")) return false;
-      if (opts?.prefix && !taskId.startsWith(opts.prefix)) return false;
-      return true;
-    });
-  }
-  appendEntry(entry: VaultEntry): void {
-    this.entries.push(entry);
-  }
-  appendEntries(entries: VaultEntry[]): number {
-    this.entries.push(...entries);
-    return entries.length;
-  }
-  writeLineageMd(
-    _loopId: string,
-    roundNum: number,
-    content: string,
-    _metadata: Record<string, unknown>,
-  ): string | null {
-    this.markdownFiles.set(`${_loopId}:r${roundNum}`, content);
-    return `/fake/${_loopId}/r${roundNum}.md`;
-  }
-  readLineageMd(loopId: string, roundNum: number): string | null {
-    return this.markdownFiles.get(`${loopId}:r${roundNum}`) ?? null;
-  }
-  scanLineageMd(loopId: string): VaultEntry[] {
-    return this.markdownScans.get(loopId) ?? [];
-  }
-}
+import { MemoryBackend } from "./_helpers.js";
+import type { VaultEntry } from "../backends/interface.js";
 
 function makeEntry(overrides: Partial<VaultEntry> = {}): VaultEntry {
   return {
@@ -179,6 +131,31 @@ describe("ReplayBackend — timeline", () => {
     assert.equal(tl[0].recompile_level, "l2");
     assert.equal(tl[1].recompile_level, "l1");
   });
+
+  it("returns empty array for unknown loop", () => {
+    const backend = new MemoryBackend();
+    const replay = new ReplayBackend(backend);
+    const tl = replay.timeline("nonexistent");
+    assert.deepEqual(tl, []);
+  });
+
+  it("falls back to markdown scan for maxRound detection", () => {
+    const backend = new MemoryBackend();
+    // Provide all 5 rounds via markdown scan (simulating a loop with
+    // no JSON vault entries — all data from markdown lineage)
+    const mdEntries: VaultEntry[] = [];
+    for (let r = 1; r <= 5; r++) {
+      mdEntries.push({
+        task_id: `loop:test:r${r}`,
+        loop_lineage: { round: r, loop_id: "test", goal_id: "audit" },
+      });
+    }
+    backend.markdownScans.set("test", mdEntries);
+    const replay = new ReplayBackend(backend);
+    const results = replay.replay("test");
+    assert.equal(results.length, 5); // rounds 1-5, all from markdown
+    assert.equal(results[4]?.loop_lineage?.round, 5);
+  });
 });
 
 describe("ReplayBackend — diff", () => {
@@ -219,5 +196,56 @@ describe("ReplayBackend — diff", () => {
 
     const diff = replay.diff("test", 1, 2);
     assert.equal(diff.missing, "both");
+  });
+
+  it("reports added and removed constraints", () => {
+    const backend = new MemoryBackend();
+    backend.appendEntry(makeEntry({
+      task_id: "loop:test:r1",
+      loop_lineage: {
+        loop_id: "test", round: 1, recompile_level: "l2", goal_id: "audit",
+        task: "Initial", constraints_active: ["A", "B"],
+      },
+    }));
+    backend.appendEntry(makeEntry({
+      task_id: "loop:test:r2",
+      loop_lineage: {
+        loop_id: "test", round: 2, recompile_level: "l1", goal_id: "audit",
+        task: "Updated", constraints_active: ["B", "C"],
+      },
+    }));
+    const replay = new ReplayBackend(backend);
+    const diff = replay.diff("test", 1, 2);
+
+    const changes = diff.changes as Record<string, unknown>[];
+    const constraintChange = changes.find(
+      (c) => c.field === "constraints_active",
+    );
+    assert.notEqual(constraintChange, undefined);
+    assert.deepEqual(constraintChange!.added, ["C"]);
+    assert.deepEqual(constraintChange!.removed, ["A"]);
+  });
+
+  it("does not report constraints_active as changed when identical", () => {
+    const backend = new MemoryBackend();
+    backend.appendEntry(makeEntry({
+      task_id: "loop:test:r1",
+      loop_lineage: {
+        loop_id: "test", round: 1, recompile_level: "l2", goal_id: "x",
+        constraints_active: ["A"],
+      },
+    }));
+    backend.appendEntry(makeEntry({
+      task_id: "loop:test:r2",
+      loop_lineage: {
+        loop_id: "test", round: 2, recompile_level: "l0", goal_id: "x",
+        constraints_active: ["A"],
+      },
+    }));
+    const replay = new ReplayBackend(backend);
+    const diff = replay.diff("test", 1, 2);
+
+    const unchanged = diff.unchanged as string[];
+    assert.ok(unchanged.includes("constraints_active"));
   });
 });

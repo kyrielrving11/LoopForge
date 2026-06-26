@@ -48,6 +48,27 @@ export interface ExecutionFeedback {
     manual_fixes_needed: string;
 }
 export declare function makeExecutionFeedback(overrides?: Partial<ExecutionFeedback>): ExecutionFeedback;
+/** Structured self-evaluation embedded in compiled prompts.
+ *  The agent outputs this after completing each round.
+ *  Every field is consumed by at least one downstream function. */
+export interface SelfEvaluation {
+    /** true ONLY if all hard constraints were met and the task goal was achieved. */
+    success: boolean;
+    /** Specific, actionable summary of what was DONE this round.
+     *  Feeds: buildRollingSummary (what_worked, key_lessons),
+     *  computeConstraintRetirement (activity detection), vault lineage. */
+    output_summary: string;
+    /** Constraints the agent actually violated this round.
+     *  Feeds: scoreQuality, checkLoopHealth (constraint_integrity),
+     *  buildRollingSummary (recurring_issues), computeConstraintRetirement. */
+    constraint_violations: string[];
+    /** false ONLY when the entire task is complete. Tells the autonomous
+     *  runner to stop the loop. Not consumed by the compiler. */
+    should_continue: boolean;
+}
+export declare function makeSelfEvaluation(overrides?: Partial<SelfEvaluation>): SelfEvaluation;
+/** Regex to extract a self-evaluation JSON block from agent output. */
+export declare const SELF_EVAL_REGEX: RegExp;
 export interface LoopForgeRequest {
     task: string;
     mode: Mode;

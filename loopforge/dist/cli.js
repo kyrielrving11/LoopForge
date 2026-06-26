@@ -3,14 +3,15 @@
  *
  * v1.0 — npm install loopforge
  */
-import { createEngine } from "./engine.js";
+import { createEngine, extractSelfEvaluation } from "./engine.js";
 import { FSBackend } from "./backends/fs.js";
 import { ReplayBackend } from "./replay.js";
 import { makeExecutionFeedback, } from "./protocol.js";
+import { runOneRound } from "./autonomous.js";
 // ═══════════════════════════════════════════════════════════════════════════
 // Constants
 // ═══════════════════════════════════════════════════════════════════════════
-const VERSION = "1.0.0";
+const VERSION = "1.1.0";
 const VAULT_CONFIG = {
     project_vault: ".promptcraft/prompt_vault.json",
     global_vault: "~/.promptcraft/global_vault.json",
@@ -23,6 +24,8 @@ Usage:
   loopforge init                  Initialise .promptcraft vault
   loopforge compile [json]        Compile a loop prompt
   loopforge feedback [json]       Record execution feedback
+  loopforge run [json]            Autonomous loop (compile → execute → extract → repeat)
+  loopforge hook-stop [json]      Claude Code Stop hook handler — auto-continue loop
   loopforge replay <loop-id>      Show loop timeline
   loopforge diff <loop-id> <a> <b> Diff two rounds
   loopforge review <loop-id> <rN> Audit stored prompt
@@ -38,6 +41,8 @@ const CMD_HELP = {
     init: "loopforge init — create .promptcraft/prompt_vault.json if it doesn't exist.",
     compile: "loopforge compile '<json>' — run loop_compile (L0/L1/L2).\n  Required: task, loop_id, goal_id. Optional: round, domain, constraints_from_plan, new_since_last_round, force_level.",
     feedback: "loopforge feedback '<json>' — record execution result.\n  Flat: {loop_id, round, success, score, output}\n  Nested: {loop_id, round, feedback: {success, score, output}}",
+    run: "loopforge run '<json>' — autonomous loop (v1.1).\n  Required: task, loop_id. Optional: goal_id, max_rounds (default 20), plan_source, domain.\n  Outputs compiled prompt → reads agent output from stdin → extracts self-eval → compiles next → repeat.\n  Pipe mode: echo '{\"task\":\"...\",\"loop_id\":\"...\"}' | loopforge run",
+    "hook-stop": "loopforge hook-stop --loop-id <id> — Claude Code Stop hook handler.\n  Reads Stop hook JSON from stdin, extracts self-eval from last_assistant_message,\n  auto-feeds back, compiles next round, outputs decision JSON.",
     replay: "loopforge replay <loop-id> — show timeline: round, recompile level, quality, technique, task.",
     diff: "loopforge diff <loop-id> <round-a> <round-b> — field-level comparison between two rounds.",
     review: "loopforge review <loop-id> <round-num> — structural audit of a stored prompt.",
@@ -277,6 +282,204 @@ function cmdReview(loopId, roundStr) {
     }, { results: [target], global_entries: [] });
     console.log(result.response?.prompt ?? "Review produced no output.");
 }
+async function cmdRun(engine, jsonArg) {
+    if (jsonArg === "--help" || jsonArg === "-h") {
+        showHelp("run");
+        return;
+    }
+    let raw;
+    if (jsonArg) {
+        raw = jsonArg;
+    }
+    else {
+        raw = await readStdin();
+    }
+    if (!raw.trim())
+        die("run requires JSON input (argument or stdin)");
+    const data = parseJson(raw);
+    const task = data.task ?? "";
+    const loopId = data.loop_id ?? "";
+    if (!task)
+        die("run requires 'task' field");
+    if (!loopId)
+        die("run requires 'loop_id' field");
+    const config = {
+        task,
+        loopId,
+        goalId: data.goal_id ?? "",
+        maxRounds: data.max_rounds ?? 20,
+        healthCheckInterval: data.health_check_interval ?? 3,
+        planSource: data.plan_source ?? undefined,
+        constraintsFromPlan: data.constraints_from_plan ?? [],
+        domain: data.domain ?? "",
+    };
+    let agentOutput = null;
+    for (let round = 1; round <= (config.maxRounds ?? 20); round++) {
+        const result = runOneRound(engine, config, round, agentOutput);
+        if (result.stopNow) {
+            const reason = result.stopReason ?? "unknown";
+            const summary = result.selfEval?.output_summary ?? "";
+            console.log(`\n--- Loop stopped: ${reason} ---`);
+            if (summary)
+                console.log(`Last output: ${summary.slice(0, 200)}`);
+            if (reason === "extraction_failed") {
+                console.log("WARNING: Could not extract self-evaluation from agent output. " +
+                    "Ensure the agent outputs a ---loopforge-eval block.");
+                process.exit(1);
+            }
+            break;
+        }
+        if (!result.roundOutput) {
+            console.log("\n--- Loop stopped: engine error ---");
+            process.exit(1);
+        }
+        const ro = result.roundOutput;
+        console.log(`\n=== Round ${ro.round} | Level: ${ro.recompileLevel.toUpperCase()} | ` +
+            `Technique: ${ro.techniqueUsed} ===\n`);
+        console.log(ro.prompt);
+        console.log(`\n=== End Round ${ro.round} Prompt ===\n` +
+            `[Paste agent output above, then press Ctrl+D (Unix) or Ctrl+Z (Windows) to continue]\n`);
+        const output = await readStdin();
+        if (!output.trim()) {
+            console.log("No agent output provided. Stopping loop.");
+            break;
+        }
+        agentOutput = output;
+    }
+}
+/** Claude Code Stop hook handler.
+ *  Reads Stop hook JSON from stdin, extracts self-eval from the agent's last
+ *  message, auto-records feedback, compiles the next round, and outputs a
+ *  decision JSON that either blocks the stop (to continue the loop) or lets
+ *  the agent stop naturally. */
+async function cmdHookStop() {
+    const raw = await readStdin();
+    if (!raw.trim()) {
+        // No stdin — not called from a hook, nothing to do
+        process.exit(0);
+    }
+    let hookInput;
+    try {
+        hookInput = JSON.parse(raw);
+    }
+    catch {
+        // Not valid JSON — exit silently, don't break the hook chain
+        process.exit(0);
+    }
+    const lastMessage = String(hookInput.last_assistant_message ?? "").trim();
+    const stopHookActive = Boolean(hookInput.stop_hook_active);
+    const cwd = String(hookInput.cwd ?? process.cwd());
+    // Guard: if stop_hook_active is true, we already blocked once —
+    // don't block again to prevent infinite loops
+    if (stopHookActive) {
+        process.exit(0);
+    }
+    if (!lastMessage) {
+        process.exit(0);
+    }
+    // Try structured extraction from agent's last message
+    let selfEval = extractSelfEvaluation(lastMessage);
+    if (selfEval === null) {
+        // No structured self-eval found — agent may have finished without
+        // outputting the block. Let it stop naturally.
+        process.exit(0);
+    }
+    // Determine loop_id from the vault or environment
+    // Look for loop_id in the agent's message context, or use LOOPFORGE_LOOP_ID env
+    const envLoopId = process.env.LOOPFORGE_LOOP_ID ?? "";
+    let loopId = envLoopId;
+    // Try to extract loop_id from the self-eval context (embedded in the prompt)
+    if (!loopId) {
+        // Scan the vault for the most recently active loop
+        const backend = new FSBackend();
+        const vault = backend.readVault();
+        const entries = vault.entries ?? [];
+        // Find the loop with the most recent entry
+        let latestTimestamp = "";
+        for (const e of entries) {
+            const ts = String(e.timestamp ?? "");
+            const lid = String(e.loop_id ??
+                e.loopId ??
+                "");
+            if (lid && ts > latestTimestamp) {
+                latestTimestamp = ts;
+                loopId = lid;
+            }
+        }
+    }
+    if (!loopId) {
+        // No loop_id found — can't continue without knowing which loop
+        process.exit(0);
+    }
+    // Determine current round from vault
+    const engine = createEngine("skills");
+    const context = engine.hydrateLoopContext(loopId);
+    let currentRound = 0;
+    if (context) {
+        const results = context.results ?? [];
+        for (const r of results) {
+            const lineage = (r.loop_lineage ??
+                r.lineage ??
+                {});
+            const rnd = lineage.round ?? 0;
+            if (rnd > currentRound)
+                currentRound = rnd;
+        }
+    }
+    const nextRound = currentRound + 1;
+    // If task is complete, let the agent stop
+    if (!selfEval.should_continue) {
+        // Record final feedback
+        engine.autoFeedback(selfEval, loopId, currentRound > 0 ? currentRound : 1, `loop:${loopId}`);
+        process.exit(0);
+    }
+    // Record feedback for the round that just completed
+    engine.autoFeedback(selfEval, loopId, currentRound > 0 ? currentRound : 1, `loop:${loopId}`);
+    // Check circuit breaker
+    if (engine.shouldBreak()) {
+        process.exit(0); // STALLED — let agent stop
+    }
+    // Compile the next round's prompt
+    const compileResult = engine.invokeLoopCompile({
+        task: `loop:${loopId}`,
+        mode: "loop_compile",
+        vault_config: {
+            project_vault: ".promptcraft/prompt_vault.json",
+            global_vault: "~/.promptcraft/global_vault.json",
+            skills_dir: "skills",
+            no_global: false,
+        },
+        feedback: null,
+        skill_name: null,
+        task_id: null,
+        loop_id: loopId,
+        round: nextRound,
+        goal_id: selfEval.should_continue ? loopId : "",
+        last_round_result: {
+            round: currentRound > 0 ? currentRound : 1,
+            success: selfEval.success,
+            output_summary: selfEval.output_summary,
+            constraint_violations: selfEval.constraint_violations,
+            manual_fixes_needed: "",
+            quality_score: 0,
+        },
+    });
+    if (!compileResult.response?.prompt) {
+        process.exit(0);
+    }
+    // Output the decision to block the stop and inject the next prompt
+    const decision = {
+        decision: "block",
+        reason: `LoopForge: continuing to round ${nextRound}`,
+        hookSpecificOutput: {
+            hookEventName: "Stop",
+            additionalContext: `\n${compileResult.response.prompt}\n\n` +
+                `[LoopForge auto-continue — round ${nextRound}]`,
+        },
+    };
+    console.log(JSON.stringify(decision));
+    process.exit(0);
+}
 function cmdStatus() {
     const backend = new FSBackend();
     const vault = backend.readVault();
@@ -333,6 +536,12 @@ async function main() {
             break;
         case "feedback":
             await cmdFeedback(engine, args[1]);
+            break;
+        case "run":
+            await cmdRun(engine, args[1]);
+            break;
+        case "hook-stop":
+            await cmdHookStop();
             break;
         case "replay":
             cmdReplay(args[1]);

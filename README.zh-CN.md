@@ -6,8 +6,8 @@
 为长程 Agent Loop 编译每轮迭代的提示词 —— 具备结构化记忆、约束继承、
 漂移纠正和增量重编译（L0/L1/L2）能力。
 
-> **v1.0** — `npm install loopforge`。CLI + 库 API。零运行时依赖。
-> 103 测试。Node.js ≥18。
+> **v1.1** — `npm install loopforge`。CLI + 库 API。零运行时依赖。
+> 150 测试。Node.js ≥18。
 
 ---
 
@@ -22,7 +22,15 @@ npx loopforge init
 # 编译提示词（loop_compile 模式）
 npx loopforge compile '{"task":"审计 ERC20 代币","loop_id":"audit","round":1,"goal_id":"audit"}'
 
-# 记录反馈
+# v1.1: 自主循环 — 通过 Claude Code Hook，Agent 自己驱动自己
+# 第1步：将 Stop hook 配置复制到 .claude/settings.json
+# 第2步：启动循环
+npx loopforge compile '{"task":"审计 ERC20","loop_id":"audit","round":1,"goal_id":"audit"}'
+
+# Hook 在每轮结束后自动继续 — 无需人工参与
+# 任务完成？Agent 自动停止。漂移检测？熔断器触发。
+
+# 记录反馈（手动模式）
 npx loopforge feedback '{"loop_id":"audit","round":1,"success":true,"score":4}'
 
 # 回放时间线
@@ -52,6 +60,52 @@ console.log(result.response?.full_prompt);
 console.log(result.response?.health_line);
 ```
 
+```typescript
+// v1.1: 自主循环 — 反馈环无人工参与
+import { createEngine, runAutonomousLoop } from "loopforge";
+
+const engine = createEngine();
+const result = await runAutonomousLoop(engine, {
+  task: "审计 ERC20 代币安全漏洞",
+  loopId: "audit-erc20",
+  maxRounds: 10,
+}, async (prompt, round) => {
+  // 你的 AI 执行器 — Claude API、CLI agent 等
+  return await callAiApi(prompt);
+});
+
+console.log(`完成 ${result.roundsCompleted} 轮: ${result.stopReason}`);
+console.log(`质量轨迹: ${result.qualityTrajectory}`);
+```
+
+---
+
+## 工作原理
+
+LoopForge 闭合了 Agent 反馈环。
+Agent 自主输出结构化自我评估：
+
+```
+LoopForge 编译提示词（嵌入自评指令）
+  → Agent 执行 + 输出结构化自评
+    → LoopForge 自动提取反馈 → vault
+      → LoopForge 编译下一轮提示词（L0/L1/L2 自动决策）
+        → ... 循环直到任务完成或熔断
+```
+
+每轮编译提示词末尾嵌入 4 字段自评 JSON：
+
+```json
+{
+  "success": true,
+  "output_summary": "发现 3 个漏洞：withdraw() 重入、transfer() 整数溢出、mint() 缺权限控制",
+  "constraint_violations": [],
+  "should_continue": true
+}
+```
+
+每个字段都有明确的下游消费者——没有装饰字段。
+
 ---
 
 ## 3 种模式
@@ -59,7 +113,7 @@ console.log(result.response?.health_line);
 | 模式 | 触发条件 | 返回内容 |
 |------|---------|---------|
 | **loop_compile** | 每轮 agent loop 迭代 | 编译后的提示词 + 重编译级别(L0/L1/L2) + loop_health + task_alignment |
-| **feedback** | 执行完成后 | 质量评分 → vault 持久化 |
+| **feedback** | 执行完成后（手动或自动） | 质量评分 → vault 持久化 |
 | **review** | 审计提示词质量 | 结构检查 + 约束合规报告 |
 
 ---
@@ -80,6 +134,8 @@ console.log(result.response?.health_line);
 loopforge init                     # 初始化 .promptcraft vault
 loopforge compile '<json>'         # 编译提示词（支持 stdin 管道）
 loopforge feedback '<json>'        # 记录执行反馈
+loopforge run '<json>'             # v1.1: 自主循环（编译 → 提取 → 重复）
+loopforge hook-stop               # Claude Code Stop hook — 自动继续循环
 loopforge replay <loop-id>         # 循环时间线 — 轮次、质量、技术
 loopforge diff <loop-id> <a> <b>   # 两轮逐字段对比
 loopforge review <loop-id> <rN>    # 存储提示词结构审计
@@ -90,6 +146,8 @@ loopforge status                   # Vault 健康摘要
 
 ## 核心特性
 
+- **自主循环（v1.1）** — Agent 每轮通过结构化 JSON 块自我评估。反馈环无人工参与。Claude Code Stop hook（`npx loopforge hook-stop`）每轮结束后自动继续。
+- **自评提取** — 解析 Agent 输出中的 `---loopforge-eval` 块。结构化提取失败时降级为启发式推断。
 - **L0/L1/L2 增量重编译** — 4 门控硬路由：force_level → 首轮/plan_source → goal_id 稳定性 → 失败/约束信号
 - **Loop Objective 锚定** — 首轮自动生成稳定目标锚点，每轮校验
 - **约束退役** — 连续 3 轮无活跃信号的约束自动退役，防止提示词膨胀
@@ -109,9 +167,9 @@ loopforge status                   # Vault 健康摘要
 ```
 LoopForge/
 ├── loopforge/              # TypeScript 包
-│   ├── src/                     # adapter, builder, cli, engine, loop-compiler, policy, protocol, replay, backends
+│   ├── src/                     # adapter, autonomous, builder, cli, engine, loop-compiler, policy, protocol, replay, backends
 │   ├── dist/                    # 编译产物 + 类型声明
-│   └── tests/                   # 103 测试（Node.js 内置 runner）
+│   └── tests/                   # 150 测试（Node.js 内置 runner）
 ├── skills/
 │   └── prompt-techniques/       # 技巧参考文件（运行时读取）
 │       └── references/          # zero-shot, few-shot, cot, step-back, least-to-most, tot
@@ -128,8 +186,9 @@ LoopForge/
 | 导入路径 | 用途 |
 |----------|------|
 | `loopforge` | `handle()`、`createEngine()`、全部类型 |
-| `loopforge/compiler` | `compileLoop()`、`decideLevel()`、`compileL2()` |
+| `loopforge/compiler` | `compileLoop()`、`decideLevel()`、`compileL2()`、`buildSelfEvalBlock()` |
 | `loopforge/replay` | `ReplayBackend` — `getRound()`、`replay()`、`timeline()`、`diff()` |
+| `loopforge/autonomous` | `runOneRound()`、`runAutonomousLoop()` — v1.1 自主循环驱动器 |
 
 ---
 

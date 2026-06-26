@@ -43,9 +43,9 @@ describe("Generated JSON Schema — top-level", () => {
     assert.ok(String(schema.title ?? "").includes("LoopForge"));
   });
 
-  it("has 17 $defs (3 enums + 14 interfaces)", () => {
+  it("has 18 $defs (3 enums + 15 interfaces)", () => {
     const names = Object.keys(defs);
-    assert.equal(names.length, 17, `expected 17, got ${names.length}: ${names.join(", ")}`);
+    assert.equal(names.length, 18, `expected 18, got ${names.length}: ${names.join(", ")}`);
   });
 });
 

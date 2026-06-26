@@ -1,0 +1,16 @@
+{
+  "_comment": "LoopForge — Hook-driven autonomous agent loop. Copy the Stop hook block below into your project's .claude/settings.json to enable auto-continue.",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx loopforge hook-stop",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

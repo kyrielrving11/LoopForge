@@ -1,6 +1,6 @@
 /** LoopForge — Loop-Time Intelligence Layer for AI coding agents.
  *
- * TypeScript reference implementation v1.0.
+ * TypeScript reference implementation v1.1.
  *
  * Usage:
  *   import { handle, LoopForgeEngine, ReplayBackend, compileLoop } from "loopforge";
@@ -11,6 +11,12 @@
  *   // As a library
  *   const engine = createEngine();
  *   const response = engine.invokeLoopCompile(request);
+ *
+ *   // v1.1: Autonomous loop
+ *   import { runAutonomousLoop } from "loopforge";
+ *   const result = await runAutonomousLoop(engine, config, async (prompt, round) => {
+ *     return await callAiApi(prompt); // your AI executor
+ *   });
  */
 
 // Protocol types
@@ -21,6 +27,7 @@ export {
   makeAnalysis,
   makeVaultConfig,
   makeExecutionFeedback,
+  makeSelfEvaluation,
   makeLoopObjective,
   makeLoopHealth,
   makeRollingSummary,
@@ -31,12 +38,14 @@ export {
   makeSessionState,
   makeTaskId,
   toDict,
+  SELF_EVAL_REGEX,
 } from "./protocol.js";
 
 export type {
   Analysis,
   VaultConfig,
   ExecutionFeedback,
+  SelfEvaluation,
   LoopForgeRequest,
   LoopObjective,
   LoopHealth,
@@ -92,6 +101,7 @@ export {
   computeGoalTextHash,
   deriveGoalId,
   getPreviousRound,
+  buildSelfEvalBlock,
 } from "./loop-compiler.js";
 
 // Replay
@@ -101,9 +111,26 @@ export { ReplayBackend } from "./replay.js";
 export {
   LoopForgeEngine,
   createEngine,
+  extractSelfEvaluation,
+  heuristicSelfEvaluation,
 } from "./engine.js";
 
 export type { EngineMetrics } from "./engine.js";
+
+// Autonomous loop (v1.1)
+export {
+  runOneRound,
+  runAutonomousLoop,
+} from "./autonomous.js";
+
+export type {
+  AutonomousConfig,
+  RoundOutput,
+  StopReason,
+  AutonomousResult,
+  AgentExecutor,
+  RunOneRoundResult,
+} from "./autonomous.js";
 
 // Adapter
 export { handle, main } from "./adapter.js";

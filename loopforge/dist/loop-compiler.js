@@ -1203,6 +1203,47 @@ function compileToT(request, goalId, constraints, loopObjective, rollingText, an
     return lines.join("\n");
 }
 // ═══════════════════════════════════════════════════════════════════════════
+// Self-Evaluation block (v1.1 — autonomous loop feedback)
+// ═══════════════════════════════════════════════════════════════════════════
+/** Build the standardized self-evaluation block appended to every compiled prompt.
+ *  The agent MUST output a JSON self-evaluation between the delimiters.
+ *  Only 4 fields — each consumed by at least one downstream function. */
+export function buildSelfEvalBlock(round) {
+    return [
+        "",
+        "### LoopForge Self-Evaluation (REQUIRED)",
+        "",
+        `You are completing Round ${round}. After finishing the task above, ` +
+            "you MUST output a self-evaluation in this exact format:",
+        "",
+        "```",
+        "---loopforge-eval",
+        "{",
+        '  "success": true,',
+        `  "output_summary": "<one paragraph — what was DONE in round ${round}, be specific>",`,
+        '  "constraint_violations": [],',
+        '  "should_continue": true',
+        "}",
+        "---end-loopforge-eval",
+        "```",
+        "",
+        "Field rules:",
+        `- success: true ONLY if all hard constraints were met and the task goal was achieved`,
+        `- output_summary: Be specific about what was PRODUCED, not what you "tried". ` +
+            `Bad: "worked on audit". Good: "Found 3 vulns: reentrancy in withdraw(), ` +
+            `integer overflow in transfer(), missing access control in mint()". ` +
+            `This feeds cross-round knowledge distillation.`,
+        `- constraint_violations: List ONLY constraints you actually broke. Empty array [] if none. ` +
+            `This directly affects constraint-integrity scoring and retirement decisions.`,
+        `- should_continue: false ONLY when the ENTIRE task is complete. ` +
+            `If there is more to audit/implement/test, say true. ` +
+            `This tells the autonomous runner when to stop.`,
+        `- The JSON MUST appear between the ---loopforge-eval and ---end-loopforge-eval markers`,
+        `- Do NOT wrap the markers in code fences — output them as raw text`,
+        "",
+    ].join("\n");
+}
+// ═══════════════════════════════════════════════════════════════════════════
 // Top-level compile — ties layers together
 // ═══════════════════════════════════════════════════════════════════════════
 export function compileLoop(request, vaultContext = null) {
@@ -1227,6 +1268,8 @@ export function compileLoop(request, vaultContext = null) {
     response.task_alignment = alignment;
     response.loop_health = health;
     response.recompile_level = level;
+    // v1.1: Append self-evaluation block for autonomous loop feedback
+    response.prompt += buildSelfEvalBlock(request.round);
     return response;
 }
 //# sourceMappingURL=loop-compiler.js.map

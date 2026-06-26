@@ -13,20 +13,82 @@ import type { VaultBackend, VaultEntry } from "./backends/interface.js";
 import {
   AgentStatus,
   makeAnalysis,
+  makeExecutionFeedback,
   makeLoopCompileRequest,
   makeLoopObjective,
   makeLoopRoundResult,
+  makeSelfEvaluation,
   makeSessionState,
   makeTaskId,
+  SELF_EVAL_REGEX,
   type AgentLoopResult,
+  type ExecutionFeedback,
   type LoopCompileRequest,
   type LoopCompileResponse,
   type LoopForgeRequest,
+  type SelfEvaluation,
   type SessionState,
 } from "./protocol.js";
 import { routeTechnique } from "./builder.js";
 import { scoreQuality } from "./builder.js";
 import { compileLoop } from "./loop-compiler.js";
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Self-Evaluation extraction (v1.1 — autonomous loop feedback)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** Extract a structured SelfEvaluation from agent output text.
+ *  Returns null if no valid self-evaluation block is found.
+ *  The agent is instructed to output JSON between the delimiters. */
+export function extractSelfEvaluation(text: string): SelfEvaluation | null {
+  const match = text.match(SELF_EVAL_REGEX);
+  if (!match) return null;
+
+  try {
+    const raw = JSON.parse(match[1]);
+    // Validate required fields
+    if (typeof raw.success !== "boolean") return null;
+    if (typeof raw.output_summary !== "string") return null;
+    if (!Array.isArray(raw.constraint_violations)) return null;
+    if (typeof raw.should_continue !== "boolean") return null;
+
+    return makeSelfEvaluation({
+      success: raw.success,
+      output_summary: raw.output_summary,
+      constraint_violations: raw.constraint_violations,
+      should_continue: raw.should_continue,
+    });
+  } catch {
+    return null;
+  }
+}
+
+/** Fallback heuristic when structured self-eval extraction fails.
+ *  Scans agent output for completion and error signals.
+ *  Returns a low-confidence SelfEvaluation — the autonomous runner
+ *  may choose to warn the user or continue cautiously. */
+export function heuristicSelfEvaluation(text: string): SelfEvaluation | null {
+  const lower = text.toLowerCase();
+  const hasError =
+    /error|failed|exception|cannot|unable|失败|错误|异常/.test(lower);
+  const hasCompletion =
+    /done|complete|finished|完成|成功/.test(lower);
+  const hasRemaining =
+    /remaining|continue|still need|next|todo|剩余|继续|下一步/.test(lower);
+
+  // Extract a reasonable summary from the last meaningful paragraph
+  const paragraphs = text.split(/\n\n+/).filter((p) => p.trim().length > 30);
+  const summary = paragraphs.length > 0
+    ? paragraphs[paragraphs.length - 1].trim().slice(0, 300)
+    : text.trim().slice(0, 300);
+
+  return makeSelfEvaluation({
+    success: !hasError && (hasCompletion || !hasRemaining),
+    output_summary: summary || "[heuristic fallback — could not parse structured self-eval]",
+    constraint_violations: [],
+    should_continue: hasRemaining && !hasError,
+  });
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Engine Metrics
@@ -475,6 +537,67 @@ export class LoopForgeEngine {
         error: null,
       },
     };
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // Auto-Feedback (v1.1 — autonomous loop, no human in the loop)
+  // ═══════════════════════════════════════════════════════════════════════
+
+  /** Record self-evaluation from agent output without human intervention.
+   *  Converts SelfEvaluation → ExecutionFeedback → vault persistence.
+   *  Call this BEFORE invokeLoopCompile for the next round so that
+   *  hydrateLoopContext picks up the latest quality scores. */
+  autoFeedback(
+    selfEval: SelfEvaluation,
+    loopId: string,
+    round: number,
+    task: string,
+  ): number {
+    this.ensureInit({ task, mode: "feedback" as never, vault_config: {} as never, feedback: null, skill_name: null, task_id: null });
+
+    const fb: ExecutionFeedback = makeExecutionFeedback({
+      output: selfEval.output_summary,
+      success: selfEval.success,
+      constraint_violations: selfEval.constraint_violations,
+      manual_fixes_needed: "",
+    });
+
+    const quality = scoreQuality({
+      success: fb.success,
+      constraint_violations: fb.constraint_violations,
+      manual_fixes_needed: fb.manual_fixes_needed,
+    });
+
+    const taskId = `loop:${loopId}:r${round}:feedback`;
+
+    const signal: Record<string, unknown> = {
+      task_id: taskId,
+      task_type: task.slice(0, 80),
+      quality_score: quality,
+      skill_used: "",
+      violations: selfEval.constraint_violations,
+      manual_fixes: "",
+      loop_id: loopId,
+      round,
+    };
+    this.persistFeedbackToVault(signal);
+    this.flushFeedbackBuffer();
+
+    // Update state
+    this.state!.call_count++;
+    this.state!.quality_trend.push(quality);
+    if (this.state!.quality_trend.length > 20) {
+      this.state!.quality_trend = this.state!.quality_trend.slice(-20);
+    }
+
+    // Circuit breaker
+    if (this.shouldBreak()) {
+      this.state!.circuit_breaker_count++;
+    } else {
+      this.state!.circuit_breaker_count = 0;
+    }
+
+    return quality;
   }
 
   // ═══════════════════════════════════════════════════════════════════════

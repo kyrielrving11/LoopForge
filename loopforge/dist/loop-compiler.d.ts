@@ -32,6 +32,10 @@ export declare function computeAdvisories(request: LoopCompileRequest, vaultCont
     health: LoopHealth | null;
 };
 export declare function compileL2(request: LoopCompileRequest, vaultContext: Record<string, unknown> | null): LoopCompileResponse;
+/** Build the standardized self-evaluation block appended to every compiled prompt.
+ *  The agent MUST output a JSON self-evaluation between the delimiters.
+ *  Only 4 fields — each consumed by at least one downstream function. */
+export declare function buildSelfEvalBlock(round: number): string;
 export declare function compileLoop(request: LoopCompileRequest, vaultContext?: Record<string, unknown> | null): LoopCompileResponse;
 export {};
 //# sourceMappingURL=loop-compiler.d.ts.map

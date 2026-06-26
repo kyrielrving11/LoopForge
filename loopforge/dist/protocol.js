@@ -58,6 +58,17 @@ export function makeExecutionFeedback(overrides = {}) {
         ...overrides,
     };
 }
+export function makeSelfEvaluation(overrides = {}) {
+    return {
+        success: false,
+        output_summary: "",
+        constraint_violations: [],
+        should_continue: true,
+        ...overrides,
+    };
+}
+/** Regex to extract a self-evaluation JSON block from agent output. */
+export const SELF_EVAL_REGEX = /---loopforge-eval\s*([\s\S]*?)\s*---end-loopforge-eval/;
 export function makeLoopObjective(overrides = {}) {
     return {
         objective: "",

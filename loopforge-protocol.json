@@ -115,6 +115,33 @@
         "manual_fixes_needed"
       ]
     },
+    "SelfEvaluation": {
+      "type": "object",
+      "properties": {
+        "success": {
+          "type": "boolean"
+        },
+        "output_summary": {
+          "type": "string"
+        },
+        "constraint_violations": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "should_continue": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success",
+        "output_summary",
+        "constraint_violations",
+        "should_continue"
+      ],
+      "description": "Structured self-evaluation embedded in compiled prompts.\nThe agent outputs this after completing each round.\nEvery field is consumed by at least one downstream function."
+    },
     "LoopForgeRequest": {
       "type": "object",
       "properties": {

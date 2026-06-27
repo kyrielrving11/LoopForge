@@ -23,8 +23,8 @@ mkdir -p ~/.claude/skills/perception
 cp "$(npm root -g)/loopforge/skills/perception/SKILL.md" ~/.claude/skills/perception/
 ```
 
-然后在 Claude Code / Codex 中：`/loop "审计 ERC20 代币"` — Perception-Skill
-将通过 MCP 工具自动管理完整的循环生命周期。
+然后在 Claude Code / Codex 中：`/perception "审计 ERC20 代币"` — Perception-Skill
+将通过 MCP 工具自动管理完整的循环生命周期。Agent 也会在检测到多轮任务时自动激活。
 
 ### CLI
 
@@ -117,7 +117,7 @@ LoopForge 编译提示词（嵌入自评指令）
 
 ```
 AI 宿主（Claude Code / Codex）
-  → Perception-Skill 在 /loop 时激活
+  → Perception-Skill 在 /perception 时激活（或自动检测多轮任务）
   → loopforge_start → 编译后的第 1 轮 prompt
   → [Agent 执行 + 自评]
   → loopforge_next → 编译后的第 2 轮 prompt
@@ -206,7 +206,7 @@ loopforge status                   # Vault 健康摘要
 - **MCP 服务器（v1.3）** — 8 个工具，JSON-RPC over stdio：`start`、`next`、`status`、`stop`、`list`、`replay`、`resume`、`health`。零配置接入 Claude Code 和 Codex。
 - **会话恢复（v1.3.1）** — 会话自动保存到 vault。`loopforge_resume` 在进程重启后恢复循环状态 — 不再从第 1 轮重新开始。
 - **验收标准强制执行（v1.3.1）** — `loop_objective.success_criteria` 合并到活跃约束系统 — 像硬约束一样被追踪、退役、违规检查。
-- **Perception-Skill（v1.3）** — 平台无关的 Agent Skill。复制粘贴即可在任意 MCP-capable 宿主中启用自主 `/loop` 工作流。
+- **Perception-Skill（v1.3）** — 平台无关的 Agent Skill。复制粘贴即可在任意 MCP-capable 宿主中启用自主多轮认知循环。通过 `/perception` 或自然语言触发。
 - **Loop Runtime（v1.2）** — 事件驱动自主循环，内置心跳监控、单轮超时、stall 检测、优雅退出。`run({ task, execute })` 函数——仅 2 个必填字段。
 - **心跳 & 超时** — 每轮心跳（可配置间隔）+ 超时 + stall 检测。支持 interactive 模式用于人机协同。
 - **自评提取** — 解析 Agent 输出中的 `---loopforge-eval` 块。结构化提取失败时降级为启发式推断。
@@ -232,7 +232,7 @@ LoopForge/
 │   ├── src/                     # adapter, builder, cli, engine, loop-compiler, policy, protocol, replay, runtime, backends, mcp
 │   ├── dist/                    # 编译产物 + 类型声明
 │   ├── skills/
-│   │   └── perception/          # Perception-Skill：Agent 的 /loop 工作流指令
+│   │   └── perception/          # Perception-Skill：Agent 的认知循环工作流指令
 │   │       └── SKILL.md
 │   └── tests/                   # 92 测试（Node.js 内置 runner）
 ├── skills/

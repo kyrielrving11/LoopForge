@@ -23,8 +23,9 @@ mkdir -p ~/.claude/skills/perception
 cp "$(npm root -g)/loopforge/skills/perception/SKILL.md" ~/.claude/skills/perception/
 ```
 
-Then in Claude Code / Codex: `/loop "Audit ERC20 token"` — the Perception-Skill
-handles the full loop lifecycle via MCP tools.
+Then in Claude Code / Codex: `/perception "Audit ERC20 token"` — the Perception-Skill
+handles the full loop lifecycle via MCP tools. (The agent also activates
+automatically for multi-round tasks — no explicit command needed.)
 
 ### CLI
 
@@ -116,7 +117,7 @@ LoopForge compiles prompt (with self-eval instructions)
 
 ```
 AI Host (Claude Code / Codex)
-  → Perception-Skill activates on /loop
+  → Perception-Skill activates on /perception (or auto-detects multi-round tasks)
   → loopforge_start → compiled Round 1 prompt
   → [Agent executes + self-eval]
   → loopforge_next → compiled Round 2 prompt
@@ -206,7 +207,7 @@ loopforge status                   # Vault health summary
 - **MCP Server (v1.3)** — 8 tools over JSON-RPC stdio: `start`, `next`, `status`, `stop`, `list`, `replay`, `resume`, `health`. Zero-config integration with Claude Code and Codex.
 - **Session Recovery (v1.3.1)** — Sessions auto-saved to vault. `loopforge_resume` restores loop state after process restart — no more starting from round 1.
 - **Success Criteria Enforcement (v1.3.1)** — `loop_objective.success_criteria` merged into active constraints — tracked, retired, and violation-checked like hard constraints.
-- **Perception-Skill (v1.3)** — Platform-agnostic agent skill. Copy-and-paste into any MCP-capable host to enable autonomous `/loop` workflows.
+- **Perception-Skill (v1.3)** — Platform-agnostic agent skill. Copy-and-paste into any MCP-capable host to enable autonomous multi-round cognitive loops. Trigger with `/perception` or natural language.
 - **Loop Runtime (v1.2)** — Event-driven autonomous loop with heartbeat monitoring, round timeout, stall detection, and graceful shutdown. Single `run({ task, execute })` function — 2 required fields.
 - **Heartbeat & Timeout** — Per-round heartbeat (configurable interval) with timeout + stall detection. Interactive mode for human-in-the-loop scenarios.
 - **Self-Evaluation Extraction** — Parses `---loopforge-eval` blocks from agent output. Falls back to heuristic extraction for graceful degradation.
@@ -232,7 +233,7 @@ LoopForge/
 │   ├── src/                     # adapter, builder, cli, engine, loop-compiler, policy, protocol, replay, runtime, backends, mcp
 │   ├── dist/                    # Compiled JS + type declarations
 │   ├── skills/
-│   │   └── perception/          # Perception-Skill: agent instructions for /loop workflows
+│   │   └── perception/          # Perception-Skill: agent instructions for cognitive loop workflows
 │   │       └── SKILL.md
 │   └── tests/                   # 92 tests (Node.js built-in runner)
 ├── skills/

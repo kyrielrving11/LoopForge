@@ -16,7 +16,7 @@ beyond having `loopforge-mcp` registered as an MCP server.
 ## When to Activate
 
 Activate when the user says any of:
-- `/loop <task>` — start an autonomous multi-round loop
+- `/perception <task>` — start an autonomous multi-round loop
 - "do this in a loop", "keep going until done", "iterate on this"
 - Any task that clearly needs 3+ rounds (audit, refactor, migrate, review-and-fix cycles)
 
@@ -154,7 +154,7 @@ The prompt changes between rounds based on your trajectory. Pay attention to:
 ## Example
 
 ```
-User: /loop "Audit the ERC20 token in contracts/Token.sol for security issues"
+User: /perception "Audit the ERC20 token in contracts/Token.sol for security issues"
 
 Agent:
   → loopforge_start({ task: "Audit ERC20 token in contracts/Token.sol for security issues",

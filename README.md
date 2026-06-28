@@ -23,7 +23,7 @@ mkdir -p ~/.claude/skills/perception
 cp "$(npm root -g)/loopforge/skills/perception/SKILL.md" ~/.claude/skills/perception/
 ```
 
-Then in Claude Code / Codex: `/perception "Audit ERC20 token"` — the Perception-Skill
+Then in Claude Code / Codex: `/perception "Audit ERC20 token"` 
 handles the full loop lifecycle via MCP tools. (The agent also activates
 automatically for multi-round tasks — no explicit command needed.)
 

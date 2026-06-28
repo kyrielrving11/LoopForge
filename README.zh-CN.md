@@ -23,7 +23,7 @@ mkdir -p ~/.claude/skills/perception
 cp "$(npm root -g)/loopforge/skills/perception/SKILL.md" ~/.claude/skills/perception/
 ```
 
-然后在 Claude Code / Codex 中：`/perception "审计 ERC20 代币"` — Perception-Skill
+然后在 Claude Code / Codex 中：`/perception "审计 ERC20 代币"` 
 将通过 MCP 工具自动管理完整的循环生命周期。Agent 也会在检测到多轮任务时自动激活。
 
 ### CLI

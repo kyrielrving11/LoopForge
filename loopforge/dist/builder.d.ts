@@ -13,5 +13,4 @@ export declare function scoreQuality(feedback: {
     manual_fixes_needed?: string;
 } | null): number;
 export declare function routeTechniqueAdaptive(task: string, vaultContext?: Record<string, unknown> | null, loopId?: string): Analysis;
-export declare function extractGlobalConstraints(hydrateResults: Record<string, unknown> | null): string[];
 //# sourceMappingURL=builder.d.ts.map

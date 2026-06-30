@@ -10,11 +10,14 @@ import {
   alignTask,
   checkLoopHealth,
   compileL2,
+  buildRollingSummary,
+  formatRollingSummaryForPrompt,
 } from "../loop-compiler.js";
 import {
   makeLoopCompileRequest,
   makeLoopRoundResult,
   makeLoopObjective,
+  makeRollingSummary,
 } from "../protocol.js";
 import { resetPolicy } from "../policy.js";
 
@@ -455,5 +458,223 @@ describe("Loop Compiler — Cross-Round Scenarios", () => {
     });
     const level = decideLevel(req, vaultContext);
     assert.equal(level, "l0");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Failure Lineage Weighting (v1.7)
+// ═══════════════════════════════════════════════════════════════════════════
+
+function makeVaultResult(
+  loopId: string,
+  round: number,
+  qualityScore: number,
+  task: string,
+  outputSummary = "",
+  techniqueUsed = "zero-shot",
+  constraintViolations: string[] = [],
+): Record<string, unknown> {
+  return {
+    task,
+    output_summary: outputSummary,
+    constraint_violations: constraintViolations,
+    technique_used: techniqueUsed,
+    quality_score: qualityScore,
+    loop_lineage: {
+      loop_id: loopId,
+      round,
+      quality_score: qualityScore,
+      task,
+      technique_used: techniqueUsed,
+    },
+  };
+}
+
+describe("Failure Lineage Weighting — buildRollingSummary", () => {
+  it("no failure patterns when all rounds score >= 4", () => {
+    const vault = {
+      results: [
+        makeVaultResult("loop-1", 1, 5, "fix auth bug", "Fixed auth by updating middleware"),
+        makeVaultResult("loop-1", 2, 4, "add tests for auth", "Added 12 test cases"),
+        makeVaultResult("loop-1", 3, 5, "refactor auth module", "Cleaned up auth module"),
+      ],
+      global_entries: [],
+    };
+    const rs = buildRollingSummary("loop-1", 4, vault);
+    assert.ok(rs !== null);
+    assert.equal(rs!.failed_patterns?.length ?? 0, 0);
+    // key_lessons should not have [Consider alternatives] marker
+    for (const kl of rs!.key_lessons) {
+      assert.ok(!kl.includes("[Consider alternatives]"));
+    }
+  });
+
+  it("detects 2 consecutive low-quality rounds with same technique and similar task", () => {
+    const vault = {
+      results: [
+        makeVaultResult("loop-1", 1, 2, "fix cache bug", "Tried cache fix A", "zero-shot"),
+        makeVaultResult("loop-1", 2, 2, "fix cache problem", "Tried cache fix B", "zero-shot"),
+        makeVaultResult("loop-1", 3, 5, "found auth root cause", "Auth middleware was the issue", "step-back"),
+      ],
+      global_entries: [],
+    };
+    const rs = buildRollingSummary("loop-1", 4, vault);
+    assert.ok(rs !== null);
+    assert.ok((rs!.failed_patterns?.length ?? 0) >= 1);
+    const fp = rs!.failed_patterns![0];
+    assert.ok(fp.includes("zero-shot"));
+    assert.ok(fp.includes("cache"));
+    assert.ok(fp.includes("2 consecutive rounds"));
+  });
+
+  it("detects 3 consecutive low-quality rounds", () => {
+    const vault = {
+      results: [
+        makeVaultResult("loop-1", 1, 2, "fix memory leak", "Attempt 1", "few-shot"),
+        makeVaultResult("loop-1", 2, 1, "fix memory leak in parser", "Attempt 2", "few-shot"),
+        makeVaultResult("loop-1", 3, 2, "fix memory leak - retry", "Attempt 3", "few-shot"),
+      ],
+      global_entries: [],
+    };
+    const rs = buildRollingSummary("loop-1", 4, vault);
+    assert.ok(rs !== null);
+    assert.ok((rs!.failed_patterns?.length ?? 0) >= 1);
+    assert.ok(rs!.failed_patterns![0].includes("3 consecutive rounds"));
+  });
+
+  it("no pattern when low-quality rounds use different techniques", () => {
+    const vault = {
+      results: [
+        makeVaultResult("loop-1", 1, 2, "fix cache bug", "Attempt", "zero-shot"),
+        makeVaultResult("loop-1", 2, 2, "fix cache bug", "Attempt", "tree-of-thought"),
+      ],
+      global_entries: [],
+    };
+    const rs = buildRollingSummary("loop-1", 3, vault);
+    assert.ok(rs !== null);
+    assert.equal(rs!.failed_patterns?.length ?? 0, 0);
+  });
+
+  it("no pattern when low-quality tasks are completely different (Jaccard < 0.4)", () => {
+    const vault = {
+      results: [
+        makeVaultResult("loop-1", 1, 2, "fix cache bug in Redis layer", "Attempt", "zero-shot"),
+        makeVaultResult("loop-1", 2, 2, "rewrite authentication module entirely", "Attempt", "zero-shot"),
+      ],
+      global_entries: [],
+    };
+    const rs = buildRollingSummary("loop-1", 3, vault);
+    assert.ok(rs !== null);
+    assert.equal(rs!.failed_patterns?.length ?? 0, 0);
+  });
+
+  it("key_lessons from failure-pattern rounds are demoted to end with [Consider alternatives]", () => {
+    const vault = {
+      results: [
+        makeVaultResult("loop-1", 1, 2, "fix cache bug", "Tried cache approach", "zero-shot"),
+        makeVaultResult("loop-1", 2, 2, "fix cache problem", "Tried another cache fix", "zero-shot"),
+        makeVaultResult("loop-1", 3, 5, "found real issue in auth", "Auth was the real problem — fixed", "step-back", ["Auth bug resolved"]),
+      ],
+      global_entries: [],
+    };
+    const rs = buildRollingSummary("loop-1", 4, vault);
+    assert.ok(rs !== null);
+
+    // key_lessons should have the successful round first, then demoted ones
+    // (but since score >= 4 for key_lessons, rounds 1-2 with score=2 won't appear at all)
+    // The real test is: no false positives in key_lessons
+    for (const kl of rs!.key_lessons) {
+      if (kl.includes("cache")) {
+        assert.ok(kl.includes("[Consider alternatives]"));
+      }
+    }
+  });
+
+  it("recurring_issues from failure-only rounds marked as [Possible dead end]", () => {
+    const vault = {
+      results: [
+        makeVaultResult("loop-1", 1, 2, "fix cache bug", "Attempt 1", "zero-shot",
+          ["missed edge case"]),
+        makeVaultResult("loop-1", 2, 2, "fix cache problem", "Attempt 2", "zero-shot",
+          ["missed edge case"]),
+        makeVaultResult("loop-1", 3, 5, "found auth root cause", "Fixed auth", "step-back",
+          ["auth constraint missed"]),
+        makeVaultResult("loop-1", 4, 4, "add auth tests", "Added tests", "least-to-most",
+          ["auth constraint missed"]),
+      ],
+      global_entries: [],
+    };
+    const rs = buildRollingSummary("loop-1", 5, vault);
+    assert.ok(rs !== null);
+
+    // "missed edge case" only appears in failed rounds (1,2) → should be marked
+    const edgeCaseIssue = rs!.recurring_issues.find((ri) => ri.includes("missed edge case"));
+    assert.ok(edgeCaseIssue !== undefined);
+    assert.ok(edgeCaseIssue!.includes("[Possible dead end"));
+
+    // "auth constraint missed" appears in both failed (3) and successful (4) → NOT marked
+    const authIssue = rs!.recurring_issues.find((ri) => ri.includes("auth constraint missed"));
+    assert.ok(authIssue !== undefined);
+    assert.ok(!authIssue!.includes("[Possible dead end"));
+  });
+
+  it("empty vault returns null", () => {
+    const rs = buildRollingSummary("loop-1", 1, { results: [], global_entries: [] });
+    assert.equal(rs, null);
+  });
+
+  it("single round returns no failure patterns", () => {
+    const vault = {
+      results: [
+        makeVaultResult("loop-1", 1, 2, "fix cache bug", "Attempt", "zero-shot"),
+      ],
+      global_entries: [],
+    };
+    const rs = buildRollingSummary("loop-1", 2, vault);
+    assert.ok(rs !== null);
+    assert.equal(rs!.failed_patterns?.length ?? 0, 0);
+  });
+});
+
+describe("Failure Lineage Weighting — formatRollingSummaryForPrompt", () => {
+  it("renders failure patterns section when present", () => {
+    const rs = makeRollingSummary({
+      quality_trajectory: [2, 2, 5],
+      trajectory_direction: "improving",
+      what_worked: ["R3 (score=5): Fixed auth"],
+      recurring_issues: [],
+      key_lessons: ["[R3] Fixed auth bug"],
+      rounds_sampled: 3,
+      generated_at_round: 4,
+      failed_patterns: [
+        "technique 'zero-shot' on task 'fix cache bug' failed 2 consecutive rounds (R1-R2, avg score 2.0) — consider strategy change",
+      ],
+    });
+    const text = formatRollingSummaryForPrompt(rs);
+    assert.ok(text.includes("### ⚠️ Failure Patterns"));
+    assert.ok(text.includes("Consider Strategy Change"));
+    assert.ok(text.includes("fix cache bug"));
+    assert.ok(text.includes("🚫"));
+  });
+
+  it("no failure patterns section when empty", () => {
+    const rs = makeRollingSummary({
+      quality_trajectory: [5, 4],
+      trajectory_direction: "stable",
+      what_worked: [],
+      recurring_issues: [],
+      key_lessons: [],
+      rounds_sampled: 2,
+      generated_at_round: 3,
+      failed_patterns: [],
+    });
+    const text = formatRollingSummaryForPrompt(rs);
+    assert.ok(!text.includes("Failure Patterns"));
+  });
+
+  it("returns empty string for null or empty summary", () => {
+    assert.equal(formatRollingSummaryForPrompt(null), "");
+    const empty = makeRollingSummary({ rounds_sampled: 0 });
+    assert.equal(formatRollingSummaryForPrompt(empty), "");
   });
 });

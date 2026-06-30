@@ -237,9 +237,140 @@ function computeConstraintRetirement(activeConstraints, loopId, currentRound, va
     return { active: pruned, retired };
 }
 // ═══════════════════════════════════════════════════════════════════════════
+// P4: Progress evidence helpers
+// ═══════════════════════════════════════════════════════════════════════════
+/** Extract execution evidence from a previous round in the vault.
+ *  Used for progress gradient calculation and trend detection. */
+function getPreviousRoundEvidence(loopId, roundNum, vaultContext) {
+    if (vaultContext === null)
+        return null;
+    const results = vaultContext.results || [];
+    for (const r of results) {
+        const lineage = (r.loop_lineage || r.lineage || {});
+        if (lineage.loop_id !== loopId)
+            continue;
+        if (lineage.round !== roundNum)
+            continue;
+        const evidence = (r.execution_evidence ?? lineage.execution_evidence);
+        if (evidence) {
+            return {
+                progress_estimate: evidence.progress_estimate ?? 0,
+                success_criteria_met: evidence.success_criteria_met ?? [],
+            };
+        }
+        return null;
+    }
+    return null;
+}
+/** Count consecutive rounds (including current) where progress delta
+ *  has been below the stall threshold. */
+function countProgressStallRounds(loopId, currentRound, vaultContext, threshold) {
+    if (vaultContext === null || currentRound < 2)
+        return 0;
+    let count = 0;
+    for (let r = currentRound; r >= 2; r--) {
+        const curr = getPreviousRoundEvidence(loopId, r, vaultContext);
+        const prev = getPreviousRoundEvidence(loopId, r - 1, vaultContext);
+        if (curr && prev) {
+            const delta = curr.progress_estimate - prev.progress_estimate;
+            if (delta < threshold && curr.progress_estimate < 0.95) {
+                count++;
+            }
+            else {
+                break;
+            }
+        }
+        else {
+            break;
+        }
+    }
+    return count;
+}
+/** Detect repeated failure patterns in sampled rounds.
+ *  A failure pattern = 2+ consecutive rounds where:
+ *    1. quality_score < 3 (failed or weak)
+ *    2. same technique was used
+ *    3. task text is similar (Jaccard > 0.4)
+ *
+ *  Returns human-readable descriptions for injection into the prompt. */
+function detectFailurePatterns(sampled) {
+    if (sampled.length < 2)
+        return [];
+    const patterns = [];
+    let runStart = -1;
+    for (let i = 0; i < sampled.length; i++) {
+        const r = sampled[i];
+        const isFailed = r.quality_score < 3;
+        if (isFailed && runStart === -1) {
+            runStart = i;
+        }
+        else if (!isFailed && runStart !== -1) {
+            if (i - runStart >= 2) {
+                const pattern = classifyRun(sampled.slice(runStart, i));
+                if (pattern)
+                    patterns.push(pattern);
+            }
+            runStart = -1;
+        }
+    }
+    // Handle run at end of array
+    if (runStart !== -1 && sampled.length - runStart >= 2) {
+        const pattern = classifyRun(sampled.slice(runStart));
+        if (pattern)
+            patterns.push(pattern);
+    }
+    return patterns;
+}
+/** Classify a run of consecutive low-quality rounds as a failure pattern.
+ *  Returns null if the rounds are too dissimilar to be the same pattern. */
+function classifyRun(run) {
+    if (run.length < 2)
+        return null;
+    // Must all use the same technique
+    const technique = run[0].technique_used || "unknown";
+    if (!run.every((r) => (r.technique_used || "unknown") === technique)) {
+        return null;
+    }
+    // Task text must be similar across the run (pairwise Jaccard)
+    const tokensList = run.map((r) => tokenize(r.task.toLowerCase()));
+    for (let i = 0; i < tokensList.length - 1; i++) {
+        for (let j = i + 1; j < tokensList.length; j++) {
+            if (jaccard(tokensList[i], tokensList[j]) < 0.4)
+                return null;
+        }
+    }
+    const rounds = `R${run[0].round}-R${run[run.length - 1].round}`;
+    const taskPreview = run[0].task.slice(0, 80);
+    const avgScore = (run.reduce((s, r) => s + r.quality_score, 0) / run.length).toFixed(1);
+    return (`technique '${technique}' on task '${taskPreview}' ` +
+        `failed ${run.length} consecutive rounds (${rounds}, avg score ${avgScore}) — ` +
+        `consider strategy change`);
+}
+/** Extract round numbers referenced in failure pattern descriptions.
+ *  Used by buildRollingSummary to identify which rounds to demote. */
+function extractFailureRoundNums(patterns) {
+    const nums = new Set();
+    for (const p of patterns) {
+        // Match "R2-R4" or "R5"
+        const rangeMatch = p.match(/R(\d+)-R(\d+)/);
+        if (rangeMatch) {
+            const start = parseInt(rangeMatch[1], 10);
+            const end = parseInt(rangeMatch[2], 10);
+            for (let r = start; r <= end; r++)
+                nums.add(r);
+        }
+        else {
+            const singleMatch = p.match(/R(\d+)/);
+            if (singleMatch)
+                nums.add(parseInt(singleMatch[1], 10));
+        }
+    }
+    return nums;
+}
+// ═══════════════════════════════════════════════════════════════════════════
 // Rolling Summary (v3.5)
 // ═══════════════════════════════════════════════════════════════════════════
-function buildRollingSummary(loopId, currentRound, vaultContext) {
+export function buildRollingSummary(loopId, currentRound, vaultContext) {
     if (vaultContext === null)
         return null;
     const results = vaultContext.results || [];
@@ -310,7 +441,7 @@ function buildRollingSummary(loopId, currentRound, vaultContext) {
             }
         }
     }
-    const recurringIssues = [...violationCounts.entries()]
+    let recurringIssues = [...violationCounts.entries()]
         .filter(([, count]) => count >= 2)
         .sort((a, b) => b[1] - a[1])
         .map(([v, count]) => `${v} (appeared in ${count} rounds)`);
@@ -321,6 +452,57 @@ function buildRollingSummary(loopId, currentRound, vaultContext) {
             keyLessons.push(`[R${r.round}] ${String(r.output_summary).slice(0, 200)}`);
         }
     }
+    // v1.7: Failure lineage weighting — detect and demote failure patterns
+    const sampledRounds = sampled.map((r) => ({
+        round: r.round,
+        quality_score: r.quality_score,
+        task: r.task,
+        output_summary: r.output_summary,
+        constraint_violations: r.constraint_violations,
+        technique_used: r.technique_used,
+    }));
+    const failurePatterns = detectFailurePatterns(sampledRounds);
+    const failedRoundNums = extractFailureRoundNums(failurePatterns);
+    // Re-weight key_lessons: lessons from failure-pattern rounds go to end
+    if (failedRoundNums.size > 0 && keyLessons.length > 0) {
+        const promoted = [];
+        const demoted = [];
+        for (const kl of keyLessons) {
+            const rndMatch = kl.match(/^\[R(\d+)\]/);
+            if (rndMatch && failedRoundNums.has(parseInt(rndMatch[1], 10))) {
+                demoted.push(kl.replace(/^\[R\d+\]/, "$& [Consider alternatives]"));
+            }
+            else {
+                promoted.push(kl);
+            }
+        }
+        keyLessons.length = 0;
+        keyLessons.push(...promoted, ...demoted);
+    }
+    // Re-weight recurring_issues: mark issues that ONLY appear in failure-pattern rounds
+    if (failedRoundNums.size > 0 && recurringIssues.length > 0) {
+        // Build per-round violation sets
+        const failureViolations = new Set();
+        const successViolations = new Set();
+        for (const r of sampledRounds) {
+            const target = failedRoundNums.has(r.round) ? failureViolations : successViolations;
+            for (const v of r.constraint_violations) {
+                target.add(String(v).trim().toLowerCase());
+            }
+        }
+        recurringIssues.length = 0;
+        recurringIssues.push(...[...violationCounts.entries()]
+            .filter(([, count]) => count >= 2)
+            .sort((a, b) => b[1] - a[1])
+            .map(([v, count]) => {
+            const vNorm = v.trim().toLowerCase();
+            // Mark if this issue only appears in failure rounds (possible dead end)
+            if (failureViolations.has(vNorm) && !successViolations.has(vNorm)) {
+                return `${v} (appeared in ${count} rounds) ⚠️ [Possible dead end — only in failed rounds]`;
+            }
+            return `${v} (appeared in ${count} rounds)`;
+        }));
+    }
     return makeRollingSummary({
         quality_trajectory: trajectory,
         trajectory_direction: direction,
@@ -329,9 +511,10 @@ function buildRollingSummary(loopId, currentRound, vaultContext) {
         key_lessons: keyLessons,
         rounds_sampled: sampled.length,
         generated_at_round: currentRound,
+        failed_patterns: failurePatterns.length ? failurePatterns : [],
     });
 }
-function formatRollingSummaryForPrompt(rs) {
+export function formatRollingSummaryForPrompt(rs) {
     if (rs === null || rs.rounds_sampled === 0)
         return "";
     const lines = [
@@ -351,6 +534,18 @@ function formatRollingSummaryForPrompt(rs) {
         lines.push("**Recurring Issues (appeared 2+ times)**:");
         for (const ri of rs.recurring_issues)
             lines.push(`- ⚠️ ${ri}`);
+        lines.push("");
+    }
+    // v1.7: Failure patterns — explicit warnings about repeated failure paths
+    if (rs.failed_patterns && rs.failed_patterns.length) {
+        lines.push("### ⚠️ Failure Patterns — Consider Strategy Change");
+        lines.push("");
+        lines.push("The following approaches failed repeatedly. The compiler has demoted " +
+            "their influence on key lessons. Consider a different technique or " +
+            "narrower scope.");
+        for (const fp of rs.failed_patterns) {
+            lines.push(`- 🚫 ${fp}`);
+        }
         lines.push("");
     }
     if (rs.key_lessons.length) {
@@ -384,7 +579,23 @@ export function decideLevel(request, vaultContext) {
     // Gate 3: goal_id stability
     if (goalId !== prev.goal_id)
         return "l2";
-    // Gate 4: Explicit failures or new constraints → patch
+    // Gate 4: P0–P5 cognitive evolution signals → full recompile (v1.7)
+    // Check BEFORE the simple repair/new-constraint gates because evolution signals
+    // (constraint discovery, objective refinement, self-correction) need full L2
+    // processing. Only structural evolution signals trigger L2 — execution_evidence
+    // alone does not (it is processed via the rolling summary at L1).
+    if (request.last_round_result) {
+        const lr = request.last_round_result;
+        if ((lr.discovered_constraints?.length ?? 0) > 0 ||
+            (lr.objective_refinement?.trim().length ?? 0) > 0 ||
+            (lr.emerged_subtasks?.length ?? 0) > 0 ||
+            (lr.retracted_constraints?.length ?? 0) > 0 ||
+            (lr.revised_success_criteria?.length ?? 0) > 0 ||
+            (lr.wrong_assumptions?.length ?? 0) > 0) {
+            return "l2";
+        }
+    }
+    // Gate 5: Explicit failures or new constraints → patch
     const hasNewConstraints = request.constraints_from_plan.length > 0;
     const hasNewFailures = request.last_round_result !== null &&
         !request.last_round_result.success;
@@ -601,7 +812,8 @@ function extractObjectiveFromPlan(planPath) {
     const goalPatterns = ["goal", "objective", "目标", "目的", "意图"];
     const successPatterns = [
         "success criteria", "acceptance criteria", "验收标准", "成功标准",
-        "done when", "完成标准", "交付标准",
+        "done when", "完成标准", "交付标准", "outcome", "deliverable",
+        "结果", "产出", "交付物",
     ];
     const constraintPatterns = [
         "hard constraint", "constraint", "non-goal", "out of scope",
@@ -641,6 +853,12 @@ function extractObjectiveFromPlan(planPath) {
                 sections.goal.push(stripped);
             }
         }
+        else if (stripped && currentSection === "success" && stripped.length > 10) {
+            // P3: Also capture free-text paragraphs under success criteria headers
+            if (!/^#/.test(stripped)) {
+                sections.success.push(stripped);
+            }
+        }
     }
     if (!Object.values(sections).some((v) => v.length))
         return null;
@@ -656,16 +874,33 @@ function computeLoopObjectiveFromTask(request, _vaultContext) {
     let objective = task.trim().slice(0, 200);
     const successCriteria = [];
     const hardConstraints = [...constraints];
+    // P3: Outcome-oriented default success criteria — describe the RESULT,
+    //      not the process. The process emerges from the loop.
     if (/test|测试/i.test(task)) {
-        successCriteria.push("All tests pass");
+        successCriteria.push("All tests pass with no regressions");
     }
     if (/compat|兼容/i.test(task)) {
-        successCriteria.push("Backward compatibility maintained");
+        successCriteria.push("Existing API contracts and integrations unchanged");
     }
     if (/security|安全|audit/i.test(task)) {
-        successCriteria.push("No security vulnerabilities found");
+        successCriteria.push("All identified vulnerabilities resolved or documented");
     }
-    // Try to extract richer objective from plan_source
+    if (/fix|修复|bug/i.test(task)) {
+        successCriteria.push("Root cause addressed and verified, not just symptoms");
+    }
+    if (/build|create|implement|开发|实现|构建/i.test(task)) {
+        successCriteria.push("Deliverable matches specification and passes review");
+    }
+    if (/refactor|重构/i.test(task)) {
+        successCriteria.push("Behavior preserved, structure improved, no new failures");
+    }
+    if (/migrate|迁移|upgrade|升级/i.test(task)) {
+        successCriteria.push("Migration completes without data loss or downtime");
+    }
+    if (/perf|performance|optimize|性能|优化/i.test(task)) {
+        successCriteria.push("Measurable improvement verified by benchmarks");
+    }
+    // P3: Try to extract richer objective from plan_source
     if (request.plan_source) {
         const planExtracted = extractObjectiveFromPlan(request.plan_source);
         if (planExtracted) {
@@ -683,11 +918,27 @@ function computeLoopObjectiveFromTask(request, _vaultContext) {
             hardConstraints.push(`Follow plan: ${request.plan_source}`);
         }
     }
+    // P3: Derive domain from task content for context-aware defaults
     if (!successCriteria.length) {
-        successCriteria.push("Task completed successfully");
+        if (/\.sol|solidity|contract|智能合约/i.test(task)) {
+            successCriteria.push("All functions respect check-effects-interactions pattern");
+            successCriteria.push("No unchecked external calls or reentrancy vectors");
+        }
+        else if (/\.tsx?|\.jsx?|react|component|组件/i.test(task)) {
+            successCriteria.push("Component renders correctly across all states (loading, empty, error)");
+            successCriteria.push("No prop-type or accessibility regressions");
+        }
+        else if (/api|endpoint|接口|route/i.test(task)) {
+            successCriteria.push("Endpoint responds correctly for all defined status codes");
+            successCriteria.push("Error responses follow the project's error schema");
+        }
+        else {
+            successCriteria.push("Task goal achieved with verifiable evidence");
+        }
     }
     if (!hardConstraints.length) {
-        hardConstraints.push("Do not modify files outside scope");
+        hardConstraints.push("Do not modify files outside the stated scope");
+        hardConstraints.push("Preserve existing test coverage — no test deletions without replacement");
     }
     return makeLoopObjective({
         objective,
@@ -695,6 +946,8 @@ function computeLoopObjectiveFromTask(request, _vaultContext) {
         hard_constraints: hardConstraints,
         created_at_round: 1,
         loop_id: request.loop_id,
+        version: 1,
+        refinement_history: [],
     });
 }
 // ═══════════════════════════════════════════════════════════════════════════
@@ -825,8 +1078,19 @@ export function compileL2(request, vaultContext) {
     const referenceFile = analysis.reference_file;
     // v3.5: Rolling summary
     const rollingSummary = buildRollingSummary(request.loop_id, request.round, vaultContext);
+    // P5c: Wrong assumptions — must be applied BEFORE formatting so they appear
+    // in the rendered cross-round summary text injected into the prompt.
+    const lr = request.last_round_result;
+    if (lr?.wrong_assumptions?.length) {
+        if (rollingSummary) {
+            rollingSummary.key_lessons = [
+                ...rollingSummary.key_lessons,
+                ...lr.wrong_assumptions.map((a) => `Wrong assumption corrected: ${a}`),
+            ];
+        }
+    }
     const rollingText = formatRollingSummaryForPrompt(rollingSummary);
-    // Generate loop objective at round 1 if not provided
+    // ── Loop Objective: create at round 1, load from vault at later rounds ──
     let loopObjective = null;
     if (request.round === 1) {
         if (request.loop_objective) {
@@ -836,9 +1100,113 @@ export function compileL2(request, vaultContext) {
             loopObjective = computeLoopObjectiveFromTask(request, vaultContext);
         }
     }
+    else {
+        // P1 fix: Load loop objective from vault for round > 1
+        const vaultLo = vaultGetLoopObjective(request.loop_id, vaultContext);
+        if (vaultLo) {
+            const loData = vaultLo.loop_objective;
+            if (loData) {
+                loopObjective = makeLoopObjective({
+                    objective: loData.objective ?? "",
+                    success_criteria: loData.success_criteria ?? [],
+                    hard_constraints: loData.hard_constraints ?? [],
+                    created_at_round: loData.created_at_round ?? 1,
+                    loop_id: loData.loop_id ?? request.loop_id,
+                    version: loData.version ?? 1,
+                    refinement_history: loData.refinement_history ?? [],
+                });
+            }
+        }
+        if (!loopObjective && request.loop_objective) {
+            loopObjective = request.loop_objective;
+        }
+    }
+    // ── P1: Apply objective_refinement from last round ──
+    if (loopObjective && request.last_round_result?.objective_refinement) {
+        const refinement = request.last_round_result.objective_refinement.trim();
+        if (refinement) {
+            const version = (loopObjective.version ?? 1) + 1;
+            const history = [...(loopObjective.refinement_history ?? []), refinement];
+            // Enforce max versions from policy
+            const policy = getPolicy();
+            const maxVersions = policy.evolution?.max_objective_versions ?? 10;
+            const prunedHistory = history.slice(-maxVersions);
+            const refinedObjective = `${loopObjective.objective} [R${request.round}: ${refinement}]`;
+            loopObjective = makeLoopObjective({
+                ...loopObjective,
+                objective: refinedObjective,
+                version,
+                refinement_history: prunedHistory,
+            });
+        }
+    }
+    // ── Build active constraints (base + LO + P0 discovered) ──
     let constraints = [...request.constraints_from_plan];
     if (loopObjective) {
-        constraints = [...new Set([...constraints, ...loopObjective.hard_constraints, ...loopObjective.success_criteria])];
+        constraints = [
+            ...new Set([
+                ...constraints,
+                ...loopObjective.hard_constraints,
+                ...loopObjective.success_criteria,
+            ]),
+        ];
+    }
+    // P0: Merge discovered constraints from last round
+    if (request.last_round_result?.discovered_constraints?.length) {
+        const policy = getPolicy();
+        const maxPerRound = policy.evolution?.max_discovered_constraints_per_round ?? 5;
+        const maxActive = policy.evolution?.max_active_constraints ?? 15;
+        const newConstraints = request.last_round_result.discovered_constraints
+            .slice(0, maxPerRound)
+            .filter((c) => !constraints.includes(c));
+        constraints = [...constraints, ...newConstraints].slice(0, maxActive);
+    }
+    // ═══════════════════════════════════════════════════════════════════════════
+    // P5: Self-correction — MUST process retractions/revisions BEFORE prompt build
+    // so the technician compiler sees the corrected constraints and loop objective.
+    // ═══════════════════════════════════════════════════════════════════════════
+    const warnings = [];
+    const retired = [];
+    // P5a: Retracted constraints — remove from active set
+    if (lr?.retracted_constraints?.length) {
+        for (const rc of lr.retracted_constraints) {
+            const idx = constraints.indexOf(rc);
+            if (idx >= 0) {
+                constraints.splice(idx, 1);
+                retired.push(`[agent-retracted] ${rc}`);
+            }
+        }
+    }
+    // P5b: Revised success criteria — update Loop Objective
+    if (lr?.revised_success_criteria?.length && loopObjective) {
+        const sc = [...loopObjective.success_criteria];
+        for (const rev of lr.revised_success_criteria) {
+            const idx = sc.indexOf(rev.old);
+            if (idx >= 0) {
+                sc[idx] = rev.new;
+            }
+            else {
+                sc.push(rev.new);
+            }
+        }
+        const version = (loopObjective.version ?? 1) + 1;
+        const history = [
+            ...(loopObjective.refinement_history ?? []),
+            `R${request.round}: revised ${lr.revised_success_criteria.length} success criteria`,
+        ];
+        const updatedLo = makeLoopObjective({
+            ...loopObjective,
+            success_criteria: sc,
+            version,
+            refinement_history: history,
+        });
+        // Rebuild constraints to include revised criteria
+        constraints = [...new Set([
+                ...constraints.filter((c) => !updatedLo.hard_constraints.includes(c) && !updatedLo.success_criteria.includes(c)),
+                ...updatedLo.hard_constraints,
+                ...updatedLo.success_criteria,
+            ])];
+        loopObjective = updatedLo;
     }
     // ── Route to technique-specific specialist (v1.1 deep integration) ──
     let prompt;
@@ -854,16 +1222,126 @@ export function compileL2(request, vaultContext) {
     else {
         prompt = compileGeneric(request, goalId, constraints, loopObjective, rollingText, analysis, referenceFile, technique);
     }
+    // ── P2: Emerged subtasks → suggested next task ──
+    let suggestedNextTask = "";
+    if (request.last_round_result?.emerged_subtasks?.length) {
+        suggestedNextTask = request.last_round_result.emerged_subtasks
+            .slice(0, 3)
+            .join("; ");
+    }
+    // ═══════════════════════════════════════════════════════════════════════════
+    // P4: Consistency validation — cross-check agent claims
+    // ═══════════════════════════════════════════════════════════════════════════
+    const evidence = lr?.execution_evidence;
+    if (evidence) {
+        // Check 1: Agent claims action but reports no files changed
+        if (evidence.files_changed.length === 0 && lr.output_summary) {
+            const actionWords = /\b(fix|modif|chang|updat|refactor|implement|add|remov|delet|rewrit|修补|修改|更改|更新|重构|实现|添加|删除|重写)\b/i;
+            if (actionWords.test(lr.output_summary)) {
+                warnings.push("P4: Agent output claims changes but execution_evidence.files_changed is empty — possible oversight");
+            }
+        }
+        // Check 2: Agent reports success but tests failed
+        if (evidence.test_results && evidence.test_results.failed > 0 && lr.success) {
+            warnings.push(`P4: Agent reports success=true but ${evidence.test_results.failed} tests failed — claims may not match reality`);
+        }
+        // Check 3: Progress estimate mismatch with criteria tracking
+        if (loopObjective && loopObjective.success_criteria.length > 0) {
+            const metCount = evidence.success_criteria_met.length;
+            const totalCount = loopObjective.success_criteria.length;
+            const objectiveProgress = totalCount > 0 ? metCount / totalCount : 0;
+            const subjectiveProgress = evidence.progress_estimate;
+            const policy = getPolicy();
+            const mismatchThreshold = policy.evolution?.progress_mismatch_threshold ?? 0.3;
+            if (Math.abs(objectiveProgress - subjectiveProgress) > mismatchThreshold) {
+                warnings.push(`P4: Progress estimate mismatch — agent estimates ${(subjectiveProgress * 100).toFixed(0)}% but ${metCount}/${totalCount} criteria met (${(objectiveProgress * 100).toFixed(0)}%)`);
+            }
+        }
+    }
+    // ═══════════════════════════════════════════════════════════════════════════
+    // P4: Progress gradient — early stall detection
+    // ═══════════════════════════════════════════════════════════════════════════
+    if (evidence && vaultContext) {
+        const prevEvidence = getPreviousRoundEvidence(request.loop_id, request.round - 1, vaultContext);
+        if (prevEvidence) {
+            const delta = evidence.progress_estimate - prevEvidence.progress_estimate;
+            const policy = getPolicy();
+            const stallThreshold = policy.evolution?.progress_stall_threshold ?? 0.05;
+            const stallRounds = policy.evolution?.progress_stall_rounds ?? 2;
+            if (delta < stallThreshold && evidence.progress_estimate < 0.95) {
+                // Check how many consecutive rounds have been below threshold
+                const stallCount = countProgressStallRounds(request.loop_id, request.round, vaultContext, stallThreshold);
+                if (stallCount >= stallRounds) {
+                    warnings.push(`P4: Progress has stalled — <${(stallThreshold * 100).toFixed(0)}% improvement for ${stallCount} consecutive rounds. Current: ${(evidence.progress_estimate * 100).toFixed(0)}%`);
+                }
+            }
+        }
+    }
+    // ═══════════════════════════════════════════════════════════════════════════
+    // P4: Build Progress Dashboard for prompt injection
+    // ═══════════════════════════════════════════════════════════════════════════
+    let progressDashboard = "";
+    if (evidence && loopObjective) {
+        const totalCriteria = loopObjective.success_criteria.length;
+        const metCriteria = evidence.success_criteria_met.length;
+        const remainingCriteria = evidence.success_criteria_remaining;
+        const objProgress = totalCriteria > 0 ? metCriteria / totalCriteria : evidence.progress_estimate;
+        const subjProgress = evidence.progress_estimate;
+        const lines = [
+            "",
+            "### Progress Dashboard",
+            "",
+            `**Overall**: ${metCriteria}/${totalCriteria} criteria met (${(objProgress * 100).toFixed(0)}%)`,
+        ];
+        if (Math.abs(objProgress - subjProgress) > 0.05) {
+            lines.push(`**Agent estimate**: ${(subjProgress * 100).toFixed(0)}%`);
+        }
+        if (evidence.files_changed.length) {
+            lines.push(`**Files changed**: ${evidence.files_changed.join(", ")}`);
+        }
+        if (evidence.test_results) {
+            const tr = evidence.test_results;
+            lines.push(`**Tests**: ${tr.passed} passed, ${tr.failed} failed, ${tr.skipped} skipped`);
+        }
+        if (remainingCriteria.length) {
+            lines.push("**Remaining criteria**:");
+            for (const rc of remainingCriteria.slice(0, 5)) {
+                lines.push(`- ${rc}`);
+            }
+            if (remainingCriteria.length > 5) {
+                lines.push(`- ... and ${remainingCriteria.length - 5} more`);
+            }
+        }
+        lines.push("");
+        // Compute trend from previous round
+        if (vaultContext) {
+            const prevEvidence = getPreviousRoundEvidence(request.loop_id, request.round - 1, vaultContext);
+            if (prevEvidence) {
+                const trend = objProgress - (prevEvidence.success_criteria_met.length / Math.max(totalCriteria, 1));
+                if (trend > 0.03) {
+                    lines.push(`**Trend**: ↑ advancing (+${(trend * 100).toFixed(0)}% this round)`);
+                }
+                else if (trend > -0.03) {
+                    lines.push("**Trend**: → stable");
+                }
+                else {
+                    lines.push(`**Trend**: ↓ regressing (${(trend * 100).toFixed(0)}% this round)`);
+                }
+                lines.push("");
+            }
+        }
+        progressDashboard = lines.join("\n");
+    }
     return makeLoopCompileResponse({
         status: "ok",
-        prompt,
+        prompt: prompt + progressDashboard,
         recompile_level: "l2",
         diff_from_previous: request.round === 1 || request.plan_source
             ? "Full recompile — new goal or first call."
             : "Full recompile — goal_id changed or strategy collapse.",
         lineage: [`${request.loop_id}:r${request.round}`],
         constraints_active: constraints,
-        constraints_retired: [],
+        constraints_retired: retired,
         technique_used: technique,
         reference_file: referenceFile,
         rolling_summary: rollingSummary,
@@ -873,7 +1351,8 @@ export function compileL2(request, vaultContext) {
         goal_text_hash: computeGoalTextHash(request.task),
         loop_objective: loopObjective,
         plan_source: request.plan_source,
-        warnings: [],
+        suggested_next_task: suggestedNextTask,
+        warnings,
     });
 }
 function buildHeader(ctx, technique) {
@@ -1207,7 +1686,8 @@ function compileToT(request, goalId, constraints, loopObjective, rollingText, an
 // ═══════════════════════════════════════════════════════════════════════════
 /** Build the standardized self-evaluation block appended to every compiled prompt.
  *  The agent MUST output a JSON self-evaluation between the delimiters.
- *  Only 4 fields — each consumed by at least one downstream function. */
+ *  4 required fields + 3 optional evolution fields (P0–P2) —
+ *  each consumed by at least one downstream function. */
 export function buildSelfEvalBlock(round) {
     return [
         "",
@@ -1222,7 +1702,20 @@ export function buildSelfEvalBlock(round) {
         '  "success": true,',
         `  "output_summary": "<one paragraph — what was DONE in round ${round}, be specific>",`,
         '  "constraint_violations": [],',
-        '  "should_continue": true',
+        '  "should_continue": true,',
+        '  "discovered_constraints": [],',
+        '  "objective_refinement": "",',
+        '  "emerged_subtasks": [],',
+        '  "execution_evidence": {',
+        '    "files_changed": [],',
+        '    "test_results": {"passed": 0, "failed": 0, "skipped": 0},',
+        '    "success_criteria_met": [],',
+        '    "success_criteria_remaining": [],',
+        '    "progress_estimate": 0.0',
+        '  },',
+        '  "retracted_constraints": [],',
+        '  "revised_success_criteria": [],',
+        '  "wrong_assumptions": []',
         "}",
         "---end-loopforge-eval",
         "```",
@@ -1238,6 +1731,23 @@ export function buildSelfEvalBlock(round) {
         `- should_continue: false ONLY when the ENTIRE task is complete. ` +
             `If there is more to audit/implement/test, say true. ` +
             `This tells the autonomous runner when to stop.`,
+        `- discovered_constraints (P0 — optional): New constraints you discovered this round. ` +
+            `Omit or [] if none.`,
+        `- objective_refinement (P1 — optional): Deepened understanding of the task goal. ` +
+            `APPENDED to the original objective. Omit or "" if unchanged.`,
+        `- emerged_subtasks (P2 — optional): Sub-problems that surfaced during execution. ` +
+            `Omit or [] if none.`,
+        `- execution_evidence (P4 — recommended): Structured record of what you actually did. ` +
+            `files_changed: paths relative to project root. test_results: null if no tests run. ` +
+            `success_criteria_met/remaining: track against the Loop Objective. ` +
+            `progress_estimate: your honest estimate of overall completion (0.0 to 1.0). ` +
+            `This enables real progress tracking and early stall detection.`,
+        `- retracted_constraints (P5 — optional): Constraints you now believe are WRONG. ` +
+            `Removed from active guardrails. Only retract if you have evidence. Omit or [] if none.`,
+        `- revised_success_criteria (P5 — optional): Success criteria that need reformulation. ` +
+            `Array of {old, new} objects. Applied to the Loop Objective. Omit or [] if none.`,
+        `- wrong_assumptions (P5 — optional): Assumptions from earlier rounds that turned ` +
+            `out to be incorrect. Recorded as key lessons. Omit or [] if none.`,
         `- The JSON MUST appear between the ---loopforge-eval and ---end-loopforge-eval markers`,
         `- Do NOT wrap the markers in code fences — output them as raw text`,
         "",
@@ -1264,7 +1774,11 @@ export function compileLoop(request, vaultContext = null) {
     const { warnings, suggestedNextTask, alignment, health } = computeAdvisories(request, vaultContext);
     // Merge advisories into response
     response.warnings = warnings;
-    response.suggested_next_task = suggestedNextTask;
+    // Only overwrite suggested_next_task from advisories if the compile function
+    // didn't already set one (e.g. L2 sets it from emerged_subtasks)
+    if (!response.suggested_next_task) {
+        response.suggested_next_task = suggestedNextTask;
+    }
     response.task_alignment = alignment;
     response.loop_health = health;
     response.recompile_level = level;

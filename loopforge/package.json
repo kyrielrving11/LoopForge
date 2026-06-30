@@ -1,6 +1,6 @@
 {
   "name": "loopforge",
-  "version": "1.3.1",
+  "version": "1.7.0",
   "description": "Loop-Time Intelligence Layer for AI coding agents — per-iteration prompt compiler with structured memory, constraint inheritance, and drift correction.",
   "type": "module",
   "main": "./dist/index.js",
@@ -24,7 +24,6 @@
     }
   },
   "bin": {
-    "loopforge": "./dist/cli.js",
     "loopforge-mcp": "./dist/mcp-server.js"
   },
   "files": [

@@ -11,8 +11,10 @@ import { getPolicy } from "../policy.js";
 import { Mode, makeLoopCompileRequest, makeVaultConfig } from "../protocol.js";
 import { ReplayBackend } from "../replay.js";
 import { FSBackend } from "../backends/fs.js";
+import { verifySelfEvaluation } from "../verification-gate.js";
+import { logEvent } from "../observability.js";
 // ── Helpers ────────────────────────────────────────────────────────────────
-function buildLoopRequest(session, lastEval, lastQuality) {
+function buildLoopRequest(session, lastEval, lastQuality, verificationFlags) {
     const req = {
         task: session.task,
         mode: Mode.LOOP_COMPILE,
@@ -22,6 +24,7 @@ function buildLoopRequest(session, lastEval, lastQuality) {
         task_id: null,
         loop_id: session.loopId,
         round: session.currentRound,
+        verification_flags: verificationFlags ?? [],
     };
     if (lastEval && lastQuality !== undefined) {
         req.last_round_result = {
@@ -31,6 +34,16 @@ function buildLoopRequest(session, lastEval, lastQuality) {
             constraint_violations: lastEval.constraint_violations,
             manual_fixes_needed: "",
             quality_score: lastQuality,
+            // P0–P2: Forward evolution fields to next compile
+            discovered_constraints: lastEval.discovered_constraints ?? [],
+            objective_refinement: lastEval.objective_refinement ?? "",
+            emerged_subtasks: lastEval.emerged_subtasks ?? [],
+            // P4: Execution evidence
+            execution_evidence: lastEval.execution_evidence ?? undefined,
+            // P5: Self-correction
+            retracted_constraints: lastEval.retracted_constraints ?? [],
+            revised_success_criteria: lastEval.revised_success_criteria ?? [],
+            wrong_assumptions: lastEval.wrong_assumptions ?? [],
         };
     }
     return req;
@@ -87,6 +100,12 @@ export class SessionManager {
         this.sessions.set(sessionId, session);
         // Persist to vault for cross-process recovery
         this.save(session);
+        logEvent("session_start", {
+            sessionId,
+            loopId,
+            task: input.task.slice(0, 80),
+            maxRounds,
+        });
         return {
             sessionId,
             round: 1,
@@ -106,35 +125,53 @@ export class SessionManager {
             return false;
         session.status = "stopped";
         this.sessions.delete(sessionId);
+        logEvent("session_end", {
+            sessionId,
+            loopId: session.loopId,
+            stopReason: "stopped",
+            roundsCompleted: session.currentRound,
+        });
         return true;
     }
     /** Persist session state to vault for cross-process recovery.
      *  Uses upsert: removes any previous session_state entry for this loop,
-     *  then appends a new one with current state. */
+     *  then appends a new one with current state.
+     *  Entire read→filter→write→append is wrapped in a file lock to prevent
+     *  lost updates from concurrent processes. */
     save(session) {
         if (!this.backend)
             return;
-        // Upsert: remove old session_state entries for this loop
-        const vault = this.backend.readVault();
-        const entries = vault.entries || [];
-        vault.entries = entries.filter((e) => !(e.task_type === "session_state" && e.loop_id === session.loopId));
-        this.backend.writeVault(vault);
-        // Append fresh session state
-        this.backend.appendEntry({
-            task_id: `loop:${session.loopId}:session`,
-            task_type: "session_state",
-            timestamp: new Date().toISOString(),
-            loop_id: session.loopId,
-            task: session.task,
-            loop_lineage: {
-                session_id: session.sessionId,
-                current_round: session.currentRound,
-                max_rounds: session.maxRounds,
-                quality_trajectory: session.qualityTrajectory,
-                status: session.status,
-                created_at: session.createdAt,
-            },
-        });
+        const doSave = () => {
+            // Upsert: remove old session_state entries for this loop
+            const vault = this.backend.readVault();
+            const entries = vault.entries || [];
+            vault.entries = entries.filter((e) => !(e.task_type === "session_state" && e.loop_id === session.loopId));
+            this.backend.writeVault(vault);
+            // Append fresh session state
+            this.backend.appendEntry({
+                task_id: `loop:${session.loopId}:session`,
+                task_type: "session_state",
+                timestamp: new Date().toISOString(),
+                loop_id: session.loopId,
+                task: session.task,
+                loop_lineage: {
+                    session_id: session.sessionId,
+                    current_round: session.currentRound,
+                    max_rounds: session.maxRounds,
+                    quality_trajectory: session.qualityTrajectory,
+                    status: session.status,
+                    created_at: session.createdAt,
+                },
+            });
+        };
+        // Use FSBackend's file lock if available (only FSBackend implements withLock)
+        if ("withLock" in this.backend &&
+            typeof this.backend.withLock === "function") {
+            this.backend.withLock(doSave);
+        }
+        else {
+            doSave();
+        }
     }
     /** Resume a loop from vault state.
      *  Reconstructs the session and compiles the prompt for the next round.
@@ -273,51 +310,89 @@ export class SessionManager {
             task_continuity: health.task_continuity,
         };
     }
-    /** Core cycle: extract self-eval → record feedback → check stop → compile next. */
-    advance(sessionId, output) {
+    /** Core cycle: extract self-eval → record feedback → check stop → compile next.
+     *  @param preExtractedEval Optional pre-built SelfEvaluation from MCP tool parameter.
+     *    When provided (MCP path with evaluation parameter), skips regex extraction.
+     *    When undefined (runtime/CLI path), falls back to regex extraction from output. */
+    advance(sessionId, output, preExtractedEval) {
         const session = this.sessions.get(sessionId);
         if (!session)
             return { sessionId, round: 0, prompt: null, stopReason: "session_not_found" };
         if (session.status !== "running") {
             return { sessionId, round: session.currentRound, prompt: null, stopReason: session.status };
         }
-        // 1. Extract self-evaluation
-        const structured = extractSelfEvaluation(output);
-        const extractionFailed = structured === null;
-        const selfEval = structured ?? heuristicSelfEvaluation(output);
+        // 1. Extract self-evaluation (structured param preferred → regex → heuristic)
+        let extractionFailed = false;
+        let selfEval;
+        if (preExtractedEval) {
+            selfEval = preExtractedEval;
+            extractionFailed = false;
+        }
+        else {
+            const structured = extractSelfEvaluation(output);
+            extractionFailed = structured === null;
+            selfEval = structured ?? heuristicSelfEvaluation(output);
+        }
         // Guard: if both extraction methods returned null, stop
         if (!selfEval) {
             session.status = "stalled";
             this.save(session);
+            logEvent("session_end", { sessionId, loopId: session.loopId, stopReason: "stalled", round: session.currentRound });
             return { sessionId, round: session.currentRound, prompt: null, stopReason: "stalled", quality: 0 };
+        }
+        // 1.5. Verification gate — cross-round consistency check (v1.6)
+        let verificationFlags = [];
+        let gateVerdict = "trusted";
+        {
+            const vaultEntries = this.backend
+                ? this.backend.queryEntries({ prefix: `loop:${session.loopId}:r` })
+                : [];
+            const verifyResult = verifySelfEvaluation(selfEval, session.currentRound, vaultEntries, session.lastSelfEval ?? null);
+            verificationFlags = verifyResult.flags;
+            gateVerdict = verifyResult.verdict;
         }
         // 2. Record feedback (flushes immediately so next compile sees scores)
         const quality = session.engine.autoFeedback(selfEval, session.loopId, session.currentRound, session.task);
-        session.qualityTrajectory.push(quality);
+        // Contradicted verdict: skip quality trend (quality score is unreliable)
+        if (gateVerdict !== "contradicted") {
+            session.qualityTrajectory.push(quality);
+        }
+        // Note: feedback vault entry is always persisted via autoFeedback above.
+        // Only the in-memory trend is skipped — the raw data stays for audit.
+        // Store selfEval for next round's verification gate.
+        // NOTE: lastSelfEval is intentionally NOT persisted to vault (save()).
+        // A resumed session starts with lastSelfEval=undefined, which means the
+        // first round after resumption runs with degraded verification (most
+        // checks skip without prevSelfEval). The gate recovers on the next round.
+        session.lastSelfEval = selfEval;
         // 3. Stop conditions (extraction-first order — see memory)
         if (extractionFailed) {
             session.status = "stalled";
             this.save(session);
+            logEvent("session_end", { sessionId, loopId: session.loopId, stopReason: "stalled", round: session.currentRound });
             return { sessionId, round: session.currentRound, prompt: null, stopReason: "stalled", quality };
         }
         if (!selfEval.should_continue) {
             session.status = "stopped";
             this.save(session);
+            logEvent("session_end", { sessionId, loopId: session.loopId, stopReason: "task_complete", round: session.currentRound });
             return { sessionId, round: session.currentRound, prompt: null, stopReason: "task_complete", quality };
         }
         if (session.engine.shouldBreak()) {
             session.status = "stopped";
             this.save(session);
+            logEvent("session_end", { sessionId, loopId: session.loopId, stopReason: "circuit_breaker", round: session.currentRound });
             return { sessionId, round: session.currentRound, prompt: null, stopReason: "circuit_breaker", quality };
         }
         if (session.currentRound >= session.maxRounds) {
             session.status = "stopped";
             this.save(session);
+            logEvent("session_end", { sessionId, loopId: session.loopId, stopReason: "max_rounds", round: session.currentRound });
             return { sessionId, round: session.currentRound, prompt: null, stopReason: "max_rounds", quality };
         }
         // 4. Compile next round
         session.currentRound++;
-        const request = buildLoopRequest(session, selfEval, quality);
+        const request = buildLoopRequest(session, selfEval, quality, verificationFlags);
         const result = session.engine.invokeLoopCompile(request);
         this.save(session);
         return {

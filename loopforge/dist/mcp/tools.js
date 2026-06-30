@@ -3,6 +3,7 @@
  * 6 tools: start, next, status, stop, list, replay.
  * Each handler receives SessionManager + parsed input, returns the output object.
  */
+import { buildSelfEvaluation } from "../engine.js";
 // ═══════════════════════════════════════════════════════════════════════════
 // Tool schemas (MCP JSON Schema format)
 // ═══════════════════════════════════════════════════════════════════════════
@@ -44,7 +45,7 @@ export const TOOL_SCHEMAS = [
     },
     {
         name: "loopforge_next",
-        description: "Submit the output from the current round and advance to the next. Returns the next-round prompt, or null with a stopReason when the loop ends.",
+        description: "Submit the output from the current round and advance to the next. Returns the next-round prompt, or null with a stopReason when the loop ends. The evaluation parameter provides structured self-assessment — prefer this over embedding a ---loopforge-eval block in the output text.",
         inputSchema: {
             type: "object",
             properties: {
@@ -54,10 +55,105 @@ export const TOOL_SCHEMAS = [
                 },
                 output: {
                     type: "string",
-                    description: "The agent's full output from executing the current round's prompt.",
+                    description: "Optional. The agent's full output from executing the current round's prompt. May be omitted if evaluation parameter is provided.",
+                },
+                evaluation: {
+                    type: "object",
+                    description: "Structured self-evaluation for this round. Required for the loop to continue. Preferred over embedding ---loopforge-eval blocks in output text.",
+                    required: ["success", "output_summary", "should_continue", "constraint_violations"],
+                    properties: {
+                        success: {
+                            type: "boolean",
+                            description: "true ONLY if all hard constraints met AND the task goal achieved.",
+                        },
+                        output_summary: {
+                            type: "string",
+                            description: "Specific, actionable summary of what was DONE this round — not what was attempted.",
+                        },
+                        should_continue: {
+                            type: "boolean",
+                            description: "false ONLY when the ENTIRE task is complete. Partial progress = true.",
+                        },
+                        constraint_violations: {
+                            type: "array",
+                            items: { type: "string" },
+                            description: "Constraints the agent actually violated this round. Be honest.",
+                        },
+                        discovered_constraints: {
+                            type: "array",
+                            items: { type: "string" },
+                            description: "Optional. New constraints discovered this round.",
+                        },
+                        objective_refinement: {
+                            type: "string",
+                            description: "Optional. If this round deepened understanding of the task objective.",
+                        },
+                        emerged_subtasks: {
+                            type: "array",
+                            items: { type: "string" },
+                            description: "Optional. Sub-problems that surfaced during execution.",
+                        },
+                        execution_evidence: {
+                            type: "object",
+                            description: "Optional. Structured record of what actually happened this round.",
+                            properties: {
+                                files_changed: {
+                                    type: "array",
+                                    items: { type: "string" },
+                                    description: "Files modified this round.",
+                                },
+                                test_results: {
+                                    type: "object",
+                                    description: "Test results from this round.",
+                                    properties: {
+                                        passed: { type: "integer", minimum: 0, description: "Number of passing tests." },
+                                        failed: { type: "integer", minimum: 0, description: "Number of failing tests." },
+                                        skipped: { type: "integer", minimum: 0, description: "Number of skipped tests." },
+                                    },
+                                },
+                                success_criteria_met: {
+                                    type: "array",
+                                    items: { type: "string" },
+                                    description: "Success criteria satisfied this round.",
+                                },
+                                success_criteria_remaining: {
+                                    type: "array",
+                                    items: { type: "string" },
+                                    description: "Success criteria still outstanding.",
+                                },
+                                progress_estimate: {
+                                    type: "number",
+                                    minimum: 0,
+                                    maximum: 1,
+                                    description: "Estimated progress toward task completion (0.0–1.0).",
+                                },
+                            },
+                        },
+                        retracted_constraints: {
+                            type: "array",
+                            items: { type: "string" },
+                            description: "Optional. Constraints the agent now believes are wrong.",
+                        },
+                        revised_success_criteria: {
+                            type: "array",
+                            description: "Optional. Success criteria that need reformulation.",
+                            items: {
+                                type: "object",
+                                properties: {
+                                    old: { type: "string", description: "Original criterion." },
+                                    new: { type: "string", description: "Revised criterion." },
+                                },
+                            },
+                        },
+                        wrong_assumptions: {
+                            type: "array",
+                            items: { type: "string" },
+                            description: "Optional. Assumptions from earlier rounds that were incorrect.",
+                        },
+                    },
                 },
             },
-            required: ["sessionId", "output"],
+            required: ["sessionId", "evaluation"],
         },
     },
     {
@@ -161,11 +257,16 @@ export const TOOL_HANDLERS = {
     loopforge_next(mgr, input) {
         const sessionId = String(input.sessionId ?? "");
         const output = String(input.output ?? "");
+        const rawEval = input.evaluation;
         if (!sessionId)
             return { error: "sessionId is required" };
-        if (!output.trim())
-            return { error: "output is required and must be non-empty" };
-        const result = mgr.advance(sessionId, output);
+        // Build SelfEvaluation from structured evaluation parameter
+        const preExtractedEval = rawEval ? buildSelfEvaluation(rawEval) : undefined;
+        // Require at least one of: evaluation parameter or output with embedded eval block
+        if (!preExtractedEval && !output.trim()) {
+            return { error: "Either evaluation parameter or output with ---loopforge-eval block is required" };
+        }
+        const result = mgr.advance(sessionId, output, preExtractedEval);
         // Clean up finished sessions
         if (result.prompt === null) {
             mgr.delete(sessionId);
@@ -179,6 +280,7 @@ export const TOOL_HANDLERS = {
         const session = mgr.get(sessionId);
         if (!session)
             return { error: `session not found: ${sessionId}` };
+        const metrics = session.engine.getMetrics();
         return {
             sessionId: session.sessionId,
             loopId: session.loopId,
@@ -187,6 +289,14 @@ export const TOOL_HANDLERS = {
             status: session.status,
             qualityTrajectory: session.qualityTrajectory,
             technique: session.engine.state?.last_technique ?? null,
+            metrics: {
+                vaultWriteErrors: metrics.vaultWriteErrors,
+                vaultWriteBytes: metrics.vaultWriteBytes,
+                feedbackBufferFlushes: metrics.feedbackBufferFlushes,
+                feedbackBufferMaxSize: metrics.feedbackBufferMaxSize,
+                hydrateCacheMisses: metrics.hydrateCacheMisses,
+                silentAnalysisErrors: metrics.silentAnalysisErrors,
+            },
         };
     },
     loopforge_stop(mgr, input) {

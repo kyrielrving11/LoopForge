@@ -3,10 +3,7 @@
  * TypeScript reference implementation v1.3.
  *
  * Usage:
- *   import { handle, LoopForgeEngine, ReplayBackend, compileLoop } from "loopforge";
- *
- *   // As a sub-agent adapter
- *   const result = handle('{"mode":"loop_compile","loop_id":"test","round":1,"task":"Audit ERC20"}');
+ *   import { LoopForgeEngine, ReplayBackend, compileLoop } from "loopforge";
  *
  *   // As a library
  *   const engine = createEngine();
@@ -30,18 +27,16 @@ export { Mode, AgentStatus, Technique, makeAnalysis, makeVaultConfig, makeExecut
 export { getPolicy, loadPolicy, resetPolicy, DEFAULT_POLICY, } from "./policy.js";
 export { FSBackend } from "./backends/fs.js";
 // Builder
-export { routeTechnique, routeTechniqueAdaptive, scoreQuality, extractGlobalConstraints, TECHNIQUE_REFERENCE, } from "./builder.js";
+export { routeTechniqueAdaptive, scoreQuality, TECHNIQUE_REFERENCE, } from "./builder.js";
 // Loop Compiler
-export { compileLoop, decideLevel, compileL2, alignTask, checkLoopHealth, computeAdvisories, computeGoalTextHash, deriveGoalId, getPreviousRound, buildSelfEvalBlock, } from "./loop-compiler.js";
+export { compileLoop, decideLevel, compileL2, alignTask, checkLoopHealth, computeAdvisories, computeGoalTextHash, deriveGoalId, getPreviousRound, buildSelfEvalBlock, buildRollingSummary, formatRollingSummaryForPrompt, } from "./loop-compiler.js";
 // Replay
 export { ReplayBackend } from "./replay.js";
 // Engine
-export { LoopForgeEngine, createEngine, extractSelfEvaluation, heuristicSelfEvaluation, } from "./engine.js";
+export { LoopForgeEngine, createEngine, extractSelfEvaluation, heuristicSelfEvaluation, buildSelfEvaluation, } from "./engine.js";
 // Runtime (v1.2)
 export { LoopRuntime, run } from "./runtime.js";
 export { RuntimeStatus } from "./protocol.js";
-// Adapter
-export { handle, main } from "./adapter.js";
 // MCP (v1.3)
 export { McpServer } from "./mcp/server.js";
 export { SessionManager } from "./mcp/session.js";

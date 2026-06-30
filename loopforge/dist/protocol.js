@@ -3,15 +3,13 @@
  * All types exchanged between the Main Agent and LoopForge flow through
  * these interfaces. This is the contract layer — no implementation logic.
  *
- * v1.2: 28 types — 4 enums + 23 interfaces + 1 type alias.
+ * v1.6: 32 types — 4 enums + 27 interfaces + 1 type alias.
  */
 // ── Enums ──────────────────────────────────────────────────────────────────
 export var Mode;
 (function (Mode) {
     Mode["LOOP_COMPILE"] = "loop_compile";
     Mode["FEEDBACK"] = "feedback";
-    Mode["REVIEW"] = "review";
-    Mode["BUILD"] = "build";
 })(Mode || (Mode = {}));
 export var AgentStatus;
 (function (AgentStatus) {
@@ -58,12 +56,29 @@ export function makeExecutionFeedback(overrides = {}) {
         ...overrides,
     };
 }
+export function makeExecutionEvidence(overrides = {}) {
+    return {
+        files_changed: [],
+        test_results: null,
+        success_criteria_met: [],
+        success_criteria_remaining: [],
+        progress_estimate: 0.0,
+        ...overrides,
+    };
+}
 export function makeSelfEvaluation(overrides = {}) {
     return {
         success: false,
         output_summary: "",
         constraint_violations: [],
         should_continue: true,
+        discovered_constraints: [],
+        objective_refinement: "",
+        emerged_subtasks: [],
+        execution_evidence: makeExecutionEvidence(),
+        retracted_constraints: [],
+        revised_success_criteria: [],
+        wrong_assumptions: [],
         ...overrides,
     };
 }
@@ -76,6 +91,8 @@ export function makeLoopObjective(overrides = {}) {
         hard_constraints: [],
         created_at_round: 1,
         loop_id: "",
+        version: 1,
+        refinement_history: [],
         ...overrides,
     };
 }
@@ -99,6 +116,7 @@ export function makeRollingSummary(overrides = {}) {
         key_lessons: [],
         rounds_sampled: 0,
         generated_at_round: 0,
+        failed_patterns: [],
         ...overrides,
     };
 }
@@ -119,6 +137,13 @@ export function makeLoopRoundResult(overrides = {}) {
         constraint_violations: [],
         manual_fixes_needed: "",
         quality_score: 0,
+        discovered_constraints: [],
+        objective_refinement: "",
+        emerged_subtasks: [],
+        execution_evidence: undefined,
+        retracted_constraints: [],
+        revised_success_criteria: [],
+        wrong_assumptions: [],
         ...overrides,
     };
 }
@@ -187,6 +212,22 @@ export var RuntimeStatus;
     RuntimeStatus["STOPPED"] = "stopped";
     RuntimeStatus["STALLED"] = "stalled";
 })(RuntimeStatus || (RuntimeStatus = {}));
+export function makeVerificationFlag(overrides = {}) {
+    return {
+        severity: "warn",
+        field: "",
+        check: "",
+        detail: "",
+        ...overrides,
+    };
+}
+export function makeVerificationResult(overrides = {}) {
+    return {
+        verdict: "trusted",
+        flags: [],
+        ...overrides,
+    };
+}
 // ── Serialisation helpers ───────────────────────────────────────────────────
 export function toDict(obj) {
     const result = {};

@@ -9,13 +9,14 @@ import {
   AgentStatus,
   Mode,
   makeExecutionFeedback,
+  type LoopForgeRequest,
 } from "../protocol.js";
 import { resetPolicy } from "../policy.js";
 
 function makeRequest(overrides: Record<string, unknown> = {}): import("../protocol.js").LoopForgeRequest {
   return {
     task: "Audit ERC20 token",
-    mode: Mode.BUILD,
+    mode: Mode.LOOP_COMPILE,
     vault_config: {
       project_vault: ".promptcraft/prompt_vault.json",
       global_vault: "~/.promptcraft/global_vault.json",
@@ -41,30 +42,13 @@ describe("Engine — Initialisation", () => {
 
   it("engine lazy-inits state on first invocation", () => {
     const engine = createEngine();
-    engine.invokeBuild(makeRequest());
+    engine.invokeLoopCompile(makeRequest({
+      loop_id: "test",
+      round: 1,
+      goal_id: "audit",
+    }));
     assert.notEqual(engine.state, null);
     assert.equal(engine.state!.call_count, 0);
-  });
-});
-
-describe("Engine — Build mode (internal)", () => {
-  beforeEach(() => resetPolicy());
-
-  it("returns OK with generated prompt", () => {
-    const engine = createEngine();
-    const result = engine.invokeBuild(makeRequest({ task: "Audit ERC20" }));
-    assert.equal(result.status, AgentStatus.OK);
-    assert.ok(result.response!.prompt!.includes("LoopForge Build"));
-    assert.ok(result.response!.prompt!.includes("Audit ERC20"));
-    assert.notEqual(result.response!.analysis, null);
-  });
-
-  it("sets technique in analysis", () => {
-    const engine = createEngine();
-    const result = engine.invokeBuild(makeRequest({
-      task: "Rename getCwd to getCurrentWorkingDirectory",
-    }));
-    assert.equal(result.response!.analysis!.technique, "zero-shot");
   });
 });
 
@@ -131,21 +115,30 @@ describe("Engine — Circuit breaker", () => {
 
   it("returns false when not enough data points", () => {
     const engine = createEngine();
-    engine.invokeBuild(makeRequest()); // init state
+    engine.invokeFeedback(makeRequest({
+      mode: Mode.FEEDBACK,
+      feedback: makeExecutionFeedback({ success: true, output: "ok" }),
+    })); // init state
     engine.state!.quality_trend = [5, 4];
     assert.equal(engine.shouldBreak(), false);
   });
 
   it("returns true when quality is non-increasing for 3 rounds", () => {
     const engine = createEngine();
-    engine.invokeBuild(makeRequest());
+    engine.invokeFeedback(makeRequest({
+      mode: Mode.FEEDBACK,
+      feedback: makeExecutionFeedback({ success: true, output: "ok" }),
+    }));
     engine.state!.quality_trend = [3, 3, 3];
     assert.equal(engine.shouldBreak(), true);
   });
 
   it("returns false when quality is improving", () => {
     const engine = createEngine();
-    engine.invokeBuild(makeRequest());
+    engine.invokeFeedback(makeRequest({
+      mode: Mode.FEEDBACK,
+      feedback: makeExecutionFeedback({ success: true, output: "ok" }),
+    }));
     engine.state!.quality_trend = [3, 4, 5];
     assert.equal(engine.shouldBreak(), false);
   });
@@ -197,37 +190,224 @@ describe("Engine — Loop Compile mode", () => {
       goal_id: "audit",
       task: "Check approve race condition",
     });
-    // Should fail gracefully to build mode fallback when no prior lineage
+    // Compiles at L2 when no prior lineage found
     const result = engine.invokeLoopCompile(req);
     assert.equal(result.status, AgentStatus.OK);
   });
 });
 
-describe("Engine — Review mode", () => {
+describe("Engine — P0-P5 Cognitive Evolution (v1.7 E2E)", () => {
   beforeEach(() => resetPolicy());
 
-  it("returns error when no hydrate results", () => {
+  it("P0: discovered_constraints survive engine boundary and reach compiler", () => {
     const engine = createEngine();
-    const result = engine.handleReview(makeRequest());
-    assert.equal(result.status, AgentStatus.ERROR);
-    assert.ok(result.response!.error!.includes("hydrate_results"));
+    // First round: establish loop objective
+    const r1 = engine.invokeLoopCompile(makeRequest({
+      mode: Mode.LOOP_COMPILE,
+      loop_id: "p0-test",
+      round: 1,
+      goal_id: "audit",
+      task: "Audit ERC20 token",
+    }));
+    assert.equal(r1.status, AgentStatus.OK);
+
+    // Round 2: pass discovered_constraints via last_round_result
+    const r2 = engine.invokeLoopCompile({
+      ...makeRequest({
+        mode: Mode.LOOP_COMPILE,
+        loop_id: "p0-test",
+        round: 2,
+        goal_id: "audit",
+        task: "Audit ERC20 token",
+      }),
+      last_round_result: {
+        round: 1,
+        success: true,
+        output_summary: "Found 2 reentrancy bugs",
+        constraint_violations: [],
+        manual_fixes_needed: "",
+        quality_score: 5,
+        discovered_constraints: ["Use SafeERC20 for all external calls"],
+        objective_refinement: "Scope includes upgradeable proxy patterns",
+        emerged_subtasks: ["Audit proxy init", "Verify timelock"],
+      },
+    } as unknown as LoopForgeRequest);
+    assert.equal(r2.status, AgentStatus.OK);
+    const prompt = r2.response!.prompt!;
+    // P0: discovered constraint should appear in active constraints
+    assert.ok(prompt.includes("SafeERC20"), "P0: discovered constraint not in prompt");
+    // P2: emerged subtasks → suggested next task
+    assert.ok(prompt.includes("proxy init") || prompt.includes("timelock"),
+      "P2: emerged subtasks not forwarded");
   });
 
-  it("returns report when hydrate results provided", () => {
+  it("P4: execution_evidence survives engine boundary and generates progress dashboard", () => {
     const engine = createEngine();
-    const hydrateResults = {
-      results: [
-        {
-          full_prompt: "角色: Security Auditor\n任务: Audit\n输入: Contract\n输出格式: Report\n硬约束: No deps\n生成要求: Complete",
+    // Round 1
+    engine.invokeLoopCompile(makeRequest({
+      mode: Mode.LOOP_COMPILE,
+      loop_id: "p4-test",
+      round: 1,
+      goal_id: "audit",
+      task: "Fix security bugs",
+      loop_objective: {
+        objective: "Fix all security bugs",
+        success_criteria: ["No reentrancy", "Access control OK", "Overflow checks"],
+        hard_constraints: [],
+        created_at_round: 1,
+        loop_id: "p4-test",
+      },
+    }));
+    // Round 2 with execution evidence — force L2 so progress dashboard is rendered
+    const r2 = engine.invokeLoopCompile({
+      ...makeRequest({
+        mode: Mode.LOOP_COMPILE,
+        loop_id: "p4-test",
+        round: 2,
+        goal_id: "audit",
+        task: "Fix security bugs",
+        force_level: "l2",  // trigger full recompile for P4 processing
+        loop_objective: {
+          objective: "Fix all security bugs",
+          success_criteria: ["No reentrancy", "Access control OK", "Overflow checks"],
+          hard_constraints: [],
+          created_at_round: 1,
+          loop_id: "p4-test",
         },
-      ],
-      global_entries: [],
-    };
-    const result = engine.handleReview(
-      makeRequest({ mode: Mode.REVIEW }),
-      hydrateResults,
+      }),
+      last_round_result: {
+        round: 1,
+        success: true,
+        output_summary: "Fixed reentrancy in withdraw()",
+        constraint_violations: [],
+        manual_fixes_needed: "",
+        quality_score: 5,
+        execution_evidence: {
+          files_changed: ["contracts/Token.sol", "test/Token.test.ts"],
+          test_results: { passed: 24, failed: 0, skipped: 0 },
+          success_criteria_met: ["No reentrancy"],
+          success_criteria_remaining: ["Access control OK", "Overflow checks"],
+          progress_estimate: 0.33,
+        },
+      },
+    } as unknown as LoopForgeRequest);
+    assert.equal(r2.status, AgentStatus.OK);
+    const prompt = r2.response!.prompt!;
+    // P4: Progress dashboard should appear (L2 recompile)
+    assert.ok(prompt.includes("Progress Dashboard"), "P4: progress dashboard missing");
+    assert.ok(prompt.includes("1/3"), "P4: criteria count missing");
+    assert.ok(prompt.includes("Token.sol"), "P4: files_changed missing");
+  });
+
+  it("P5: wrong_assumptions are forwarded to compiler as key lessons", () => {
+    const engine = createEngine();
+    engine.invokeLoopCompile(makeRequest({
+      mode: Mode.LOOP_COMPILE,
+      loop_id: "p5-test",
+      round: 1,
+      goal_id: "audit",
+      task: "Audit ERC20",
+    }));
+    const r2 = engine.invokeLoopCompile({
+      ...makeRequest({
+        mode: Mode.LOOP_COMPILE,
+        loop_id: "p5-test",
+        round: 2,
+        goal_id: "audit",
+        task: "Audit ERC20",
+      }),
+      last_round_result: {
+        round: 1,
+        success: false,
+        output_summary: "Found missing access control",
+        constraint_violations: [],
+        manual_fixes_needed: "",
+        quality_score: 2,
+        wrong_assumptions: ["Assumed OZ v4.0 has no known issues"],
+        retracted_constraints: [],
+        revised_success_criteria: [],
+      },
+    } as unknown as LoopForgeRequest);
+    assert.equal(r2.status, AgentStatus.OK);
+    const prompt = r2.response!.prompt!;
+    // Wrong assumptions should appear in the prompt
+    assert.ok(
+      prompt.includes("wrong assumption") || prompt.includes("Wrong assumption") ||
+      prompt.includes("assumed") || prompt.includes("Assumed"),
+      "P5: wrong_assumptions not reflected in prompt",
     );
+  });
+
+  it("P5: retracted_constraints are removed from active set", () => {
+    const engine = createEngine();
+    engine.invokeLoopCompile(makeRequest({
+      mode: Mode.LOOP_COMPILE,
+      loop_id: "p5b-test",
+      round: 1,
+      goal_id: "audit",
+      task: "Audit ERC20",
+    }));
+    const r2 = engine.invokeLoopCompile({
+      ...makeRequest({
+        mode: Mode.LOOP_COMPILE,
+        loop_id: "p5b-test",
+        round: 2,
+        goal_id: "audit",
+        task: "Audit ERC20",
+      }),
+      last_round_result: {
+        round: 1,
+        success: true,
+        output_summary: "Audited contracts",
+        constraint_violations: [],
+        manual_fixes_needed: "",
+        quality_score: 5,
+        discovered_constraints: ["No external deps"],
+        retracted_constraints: ["No external deps"],
+        wrong_assumptions: [],
+        revised_success_criteria: [],
+      },
+    } as unknown as LoopForgeRequest);
+    assert.equal(r2.status, AgentStatus.OK);
+    // The retracted constraint was discovered then immediately retracted — it should
+    // NOT appear in the active constraints section of the prompt.
+    const prompt = r2.response!.prompt!;
+    // If Active Constraints section exists, it shouldn't contain the retracted item
+    if (prompt.includes("Active Constraints")) {
+      const activeStart = prompt.indexOf("Active Constraints");
+      const nextSection = prompt.indexOf("###", activeStart + 10);
+      const activeBlock = nextSection >= 0
+        ? prompt.slice(activeStart, nextSection)
+        : prompt.slice(activeStart);
+      assert.ok(!activeBlock.includes("No external deps"),
+        "P5: retracted constraint still in active constraints block");
+    }
+  });
+
+  it("verification_flags are rendered as Verification Gate section in prompt", () => {
+    const engine = createEngine();
+    const req = makeRequest({
+      mode: Mode.LOOP_COMPILE,
+      loop_id: "vg-test",
+      round: 2,
+      goal_id: "audit",
+      task: "Audit ERC20",
+    });
+    const result = engine.invokeLoopCompile({
+      ...req,
+      verification_flags: [
+        { severity: "error", field: "success", check: "success_with_remaining_criteria",
+          detail: "Agent claims success but 2 criteria remain unmet: Access control, Overflow" },
+        { severity: "warn", field: "progress_estimate", check: "progress_regression",
+          detail: "Progress dropped from 0.50 to 0.20" },
+      ],
+    } as unknown as LoopForgeRequest);
     assert.equal(result.status, AgentStatus.OK);
-    assert.ok(result.response!.prompt!.includes("Review Report"));
+    const prompt = result.response!.prompt!;
+    assert.ok(prompt.includes("Verification Gate"), "Gate section missing");
+    assert.ok(prompt.includes("🚫"), "Error flag icon missing");
+    assert.ok(prompt.includes("CONTRADICTED"), "Contradicted verdict message missing");
+    assert.ok(prompt.includes("progress_regression"), "Warn flag check name missing");
   });
 });
+

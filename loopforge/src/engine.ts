@@ -1,7 +1,7 @@
 /** LoopForge-loop_compile — Engine (outer loop manager).
  *
- * v1.0: 3-mode engine with vault-backed loop lineage persistence.
- * invokeLoopCompile (primary), invokeBuild (internal), invokeFeedback.
+ * 2-mode engine with vault-backed loop lineage persistence.
+ * invokeLoopCompile (primary), invokeFeedback.
  * Circuit breaker prevents infinite stall loops.
  * EngineMetrics tracks silent-failure counters for observability.
  */
@@ -14,6 +14,7 @@ import {
   AgentStatus,
   Mode,
   makeAnalysis,
+  makeExecutionEvidence,
   makeExecutionFeedback,
   makeLoopCompileRequest,
   makeLoopObjective,
@@ -24,6 +25,8 @@ import {
   makeVaultConfig,
   SELF_EVAL_REGEX,
   type AgentLoopResult,
+  type CriterionRevision,
+  type ExecutionEvidence,
   type ExecutionFeedback,
   type LoopCompileRequest,
   type LoopCompileResponse,
@@ -31,16 +34,16 @@ import {
   type SelfEvaluation,
   type SessionState,
 } from "./protocol.js";
-import { routeTechnique } from "./builder.js";
 import { scoreQuality } from "./builder.js";
 import { compileLoop } from "./loop-compiler.js";
+import { logEvent } from "./observability.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Self-Evaluation extraction (v1.1 — autonomous loop feedback)
 // ═══════════════════════════════════════════════════════════════════════════
 
 /** Extract a structured SelfEvaluation from agent output text.
- *  Returns null if no valid self-evaluation block is found.
+ *  Returns null if no valid self-eval block is found.
  *  The agent is instructed to output JSON between the delimiters. */
 export function extractSelfEvaluation(text: string): SelfEvaluation | null {
   const match = text.match(SELF_EVAL_REGEX);
@@ -53,16 +56,90 @@ export function extractSelfEvaluation(text: string): SelfEvaluation | null {
     if (typeof raw.output_summary !== "string") return null;
     if (!Array.isArray(raw.constraint_violations)) return null;
     if (typeof raw.should_continue !== "boolean") return null;
-
-    return makeSelfEvaluation({
-      success: raw.success,
-      output_summary: raw.output_summary,
-      constraint_violations: raw.constraint_violations,
-      should_continue: raw.should_continue,
-    });
+    return buildSelfEvaluation(raw);
   } catch {
     return null;
   }
+}
+
+/** Build a SelfEvaluation from a parsed JSON object.
+ *  Lenient parsing: missing optional fields get sensible defaults.
+ *  Used by extractSelfEvaluation() (regex path) and MCP tool handler
+ *  (structured evaluation parameter path). */
+export function buildSelfEvaluation(
+  raw: Record<string, unknown>,
+): SelfEvaluation {
+  // P4: Parse execution evidence from raw JSON
+  let executionEvidence: ExecutionEvidence | undefined;
+  const rawEvidence = raw.execution_evidence as Record<string, unknown> | undefined;
+  if (rawEvidence && typeof rawEvidence === "object") {
+    const testResults = rawEvidence.test_results as Record<string, unknown> | undefined;
+    executionEvidence = makeExecutionEvidence({
+      files_changed: Array.isArray(rawEvidence.files_changed)
+        ? rawEvidence.files_changed.filter((v: unknown) => typeof v === "string")
+        : [],
+      test_results: testResults && typeof testResults.passed === "number"
+        ? {
+            passed: testResults.passed as number,
+            failed: (testResults.failed as number) ?? 0,
+            skipped: (testResults.skipped as number) ?? 0,
+          }
+        : null,
+      success_criteria_met: Array.isArray(rawEvidence.success_criteria_met)
+        ? rawEvidence.success_criteria_met.filter((v: unknown) => typeof v === "string")
+        : [],
+      success_criteria_remaining: Array.isArray(rawEvidence.success_criteria_remaining)
+        ? rawEvidence.success_criteria_remaining.filter((v: unknown) => typeof v === "string")
+        : [],
+      progress_estimate: typeof rawEvidence.progress_estimate === "number"
+        ? Math.max(0, Math.min(1, rawEvidence.progress_estimate))
+        : 0.0,
+    });
+  }
+
+  // P5: Parse corrections
+  const retractedConstraints: string[] = Array.isArray(raw.retracted_constraints)
+    ? raw.retracted_constraints.filter((v: unknown) => typeof v === "string")
+    : [];
+  const revisedCriteria: CriterionRevision[] = Array.isArray(raw.revised_success_criteria)
+    ? raw.revised_success_criteria
+        .filter((v: unknown) =>
+          typeof v === "object" && v !== null &&
+          typeof (v as Record<string, unknown>).old === "string" &&
+          typeof (v as Record<string, unknown>).new === "string")
+        .map((v: unknown) => {
+          const r = v as Record<string, unknown>;
+          return { old: r.old as string, new: r.new as string };
+        })
+    : [];
+  const wrongAssumptions: string[] = Array.isArray(raw.wrong_assumptions)
+    ? raw.wrong_assumptions.filter((v: unknown) => typeof v === "string")
+    : [];
+
+  return makeSelfEvaluation({
+    success: typeof raw.success === "boolean" ? raw.success : false,
+    output_summary: typeof raw.output_summary === "string" ? raw.output_summary : "",
+    constraint_violations: Array.isArray(raw.constraint_violations)
+      ? raw.constraint_violations.filter((v: unknown) => typeof v === "string")
+      : [],
+    should_continue: typeof raw.should_continue === "boolean" ? raw.should_continue : true,
+    // P0–P2: Optional evolution fields
+    discovered_constraints: Array.isArray(raw.discovered_constraints)
+      ? raw.discovered_constraints.filter((v: unknown) => typeof v === "string")
+      : [],
+    objective_refinement: typeof raw.objective_refinement === "string"
+      ? raw.objective_refinement
+      : "",
+    emerged_subtasks: Array.isArray(raw.emerged_subtasks)
+      ? raw.emerged_subtasks.filter((v: unknown) => typeof v === "string")
+      : [],
+    // P4: Execution evidence
+    execution_evidence: executionEvidence,
+    // P5: Self-correction
+    retracted_constraints: retractedConstraints,
+    revised_success_criteria: revisedCriteria,
+    wrong_assumptions: wrongAssumptions,
+  });
 }
 
 /** Fallback heuristic when structured self-eval extraction fails.
@@ -145,6 +222,19 @@ export class LoopForgeEngine {
     return this.backend;
   }
 
+  /** Public accessor for the vault backend — used by runtime/verification gate. */
+  getBackend(): VaultBackend {
+    return this.resolveBackend();
+  }
+
+  /** Expose engine health counters for observability (MCP status, logging). */
+  getMetrics(): EngineMetrics {
+    if (this.metrics === null) {
+      this.metrics = makeEngineMetrics();
+    }
+    return this.metrics;
+  }
+
   private ensureInit(request: LoopForgeRequest): void {
     if (this.state === null) {
       this.state = makeSessionState(
@@ -204,7 +294,7 @@ export class LoopForgeEngine {
                 : "partial",
             quality_score: signal.quality_score ?? 0,
             constraint_compliance: {
-              all_hard_constraints_met: !(signal.violations as unknown[]),
+              all_hard_constraints_met: !Array.isArray(signal.violations) || (signal.violations as unknown[]).length === 0,
               violations: signal.violations ?? [],
             },
             output_summary: signal.task_type ?? "",
@@ -219,6 +309,7 @@ export class LoopForgeEngine {
         entries.push(entry);
       } catch {
         if (this.metrics) this.metrics.vaultWriteErrors++;
+        logEvent("vault_write_error", { error: "feedback_entry_build" });
       }
     }
 
@@ -227,6 +318,7 @@ export class LoopForgeEngine {
         this.resolveBackend().appendEntries(entries);
       } catch {
         if (this.metrics) this.metrics.vaultWriteErrors += entries.length;
+        logEvent("vault_write_error", { error: "feedback_append_entries", count: entries.length });
         return 0;
       }
     }
@@ -295,6 +387,7 @@ export class LoopForgeEngine {
       vaultOk = true;
     } catch {
       if (this.metrics) this.metrics.vaultWriteErrors++;
+      logEvent("vault_write_error", { error: "persist_lineage_json" });
     }
 
     // 2. Markdown write (secondary, non-blocking)
@@ -319,6 +412,7 @@ export class LoopForgeEngine {
       );
     } catch {
       if (this.metrics) this.metrics.vaultWriteErrors++;
+      logEvent("vault_write_error", { error: "persist_lineage_md" });
     }
 
     return vaultOk;
@@ -386,6 +480,10 @@ export class LoopForgeEngine {
         entry.constraint_violations =
           (lineage.constraint_violations as string[]) ?? [];
       }
+      // v1.7: Ensure quality_score is always populated for failure lineage weighting
+      if (entry.quality_score === undefined || entry.quality_score === null) {
+        entry.quality_score = (lineage.quality_score as number) ?? 0;
+      }
     }
 
     // Enrich: attach full prompt text from Markdown for L0 cache reuse
@@ -407,45 +505,6 @@ export class LoopForgeEngine {
     if (!finalResults.length) return null;
 
     return { results: finalResults, global_entries: [] };
-  }
-
-  // ═══════════════════════════════════════════════════════════════════════
-  // Build (internal)
-  // ═══════════════════════════════════════════════════════════════════════
-
-  invokeBuild(
-    request: LoopForgeRequest,
-    _hydrateResults?: Record<string, unknown> | null,
-  ): AgentLoopResult {
-    this.ensureInit(request);
-    this.lastTask = request.task;
-
-    const analysis = routeTechnique(request.task);
-    const technique = analysis.technique;
-    const rationale = analysis.rationale;
-
-    const promptSections = [
-      "## LoopForge Build",
-      `**Technique**: ${technique}`,
-      `**Rationale**: ${rationale}`,
-      "",
-      "### Task",
-      request.task,
-      "",
-      "### Instructions",
-      `Apply the **${technique}** technique to complete the task above.`,
-      "Respect all hard constraints and provide verifiable output.",
-    ];
-
-    return {
-      status: AgentStatus.OK,
-      response: {
-        status: AgentStatus.OK,
-        prompt: promptSections.join("\n"),
-        analysis,
-        error: null,
-      },
-    };
   }
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -525,6 +584,13 @@ export class LoopForgeEngine {
       this.state!.circuit_breaker_count = 0;
     }
 
+    logEvent("round_complete", {
+      technique: "feedback",
+      quality,
+      loopId: loopId ?? "unknown",
+      round: loopRound ?? this.state!.call_count,
+    });
+
     return {
       status: AgentStatus.OK,
       response: {
@@ -547,6 +613,8 @@ export class LoopForgeEngine {
 
   /** Record self-evaluation from agent output without human intervention.
    *  Converts SelfEvaluation → ExecutionFeedback → vault persistence.
+   *  P0–P2: Also persists discovered_constraints, objective_refinement,
+   *  and emerged_subtasks for the compiler to consume next round.
    *  Call this BEFORE invokeLoopCompile for the next round so that
    *  hydrateLoopContext picks up the latest quality scores. */
   autoFeedback(
@@ -581,6 +649,16 @@ export class LoopForgeEngine {
       manual_fixes: "",
       loop_id: loopId,
       round,
+      // P0–P2: Evolution fields
+      discovered_constraints: selfEval.discovered_constraints ?? [],
+      objective_refinement: selfEval.objective_refinement ?? "",
+      emerged_subtasks: selfEval.emerged_subtasks ?? [],
+      // P4: Execution evidence
+      execution_evidence: selfEval.execution_evidence ?? null,
+      // P5: Self-correction
+      retracted_constraints: selfEval.retracted_constraints ?? [],
+      revised_success_criteria: selfEval.revised_success_criteria ?? [],
+      wrong_assumptions: selfEval.wrong_assumptions ?? [],
     };
     this.persistFeedbackToVault(signal);
     this.flushFeedbackBuffer();
@@ -598,6 +676,13 @@ export class LoopForgeEngine {
     } else {
       this.state!.circuit_breaker_count = 0;
     }
+
+    logEvent("round_complete", {
+      loopId,
+      round,
+      quality,
+      technique: this.state?.last_technique ?? "feedback",
+    });
 
     return quality;
   }
@@ -637,6 +722,41 @@ export class LoopForgeEngine {
     if (lastRR) {
       if (typeof lastRR === "object" && !Array.isArray(lastRR)) {
         const rr = lastRR as Record<string, unknown>;
+        // Parse P4 execution evidence
+        let executionEvidence: ExecutionEvidence | undefined;
+        const rawEvidence = rr.execution_evidence as Record<string, unknown> | undefined;
+        if (rawEvidence && typeof rawEvidence === "object") {
+          const testResults = rawEvidence.test_results as Record<string, unknown> | undefined;
+          executionEvidence = makeExecutionEvidence({
+            files_changed: Array.isArray(rawEvidence.files_changed)
+              ? rawEvidence.files_changed.filter((v: unknown) => typeof v === "string")
+              : [],
+            test_results: testResults && typeof testResults.passed === "number"
+              ? {
+                  passed: testResults.passed as number,
+                  failed: (testResults.failed as number) ?? 0,
+                  skipped: (testResults.skipped as number) ?? 0,
+                }
+              : null,
+            success_criteria_met: Array.isArray(rawEvidence.success_criteria_met)
+              ? rawEvidence.success_criteria_met.filter((v: unknown) => typeof v === "string")
+              : [],
+            success_criteria_remaining: Array.isArray(rawEvidence.success_criteria_remaining)
+              ? rawEvidence.success_criteria_remaining.filter((v: unknown) => typeof v === "string")
+              : [],
+            progress_estimate: typeof rawEvidence.progress_estimate === "number"
+              ? Math.max(0, Math.min(1, rawEvidence.progress_estimate))
+              : 0.0,
+          });
+        }
+        // Parse P5 revised_success_criteria
+        const revisedCriteria: CriterionRevision[] = Array.isArray(rr.revised_success_criteria)
+          ? (rr.revised_success_criteria as Array<Record<string, unknown>>)
+              .filter((v) =>
+                typeof v === "object" && v !== null &&
+                typeof v.old === "string" && typeof v.new === "string")
+              .map((v) => ({ old: v.old as string, new: v.new as string }))
+          : [];
         lcr.last_round_result = makeLoopRoundResult({
           round: (rr.round as number) ?? 0,
           success: (rr.success as boolean) ?? false,
@@ -645,6 +765,26 @@ export class LoopForgeEngine {
             (rr.constraint_violations as string[]) ?? [],
           manual_fixes_needed: (rr.manual_fixes_needed as string) ?? "",
           quality_score: (rr.quality_score as number) ?? 0,
+          // P0–P2: Cognitive evolution fields
+          discovered_constraints: Array.isArray(rr.discovered_constraints)
+            ? (rr.discovered_constraints as string[]).filter((v: unknown) => typeof v === "string")
+            : [],
+          objective_refinement: typeof rr.objective_refinement === "string"
+            ? rr.objective_refinement
+            : "",
+          emerged_subtasks: Array.isArray(rr.emerged_subtasks)
+            ? (rr.emerged_subtasks as string[]).filter((v: unknown) => typeof v === "string")
+            : [],
+          // P4: Execution evidence
+          execution_evidence: executionEvidence,
+          // P5: Self-correction
+          retracted_constraints: Array.isArray(rr.retracted_constraints)
+            ? (rr.retracted_constraints as string[]).filter((v: unknown) => typeof v === "string")
+            : [],
+          revised_success_criteria: revisedCriteria,
+          wrong_assumptions: Array.isArray(rr.wrong_assumptions)
+            ? (rr.wrong_assumptions as string[]).filter((v: unknown) => typeof v === "string")
+            : [],
         });
       }
     }
@@ -699,6 +839,25 @@ export class LoopForgeEngine {
       promptLines.push("### Warnings");
       for (const w of response.warnings) {
         promptLines.push(`- ⚠️ ${w}`);
+      }
+    }
+
+    // Verification gate flags (v1.6) — injected after compiler warnings
+    const verificationFlags = (extras.verification_flags as Array<Record<string, unknown>>) ?? [];
+    if (verificationFlags.length) {
+      promptLines.push("");
+      promptLines.push("### Verification Gate");
+      for (const f of verificationFlags) {
+        const icon = f.severity === "error" ? "🚫" : "⚠️";
+        promptLines.push(`- ${icon} [${f.check}] ${f.detail}`);
+      }
+      const hasError = verificationFlags.some((f) => f.severity === "error");
+      if (hasError) {
+        promptLines.push("");
+        promptLines.push(
+          "**Gate Verdict: CONTRADICTED** — this round's quality score has been excluded " +
+          "from the quality trend. Address each 🚫 flag explicitly in your next response.",
+        );
       }
     }
 
@@ -768,79 +927,6 @@ export class LoopForgeEngine {
   }
 
   // ═══════════════════════════════════════════════════════════════════════
-  // Review handler
-  // ═══════════════════════════════════════════════════════════════════════
-
-  handleReview(
-    request: LoopForgeRequest,
-    hydrateResults?: Record<string, unknown> | null,
-  ): AgentLoopResult {
-    if (!hydrateResults) {
-      return {
-        status: AgentStatus.ERROR,
-        response: {
-          status: AgentStatus.ERROR,
-          prompt: null,
-          analysis: null,
-          error: "Review mode requires hydrate_results (prompt to review).",
-        },
-      };
-    }
-
-    const results = (hydrateResults.results as Record<string, unknown>[]) ?? [];
-    if (!results.length) {
-      return {
-        status: AgentStatus.ERROR,
-        response: {
-          status: AgentStatus.ERROR,
-          prompt: null,
-          analysis: null,
-          error: "No matching prompt found in vault to review.",
-        },
-      };
-    }
-
-    const promptData = results[0];
-    const fullText = (promptData.full_prompt as string) ?? "";
-    const issues: string[] = [];
-
-    // Structural checks
-    const requiredSections = [
-      "角色", "任务", "输入", "输出格式", "硬约束", "生成要求",
-    ];
-    for (const section of requiredSections) {
-      if (!fullText.includes(section)) {
-        issues.push(`Missing section: ${section}`);
-      }
-    }
-
-    // Constraint check
-    const globalEntries =
-      (hydrateResults.global_entries as Record<string, unknown>[]) ?? [];
-    for (const entry of globalEntries) {
-      for (const c of (entry.hard_constraints_added as string[]) ?? []) {
-        if (!fullText.includes(c)) {
-          issues.push(`GLOBAL constraint not reflected: ${c}`);
-        }
-      }
-    }
-
-    const reviewReport = issues.length
-      ? issues.map((i) => `- ${i}`).join("\n")
-      : "All checks passed.";
-
-    return {
-      status: AgentStatus.OK,
-      response: {
-        status: AgentStatus.OK,
-        prompt: `## Review Report\n\n${reviewReport}\n\n---\n\n${fullText}`,
-        analysis: null,
-        error: null,
-      },
-    };
-  }
-
-  // ═══════════════════════════════════════════════════════════════════════
   // Circuit breaker
   // ═══════════════════════════════════════════════════════════════════════
 
@@ -852,9 +938,16 @@ export class LoopForgeEngine {
     if (this.state.quality_trend.length < maxCB) return false;
 
     const recent = this.state.quality_trend.slice(-maxCB);
-    return recent.every(
+    const isFlat = recent.every(
       (val, i) => i === 0 || recent[i - 1] >= val,
     );
+    if (isFlat) {
+      logEvent("circuit_breaker", {
+        trend: recent,
+        totalRounds: this.state.quality_trend.length,
+      });
+    }
+    return isFlat;
   }
 }
 

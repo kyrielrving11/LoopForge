@@ -20,12 +20,10 @@ import {
 } from "../protocol.js";
 
 describe("Protocol — Enums", () => {
-  it("Mode has 4 values", () => {
-    assert.equal(Object.values(Mode).length, 4);
+  it("Mode has 2 values", () => {
+    assert.equal(Object.values(Mode).length, 2);
     assert.equal(Mode.LOOP_COMPILE, "loop_compile");
     assert.equal(Mode.FEEDBACK, "feedback");
-    assert.equal(Mode.REVIEW, "review");
-    assert.equal(Mode.BUILD, "build");
   });
 
   it("AgentStatus has 3 values", () => {

@@ -11,6 +11,7 @@ import {
   mkdirSync,
   readdirSync,
   existsSync,
+  rmSync,
 } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { homedir } from "node:os";
@@ -277,6 +278,8 @@ export class FSBackend implements VaultBackend {
   private readonly vaultPath: string;
   // v2: federation — global vault for cross-project constraints (not yet implemented)
   private readonly globalVaultPath: string;
+  /** Re-entrant lock depth — >0 means this process holds the lock. */
+  private lockDepth = 0;
 
   constructor(
     vaultPath = ".promptcraft/prompt_vault.json",
@@ -284,6 +287,48 @@ export class FSBackend implements VaultBackend {
   ) {
     this.vaultPath = vaultPath;
     this.globalVaultPath = globalVaultPath;
+  }
+
+  /** File-system mutex via mkdir (atomic on POSIX and Windows).
+   *  Re-entrant: nested calls from the same process bypass the lock. */
+  withLock<T>(fn: () => T): T {
+    if (this.lockDepth > 0) {
+      this.lockDepth++;
+      try {
+        return fn();
+      } finally {
+        this.lockDepth--;
+      }
+    }
+
+    const lockPath = resolveVaultPath(this.vaultPath).replace(
+      /\.json$/,
+      ".lock",
+    );
+    for (let i = 0; i < 100; i++) {
+      try {
+        mkdirSync(lockPath);
+        break;
+      } catch {
+        if (i === 99) throw new Error("Vault lock timeout");
+      }
+      // spin-wait 10ms
+      const start = Date.now();
+      while (Date.now() - start < 10) {
+        /* spin */
+      }
+    }
+    this.lockDepth = 1;
+    try {
+      return fn();
+    } finally {
+      this.lockDepth = 0;
+      try {
+        rmSync(lockPath, { recursive: true });
+      } catch {
+        /* orphaned lock — next process cleans up via timeout */
+      }
+    }
   }
 
   // ── JSON vault ────────────────────────────────────────────────────────
@@ -299,9 +344,11 @@ export class FSBackend implements VaultBackend {
   }
 
   writeVault(data: Record<string, unknown>): void {
-    const resolved = resolveVaultPath(this.vaultPath);
-    mkdirSync(dirname(resolved), { recursive: true });
-    writeFileSync(resolved, JSON.stringify(data, null, 2), "utf-8");
+    this.withLock(() => {
+      const resolved = resolveVaultPath(this.vaultPath);
+      mkdirSync(dirname(resolved), { recursive: true });
+      writeFileSync(resolved, JSON.stringify(data, null, 2), "utf-8");
+    });
   }
 
   // ── Entry queries ─────────────────────────────────────────────────────
@@ -342,20 +389,24 @@ export class FSBackend implements VaultBackend {
   }
 
   appendEntry(entry: VaultEntry): void {
-    const vault = this.readVault();
-    const entries = (vault.entries as VaultEntry[]) || [];
-    entries.push(entry);
-    vault.entries = entries;
-    this.writeVault(vault);
+    this.withLock(() => {
+      const vault = this.readVault();
+      const entries = (vault.entries as VaultEntry[]) || [];
+      entries.push(entry);
+      vault.entries = entries;
+      this.writeVault(vault);
+    });
   }
 
   appendEntries(entries: VaultEntry[]): number {
-    if (entries.length === 0) return 0;
-    const vault = this.readVault();
-    const existing = (vault.entries as VaultEntry[]) || [];
-    vault.entries = [...existing, ...entries];
-    this.writeVault(vault);
-    return entries.length;
+    return this.withLock(() => {
+      if (entries.length === 0) return 0;
+      const vault = this.readVault();
+      const existing = (vault.entries as VaultEntry[]) || [];
+      vault.entries = [...existing, ...entries];
+      this.writeVault(vault);
+      return entries.length;
+    });
   }
 
   // ── Markdown lineage ──────────────────────────────────────────────────

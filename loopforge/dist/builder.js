@@ -5,6 +5,7 @@
  *   2. Quality scoring — deterministic 1-5 from feedback signals
  */
 import { getPolicy } from "./policy.js";
+import { logEvent } from "./observability.js";
 import { makeAnalysis, Technique, } from "./protocol.js";
 // ═══════════════════════════════════════════════════════════════════════════
 // Routing table
@@ -27,13 +28,13 @@ const RATIONALE = {
     [Technique.TREE_OF_THOUGHT]: "High risk, multi-path — explore + evaluate + prune.",
 };
 export const TECHNIQUE_REFERENCE = {
-    "zero-shot": "skills/prompt-techniques/references/zero-shot.md",
-    "few-shot": "skills/prompt-techniques/references/few-shot.md",
-    "zero-shot-cot": "skills/prompt-techniques/references/chain-of-thought.md",
-    "few-shot-cot": "skills/prompt-techniques/references/chain-of-thought.md",
-    "step-back": "skills/prompt-techniques/references/step-back.md",
-    "least-to-most": "skills/prompt-techniques/references/least-to-most.md",
-    "tree-of-thought": "skills/prompt-techniques/references/tree-of-thought.md",
+    "zero-shot": "loopforge/skills/prompt-techniques/references/zero-shot.md",
+    "few-shot": "loopforge/skills/prompt-techniques/references/few-shot.md",
+    "zero-shot-cot": "loopforge/skills/prompt-techniques/references/chain-of-thought.md",
+    "few-shot-cot": "loopforge/skills/prompt-techniques/references/chain-of-thought.md",
+    "step-back": "loopforge/skills/prompt-techniques/references/step-back.md",
+    "least-to-most": "loopforge/skills/prompt-techniques/references/least-to-most.md",
+    "tree-of-thought": "loopforge/skills/prompt-techniques/references/tree-of-thought.md",
 };
 // Keyword sets for heuristic classification
 const HIGH_LOAD_WORDS = new Set([
@@ -170,6 +171,12 @@ export function routeTechniqueAdaptive(task, vaultContext = null, loopId = "") {
         return analysis; // Already at ceiling
     const originalTechnique = technique;
     const originalRationale = analysis.rationale;
+    logEvent("strategy_rotated", {
+        loopId,
+        from: originalTechnique,
+        to: fallback,
+        consecutiveLowRounds: lowCount,
+    });
     return makeAnalysis({
         technique: fallback,
         rationale: `${originalRationale} [ROTATED: ${originalTechnique} → ${fallback} — ` +
@@ -183,23 +190,5 @@ export function routeTechniqueAdaptive(task, vaultContext = null, loopId = "") {
         reference_file: TECHNIQUE_REFERENCE[fallback] ?? analysis.reference_file,
         was_rotated: true,
     });
-}
-// ═══════════════════════════════════════════════════════════════════════════
-// Global constraints extraction
-// ═══════════════════════════════════════════════════════════════════════════
-export function extractGlobalConstraints(hydrateResults) {
-    const constraints = [];
-    if (!hydrateResults)
-        return constraints;
-    const globalEntries = hydrateResults.global_entries || [];
-    for (const entry of globalEntries) {
-        const added = entry.hard_constraints_added || [];
-        for (const c of added) {
-            if (!constraints.includes(c)) {
-                constraints.push(c);
-            }
-        }
-    }
-    return constraints;
 }
 //# sourceMappingURL=builder.js.map

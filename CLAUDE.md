@@ -5,7 +5,7 @@ with structured memory, constraint inheritance, and drift correction — maintai
 cognitive stability across long-horizon agent loops.
 
 - Language: TypeScript only. No Python, Ruby, or other language files.
-- Package: `loopforge/` — npm package `loopforge` v1.3.0, ESM, Node ≥18.
+- Package: `loopforge/` — npm package `loopforge` v1.6.0, ESM, Node ≥18.
 - Zero runtime dependencies — stdlib only.
 
 ## Commands
@@ -13,7 +13,7 @@ cognitive stability across long-horizon agent loops.
 ```bash
 cd loopforge
 npm run build    # tsc + generate JSON Schema
-npm test         # tsc + schema gen + 92 tests (node:test)
+npm test         # tsc + schema gen + 197 tests (node:test)
 npx tsc --noEmit # type-check only
 ```
 
@@ -21,13 +21,14 @@ npx tsc --noEmit # type-check only
 
 ```
 loopforge/src/
-  protocol.ts          # 28 types (4 enums + 23 interfaces + 1 type alias) — wire contract
+  protocol.ts          # 32 types (4 enums + 27 interfaces + 1 type alias) — wire contract
   loop-compiler.ts     # L0/L1/L2 + advisories + specialist compilers (~1600 lines)
-  engine.ts            # Lifecycle, circuit breaker, session state (~860 lines)
-  runtime.ts           # Loop Runtime (v1.2+, unchanged in v1.3) — event-driven loop with heartbeat/timeout/stall
+  engine.ts            # Lifecycle, circuit breaker, session state + verification gate injection (~890 lines)
+  runtime.ts           # Loop Runtime (v1.2+) — event-driven loop with heartbeat/timeout/stall
+  verification-gate.ts # Layer 1 cross-round consistency checks (v1.6, ~250 lines)
   builder.ts           # Technique routing (keyword + adaptive) + quality scoring
   adapter.ts           # Mode routing (loop_compile | feedback | review)
-  cli.ts               # CLI entry point (7 commands)
+  mcp-server.ts        # MCP server entry point (#!/usr/bin/env node)
   replay.ts            # Time-travel queries: getRound / replay / timeline / diff
   policy.ts            # loop_policy.json loader (includes RuntimePolicy)
   generate-schema.ts   # JSON Schema generator (runs during build)
@@ -46,6 +47,14 @@ loopforge/src/
 
 ## Hotspot Files
 
+### `verification-gate.ts` (~250 lines)
+Pure-function cross-round consistency verifier. Key boundaries:
+- 6 individual check functions, each returns `VerificationFlag | null`
+- `verifySelfEvaluation()` orchestrates all 6 checks and produces a `VerificationResult`
+- 3 verdict tiers: `trusted` (normal flow), `suspect` (warn in prompt), `contradicted` (skip quality trend, hard constraint to respond)
+- Zero side effects — all data flows through parameters; vault queries happen in the caller (session.ts)
+- Does NOT modify quality scores — only skips trend writes for contradicted rounds
+
 ### `loop-compiler.ts` (~1600 lines)
 Pure-function compiler — largest module. Key boundaries:
 - `compileL0/L1/L2()` are entry points; `compileL2()` delegates to specialist compilers
@@ -53,12 +62,13 @@ Pure-function compiler — largest module. Key boundaries:
 - `computeAdvisories()` uses Jaccard token similarity; thresholds hardcoded (0.5 aligned, 0.3 warn)
 - Before modifying: ensure `npm test` covers the change path
 
-### `engine.ts` (~860 lines)
+### `engine.ts` (~890 lines)
 Stateful engine — only module with mutable session state.
 - `invokeLoopCompile()` delegates to pure-function `compileLoop()`
 - `autoFeedback()` flushes buffer immediately so next compile sees latest scores
 - `shouldBreak()` treats flat quality as non-increasing (e.g. `[5,5,5]` fires breaker)
 - `hydrateLoopContext()` adds `full_prompt` field — this field only exists on hydrated entries, not in the raw JSON vault
+- (v1.6) Injects verification gate flags into prompt as a `### Verification Gate` section after compiler warnings
 
 ### `runtime.ts` (~530 lines)
 Event-driven loop driver. Key invariants:
@@ -66,12 +76,13 @@ Event-driven loop driver. Key invariants:
 - SIGINT/SIGTERM → `stop()` sets status=STOPPED; next iteration of for-loop exits
 - Interactive mode (`interactive: true`) skips timeout/stall — used by CLI `cmdRun`
 
-### `mcp/session.ts` (~230 lines)
+### `mcp/session.ts` (~260 lines)
 Session manager — MCP integration layer. Key invariants:
 - Each session = one complete multi-round loop with its own LoopForgeEngine instance
-- `advance()` cycle: extract → feedback → check stop → compile next (extraction-first order)
+- `advance()` cycle: extract → verify (v1.6) → feedback → check stop → compile next (extraction-first order)
 - `create()` compiles round 1 via `engine.invokeLoopCompile()` and stores the session
 - `replayTimeline()` wraps ReplayBackend using the same VaultBackend as the engine
+- (v1.6) Verification gate runs between extraction and feedback; contradicted rounds skip quality trend
 - Sessions auto-cleanup when advance returns prompt=null; stop/delete are idempotent
 
 ## Key Rules

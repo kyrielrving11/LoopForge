@@ -3,10 +3,7 @@
  * TypeScript reference implementation v1.3.
  *
  * Usage:
- *   import { handle, LoopForgeEngine, ReplayBackend, compileLoop } from "loopforge";
- *
- *   // As a sub-agent adapter
- *   const result = handle('{"mode":"loop_compile","loop_id":"test","round":1,"task":"Audit ERC20"}');
+ *   import { LoopForgeEngine, ReplayBackend, compileLoop } from "loopforge";
  *
  *   // As a library
  *   const engine = createEngine();
@@ -89,10 +86,8 @@ export { FSBackend } from "./backends/fs.js";
 
 // Builder
 export {
-  routeTechnique,
   routeTechniqueAdaptive,
   scoreQuality,
-  extractGlobalConstraints,
   TECHNIQUE_REFERENCE,
 } from "./builder.js";
 
@@ -108,6 +103,8 @@ export {
   deriveGoalId,
   getPreviousRound,
   buildSelfEvalBlock,
+  buildRollingSummary,
+  formatRollingSummaryForPrompt,
 } from "./loop-compiler.js";
 
 // Replay
@@ -119,6 +116,7 @@ export {
   createEngine,
   extractSelfEvaluation,
   heuristicSelfEvaluation,
+  buildSelfEvaluation,
 } from "./engine.js";
 
 export type { EngineMetrics } from "./engine.js";
@@ -138,9 +136,6 @@ export type {
   RuntimeConfig,
   RunResult,
 } from "./protocol.js";
-
-// Adapter
-export { handle, main } from "./adapter.js";
 
 // MCP (v1.3)
 export { McpServer } from "./mcp/server.js";

@@ -23,6 +23,8 @@ export declare class LoopRuntime extends EventEmitter {
     private heartbeatTimer;
     private sigintHandler;
     private sigtermHandler;
+    private lastSelfEval;
+    private pendingVerificationFlags;
     private roundStartTime;
     private lastProgressTime;
     private activeCtx;

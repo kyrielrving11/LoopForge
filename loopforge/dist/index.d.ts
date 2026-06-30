@@ -3,10 +3,7 @@
  * TypeScript reference implementation v1.3.
  *
  * Usage:
- *   import { handle, LoopForgeEngine, ReplayBackend, compileLoop } from "loopforge";
- *
- *   // As a sub-agent adapter
- *   const result = handle('{"mode":"loop_compile","loop_id":"test","round":1,"task":"Audit ERC20"}');
+ *   import { LoopForgeEngine, ReplayBackend, compileLoop } from "loopforge";
  *
  *   // As a library
  *   const engine = createEngine();
@@ -30,15 +27,14 @@ export { getPolicy, loadPolicy, resetPolicy, DEFAULT_POLICY, } from "./policy.js
 export type { LoopPolicy, ConstraintsPolicy, SummaryPolicy, RecompileTriggersPolicy, TechniquePolicy, EnginePolicy, BackendPolicy, } from "./policy.js";
 export type { VaultBackend, VaultEntry } from "./backends/interface.js";
 export { FSBackend } from "./backends/fs.js";
-export { routeTechnique, routeTechniqueAdaptive, scoreQuality, extractGlobalConstraints, TECHNIQUE_REFERENCE, } from "./builder.js";
-export { compileLoop, decideLevel, compileL2, alignTask, checkLoopHealth, computeAdvisories, computeGoalTextHash, deriveGoalId, getPreviousRound, buildSelfEvalBlock, } from "./loop-compiler.js";
+export { routeTechniqueAdaptive, scoreQuality, TECHNIQUE_REFERENCE, } from "./builder.js";
+export { compileLoop, decideLevel, compileL2, alignTask, checkLoopHealth, computeAdvisories, computeGoalTextHash, deriveGoalId, getPreviousRound, buildSelfEvalBlock, buildRollingSummary, formatRollingSummaryForPrompt, } from "./loop-compiler.js";
 export { ReplayBackend } from "./replay.js";
-export { LoopForgeEngine, createEngine, extractSelfEvaluation, heuristicSelfEvaluation, } from "./engine.js";
+export { LoopForgeEngine, createEngine, extractSelfEvaluation, heuristicSelfEvaluation, buildSelfEvaluation, } from "./engine.js";
 export type { EngineMetrics } from "./engine.js";
 export { LoopRuntime, run } from "./runtime.js";
 export { RuntimeStatus } from "./protocol.js";
 export type { RoundContext, AgentExecutor, StopReason, RoundStartInfo, RoundCompleteInfo, HeartbeatInfo, TimeoutInfo, HealthWarning, RuntimeConfig, RunResult, } from "./protocol.js";
-export { handle, main } from "./adapter.js";
 export { McpServer } from "./mcp/server.js";
 export { SessionManager } from "./mcp/session.js";
 export type { McpSession, McpSessionSummary } from "./mcp/session.js";

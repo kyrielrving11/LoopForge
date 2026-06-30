@@ -6,6 +6,7 @@
  */
 
 import { getPolicy } from "./policy.js";
+import { logEvent } from "./observability.js";
 import {
   makeAnalysis,
   Technique,
@@ -42,13 +43,13 @@ const RATIONALE: Record<string, string> = {
 };
 
 export const TECHNIQUE_REFERENCE: Record<string, string> = {
-  "zero-shot": "skills/prompt-techniques/references/zero-shot.md",
-  "few-shot": "skills/prompt-techniques/references/few-shot.md",
-  "zero-shot-cot": "skills/prompt-techniques/references/chain-of-thought.md",
-  "few-shot-cot": "skills/prompt-techniques/references/chain-of-thought.md",
-  "step-back": "skills/prompt-techniques/references/step-back.md",
-  "least-to-most": "skills/prompt-techniques/references/least-to-most.md",
-  "tree-of-thought": "skills/prompt-techniques/references/tree-of-thought.md",
+  "zero-shot": "loopforge/skills/prompt-techniques/references/zero-shot.md",
+  "few-shot": "loopforge/skills/prompt-techniques/references/few-shot.md",
+  "zero-shot-cot": "loopforge/skills/prompt-techniques/references/chain-of-thought.md",
+  "few-shot-cot": "loopforge/skills/prompt-techniques/references/chain-of-thought.md",
+  "step-back": "loopforge/skills/prompt-techniques/references/step-back.md",
+  "least-to-most": "loopforge/skills/prompt-techniques/references/least-to-most.md",
+  "tree-of-thought": "loopforge/skills/prompt-techniques/references/tree-of-thought.md",
 };
 
 // Keyword sets for heuristic classification
@@ -206,6 +207,13 @@ export function routeTechniqueAdaptive(
   const originalTechnique = technique;
   const originalRationale = analysis.rationale;
 
+  logEvent("strategy_rotated", {
+    loopId,
+    from: originalTechnique,
+    to: fallback,
+    consecutiveLowRounds: lowCount,
+  });
+
   return makeAnalysis({
     technique: fallback,
     rationale:
@@ -223,25 +231,3 @@ export function routeTechniqueAdaptive(
   });
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Global constraints extraction
-// ═══════════════════════════════════════════════════════════════════════════
-
-export function extractGlobalConstraints(
-  hydrateResults: Record<string, unknown> | null,
-): string[] {
-  const constraints: string[] = [];
-  if (!hydrateResults) return constraints;
-
-  const globalEntries =
-    (hydrateResults.global_entries as Record<string, unknown>[]) || [];
-  for (const entry of globalEntries) {
-    const added = (entry.hard_constraints_added as string[]) || [];
-    for (const c of added) {
-      if (!constraints.includes(c)) {
-        constraints.push(c);
-      }
-    }
-  }
-  return constraints;
-}

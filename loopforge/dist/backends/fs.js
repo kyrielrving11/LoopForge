@@ -4,7 +4,7 @@
  * All file I/O is contained in this single module — engine.ts never
  * touches the filesystem directly.
  */
-import { readFileSync, writeFileSync, mkdirSync, readdirSync, existsSync, } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, existsSync, rmSync, } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { homedir } from "node:os";
 // ═══════════════════════════════════════════════════════════════════════════
@@ -232,9 +232,53 @@ export class FSBackend {
     vaultPath;
     // v2: federation — global vault for cross-project constraints (not yet implemented)
     globalVaultPath;
+    /** Re-entrant lock depth — >0 means this process holds the lock. */
+    lockDepth = 0;
     constructor(vaultPath = ".promptcraft/prompt_vault.json", globalVaultPath = "~/.promptcraft/global_vault.json") {
         this.vaultPath = vaultPath;
         this.globalVaultPath = globalVaultPath;
+    }
+    /** File-system mutex via mkdir (atomic on POSIX and Windows).
+     *  Re-entrant: nested calls from the same process bypass the lock. */
+    withLock(fn) {
+        if (this.lockDepth > 0) {
+            this.lockDepth++;
+            try {
+                return fn();
+            }
+            finally {
+                this.lockDepth--;
+            }
+        }
+        const lockPath = resolveVaultPath(this.vaultPath).replace(/\.json$/, ".lock");
+        for (let i = 0; i < 100; i++) {
+            try {
+                mkdirSync(lockPath);
+                break;
+            }
+            catch {
+                if (i === 99)
+                    throw new Error("Vault lock timeout");
+            }
+            // spin-wait 10ms
+            const start = Date.now();
+            while (Date.now() - start < 10) {
+                /* spin */
+            }
+        }
+        this.lockDepth = 1;
+        try {
+            return fn();
+        }
+        finally {
+            this.lockDepth = 0;
+            try {
+                rmSync(lockPath, { recursive: true });
+            }
+            catch {
+                /* orphaned lock — next process cleans up via timeout */
+            }
+        }
     }
     // ── JSON vault ────────────────────────────────────────────────────────
     readVault() {
@@ -248,9 +292,11 @@ export class FSBackend {
         }
     }
     writeVault(data) {
-        const resolved = resolveVaultPath(this.vaultPath);
-        mkdirSync(dirname(resolved), { recursive: true });
-        writeFileSync(resolved, JSON.stringify(data, null, 2), "utf-8");
+        this.withLock(() => {
+            const resolved = resolveVaultPath(this.vaultPath);
+            mkdirSync(dirname(resolved), { recursive: true });
+            writeFileSync(resolved, JSON.stringify(data, null, 2), "utf-8");
+        });
     }
     // ── Entry queries ─────────────────────────────────────────────────────
     queryEntries(opts) {
@@ -279,20 +325,24 @@ export class FSBackend {
         });
     }
     appendEntry(entry) {
-        const vault = this.readVault();
-        const entries = vault.entries || [];
-        entries.push(entry);
-        vault.entries = entries;
-        this.writeVault(vault);
+        this.withLock(() => {
+            const vault = this.readVault();
+            const entries = vault.entries || [];
+            entries.push(entry);
+            vault.entries = entries;
+            this.writeVault(vault);
+        });
     }
     appendEntries(entries) {
-        if (entries.length === 0)
-            return 0;
-        const vault = this.readVault();
-        const existing = vault.entries || [];
-        vault.entries = [...existing, ...entries];
-        this.writeVault(vault);
-        return entries.length;
+        return this.withLock(() => {
+            if (entries.length === 0)
+                return 0;
+            const vault = this.readVault();
+            const existing = vault.entries || [];
+            vault.entries = [...existing, ...entries];
+            this.writeVault(vault);
+            return entries.length;
+        });
     }
     // ── Markdown lineage ──────────────────────────────────────────────────
     writeLineageMd(loopId, roundNum, content, metadata) {

@@ -5,7 +5,6 @@ import {
   routeTechnique,
   routeTechniqueAdaptive,
   scoreQuality,
-  extractGlobalConstraints,
   TECHNIQUE_REFERENCE,
 } from "../builder.js";
 import { resetPolicy } from "../policy.js";
@@ -119,29 +118,3 @@ describe("Builder — Adaptive routing", () => {
   });
 });
 
-describe("Builder — Extract Global Constraints", () => {
-  it("returns empty array for null input", () => {
-    assert.deepEqual(extractGlobalConstraints(null), []);
-  });
-
-  it("extracts constraints from global_entries", () => {
-    const hydrateResults = {
-      global_entries: [
-        { hard_constraints_added: ["no external deps", "stdlib only"] },
-        { hard_constraints_added: ["must pass CI"] },
-      ],
-    };
-    const constraints = extractGlobalConstraints(hydrateResults);
-    assert.deepEqual(constraints, ["no external deps", "stdlib only", "must pass CI"]);
-  });
-
-  it("deduplicates constraints", () => {
-    const hydrateResults = {
-      global_entries: [
-        { hard_constraints_added: ["no external deps"] },
-        { hard_constraints_added: ["no external deps"] },
-      ],
-    };
-    assert.deepEqual(extractGlobalConstraints(hydrateResults), ["no external deps"]);
-  });
-});

@@ -43,9 +43,9 @@ describe("Generated JSON Schema — top-level", () => {
     assert.ok(String(schema.title ?? "").includes("LoopForge"));
   });
 
-  it("has 28 $defs (4 enums + 23 interfaces + 1 type alias)", () => {
+  it("has 32 $defs (4 enums + 27 interfaces + 1 type alias)", () => {
     const names = Object.keys(defs);
-    assert.equal(names.length, 28, `expected 28, got ${names.length}: ${names.join(", ")}`);
+    assert.equal(names.length, 32, `expected 32, got ${names.length}: ${names.join(", ")}`);
   });
 });
 
@@ -54,10 +54,10 @@ describe("Generated JSON Schema — top-level", () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("Enums", () => {
-  it("Mode — 4 values", () => {
+  it("Mode — 2 values", () => {
     assert.equal(def("Mode").type, "string");
     assert.deepEqual(def("Mode").enum, [
-      "loop_compile", "feedback", "review", "build",
+      "loop_compile", "feedback",
     ]);
   });
 

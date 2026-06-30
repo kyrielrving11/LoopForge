@@ -9,11 +9,9 @@
       "type": "string",
       "enum": [
         "loop_compile",
-        "feedback",
-        "review",
-        "build"
+        "feedback"
       ],
-      "description": "LoopForge-loop_compile — TypeScript protocol definitions.\n\nAll types exchanged between the Main Agent and LoopForge flow through\nthese interfaces. This is the contract layer — no implementation logic.\n\nv1.2: 28 types — 4 enums + 23 interfaces + 1 type alias."
+      "description": "LoopForge-loop_compile — TypeScript protocol definitions.\n\nAll types exchanged between the Main Agent and LoopForge flow through\nthese interfaces. This is the contract layer — no implementation logic.\n\nv1.6: 32 types — 4 enums + 27 interfaces + 1 type alias."
     },
     "AgentStatus": {
       "type": "string",
@@ -115,6 +113,61 @@
         "manual_fixes_needed"
       ]
     },
+    "ExecutionEvidence": {
+      "type": "object",
+      "properties": {
+        "files_changed": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "test_results": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "success_criteria_met": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "success_criteria_remaining": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "progress_estimate": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "files_changed",
+        "success_criteria_met",
+        "success_criteria_remaining",
+        "progress_estimate"
+      ],
+      "description": "P4: Structured execution evidence reported by the agent after each round.\nGives LoopForge visibility into what actually happened — files changed,\ntest results, success criteria met, and a subjective progress estimate.\nEnables the compiler to cross-validate agent claims and compute real progress."
+    },
+    "CriterionRevision": {
+      "type": "object",
+      "properties": {
+        "old": {
+          "type": "string"
+        },
+        "new": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "old",
+        "new"
+      ],
+      "description": "P5: A revision to a success criterion — the old form and the new form.\nThe agent proposes this when it discovers the original criterion was\nwrong, unrealistic, or needs refinement."
+    },
     "SelfEvaluation": {
       "type": "object",
       "properties": {
@@ -132,6 +185,42 @@
         },
         "should_continue": {
           "type": "boolean"
+        },
+        "discovered_constraints": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "objective_refinement": {
+          "type": "string"
+        },
+        "emerged_subtasks": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "execution_evidence": {
+          "$ref": "#/$defs/ExecutionEvidence"
+        },
+        "retracted_constraints": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "revised_success_criteria": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CriterionRevision"
+          }
+        },
+        "wrong_assumptions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       },
       "required": [
@@ -140,7 +229,7 @@
         "constraint_violations",
         "should_continue"
       ],
-      "description": "Structured self-evaluation embedded in compiled prompts.\nThe agent outputs this after completing each round.\nEvery field is consumed by at least one downstream function."
+      "description": "Structured self-evaluation embedded in compiled prompts.\nThe agent outputs this after completing each round.\nEvery field is consumed by at least one downstream function.\n\nv1.4 (P0–P2): Three new optional fields enable cognitive evolution.\nv1.5 (P4–P5): Execution evidence, progress tracking, and self-correction."
     },
     "LoopForgeRequest": {
       "type": "object",
@@ -207,6 +296,15 @@
         },
         "loop_id": {
           "type": "string"
+        },
+        "version": {
+          "type": "number"
+        },
+        "refinement_history": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       },
       "required": [
@@ -283,6 +381,12 @@
         },
         "generated_at_round": {
           "type": "number"
+        },
+        "failed_patterns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       },
       "required": [
@@ -341,6 +445,42 @@
         },
         "quality_score": {
           "type": "number"
+        },
+        "discovered_constraints": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "objective_refinement": {
+          "type": "string"
+        },
+        "emerged_subtasks": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "execution_evidence": {
+          "$ref": "#/$defs/ExecutionEvidence"
+        },
+        "retracted_constraints": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "revised_success_criteria": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CriterionRevision"
+          }
+        },
+        "wrong_assumptions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       },
       "required": [
@@ -897,6 +1037,87 @@
         "roundsCompleted",
         "qualityTrajectory"
       ]
+    },
+    "VerificationFlag": {
+      "type": "object",
+      "properties": {
+        "severity": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "info"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "warn"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "error"
+              ]
+            }
+          ]
+        },
+        "field": {
+          "type": "string"
+        },
+        "check": {
+          "type": "string"
+        },
+        "detail": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "severity",
+        "field",
+        "check",
+        "detail"
+      ],
+      "description": "A single flag raised during self-evaluation verification.\nEach flag identifies a specific inconsistency between the agent's\nself-reported data and the loop's cross-round lineage."
+    },
+    "VerificationResult": {
+      "type": "object",
+      "properties": {
+        "verdict": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "trusted"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "suspect"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "contradicted"
+              ]
+            }
+          ]
+        },
+        "flags": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/VerificationFlag"
+          }
+        }
+      },
+      "required": [
+        "verdict",
+        "flags"
+      ],
+      "description": "Result of cross-round self-evaluation verification.\n\nVerdict semantics:\n- trusted:   all checks passed; flags are informational only.\n- suspect:   one or more warn-level flags; flags become warnings in the\n             next prompt so the agent can clarify.\n- contradicted: one or more error-level flags; the quality score for this\n                round is excluded from the quality trend (NOT modified).\n                Flags become hard constraints — the agent must respond."
     }
   }
 }

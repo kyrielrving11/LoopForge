@@ -16,6 +16,8 @@ import { EventEmitter } from "node:events";
 import { extractSelfEvaluation, heuristicSelfEvaluation, createEngine, } from "./engine.js";
 import { Mode, RuntimeStatus, makeLoopCompileRequest, makeLoopRoundResult, makeSelfEvaluation, makeVaultConfig, } from "./protocol.js";
 import { getPolicy } from "./policy.js";
+import { verifySelfEvaluation } from "./verification-gate.js";
+import { logEvent } from "./observability.js";
 // ═══════════════════════════════════════════════════════════════════════════
 // Helpers
 // ═══════════════════════════════════════════════════════════════════════════
@@ -62,6 +64,9 @@ export class LoopRuntime extends EventEmitter {
     heartbeatTimer = null;
     sigintHandler = null;
     sigtermHandler = null;
+    // Verification gate state (v1.6 unified — was MCP-only, now also in runtime)
+    lastSelfEval = null;
+    pendingVerificationFlags = [];
     // Shared mutable state between the main loop and the heartbeat tick
     roundStartTime = 0;
     lastProgressTime = 0;
@@ -97,7 +102,7 @@ export class LoopRuntime extends EventEmitter {
         let consecutiveErrors = 0;
         for (this.currentRound = 1; this.currentRound <= this.config.maxRounds; this.currentRound++) {
             if (this._status !== RuntimeStatus.RUNNING) {
-                stopReason = "stopped";
+                stopReason = this._status === RuntimeStatus.STALLED ? "stalled" : "stopped";
                 break;
             }
             // ── Compile ──────────────────────────────────────────────────
@@ -117,6 +122,7 @@ export class LoopRuntime extends EventEmitter {
                 constraints_from_plan: lcr.constraints_from_plan ?? [],
                 health_check_interval: lcr.health_check_interval,
                 last_round_result: (lcr.last_round_result ?? undefined),
+                verification_flags: this.pendingVerificationFlags,
             });
             if (!compileResult.response?.prompt) {
                 stopReason = "stalled";
@@ -193,6 +199,27 @@ export class LoopRuntime extends EventEmitter {
             if (selfEval !== null) {
                 this.engine.autoFeedback(selfEval, this.config.loopId, this.currentRound, this.config.task);
             }
+            // ── Verification gate (v1.6 unified) ──────────────────────────
+            // Run cross-round consistency checks between self-eval and lineage.
+            // Flags are injected into the NEXT round's prompt via the engine.
+            this.pendingVerificationFlags = [];
+            let gateContradicted = false;
+            if (selfEval !== null) {
+                const vaultEntries = this.engine.getBackend().queryEntries({
+                    prefix: `loop:${this.config.loopId}:r`,
+                });
+                const verifyResult = verifySelfEvaluation(selfEval, this.currentRound, vaultEntries, this.lastSelfEval);
+                this.pendingVerificationFlags = verifyResult.flags;
+                if (verifyResult.verdict === "contradicted") {
+                    gateContradicted = true;
+                    logEvent("gate_contradicted", {
+                        loopId: this.config.loopId,
+                        round: this.currentRound,
+                        flags: verifyResult.flags.map((f) => f.check),
+                    });
+                }
+                this.lastSelfEval = selfEval;
+            }
             // Compute quality score
             let quality = 0;
             if (selfEval) {
@@ -209,7 +236,10 @@ export class LoopRuntime extends EventEmitter {
                     quality = 1;
                 }
             }
-            this.qualityTrajectory.push(quality);
+            // Contradicted gate verdict: skip quality trend (match MCP path behavior)
+            if (!gateContradicted) {
+                this.qualityTrajectory.push(quality);
+            }
             // ── Emit round:complete ───────────────────────────────────────
             const completeInfo = {
                 round: this.currentRound,
@@ -219,6 +249,13 @@ export class LoopRuntime extends EventEmitter {
             };
             this.emit("round:complete", completeInfo);
             this.config.onRoundComplete?.(completeInfo);
+            logEvent("round_complete", {
+                loopId: this.config.loopId ?? "unknown",
+                round: this.currentRound,
+                quality,
+                durationMs,
+                technique: "loop_runtime",
+            });
             // ── Check stop conditions ─────────────────────────────────────
             // Extraction check FIRST — heuristic results are low-confidence
             if (!extractionSucceeded) {
@@ -291,6 +328,16 @@ export class LoopRuntime extends EventEmitter {
                     constraint_violations: selfEval.constraint_violations,
                     manual_fixes_needed: "",
                     quality_score: 0,
+                    // P0–P2: Cognitive evolution
+                    discovered_constraints: selfEval.discovered_constraints ?? [],
+                    objective_refinement: selfEval.objective_refinement ?? "",
+                    emerged_subtasks: selfEval.emerged_subtasks ?? [],
+                    // P4: Execution evidence
+                    execution_evidence: selfEval.execution_evidence,
+                    // P5: Self-correction
+                    retracted_constraints: selfEval.retracted_constraints ?? [],
+                    revised_success_criteria: selfEval.revised_success_criteria ?? [],
+                    wrong_assumptions: selfEval.wrong_assumptions ?? [],
                 });
             }
         }
@@ -351,7 +398,8 @@ export class LoopRuntime extends EventEmitter {
                 this.config.onTimeout?.(timeoutInfo);
             }
             // Stall — timeout + grace period elapsed, execute still hasn't returned
-            if (elapsed > this.config.roundTimeoutMs + this.config.stallGraceMs) {
+            if (this.activeCtx !== null &&
+                elapsed > this.config.roundTimeoutMs + this.config.stallGraceMs) {
                 this._status = RuntimeStatus.STALLED;
                 const stallMsg = `Round ${this.currentRound} stalled after ${elapsed}ms`;
                 this.emit("stalled", {

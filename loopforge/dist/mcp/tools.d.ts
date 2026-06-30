@@ -39,6 +39,7 @@ export declare const TOOL_SCHEMAS: ({
             };
             sessionId?: undefined;
             output?: undefined;
+            evaluation?: undefined;
         };
         required: string[];
     };
@@ -56,6 +57,135 @@ export declare const TOOL_SCHEMAS: ({
                 type: "string";
                 description: string;
             };
+            evaluation: {
+                type: "object";
+                description: string;
+                required: string[];
+                properties: {
+                    success: {
+                        type: "boolean";
+                        description: string;
+                    };
+                    output_summary: {
+                        type: "string";
+                        description: string;
+                    };
+                    should_continue: {
+                        type: "boolean";
+                        description: string;
+                    };
+                    constraint_violations: {
+                        type: "array";
+                        items: {
+                            type: "string";
+                        };
+                        description: string;
+                    };
+                    discovered_constraints: {
+                        type: "array";
+                        items: {
+                            type: "string";
+                        };
+                        description: string;
+                    };
+                    objective_refinement: {
+                        type: "string";
+                        description: string;
+                    };
+                    emerged_subtasks: {
+                        type: "array";
+                        items: {
+                            type: "string";
+                        };
+                        description: string;
+                    };
+                    execution_evidence: {
+                        type: "object";
+                        description: string;
+                        properties: {
+                            files_changed: {
+                                type: "array";
+                                items: {
+                                    type: "string";
+                                };
+                                description: string;
+                            };
+                            test_results: {
+                                type: "object";
+                                description: string;
+                                properties: {
+                                    passed: {
+                                        type: "integer";
+                                        minimum: number;
+                                        description: string;
+                                    };
+                                    failed: {
+                                        type: "integer";
+                                        minimum: number;
+                                        description: string;
+                                    };
+                                    skipped: {
+                                        type: "integer";
+                                        minimum: number;
+                                        description: string;
+                                    };
+                                };
+                            };
+                            success_criteria_met: {
+                                type: "array";
+                                items: {
+                                    type: "string";
+                                };
+                                description: string;
+                            };
+                            success_criteria_remaining: {
+                                type: "array";
+                                items: {
+                                    type: "string";
+                                };
+                                description: string;
+                            };
+                            progress_estimate: {
+                                type: "number";
+                                minimum: number;
+                                maximum: number;
+                                description: string;
+                            };
+                        };
+                    };
+                    retracted_constraints: {
+                        type: "array";
+                        items: {
+                            type: "string";
+                        };
+                        description: string;
+                    };
+                    revised_success_criteria: {
+                        type: "array";
+                        description: string;
+                        items: {
+                            type: "object";
+                            properties: {
+                                old: {
+                                    type: "string";
+                                    description: string;
+                                };
+                                new: {
+                                    type: "string";
+                                    description: string;
+                                };
+                            };
+                        };
+                    };
+                    wrong_assumptions: {
+                        type: "array";
+                        items: {
+                            type: "string";
+                        };
+                        description: string;
+                    };
+                };
+            };
             task?: undefined;
             loopId?: undefined;
             maxRounds?: undefined;
@@ -82,6 +212,7 @@ export declare const TOOL_SCHEMAS: ({
             planSource?: undefined;
             constraints?: undefined;
             output?: undefined;
+            evaluation?: undefined;
         };
         required: string[];
     };
@@ -99,6 +230,7 @@ export declare const TOOL_SCHEMAS: ({
             constraints?: undefined;
             sessionId?: undefined;
             output?: undefined;
+            evaluation?: undefined;
         };
         required: never[];
     };
@@ -119,6 +251,7 @@ export declare const TOOL_SCHEMAS: ({
             constraints?: undefined;
             sessionId?: undefined;
             output?: undefined;
+            evaluation?: undefined;
         };
         required: string[];
     };

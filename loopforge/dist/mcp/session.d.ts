@@ -6,6 +6,7 @@
  */
 import { LoopForgeEngine } from "../engine.js";
 import type { VaultBackend } from "../backends/interface.js";
+import type { SelfEvaluation } from "../protocol.js";
 export interface McpSession {
     sessionId: string;
     loopId: string;
@@ -16,6 +17,8 @@ export interface McpSession {
     qualityTrajectory: number[];
     status: "running" | "stopped" | "stalled";
     createdAt: number;
+    /** Previous round's validated SelfEvaluation — used by verification gate. */
+    lastSelfEval?: SelfEvaluation;
 }
 export interface McpSessionSummary {
     sessionId: string;
@@ -50,7 +53,9 @@ export declare class SessionManager {
     delete(sessionId: string): boolean;
     /** Persist session state to vault for cross-process recovery.
      *  Uses upsert: removes any previous session_state entry for this loop,
-     *  then appends a new one with current state. */
+     *  then appends a new one with current state.
+     *  Entire read→filter→write→append is wrapped in a file lock to prevent
+     *  lost updates from concurrent processes. */
     save(session: McpSession): void;
     /** Resume a loop from vault state.
      *  Reconstructs the session and compiles the prompt for the next round.
@@ -60,8 +65,11 @@ export declare class SessionManager {
     /** Get loop health for a loop (in-memory or vault).
      *  Computes goal alignment, constraint integrity, drift, strategy stability. */
     getHealth(loopId: string): Record<string, unknown> | null;
-    /** Core cycle: extract self-eval → record feedback → check stop → compile next. */
-    advance(sessionId: string, output: string): AdvanceResult;
+    /** Core cycle: extract self-eval → record feedback → check stop → compile next.
+     *  @param preExtractedEval Optional pre-built SelfEvaluation from MCP tool parameter.
+     *    When provided (MCP path with evaluation parameter), skips regex extraction.
+     *    When undefined (runtime/CLI path), falls back to regex extraction from output. */
+    advance(sessionId: string, output: string, preExtractedEval?: SelfEvaluation): AdvanceResult;
     /** Replay timeline for a session — creates ReplayBackend from the stored backend. */
     replayTimeline(sessionId: string): Record<string, unknown>[] | null;
 }

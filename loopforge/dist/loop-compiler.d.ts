@@ -9,7 +9,7 @@
  *
  * Compilation: compileL0() / compileL1() / compileL2() produce the actual prompt.
  */
-import { type LoopCompileRequest, type LoopCompileResponse, type LoopHealth, type TaskAlignment } from "./protocol.js";
+import { type LoopCompileRequest, type LoopCompileResponse, type LoopHealth, type RollingSummary, type TaskAlignment } from "./protocol.js";
 export declare function computeGoalTextHash(task: string): string;
 export declare function deriveGoalId(loopId: string, task: string, explicitGoalId?: string): string;
 interface PreviousRound {
@@ -22,6 +22,8 @@ interface PreviousRound {
     prompt_text: string;
 }
 export declare function getPreviousRound(loopId: string, roundNum: number, vaultContext: Record<string, unknown> | null): PreviousRound | null;
+export declare function buildRollingSummary(loopId: string, currentRound: number, vaultContext: Record<string, unknown> | null): RollingSummary | null;
+export declare function formatRollingSummaryForPrompt(rs: RollingSummary | null): string;
 export declare function decideLevel(request: LoopCompileRequest, vaultContext: Record<string, unknown> | null): string;
 export declare function alignTask(proposedTask: string, request: LoopCompileRequest, vaultContext: Record<string, unknown> | null): TaskAlignment;
 export declare function checkLoopHealth(loopId: string, request: LoopCompileRequest, vaultContext: Record<string, unknown> | null): LoopHealth;
@@ -34,7 +36,8 @@ export declare function computeAdvisories(request: LoopCompileRequest, vaultCont
 export declare function compileL2(request: LoopCompileRequest, vaultContext: Record<string, unknown> | null): LoopCompileResponse;
 /** Build the standardized self-evaluation block appended to every compiled prompt.
  *  The agent MUST output a JSON self-evaluation between the delimiters.
- *  Only 4 fields — each consumed by at least one downstream function. */
+ *  4 required fields + 3 optional evolution fields (P0–P2) —
+ *  each consumed by at least one downstream function. */
 export declare function buildSelfEvalBlock(round: number): string;
 export declare function compileLoop(request: LoopCompileRequest, vaultContext?: Record<string, unknown> | null): LoopCompileResponse;
 export {};

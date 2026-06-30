@@ -62,6 +62,14 @@ export const DEFAULT_POLICY = {
         vault_path: ".promptcraft/prompt_vault.json",
         global_vault_path: "~/.promptcraft/global_vault.json",
     },
+    evolution: {
+        max_discovered_constraints_per_round: 5,
+        max_active_constraints: 15,
+        max_objective_versions: 10,
+        progress_stall_threshold: 0.05,
+        progress_stall_rounds: 2,
+        progress_mismatch_threshold: 0.3,
+    },
 };
 // ═══════════════════════════════════════════════════════════════════════════
 // Deep merge — custom values override defaults, unset fields retain defaults

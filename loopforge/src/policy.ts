@@ -51,6 +51,21 @@ export interface BackendPolicy {
   global_vault_path: string;
 }
 
+export interface EvolutionPolicy {
+  /** P0: Max new constraints the agent can discover per round. */
+  max_discovered_constraints_per_round: number;
+  /** P0: Hard upper bound on total active constraints. */
+  max_active_constraints: number;
+  /** P1: Max versions of the loop objective to retain in history. */
+  max_objective_versions: number;
+  /** P4: Minimum progress delta to not be considered stalled. */
+  progress_stall_threshold: number;
+  /** P4: Consecutive rounds below stall threshold before warning. */
+  progress_stall_rounds: number;
+  /** P4: Max allowed difference between objective and subjective progress. */
+  progress_mismatch_threshold: number;
+}
+
 export interface LoopPolicy {
   version: string;
   constraints: ConstraintsPolicy;
@@ -60,6 +75,7 @@ export interface LoopPolicy {
   engine: EnginePolicy;
   runtime: RuntimePolicy;
   backend: BackendPolicy;
+  evolution: EvolutionPolicy;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -120,6 +136,14 @@ export const DEFAULT_POLICY: LoopPolicy = {
   backend: {
     vault_path: ".promptcraft/prompt_vault.json",
     global_vault_path: "~/.promptcraft/global_vault.json",
+  },
+  evolution: {
+    max_discovered_constraints_per_round: 5,
+    max_active_constraints: 15,
+    max_objective_versions: 10,
+    progress_stall_threshold: 0.05,
+    progress_stall_rounds: 2,
+    progress_mismatch_threshold: 0.3,
   },
 };
 

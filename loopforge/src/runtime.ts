@@ -41,6 +41,9 @@ import {
   type StopReason,
 } from "./protocol.js";
 import { getPolicy } from "./policy.js";
+import { verifySelfEvaluation } from "./verification-gate.js";
+import type { VerificationFlag } from "./protocol.js";
+import { logEvent } from "./observability.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Helpers
@@ -117,6 +120,10 @@ export class LoopRuntime extends EventEmitter {
   private sigintHandler: (() => void) | null = null;
   private sigtermHandler: (() => void) | null = null;
 
+  // Verification gate state (v1.6 unified — was MCP-only, now also in runtime)
+  private lastSelfEval: SelfEvaluation | null = null;
+  private pendingVerificationFlags: VerificationFlag[] = [];
+
   // Shared mutable state between the main loop and the heartbeat tick
   private roundStartTime = 0;
   private lastProgressTime = 0;
@@ -166,7 +173,7 @@ export class LoopRuntime extends EventEmitter {
       this.currentRound++
     ) {
       if (this._status !== RuntimeStatus.RUNNING) {
-        stopReason = "stopped";
+        stopReason = this._status === RuntimeStatus.STALLED ? "stalled" : "stopped";
         break;
       }
 
@@ -189,6 +196,7 @@ export class LoopRuntime extends EventEmitter {
         last_round_result: (lcr.last_round_result ?? undefined) as
           | Record<string, unknown>
           | undefined,
+        verification_flags: this.pendingVerificationFlags,
       });
 
       if (!compileResult.response?.prompt) {
@@ -282,6 +290,33 @@ export class LoopRuntime extends EventEmitter {
         );
       }
 
+      // ── Verification gate (v1.6 unified) ──────────────────────────
+      // Run cross-round consistency checks between self-eval and lineage.
+      // Flags are injected into the NEXT round's prompt via the engine.
+      this.pendingVerificationFlags = [];
+      let gateContradicted = false;
+      if (selfEval !== null) {
+        const vaultEntries = this.engine.getBackend().queryEntries({
+          prefix: `loop:${this.config.loopId}:r`,
+        });
+        const verifyResult = verifySelfEvaluation(
+          selfEval,
+          this.currentRound,
+          vaultEntries,
+          this.lastSelfEval,
+        );
+        this.pendingVerificationFlags = verifyResult.flags;
+        if (verifyResult.verdict === "contradicted") {
+          gateContradicted = true;
+          logEvent("gate_contradicted", {
+            loopId: this.config.loopId,
+            round: this.currentRound,
+            flags: verifyResult.flags.map((f) => f.check),
+          });
+        }
+        this.lastSelfEval = selfEval;
+      }
+
       // Compute quality score
       let quality = 0;
       if (selfEval) {
@@ -295,7 +330,10 @@ export class LoopRuntime extends EventEmitter {
           quality = 1;
         }
       }
-      this.qualityTrajectory.push(quality);
+      // Contradicted gate verdict: skip quality trend (match MCP path behavior)
+      if (!gateContradicted) {
+        this.qualityTrajectory.push(quality);
+      }
 
       // ── Emit round:complete ───────────────────────────────────────
       const completeInfo: RoundCompleteInfo = {
@@ -306,6 +344,13 @@ export class LoopRuntime extends EventEmitter {
       };
       this.emit("round:complete", completeInfo);
       this.config.onRoundComplete?.(completeInfo);
+      logEvent("round_complete", {
+        loopId: this.config.loopId ?? "unknown",
+        round: this.currentRound,
+        quality,
+        durationMs,
+        technique: "loop_runtime",
+      });
 
       // ── Check stop conditions ─────────────────────────────────────
       // Extraction check FIRST — heuristic results are low-confidence
@@ -397,6 +442,16 @@ export class LoopRuntime extends EventEmitter {
           constraint_violations: selfEval.constraint_violations,
           manual_fixes_needed: "",
           quality_score: 0,
+          // P0–P2: Cognitive evolution
+          discovered_constraints: selfEval.discovered_constraints ?? [],
+          objective_refinement: selfEval.objective_refinement ?? "",
+          emerged_subtasks: selfEval.emerged_subtasks ?? [],
+          // P4: Execution evidence
+          execution_evidence: selfEval.execution_evidence,
+          // P5: Self-correction
+          retracted_constraints: selfEval.retracted_constraints ?? [],
+          revised_success_criteria: selfEval.revised_success_criteria ?? [],
+          wrong_assumptions: selfEval.wrong_assumptions ?? [],
         });
       }
     }
@@ -466,7 +521,10 @@ export class LoopRuntime extends EventEmitter {
       }
 
       // Stall — timeout + grace period elapsed, execute still hasn't returned
-      if (elapsed > this.config.roundTimeoutMs + this.config.stallGraceMs) {
+      if (
+        this.activeCtx !== null &&
+        elapsed > this.config.roundTimeoutMs + this.config.stallGraceMs
+      ) {
         this._status = RuntimeStatus.STALLED;
         const stallMsg = `Round ${this.currentRound} stalled after ${elapsed}ms`;
         this.emit("stalled", {

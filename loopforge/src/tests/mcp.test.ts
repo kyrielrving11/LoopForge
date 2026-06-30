@@ -39,6 +39,21 @@ function agentOutputNoEval(body?: string): string {
   return body ?? "## Round Output\n\nTask done. No eval block here.";
 }
 
+/** Build a structured evaluation object for the evaluation parameter of loopforge_next. */
+function evalParam(opts: {
+  success?: boolean;
+  violations?: string[];
+  shouldContinue?: boolean;
+  body?: string;
+}): Record<string, unknown> {
+  return {
+    success: opts.success ?? true,
+    output_summary: opts.body ?? "Completed the task successfully.",
+    constraint_violations: opts.violations ?? [],
+    should_continue: opts.shouldContinue ?? true,
+  };
+}
+
 import { SessionManager } from "../mcp/session.js";
 import { TOOL_HANDLERS } from "../mcp/tools.js";
 import { resetPolicy } from "../policy.js";
@@ -176,6 +191,96 @@ describe("MCP — multi-round lifecycle", () => {
     assert.equal(r2.prompt, null);
     assert.equal(r2.stopReason, "max_rounds");
     assert.equal(r2.round, 2);
+  });
+
+  // ── New: evaluation parameter tests ──────────────────────────────────
+
+  it("next with evaluation parameter (no output) → advances normally", () => {
+    const start = TOOL_HANDLERS.loopforge_start(mgr, { task: "Eval param test" });
+    const sessionId = String(start.sessionId);
+
+    const r1 = TOOL_HANDLERS.loopforge_next(mgr, {
+      sessionId,
+      evaluation: evalParam({ success: true, shouldContinue: true }),
+    });
+    assert.equal(r1.stopReason, undefined, "should advance without output");
+    assert.equal(r1.round, 2);
+    assert.ok(typeof r1.prompt === "string");
+  });
+
+  it("next with evaluation parameter + output → advances normally", () => {
+    const start = TOOL_HANDLERS.loopforge_start(mgr, { task: "Both sources test" });
+    const sessionId = String(start.sessionId);
+
+    const r1 = TOOL_HANDLERS.loopforge_next(mgr, {
+      sessionId,
+      output: "Some raw output text without eval block",
+      evaluation: evalParam({ success: false, violations: ["v1"], shouldContinue: true }),
+    });
+    assert.equal(r1.stopReason, undefined);
+    assert.equal(r1.round, 2);
+  });
+
+  it("next with evaluation → task_complete when shouldContinue=false", () => {
+    const start = TOOL_HANDLERS.loopforge_start(mgr, { task: "Eval complete test" });
+    const sessionId = String(start.sessionId);
+
+    const r1 = TOOL_HANDLERS.loopforge_next(mgr, {
+      sessionId,
+      evaluation: evalParam({ success: true, shouldContinue: false }),
+    });
+    assert.equal(r1.prompt, null);
+    assert.equal(r1.stopReason, "task_complete");
+  });
+
+  it("next without evaluation or eval block in output → stalled", () => {
+    const start = TOOL_HANDLERS.loopforge_start(mgr, { task: "No eval stall" });
+    const sessionId = String(start.sessionId);
+
+    const result = TOOL_HANDLERS.loopforge_next(mgr, {
+      sessionId,
+      output: agentOutputNoEval("Just some text without any eval"),
+    });
+    assert.equal(result.prompt, null);
+    assert.equal(result.stopReason, "stalled");
+  });
+
+  it("next with evaluation parameter (multi-round with discoveries)", () => {
+    const start = TOOL_HANDLERS.loopforge_start(mgr, { task: "Multi-round eval test" });
+    const sessionId = String(start.sessionId);
+
+    // Round 1 → 2 with discovered constraints
+    const r1 = TOOL_HANDLERS.loopforge_next(mgr, {
+      sessionId,
+      evaluation: {
+        success: false,
+        output_summary: "Found 2 reentrancy bugs, fixed 1.",
+        constraint_violations: [],
+        should_continue: true,
+        discovered_constraints: ["All external calls must use SafeERC20"],
+        execution_evidence: {
+          files_changed: ["Token.sol"],
+          test_results: { passed: 20, failed: 2, skipped: 0 },
+          success_criteria_met: ["Reentrancy guard added to withdraw()"],
+          success_criteria_remaining: ["Reentrancy guard for deposit()", "Access control audit"],
+          progress_estimate: 0.4,
+        },
+      },
+    });
+    assert.equal(r1.stopReason, undefined);
+
+    // Round 2 → stop
+    const r2 = TOOL_HANDLERS.loopforge_next(mgr, {
+      sessionId,
+      evaluation: {
+        success: true,
+        output_summary: "All reentrancy bugs fixed. 24/24 tests pass.",
+        constraint_violations: [],
+        should_continue: false,
+      },
+    });
+    assert.equal(r2.prompt, null);
+    assert.equal(r2.stopReason, "task_complete");
   });
 });
 

@@ -14,7 +14,12 @@ export declare function scanLineageMd(loopId: string, vaultPath?: string): Vault
 export declare class FSBackend implements VaultBackend {
     private readonly vaultPath;
     private readonly globalVaultPath;
+    /** Re-entrant lock depth — >0 means this process holds the lock. */
+    private lockDepth;
     constructor(vaultPath?: string, globalVaultPath?: string);
+    /** File-system mutex via mkdir (atomic on POSIX and Windows).
+     *  Re-entrant: nested calls from the same process bypass the lock. */
+    withLock<T>(fn: () => T): T;
     readVault(): Record<string, unknown>;
     writeVault(data: Record<string, unknown>): void;
     queryEntries(opts?: {

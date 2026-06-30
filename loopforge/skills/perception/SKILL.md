@@ -26,20 +26,20 @@ round (e.g. "audit the entire codebase and fix every issue").
 ## Core Workflow
 
 ```
-┌─────────────────────────────────────────────────────┐
-│  1. loopforge_start(task, constraints, maxRounds)    │
-│     → sessionId + Round 1 prompt                     │
-│                                                      │
-│  2. Execute the prompt (read, write, test, fix)      │
-│     MUST include ---loopforge-eval block in output   │
-│                                                      │
-│  3. loopforge_next(sessionId, output)                │
-│     → if prompt: go to step 2                        │
-│     → if prompt=null: loop ended, read stopReason    │
-│                                                      │
-│  After restart: loopforge_resume(loopId)             │
-│     → picks up from last saved round                 │
-└─────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│  1. loopforge_start(task, constraints, maxRounds)         │
+│     → sessionId + Round 1 prompt                          │
+│                                                           │
+│  2. Execute the prompt (read, write, test, fix)           │
+│     Prepare a structured self-evaluation                  │
+│                                                           │
+│  3. loopforge_next(sessionId, evaluation, output?)        │
+│     → if prompt: go to step 2                             │
+│     → if prompt=null: loop ended, read stopReason         │
+│                                                           │
+│  After restart: loopforge_resume(loopId)                  │
+│     → picks up from last saved round                      │
+└──────────────────────────────────────────────────────────┘
 ```
 
 ### Step-by-step
@@ -60,17 +60,37 @@ Execute the compiled prompt exactly as you would any user task. Read files,
 write code, run tests, fix bugs. The prompt already contains the task scope,
 constraints, and quality expectations for this specific round.
 
-**CRITICAL: Every round's output MUST end with a self-evaluation block:**
-```
----loopforge-eval
+After executing, prepare a structured self-evaluation. Pass it as the
+`evaluation` parameter to `loopforge_next` — do NOT embed it as a text block
+in the output. The `evaluation` parameter is a typed object with the fields
+described below.
+
+**New (v1.7+): Pass evaluation as a structured tool parameter.**
+```json
 {
   "success": true,
   "output_summary": "Fixed 3 reentrancy bugs in withdraw() and deposit(). All 12 tests pass.",
   "constraint_violations": [],
-  "should_continue": true
+  "should_continue": true,
+  "discovered_constraints": [],
+  "objective_refinement": "",
+  "emerged_subtasks": [],
+  "execution_evidence": {
+    "files_changed": ["contracts/Token.sol", "test/Token.test.ts"],
+    "test_results": {"passed": 24, "failed": 0, "skipped": 0},
+    "success_criteria_met": ["No reentrancy vectors remain"],
+    "success_criteria_remaining": ["Access control verified", "Overflow checks complete"],
+    "progress_estimate": 0.4
+  },
+  "retracted_constraints": [],
+  "revised_success_criteria": [],
+  "wrong_assumptions": []
 }
----end-loopforge-eval
 ```
+
+**Legacy (still supported):** Embed a `---loopforge-eval` block in output text
+when the agent cannot pass structured tool parameters. The new parameter form
+is preferred — it's validated by the MCP client before reaching the server.
 
 **Field rules:**
 
@@ -80,24 +100,36 @@ constraints, and quality expectations for this specific round.
 | `output_summary` | string | Specific, actionable. What was DONE this round — not what was attempted |
 | `constraint_violations` | string[] | Constraints the agent actually violated this round. Be honest — hiding violations corrupts the quality signal and defeats the circuit breaker |
 | `should_continue` | boolean | `false` ONLY when the ENTIRE task is complete. Partial progress = `true` |
+| `discovered_constraints` | string[] | **P0 (optional)** — New constraints discovered this round. They become active guardrails for future rounds. Example: `["All external calls must use SafeERC20"]`. Empty `[]` if none. |
+| `objective_refinement` | string | **P1 (optional)** — If this round deepened your understanding of what the task is really about, describe the refinement. APPENDED to (never replaces) the original objective. Empty `""` if unchanged. |
+| `emerged_subtasks` | string[] | **P2 (optional)** — Sub-problems that surfaced during execution and need separate attention. Feed into next-round task suggestions. Example: `["Audit upgrade proxy", "Verify timelock"]`. Empty `[]` if none. |
+| `execution_evidence` | object | **P4 (recommended)** — Structured record of what actually happened. `files_changed` (string[]), `test_results` ({passed, failed, skipped} | null), `success_criteria_met` (string[]), `success_criteria_remaining` (string[]), `progress_estimate` (0.0–1.0). Use this to give LoopForge real visibility into your progress. |
+| `retracted_constraints` | string[] | **P5 (optional)** — Constraints you now believe are wrong. Removed from active guardrails. Only retract with evidence. Empty `[]` if none. |
+| `revised_success_criteria` | object[] | **P5 (optional)** — Success criteria that need reformulation. Array of `{old: string, new: string}`. Applied to Loop Objective. Empty `[]` if none. |
+| `wrong_assumptions` | string[] | **P5 (optional)** — Assumptions from earlier rounds that turned out to be incorrect. Recorded as key lessons. Empty `[]` if none. |
 
-**Why this matters:** Without a valid `---loopforge-eval` block, extraction
-fails and the loop stops with `stopReason: stalled`. The circuit breaker
-uses `success` + `violations` to compute quality scores — lying here defeats
-the only mechanism that prevents infinite loops.
+**Why this matters:** The evaluation is validated by the MCP client before
+reaching the server — a missing or malformed evaluation causes an immediate
+error, not a silent stall. The circuit breaker uses `success` + `violations`
+to compute quality scores — lying here defeats the only mechanism that
+prevents infinite loops. The optional fields (P0–P5) enable cognitive
+evolution: discovering constraints, deepening understanding, surfacing
+sub-problems, tracking real progress, and correcting wrong assumptions as
+the loop executes.
 
 **Step 3 — Advance to next round:**
 ```
 Call loopforge_next with:
-  sessionId: from loopforge_start
-  output:    your FULL output from this round (including the eval block)
+  sessionId:  from loopforge_start
+  evaluation: REQUIRED — structured self-evaluation object (see field table below)
+  output:     OPTIONAL — raw output text for audit trail (can be omitted)
 ```
 
 If the result has `prompt: null`, the loop has ended. Read `stopReason`:
 - `task_complete` — you reported should_continue=false. Work is done.
 - `circuit_breaker` — quality flat or declining for 3+ rounds. Review your approach.
 - `max_rounds` — hit the round limit. Decide whether to extend or accept.
-- `stalled` — no valid self-eval block found. Check your output format.
+- `stalled` — no valid self-evaluation provided. Check your evaluation parameter.
 
 If the result has a non-null `prompt`, execute it and repeat from Step 2.
 
@@ -138,7 +170,8 @@ The prompt changes between rounds based on your trajectory. Pay attention to:
 
 ## Rules
 
-1. **Never skip the eval block.** No exceptions. If you forget, the loop stalls.
+1. **Always pass the evaluation parameter.** `loopforge_next` requires it.
+   If you omit it, the MCP client will reject the call with a schema error.
 2. **Be honest in self-evaluation.** Lying about success or hiding violations
    produces a false quality signal. The circuit breaker exists to stop bad
    loops — if you fake quality=5 every round, it fires anyway.
@@ -162,33 +195,41 @@ Agent:
                        constraints: ["must not break existing tests", "follow check-effects-interactions"] })
   ← { sessionId: "abc-123", round: 1, prompt: "## LoopForge Loop Compile — Round 1\n...", level: "l2" }
 
-  [Executes prompt: reads Token.sol, identifies 4 issues, writes audit notes]
+  [Executes prompt: reads Token.sol, identifies 4 issues, discovers a new constraint]
 
-  Output ends with:
-  ---loopforge-eval
-  {"success":false,"output_summary":"Found 4 potential issues: 2 reentrancy, 1 overflow, 1 access control. Not yet fixed.","constraint_violations":[],"should_continue":true}
-  ---end-loopforge-eval
-
-  → loopforge_next({ sessionId: "abc-123", output: <full output> })
+  → loopforge_next({ sessionId: "abc-123",
+      evaluation: {
+        success: false,
+        output_summary: "Found 4 potential issues: 2 reentrancy, 1 overflow, 1 access control. Not yet fixed.",
+        constraint_violations: [],
+        should_continue: true,
+        discovered_constraints: ["All _mint() calls must emit Transfer event per ERC20 spec"]
+      } })
   ← { sessionId: "abc-123", round: 2, prompt: "## LoopForge Loop Compile — Round 2\n...", level: "l1" }
 
-  [Executes prompt: fixes 3 issues, 1 needs more investigation]
+  [Executes prompt: fixes 3 issues, deepens understanding of access control problem]
 
-  ---loopforge-eval
-  {"success":false,"output_summary":"Fixed reentrancy in withdraw() and overflow in calcReward(). Access control issue in setOwner() needs design discussion.","constraint_violations":[],"should_continue":true}
-  ---end-loopforge-eval
+  → loopforge_next({ sessionId: "abc-123",
+      evaluation: {
+        success: false,
+        output_summary: "Fixed reentrancy in withdraw() and overflow in calcReward(). Access control in setOwner() needs design discussion — discovered it's part of a larger upgradeability concern.",
+        constraint_violations: [],
+        should_continue: true,
+        objective_refinement: "Access control audit scope expanded: setOwner() is unprotected because the contract follows an upgradeable proxy pattern where owner is set via initializer — need to verify the initializer guard and proxy admin separately",
+        emerged_subtasks: ["Audit upgrade proxy initialization flow", "Verify proxy admin is not renounced without recovery path"]
+      } })
+  ← { sessionId: "abc-123", round: 3, prompt: "## LoopForge Loop Compile — Round 3\n  Suggested Next Task: Audit upgrade proxy initialization flow; Verify proxy admin is not renounced without recovery path\n...", level: "l0" }
 
-  → loopforge_next({ sessionId: "abc-123", output: <full output> })
-  ← { sessionId: "abc-123", round: 3, prompt: "## LoopForge Loop Compile — Round 3\n...", level: "l0" }
+  [Executes prompt: audits proxy pattern, documents findings, all fixes pass tests]
 
-  [Executes prompt: documents access control issue for user decision, all fixes pass tests]
-
-  ---loopforge-eval
-  {"success":true,"output_summary":"All fixable issues resolved. 1 access control design question flagged for user. 24/24 tests pass.","constraint_violations":[],"should_continue":false}
-  ---end-loopforge-eval
-
-  → loopforge_next({ sessionId: "abc-123", output: <full output> })
+  → loopforge_next({ sessionId: "abc-123",
+      evaluation: {
+        success: true,
+        output_summary: "All fixable issues resolved. Proxy initialization verified — initializer modifier prevents double-init. Proxy admin held by multisig — low risk. 24/24 tests pass.",
+        constraint_violations: [],
+        should_continue: false
+      } })
   ← { sessionId: "abc-123", round: 3, prompt: null, stopReason: "task_complete", quality: 5 }
 
-  Reports to user: "Audit complete in 3 rounds. 3 issues fixed, 1 design question flagged."
+  Reports to user: "Audit complete in 3 rounds. 3 issues fixed, 1 design question flagged. Discovered 1 new constraint during audit. Objective deepened to include proxy pattern verification."
 ```

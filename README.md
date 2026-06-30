@@ -2,12 +2,45 @@
 
 [中文文档](README.zh-CN.md)
 
-**Loop-Time Intelligence Layer** for AI coding agents. Per-iteration prompt compiler
-with structured memory, constraint inheritance, and drift correction — maintains
-cognitive stability across long-horizon agent loops.
+**Cognitive Loop Governance Layer** for AI coding agents.
 
-> **v1.3.1** — `npm install loopforge`. MCP server (8 tools) + Perception-Skill + CLI + library API.
-> Zero runtime dependencies. 92 tests. Node.js ≥18.
+Most AI agent loops are either timer-based cron jobs (`/loop` — run the same
+thing every N minutes) or single-turn reasoning patterns (CoT, ToT, ReAct —
+think harder within one response). Neither is designed for the real problem:
+**when a task is too complex to fully decompose upfront, and your understanding
+of the task changes as you execute it.**
+
+LoopForge governs the *gap between turns* — the space where an agent finishes
+one round of work and needs to decide what to do next. It doesn't plan the
+process (you can't, because you don't know what you'll discover). It plans
+the **outcome and constraints**, then lets the agent discover the path one
+step at a time. As the agent executes, LoopForge tracks real progress, detects
+drift, merges discovered constraints, deepens the objective, and corrects
+wrong assumptions — maintaining cognitive stability across long-horizon loops.
+
+> **v1.7** — `npm install loopforge`. MCP server (8 tools) + Perception-Skill +
+> library API + Verification Gate + Structured Evaluation + Failure Lineage Weighting. Zero runtime dependencies. 202 tests. Node.js ≥18.
+
+---
+
+## The Philosophy
+
+```
+You start with a rough direction and a set of guardrails.
+You take one step. You look at what you found.
+What you found changes how you understand the task.
+So the next step is different from what you would have planned.
+This is not a bug — it's the defining feature of complex work.
+
+LoopForge formalizes this loop:
+  Execute → Self-Evaluate (with evidence) → Verify against lineage (v1.6) →
+  Discover constraints → Deepen understanding → Correct mistakes →
+  Compile next prompt → Execute again — until the outcome is achieved.
+```
+
+**This is not a timer loop.** A timer loop asks "has N minutes passed?"
+A cognitive loop asks "what did I learn, and how does that change what I
+should do next?"
 
 ---
 
@@ -18,49 +51,23 @@ cognitive stability across long-horizon agent loops.
 ```bash
 npm install -g loopforge
 claude mcp add loopforge -- npx loopforge-mcp
-# Copy the Perception-Skill for multi-round loop instructions
+# Install the Perception-Skill — teaches the agent how to run cognitive loops
 mkdir -p ~/.claude/skills/perception
 cp "$(npm root -g)/loopforge/skills/perception/SKILL.md" ~/.claude/skills/perception/
 ```
 
-Then in Claude Code / Codex: `/perception "Audit ERC20 token"` — the Perception-Skill
-handles the full loop lifecycle via MCP tools. (The agent also activates
-automatically for multi-round tasks — no explicit command needed.)
+Then just describe your task naturally:
+- `/perception "Audit ERC20 token for security issues"`
+- "Keep going until every file passes review"
+- "Take this step by step — I don't know the full scope yet"
 
-### CLI
-
-```bash
-npm install loopforge
-
-# Init vault
-npx loopforge init
-
-# Compile a prompt (loop_compile mode)
-npx loopforge compile '{"task":"Audit ERC20 token","loop_id":"audit","round":1,"goal_id":"audit"}'
-
-# v1.2: Autonomous loop — interactive mode (paste agent output each round)
-npx loopforge run '{"task":"Audit ERC20 token","loop_id":"audit-erc20"}'
-
-# Record feedback (manual mode)
-npx loopforge feedback '{"loop_id":"audit","round":1,"success":true,"score":4}'
-
-# Replay timeline
-npx loopforge replay audit
-
-# Diff two rounds
-npx loopforge diff audit 1 3
-
-# Resume a loop from vault after restart (v1.3.1)
-npx loopforge resume audit
-
-# Vault health
-npx loopforge status
-```
+The agent activates the Perception-Skill, calls `loopforge_start`, and the
+cognitive loop begins. No timer, no fixed plan — just structured discovery.
 
 ### Library API
 
 ```typescript
-import { createEngine, ReplayBackend, FSBackend } from "loopforge";
+import { createEngine } from "loopforge";
 
 const engine = createEngine();
 const result = engine.invokeLoopCompile({
@@ -70,157 +77,162 @@ const result = engine.invokeLoopCompile({
   round: 1,
   goal_id: "audit",
 });
-
-console.log(result.response?.prompt);
-console.log(result.status); // "ok" | "error" | "stalled"
 ```
 
 ```typescript
-// v1.2: Autonomous loop — 2 required fields, everything else automatic
+// Autonomous loop — 2 required fields
 import { run } from "loopforge";
 
 const result = await run({
   task: "Audit ERC20 token for security vulnerabilities",
-  execute: async (prompt) => {
-    // Your AI executor — Claude API, CLI agent, etc.
-    return await callAiApi(prompt);
-  },
+  execute: async (prompt) => await callAiApi(prompt),
 });
 
-console.log(`Completed ${result.roundsCompleted} rounds: ${result.stopReason}`);
-console.log(`Quality trajectory: ${result.qualityTrajectory}`);
-```
-
-```typescript
-// v1.3: MCP server — embed in any MCP-capable host
-import { McpServer, SessionManager } from "loopforge";
-
-const server = new McpServer();
-server.start(); // JSON-RPC over stdio
+console.log(`${result.roundsCompleted} rounds: ${result.stopReason}`);
 ```
 
 ---
 
 ## How It Works
 
-LoopForge closes the agent feedback loop. The agent self-evaluates:
+### The Cognitive Loop
 
 ```
-LoopForge compiles prompt (with self-eval instructions)
-  → Agent executes + outputs structured self-evaluation
-    → LoopForge auto-extracts feedback → vault
-      → LoopForge compiles next prompt (L0/L1/L2 auto-decided)
-        → ... loop until task complete or circuit breaker
+Round 1:
+  LoopForge compiles a prompt with:
+    - The task (your rough direction)
+    - The Loop Objective (outcome + success criteria + hard constraints)
+    - Self-evaluation instructions (structured evidence reporting)
+  → Agent executes, discovers unknowns, reports evidence
+  → LoopForge computes real progress, validates claims, merges discoveries
+
+Round 2+:
+  LoopForge compiles a NEW prompt — different from Round 1 because:
+    - New constraints were discovered (P0)
+    - The objective was deepened (P1)
+    - Emergent sub-problems surfaced (P2)
+    - Progress is tracked against success criteria (P4)
+    - Wrong assumptions were corrected (P5)
+    - Strategy may switch (CoT → ToT → Step-Back) based on trajectory
+  → Agent executes with richer context
+  → ... loop until all criteria met, circuit breaker trips, or task complete
 ```
 
-**MCP integration (v1.3):**
+### Self-Evaluation (what the agent reports each round)
 
-```
-AI Host (Claude Code / Codex)
-  → Perception-Skill activates on /perception (or auto-detects multi-round tasks)
-  → loopforge_start → compiled Round 1 prompt
-  → [Agent executes + self-eval]
-  → loopforge_next → compiled Round 2 prompt
-  → ... loop until prompt=null (task_complete / circuit_breaker / max_rounds / stalled)
-  → Process restart: loopforge_resume → pick up from last saved round (v1.3.1)
-```
-
-The self-evaluation is a 4-field JSON block embedded in every compiled prompt:
+Since v1.7, the evaluation is passed as a **structured MCP tool parameter** —
+validated by the MCP client before reaching the server. The `loopforge_next`
+tool requires an `evaluation` object; the `output` text is optional.
 
 ```json
-{
-  "success": true,
-  "output_summary": "Found 3 vulns: reentrancy in withdraw(), integer overflow in transfer(), missing access control in mint()",
-  "constraint_violations": [],
-  "should_continue": true
-}
+loopforge_next({
+  sessionId: "abc-123",
+  evaluation: {
+    "success": true,
+    "output_summary": "Fixed 3 reentrancy bugs. 24/24 tests pass.",
+    "constraint_violations": [],
+    "should_continue": true,
+
+    "discovered_constraints": ["All external calls must use SafeERC20"],
+    "objective_refinement": "Scope expanded: access control is part of a larger upgradeable proxy pattern",
+    "emerged_subtasks": ["Audit upgrade proxy initialization", "Verify timelock parameters"],
+
+    "execution_evidence": {
+      "files_changed": ["contracts/Token.sol", "test/Token.test.ts"],
+      "test_results": {"passed": 24, "failed": 0, "skipped": 0},
+      "success_criteria_met": ["No reentrancy vectors remain"],
+      "success_criteria_remaining": ["Access control verified", "Overflow checks complete"],
+      "progress_estimate": 0.4
+    },
+
+    "retracted_constraints": [],
+    "revised_success_criteria": [],
+    "wrong_assumptions": []
+  }
+})
 ```
 
-Each field is consumed by specific downstream functions — nothing decorative.
+Every field is consumed by a specific downstream function — nothing decorative.
+Legacy `---loopforge-eval` blocks in output text are still supported as fallback.
+
+### What the compiler does with this evidence
+
+| Capability | What happens |
+|-----------|-------------|
+| **P0 — Constraint Discovery** | `discovered_constraints` merged into active guardrails for future rounds |
+| **P1 — Objective Refinement** | `objective_refinement` appended to Loop Objective; version history tracked |
+| **P2 — Emergent Subtasks** | `emerged_subtasks` feed the next-round task suggestion |
+| **P4 — Progress Tracking** | Objective progress (criteria met / total) vs subjective estimate; gradient alerts |
+| **P4 — Consistency Validation** | Agent claims changes but `files_changed` empty → warning; claims success but tests failed → warning |
+| **V1.6 — Verification Gate** | Cross-round consistency checks validate every SelfEvaluation against lineage before it enters the compiler. 6 automated checks (progress regression, empty-change detection, success/remains mismatch, duplicate constraint discovery, 3-round recurring violation, retract-fresh-constraint flip-flop). 3 verdict tiers: `trusted` → normal flow; `suspect` → warnings injected into next prompt for agent clarification; `contradicted` → quality score excluded from trend, 🚫 flags become hard constraints the agent must respond to. Quality scores are NEVER modified — only the trend write is skipped. |
+| **P5 — Self-Correction** | `retracted_constraints` removed from active set; `revised_success_criteria` update the Loop Objective; `wrong_assumptions` recorded as key lessons |
+| **Progress Dashboard** | Injected into each round's prompt: files changed, test results, remaining criteria, trend arrow |
 
 ---
 
-## MCP Tools (v1.3)
+## MCP Tools (v1.7)
 
-| Tool | Input | Output |
-|------|-------|--------|
-| `loopforge_start` | `task`, `maxRounds?`, `constraints?`, `domain?` | `sessionId`, round 1 `prompt` |
-| `loopforge_next` | `sessionId`, `output` (with eval block) | next `prompt` or `null` + `stopReason` |
-| `loopforge_status` | `sessionId` | `round`, `qualityTrajectory`, `status`, `technique` |
-| `loopforge_stop` | `sessionId` | `roundsCompleted`, final trajectory |
-| `loopforge_list` | — | `sessions[]` (in-memory + vault-persisted) |
-| `loopforge_replay` | `sessionId` | `timeline[]` |
-| `loopforge_resume` | `loopId` | next `prompt` or `null` + `stopReason` (v1.3.1) |
-| `loopforge_health` | `loopId` | goal alignment, constraint integrity, drift, strategy stability (v1.3.1) |
+| Tool | Purpose |
+|------|---------|
+| `loopforge_start` | Start a loop — compiles Round 1 prompt from task + constraints |
+| `loopforge_next` | Submit evaluation (+ optional output) → get next prompt (or `null` + stop reason). Evaluation is a required typed object — validated by MCP client before reaching server. |
+| `loopforge_status` | Current round, quality trajectory, technique in use |
+| `loopforge_stop` | Manual stop with final trajectory preserved |
+| `loopforge_list` | All active sessions (in-memory + vault-persisted) |
+| `loopforge_replay` | Full timeline: rounds, techniques, quality, decisions |
+| `loopforge_resume` | Resume loop from vault after process restart |
+| `loopforge_health` | Goal alignment, constraint integrity, drift, strategy stability |
 
 Stop reasons: `task_complete` | `circuit_breaker` | `max_rounds` | `stalled` | `stopped`
 
 ---
 
-## Perception-Skill
-
-A platform-agnostic agent skill (`skills/perception/SKILL.md`) that teaches
-any AI agent how to use LoopForge MCP tools for autonomous multi-round loops.
-Copy it to your agent's skill directory — works with Claude Code, Codex, and
-any MCP-capable host.
-
----
-
-## 3 Modes
-
-| Mode | When | Returns |
-|------|------|---------|
-| **loop_compile** | Every agent loop iteration | Compiled prompt + recompile level (L0/L1/L2) + loop health + task alignment |
-| **feedback** | After execution (manual or auto) | Quality score → vault persistence |
-| **review** | Audit prompt quality | Structural checks + constraint compliance |
-
----
-
 ## Recompile Levels
 
-| Level | Trigger | What Happens |
-|-------|---------|--------------|
-| **L0 Fast Path** | goal_id unchanged, no new failures/constraints | Reuse cached prompt from previous round |
-| **L1 Patch** | New constraints, failures, or repair signals | Patch previous prompt with deltas; auto-retires stale constraints |
-| **L2 Full Recompile** | Round 1, goal_id changed, plan_source, strategy collapse | Full hydrate + adaptive technique routing + rolling summary |
-
----
-
-## CLI Commands
-
-```bash
-loopforge init                     # Initialize .promptcraft vault
-loopforge compile '<json>'         # Compile a loop prompt (or pipe JSON via stdin)
-loopforge feedback '<json>'        # Record execution feedback
-loopforge run '<json>'             # v1.2: Autonomous loop with heartbeat/timeout/stall detection
-loopforge replay <loop-id>         # Loop timeline — rounds, quality, technique per round
-loopforge diff <loop-id> <a> <b>   # Field-level diff between two rounds
-loopforge review <loop-id> <rN>    # Structural prompt audit
-loopforge resume <loop-id>          # v1.3.1: Resume loop from vault state
-loopforge status                   # Vault health summary
-```
+| Level | When | What |
+|-------|------|------|
+| **L0 Fast Path** | Goal stable, no new failures | Reuse cached prompt |
+| **L1 Patch** | New constraints, failures, repair signals | Patch previous prompt with deltas |
+| **L2 Full Recompile** | Round 1, goal changed, strategy collapse, progress stall | Full hydrate + adaptive technique routing + progress dashboard |
 
 ---
 
 ## Key Features
 
-- **MCP Server (v1.3)** — 8 tools over JSON-RPC stdio: `start`, `next`, `status`, `stop`, `list`, `replay`, `resume`, `health`. Zero-config integration with Claude Code and Codex.
-- **Session Recovery (v1.3.1)** — Sessions auto-saved to vault. `loopforge_resume` restores loop state after process restart — no more starting from round 1.
-- **Success Criteria Enforcement (v1.3.1)** — `loop_objective.success_criteria` merged into active constraints — tracked, retired, and violation-checked like hard constraints.
-- **Perception-Skill (v1.3)** — Platform-agnostic agent skill. Copy-and-paste into any MCP-capable host to enable autonomous multi-round cognitive loops. Trigger with `/perception` or natural language.
-- **Loop Runtime (v1.2)** — Event-driven autonomous loop with heartbeat monitoring, round timeout, stall detection, and graceful shutdown. Single `run({ task, execute })` function — 2 required fields.
-- **Heartbeat & Timeout** — Per-round heartbeat (configurable interval) with timeout + stall detection. Interactive mode for human-in-the-loop scenarios.
-- **Self-Evaluation Extraction** — Parses `---loopforge-eval` blocks from agent output. Falls back to heuristic extraction for graceful degradation.
-- **L0/L1/L2 Incremental Recompilation** — 4-gate hard router: force_level → first-call/plan_source → goal_id stability → failure/constraint
-- **Loop Objective Anchoring** — Auto-generated stable reference at round 1, checked every round
-- **Constraint Retirement** — Stale constraints silent for 3+ rounds auto-retire to prevent prompt bloat
-- **Rolling Summary** — Deterministic cross-round knowledge distillation from last 5 rounds
-- **Adaptive Technique Routing** — Quality-driven fallback: 2+ consecutive low-quality rounds trigger rotation
-- **Replay Engine** — Time-travel queries over vault lineage: `replay()`, `diff()`, `timeline()`
-- **Policy Externalization** — All tunables in `loop_policy.json` — constraint windows, technique chains, triggers
-- **Pluggable Backends** — `VaultBackend` interface; `FSBackend` (JSON + Markdown dual-write) ships by default
-- **Task Alignment** — Validates proposed next-task against Loop Objective — advisory drift detection
-- **Circuit Breaker** — 3 consecutive no-improvement rounds → STALLED. Separate executor-failure breaker.
+### Cognitive Evolution (v1.5)
+- **Constraint Discovery (P0)** — Agent discovers new guardrails during execution. Auto-merged into active constraints.
+- **Objective Refinement (P1)** — Understanding deepens over rounds. Objective grows a version chain — appended, never replaced.
+- **Emergent Subtasks (P2)** — Sub-problems surface organically. Feed the next-task suggestion without pre-planning.
+- **Execution Evidence (P4)** — Structured reporting of files changed, test results, criteria met/remaining, progress estimate. Gives the compiler real visibility.
+- **Progress Tracking (P4)** — Objective vs subjective progress with gradient detection. Early stall warning before the circuit breaker fires.
+- **Self-Correction (P5)** — Retract wrong constraints, revise bad success criteria, flag incorrect assumptions. The loop can admit it was wrong.
+
+### Verification Gate (v1.6)
+- **Cross-Round Self-Eval Validation** — Every agent self-evaluation is verified against the loop's lineage before it enters the compiler.
+- **6 Automated Checks** — Progress regression, empty-change detection, success-with-remaining-criteria mismatch, duplicate constraint discovery, 3-round recurring violation, retract-fresh-constraint flip-flop.
+- **3 Verdict Tiers** — `trusted` → normal flow. `suspect` → warnings injected into next prompt for agent clarification. `contradicted` → quality score excluded from quality trend; 🚫 flags become hard constraints the agent must address explicitly.
+- **Quality Score Preservation** — Quality scores are NEVER modified by the gate. Only trend writes are skipped for contradicted rounds — raw scores remain in the vault for audit.
+
+### Structured Evaluation (v1.7)
+- **Evaluation Parameter** — `loopforge_next` accepts a typed `evaluation` object validated by MCP client schema enforcement. No more regex extraction of embedded eval blocks. `output` text is optional (kept for audit trail). Legacy `---loopforge-eval` blocks still supported.
+
+### Observability (v1.7)
+- **Engine Metrics** — `getMetrics()` public getter exposes 8 health counters: vault write errors/bytes, feedback buffer stats, cache misses, analysis errors. Included in `loopforge_status` MCP tool output.
+- **Structured Event Logging** — JSON-line events to stderr when `LOOPFORGE_LOG=1` is set. 6 event types: `round_complete`, `circuit_breaker`, `gate_contradicted`, `strategy_rotated`, `vault_write_error`, `session_start` / `session_end`. Silent by default — zero overhead when not enabled.
+
+### Foundation (v1.0–v1.3)
+- **MCP Server** — 8 tools over JSON-RPC stdio. Zero-config with Claude Code and Codex.
+- **Session Recovery** — Vault-persisted sessions. `loopforge_resume` after restart.
+- **L0/L1/L2 Incremental Recompilation** — 4-gate router: force_level → first-call → goal_id stability → failure signals.
+- **Loop Objective Anchoring** — Stable outcome reference created at Round 1, refined over time.
+- **Constraint Retirement** — Stale constraints silent for 3+ rounds auto-retire.
+- **Failure Lineage Weighting** — Repeated failure patterns with same technique + similar task are detected and demoted in summaries. Failed-path lessons pushed down, marked `[Consider alternatives]`. Dead-end violations flagged `[Possible dead end]`. Explicit `### ⚠️ Failure Patterns` section in compiled prompts.
+- **Rolling Summary** — Cross-round knowledge distillation from last 5 rounds.
+- **Adaptive Technique Routing** — Zero-shot → Few-shot → CoT → Step-Back → ToT, switched by quality trajectory.
+- **Circuit Breaker** — 3 consecutive no-improvement rounds → stop. Separate executor-failure breaker.
+- **Replay Engine** — Time-travel queries: `replay()`, `diff()`, `timeline()`.
+- **Policy Externalization** — All tunables in `loop_policy.json`.
+- **Vault File Lock** — mkdir-based mutex guards all JSON vault writes. Re-entrant for same-process nesting. Concurrent-process safe — prevents lost updates from parallel sessions.
 - **Zero Dependencies** — Node.js stdlib only. TypeScript strict mode.
 
 ---
@@ -230,18 +242,19 @@ loopforge status                   # Vault health summary
 ```
 LoopForge/
 ├── loopforge/              # TypeScript package
-│   ├── src/                     # adapter, builder, cli, engine, loop-compiler, policy, protocol, replay, runtime, backends, mcp
+│   ├── src/                     # builder, engine, loop-compiler, observability, policy,
+│   │                            #   protocol, replay, runtime, verification-gate, backends, mcp
 │   ├── dist/                    # Compiled JS + type declarations
 │   ├── skills/
-│   │   └── perception/          # Perception-Skill: agent instructions for cognitive loop workflows
+│   │   └── perception/          # Perception-Skill: agent instructions for cognitive loops
 │   │       └── SKILL.md
-│   └── tests/                   # 92 tests (Node.js built-in runner)
+│   └── tests/                   # 202 tests (Node.js built-in runner)
 ├── skills/
 │   └── prompt-techniques/       # Technique reference files (read at runtime)
 │       └── references/          # zero-shot, few-shot, cot, step-back, least-to-most, tot
 ├── docs/
-│   └── loopforge-spec.md      # Semantic spec
-├── loopforge-protocol.json    # JSON Schema (draft 2020-12)
+│   └── loopforge-spec.md       # Semantic spec
+├── loopforge-protocol.json     # JSON Schema (draft 2020-12)
 └── README.md / README.zh-CN.md
 ```
 

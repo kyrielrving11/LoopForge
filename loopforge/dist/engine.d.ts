@@ -21,6 +21,16 @@ export declare function buildSelfEvaluation(raw: Record<string, unknown>): SelfE
  *  Returns a low-confidence SelfEvaluation — the autonomous runner
  *  may choose to warn the user or continue cautiously. */
 export declare function heuristicSelfEvaluation(text: string): SelfEvaluation | null;
+/** A single sub-agent delegation record (v1.9 — AgentTool mode). */
+export interface DelegationEntry {
+    index: number;
+    agentId: string;
+    subAgentType: string;
+    subTask: string;
+    resultSummary: string;
+    success: boolean;
+    discoveredConstraints: string[];
+}
 export interface EngineMetrics {
     vaultWriteErrors: number;
     vaultWriteTimeouts: number;
@@ -49,6 +59,10 @@ export declare class LoopForgeEngine {
     private persistFeedbackToVault;
     flushFeedbackBuffer(): number;
     private persistLoopLineage;
+    /** Record sub-agent delegations for this round into the vault.
+     *  Written as a lightweight journal entry so the main agent's rolling
+     *  summary can reference delegation history in subsequent rounds. */
+    recordDelegation(loopId: string, round: number, entries: DelegationEntry[]): void;
     hydrateLoopContext(loopId: string): Record<string, unknown> | null;
     invokeFeedback(request: LoopForgeRequest, _hydrateResults?: Record<string, unknown> | null): AgentLoopResult;
     /** Record self-evaluation from agent output without human intervention.

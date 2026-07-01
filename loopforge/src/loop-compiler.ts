@@ -85,6 +85,163 @@ export function jaccard(a: Set<string>, b: Set<string>): number {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Delegation helpers (v1.9 — AgentTool mode lightweight utilities)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** Filter relevant constraints for a sub-agent task using Jaccard token similarity.
+ *  Returns constraints whose token overlap with the subTask exceeds the threshold.
+ *  Default threshold 0.15 is intentionally lower than the 0.3/0.5 alignment thresholds
+ *  — constraint filtering should err on the side of inclusion. */
+export function filterConstraintsForSubTask(
+  allConstraints: string[],
+  subTask: string,
+  threshold = 0.15,
+): string[] {
+  if (!allConstraints.length || !subTask.trim()) return [];
+  const taskTokens = tokenize(subTask);
+  if (taskTokens.size === 0) return [];
+  return allConstraints.filter((c) => {
+    const cTokens = tokenize(c);
+    return jaccard(taskTokens, cTokens) >= threshold;
+  });
+}
+
+/** Format a self-contained delegation prompt for a sub-agent.
+ *  Produces a prompt that stands alone — no references to parent conversation,
+ *  no "based on above", no "continue from previous". This matches the AgentTool
+ *  contract: "Workers can't see your conversation." */
+export function formatDelegationPrompt(
+  subTask: string,
+  subAgentType: string,
+  relevantConstraints: string[],
+  options?: { context?: string; outputFormat?: string },
+): string {
+  const lines: string[] = [];
+
+  // Header
+  lines.push("### Delegated Task");
+  lines.push("");
+  lines.push(subTask);
+  lines.push("");
+
+  // Context (optional — e.g. file paths, module names)
+  if (options?.context) {
+    lines.push("### Context");
+    lines.push("");
+    lines.push(options.context);
+    lines.push("");
+  }
+
+  // Constraints (only for types that need them — Explore is read-only)
+  if (relevantConstraints.length && subAgentType !== "explore") {
+    lines.push("### Relevant Constraints");
+    for (const c of relevantConstraints) lines.push(`- ${c}`);
+    lines.push("");
+  }
+
+  // Output format (for Explore and Plan agents)
+  if (subAgentType === "explore") {
+    if (options?.outputFormat) {
+      lines.push("### Output Format");
+      lines.push("");
+      lines.push(options.outputFormat);
+      lines.push("");
+    } else {
+      lines.push("### Output Format");
+      lines.push("");
+      lines.push("Report findings as a structured list with file paths and line numbers.");
+      lines.push("");
+    }
+  }
+
+  if (subAgentType === "plan") {
+    lines.push("### Instructions");
+    lines.push("");
+    lines.push("Design a concrete implementation plan. Output must include:");
+    lines.push("- Step-by-step approach");
+    lines.push("- Critical files for implementation (3-5 files with paths)");
+    lines.push("- Key design decisions and tradeoffs");
+    lines.push("");
+  }
+
+  if (subAgentType === "general-purpose") {
+    lines.push("### Instructions");
+    lines.push("");
+    lines.push("Complete the task fully — don't gold-plate, but don't leave it half-done.");
+    lines.push("Report what was done, what files were changed, and any issues encountered.");
+    lines.push("");
+  }
+
+  if (!["explore", "general-purpose", "plan"].includes(subAgentType)) {
+    // Custom sub-agent type — generic template
+    lines.push("### Instructions");
+    lines.push("");
+    lines.push("Complete the task above and report results concisely.");
+    lines.push("");
+  }
+
+  return lines.join("\n");
+}
+
+/** Build a delegation history summary from vault context (v1.9 — multi-agent).
+ *  Scans vault for delegation_journal entries and formats them as a table.
+ *  Returns empty string if no delegation history exists. */
+export function buildDelegationSummary(
+  vaultContext: Record<string, unknown> | null,
+): string {
+  if (!vaultContext) return "";
+  const results = vaultContext.results as Record<string, unknown>[] | undefined;
+  if (!results?.length) return "";
+
+  const delegations = results.filter(
+    (r) => r?.task_type === "delegation_journal",
+  );
+  if (!delegations.length) return "";
+
+  // Helper: escape pipe characters so they don't break the markdown table
+  const esc = (s: string): string => s.replace(/\|/g, "\\|");
+
+  // Collect all delegation entries across rounds
+  const entries: { round: number; agentId: string; type: string; task: string; result: string; success: boolean }[] = [];
+  for (const d of delegations) {
+    const lineage = d.loop_lineage as Record<string, unknown> | undefined;
+    const round = typeof lineage?.round === "number" ? lineage.round : 0;
+    const dels = lineage?.delegations as Array<Record<string, unknown>> | undefined;
+    if (!dels?.length) continue;
+    for (const e of dels) {
+      entries.push({
+        round,
+        agentId: typeof e.agentId === "string" ? e.agentId : (typeof e.index === "number" ? `worker-${e.index}` : "?"),
+        type: typeof e.subAgentType === "string" ? e.subAgentType : "?",
+        task: typeof e.subTask === "string" ? e.subTask : "?",
+        result: typeof e.resultSummary === "string" ? e.resultSummary : "?",
+        success: typeof e.success === "boolean" ? e.success : true,
+      });
+    }
+  }
+
+  if (!entries.length) return "";
+
+  const lines: string[] = [
+    "",
+    "### Delegation History (Multi-Agent)",
+    "",
+    "| Round | Agent | Type | Task | Result | ✓/✗ |",
+    "|-------|-------|------|------|--------|-----|",
+  ];
+  for (const e of entries) {
+    const status = e.success ? "✓" : "✗";
+    const shortAgent = e.agentId.length > 24 ? e.agentId.slice(0, 21) + "..." : e.agentId;
+    const shortTask = e.task.length > 50 ? e.task.slice(0, 47) + "..." : e.task;
+    const shortResult = e.result.length > 40 ? e.result.slice(0, 37) + "..." : e.result;
+    lines.push(`| R${e.round} | ${esc(shortAgent)} | ${e.type} | ${esc(shortTask)} | ${esc(shortResult)} | ${status} |`);
+  }
+  lines.push("");
+
+  return lines.join("\n");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Goal identity
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -2203,6 +2360,14 @@ export function compileLoop(
 
   // v1.1: Append self-evaluation block for autonomous loop feedback
   response.prompt += buildSelfEvalBlock(request.round);
+
+  // Multi-agent: Inject delegation history if available
+  if (vaultContext) {
+    const delegationText = buildDelegationSummary(vaultContext);
+    if (delegationText) {
+      response.prompt += delegationText;
+    }
+  }
 
   return response;
 }

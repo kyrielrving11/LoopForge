@@ -35,7 +35,13 @@ function buildLoopRequest(session, lastEval, lastQuality, verificationFlags) {
             manual_fixes_needed: "",
             quality_score: lastQuality,
             // P0–P2: Forward evolution fields to next compile
-            discovered_constraints: lastEval.discovered_constraints ?? [],
+            // Merge sub-agent discovered constraints into the active set
+            discovered_constraints: [
+                ...new Set([
+                    ...(lastEval.discovered_constraints ?? []),
+                    ...(lastEval.worker_results ?? []).flatMap((w) => w.discoveredConstraints ?? []).filter((c) => c.length > 0),
+                ]),
+            ],
             objective_refinement: lastEval.objective_refinement ?? "",
             emerged_subtasks: lastEval.emerged_subtasks ?? [],
             // P4: Execution evidence
@@ -44,6 +50,8 @@ function buildLoopRequest(session, lastEval, lastQuality, verificationFlags) {
             retracted_constraints: lastEval.retracted_constraints ?? [],
             revised_success_criteria: lastEval.revised_success_criteria ?? [],
             wrong_assumptions: lastEval.wrong_assumptions ?? [],
+            // Multi-agent: Forward delegation results to next compile
+            worker_results: lastEval.worker_results ?? [],
         };
     }
     return req;

@@ -184,6 +184,37 @@ export declare const TOOL_SCHEMAS: ({
                         };
                         description: string;
                     };
+                    worker_results: {
+                        type: "array";
+                        description: string;
+                        items: {
+                            type: "object";
+                            properties: {
+                                agentId: {
+                                    type: "string";
+                                };
+                                subAgentType: {
+                                    type: "string";
+                                };
+                                subTask: {
+                                    type: "string";
+                                };
+                                resultSummary: {
+                                    type: "string";
+                                };
+                                success: {
+                                    type: "boolean";
+                                };
+                                discoveredConstraints: {
+                                    type: "array";
+                                    items: {
+                                        type: "string";
+                                    };
+                                };
+                            };
+                            required: string[];
+                        };
+                    };
                 };
             };
             task?: undefined;

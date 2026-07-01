@@ -122,6 +122,20 @@ export interface SelfEvaluation {
      *  be wrong. Recorded in the rolling summary as key lessons.
      *  Omit or leave empty if none. */
     wrong_assumptions?: string[];
+    /** Multi-agent: Results of sub-agent / Worker delegations this round.
+     *  The main agent (or Coordinator) reports what it delegated.
+     *  The engine automatically writes these to the delegation journal.
+     *  Omit or leave empty if no delegations occurred. */
+    worker_results?: WorkerResult[];
+}
+/** A single sub-agent / Worker delegation result (v1.9 — multi-agent). */
+export interface WorkerResult {
+    agentId: string;
+    subAgentType: string;
+    subTask: string;
+    resultSummary: string;
+    success: boolean;
+    discoveredConstraints?: string[];
 }
 export declare function makeSelfEvaluation(overrides?: Partial<SelfEvaluation>): SelfEvaluation;
 /** Regex to extract a self-evaluation JSON block from agent output. */
@@ -200,6 +214,9 @@ export interface LoopRoundResult {
     revised_success_criteria?: CriterionRevision[];
     /** P5: Wrong assumptions identified this round. */
     wrong_assumptions?: string[];
+    /** Multi-agent: Delegation results from this round.
+     *  Set from SelfEvaluation.worker_results during buildLoopRequest. */
+    worker_results?: WorkerResult[];
 }
 export declare function makeLoopRoundResult(overrides?: Partial<LoopRoundResult>): LoopRoundResult;
 export interface LoopCompileRequest {

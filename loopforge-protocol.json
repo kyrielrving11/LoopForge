@@ -221,6 +221,12 @@
           "items": {
             "type": "string"
           }
+        },
+        "worker_results": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WorkerResult"
+          }
         }
       },
       "required": [
@@ -230,6 +236,40 @@
         "should_continue"
       ],
       "description": "Structured self-evaluation embedded in compiled prompts.\nThe agent outputs this after completing each round.\nEvery field is consumed by at least one downstream function.\n\nv1.4 (P0–P2): Three new optional fields enable cognitive evolution.\nv1.5 (P4–P5): Execution evidence, progress tracking, and self-correction."
+    },
+    "WorkerResult": {
+      "type": "object",
+      "properties": {
+        "agentId": {
+          "type": "string"
+        },
+        "subAgentType": {
+          "type": "string"
+        },
+        "subTask": {
+          "type": "string"
+        },
+        "resultSummary": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "discoveredConstraints": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "agentId",
+        "subAgentType",
+        "subTask",
+        "resultSummary",
+        "success"
+      ],
+      "description": "A single sub-agent / Worker delegation result (v1.9 — multi-agent)."
     },
     "LoopForgeRequest": {
       "type": "object",
@@ -480,6 +520,12 @@
           "type": "array",
           "items": {
             "type": "string"
+          }
+        },
+        "worker_results": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WorkerResult"
           }
         }
       },

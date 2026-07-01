@@ -12,6 +12,23 @@
 import { type LoopCompileRequest, type LoopCompileResponse, type LoopHealth, type RollingSummary, type TaskAlignment } from "./protocol.js";
 export declare function tokenize(text: string): Set<string>;
 export declare function jaccard(a: Set<string>, b: Set<string>): number;
+/** Filter relevant constraints for a sub-agent task using Jaccard token similarity.
+ *  Returns constraints whose token overlap with the subTask exceeds the threshold.
+ *  Default threshold 0.15 is intentionally lower than the 0.3/0.5 alignment thresholds
+ *  — constraint filtering should err on the side of inclusion. */
+export declare function filterConstraintsForSubTask(allConstraints: string[], subTask: string, threshold?: number): string[];
+/** Format a self-contained delegation prompt for a sub-agent.
+ *  Produces a prompt that stands alone — no references to parent conversation,
+ *  no "based on above", no "continue from previous". This matches the AgentTool
+ *  contract: "Workers can't see your conversation." */
+export declare function formatDelegationPrompt(subTask: string, subAgentType: string, relevantConstraints: string[], options?: {
+    context?: string;
+    outputFormat?: string;
+}): string;
+/** Build a delegation history summary from vault context (v1.9 — multi-agent).
+ *  Scans vault for delegation_journal entries and formats them as a table.
+ *  Returns empty string if no delegation history exists. */
+export declare function buildDelegationSummary(vaultContext: Record<string, unknown> | null): string;
 export declare function computeGoalTextHash(task: string): string;
 export declare function deriveGoalId(loopId: string, task: string, explicitGoalId?: string): string;
 interface PreviousRound {

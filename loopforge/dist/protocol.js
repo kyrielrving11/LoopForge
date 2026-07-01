@@ -79,6 +79,7 @@ export function makeSelfEvaluation(overrides = {}) {
         retracted_constraints: [],
         revised_success_criteria: [],
         wrong_assumptions: [],
+        worker_results: [],
         ...overrides,
     };
 }

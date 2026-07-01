@@ -1,6 +1,6 @@
 ---
 name: perception
-description: Multi-round autonomous loop driver powered by LoopForge MCP. Compiles context-aware prompts per iteration, tracks quality, inherits constraints, and stops when work is done — not when rounds run out.
+description: Multi-round autonomous loop driver powered by LoopForge MCP. Compiles context-aware prompts per iteration, tracks quality, inherits constraints, and stops when work is done — not when rounds run out. Supports single-agent and multi-agent (AgentTool / Coordinator) scenarios.
 ---
 
 # Perception — Loop-Time Intelligence Skill
@@ -12,6 +12,11 @@ detection — maintaining cognitive stability across long-horizon loops.
 
 Works with Claude Code, Codex, and any MCP-capable host. Zero configuration
 beyond having `loopforge-mcp` registered as an MCP server.
+
+**Multi-Agent:** When you spawn sub-agents (AgentTool) or orchestrate Workers
+(Coordinator mode), LoopForge tracks delegation history, inherits constraints
+across Workers, and injects structured summaries into subsequent prompts.
+No separate mode required — LoopForge treats all agents the same.
 
 ## When to Activate
 
@@ -107,6 +112,7 @@ is preferred — it's validated by the MCP client before reaching the server.
 | `retracted_constraints` | string[] | **P5 (optional)** — Constraints you now believe are wrong. Removed from active guardrails. Only retract with evidence. Empty `[]` if none. |
 | `revised_success_criteria` | object[] | **P5 (optional)** — Success criteria that need reformulation. Array of `{old: string, new: string}`. Applied to Loop Objective. Empty `[]` if none. |
 | `wrong_assumptions` | string[] | **P5 (optional)** — Assumptions from earlier rounds that turned out to be incorrect. Recorded as key lessons. Empty `[]` if none. |
+| `worker_results` | object[] | **Multi-Agent (optional)** — Results of sub-agent / Worker delegations this round. Each entry: `{ agentId, subAgentType, subTask, resultSummary, success, discoveredConstraints? }`. Engine auto-records to delegation journal. Empty `[]` if no delegations. |
 
 **Why this matters:** The evaluation is validated by the MCP client before
 reaching the server — a missing or malformed evaluation causes an immediate
@@ -145,6 +151,51 @@ If the result has a non-null `prompt`, execute it and repeat from Step 2.
 | `loopforge_replay` | After loop ends, user asks "show me what happened" | `sessionId` | `timeline[]` with all rounds |
 | `loopforge_resume` | Resume a loop after process restart | `loopId` | next `prompt` or `null` + `stopReason` |
 | `loopforge_health` | Check loop health mid-run | `loopId` | goal alignment, constraint integrity, drift, strategy |
+
+## Delegation Helpers (AgentTool Mode)
+
+When you spawn sub-agents via `AgentTool` (Explore, General-purpose, Plan)
+during a loop round, use these helpers to improve delegation quality:
+
+**Before delegating:**
+1. **Filter constraints** — not all active constraints apply to every sub-agent.
+   An Explore agent searching for deprecated APIs doesn't need "all files must
+   have a license header." Use `filterConstraintsForSubTask(allConstraints, subTask)`
+   to get only the relevant subset.
+2. **Format the prompt** — use `formatDelegationPrompt(subTask, subAgentType,
+   relevantConstraints, options?)` to produce a self-contained prompt. This is
+   critical: sub-agents cannot see your conversation. Every prompt must stand
+   alone — no "based on above," no "continue from previous."
+
+**After delegating (in your self-evaluation):**
+Include `worker_results` in your evaluation to record what you delegated.
+The engine auto-detects this field and writes delegation journals to the vault:
+
+```json
+{
+  "worker_results": [
+    {
+      "agentId": "abc123",
+      "subAgentType": "explore",
+      "subTask": "Search for deprecated API usage in src/",
+      "resultSummary": "Found 12 deprecated calls across 8 files",
+      "success": true,
+      "discoveredConstraints": ["All API calls must be versioned"]
+    }
+  ]
+}
+```
+
+This feeds into the delegation history table displayed in future rounds.
+Constraints discovered by sub-agents flow into the active constraint set
+automatically — they appear in future prompts alongside main-agent constraints.
+Delegation recording is lightweight — it's the main agent's memory,
+not sub-agent memory.
+
+**Important:** These helpers are optional. If your sub-task is trivial (e.g.
+"read file X and report line 42"), a raw prompt is fine. Use the helpers when
+sub-tasks involve constraints, specific output formats, or results worth
+remembering across rounds.
 
 ## Quality Signals (Read the Room)
 

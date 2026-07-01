@@ -116,6 +116,29 @@ export function buildSelfEvaluation(
     ? raw.wrong_assumptions.filter((v: unknown) => typeof v === "string")
     : [];
 
+  // Multi-agent: Parse worker delegation results
+  const workerResults: import("./protocol.js").WorkerResult[] = Array.isArray(raw.worker_results)
+    ? raw.worker_results
+        .filter((v: unknown) =>
+          typeof v === "object" && v !== null &&
+          typeof (v as Record<string, unknown>).agentId === "string" &&
+          typeof (v as Record<string, unknown>).subTask === "string" &&
+          typeof (v as Record<string, unknown>).resultSummary === "string")
+        .map((v: unknown) => {
+          const w = v as Record<string, unknown>;
+          return {
+            agentId: w.agentId as string,
+            subAgentType: typeof w.subAgentType === "string" ? w.subAgentType : "general-purpose",
+            subTask: w.subTask as string,
+            resultSummary: w.resultSummary as string,
+            success: typeof w.success === "boolean" ? w.success : false,
+            discoveredConstraints: Array.isArray(w.discoveredConstraints)
+              ? w.discoveredConstraints.filter((c: unknown) => typeof c === "string")
+              : [],
+          };
+        })
+    : [];
+
   return makeSelfEvaluation({
     success: typeof raw.success === "boolean" ? raw.success : false,
     output_summary: typeof raw.output_summary === "string" ? raw.output_summary : "",
@@ -139,6 +162,8 @@ export function buildSelfEvaluation(
     retracted_constraints: retractedConstraints,
     revised_success_criteria: revisedCriteria,
     wrong_assumptions: wrongAssumptions,
+    // Multi-agent: Worker delegation results
+    worker_results: workerResults,
   });
 }
 
@@ -172,6 +197,17 @@ export function heuristicSelfEvaluation(text: string): SelfEvaluation | null {
 // ═══════════════════════════════════════════════════════════════════════════
 // Engine Metrics
 // ═══════════════════════════════════════════════════════════════════════════
+
+/** A single sub-agent delegation record (v1.9 — AgentTool mode). */
+export interface DelegationEntry {
+  index: number;
+  agentId: string;
+  subAgentType: string;
+  subTask: string;
+  resultSummary: string;
+  success: boolean;
+  discoveredConstraints: string[];
+}
 
 export interface EngineMetrics {
   vaultWriteErrors: number;
@@ -419,6 +455,49 @@ export class LoopForgeEngine {
   }
 
   // ═══════════════════════════════════════════════════════════════════════
+  // Delegation journal (v1.9 — AgentTool mode)
+  // ═══════════════════════════════════════════════════════════════════════
+
+  /** Record sub-agent delegations for this round into the vault.
+   *  Written as a lightweight journal entry so the main agent's rolling
+   *  summary can reference delegation history in subsequent rounds. */
+  recordDelegation(
+    loopId: string,
+    round: number,
+    entries: DelegationEntry[],
+  ): void {
+    if (!entries.length) return;
+    const entry: VaultEntry = {
+      id: randomUUID(),
+      task_id: `loop:${loopId}:r${round}:delegations`,
+      version_tag: "v1",
+      is_active: true,
+      timestamp: new Date().toISOString().replace(/\.\d+Z$/, ""),
+      user_intent: `Delegation journal — round ${round}`,
+      task_type: "delegation_journal",
+      loop_id: loopId,
+      loop_lineage: {
+        round,
+        delegations: entries.map((e) => ({
+          index: e.index,
+          agentId: e.agentId,
+          subAgentType: e.subAgentType,
+          subTask: e.subTask,
+          resultSummary: e.resultSummary,
+          success: e.success,
+          discoveredConstraints: e.discoveredConstraints,
+        })),
+      },
+    };
+    try {
+      this.resolveBackend().appendEntry(entry);
+    } catch {
+      if (this.metrics) this.metrics.vaultWriteErrors++;
+      logEvent("vault_write_error", { error: "record_delegation" });
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
   // Hydrate loop context from vault
   // ═══════════════════════════════════════════════════════════════════════
 
@@ -640,6 +719,14 @@ export class LoopForgeEngine {
 
     const taskId = `loop:${loopId}:r${round}:feedback`;
 
+    // Multi-agent: Merge sub-agent discovered constraints into the main constraint flow
+    const subDiscovered = (selfEval.worker_results ?? [])
+      .flatMap((w) => w.discoveredConstraints ?? [])
+      .filter((c) => c.length > 0);
+    const mergedDiscovered = [
+      ...new Set([...(selfEval.discovered_constraints ?? []), ...subDiscovered]),
+    ];
+
     const signal: Record<string, unknown> = {
       task_id: taskId,
       task_type: task.slice(0, 80),
@@ -650,7 +737,7 @@ export class LoopForgeEngine {
       loop_id: loopId,
       round,
       // P0–P2: Evolution fields
-      discovered_constraints: selfEval.discovered_constraints ?? [],
+      discovered_constraints: mergedDiscovered,
       objective_refinement: selfEval.objective_refinement ?? "",
       emerged_subtasks: selfEval.emerged_subtasks ?? [],
       // P4: Execution evidence
@@ -659,9 +746,25 @@ export class LoopForgeEngine {
       retracted_constraints: selfEval.retracted_constraints ?? [],
       revised_success_criteria: selfEval.revised_success_criteria ?? [],
       wrong_assumptions: selfEval.wrong_assumptions ?? [],
+      // Multi-agent: Worker delegation results
+      worker_results: selfEval.worker_results ?? [],
     };
     this.persistFeedbackToVault(signal);
     this.flushFeedbackBuffer();
+
+    // Multi-agent: Auto-record delegation journal from worker_results
+    if (selfEval.worker_results && selfEval.worker_results.length > 0) {
+      const entries = selfEval.worker_results.map((w, i) => ({
+        index: i + 1,
+        agentId: w.agentId,
+        subAgentType: w.subAgentType,
+        subTask: w.subTask,
+        resultSummary: w.resultSummary,
+        success: w.success,
+        discoveredConstraints: w.discoveredConstraints ?? [],
+      }));
+      this.recordDelegation(loopId, round, entries);
+    }
 
     // Update state
     this.state!.call_count++;
@@ -785,6 +888,21 @@ export class LoopForgeEngine {
           revised_success_criteria: revisedCriteria,
           wrong_assumptions: Array.isArray(rr.wrong_assumptions)
             ? (rr.wrong_assumptions as string[]).filter((v: unknown) => typeof v === "string")
+            : [],
+          // Multi-agent: Worker delegation results
+          worker_results: Array.isArray(rr.worker_results)
+            ? (rr.worker_results as Array<Record<string, unknown>>)
+                .filter((v) => typeof v?.agentId === "string" && typeof v?.subTask === "string")
+                .map((v) => ({
+                  agentId: v.agentId as string,
+                  subAgentType: typeof v.subAgentType === "string" ? v.subAgentType : "general-purpose",
+                  subTask: v.subTask as string,
+                  resultSummary: typeof v.resultSummary === "string" ? v.resultSummary : "",
+                  success: typeof v.success === "boolean" ? v.success : false,
+                  discoveredConstraints: Array.isArray(v.discoveredConstraints)
+                    ? (v.discoveredConstraints as string[])
+                    : [],
+                }))
             : [],
         });
       }

@@ -17,6 +17,7 @@ import {
   makeLoopCompileResponse,
   makeSessionState,
   makeTaskId,
+  makeSelfEvaluation,
 } from "../protocol.js";
 
 describe("Protocol — Enums", () => {
@@ -81,5 +82,18 @@ describe("Protocol — Factory functions", () => {
   it("makeTaskId derives kebab-case from description", () => {
     assert.equal(makeTaskId("Audit ERC20 token"), "audit-erc20-token");
     assert.equal(makeTaskId(""), "unnamed-task");
+  });
+
+  it("makeSelfEvaluation includes worker_results default", () => {
+    const se = makeSelfEvaluation();
+    assert.deepEqual(se.worker_results, []);
+  });
+
+  it("makeSelfEvaluation accepts worker_results override", () => {
+    const wr = [{ agentId: "abc", subAgentType: "explore", subTask: "search", resultSummary: "found 3 bugs", success: true }];
+    const se = makeSelfEvaluation({ worker_results: wr });
+    assert.equal(se.worker_results!.length, 1);
+    assert.equal(se.worker_results![0].agentId, "abc");
+    assert.equal(se.worker_results![0].success, true);
   });
 });

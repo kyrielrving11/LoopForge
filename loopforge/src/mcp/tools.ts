@@ -156,6 +156,25 @@ export const TOOL_SCHEMAS = [
               items: { type: "string" as const },
               description: "Optional. Assumptions from earlier rounds that were incorrect.",
             },
+            worker_results: {
+              type: "array" as const,
+              description: "Optional. Results of sub-agent / Worker delegations this round.",
+              items: {
+                type: "object" as const,
+                properties: {
+                  agentId: { type: "string" as const },
+                  subAgentType: { type: "string" as const },
+                  subTask: { type: "string" as const },
+                  resultSummary: { type: "string" as const },
+                  success: { type: "boolean" as const },
+                  discoveredConstraints: {
+                    type: "array" as const,
+                    items: { type: "string" as const },
+                  },
+                },
+                required: ["agentId", "subAgentType", "subTask", "resultSummary", "success"],
+              },
+            },
           },
         },
       },

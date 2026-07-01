@@ -60,6 +60,7 @@ export type {
   LoopForgeResponse,
   SessionState,
   AgentLoopResult,
+  WorkerResult,
 } from "./protocol.js";
 
 // Policy
@@ -109,6 +110,9 @@ export {
   buildSelfEvalBlock,
   buildRollingSummary,
   formatRollingSummaryForPrompt,
+  filterConstraintsForSubTask,
+  formatDelegationPrompt,
+  buildDelegationSummary,
 } from "./loop-compiler.js";
 
 // Replay
@@ -123,7 +127,7 @@ export {
   buildSelfEvaluation,
 } from "./engine.js";
 
-export type { EngineMetrics } from "./engine.js";
+export type { EngineMetrics, DelegationEntry } from "./engine.js";
 
 // Runtime (v1.2)
 export { LoopRuntime, run } from "./runtime.js";

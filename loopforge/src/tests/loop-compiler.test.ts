@@ -12,6 +12,9 @@ import {
   compileL2,
   buildRollingSummary,
   formatRollingSummaryForPrompt,
+  filterConstraintsForSubTask,
+  formatDelegationPrompt,
+  buildDelegationSummary,
 } from "../loop-compiler.js";
 import {
   makeLoopCompileRequest,
@@ -676,5 +679,317 @@ describe("Failure Lineage Weighting — formatRollingSummaryForPrompt", () => {
     assert.equal(formatRollingSummaryForPrompt(null), "");
     const empty = makeRollingSummary({ rounds_sampled: 0 });
     assert.equal(formatRollingSummaryForPrompt(empty), "");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Delegation Helpers (v1.9 — AgentTool mode)
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("Delegation Helpers — filterConstraintsForSubTask", () => {
+  const constraints = [
+    "all APIs must have rate limiting",
+    "use TypeScript strict mode",
+    "all files must have license header",
+    "every function needs unit tests",
+    "禁止使用 any 类型",
+  ];
+
+  it("returns empty array for empty constraints", () => {
+    assert.deepEqual(
+      filterConstraintsForSubTask([], "search for deprecated API"),
+      [],
+    );
+  });
+
+  it("returns empty array for empty subTask", () => {
+    assert.deepEqual(filterConstraintsForSubTask(constraints, ""), []);
+    assert.deepEqual(filterConstraintsForSubTask(constraints, "   "), []);
+  });
+
+  it("returns only relevant constraints by Jaccard similarity", () => {
+    // "search for deprecated API usage in src/" should NOT match
+    // rate limiting, strict mode, license headers, or unit tests
+    const result = filterConstraintsForSubTask(
+      constraints,
+      "search for deprecated API usage in src/",
+    );
+    assert.equal(result.length, 0);
+  });
+
+  it("returns relevant constraint when task overlaps", () => {
+    // "add rate limiting to all API endpoints" should match
+    // "all APIs must have rate limiting"
+    const result = filterConstraintsForSubTask(
+      constraints,
+      "add rate limiting to all API endpoints",
+    );
+    assert.ok(result.length >= 1);
+    assert.ok(result.some((c) => c.includes("rate limiting")));
+  });
+
+  it("returns at least one constraint when task has TypeScript+testing overlap", () => {
+    // "add TypeScript unit tests for all API functions" overlaps with
+    // "every function needs unit tests" (Jaccard ~0.2);
+    // "use TypeScript strict mode" overlap is too low (Jaccard ~0.1)
+    const result = filterConstraintsForSubTask(
+      constraints,
+      "add TypeScript unit tests for all API functions",
+    );
+    assert.ok(result.length >= 1);
+    assert.ok(result.some((c) => c.includes("unit tests")));
+  });
+
+  it("custom threshold filters more aggressively", () => {
+    // With threshold 0.5, should return very few constraints
+    const lenient = filterConstraintsForSubTask(
+      constraints,
+      "add rate limiting to all API endpoints",
+      0.15,
+    );
+    const strict = filterConstraintsForSubTask(
+      constraints,
+      "add rate limiting to all API endpoints",
+      0.5,
+    );
+    assert.ok(strict.length <= lenient.length);
+  });
+
+  it("supports CJK subTask with CJK constraints", () => {
+    const cjkConstraints = [
+      "所有API必须有速率限制",
+      "使用TypeScript严格模式",
+    ];
+    // "搜索废弃的API" doesn't overlap with rate limiting or strict mode
+    const result = filterConstraintsForSubTask(
+      cjkConstraints,
+      "搜索废弃的API使用情况",
+    );
+    assert.equal(result.length, 0);
+  });
+
+  it("matches CJK constraint with overlapping CJK subTask", () => {
+    const cjkConstraints = [
+      "所有API必须有速率限制",
+      "所有文件必须有许可证头",
+    ];
+    const result = filterConstraintsForSubTask(
+      cjkConstraints,
+      "为API添加速率限制",
+    );
+    assert.ok(result.length >= 1);
+    assert.ok(result.some((c) => c.includes("速率限制")));
+  });
+});
+
+describe("Delegation Helpers — formatDelegationPrompt", () => {
+  const subTask = "search for deprecated API usage in src/";
+  const constraints = ["all APIs must have rate limiting"];
+
+  it("generates self-contained explore prompt", () => {
+    const prompt = formatDelegationPrompt(subTask, "explore", []);
+    assert.ok(prompt.includes("### Delegated Task"));
+    assert.ok(prompt.includes(subTask));
+    assert.ok(prompt.includes("### Output Format"));
+    // Explore should NOT get constraints
+    assert.ok(!prompt.includes("### Relevant Constraints"));
+    // Must be self-contained
+    assert.ok(!prompt.match(/based on (above|previous|your findings)/i));
+    assert.ok(!prompt.includes("continue from"));
+  });
+
+  it("generates general-purpose prompt with constraints", () => {
+    const prompt = formatDelegationPrompt(
+      "fix the null pointer in src/auth/validate.ts:42",
+      "general-purpose",
+      constraints,
+    );
+    assert.ok(prompt.includes("### Delegated Task"));
+    assert.ok(prompt.includes("### Relevant Constraints"));
+    assert.ok(prompt.includes("rate limiting"));
+    assert.ok(prompt.includes("don't leave it half-done"));
+    // Must be self-contained
+    assert.ok(!prompt.match(/based on (above|previous|your findings)/i));
+  });
+
+  it("generates plan prompt with instructions", () => {
+    const prompt = formatDelegationPrompt(
+      "design authentication middleware",
+      "plan",
+      constraints,
+      { context: "Current auth is JWT-based in src/auth/" },
+    );
+    assert.ok(prompt.includes("### Delegated Task"));
+    assert.ok(prompt.includes("### Context"));
+    assert.ok(prompt.includes("JWT-based"));
+    assert.ok(prompt.includes("### Relevant Constraints"));
+    assert.ok(prompt.includes("Critical files for implementation"));
+    assert.ok(prompt.includes("3-5 files"));
+  });
+
+  it("skips constraints section when empty", () => {
+    const prompt = formatDelegationPrompt(
+      subTask,
+      "general-purpose",
+      [],
+    );
+    assert.ok(!prompt.includes("### Relevant Constraints"));
+  });
+
+  it("custom sub-agent type gets generic template", () => {
+    const prompt = formatDelegationPrompt(
+      subTask,
+      "custom-auditor",
+      constraints,
+    );
+    assert.ok(prompt.includes("### Delegated Task"));
+    assert.ok(prompt.includes("### Relevant Constraints"));
+    assert.ok(prompt.includes("Complete the task above"));
+  });
+
+  it("output is self-contained — no parent-context references", () => {
+    const types = ["explore", "general-purpose", "plan", "custom"];
+    for (const t of types) {
+      const prompt = formatDelegationPrompt(
+        "do something",
+        t,
+        constraints,
+      );
+      // No references to parent conversation
+      assert.ok(!prompt.match(/based on (above|previous|your findings)/i),
+        `${t}: should not reference parent context`);
+      assert.ok(!prompt.includes("continue from"),
+        `${t}: should not say "continue from"`);
+      assert.ok(!prompt.includes("as discussed"),
+        `${t}: should not say "as discussed"`);
+      assert.ok(!prompt.includes("see above"),
+        `${t}: should not say "see above"`);
+    }
+  });
+});
+
+describe("Delegation — buildDelegationSummary", () => {
+  it("returns empty string for null vault context", () => {
+    assert.equal(buildDelegationSummary(null), "");
+  });
+
+  it("returns empty string when no delegation journal entries", () => {
+    const vault = { results: [{ task_type: "loop_lineage", loop_id: "test" }] };
+    assert.equal(buildDelegationSummary(vault), "");
+  });
+
+  it("returns empty string when results array is empty", () => {
+    const vault = { results: [] };
+    assert.equal(buildDelegationSummary(vault), "");
+  });
+
+  it("builds delegation table from journal entries", () => {
+    const vault = {
+      results: [
+        {
+          task_type: "delegation_journal",
+          loop_lineage: {
+            round: 2,
+            delegations: [
+              { index: 1, agentId: "abc-123", subAgentType: "explore", subTask: "search deprecated APIs", resultSummary: "found 12 instances", success: true, discoveredConstraints: [] },
+              { index: 2, agentId: "def-456", subAgentType: "general-purpose", subTask: "fix auth bug", resultSummary: "fixed null pointer", success: true, discoveredConstraints: [] },
+            ],
+          },
+        },
+      ],
+    };
+    const text = buildDelegationSummary(vault);
+    assert.ok(text.includes("### Delegation History"));
+    assert.ok(text.includes("R2"));
+    assert.ok(text.includes("search deprecated APIs"));
+    assert.ok(text.includes("fix auth bug"));
+    assert.ok(text.includes("✓"));
+    // Agent column should display agentId
+    assert.ok(text.includes("abc-123"));
+    assert.ok(text.includes("def-456"));
+    // Table header should include Agent column
+    assert.ok(text.includes("| Round | Agent | Type | Task | Result | ✓/✗ |"));
+  });
+
+  it("shows ✗ for failed delegations", () => {
+    const vault = {
+      results: [
+        {
+          task_type: "delegation_journal",
+          loop_lineage: {
+            round: 3,
+            delegations: [
+              { index: 1, agentId: "worker-xyz", subAgentType: "general-purpose", subTask: "fix complex bug", resultSummary: "failed — wrong approach", success: false, discoveredConstraints: [] },
+            ],
+          },
+        },
+      ],
+    };
+    const text = buildDelegationSummary(vault);
+    assert.ok(text.includes("✗"));
+    assert.ok(text.includes("fix complex bug"));
+    assert.ok(text.includes("wrong approach"));
+  });
+
+  it("handles multiple rounds of delegation", () => {
+    const vault = {
+      results: [
+        {
+          task_type: "delegation_journal",
+          loop_lineage: { round: 1, delegations: [{ index: 1, agentId: "agent-a", subAgentType: "explore", subTask: "research X", resultSummary: "done", success: true, discoveredConstraints: [] }] },
+        },
+        {
+          task_type: "delegation_journal",
+          loop_lineage: { round: 2, delegations: [{ index: 1, agentId: "agent-b", subAgentType: "general-purpose", subTask: "fix Y", resultSummary: "done", success: true, discoveredConstraints: [] }] },
+        },
+      ],
+    };
+    const text = buildDelegationSummary(vault);
+    assert.ok(text.includes("R1"));
+    assert.ok(text.includes("R2"));
+  });
+
+  it("falls back to worker-N when agentId is missing (backward compat)", () => {
+    const vault = {
+      results: [
+        {
+          task_type: "delegation_journal",
+          loop_lineage: {
+            round: 1,
+            delegations: [
+              { index: 3, subAgentType: "explore", subTask: "scan codebase", resultSummary: "done", success: true },
+            ],
+          },
+        },
+      ],
+    };
+    const text = buildDelegationSummary(vault);
+    assert.ok(text.includes("worker-3"), "should fall back to worker-3");
+  });
+
+  it("escapes pipe characters in markdown table cells", () => {
+    const vault = {
+      results: [
+        {
+          task_type: "delegation_journal",
+          loop_lineage: {
+            round: 1,
+            delegations: [
+              { index: 1, agentId: "agent-1", subAgentType: "explore", subTask: "audit A|B testing in src/", resultSummary: "found issues in x|y module", success: true, discoveredConstraints: [] },
+            ],
+          },
+        },
+      ],
+    };
+    const text = buildDelegationSummary(vault);
+    // Should contain escaped pipes, not raw pipes that would break the table
+    assert.ok(text.includes("A\\|B"), "pipe in task should be escaped");
+    assert.ok(text.includes("x\\|y"), "pipe in result should be escaped");
+    // Verify the table row still has the correct number of pipe chars:
+    // 7 structural (leading + 5 separators + trailing) + 2 escaped inside cells = 9 total
+    const tableRow = text.split("\n").find((l) => l.startsWith("| R1"));
+    assert.ok(tableRow, "should have a table row for R1");
+    const pipeCount = (tableRow!.match(/\|/g) ?? []).length;
+    assert.equal(pipeCount, 9, "table row should have 9 pipe chars (7 structural + 2 escaped)");
   });
 });

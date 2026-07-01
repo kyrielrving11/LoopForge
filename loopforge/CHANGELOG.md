@@ -1,5 +1,54 @@
 # Changelog
 
+## v1.9.0 (2026-07-01)
+
+Multi-Agent Delegation Support — LoopForge now tracks and injects sub-agent delegation
+history into compiled prompts. Works with AgentTool sub-agents and Coordinator Workers
+without requiring a separate "mode."
+
+### Delegation Helpers (AgentTool Mode)
+- **`filterConstraintsForSubTask(allConstraints, subTask, threshold?)`** — Pure function.
+  Filters relevant constraints for a sub-agent task using Jaccard token similarity.
+  Default threshold 0.15 (inclusive — lower than the 0.3 warn threshold).
+- **`formatDelegationPrompt(subTask, subAgentType, constraints, options?)`** — Pure function.
+  Produces self-contained prompts for Explore / General-purpose / Plan sub-agent types.
+  All outputs are self-contained (no "based on above" references) — matching the
+  AgentTool contract: "Workers can't see your conversation."
+- **`recordDelegation(loopId, round, entries)`** — Engine method. Writes delegation
+  journal entries to vault as `task_type: "delegation_journal"`.
+
+### Worker Results (Coordinator / Multi-Agent)
+- **`WorkerResult` interface** — `{ agentId, subAgentType, subTask, resultSummary, success, discoveredConstraints? }`.
+  Added to `SelfEvaluation.worker_results` and `LoopRoundResult.worker_results`.
+- **Auto-detection** — `buildSelfEvaluation()` parses `worker_results` from raw evaluation JSON.
+  `autoFeedback()` automatically calls `recordDelegation()` when `worker_results` are present.
+- **MCP schema** — `loopforge_next` evaluation schema updated with `worker_results` array property.
+- **Cross-round injection** — `buildDelegationSummary(vaultContext)` scans vault for delegation
+  journal entries and formats them as a `### Delegation History` table injected into the
+  next round's compiled prompt.
+- **Constraint flow** — Workers discover constraints → Coordinator reports via `worker_results` →
+  LoopForge records to vault → next round's `Active Constraints` includes them →
+  Coordinator passes them to future Workers.
+
+### Design Principle
+No `MultiAgentMode` enum. No `compileCoordination()` function. LoopForge does not
+distinguish between single-agent and multi-agent execution. The main agent —
+whether a single agent, an AgentTool user, or a Coordinator — receives compiled
+prompts, executes, and reports results. LoopForge records, compresses, and injects.
+
+### Protocol Changes (v1.8→v1.9)
+- **1 new interface**: `WorkerResult`.
+- **`SelfEvaluation.worker_results`** — optional array. Main agent reports sub-agent
+  delegation results.
+- **`LoopRoundResult.worker_results`** — optional array. Forwarded through
+  `buildLoopRequest()` for compiler access.
+
+### Tests
+- 251 tests (was 241). 10 new tests: protocol factory defaults, constraint filtering
+  (8 cases incl. CJK), delegation prompt formatting (6 cases incl. self-containment),
+  delegation summary (null vault, multi-round table, failed delegations, backward compat,
+  pipe escaping), schema count update.
+
 ## v1.8.0 (2026-07-01)
 
 Memory System Integration — bidirectional bridge between LoopForge and Agent long-term memory.

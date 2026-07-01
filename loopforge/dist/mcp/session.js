@@ -6,8 +6,8 @@
  */
 import { randomUUID } from "node:crypto";
 import { LoopForgeEngine, extractSelfEvaluation, heuristicSelfEvaluation } from "../engine.js";
-import { checkLoopHealth } from "../loop-compiler.js";
-import { getPolicy } from "../policy.js";
+import { checkLoopHealth, tokenize, jaccard } from "../loop-compiler.js";
+import { getPolicy, resolveAllowedPhases } from "../policy.js";
 import { Mode, makeLoopCompileRequest, makeVaultConfig } from "../protocol.js";
 import { ReplayBackend } from "../replay.js";
 import { FSBackend } from "../backends/fs.js";
@@ -75,10 +75,14 @@ function parseWarnings(prompt) {
 export class SessionManager {
     sessions = new Map();
     backend;
+    /** Optional provider for long-term memory context retrieval. */
+    memoryProvider;
+    /** Optional writer for persisting loop knowledge back to long-term memory. */
+    memoryWriter;
     constructor(backend) {
         this.backend = backend;
     }
-    create(input) {
+    async create(input) {
         const sessionId = randomUUID();
         const loopId = input.loopId ?? randomUUID();
         const engine = new LoopForgeEngine("skills", this.backend);
@@ -87,15 +91,57 @@ export class SessionManager {
         const request = buildLoopRequest({
             sessionId, loopId, task: input.task, engine, currentRound: 1,
             maxRounds, qualityTrajectory: [], status: "running", createdAt: Date.now(),
+            injectionCount: 0, lastInjectionRound: 0, injectedContexts: [],
+            phase2Triggered: false, phase3Triggered: false,
         });
         request.domain = input.domain ?? "";
         request.plan_source = input.planSource ?? null;
         request.constraints_from_plan = input.constraints ?? [];
+        // v1.8: Phase 1 memory injection (Round 1) — only if allowed by tier
+        const miPolicy = getPolicy().memory_injection;
+        const allowedPhases = new Set(resolveAllowedPhases(maxRounds, miPolicy.round_tiers));
+        if (miPolicy.enabled && this.memoryProvider && allowedPhases.has(1)) {
+            try {
+                const ctx = {
+                    loopId,
+                    round: 1,
+                    task: input.task,
+                    domain: input.domain ?? "",
+                    phase: 1,
+                    progressEstimate: 0,
+                    accumulatedContext: {
+                        recurringIssues: [],
+                        failedPatterns: [],
+                        keyLessons: [],
+                        remainingCriteria: [],
+                    },
+                };
+                const rawContext = await this.memoryProvider(ctx);
+                if (rawContext?.trim()) {
+                    request.external_context = rawContext.trim().slice(0, miPolicy.max_context_length);
+                    logEvent("memory_injected", {
+                        loopId, round: 1, phase: 1, injectionCount: 1,
+                        contextLength: request.external_context.length,
+                    });
+                }
+            }
+            catch {
+                // memoryProvider failed — degrade gracefully
+                logEvent("memory_provider_error", { loopId, round: 1 });
+            }
+        }
         const result = engine.invokeLoopCompile(request);
+        const injectedCtx = request.external_context;
         const session = {
             sessionId, loopId, task: input.task, engine,
             currentRound: 1, maxRounds, qualityTrajectory: [],
             status: "running", createdAt: Date.now(),
+            // v1.7: Memory integration state
+            injectionCount: injectedCtx ? 1 : 0,
+            lastInjectionRound: injectedCtx ? 1 : 0,
+            injectedContexts: injectedCtx ? [injectedCtx] : [],
+            phase2Triggered: false,
+            phase3Triggered: false,
         };
         this.sessions.set(sessionId, session);
         // Persist to vault for cross-process recovery
@@ -124,6 +170,7 @@ export class SessionManager {
         if (!session)
             return false;
         session.status = "stopped";
+        void this.doWriteback(session, "stopped");
         this.sessions.delete(sessionId);
         logEvent("session_end", {
             sessionId,
@@ -161,6 +208,11 @@ export class SessionManager {
                     quality_trajectory: session.qualityTrajectory,
                     status: session.status,
                     created_at: session.createdAt,
+                    // v1.7: Memory integration state for cross-process recovery
+                    injection_count: session.injectionCount,
+                    last_injection_round: session.lastInjectionRound,
+                    phase2_triggered: session.phase2Triggered,
+                    phase3_triggered: session.phase3Triggered,
                 },
             });
         };
@@ -213,6 +265,12 @@ export class SessionManager {
             qualityTrajectory,
             status: "running",
             createdAt: lineage.created_at ?? Date.now(),
+            // v1.7: Memory integration state restored from vault
+            injectionCount: lineage.injection_count ?? 0,
+            lastInjectionRound: lineage.last_injection_round ?? 0,
+            injectedContexts: [],
+            phase2Triggered: lineage.phase2_triggered ?? false,
+            phase3Triggered: lineage.phase3_triggered ?? false,
         };
         this.sessions.set(sessionId, session);
         // Compile the next round's prompt from vault lineage
@@ -314,7 +372,7 @@ export class SessionManager {
      *  @param preExtractedEval Optional pre-built SelfEvaluation from MCP tool parameter.
      *    When provided (MCP path with evaluation parameter), skips regex extraction.
      *    When undefined (runtime/CLI path), falls back to regex extraction from output. */
-    advance(sessionId, output, preExtractedEval) {
+    async advance(sessionId, output, preExtractedEval) {
         const session = this.sessions.get(sessionId);
         if (!session)
             return { sessionId, round: 0, prompt: null, stopReason: "session_not_found" };
@@ -337,6 +395,7 @@ export class SessionManager {
         if (!selfEval) {
             session.status = "stalled";
             this.save(session);
+            void this.doWriteback(session, "stalled");
             logEvent("session_end", { sessionId, loopId: session.loopId, stopReason: "stalled", round: session.currentRound });
             return { sessionId, round: session.currentRound, prompt: null, stopReason: "stalled", quality: 0 };
         }
@@ -369,30 +428,110 @@ export class SessionManager {
         if (extractionFailed) {
             session.status = "stalled";
             this.save(session);
+            void this.doWriteback(session, "stalled");
             logEvent("session_end", { sessionId, loopId: session.loopId, stopReason: "stalled", round: session.currentRound });
             return { sessionId, round: session.currentRound, prompt: null, stopReason: "stalled", quality };
         }
         if (!selfEval.should_continue) {
             session.status = "stopped";
             this.save(session);
+            void this.doWriteback(session, "task_complete");
             logEvent("session_end", { sessionId, loopId: session.loopId, stopReason: "task_complete", round: session.currentRound });
             return { sessionId, round: session.currentRound, prompt: null, stopReason: "task_complete", quality };
         }
         if (session.engine.shouldBreak()) {
             session.status = "stopped";
             this.save(session);
+            void this.doWriteback(session, "circuit_breaker");
             logEvent("session_end", { sessionId, loopId: session.loopId, stopReason: "circuit_breaker", round: session.currentRound });
             return { sessionId, round: session.currentRound, prompt: null, stopReason: "circuit_breaker", quality };
         }
         if (session.currentRound >= session.maxRounds) {
             session.status = "stopped";
             this.save(session);
+            void this.doWriteback(session, "max_rounds");
             logEvent("session_end", { sessionId, loopId: session.loopId, stopReason: "max_rounds", round: session.currentRound });
             return { sessionId, round: session.currentRound, prompt: null, stopReason: "max_rounds", quality };
         }
         // 4. Compile next round
         session.currentRound++;
+        // v1.8: Memory injection for phases 2/3 — tier-aware
+        let externalCtx = "";
+        const miPolicy = getPolicy().memory_injection;
+        if (miPolicy.enabled && this.memoryProvider) {
+            const allowedPhases = new Set(resolveAllowedPhases(session.maxRounds, miPolicy.round_tiers));
+            if (session.injectionCount < allowedPhases.size &&
+                session.currentRound - session.lastInjectionRound >= miPolicy.min_rounds_between_injections) {
+                const progress = selfEval.execution_evidence?.progress_estimate;
+                const hasProgress = typeof progress === "number" && progress >= 0;
+                let phase = null;
+                if (allowedPhases.has(2) &&
+                    !session.phase2Triggered &&
+                    hasProgress &&
+                    progress >= miPolicy.phase_thresholds.phase2.threshold) {
+                    phase = 2;
+                    session.phase2Triggered = true;
+                }
+                else if (allowedPhases.has(3) &&
+                    !session.phase3Triggered &&
+                    hasProgress &&
+                    progress >= miPolicy.phase_thresholds.phase3.threshold) {
+                    phase = 3;
+                    session.phase3Triggered = true;
+                }
+                if (phase !== null) {
+                    try {
+                        const accCtx = {
+                            recurringIssues: selfEval.constraint_violations ?? [],
+                            failedPatterns: [],
+                            keyLessons: selfEval.emerged_subtasks ?? [],
+                            remainingCriteria: selfEval.execution_evidence?.success_criteria_remaining ?? [],
+                        };
+                        const ctx = {
+                            loopId: session.loopId,
+                            round: session.currentRound,
+                            task: session.task,
+                            domain: "",
+                            phase,
+                            progressEstimate: hasProgress ? progress : -1,
+                            accumulatedContext: accCtx,
+                        };
+                        const rawContext = await this.memoryProvider(ctx);
+                        if (rawContext?.trim()) {
+                            // Dedup
+                            const newTokens = tokenize(rawContext);
+                            let isDuplicate = false;
+                            for (const old of session.injectedContexts) {
+                                if (jaccard(newTokens, tokenize(old)) > miPolicy.dedup_threshold) {
+                                    isDuplicate = true;
+                                    break;
+                                }
+                            }
+                            if (!isDuplicate) {
+                                externalCtx = rawContext.trim().slice(0, miPolicy.max_context_length);
+                                session.injectionCount++;
+                                session.lastInjectionRound = session.currentRound;
+                                session.injectedContexts.push(externalCtx);
+                                logEvent("memory_injected", {
+                                    loopId: session.loopId, round: session.currentRound,
+                                    phase, injectionCount: session.injectionCount,
+                                    contextLength: externalCtx.length,
+                                });
+                            }
+                        }
+                    }
+                    catch {
+                        logEvent("memory_provider_error", {
+                            loopId: session.loopId, round: session.currentRound,
+                        });
+                    }
+                }
+            }
+        }
         const request = buildLoopRequest(session, selfEval, quality, verificationFlags);
+        if (externalCtx) {
+            request.external_context = externalCtx;
+        }
         const result = session.engine.invokeLoopCompile(request);
         this.save(session);
         return {
@@ -404,6 +543,53 @@ export class SessionManager {
             quality,
             warnings: parseWarnings(result.response?.prompt ?? null),
         };
+    }
+    /** Write back loop knowledge to long-term memory.
+     *  Called when a loop terminates for any reason. */
+    async doWriteback(session, stopReason) {
+        if (!this.memoryWriter)
+            return;
+        const wp = getPolicy().memory_writeback;
+        if (!wp.enabled)
+            return;
+        if (wp.write_on_outcomes.length > 0 && !wp.write_on_outcomes.includes(stopReason))
+            return;
+        if (session.currentRound < 1)
+            return;
+        const outcome = ["completed", "circuit_breaker", "stalled", "max_rounds", "stopped"].find((o) => stopReason === o) ?? "stopped";
+        try {
+            const payload = {
+                loopId: session.loopId,
+                task: session.task,
+                outcome,
+                roundsCompleted: session.currentRound,
+                qualityTrajectory: [...session.qualityTrajectory],
+                projectEntry: {
+                    title: `${session.task.slice(0, 80)} — ${outcome}`,
+                    objective: session.task.slice(0, 200),
+                    keyOutcome: outcome === "completed"
+                        ? `Completed successfully in ${session.currentRound} rounds.`
+                        : `Terminated with reason '${stopReason}' after ${session.currentRound} rounds.`,
+                    keyDiscoveries: [],
+                    date: new Date().toISOString().split("T")[0],
+                },
+                feedbackEntries: [],
+                referenceEntry: {
+                    description: `LoopForge vault data for "${session.task.slice(0, 80)}"`,
+                    vaultLocation: `.promptcraft/prompt_vault.json → loop:${session.loopId}:*`,
+                },
+            };
+            await this.memoryWriter(payload);
+            logEvent("memory_writeback", {
+                loopId: session.loopId, stopReason,
+                feedbackCount: payload.feedbackEntries.length,
+            });
+        }
+        catch {
+            logEvent("memory_writeback_error", {
+                loopId: session.loopId, stopReason,
+            });
+        }
     }
     /** Replay timeline for a session — creates ReplayBackend from the stored backend. */
     replayTimeline(sessionId) {

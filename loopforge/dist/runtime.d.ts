@@ -25,6 +25,12 @@ export declare class LoopRuntime extends EventEmitter {
     private sigtermHandler;
     private lastSelfEval;
     private pendingVerificationFlags;
+    private injectionCount;
+    private lastInjectionRound;
+    private injectedContexts;
+    private phase2Triggered;
+    private phase3Triggered;
+    private pendingExternalContext;
     private roundStartTime;
     private lastProgressTime;
     private activeCtx;
@@ -33,6 +39,17 @@ export declare class LoopRuntime extends EventEmitter {
     get status(): RuntimeStatus;
     getCurrentRound(): number;
     getQualityTrajectory(): number[];
+    /** Derive the current progress estimate from the last self evaluation.
+     *  Returns -1 if no progress data is available. */
+    private getCurrentProgress;
+    /** Determine whether memory should be injected this round based on
+     *  tier-based allowed phases, progress thresholds, and round spacing. */
+    private shouldInjectMemory;
+    /** Build the accumulated context for constructing a targeted memory query. */
+    private buildAccumulatedContext;
+    /** Deduplicate external context against previously injected contexts.
+     *  Returns empty string if the new context is too similar to any prior. */
+    private dedupAndStoreContext;
     /** Start the loop. Returns when the loop terminates (task complete,
      *  circuit breaker, max rounds, stalled, or manual stop). */
     start(): Promise<RunResult>;

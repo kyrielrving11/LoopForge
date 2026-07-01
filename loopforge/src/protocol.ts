@@ -3,7 +3,7 @@
  * All types exchanged between the Main Agent and LoopForge flow through
  * these interfaces. This is the contract layer — no implementation logic.
  *
- * v1.6: 32 types — 4 enums + 27 interfaces + 1 type alias.
+ * v1.7: 38 types — 4 enums + 32 interfaces + 2 type aliases.
  */
 
 // ── Enums ──────────────────────────────────────────────────────────────────
@@ -212,7 +212,11 @@ export interface LoopForgeRequest {
   feedback: ExecutionFeedback | null;
   skill_name: string | null;
   task_id: string | null;
-  // Dynamic fields (loop_compile mode attaches these via extras)
+  // Extended fields accepted by invokeLoopCompile() to populate LoopCompileRequest:
+  //   loop_id, round, goal_id, domain, next_task_proposal, plan_source,
+  //   constraints_from_plan, new_since_last_round, force_level,
+  //   health_check_interval, external_context, last_round_result,
+  //   verification_flags
   [key: string]: unknown;
 }
 
@@ -362,7 +366,7 @@ export function makeLoopRoundResult(
 }
 
 export interface LoopCompileRequest {
-  mode: string;
+  mode: Mode;
   loop_id: string;
   round: number;
   goal_id: string;
@@ -377,13 +381,17 @@ export interface LoopCompileRequest {
   force_level: string;
   health_check_interval: number;
   vault_config: VaultConfig;
+  /** Optional external context from a long-term memory system (e.g. claude-mem).
+   *  Injected into L2 prompts only. Ignored by L0/L1 compilers.
+   *  Populated by the caller (runtime / MCP session) via a memoryProvider callback. */
+  external_context?: string;
 }
 
 export function makeLoopCompileRequest(
   overrides: Partial<LoopCompileRequest> = {},
 ): LoopCompileRequest {
   return {
-    mode: "loop_compile",
+    mode: Mode.LOOP_COMPILE,
     loop_id: "",
     round: 1,
     goal_id: "",
@@ -398,12 +406,13 @@ export function makeLoopCompileRequest(
     force_level: "auto",
     health_check_interval: 1,
     vault_config: makeVaultConfig(),
+    external_context: "",
     ...overrides,
   };
 }
 
 export interface LoopCompileResponse {
-  status: string;
+  status: AgentStatus;
   prompt: string;
   recompile_level: string;
   diff_from_previous: string;
@@ -430,7 +439,7 @@ export function makeLoopCompileResponse(
   overrides: Partial<LoopCompileResponse> = {},
 ): LoopCompileResponse {
   return {
-    status: "ok",
+    status: AgentStatus.OK,
     prompt: "",
     recompile_level: "l2",
     diff_from_previous: "",
@@ -570,6 +579,35 @@ export interface RuntimeConfig {
   onHeartbeat?: (info: HeartbeatInfo) => void;
   onTimeout?: (info: TimeoutInfo) => void;
   onHealthWarning?: (warning: HealthWarning) => void;
+  /** Optional provider for long-term memory context retrieval.
+   *  Called at L2 compile rounds during designated injection phases.
+   *  Receives loop state for constructing a targeted query.
+   *  Return empty string to skip injection. */
+  memoryProvider?: (ctx: MemoryProviderContext) => Promise<string>;
+  /** Optional writer for persisting loop knowledge back to long-term memory.
+   *  Called once when the loop terminates (any stop reason).
+   *  Receives a structured writeback payload with project/feedback/reference entries. */
+  memoryWriter?: (payload: LoopMemoryWriteback) => Promise<void>;
+}
+
+/** Context passed to the memoryProvider callback at each injection phase.
+ *  Contains enough loop state to construct a targeted semantic query. */
+export interface MemoryProviderContext {
+  loopId: string;
+  round: number;
+  task: string;
+  domain: string;
+  /** Injection phase: 1 (start), 2 (mid), 3 (late). */
+  phase: 1 | 2 | 3;
+  /** Current progress estimate (0.0–1.0), or -1 if unavailable. */
+  progressEstimate: number;
+  /** Accumulated loop knowledge for constructing a differential query. */
+  accumulatedContext: {
+    recurringIssues: string[];
+    failedPatterns: string[];
+    keyLessons: string[];
+    remainingCriteria: string[];
+  };
 }
 
 export interface RunResult {
@@ -577,6 +615,44 @@ export interface RunResult {
   stopReason: StopReason;
   roundsCompleted: number;
   qualityTrajectory: number[];
+}
+
+// ── Memory Writeback (v1.7) ───────────────────────────────────────────────────
+
+/** Structured payload written back to the long-term memory system
+ *  when a loop terminates. Contains distilled knowledge suitable
+ *  for cross-task reuse. */
+export interface LoopMemoryWriteback {
+  loopId: string;
+  task: string;
+  outcome: "completed" | "circuit_breaker" | "stalled" | "max_rounds" | "stopped";
+  roundsCompleted: number;
+  qualityTrajectory: number[];
+  /** Project-type memory entry — task outcome and key discoveries. */
+  projectEntry: LoopMemoryWritebackProjectEntry;
+  /** Feedback-type memory entries — tactical lessons learned. */
+  feedbackEntries: LoopMemoryWritebackFeedbackEntry[];
+  /** Reference-type memory entry — pointer to the vault for deep dives. */
+  referenceEntry: LoopMemoryWritebackReferenceEntry;
+}
+
+export interface LoopMemoryWritebackProjectEntry {
+  title: string;
+  objective: string;
+  keyOutcome: string;
+  keyDiscoveries: string[];
+  date: string;
+}
+
+export interface LoopMemoryWritebackFeedbackEntry {
+  rule: string;
+  why: string;
+  howToApply: string;
+}
+
+export interface LoopMemoryWritebackReferenceEntry {
+  description: string;
+  vaultLocation: string;
 }
 
 // ── Verification Gate (v1.6) ──────────────────────────────────────────────────

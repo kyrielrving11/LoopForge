@@ -715,6 +715,7 @@ export class LoopForgeEngine {
       force_level: (extras.force_level as string) ?? "auto",
       health_check_interval:
         (extras.health_check_interval as number) ?? 1,
+      external_context: (extras.external_context as string) ?? "",
     });
 
     // Convert last_round_result if present

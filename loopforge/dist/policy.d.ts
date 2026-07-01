@@ -49,6 +49,61 @@ export interface EvolutionPolicy {
     /** P4: Max allowed difference between objective and subjective progress. */
     progress_mismatch_threshold: number;
 }
+/** A tier in the round-based injection strategy.
+ *  Each tier defines how many and which injection phases are allowed
+ *  based on the loop's maxRounds. */
+export interface MemoryInjectionTier {
+    /** Upper bound of maxRounds for this tier (inclusive). */
+    max_rounds: number;
+    /** Which phases are allowed in this tier: [1], [1,3], or [1,2,3]. */
+    allowed_phases: number[];
+}
+export interface MemoryInjectionPolicy {
+    /** Master toggle for memory injection. */
+    enabled: boolean;
+    /** Minimum rounds between two consecutive injections. */
+    min_rounds_between_injections: number;
+    /** Phase trigger configuration. */
+    phase_thresholds: {
+        phase1: {
+            trigger: "round_1";
+        };
+        phase2: {
+            trigger: "progress";
+            threshold: number;
+        };
+        phase3: {
+            trigger: "progress";
+            threshold: number;
+        };
+    };
+    /** Round-based tiered injection strategy. Each tier defines which phases
+     *  are allowed based on maxRounds. The first matching tier wins.
+     *  Tiers should be ordered by max_rounds ascending. */
+    round_tiers: MemoryInjectionTier[];
+    /** Jaccard similarity threshold above which a new context is considered
+     *  duplicate and skipped. */
+    dedup_threshold: number;
+    /** Maximum characters of memory context to inject (truncated if longer). */
+    max_context_length: number;
+    /** Section header for the injected context block in the L2 prompt. */
+    section_title: string;
+}
+/** Resolve which injection phases are allowed for a given maxRounds.
+ *  Uses the tiered strategy: finds the first tier where maxRounds ≤ tier.max_rounds,
+ *  and returns its allowed_phases. If maxRounds exceeds all tiers, returns the
+ *  last tier's phases. */
+export declare function resolveAllowedPhases(maxRounds: number, tiers: MemoryInjectionTier[]): number[];
+export interface MemoryWritebackPolicy {
+    /** Master toggle for memory writeback on loop end. */
+    enabled: boolean;
+    /** Maximum number of feedback entries to write back. */
+    max_feedback_entries: number;
+    /** Maximum number of discoveries in the project entry. */
+    max_discoveries_in_project: number;
+    /** Only write back for these stop reasons. */
+    write_on_outcomes: string[];
+}
 export interface LoopPolicy {
     version: string;
     constraints: ConstraintsPolicy;
@@ -59,6 +114,8 @@ export interface LoopPolicy {
     runtime: RuntimePolicy;
     backend: BackendPolicy;
     evolution: EvolutionPolicy;
+    memory_injection: MemoryInjectionPolicy;
+    memory_writeback: MemoryWritebackPolicy;
 }
 export declare const DEFAULT_POLICY: LoopPolicy;
 export declare function loadPolicy(path?: string): LoopPolicy;

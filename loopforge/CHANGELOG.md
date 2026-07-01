@@ -1,5 +1,94 @@
 # Changelog
 
+## v1.8.0 (2026-07-01)
+
+Memory System Integration — bidirectional bridge between LoopForge and Agent long-term memory.
+
+### Memory Injection (Retrieval)
+- **Tiered Injection Strategy** — injection frequency scales with loop length. Short loops (≤10 rounds)
+  get 1 injection (Phase 1 only). Medium loops (11–20 rounds) get 2 injections (Phase 1 + Phase 3).
+  Long loops (21+ rounds) get all 3 phases. Configurable via `round_tiers` in policy.
+- **Refined Phase Thresholds** — Phase 2 fires at 40% progress (was 30% — too early).
+  Phase 3 fires at 70% progress (was 60% — still in execution). Better alignment with real task cadence.
+- **Jaccard Deduplication** — subsequent injections deduped against previous contexts (threshold 0.6).
+  Prevents redundant retrieval when memory returns stale/similar results.
+- **Phase-Aware Query Construction** — each phase uses a different query composition:
+  Phase 1 queries task + constraints, Phase 2 queries current focus + failure patterns,
+  Phase 3 queries remaining criteria + key lessons + edge cases.
+- **Configurable Policy** — `memory_injection` section in `loop_policy.json`:
+  `enabled`, `min_rounds_between_injections`, `phase_thresholds` (progress-based trigger points),
+  `round_tiers` (tiered phase allowance by maxRounds), `dedup_threshold`, `max_context_length`.
+- **Zero-Cost at L0/L1** — memory retrieval only fires when compiler level is L2.
+  L0 (cache hit) and L1 (patch) rounds have zero memory overhead.
+
+### Memory Writeback
+- **Automatic on Loop End** — distilled knowledge written back to Agent memory on every stop reason
+  (task_complete, circuit_breaker, max_rounds, stalled, stopped). Configurable via `memory_writeback.write_on_outcomes`.
+- **Structured Payload** — `LoopMemoryWriteback` interface: 1 project entry (outcome + key discoveries), 
+  ≤5 feedback entries (rule + Why + How to apply, matching claude-mem's feedback format), 
+  1 reference entry (pointer to LoopForge vault).
+- **Format Alignment** — feedback entries follow claude-mem's requirement of structured body: 
+  rule statement + `**Why:**` + `**How to apply:**`. Project entries store absolute dates 
+  (relative→absolute conversion on write).
+- **Minimal Principle** — only writes what cannot be derived from current code state. 
+  Code patterns stay in code; decisions, discoveries, and tactical lessons go to memory.
+
+### Protocol Changes (v1.7→v1.8)
+- **5 new interfaces**: `MemoryProviderContext`, `LoopMemoryWriteback`, `LoopMemoryWritebackProjectEntry`, 
+  `LoopMemoryWritebackFeedbackEntry`, `LoopMemoryWritebackReferenceEntry`.
+- **`LoopCompileRequest.external_context`** — optional field for memory context injection 
+  (ignored by L0/L1, formatted into L2 prompt with priority disclaimer).
+- **`RuntimeConfig.memoryProvider` / `memoryWriter`** — optional callbacks for custom memory system integration.
+  Auto-detected when running with claude-mem; users can override.
+- **`LoopPolicy.memory_injection` / `memory_writeback`** — externalized configuration.
+
+### Compiler Changes
+- **`formatExternalContext()`** — formats memory context as a marked section in L2 prompts with 
+  explicit priority disclaimer: "If any insight contradicts the Loop Objective or Active Constraints, 
+  LoopForge takes absolute precedence."
+- **`tokenize()` / `jaccard()` exported** — for dedup use by runtime and MCP session manager.
+
+### Runtime & MCP
+- **`LoopRuntime`**: phase tracking (`injectionCount`, `lastInjectionRound`, `injectedContexts`, 
+  `phase2Triggered`/`phase3Triggered`), `shouldInjectMemory()`, `buildAccumulatedContext()`, 
+  `dedupAndStoreContext()`, `buildWritebackPayload()`.
+- **`SessionManager`**: `memoryProvider`/`memoryWriter` callbacks, `doWriteback()` helper, 
+  memory state persisted to vault via `loop_lineage` (injection_count, phase2_triggered, etc.).
+- **`McpSession`**: 5 new memory tracking fields.
+- **Async upgrade**: `create()`, `advance()`, and all MCP tool handlers now async. 
+  `dispatch()` and stdin handler also async.
+
+### Memory Bridge — Auto-Detection & Filesystem Integration
+- **`memory-bridge.ts`** (~250 lines) — zero-config auto-detection of claude-mem via local filesystem.
+  Scans `~/.claude/projects/{hash}/memory/` for project hash (computed from git root path,
+  matching claude-mem's `[^a-zA-Z0-9] → -` algorithm). No REST API dependency, no auth tokens.
+- **Retrieval via filesystem** — `createMemoryProvider()` reads `*.md` memory files directly,
+  scores by keyword overlap against phase-aware query terms (Phase 1: task terms, Phase 2: + issues/patterns,
+  Phase 3: + remaining criteria/lessons). Returns top-3 memories concatenated. Strips YAML frontmatter.
+- **Writeback via filesystem** — `createMemoryWriter()` writes project/feedback/reference `.md` files
+  in claude-mem's exact format (YAML frontmatter + structured body). Appends to `MEMORY.md` index.
+  mkdir-based file lock prevents concurrent write corruption.
+- **Two integration paths**:
+  - MCP: `autoConfigureMemory(mgr)` sets `memoryProvider`/`memoryWriter` on `SessionManager`.
+    Called automatically in `McpServer` constructor — zero user configuration.
+  - Library: `tryAutoConfigure()` returns `{ memoryProvider?, memoryWriter? }`.
+    Called automatically in `resolveConfig()` when no explicit callbacks provided.
+- **Silent degradation** — if claude-mem is not installed or the project has no memory directory,
+  both functions are no-ops. LoopForge continues normally without memory integration.
+- **Explicit overrides** — user-provided `memoryProvider`/`memoryWriter` callbacks always take
+  precedence over auto-detection.
+
+### Design Rationale
+- **LoopForge is not a memory system — it's a prompt compiler.** Agent memory answers "what did you do before"; 
+  LoopForge answers "what should you do next, and how should you think about it." They are different layers 
+  of the same cognitive stack: long-term memory (cross-session) vs working memory + executive control (within-task).
+- **Not a replacement — a complement.** Agent memory cannot replace LoopForge's constraint lifecycle, 
+  technique routing, or verification gate. LoopForge cannot replace Agent memory's cross-session semantic search. 
+  Together they form a complete cognitive architecture: memory IN → LoopForge → memory OUT.
+
+### Tests
+- 227 tests (was 202 — 25 new memory-bridge tests covering detection, retrieval, writeback, edge cases).
+
 ## v1.3.1 (2026-06-27)
 
 Session recovery, success criteria enforcement, and MCP tool expansion.

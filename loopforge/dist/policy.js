@@ -4,6 +4,19 @@
  */
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+/** Resolve which injection phases are allowed for a given maxRounds.
+ *  Uses the tiered strategy: finds the first tier where maxRounds ≤ tier.max_rounds,
+ *  and returns its allowed_phases. If maxRounds exceeds all tiers, returns the
+ *  last tier's phases. */
+export function resolveAllowedPhases(maxRounds, tiers) {
+    if (tiers.length === 0)
+        return [1]; // safety fallback
+    for (const tier of tiers) {
+        if (maxRounds <= tier.max_rounds)
+            return tier.allowed_phases;
+    }
+    return tiers[tiers.length - 1].allowed_phases;
+}
 // ═══════════════════════════════════════════════════════════════════════════
 // Default policy
 // ═══════════════════════════════════════════════════════════════════════════
@@ -69,6 +82,29 @@ export const DEFAULT_POLICY = {
         progress_stall_threshold: 0.05,
         progress_stall_rounds: 2,
         progress_mismatch_threshold: 0.3,
+    },
+    memory_injection: {
+        enabled: true,
+        min_rounds_between_injections: 1,
+        phase_thresholds: {
+            phase1: { trigger: "round_1" },
+            phase2: { trigger: "progress", threshold: 0.40 },
+            phase3: { trigger: "progress", threshold: 0.70 },
+        },
+        round_tiers: [
+            { max_rounds: 10, allowed_phases: [1] },
+            { max_rounds: 20, allowed_phases: [1, 3] },
+            { max_rounds: 30, allowed_phases: [1, 2, 3] },
+        ],
+        dedup_threshold: 0.6,
+        max_context_length: 2000,
+        section_title: "### Background Context (Long-Term Memory)",
+    },
+    memory_writeback: {
+        enabled: true,
+        max_feedback_entries: 5,
+        max_discoveries_in_project: 3,
+        write_on_outcomes: ["completed", "circuit_breaker", "max_rounds"],
     },
 };
 // ═══════════════════════════════════════════════════════════════════════════

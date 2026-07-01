@@ -6,7 +6,7 @@
  */
 import { LoopForgeEngine } from "../engine.js";
 import type { VaultBackend } from "../backends/interface.js";
-import type { SelfEvaluation } from "../protocol.js";
+import type { SelfEvaluation, LoopMemoryWriteback, MemoryProviderContext } from "../protocol.js";
 export interface McpSession {
     sessionId: string;
     loopId: string;
@@ -19,6 +19,11 @@ export interface McpSession {
     createdAt: number;
     /** Previous round's validated SelfEvaluation — used by verification gate. */
     lastSelfEval?: SelfEvaluation;
+    injectionCount: number;
+    lastInjectionRound: number;
+    injectedContexts: string[];
+    phase2Triggered: boolean;
+    phase3Triggered: boolean;
 }
 export interface McpSessionSummary {
     sessionId: string;
@@ -47,8 +52,12 @@ export interface AdvanceResult {
 export declare class SessionManager {
     private sessions;
     private backend;
+    /** Optional provider for long-term memory context retrieval. */
+    memoryProvider?: (ctx: MemoryProviderContext) => Promise<string>;
+    /** Optional writer for persisting loop knowledge back to long-term memory. */
+    memoryWriter?: (payload: LoopMemoryWriteback) => Promise<void>;
     constructor(backend?: VaultBackend);
-    create(input: StartInput): AdvanceResult;
+    create(input: StartInput): Promise<AdvanceResult>;
     get(sessionId: string): McpSession | undefined;
     delete(sessionId: string): boolean;
     /** Persist session state to vault for cross-process recovery.
@@ -69,7 +78,10 @@ export declare class SessionManager {
      *  @param preExtractedEval Optional pre-built SelfEvaluation from MCP tool parameter.
      *    When provided (MCP path with evaluation parameter), skips regex extraction.
      *    When undefined (runtime/CLI path), falls back to regex extraction from output. */
-    advance(sessionId: string, output: string, preExtractedEval?: SelfEvaluation): AdvanceResult;
+    advance(sessionId: string, output: string, preExtractedEval?: SelfEvaluation): Promise<AdvanceResult>;
+    /** Write back loop knowledge to long-term memory.
+     *  Called when a loop terminates for any reason. */
+    private doWriteback;
     /** Replay timeline for a session — creates ReplayBackend from the stored backend. */
     replayTimeline(sessionId: string): Record<string, unknown>[] | null;
 }

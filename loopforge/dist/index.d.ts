@@ -23,8 +23,8 @@
  */
 export { Mode, AgentStatus, Technique, makeAnalysis, makeVaultConfig, makeExecutionFeedback, makeSelfEvaluation, makeLoopObjective, makeLoopHealth, makeRollingSummary, makeTaskAlignment, makeLoopRoundResult, makeLoopCompileRequest, makeLoopCompileResponse, makeSessionState, makeTaskId, toDict, SELF_EVAL_REGEX, } from "./protocol.js";
 export type { Analysis, VaultConfig, ExecutionFeedback, SelfEvaluation, LoopForgeRequest, LoopObjective, LoopHealth, RollingSummary, TaskAlignment, LoopRoundResult, LoopCompileRequest, LoopCompileResponse, LoopForgeResponse, SessionState, AgentLoopResult, } from "./protocol.js";
-export { getPolicy, loadPolicy, resetPolicy, DEFAULT_POLICY, } from "./policy.js";
-export type { LoopPolicy, ConstraintsPolicy, SummaryPolicy, RecompileTriggersPolicy, TechniquePolicy, EnginePolicy, BackendPolicy, } from "./policy.js";
+export { getPolicy, loadPolicy, resetPolicy, DEFAULT_POLICY, resolveAllowedPhases, } from "./policy.js";
+export type { LoopPolicy, ConstraintsPolicy, SummaryPolicy, RecompileTriggersPolicy, TechniquePolicy, EnginePolicy, BackendPolicy, MemoryInjectionPolicy, MemoryInjectionTier, MemoryWritebackPolicy, } from "./policy.js";
 export type { VaultBackend, VaultEntry } from "./backends/interface.js";
 export { FSBackend } from "./backends/fs.js";
 export { routeTechniqueAdaptive, scoreQuality, TECHNIQUE_REFERENCE, } from "./builder.js";
@@ -38,4 +38,5 @@ export type { RoundContext, AgentExecutor, StopReason, RoundStartInfo, RoundComp
 export { McpServer } from "./mcp/server.js";
 export { SessionManager } from "./mcp/session.js";
 export type { McpSession, McpSessionSummary } from "./mcp/session.js";
+export { computeProjectHash, findGitRoot, detectClaudeMem, createMemoryProvider, createMemoryWriter, autoConfigureMemory, tryAutoConfigure, } from "./memory-bridge.js";
 //# sourceMappingURL=index.d.ts.map

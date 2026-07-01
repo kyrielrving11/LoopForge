@@ -68,6 +68,7 @@ export {
   loadPolicy,
   resetPolicy,
   DEFAULT_POLICY,
+  resolveAllowedPhases,
 } from "./policy.js";
 
 export type {
@@ -78,6 +79,9 @@ export type {
   TechniquePolicy,
   EnginePolicy,
   BackendPolicy,
+  MemoryInjectionPolicy,
+  MemoryInjectionTier,
+  MemoryWritebackPolicy,
 } from "./policy.js";
 
 // Backends
@@ -141,3 +145,14 @@ export type {
 export { McpServer } from "./mcp/server.js";
 export { SessionManager } from "./mcp/session.js";
 export type { McpSession, McpSessionSummary } from "./mcp/session.js";
+
+// Memory Bridge (v1.8)
+export {
+  computeProjectHash,
+  findGitRoot,
+  detectClaudeMem,
+  createMemoryProvider,
+  createMemoryWriter,
+  autoConfigureMemory,
+  tryAutoConfigure,
+} from "./memory-bridge.js";

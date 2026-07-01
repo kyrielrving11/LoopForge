@@ -8,6 +8,7 @@
 import { createInterface } from "node:readline";
 import { SessionManager } from "./session.js";
 import { TOOL_SCHEMAS, TOOL_HANDLERS } from "./tools.js";
+import { autoConfigureMemory } from "../memory-bridge.js";
 import type { VaultBackend } from "../backends/interface.js";
 
 const SERVER_INFO = {
@@ -48,12 +49,13 @@ export class McpServer {
 
   constructor(backend?: VaultBackend) {
     this.mgr = new SessionManager(backend);
+    autoConfigureMemory(this.mgr);
   }
 
   start(): void {
     const rl = createInterface({ input: process.stdin });
 
-    rl.on("line", (line: string) => {
+    rl.on("line", async (line: string) => {
       let req: JsonRpcRequest;
       try {
         req = JSON.parse(line);
@@ -70,7 +72,7 @@ export class McpServer {
       }
 
       try {
-        const result = this.dispatch(req);
+        const result = await this.dispatch(req);
         if (result !== null) {
           process.stdout.write(okResponse(req.id, result) + "\n");
         }
@@ -84,7 +86,7 @@ export class McpServer {
     process.stderr.write(`[loopforge-mcp] v${SERVER_INFO.version} started\n`);
   }
 
-  private dispatch(req: JsonRpcRequest): Record<string, unknown> | null {
+  private async dispatch(req: JsonRpcRequest): Promise<Record<string, unknown> | null> {
     switch (req.method) {
       case "initialize":
         return {
@@ -106,7 +108,7 @@ export class McpServer {
           throw new Error(`Unknown tool: ${name}`);
         }
 
-        const output = handler(this.mgr, args);
+        const output = await handler(this.mgr, args);
         return {
           content: [{ type: "text", text: JSON.stringify(output) }],
         };

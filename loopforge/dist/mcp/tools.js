@@ -237,7 +237,7 @@ export const TOOL_SCHEMAS = [
     },
 ];
 export const TOOL_HANDLERS = {
-    loopforge_start(mgr, input) {
+    async loopforge_start(mgr, input) {
         const startInput = {
             task: String(input.task ?? ""),
             loopId: input.loopId,
@@ -251,10 +251,10 @@ export const TOOL_HANDLERS = {
         if (!startInput.task.trim()) {
             return { error: "task is required and must be non-empty" };
         }
-        const result = mgr.create(startInput);
+        const result = await mgr.create(startInput);
         return { ...result };
     },
-    loopforge_next(mgr, input) {
+    async loopforge_next(mgr, input) {
         const sessionId = String(input.sessionId ?? "");
         const output = String(input.output ?? "");
         const rawEval = input.evaluation;
@@ -266,14 +266,14 @@ export const TOOL_HANDLERS = {
         if (!preExtractedEval && !output.trim()) {
             return { error: "Either evaluation parameter or output with ---loopforge-eval block is required" };
         }
-        const result = mgr.advance(sessionId, output, preExtractedEval);
+        const result = await mgr.advance(sessionId, output, preExtractedEval);
         // Clean up finished sessions
         if (result.prompt === null) {
             mgr.delete(sessionId);
         }
         return { ...result };
     },
-    loopforge_status(mgr, input) {
+    async loopforge_status(mgr, input) {
         const sessionId = String(input.sessionId ?? "");
         if (!sessionId)
             return { error: "sessionId is required" };
@@ -299,7 +299,7 @@ export const TOOL_HANDLERS = {
             },
         };
     },
-    loopforge_stop(mgr, input) {
+    async loopforge_stop(mgr, input) {
         const sessionId = String(input.sessionId ?? "");
         if (!sessionId)
             return { error: "sessionId is required" };
@@ -311,11 +311,11 @@ export const TOOL_HANDLERS = {
         mgr.delete(sessionId);
         return { success: true, roundsCompleted, qualityTrajectory };
     },
-    loopforge_list(mgr, _input) {
+    async loopforge_list(mgr, _input) {
         const sessions = mgr.list();
         return { sessions };
     },
-    loopforge_replay(mgr, input) {
+    async loopforge_replay(mgr, input) {
         const sessionId = String(input.sessionId ?? "");
         if (!sessionId)
             return { error: "sessionId is required" };
@@ -325,7 +325,7 @@ export const TOOL_HANDLERS = {
         const timeline = mgr.replayTimeline(sessionId) ?? [];
         return { sessionId, loopId: session.loopId, timeline };
     },
-    loopforge_resume(mgr, input) {
+    async loopforge_resume(mgr, input) {
         const loopId = String(input.loopId ?? "");
         if (!loopId)
             return { error: "loopId is required" };
@@ -334,7 +334,7 @@ export const TOOL_HANDLERS = {
             return { error: `no saved session found for loop "${loopId}"` };
         return { ...result };
     },
-    loopforge_health(mgr, input) {
+    async loopforge_health(mgr, input) {
         const loopId = String(input.loopId ?? "");
         if (!loopId)
             return { error: "loopId is required" };

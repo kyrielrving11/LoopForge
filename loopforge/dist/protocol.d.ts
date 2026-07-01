@@ -3,7 +3,7 @@
  * All types exchanged between the Main Agent and LoopForge flow through
  * these interfaces. This is the contract layer — no implementation logic.
  *
- * v1.6: 32 types — 4 enums + 27 interfaces + 1 type alias.
+ * v1.7: 38 types — 4 enums + 32 interfaces + 2 type aliases.
  */
 export declare enum Mode {
     LOOP_COMPILE = "loop_compile",
@@ -203,7 +203,7 @@ export interface LoopRoundResult {
 }
 export declare function makeLoopRoundResult(overrides?: Partial<LoopRoundResult>): LoopRoundResult;
 export interface LoopCompileRequest {
-    mode: string;
+    mode: Mode;
     loop_id: string;
     round: number;
     goal_id: string;
@@ -218,10 +218,14 @@ export interface LoopCompileRequest {
     force_level: string;
     health_check_interval: number;
     vault_config: VaultConfig;
+    /** Optional external context from a long-term memory system (e.g. claude-mem).
+     *  Injected into L2 prompts only. Ignored by L0/L1 compilers.
+     *  Populated by the caller (runtime / MCP session) via a memoryProvider callback. */
+    external_context?: string;
 }
 export declare function makeLoopCompileRequest(overrides?: Partial<LoopCompileRequest>): LoopCompileRequest;
 export interface LoopCompileResponse {
-    status: string;
+    status: AgentStatus;
     prompt: string;
     recompile_level: string;
     diff_from_previous: string;
@@ -324,12 +328,72 @@ export interface RuntimeConfig {
     onHeartbeat?: (info: HeartbeatInfo) => void;
     onTimeout?: (info: TimeoutInfo) => void;
     onHealthWarning?: (warning: HealthWarning) => void;
+    /** Optional provider for long-term memory context retrieval.
+     *  Called at L2 compile rounds during designated injection phases.
+     *  Receives loop state for constructing a targeted query.
+     *  Return empty string to skip injection. */
+    memoryProvider?: (ctx: MemoryProviderContext) => Promise<string>;
+    /** Optional writer for persisting loop knowledge back to long-term memory.
+     *  Called once when the loop terminates (any stop reason).
+     *  Receives a structured writeback payload with project/feedback/reference entries. */
+    memoryWriter?: (payload: LoopMemoryWriteback) => Promise<void>;
+}
+/** Context passed to the memoryProvider callback at each injection phase.
+ *  Contains enough loop state to construct a targeted semantic query. */
+export interface MemoryProviderContext {
+    loopId: string;
+    round: number;
+    task: string;
+    domain: string;
+    /** Injection phase: 1 (start), 2 (mid), 3 (late). */
+    phase: 1 | 2 | 3;
+    /** Current progress estimate (0.0–1.0), or -1 if unavailable. */
+    progressEstimate: number;
+    /** Accumulated loop knowledge for constructing a differential query. */
+    accumulatedContext: {
+        recurringIssues: string[];
+        failedPatterns: string[];
+        keyLessons: string[];
+        remainingCriteria: string[];
+    };
 }
 export interface RunResult {
     success: boolean;
     stopReason: StopReason;
     roundsCompleted: number;
     qualityTrajectory: number[];
+}
+/** Structured payload written back to the long-term memory system
+ *  when a loop terminates. Contains distilled knowledge suitable
+ *  for cross-task reuse. */
+export interface LoopMemoryWriteback {
+    loopId: string;
+    task: string;
+    outcome: "completed" | "circuit_breaker" | "stalled" | "max_rounds" | "stopped";
+    roundsCompleted: number;
+    qualityTrajectory: number[];
+    /** Project-type memory entry — task outcome and key discoveries. */
+    projectEntry: LoopMemoryWritebackProjectEntry;
+    /** Feedback-type memory entries — tactical lessons learned. */
+    feedbackEntries: LoopMemoryWritebackFeedbackEntry[];
+    /** Reference-type memory entry — pointer to the vault for deep dives. */
+    referenceEntry: LoopMemoryWritebackReferenceEntry;
+}
+export interface LoopMemoryWritebackProjectEntry {
+    title: string;
+    objective: string;
+    keyOutcome: string;
+    keyDiscoveries: string[];
+    date: string;
+}
+export interface LoopMemoryWritebackFeedbackEntry {
+    rule: string;
+    why: string;
+    howToApply: string;
+}
+export interface LoopMemoryWritebackReferenceEntry {
+    description: string;
+    vaultLocation: string;
 }
 /** A single flag raised during self-evaluation verification.
  *  Each flag identifies a specific inconsistency between the agent's

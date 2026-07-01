@@ -21,22 +21,22 @@ npx tsc --noEmit # type-check only
 
 ```
 loopforge/src/
-  protocol.ts          # 32 types (4 enums + 27 interfaces + 1 type alias) — wire contract
+  protocol.ts          # 38 types (4 enums + 32 interfaces + 2 type aliases) — wire contract
   loop-compiler.ts     # L0/L1/L2 + advisories + specialist compilers (~1600 lines)
   engine.ts            # Lifecycle, circuit breaker, session state + verification gate injection (~890 lines)
   runtime.ts           # Loop Runtime (v1.2+) — event-driven loop with heartbeat/timeout/stall
   verification-gate.ts # Layer 1 cross-round consistency checks (v1.6, ~250 lines)
   builder.ts           # Technique routing (keyword + adaptive) + quality scoring
-  adapter.ts           # Mode routing (loop_compile | feedback | review)
-  mcp-server.ts        # MCP server entry point (#!/usr/bin/env node)
   replay.ts            # Time-travel queries: getRound / replay / timeline / diff
   policy.ts            # loop_policy.json loader (includes RuntimePolicy)
   generate-schema.ts   # JSON Schema generator (runs during build)
+  observability.ts     # Structured JSON event logging to stderr (LOOPFORGE_LOG env-var gated)
+  memory-bridge.ts     # claude-mem integration — autoConfigure, memoryProvider, memoryWriter
   backends/
     interface.ts       # VaultBackend interface (9 methods)
     fs.ts              # FSBackend — JSON vault + Markdown lineage dual-write
   mcp/
-    session.ts         # SessionManager — Map<id, {engine, round, ...}> + advance/save/resume/getHealth (~370 lines)
+    session.ts         # SessionManager — Map<id, {engine, round, ...}> + advance/save/resume/getHealth (~737 lines)
     tools.ts           # 8 tool defs + handlers: start/next/status/stop/list/replay/resume/health (~250 lines)
     server.ts          # JSON-RPC over stdio — initialize/tools/list/tools/call (~100 lines)
   mcp-server.ts        # MCP server entry point (#!/usr/bin/env node)
@@ -76,7 +76,7 @@ Event-driven loop driver. Key invariants:
 - SIGINT/SIGTERM → `stop()` sets status=STOPPED; next iteration of for-loop exits
 - Interactive mode (`interactive: true`) skips timeout/stall — used by CLI `cmdRun`
 
-### `mcp/session.ts` (~260 lines)
+### `mcp/session.ts` (~737 lines)
 Session manager — MCP integration layer. Key invariants:
 - Each session = one complete multi-round loop with its own LoopForgeEngine instance
 - `advance()` cycle: extract → verify (v1.6) → feedback → check stop → compile next (extraction-first order)

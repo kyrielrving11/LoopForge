@@ -10,6 +10,8 @@
  * Compilation: compileL0() / compileL1() / compileL2() produce the actual prompt.
  */
 import { type LoopCompileRequest, type LoopCompileResponse, type LoopHealth, type RollingSummary, type TaskAlignment } from "./protocol.js";
+export declare function tokenize(text: string): Set<string>;
+export declare function jaccard(a: Set<string>, b: Set<string>): number;
 export declare function computeGoalTextHash(task: string): string;
 export declare function deriveGoalId(loopId: string, task: string, explicitGoalId?: string): string;
 interface PreviousRound {
@@ -24,6 +26,10 @@ interface PreviousRound {
 export declare function getPreviousRound(loopId: string, roundNum: number, vaultContext: Record<string, unknown> | null): PreviousRound | null;
 export declare function buildRollingSummary(loopId: string, currentRound: number, vaultContext: Record<string, unknown> | null): RollingSummary | null;
 export declare function formatRollingSummaryForPrompt(rs: RollingSummary | null): string;
+/** Format an external context string for injection into an L2 prompt.
+ *  Wraps the raw context in a marked section with a priority disclaimer.
+ *  Returns empty string if context is empty or injection is disabled by policy. */
+export declare function formatExternalContext(externalContext: string | undefined, sectionTitle: string, maxLength: number): string;
 export declare function decideLevel(request: LoopCompileRequest, vaultContext: Record<string, unknown> | null): string;
 export declare function alignTask(proposedTask: string, request: LoopCompileRequest, vaultContext: Record<string, unknown> | null): TaskAlignment;
 export declare function checkLoopHealth(loopId: string, request: LoopCompileRequest, vaultContext: Record<string, unknown> | null): LoopHealth;

@@ -20,6 +20,7 @@ import {
   LoopForgeEngine,
   createEngine,
 } from "./engine.js";
+import { tokenize, jaccard } from "./loop-compiler.js";
 import {
   Mode,
   RuntimeStatus,
@@ -39,15 +40,101 @@ import {
   type RunResult,
   type SelfEvaluation,
   type StopReason,
+  type LoopMemoryWriteback,
+  type MemoryProviderContext,
 } from "./protocol.js";
-import { getPolicy } from "./policy.js";
+import { getPolicy, resolveAllowedPhases } from "./policy.js";
 import { verifySelfEvaluation } from "./verification-gate.js";
 import type { VerificationFlag } from "./protocol.js";
 import { logEvent } from "./observability.js";
+import { tryAutoConfigure } from "./memory-bridge.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Helpers
 // ═══════════════════════════════════════════════════════════════════════════
+
+/** Build a writeback payload from the loop's final state.
+ *  Extracts project-level outcome, tactical lessons, and vault reference.
+ *  Returns null if there is no meaningful data to write back. */
+function buildWritebackPayload(
+  loopId: string,
+  task: string,
+  stopReason: string,
+  result: RunResult,
+): LoopMemoryWriteback | null {
+  // Only write back for meaningful loops (at least 1 round completed)
+  if (result.roundsCompleted < 1) return null;
+
+  const policy = getPolicy();
+  const wp = policy.memory_writeback;
+
+  const outcome = (
+    ["completed", "circuit_breaker", "stalled", "max_rounds", "stopped"] as const
+  ).find((o) => stopReason === o) ?? "stopped";
+
+  // Build project entry
+  const projectEntry = {
+    title: `${task.slice(0, 80)} — ${outcome}`,
+    objective: task.slice(0, 200),
+    keyOutcome: stopReason === "task_complete"
+      ? `Completed successfully in ${result.roundsCompleted} rounds.`
+      : `Terminated with reason '${stopReason}' after ${result.roundsCompleted} rounds.`,
+    keyDiscoveries: [] as string[],
+    date: new Date().toISOString().split("T")[0],
+  };
+
+  // Build feedback entries from quality trajectory patterns
+  const feedbackEntries: LoopMemoryWriteback["feedbackEntries"] = [];
+  const trajectory = result.qualityTrajectory;
+
+  if (trajectory.length >= 3) {
+    // Detect improving trend
+    const firstHalf = trajectory.slice(0, Math.floor(trajectory.length / 2));
+    const secondHalf = trajectory.slice(Math.floor(trajectory.length / 2));
+    const firstAvg = firstHalf.reduce((a, b) => a + b, 0) / firstHalf.length;
+    const secondAvg = secondHalf.reduce((a, b) => a + b, 0) / secondHalf.length;
+
+    if (secondAvg - firstAvg > 1.0) {
+      feedbackEntries.push({
+        rule: `Quality trajectory improved from avg ${firstAvg.toFixed(1)} to ${secondAvg.toFixed(1)} over ${trajectory.length} rounds`,
+        why: `Mid-loop strategy adjustment unlocked progress in task "${task.slice(0, 80)}"`,
+        howToApply: "Consider the strategy used in later rounds for similar tasks",
+      });
+    }
+  }
+
+  // Detect flatlining
+  if (trajectory.length >= 3) {
+    const recent = trajectory.slice(-3);
+    if (recent.every((v, i) => i === 0 || recent[i - 1] >= v)) {
+      feedbackEntries.push({
+        rule: `Quality flatlined at [${recent.join(", ")}] in the last 3 rounds`,
+        why: `Task "${task.slice(0, 80)}" stopped with reason '${stopReason}' — strategy may have stagnated`,
+        howToApply: "If re-attempting, start with a different technique than the one that produced the flatline",
+      });
+    }
+  }
+
+  // Build reference entry pointing to vault
+  const referenceEntry = {
+    description: `LoopForge vault data for "${task.slice(0, 80)}"`,
+    vaultLocation: `.promptcraft/prompt_vault.json → loop:${loopId}:*`,
+  };
+
+  return {
+    loopId,
+    task,
+    outcome,
+    roundsCompleted: result.roundsCompleted,
+    qualityTrajectory: result.qualityTrajectory,
+    projectEntry: {
+      ...projectEntry,
+      keyDiscoveries: projectEntry.keyDiscoveries.slice(0, wp.max_discoveries_in_project),
+    },
+    feedbackEntries: feedbackEntries.slice(0, wp.max_feedback_entries),
+    referenceEntry,
+  };
+}
 
 function autoLoopId(task: string): string {
   let slug = task.toLowerCase().trim().slice(0, 60);
@@ -59,7 +146,7 @@ function autoLoopId(task: string): string {
 function resolveConfig(raw: RuntimeConfig): RequiredConfig {
   const policy = getPolicy();
   const rtPolicy = policy.runtime;
-  return {
+  const config: RequiredConfig = {
     task: raw.task,
     execute: raw.execute,
     loopId: raw.loopId || autoLoopId(raw.task),
@@ -81,7 +168,18 @@ function resolveConfig(raw: RuntimeConfig): RequiredConfig {
     onHeartbeat: raw.onHeartbeat,
     onTimeout: raw.onTimeout,
     onHealthWarning: raw.onHealthWarning,
+    memoryProvider: raw.memoryProvider,
+    memoryWriter: raw.memoryWriter,
   };
+
+  // Auto-detect claude-mem if no explicit provider was given
+  if (!config.memoryProvider && !config.memoryWriter) {
+    const auto = tryAutoConfigure();
+    if (auto.memoryProvider) config.memoryProvider = auto.memoryProvider;
+    if (auto.memoryWriter) config.memoryWriter = auto.memoryWriter;
+  }
+
+  return config;
 }
 
 interface RequiredConfig {
@@ -104,6 +202,8 @@ interface RequiredConfig {
   onHeartbeat?: (info: HeartbeatInfo) => void;
   onTimeout?: (info: TimeoutInfo) => void;
   onHealthWarning?: (warning: HealthWarning) => void;
+  memoryProvider?: (ctx: MemoryProviderContext) => Promise<string>;
+  memoryWriter?: (payload: LoopMemoryWriteback) => Promise<void>;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -123,6 +223,14 @@ export class LoopRuntime extends EventEmitter {
   // Verification gate state (v1.6 unified — was MCP-only, now also in runtime)
   private lastSelfEval: SelfEvaluation | null = null;
   private pendingVerificationFlags: VerificationFlag[] = [];
+
+  // Memory integration state (v1.7)
+  private injectionCount = 0;
+  private lastInjectionRound = 0;
+  private injectedContexts: string[] = [];
+  private phase2Triggered = false;
+  private phase3Triggered = false;
+  private pendingExternalContext = "";
 
   // Shared mutable state between the main loop and the heartbeat tick
   private roundStartTime = 0;
@@ -148,6 +256,117 @@ export class LoopRuntime extends EventEmitter {
     return [...this.qualityTrajectory];
   }
 
+  // ── Memory Integration (v1.7) ──────────────────────────────────────────
+
+  /** Derive the current progress estimate from the last self evaluation.
+   *  Returns -1 if no progress data is available. */
+  private getCurrentProgress(): number {
+    if (!this.lastSelfEval?.execution_evidence) return -1;
+    const pe = this.lastSelfEval.execution_evidence.progress_estimate;
+    return typeof pe === "number" ? pe : -1;
+  }
+
+  /** Determine whether memory should be injected this round based on
+   *  tier-based allowed phases, progress thresholds, and round spacing. */
+  private shouldInjectMemory(): boolean {
+    const policy = getPolicy();
+    const mi = policy.memory_injection;
+    if (!mi.enabled) return false;
+    if (!this.config.memoryProvider) return false;
+    if (
+      this.lastInjectionRound > 0 &&
+      this.currentRound - this.lastInjectionRound < mi.min_rounds_between_injections
+    ) {
+      return false;
+    }
+
+    // Resolve which phases are allowed for this loop's maxRounds
+    const allowedPhases = new Set(
+      resolveAllowedPhases(this.config.maxRounds, mi.round_tiers),
+    );
+    const maxInjections = allowedPhases.size;
+    if (this.injectionCount >= maxInjections) return false;
+
+    const progress = this.getCurrentProgress();
+
+    // Phase 1: round 1, always check if allowed
+    if (this.currentRound === 1 && this.injectionCount === 0 && allowedPhases.has(1)) {
+      return true;
+    }
+
+    // Phase 2: progress threshold (only if allowed by tier)
+    if (
+      allowedPhases.has(2) &&
+      !this.phase2Triggered &&
+      progress >= mi.phase_thresholds.phase2.threshold
+    ) {
+      return true;
+    }
+
+    // Phase 3: progress threshold (only if allowed by tier)
+    if (
+      allowedPhases.has(3) &&
+      !this.phase3Triggered &&
+      progress >= mi.phase_thresholds.phase3.threshold
+    ) {
+      return true;
+    }
+
+    return false;
+  }
+
+  /** Build the accumulated context for constructing a targeted memory query. */
+  private buildAccumulatedContext() {
+    const recurringIssues: string[] = [];
+    const failedPatterns: string[] = [];
+    const keyLessons: string[] = [];
+    const remainingCriteria: string[] = [];
+
+    if (this.lastSelfEval) {
+      // Recurring issues: violations that have appeared before
+      if (this.lastSelfEval.constraint_violations.length) {
+        recurringIssues.push(...this.lastSelfEval.constraint_violations);
+      }
+      // Remaining criteria
+      if (this.lastSelfEval.execution_evidence?.success_criteria_remaining?.length) {
+        remainingCriteria.push(
+          ...this.lastSelfEval.execution_evidence.success_criteria_remaining,
+        );
+      }
+      // Key lessons from emerged subtasks
+      if (this.lastSelfEval.emerged_subtasks?.length) {
+        keyLessons.push(...this.lastSelfEval.emerged_subtasks);
+      }
+      // Wrong assumptions as negative lessons
+      if (this.lastSelfEval.wrong_assumptions?.length) {
+        keyLessons.push(
+          ...this.lastSelfEval.wrong_assumptions.map((a) => `Wrong: ${a}`),
+        );
+      }
+    }
+
+    return { recurringIssues, failedPatterns, keyLessons, remainingCriteria };
+  }
+
+  /** Deduplicate external context against previously injected contexts.
+   *  Returns empty string if the new context is too similar to any prior. */
+  private dedupAndStoreContext(newContext: string): string {
+    if (!newContext.trim()) return "";
+    const policy = getPolicy();
+    const threshold = policy.memory_injection.dedup_threshold;
+    const newTokens = tokenize(newContext);
+
+    for (const old of this.injectedContexts) {
+      const oldTokens = tokenize(old);
+      if (jaccard(newTokens, oldTokens) > threshold) {
+        return ""; // Too similar — skip
+      }
+    }
+
+    this.injectedContexts.push(newContext);
+    return newContext;
+  }
+
   // ── Lifecycle ──────────────────────────────────────────────────────────
 
   /** Start the loop. Returns when the loop terminates (task complete,
@@ -167,14 +386,63 @@ export class LoopRuntime extends EventEmitter {
     let previousAgentOutput: string | null = null;
     let consecutiveErrors = 0;
 
-    for (
-      this.currentRound = 1;
-      this.currentRound <= this.config.maxRounds;
-      this.currentRound++
-    ) {
-      if (this._status !== RuntimeStatus.RUNNING) {
-        stopReason = this._status === RuntimeStatus.STALLED ? "stalled" : "stopped";
-        break;
+    try {
+      for (
+        this.currentRound = 1;
+        this.currentRound <= this.config.maxRounds;
+        this.currentRound++
+      ) {
+        if (this._status !== RuntimeStatus.RUNNING) {
+          stopReason = this._status === RuntimeStatus.STALLED ? "stalled" : "stopped";
+          break;
+        }
+
+      // ── v1.7: Memory Injection (before compile, only at L2 phases) ──
+      this.pendingExternalContext = "";
+      if (this.shouldInjectMemory()) {
+        const progress = this.getCurrentProgress();
+        let phase: 1 | 2 | 3;
+        if (this.currentRound === 1) {
+          phase = 1;
+        } else if (!this.phase2Triggered && progress >= getPolicy().memory_injection.phase_thresholds.phase2.threshold) {
+          phase = 2;
+          this.phase2Triggered = true;
+        } else {
+          phase = 3;
+          this.phase3Triggered = true;
+        }
+
+        try {
+          const ctx: MemoryProviderContext = {
+            loopId: this.config.loopId,
+            round: this.currentRound,
+            task: this.config.task,
+            domain: this.config.domain,
+            phase,
+            progressEstimate: progress,
+            accumulatedContext: this.buildAccumulatedContext(),
+          };
+          const rawContext = await this.config.memoryProvider!(ctx);
+          this.pendingExternalContext = this.dedupAndStoreContext(rawContext);
+          if (this.pendingExternalContext) {
+            this.injectionCount++;
+            this.lastInjectionRound = this.currentRound;
+            logEvent("memory_injected", {
+              loopId: this.config.loopId,
+              round: this.currentRound,
+              phase,
+              injectionCount: this.injectionCount,
+              contextLength: this.pendingExternalContext.length,
+            });
+          }
+        } catch {
+          // memoryProvider failed — degrade gracefully, continue without context
+          this.pendingExternalContext = "";
+          logEvent("memory_provider_error", {
+            loopId: this.config.loopId,
+            round: this.currentRound,
+          });
+        }
       }
 
       // ── Compile ──────────────────────────────────────────────────
@@ -197,6 +465,7 @@ export class LoopRuntime extends EventEmitter {
           | Record<string, unknown>
           | undefined,
         verification_flags: this.pendingVerificationFlags,
+        external_context: this.pendingExternalContext || undefined,
       });
 
       if (!compileResult.response?.prompt) {
@@ -376,13 +645,14 @@ export class LoopRuntime extends EventEmitter {
 
       previousAgentOutput = agentOutput;
     }
+    } finally {
+      // ── Cleanup — always runs even if the loop body throws ──────────
+      this.stopHeartbeat();
+      this.unregisterSignalHandlers();
 
-    // ── Cleanup ──────────────────────────────────────────────────────
-    this.stopHeartbeat();
-    this.unregisterSignalHandlers();
-
-    if (this._status === RuntimeStatus.RUNNING) {
-      this._status = RuntimeStatus.STOPPED;
+      if (this._status === RuntimeStatus.RUNNING) {
+        this._status = RuntimeStatus.STOPPED;
+      }
     }
 
     const result: RunResult = {
@@ -393,6 +663,37 @@ export class LoopRuntime extends EventEmitter {
         : this.currentRound,
       qualityTrajectory: [...this.qualityTrajectory],
     };
+
+    // ── v1.7: Memory Writeback ───────────────────────────────────────
+    const wp = getPolicy().memory_writeback;
+    if (wp.enabled && this.config.memoryWriter) {
+      const shouldWrite = wp.write_on_outcomes.includes(stopReason) ||
+        wp.write_on_outcomes.length === 0;
+      if (shouldWrite && result.roundsCompleted > 0) {
+        try {
+          const payload = buildWritebackPayload(
+            this.config.loopId,
+            this.config.task,
+            stopReason,
+            result,
+          );
+          if (payload) {
+            await this.config.memoryWriter(payload);
+            logEvent("memory_writeback", {
+              loopId: this.config.loopId,
+              stopReason,
+              feedbackCount: payload.feedbackEntries.length,
+            });
+          }
+        } catch {
+          // memoryWriter failed — degrade gracefully
+          logEvent("memory_writeback_error", {
+            loopId: this.config.loopId,
+            stopReason,
+          });
+        }
+      }
+    }
 
     this.emit("done", result);
     return result;

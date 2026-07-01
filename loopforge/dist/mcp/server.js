@@ -7,6 +7,7 @@
 import { createInterface } from "node:readline";
 import { SessionManager } from "./session.js";
 import { TOOL_SCHEMAS, TOOL_HANDLERS } from "./tools.js";
+import { autoConfigureMemory } from "../memory-bridge.js";
 const SERVER_INFO = {
     name: "loopforge-mcp",
     version: "1.3.0",
@@ -30,10 +31,11 @@ export class McpServer {
     mgr;
     constructor(backend) {
         this.mgr = new SessionManager(backend);
+        autoConfigureMemory(this.mgr);
     }
     start() {
         const rl = createInterface({ input: process.stdin });
-        rl.on("line", (line) => {
+        rl.on("line", async (line) => {
             let req;
             try {
                 req = JSON.parse(line);
@@ -49,7 +51,7 @@ export class McpServer {
                 return;
             }
             try {
-                const result = this.dispatch(req);
+                const result = await this.dispatch(req);
                 if (result !== null) {
                     process.stdout.write(okResponse(req.id, result) + "\n");
                 }
@@ -62,7 +64,7 @@ export class McpServer {
         });
         process.stderr.write(`[loopforge-mcp] v${SERVER_INFO.version} started\n`);
     }
-    dispatch(req) {
+    async dispatch(req) {
         switch (req.method) {
             case "initialize":
                 return {
@@ -80,7 +82,7 @@ export class McpServer {
                 if (!handler) {
                     throw new Error(`Unknown tool: ${name}`);
                 }
-                const output = handler(this.mgr, args);
+                const output = await handler(this.mgr, args);
                 return {
                     content: [{ type: "text", text: JSON.stringify(output) }],
                 };

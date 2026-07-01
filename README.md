@@ -18,8 +18,8 @@ step at a time. As the agent executes, LoopForge tracks real progress, detects
 drift, merges discovered constraints, deepens the objective, and corrects
 wrong assumptions — maintaining cognitive stability across long-horizon loops.
 
-> **v1.7** — `npm install loopforge`. MCP server (8 tools) + Perception-Skill +
-> library API + Verification Gate + Structured Evaluation + Failure Lineage Weighting. Zero runtime dependencies. 202 tests. Node.js ≥18.
+> **v1.8** — `npm install loopforge`. MCP server (8 tools) + Perception-Skill +
+> library API + Verification Gate + Structured Evaluation + Memory System Integration (3-phase injection + writeback). Zero runtime dependencies. 202 tests. Node.js ≥18.
 
 ---
 
@@ -216,6 +216,93 @@ Stop reasons: `task_complete` | `circuit_breaker` | `max_rounds` | `stalled` | `
 ### Structured Evaluation (v1.7)
 - **Evaluation Parameter** — `loopforge_next` accepts a typed `evaluation` object validated by MCP client schema enforcement. No more regex extraction of embedded eval blocks. `output` text is optional (kept for audit trail). Legacy `---loopforge-eval` blocks still supported.
 
+### Memory System Integration (v1.7)
+
+**LoopForge is not a memory system — it's a prompt compiler.** Understanding this distinction
+is the key to understanding how they complement each other.
+
+| | Agent Memory (claude-mem, Mem0, etc.) | LoopForge |
+|---|---|---|
+| **Answers** | "What did you do before?" | "What should you do next, and how should you think about it?" |
+| **Scope** | Cross-task, cross-session (long-term) | Single-task, cross-round (working memory) |
+| **Operation** | Observe → extract → store → retrieve | Compile L0/L1/L2 → inject constraints → verify → generate |
+| **Decision** | None — raw context injection | Full — technique routing, strategy rotation, constraint lifecycle |
+| **Verification** | Trusts agent's self-report | 6 adversarial cross-round consistency checks |
+| **Active** | Passive librarian — fetches relevant files | Active editor — writes the next chapter |
+
+**They are not competitors. They are different layers of the same stack.**
+
+Agent memory manages *what you know across sessions* — codebase patterns, user preferences,
+past decisions. LoopForge manages *what you do within a task* — which constraint is active,
+what strategy to use, whether progress is real.
+
+#### The Integration: 3-Phase Injection + Writeback
+
+LoopForge v1.7 automatically bridges the two layers:
+
+```
+┌─────────────────────────────────────┐
+│       Agent Memory (Long-Term)      │  ← cross-session knowledge
+│  "You prefer terse responses"       │
+│  "The auth module uses JWT"         │
+└──────────────┬──────────────────────┘
+               │ injected at 3 strategic points
+               ▼
+┌─────────────────────────────────────┐
+│       LoopForge (Working Memory)    │  ← within-task execution control
+│  "Round 3: active constraints are…" │
+│  "Technique rotated: zero-shot→ToT" │
+│  "Progress: 2/5 criteria met"       │
+└──────────────┬──────────────────────┘
+               │ loop ends → distilled knowledge written back
+               ▼
+┌─────────────────────────────────────┐
+│       Agent Memory (updated)        │
+│  "ERC20 audits: zero-shot fails,    │
+│   switch to ToT after 2 low rounds" │
+│  "Key discovery: reentrancy in …"   │
+└─────────────────────────────────────┘
+```
+
+**3-Phase Injection** (read from memory, only during L2 full recompiles).
+Injection frequency scales with loop length via a tiered strategy:
+
+| maxRounds | Injections | Phases | Rationale |
+|-----------|-----------|--------|-----------|
+| ≤10 | 1 | Phase 1 (Round 1) | Short loops — working memory stays fresh, one anchor is enough |
+| 11–20 | 2 | Phase 1 + Phase 3 (70% progress) | Medium loops — initial context + late-stage verification |
+| 21+ | 3 | Phase 1 + Phase 2 (40% progress) + Phase 3 (70% progress) | Long loops — full cognitive support at all strategic points |
+
+L0 and L1 rounds NEVER inject memory — the compiler's incremental path is deterministic
+and injecting external context would create unpredictable signal interference.
+
+**Writeback** (write to memory, once per loop):
+- **1 project entry** — task outcome + key discoveries (absolute dates)
+- **≤5 feedback entries** — tactical lessons (rule + Why + How to apply, matching claude-mem's format)
+- **1 reference entry** — pointer to the LoopForge vault for deep dives
+
+Writeback follows claude-mem's core principle: **only store what cannot be derived from current state.**
+Code patterns stay in code. Decisions, discoveries, and tactical lessons go to memory.
+
+**Auto-detection**: No configuration required. LoopForge detects claude-mem automatically
+(via the local filesystem). Users can override with explicit `memoryProvider`
+/ `memoryWriter` callbacks. If claude-mem is unavailable, memory integration degrades
+silently — the loop continues normally.
+
+#### How to install claude-mem
+
+claude-mem is a third-party Claude Code plugin ([github.com/thedotmack/claude-mem](https://github.com/thedotmack/claude-mem))
+that provides persistent cross-session memory. LoopForge auto-detects it — no additional
+wiring needed once installed.
+
+| Platform | Install command | Notes |
+|----------|----------------|-------|
+| **Claude Code** | `claude plugin install claude-mem@thedotmack` | One-click via plugin marketplace. Auto-starts on session open. |
+| **Codex (OpenAI)** | `npx codex-mem-cli@latest codex setup` | Dedicated Codex port ([npm](https://www.npmjs.com/package/@iflow-mcp/keystonescience-codex-mem)). |
+| **Cursor / MCP** | Manual — add to MCP config: | Point to `mcp-server.cjs` from the installed plugin or a source build. See [claude-mem docs](https://docs.claude-mem.ai/development) for the MCP server path. |
+
+LoopForge will detect it on next startup. No config changes needed.
+
 ### Observability (v1.7)
 - **Engine Metrics** — `getMetrics()` public getter exposes 8 health counters: vault write errors/bytes, feedback buffer stats, cache misses, analysis errors. Included in `loopforge_status` MCP tool output.
 - **Structured Event Logging** — JSON-line events to stderr when `LOOPFORGE_LOG=1` is set. 6 event types: `round_complete`, `circuit_breaker`, `gate_contradicted`, `strategy_rotated`, `vault_write_error`, `session_start` / `session_end`. Silent by default — zero overhead when not enabled.
@@ -242,8 +329,8 @@ Stop reasons: `task_complete` | `circuit_breaker` | `max_rounds` | `stalled` | `
 ```
 LoopForge/
 ├── loopforge/              # TypeScript package
-│   ├── src/                     # builder, engine, loop-compiler, observability, policy,
-│   │                            #   protocol, replay, runtime, verification-gate, backends, mcp
+│   ├── src/                     # builder, engine, loop-compiler, memory-bridge, observability,
+│   │                            #   policy, protocol, replay, runtime, verification-gate, backends, mcp
 │   ├── dist/                    # Compiled JS + type declarations
 │   ├── skills/
 │   │   └── perception/          # Perception-Skill: agent instructions for cognitive loops

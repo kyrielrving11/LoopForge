@@ -12,7 +12,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { getPolicy } from "./policy.js";
-import { makeLoopCompileResponse, makeLoopHealth, makeLoopObjective, makeRollingSummary, makeTaskAlignment, } from "./protocol.js";
+import { AgentStatus, makeLoopCompileResponse, makeLoopHealth, makeLoopObjective, makeRollingSummary, makeTaskAlignment, } from "./protocol.js";
 import { routeTechniqueAdaptive } from "./builder.js";
 // ═══════════════════════════════════════════════════════════════════════════
 // Repair cue detection
@@ -34,7 +34,7 @@ function detectsRepairSignal(request) {
 // ═══════════════════════════════════════════════════════════════════════════
 // Tokenization helpers
 // ═══════════════════════════════════════════════════════════════════════════
-function tokenize(text) {
+export function tokenize(text) {
     const tokens = text.split(/\s+/);
     const result = new Set();
     for (let token of tokens) {
@@ -52,7 +52,7 @@ function tokenize(text) {
     }
     return result;
 }
-function jaccard(a, b) {
+export function jaccard(a, b) {
     if (a.size === 0 || b.size === 0)
         return 0.0;
     let intersection = 0;
@@ -76,17 +76,6 @@ export function deriveGoalId(loopId, task, explicitGoalId = "") {
     let taskPrefix = (task || "unnamed").slice(0, 60).trim().toLowerCase();
     taskPrefix = taskPrefix.replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
     return loopId ? `${loopId}:${taskPrefix}` : taskPrefix;
-}
-function makePreviousRound() {
-    return {
-        goal_id: "",
-        goal_text_hash: "",
-        quality_score: 0,
-        success: true,
-        task: "",
-        constraints_active: [],
-        prompt_text: "",
-    };
 }
 export function getPreviousRound(loopId, roundNum, vaultContext) {
     if (vaultContext === null)
@@ -557,6 +546,36 @@ export function formatRollingSummaryForPrompt(rs) {
     return lines.join("\n");
 }
 // ═══════════════════════════════════════════════════════════════════════════
+// External Context formatting (v1.7 — memory system integration)
+// ═══════════════════════════════════════════════════════════════════════════
+/** Format an external context string for injection into an L2 prompt.
+ *  Wraps the raw context in a marked section with a priority disclaimer.
+ *  Returns empty string if context is empty or injection is disabled by policy. */
+export function formatExternalContext(externalContext, sectionTitle, maxLength) {
+    if (!externalContext || externalContext.trim().length === 0)
+        return "";
+    const trimmed = externalContext.trim().slice(0, maxLength);
+    const truncationNote = trimmed.length < externalContext.trim().length
+        ? `\n> ⚠️ Context was truncated to ${maxLength} characters.`
+        : "";
+    return [
+        "",
+        sectionTitle,
+        "",
+        "> ⚠️ **Role**: Situational awareness only. These are point-in-time",
+        "> observations from past sessions — claims about code locations or",
+        "> behaviour may be outdated. If any insight contradicts the Loop",
+        "> Objective or Active Constraints above, the LoopForge specification",
+        "> takes absolute precedence.",
+        "",
+        trimmed,
+        truncationNote,
+        "",
+        "---",
+        "",
+    ].join("\n");
+}
+// ═══════════════════════════════════════════════════════════════════════════
 // LAYER 1 — Hard Gates (can change compile level)
 // ═══════════════════════════════════════════════════════════════════════════
 export function decideLevel(request, vaultContext) {
@@ -959,7 +978,7 @@ function compileL0(request, vaultContext, prevRound) {
     const cachedPrompt = prev?.prompt_text ?? "";
     if (cachedPrompt) {
         return makeLoopCompileResponse({
-            status: "ok",
+            status: AgentStatus.OK,
             prompt: cachedPrompt,
             recompile_level: "l0",
             diff_from_previous: `L0 cache hit — reusing prompt from round ${request.round - 1}`,
@@ -1053,7 +1072,7 @@ function compileL1(request, vaultContext, prevRound) {
     lines.push("### Task");
     lines.push(request.task);
     return makeLoopCompileResponse({
-        status: "ok",
+        status: AgentStatus.OK,
         prompt: lines.join("\n"),
         recompile_level: "l1",
         diff_from_previous: diffParts.length ? diffParts.join("; ") : "Patch applied.",
@@ -1222,6 +1241,11 @@ export function compileL2(request, vaultContext) {
     else {
         prompt = compileGeneric(request, goalId, constraints, loopObjective, rollingText, analysis, referenceFile, technique);
     }
+    // ── v1.7: Inject external memory context (L2 only) ──
+    const policy = getPolicy();
+    if (policy.memory_injection.enabled && request.external_context) {
+        prompt += formatExternalContext(request.external_context, policy.memory_injection.section_title, policy.memory_injection.max_context_length);
+    }
     // ── P2: Emerged subtasks → suggested next task ──
     let suggestedNextTask = "";
     if (request.last_round_result?.emerged_subtasks?.length) {
@@ -1333,7 +1357,7 @@ export function compileL2(request, vaultContext) {
         progressDashboard = lines.join("\n");
     }
     return makeLoopCompileResponse({
-        status: "ok",
+        status: AgentStatus.OK,
         prompt: prompt + progressDashboard,
         recompile_level: "l2",
         diff_from_previous: request.round === 1 || request.plan_source
@@ -1772,8 +1796,8 @@ export function compileLoop(request, vaultContext = null) {
     }
     // Layer 2: Compute advisories
     const { warnings, suggestedNextTask, alignment, health } = computeAdvisories(request, vaultContext);
-    // Merge advisories into response
-    response.warnings = warnings;
+    // Merge advisories into response (preserve P4 consistency warnings from L2)
+    response.warnings = [...(response.warnings || []), ...warnings];
     // Only overwrite suggested_next_task from advisories if the compile function
     // didn't already set one (e.g. L2 sets it from emerged_subtasks)
     if (!response.suggested_next_task) {

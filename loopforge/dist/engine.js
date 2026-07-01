@@ -584,6 +584,7 @@ export class LoopForgeEngine {
             new_since_last_round: extras.new_since_last_round ?? "",
             force_level: extras.force_level ?? "auto",
             health_check_interval: extras.health_check_interval ?? 1,
+            external_context: extras.external_context ?? "",
         });
         // Convert last_round_result if present
         const lastRR = extras.last_round_result;

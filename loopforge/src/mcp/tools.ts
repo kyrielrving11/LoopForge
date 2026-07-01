@@ -253,10 +253,10 @@ export const TOOL_SCHEMAS = [
 // Handler registry
 // ═══════════════════════════════════════════════════════════════════════════
 
-export type ToolHandler = (mgr: SessionManager, input: Record<string, unknown>) => Record<string, unknown>;
+export type ToolHandler = (mgr: SessionManager, input: Record<string, unknown>) => Promise<Record<string, unknown>>;
 
 export const TOOL_HANDLERS: Record<string, ToolHandler> = {
-  loopforge_start(mgr, input): Record<string, unknown> {
+  async loopforge_start(mgr, input): Promise<Record<string, unknown>> {
     const startInput: StartInput = {
       task: String(input.task ?? ""),
       loopId: input.loopId as string | undefined,
@@ -272,11 +272,11 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
       return { error: "task is required and must be non-empty" };
     }
 
-    const result = mgr.create(startInput);
+    const result = await mgr.create(startInput);
     return { ...result };
   },
 
-  loopforge_next(mgr, input): Record<string, unknown> {
+  async loopforge_next(mgr, input): Promise<Record<string, unknown>> {
     const sessionId = String(input.sessionId ?? "");
     const output = String(input.output ?? "");
     const rawEval = input.evaluation as Record<string, unknown> | undefined;
@@ -291,7 +291,7 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
       return { error: "Either evaluation parameter or output with ---loopforge-eval block is required" };
     }
 
-    const result = mgr.advance(sessionId, output, preExtractedEval);
+    const result = await mgr.advance(sessionId, output, preExtractedEval);
 
     // Clean up finished sessions
     if (result.prompt === null) {
@@ -301,7 +301,7 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
     return { ...result };
   },
 
-  loopforge_status(mgr, input): Record<string, unknown> {
+  async loopforge_status(mgr, input): Promise<Record<string, unknown>> {
     const sessionId = String(input.sessionId ?? "");
     if (!sessionId) return { error: "sessionId is required" };
 
@@ -328,7 +328,7 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
     };
   },
 
-  loopforge_stop(mgr, input): Record<string, unknown> {
+  async loopforge_stop(mgr, input): Promise<Record<string, unknown>> {
     const sessionId = String(input.sessionId ?? "");
     if (!sessionId) return { error: "sessionId is required" };
 
@@ -342,12 +342,12 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
     return { success: true, roundsCompleted, qualityTrajectory };
   },
 
-  loopforge_list(mgr, _input): Record<string, unknown> {
+  async loopforge_list(mgr, _input): Promise<Record<string, unknown>> {
     const sessions = mgr.list();
     return { sessions };
   },
 
-  loopforge_replay(mgr, input): Record<string, unknown> {
+  async loopforge_replay(mgr, input): Promise<Record<string, unknown>> {
     const sessionId = String(input.sessionId ?? "");
     if (!sessionId) return { error: "sessionId is required" };
 
@@ -358,7 +358,7 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
     return { sessionId, loopId: session.loopId, timeline };
   },
 
-  loopforge_resume(mgr, input): Record<string, unknown> {
+  async loopforge_resume(mgr, input): Promise<Record<string, unknown>> {
     const loopId = String(input.loopId ?? "");
     if (!loopId) return { error: "loopId is required" };
 
@@ -368,7 +368,7 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
     return { ...result };
   },
 
-  loopforge_health(mgr, input): Record<string, unknown> {
+  async loopforge_health(mgr, input): Promise<Record<string, unknown>> {
     const loopId = String(input.loopId ?? "");
     if (!loopId) return { error: "loopId is required" };
 

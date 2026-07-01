@@ -24,7 +24,7 @@
 // Protocol types
 export { Mode, AgentStatus, Technique, makeAnalysis, makeVaultConfig, makeExecutionFeedback, makeSelfEvaluation, makeLoopObjective, makeLoopHealth, makeRollingSummary, makeTaskAlignment, makeLoopRoundResult, makeLoopCompileRequest, makeLoopCompileResponse, makeSessionState, makeTaskId, toDict, SELF_EVAL_REGEX, } from "./protocol.js";
 // Policy
-export { getPolicy, loadPolicy, resetPolicy, DEFAULT_POLICY, } from "./policy.js";
+export { getPolicy, loadPolicy, resetPolicy, DEFAULT_POLICY, resolveAllowedPhases, } from "./policy.js";
 export { FSBackend } from "./backends/fs.js";
 // Builder
 export { routeTechniqueAdaptive, scoreQuality, TECHNIQUE_REFERENCE, } from "./builder.js";
@@ -40,4 +40,6 @@ export { RuntimeStatus } from "./protocol.js";
 // MCP (v1.3)
 export { McpServer } from "./mcp/server.js";
 export { SessionManager } from "./mcp/session.js";
+// Memory Bridge (v1.8)
+export { computeProjectHash, findGitRoot, detectClaudeMem, createMemoryProvider, createMemoryWriter, autoConfigureMemory, tryAutoConfigure, } from "./memory-bridge.js";
 //# sourceMappingURL=index.js.map

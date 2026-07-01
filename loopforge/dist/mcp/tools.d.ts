@@ -256,6 +256,6 @@ export declare const TOOL_SCHEMAS: ({
         required: string[];
     };
 })[];
-export type ToolHandler = (mgr: SessionManager, input: Record<string, unknown>) => Record<string, unknown>;
+export type ToolHandler = (mgr: SessionManager, input: Record<string, unknown>) => Promise<Record<string, unknown>>;
 export declare const TOOL_HANDLERS: Record<string, ToolHandler>;
 //# sourceMappingURL=tools.d.ts.map

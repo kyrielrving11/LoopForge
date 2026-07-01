@@ -3,7 +3,7 @@
  * All types exchanged between the Main Agent and LoopForge flow through
  * these interfaces. This is the contract layer — no implementation logic.
  *
- * v1.6: 32 types — 4 enums + 27 interfaces + 1 type alias.
+ * v1.7: 38 types — 4 enums + 32 interfaces + 2 type aliases.
  */
 // ── Enums ──────────────────────────────────────────────────────────────────
 export var Mode;
@@ -149,7 +149,7 @@ export function makeLoopRoundResult(overrides = {}) {
 }
 export function makeLoopCompileRequest(overrides = {}) {
     return {
-        mode: "loop_compile",
+        mode: Mode.LOOP_COMPILE,
         loop_id: "",
         round: 1,
         goal_id: "",
@@ -164,12 +164,13 @@ export function makeLoopCompileRequest(overrides = {}) {
         force_level: "auto",
         health_check_interval: 1,
         vault_config: makeVaultConfig(),
+        external_context: "",
         ...overrides,
     };
 }
 export function makeLoopCompileResponse(overrides = {}) {
     return {
-        status: "ok",
+        status: AgentStatus.OK,
         prompt: "",
         recompile_level: "l2",
         diff_from_previous: "",

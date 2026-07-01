@@ -11,7 +11,7 @@
         "loop_compile",
         "feedback"
       ],
-      "description": "LoopForge-loop_compile — TypeScript protocol definitions.\n\nAll types exchanged between the Main Agent and LoopForge flow through\nthese interfaces. This is the contract layer — no implementation logic.\n\nv1.6: 32 types — 4 enums + 27 interfaces + 1 type alias."
+      "description": "LoopForge-loop_compile — TypeScript protocol definitions.\n\nAll types exchanged between the Main Agent and LoopForge flow through\nthese interfaces. This is the contract layer — no implementation logic.\n\nv1.7: 38 types — 4 enums + 32 interfaces + 2 type aliases."
     },
     "AgentStatus": {
       "type": "string",
@@ -496,7 +496,7 @@
       "type": "object",
       "properties": {
         "mode": {
-          "type": "string"
+          "$ref": "#/$defs/Mode"
         },
         "loop_id": {
           "type": "string"
@@ -559,6 +559,9 @@
         },
         "vault_config": {
           "$ref": "#/$defs/VaultConfig"
+        },
+        "external_context": {
+          "type": "string"
         }
       },
       "required": [
@@ -580,7 +583,7 @@
       "type": "object",
       "properties": {
         "status": {
-          "type": "string"
+          "$ref": "#/$defs/AgentStatus"
         },
         "prompt": {
           "type": "string"
@@ -1005,12 +1008,64 @@
         },
         "onHealthWarning": {
           "type": "string"
+        },
+        "memoryProvider": {
+          "type": "string"
+        },
+        "memoryWriter": {
+          "type": "string"
         }
       },
       "required": [
         "task",
         "execute"
       ]
+    },
+    "MemoryProviderContext": {
+      "type": "object",
+      "properties": {
+        "loopId": {
+          "type": "string"
+        },
+        "round": {
+          "type": "number"
+        },
+        "task": {
+          "type": "string"
+        },
+        "domain": {
+          "type": "string"
+        },
+        "phase": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ]
+        },
+        "progressEstimate": {
+          "type": "number"
+        },
+        "accumulatedContext": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "loopId",
+        "round",
+        "task",
+        "domain",
+        "phase",
+        "progressEstimate",
+        "accumulatedContext"
+      ],
+      "description": "Context passed to the memoryProvider callback at each injection phase.\nContains enough loop state to construct a targeted semantic query."
     },
     "RunResult": {
       "type": "object",
@@ -1036,6 +1091,147 @@
         "stopReason",
         "roundsCompleted",
         "qualityTrajectory"
+      ]
+    },
+    "LoopMemoryWriteback": {
+      "type": "object",
+      "properties": {
+        "loopId": {
+          "type": "string"
+        },
+        "task": {
+          "type": "string"
+        },
+        "outcome": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "completed"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "circuit_breaker"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "stalled"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "max_rounds"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "stopped"
+              ]
+            }
+          ]
+        },
+        "roundsCompleted": {
+          "type": "number"
+        },
+        "qualityTrajectory": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          }
+        },
+        "projectEntry": {
+          "$ref": "#/$defs/LoopMemoryWritebackProjectEntry"
+        },
+        "feedbackEntries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LoopMemoryWritebackFeedbackEntry"
+          }
+        },
+        "referenceEntry": {
+          "$ref": "#/$defs/LoopMemoryWritebackReferenceEntry"
+        }
+      },
+      "required": [
+        "loopId",
+        "task",
+        "outcome",
+        "roundsCompleted",
+        "qualityTrajectory",
+        "projectEntry",
+        "feedbackEntries",
+        "referenceEntry"
+      ],
+      "description": "Structured payload written back to the long-term memory system\nwhen a loop terminates. Contains distilled knowledge suitable\nfor cross-task reuse."
+    },
+    "LoopMemoryWritebackProjectEntry": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string"
+        },
+        "objective": {
+          "type": "string"
+        },
+        "keyOutcome": {
+          "type": "string"
+        },
+        "keyDiscoveries": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "date": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "title",
+        "objective",
+        "keyOutcome",
+        "keyDiscoveries",
+        "date"
+      ]
+    },
+    "LoopMemoryWritebackFeedbackEntry": {
+      "type": "object",
+      "properties": {
+        "rule": {
+          "type": "string"
+        },
+        "why": {
+          "type": "string"
+        },
+        "howToApply": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "rule",
+        "why",
+        "howToApply"
+      ]
+    },
+    "LoopMemoryWritebackReferenceEntry": {
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "vaultLocation": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "description",
+        "vaultLocation"
       ]
     },
     "VerificationFlag": {

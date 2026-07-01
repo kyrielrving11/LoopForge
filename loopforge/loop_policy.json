@@ -55,5 +55,28 @@
     "progress_stall_threshold": 0.05,
     "progress_stall_rounds": 2,
     "progress_mismatch_threshold": 0.3
+  },
+  "memory_injection": {
+    "enabled": true,
+    "min_rounds_between_injections": 1,
+    "phase_thresholds": {
+      "phase1": { "trigger": "round_1" },
+      "phase2": { "trigger": "progress", "threshold": 0.40 },
+      "phase3": { "trigger": "progress", "threshold": 0.70 }
+    },
+    "round_tiers": [
+      { "max_rounds": 10, "allowed_phases": [1] },
+      { "max_rounds": 20, "allowed_phases": [1, 3] },
+      { "max_rounds": 30, "allowed_phases": [1, 2, 3] }
+    ],
+    "dedup_threshold": 0.6,
+    "max_context_length": 2000,
+    "section_title": "### Background Context (Long-Term Memory)"
+  },
+  "memory_writeback": {
+    "enabled": true,
+    "max_feedback_entries": 5,
+    "max_discoveries_in_project": 3,
+    "write_on_outcomes": ["completed", "circuit_breaker", "max_rounds"]
   }
 }

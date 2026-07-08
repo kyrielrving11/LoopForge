@@ -43,31 +43,31 @@ function buildWritebackPayload(loopId, task, stopReason, result) {
         keyDiscoveries: [],
         date: new Date().toISOString().split("T")[0],
     };
-    // Build feedback entries from quality trajectory patterns
+    // Build feedback entries from success trajectory patterns
     const feedbackEntries = [];
-    const trajectory = result.qualityTrajectory;
+    const trajectory = result.successTrajectory;
     if (trajectory.length >= 3) {
-        // Detect improving trend
+        // Detect improving trend via success rate
         const firstHalf = trajectory.slice(0, Math.floor(trajectory.length / 2));
         const secondHalf = trajectory.slice(Math.floor(trajectory.length / 2));
-        const firstAvg = firstHalf.reduce((a, b) => a + b, 0) / firstHalf.length;
-        const secondAvg = secondHalf.reduce((a, b) => a + b, 0) / secondHalf.length;
-        if (secondAvg - firstAvg > 1.0) {
+        const firstRate = firstHalf.filter(Boolean).length / firstHalf.length;
+        const secondRate = secondHalf.filter(Boolean).length / secondHalf.length;
+        if (secondRate - firstRate > 0.3) {
             feedbackEntries.push({
-                rule: `Quality trajectory improved from avg ${firstAvg.toFixed(1)} to ${secondAvg.toFixed(1)} over ${trajectory.length} rounds`,
+                rule: `Success rate improved from ${(firstRate * 100).toFixed(0)}% to ${(secondRate * 100).toFixed(0)}% over ${trajectory.length} rounds`,
                 why: `Mid-loop strategy adjustment unlocked progress in task "${task.slice(0, 80)}"`,
                 howToApply: "Consider the strategy used in later rounds for similar tasks",
             });
         }
     }
-    // Detect flatlining
+    // Detect flatlining — 3 consecutive failures
     if (trajectory.length >= 3) {
         const recent = trajectory.slice(-3);
-        if (recent.every((v, i) => i === 0 || recent[i - 1] >= v)) {
+        if (recent.every((v) => v === false)) {
             feedbackEntries.push({
-                rule: `Quality flatlined at [${recent.join(", ")}] in the last 3 rounds`,
+                rule: `Failed 3 consecutive rounds at end of loop`,
                 why: `Task "${task.slice(0, 80)}" stopped with reason '${stopReason}' — strategy may have stagnated`,
-                howToApply: "If re-attempting, start with a different technique than the one that produced the flatline",
+                howToApply: "If re-attempting, start with a different technique than the one that produced the failures",
             });
         }
     }
@@ -81,7 +81,6 @@ function buildWritebackPayload(loopId, task, stopReason, result) {
         task,
         outcome,
         roundsCompleted: result.roundsCompleted,
-        qualityTrajectory: result.qualityTrajectory,
         projectEntry: {
             ...projectEntry,
             keyDiscoveries: projectEntry.keyDiscoveries.slice(0, wp.max_discoveries_in_project),
@@ -140,7 +139,7 @@ export class LoopRuntime extends EventEmitter {
     engine;
     _status = RuntimeStatus.IDLE;
     currentRound = 1;
-    qualityTrajectory = [];
+    successTrajectory = [];
     heartbeatTimer = null;
     sigintHandler = null;
     sigtermHandler = null;
@@ -170,8 +169,8 @@ export class LoopRuntime extends EventEmitter {
     getCurrentRound() {
         return this.currentRound;
     }
-    getQualityTrajectory() {
-        return [...this.qualityTrajectory];
+    getSuccessTrajectory() {
+        return [...this.successTrajectory];
     }
     // ── Memory Integration (v1.7) ──────────────────────────────────────────
     /** Derive the current progress estimate from the last self evaluation.
@@ -392,7 +391,7 @@ export class LoopRuntime extends EventEmitter {
                     // Emit round:complete with error info
                     const errInfo = {
                         round: this.currentRound,
-                        quality: 0,
+                        roundSuccess: false,
                         selfEval: makeSelfEvaluation({
                             success: false,
                             output_summary: `execute threw: ${String(err).slice(0, 200)}`,
@@ -403,7 +402,7 @@ export class LoopRuntime extends EventEmitter {
                     };
                     this.emit("round:complete", errInfo);
                     this.config.onRoundComplete?.(errInfo);
-                    this.qualityTrajectory.push(0);
+                    this.successTrajectory.push(false);
                     if (consecutiveErrors >= this.config.maxConsecutiveErrors) {
                         stopReason = "executor_failure";
                         break;
@@ -447,30 +446,16 @@ export class LoopRuntime extends EventEmitter {
                     }
                     this.lastSelfEval = selfEval;
                 }
-                // Compute quality score
-                let quality = 0;
-                if (selfEval) {
-                    if (selfEval.success && selfEval.constraint_violations.length === 0) {
-                        quality = 5;
-                    }
-                    else if (selfEval.success) {
-                        quality = 3;
-                    }
-                    else if (selfEval.constraint_violations.length > 0) {
-                        quality = 2;
-                    }
-                    else {
-                        quality = 1;
-                    }
-                }
-                // Contradicted gate verdict: skip quality trend (match MCP path behavior)
+                // Compute round success
+                const roundSuccess = selfEval?.success ?? false;
+                // Contradicted gate verdict: skip success trend (match MCP path behavior)
                 if (!gateContradicted) {
-                    this.qualityTrajectory.push(quality);
+                    this.successTrajectory.push(roundSuccess);
                 }
                 // ── Emit round:complete ───────────────────────────────────────
                 const completeInfo = {
                     round: this.currentRound,
-                    quality,
+                    roundSuccess,
                     selfEval,
                     durationMs,
                 };
@@ -479,7 +464,7 @@ export class LoopRuntime extends EventEmitter {
                 logEvent("round_complete", {
                     loopId: this.config.loopId ?? "unknown",
                     round: this.currentRound,
-                    quality,
+                    success: roundSuccess,
                     durationMs,
                     technique: "loop_runtime",
                 });
@@ -518,7 +503,7 @@ export class LoopRuntime extends EventEmitter {
             roundsCompleted: this.currentRound > this.config.maxRounds
                 ? this.config.maxRounds
                 : this.currentRound,
-            qualityTrajectory: [...this.qualityTrajectory],
+            successTrajectory: [...this.successTrajectory],
         };
         // ── v1.7: Memory Writeback ───────────────────────────────────────
         const wp = getPolicy().memory_writeback;
@@ -583,7 +568,6 @@ export class LoopRuntime extends EventEmitter {
                     output_summary: selfEval.output_summary,
                     constraint_violations: selfEval.constraint_violations,
                     manual_fixes_needed: "",
-                    quality_score: 0,
                     // P0–P2: Cognitive evolution
                     discovered_constraints: selfEval.discovered_constraints ?? [],
                     objective_refinement: selfEval.objective_refinement ?? "",
@@ -594,6 +578,9 @@ export class LoopRuntime extends EventEmitter {
                     retracted_constraints: selfEval.retracted_constraints ?? [],
                     revised_success_criteria: selfEval.revised_success_criteria ?? [],
                     wrong_assumptions: selfEval.wrong_assumptions ?? [],
+                    // v1.10: Checkpoint
+                    compression_checkpoint: selfEval.compression_checkpoint ?? false,
+                    checkpoint_label: selfEval.checkpoint_label ?? "",
                 });
             }
         }
@@ -709,7 +696,7 @@ export class LoopRuntime extends EventEmitter {
  *    task: 'Audit ERC20 token for security vulnerabilities',
  *    execute: async (prompt) => await myAgent.call(prompt),
  *  });
- *  // result: { success, stopReason, roundsCompleted, qualityTrajectory }
+ *  // result: { success, stopReason, roundsCompleted, successTrajectory }
  */
 export async function run(rawConfig) {
     const runtime = new LoopRuntime(rawConfig);

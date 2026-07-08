@@ -7,8 +7,8 @@
  * - trusted:      all checks passed; flags are informational only.
  * - suspect:      one or more warn-level flags; flags become warnings in
  *                 the next prompt so the agent can clarify.
- * - contradicted: one or more error-level flags; the quality score for
- *                 this round is excluded from the quality trend (NOT
+ * - contradicted: one or more error-level flags; the success flag for
+ *                 this round is excluded from the success trend (NOT
  *                 modified). Flags become hard constraints — the agent
  *                 must respond in the next round.
  */

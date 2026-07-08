@@ -1,16 +1,12 @@
-/** LoopForge Agent — Technique router + quality scoring.
+/** LoopForge Agent — Technique router.
  *
- * Two pure-function responsibilities:
- *   1. Technique selection — keyword heuristic, fast + zero-cost
- *   2. Quality scoring — deterministic 1-5 from feedback signals
+ * Pure-function technique selection via keyword heuristic with tier gating.
+ * Tier 1 (zero-shot / few-shot / CoT): always available.
+ * Tier 2 (step-back / least-to-most / ToT): checkpoint boundaries or
+ * after consecutive failures only.
  */
 import { type Analysis } from "./protocol.js";
 export declare const TECHNIQUE_REFERENCE: Record<string, string>;
 export declare function routeTechnique(task: string): Analysis;
-export declare function scoreQuality(feedback: {
-    success: boolean;
-    constraint_violations?: unknown[];
-    manual_fixes_needed?: string;
-} | null): number;
-export declare function routeTechniqueAdaptive(task: string, vaultContext?: Record<string, unknown> | null, loopId?: string): Analysis;
+export declare function routeTechniqueAdaptive(task: string, vaultContext?: Record<string, unknown> | null, loopId?: string, isCheckpoint?: boolean): Analysis;
 //# sourceMappingURL=builder.d.ts.map

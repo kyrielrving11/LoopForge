@@ -12,6 +12,8 @@ import {
   compileL2,
   buildRollingSummary,
   formatRollingSummaryForPrompt,
+  buildCheckpointSummary,
+  formatCheckpointForPrompt,
   filterConstraintsForSubTask,
   formatDelegationPrompt,
   buildDelegationSummary,
@@ -21,6 +23,8 @@ import {
   makeLoopRoundResult,
   makeLoopObjective,
   makeRollingSummary,
+  makeCheckpointSummary,
+  makeSelfEvaluation,
 } from "../protocol.js";
 import { resetPolicy } from "../policy.js";
 
@@ -477,16 +481,17 @@ function makeVaultResult(
   techniqueUsed = "zero-shot",
   constraintViolations: string[] = [],
 ): Record<string, unknown> {
+  const success = qualityScore >= 3;
   return {
     task,
     output_summary: outputSummary,
     constraint_violations: constraintViolations,
     technique_used: techniqueUsed,
-    quality_score: qualityScore,
+    success,
     loop_lineage: {
       loop_id: loopId,
       round,
-      quality_score: qualityScore,
+      success,
       task,
       technique_used: techniqueUsed,
     },
@@ -506,13 +511,13 @@ describe("Failure Lineage Weighting — buildRollingSummary", () => {
     const rs = buildRollingSummary("loop-1", 4, vault);
     assert.ok(rs !== null);
     assert.equal(rs!.failed_patterns?.length ?? 0, 0);
-    // key_lessons should not have [Consider alternatives] marker
-    for (const kl of rs!.key_lessons) {
-      assert.ok(!kl.includes("[Consider alternatives]"));
+    // key_outcomes should not have [Consider alternatives] marker
+    for (const ko of rs!.key_outcomes) {
+      assert.ok(!ko.includes("[Consider alternatives]"));
     }
   });
 
-  it("detects 2 consecutive low-quality rounds with same technique and similar task", () => {
+  it("detects 2 consecutive failed rounds with same technique and similar task", () => {
     const vault = {
       results: [
         makeVaultResult("loop-1", 1, 2, "fix cache bug", "Tried cache fix A", "zero-shot"),
@@ -530,7 +535,7 @@ describe("Failure Lineage Weighting — buildRollingSummary", () => {
     assert.ok(fp.includes("2 consecutive rounds"));
   });
 
-  it("detects 3 consecutive low-quality rounds", () => {
+  it("detects 3 consecutive failed rounds", () => {
     const vault = {
       results: [
         makeVaultResult("loop-1", 1, 2, "fix memory leak", "Attempt 1", "few-shot"),
@@ -545,7 +550,7 @@ describe("Failure Lineage Weighting — buildRollingSummary", () => {
     assert.ok(rs!.failed_patterns![0].includes("3 consecutive rounds"));
   });
 
-  it("no pattern when low-quality rounds use different techniques", () => {
+  it("no pattern when failed rounds use different techniques", () => {
     const vault = {
       results: [
         makeVaultResult("loop-1", 1, 2, "fix cache bug", "Attempt", "zero-shot"),
@@ -558,7 +563,7 @@ describe("Failure Lineage Weighting — buildRollingSummary", () => {
     assert.equal(rs!.failed_patterns?.length ?? 0, 0);
   });
 
-  it("no pattern when low-quality tasks are completely different (Jaccard < 0.4)", () => {
+  it("no pattern when failed tasks are completely different (Jaccard < 0.4)", () => {
     const vault = {
       results: [
         makeVaultResult("loop-1", 1, 2, "fix cache bug in Redis layer", "Attempt", "zero-shot"),
@@ -571,7 +576,7 @@ describe("Failure Lineage Weighting — buildRollingSummary", () => {
     assert.equal(rs!.failed_patterns?.length ?? 0, 0);
   });
 
-  it("key_lessons from failure-pattern rounds are demoted to end with [Consider alternatives]", () => {
+  it("key_outcomes from failure-pattern rounds are demoted to end with [Consider alternatives]", () => {
     const vault = {
       results: [
         makeVaultResult("loop-1", 1, 2, "fix cache bug", "Tried cache approach", "zero-shot"),
@@ -583,14 +588,15 @@ describe("Failure Lineage Weighting — buildRollingSummary", () => {
     const rs = buildRollingSummary("loop-1", 4, vault);
     assert.ok(rs !== null);
 
-    // key_lessons should have the successful round first, then demoted ones
-    // (but since score >= 4 for key_lessons, rounds 1-2 with score=2 won't appear at all)
-    // The real test is: no false positives in key_lessons
-    for (const kl of rs!.key_lessons) {
-      if (kl.includes("cache")) {
-        assert.ok(kl.includes("[Consider alternatives]"));
+    // key_outcomes only include score>=4 rounds (failure-pattern rounds score<3 don't appear)
+    // Round 3 (score=5) should be present and not marked
+    for (const ko of rs!.key_outcomes) {
+      if (ko.includes("cache")) {
+        assert.ok(ko.includes("[Consider alternatives]"));
       }
     }
+    // Round 3 (score=5) should be present with auth fix outcome
+    assert.ok(rs!.key_outcomes.some((ko) => ko.includes("Auth")));
   });
 
   it("recurring_issues from failure-only rounds marked as [Possible dead end]", () => {
@@ -642,15 +648,12 @@ describe("Failure Lineage Weighting — buildRollingSummary", () => {
 describe("Failure Lineage Weighting — formatRollingSummaryForPrompt", () => {
   it("renders failure patterns section when present", () => {
     const rs = makeRollingSummary({
-      quality_trajectory: [2, 2, 5],
-      trajectory_direction: "improving",
-      what_worked: ["R3 (score=5): Fixed auth"],
+      key_outcomes: ["[R3] ✓ (step-back): Fixed auth bug"],
       recurring_issues: [],
-      key_lessons: ["[R3] Fixed auth bug"],
       rounds_sampled: 3,
       generated_at_round: 4,
       failed_patterns: [
-        "technique 'zero-shot' on task 'fix cache bug' failed 2 consecutive rounds (R1-R2, avg score 2.0) — consider strategy change",
+        "technique 'zero-shot' on task 'fix cache bug' failed 2 consecutive rounds (R1-R2) — consider strategy change",
       ],
     });
     const text = formatRollingSummaryForPrompt(rs);
@@ -662,11 +665,8 @@ describe("Failure Lineage Weighting — formatRollingSummaryForPrompt", () => {
 
   it("no failure patterns section when empty", () => {
     const rs = makeRollingSummary({
-      quality_trajectory: [5, 4],
-      trajectory_direction: "stable",
-      what_worked: [],
+      key_outcomes: [],
       recurring_issues: [],
-      key_lessons: [],
       rounds_sampled: 2,
       generated_at_round: 3,
       failed_patterns: [],
@@ -991,5 +991,251 @@ describe("Delegation — buildDelegationSummary", () => {
     assert.ok(tableRow, "should have a table row for R1");
     const pipeCount = (tableRow!.match(/\|/g) ?? []).length;
     assert.equal(pipeCount, 9, "table row should have 9 pipe chars (7 structural + 2 escaped)");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Checkpoint Compression (v1.10)
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("Checkpoint — buildCheckpointSummary", () => {
+  it("builds from self-eval with checkpoint fields", () => {
+    const selfEval = makeSelfEvaluation({
+      success: true,
+      output_summary: "Completed ERC20 data model with full test coverage",
+      compression_checkpoint: true,
+      checkpoint_label: "数据模型层完成",
+    });
+    const cs = buildCheckpointSummary(
+      selfEval, 8,
+      ["constraint-A", "constraint-B", "constraint-C"],
+      ["old-constraint"],
+    );
+    assert.ok(cs !== null);
+    assert.equal(cs.label, "数据模型层完成");
+    assert.equal(cs.declared_at_round, 8);
+    assert.ok(cs.outcome.includes("ERC20 data model"));
+    assert.deepStrictEqual(cs.carried_constraints, ["constraint-A", "constraint-B", "constraint-C"]);
+    assert.deepStrictEqual(cs.resolved_constraints, ["old-constraint"]);
+  });
+
+  it("falls back to auto-generated label when checkpoint_label is empty", () => {
+    const selfEval = makeSelfEvaluation({
+      success: true,
+      output_summary: "Done with auth module",
+      compression_checkpoint: true,
+      checkpoint_label: "",
+    });
+    const cs = buildCheckpointSummary(selfEval, 5, ["c1"], []);
+    assert.ok(cs.label.includes("Subtask completed at round 5"));
+  });
+
+  it("caps carried and resolved constraints at policy limit", () => {
+    const selfEval = makeSelfEvaluation({
+      success: true,
+      output_summary: "Done",
+      compression_checkpoint: true,
+      checkpoint_label: "test",
+    });
+    const manyConstraints = Array.from({ length: 15 }, (_, i) => `c${i + 1}`);
+    const cs = buildCheckpointSummary(selfEval, 3, manyConstraints, manyConstraints);
+    // Default policy: max_carried_constraints = 10
+    assert.equal(cs.carried_constraints.length, 10);
+    assert.equal(cs.resolved_constraints.length, 10);
+  });
+
+  it("truncates outcome at policy limit", () => {
+    const selfEval = makeSelfEvaluation({
+      success: true,
+      output_summary: "x".repeat(300),
+      compression_checkpoint: true,
+      checkpoint_label: "test",
+    });
+    const cs = buildCheckpointSummary(selfEval, 1, [], []);
+    // Default policy: outcome_max_chars = 200
+    assert.ok(cs.outcome.length <= 200);
+  });
+});
+
+describe("Checkpoint — formatCheckpointForPrompt", () => {
+  it("renders checkpoint block with all fields", () => {
+    const cs = makeCheckpointSummary({
+      label: "Auth module complete",
+      declared_at_round: 5,
+      outcome: "Implemented JWT auth with refresh tokens",
+      carried_constraints: ["所有API需要认证", "token过期时间≤24h"],
+      resolved_constraints: ["旧密码哈希方式需更新"],
+    });
+    const text = formatCheckpointForPrompt(cs);
+    assert.ok(text.includes("### Checkpoint: Auth module complete (Round 5)"));
+    assert.ok(text.includes("Implemented JWT auth"));
+    assert.ok(text.includes("所有API需要认证"));
+    assert.ok(text.includes("旧密码哈希方式需更新"));
+    assert.ok(text.includes("Carried Constraints"));
+    assert.ok(text.includes("Resolved Constraints"));
+  });
+
+  it("returns empty string for null", () => {
+    assert.equal(formatCheckpointForPrompt(null), "");
+  });
+
+  it("returns empty string for empty checkpoint", () => {
+    const cs = makeCheckpointSummary({});
+    assert.equal(formatCheckpointForPrompt(cs), "");
+  });
+
+  it("omits resolved section when no resolved constraints", () => {
+    const cs = makeCheckpointSummary({
+      label: "test",
+      declared_at_round: 1,
+      outcome: "done",
+      carried_constraints: ["c1"],
+      resolved_constraints: [],
+    });
+    const text = formatCheckpointForPrompt(cs);
+    assert.ok(!text.includes("Resolved Constraints"));
+  });
+});
+
+describe("Checkpoint — buildRollingSummary with sinceRound", () => {
+  function makeVaultResult(
+    loopId: string, round: number, qualityScore: number,
+    task: string, outputSummary = "", techniqueUsed = "zero-shot",
+    constraintViolations: string[] = [],
+  ): Record<string, unknown> {
+    const success = qualityScore >= 3;
+    return {
+      task, output_summary: outputSummary,
+      constraint_violations: constraintViolations,
+      technique_used: techniqueUsed, success,
+      loop_lineage: { loop_id: loopId, round, success, task, technique_used: techniqueUsed },
+    };
+  }
+
+  it("only includes rounds at or after sinceRound", () => {
+    const vault = {
+      results: [
+        makeVaultResult("loop-1", 1, 4, "task A", "did A"),
+        makeVaultResult("loop-1", 2, 5, "task B", "did B"),
+        makeVaultResult("loop-1", 3, 3, "task C", "did C"),
+        makeVaultResult("loop-1", 4, 5, "task D", "did D"),
+        makeVaultResult("loop-1", 5, 4, "task E", "did E"),
+      ],
+    };
+    const rs = buildRollingSummary("loop-1", 6, vault, 3);
+    assert.ok(rs !== null);
+    // Round 1 and 2 should be excluded (before sinceRound=3)
+    assert.equal(rs!.rounds_sampled, 3);
+    // Verify key_outcomes contains rounds 3-5
+    assert.equal(rs!.key_outcomes.length, 3);
+    assert.ok(rs!.key_outcomes.some((k) => k.includes("R3")));
+    assert.ok(rs!.key_outcomes.some((k) => k.includes("R5")));
+  });
+
+  it("sinceRound with no matching rounds returns null", () => {
+    const vault = {
+      results: [
+        makeVaultResult("loop-1", 1, 4, "task A", "did A"),
+        makeVaultResult("loop-1", 2, 5, "task B", "did B"),
+      ],
+    };
+    const rs = buildRollingSummary("loop-1", 3, vault, 5);
+    assert.equal(rs, null);
+  });
+
+  it("without sinceRound includes all rounds (backward compat)", () => {
+    const vault = {
+      results: [
+        makeVaultResult("loop-1", 1, 4, "task A", "did A"),
+        makeVaultResult("loop-1", 2, 5, "task B", "did B"),
+      ],
+    };
+    const rs = buildRollingSummary("loop-1", 3, vault);
+    assert.ok(rs !== null);
+    assert.equal(rs!.rounds_sampled, 2);
+  });
+});
+
+describe("Checkpoint — compileL2 integration", () => {
+  it("renders checkpoint in prompt when last_round_result has checkpoint", () => {
+    const lr = makeLoopRoundResult({
+      round: 4,
+      success: true,
+      output_summary: "Completed data model layer",
+      constraint_violations: [],
+      compression_checkpoint: true,
+      checkpoint_label: "Data model done",
+    });
+    const req = makeLoopCompileRequest({
+      round: 5,
+      loop_id: "test-cp",
+      task: "Build API layer on top of data model",
+      last_round_result: lr,
+    });
+    // Empty vault — no prior checkpoint to load
+    const vault = { results: [], global_entries: [] };
+    const response = compileL2(req, vault);
+    assert.ok(response.prompt.includes("### Checkpoint: Data model done (Round 4)"));
+    assert.ok(response.prompt.includes("Completed data model layer"));
+    assert.ok(response.checkpoint_summary !== null);
+    assert.equal(response.checkpoint_summary!.declared_at_round, 4);
+  });
+
+  it("no checkpoint in prompt when last_round_result has no checkpoint", () => {
+    const lr = makeLoopRoundResult({
+      round: 2,
+      success: true,
+      output_summary: "Fixed a bug",
+      constraint_violations: [],
+    });
+    const req = makeLoopCompileRequest({
+      round: 3,
+      loop_id: "test-nocp",
+      task: "Continue fixing bugs",
+      last_round_result: lr,
+    });
+    const vault = { results: [], global_entries: [] };
+    const response = compileL2(req, vault);
+    assert.ok(!response.prompt.includes("### Checkpoint:"));
+    assert.equal(response.checkpoint_summary, null);
+  });
+
+  it("loads existing checkpoint from vault on later rounds", () => {
+    // Simulate a previous round that stored a checkpoint in vault
+    const vault = {
+      results: [
+        {
+          loop_lineage: { loop_id: "test-cp2", round: 3, success: true },
+          checkpoint_summary: {
+            label: "API layer done",
+            declared_at_round: 3,
+            outcome: "Built REST API",
+            carried_constraints: ["auth required"],
+            resolved_constraints: [],
+          },
+          task: "Build API",
+          output_summary: "Built REST API",
+          technique_used: "least-to-most",
+        },
+      ],
+    };
+    const lr = makeLoopRoundResult({
+      round: 4,
+      success: true,
+      output_summary: "Added tests",
+      constraint_violations: [],
+    });
+    const req = makeLoopCompileRequest({
+      round: 5,
+      loop_id: "test-cp2",
+      task: "Add integration tests",
+      last_round_result: lr,
+    });
+    const response = compileL2(req, vault);
+    // Should load checkpoint from round 3
+    assert.ok(response.prompt.includes("### Checkpoint: API layer done (Round 3)"));
+    assert.ok(response.prompt.includes("Built REST API"));
+    assert.ok(response.checkpoint_summary !== null);
+    assert.equal(response.checkpoint_summary!.declared_at_round, 3);
   });
 });

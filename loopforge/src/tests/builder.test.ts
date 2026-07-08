@@ -4,7 +4,6 @@ import assert from "node:assert/strict";
 import {
   routeTechnique,
   routeTechniqueAdaptive,
-  scoreQuality,
   TECHNIQUE_REFERENCE,
 } from "../builder.js";
 import { resetPolicy } from "../policy.js";
@@ -58,63 +57,72 @@ describe("Builder — Route Technique", () => {
   });
 });
 
-describe("Builder — Score Quality", () => {
-  it("returns 5 for success with no violations or fixes", () => {
-    assert.equal(scoreQuality({ success: true, constraint_violations: [], manual_fixes_needed: "" }), 5);
-  });
-
-  it("returns 4 for success with manual fixes needed but no violations", () => {
-    assert.equal(scoreQuality({ success: true, constraint_violations: [], manual_fixes_needed: "fix formatting" }), 4);
-  });
-
-  it("returns 3 for success with constraint violations", () => {
-    assert.equal(scoreQuality({ success: true, constraint_violations: ["missing check"] }), 3);
-  });
-
-  it("returns 2 for failure with constraint violations", () => {
-    assert.equal(scoreQuality({ success: false, constraint_violations: ["XSS vulnerability"] }), 2);
-  });
-
-  it("returns 1 for failure with no constraint violations", () => {
-    assert.equal(scoreQuality({ success: false, constraint_violations: [] }), 1);
-  });
-
-  it("returns 0 for null feedback", () => {
-    assert.equal(scoreQuality(null), 0);
-  });
-});
-
-describe("Builder — Adaptive routing", () => {
-  it("falls back to keyword heuristic when no vault context", () => {
-    // "Audit" + "fix" → continuous + high → few-shot-cot
+describe("Builder — Tier-gated routing", () => {
+  it("uses keyword heuristic when no vault context (Tier 1 default)", () => {
     const analysis = routeTechniqueAdaptive("Fix the encryption protocol security audit", null, "");
     assert.equal(analysis.technique, "few-shot-cot");
     assert.equal(analysis.was_rotated, false);
   });
 
-  it("falls back to keyword heuristic when no loop_id", () => {
+  it("uses keyword heuristic when no loop_id (Tier 1 default)", () => {
     const analysis = routeTechniqueAdaptive("Fix the encryption protocol security audit", { results: [] }, "");
     assert.equal(analysis.technique, "few-shot-cot");
     assert.equal(analysis.was_rotated, false);
   });
 
-  it("does not rotate when quality scores are high", () => {
+  it("stays in Tier 1 by default", () => {
     const vaultContext = {
       results: [
         {
           loop_lineage: {
             loop_id: "test-loop",
             round: 1,
-            quality_score: 5,
+            success: true,
           },
           technique_used: "few-shot-cot",
-          quality_score: 5,
+          success: true,
         },
       ],
     };
     const analysis = routeTechniqueAdaptive("Fix the encryption protocol security audit", vaultContext, "test-loop");
     assert.equal(analysis.technique, "few-shot-cot");
     assert.equal(analysis.was_rotated, false);
+  });
+
+  it("allows Tier 2 on checkpoint boundary", () => {
+    // Task triggers step-back keyword → Tier 2, normally downgraded
+    // But with isCheckpoint=true, should be allowed
+    const analysis = routeTechniqueAdaptive("重构 legacy 系统", null, "", true);
+    assert.equal(analysis.technique, "step-back");
+  });
+
+  it("downgrades Tier 2 to Tier 1 in normal round", () => {
+    // "重构 legacy 系统" triggers step-back (Tier 2), but without checkpoint it downgrades
+    const analysis = routeTechniqueAdaptive("重构 legacy 系统");
+    // step-back downgrades to few-shot-cot
+    assert.ok(["zero-shot", "few-shot", "zero-shot-cot", "few-shot-cot"].includes(analysis.technique));
+  });
+
+  it("escalates to Tier 2 after consecutive failures", () => {
+    const vaultContext = {
+      results: [
+        {
+          loop_lineage: { loop_id: "test-loop", round: 1 },
+          success: false,
+        },
+        {
+          loop_lineage: { loop_id: "test-loop", round: 2 },
+          success: false,
+        },
+        {
+          loop_lineage: { loop_id: "test-loop", round: 3 },
+          success: false,
+        },
+      ],
+    };
+    const analysis = routeTechniqueAdaptive("Fix the encryption protocol security audit", vaultContext, "test-loop");
+    // Should be in Tier 2 (step-back / least-to-most / tree-of-thought)
+    assert.ok(["step-back", "least-to-most", "tree-of-thought"].includes(analysis.technique));
   });
 });
 

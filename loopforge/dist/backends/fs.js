@@ -197,7 +197,7 @@ export function scanLineageMd(loopId, vaultPath) {
                 task_id: `loop:${loopId}:r${roundNum}`,
                 full_prompt: body,
                 technique_used: metadata.technique_used,
-                quality_score: metadata.quality_score,
+                success: metadata.success ?? true,
                 loop_lineage: {
                     loop_id: loopId,
                     round: roundNum,
@@ -208,7 +208,6 @@ export function scanLineageMd(loopId, vaultPath) {
                     task: metadata.task,
                     technique_used: metadata.technique_used,
                     success: metadata.success,
-                    quality_score: metadata.quality_score,
                     output_summary: metadata.output_summary,
                     constraint_violations: metadata.constraint_violations,
                 },

@@ -49,9 +49,10 @@ describe("Protocol — Factory functions", () => {
   });
 
   it("makeAnalysis accepts overrides", () => {
-    const a = makeAnalysis({ technique: "few-shot", was_rotated: true });
+    // was_rotated is deprecated (always false since v4.0) but overrides still work
+    const a = makeAnalysis({ technique: "few-shot", was_rotated: false });
     assert.equal(a.technique, "few-shot");
-    assert.equal(a.was_rotated, true);
+    assert.equal(a.was_rotated, false);
   });
 
   it("makeVaultConfig returns sensible defaults", () => {

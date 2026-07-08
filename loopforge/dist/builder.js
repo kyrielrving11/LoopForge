@@ -1,8 +1,9 @@
-/** LoopForge Agent — Technique router + quality scoring.
+/** LoopForge Agent — Technique router.
  *
- * Two pure-function responsibilities:
- *   1. Technique selection — keyword heuristic, fast + zero-cost
- *   2. Quality scoring — deterministic 1-5 from feedback signals
+ * Pure-function technique selection via keyword heuristic with tier gating.
+ * Tier 1 (zero-shot / few-shot / CoT): always available.
+ * Tier 2 (step-back / least-to-most / ToT): checkpoint boundaries or
+ * after consecutive failures only.
  */
 import { getPolicy } from "./policy.js";
 import { logEvent } from "./observability.js";
@@ -98,53 +99,60 @@ export function routeTechnique(task) {
     });
 }
 // ═══════════════════════════════════════════════════════════════════════════
-// Quality scoring
+// Tier definitions
 // ═══════════════════════════════════════════════════════════════════════════
-export function scoreQuality(feedback) {
-    if (feedback === null)
-        return 0;
-    const success = feedback.success;
-    const violations = feedback.constraint_violations ?? [];
-    const fixes = feedback.manual_fixes_needed ?? "";
-    if (success && violations.length === 0 && !fixes)
-        return 5;
-    if (success && violations.length === 0)
-        return 4;
-    if (success)
-        return 3;
-    if (violations.length > 0)
-        return 2;
-    return 1;
+const TIER_1_TECHNIQUES = new Set([
+    Technique.ZERO_SHOT,
+    Technique.FEW_SHOT,
+    Technique.ZERO_SHOT_COT,
+    Technique.FEW_SHOT_COT,
+]);
+const TIER_2_TECHNIQUES = new Set([
+    Technique.STEP_BACK,
+    Technique.LEAST_TO_MOST,
+    Technique.TREE_OF_THOUGHT,
+]);
+function isTier2Technique(t) {
+    return TIER_2_TECHNIQUES.has(t);
+}
+// Downgrade map: Tier 2 → nearest Tier 1 equivalent
+const DOWNGRADE_TIER2_TO_TIER1 = {
+    [Technique.STEP_BACK]: Technique.FEW_SHOT_COT,
+    [Technique.LEAST_TO_MOST]: Technique.ZERO_SHOT_COT,
+    [Technique.TREE_OF_THOUGHT]: Technique.FEW_SHOT_COT,
+};
+function downgradeToTier1(technique) {
+    return DOWNGRADE_TIER2_TO_TIER1[technique] ?? Technique.FEW_SHOT;
 }
 // ═══════════════════════════════════════════════════════════════════════════
-// Adaptive routing (v3.5)
+// Consecutive failure detection
 // ═══════════════════════════════════════════════════════════════════════════
-function countConsecutiveLowQuality(technique, loopId, vaultContext) {
+function countConsecutiveFailures(loopId, vaultContext) {
     if (vaultContext === null)
         return 0;
     const results = vaultContext.results || [];
     if (!results.length)
         return 0;
-    const policy = getPolicy();
-    const threshold = policy.technique.adaptive_quality_threshold;
-    // Filter to this loop, sort by round descending
+    // Collect rounds with success field from feedback entries
     const rounds = [];
     for (const r of results) {
         const lineage = (r.loop_lineage || r.lineage || {});
         if (lineage.loop_id !== loopId)
             continue;
+        const success = r.success !== undefined
+            ? r.success
+            : lineage.success;
+        if (success === undefined)
+            continue; // lineage entries without merged feedback — skip
         rounds.push({
             round: lineage.round ?? 0,
-            quality_score: r.quality_score ?? lineage.quality_score ?? 0,
-            technique_used: r.technique_used ?? r.skill_used ?? "",
+            success,
         });
     }
     rounds.sort((a, b) => b.round - a.round);
     let count = 0;
     for (const rnd of rounds) {
-        if (rnd.technique_used && rnd.technique_used !== technique)
-            break;
-        if (rnd.quality_score > 0 && rnd.quality_score < threshold) {
+        if (rnd.success === false) {
             count++;
         }
         else {
@@ -153,42 +161,99 @@ function countConsecutiveLowQuality(technique, loopId, vaultContext) {
     }
     return count;
 }
-export function routeTechniqueAdaptive(task, vaultContext = null, loopId = "") {
-    // Step 1: Keyword heuristic (always)
-    const analysis = routeTechnique(task);
-    if (!vaultContext || !loopId)
-        return analysis;
-    // Step 2: Check if current technique needs rotation
-    const technique = analysis.technique;
-    const policy = getPolicy();
-    const lowCount = countConsecutiveLowQuality(technique, loopId, vaultContext);
-    if (lowCount < policy.technique.adaptive_consecutive_rounds) {
-        return analysis;
+// ═══════════════════════════════════════════════════════════════════════════
+// Keyword routing restricted to a subset of techniques
+// ═══════════════════════════════════════════════════════════════════════════
+function keywordRouteRestricted(task, allowedTechniques) {
+    // Run full keyword routing first
+    const full = routeTechnique(task);
+    const technique = full.technique;
+    // If the keyword result is already in the allowed set, use it
+    if (allowedTechniques.includes(technique))
+        return full;
+    // If it's Tier 2 downgraded to Tier 1, map to the nearest Tier 1
+    if (isTier2Technique(technique)) {
+        const downgraded = downgradeToTier1(technique);
+        if (allowedTechniques.includes(downgraded)) {
+            return makeAnalysis({
+                technique: downgraded,
+                rationale: `${full.rationale} [DOWNGRADED: ${technique} → ${downgraded} — Tier 2 not available this round]`,
+                independence: full.independence,
+                cognitive_load: full.cognitive_load,
+                reference_file: TECHNIQUE_REFERENCE[downgraded] ?? full.reference_file,
+            });
+        }
     }
-    // Step 3: Rotate
-    const fallback = policy.technique.fallback_chain[technique] ?? technique;
-    if (fallback === technique)
-        return analysis; // Already at ceiling
-    const originalTechnique = technique;
-    const originalRationale = analysis.rationale;
-    logEvent("strategy_rotated", {
-        loopId,
-        from: originalTechnique,
-        to: fallback,
-        consecutiveLowRounds: lowCount,
-    });
+    // Fallback: pick the first technique in the allowed set
+    const fallback = allowedTechniques[0];
     return makeAnalysis({
         technique: fallback,
-        rationale: `${originalRationale} [ROTATED: ${originalTechnique} → ${fallback} — ` +
-            `${lowCount} consecutive low-quality rounds (score < ${policy.technique.adaptive_quality_threshold})]`,
-        independence: analysis.independence,
-        cognitive_load: fallback === "tree-of-thought" || fallback === "few-shot-cot"
-            ? "high"
-            : fallback === "zero-shot-cot" || fallback === "least-to-most"
-                ? "medium"
-                : analysis.cognitive_load,
-        reference_file: TECHNIQUE_REFERENCE[fallback] ?? analysis.reference_file,
-        was_rotated: true,
+        rationale: `${RATIONALE[fallback] ?? "Tier-restricted route."} [RESTRICTED: keyword ${technique} not in allowed set [${allowedTechniques.join(", ")}]]`,
+        independence: full.independence,
+        cognitive_load: full.cognitive_load,
+        reference_file: TECHNIQUE_REFERENCE[fallback] ?? "",
     });
+}
+// ═══════════════════════════════════════════════════════════════════════════
+// Tier-gated technique router (v4.0)
+// ═══════════════════════════════════════════════════════════════════════════
+export function routeTechniqueAdaptive(task, vaultContext = null, loopId = "", isCheckpoint = false) {
+    // Step 1: Full keyword routing over all 7 techniques
+    const keyword = routeTechnique(task);
+    const technique = keyword.technique;
+    // Step 2: Determine which tier is allowed this round
+    const policy = getPolicy();
+    const tier2Failures = policy.technique.tier2_escalation_failures ?? 3;
+    const consecutiveFailures = vaultContext && loopId
+        ? countConsecutiveFailures(loopId, vaultContext)
+        : 0;
+    let allowedTechniques;
+    let tierLabel;
+    if (isCheckpoint) {
+        // Checkpoint boundary: full access to all 7 techniques
+        allowedTechniques = [
+            Technique.ZERO_SHOT, Technique.FEW_SHOT,
+            Technique.ZERO_SHOT_COT, Technique.FEW_SHOT_COT,
+            Technique.STEP_BACK, Technique.LEAST_TO_MOST, Technique.TREE_OF_THOUGHT,
+        ];
+        tierLabel = "checkpoint";
+    }
+    else if (consecutiveFailures >= tier2Failures) {
+        // Escalation: Tier 2 only
+        allowedTechniques = [
+            Technique.STEP_BACK, Technique.LEAST_TO_MOST, Technique.TREE_OF_THOUGHT,
+        ];
+        tierLabel = `escalated (${consecutiveFailures} consecutive failures)`;
+        logEvent("tier2_escalation", {
+            loopId,
+            consecutiveFailures,
+            keywordTechnique: technique,
+        });
+    }
+    else {
+        // Normal: Tier 1 only
+        allowedTechniques = [
+            Technique.ZERO_SHOT, Technique.FEW_SHOT,
+            Technique.ZERO_SHOT_COT, Technique.FEW_SHOT_COT,
+        ];
+        tierLabel = "default";
+    }
+    // Step 3: Apply gate — if keyword result is in allowed set, use it
+    if (allowedTechniques.includes(technique)) {
+        if (tierLabel === "default")
+            return keyword; // Most common path — no overhead
+        const label = tierLabel === "checkpoint"
+            ? `${keyword.rationale} [CHECKPOINT: full technique access]`
+            : `${keyword.rationale} [ESCALATED: Tier 2 — ${consecutiveFailures} consecutive failures]`;
+        return makeAnalysis({
+            technique,
+            rationale: label,
+            independence: keyword.independence,
+            cognitive_load: keyword.cognitive_load,
+            reference_file: keyword.reference_file,
+        });
+    }
+    // Step 4: Keyword result outside allowed set — downgrade or restrict
+    return keywordRouteRestricted(task, allowedTechniques);
 }
 //# sourceMappingURL=builder.js.map

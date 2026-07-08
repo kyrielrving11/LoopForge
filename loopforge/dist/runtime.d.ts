@@ -19,7 +19,7 @@ export declare class LoopRuntime extends EventEmitter {
     private engine;
     private _status;
     private currentRound;
-    private qualityTrajectory;
+    private successTrajectory;
     private heartbeatTimer;
     private sigintHandler;
     private sigtermHandler;
@@ -38,7 +38,7 @@ export declare class LoopRuntime extends EventEmitter {
     constructor(rawConfig: RuntimeConfig);
     get status(): RuntimeStatus;
     getCurrentRound(): number;
-    getQualityTrajectory(): number[];
+    getSuccessTrajectory(): boolean[];
     /** Derive the current progress estimate from the last self evaluation.
      *  Returns -1 if no progress data is available. */
     private getCurrentProgress;
@@ -70,7 +70,7 @@ export declare class LoopRuntime extends EventEmitter {
  *    task: 'Audit ERC20 token for security vulnerabilities',
  *    execute: async (prompt) => await myAgent.call(prompt),
  *  });
- *  // result: { success, stopReason, roundsCompleted, qualityTrajectory }
+ *  // result: { success, stopReason, roundsCompleted, successTrajectory }
  */
 export declare function run(rawConfig: RuntimeConfig): Promise<RunResult>;
 //# sourceMappingURL=runtime.d.ts.map

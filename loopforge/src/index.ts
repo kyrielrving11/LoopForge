@@ -76,7 +76,6 @@ export type {
   LoopPolicy,
   ConstraintsPolicy,
   SummaryPolicy,
-  RecompileTriggersPolicy,
   TechniquePolicy,
   EnginePolicy,
   BackendPolicy,
@@ -92,7 +91,6 @@ export { FSBackend } from "./backends/fs.js";
 // Builder
 export {
   routeTechniqueAdaptive,
-  scoreQuality,
   TECHNIQUE_REFERENCE,
 } from "./builder.js";
 

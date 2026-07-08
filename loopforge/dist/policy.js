@@ -30,35 +30,8 @@ export const DEFAULT_POLICY = {
         window: 5,
         health_check_interval: 1,
     },
-    recompile_triggers: {
-        l1: ["new_constraints", "repeated_failure", "repair_signal"],
-        l2: [
-            "goal_id_changed",
-            "plan_source_provided",
-            "strategy_collapse",
-            "severe_alignment_drop",
-        ],
-    },
     technique: {
-        fallback_chain: {
-            "zero-shot": "few-shot",
-            "few-shot": "zero-shot-cot",
-            "zero-shot-cot": "few-shot-cot",
-            "few-shot-cot": "tree-of-thought",
-            "step-back": "least-to-most",
-            "least-to-most": "tree-of-thought",
-            "tree-of-thought": "tree-of-thought",
-        },
-        adaptive_quality_threshold: 3,
-        adaptive_consecutive_rounds: 2,
-        routing_table: {
-            continuous_low: "zero-shot",
-            independent_low: "zero-shot",
-            continuous_medium: "few-shot",
-            independent_medium: "zero-shot-cot",
-            continuous_high: "few-shot-cot",
-            independent_high: "tree-of-thought",
-        },
+        tier2_escalation_failures: 3,
     },
     engine: {
         feedback_flush_interval: 5,
@@ -105,6 +78,10 @@ export const DEFAULT_POLICY = {
         max_feedback_entries: 5,
         max_discoveries_in_project: 3,
         write_on_outcomes: ["completed", "circuit_breaker", "max_rounds"],
+    },
+    checkpoint: {
+        max_carried_constraints: 10,
+        outcome_max_chars: 200,
     },
 };
 // ═══════════════════════════════════════════════════════════════════════════

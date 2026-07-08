@@ -43,9 +43,9 @@ describe("Generated JSON Schema — top-level", () => {
     assert.ok(String(schema.title ?? "").includes("LoopForge"));
   });
 
-  it("has 38 $defs (4 enums + 33 interfaces + 1 type alias)", () => {
+  it("has 39 $defs (4 enums + 34 interfaces + 1 type alias)", () => {
     const names = Object.keys(defs);
-    assert.equal(names.length, 38, `expected 38, got ${names.length}: ${names.join(", ")}`);
+    assert.equal(names.length, 39, `expected 39, got ${names.length}: ${names.join(", ")}`);
   });
 });
 
@@ -107,11 +107,12 @@ describe("Interface type correctness", () => {
     assert.equal(p.alignment_score.type, "number");
   });
 
-  it("LoopRoundResult — round is number, success is boolean, quality_score is number", () => {
+  it("LoopRoundResult — round is number, success is boolean (quality_score removed v1.12)", () => {
     const p = props("LoopRoundResult");
     assert.equal(p.round.type, "number");
     assert.equal(p.success.type, "boolean");
-    assert.equal(p.quality_score.type, "number");
+    // quality_score field has been removed — verify it's gone
+    assert.equal(p.quality_score, undefined);
   });
 });
 
@@ -135,10 +136,12 @@ describe("Array properties", () => {
     assert.equal(p.lineage.type, "array");
   });
 
-  it("RollingSummary — quality_trajectory is number array", () => {
+  it("RollingSummary — key_outcomes is string array", () => {
     const p = props("RollingSummary");
-    assert.equal(p.quality_trajectory.type, "array");
-    assert.equal((p.quality_trajectory.items as Record<string, unknown>).type, "number");
+    assert.equal(p.key_outcomes.type, "array");
+    assert.equal((p.key_outcomes.items as Record<string, unknown>).type, "string");
+    // quality_trajectory and trajectory_direction removed in v1.12
+    assert.equal(p.quality_trajectory, undefined);
   });
 });
 

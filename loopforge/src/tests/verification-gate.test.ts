@@ -32,7 +32,7 @@ function vaultRound(
   return {
     task_id: `loop:test-loop:r${round}`,
     loop_id: "test-loop",
-    loop_lineage: { round, quality_score: 5, task: "test task" },
+    loop_lineage: { round, success: true, task: "test task" },
     constraint_violations: violations,
   };
 }

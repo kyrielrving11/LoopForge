@@ -177,7 +177,7 @@ export const TOOL_SCHEMAS = [
     },
     {
         name: "loopforge_status",
-        description: "Get the current status of a loop session: round number, quality trajectory, technique in use.",
+        description: "Get the current status of a loop session: round number, success trajectory, technique in use.",
         inputSchema: {
             type: "object",
             properties: {
@@ -306,7 +306,7 @@ export const TOOL_HANDLERS = {
             round: session.currentRound,
             maxRounds: session.maxRounds,
             status: session.status,
-            qualityTrajectory: session.qualityTrajectory,
+            successTrajectory: session.successTrajectory,
             technique: session.engine.state?.last_technique ?? null,
             metrics: {
                 vaultWriteErrors: metrics.vaultWriteErrors,
@@ -326,9 +326,9 @@ export const TOOL_HANDLERS = {
         if (!session)
             return { error: `session not found: ${sessionId}` };
         const roundsCompleted = session.currentRound;
-        const qualityTrajectory = [...session.qualityTrajectory];
+        const successTrajectory = [...session.successTrajectory];
         mgr.delete(sessionId);
-        return { success: true, roundsCompleted, qualityTrajectory };
+        return { success: true, roundsCompleted, successTrajectory };
     },
     async loopforge_list(mgr, _input) {
         const sessions = mgr.list();

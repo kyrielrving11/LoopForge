@@ -144,25 +144,25 @@ describe("MCP — multi-round lifecycle", async () => {
     assert.equal(result.stopReason, "stalled");
   });
 
-  it("next with consecutive flat quality → circuit_breaker", async () => {
+  it("next with 3 consecutive failures → circuit_breaker", async () => {
     const start = await TOOL_HANDLERS.loopforge_start(mgr, {
       task: "Breaker test",
       maxRounds: 20,
     });
     const sessionId = String(start.sessionId);
 
-    // 3 rounds of identical high quality = [5, 5, 5] → breaker fires
+    // 3 rounds of failures = [false, false, false] → breaker fires
     await TOOL_HANDLERS.loopforge_next(mgr, {
       sessionId,
-      output: agentOutput({ success: true, shouldContinue: true }),
+      output: agentOutput({ success: false, shouldContinue: true }),
     });
     await TOOL_HANDLERS.loopforge_next(mgr, {
       sessionId,
-      output: agentOutput({ success: true, shouldContinue: true }),
+      output: agentOutput({ success: false, shouldContinue: true }),
     });
     const r3 = await TOOL_HANDLERS.loopforge_next(mgr, {
       sessionId,
-      output: agentOutput({ success: true, shouldContinue: true }),
+      output: agentOutput({ success: false, shouldContinue: true }),
     });
 
     assert.equal(r3.prompt, null);
@@ -323,8 +323,8 @@ describe("MCP — session persistence (save / resume)", async () => {
     assert.ok(sessionEntry !== undefined);
     const lineage = sessionEntry!.loop_lineage as Record<string, unknown>;
     assert.equal(lineage.current_round, 2);
-    const qt = lineage.quality_trajectory as number[];
-    assert.ok(qt.length >= 1, "quality trajectory should have at least 1 entry");
+    const st = lineage.success_trajectory as boolean[];
+    assert.ok(st.length >= 1, "success trajectory should have at least 1 entry");
   });
 
   it("advance() saves stopped status when task_complete", async () => {
@@ -441,7 +441,7 @@ describe("MCP — status / list / stop / replay", async () => {
     assert.equal(status.sessionId, sessionId);
     assert.equal(status.round, 2);
     assert.equal(status.status, "running");
-    assert.ok((status.qualityTrajectory as number[]).length >= 1);
+    assert.ok((status.successTrajectory as boolean[]).length >= 1);
   });
 
   it("list returns multiple sessions", async () => {
@@ -467,7 +467,7 @@ describe("MCP — status / list / stop / replay", async () => {
     const result = await TOOL_HANDLERS.loopforge_stop(mgr, { sessionId });
     assert.equal(result.success, true);
     assert.equal(result.roundsCompleted, 2);
-    assert.ok((result.qualityTrajectory as number[]).length >= 1);
+    assert.ok((result.successTrajectory as boolean[]).length >= 1);
 
     // Session should be gone
     const status = await TOOL_HANDLERS.loopforge_status(mgr, { sessionId });

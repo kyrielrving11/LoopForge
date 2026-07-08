@@ -241,7 +241,7 @@ export function scanLineageMd(
         task_id: `loop:${loopId}:r${roundNum}`,
         full_prompt: body,
         technique_used: metadata.technique_used as string | undefined,
-        quality_score: metadata.quality_score as number | undefined,
+        success: (metadata.success as boolean) ?? true,
         loop_lineage: {
           loop_id: loopId,
           round: roundNum,
@@ -252,7 +252,6 @@ export function scanLineageMd(
           task: metadata.task,
           technique_used: metadata.technique_used,
           success: metadata.success,
-          quality_score: metadata.quality_score,
           output_summary: metadata.output_summary,
           constraint_violations: metadata.constraint_violations,
         },

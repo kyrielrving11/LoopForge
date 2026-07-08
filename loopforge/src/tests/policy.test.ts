@@ -26,24 +26,13 @@ describe("Policy — Defaults", () => {
     assert.equal(DEFAULT_POLICY.engine.max_circuit_breaker, 3);
   });
 
-  it("DEFAULT_POLICY fallback_chain is complete", () => {
-    const chain = DEFAULT_POLICY.technique.fallback_chain;
-    assert.equal(chain["zero-shot"], "few-shot");
-    assert.equal(chain["few-shot"], "zero-shot-cot");
-    assert.equal(chain["tree-of-thought"], "tree-of-thought");
+  it("DEFAULT_POLICY tier2_escalation_failures is set", () => {
+    assert.equal(DEFAULT_POLICY.technique.tier2_escalation_failures, 3);
   });
+});
 
-  it("DEFAULT_POLICY routing_table has 6 entries", () => {
-    const rt = DEFAULT_POLICY.technique.routing_table;
-    assert.equal(Object.keys(rt).length, 6);
-    assert.equal(rt["continuous_high"], "few-shot-cot");
-    assert.equal(rt["independent_high"], "tree-of-thought");
-  });
-
-  it("DEFAULT_POLICY recompile_triggers has L1 and L2 lists", () => {
-    assert.ok(DEFAULT_POLICY.recompile_triggers.l1.includes("new_constraints"));
-    assert.ok(DEFAULT_POLICY.recompile_triggers.l2.includes("goal_id_changed"));
-  });
+describe("Policy — Loading", () => {
+  beforeEach(() => resetPolicy());
 
   it("getPolicy returns DEFAULT_POLICY when no file found", () => {
     resetPolicy();

@@ -17,7 +17,7 @@ function makeEntry(overrides: Partial<VaultEntry> = {}): VaultEntry {
       constraints_active: ["check ownership"],
     },
     technique_used: "few-shot-cot",
-    quality_score: 4,
+    success: true,
     ...overrides,
   };
 }
@@ -63,14 +63,14 @@ describe("ReplayBackend — getRound", () => {
     assert.equal(result!.full_prompt, "## From Markdown");
   });
 
-  it("merges feedback quality_score", () => {
-    backend.appendEntry(makeEntry({ quality_score: 0 }));
+  it("merges feedback success flag", () => {
+    backend.appendEntry(makeEntry({ success: false }));
     backend.appendEntry({
       task_id: "loop:test:r1:feedback",
-      quality_score: 5,
+      success: true,
     });
     const result = replay.getRound("test", 1);
-    assert.equal(result!.quality_score, 5);
+    assert.equal(result!.success, true);
   });
 });
 
@@ -114,13 +114,13 @@ describe("ReplayBackend — timeline", () => {
       task_id: "loop:test:r3",
       loop_lineage: { loop_id: "test", round: 3, recompile_level: "l1", goal_id: "audit", task: "Fix bugs" },
       technique_used: "few-shot",
-      quality_score: 3,
+      success: false,
     }));
     backend.appendEntry(makeEntry({
       task_id: "loop:test:r1",
       loop_lineage: { loop_id: "test", round: 1, recompile_level: "l2", goal_id: "audit", task: "Audit" },
       technique_used: "few-shot-cot",
-      quality_score: 4,
+      success: true,
     }));
     const replay = new ReplayBackend(backend);
 
@@ -165,13 +165,13 @@ describe("ReplayBackend — diff", () => {
       task_id: "loop:test:r1",
       loop_lineage: { loop_id: "test", round: 1, recompile_level: "l2", goal_id: "audit", task: "Audit ERC20", constraints_active: ["check ownership"] },
       technique_used: "few-shot-cot",
-      quality_score: 4,
+      success: true,
     }));
     backend.appendEntry(makeEntry({
       task_id: "loop:test:r3",
       loop_lineage: { loop_id: "test", round: 3, recompile_level: "l1", goal_id: "audit", task: "Check flash loans", constraints_active: ["check ownership", "check flash loans"] },
       technique_used: "few-shot",
-      quality_score: 3,
+      success: false,
     }));
     const replay = new ReplayBackend(backend);
 

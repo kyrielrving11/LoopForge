@@ -9,7 +9,6 @@ import { randomUUID } from "node:crypto";
 import { getPolicy } from "./policy.js";
 import { FSBackend, readLineageMd } from "./backends/fs.js";
 import { AgentStatus, Mode, makeAnalysis, makeExecutionEvidence, makeExecutionFeedback, makeLoopCompileRequest, makeLoopObjective, makeLoopRoundResult, makeSelfEvaluation, makeSessionState, makeTaskId, makeVaultConfig, SELF_EVAL_REGEX, } from "./protocol.js";
-import { scoreQuality } from "./builder.js";
 import { compileLoop } from "./loop-compiler.js";
 import { logEvent } from "./observability.js";
 // ═══════════════════════════════════════════════════════════════════════════
@@ -134,6 +133,9 @@ export function buildSelfEvaluation(raw) {
         wrong_assumptions: wrongAssumptions,
         // Multi-agent: Worker delegation results
         worker_results: workerResults,
+        // v1.10: Checkpoint compression
+        compression_checkpoint: typeof raw.compression_checkpoint === "boolean" ? raw.compression_checkpoint : false,
+        checkpoint_label: typeof raw.checkpoint_label === "string" ? raw.checkpoint_label : "",
     });
 }
 /** Fallback heuristic when structured self-eval extraction fails.
@@ -244,12 +246,12 @@ export class LoopForgeEngine {
                     is_active: true,
                     timestamp: now,
                     user_intent: String(signal.task_type ?? "").slice(0, 200),
-                    quality_score: signal.quality_score ?? 0,
+                    success: signal.success ?? false,
                     execution_feedback: JSON.stringify({
-                        status: (signal.quality_score ?? 0) >= 3
+                        success: signal.success ?? false,
+                        status: signal.success
                             ? "success"
                             : "partial",
-                        quality_score: signal.quality_score ?? 0,
                         constraint_compliance: {
                             all_hard_constraints_met: !Array.isArray(signal.violations) || signal.violations.length === 0,
                             violations: signal.violations ?? [],
@@ -299,7 +301,6 @@ export class LoopForgeEngine {
             goal_id: response.goal_id,
             goal_text_hash: response.goal_text_hash,
             recompile_level: response.recompile_level,
-            quality_score: 0,
             constraints_active: response.constraints_active,
             task: request.task,
             success: true,
@@ -319,7 +320,6 @@ export class LoopForgeEngine {
             timestamp: new Date().toISOString().replace(/\.\d+Z$/, ""),
             user_intent: `loop_compile round ${response.round} — ${response.goal_id}`,
             task_type: "loop_lineage",
-            quality_score: 0,
             skill_used: response.technique_used,
             technique_used: response.technique_used,
             loop_id: response.loop_id,
@@ -352,7 +352,6 @@ export class LoopForgeEngine {
                 technique_used: response.technique_used,
                 loop_objective: loopObjDict,
                 success: true,
-                quality_score: 0,
                 output_summary: lastOutputSummary,
                 constraint_violations: lastViolations,
             });
@@ -410,30 +409,29 @@ export class LoopForgeEngine {
     hydrateLoopContext(loopId) {
         const prefix = `loop:${loopId}:r`;
         const results = this.resolveBackend().queryEntries({ prefix });
-        // Merge feedback quality scores into lineage entries
+        // Merge feedback success flags into lineage entries
         const fbEntries = this.resolveBackend().queryEntries({
             prefix,
             feedbackOnly: true,
         });
-        const fbQuality = new Map();
+        const fbSuccess = new Map();
         for (const fe of fbEntries) {
             const tid = String(fe.task_id ?? "");
             const parts = tid.split(":r");
             if (parts.length >= 2) {
                 const roundStr = parts[1].split(":")[0];
                 const fbRound = parseInt(roundStr, 10);
-                const fbScore = fe.quality_score ?? 0;
-                if (!Number.isNaN(fbRound) && fbScore > 0) {
-                    fbQuality.set(fbRound, Math.max(fbQuality.get(fbRound) ?? 0, fbScore));
+                if (!Number.isNaN(fbRound) && fe.success !== undefined) {
+                    fbSuccess.set(fbRound, fe.success);
                 }
             }
         }
         for (const entry of results) {
             const lineage = (entry.loop_lineage ?? entry.lineage ?? {});
             const rnd = lineage.round;
-            if (rnd && fbQuality.has(rnd)) {
-                lineage.quality_score = fbQuality.get(rnd);
-                entry.quality_score = fbQuality.get(rnd);
+            if (rnd && fbSuccess.has(rnd)) {
+                lineage.success = fbSuccess.get(rnd);
+                entry.success = fbSuccess.get(rnd);
             }
         }
         // Fallback: scan Markdown files if JSON vault had no matches
@@ -455,10 +453,6 @@ export class LoopForgeEngine {
             if (!entry.constraint_violations) {
                 entry.constraint_violations =
                     lineage.constraint_violations ?? [];
-            }
-            // v1.7: Ensure quality_score is always populated for failure lineage weighting
-            if (entry.quality_score === undefined || entry.quality_score === null) {
-                entry.quality_score = lineage.quality_score ?? 0;
             }
         }
         // Enrich: attach full prompt text from Markdown for L0 cache reuse
@@ -499,11 +493,6 @@ export class LoopForgeEngine {
         const success = fb.success;
         const violations = fb.constraint_violations ?? [];
         const fixes = fb.manual_fixes_needed ?? "";
-        const quality = scoreQuality({
-            success,
-            constraint_violations: violations,
-            manual_fixes_needed: fixes,
-        });
         // Loop-aware task_id for feedback→lineage backfill
         const loopId = request.loop_id;
         const loopRound = request.round;
@@ -517,7 +506,7 @@ export class LoopForgeEngine {
         const signal = {
             task_id: taskId,
             task_type: request.task.slice(0, 80),
-            quality_score: quality,
+            success,
             skill_used: request.skill_name ?? "",
             violations,
             manual_fixes: fixes,
@@ -525,13 +514,13 @@ export class LoopForgeEngine {
             round: loopRound,
         };
         this.persistFeedbackToVault(signal);
-        // Flush immediately so next compile cycle sees quality scores
+        // Flush immediately so next compile cycle sees success flags
         this.flushFeedbackBuffer();
         // Update state
         this.state.call_count++;
-        this.state.quality_trend.push(quality);
-        if (this.state.quality_trend.length > 20) {
-            this.state.quality_trend = this.state.quality_trend.slice(-20);
+        this.state.success_trend.push(success);
+        if (this.state.success_trend.length > 20) {
+            this.state.success_trend = this.state.success_trend.slice(-20);
         }
         // Circuit breaker
         if (this.shouldBreak()) {
@@ -542,7 +531,7 @@ export class LoopForgeEngine {
         }
         logEvent("round_complete", {
             technique: "feedback",
-            quality,
+            success,
             loopId: loopId ?? "unknown",
             round: loopRound ?? this.state.call_count,
         });
@@ -550,10 +539,10 @@ export class LoopForgeEngine {
             status: AgentStatus.OK,
             response: {
                 status: AgentStatus.OK,
-                prompt: `## Feedback Recorded\n\nQuality Score: ${quality}/5\nSignals: 1`,
+                prompt: `## Feedback Recorded\n\nSuccess: ${success}\nSignals: 1`,
                 analysis: makeAnalysis({
                     technique: "feedback",
-                    rationale: `quality=${quality}`,
+                    rationale: `success=${success}`,
                     independence: "n/a",
                     cognitive_load: "low",
                 }),
@@ -569,7 +558,7 @@ export class LoopForgeEngine {
      *  P0–P2: Also persists discovered_constraints, objective_refinement,
      *  and emerged_subtasks for the compiler to consume next round.
      *  Call this BEFORE invokeLoopCompile for the next round so that
-     *  hydrateLoopContext picks up the latest quality scores. */
+     *  hydrateLoopContext picks up the latest success flags. */
     autoFeedback(selfEval, loopId, round, task) {
         this.ensureInit({ task, mode: Mode.FEEDBACK, vault_config: makeVaultConfig(), feedback: null, skill_name: null, task_id: null });
         const fb = makeExecutionFeedback({
@@ -577,11 +566,6 @@ export class LoopForgeEngine {
             success: selfEval.success,
             constraint_violations: selfEval.constraint_violations,
             manual_fixes_needed: "",
-        });
-        const quality = scoreQuality({
-            success: fb.success,
-            constraint_violations: fb.constraint_violations,
-            manual_fixes_needed: fb.manual_fixes_needed,
         });
         const taskId = `loop:${loopId}:r${round}:feedback`;
         // Multi-agent: Merge sub-agent discovered constraints into the main constraint flow
@@ -594,7 +578,7 @@ export class LoopForgeEngine {
         const signal = {
             task_id: taskId,
             task_type: task.slice(0, 80),
-            quality_score: quality,
+            success: fb.success,
             skill_used: "",
             violations: selfEval.constraint_violations,
             manual_fixes: "",
@@ -630,9 +614,9 @@ export class LoopForgeEngine {
         }
         // Update state
         this.state.call_count++;
-        this.state.quality_trend.push(quality);
-        if (this.state.quality_trend.length > 20) {
-            this.state.quality_trend = this.state.quality_trend.slice(-20);
+        this.state.success_trend.push(fb.success);
+        if (this.state.success_trend.length > 20) {
+            this.state.success_trend = this.state.success_trend.slice(-20);
         }
         // Circuit breaker
         if (this.shouldBreak()) {
@@ -644,10 +628,10 @@ export class LoopForgeEngine {
         logEvent("round_complete", {
             loopId,
             round,
-            quality,
+            success: fb.success,
             technique: this.state?.last_technique ?? "feedback",
         });
-        return quality;
+        return fb.success;
     }
     // ═══════════════════════════════════════════════════════════════════════
     // Loop Compile (public, primary)
@@ -716,7 +700,6 @@ export class LoopForgeEngine {
                     output_summary: rr.output_summary ?? "",
                     constraint_violations: rr.constraint_violations ?? [],
                     manual_fixes_needed: rr.manual_fixes_needed ?? "",
-                    quality_score: rr.quality_score ?? 0,
                     // P0–P2: Cognitive evolution fields
                     discovered_constraints: Array.isArray(rr.discovered_constraints)
                         ? rr.discovered_constraints.filter((v) => typeof v === "string")
@@ -737,6 +720,9 @@ export class LoopForgeEngine {
                     wrong_assumptions: Array.isArray(rr.wrong_assumptions)
                         ? rr.wrong_assumptions.filter((v) => typeof v === "string")
                         : [],
+                    // v1.10: Checkpoint boundary
+                    compression_checkpoint: typeof rr.compression_checkpoint === "boolean" ? rr.compression_checkpoint : false,
+                    checkpoint_label: typeof rr.checkpoint_label === "string" ? rr.checkpoint_label : "",
                     // Multi-agent: Worker delegation results
                     worker_results: Array.isArray(rr.worker_results)
                         ? rr.worker_results
@@ -816,8 +802,8 @@ export class LoopForgeEngine {
             const hasError = verificationFlags.some((f) => f.severity === "error");
             if (hasError) {
                 promptLines.push("");
-                promptLines.push("**Gate Verdict: CONTRADICTED** — this round's quality score has been excluded " +
-                    "from the quality trend. Address each 🚫 flag explicitly in your next response.");
+                promptLines.push("**Gate Verdict: CONTRADICTED** — this round's success flag has been excluded " +
+                    "from the success trend. Address each 🚫 flag explicitly in your next response.");
             }
         }
         if (response.loop_health) {
@@ -876,17 +862,18 @@ export class LoopForgeEngine {
             return false;
         const policy = getPolicy();
         const maxCB = policy.engine.max_circuit_breaker;
-        if (this.state.quality_trend.length < maxCB)
+        if (this.state.success_trend.length < maxCB)
             return false;
-        const recent = this.state.quality_trend.slice(-maxCB);
-        const isFlat = recent.every((val, i) => i === 0 || recent[i - 1] >= val);
-        if (isFlat) {
+        const recent = this.state.success_trend.slice(-maxCB);
+        // Trip only when all recent rounds are failures (no false-positives on all-success)
+        const allFailed = recent.every((v) => v === false);
+        if (allFailed) {
             logEvent("circuit_breaker", {
                 trend: recent,
-                totalRounds: this.state.quality_trend.length,
+                totalRounds: this.state.success_trend.length,
             });
         }
-        return isFlat;
+        return allFailed;
     }
 }
 // ═══════════════════════════════════════════════════════════════════════════

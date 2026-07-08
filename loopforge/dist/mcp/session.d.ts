@@ -14,7 +14,7 @@ export interface McpSession {
     engine: LoopForgeEngine;
     currentRound: number;
     maxRounds: number;
-    qualityTrajectory: number[];
+    successTrajectory: boolean[];
     status: "running" | "stopped" | "stalled";
     createdAt: number;
     /** Previous round's validated SelfEvaluation — used by verification gate. */
@@ -46,7 +46,9 @@ export interface AdvanceResult {
     stopReason?: string;
     technique?: string;
     level?: string;
+    /** @deprecated Use roundSuccess instead. Derived: roundSuccess ? 5 : 1 */
     quality?: number;
+    roundSuccess?: boolean;
     warnings?: string[];
 }
 export declare class SessionManager {

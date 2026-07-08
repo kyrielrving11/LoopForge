@@ -34,15 +34,23 @@ export declare function deriveGoalId(loopId: string, task: string, explicitGoalI
 interface PreviousRound {
     goal_id: string;
     goal_text_hash: string;
-    quality_score: number;
     success: boolean;
     task: string;
     constraints_active: string[];
     prompt_text: string;
 }
 export declare function getPreviousRound(loopId: string, roundNum: number, vaultContext: Record<string, unknown> | null): PreviousRound | null;
-export declare function buildRollingSummary(loopId: string, currentRound: number, vaultContext: Record<string, unknown> | null): RollingSummary | null;
+export declare function buildRollingSummary(loopId: string, currentRound: number, vaultContext: Record<string, unknown> | null, sinceRound?: number): RollingSummary | null;
 export declare function formatRollingSummaryForPrompt(rs: RollingSummary | null): string;
+/** Build a CheckpointSummary from the current round's self-evaluation state.
+ *  Called when the Agent sets compression_checkpoint: true in its self-eval.
+ *  Snapshots the current constraints and outcome so they survive rolling-window
+ *  eviction in subsequent rounds. */
+export declare function buildCheckpointSummary(selfEval: import("./protocol.js").SelfEvaluation, round: number, activeConstraints: string[], retiredConstraints: string[]): import("./protocol.js").CheckpointSummary;
+/** Format a CheckpointSummary as a prompt block.
+ *  Renders as a fixed section that persists across rolling-window eviction.
+ *  Returns empty string if the summary is null or has no meaningful data. */
+export declare function formatCheckpointForPrompt(cs: import("./protocol.js").CheckpointSummary | null): string;
 /** Format an external context string for injection into an L2 prompt.
  *  Wraps the raw context in a marked section with a priority disclaimer.
  *  Returns empty string if context is empty or injection is disabled by policy. */

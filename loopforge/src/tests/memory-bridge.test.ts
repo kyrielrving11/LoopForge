@@ -72,7 +72,6 @@ function makeWritebackPayload(overrides?: Partial<LoopMemoryWriteback>): LoopMem
     task: "Audit ERC20 token for reentrancy vulnerabilities",
     outcome: "completed",
     roundsCompleted: 5,
-    qualityTrajectory: [1, 3, 3, 5, 5],
     projectEntry: {
       title: "ERC20 Audit — completed",
       objective: "Find and fix all reentrancy bugs in the ERC20 token contract",

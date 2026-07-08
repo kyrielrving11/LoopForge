@@ -209,7 +209,7 @@ export function createMemoryWriter(memoryDir, indexPath) {
                 `**Outcome**: ${payload.projectEntry.keyOutcome}`,
                 `**Date**: ${date}`,
                 `**Rounds**: ${payload.roundsCompleted}`,
-                `**Quality Trajectory**: [${payload.qualityTrajectory.join(", ")}]`,
+                `**Rounds Completed**: ${payload.roundsCompleted}`,
                 "",
                 payload.projectEntry.objective
                     ? `**Objective**: ${payload.projectEntry.objective}\n`

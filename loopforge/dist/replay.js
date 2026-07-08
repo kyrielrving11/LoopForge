@@ -33,17 +33,17 @@ export class ReplayBackend {
             if (mdContent)
                 entry.full_prompt = mdContent;
         }
-        // Merge feedback quality_score
+        // Merge feedback success flag
         const fbEntries = this.backend.queryEntries({
             prefix,
             feedbackOnly: true,
         });
         if (fbEntries.length) {
-            const fbScore = fbEntries[0].quality_score ?? 0;
-            if (fbScore) {
-                entry.quality_score = fbScore;
+            const fbSuccess = fbEntries[0].success;
+            if (fbSuccess !== undefined) {
+                entry.success = fbSuccess;
                 const lineage = (entry.loop_lineage ?? {});
-                lineage.quality_score = fbScore;
+                lineage.success = fbSuccess;
                 entry.loop_lineage = lineage;
             }
         }
@@ -76,7 +76,7 @@ export class ReplayBackend {
                 round: lineage.round ?? 0,
                 recompile_level: lineage.recompile_level ?? "l2",
                 technique_used: entry.technique_used ?? lineage.technique_used ?? "",
-                quality_score: entry.quality_score ?? lineage.quality_score ?? 0,
+                success: entry.success ?? lineage.success ?? false,
                 task: lineage.task ?? entry.task ?? "",
                 goal_id: lineage.goal_id ?? "",
             });
@@ -121,7 +121,7 @@ export class ReplayBackend {
             ["goal_id", "Goal ID"],
             ["recompile_level", "Recompile Level"],
             ["technique_used", "Technique"],
-            ["quality_score", "Quality Score"],
+            ["success", "Success"],
             ["task", "Task"],
         ];
         const changes = [];

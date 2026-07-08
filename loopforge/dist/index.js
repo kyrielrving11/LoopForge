@@ -27,7 +27,7 @@ export { Mode, AgentStatus, Technique, makeAnalysis, makeVaultConfig, makeExecut
 export { getPolicy, loadPolicy, resetPolicy, DEFAULT_POLICY, resolveAllowedPhases, } from "./policy.js";
 export { FSBackend } from "./backends/fs.js";
 // Builder
-export { routeTechniqueAdaptive, scoreQuality, TECHNIQUE_REFERENCE, } from "./builder.js";
+export { routeTechniqueAdaptive, TECHNIQUE_REFERENCE, } from "./builder.js";
 // Loop Compiler
 export { compileLoop, decideLevel, compileL2, alignTask, checkLoopHealth, computeAdvisories, computeGoalTextHash, deriveGoalId, getPreviousRound, buildSelfEvalBlock, buildRollingSummary, formatRollingSummaryForPrompt, filterConstraintsForSubTask, formatDelegationPrompt, buildDelegationSummary, } from "./loop-compiler.js";
 // Replay

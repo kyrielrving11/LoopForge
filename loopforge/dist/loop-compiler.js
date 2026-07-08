@@ -12,7 +12,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { getPolicy } from "./policy.js";
-import { AgentStatus, makeLoopCompileResponse, makeLoopHealth, makeLoopObjective, makeRollingSummary, makeTaskAlignment, } from "./protocol.js";
+import { AgentStatus, makeCheckpointSummary, makeLoopCompileResponse, makeLoopHealth, makeLoopObjective, makeRollingSummary, makeTaskAlignment, } from "./protocol.js";
 import { routeTechniqueAdaptive } from "./builder.js";
 // ═══════════════════════════════════════════════════════════════════════════
 // Repair cue detection
@@ -224,8 +224,7 @@ export function getPreviousRound(loopId, roundNum, vaultContext) {
             return {
                 goal_id: lineage.goal_id ?? "",
                 goal_text_hash: lineage.goal_text_hash ?? "",
-                quality_score: lineage.quality_score ?? 0,
-                success: r.success ?? true,
+                success: r.success ?? lineage.success ?? true,
                 task: r.task ?? r.user_intent ?? "",
                 constraints_active: lineage.constraints_active ?? [],
                 prompt_text: r.full_prompt ?? "",
@@ -243,7 +242,7 @@ function getRecentRounds(loopId, n, vaultContext) {
         const lineage = (r.loop_lineage || r.lineage || {});
         if (lineage.loop_id === loopId) {
             rounds.push({
-                quality_score: lineage.quality_score ?? 0,
+                success: r.success ?? lineage.success ?? false,
                 round: lineage.round ?? 0,
                 goal_text_hash: lineage.goal_text_hash ?? "",
             });
@@ -303,7 +302,7 @@ function strategyCollapse(loopId, vaultContext) {
     const recent = getRecentRounds(loopId, 3, vaultContext);
     if (recent.length < 3)
         return false;
-    return recent.every((r) => r.quality_score < 3);
+    return recent.every((r) => r.success === false);
 }
 // ═══════════════════════════════════════════════════════════════════════════
 // Constraint Retirement (v3.5)
@@ -412,7 +411,7 @@ function countProgressStallRounds(loopId, currentRound, vaultContext, threshold)
 }
 /** Detect repeated failure patterns in sampled rounds.
  *  A failure pattern = 2+ consecutive rounds where:
- *    1. quality_score < 3 (failed or weak)
+ *    1. success === false (failed)
  *    2. same technique was used
  *    3. task text is similar (Jaccard > 0.4)
  *
@@ -424,7 +423,7 @@ function detectFailurePatterns(sampled) {
     let runStart = -1;
     for (let i = 0; i < sampled.length; i++) {
         const r = sampled[i];
-        const isFailed = r.quality_score < 3;
+        const isFailed = r.success === false;
         if (isFailed && runStart === -1) {
             runStart = i;
         }
@@ -445,7 +444,7 @@ function detectFailurePatterns(sampled) {
     }
     return patterns;
 }
-/** Classify a run of consecutive low-quality rounds as a failure pattern.
+/** Classify a run of consecutive failed rounds as a failure pattern.
  *  Returns null if the rounds are too dissimilar to be the same pattern. */
 function classifyRun(run) {
     if (run.length < 2)
@@ -465,9 +464,9 @@ function classifyRun(run) {
     }
     const rounds = `R${run[0].round}-R${run[run.length - 1].round}`;
     const taskPreview = run[0].task.slice(0, 80);
-    const avgScore = (run.reduce((s, r) => s + r.quality_score, 0) / run.length).toFixed(1);
+    const failureRate = `${run.length}/${run.length}`;
     return (`technique '${technique}' on task '${taskPreview}' ` +
-        `failed ${run.length} consecutive rounds (${rounds}, avg score ${avgScore}) — ` +
+        `failed ${run.length} consecutive rounds (${rounds}) — ` +
         `consider strategy change`);
 }
 /** Extract round numbers referenced in failure pattern descriptions.
@@ -494,7 +493,7 @@ function extractFailureRoundNums(patterns) {
 // ═══════════════════════════════════════════════════════════════════════════
 // Rolling Summary (v3.5)
 // ═══════════════════════════════════════════════════════════════════════════
-export function buildRollingSummary(loopId, currentRound, vaultContext) {
+export function buildRollingSummary(loopId, currentRound, vaultContext, sinceRound) {
     if (vaultContext === null)
         return null;
     const results = vaultContext.results || [];
@@ -502,6 +501,7 @@ export function buildRollingSummary(loopId, currentRound, vaultContext) {
         return null;
     const policy = getPolicy();
     const window = policy.summary.window;
+    const minRound = sinceRound ?? 0;
     // Collect rounds matching this loop_id, excluding current
     const rounds = [];
     for (const r of results) {
@@ -511,9 +511,11 @@ export function buildRollingSummary(loopId, currentRound, vaultContext) {
         const rnd = lineage.round;
         if (rnd >= currentRound)
             continue;
+        if (rnd < minRound)
+            continue;
         rounds.push({
             round: rnd,
-            quality_score: lineage.quality_score ?? 0,
+            success: r.success ?? lineage.success ?? false,
             task: r.task ?? r.user_intent ?? "",
             output_summary: r.output_summary ?? "",
             constraint_violations: r.constraint_violations || [],
@@ -525,32 +527,13 @@ export function buildRollingSummary(loopId, currentRound, vaultContext) {
     // Sort by round descending, take last N
     rounds.sort((a, b) => b.round - a.round);
     const sampled = rounds.slice(0, window).reverse(); // chronological order
-    // Quality trajectory
-    const trajectory = sampled.map((r) => r.quality_score);
-    // Trajectory direction
-    let direction = "stable";
-    if (trajectory.length >= 2) {
-        const diffs = trajectory.slice(1).map((v, i) => v - trajectory[i]);
-        if (diffs.every((d) => d >= 0) && diffs.some((d) => d > 0)) {
-            direction = "improving";
-        }
-        else if (diffs.every((d) => d <= 0) && diffs.some((d) => d < 0)) {
-            direction = "declining";
-        }
-        else if (diffs.every((d) => d === 0)) {
-            direction = "stable";
-        }
-        else {
-            direction = "volatile";
-        }
-    }
-    // What worked
-    const whatWorked = [];
+    // v1.12: Key outcomes — all rounds with output_summary
+    const keyOutcomes = [];
     for (const r of sampled) {
-        if (r.quality_score >= 4 &&
-            r.output_summary) {
-            whatWorked.push(`R${r.round} (score=${r.quality_score}, ` +
-                `${r.technique_used || "n/a"}): ${String(r.output_summary).slice(0, 150)}`);
+        if (r.output_summary) {
+            const status = r.success ? "✓" : "✗";
+            keyOutcomes.push(`[R${r.round}] ${status} (${r.technique_used || "n/a"}): ` +
+                `${String(r.output_summary).slice(0, 200)}`);
         }
     }
     // Recurring issues
@@ -569,17 +552,10 @@ export function buildRollingSummary(loopId, currentRound, vaultContext) {
         .filter(([, count]) => count >= 2)
         .sort((a, b) => b[1] - a[1])
         .map(([v, count]) => `${v} (appeared in ${count} rounds)`);
-    // Key lessons
-    const keyLessons = [];
-    for (const r of sampled) {
-        if (r.quality_score >= 4 && r.output_summary) {
-            keyLessons.push(`[R${r.round}] ${String(r.output_summary).slice(0, 200)}`);
-        }
-    }
     // v1.7: Failure lineage weighting — detect and demote failure patterns
     const sampledRounds = sampled.map((r) => ({
         round: r.round,
-        quality_score: r.quality_score,
+        success: r.success,
         task: r.task,
         output_summary: r.output_summary,
         constraint_violations: r.constraint_violations,
@@ -587,21 +563,21 @@ export function buildRollingSummary(loopId, currentRound, vaultContext) {
     }));
     const failurePatterns = detectFailurePatterns(sampledRounds);
     const failedRoundNums = extractFailureRoundNums(failurePatterns);
-    // Re-weight key_lessons: lessons from failure-pattern rounds go to end
-    if (failedRoundNums.size > 0 && keyLessons.length > 0) {
+    // Re-weight key_outcomes: outcomes from failure-pattern rounds go to end
+    if (failedRoundNums.size > 0 && keyOutcomes.length > 0) {
         const promoted = [];
         const demoted = [];
-        for (const kl of keyLessons) {
-            const rndMatch = kl.match(/^\[R(\d+)\]/);
+        for (const ko of keyOutcomes) {
+            const rndMatch = ko.match(/^\[R(\d+)\]/);
             if (rndMatch && failedRoundNums.has(parseInt(rndMatch[1], 10))) {
-                demoted.push(kl.replace(/^\[R\d+\]/, "$& [Consider alternatives]"));
+                demoted.push(ko.replace(/^\[R\d+\]/, "$& [Consider alternatives]"));
             }
             else {
-                promoted.push(kl);
+                promoted.push(ko);
             }
         }
-        keyLessons.length = 0;
-        keyLessons.push(...promoted, ...demoted);
+        keyOutcomes.length = 0;
+        keyOutcomes.push(...promoted, ...demoted);
     }
     // Re-weight recurring_issues: mark issues that ONLY appear in failure-pattern rounds
     if (failedRoundNums.size > 0 && recurringIssues.length > 0) {
@@ -628,11 +604,8 @@ export function buildRollingSummary(loopId, currentRound, vaultContext) {
         }));
     }
     return makeRollingSummary({
-        quality_trajectory: trajectory,
-        trajectory_direction: direction,
-        what_worked: whatWorked,
+        key_outcomes: keyOutcomes,
         recurring_issues: recurringIssues,
-        key_lessons: keyLessons,
         rounds_sampled: sampled.length,
         generated_at_round: currentRound,
         failed_patterns: failurePatterns.length ? failurePatterns : [],
@@ -644,14 +617,13 @@ export function formatRollingSummaryForPrompt(rs) {
     const lines = [
         "### Cross-Round Summary (Accumulated)",
         "",
-        `**Sampled**: ${rs.rounds_sampled} prior rounds | **Direction**: ${rs.trajectory_direction}`,
-        `**Quality Trajectory**: [${rs.quality_trajectory.join(", ")}]`,
+        `**Sampled**: ${rs.rounds_sampled} prior rounds`,
         "",
     ];
-    if (rs.what_worked.length) {
-        lines.push("**What Worked (score >= 4)**:");
-        for (const w of rs.what_worked)
-            lines.push(`- ${w}`);
+    if (rs.key_outcomes.length) {
+        lines.push("**Key Outcomes**:");
+        for (const ko of rs.key_outcomes)
+            lines.push(`- ${ko}`);
         lines.push("");
     }
     if (rs.recurring_issues.length) {
@@ -665,20 +637,106 @@ export function formatRollingSummaryForPrompt(rs) {
         lines.push("### ⚠️ Failure Patterns — Consider Strategy Change");
         lines.push("");
         lines.push("The following approaches failed repeatedly. The compiler has demoted " +
-            "their influence on key lessons. Consider a different technique or " +
+            "their influence on key outcomes. Consider a different technique or " +
             "narrower scope.");
         for (const fp of rs.failed_patterns) {
             lines.push(`- 🚫 ${fp}`);
         }
         lines.push("");
     }
-    if (rs.key_lessons.length) {
-        lines.push("**Key Lessons From High-Score Rounds**:");
-        for (const kl of rs.key_lessons)
-            lines.push(`- ${kl}`);
+    return lines.join("\n");
+}
+// ═══════════════════════════════════════════════════════════════════════════
+// Checkpoint compression (v1.10 — subtask boundary snapshots)
+// ═══════════════════════════════════════════════════════════════════════════
+/** Build a CheckpointSummary from the current round's self-evaluation state.
+ *  Called when the Agent sets compression_checkpoint: true in its self-eval.
+ *  Snapshots the current constraints and outcome so they survive rolling-window
+ *  eviction in subsequent rounds. */
+export function buildCheckpointSummary(selfEval, round, activeConstraints, retiredConstraints) {
+    const policy = getPolicy();
+    const cpCfg = policy.checkpoint;
+    const maxCarried = cpCfg?.max_carried_constraints ?? 10;
+    const outcomeMaxChars = cpCfg?.outcome_max_chars ?? 200;
+    const label = selfEval.checkpoint_label?.trim() ||
+        `Subtask completed at round ${round}`;
+    const outcome = (selfEval.output_summary || "").trim().slice(0, outcomeMaxChars);
+    // Carried: constraints still active, capped
+    const carried = activeConstraints.slice(0, maxCarried);
+    // Resolved: constraints retired this round (retracted + the retire delta)
+    const resolved = retiredConstraints.slice(0, maxCarried);
+    return {
+        label,
+        declared_at_round: round,
+        outcome,
+        carried_constraints: carried,
+        resolved_constraints: resolved,
+    };
+}
+/** Format a CheckpointSummary as a prompt block.
+ *  Renders as a fixed section that persists across rolling-window eviction.
+ *  Returns empty string if the summary is null or has no meaningful data. */
+export function formatCheckpointForPrompt(cs) {
+    if (!cs)
+        return "";
+    // Must have at least a label and some content to be meaningful
+    if (!cs.label && !cs.outcome && !cs.carried_constraints.length)
+        return "";
+    const lines = [
+        `### Checkpoint: ${cs.label} (Round ${cs.declared_at_round})`,
+        "",
+    ];
+    if (cs.outcome) {
+        lines.push(`**Outcome**: ${cs.outcome}`);
+        lines.push("");
+    }
+    if (cs.carried_constraints.length) {
+        lines.push("**Carried Constraints** (still active):");
+        for (const c of cs.carried_constraints) {
+            lines.push(`- ${c}`);
+        }
+        lines.push("");
+    }
+    if (cs.resolved_constraints.length) {
+        lines.push("**Resolved Constraints** (closed with this checkpoint):");
+        for (const c of cs.resolved_constraints) {
+            lines.push(`- ${c}`);
+        }
         lines.push("");
     }
     return lines.join("\n");
+}
+/** Query the vault for the most recent checkpoint entry before the current
+ *  round. Returns null if no checkpoint has been declared yet. */
+function loadLatestCheckpoint(loopId, currentRound, vaultContext) {
+    if (!vaultContext)
+        return null;
+    const results = vaultContext.results || [];
+    let latest = null;
+    let latestRound = -1;
+    for (const r of results) {
+        const lineage = (r.loop_lineage || r.lineage || {});
+        if (lineage.loop_id !== loopId)
+            continue;
+        const rnd = lineage.round;
+        if (rnd >= currentRound)
+            continue;
+        // Check for stored checkpoint summary on this entry
+        const cp = r.checkpoint_summary;
+        if (cp && typeof cp.declared_at_round === "number" && cp.declared_at_round > latestRound) {
+            latest = cp;
+            latestRound = cp.declared_at_round;
+        }
+    }
+    if (!latest)
+        return null;
+    return makeCheckpointSummary({
+        label: latest.label ?? "",
+        declared_at_round: latest.declared_at_round ?? 0,
+        outcome: latest.outcome ?? "",
+        carried_constraints: latest.carried_constraints ?? [],
+        resolved_constraints: latest.resolved_constraints ?? [],
+    });
 }
 // ═══════════════════════════════════════════════════════════════════════════
 // External Context formatting (v1.7 — memory system integration)
@@ -853,7 +911,7 @@ export function checkLoopHealth(loopId, request, vaultContext) {
     // 4. strategy_stability
     const recent = getRecentRounds(loopId, 3, vaultContext);
     const strategyStability = recent.length > 0
-        ? recent.every((r) => r.quality_score >= 4)
+        ? recent.every((r) => r.success === true)
         : true;
     // 5. task_continuity
     let taskContinuity = 1.0;
@@ -890,15 +948,22 @@ function computeSuggestedNextTask(loopId, vaultContext) {
     if (vaultContext === null)
         return "";
     const results = vaultContext.results || [];
+    let bestTask = "";
+    let bestRound = -1;
     for (const r of results) {
         const lineage = (r.loop_lineage || r.lineage || {});
-        if (lineage.loop_id === loopId) {
+        if (lineage.loop_id !== loopId)
+            continue;
+        const rnd = lineage.round ?? 0;
+        if (rnd > bestRound) {
             const task = r.task ?? r.user_intent ?? "";
-            if (task)
-                return `Previous round focused on: ${task.slice(0, 120)}`;
+            if (task) {
+                bestTask = task;
+                bestRound = rnd;
+            }
         }
     }
-    return "";
+    return bestTask ? `[R${bestRound}] Previous task: ${bestTask.slice(0, 120)}` : "";
 }
 export function computeAdvisories(request, vaultContext) {
     const warnings = [];
@@ -914,7 +979,7 @@ export function computeAdvisories(request, vaultContext) {
     }
     // Strategy collapse check
     if (strategyCollapse(request.loop_id, vaultContext)) {
-        warnings.push("strategy_collapse: 3 consecutive low-quality rounds — " +
+        warnings.push("strategy_collapse: 3 consecutive failed rounds — " +
             "consider force_level=L2 rebuild");
     }
     // Repair cue detection
@@ -1226,19 +1291,38 @@ function compileL1(request, vaultContext, prevRound) {
 }
 export function compileL2(request, vaultContext) {
     const goalId = deriveGoalId(request.loop_id, request.task, request.goal_id);
-    // v3.5: Adaptive technique routing
-    const analysis = routeTechniqueAdaptive(request.task, vaultContext, request.loop_id);
+    // v4.0: Tier-gated technique routing
+    const isCheckpoint = request.last_round_result?.compression_checkpoint === true;
+    const analysis = routeTechniqueAdaptive(request.task, vaultContext, request.loop_id, isCheckpoint);
     const technique = analysis.technique;
     const referenceFile = analysis.reference_file;
-    // v3.5: Rolling summary
-    const rollingSummary = buildRollingSummary(request.loop_id, request.round, vaultContext);
+    // v1.10: Checkpoint — load existing or build new from last round's self-eval
+    let checkpointSummary = null;
+    let checkpointRound = 0;
+    // Check if the last round declared a checkpoint
+    const lr = request.last_round_result;
+    if (lr?.compression_checkpoint === true) {
+        // Build fresh checkpoint from the last round's data
+        // Constraints haven't been updated yet at this point, but we snapshot the
+        // current state as seen by this compile call (pre-P5 correction).
+        // We defer building until constraints are finalized below.
+        checkpointRound = request.round - 1;
+    }
+    else if (request.round > 1) {
+        // No new checkpoint — try loading the previous one from vault
+        checkpointSummary = loadLatestCheckpoint(request.loop_id, request.round, vaultContext);
+        if (checkpointSummary) {
+            checkpointRound = checkpointSummary.declared_at_round;
+        }
+    }
+    // v3.5: Rolling summary — optionally scoped to post-checkpoint rounds
+    const rollingSummary = buildRollingSummary(request.loop_id, request.round, vaultContext, checkpointRound > 0 ? checkpointRound : undefined);
     // P5c: Wrong assumptions — must be applied BEFORE formatting so they appear
     // in the rendered cross-round summary text injected into the prompt.
-    const lr = request.last_round_result;
     if (lr?.wrong_assumptions?.length) {
         if (rollingSummary) {
-            rollingSummary.key_lessons = [
-                ...rollingSummary.key_lessons,
+            rollingSummary.key_outcomes = [
+                ...rollingSummary.key_outcomes,
                 ...lr.wrong_assumptions.map((a) => `Wrong assumption corrected: ${a}`),
             ];
         }
@@ -1362,6 +1446,21 @@ export function compileL2(request, vaultContext) {
             ])];
         loopObjective = updatedLo;
     }
+    // ── v1.10: Build checkpoint summary if last round declared one ──
+    if (checkpointRound > 0 && !checkpointSummary && lr) {
+        // checkpointRound was set but no summary yet → fresh declaration
+        // We need the self-eval from last round. It's embedded in lr fields.
+        // Build a synthetic SelfEvaluation from the last_round_result for the builder.
+        const synthEval = {
+            success: lr.success,
+            output_summary: lr.output_summary,
+            constraint_violations: lr.constraint_violations,
+            should_continue: true,
+            compression_checkpoint: true,
+            checkpoint_label: lr.checkpoint_label ?? "",
+        };
+        checkpointSummary = buildCheckpointSummary(synthEval, checkpointRound, constraints, retired);
+    }
     // ── Route to technique-specific specialist (v1.1 deep integration) ──
     let prompt;
     if (technique === "step-back") {
@@ -1375,6 +1474,12 @@ export function compileL2(request, vaultContext) {
     }
     else {
         prompt = compileGeneric(request, goalId, constraints, loopObjective, rollingText, analysis, referenceFile, technique);
+    }
+    // ── v1.10: Inject checkpoint block (before rolling summary in prompt) ──
+    // The checkpoint is rendered before the external context so it appears
+    // in a natural position: after Loop Objective, before Cross-Round Summary.
+    if (checkpointSummary) {
+        prompt += "\n" + formatCheckpointForPrompt(checkpointSummary);
     }
     // ── v1.7: Inject external memory context (L2 only) ──
     const policy = getPolicy();
@@ -1504,6 +1609,7 @@ export function compileL2(request, vaultContext) {
         technique_used: technique,
         reference_file: referenceFile,
         rolling_summary: rollingSummary,
+        checkpoint_summary: checkpointSummary,
         loop_id: request.loop_id,
         round: request.round,
         goal_id: goalId,
@@ -1594,10 +1700,8 @@ function compileGeneric(request, goalId, constraints, loopObjective, rollingText
         "### Generation Instructions",
         `1. Read \`${referenceFile}\` — study its structure rules, section count, and format requirements`,
         "2. Generate a complete prompt following that technique's structure",
-        "3. Inject all hard constraints and the loop objective into the prompt",
-        "4. If Cross-Round Summary is present above, incorporate its recurring issues and key lessons",
-        "5. The prompt must be self-contained — ready for a coding agent to execute",
-        "6. Output only the generated prompt — no preamble, no meta-commentary",
+        "3. The prompt must be self-contained — ready for a coding agent to execute",
+        "4. Output only the generated prompt — no preamble, no meta-commentary",
     ];
     return lines.join("\n");
 }
@@ -1656,19 +1760,12 @@ function compileStepBack(request, goalId, constraints, loopObjective, rollingTex
         "**Section 6 transition sentence (MANDATORY)**:",
         "\"基于上述抽象框架，实现以下所有功能。\"",
         "",
-        "### Quality Checklist",
-        "- [ ] Frameworks are abstract concepts/formulas/principles, NOT concrete code",
-        "- [ ] Section 6 starts with the mandatory transition sentence",
-        "- [ ] Abstraction level is consistent across frameworks",
-        "- [ ] Step-back question is tightened to minimum necessary generalisation",
-        "",
         "### Generation Instructions",
         "1. Extract 2-3 abstract principles/frameworks from the task domain",
         "2. Build ASCII diagrams for each framework (formulas, tables, rules)",
         "3. Apply the abstraction back to the concrete task",
-        "4. Inject all hard constraints and the loop objective into the prompt",
-        "5. If Cross-Round Summary is present above, incorporate its recurring issues and key lessons",
-        "6. Output only the generated prompt — no preamble, no meta-commentary",
+        "4. Verify: the generated prompt satisfies all structural rules in the skeleton above",
+        "5. Output only the generated prompt — no preamble, no meta-commentary",
     ];
     return lines.join("\n");
 }
@@ -1726,21 +1823,13 @@ function compileLeastToMost(request, goalId, constraints, loopObjective, rolling
         "- Each sub-problem must serve the original task — no unrelated steps",
         "- The final sub-problem must be equivalent to or directly address the original task",
         "",
-        "### Quality Checklist",
-        "- [ ] Sub-problems ordered simplest → most complex, dependency chain explicit",
-        "- [ ] Each sub-problem declares its prerequisite sub-problems",
-        "- [ ] Last sub-problem is \"综合实现完整模块\" with integration list",
-        "- [ ] Section 6 expands per output format list (NOT per sub-problem)",
-        "- [ ] Sub-problem count: 4-6, no more, no less",
-        "",
         "### Generation Instructions",
         "1. Decompose the task into 4-6 ordered sub-problems with explicit dependencies",
         "2. Sub-problem 1 starts with the simplest building block (data structures, enums, base config)",
         "3. Each subsequent sub-problem builds on prior results",
         "4. Final sub-problem integrates all components into the complete module",
-        "5. Inject all hard constraints and the loop objective into the prompt",
-        "6. If Cross-Round Summary is present above, incorporate its recurring issues and key lessons",
-        "7. Output only the generated prompt — no preamble, no meta-commentary",
+        "5. Verify: the generated prompt satisfies all structural rules in the skeleton above",
+        "6. Output only the generated prompt — no preamble, no meta-commentary",
     ];
     return lines.join("\n");
 }
@@ -1819,24 +1908,14 @@ function compileToT(request, goalId, constraints, loopObjective, rollingText, an
         "- thought is a PUBLIC intermediate semantic unit, not hidden chain-of-thought",
         "- State table MUST have: round, branch ID, candidate description, evaluation score/judgment, keep/prune decision",
         "",
-        "### Quality Checklist",
-        "- [ ] Branch count 2-4, depth ≤3 (prevents token explosion)",
-        "- [ ] Evaluation criteria table has ≥3 dimensions including correctness, feasibility, constraint matching",
-        "- [ ] State table format explicit (round/branch/candidate/evaluation/decision)",
-        "- [ ] Search strategy matches task type (beam/dfs/expert-panel)",
-        "- [ ] Hard constraints listed FIRST in evaluation criteria",
-        "- [ ] Not \"3 experts casually discussing\" — has explicit branch count, depth, scoring, and pruning rules",
-        "- [ ] Ends with model outputting final selection and rationale",
-        "",
         "### Generation Instructions",
         "1. Select the appropriate search strategy (beam/dfs/expert-panel) based on task type",
         "2. Define 2-4 candidate approaches as initial branches",
         "3. Build evaluation criteria table with hard constraints ranked first",
         "4. Define the state table format for tracking exploration",
         "5. Set branch count and max depth to prevent token explosion",
-        "6. Inject all hard constraints and the loop objective into the prompt",
-        "7. If Cross-Round Summary is present above, incorporate its recurring issues and key lessons",
-        "8. Output only the generated prompt — no preamble, no meta-commentary",
+        "6. Verify: the generated prompt satisfies all structural rules in the skeleton above",
+        "7. Output only the generated prompt — no preamble, no meta-commentary",
     ];
     return lines.join("\n");
 }
@@ -1874,7 +1953,9 @@ export function buildSelfEvalBlock(round) {
         '  },',
         '  "retracted_constraints": [],',
         '  "revised_success_criteria": [],',
-        '  "wrong_assumptions": []',
+        '  "wrong_assumptions": [],',
+        '  "compression_checkpoint": false,',
+        '  "checkpoint_label": ""',
         "}",
         "---end-loopforge-eval",
         "```",
@@ -1907,6 +1988,15 @@ export function buildSelfEvalBlock(round) {
             `Array of {old, new} objects. Applied to the Loop Objective. Omit or [] if none.`,
         `- wrong_assumptions (P5 — optional): Assumptions from earlier rounds that turned ` +
             `out to be incorrect. Recorded as key lessons. Omit or [] if none.`,
+        `- compression_checkpoint (v1.10 — optional): Set to true when you have COMPLETED a ` +
+            `major subtask. The compiler will snapshot the current state (constraints, outcome) ` +
+            `into a persistent checkpoint that survives context-window eviction. ` +
+            `Use sparingly — only at genuine subtask boundaries, not every round. ` +
+            `Omit or false otherwise.`,
+        `- checkpoint_label (v1.10 — optional): Human-readable label for this checkpoint. ` +
+            `e.g. "数据模型层完成", "API layer complete", "Auth module done". ` +
+            `Used as the checkpoint heading in subsequent prompts. Only meaningful when ` +
+            `compression_checkpoint is true. Omit or "" otherwise.`,
         `- The JSON MUST appear between the ---loopforge-eval and ---end-loopforge-eval markers`,
         `- Do NOT wrap the markers in code fences — output them as raw text`,
         "",

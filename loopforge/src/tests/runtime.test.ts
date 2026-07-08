@@ -99,10 +99,10 @@ describe("run() — convenience function", () => {
     assert.equal(result.stopReason, "task_complete");
     assert.equal(result.success, true);
     assert.equal(result.roundsCompleted, 3);
-    assert.equal(result.qualityTrajectory.length, 3);
-    // All rounds should have quality 5 (success + no violations)
-    for (const q of result.qualityTrajectory) {
-      assert.equal(q, 5);
+    assert.equal(result.successTrajectory.length, 3);
+    // All rounds should have success true
+    for (const s of result.successTrajectory) {
+      assert.equal(s, true);
     }
   });
 
@@ -219,7 +219,7 @@ describe("LoopRuntime", () => {
     assert.ok(result.roundsCompleted <= 3);
   });
 
-  it("getCurrentRound and getQualityTrajectory work", async () => {
+  it("getCurrentRound and getSuccessTrajectory work", async () => {
     const rt = new LoopRuntime({
       task: "Test accessors",
       execute: mockExecutor([
@@ -230,11 +230,11 @@ describe("LoopRuntime", () => {
     });
 
     assert.equal(rt.getCurrentRound(), 1); // before start
-    assert.equal(rt.getQualityTrajectory().length, 0);
+    assert.equal(rt.getSuccessTrajectory().length, 0);
 
     await rt.start();
 
-    assert.equal(rt.getQualityTrajectory().length, 2);
+    assert.equal(rt.getSuccessTrajectory().length, 2);
   });
 });
 
@@ -339,7 +339,7 @@ describe("Heartbeat & timeout", () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("Circuit breaker & extraction", () => {
-  it("circuit breaker triggers after consecutive low quality", async () => {
+  it("circuit breaker triggers after consecutive failures", async () => {
     // Generate failing outputs for 5+ rounds to trigger circuit breaker
     const responses = Array.from({ length: 10 }, () =>
       makeFailingOutput(["violated constraint X"]),

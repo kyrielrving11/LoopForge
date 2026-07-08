@@ -7,7 +7,7 @@ description: Multi-round autonomous loop driver powered by LoopForge MCP. Compil
 
 **Perception** turns any AI agent into a self-aware multi-round executor. It
 drives the LoopForge MCP server (`loopforge-mcp`) to compile per-iteration
-prompts from running quality trajectory, constraint inheritance, and drift
+prompts from running success trajectory, constraint inheritance, and drift
 detection — maintaining cognitive stability across long-horizon loops.
 
 Works with Claude Code, Codex, and any MCP-capable host. Zero configuration
@@ -103,7 +103,7 @@ is preferred — it's validated by the MCP client before reaching the server.
 |-------|------|------|
 | `success` | boolean | `true` ONLY if all hard constraints met AND the task goal achieved |
 | `output_summary` | string | Specific, actionable. What was DONE this round — not what was attempted |
-| `constraint_violations` | string[] | Constraints the agent actually violated this round. Be honest — hiding violations corrupts the quality signal and defeats the circuit breaker |
+| `constraint_violations` | string[] | Constraints the agent actually violated this round. Be honest — hiding violations corrupts the success signal and defeats the circuit breaker |
 | `should_continue` | boolean | `false` ONLY when the ENTIRE task is complete. Partial progress = `true` |
 | `discovered_constraints` | string[] | **P0 (optional)** — New constraints discovered this round. They become active guardrails for future rounds. Example: `["All external calls must use SafeERC20"]`. Empty `[]` if none. |
 | `objective_refinement` | string | **P1 (optional)** — If this round deepened your understanding of what the task is really about, describe the refinement. APPENDED to (never replaces) the original objective. Empty `""` if unchanged. |
@@ -117,7 +117,7 @@ is preferred — it's validated by the MCP client before reaching the server.
 **Why this matters:** The evaluation is validated by the MCP client before
 reaching the server — a missing or malformed evaluation causes an immediate
 error, not a silent stall. The circuit breaker uses `success` + `violations`
-to compute quality scores — lying here defeats the only mechanism that
+to determine loop trajectory — lying here defeats the only mechanism that
 prevents infinite loops. The optional fields (P0–P5) enable cognitive
 evolution: discovering constraints, deepening understanding, surfacing
 sub-problems, tracking real progress, and correcting wrong assumptions as
@@ -133,7 +133,7 @@ Call loopforge_next with:
 
 If the result has `prompt: null`, the loop has ended. Read `stopReason`:
 - `task_complete` — you reported should_continue=false. Work is done.
-- `circuit_breaker` — quality flat or declining for 3+ rounds. Review your approach.
+- `circuit_breaker` — 3 consecutive failed rounds. Review your approach.
 - `max_rounds` — hit the round limit. Decide whether to extend or accept.
 - `stalled` — no valid self-evaluation provided. Check your evaluation parameter.
 
@@ -145,7 +145,7 @@ If the result has a non-null `prompt`, execute it and repeat from Step 2.
 |------|-------------|-----------|------------|
 | `loopforge_start` | Beginning of every loop | `task`, `maxRounds?`, `constraints?` | `sessionId`, round 1 `prompt` |
 | `loopforge_next` | After executing every round | `sessionId`, `output` (with eval block) | next `prompt` or `null` + `stopReason` |
-| `loopforge_status` | Mid-loop checkpoint, user asks "how's it going" | `sessionId` | `round`, `qualityTrajectory`, `status`, `technique` |
+| `loopforge_status` | Mid-loop checkpoint, user asks "how's it going" | `sessionId` | `round`, `successTrajectory`, `status`, `technique` |
 | `loopforge_stop` | User wants to abort, fatal error | `sessionId` | `roundsCompleted`, final trajectory |
 | `loopforge_list` | User asks "what loops are running" | — | `sessions[]` (includes vault-persisted) |
 | `loopforge_replay` | After loop ends, user asks "show me what happened" | `sessionId` | `timeline[]` with all rounds |
@@ -206,15 +206,16 @@ The prompt changes between rounds based on your trajectory. Pay attention to:
   major shift — read the prompt carefully.
 - **Warnings** — constraint violations accumulating, task drift, quality
   decline. These are the compiler begging you to course-correct.
-- **Technique rotation** — the compiler may switch from `zero-shot-cot` to
-  `tree-of-thought` if quality drops. Follow the new technique.
+- **Technique escalation** — the compiler may escalate from Tier 1 to
+  Tier 2 (step-back/least-to-most/ToT) after consecutive failures. Trust
+  the new technique — it's chosen for structured reasoning depth.
 
 ## Stop Condition Matrix
 
 | Condition | stopReason | What to do |
 |-----------|-----------|------------|
 | You set `should_continue: false` | `task_complete` | Report final results to user |
-| 3+ rounds of flat/declining quality | `circuit_breaker` | Tell user the approach is stuck, suggest a different strategy |
+| 3 consecutive failed rounds | `circuit_breaker` | Tell user the approach is stuck, suggest a different strategy |
 | Round count reached `maxRounds` | `max_rounds` | Summarize progress, ask user whether to extend |
 | No `---loopforge-eval` block found | `stalled` | Fix your output format and restart |
 | User interrupts or fatal error | (call `loopforge_stop`) | Clean stop with trajectory preserved |
@@ -224,8 +225,8 @@ The prompt changes between rounds based on your trajectory. Pay attention to:
 1. **Always pass the evaluation parameter.** `loopforge_next` requires it.
    If you omit it, the MCP client will reject the call with a schema error.
 2. **Be honest in self-evaluation.** Lying about success or hiding violations
-   produces a false quality signal. The circuit breaker exists to stop bad
-   loops — if you fake quality=5 every round, it fires anyway.
+   produces a false success signal. The circuit breaker exists to stop bad
+   loops — if you fake success=true every round, it fires anyway.
 3. **One loop per task.** Don't reuse a sessionId across different tasks.
 4. **Execute the prompt you're given.** The compiler may change technique or
    narrow scope between rounds. Trust it — it sees the trajectory.
@@ -280,7 +281,7 @@ Agent:
         constraint_violations: [],
         should_continue: false
       } })
-  ← { sessionId: "abc-123", round: 3, prompt: null, stopReason: "task_complete", quality: 5 }
+  ← { sessionId: "abc-123", round: 3, prompt: null, stopReason: "task_complete", roundSuccess: true }
 
   Reports to user: "Audit complete in 3 rounds. 3 issues fixed, 1 design question flagged. Discovered 1 new constraint during audit. Objective deepened to include proxy pattern verification."
 ```

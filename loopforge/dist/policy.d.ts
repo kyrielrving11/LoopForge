@@ -10,15 +10,9 @@ export interface SummaryPolicy {
     window: number;
     health_check_interval: number;
 }
-export interface RecompileTriggersPolicy {
-    l1: string[];
-    l2: string[];
-}
 export interface TechniquePolicy {
-    fallback_chain: Record<string, string>;
-    adaptive_quality_threshold: number;
-    adaptive_consecutive_rounds: number;
-    routing_table: Record<string, string>;
+    /** Number of consecutive failures before escalating to Tier 2 techniques. */
+    tier2_escalation_failures: number;
 }
 export interface EnginePolicy {
     feedback_flush_interval: number;
@@ -104,11 +98,16 @@ export interface MemoryWritebackPolicy {
     /** Only write back for these stop reasons. */
     write_on_outcomes: string[];
 }
+export interface CheckpointPolicy {
+    /** Maximum number of constraints carried forward in a checkpoint. */
+    max_carried_constraints: number;
+    /** Maximum character length of the outcome field in a checkpoint. */
+    outcome_max_chars: number;
+}
 export interface LoopPolicy {
     version: string;
     constraints: ConstraintsPolicy;
     summary: SummaryPolicy;
-    recompile_triggers: RecompileTriggersPolicy;
     technique: TechniquePolicy;
     engine: EnginePolicy;
     runtime: RuntimePolicy;
@@ -116,6 +115,7 @@ export interface LoopPolicy {
     evolution: EvolutionPolicy;
     memory_injection: MemoryInjectionPolicy;
     memory_writeback: MemoryWritebackPolicy;
+    checkpoint: CheckpointPolicy;
 }
 export declare const DEFAULT_POLICY: LoopPolicy;
 export declare function loadPolicy(path?: string): LoopPolicy;

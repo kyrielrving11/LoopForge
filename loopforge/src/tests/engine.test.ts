@@ -62,7 +62,7 @@ describe("Engine — Feedback mode", () => {
     assert.ok(result.response!.error!.includes("feedback payload"));
   });
 
-  it("returns OK with quality score when feedback provided", () => {
+  it("returns OK with success flag when feedback provided", () => {
     const engine = createEngine();
     const req = makeRequest({
       mode: Mode.FEEDBACK,
@@ -75,33 +75,33 @@ describe("Engine — Feedback mode", () => {
     });
     const result = engine.invokeFeedback(req);
     assert.equal(result.status, AgentStatus.OK);
-    assert.ok(result.response!.prompt!.includes("Quality Score: 5/5"));
+    assert.ok(result.response!.prompt!.includes("Success: true"));
   });
 
-  it("scores quality=4 for success with fixes but no violations", () => {
+  it("returns OK with success=false for failures", () => {
     const engine = createEngine();
     const req = makeRequest({
       mode: Mode.FEEDBACK,
       feedback: makeExecutionFeedback({
-        success: true,
+        success: false,
         constraint_violations: [],
         manual_fixes_needed: "formatting",
         output: "Works with manual tweaks",
       }),
     });
     const result = engine.invokeFeedback(req);
-    assert.ok(result.response!.prompt!.includes("Quality Score: 4/5"));
+    assert.ok(result.response!.prompt!.includes("Success: false"));
   });
 
-  it("updates quality trend in state", () => {
+  it("updates success trend in state", () => {
     const engine = createEngine();
     const req = makeRequest({
       mode: Mode.FEEDBACK,
       feedback: makeExecutionFeedback({ success: true, output: "ok" }),
     });
     engine.invokeFeedback(req);
-    assert.equal(engine.state!.quality_trend.length, 1);
-    assert.equal(engine.state!.quality_trend[0], 5);
+    assert.equal(engine.state!.success_trend.length, 1);
+    assert.equal(engine.state!.success_trend[0], true);
   });
 });
 
@@ -119,27 +119,27 @@ describe("Engine — Circuit breaker", () => {
       mode: Mode.FEEDBACK,
       feedback: makeExecutionFeedback({ success: true, output: "ok" }),
     })); // init state
-    engine.state!.quality_trend = [5, 4];
+    engine.state!.success_trend = [true, true];
     assert.equal(engine.shouldBreak(), false);
   });
 
-  it("returns true when quality is non-increasing for 3 rounds", () => {
+  it("returns true when 3 consecutive failures", () => {
     const engine = createEngine();
     engine.invokeFeedback(makeRequest({
       mode: Mode.FEEDBACK,
       feedback: makeExecutionFeedback({ success: true, output: "ok" }),
     }));
-    engine.state!.quality_trend = [3, 3, 3];
+    engine.state!.success_trend = [false, false, false];
     assert.equal(engine.shouldBreak(), true);
   });
 
-  it("returns false when quality is improving", () => {
+  it("returns false when all successes (no longer trips on flat success)", () => {
     const engine = createEngine();
     engine.invokeFeedback(makeRequest({
       mode: Mode.FEEDBACK,
       feedback: makeExecutionFeedback({ success: true, output: "ok" }),
     }));
-    engine.state!.quality_trend = [3, 4, 5];
+    engine.state!.success_trend = [true, true, true];
     assert.equal(engine.shouldBreak(), false);
   });
 });
@@ -226,7 +226,6 @@ describe("Engine — P0-P5 Cognitive Evolution (v1.7 E2E)", () => {
         output_summary: "Found 2 reentrancy bugs",
         constraint_violations: [],
         manual_fixes_needed: "",
-        quality_score: 5,
         discovered_constraints: ["Use SafeERC20 for all external calls"],
         objective_refinement: "Scope includes upgradeable proxy patterns",
         emerged_subtasks: ["Audit proxy init", "Verify timelock"],
@@ -281,7 +280,6 @@ describe("Engine — P0-P5 Cognitive Evolution (v1.7 E2E)", () => {
         output_summary: "Fixed reentrancy in withdraw()",
         constraint_violations: [],
         manual_fixes_needed: "",
-        quality_score: 5,
         execution_evidence: {
           files_changed: ["contracts/Token.sol", "test/Token.test.ts"],
           test_results: { passed: 24, failed: 0, skipped: 0 },
@@ -322,7 +320,6 @@ describe("Engine — P0-P5 Cognitive Evolution (v1.7 E2E)", () => {
         output_summary: "Found missing access control",
         constraint_violations: [],
         manual_fixes_needed: "",
-        quality_score: 2,
         wrong_assumptions: ["Assumed OZ v4.0 has no known issues"],
         retracted_constraints: [],
         revised_success_criteria: [],
@@ -361,7 +358,6 @@ describe("Engine — P0-P5 Cognitive Evolution (v1.7 E2E)", () => {
         output_summary: "Audited contracts",
         constraint_violations: [],
         manual_fixes_needed: "",
-        quality_score: 5,
         discovered_constraints: ["No external deps"],
         retracted_constraints: ["No external deps"],
         wrong_assumptions: [],

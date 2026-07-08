@@ -11,7 +11,7 @@
         "loop_compile",
         "feedback"
       ],
-      "description": "LoopForge-loop_compile — TypeScript protocol definitions.\n\nAll types exchanged between the Main Agent and LoopForge flow through\nthese interfaces. This is the contract layer — no implementation logic.\n\nv1.7: 38 types — 4 enums + 32 interfaces + 2 type aliases."
+      "description": "LoopForge-loop_compile — TypeScript protocol definitions.\n\nAll types exchanged between the Main Agent and LoopForge flow through\nthese interfaces. This is the contract layer — no implementation logic.\n\nv1.10: 39 types — 4 enums + 34 interfaces + 1 type alias."
     },
     "AgentStatus": {
       "type": "string",
@@ -222,6 +222,12 @@
             "type": "string"
           }
         },
+        "compression_checkpoint": {
+          "type": "boolean"
+        },
+        "checkpoint_label": {
+          "type": "string"
+        },
         "worker_results": {
           "type": "array",
           "items": {
@@ -236,6 +242,40 @@
         "should_continue"
       ],
       "description": "Structured self-evaluation embedded in compiled prompts.\nThe agent outputs this after completing each round.\nEvery field is consumed by at least one downstream function.\n\nv1.4 (P0–P2): Three new optional fields enable cognitive evolution.\nv1.5 (P4–P5): Execution evidence, progress tracking, and self-correction."
+    },
+    "CheckpointSummary": {
+      "type": "object",
+      "properties": {
+        "label": {
+          "type": "string"
+        },
+        "declared_at_round": {
+          "type": "number"
+        },
+        "outcome": {
+          "type": "string"
+        },
+        "carried_constraints": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "resolved_constraints": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "label",
+        "declared_at_round",
+        "outcome",
+        "carried_constraints",
+        "resolved_constraints"
+      ],
+      "description": "v1.10: Checkpoint summary — a compressed snapshot of loop state at a\nsubtask boundary. Declared by the Agent via self-evaluation, built by\nthe compiler. Rendered as a fixed block that survives rolling-window\neviction, so constraints and outcomes from completed subtasks remain\nvisible in later rounds."
     },
     "WorkerResult": {
       "type": "object",
@@ -389,28 +429,13 @@
     "RollingSummary": {
       "type": "object",
       "properties": {
-        "quality_trajectory": {
-          "type": "array",
-          "items": {
-            "type": "number"
-          }
-        },
-        "trajectory_direction": {
-          "type": "string"
-        },
-        "what_worked": {
+        "key_outcomes": {
           "type": "array",
           "items": {
             "type": "string"
           }
         },
         "recurring_issues": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "key_lessons": {
           "type": "array",
           "items": {
             "type": "string"
@@ -430,11 +455,8 @@
         }
       },
       "required": [
-        "quality_trajectory",
-        "trajectory_direction",
-        "what_worked",
+        "key_outcomes",
         "recurring_issues",
-        "key_lessons",
         "rounds_sampled",
         "generated_at_round"
       ]
@@ -483,9 +505,6 @@
         "manual_fixes_needed": {
           "type": "string"
         },
-        "quality_score": {
-          "type": "number"
-        },
         "discovered_constraints": {
           "type": "array",
           "items": {
@@ -527,6 +546,12 @@
           "items": {
             "$ref": "#/$defs/WorkerResult"
           }
+        },
+        "compression_checkpoint": {
+          "type": "boolean"
+        },
+        "checkpoint_label": {
+          "type": "string"
         }
       },
       "required": [
@@ -534,8 +559,7 @@
         "success",
         "output_summary",
         "constraint_violations",
-        "manual_fixes_needed",
-        "quality_score"
+        "manual_fixes_needed"
       ]
     },
     "LoopCompileRequest": {
@@ -716,6 +740,16 @@
             }
           ]
         },
+        "checkpoint_summary": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CheckpointSummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "suggested_next_task": {
           "type": "string"
         },
@@ -796,10 +830,10 @@
         "call_count": {
           "type": "number"
         },
-        "quality_trend": {
+        "success_trend": {
           "type": "array",
           "items": {
-            "type": "number"
+            "type": "boolean"
           }
         },
         "current_version": {
@@ -825,7 +859,7 @@
       "required": [
         "task_id",
         "call_count",
-        "quality_trend",
+        "success_trend",
         "current_version",
         "circuit_breaker_count",
         "feedback_buffer"
@@ -920,8 +954,8 @@
         "round": {
           "type": "number"
         },
-        "quality": {
-          "type": "number"
+        "roundSuccess": {
+          "type": "boolean"
         },
         "selfEval": {
           "anyOf": [
@@ -939,7 +973,7 @@
       },
       "required": [
         "round",
-        "quality",
+        "roundSuccess",
         "durationMs"
       ]
     },
@@ -1125,10 +1159,10 @@
         "roundsCompleted": {
           "type": "number"
         },
-        "qualityTrajectory": {
+        "successTrajectory": {
           "type": "array",
           "items": {
-            "type": "number"
+            "type": "boolean"
           }
         }
       },
@@ -1136,7 +1170,7 @@
         "success",
         "stopReason",
         "roundsCompleted",
-        "qualityTrajectory"
+        "successTrajectory"
       ]
     },
     "LoopMemoryWriteback": {
@@ -1185,12 +1219,6 @@
         "roundsCompleted": {
           "type": "number"
         },
-        "qualityTrajectory": {
-          "type": "array",
-          "items": {
-            "type": "number"
-          }
-        },
         "projectEntry": {
           "$ref": "#/$defs/LoopMemoryWritebackProjectEntry"
         },
@@ -1209,7 +1237,6 @@
         "task",
         "outcome",
         "roundsCompleted",
-        "qualityTrajectory",
         "projectEntry",
         "feedbackEntries",
         "referenceEntry"

@@ -24,10 +24,10 @@
 export { Mode, AgentStatus, Technique, makeAnalysis, makeVaultConfig, makeExecutionFeedback, makeSelfEvaluation, makeLoopObjective, makeLoopHealth, makeRollingSummary, makeTaskAlignment, makeLoopRoundResult, makeLoopCompileRequest, makeLoopCompileResponse, makeSessionState, makeTaskId, toDict, SELF_EVAL_REGEX, } from "./protocol.js";
 export type { Analysis, VaultConfig, ExecutionFeedback, SelfEvaluation, LoopForgeRequest, LoopObjective, LoopHealth, RollingSummary, TaskAlignment, LoopRoundResult, LoopCompileRequest, LoopCompileResponse, LoopForgeResponse, SessionState, AgentLoopResult, WorkerResult, } from "./protocol.js";
 export { getPolicy, loadPolicy, resetPolicy, DEFAULT_POLICY, resolveAllowedPhases, } from "./policy.js";
-export type { LoopPolicy, ConstraintsPolicy, SummaryPolicy, RecompileTriggersPolicy, TechniquePolicy, EnginePolicy, BackendPolicy, MemoryInjectionPolicy, MemoryInjectionTier, MemoryWritebackPolicy, } from "./policy.js";
+export type { LoopPolicy, ConstraintsPolicy, SummaryPolicy, TechniquePolicy, EnginePolicy, BackendPolicy, MemoryInjectionPolicy, MemoryInjectionTier, MemoryWritebackPolicy, } from "./policy.js";
 export type { VaultBackend, VaultEntry } from "./backends/interface.js";
 export { FSBackend } from "./backends/fs.js";
-export { routeTechniqueAdaptive, scoreQuality, TECHNIQUE_REFERENCE, } from "./builder.js";
+export { routeTechniqueAdaptive, TECHNIQUE_REFERENCE, } from "./builder.js";
 export { compileLoop, decideLevel, compileL2, alignTask, checkLoopHealth, computeAdvisories, computeGoalTextHash, deriveGoalId, getPreviousRound, buildSelfEvalBlock, buildRollingSummary, formatRollingSummaryForPrompt, filterConstraintsForSubTask, formatDelegationPrompt, buildDelegationSummary, } from "./loop-compiler.js";
 export { ReplayBackend } from "./replay.js";
 export { LoopForgeEngine, createEngine, extractSelfEvaluation, heuristicSelfEvaluation, buildSelfEvaluation, } from "./engine.js";

@@ -18,8 +18,8 @@ step at a time. As the agent executes, LoopForge tracks real progress, detects
 drift, merges discovered constraints, deepens the objective, and corrects
 wrong assumptions — maintaining cognitive stability across long-horizon loops.
 
-> **v1.8** — `npm install loopforge`. MCP server (8 tools) + Perception-Skill +
-> library API + Verification Gate + Structured Evaluation + Memory System Integration (3-phase injection + writeback). Zero runtime dependencies. 202 tests. Node.js ≥18.
+> **v1.12** — `npm install loopforge`. MCP server (8 tools) + Perception-Skill +
+> library API + Verification Gate + Structured Evaluation + Memory System Integration (3-phase injection + writeback). Zero runtime dependencies. 260 tests. Node.js ≥18.
 
 ---
 
@@ -176,10 +176,10 @@ Legacy `---loopforge-eval` blocks in output text are still supported as fallback
 |------|---------|
 | `loopforge_start` | Start a loop — compiles Round 1 prompt from task + constraints |
 | `loopforge_next` | Submit evaluation (+ optional output) → get next prompt (or `null` + stop reason). Evaluation is a required typed object — validated by MCP client before reaching server. |
-| `loopforge_status` | Current round, quality trajectory, technique in use |
+| `loopforge_status` | Current round, success trajectory, technique in use |
 | `loopforge_stop` | Manual stop with final trajectory preserved |
 | `loopforge_list` | All active sessions (in-memory + vault-persisted) |
-| `loopforge_replay` | Full timeline: rounds, techniques, quality, decisions |
+| `loopforge_replay` | Full timeline: rounds, techniques, success, decisions |
 | `loopforge_resume` | Resume loop from vault after process restart |
 | `loopforge_health` | Goal alignment, constraint integrity, drift, strategy stability |
 
@@ -210,8 +210,8 @@ Stop reasons: `task_complete` | `circuit_breaker` | `max_rounds` | `stalled` | `
 ### Verification Gate (v1.6)
 - **Cross-Round Self-Eval Validation** — Every agent self-evaluation is verified against the loop's lineage before it enters the compiler.
 - **6 Automated Checks** — Progress regression, empty-change detection, success-with-remaining-criteria mismatch, duplicate constraint discovery, 3-round recurring violation, retract-fresh-constraint flip-flop.
-- **3 Verdict Tiers** — `trusted` → normal flow. `suspect` → warnings injected into next prompt for agent clarification. `contradicted` → quality score excluded from quality trend; 🚫 flags become hard constraints the agent must address explicitly.
-- **Quality Score Preservation** — Quality scores are NEVER modified by the gate. Only trend writes are skipped for contradicted rounds — raw scores remain in the vault for audit.
+- **3 Verdict Tiers** — `trusted` → normal flow. `suspect` → warnings injected into next prompt for agent clarification. `contradicted` → success flag excluded from success trend; 🚫 flags become hard constraints the agent must address explicitly.
+- **Success Flag Preservation** — Success flags are NEVER modified by the gate. Only trend writes are skipped for contradicted rounds — raw flags remain in the vault for audit.
 
 ### Structured Evaluation (v1.7)
 - **Evaluation Parameter** — `loopforge_next` accepts a typed `evaluation` object validated by MCP client schema enforcement. No more regex extraction of embedded eval blocks. `output` text is optional (kept for audit trail). Legacy `---loopforge-eval` blocks still supported.
@@ -251,15 +251,15 @@ LoopForge v1.7 automatically bridges the two layers:
 ┌─────────────────────────────────────┐
 │       LoopForge (Working Memory)    │  ← within-task execution control
 │  "Round 3: active constraints are…" │
-│  "Technique rotated: zero-shot→ToT" │
+│  "Technique escalated: Tier 2 after 3"│
 │  "Progress: 2/5 criteria met"       │
 └──────────────┬──────────────────────┘
                │ loop ends → distilled knowledge written back
                ▼
 ┌─────────────────────────────────────┐
 │       Agent Memory (updated)        │
-│  "ERC20 audits: zero-shot fails,    │
-│   switch to ToT after 2 low rounds" │
+│  "ERC20 audits: escalate to Tier 2   │
+│   after 3 consecutive failures"      │
 │  "Key discovery: reentrancy in …"   │
 └─────────────────────────────────────┘
 ```
@@ -305,7 +305,7 @@ LoopForge will detect it on next startup. No config changes needed.
 
 ### Observability (v1.7)
 - **Engine Metrics** — `getMetrics()` public getter exposes 8 health counters: vault write errors/bytes, feedback buffer stats, cache misses, analysis errors. Included in `loopforge_status` MCP tool output.
-- **Structured Event Logging** — JSON-line events to stderr when `LOOPFORGE_LOG=1` is set. 6 event types: `round_complete`, `circuit_breaker`, `gate_contradicted`, `strategy_rotated`, `vault_write_error`, `session_start` / `session_end`. Silent by default — zero overhead when not enabled.
+- **Structured Event Logging** — JSON-line events to stderr when `LOOPFORGE_LOG=1` is set. 6 event types: `round_complete`, `circuit_breaker`, `gate_contradicted`, `tier2_escalation`, `vault_write_error`, `session_start` / `session_end`. Silent by default — zero overhead when not enabled.
 
 ### Foundation (v1.0–v1.3)
 - **MCP Server** — 8 tools over JSON-RPC stdio. Zero-config with Claude Code and Codex.
@@ -315,8 +315,8 @@ LoopForge will detect it on next startup. No config changes needed.
 - **Constraint Retirement** — Stale constraints silent for 3+ rounds auto-retire.
 - **Failure Lineage Weighting** — Repeated failure patterns with same technique + similar task are detected and demoted in summaries. Failed-path lessons pushed down, marked `[Consider alternatives]`. Dead-end violations flagged `[Possible dead end]`. Explicit `### ⚠️ Failure Patterns` section in compiled prompts.
 - **Rolling Summary** — Cross-round knowledge distillation from last 5 rounds.
-- **Adaptive Technique Routing** — Zero-shot → Few-shot → CoT → Step-Back → ToT, switched by quality trajectory.
-- **Circuit Breaker** — 3 consecutive no-improvement rounds → stop. Separate executor-failure breaker.
+- **Tier-Gated Technique Routing** — Tier 1 (zero-shot/few-shot/CoT) always available. Tier 2 (step-back/least-to-most/ToT) opens at checkpoint boundaries or after consecutive failures. No rotation — technique stays stable across rounds.
+- **Circuit Breaker** — 3 consecutive failed rounds → stop. Separate executor-failure breaker.
 - **Replay Engine** — Time-travel queries: `replay()`, `diff()`, `timeline()`.
 - **Policy Externalization** — All tunables in `loop_policy.json`.
 - **Vault File Lock** — mkdir-based mutex guards all JSON vault writes. Re-entrant for same-process nesting. Concurrent-process safe — prevents lost updates from parallel sessions.

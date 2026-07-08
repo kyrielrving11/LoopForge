@@ -5,7 +5,7 @@ with structured memory, constraint inheritance, and drift correction — maintai
 cognitive stability across long-horizon agent loops.
 
 - Language: TypeScript only. No Python, Ruby, or other language files.
-- Package: `loopforge/` — npm package `loopforge` v1.6.0, ESM, Node ≥18.
+- Package: `loopforge/` — npm package `loopforge` v1.12.0, ESM, Node ≥18.
 - Zero runtime dependencies — stdlib only.
 
 ## Commands
@@ -13,7 +13,7 @@ cognitive stability across long-horizon agent loops.
 ```bash
 cd loopforge
 npm run build    # tsc + generate JSON Schema
-npm test         # tsc + schema gen + 197 tests (node:test)
+npm test         # tsc + schema gen + 260 tests (node:test)
 npx tsc --noEmit # type-check only
 ```
 
@@ -21,12 +21,12 @@ npx tsc --noEmit # type-check only
 
 ```
 loopforge/src/
-  protocol.ts          # 38 types (4 enums + 32 interfaces + 2 type aliases) — wire contract
+  protocol.ts          # 39 types (4 enums + 34 interfaces + 1 type alias) — wire contract
   loop-compiler.ts     # L0/L1/L2 + advisories + specialist compilers (~1600 lines)
   engine.ts            # Lifecycle, circuit breaker, session state + verification gate injection (~890 lines)
   runtime.ts           # Loop Runtime (v1.2+) — event-driven loop with heartbeat/timeout/stall
   verification-gate.ts # Layer 1 cross-round consistency checks (v1.6, ~250 lines)
-  builder.ts           # Technique routing (keyword + adaptive) + quality scoring
+  builder.ts           # Technique routing (keyword + tier-gated)
   replay.ts            # Time-travel queries: getRound / replay / timeline / diff
   policy.ts            # loop_policy.json loader (includes RuntimePolicy)
   generate-schema.ts   # JSON Schema generator (runs during build)
@@ -51,9 +51,9 @@ loopforge/src/
 Pure-function cross-round consistency verifier. Key boundaries:
 - 6 individual check functions, each returns `VerificationFlag | null`
 - `verifySelfEvaluation()` orchestrates all 6 checks and produces a `VerificationResult`
-- 3 verdict tiers: `trusted` (normal flow), `suspect` (warn in prompt), `contradicted` (skip quality trend, hard constraint to respond)
+- 3 verdict tiers: `trusted` (normal flow), `suspect` (warn in prompt), `contradicted` (skip success trend, hard constraint to respond)
 - Zero side effects — all data flows through parameters; vault queries happen in the caller (session.ts)
-- Does NOT modify quality scores — only skips trend writes for contradicted rounds
+- Does NOT modify success flags — only skips trend writes for contradicted rounds
 
 ### `loop-compiler.ts` (~1600 lines)
 Pure-function compiler — largest module. Key boundaries:
@@ -65,8 +65,8 @@ Pure-function compiler — largest module. Key boundaries:
 ### `engine.ts` (~890 lines)
 Stateful engine — only module with mutable session state.
 - `invokeLoopCompile()` delegates to pure-function `compileLoop()`
-- `autoFeedback()` flushes buffer immediately so next compile sees latest scores
-- `shouldBreak()` treats flat quality as non-increasing (e.g. `[5,5,5]` fires breaker)
+- `autoFeedback()` flushes buffer immediately so next compile sees latest success flags
+- `shouldBreak()` trips on 3 consecutive failures (`success === false`)
 - `hydrateLoopContext()` adds `full_prompt` field — this field only exists on hydrated entries, not in the raw JSON vault
 - (v1.6) Injects verification gate flags into prompt as a `### Verification Gate` section after compiler warnings
 
@@ -82,7 +82,7 @@ Session manager — MCP integration layer. Key invariants:
 - `advance()` cycle: extract → verify (v1.6) → feedback → check stop → compile next (extraction-first order)
 - `create()` compiles round 1 via `engine.invokeLoopCompile()` and stores the session
 - `replayTimeline()` wraps ReplayBackend using the same VaultBackend as the engine
-- (v1.6) Verification gate runs between extraction and feedback; contradicted rounds skip quality trend
+- (v1.6) Verification gate runs between extraction and feedback; contradicted rounds skip success trend
 - Sessions auto-cleanup when advance returns prompt=null; stop/delete are idempotent
 
 ## Key Rules

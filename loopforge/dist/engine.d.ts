@@ -70,8 +70,8 @@ export declare class LoopForgeEngine {
      *  P0–P2: Also persists discovered_constraints, objective_refinement,
      *  and emerged_subtasks for the compiler to consume next round.
      *  Call this BEFORE invokeLoopCompile for the next round so that
-     *  hydrateLoopContext picks up the latest quality scores. */
-    autoFeedback(selfEval: SelfEvaluation, loopId: string, round: number, task: string): number;
+     *  hydrateLoopContext picks up the latest success flags. */
+    autoFeedback(selfEval: SelfEvaluation, loopId: string, round: number, task: string): boolean;
     invokeLoopCompile(request: LoopForgeRequest, hydrateResults?: Record<string, unknown> | null): AgentLoopResult;
     shouldBreak(): boolean;
 }

@@ -3,7 +3,7 @@
  * All types exchanged between the Main Agent and LoopForge flow through
  * these interfaces. This is the contract layer — no implementation logic.
  *
- * v1.7: 38 types — 4 enums + 32 interfaces + 2 type aliases.
+ * v1.10: 39 types — 4 enums + 34 interfaces + 1 type alias.
  */
 
 // ── Enums ──────────────────────────────────────────────────────────────────
@@ -37,6 +37,7 @@ export interface Analysis {
   independence: string;
   cognitive_load: string;
   reference_file: string;
+  /** @deprecated Since v4.0 — no technique rotation. Always false. */
   was_rotated: boolean;
 }
 
@@ -142,11 +143,11 @@ export interface SelfEvaluation {
   /** true ONLY if all hard constraints were met and the task goal was achieved. */
   success: boolean;
   /** Specific, actionable summary of what was DONE this round.
-   *  Feeds: buildRollingSummary (what_worked, key_lessons),
+   *  Feeds: buildRollingSummary (key_outcomes),
    *  computeConstraintRetirement (activity detection), vault lineage. */
   output_summary: string;
   /** Constraints the agent actually violated this round.
-   *  Feeds: scoreQuality, checkLoopHealth (constraint_integrity),
+   *  Feeds: checkLoopHealth (constraint_integrity),
    *  buildRollingSummary (recurring_issues), computeConstraintRetirement. */
   constraint_violations: string[];
   /** false ONLY when the entire task is complete. Tells the autonomous
@@ -180,11 +181,44 @@ export interface SelfEvaluation {
    *  be wrong. Recorded in the rolling summary as key lessons.
    *  Omit or leave empty if none. */
   wrong_assumptions?: string[];
+  /** v1.10: Agent declares a subtask boundary. When true, the compiler
+   *  snapshots the current round's state into a CheckpointSummary that
+   *  persists across rolling-window eviction. */
+  compression_checkpoint?: boolean;
+  /** v1.10: Human-readable label for this checkpoint (e.g. "数据模型层完成").
+   *  Used as the checkpoint heading in subsequent prompts. */
+  checkpoint_label?: string;
   /** Multi-agent: Results of sub-agent / Worker delegations this round.
    *  The main agent (or Coordinator) reports what it delegated.
    *  The engine automatically writes these to the delegation journal.
    *  Omit or leave empty if no delegations occurred. */
   worker_results?: WorkerResult[];
+}
+
+/** v1.10: Checkpoint summary — a compressed snapshot of loop state at a
+ *  subtask boundary. Declared by the Agent via self-evaluation, built by
+ *  the compiler. Rendered as a fixed block that survives rolling-window
+ *  eviction, so constraints and outcomes from completed subtasks remain
+ *  visible in later rounds. */
+export interface CheckpointSummary {
+  label: string;
+  declared_at_round: number;
+  outcome: string;
+  carried_constraints: string[];
+  resolved_constraints: string[];
+}
+
+export function makeCheckpointSummary(
+  overrides: Partial<CheckpointSummary> = {},
+): CheckpointSummary {
+  return {
+    label: "",
+    declared_at_round: 0,
+    outcome: "",
+    carried_constraints: [],
+    resolved_constraints: [],
+    ...overrides,
+  };
 }
 
 /** A single sub-agent / Worker delegation result (v1.9 — multi-agent). */
@@ -213,6 +247,8 @@ export function makeSelfEvaluation(
     revised_success_criteria: [],
     wrong_assumptions: [],
     worker_results: [],
+    compression_checkpoint: false,
+    checkpoint_label: "",
     ...overrides,
   };
 }
@@ -289,16 +325,15 @@ export function makeLoopHealth(overrides: Partial<LoopHealth> = {}): LoopHealth 
 }
 
 export interface RollingSummary {
-  quality_trajectory: number[];
-  trajectory_direction: string;
-  what_worked: string[];
+  /** v1.12: Unified key outcomes — merged from what_worked + key_lessons.
+   *  Format: "[R{round}] ✓/✗ ({technique}): {summary}" */
+  key_outcomes: string[];
   recurring_issues: string[];
-  key_lessons: string[];
   rounds_sampled: number;
   generated_at_round: number;
-  /** v1.7: Detected failure patterns — repeated low-quality rounds with
-   *  the same technique and similar task text. These are demoted in
-   *  key_lessons and surfaced as explicit warnings in the prompt. */
+  /** v1.7: Detected failure patterns — repeated failed rounds with
+   *  the same technique and similar task text. These are surfaced as
+   *  explicit warnings in the prompt. */
   failed_patterns?: string[];
 }
 
@@ -306,11 +341,8 @@ export function makeRollingSummary(
   overrides: Partial<RollingSummary> = {},
 ): RollingSummary {
   return {
-    quality_trajectory: [],
-    trajectory_direction: "",
-    what_worked: [],
+    key_outcomes: [],
     recurring_issues: [],
-    key_lessons: [],
     rounds_sampled: 0,
     generated_at_round: 0,
     failed_patterns: [],
@@ -343,7 +375,6 @@ export interface LoopRoundResult {
   output_summary: string;
   constraint_violations: string[];
   manual_fixes_needed: string;
-  quality_score: number;
   /** P0: Constraints discovered during this round. */
   discovered_constraints?: string[];
   /** P1: Objective refinement from this round. */
@@ -361,6 +392,10 @@ export interface LoopRoundResult {
   /** Multi-agent: Delegation results from this round.
    *  Set from SelfEvaluation.worker_results during buildLoopRequest. */
   worker_results?: WorkerResult[];
+  /** v1.10: Agent declared a subtask boundary in this round. */
+  compression_checkpoint?: boolean;
+  /** v1.10: Human-readable label for the checkpoint. */
+  checkpoint_label?: string;
 }
 
 export function makeLoopRoundResult(
@@ -372,7 +407,6 @@ export function makeLoopRoundResult(
     output_summary: "",
     constraint_violations: [],
     manual_fixes_needed: "",
-    quality_score: 0,
     discovered_constraints: [],
     objective_refinement: "",
     emerged_subtasks: [],
@@ -380,6 +414,9 @@ export function makeLoopRoundResult(
     retracted_constraints: [],
     revised_success_criteria: [],
     wrong_assumptions: [],
+    worker_results: [],
+    compression_checkpoint: false,
+    checkpoint_label: "",
     ...overrides,
   };
 }
@@ -448,6 +485,7 @@ export interface LoopCompileResponse {
   loop_health: LoopHealth | null;
   task_alignment: TaskAlignment | null;
   rolling_summary: RollingSummary | null;
+  checkpoint_summary: CheckpointSummary | null;
   suggested_next_task: string;
   plan_source: string | null;
   warnings: string[];
@@ -475,6 +513,7 @@ export function makeLoopCompileResponse(
     loop_health: null,
     task_alignment: null,
     rolling_summary: null,
+    checkpoint_summary: null,
     suggested_next_task: "",
     plan_source: null,
     warnings: [],
@@ -497,7 +536,7 @@ export interface LoopForgeResponse {
 export interface SessionState {
   task_id: string;
   call_count: number;
-  quality_trend: number[];
+  success_trend: boolean[];
   current_version: string;
   last_technique: string | null;
   circuit_breaker_count: number;
@@ -508,7 +547,7 @@ export function makeSessionState(taskId: string): SessionState {
   return {
     task_id: taskId,
     call_count: 0,
-    quality_trend: [],
+    success_trend: [],
     current_version: "v1",
     last_technique: null,
     circuit_breaker_count: 0,
@@ -557,7 +596,7 @@ export interface RoundStartInfo {
 
 export interface RoundCompleteInfo {
   round: number;
-  quality: number;
+  roundSuccess: boolean;
   selfEval: SelfEvaluation | null;
   durationMs: number;
 }
@@ -633,7 +672,7 @@ export interface RunResult {
   success: boolean;
   stopReason: StopReason;
   roundsCompleted: number;
-  qualityTrajectory: number[];
+  successTrajectory: boolean[];
 }
 
 // ── Memory Writeback (v1.7) ───────────────────────────────────────────────────
@@ -646,7 +685,6 @@ export interface LoopMemoryWriteback {
   task: string;
   outcome: "completed" | "circuit_breaker" | "stalled" | "max_rounds" | "stopped";
   roundsCompleted: number;
-  qualityTrajectory: number[];
   /** Project-type memory entry — task outcome and key discoveries. */
   projectEntry: LoopMemoryWritebackProjectEntry;
   /** Feedback-type memory entries — tactical lessons learned. */

@@ -29,7 +29,7 @@ export interface McpSession {
   engine: LoopForgeEngine;
   currentRound: number;
   maxRounds: number;
-  qualityTrajectory: number[];
+  successTrajectory: boolean[];
   status: "running" | "stopped" | "stalled";
   createdAt: number;
   /** Previous round's validated SelfEvaluation — used by verification gate. */
@@ -65,7 +65,9 @@ export interface AdvanceResult {
   stopReason?: string;
   technique?: string;
   level?: string;
+  /** @deprecated Use roundSuccess instead. Derived: roundSuccess ? 5 : 1 */
   quality?: number;
+  roundSuccess?: boolean;
   warnings?: string[];
 }
 
@@ -74,7 +76,7 @@ export interface AdvanceResult {
 function buildLoopRequest(
   session: McpSession,
   lastEval?: SelfEvaluation,
-  lastQuality?: number,
+  _lastQuality?: number, // deprecated — kept for backward compat
   verificationFlags?: VerificationFlag[],
 ): Record<string, unknown> {
   const req: Record<string, unknown> = {
@@ -89,14 +91,13 @@ function buildLoopRequest(
     verification_flags: verificationFlags ?? [],
   };
 
-  if (lastEval && lastQuality !== undefined) {
+  if (lastEval) {
     req.last_round_result = {
       round: session.currentRound - 1,
       success: lastEval.success,
       output_summary: lastEval.output_summary,
       constraint_violations: lastEval.constraint_violations,
       manual_fixes_needed: "",
-      quality_score: lastQuality,
       // P0–P2: Forward evolution fields to next compile
       // Merge sub-agent discovered constraints into the active set
       discovered_constraints: [
@@ -115,6 +116,9 @@ function buildLoopRequest(
       wrong_assumptions: lastEval.wrong_assumptions ?? [],
       // Multi-agent: Forward delegation results to next compile
       worker_results: lastEval.worker_results ?? [],
+      // v1.10: Checkpoint boundary
+      compression_checkpoint: lastEval.compression_checkpoint ?? false,
+      checkpoint_label: lastEval.checkpoint_label ?? "",
     };
   }
 
@@ -164,7 +168,7 @@ export class SessionManager {
     // Populate extra fields for the first round
     const request = buildLoopRequest({
       sessionId, loopId, task: input.task, engine, currentRound: 1,
-      maxRounds, qualityTrajectory: [], status: "running", createdAt: Date.now(),
+      maxRounds, successTrajectory: [], status: "running", createdAt: Date.now(),
       injectionCount: 0, lastInjectionRound: 0, injectedContexts: [],
       phase2Triggered: false, phase3Triggered: false,
     });
@@ -212,7 +216,7 @@ export class SessionManager {
     const injectedCtx = request.external_context as string | undefined;
     const session: McpSession = {
       sessionId, loopId, task: input.task, engine,
-      currentRound: 1, maxRounds, qualityTrajectory: [],
+      currentRound: 1, maxRounds, successTrajectory: [],
       status: "running", createdAt: Date.now(),
       // v1.7: Memory integration state
       injectionCount: injectedCtx ? 1 : 0,
@@ -239,6 +243,7 @@ export class SessionManager {
       prompt: result.response?.prompt ?? null,
       technique: result.response?.analysis?.technique ?? "zero-shot",
       level: parseLevel(result.response?.analysis?.rationale),
+      roundSuccess: false,
       quality: 0,
       warnings: parseWarnings(result.response?.prompt ?? null),
     };
@@ -292,7 +297,7 @@ export class SessionManager {
           session_id: session.sessionId,
           current_round: session.currentRound,
           max_rounds: session.maxRounds,
-          quality_trajectory: session.qualityTrajectory,
+          success_trajectory: session.successTrajectory,
           status: session.status,
           created_at: session.createdAt,
           // v1.7: Memory integration state for cross-process recovery
@@ -335,8 +340,8 @@ export class SessionManager {
     >;
     const status = (lineage.status as string) ?? "running";
     const currentRound = (lineage.current_round as number) ?? 1;
-    const qualityTrajectory =
-      (lineage.quality_trajectory as number[]) ?? [];
+    const successTrajectory =
+      (lineage.success_trajectory as boolean[]) ?? (lineage.quality_trajectory as boolean[]) ?? [];
     const task = (sessionEntry.task as string) ?? "";
     const maxRounds =
       (lineage.max_rounds as number) ?? getPolicy().runtime.max_rounds;
@@ -361,7 +366,7 @@ export class SessionManager {
       engine,
       currentRound,
       maxRounds,
-      qualityTrajectory,
+      successTrajectory,
       status: "running",
       createdAt: (lineage.created_at as number) ?? Date.now(),
       // v1.7: Memory integration state restored from vault
@@ -385,6 +390,7 @@ export class SessionManager {
       prompt: result.response?.prompt ?? null,
       technique: result.response?.analysis?.technique ?? "zero-shot",
       level: parseLevel(result.response?.analysis?.rationale),
+      roundSuccess: false,
       quality: 0,
       warnings: parseWarnings(result.response?.prompt ?? null),
     };
@@ -511,7 +517,7 @@ export class SessionManager {
       this.save(session);
       void this.doWriteback(session, "stalled");
       logEvent("session_end", { sessionId, loopId: session.loopId, stopReason: "stalled", round: session.currentRound });
-      return { sessionId, round: session.currentRound, prompt: null, stopReason: "stalled", quality: 0 };
+      return { sessionId, round: session.currentRound, prompt: null, stopReason: "stalled", roundSuccess: false, quality: 0 };
     }
 
     // 1.5. Verification gate — cross-round consistency check (v1.6)
@@ -531,14 +537,14 @@ export class SessionManager {
       gateVerdict = verifyResult.verdict;
     }
 
-    // 2. Record feedback (flushes immediately so next compile sees scores)
-    const quality = session.engine.autoFeedback(
+    // 2. Record feedback (flushes immediately so next compile sees success flags)
+    const roundSuccess = session.engine.autoFeedback(
       selfEval, session.loopId, session.currentRound, session.task,
     );
 
-    // Contradicted verdict: skip quality trend (quality score is unreliable)
+    // Contradicted verdict: skip success trend
     if (gateVerdict !== "contradicted") {
-      session.qualityTrajectory.push(quality);
+      session.successTrajectory.push(roundSuccess);
     }
     // Note: feedback vault entry is always persisted via autoFeedback above.
     // Only the in-memory trend is skipped — the raw data stays for audit.
@@ -550,34 +556,37 @@ export class SessionManager {
     // checks skip without prevSelfEval). The gate recovers on the next round.
     session.lastSelfEval = selfEval;
 
+    // Build deprecated quality alias for backward compat
+    const deprecatedQuality = roundSuccess ? 5 : 1;
+
     // 3. Stop conditions (extraction-first order — see memory)
     if (extractionFailed) {
       session.status = "stalled";
       this.save(session);
       void this.doWriteback(session, "stalled");
       logEvent("session_end", { sessionId, loopId: session.loopId, stopReason: "stalled", round: session.currentRound });
-      return { sessionId, round: session.currentRound, prompt: null, stopReason: "stalled", quality };
+      return { sessionId, round: session.currentRound, prompt: null, stopReason: "stalled", roundSuccess, quality: deprecatedQuality };
     }
     if (!selfEval.should_continue) {
       session.status = "stopped";
       this.save(session);
       void this.doWriteback(session, "task_complete");
       logEvent("session_end", { sessionId, loopId: session.loopId, stopReason: "task_complete", round: session.currentRound });
-      return { sessionId, round: session.currentRound, prompt: null, stopReason: "task_complete", quality };
+      return { sessionId, round: session.currentRound, prompt: null, stopReason: "task_complete", roundSuccess, quality: deprecatedQuality };
     }
     if (session.engine.shouldBreak()) {
       session.status = "stopped";
       this.save(session);
       void this.doWriteback(session, "circuit_breaker");
       logEvent("session_end", { sessionId, loopId: session.loopId, stopReason: "circuit_breaker", round: session.currentRound });
-      return { sessionId, round: session.currentRound, prompt: null, stopReason: "circuit_breaker", quality };
+      return { sessionId, round: session.currentRound, prompt: null, stopReason: "circuit_breaker", roundSuccess, quality: deprecatedQuality };
     }
     if (session.currentRound >= session.maxRounds) {
       session.status = "stopped";
       this.save(session);
       void this.doWriteback(session, "max_rounds");
       logEvent("session_end", { sessionId, loopId: session.loopId, stopReason: "max_rounds", round: session.currentRound });
-      return { sessionId, round: session.currentRound, prompt: null, stopReason: "max_rounds", quality };
+      return { sessionId, round: session.currentRound, prompt: null, stopReason: "max_rounds", roundSuccess, quality: deprecatedQuality };
     }
 
     // 4. Compile next round
@@ -663,7 +672,7 @@ export class SessionManager {
       }
     }
 
-    const request = buildLoopRequest(session, selfEval, quality, verificationFlags);
+    const request = buildLoopRequest(session, selfEval, deprecatedQuality, verificationFlags);
     if (externalCtx) {
       request.external_context = externalCtx;
     }
@@ -677,7 +686,8 @@ export class SessionManager {
       prompt: result.response?.prompt ?? null,
       technique: result.response?.analysis?.technique ?? "zero-shot",
       level: parseLevel(result.response?.analysis?.rationale),
-      quality,
+      roundSuccess,
+      quality: deprecatedQuality,
       warnings: parseWarnings(result.response?.prompt ?? null),
     };
   }
@@ -704,7 +714,6 @@ export class SessionManager {
         task: session.task,
         outcome,
         roundsCompleted: session.currentRound,
-        qualityTrajectory: [...session.qualityTrajectory],
         projectEntry: {
           title: `${session.task.slice(0, 80)} — ${outcome}`,
           objective: session.task.slice(0, 200),

@@ -20,16 +20,9 @@ export interface SummaryPolicy {
   health_check_interval: number;
 }
 
-export interface RecompileTriggersPolicy {
-  l1: string[];
-  l2: string[];
-}
-
 export interface TechniquePolicy {
-  fallback_chain: Record<string, string>;
-  adaptive_quality_threshold: number;
-  adaptive_consecutive_rounds: number;
-  routing_table: Record<string, string>;
+  /** Number of consecutive failures before escalating to Tier 2 techniques. */
+  tier2_escalation_failures: number;
 }
 
 export interface EnginePolicy {
@@ -126,11 +119,17 @@ export interface MemoryWritebackPolicy {
   write_on_outcomes: string[];
 }
 
+export interface CheckpointPolicy {
+  /** Maximum number of constraints carried forward in a checkpoint. */
+  max_carried_constraints: number;
+  /** Maximum character length of the outcome field in a checkpoint. */
+  outcome_max_chars: number;
+}
+
 export interface LoopPolicy {
   version: string;
   constraints: ConstraintsPolicy;
   summary: SummaryPolicy;
-  recompile_triggers: RecompileTriggersPolicy;
   technique: TechniquePolicy;
   engine: EnginePolicy;
   runtime: RuntimePolicy;
@@ -138,6 +137,7 @@ export interface LoopPolicy {
   evolution: EvolutionPolicy;
   memory_injection: MemoryInjectionPolicy;
   memory_writeback: MemoryWritebackPolicy;
+  checkpoint: CheckpointPolicy;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -154,35 +154,8 @@ export const DEFAULT_POLICY: LoopPolicy = {
     window: 5,
     health_check_interval: 1,
   },
-  recompile_triggers: {
-    l1: ["new_constraints", "repeated_failure", "repair_signal"],
-    l2: [
-      "goal_id_changed",
-      "plan_source_provided",
-      "strategy_collapse",
-      "severe_alignment_drop",
-    ],
-  },
   technique: {
-    fallback_chain: {
-      "zero-shot": "few-shot",
-      "few-shot": "zero-shot-cot",
-      "zero-shot-cot": "few-shot-cot",
-      "few-shot-cot": "tree-of-thought",
-      "step-back": "least-to-most",
-      "least-to-most": "tree-of-thought",
-      "tree-of-thought": "tree-of-thought",
-    },
-    adaptive_quality_threshold: 3,
-    adaptive_consecutive_rounds: 2,
-    routing_table: {
-      continuous_low: "zero-shot",
-      independent_low: "zero-shot",
-      continuous_medium: "few-shot",
-      independent_medium: "zero-shot-cot",
-      continuous_high: "few-shot-cot",
-      independent_high: "tree-of-thought",
-    },
+    tier2_escalation_failures: 3,
   },
   engine: {
     feedback_flush_interval: 5,
@@ -229,6 +202,10 @@ export const DEFAULT_POLICY: LoopPolicy = {
     max_feedback_entries: 5,
     max_discoveries_in_project: 3,
     write_on_outcomes: ["completed", "circuit_breaker", "max_rounds"],
+  },
+  checkpoint: {
+    max_carried_constraints: 10,
+    outcome_max_chars: 200,
   },
 };
 

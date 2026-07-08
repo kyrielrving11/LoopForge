@@ -3,7 +3,7 @@
  * All types exchanged between the Main Agent and LoopForge flow through
  * these interfaces. This is the contract layer — no implementation logic.
  *
- * v1.7: 38 types — 4 enums + 32 interfaces + 2 type aliases.
+ * v1.10: 39 types — 4 enums + 34 interfaces + 1 type alias.
  */
 // ── Enums ──────────────────────────────────────────────────────────────────
 export var Mode;
@@ -66,6 +66,16 @@ export function makeExecutionEvidence(overrides = {}) {
         ...overrides,
     };
 }
+export function makeCheckpointSummary(overrides = {}) {
+    return {
+        label: "",
+        declared_at_round: 0,
+        outcome: "",
+        carried_constraints: [],
+        resolved_constraints: [],
+        ...overrides,
+    };
+}
 export function makeSelfEvaluation(overrides = {}) {
     return {
         success: false,
@@ -80,6 +90,8 @@ export function makeSelfEvaluation(overrides = {}) {
         revised_success_criteria: [],
         wrong_assumptions: [],
         worker_results: [],
+        compression_checkpoint: false,
+        checkpoint_label: "",
         ...overrides,
     };
 }
@@ -110,11 +122,8 @@ export function makeLoopHealth(overrides = {}) {
 }
 export function makeRollingSummary(overrides = {}) {
     return {
-        quality_trajectory: [],
-        trajectory_direction: "",
-        what_worked: [],
+        key_outcomes: [],
         recurring_issues: [],
-        key_lessons: [],
         rounds_sampled: 0,
         generated_at_round: 0,
         failed_patterns: [],
@@ -137,7 +146,6 @@ export function makeLoopRoundResult(overrides = {}) {
         output_summary: "",
         constraint_violations: [],
         manual_fixes_needed: "",
-        quality_score: 0,
         discovered_constraints: [],
         objective_refinement: "",
         emerged_subtasks: [],
@@ -145,6 +153,9 @@ export function makeLoopRoundResult(overrides = {}) {
         retracted_constraints: [],
         revised_success_criteria: [],
         wrong_assumptions: [],
+        worker_results: [],
+        compression_checkpoint: false,
+        checkpoint_label: "",
         ...overrides,
     };
 }
@@ -188,6 +199,7 @@ export function makeLoopCompileResponse(overrides = {}) {
         loop_health: null,
         task_alignment: null,
         rolling_summary: null,
+        checkpoint_summary: null,
         suggested_next_task: "",
         plan_source: null,
         warnings: [],
@@ -199,7 +211,7 @@ export function makeSessionState(taskId) {
     return {
         task_id: taskId,
         call_count: 0,
-        quality_trend: [],
+        success_trend: [],
         current_version: "v1",
         last_technique: null,
         circuit_breaker_count: 0,

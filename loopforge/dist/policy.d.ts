@@ -4,14 +4,16 @@
  */
 export interface ConstraintsPolicy {
     retire_window: number;
-    max_active: number;
 }
 export interface SummaryPolicy {
     window: number;
     health_check_interval: number;
 }
 export interface TechniquePolicy {
-    /** Number of consecutive failures before escalating to Tier 2 techniques. */
+    /** @deprecated v1.15 — Escalation (N failures → Tier 2) removed.
+     *  The Agent freely chooses techniques at L2; keyword routing stays
+     *  in Tier 1 at L1. This field is retained for config compatibility
+     *  but no longer consumed by the routing logic. */
     tier2_escalation_failures: number;
 }
 export interface EnginePolicy {
@@ -88,6 +90,63 @@ export interface MemoryInjectionPolicy {
  *  and returns its allowed_phases. If maxRounds exceeds all tiers, returns the
  *  last tier's phases. */
 export declare function resolveAllowedPhases(maxRounds: number, tiers: MemoryInjectionTier[]): number[];
+/** Resolve which memory injection phase (1/2/3) should fire this round.
+ *  Shared between LoopRuntime (runtime.ts) and SessionManager (mcp/session.ts).
+ *  Returns the phase number, or 0 if no injection should occur this round.
+ *
+ *  @param currentRound       Current round number (1-based).
+ *  @param injectionCount     How many injections have already occurred.
+ *  @param allowedPhases      Phases allowed by the round-tier policy.
+ *  @param progress           Current progress estimate (-1 if unavailable).
+ *  @param phase2Triggered    Whether phase 2 has already fired in this loop.
+ *  @param phase3Triggered    Whether phase 3 has already fired in this loop.
+ *  @param thresholds         Policy threshold config for phase2/phase3. */
+export declare function resolveInjectionPhase(currentRound: number, injectionCount: number, allowedPhases: Set<number>, progress: number, phase2Triggered: boolean, phase3Triggered: boolean, thresholds: {
+    phase2: number;
+    phase3: number;
+}): 0 | 1 | 2 | 3;
+/** Build accumulated context for a targeted memory query from a SelfEvaluation.
+ *  Extracts recurring issues, key lessons, and remaining criteria.
+ *  Shared between LoopRuntime (runtime.ts) and SessionManager (mcp/session.ts). */
+export declare function buildAccumulatedMemoryContext(selfEval: {
+    constraint_violations: string[];
+    execution_evidence?: {
+        success_criteria_remaining?: string[];
+    } | null;
+    emerged_subtasks?: string[];
+    wrong_assumptions?: string[];
+}): {
+    recurringIssues: string[];
+    failedPatterns: string[];
+    keyLessons: string[];
+    remainingCriteria: string[];
+};
+/** Build a base LoopMemoryWriteback payload from loop terminal state.
+ *  Shared between LoopRuntime (runtime.ts) and SessionManager (mcp/session.ts).
+ *  Callers may layer additional feedback entries on top of the returned payload. */
+export declare function buildBaseMemoryWriteback(params: {
+    loopId: string;
+    task: string;
+    stopReason: string;
+    roundsCompleted: number;
+    discoveries: string[];
+}): {
+    loopId: string;
+    task: string;
+    outcome: "completed" | "circuit_breaker" | "stalled" | "max_rounds" | "stopped";
+    roundsCompleted: number;
+    projectEntry: {
+        title: string;
+        objective: string;
+        keyOutcome: string;
+        keyDiscoveries: string[];
+        date: string;
+    };
+    referenceEntry: {
+        description: string;
+        vaultLocation: string;
+    };
+};
 export interface MemoryWritebackPolicy {
     /** Master toggle for memory writeback on loop end. */
     enabled: boolean;
@@ -104,6 +163,16 @@ export interface CheckpointPolicy {
     /** Maximum character length of the outcome field in a checkpoint. */
     outcome_max_chars: number;
 }
+export interface StateFilePolicy {
+    /** Master toggle. false = fully disabled, state stays inlined in prompt. */
+    enabled: boolean;
+    /** Directory relative to project root where state files are written. */
+    directory: string;
+    /** Max checkpoints to carry in state file. */
+    max_checkpoints: number;
+    /** Max rounds in cross-round summary section. */
+    max_summary_rounds: number;
+}
 export interface LoopPolicy {
     version: string;
     constraints: ConstraintsPolicy;
@@ -116,6 +185,7 @@ export interface LoopPolicy {
     memory_injection: MemoryInjectionPolicy;
     memory_writeback: MemoryWritebackPolicy;
     checkpoint: CheckpointPolicy;
+    state_file: StateFilePolicy;
 }
 export declare const DEFAULT_POLICY: LoopPolicy;
 export declare function loadPolicy(path?: string): LoopPolicy;

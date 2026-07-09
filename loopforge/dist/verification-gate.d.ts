@@ -14,6 +14,12 @@
  */
 import type { VaultEntry } from "./backends/interface.js";
 import type { SelfEvaluation, VerificationResult } from "./protocol.js";
+/** Extract the round number from a vault entry's loop_lineage.
+ *  Returns 0 if the entry has no lineage or no round field.
+ *  In practice, persistLoopLineage always writes round ≥ 1, so 0
+ *  unambiguously means "not a valid round entry" in this context.
+ *  Exported for reuse by enforcement-gate.ts. */
+export declare function entryRound(entry: VaultEntry): number;
 /** Verify a SelfEvaluation against the loop's cross-round lineage.
  *
  * @param selfEval      The agent's self-evaluation for the current round.

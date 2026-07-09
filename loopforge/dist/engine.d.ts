@@ -6,7 +6,16 @@
  * EngineMetrics tracks silent-failure counters for observability.
  */
 import type { VaultBackend } from "./backends/interface.js";
-import { type AgentLoopResult, type LoopForgeRequest, type SelfEvaluation, type SessionState } from "./protocol.js";
+import { type AgentLoopResult, type CriterionRevision, type ExecutionEvidence, type LoopForgeRequest, type SelfEvaluation, type SessionState } from "./protocol.js";
+/** Parse ExecutionEvidence from a raw JSON object. Shared by buildSelfEvaluation
+ *  and invokeLoopCompile — both parse the same execution_evidence shape. */
+export declare function parseExecutionEvidence(raw: Record<string, unknown> | undefined | null): ExecutionEvidence | undefined;
+/** Parse CriterionRevision[] from a raw JSON array. Shared by buildSelfEvaluation
+ *  and invokeLoopCompile — both parse the same revised_success_criteria shape. */
+export declare function parseCriterionRevisions(raw: unknown): CriterionRevision[];
+/** Parse WorkerResult[] from a raw JSON array. Shared by buildSelfEvaluation
+ *  and invokeLoopCompile — both parse the same worker_results shape. */
+export declare function parseWorkerResults(raw: unknown): import("./protocol.js").WorkerResult[];
 /** Extract a structured SelfEvaluation from agent output text.
  *  Returns null if no valid self-eval block is found.
  *  The agent is instructed to output JSON between the delimiters. */
@@ -42,14 +51,12 @@ export interface EngineMetrics {
     sessionStart: number;
 }
 export declare class LoopForgeEngine {
-    skillsDir: string;
     state: SessionState | null;
     private backend;
     private metrics;
     private feedbackWriteBuffer;
     lastTask: string | null;
-    private seenConstraints;
-    constructor(skillsDir?: string, backend?: VaultBackend);
+    constructor(_skillsDir?: string, backend?: VaultBackend);
     private resolveBackend;
     /** Public accessor for the vault backend — used by runtime/verification gate. */
     getBackend(): VaultBackend;

@@ -250,20 +250,24 @@ export class FSBackend {
             }
         }
         const lockPath = resolveVaultPath(this.vaultPath).replace(/\.json$/, ".lock");
-        for (let i = 0; i < 100; i++) {
+        // Cross-process mutex via mkdir (atomic on POSIX and Windows).
+        // Lock is held only for the duration of vault I/O (microseconds),
+        // so contention is rare and brief. Spin-wait with short pauses
+        // because Node.js has no synchronous sleep primitive.
+        const lockTimeout = Date.now() + 500;
+        for (;;) {
             try {
                 mkdirSync(lockPath);
                 break;
             }
             catch {
-                if (i === 99)
-                    throw new Error("Vault lock timeout");
+                if (Date.now() >= lockTimeout) {
+                    throw new Error("Vault lock timeout (500ms)");
+                }
             }
-            // spin-wait 10ms
-            const start = Date.now();
-            while (Date.now() - start < 10) {
-                /* spin */
-            }
+            // Brief yield — 2ms per iteration, ~250 retries max
+            const spinEnd = Date.now() + 2;
+            while (Date.now() < spinEnd) { /* spin */ }
         }
         this.lockDepth = 1;
         try {

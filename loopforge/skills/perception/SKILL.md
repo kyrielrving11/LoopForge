@@ -61,9 +61,13 @@ Keep the returned sessionId — you will need it for every subsequent call.
 ```
 
 **Step 2 — Execute the round:**
-Execute the compiled prompt exactly as you would any user task. Read files,
-write code, run tests, fix bugs. The prompt already contains the task scope,
-constraints, and quality expectations for this specific round.
+- **BEFORE executing the prompt**: Read `.loopforge/state/{loopId}-state.md`
+  for the loop's accumulated state — objective, constraints, progress, and
+  cross-round summary. This file is rewritten each round and is the single
+  source of truth for loop state. The prompt references this file; you must
+  read it to know the active constraints and progress.
+- Execute the compiled prompt exactly as you would any user task. Read files,
+  write code, run tests, fix bugs.
 
 After executing, prepare a structured self-evaluation. Pass it as the
 `evaluation` parameter to `loopforge_next` — do NOT embed it as a text block
@@ -201,14 +205,21 @@ remembering across rounds.
 
 The prompt changes between rounds based on your trajectory. Pay attention to:
 
-- **Compile level** — `l0` (cached, fast path), `l1` (patched, mild drift),
-  `l2` (full recompile, significant change). L2 means the compiler detected a
-  major shift — read the prompt carefully.
+- **Compile level** — `l0` (retry — honest failure, no new info, same prompt),
+  `l1` (continue — default path, state evolved, technique keyword-routed from Tier 1),
+  `l2` (restart — Round 1, checkpoint boundary, or goal_id change; full
+  context rebuild. **At L2**: LoopForge provides a Technique Selection block —
+  read `skills/prompt-techniques/SKILL.md`, freely choose the best reasoning
+  strategy for this round, read the corresponding reference file, and apply
+  the technique directly to the task). L2 means you have a new chance to
+  pick the right approach.
 - **Warnings** — constraint violations accumulating, task drift, quality
   decline. These are the compiler begging you to course-correct.
-- **Technique escalation** — the compiler may escalate from Tier 1 to
-  Tier 2 (step-back/least-to-most/ToT) after consecutive failures. Trust
-  the new technique — it's chosen for structured reasoning depth.
+- **Technique autonomy (v1.15)** — at L2 restarts, you freely choose your
+  reasoning technique. LoopForge no longer auto-selects or forces technique
+  changes after failures. Read the technique catalog, pick what fits the
+  current challenge, and apply it. Trust your own judgment — you have the
+  full loop state in the state file.
 
 ## Stop Condition Matrix
 
@@ -218,21 +229,28 @@ The prompt changes between rounds based on your trajectory. Pay attention to:
 | 3 consecutive failed rounds | `circuit_breaker` | Tell user the approach is stuck, suggest a different strategy |
 | Round count reached `maxRounds` | `max_rounds` | Summarize progress, ask user whether to extend |
 | No `---loopforge-eval` block found | `stalled` | Fix your output format and restart |
+| Enforcement gate rejected your eval | `enforcementAction: "reject"` | Read the rejection prompt's **Required Fix** section, redo the SAME round, re-submit a corrected self-evaluation |
+| Enforcement gate terminated loop | `enforcement_terminated` | Too many rejections or progress stalled — report to user and suggest a different approach |
 | User interrupts or fatal error | (call `loopforge_stop`) | Clean stop with trajectory preserved |
 
 ## Rules
 
 1. **Always pass the evaluation parameter.** `loopforge_next` requires it.
    If you omit it, the MCP client will reject the call with a schema error.
-2. **Be honest in self-evaluation.** Lying about success or hiding violations
-   produces a false success signal. The circuit breaker exists to stop bad
-   loops — if you fake success=true every round, it fires anyway.
-3. **One loop per task.** Don't reuse a sessionId across different tasks.
-4. **Execute the prompt you're given.** The compiler may change technique or
-   narrow scope between rounds. Trust it — it sees the trajectory.
-5. **Call loopforge_next within the same turn.** Don't leave a round hanging
+2. **Read the state file every round.** Before executing the prompt, read
+   `.loopforge/state/{loopId}-state.md`. It contains the accumulated constraints,
+   progress, and cross-round summary. Skip this and you'll miss active guardrails.
+3. **Be honest in self-evaluation.** Lying about success or hiding violations
+   produces a false success signal. The enforcement gate will REJECT fake
+   successes, and the circuit breaker exists to stop bad loops.
+4. **One loop per task.** Don't reuse a sessionId across different tasks.
+5. **Execute the prompt you're given — and own your technique choice.** At L2
+   restarts, read the technique catalog and freely choose the best strategy.
+   At L1, follow the keyword-routed technique. The compiler provides context
+   and guardrails — you provide the reasoning strategy.
+6. **Call loopforge_next within the same turn.** Don't leave a round hanging
    across conversation turns. The MCP server is in-memory.
-6. **After process restart, use loopforge_resume.** The session state is saved
+7. **After process restart, use loopforge_resume.** The session state is saved
    to vault every round. Call `loopforge_resume` with the original `loopId` to
    pick up where you left off — no need to restart from round 1.
 

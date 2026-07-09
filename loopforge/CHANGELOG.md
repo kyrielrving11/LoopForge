@@ -1,5 +1,63 @@
 # Changelog
 
+## v1.15.0 (2026-07-09)
+
+Agent Technique Autonomy at L2 — the Agent now freely chooses reasoning strategies
+by reading the technique catalog instead of having LoopForge auto-select via keyword routing.
+
+### L2 Restart Rework
+- **`buildL2Prompt()`** — New function. Generates L2 prompts with a Technique Selection block
+  that instructs the Agent to read `skills/prompt-techniques/SKILL.md`, freely choose the
+  best technique based on loop state, read the corresponding reference file, and apply it
+  directly. No technique skeleton is embedded — the skill reference files are the Agent's
+  working manual.
+- **`compileL2()`** — No longer calls `routeTechniqueAdaptive()` or dispatches to specialist
+  compilers. Uses `buildL2Prompt()` instead. `technique_used` set to `"agent-selected"`,
+  `reference_file` set to `"skills/prompt-techniques/SKILL.md"`.
+
+### Strategy Collapse Removal
+- **`strategyCollapse()`** — Removed. The "3 consecutive failures → force L2" gate in
+  `decideLevel()` is gone. The decision to restart strategy belongs to the Agent (via
+  checkpoint declaration), not to a failure counter.
+- **`decideLevel()` Gate 4** — Removed. L2 now triggers on: Round 1, plan_source,
+  checkpoint boundary, goal_id change.
+- **`computeAdvisories()` strategy_collapse warning** — Removed.
+
+### Tier Escalation Removal
+- **`countConsecutiveFailures()`** — Removed from `builder.ts`.
+- **`routeTechniqueAdaptive()` escalation branch** — Removed. No longer counts failures
+  or forces Tier 2 techniques. Simplified to: checkpoint → all 7 techniques, normal → Tier 1 only.
+- **`tier2_escalation_failures`** — Deprecated in `policy.ts`. Field retained for config
+  compatibility but no longer consumed.
+
+### Specialist Compilers
+- `compileStepBack`, `compileLeastToMost`, `compileToT`, `compileGeneric` — All **preserved**.
+  Still used by L1 for keyword-routed technique prompts. Only L2 no longer calls them.
+
+### Observability
+- **`tier2_escalation`** event — Deprecated. No longer emitted.
+
+---
+
+## v1.15.1 (2026-07-09)
+
+Bug fixes and policy completeness for the Thin Prompt architecture.
+
+### Bug Fixes
+- **`state_file.enabled` now respected** — State files were written to disk regardless of the
+  `state_file.enabled` policy flag. Fixed in `runtime.ts` and `mcp/session.ts` (3 call sites)
+  to check `getPolicy().state_file.enabled` before writing.
+- **`enforcement-gate.ts` git tracking** — The enforcement gate module was untracked despite
+  being imported by `runtime.ts` and `mcp/session.ts`. Now staged in git.
+
+### Policy
+- **`loop_policy.json`** — Added missing `state_file` configuration section with defaults
+  (`enabled: true`, `directory: ".loopforge/state"`, `max_checkpoints: 5`, `max_summary_rounds: 5`).
+- **`write_on_outcomes`** — Corrected from `"completed"` to `"task_complete"` to match the
+  actual `StopReason` enum value. Previously `"completed"` never matched any stop reason.
+
+---
+
 ## v1.9.0 (2026-07-01)
 
 Multi-Agent Delegation Support — LoopForge now tracks and injects sub-agent delegation

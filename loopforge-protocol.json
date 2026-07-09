@@ -11,7 +11,7 @@
         "loop_compile",
         "feedback"
       ],
-      "description": "LoopForge-loop_compile — TypeScript protocol definitions.\n\nAll types exchanged between the Main Agent and LoopForge flow through\nthese interfaces. This is the contract layer — no implementation logic.\n\nv1.10: 39 types — 4 enums + 34 interfaces + 1 type alias."
+      "description": "LoopForge-loop_compile — TypeScript protocol definitions.\n\nAll types exchanged between the Main Agent and LoopForge flow through\nthese interfaces. This is the contract layer — no implementation logic.\n\nv1.15: 40 types — 4 enums + 35 interfaces + 1 type alias."
     },
     "AgentStatus": {
       "type": "string",
@@ -632,6 +632,9 @@
         },
         "external_context": {
           "type": "string"
+        },
+        "max_rounds": {
+          "type": "number"
         }
       },
       "required": [
@@ -767,6 +770,9 @@
         },
         "error": {
           "type": "string"
+        },
+        "state_file_content": {
+          "type": "string"
         }
       },
       "required": [
@@ -815,6 +821,9 @@
             "string",
             "null"
           ]
+        },
+        "state_file_content": {
+          "type": "string"
         }
       },
       "required": [
@@ -922,8 +931,48 @@
         "max_rounds",
         "stalled",
         "stopped",
-        "executor_failure"
+        "executor_failure",
+        "enforcement_terminated"
       ]
+    },
+    "EnforcementResult": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "accept"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "reject"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "terminate"
+              ]
+            }
+          ]
+        },
+        "reason": {
+          "type": "string"
+        },
+        "fix_instructions": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "action",
+        "reason",
+        "fix_instructions"
+      ],
+      "description": "Result of round-boundary enforcement. Decides whether to accept the round,\nreject it (force the agent to redo the SAME round), or terminate the loop.\n\naccept:    round passes; proceed to next round as normal.\nreject:    agent's self-evaluation or output is invalid; the agent receives\n           a rejection prompt and must redo the same round. Round counter\n           does NOT increment.\nterminate: loop has reached an unrecoverable state; stop immediately with\n           stopReason \"enforcement_terminated\"."
     },
     "RoundStartInfo": {
       "type": "object",

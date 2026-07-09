@@ -7,7 +7,7 @@
  *    round_complete   — engine/runtime after feedback processed
  *    circuit_breaker  — shouldBreak() returns true
  *    gate_contradicted — verification gate returns contradicted verdict
- *    tier2_escalation — builder escalates to Tier 2 techniques
+ *    tier2_escalation — (deprecated v1.15) builder escalates to Tier 2 techniques
  *    vault_write_error — any catch in vault write paths
  *    session_start / session_end — MCP session lifecycle
  *

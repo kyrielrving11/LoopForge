@@ -18,8 +18,12 @@ step at a time. As the agent executes, LoopForge tracks real progress, detects
 drift, merges discovered constraints, deepens the objective, and corrects
 wrong assumptions — maintaining cognitive stability across long-horizon loops.
 
-> **v1.12** — `npm install loopforge`. MCP server (8 tools) + Perception-Skill +
-> library API + Verification Gate + Structured Evaluation + Memory System Integration (3-phase injection + writeback). Zero runtime dependencies. 260 tests. Node.js ≥18.
+> **v1.15** — `npm install loopforge`. MCP server (8 tools) + Perception-Skill +
+> library API + Verification Gate + Enforcement Gate + Thin Prompt + Fat File +
+> Structured Evaluation + Memory System Integration (3-phase injection + writeback).
+> **L2 Agent Technique Autonomy** — the Agent freely chooses reasoning strategies
+> by reading the technique catalog; escalation (N failures → Tier 2) removed.
+> Zero runtime dependencies. 277 tests. Node.js ≥18.
 
 ---
 
@@ -34,8 +38,10 @@ This is not a bug — it's the defining feature of complex work.
 
 LoopForge formalizes this loop:
   Execute → Self-Evaluate (with evidence) → Verify against lineage (v1.6) →
-  Discover constraints → Deepen understanding → Correct mistakes →
-  Compile next prompt → Execute again — until the outcome is achieved.
+  Enforce round-boundary rules (v1.13) → Discover constraints →
+  Deepen understanding → Correct mistakes → Write state file (v1.14) →
+  Agent chooses technique (v1.15) → Compile next prompt → Execute again —
+  until the outcome is achieved.
 ```
 
 **This is not a timer loop.** A timer loop asks "has N minutes passed?"
@@ -98,24 +104,34 @@ console.log(`${result.roundsCompleted} rounds: ${result.stopReason}`);
 ### The Cognitive Loop
 
 ```
-Round 1:
-  LoopForge compiles a prompt with:
-    - The task (your rough direction)
-    - The Loop Objective (outcome + success criteria + hard constraints)
-    - Self-evaluation instructions (structured evidence reporting)
-  → Agent executes, discovers unknowns, reports evidence
+Round 1 (L2 — Restart):
+  LoopForge compiles a strategy prompt with:
+    - Technique Selection block — Agent reads the technique catalog
+      (skills/prompt-techniques/SKILL.md) and freely chooses the best
+      reasoning strategy for this task
+    - The task + Loop Objective + constraints + cross-round summary
+    - State file written to .loopforge/state/{loopId}-state.md
+  → Agent reads catalog → chooses technique → reads reference → executes
   → LoopForge computes real progress, validates claims, merges discoveries
 
-Round 2+:
-  LoopForge compiles a NEW prompt — different from Round 1 because:
-    - New constraints were discovered (P0)
-    - The objective was deepened (P1)
-    - Emergent sub-problems surfaced (P2)
-    - Progress is tracked against success criteria (P4)
-    - Wrong assumptions were corrected (P5)
-    - Strategy may switch (CoT → ToT → Step-Back) based on trajectory
-  → Agent executes with richer context
+Round 2+ (L1 — Continue):
+  LoopForge compiles a THIN prompt — state is in the state file:
+    - Agent reads state file for constraints, progress, checkpoints
+    - Technique keyword-routed from Tier 1 (4 techniques: zero-shot,
+      few-shot, zero-shot-cot, few-shot-cot)
+    - P0-P5 state evolution handled: constraints discovered, objective refined,
+      subtasks emerged, wrong assumptions corrected
+    - State file rewritten with updated state
+  → Agent executes with fresh context each round
   → ... loop until all criteria met, circuit breaker trips, or task complete
+
+Strategy Restart (L2 — triggered by checkpoint boundary or goal_id change):
+  Agent declares a subtask boundary → LoopForge compiles a fresh L2 prompt
+  → Agent re-reads the technique catalog and re-chooses strategy freely
+
+Failure without new info (L0 — Retry):
+  Agent failed honestly but discovered nothing new → same prompt retried
+  → Enforcement gate catches fake successes and repeated violations (v1.13)
 ```
 
 ### Self-Evaluation (what the agent reports each round)
@@ -166,6 +182,9 @@ Legacy `---loopforge-eval` blocks in output text are still supported as fallback
 | **P4 — Consistency Validation** | Agent claims changes but `files_changed` empty → warning; claims success but tests failed → warning |
 | **V1.6 — Verification Gate** | Cross-round consistency checks validate every SelfEvaluation against lineage before it enters the compiler. 6 automated checks (progress regression, empty-change detection, success/remains mismatch, duplicate constraint discovery, 3-round recurring violation, retract-fresh-constraint flip-flop). 3 verdict tiers: `trusted` → normal flow; `suspect` → warnings injected into next prompt for agent clarification; `contradicted` → quality score excluded from trend, 🚫 flags become hard constraints the agent must respond to. Quality scores are NEVER modified — only the trend write is skipped. |
 | **P5 — Self-Correction** | `retracted_constraints` removed from active set; `revised_success_criteria` update the Loop Objective; `wrong_assumptions` recorded as key lessons |
+| **V1.13 — Enforcement Gate** | 5 rules at round boundaries: REJECT invalid self-evaluations (agent must redo same round), TERMINATE unrecoverable loops. Runs before state changes so rejected rounds don't pollute the vault |
+| **V1.14 — Thin Prompt + Fat File** | Accumulated state moved to `.loopforge/state/{loopId}-state.md` (rewritten each round). Prompt carries only task + delta. Technique reference lives in the state file |
+| **V1.15 — Agent Technique Autonomy** | At L2 strategy restarts, the Agent reads the technique catalog (`skills/prompt-techniques/SKILL.md`) and freely chooses the best reasoning strategy. Technique skeletons are no longer embedded — the skill reference files are the Agent's working manual. Strategy collapse auto-trigger (3 failures → force Tier 2) removed. |
 | **Progress Dashboard** | Injected into each round's prompt: files changed, test results, remaining criteria, trend arrow |
 
 ---
@@ -191,9 +210,9 @@ Stop reasons: `task_complete` | `circuit_breaker` | `max_rounds` | `stalled` | `
 
 | Level | When | What |
 |-------|------|------|
-| **L0 Fast Path** | Goal stable, no new failures | Reuse cached prompt |
-| **L1 Patch** | New constraints, failures, repair signals | Patch previous prompt with deltas |
-| **L2 Full Recompile** | Round 1, goal changed, strategy collapse, progress stall | Full hydrate + adaptive technique routing + progress dashboard |
+| **L0 Retry** | Honest failure with no new information (no P0-P5, no repair, no new constraints) | Reuse cached prompt — same round, same task |
+| **L1 Continue** | Default path — all normal execution rounds | Tier 1 technique routing (4 techniques), P0-P5 state evolution, rendered state file, thin prompt |
+| **L2 Restart** | Round 1, checkpoint boundary, or goal_id change | Agent reads technique catalog (SKILL.md), freely chooses strategy, rebuilds state file. (v1.15: strategy collapse auto-trigger and technique skeleton embedding removed.) |
 
 ---
 
@@ -305,7 +324,13 @@ LoopForge will detect it on next startup. No config changes needed.
 
 ### Observability (v1.7)
 - **Engine Metrics** — `getMetrics()` public getter exposes 8 health counters: vault write errors/bytes, feedback buffer stats, cache misses, analysis errors. Included in `loopforge_status` MCP tool output.
-- **Structured Event Logging** — JSON-line events to stderr when `LOOPFORGE_LOG=1` is set. 6 event types: `round_complete`, `circuit_breaker`, `gate_contradicted`, `tier2_escalation`, `vault_write_error`, `session_start` / `session_end`. Silent by default — zero overhead when not enabled.
+- **Structured Event Logging** — JSON-line events to stderr when `LOOPFORGE_LOG=1` is set. 6 event types: `round_complete`, `circuit_breaker`, `gate_contradicted`, `vault_write_error`, `session_start` / `session_end`. Silent by default — zero overhead when not enabled.
+
+### Agent Technique Autonomy (v1.15)
+- **L2 Agent-Driven Technique Selection** — At strategy restart points (Round 1, checkpoint boundaries, goal_id changes), LoopForge no longer auto-selects a technique via keyword routing. Instead, the Agent reads the technique catalog (`skills/prompt-techniques/SKILL.md`), freely chooses the best reasoning strategy based on loop state, reads the corresponding reference file, and applies the technique directly.
+- **Technique Skeleton Removal** — L2 prompts no longer embed 8-section technique skeletons. The skill reference files are the Agent's working manual, not dictated templates.
+- **Strategy Collapse Removal** — The "3 consecutive failures → force Tier 2 techniques" mechanism is removed. The Agent decides when to change approach; LoopForge enforces honesty (verification gate) and progress (enforcement gate) without micromanaging reasoning strategy.
+- **Simplified Technique Router** — `routeTechniqueAdaptive()` no longer counts consecutive failures or escalates tiers. It provides Tier 1 routing for L1 and full access at checkpoint boundaries.
 
 ### Foundation (v1.0–v1.3)
 - **MCP Server** — 8 tools over JSON-RPC stdio. Zero-config with Claude Code and Codex.
@@ -315,7 +340,7 @@ LoopForge will detect it on next startup. No config changes needed.
 - **Constraint Retirement** — Stale constraints silent for 3+ rounds auto-retire.
 - **Failure Lineage Weighting** — Repeated failure patterns with same technique + similar task are detected and demoted in summaries. Failed-path lessons pushed down, marked `[Consider alternatives]`. Dead-end violations flagged `[Possible dead end]`. Explicit `### ⚠️ Failure Patterns` section in compiled prompts.
 - **Rolling Summary** — Cross-round knowledge distillation from last 5 rounds.
-- **Tier-Gated Technique Routing** — Tier 1 (zero-shot/few-shot/CoT) always available. Tier 2 (step-back/least-to-most/ToT) opens at checkpoint boundaries or after consecutive failures. No rotation — technique stays stable across rounds.
+- **Tier-Gated Technique Routing** — Tier 1 (zero-shot/few-shot/CoT) always available at L1 via keyword heuristic. L2 lets the Agent freely choose from all 7 techniques by reading the technique catalog. (v1.15: tier escalation after consecutive failures removed — the Agent owns technique decisions.)
 - **Circuit Breaker** — 3 consecutive failed rounds → stop. Separate executor-failure breaker.
 - **Replay Engine** — Time-travel queries: `replay()`, `diff()`, `timeline()`.
 - **Policy Externalization** — All tunables in `loop_policy.json`.
@@ -335,7 +360,7 @@ LoopForge/
 │   ├── skills/
 │   │   └── perception/          # Perception-Skill: agent instructions for cognitive loops
 │   │       └── SKILL.md
-│   └── tests/                   # 202 tests (Node.js built-in runner)
+│   └── tests/                   # 277 tests (Node.js built-in runner)
 ├── skills/
 │   └── prompt-techniques/       # Technique reference files (read at runtime)
 │       └── references/          # zero-shot, few-shot, cot, step-back, least-to-most, tot

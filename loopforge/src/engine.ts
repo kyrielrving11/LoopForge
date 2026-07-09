@@ -38,6 +38,84 @@ import { compileLoop } from "./loop-compiler.js";
 import { logEvent } from "./observability.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Shared helpers
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** Parse ExecutionEvidence from a raw JSON object. Shared by buildSelfEvaluation
+ *  and invokeLoopCompile — both parse the same execution_evidence shape. */
+export function parseExecutionEvidence(
+  raw: Record<string, unknown> | undefined | null,
+): ExecutionEvidence | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const testResults = raw.test_results as Record<string, unknown> | undefined;
+  return makeExecutionEvidence({
+    files_changed: Array.isArray(raw.files_changed)
+      ? raw.files_changed.filter((v: unknown) => typeof v === "string")
+      : [],
+    test_results: testResults && typeof testResults.passed === "number"
+      ? {
+          passed: testResults.passed as number,
+          failed: (testResults.failed as number) ?? 0,
+          skipped: (testResults.skipped as number) ?? 0,
+        }
+      : null,
+    success_criteria_met: Array.isArray(raw.success_criteria_met)
+      ? raw.success_criteria_met.filter((v: unknown) => typeof v === "string")
+      : [],
+    success_criteria_remaining: Array.isArray(raw.success_criteria_remaining)
+      ? raw.success_criteria_remaining.filter((v: unknown) => typeof v === "string")
+      : [],
+    progress_estimate: typeof raw.progress_estimate === "number"
+      ? Math.max(0, Math.min(1, raw.progress_estimate))
+      : 0.0,
+  });
+}
+
+/** Parse CriterionRevision[] from a raw JSON array. Shared by buildSelfEvaluation
+ *  and invokeLoopCompile — both parse the same revised_success_criteria shape. */
+export function parseCriterionRevisions(
+  raw: unknown,
+): CriterionRevision[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((v: unknown) =>
+      typeof v === "object" && v !== null &&
+      typeof (v as Record<string, unknown>).old === "string" &&
+      typeof (v as Record<string, unknown>).new === "string")
+    .map((v: unknown) => {
+      const r = v as Record<string, unknown>;
+      return { old: r.old as string, new: r.new as string };
+    });
+}
+
+/** Parse WorkerResult[] from a raw JSON array. Shared by buildSelfEvaluation
+ *  and invokeLoopCompile — both parse the same worker_results shape. */
+export function parseWorkerResults(
+  raw: unknown,
+): import("./protocol.js").WorkerResult[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((v: unknown) =>
+      typeof v === "object" && v !== null &&
+      typeof (v as Record<string, unknown>).agentId === "string" &&
+      typeof (v as Record<string, unknown>).subTask === "string" &&
+      typeof (v as Record<string, unknown>).resultSummary === "string")
+    .map((v: unknown) => {
+      const w = v as Record<string, unknown>;
+      return {
+        agentId: w.agentId as string,
+        subAgentType: typeof w.subAgentType === "string" ? w.subAgentType : "general-purpose",
+        subTask: w.subTask as string,
+        resultSummary: w.resultSummary as string,
+        success: typeof w.success === "boolean" ? w.success : false,
+        discoveredConstraints: Array.isArray(w.discoveredConstraints)
+          ? w.discoveredConstraints.filter((c: unknown) => typeof c === "string")
+          : [],
+      };
+    });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Self-Evaluation extraction (v1.1 — autonomous loop feedback)
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -69,74 +147,21 @@ export function buildSelfEvaluation(
   raw: Record<string, unknown>,
 ): SelfEvaluation {
   // P4: Parse execution evidence from raw JSON
-  let executionEvidence: ExecutionEvidence | undefined;
-  const rawEvidence = raw.execution_evidence as Record<string, unknown> | undefined;
-  if (rawEvidence && typeof rawEvidence === "object") {
-    const testResults = rawEvidence.test_results as Record<string, unknown> | undefined;
-    executionEvidence = makeExecutionEvidence({
-      files_changed: Array.isArray(rawEvidence.files_changed)
-        ? rawEvidence.files_changed.filter((v: unknown) => typeof v === "string")
-        : [],
-      test_results: testResults && typeof testResults.passed === "number"
-        ? {
-            passed: testResults.passed as number,
-            failed: (testResults.failed as number) ?? 0,
-            skipped: (testResults.skipped as number) ?? 0,
-          }
-        : null,
-      success_criteria_met: Array.isArray(rawEvidence.success_criteria_met)
-        ? rawEvidence.success_criteria_met.filter((v: unknown) => typeof v === "string")
-        : [],
-      success_criteria_remaining: Array.isArray(rawEvidence.success_criteria_remaining)
-        ? rawEvidence.success_criteria_remaining.filter((v: unknown) => typeof v === "string")
-        : [],
-      progress_estimate: typeof rawEvidence.progress_estimate === "number"
-        ? Math.max(0, Math.min(1, rawEvidence.progress_estimate))
-        : 0.0,
-    });
-  }
+  const executionEvidence = parseExecutionEvidence(
+    raw.execution_evidence as Record<string, unknown> | undefined,
+  );
 
   // P5: Parse corrections
   const retractedConstraints: string[] = Array.isArray(raw.retracted_constraints)
     ? raw.retracted_constraints.filter((v: unknown) => typeof v === "string")
     : [];
-  const revisedCriteria: CriterionRevision[] = Array.isArray(raw.revised_success_criteria)
-    ? raw.revised_success_criteria
-        .filter((v: unknown) =>
-          typeof v === "object" && v !== null &&
-          typeof (v as Record<string, unknown>).old === "string" &&
-          typeof (v as Record<string, unknown>).new === "string")
-        .map((v: unknown) => {
-          const r = v as Record<string, unknown>;
-          return { old: r.old as string, new: r.new as string };
-        })
-    : [];
+  const revisedCriteria: CriterionRevision[] = parseCriterionRevisions(raw.revised_success_criteria);
   const wrongAssumptions: string[] = Array.isArray(raw.wrong_assumptions)
     ? raw.wrong_assumptions.filter((v: unknown) => typeof v === "string")
     : [];
 
   // Multi-agent: Parse worker delegation results
-  const workerResults: import("./protocol.js").WorkerResult[] = Array.isArray(raw.worker_results)
-    ? raw.worker_results
-        .filter((v: unknown) =>
-          typeof v === "object" && v !== null &&
-          typeof (v as Record<string, unknown>).agentId === "string" &&
-          typeof (v as Record<string, unknown>).subTask === "string" &&
-          typeof (v as Record<string, unknown>).resultSummary === "string")
-        .map((v: unknown) => {
-          const w = v as Record<string, unknown>;
-          return {
-            agentId: w.agentId as string,
-            subAgentType: typeof w.subAgentType === "string" ? w.subAgentType : "general-purpose",
-            subTask: w.subTask as string,
-            resultSummary: w.resultSummary as string,
-            success: typeof w.success === "boolean" ? w.success : false,
-            discoveredConstraints: Array.isArray(w.discoveredConstraints)
-              ? w.discoveredConstraints.filter((c: unknown) => typeof c === "string")
-              : [],
-          };
-        })
-    : [];
+  const workerResults = parseWorkerResults(raw.worker_results);
 
   return makeSelfEvaluation({
     success: typeof raw.success === "boolean" ? raw.success : false,
@@ -242,16 +267,15 @@ function makeEngineMetrics(): EngineMetrics {
 // ═══════════════════════════════════════════════════════════════════════════
 
 export class LoopForgeEngine {
-  skillsDir: string;
   state: SessionState | null = null;
   private backend: VaultBackend | null = null;
   private metrics: EngineMetrics | null = null;
   private feedbackWriteBuffer: VaultEntry[] = [];
   lastTask: string | null = null;
-  private seenConstraints = new Set<string>();
 
-  constructor(skillsDir = "skills", backend?: VaultBackend) {
-    this.skillsDir = skillsDir;
+  // skillsDir parameter retained for API backward compatibility (v1.15).
+  // Previously stored as this.skillsDir but never read — now accepted & dropped.
+  constructor(_skillsDir = "skills", backend?: VaultBackend) {
     if (backend) this.backend = backend;
   }
 
@@ -803,6 +827,7 @@ export class LoopForgeEngine {
       health_check_interval:
         (extras.health_check_interval as number) ?? 1,
       external_context: (extras.external_context as string) ?? "",
+      max_rounds: (extras.max_rounds as number) ?? undefined,
     });
 
     // Convert last_round_result if present
@@ -810,41 +835,12 @@ export class LoopForgeEngine {
     if (lastRR) {
       if (typeof lastRR === "object" && !Array.isArray(lastRR)) {
         const rr = lastRR as Record<string, unknown>;
-        // Parse P4 execution evidence
-        let executionEvidence: ExecutionEvidence | undefined;
-        const rawEvidence = rr.execution_evidence as Record<string, unknown> | undefined;
-        if (rawEvidence && typeof rawEvidence === "object") {
-          const testResults = rawEvidence.test_results as Record<string, unknown> | undefined;
-          executionEvidence = makeExecutionEvidence({
-            files_changed: Array.isArray(rawEvidence.files_changed)
-              ? rawEvidence.files_changed.filter((v: unknown) => typeof v === "string")
-              : [],
-            test_results: testResults && typeof testResults.passed === "number"
-              ? {
-                  passed: testResults.passed as number,
-                  failed: (testResults.failed as number) ?? 0,
-                  skipped: (testResults.skipped as number) ?? 0,
-                }
-              : null,
-            success_criteria_met: Array.isArray(rawEvidence.success_criteria_met)
-              ? rawEvidence.success_criteria_met.filter((v: unknown) => typeof v === "string")
-              : [],
-            success_criteria_remaining: Array.isArray(rawEvidence.success_criteria_remaining)
-              ? rawEvidence.success_criteria_remaining.filter((v: unknown) => typeof v === "string")
-              : [],
-            progress_estimate: typeof rawEvidence.progress_estimate === "number"
-              ? Math.max(0, Math.min(1, rawEvidence.progress_estimate))
-              : 0.0,
-          });
-        }
-        // Parse P5 revised_success_criteria
-        const revisedCriteria: CriterionRevision[] = Array.isArray(rr.revised_success_criteria)
-          ? (rr.revised_success_criteria as Array<Record<string, unknown>>)
-              .filter((v) =>
-                typeof v === "object" && v !== null &&
-                typeof v.old === "string" && typeof v.new === "string")
-              .map((v) => ({ old: v.old as string, new: v.new as string }))
-          : [];
+        // Parse P4 execution evidence (shared helper)
+        const executionEvidence = parseExecutionEvidence(
+          rr.execution_evidence as Record<string, unknown> | undefined,
+        );
+        // Parse P5 revised_success_criteria (shared parser)
+        const revisedCriteria = parseCriterionRevisions(rr.revised_success_criteria);
         lcr.last_round_result = makeLoopRoundResult({
           round: (rr.round as number) ?? 0,
           success: (rr.success as boolean) ?? false,
@@ -877,21 +873,8 @@ export class LoopForgeEngine {
             typeof rr.compression_checkpoint === "boolean" ? rr.compression_checkpoint : false,
           checkpoint_label:
             typeof rr.checkpoint_label === "string" ? rr.checkpoint_label : "",
-          // Multi-agent: Worker delegation results
-          worker_results: Array.isArray(rr.worker_results)
-            ? (rr.worker_results as Array<Record<string, unknown>>)
-                .filter((v) => typeof v?.agentId === "string" && typeof v?.subTask === "string")
-                .map((v) => ({
-                  agentId: v.agentId as string,
-                  subAgentType: typeof v.subAgentType === "string" ? v.subAgentType : "general-purpose",
-                  subTask: v.subTask as string,
-                  resultSummary: typeof v.resultSummary === "string" ? v.resultSummary : "",
-                  success: typeof v.success === "boolean" ? v.success : false,
-                  discoveredConstraints: Array.isArray(v.discoveredConstraints)
-                    ? (v.discoveredConstraints as string[])
-                    : [],
-                }))
-            : [],
+          // Multi-agent: Worker delegation results (shared parser)
+          worker_results: parseWorkerResults(rr.worker_results),
         });
       }
     }
@@ -931,15 +914,10 @@ export class LoopForgeEngine {
       };
     }
 
-    // Build prompt text from response
-    const promptLines: string[] = [
-      `## LoopForge Loop Compile — Round ${response.round}`,
-      `**Recompile Level**: ${response.recompile_level.toUpperCase()}`,
-      `**Loop ID**: ${response.loop_id}`,
-      `**Goal ID**: ${response.goal_id}`,
-      "",
-      response.prompt,
-    ];
+    // Build prompt text from response.
+    // Compile functions (buildL2Prompt / specialist compilers via buildHeader)
+    // already produce their own round-level headers with technique + identity.
+    const promptLines: string[] = [response.prompt];
 
     if (response.warnings.length) {
       promptLines.push("");
@@ -1029,6 +1007,7 @@ export class LoopForgeEngine {
           reference_file: response.reference_file,
         }),
         error: null,
+        state_file_content: response.state_file_content,
       },
     };
   }

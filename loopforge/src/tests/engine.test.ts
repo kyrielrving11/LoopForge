@@ -36,8 +36,8 @@ describe("Engine — Initialisation", () => {
   it("createEngine returns LoopForgeEngine instance", () => {
     const engine = createEngine("skills");
     assert.ok(engine instanceof LoopForgeEngine);
-    assert.equal(engine.skillsDir, "skills");
     assert.equal(engine.state, null);
+    assert.equal(engine.lastTask, null);
   });
 
   it("engine lazy-inits state on first invocation", () => {
@@ -290,11 +290,15 @@ describe("Engine — P0-P5 Cognitive Evolution (v1.7 E2E)", () => {
       },
     } as unknown as LoopForgeRequest);
     assert.equal(r2.status, AgentStatus.OK);
+    // v1.14 Thin Prompt: progress dashboard lives in state file, not in prompt
+    const stateFile = r2.response!.state_file_content;
+    assert.ok(stateFile, "P4: state_file_content should be set for L2 compile");
+    assert.ok(stateFile!.includes("Progress Dashboard"), "P4: progress dashboard in state file");
+    assert.ok(stateFile!.includes("1/3"), "P4: criteria count in state file");
+    assert.ok(stateFile!.includes("Token.sol"), "P4: files_changed in state file");
+    // Thin prompt: progress dashboard should NOT be in the prompt text
     const prompt = r2.response!.prompt!;
-    // P4: Progress dashboard should appear (L2 recompile)
-    assert.ok(prompt.includes("Progress Dashboard"), "P4: progress dashboard missing");
-    assert.ok(prompt.includes("1/3"), "P4: criteria count missing");
-    assert.ok(prompt.includes("Token.sol"), "P4: files_changed missing");
+    assert.ok(!prompt.includes("Progress Dashboard"), "P4: thin prompt — dashboard in state file only");
   });
 
   it("P5: wrong_assumptions are forwarded to compiler as key lessons", () => {

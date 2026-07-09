@@ -3,7 +3,7 @@
  * All types exchanged between the Main Agent and LoopForge flow through
  * these interfaces. This is the contract layer — no implementation logic.
  *
- * v1.10: 39 types — 4 enums + 34 interfaces + 1 type alias.
+ * v1.15: 40 types — 4 enums + 35 interfaces + 1 type alias.
  */
 // ── Enums ──────────────────────────────────────────────────────────────────
 export var Mode;
@@ -85,7 +85,7 @@ export function makeSelfEvaluation(overrides = {}) {
         discovered_constraints: [],
         objective_refinement: "",
         emerged_subtasks: [],
-        execution_evidence: makeExecutionEvidence(),
+        execution_evidence: undefined,
         retracted_constraints: [],
         revised_success_criteria: [],
         wrong_assumptions: [],
@@ -204,6 +204,7 @@ export function makeLoopCompileResponse(overrides = {}) {
         plan_source: null,
         warnings: [],
         error: "",
+        state_file_content: undefined,
         ...overrides,
     };
 }
@@ -226,6 +227,25 @@ export var RuntimeStatus;
     RuntimeStatus["STOPPED"] = "stopped";
     RuntimeStatus["STALLED"] = "stalled";
 })(RuntimeStatus || (RuntimeStatus = {}));
+/** Map StopReason (internal) → MemoryWriteback outcome (wire format).
+ *  Shared between runtime.ts and mcp/session.ts — single source of truth. */
+export const STOP_REASON_OUTCOME_MAP = {
+    task_complete: "completed",
+    circuit_breaker: "circuit_breaker",
+    stalled: "stalled",
+    max_rounds: "max_rounds",
+    stopped: "stopped",
+    executor_failure: "stopped",
+    enforcement_terminated: "stopped",
+};
+export function makeEnforcementResult(overrides = {}) {
+    return {
+        action: "accept",
+        reason: "",
+        fix_instructions: "",
+        ...overrides,
+    };
+}
 export function makeVerificationFlag(overrides = {}) {
     return {
         severity: "warn",

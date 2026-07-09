@@ -42,6 +42,7 @@ export {
   makeTaskId,
   toDict,
   SELF_EVAL_REGEX,
+  STOP_REASON_OUTCOME_MAP,
 } from "./protocol.js";
 
 export type {
@@ -70,6 +71,9 @@ export {
   resetPolicy,
   DEFAULT_POLICY,
   resolveAllowedPhases,
+  resolveInjectionPhase,
+  buildAccumulatedMemoryContext,
+  buildBaseMemoryWriteback,
 } from "./policy.js";
 
 export type {
@@ -92,6 +96,7 @@ export { FSBackend } from "./backends/fs.js";
 export {
   routeTechniqueAdaptive,
   TECHNIQUE_REFERENCE,
+  SKILLS_DIR,
 } from "./builder.js";
 
 // Loop Compiler
@@ -123,6 +128,9 @@ export {
   extractSelfEvaluation,
   heuristicSelfEvaluation,
   buildSelfEvaluation,
+  parseExecutionEvidence,
+  parseCriterionRevisions,
+  parseWorkerResults,
 } from "./engine.js";
 
 export type { EngineMetrics, DelegationEntry } from "./engine.js";

@@ -24,8 +24,9 @@ import { makeVerificationFlag, makeVerificationResult } from "./protocol.js";
 /** Extract the round number from a vault entry's loop_lineage.
  *  Returns 0 if the entry has no lineage or no round field.
  *  In practice, persistLoopLineage always writes round ≥ 1, so 0
- *  unambiguously means "not a valid round entry" in this context. */
-function entryRound(entry: VaultEntry): number {
+ *  unambiguously means "not a valid round entry" in this context.
+ *  Exported for reuse by enforcement-gate.ts. */
+export function entryRound(entry: VaultEntry): number {
   const lineage = (entry.loop_lineage ?? {}) as Record<string, unknown>;
   return (lineage.round as number) ?? 0;
 }

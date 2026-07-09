@@ -6,9 +6,11 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { writeFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
 import { LoopForgeEngine, extractSelfEvaluation, heuristicSelfEvaluation } from "../engine.js";
 import { checkLoopHealth, tokenize, jaccard } from "../loop-compiler.js";
-import { getPolicy, resolveAllowedPhases } from "../policy.js";
+import { getPolicy, resolveAllowedPhases, resolveInjectionPhase, buildAccumulatedMemoryContext, buildBaseMemoryWriteback } from "../policy.js";
 import { Mode, makeLoopCompileRequest, makeVaultConfig } from "../protocol.js";
 import { ReplayBackend } from "../replay.js";
 import { FSBackend } from "../backends/fs.js";
@@ -18,6 +20,7 @@ import type {
   LoopMemoryWriteback, MemoryProviderContext,
 } from "../protocol.js";
 import { verifySelfEvaluation } from "../verification-gate.js";
+import { enforceRound, buildRejectionPrompt } from "../enforcement-gate.js";
 import { logEvent } from "../observability.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -40,6 +43,8 @@ export interface McpSession {
   injectedContexts: string[];
   phase2Triggered: boolean;
   phase3Triggered: boolean;
+  // v1.13: Enforcement gate state
+  consecutiveRejections: number;
 }
 
 export interface McpSessionSummary {
@@ -69,6 +74,13 @@ export interface AdvanceResult {
   quality?: number;
   roundSuccess?: boolean;
   warnings?: string[];
+  /** v1.13: Enforcement action for this round. accept/reject/terminate.
+   *  When "reject", the prompt contains a rejection notice and the agent
+   *  must redo the same round. Round counter does NOT increment. */
+  enforcementAction?: "accept" | "reject" | "terminate";
+  /** v1.13: When enforcementAction is "reject" or "terminate", the reason
+   *  why the round was rejected or the loop was terminated. */
+  enforcementReason?: string;
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -88,6 +100,7 @@ function buildLoopRequest(
     task_id: null,
     loop_id: session.loopId,
     round: session.currentRound,
+    max_rounds: session.maxRounds,
     verification_flags: verificationFlags ?? [],
   };
 
@@ -170,7 +183,7 @@ export class SessionManager {
       sessionId, loopId, task: input.task, engine, currentRound: 1,
       maxRounds, successTrajectory: [], status: "running", createdAt: Date.now(),
       injectionCount: 0, lastInjectionRound: 0, injectedContexts: [],
-      phase2Triggered: false, phase3Triggered: false,
+      phase2Triggered: false, phase3Triggered: false, consecutiveRejections: 0,
     });
     request.domain = input.domain ?? "";
     request.plan_source = input.planSource ?? null;
@@ -213,6 +226,14 @@ export class SessionManager {
 
     const result = engine.invokeLoopCompile(request as unknown as LoopForgeRequest);
 
+    // v1.14: Write state file if the compiler produced one and policy allows it
+    const sfContent = result.response?.state_file_content;
+    if (sfContent && getPolicy().state_file.enabled) {
+      const sfDir = join(process.cwd(), getPolicy().state_file.directory);
+      mkdirSync(sfDir, { recursive: true });
+      writeFileSync(join(sfDir, `${loopId}-state.md`), sfContent, "utf-8");
+    }
+
     const injectedCtx = request.external_context as string | undefined;
     const session: McpSession = {
       sessionId, loopId, task: input.task, engine,
@@ -224,6 +245,8 @@ export class SessionManager {
       injectedContexts: injectedCtx ? [injectedCtx] : [],
       phase2Triggered: false,
       phase3Triggered: false,
+      // v1.13: Enforcement gate state
+      consecutiveRejections: 0,
     };
     this.sessions.set(sessionId, session);
 
@@ -305,6 +328,8 @@ export class SessionManager {
           last_injection_round: session.lastInjectionRound,
           phase2_triggered: session.phase2Triggered,
           phase3_triggered: session.phase3Triggered,
+          // v1.13: Enforcement gate state
+          consecutive_rejections: session.consecutiveRejections,
         },
       });
     };
@@ -375,6 +400,8 @@ export class SessionManager {
       injectedContexts: [],
       phase2Triggered: (lineage.phase2_triggered as boolean) ?? false,
       phase3Triggered: (lineage.phase3_triggered as boolean) ?? false,
+      // v1.13: Enforcement gate state restored from vault
+      consecutiveRejections: (lineage.consecutive_rejections as number) ?? 0,
     };
     this.sessions.set(sessionId, session);
 
@@ -523,8 +550,9 @@ export class SessionManager {
     // 1.5. Verification gate — cross-round consistency check (v1.6)
     let verificationFlags: VerificationFlag[] = [];
     let gateVerdict: string = "trusted";
+    let vaultEntries: VaultEntry[] = [];
     {
-      const vaultEntries = this.backend
+      vaultEntries = this.backend
         ? this.backend.queryEntries({ prefix: `loop:${session.loopId}:r` })
         : [];
       const verifyResult = verifySelfEvaluation(
@@ -535,6 +563,64 @@ export class SessionManager {
       );
       verificationFlags = verifyResult.flags;
       gateVerdict = verifyResult.verdict;
+    }
+
+    // 1.6. Enforcement gate — round-boundary runtime enforcement (v1.13)
+    // Runs AFTER verification so it can use the flags as input.
+    // Runs BEFORE feedback recording so rejected rounds don't pollute the vault.
+    // Only runs when the self-eval came from structured extraction (not heuristic
+    // fallback) — heuristic evaluations have no reliable execution_evidence.
+    if (!extractionFailed) {
+      const enforceResult = enforceRound(
+        selfEval,
+        { verdict: gateVerdict as "trusted" | "suspect" | "contradicted", flags: verificationFlags },
+        session.currentRound,
+        vaultEntries,
+        session.consecutiveRejections,
+      );
+
+      if (enforceResult.action === "reject") {
+        session.consecutiveRejections++;
+        this.save(session);
+        const rejectionPrompt = buildRejectionPrompt(
+          session.currentRound, session.task, enforceResult,
+        );
+        logEvent("enforcement_reject", {
+          sessionId,
+          loopId: session.loopId,
+          round: session.currentRound,
+          reason: enforceResult.reason.slice(0, 120),
+          consecutiveRejections: session.consecutiveRejections,
+        });
+        return {
+          sessionId,
+          round: session.currentRound,
+          prompt: rejectionPrompt,
+          enforcementAction: "reject",
+          enforcementReason: enforceResult.reason,
+        };
+      }
+
+      if (enforceResult.action === "terminate") {
+        session.status = "stopped";
+        this.save(session);
+        void this.doWriteback(session, "enforcement_terminated");
+        logEvent("session_end", {
+          sessionId, loopId: session.loopId,
+          stopReason: "enforcement_terminated", round: session.currentRound,
+        });
+        return {
+          sessionId,
+          round: session.currentRound,
+          prompt: null,
+          stopReason: "enforcement_terminated",
+          enforcementAction: "terminate",
+          enforcementReason: enforceResult.reason,
+        };
+      }
+
+      // Accept: reset rejection counter and continue
+      session.consecutiveRejections = 0;
     }
 
     // 2. Record feedback (flushes immediately so next compile sees success flags)
@@ -601,43 +687,32 @@ export class SessionManager {
       );
       if (session.injectionCount < allowedPhases.size &&
           session.currentRound - session.lastInjectionRound >= miPolicy.min_rounds_between_injections) {
-        const progress = selfEval.execution_evidence?.progress_estimate;
-        const hasProgress = typeof progress === "number" && progress >= 0;
-        let phase: 1 | 2 | 3 | null = null;
+        const progress = selfEval.execution_evidence?.progress_estimate ?? -1;
+        const phase = resolveInjectionPhase(
+          session.currentRound,
+          session.injectionCount,
+          allowedPhases,
+          typeof progress === "number" ? progress : -1,
+          session.phase2Triggered,
+          session.phase3Triggered,
+          {
+            phase2: miPolicy.phase_thresholds.phase2.threshold,
+            phase3: miPolicy.phase_thresholds.phase3.threshold,
+          },
+        );
+        if (phase === 2) session.phase2Triggered = true;
+        if (phase === 3) session.phase3Triggered = true;
 
-        if (
-          allowedPhases.has(2) &&
-          !session.phase2Triggered &&
-          hasProgress &&
-          progress! >= miPolicy.phase_thresholds.phase2.threshold
-        ) {
-          phase = 2;
-          session.phase2Triggered = true;
-        } else if (
-          allowedPhases.has(3) &&
-          !session.phase3Triggered &&
-          hasProgress &&
-          progress! >= miPolicy.phase_thresholds.phase3.threshold
-        ) {
-          phase = 3;
-          session.phase3Triggered = true;
-        }
-
-      if (phase !== null) {
+      if (phase !== 0) {
         try {
-          const accCtx = {
-            recurringIssues: selfEval.constraint_violations ?? [],
-            failedPatterns: [] as string[],
-            keyLessons: selfEval.emerged_subtasks ?? [],
-            remainingCriteria: selfEval.execution_evidence?.success_criteria_remaining ?? [],
-          };
+          const accCtx = buildAccumulatedMemoryContext(selfEval);
           const ctx: MemoryProviderContext = {
             loopId: session.loopId,
             round: session.currentRound,
             task: session.task,
             domain: "",
             phase,
-            progressEstimate: hasProgress ? progress! : -1,
+            progressEstimate: typeof progress === "number" && progress >= 0 ? progress : -1,
             accumulatedContext: accCtx,
           };
           const rawContext = await this.memoryProvider(ctx);
@@ -678,6 +753,14 @@ export class SessionManager {
     }
     const result = session.engine.invokeLoopCompile(request as unknown as LoopForgeRequest);
 
+    // v1.14: Write state file if the compiler produced one and policy allows it
+    const sfContent = result.response?.state_file_content;
+    if (sfContent && getPolicy().state_file.enabled) {
+      const sfDir = join(process.cwd(), getPolicy().state_file.directory);
+      mkdirSync(sfDir, { recursive: true });
+      writeFileSync(join(sfDir, `${session.loopId}-state.md`), sfContent, "utf-8");
+    }
+
     this.save(session);
 
     return {
@@ -693,7 +776,7 @@ export class SessionManager {
   }
 
   /** Write back loop knowledge to long-term memory.
-   *  Called when a loop terminates for any reason. */
+   *  Uses shared base builder from policy.ts. Called when a loop terminates. */
   private async doWriteback(
     session: McpSession,
     stopReason: string,
@@ -704,35 +787,30 @@ export class SessionManager {
     if (wp.write_on_outcomes.length > 0 && !wp.write_on_outcomes.includes(stopReason)) return;
     if (session.currentRound < 1) return;
 
-    const outcome = (
-      ["completed", "circuit_breaker", "stalled", "max_rounds", "stopped"] as const
-    ).find((o) => stopReason === o) ?? "stopped";
-
     try {
-      const payload: LoopMemoryWriteback = {
+      const lastEval = session.lastSelfEval;
+      const discoveries = lastEval
+        ? [
+            ...(lastEval.wrong_assumptions ?? []),
+            ...(lastEval.emerged_subtasks ?? []),
+            ...(lastEval.discovered_constraints ?? []),
+          ].slice(0, wp.max_discoveries_in_project)
+        : [];
+      const base = buildBaseMemoryWriteback({
         loopId: session.loopId,
         task: session.task,
-        outcome,
+        stopReason,
         roundsCompleted: session.currentRound,
-        projectEntry: {
-          title: `${session.task.slice(0, 80)} — ${outcome}`,
-          objective: session.task.slice(0, 200),
-          keyOutcome: outcome === "completed"
-            ? `Completed successfully in ${session.currentRound} rounds.`
-            : `Terminated with reason '${stopReason}' after ${session.currentRound} rounds.`,
-          keyDiscoveries: [],
-          date: new Date().toISOString().split("T")[0],
-        },
+        discoveries,
+      });
+      const payload: LoopMemoryWriteback = {
+        ...base,
         feedbackEntries: [],
-        referenceEntry: {
-          description: `LoopForge vault data for "${session.task.slice(0, 80)}"`,
-          vaultLocation: `.promptcraft/prompt_vault.json → loop:${session.loopId}:*`,
-        },
       };
       await this.memoryWriter(payload);
       logEvent("memory_writeback", {
         loopId: session.loopId, stopReason,
-        feedbackCount: payload.feedbackEntries.length,
+        feedbackCount: 0,
       });
     } catch {
       logEvent("memory_writeback_error", {

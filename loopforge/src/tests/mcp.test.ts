@@ -19,11 +19,21 @@ function agentOutput(opts: {
   shouldContinue?: boolean;
   body?: string;
 }): string {
+  const hasSuccess = opts.success ?? true;
   const evalBlock = {
-    success: opts.success ?? true,
+    success: hasSuccess,
     output_summary: opts.body ?? "Completed the task successfully.",
     constraint_violations: opts.violations ?? [],
     should_continue: opts.shouldContinue ?? true,
+    // Include minimal execution evidence so enforcement gate R3
+    // (empty success) doesn't reject valid test rounds.
+    execution_evidence: hasSuccess ? {
+      files_changed: ["src/test.ts"],
+      test_results: { passed: 1, failed: 0, skipped: 0 },
+      success_criteria_met: [],
+      success_criteria_remaining: [],
+      progress_estimate: 0.5,
+    } : undefined,
   };
   return [
     opts.body ?? "## Round Output\n\nAll checks passed.",
@@ -46,11 +56,21 @@ function evalParam(opts: {
   shouldContinue?: boolean;
   body?: string;
 }): Record<string, unknown> {
+  const hasSuccess = opts.success ?? true;
   return {
-    success: opts.success ?? true,
+    success: hasSuccess,
     output_summary: opts.body ?? "Completed the task successfully.",
     constraint_violations: opts.violations ?? [],
     should_continue: opts.shouldContinue ?? true,
+    // Include minimal execution evidence so enforcement gate R3
+    // (empty success) doesn't reject valid test rounds.
+    execution_evidence: hasSuccess ? {
+      files_changed: ["src/test.ts"],
+      test_results: { passed: 1, failed: 0, skipped: 0 },
+      success_criteria_met: [],
+      success_criteria_remaining: [],
+      progress_estimate: 0.5,
+    } : undefined,
   };
 }
 

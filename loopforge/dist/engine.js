@@ -12,6 +12,75 @@ import { AgentStatus, Mode, makeAnalysis, makeExecutionEvidence, makeExecutionFe
 import { compileLoop } from "./loop-compiler.js";
 import { logEvent } from "./observability.js";
 // ═══════════════════════════════════════════════════════════════════════════
+// Shared helpers
+// ═══════════════════════════════════════════════════════════════════════════
+/** Parse ExecutionEvidence from a raw JSON object. Shared by buildSelfEvaluation
+ *  and invokeLoopCompile — both parse the same execution_evidence shape. */
+export function parseExecutionEvidence(raw) {
+    if (!raw || typeof raw !== "object")
+        return undefined;
+    const testResults = raw.test_results;
+    return makeExecutionEvidence({
+        files_changed: Array.isArray(raw.files_changed)
+            ? raw.files_changed.filter((v) => typeof v === "string")
+            : [],
+        test_results: testResults && typeof testResults.passed === "number"
+            ? {
+                passed: testResults.passed,
+                failed: testResults.failed ?? 0,
+                skipped: testResults.skipped ?? 0,
+            }
+            : null,
+        success_criteria_met: Array.isArray(raw.success_criteria_met)
+            ? raw.success_criteria_met.filter((v) => typeof v === "string")
+            : [],
+        success_criteria_remaining: Array.isArray(raw.success_criteria_remaining)
+            ? raw.success_criteria_remaining.filter((v) => typeof v === "string")
+            : [],
+        progress_estimate: typeof raw.progress_estimate === "number"
+            ? Math.max(0, Math.min(1, raw.progress_estimate))
+            : 0.0,
+    });
+}
+/** Parse CriterionRevision[] from a raw JSON array. Shared by buildSelfEvaluation
+ *  and invokeLoopCompile — both parse the same revised_success_criteria shape. */
+export function parseCriterionRevisions(raw) {
+    if (!Array.isArray(raw))
+        return [];
+    return raw
+        .filter((v) => typeof v === "object" && v !== null &&
+        typeof v.old === "string" &&
+        typeof v.new === "string")
+        .map((v) => {
+        const r = v;
+        return { old: r.old, new: r.new };
+    });
+}
+/** Parse WorkerResult[] from a raw JSON array. Shared by buildSelfEvaluation
+ *  and invokeLoopCompile — both parse the same worker_results shape. */
+export function parseWorkerResults(raw) {
+    if (!Array.isArray(raw))
+        return [];
+    return raw
+        .filter((v) => typeof v === "object" && v !== null &&
+        typeof v.agentId === "string" &&
+        typeof v.subTask === "string" &&
+        typeof v.resultSummary === "string")
+        .map((v) => {
+        const w = v;
+        return {
+            agentId: w.agentId,
+            subAgentType: typeof w.subAgentType === "string" ? w.subAgentType : "general-purpose",
+            subTask: w.subTask,
+            resultSummary: w.resultSummary,
+            success: typeof w.success === "boolean" ? w.success : false,
+            discoveredConstraints: Array.isArray(w.discoveredConstraints)
+                ? w.discoveredConstraints.filter((c) => typeof c === "string")
+                : [],
+        };
+    });
+}
+// ═══════════════════════════════════════════════════════════════════════════
 // Self-Evaluation extraction (v1.1 — autonomous loop feedback)
 // ═══════════════════════════════════════════════════════════════════════════
 /** Extract a structured SelfEvaluation from agent output text.
@@ -44,70 +113,17 @@ export function extractSelfEvaluation(text) {
  *  (structured evaluation parameter path). */
 export function buildSelfEvaluation(raw) {
     // P4: Parse execution evidence from raw JSON
-    let executionEvidence;
-    const rawEvidence = raw.execution_evidence;
-    if (rawEvidence && typeof rawEvidence === "object") {
-        const testResults = rawEvidence.test_results;
-        executionEvidence = makeExecutionEvidence({
-            files_changed: Array.isArray(rawEvidence.files_changed)
-                ? rawEvidence.files_changed.filter((v) => typeof v === "string")
-                : [],
-            test_results: testResults && typeof testResults.passed === "number"
-                ? {
-                    passed: testResults.passed,
-                    failed: testResults.failed ?? 0,
-                    skipped: testResults.skipped ?? 0,
-                }
-                : null,
-            success_criteria_met: Array.isArray(rawEvidence.success_criteria_met)
-                ? rawEvidence.success_criteria_met.filter((v) => typeof v === "string")
-                : [],
-            success_criteria_remaining: Array.isArray(rawEvidence.success_criteria_remaining)
-                ? rawEvidence.success_criteria_remaining.filter((v) => typeof v === "string")
-                : [],
-            progress_estimate: typeof rawEvidence.progress_estimate === "number"
-                ? Math.max(0, Math.min(1, rawEvidence.progress_estimate))
-                : 0.0,
-        });
-    }
+    const executionEvidence = parseExecutionEvidence(raw.execution_evidence);
     // P5: Parse corrections
     const retractedConstraints = Array.isArray(raw.retracted_constraints)
         ? raw.retracted_constraints.filter((v) => typeof v === "string")
         : [];
-    const revisedCriteria = Array.isArray(raw.revised_success_criteria)
-        ? raw.revised_success_criteria
-            .filter((v) => typeof v === "object" && v !== null &&
-            typeof v.old === "string" &&
-            typeof v.new === "string")
-            .map((v) => {
-            const r = v;
-            return { old: r.old, new: r.new };
-        })
-        : [];
+    const revisedCriteria = parseCriterionRevisions(raw.revised_success_criteria);
     const wrongAssumptions = Array.isArray(raw.wrong_assumptions)
         ? raw.wrong_assumptions.filter((v) => typeof v === "string")
         : [];
     // Multi-agent: Parse worker delegation results
-    const workerResults = Array.isArray(raw.worker_results)
-        ? raw.worker_results
-            .filter((v) => typeof v === "object" && v !== null &&
-            typeof v.agentId === "string" &&
-            typeof v.subTask === "string" &&
-            typeof v.resultSummary === "string")
-            .map((v) => {
-            const w = v;
-            return {
-                agentId: w.agentId,
-                subAgentType: typeof w.subAgentType === "string" ? w.subAgentType : "general-purpose",
-                subTask: w.subTask,
-                resultSummary: w.resultSummary,
-                success: typeof w.success === "boolean" ? w.success : false,
-                discoveredConstraints: Array.isArray(w.discoveredConstraints)
-                    ? w.discoveredConstraints.filter((c) => typeof c === "string")
-                    : [],
-            };
-        })
-        : [];
+    const workerResults = parseWorkerResults(raw.worker_results);
     return makeSelfEvaluation({
         success: typeof raw.success === "boolean" ? raw.success : false,
         output_summary: typeof raw.output_summary === "string" ? raw.output_summary : "",
@@ -175,15 +191,14 @@ function makeEngineMetrics() {
 // LoopForgeEngine
 // ═══════════════════════════════════════════════════════════════════════════
 export class LoopForgeEngine {
-    skillsDir;
     state = null;
     backend = null;
     metrics = null;
     feedbackWriteBuffer = [];
     lastTask = null;
-    seenConstraints = new Set();
-    constructor(skillsDir = "skills", backend) {
-        this.skillsDir = skillsDir;
+    // skillsDir parameter retained for API backward compatibility (v1.15).
+    // Previously stored as this.skillsDir but never read — now accepted & dropped.
+    constructor(_skillsDir = "skills", backend) {
         if (backend)
             this.backend = backend;
     }
@@ -654,46 +669,17 @@ export class LoopForgeEngine {
             force_level: extras.force_level ?? "auto",
             health_check_interval: extras.health_check_interval ?? 1,
             external_context: extras.external_context ?? "",
+            max_rounds: extras.max_rounds ?? undefined,
         });
         // Convert last_round_result if present
         const lastRR = extras.last_round_result;
         if (lastRR) {
             if (typeof lastRR === "object" && !Array.isArray(lastRR)) {
                 const rr = lastRR;
-                // Parse P4 execution evidence
-                let executionEvidence;
-                const rawEvidence = rr.execution_evidence;
-                if (rawEvidence && typeof rawEvidence === "object") {
-                    const testResults = rawEvidence.test_results;
-                    executionEvidence = makeExecutionEvidence({
-                        files_changed: Array.isArray(rawEvidence.files_changed)
-                            ? rawEvidence.files_changed.filter((v) => typeof v === "string")
-                            : [],
-                        test_results: testResults && typeof testResults.passed === "number"
-                            ? {
-                                passed: testResults.passed,
-                                failed: testResults.failed ?? 0,
-                                skipped: testResults.skipped ?? 0,
-                            }
-                            : null,
-                        success_criteria_met: Array.isArray(rawEvidence.success_criteria_met)
-                            ? rawEvidence.success_criteria_met.filter((v) => typeof v === "string")
-                            : [],
-                        success_criteria_remaining: Array.isArray(rawEvidence.success_criteria_remaining)
-                            ? rawEvidence.success_criteria_remaining.filter((v) => typeof v === "string")
-                            : [],
-                        progress_estimate: typeof rawEvidence.progress_estimate === "number"
-                            ? Math.max(0, Math.min(1, rawEvidence.progress_estimate))
-                            : 0.0,
-                    });
-                }
-                // Parse P5 revised_success_criteria
-                const revisedCriteria = Array.isArray(rr.revised_success_criteria)
-                    ? rr.revised_success_criteria
-                        .filter((v) => typeof v === "object" && v !== null &&
-                        typeof v.old === "string" && typeof v.new === "string")
-                        .map((v) => ({ old: v.old, new: v.new }))
-                    : [];
+                // Parse P4 execution evidence (shared helper)
+                const executionEvidence = parseExecutionEvidence(rr.execution_evidence);
+                // Parse P5 revised_success_criteria (shared parser)
+                const revisedCriteria = parseCriterionRevisions(rr.revised_success_criteria);
                 lcr.last_round_result = makeLoopRoundResult({
                     round: rr.round ?? 0,
                     success: rr.success ?? false,
@@ -723,21 +709,8 @@ export class LoopForgeEngine {
                     // v1.10: Checkpoint boundary
                     compression_checkpoint: typeof rr.compression_checkpoint === "boolean" ? rr.compression_checkpoint : false,
                     checkpoint_label: typeof rr.checkpoint_label === "string" ? rr.checkpoint_label : "",
-                    // Multi-agent: Worker delegation results
-                    worker_results: Array.isArray(rr.worker_results)
-                        ? rr.worker_results
-                            .filter((v) => typeof v?.agentId === "string" && typeof v?.subTask === "string")
-                            .map((v) => ({
-                            agentId: v.agentId,
-                            subAgentType: typeof v.subAgentType === "string" ? v.subAgentType : "general-purpose",
-                            subTask: v.subTask,
-                            resultSummary: typeof v.resultSummary === "string" ? v.resultSummary : "",
-                            success: typeof v.success === "boolean" ? v.success : false,
-                            discoveredConstraints: Array.isArray(v.discoveredConstraints)
-                                ? v.discoveredConstraints
-                                : [],
-                        }))
-                        : [],
+                    // Multi-agent: Worker delegation results (shared parser)
+                    worker_results: parseWorkerResults(rr.worker_results),
                 });
             }
         }
@@ -774,15 +747,10 @@ export class LoopForgeEngine {
                 },
             };
         }
-        // Build prompt text from response
-        const promptLines = [
-            `## LoopForge Loop Compile — Round ${response.round}`,
-            `**Recompile Level**: ${response.recompile_level.toUpperCase()}`,
-            `**Loop ID**: ${response.loop_id}`,
-            `**Goal ID**: ${response.goal_id}`,
-            "",
-            response.prompt,
-        ];
+        // Build prompt text from response.
+        // Compile functions (buildL2Prompt / specialist compilers via buildHeader)
+        // already produce their own round-level headers with technique + identity.
+        const promptLines = [response.prompt];
         if (response.warnings.length) {
             promptLines.push("");
             promptLines.push("### Warnings");
@@ -851,6 +819,7 @@ export class LoopForgeEngine {
                     reference_file: response.reference_file,
                 }),
                 error: null,
+                state_file_content: response.state_file_content,
             },
         };
     }

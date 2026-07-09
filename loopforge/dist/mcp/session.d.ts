@@ -24,6 +24,7 @@ export interface McpSession {
     injectedContexts: string[];
     phase2Triggered: boolean;
     phase3Triggered: boolean;
+    consecutiveRejections: number;
 }
 export interface McpSessionSummary {
     sessionId: string;
@@ -50,6 +51,13 @@ export interface AdvanceResult {
     quality?: number;
     roundSuccess?: boolean;
     warnings?: string[];
+    /** v1.13: Enforcement action for this round. accept/reject/terminate.
+     *  When "reject", the prompt contains a rejection notice and the agent
+     *  must redo the same round. Round counter does NOT increment. */
+    enforcementAction?: "accept" | "reject" | "terminate";
+    /** v1.13: When enforcementAction is "reject" or "terminate", the reason
+     *  why the round was rejected or the loop was terminated. */
+    enforcementReason?: string;
 }
 export declare class SessionManager {
     private sessions;
@@ -82,7 +90,7 @@ export declare class SessionManager {
      *    When undefined (runtime/CLI path), falls back to regex extraction from output. */
     advance(sessionId: string, output: string, preExtractedEval?: SelfEvaluation): Promise<AdvanceResult>;
     /** Write back loop knowledge to long-term memory.
-     *  Called when a loop terminates for any reason. */
+     *  Uses shared base builder from policy.ts. Called when a loop terminates. */
     private doWriteback;
     /** Replay timeline for a session — creates ReplayBackend from the stored backend. */
     replayTimeline(sessionId: string): Record<string, unknown>[] | null;

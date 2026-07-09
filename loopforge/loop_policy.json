@@ -1,8 +1,7 @@
 {
   "version": "1",
   "constraints": {
-    "retire_window": 3,
-    "max_active": 12
+    "retire_window": 3
   },
   "summary": {
     "window": 5,
@@ -59,6 +58,12 @@
     "enabled": true,
     "max_feedback_entries": 5,
     "max_discoveries_in_project": 3,
-    "write_on_outcomes": ["completed", "circuit_breaker", "max_rounds"]
+    "write_on_outcomes": ["task_complete", "circuit_breaker", "max_rounds"]
+  },
+  "state_file": {
+    "enabled": true,
+    "directory": ".loopforge/state",
+    "max_checkpoints": 5,
+    "max_summary_rounds": 5
   }
 }

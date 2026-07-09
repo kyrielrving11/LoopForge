@@ -24,11 +24,21 @@ import type {
 function makeAgentOutput(
   opts: Partial<SelfEvaluation> = {},
 ): string {
+  const hasSuccess = opts.success ?? true;
   const se = makeSelfEvaluation({
-    success: true,
+    success: hasSuccess,
     output_summary: "Task completed successfully.",
     constraint_violations: [],
     should_continue: true,
+    // Include minimal execution evidence so enforcement gate R3
+    // (empty success) doesn't reject valid test rounds.
+    execution_evidence: hasSuccess ? {
+      files_changed: ["src/test.ts"],
+      test_results: { passed: 1, failed: 0, skipped: 0 },
+      success_criteria_met: [],
+      success_criteria_remaining: [],
+      progress_estimate: 0.5,
+    } : undefined,
     ...opts,
   });
   return [
@@ -340,9 +350,11 @@ describe("Heartbeat & timeout", () => {
 
 describe("Circuit breaker & extraction", () => {
   it("circuit breaker triggers after consecutive failures", async () => {
-    // Generate failing outputs for 5+ rounds to trigger circuit breaker
-    const responses = Array.from({ length: 10 }, () =>
-      makeFailingOutput(["violated constraint X"]),
+    // Generate failing outputs for 5+ rounds to trigger circuit breaker.
+    // Each output has a UNIQUE violation message so enforcement R2
+    // (recurring violation) does not fire before the circuit breaker.
+    const responses = Array.from({ length: 10 }, (_, i) =>
+      makeFailingOutput([`violated constraint ${i}`]),
     );
 
     const result = await run({
@@ -351,11 +363,13 @@ describe("Circuit breaker & extraction", () => {
       maxRounds: 10,
     });
 
-    // Either circuit_breaker or max_rounds — depends on policy
+    // Either circuit_breaker or max_rounds or enforcement_terminated
+    // — depends on whether enforcement or circuit breaker fires first.
     assert.ok(
       result.stopReason === "circuit_breaker" ||
-        result.stopReason === "max_rounds",
-      `expected circuit_breaker or max_rounds, got ${result.stopReason}`,
+        result.stopReason === "max_rounds" ||
+        result.stopReason === "enforcement_terminated",
+      `expected circuit_breaker, max_rounds, or enforcement_terminated, got ${result.stopReason}`,
     );
   });
 

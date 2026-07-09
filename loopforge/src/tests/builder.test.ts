@@ -103,7 +103,9 @@ describe("Builder — Tier-gated routing", () => {
     assert.ok(["zero-shot", "few-shot", "zero-shot-cot", "few-shot-cot"].includes(analysis.technique));
   });
 
-  it("escalates to Tier 2 after consecutive failures", () => {
+  // v1.15: Tier escalation removed — Agent freely chooses at L2.
+  // Consecutive failures no longer force Tier 2 techniques.
+  it("stays in Tier 1 after consecutive failures (v1.15 — escalation removed)", () => {
     const vaultContext = {
       results: [
         {
@@ -121,8 +123,8 @@ describe("Builder — Tier-gated routing", () => {
       ],
     };
     const analysis = routeTechniqueAdaptive("Fix the encryption protocol security audit", vaultContext, "test-loop");
-    // Should be in Tier 2 (step-back / least-to-most / tree-of-thought)
-    assert.ok(["step-back", "least-to-most", "tree-of-thought"].includes(analysis.technique));
+    // Tier 1 only in normal round (no escalation)
+    assert.ok(["zero-shot", "few-shot", "zero-shot-cot", "few-shot-cot"].includes(analysis.technique));
   });
 });
 

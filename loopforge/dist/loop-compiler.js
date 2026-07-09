@@ -13,7 +13,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { getPolicy } from "./policy.js";
 import { AgentStatus, makeCheckpointSummary, makeLoopCompileResponse, makeLoopHealth, makeLoopObjective, makeRollingSummary, makeTaskAlignment, } from "./protocol.js";
-import { routeTechniqueAdaptive } from "./builder.js";
+import { routeTechniqueAdaptive, SKILLS_DIR } from "./builder.js";
 // ═══════════════════════════════════════════════════════════════════════════
 // Repair cue detection
 // ═══════════════════════════════════════════════════════════════════════════
@@ -251,6 +251,192 @@ function getRecentRounds(loopId, n, vaultContext) {
     rounds.sort((a, b) => b.round - a.round);
     return rounds.slice(0, n);
 }
+/** Extract the technique used in the most recent round before currentRound.
+ *  Scans vault entries for this loop_id and returns the technique_used field
+ *  from the highest round number below currentRound.
+ *  Returns null if no prior rounds exist (round 1 scenario). */
+function getPreviousTechnique(loopId, currentRound, vaultContext) {
+    if (vaultContext === null || currentRound <= 1)
+        return null;
+    const results = vaultContext.results || [];
+    if (!results.length)
+        return null;
+    let bestTechnique = null;
+    let bestRound = -1;
+    for (const r of results) {
+        const lineage = (r.loop_lineage || r.lineage || {});
+        if (lineage.loop_id !== loopId)
+            continue;
+        const rnd = lineage.round;
+        if (rnd >= currentRound || rnd <= bestRound)
+            continue;
+        // technique_used can be on the entry directly or in lineage
+        const technique = r.technique_used ??
+            lineage.technique_used ?? "";
+        if (technique) {
+            bestTechnique = technique;
+            bestRound = rnd;
+        }
+    }
+    return bestTechnique;
+}
+function techniqueChanged(loopId, newTechnique, currentRound, vaultContext) {
+    if (currentRound === 1)
+        return true; // Round 1: first selection is always a "change"
+    const prevTech = getPreviousTechnique(loopId, currentRound, vaultContext);
+    if (!prevTech)
+        return true; // No prior technique found → treat as change
+    return newTechnique !== prevTech;
+}
+/** Returns the mandatory state file read instruction that goes at the top
+ *  of every compiled prompt. Tells the agent to read the loop state file
+ *  before executing the round. */
+function renderStateFilePointer(loopId) {
+    return [
+        `⚠️ **BEFORE anything else**: Read \`.loopforge/state/${loopId}-state.md\``,
+        "for accumulated loop state — objective, constraints, progress, and cross-round summary.",
+        "This file is rewritten each round and is the single source of truth for loop state.",
+        "",
+    ].join("\n");
+}
+/** Render the full loop state file as markdown. Called by compileL2() every round.
+ *  The file is a snapshot — rewritten in full each round, not appended.
+ *  All sections have hard size caps from policy to prevent bloat.
+ *
+ *  Sections: Loop Objective, Progress, Cross-Round Summary, Active Constraints,
+ *  Checkpoints, Delegation Summary. */
+function renderStateFile(params) {
+    const lines = [];
+    const sfPolicy = getPolicy().state_file;
+    // ── Header ──
+    lines.push(`# LoopForge State — ${params.loopId}`);
+    lines.push("");
+    lines.push(`**Round**: ${params.currentRound}/${params.maxRounds}`);
+    lines.push("");
+    // ── Loop Objective ──
+    if (params.loopObjective) {
+        const lo = params.loopObjective;
+        lines.push("## Loop Objective");
+        if (lo.version && lo.version > 1) {
+            lines.push(`> Version ${lo.version}, created at Round ${lo.created_at_round}`);
+        }
+        lines.push("");
+        lines.push(`**Objective**: ${lo.objective}`);
+        lines.push("");
+        if (lo.success_criteria.length) {
+            lines.push("### Success Criteria");
+            for (const sc of lo.success_criteria) {
+                // Check if this criterion has been met (from execution_evidence)
+                lines.push(`- ${sc}`);
+            }
+            lines.push("");
+        }
+        if (lo.hard_constraints.length) {
+            lines.push("### Hard Constraints");
+            for (const hc of lo.hard_constraints) {
+                lines.push(`- ${hc}`);
+            }
+            lines.push("");
+        }
+    }
+    // ── Progress Dashboard ──
+    if (params.progressDashboard) {
+        lines.push(params.progressDashboard);
+        lines.push("");
+    }
+    // ── Cross-Round Summary ──
+    if (params.rollingSummary && params.rollingSummary.rounds_sampled > 0) {
+        const rs = params.rollingSummary;
+        const maxRounds = sfPolicy.max_summary_rounds;
+        lines.push(`## Cross-Round Summary (Last ${Math.min(rs.rounds_sampled, maxRounds)} Rounds)`);
+        lines.push("");
+        if (rs.key_outcomes.length) {
+            lines.push("**Key Outcomes**:");
+            for (const ko of rs.key_outcomes.slice(0, maxRounds)) {
+                lines.push(`- ${ko}`);
+            }
+            lines.push("");
+        }
+        if (rs.recurring_issues.length) {
+            lines.push("**Recurring Issues**:");
+            for (const ri of rs.recurring_issues) {
+                lines.push(`- ⚠️ ${ri}`);
+            }
+            lines.push("");
+        }
+        if (rs.failed_patterns && rs.failed_patterns.length) {
+            lines.push("**Failure Patterns**:");
+            for (const fp of rs.failed_patterns) {
+                lines.push(`- 🚫 ${fp}`);
+            }
+            lines.push("");
+        }
+    }
+    // ── Active Constraints ──
+    lines.push("## Active Constraints");
+    lines.push("");
+    if (params.constraints.length) {
+        for (const c of params.constraints) {
+            lines.push(`- ${c}`);
+        }
+    }
+    else {
+        lines.push("_(none)_");
+    }
+    lines.push("");
+    if (params.retiredConstraints.length) {
+        lines.push("## Retired Constraints");
+        lines.push("");
+        for (const c of params.retiredConstraints.slice(0, 10)) {
+            lines.push(`- ~${c}~`);
+        }
+        lines.push("");
+    }
+    // ── Checkpoints ──
+    if (params.checkpoints.length) {
+        const maxCp = sfPolicy.max_checkpoints;
+        const shown = params.checkpoints.slice(-maxCp).reverse(); // newest first
+        lines.push(`## Checkpoints (${shown.length})`);
+        lines.push("");
+        for (const cp of shown) {
+            lines.push(`### ${cp.label || `Round ${cp.declared_at_round}`}`);
+            lines.push(`> Declared at Round ${cp.declared_at_round}`);
+            lines.push("");
+            if (cp.outcome) {
+                lines.push(`**Outcome**: ${cp.outcome}`);
+                lines.push("");
+            }
+            if (cp.carried_constraints.length) {
+                lines.push("**Carried Constraints**:");
+                for (const cc of cp.carried_constraints) {
+                    lines.push(`- ${cc}`);
+                }
+                lines.push("");
+            }
+            if (cp.resolved_constraints.length) {
+                lines.push("**Resolved Constraints**:");
+                for (const rc of cp.resolved_constraints) {
+                    lines.push(`- ✅ ${rc}`);
+                }
+                lines.push("");
+            }
+        }
+    }
+    // ── Delegation Summary ──
+    if (params.delegationSummary) {
+        lines.push(params.delegationSummary);
+    }
+    // ── External Context (current round only) ──
+    if (params.externalContext) {
+        lines.push("---");
+        lines.push("");
+        lines.push("## External Context (This Round)");
+        lines.push("");
+        lines.push(params.externalContext);
+        lines.push("");
+    }
+    return lines.join("\n");
+}
 function getPreviousRoundTask(loopId, roundNum, vaultContext) {
     const prev = getPreviousRound(loopId, roundNum, vaultContext);
     return prev?.task ?? "";
@@ -297,13 +483,6 @@ function countConsecutiveHashMismatches(loopId, vaultContext) {
 }
 // ═══════════════════════════════════════════════════════════════════════════
 // Strategy collapse detection
-// ═══════════════════════════════════════════════════════════════════════════
-function strategyCollapse(loopId, vaultContext) {
-    const recent = getRecentRounds(loopId, 3, vaultContext);
-    if (recent.length < 3)
-        return false;
-    return recent.every((r) => r.success === false);
-}
 // ═══════════════════════════════════════════════════════════════════════════
 // Constraint Retirement (v3.5)
 // ═══════════════════════════════════════════════════════════════════════════
@@ -739,6 +918,116 @@ function loadLatestCheckpoint(loopId, currentRound, vaultContext) {
     });
 }
 // ═══════════════════════════════════════════════════════════════════════════
+// Shared state evolution (P0/P1/P5) — used by both compileL1 and compileL2
+// ═══════════════════════════════════════════════════════════════════════════
+/** Apply P1 objective refinement from last round's self-evaluation.
+ *  Appends the refinement to the objective with a round marker.
+ *  Returns the updated loop objective (or unchanged if no refinement). */
+function applyObjectiveRefinement(loopObjective, lastRoundResult, currentRound) {
+    if (!loopObjective || !lastRoundResult?.objective_refinement)
+        return loopObjective;
+    const refinement = lastRoundResult.objective_refinement.trim();
+    if (!refinement)
+        return loopObjective;
+    const version = (loopObjective.version ?? 1) + 1;
+    const history = [...(loopObjective.refinement_history ?? []), refinement];
+    const policy = getPolicy();
+    const maxVersions = policy.evolution?.max_objective_versions ?? 10;
+    const prunedHistory = history.slice(-maxVersions);
+    const refinedObjective = `${loopObjective.objective} [R${currentRound}: ${refinement}]`;
+    return makeLoopObjective({
+        ...loopObjective,
+        objective: refinedObjective,
+        version,
+        refinement_history: prunedHistory,
+    });
+}
+/** Apply P0 discovered constraints and P5 retractions/revisions.
+ *  Pure function — returns updated constraints, loop objective, and retired list. */
+function applyConstraintEvolution(constraints, loopObjective, lastRoundResult, currentRound) {
+    const retired = [];
+    let lo = loopObjective;
+    let cs = [...constraints];
+    // P0: Merge discovered constraints
+    if (lastRoundResult?.discovered_constraints?.length) {
+        const policy = getPolicy();
+        const maxPerRound = policy.evolution?.max_discovered_constraints_per_round ?? 5;
+        const maxActive = policy.evolution?.max_active_constraints ?? 15;
+        const newConstraints = lastRoundResult.discovered_constraints
+            .slice(0, maxPerRound)
+            .filter((c) => !cs.includes(c));
+        cs = [...cs, ...newConstraints].slice(0, maxActive);
+    }
+    // P5a: Retracted constraints
+    if (lastRoundResult?.retracted_constraints?.length) {
+        for (const rc of lastRoundResult.retracted_constraints) {
+            const idx = cs.indexOf(rc);
+            if (idx >= 0) {
+                cs.splice(idx, 1);
+                retired.push(`[agent-retracted] ${rc}`);
+            }
+        }
+    }
+    // P5b: Revised success criteria
+    if (lastRoundResult?.revised_success_criteria?.length && lo) {
+        const sc = [...lo.success_criteria];
+        for (const rev of lastRoundResult.revised_success_criteria) {
+            const idx = sc.indexOf(rev.old);
+            if (idx >= 0)
+                sc[idx] = rev.new;
+            else
+                sc.push(rev.new);
+        }
+        const version = (lo.version ?? 1) + 1;
+        const history = [
+            ...(lo.refinement_history ?? []),
+            `R${currentRound}: revised ${lastRoundResult.revised_success_criteria.length} success criteria`,
+        ];
+        const updatedLo = makeLoopObjective({
+            ...lo,
+            success_criteria: sc,
+            version,
+            refinement_history: history,
+        });
+        // Rebuild constraints to include revised criteria, deduplicate
+        cs = [...new Set([
+                ...cs.filter((c) => !updatedLo.hard_constraints.includes(c) && !updatedLo.success_criteria.includes(c)),
+                ...updatedLo.hard_constraints,
+                ...updatedLo.success_criteria,
+            ])];
+        lo = updatedLo;
+    }
+    return { constraints: cs, loopObjective: lo, retired };
+}
+/** Collect checkpoint summaries from vault entries for a given loop.
+ *  Shared between compileL1 and compileL2 — same vault scanning logic. */
+function collectVaultCheckpoints(vaultContext, loopId, excludeRounds) {
+    const checkpoints = [];
+    if (!vaultContext)
+        return checkpoints;
+    const results = vaultContext.results || [];
+    for (const r of results) {
+        const lineage = (r.loop_lineage || r.lineage || {});
+        if (lineage.loop_id !== loopId)
+            continue;
+        const cp = r.checkpoint_summary;
+        if (cp && typeof cp.declared_at_round === "number") {
+            if (excludeRounds?.has(cp.declared_at_round))
+                continue;
+            if (checkpoints.some((c) => c.declared_at_round === cp.declared_at_round))
+                continue;
+            checkpoints.push(makeCheckpointSummary({
+                label: cp.label ?? "",
+                declared_at_round: cp.declared_at_round,
+                outcome: cp.outcome ?? "",
+                carried_constraints: cp.carried_constraints ?? [],
+                resolved_constraints: cp.resolved_constraints ?? [],
+            }));
+        }
+    }
+    return checkpoints;
+}
+// ═══════════════════════════════════════════════════════════════════════════
 // External Context formatting (v1.7 — memory system integration)
 // ═══════════════════════════════════════════════════════════════════════════
 /** Format an external context string for injection into an L2 prompt.
@@ -779,43 +1068,35 @@ export function decideLevel(request, vaultContext) {
             return request.force_level;
         }
     }
-    // Gate 2: First call or explicit plan input → full rebuild
-    if (request.round === 1 || request.plan_source) {
+    // ── L2 triggers: structural restarts ──────────────────────────────────
+    // Gate 2: First call or explicit plan → full rebuild
+    if (request.round === 1 || request.plan_source)
         return "l2";
-    }
-    // Derive goal_id
+    // Gate 3: Checkpoint boundary — subtask completed, re-plan
+    if (request.last_round_result?.compression_checkpoint === true)
+        return "l2";
+    // Gate 4: goal_id stability
     const goalId = deriveGoalId(request.loop_id, request.task, request.goal_id);
     const prev = getPreviousRound(request.loop_id, request.round - 1, vaultContext);
     if (prev === null)
         return "l2";
-    // Gate 3: goal_id stability
     if (goalId !== prev.goal_id)
         return "l2";
-    // Gate 4: P0–P5 cognitive evolution signals → full recompile (v1.7)
-    // Check BEFORE the simple repair/new-constraint gates because evolution signals
-    // (constraint discovery, objective refinement, self-correction) need full L2
-    // processing. Only structural evolution signals trigger L2 — execution_evidence
-    // alone does not (it is processed via the rolling summary at L1).
-    if (request.last_round_result) {
-        const lr = request.last_round_result;
-        if ((lr.discovered_constraints?.length ?? 0) > 0 ||
-            (lr.objective_refinement?.trim().length ?? 0) > 0 ||
-            (lr.emerged_subtasks?.length ?? 0) > 0 ||
-            (lr.retracted_constraints?.length ?? 0) > 0 ||
-            (lr.revised_success_criteria?.length ?? 0) > 0 ||
-            (lr.wrong_assumptions?.length ?? 0) > 0) {
-            return "l2";
-        }
-    }
-    // Gate 5: Explicit failures or new constraints → patch
-    const hasNewConstraints = request.constraints_from_plan.length > 0;
-    const hasNewFailures = request.last_round_result !== null &&
-        !request.last_round_result.success;
-    const hasRepair = detectsRepairSignal(request);
-    if (hasNewConstraints || hasNewFailures || hasRepair)
-        return "l1";
-    // Nothing triggered → fast path
-    return "l0";
+    // ── L0 trigger: honest failure with no new information ────────────────
+    const lr = request.last_round_result;
+    const prevFailed = lr !== null && !lr.success;
+    const hasNoNewInfo = (lr?.discovered_constraints?.length ?? 0) === 0 &&
+        (lr?.objective_refinement?.trim().length ?? 0) === 0 &&
+        (lr?.emerged_subtasks?.length ?? 0) === 0 &&
+        (lr?.retracted_constraints?.length ?? 0) === 0 &&
+        (lr?.revised_success_criteria?.length ?? 0) === 0 &&
+        (lr?.wrong_assumptions?.length ?? 0) === 0 &&
+        request.constraints_from_plan.length === 0 &&
+        !detectsRepairSignal(request);
+    if (prevFailed && hasNoNewInfo)
+        return "l0";
+    // ── L1: default path — all P0-P5 state changes handled here ───────────
+    return "l1";
 }
 // ═══════════════════════════════════════════════════════════════════════════
 // LAYER 2 — Soft Advisories (NEVER change compile level)
@@ -976,11 +1257,6 @@ export function computeAdvisories(request, vaultContext) {
     if (prev && currentHash !== prev.goal_text_hash && prev.goal_text_hash) {
         warnings.push(`goal_text_hash changed (${prev.goal_text_hash} → ${currentHash}) ` +
             "but goal_id matched — wording drift detected");
-    }
-    // Strategy collapse check
-    if (strategyCollapse(request.loop_id, vaultContext)) {
-        warnings.push("strategy_collapse: 3 consecutive failed rounds — " +
-            "consider force_level=L2 rebuild");
     }
     // Repair cue detection
     if (detectsRepairSignal(request)) {
@@ -1170,6 +1446,96 @@ function computeLoopObjectiveFromTask(request, _vaultContext) {
     });
 }
 // ═══════════════════════════════════════════════════════════════════════════
+// P4: Shared consistency checks and progress dashboard (used by L1 & L2)
+// ═══════════════════════════════════════════════════════════════════════════
+/** Run P4 consistency validation checks on agent execution evidence.
+ *  Returns warning strings. Called by both compileL1 and compileL2.
+ *  Three checks:
+ *    1. Agent claims file changes but files_changed is empty
+ *    2. Agent reports success but test results show failures
+ *    3. Progress estimate mismatch (objective vs subjective) */
+function runP4ConsistencyChecks(evidence, outputSummary, success, loopObjective) {
+    const warnings = [];
+    // Check 1: Agent claims action but reports no files changed
+    if (evidence.files_changed.length === 0 && outputSummary) {
+        const actionWords = /\b(fix|modif|chang|updat|refactor|implement|add|remov|delet|rewrit|修补|修改|更改|更新|重构|实现|添加|删除|重写)\b/i;
+        if (actionWords.test(outputSummary)) {
+            warnings.push("P4: Agent output claims changes but execution_evidence.files_changed is empty — possible oversight");
+        }
+    }
+    // Check 2: Agent reports success but tests failed
+    if (evidence.test_results && evidence.test_results.failed > 0 && success) {
+        warnings.push(`P4: Agent reports success=true but ${evidence.test_results.failed} tests failed — claims may not match reality`);
+    }
+    // Check 3: Progress estimate mismatch with criteria tracking
+    if (loopObjective && loopObjective.success_criteria.length > 0) {
+        const metCount = evidence.success_criteria_met.length;
+        const totalCount = loopObjective.success_criteria.length;
+        const objectiveProgress = totalCount > 0 ? metCount / totalCount : 0;
+        const subjectiveProgress = evidence.progress_estimate;
+        const policy = getPolicy();
+        const mismatchThreshold = policy.evolution?.progress_mismatch_threshold ?? 0.3;
+        if (Math.abs(objectiveProgress - subjectiveProgress) > mismatchThreshold) {
+            warnings.push(`P4: Progress estimate mismatch — agent estimates ${(subjectiveProgress * 100).toFixed(0)}% but ${metCount}/${totalCount} criteria met (${(objectiveProgress * 100).toFixed(0)}%)`);
+        }
+    }
+    return warnings;
+}
+/** Build a progress dashboard string for prompt or state file injection.
+ *  Used by both compileL1 and compileL2. When showTrend is true, also
+ *  computes a trend arrow from vault history (L2 path). */
+function buildProgressDashboard(evidence, loopObjective, vaultContext, loopId, currentRound, showTrend) {
+    const totalCriteria = loopObjective?.success_criteria.length ?? 0;
+    const metCriteria = evidence.success_criteria_met.length;
+    const remainingCriteria = evidence.success_criteria_remaining;
+    const objProgress = totalCriteria > 0 ? metCriteria / totalCriteria : evidence.progress_estimate;
+    const subjProgress = evidence.progress_estimate;
+    const lines = [
+        "",
+        "### Progress Dashboard",
+        "",
+        `**Overall**: ${metCriteria}/${totalCriteria} criteria met (${(objProgress * 100).toFixed(0)}%)`,
+    ];
+    if (Math.abs(objProgress - subjProgress) > 0.05) {
+        lines.push(`**Agent estimate**: ${(subjProgress * 100).toFixed(0)}%`);
+    }
+    if (evidence.files_changed.length) {
+        lines.push(`**Files changed**: ${evidence.files_changed.join(", ")}`);
+    }
+    if (evidence.test_results) {
+        const tr = evidence.test_results;
+        lines.push(`**Tests**: ${tr.passed} passed, ${tr.failed} failed, ${tr.skipped} skipped`);
+    }
+    if (remainingCriteria.length) {
+        lines.push("**Remaining criteria**:");
+        for (const rc of remainingCriteria.slice(0, 5)) {
+            lines.push(`- ${rc}`);
+        }
+        if (remainingCriteria.length > 5) {
+            lines.push(`- ... and ${remainingCriteria.length - 5} more`);
+        }
+    }
+    lines.push("");
+    // Trend arrow — only computed in L2 path where full vault history is available
+    if (showTrend && vaultContext && loopObjective) {
+        const prevEvidence = getPreviousRoundEvidence(loopId, currentRound - 1, vaultContext);
+        if (prevEvidence) {
+            const trend = objProgress - (prevEvidence.success_criteria_met.length / Math.max(totalCriteria, 1));
+            if (trend > 0.03) {
+                lines.push(`**Trend**: ↑ advancing (+${(trend * 100).toFixed(0)}% this round)`);
+            }
+            else if (trend > -0.03) {
+                lines.push("**Trend**: → stable");
+            }
+            else {
+                lines.push(`**Trend**: ↓ regressing (${(trend * 100).toFixed(0)}% this round)`);
+            }
+            lines.push("");
+        }
+    }
+    return lines.join("\n");
+}
+// ═══════════════════════════════════════════════════════════════════════════
 // Compilation — L0 / L1 / L2
 // ═══════════════════════════════════════════════════════════════════════════
 function compileL0(request, vaultContext, prevRound) {
@@ -1202,100 +1568,169 @@ function compileL0(request, vaultContext, prevRound) {
     return l2Response;
 }
 function compileL1(request, vaultContext, prevRound) {
-    const prev = prevRound ??
-        getPreviousRound(request.loop_id, request.round - 1, vaultContext);
     const goalId = deriveGoalId(request.loop_id, request.task, request.goal_id);
-    const newConstraints = [...request.constraints_from_plan];
-    let activeRaw = [...(prev?.constraints_active ?? []), ...newConstraints];
-    // Deduplicate preserving order
-    activeRaw = [...new Set(activeRaw)];
-    // v3.5: Constraint retirement
-    const { active, retired } = computeConstraintRetirement(activeRaw, request.loop_id, request.round, vaultContext);
-    // v3.5: Rolling summary
+    const lr = request.last_round_result;
+    // ── v1.14: Technique routing (Tier 1 only — 4 techniques) ────────────
+    // L1 is the default path: technique evolves within Tier 1 unless
+    // decideLevel already escalated to L2 (strategy collapse / checkpoint).
+    const analysis = routeTechniqueAdaptive(request.task, vaultContext, request.loop_id, 
+    /* isCheckpoint */ false);
+    const technique = analysis.technique;
+    const referenceFile = analysis.reference_file;
+    // Determine if technique changed from last round
+    const techChanged = techniqueChanged(request.loop_id, technique, request.round, vaultContext);
+    // ── Loop Objective: load from vault, apply P1 refinement ─────────────
+    let loopObjective = null;
+    const vaultLo = vaultGetLoopObjective(request.loop_id, vaultContext);
+    if (vaultLo) {
+        const loData = vaultLo.loop_objective;
+        if (loData) {
+            loopObjective = makeLoopObjective({
+                objective: loData.objective ?? "",
+                success_criteria: loData.success_criteria ?? [],
+                hard_constraints: loData.hard_constraints ?? [],
+                created_at_round: loData.created_at_round ?? 1,
+                loop_id: loData.loop_id ?? request.loop_id,
+                version: loData.version ?? 1,
+                refinement_history: loData.refinement_history ?? [],
+            });
+        }
+    }
+    if (!loopObjective && request.loop_objective) {
+        loopObjective = request.loop_objective;
+    }
+    // P1: Apply objective refinement (shared)
+    loopObjective = applyObjectiveRefinement(loopObjective, lr, request.round);
+    // ── Build active constraints (base + LO) ─────────────────────────────
+    let constraints = [...request.constraints_from_plan];
+    if (loopObjective) {
+        constraints = [
+            ...new Set([
+                ...constraints,
+                ...loopObjective.hard_constraints,
+                ...loopObjective.success_criteria,
+            ]),
+        ];
+    }
+    // ── P0/P5: Constraint evolution (shared) ─────────────────────────────
+    const { constraints: evolvedCs, loopObjective: evolvedLo, retired } = applyConstraintEvolution(constraints, loopObjective, lr, request.round);
+    constraints = evolvedCs;
+    loopObjective = evolvedLo;
+    // ── Constraint retirement ────────────────────────────────────────────
+    const { active, retired: autoRetired } = computeConstraintRetirement(constraints, request.loop_id, request.round, vaultContext);
+    for (const r of autoRetired) {
+        if (!retired.includes(r))
+            retired.push(r);
+    }
+    // ── Rolling summary + P5c wrong assumptions ──────────────────────────
     const rollingSummary = buildRollingSummary(request.loop_id, request.round, vaultContext);
+    if (lr?.wrong_assumptions?.length) {
+        if (rollingSummary) {
+            rollingSummary.key_outcomes = [
+                ...rollingSummary.key_outcomes,
+                ...lr.wrong_assumptions.map((a) => `Wrong assumption corrected: ${a}`),
+            ];
+        }
+    }
     const rollingText = formatRollingSummaryForPrompt(rollingSummary);
-    const violations = request.last_round_result?.constraint_violations ?? [];
+    // ── P2: Emerged subtasks → suggested next task ───────────────────────
+    let suggestedNextTask = "";
+    if (lr?.emerged_subtasks?.length) {
+        suggestedNextTask = lr.emerged_subtasks.slice(0, 3).join("; ");
+    }
+    // ── P4: Consistency validation ───────────────────────────────────────
+    const evidence = lr?.execution_evidence;
+    const warnings = evidence
+        ? runP4ConsistencyChecks(evidence, lr.output_summary, lr.success, loopObjective)
+        : [];
+    // ── Route to specialist (all 4 techniques available via Tier 1) ──────
+    let prompt;
+    if (technique === "step-back") {
+        prompt = compileStepBack(request, goalId, active, loopObjective, rollingText, analysis, { embedSkeleton: techChanged, level: "l1" });
+    }
+    else if (technique === "least-to-most") {
+        prompt = compileLeastToMost(request, goalId, active, loopObjective, rollingText, analysis, { embedSkeleton: techChanged, level: "l1" });
+    }
+    else if (technique === "tree-of-thought") {
+        prompt = compileToT(request, goalId, active, loopObjective, rollingText, analysis, { embedSkeleton: techChanged, level: "l1" });
+    }
+    else {
+        prompt = compileGeneric(request, goalId, active, loopObjective, rollingText, analysis, referenceFile, technique, { embedSkeleton: techChanged, level: "l1" });
+    }
+    // ── P4: Progress Dashboard ───────────────────────────────────────────
+    const progressDashboard = (evidence && loopObjective)
+        ? buildProgressDashboard(evidence, loopObjective, vaultContext, request.loop_id, request.round, /* showTrend */ false)
+        : "";
+    // ── v1.14: Render state file ─────────────────────────────────────────
+    const sfPolicy = getPolicy().state_file;
+    let stateFileContent;
+    if (sfPolicy.enabled) {
+        const allCheckpoints = collectVaultCheckpoints(vaultContext, request.loop_id);
+        const delegationSummary = vaultContext
+            ? buildDelegationSummary(vaultContext)
+            : "";
+        stateFileContent = renderStateFile({
+            loopId: request.loop_id,
+            currentRound: request.round,
+            maxRounds: request.max_rounds ?? sfPolicy.max_summary_rounds * 2,
+            loopObjective,
+            rollingSummary,
+            constraints: active,
+            retiredConstraints: retired,
+            checkpoints: allCheckpoints,
+            delegationSummary,
+            progressDashboard,
+            externalContext: request.external_context,
+        });
+        prompt = renderStateFilePointer(request.loop_id) + "\n" + prompt;
+    }
+    // ── Build thin diff ──────────────────────────────────────────────────
+    const violations = lr?.constraint_violations ?? [];
     const diffParts = [];
-    if (newConstraints.length) {
-        diffParts.push(`new constraints: [${newConstraints.join(", ")}]`);
+    if (request.constraints_from_plan.length) {
+        diffParts.push(`new constraints: [${request.constraints_from_plan.join(", ")}]`);
     }
     if (retired.length) {
         diffParts.push(`retired constraints: [${retired.join(", ")}]`);
     }
     if (violations.length) {
-        diffParts.push(`violations from last round: [${violations.join(", ")}]`);
+        diffParts.push(`violations: [${violations.join(", ")}]`);
     }
     if (request.new_since_last_round) {
         diffParts.push(`delta: ${request.new_since_last_round.slice(0, 200)}`);
     }
-    // Build patched prompt
-    const lines = [
-        `## Loop Round ${request.round} — L1 Patch`,
-        "",
-        `**Goal**: ${request.task}`,
-        `**Loop ID**: ${request.loop_id}`,
-        `**Goal ID**: ${goalId}`,
-        "",
-    ];
-    if (rollingText) {
-        lines.push(rollingText);
-        lines.push("");
-    }
-    if (active.length) {
-        lines.push("### Active Constraints (inherited + new, pruned)");
-        for (const c of active)
-            lines.push(`- ${c}`);
-        lines.push("");
-    }
-    if (retired.length) {
-        lines.push("### Retired Constraints (no recent activity)");
-        for (const c of retired)
-            lines.push(`- ~${c}~`);
-        lines.push("");
-    }
-    if (violations.length) {
-        lines.push("### Violations From Last Round (must fix)");
-        for (const v of violations)
-            lines.push(`- ${v}`);
-        lines.push("");
-    }
-    if (request.new_since_last_round) {
-        lines.push("### What Changed Since Last Round");
-        lines.push(request.new_since_last_round);
-        lines.push("");
-    }
-    if (request.last_round_result?.output_summary) {
-        lines.push("### Last Round Summary");
-        lines.push(request.last_round_result.output_summary);
-        lines.push("");
-    }
-    lines.push("### Task");
-    lines.push(request.task);
+    // v1.14: When state file is enabled, progressDashboard lives in the state
+    // file (see renderStateFile above). Only inline it in the prompt when the
+    // state file is disabled — this keeps the prompt truly thin.
+    const finalPrompt = sfPolicy.enabled ? prompt : prompt + progressDashboard;
     return makeLoopCompileResponse({
         status: AgentStatus.OK,
-        prompt: lines.join("\n"),
+        prompt: finalPrompt,
         recompile_level: "l1",
-        diff_from_previous: diffParts.length ? diffParts.join("; ") : "Patch applied.",
+        diff_from_previous: diffParts.length ? diffParts.join("; ") : "L1 continue — state updated in file.",
         lineage: [`${request.loop_id}:r${request.round}`],
         constraints_active: active,
         constraints_retired: retired,
-        technique_used: "patch",
+        technique_used: technique,
+        reference_file: referenceFile,
         rolling_summary: rollingSummary,
         loop_id: request.loop_id,
         round: request.round,
         goal_id: goalId,
         goal_text_hash: computeGoalTextHash(request.task),
+        loop_objective: loopObjective,
         plan_source: request.plan_source,
-        warnings: [],
+        suggested_next_task: suggestedNextTask,
+        warnings,
+        state_file_content: stateFileContent,
     });
 }
 export function compileL2(request, vaultContext) {
     const goalId = deriveGoalId(request.loop_id, request.task, request.goal_id);
-    // v4.0: Tier-gated technique routing
-    const isCheckpoint = request.last_round_result?.compression_checkpoint === true;
-    const analysis = routeTechniqueAdaptive(request.task, vaultContext, request.loop_id, isCheckpoint);
-    const technique = analysis.technique;
-    const referenceFile = analysis.reference_file;
+    // v1.15: L2 no longer auto-selects a technique. The Agent reads the technique
+    // catalog (skills/prompt-techniques/SKILL.md), freely chooses the best fit
+    // based on loop state, reads the corresponding reference file, and applies
+    // it directly to the task.
     // v1.10: Checkpoint — load existing or build new from last round's self-eval
     let checkpointSummary = null;
     let checkpointRound = 0;
@@ -1359,26 +1794,9 @@ export function compileL2(request, vaultContext) {
             loopObjective = request.loop_objective;
         }
     }
-    // ── P1: Apply objective_refinement from last round ──
-    if (loopObjective && request.last_round_result?.objective_refinement) {
-        const refinement = request.last_round_result.objective_refinement.trim();
-        if (refinement) {
-            const version = (loopObjective.version ?? 1) + 1;
-            const history = [...(loopObjective.refinement_history ?? []), refinement];
-            // Enforce max versions from policy
-            const policy = getPolicy();
-            const maxVersions = policy.evolution?.max_objective_versions ?? 10;
-            const prunedHistory = history.slice(-maxVersions);
-            const refinedObjective = `${loopObjective.objective} [R${request.round}: ${refinement}]`;
-            loopObjective = makeLoopObjective({
-                ...loopObjective,
-                objective: refinedObjective,
-                version,
-                refinement_history: prunedHistory,
-            });
-        }
-    }
-    // ── Build active constraints (base + LO + P0 discovered) ──
+    // ── P1: Apply objective refinement (shared) ──
+    loopObjective = applyObjectiveRefinement(loopObjective, lr, request.round);
+    // ── Build active constraints (base + LO) ──
     let constraints = [...request.constraints_from_plan];
     if (loopObjective) {
         constraints = [
@@ -1389,63 +1807,14 @@ export function compileL2(request, vaultContext) {
             ]),
         ];
     }
-    // P0: Merge discovered constraints from last round
-    if (request.last_round_result?.discovered_constraints?.length) {
-        const policy = getPolicy();
-        const maxPerRound = policy.evolution?.max_discovered_constraints_per_round ?? 5;
-        const maxActive = policy.evolution?.max_active_constraints ?? 15;
-        const newConstraints = request.last_round_result.discovered_constraints
-            .slice(0, maxPerRound)
-            .filter((c) => !constraints.includes(c));
-        constraints = [...constraints, ...newConstraints].slice(0, maxActive);
-    }
     // ═══════════════════════════════════════════════════════════════════════════
-    // P5: Self-correction — MUST process retractions/revisions BEFORE prompt build
-    // so the technician compiler sees the corrected constraints and loop objective.
+    // P0/P5: Constraint evolution (shared) — retractions/revisions BEFORE prompt
     // ═══════════════════════════════════════════════════════════════════════════
     const warnings = [];
-    const retired = [];
-    // P5a: Retracted constraints — remove from active set
-    if (lr?.retracted_constraints?.length) {
-        for (const rc of lr.retracted_constraints) {
-            const idx = constraints.indexOf(rc);
-            if (idx >= 0) {
-                constraints.splice(idx, 1);
-                retired.push(`[agent-retracted] ${rc}`);
-            }
-        }
-    }
-    // P5b: Revised success criteria — update Loop Objective
-    if (lr?.revised_success_criteria?.length && loopObjective) {
-        const sc = [...loopObjective.success_criteria];
-        for (const rev of lr.revised_success_criteria) {
-            const idx = sc.indexOf(rev.old);
-            if (idx >= 0) {
-                sc[idx] = rev.new;
-            }
-            else {
-                sc.push(rev.new);
-            }
-        }
-        const version = (loopObjective.version ?? 1) + 1;
-        const history = [
-            ...(loopObjective.refinement_history ?? []),
-            `R${request.round}: revised ${lr.revised_success_criteria.length} success criteria`,
-        ];
-        const updatedLo = makeLoopObjective({
-            ...loopObjective,
-            success_criteria: sc,
-            version,
-            refinement_history: history,
-        });
-        // Rebuild constraints to include revised criteria
-        constraints = [...new Set([
-                ...constraints.filter((c) => !updatedLo.hard_constraints.includes(c) && !updatedLo.success_criteria.includes(c)),
-                ...updatedLo.hard_constraints,
-                ...updatedLo.success_criteria,
-            ])];
-        loopObjective = updatedLo;
-    }
+    const evoResult = applyConstraintEvolution(constraints, loopObjective, lr, request.round);
+    constraints = evoResult.constraints;
+    loopObjective = evoResult.loopObjective;
+    const retired = evoResult.retired;
     // ── v1.10: Build checkpoint summary if last round declared one ──
     if (checkpointRound > 0 && !checkpointSummary && lr) {
         // checkpointRound was set but no summary yet → fresh declaration
@@ -1461,20 +1830,11 @@ export function compileL2(request, vaultContext) {
         };
         checkpointSummary = buildCheckpointSummary(synthEval, checkpointRound, constraints, retired);
     }
-    // ── Route to technique-specific specialist (v1.1 deep integration) ──
-    let prompt;
-    if (technique === "step-back") {
-        prompt = compileStepBack(request, goalId, constraints, loopObjective, rollingText, analysis);
-    }
-    else if (technique === "least-to-most") {
-        prompt = compileLeastToMost(request, goalId, constraints, loopObjective, rollingText, analysis);
-    }
-    else if (technique === "tree-of-thought") {
-        prompt = compileToT(request, goalId, constraints, loopObjective, rollingText, analysis);
-    }
-    else {
-        prompt = compileGeneric(request, goalId, constraints, loopObjective, rollingText, analysis, referenceFile, technique);
-    }
+    // ── v1.15: Build L2 prompt with Technique Selection block ──
+    // The Agent freely chooses a technique by reading the catalog and reference
+    // files. LoopForge provides the loop state (objective, constraints, rolling
+    // summary) — the Agent provides the reasoning strategy.
+    let prompt = buildL2Prompt(request, goalId, constraints, loopObjective, rollingText);
     // ── v1.10: Inject checkpoint block (before rolling summary in prompt) ──
     // The checkpoint is rendered before the external context so it appears
     // in a natural position: after Loop Objective, before Cross-Round Summary.
@@ -1498,29 +1858,7 @@ export function compileL2(request, vaultContext) {
     // ═══════════════════════════════════════════════════════════════════════════
     const evidence = lr?.execution_evidence;
     if (evidence) {
-        // Check 1: Agent claims action but reports no files changed
-        if (evidence.files_changed.length === 0 && lr.output_summary) {
-            const actionWords = /\b(fix|modif|chang|updat|refactor|implement|add|remov|delet|rewrit|修补|修改|更改|更新|重构|实现|添加|删除|重写)\b/i;
-            if (actionWords.test(lr.output_summary)) {
-                warnings.push("P4: Agent output claims changes but execution_evidence.files_changed is empty — possible oversight");
-            }
-        }
-        // Check 2: Agent reports success but tests failed
-        if (evidence.test_results && evidence.test_results.failed > 0 && lr.success) {
-            warnings.push(`P4: Agent reports success=true but ${evidence.test_results.failed} tests failed — claims may not match reality`);
-        }
-        // Check 3: Progress estimate mismatch with criteria tracking
-        if (loopObjective && loopObjective.success_criteria.length > 0) {
-            const metCount = evidence.success_criteria_met.length;
-            const totalCount = loopObjective.success_criteria.length;
-            const objectiveProgress = totalCount > 0 ? metCount / totalCount : 0;
-            const subjectiveProgress = evidence.progress_estimate;
-            const policy = getPolicy();
-            const mismatchThreshold = policy.evolution?.progress_mismatch_threshold ?? 0.3;
-            if (Math.abs(objectiveProgress - subjectiveProgress) > mismatchThreshold) {
-                warnings.push(`P4: Progress estimate mismatch — agent estimates ${(subjectiveProgress * 100).toFixed(0)}% but ${metCount}/${totalCount} criteria met (${(objectiveProgress * 100).toFixed(0)}%)`);
-            }
-        }
+        warnings.push(...runP4ConsistencyChecks(evidence, lr.output_summary, lr.success, loopObjective));
     }
     // ═══════════════════════════════════════════════════════════════════════════
     // P4: Progress gradient — early stall detection
@@ -1544,70 +1882,56 @@ export function compileL2(request, vaultContext) {
     // ═══════════════════════════════════════════════════════════════════════════
     // P4: Build Progress Dashboard for prompt injection
     // ═══════════════════════════════════════════════════════════════════════════
-    let progressDashboard = "";
-    if (evidence && loopObjective) {
-        const totalCriteria = loopObjective.success_criteria.length;
-        const metCriteria = evidence.success_criteria_met.length;
-        const remainingCriteria = evidence.success_criteria_remaining;
-        const objProgress = totalCriteria > 0 ? metCriteria / totalCriteria : evidence.progress_estimate;
-        const subjProgress = evidence.progress_estimate;
-        const lines = [
-            "",
-            "### Progress Dashboard",
-            "",
-            `**Overall**: ${metCriteria}/${totalCriteria} criteria met (${(objProgress * 100).toFixed(0)}%)`,
-        ];
-        if (Math.abs(objProgress - subjProgress) > 0.05) {
-            lines.push(`**Agent estimate**: ${(subjProgress * 100).toFixed(0)}%`);
-        }
-        if (evidence.files_changed.length) {
-            lines.push(`**Files changed**: ${evidence.files_changed.join(", ")}`);
-        }
-        if (evidence.test_results) {
-            const tr = evidence.test_results;
-            lines.push(`**Tests**: ${tr.passed} passed, ${tr.failed} failed, ${tr.skipped} skipped`);
-        }
-        if (remainingCriteria.length) {
-            lines.push("**Remaining criteria**:");
-            for (const rc of remainingCriteria.slice(0, 5)) {
-                lines.push(`- ${rc}`);
-            }
-            if (remainingCriteria.length > 5) {
-                lines.push(`- ... and ${remainingCriteria.length - 5} more`);
-            }
-        }
-        lines.push("");
-        // Compute trend from previous round
-        if (vaultContext) {
-            const prevEvidence = getPreviousRoundEvidence(request.loop_id, request.round - 1, vaultContext);
-            if (prevEvidence) {
-                const trend = objProgress - (prevEvidence.success_criteria_met.length / Math.max(totalCriteria, 1));
-                if (trend > 0.03) {
-                    lines.push(`**Trend**: ↑ advancing (+${(trend * 100).toFixed(0)}% this round)`);
-                }
-                else if (trend > -0.03) {
-                    lines.push("**Trend**: → stable");
-                }
-                else {
-                    lines.push(`**Trend**: ↓ regressing (${(trend * 100).toFixed(0)}% this round)`);
-                }
-                lines.push("");
-            }
-        }
-        progressDashboard = lines.join("\n");
+    const progressDashboard = (evidence && loopObjective)
+        ? buildProgressDashboard(evidence, loopObjective, vaultContext, request.loop_id, request.round, /* showTrend */ true)
+        : "";
+    // ── v1.14: Render state file ──────────────────────────────────────────
+    // Collect all accumulated state and render it as a markdown snapshot.
+    // The caller writes this to .loopforge/state/{loopId}-state.md.
+    const sfPolicy = getPolicy().state_file;
+    let stateFileContent;
+    if (sfPolicy.enabled) {
+        const excludeRounds = checkpointSummary
+            ? new Set([checkpointSummary.declared_at_round])
+            : undefined;
+        const allCheckpoints = collectVaultCheckpoints(vaultContext, request.loop_id, excludeRounds);
+        if (checkpointSummary)
+            allCheckpoints.unshift(checkpointSummary);
+        const delegationSummary = vaultContext
+            ? buildDelegationSummary(vaultContext)
+            : "";
+        stateFileContent = renderStateFile({
+            loopId: request.loop_id,
+            currentRound: request.round,
+            maxRounds: request.max_rounds ?? sfPolicy.max_summary_rounds * 2,
+            loopObjective,
+            rollingSummary,
+            constraints,
+            retiredConstraints: retired,
+            checkpoints: allCheckpoints,
+            delegationSummary,
+            progressDashboard,
+            externalContext: request.external_context,
+        });
+        // Prepend state file pointer to the prompt
+        prompt = renderStateFilePointer(request.loop_id) + "\n" + prompt;
     }
+    // v1.14: When state file is enabled, progressDashboard lives in the state
+    // file (see renderStateFile above). Only inline it in the prompt when the
+    // state file is disabled — this keeps the prompt truly thin.
+    const finalPrompt = sfPolicy.enabled ? prompt : prompt + progressDashboard;
     return makeLoopCompileResponse({
         status: AgentStatus.OK,
-        prompt: prompt + progressDashboard,
+        prompt: finalPrompt,
         recompile_level: "l2",
         diff_from_previous: request.round === 1 || request.plan_source
             ? "Full recompile — new goal or first call."
-            : "Full recompile — goal_id changed or strategy collapse.",
+            : "Full recompile — goal_id changed or checkpoint boundary.",
         lineage: [`${request.loop_id}:r${request.round}`],
         constraints_active: constraints,
         constraints_retired: retired,
-        technique_used: technique,
-        reference_file: referenceFile,
+        technique_used: "agent-selected",
+        reference_file: `${SKILLS_DIR}/prompt-techniques/SKILL.md`,
         rolling_summary: rollingSummary,
         checkpoint_summary: checkpointSummary,
         loop_id: request.loop_id,
@@ -1618,11 +1942,51 @@ export function compileL2(request, vaultContext) {
         plan_source: request.plan_source,
         suggested_next_task: suggestedNextTask,
         warnings,
+        state_file_content: stateFileContent,
     });
 }
-function buildHeader(ctx, technique) {
+// ═══════════════════════════════════════════════════════════════════════════
+// L2 Prompt Builder (v1.15 — Agent technique autonomy)
+// ═══════════════════════════════════════════════════════════════════════════
+/** Build the L2 restart prompt with a Technique Selection block.
+ *  The Agent reads the technique catalog (SKILL.md), freely chooses the best
+ *  technique based on loop state, reads the corresponding reference file, and
+ *  applies it directly to the task. LoopForge provides context — the Agent
+ *  provides the reasoning strategy. */
+function buildL2Prompt(request, goalId, constraints, loopObjective, rollingText) {
+    const ctx = {
+        request, goalId, constraints, loopObjective, rollingText, level: "l2",
+    };
     const lines = [
-        `## LoopForge L2 Compile — Round ${ctx.request.round}`,
+        `## LoopForge L2 Compile — Round ${request.round}`,
+        "",
+    ];
+    // Cross-round summary
+    if (rollingText) {
+        lines.push(rollingText);
+        lines.push("");
+    }
+    // Technique Selection — Agent freely chooses
+    lines.push("### Technique Selection", "", "This is a strategy restart point. Read the technique catalog to choose", "the best reasoning approach for this round:", "", `  \`${SKILLS_DIR}/prompt-techniques/SKILL.md\``, "", "Based on the loop state (state file + context below), freely select", "the technique that best fits this round's challenge. Then read the", "full reference for your chosen technique:", "", `  \`${SKILLS_DIR}/prompt-techniques/references/<chosen>.md\``, "", "Apply the technique's method directly to the task — do NOT generate", "an intermediate prompt. Execute the task using the chosen technique", "as your thinking framework.", "");
+    // Loop Objective
+    lines.push(...buildLoopObjectiveBlock(loopObjective));
+    // Active Constraints
+    lines.push(...buildConstraintsBlock(constraints));
+    // Plan Source
+    if (request.plan_source) {
+        lines.push(`**Plan Source**: ${request.plan_source}`);
+        lines.push("");
+    }
+    // Task
+    lines.push(...buildTaskBlock(ctx));
+    // Loop Identity
+    lines.push(...buildIdentityBlock(ctx));
+    return lines.join("\n");
+}
+function buildHeader(ctx, technique) {
+    const levelLabel = ctx.level.toUpperCase();
+    const lines = [
+        `## LoopForge ${levelLabel} Compile — Round ${ctx.request.round}`,
         `**Technique**: ${technique} (embedded)`,
         "",
     ];
@@ -1683,240 +2047,85 @@ function buildIdentityBlock(ctx) {
     ];
 }
 /** Generic compiler — reads technique reference file (fallback for zero-shot/few-shot/cot). */
-function compileGeneric(request, goalId, constraints, loopObjective, rollingText, analysis, referenceFile, technique) {
-    const ctx = { request, goalId, constraints, loopObjective, rollingText };
+function compileGeneric(request, goalId, constraints, loopObjective, rollingText, analysis, referenceFile, technique, opts = {}) {
+    const embedSkeleton = opts.embedSkeleton !== false; // default true
+    const ctx = { request, goalId, constraints, loopObjective, rollingText, level: opts.level ?? "l2" };
     const lines = [
         ...buildHeader(ctx, technique),
-        `Read the technique reference BEFORE generating the prompt:`,
-        `  Technique:  ${technique}`,
-        `  Reference:  ${referenceFile}`,
-        `  Rationale:  ${analysis.rationale}`,
-        "",
-        ...buildLoopObjectiveBlock(loopObjective),
-        ...buildConstraintsBlock(constraints),
-        ...(request.plan_source ? [`**Plan Source**: ${request.plan_source}`, ""] : []),
-        ...buildTaskBlock(ctx),
-        ...buildIdentityBlock(ctx),
-        "### Generation Instructions",
-        `1. Read \`${referenceFile}\` — study its structure rules, section count, and format requirements`,
-        "2. Generate a complete prompt following that technique's structure",
-        "3. The prompt must be self-contained — ready for a coding agent to execute",
-        "4. Output only the generated prompt — no preamble, no meta-commentary",
     ];
+    if (embedSkeleton) {
+        lines.push(`Read the technique reference BEFORE generating the prompt:`, `  Technique:  ${technique}`, `  Reference:  ${referenceFile}`, `  Rationale:  ${analysis.rationale}`, "");
+    }
+    else {
+        lines.push(`**Technique**: ${technique} (see state file for full reference)`, `**Rationale**: ${analysis.rationale}`, "");
+    }
+    lines.push(...buildLoopObjectiveBlock(loopObjective), ...buildConstraintsBlock(constraints), ...(request.plan_source ? [`**Plan Source**: ${request.plan_source}`, ""] : []), ...buildTaskBlock(ctx), ...buildIdentityBlock(ctx));
+    if (embedSkeleton) {
+        lines.push("### Generation Instructions", `1. Read \`${referenceFile}\` — study its structure rules, section count, and format requirements`, "2. Generate a complete prompt following that technique's structure", "3. The prompt must be self-contained — ready for a coding agent to execute", "4. Output only the generated prompt — no preamble, no meta-commentary");
+    }
     return lines.join("\n");
 }
 // ── Step-Back specialist ───────────────────────────────────────────────────────
-function compileStepBack(request, goalId, constraints, loopObjective, rollingText, analysis) {
-    const ctx = { request, goalId, constraints, loopObjective, rollingText };
+function compileStepBack(request, goalId, constraints, loopObjective, rollingText, analysis, opts = {}) {
+    const embedSkeleton = opts.embedSkeleton !== false; // default true
+    const ctx = { request, goalId, constraints, loopObjective, rollingText, level: opts.level ?? "l2" };
     const lines = [
         ...buildHeader(ctx, "step-back"),
         `**Rationale**: ${analysis.rationale}`,
         "",
-        "Generate a complete prompt using the **Step-Back** technique. Follow the 8-section skeleton below.",
-        "Embed all structural constraints — do NOT reference an external file.",
-        "",
-        ...buildLoopObjectiveBlock(loopObjective),
-        ...buildConstraintsBlock(constraints),
-        ...(request.plan_source ? [`**Plan Source**: ${request.plan_source}`, ""] : []),
-        ...buildTaskBlock(ctx),
-        ...buildIdentityBlock(ctx),
-        "",
-        "### 8-Section Skeleton (REQUIRED)",
-        "",
-        "| # | Section | Required | Notes |",
-        "|---|---------|----------|-------|",
-        "| 1 | 角色 | ✓ | Domain expert role appropriate to the task |",
-        "| 2 | 任务 | ✓ | One-sentence task summary |",
-        "| 3 | 输入 | ✓ | Target module/problem to analyse |",
-        "| 4 | 输出格式 | ✓ | Numbered list of expected outputs |",
-        "| 5 | **Step-Back 抽象框架** | ✓ | See format rules below |",
-        "| 6 | 具体实现要求 | ✓ | MUST start with: **\"基于上述抽象框架，实现以下所有功能\"** |",
-        "| 7 | 硬约束 | ✓ | Numbered list of hard constraints |",
-        "| 8 | 生成要求 | ✓ | Acceptance criteria |",
-        "",
-        "### Section 5 — Step-Back 抽象框架 (CRITICAL)",
-        "",
-        "Must contain **2-3 abstract frameworks**. Each framework is an independent ASCII diagram.",
-        "Frameworks are PARALLEL (peer-level), not sequential.",
-        "",
-        "Each framework format:",
-        "```",
-        "### 框架N：[Framework Name]",
-        "",
-        "[ASCII diagram with principles/formulas/classification tables/rule tables]",
-        "",
-        "Diagram content requirements:",
-        "- Core principle/formula (e.g. \"Total = Σ(dimension × weight)\")",
-        "- Component table (e.g. weight allocation table, type mapping table)",
-        "- Rule description (e.g. \"Missing data dimensions use neutral value\")",
-        "```",
-        "",
-        "**Tightening rules**:",
-        "- The step-back question must be MORE ABSTRACT than the original problem, but cover all required information",
-        "- Abstract ≠ vague. Use precise formulas, principles, standards, definitions, or causal mechanisms",
-        "- Tighten to the MINIMUM generalisation layer that still covers the original problem",
-        "- Reasoning must RETURN to the original problem — do not stay at the principle level",
-        "",
-        "**Section 6 transition sentence (MANDATORY)**:",
-        "\"基于上述抽象框架，实现以下所有功能。\"",
-        "",
-        "### Generation Instructions",
-        "1. Extract 2-3 abstract principles/frameworks from the task domain",
-        "2. Build ASCII diagrams for each framework (formulas, tables, rules)",
-        "3. Apply the abstraction back to the concrete task",
-        "4. Verify: the generated prompt satisfies all structural rules in the skeleton above",
-        "5. Output only the generated prompt — no preamble, no meta-commentary",
     ];
+    if (embedSkeleton) {
+        lines.push("Generate a complete prompt using the **Step-Back** technique. Follow the 8-section skeleton below.", "Embed all structural constraints — do NOT reference an external file.", "");
+    }
+    else {
+        lines.push("**Technique**: step-back (see state file for the full skeleton).", "Generate a complete prompt following this technique.", "");
+    }
+    lines.push(...buildLoopObjectiveBlock(loopObjective), ...buildConstraintsBlock(constraints), ...(request.plan_source ? [`**Plan Source**: ${request.plan_source}`, ""] : []), ...buildTaskBlock(ctx), ...buildIdentityBlock(ctx));
+    if (embedSkeleton) {
+        lines.push("", "### 8-Section Skeleton (REQUIRED)", "", "| # | Section | Required | Notes |", "|---|---------|----------|-------|", "| 1 | 角色 | ✓ | Domain expert role appropriate to the task |", "| 2 | 任务 | ✓ | One-sentence task summary |", "| 3 | 输入 | ✓ | Target module/problem to analyse |", "| 4 | 输出格式 | ✓ | Numbered list of expected outputs |", "| 5 | **Step-Back 抽象框架** | ✓ | See format rules below |", "| 6 | 具体实现要求 | ✓ | MUST start with: **\"基于上述抽象框架，实现以下所有功能\"** |", "| 7 | 硬约束 | ✓ | Numbered list of hard constraints |", "| 8 | 生成要求 | ✓ | Acceptance criteria |", "", "### Section 5 — Step-Back 抽象框架 (CRITICAL)", "", "Must contain **2-3 abstract frameworks**. Each framework is an independent ASCII diagram.", "Frameworks are PARALLEL (peer-level), not sequential.", "", "Each framework format:", "```", "### 框架N：[Framework Name]", "", "[ASCII diagram with principles/formulas/classification tables/rule tables]", "", "Diagram content requirements:", "- Core principle/formula (e.g. \"Total = Σ(dimension × weight)\")", "- Component table (e.g. weight allocation table, type mapping table)", "- Rule description (e.g. \"Missing data dimensions use neutral value\")", "```", "", "**Tightening rules**:", "- The step-back question must be MORE ABSTRACT than the original problem, but cover all required information", "- Abstract ≠ vague. Use precise formulas, principles, standards, definitions, or causal mechanisms", "- Tighten to the MINIMUM generalisation layer that still covers the original problem", "- Reasoning must RETURN to the original problem — do not stay at the principle level", "", "**Section 6 transition sentence (MANDATORY)**:", "\"基于上述抽象框架，实现以下所有功能。\"", "", "### Generation Instructions", "1. Extract 2-3 abstract principles/frameworks from the task domain", "2. Build ASCII diagrams for each framework (formulas, tables, rules)", "3. Apply the abstraction back to the concrete task", "4. Verify: the generated prompt satisfies all structural rules in the skeleton above", "5. Output only the generated prompt — no preamble, no meta-commentary");
+    }
     return lines.join("\n");
 }
 // ── Least-to-Most specialist ───────────────────────────────────────────────────
-function compileLeastToMost(request, goalId, constraints, loopObjective, rollingText, analysis) {
-    const ctx = { request, goalId, constraints, loopObjective, rollingText };
+function compileLeastToMost(request, goalId, constraints, loopObjective, rollingText, analysis, opts = {}) {
+    const embedSkeleton = opts.embedSkeleton !== false; // default true
+    const ctx = { request, goalId, constraints, loopObjective, rollingText, level: opts.level ?? "l2" };
     const lines = [
         ...buildHeader(ctx, "least-to-most"),
         `**Rationale**: ${analysis.rationale}`,
         "",
-        "Generate a complete prompt using the **Least-to-Most** technique. Follow the 8-section skeleton below.",
-        "Embed all structural constraints — do NOT reference an external file.",
-        "",
-        ...buildLoopObjectiveBlock(loopObjective),
-        ...buildConstraintsBlock(constraints),
-        ...(request.plan_source ? [`**Plan Source**: ${request.plan_source}`, ""] : []),
-        ...buildTaskBlock(ctx),
-        ...buildIdentityBlock(ctx),
-        "",
-        "### 8-Section Skeleton (REQUIRED)",
-        "",
-        "| # | Section | Required | Notes |",
-        "|---|---------|----------|-------|",
-        "| 1 | 角色 | ✓ | Domain expert role appropriate to the task |",
-        "| 2 | 任务 | ✓ | One-sentence task summary |",
-        "| 3 | 输入 | ✓ | Target module |",
-        "| 4 | 输出格式 | ✓ | Numbered list (e.g. \"1. DDL, 2. API, 3. Enum...\") |",
-        "| 5 | **Least-to-Most 逐步推理框架** | ✓ | See format rules below |",
-        "| 6 | 具体实现要求 | ✓ | Expand per output format list (NOT per sub-problem — sub-problems fully expanded in §5) |",
-        "| 7 | 硬约束 | ✓ | Numbered list |",
-        "| 8 | 生成要求 | ✓ | Acceptance criteria, must include: \"严格按照子问题顺序逐步实现\" |",
-        "",
-        "### Section 5 — Least-to-Most 逐步推理框架 (CRITICAL)",
-        "",
-        "Must contain **4-6 ordered sub-problems**. Each sub-problem format:",
-        "",
-        "```",
-        "### 子问题 N：[Sub-problem Name]",
-        "",
-        "**目标：** [What this sub-problem solves, which prior sub-problem(s) it depends on]",
-        "",
-        "**要求：**",
-        "- Specific requirement list",
-        "- [If sub-problem involves enums/mapping tables, list them]",
-        "",
-        "---",
-        "```",
-        "",
-        "**Critical rules**:",
-        "- Sub-problem 1 is the SIMPLEST (e.g. \"Define enums and base data structures\")",
-        "- Each sub-problem declares: \"基于子问题 N-1 的结论\"",
-        "- The LAST sub-problem MUST be: **\"综合实现完整模块\"** — list all components to integrate",
-        "- Sub-problems separated by `---`",
-        "- Order goes from LEAST complex → MOST complex, dependency chain must be explicit",
-        "- Each sub-problem must serve the original task — no unrelated steps",
-        "- The final sub-problem must be equivalent to or directly address the original task",
-        "",
-        "### Generation Instructions",
-        "1. Decompose the task into 4-6 ordered sub-problems with explicit dependencies",
-        "2. Sub-problem 1 starts with the simplest building block (data structures, enums, base config)",
-        "3. Each subsequent sub-problem builds on prior results",
-        "4. Final sub-problem integrates all components into the complete module",
-        "5. Verify: the generated prompt satisfies all structural rules in the skeleton above",
-        "6. Output only the generated prompt — no preamble, no meta-commentary",
     ];
+    if (embedSkeleton) {
+        lines.push("Generate a complete prompt using the **Least-to-Most** technique. Follow the 8-section skeleton below.", "Embed all structural constraints — do NOT reference an external file.", "");
+    }
+    else {
+        lines.push("**Technique**: least-to-most (see state file for the full skeleton).", "Generate a complete prompt following this technique.", "");
+    }
+    lines.push(...buildLoopObjectiveBlock(loopObjective), ...buildConstraintsBlock(constraints), ...(request.plan_source ? [`**Plan Source**: ${request.plan_source}`, ""] : []), ...buildTaskBlock(ctx), ...buildIdentityBlock(ctx));
+    if (embedSkeleton) {
+        lines.push("", "### 8-Section Skeleton (REQUIRED)", "", "| # | Section | Required | Notes |", "|---|---------|----------|-------|", "| 1 | 角色 | ✓ | Domain expert role appropriate to the task |", "| 2 | 任务 | ✓ | One-sentence task summary |", "| 3 | 输入 | ✓ | Target module |", "| 4 | 输出格式 | ✓ | Numbered list (e.g. \"1. DDL, 2. API, 3. Enum...\") |", "| 5 | **Least-to-Most 逐步推理框架** | ✓ | See format rules below |", "| 6 | 具体实现要求 | ✓ | Expand per output format list (NOT per sub-problem — sub-problems fully expanded in §5) |", "| 7 | 硬约束 | ✓ | Numbered list |", "| 8 | 生成要求 | ✓ | Acceptance criteria, must include: \"严格按照子问题顺序逐步实现\" |", "", "### Section 5 — Least-to-Most 逐步推理框架 (CRITICAL)", "", "Must contain **4-6 ordered sub-problems**. Each sub-problem format:", "", "```", "### 子问题 N：[Sub-problem Name]", "", "**目标：** [What this sub-problem solves, which prior sub-problem(s) it depends on]", "", "**要求：**", "- Specific requirement list", "- [If sub-problem involves enums/mapping tables, list them]", "", "---", "```", "", "**Critical rules**:", "- Sub-problem 1 is the SIMPLEST (e.g. \"Define enums and base data structures\")", "- Each sub-problem declares: \"基于子问题 N-1 的结论\"", "- The LAST sub-problem MUST be: **\"综合实现完整模块\"** — list all components to integrate", "- Sub-problems separated by `---`", "- Order goes from LEAST complex → MOST complex, dependency chain must be explicit", "- Each sub-problem must serve the original task — no unrelated steps", "- The final sub-problem must be equivalent to or directly address the original task", "", "### Generation Instructions", "1. Decompose the task into 4-6 ordered sub-problems with explicit dependencies", "2. Sub-problem 1 starts with the simplest building block (data structures, enums, base config)", "3. Each subsequent sub-problem builds on prior results", "4. Final sub-problem integrates all components into the complete module", "5. Verify: the generated prompt satisfies all structural rules in the skeleton above", "6. Output only the generated prompt — no preamble, no meta-commentary");
+    }
     return lines.join("\n");
 }
 // ── Tree-of-Thought specialist ──────────────────────────────────────────────────
-function compileToT(request, goalId, constraints, loopObjective, rollingText, analysis) {
-    const ctx = { request, goalId, constraints, loopObjective, rollingText };
+function compileToT(request, goalId, constraints, loopObjective, rollingText, analysis, opts = {}) {
+    const embedSkeleton = opts.embedSkeleton !== false; // default true
+    const ctx = { request, goalId, constraints, loopObjective, rollingText, level: opts.level ?? "l2" };
     const lines = [
         ...buildHeader(ctx, "tree-of-thought"),
         `**Rationale**: ${analysis.rationale}`,
         "",
-        "Generate a complete prompt using the **Tree-of-Thought** technique. Follow the 8-section skeleton below.",
-        "Embed all structural constraints — do NOT reference an external file.",
-        "",
-        ...buildLoopObjectiveBlock(loopObjective),
-        ...buildConstraintsBlock(constraints),
-        ...(request.plan_source ? [`**Plan Source**: ${request.plan_source}`, ""] : []),
-        ...buildTaskBlock(ctx),
-        ...buildIdentityBlock(ctx),
-        "",
-        "### 8-Section Skeleton (REQUIRED)",
-        "",
-        "| # | Section | Required | Notes |",
-        "|---|---------|----------|-------|",
-        "| 1 | 角色 | ✓ | Multi-path problem-solving expert; may introduce 3 expert personas |",
-        "| 2 | 任务 | ✓ | One-sentence task summary |",
-        "| 3 | 输入 | ✓ | High-risk complex problem |",
-        "| 4 | 输出格式 | ✓ | \"先输出思维树过程，再输出最终答案/方案\" |",
-        "| 5 | **思维树探索框架** | ✓ | See 3 sub-blocks below (REQUIRED) |",
-        "| 6 | 具体实现要求 | ✓ | Expand per output format |",
-        "| 7 | 硬约束 | ✓ | Include branch_count, max_depth, pruning rules, safety/performance constraints |",
-        "| 8 | 生成要求 | ✓ | \"先探索多路径，再选择最优方案\" |",
-        "",
-        "### Section 5 — 思维树探索框架 (CRITICAL — 3 sub-blocks REQUIRED)",
-        "",
-        "**Sub-block A: Search Strategy Declaration**",
-        "```",
-        "搜索策略: [beam / dfs / expert-panel]",
-        "分支数(branch_count): 2-4",
-        "最大深度(max_depth): ≤3",
-        "每轮保留数(keep_count): 1-2",
-        "```",
-        "Strategy selection guide:",
-        "- **beam** (default): planning, creative, math search — generate multiple candidates per turn, keep top b",
-        "- **dfs**: puzzles, constraint satisfaction, debugging — go deep on highest-score branch, backtrack on failure",
-        "- **expert-panel**: 3+ experts each generate candidates, then cross-evaluate and revise",
-        "",
-        "**Sub-block B: Evaluation Criteria Table**",
-        "| 标准 | 权重 | 说明 |",
-        "|------|------|------|",
-        "| 正确性 | 最高 | Logic/math correctness |",
-        "| 可行性 | 高 | Can be actually implemented |",
-        "| 约束匹配 | 高 | Satisfies hard constraints |",
-        "| 性能 | 中 | Time/space efficiency |",
-        "| 安全性 | 最高 | No vulnerabilities/privilege escalation |",
-        "",
-        "**Sub-block C: Thought Tree State Table Format**",
-        "Require the model to output in this table format:",
-        "```",
-        "| 轮次 | 分支 | 候选方案 | 评估 | 决策 |",
-        "|------|------|---------|------|------|",
-        "| 1    | A    | [方案描述] | 评分/判断 | 保留/剪枝 |",
-        "| 1    | B    | [方案描述] | 评分/判断 | 保留/剪枝 |",
-        "| 1    | C    | [方案描述] | 评分/判断 | 保留/剪枝 |",
-        "| 2    | A1   | [深入展开] | ... | ... |",
-        "| ...  | ...  | ...       | ... | ... |",
-        "",
-        "最终选择: [最优方案 + 选择理由]",
-        "```",
-        "",
-        "### Critical Rules",
-        "- Hard constraints MUST be ranked FIRST in evaluation criteria",
-        "- Branch count: 2-4, depth: ≤3 (prevents token explosion)",
-        "- Every turn: generate multiple candidates → evaluate → keep/prune — never single-path",
-        "- If all branches are low quality: backtrack to previous turn and regenerate",
-        "- The core of ToT is NOT \"3 experts chatting\" — it's: candidate generation → state evaluation → search/prune → final selection",
-        "- thought is a PUBLIC intermediate semantic unit, not hidden chain-of-thought",
-        "- State table MUST have: round, branch ID, candidate description, evaluation score/judgment, keep/prune decision",
-        "",
-        "### Generation Instructions",
-        "1. Select the appropriate search strategy (beam/dfs/expert-panel) based on task type",
-        "2. Define 2-4 candidate approaches as initial branches",
-        "3. Build evaluation criteria table with hard constraints ranked first",
-        "4. Define the state table format for tracking exploration",
-        "5. Set branch count and max depth to prevent token explosion",
-        "6. Verify: the generated prompt satisfies all structural rules in the skeleton above",
-        "7. Output only the generated prompt — no preamble, no meta-commentary",
     ];
+    if (embedSkeleton) {
+        lines.push("Generate a complete prompt using the **Tree-of-Thought** technique. Follow the 8-section skeleton below.", "Embed all structural constraints — do NOT reference an external file.", "");
+    }
+    else {
+        lines.push("**Technique**: tree-of-thought (see state file for the full skeleton).", "Generate a complete prompt following this technique.", "");
+    }
+    lines.push(...buildLoopObjectiveBlock(loopObjective), ...buildConstraintsBlock(constraints), ...(request.plan_source ? [`**Plan Source**: ${request.plan_source}`, ""] : []), ...buildTaskBlock(ctx), ...buildIdentityBlock(ctx));
+    if (embedSkeleton) {
+        lines.push("", "### 8-Section Skeleton (REQUIRED)", "", "| # | Section | Required | Notes |", "|---|---------|----------|-------|", "| 1 | 角色 | ✓ | Multi-path problem-solving expert; may introduce 3 expert personas |", "| 2 | 任务 | ✓ | One-sentence task summary |", "| 3 | 输入 | ✓ | High-risk complex problem |", "| 4 | 输出格式 | ✓ | \"先输出思维树过程，再输出最终答案/方案\" |", "| 5 | **思维树探索框架** | ✓ | See 3 sub-blocks below (REQUIRED) |", "| 6 | 具体实现要求 | ✓ | Expand per output format |", "| 7 | 硬约束 | ✓ | Include branch_count, max_depth, pruning rules, safety/performance constraints |", "| 8 | 生成要求 | ✓ | \"先探索多路径，再选择最优方案\" |", "", "### Section 5 — 思维树探索框架 (CRITICAL — 3 sub-blocks REQUIRED)", "", "**Sub-block A: Search Strategy Declaration**", "```", "搜索策略: [beam / dfs / expert-panel]", "分支数(branch_count): 2-4", "最大深度(max_depth): ≤3", "每轮保留数(keep_count): 1-2", "```", "Strategy selection guide:", "- **beam** (default): planning, creative, math search — generate multiple candidates per turn, keep top b", "- **dfs**: puzzles, constraint satisfaction, debugging — go deep on highest-score branch, backtrack on failure", "- **expert-panel**: 3+ experts each generate candidates, then cross-evaluate and revise", "", "**Sub-block B: Evaluation Criteria Table**", "| 标准 | 权重 | 说明 |", "|------|------|------|", "| 正确性 | 最高 | Logic/math correctness |", "| 可行性 | 高 | Can be actually implemented |", "| 约束匹配 | 高 | Satisfies hard constraints |", "| 性能 | 中 | Time/space efficiency |", "| 安全性 | 最高 | No vulnerabilities/privilege escalation |", "", "**Sub-block C: Thought Tree State Table Format**", "Require the model to output in this table format:", "```", "| 轮次 | 分支 | 候选方案 | 评估 | 决策 |", "|------|------|---------|------|------|", "| 1    | A    | [方案描述] | 评分/判断 | 保留/剪枝 |", "| 1    | B    | [方案描述] | 评分/判断 | 保留/剪枝 |", "| 1    | C    | [方案描述] | 评分/判断 | 保留/剪枝 |", "| 2    | A1   | [深入展开] | ... | ... |", "| ...  | ...  | ...       | ... | ... |", "", "最终选择: [最优方案 + 选择理由]", "```", "", "### Critical Rules", "- Hard constraints MUST be ranked FIRST in evaluation criteria", "- Branch count: 2-4, depth: ≤3 (prevents token explosion)", "- Every turn: generate multiple candidates → evaluate → keep/prune — never single-path", "- If all branches are low quality: backtrack to previous turn and regenerate", "- The core of ToT is NOT \"3 experts chatting\" — it's: candidate generation → state evaluation → search/prune → final selection", "- thought is a PUBLIC intermediate semantic unit, not hidden chain-of-thought", "- State table MUST have: round, branch ID, candidate description, evaluation score/judgment, keep/prune decision", "", "### Generation Instructions", "1. Select the appropriate search strategy (beam/dfs/expert-panel) based on task type", "2. Define 2-4 candidate approaches as initial branches", "3. Build evaluation criteria table with hard constraints ranked first", "4. Define the state table format for tracking exploration", "5. Set branch count and max depth to prevent token explosion", "6. Verify: the generated prompt satisfies all structural rules in the skeleton above", "7. Output only the generated prompt — no preamble, no meta-commentary");
+    }
     return lines.join("\n");
 }
 // ═══════════════════════════════════════════════════════════════════════════

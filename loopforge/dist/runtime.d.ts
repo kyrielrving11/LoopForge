@@ -25,6 +25,8 @@ export declare class LoopRuntime extends EventEmitter {
     private sigtermHandler;
     private lastSelfEval;
     private pendingVerificationFlags;
+    private consecutiveRejections;
+    private pendingRejectionNotice;
     private injectionCount;
     private lastInjectionRound;
     private injectedContexts;
@@ -42,10 +44,12 @@ export declare class LoopRuntime extends EventEmitter {
     /** Derive the current progress estimate from the last self evaluation.
      *  Returns -1 if no progress data is available. */
     private getCurrentProgress;
-    /** Determine whether memory should be injected this round based on
-     *  tier-based allowed phases, progress thresholds, and round spacing. */
-    private shouldInjectMemory;
-    /** Build the accumulated context for constructing a targeted memory query. */
+    /** Determine which memory injection phase (0/1/2/3) should fire this round.
+     *  Returns 0 if no injection should occur. Phase tracking (phase2Triggered /
+     *  phase3Triggered) is updated by the caller based on the returned phase. */
+    private getInjectionPhase;
+    /** Build the accumulated context for constructing a targeted memory query.
+     *  Delegates to the shared buildAccumulatedMemoryContext() utility. */
     private buildAccumulatedContext;
     /** Deduplicate external context against previously injected contexts.
      *  Returns empty string if the new context is too similar to any prior. */

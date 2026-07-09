@@ -13,41 +13,33 @@
  *    const result = await rt.start();
  */
 import { EventEmitter } from "node:events";
+import { writeFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
 import { extractSelfEvaluation, heuristicSelfEvaluation, createEngine, } from "./engine.js";
 import { tokenize, jaccard } from "./loop-compiler.js";
 import { Mode, RuntimeStatus, makeLoopCompileRequest, makeLoopRoundResult, makeSelfEvaluation, makeVaultConfig, } from "./protocol.js";
-import { getPolicy, resolveAllowedPhases } from "./policy.js";
+import { getPolicy, resolveAllowedPhases, resolveInjectionPhase, buildAccumulatedMemoryContext, buildBaseMemoryWriteback } from "./policy.js";
 import { verifySelfEvaluation } from "./verification-gate.js";
+import { enforceRound, buildRejectionPrompt } from "./enforcement-gate.js";
 import { logEvent } from "./observability.js";
 import { tryAutoConfigure } from "./memory-bridge.js";
 // ═══════════════════════════════════════════════════════════════════════════
 // Helpers
 // ═══════════════════════════════════════════════════════════════════════════
 /** Build a writeback payload from the loop's final state.
- *  Extracts project-level outcome, tactical lessons, and vault reference.
- *  Returns null if there is no meaningful data to write back. */
-function buildWritebackPayload(loopId, task, stopReason, result) {
-    // Only write back for meaningful loops (at least 1 round completed)
+ *  Uses shared base builder from policy.ts, then layers runtime-specific
+ *  feedback entries from trajectory analysis on top. */
+function buildWritebackPayload(loopId, task, stopReason, result, discoveries = []) {
     if (result.roundsCompleted < 1)
         return null;
-    const policy = getPolicy();
-    const wp = policy.memory_writeback;
-    const outcome = ["completed", "circuit_breaker", "stalled", "max_rounds", "stopped"].find((o) => stopReason === o) ?? "stopped";
-    // Build project entry
-    const projectEntry = {
-        title: `${task.slice(0, 80)} — ${outcome}`,
-        objective: task.slice(0, 200),
-        keyOutcome: stopReason === "task_complete"
-            ? `Completed successfully in ${result.roundsCompleted} rounds.`
-            : `Terminated with reason '${stopReason}' after ${result.roundsCompleted} rounds.`,
-        keyDiscoveries: [],
-        date: new Date().toISOString().split("T")[0],
-    };
-    // Build feedback entries from success trajectory patterns
+    const wp = getPolicy().memory_writeback;
+    const base = buildBaseMemoryWriteback({
+        loopId, task, stopReason, roundsCompleted: result.roundsCompleted, discoveries,
+    });
+    // Build feedback entries from success trajectory patterns (runtime-specific)
     const feedbackEntries = [];
     const trajectory = result.successTrajectory;
     if (trajectory.length >= 3) {
-        // Detect improving trend via success rate
         const firstHalf = trajectory.slice(0, Math.floor(trajectory.length / 2));
         const secondHalf = trajectory.slice(Math.floor(trajectory.length / 2));
         const firstRate = firstHalf.filter(Boolean).length / firstHalf.length;
@@ -60,7 +52,6 @@ function buildWritebackPayload(loopId, task, stopReason, result) {
             });
         }
     }
-    // Detect flatlining — 3 consecutive failures
     if (trajectory.length >= 3) {
         const recent = trajectory.slice(-3);
         if (recent.every((v) => v === false)) {
@@ -71,22 +62,9 @@ function buildWritebackPayload(loopId, task, stopReason, result) {
             });
         }
     }
-    // Build reference entry pointing to vault
-    const referenceEntry = {
-        description: `LoopForge vault data for "${task.slice(0, 80)}"`,
-        vaultLocation: `.promptcraft/prompt_vault.json → loop:${loopId}:*`,
-    };
     return {
-        loopId,
-        task,
-        outcome,
-        roundsCompleted: result.roundsCompleted,
-        projectEntry: {
-            ...projectEntry,
-            keyDiscoveries: projectEntry.keyDiscoveries.slice(0, wp.max_discoveries_in_project),
-        },
+        ...base,
         feedbackEntries: feedbackEntries.slice(0, wp.max_feedback_entries),
-        referenceEntry,
     };
 }
 function autoLoopId(task) {
@@ -146,6 +124,9 @@ export class LoopRuntime extends EventEmitter {
     // Verification gate state (v1.6 unified — was MCP-only, now also in runtime)
     lastSelfEval = null;
     pendingVerificationFlags = [];
+    // Enforcement gate state (v1.13)
+    consecutiveRejections = 0;
+    pendingRejectionNotice = "";
     // Memory integration state (v1.7)
     injectionCount = 0;
     lastInjectionRound = 0;
@@ -181,68 +162,34 @@ export class LoopRuntime extends EventEmitter {
         const pe = this.lastSelfEval.execution_evidence.progress_estimate;
         return typeof pe === "number" ? pe : -1;
     }
-    /** Determine whether memory should be injected this round based on
-     *  tier-based allowed phases, progress thresholds, and round spacing. */
-    shouldInjectMemory() {
+    /** Determine which memory injection phase (0/1/2/3) should fire this round.
+     *  Returns 0 if no injection should occur. Phase tracking (phase2Triggered /
+     *  phase3Triggered) is updated by the caller based on the returned phase. */
+    getInjectionPhase() {
         const policy = getPolicy();
         const mi = policy.memory_injection;
         if (!mi.enabled)
-            return false;
+            return 0;
         if (!this.config.memoryProvider)
-            return false;
+            return 0;
         if (this.lastInjectionRound > 0 &&
             this.currentRound - this.lastInjectionRound < mi.min_rounds_between_injections) {
-            return false;
+            return 0;
         }
-        // Resolve which phases are allowed for this loop's maxRounds
         const allowedPhases = new Set(resolveAllowedPhases(this.config.maxRounds, mi.round_tiers));
-        const maxInjections = allowedPhases.size;
-        if (this.injectionCount >= maxInjections)
-            return false;
         const progress = this.getCurrentProgress();
-        // Phase 1: round 1, always check if allowed
-        if (this.currentRound === 1 && this.injectionCount === 0 && allowedPhases.has(1)) {
-            return true;
-        }
-        // Phase 2: progress threshold (only if allowed by tier)
-        if (allowedPhases.has(2) &&
-            !this.phase2Triggered &&
-            progress >= mi.phase_thresholds.phase2.threshold) {
-            return true;
-        }
-        // Phase 3: progress threshold (only if allowed by tier)
-        if (allowedPhases.has(3) &&
-            !this.phase3Triggered &&
-            progress >= mi.phase_thresholds.phase3.threshold) {
-            return true;
-        }
-        return false;
+        return resolveInjectionPhase(this.currentRound, this.injectionCount, allowedPhases, progress, this.phase2Triggered, this.phase3Triggered, {
+            phase2: mi.phase_thresholds.phase2.threshold,
+            phase3: mi.phase_thresholds.phase3.threshold,
+        });
     }
-    /** Build the accumulated context for constructing a targeted memory query. */
+    /** Build the accumulated context for constructing a targeted memory query.
+     *  Delegates to the shared buildAccumulatedMemoryContext() utility. */
     buildAccumulatedContext() {
-        const recurringIssues = [];
-        const failedPatterns = [];
-        const keyLessons = [];
-        const remainingCriteria = [];
-        if (this.lastSelfEval) {
-            // Recurring issues: violations that have appeared before
-            if (this.lastSelfEval.constraint_violations.length) {
-                recurringIssues.push(...this.lastSelfEval.constraint_violations);
-            }
-            // Remaining criteria
-            if (this.lastSelfEval.execution_evidence?.success_criteria_remaining?.length) {
-                remainingCriteria.push(...this.lastSelfEval.execution_evidence.success_criteria_remaining);
-            }
-            // Key lessons from emerged subtasks
-            if (this.lastSelfEval.emerged_subtasks?.length) {
-                keyLessons.push(...this.lastSelfEval.emerged_subtasks);
-            }
-            // Wrong assumptions as negative lessons
-            if (this.lastSelfEval.wrong_assumptions?.length) {
-                keyLessons.push(...this.lastSelfEval.wrong_assumptions.map((a) => `Wrong: ${a}`));
-            }
+        if (!this.lastSelfEval) {
+            return { recurringIssues: [], failedPatterns: [], keyLessons: [], remainingCriteria: [] };
         }
-        return { recurringIssues, failedPatterns, keyLessons, remainingCriteria };
+        return buildAccumulatedMemoryContext(this.lastSelfEval);
     }
     /** Deduplicate external context against previously injected contexts.
      *  Returns empty string if the new context is too similar to any prior. */
@@ -283,27 +230,21 @@ export class LoopRuntime extends EventEmitter {
                 }
                 // ── v1.7: Memory Injection (before compile, only at L2 phases) ──
                 this.pendingExternalContext = "";
-                if (this.shouldInjectMemory()) {
-                    const progress = this.getCurrentProgress();
-                    let phase;
-                    if (this.currentRound === 1) {
-                        phase = 1;
-                    }
-                    else if (!this.phase2Triggered && progress >= getPolicy().memory_injection.phase_thresholds.phase2.threshold) {
-                        phase = 2;
+                const injectionPhase = this.getInjectionPhase();
+                if (injectionPhase !== 0) {
+                    // Track phase triggers
+                    if (injectionPhase === 2)
                         this.phase2Triggered = true;
-                    }
-                    else {
-                        phase = 3;
+                    if (injectionPhase === 3)
                         this.phase3Triggered = true;
-                    }
+                    const progress = this.getCurrentProgress();
                     try {
                         const ctx = {
                             loopId: this.config.loopId,
                             round: this.currentRound,
                             task: this.config.task,
                             domain: this.config.domain,
-                            phase,
+                            phase: injectionPhase,
                             progressEstimate: progress,
                             accumulatedContext: this.buildAccumulatedContext(),
                         };
@@ -315,7 +256,7 @@ export class LoopRuntime extends EventEmitter {
                             logEvent("memory_injected", {
                                 loopId: this.config.loopId,
                                 round: this.currentRound,
-                                phase,
+                                phase: injectionPhase,
                                 injectionCount: this.injectionCount,
                                 contextLength: this.pendingExternalContext.length,
                             });
@@ -349,12 +290,26 @@ export class LoopRuntime extends EventEmitter {
                     last_round_result: (lcr.last_round_result ?? undefined),
                     verification_flags: this.pendingVerificationFlags,
                     external_context: this.pendingExternalContext || undefined,
+                    max_rounds: this.config.maxRounds,
                 });
+                // v1.14: Write state file if the compiler produced one and policy allows it
+                const sfContent = compileResult.response?.state_file_content;
+                if (sfContent && getPolicy().state_file.enabled) {
+                    const sfDir = join(process.cwd(), getPolicy().state_file.directory);
+                    mkdirSync(sfDir, { recursive: true });
+                    writeFileSync(join(sfDir, `${this.config.loopId}-state.md`), sfContent, "utf-8");
+                }
                 if (!compileResult.response?.prompt) {
                     stopReason = "stalled";
                     break;
                 }
-                const prompt = compileResult.response.prompt;
+                let prompt = compileResult.response.prompt;
+                // If this is a redo of a rejected round, use ONLY the rejection prompt.
+                // The agent needs to fix a specific issue, not get a fresh compilation.
+                // Normal compilation resumes on the next round after enforcement accepts.
+                if (this.pendingRejectionNotice) {
+                    prompt = this.pendingRejectionNotice;
+                }
                 const analysis = compileResult.response.analysis;
                 const level = analysis?.rationale?.includes("l0")
                     ? "l0"
@@ -421,13 +376,8 @@ export class LoopRuntime extends EventEmitter {
                     selfEval = heuristicSelfEvaluation(agentOutput);
                     extractionSucceeded = false;
                 }
-                // ── Auto-feedback ─────────────────────────────────────────────
-                if (selfEval !== null) {
-                    this.engine.autoFeedback(selfEval, this.config.loopId, this.currentRound, this.config.task);
-                }
-                // ── Verification gate (v1.6 unified) ──────────────────────────
-                // Run cross-round consistency checks between self-eval and lineage.
-                // Flags are injected into the NEXT round's prompt via the engine.
+                // ── Verification gate (v1.6 unified) + Enforcement (v1.13) ────
+                // Run BEFORE autoFeedback so rejected rounds don't pollute vault.
                 this.pendingVerificationFlags = [];
                 let gateContradicted = false;
                 if (selfEval !== null) {
@@ -444,7 +394,43 @@ export class LoopRuntime extends EventEmitter {
                             flags: verifyResult.flags.map((f) => f.check),
                         });
                     }
+                    // ── Enforcement gate (v1.13) — before autoFeedback ──────────
+                    // Only run for structured self-evals, not heuristic fallback.
+                    if (extractionSucceeded) {
+                        const enforceResult = enforceRound(selfEval, verifyResult, this.currentRound, vaultEntries, this.consecutiveRejections);
+                        if (enforceResult.action === "reject") {
+                            this.consecutiveRejections++;
+                            this.pendingRejectionNotice = buildRejectionPrompt(this.currentRound, this.config.task, enforceResult);
+                            logEvent("enforcement_reject", {
+                                loopId: this.config.loopId,
+                                round: this.currentRound,
+                                reason: enforceResult.reason.slice(0, 120),
+                                consecutiveRejections: this.consecutiveRejections,
+                            });
+                            // Don't update lastSelfEval or successTrajectory.
+                            // Decrement currentRound so the for-loop increment returns
+                            // to the same round for the retry.
+                            this.currentRound--;
+                            continue;
+                        }
+                        if (enforceResult.action === "terminate") {
+                            stopReason = "enforcement_terminated";
+                            logEvent("session_end", {
+                                loopId: this.config.loopId,
+                                stopReason: "enforcement_terminated",
+                                round: this.currentRound,
+                            });
+                            break;
+                        }
+                        // Accept: reset rejection counter
+                        this.consecutiveRejections = 0;
+                        this.pendingRejectionNotice = "";
+                    } // end if (extractionSucceeded)
                     this.lastSelfEval = selfEval;
+                }
+                // ── Auto-feedback (AFTER enforcement, only if accepted) ─────────
+                if (selfEval !== null) {
+                    this.engine.autoFeedback(selfEval, this.config.loopId, this.currentRound, this.config.task);
                 }
                 // Compute round success
                 const roundSuccess = selfEval?.success ?? false;
@@ -512,7 +498,15 @@ export class LoopRuntime extends EventEmitter {
                 wp.write_on_outcomes.length === 0;
             if (shouldWrite && result.roundsCompleted > 0) {
                 try {
-                    const payload = buildWritebackPayload(this.config.loopId, this.config.task, stopReason, result);
+                    const lastEval = this.lastSelfEval;
+                    const discoveries = lastEval
+                        ? [
+                            ...(lastEval.wrong_assumptions ?? []),
+                            ...(lastEval.emerged_subtasks ?? []),
+                            ...(lastEval.discovered_constraints ?? []),
+                        ]
+                        : [];
+                    const payload = buildWritebackPayload(this.config.loopId, this.config.task, stopReason, result, discoveries);
                     if (payload) {
                         await this.config.memoryWriter(payload);
                         logEvent("memory_writeback", {

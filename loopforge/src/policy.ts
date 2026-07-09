@@ -12,7 +12,6 @@ import { resolve } from "node:path";
 
 export interface ConstraintsPolicy {
   retire_window: number;
-  max_active: number;
 }
 
 export interface SummaryPolicy {
@@ -21,7 +20,10 @@ export interface SummaryPolicy {
 }
 
 export interface TechniquePolicy {
-  /** Number of consecutive failures before escalating to Tier 2 techniques. */
+  /** @deprecated v1.15 — Escalation (N failures → Tier 2) removed.
+   *  The Agent freely chooses techniques at L2; keyword routing stays
+   *  in Tier 1 at L1. This field is retained for config compatibility
+   *  but no longer consumed by the routing logic. */
   tier2_escalation_failures: number;
 }
 
@@ -108,6 +110,140 @@ export function resolveAllowedPhases(
   return tiers[tiers.length - 1].allowed_phases;
 }
 
+/** Resolve which memory injection phase (1/2/3) should fire this round.
+ *  Shared between LoopRuntime (runtime.ts) and SessionManager (mcp/session.ts).
+ *  Returns the phase number, or 0 if no injection should occur this round.
+ *
+ *  @param currentRound       Current round number (1-based).
+ *  @param injectionCount     How many injections have already occurred.
+ *  @param allowedPhases      Phases allowed by the round-tier policy.
+ *  @param progress           Current progress estimate (-1 if unavailable).
+ *  @param phase2Triggered    Whether phase 2 has already fired in this loop.
+ *  @param phase3Triggered    Whether phase 3 has already fired in this loop.
+ *  @param thresholds         Policy threshold config for phase2/phase3. */
+export function resolveInjectionPhase(
+  currentRound: number,
+  injectionCount: number,
+  allowedPhases: Set<number>,
+  progress: number,
+  phase2Triggered: boolean,
+  phase3Triggered: boolean,
+  thresholds: { phase2: number; phase3: number },
+): 0 | 1 | 2 | 3 {
+  const maxInjections = allowedPhases.size;
+  if (injectionCount >= maxInjections) return 0;
+
+  // Phase 1: round 1 only
+  if (currentRound === 1 && injectionCount === 0 && allowedPhases.has(1)) {
+    return 1;
+  }
+
+  const hasProgress = progress >= 0;
+
+  // Phase 2: progress threshold (only if allowed by tier and not yet triggered)
+  if (
+    allowedPhases.has(2) &&
+    !phase2Triggered &&
+    hasProgress &&
+    progress >= thresholds.phase2
+  ) {
+    return 2;
+  }
+
+  // Phase 3: progress threshold (only if allowed by tier and not yet triggered)
+  if (
+    allowedPhases.has(3) &&
+    !phase3Triggered &&
+    hasProgress &&
+    progress >= thresholds.phase3
+  ) {
+    return 3;
+  }
+
+  return 0;
+}
+
+/** Build accumulated context for a targeted memory query from a SelfEvaluation.
+ *  Extracts recurring issues, key lessons, and remaining criteria.
+ *  Shared between LoopRuntime (runtime.ts) and SessionManager (mcp/session.ts). */
+export function buildAccumulatedMemoryContext(
+  selfEval: { constraint_violations: string[]; execution_evidence?: { success_criteria_remaining?: string[] } | null; emerged_subtasks?: string[]; wrong_assumptions?: string[] },
+): { recurringIssues: string[]; failedPatterns: string[]; keyLessons: string[]; remainingCriteria: string[] } {
+  const recurringIssues: string[] = [];
+  const failedPatterns: string[] = [];
+  const keyLessons: string[] = [];
+  const remainingCriteria: string[] = [];
+
+  if (selfEval.constraint_violations.length) {
+    recurringIssues.push(...selfEval.constraint_violations);
+  }
+  if (selfEval.execution_evidence?.success_criteria_remaining?.length) {
+    remainingCriteria.push(...selfEval.execution_evidence.success_criteria_remaining);
+  }
+  if (selfEval.emerged_subtasks?.length) {
+    keyLessons.push(...selfEval.emerged_subtasks);
+  }
+  if (selfEval.wrong_assumptions?.length) {
+    keyLessons.push(...selfEval.wrong_assumptions.map((a) => `Wrong: ${a}`));
+  }
+
+  return { recurringIssues, failedPatterns, keyLessons, remainingCriteria };
+}
+
+/** Build a base LoopMemoryWriteback payload from loop terminal state.
+ *  Shared between LoopRuntime (runtime.ts) and SessionManager (mcp/session.ts).
+ *  Callers may layer additional feedback entries on top of the returned payload. */
+export function buildBaseMemoryWriteback(params: {
+  loopId: string;
+  task: string;
+  stopReason: string;
+  roundsCompleted: number;
+  discoveries: string[];
+}): {
+  loopId: string;
+  task: string;
+  outcome: "completed" | "circuit_breaker" | "stalled" | "max_rounds" | "stopped";
+  roundsCompleted: number;
+  projectEntry: {
+    title: string;
+    objective: string;
+    keyOutcome: string;
+    keyDiscoveries: string[];
+    date: string;
+  };
+  referenceEntry: {
+    description: string;
+    vaultLocation: string;
+  };
+} {
+  const wp = getPolicy().memory_writeback;
+  const outcome = (params.stopReason === "task_complete" ? "completed" :
+    params.stopReason === "circuit_breaker" ? "circuit_breaker" :
+    params.stopReason === "stalled" ? "stalled" :
+    params.stopReason === "max_rounds" ? "max_rounds" :
+    "stopped") as "completed" | "circuit_breaker" | "stalled" | "max_rounds" | "stopped";
+
+  return {
+    loopId: params.loopId,
+    task: params.task,
+    outcome,
+    roundsCompleted: params.roundsCompleted,
+    projectEntry: {
+      title: `${params.task.slice(0, 80)} — ${outcome}`,
+      objective: params.task.slice(0, 200),
+      keyOutcome: params.stopReason === "task_complete"
+        ? `Completed successfully in ${params.roundsCompleted} rounds.`
+        : `Terminated with reason '${params.stopReason}' after ${params.roundsCompleted} rounds.`,
+      keyDiscoveries: params.discoveries.slice(0, wp.max_discoveries_in_project),
+      date: new Date().toISOString().split("T")[0],
+    },
+    referenceEntry: {
+      description: `LoopForge vault data for "${params.task.slice(0, 80)}"`,
+      vaultLocation: `.promptcraft/prompt_vault.json → loop:${params.loopId}:*`,
+    },
+  };
+}
+
 export interface MemoryWritebackPolicy {
   /** Master toggle for memory writeback on loop end. */
   enabled: boolean;
@@ -126,6 +262,17 @@ export interface CheckpointPolicy {
   outcome_max_chars: number;
 }
 
+export interface StateFilePolicy {
+  /** Master toggle. false = fully disabled, state stays inlined in prompt. */
+  enabled: boolean;
+  /** Directory relative to project root where state files are written. */
+  directory: string;
+  /** Max checkpoints to carry in state file. */
+  max_checkpoints: number;
+  /** Max rounds in cross-round summary section. */
+  max_summary_rounds: number;
+}
+
 export interface LoopPolicy {
   version: string;
   constraints: ConstraintsPolicy;
@@ -138,6 +285,7 @@ export interface LoopPolicy {
   memory_injection: MemoryInjectionPolicy;
   memory_writeback: MemoryWritebackPolicy;
   checkpoint: CheckpointPolicy;
+  state_file: StateFilePolicy;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -148,13 +296,13 @@ export const DEFAULT_POLICY: LoopPolicy = {
   version: "1",
   constraints: {
     retire_window: 3,
-    max_active: 12,
   },
   summary: {
     window: 5,
     health_check_interval: 1,
   },
   technique: {
+    /** @deprecated v1.15 — no longer consumed. Retained for config compatibility. */
     tier2_escalation_failures: 3,
   },
   engine: {
@@ -201,11 +349,17 @@ export const DEFAULT_POLICY: LoopPolicy = {
     enabled: true,
     max_feedback_entries: 5,
     max_discoveries_in_project: 3,
-    write_on_outcomes: ["completed", "circuit_breaker", "max_rounds"],
+    write_on_outcomes: ["task_complete", "circuit_breaker", "max_rounds"],
   },
   checkpoint: {
     max_carried_constraints: 10,
     outcome_max_chars: 200,
+  },
+  state_file: {
+    enabled: true,
+    directory: ".loopforge/state",
+    max_checkpoints: 5,
+    max_summary_rounds: 5,
   },
 };
 

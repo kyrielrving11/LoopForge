@@ -1,5 +1,6 @@
 # LoopForge generated files
 .promptcraft/
+.loopforge/
 
 # Node.js
 node_modules/

@@ -127,7 +127,7 @@ describe("Loop Compiler — Decide Level (4-gate router)", () => {
     assert.equal(decideLevel(req, vaultContext), "l1");
   });
 
-  it("returns l1 when last round failed (Gate 4)", () => {
+  it("returns l0 when last round failed with no new info (honest retry)", () => {
     const req = makeLoopCompileRequest({
       round: 2,
       loop_id: "test",
@@ -146,7 +146,8 @@ describe("Loop Compiler — Decide Level (4-gate router)", () => {
         },
       ],
     };
-    assert.equal(decideLevel(req, vaultContext), "l1");
+    // failed + no P0-P5 + no new constraints + no repair → L0 retry
+    assert.equal(decideLevel(req, vaultContext), "l0");
   });
 
   it("returns l1 with repair signal (Gate 4)", () => {
@@ -171,7 +172,7 @@ describe("Loop Compiler — Decide Level (4-gate router)", () => {
     assert.equal(decideLevel(req, vaultContext), "l1");
   });
 
-  it("returns l0 when nothing triggered (Gate 4: fast path)", () => {
+  it("returns l1 as default path when nothing specific triggered", () => {
     const req = makeLoopCompileRequest({
       round: 2,
       loop_id: "test",
@@ -189,7 +190,8 @@ describe("Loop Compiler — Decide Level (4-gate router)", () => {
         },
       ],
     };
-    assert.equal(decideLevel(req, vaultContext), "l0");
+    // v1.14: L1 is the default path — L0 only fires on honest failure with no new info
+    assert.equal(decideLevel(req, vaultContext), "l1");
   });
 
   it("respects force_level override (Gate 1)", () => {
@@ -235,7 +237,7 @@ describe("Loop Compiler — Decide Level (4-gate router)", () => {
 });
 
 describe("Loop Compiler — L0 Fast Path", () => {
-  it("reuses cached prompt from previous round", () => {
+  it("uses L1 as default when no trigger (L0 requires failure)", () => {
     const req = makeLoopCompileRequest({
       round: 2,
       loop_id: "test",
@@ -256,15 +258,17 @@ describe("Loop Compiler — L0 Fast Path", () => {
       ],
     };
     const response = compileLoop(req, vaultContext);
-    assert.equal(response.recompile_level, "l0");
-    assert.ok(response.prompt.includes("Round 1 Prompt"));
-    assert.equal(response.technique_used, "cached");
-    assert.deepEqual(response.constraints_active, ["check ownership"]);
+    // v1.14: L1 is the default — state evolves in state file, prompt is thin
+    assert.equal(response.recompile_level, "l1");
+    // L1 uses real technique routing, not "cached" or "patch"
+    assert.notEqual(response.technique_used, "");
+    assert.notEqual(response.technique_used, "cached");
+    assert.notEqual(response.technique_used, "patch");
   });
 });
 
 describe("Loop Compiler — L1 Patch Path", () => {
-  it("patches prompt with new constraints", () => {
+  it("compiles thin L1 prompt with constraints and real technique", () => {
     const req = makeLoopCompileRequest({
       round: 2,
       loop_id: "test",
@@ -287,15 +291,15 @@ describe("Loop Compiler — L1 Patch Path", () => {
     };
     const response = compileLoop(req, vaultContext);
     assert.equal(response.recompile_level, "l1");
-    assert.ok(response.prompt.includes("L1 Patch"));
-    assert.ok(response.prompt.includes("check flash loans"));
-    assert.ok(response.prompt.includes("check ownership"));
-    assert.equal(response.technique_used, "patch");
+    // v1.14: L1 uses real technique routing (not "patch")
+    assert.notEqual(response.technique_used, "patch");
+    assert.notEqual(response.technique_used, "cached");
+    assert.notEqual(response.technique_used, "");
   });
 });
 
 describe("Loop Compiler — L2 Full Recompile", () => {
-  it("generates full meta-instruction prompt", () => {
+  it("generates L2 prompt with technique selection block", () => {
     const req = makeLoopCompileRequest({
       round: 1,
       loop_id: "audit-erc20",
@@ -307,8 +311,13 @@ describe("Loop Compiler — L2 Full Recompile", () => {
     assert.equal(response.recompile_level, "l2");
     assert.ok(response.prompt.includes("L2 Compile"));
     assert.ok(response.prompt.includes("Loop Identity"));
-    assert.ok(response.prompt.includes("Generation Instructions"));
-    assert.notEqual(response.technique_used, "");
+    assert.ok(response.prompt.includes("Technique Selection"));
+    assert.equal(response.technique_used, "agent-selected");
+    // v1.15.1: Absolute path from package install location
+    assert.ok(
+      response.reference_file.endsWith("prompt-techniques/SKILL.md"),
+      `reference_file should end with prompt-techniques/SKILL.md, got: ${response.reference_file}`,
+    );
     assert.notEqual(response.goal_text_hash, "");
     assert.equal(response.round, 1);
     assert.equal(response.loop_id, "audit-erc20");
@@ -420,7 +429,7 @@ describe("Loop Compiler — Compile Loop (top-level)", () => {
 });
 
 describe("Loop Compiler — Cross-Round Scenarios", () => {
-  it("L0→L1 escalation: goal_id stable, new constraints added", () => {
+  it("L1 default: goal_id stable, new constraints added", () => {
     const vaultContext = {
       results: [
         {
@@ -442,10 +451,11 @@ describe("Loop Compiler — Cross-Round Scenarios", () => {
       constraints_from_plan: ["check flash loans"],
     });
     const level = decideLevel(req, vaultContext);
+    // v1.14: L1 is the default path for state evolution
     assert.equal(level, "l1");
   });
 
-  it("L0 stability: multiple rounds with same goal_id, no failures", () => {
+  it("L1 default: multiple rounds with same goal_id, no failures", () => {
     const vaultContext = {
       results: [
         {
@@ -464,7 +474,8 @@ describe("Loop Compiler — Cross-Round Scenarios", () => {
       task: "Audit ERC20",
     });
     const level = decideLevel(req, vaultContext);
-    assert.equal(level, "l0");
+    // v1.14: L1 is the default — L0 only fires on honest failure
+    assert.equal(level, "l1");
   });
 });
 

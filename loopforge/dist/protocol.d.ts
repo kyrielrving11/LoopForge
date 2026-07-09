@@ -3,7 +3,7 @@
  * All types exchanged between the Main Agent and LoopForge flow through
  * these interfaces. This is the contract layer — no implementation logic.
  *
- * v1.10: 39 types — 4 enums + 34 interfaces + 1 type alias.
+ * v1.15: 40 types — 4 enums + 35 interfaces + 1 type alias.
  */
 export declare enum Mode {
     LOOP_COMPILE = "loop_compile",
@@ -262,6 +262,10 @@ export interface LoopCompileRequest {
      *  Injected into L2 prompts only. Ignored by L0/L1 compilers.
      *  Populated by the caller (runtime / MCP session) via a memoryProvider callback. */
     external_context?: string;
+    /** Maximum rounds for this loop. Used by the state file header to show
+     *  accurate progress (Round X / Y). Falls back to max_summary_rounds * 2
+     *  when not provided (callers that don't track maxRounds). */
+    max_rounds?: number;
 }
 export declare function makeLoopCompileRequest(overrides?: Partial<LoopCompileRequest>): LoopCompileRequest;
 export interface LoopCompileResponse {
@@ -287,6 +291,10 @@ export interface LoopCompileResponse {
     plan_source: string | null;
     warnings: string[];
     error: string;
+    /** v1.14: Content for the loop state file. Written by the caller
+     *  (SessionManager or Runtime) to .loopforge/state/{loopId}-state.md.
+     *  Undefined for L0/L1 compilations — only L2 produces state file content. */
+    state_file_content?: string;
 }
 export declare function makeLoopCompileResponse(overrides?: Partial<LoopCompileResponse>): LoopCompileResponse;
 export interface LoopForgeResponse {
@@ -294,6 +302,8 @@ export interface LoopForgeResponse {
     prompt: string | null;
     analysis: Analysis | null;
     error: string | null;
+    /** v1.14: State file content from the compiler. Written to disk by the caller. */
+    state_file_content?: string;
 }
 export interface SessionState {
     task_id: string;
@@ -323,7 +333,28 @@ export interface RoundContext {
     reportProgress: (message: string) => void;
 }
 export type AgentExecutor = (prompt: string, ctx: RoundContext) => Promise<string>;
-export type StopReason = "task_complete" | "circuit_breaker" | "max_rounds" | "stalled" | "stopped" | "executor_failure";
+export type StopReason = "task_complete" | "circuit_breaker" | "max_rounds" | "stalled" | "stopped" | "executor_failure" | "enforcement_terminated";
+/** Map StopReason (internal) → MemoryWriteback outcome (wire format).
+ *  Shared between runtime.ts and mcp/session.ts — single source of truth. */
+export declare const STOP_REASON_OUTCOME_MAP: Record<StopReason, LoopMemoryWriteback["outcome"]>;
+/** Result of round-boundary enforcement. Decides whether to accept the round,
+ *  reject it (force the agent to redo the SAME round), or terminate the loop.
+ *
+ *  accept:    round passes; proceed to next round as normal.
+ *  reject:    agent's self-evaluation or output is invalid; the agent receives
+ *             a rejection prompt and must redo the same round. Round counter
+ *             does NOT increment.
+ *  terminate: loop has reached an unrecoverable state; stop immediately with
+ *             stopReason "enforcement_terminated". */
+export interface EnforcementResult {
+    action: "accept" | "reject" | "terminate";
+    /** Human-readable reason for the enforcement decision. */
+    reason: string;
+    /** For reject: concrete instructions the agent must follow.
+     *  Empty for accept and terminate. */
+    fix_instructions: string;
+}
+export declare function makeEnforcementResult(overrides?: Partial<EnforcementResult>): EnforcementResult;
 export interface RoundStartInfo {
     round: number;
     level: string;

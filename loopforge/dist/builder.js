@@ -5,9 +5,18 @@
  * Tier 2 (step-back / least-to-most / ToT): checkpoint boundaries or
  * after consecutive failures only.
  */
-import { getPolicy } from "./policy.js";
-import { logEvent } from "./observability.js";
 import { makeAnalysis, Technique, } from "./protocol.js";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+// ═══════════════════════════════════════════════════════════════════════════
+// Skills directory — resolved at module load time from the package install
+// location. Absolute paths ensure the Agent can find skill files regardless
+// of cwd (critical for npm-installed loopforge where skills are under
+// node_modules/loopforge/skills/, not at the project root).
+// ═══════════════════════════════════════════════════════════════════════════
+/** Absolute path to the skills/ directory shipped with this package.
+ *  Derived from this module's location in dist/ → ../skills/. */
+export const SKILLS_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "skills");
 // ═══════════════════════════════════════════════════════════════════════════
 // Routing table
 // ═══════════════════════════════════════════════════════════════════════════
@@ -29,13 +38,13 @@ const RATIONALE = {
     [Technique.TREE_OF_THOUGHT]: "High risk, multi-path — explore + evaluate + prune.",
 };
 export const TECHNIQUE_REFERENCE = {
-    "zero-shot": "loopforge/skills/prompt-techniques/references/zero-shot.md",
-    "few-shot": "loopforge/skills/prompt-techniques/references/few-shot.md",
-    "zero-shot-cot": "loopforge/skills/prompt-techniques/references/chain-of-thought.md",
-    "few-shot-cot": "loopforge/skills/prompt-techniques/references/chain-of-thought.md",
-    "step-back": "loopforge/skills/prompt-techniques/references/step-back.md",
-    "least-to-most": "loopforge/skills/prompt-techniques/references/least-to-most.md",
-    "tree-of-thought": "loopforge/skills/prompt-techniques/references/tree-of-thought.md",
+    "zero-shot": join(SKILLS_DIR, "prompt-techniques", "references", "zero-shot.md"),
+    "few-shot": join(SKILLS_DIR, "prompt-techniques", "references", "few-shot.md"),
+    "zero-shot-cot": join(SKILLS_DIR, "prompt-techniques", "references", "chain-of-thought.md"),
+    "few-shot-cot": join(SKILLS_DIR, "prompt-techniques", "references", "chain-of-thought.md"),
+    "step-back": join(SKILLS_DIR, "prompt-techniques", "references", "step-back.md"),
+    "least-to-most": join(SKILLS_DIR, "prompt-techniques", "references", "least-to-most.md"),
+    "tree-of-thought": join(SKILLS_DIR, "prompt-techniques", "references", "tree-of-thought.md"),
 };
 // Keyword sets for heuristic classification
 const HIGH_LOAD_WORDS = new Set([
@@ -125,43 +134,6 @@ function downgradeToTier1(technique) {
     return DOWNGRADE_TIER2_TO_TIER1[technique] ?? Technique.FEW_SHOT;
 }
 // ═══════════════════════════════════════════════════════════════════════════
-// Consecutive failure detection
-// ═══════════════════════════════════════════════════════════════════════════
-function countConsecutiveFailures(loopId, vaultContext) {
-    if (vaultContext === null)
-        return 0;
-    const results = vaultContext.results || [];
-    if (!results.length)
-        return 0;
-    // Collect rounds with success field from feedback entries
-    const rounds = [];
-    for (const r of results) {
-        const lineage = (r.loop_lineage || r.lineage || {});
-        if (lineage.loop_id !== loopId)
-            continue;
-        const success = r.success !== undefined
-            ? r.success
-            : lineage.success;
-        if (success === undefined)
-            continue; // lineage entries without merged feedback — skip
-        rounds.push({
-            round: lineage.round ?? 0,
-            success,
-        });
-    }
-    rounds.sort((a, b) => b.round - a.round);
-    let count = 0;
-    for (const rnd of rounds) {
-        if (rnd.success === false) {
-            count++;
-        }
-        else {
-            break;
-        }
-    }
-    return count;
-}
-// ═══════════════════════════════════════════════════════════════════════════
 // Keyword routing restricted to a subset of techniques
 // ═══════════════════════════════════════════════════════════════════════════
 function keywordRouteRestricted(task, allowedTechniques) {
@@ -197,20 +169,20 @@ function keywordRouteRestricted(task, allowedTechniques) {
 // ═══════════════════════════════════════════════════════════════════════════
 // Tier-gated technique router (v4.0)
 // ═══════════════════════════════════════════════════════════════════════════
-export function routeTechniqueAdaptive(task, vaultContext = null, loopId = "", isCheckpoint = false) {
+export function routeTechniqueAdaptive(task, 
+/** @deprecated v1.15 — escalation removed; no longer read. Kept for API compat. */
+_vaultContext = null, 
+/** @deprecated v1.15 — escalation removed; no longer read. Kept for API compat. */
+_loopId = "", isCheckpoint = false) {
     // Step 1: Full keyword routing over all 7 techniques
     const keyword = routeTechnique(task);
     const technique = keyword.technique;
-    // Step 2: Determine which tier is allowed this round
-    const policy = getPolicy();
-    const tier2Failures = policy.technique.tier2_escalation_failures ?? 3;
-    const consecutiveFailures = vaultContext && loopId
-        ? countConsecutiveFailures(loopId, vaultContext)
-        : 0;
+    // Step 2: Determine which tier is allowed this round.
+    // v1.15: Escalation (3 failures → Tier 2) removed. The Agent freely
+    // chooses techniques at L2; at L1, keyword routing stays in Tier 1.
     let allowedTechniques;
     let tierLabel;
     if (isCheckpoint) {
-        // Checkpoint boundary: full access to all 7 techniques
         allowedTechniques = [
             Technique.ZERO_SHOT, Technique.FEW_SHOT,
             Technique.ZERO_SHOT_COT, Technique.FEW_SHOT_COT,
@@ -218,20 +190,7 @@ export function routeTechniqueAdaptive(task, vaultContext = null, loopId = "", i
         ];
         tierLabel = "checkpoint";
     }
-    else if (consecutiveFailures >= tier2Failures) {
-        // Escalation: Tier 2 only
-        allowedTechniques = [
-            Technique.STEP_BACK, Technique.LEAST_TO_MOST, Technique.TREE_OF_THOUGHT,
-        ];
-        tierLabel = `escalated (${consecutiveFailures} consecutive failures)`;
-        logEvent("tier2_escalation", {
-            loopId,
-            consecutiveFailures,
-            keywordTechnique: technique,
-        });
-    }
     else {
-        // Normal: Tier 1 only
         allowedTechniques = [
             Technique.ZERO_SHOT, Technique.FEW_SHOT,
             Technique.ZERO_SHOT_COT, Technique.FEW_SHOT_COT,
@@ -241,13 +200,10 @@ export function routeTechniqueAdaptive(task, vaultContext = null, loopId = "", i
     // Step 3: Apply gate — if keyword result is in allowed set, use it
     if (allowedTechniques.includes(technique)) {
         if (tierLabel === "default")
-            return keyword; // Most common path — no overhead
-        const label = tierLabel === "checkpoint"
-            ? `${keyword.rationale} [CHECKPOINT: full technique access]`
-            : `${keyword.rationale} [ESCALATED: Tier 2 — ${consecutiveFailures} consecutive failures]`;
+            return keyword;
         return makeAnalysis({
             technique,
-            rationale: label,
+            rationale: `${keyword.rationale} [CHECKPOINT: full technique access]`,
             independence: keyword.independence,
             cognitive_load: keyword.cognitive_load,
             reference_file: keyword.reference_file,

@@ -7,8 +7,8 @@
  */
 import { randomUUID } from "node:crypto";
 import { getPolicy } from "./policy.js";
-import { FSBackend, readLineageMd } from "./backends/fs.js";
-import { AgentStatus, Mode, makeAnalysis, makeExecutionEvidence, makeExecutionFeedback, makeLoopCompileRequest, makeLoopObjective, makeLoopRoundResult, makeSelfEvaluation, makeSessionState, makeTaskId, makeVaultConfig, SELF_EVAL_REGEX, } from "./protocol.js";
+import { FileLoopStore, LoopStoreBackend } from "./loop-store.js";
+import { AgentStatus, Mode, makeExecutionEvidence, makeExecutionFeedback, makeLoopCompileRequest, makeLoopObjective, makeLoopRoundResult, makeSelfEvaluation, makeSessionState, makeTaskId, SELF_EVAL_REGEX, } from "./protocol.js";
 import { compileLoop } from "./loop-compiler.js";
 import { logEvent } from "./observability.js";
 // ═══════════════════════════════════════════════════════════════════════════
@@ -152,6 +152,8 @@ export function buildSelfEvaluation(raw) {
         // v1.10: Checkpoint compression
         compression_checkpoint: typeof raw.compression_checkpoint === "boolean" ? raw.compression_checkpoint : false,
         checkpoint_label: typeof raw.checkpoint_label === "string" ? raw.checkpoint_label : "",
+        // v1.16: Agent's declared next action
+        next_action: typeof raw.next_action === "string" ? raw.next_action : undefined,
     });
 }
 /** Fallback heuristic when structured self-eval extraction fails.
@@ -196,15 +198,16 @@ export class LoopForgeEngine {
     metrics = null;
     feedbackWriteBuffer = [];
     lastTask = null;
-    // skillsDir parameter retained for API backward compatibility (v1.15).
-    // Previously stored as this.skillsDir but never read — now accepted & dropped.
-    constructor(_skillsDir = "skills", backend) {
-        if (backend)
-            this.backend = backend;
+    constructor(storeOrBackend) {
+        if (storeOrBackend) {
+            this.backend = "readSession" in storeOrBackend
+                ? new LoopStoreBackend(storeOrBackend)
+                : storeOrBackend;
+        }
     }
     resolveBackend() {
         if (this.backend === null) {
-            this.backend = new FSBackend();
+            this.backend = new LoopStoreBackend(new FileLoopStore(getPolicy().backend.root_dir));
         }
         return this.backend;
     }
@@ -319,7 +322,6 @@ export class LoopForgeEngine {
             constraints_active: response.constraints_active,
             task: request.task,
             success: true,
-            technique_used: response.technique_used,
         };
         let lastOutputSummary = "";
         let lastViolations = [];
@@ -335,8 +337,6 @@ export class LoopForgeEngine {
             timestamp: new Date().toISOString().replace(/\.\d+Z$/, ""),
             user_intent: `loop_compile round ${response.round} — ${response.goal_id}`,
             task_type: "loop_lineage",
-            skill_used: response.technique_used,
-            technique_used: response.technique_used,
             loop_id: response.loop_id,
             loop_lineage: structuredLineage,
             loop_objective: loopObjDict,
@@ -356,26 +356,6 @@ export class LoopForgeEngine {
                 this.metrics.vaultWriteErrors++;
             logEvent("vault_write_error", { error: "persist_lineage_json" });
         }
-        // 2. Markdown write (secondary, non-blocking)
-        try {
-            this.resolveBackend().writeLineageMd(response.loop_id, response.round, response.prompt || "", {
-                goal_id: response.goal_id,
-                goal_text_hash: response.goal_text_hash,
-                recompile_level: response.recompile_level,
-                constraints_active: response.constraints_active,
-                task: request.task,
-                technique_used: response.technique_used,
-                loop_objective: loopObjDict,
-                success: true,
-                output_summary: lastOutputSummary,
-                constraint_violations: lastViolations,
-            });
-        }
-        catch {
-            if (this.metrics)
-                this.metrics.vaultWriteErrors++;
-            logEvent("vault_write_error", { error: "persist_lineage_md" });
-        }
         return vaultOk;
     }
     // ═══════════════════════════════════════════════════════════════════════
@@ -387,9 +367,14 @@ export class LoopForgeEngine {
     recordDelegation(loopId, round, entries) {
         if (!entries.length)
             return;
+        const taskId = `loop:${loopId}:r${round}:delegations`;
+        const existing = this.resolveBackend().queryEntries({ prefix: taskId })
+            .some((candidate) => candidate.task_id === taskId);
+        if (existing)
+            return;
         const entry = {
             id: randomUUID(),
-            task_id: `loop:${loopId}:r${round}:delegations`,
+            task_id: taskId,
             version_tag: "v1",
             is_active: true,
             timestamp: new Date().toISOString().replace(/\.\d+Z$/, ""),
@@ -449,18 +434,8 @@ export class LoopForgeEngine {
                 entry.success = fbSuccess.get(rnd);
             }
         }
-        // Fallback: scan Markdown files if JSON vault had no matches
-        let finalResults = results;
-        if (!finalResults.length) {
-            const mdResults = this.resolveBackend().scanLineageMd(loopId);
-            if (mdResults.length)
-                finalResults = mdResults;
-        }
-        // Normalize technique_used field
+        const finalResults = results;
         for (const entry of finalResults) {
-            if (!entry.technique_used) {
-                entry.technique_used = entry.skill_used;
-            }
             const lineage = (entry.loop_lineage ?? entry.lineage ?? {});
             if (!entry.output_summary) {
                 entry.output_summary = lineage.output_summary ?? "";
@@ -468,19 +443,6 @@ export class LoopForgeEngine {
             if (!entry.constraint_violations) {
                 entry.constraint_violations =
                     lineage.constraint_violations ?? [];
-            }
-        }
-        // Enrich: attach full prompt text from Markdown for L0 cache reuse
-        for (const entry of finalResults) {
-            if (entry.full_prompt)
-                continue;
-            const lineage = (entry.loop_lineage ?? entry.lineage ?? {});
-            const roundNum = lineage.round;
-            if (roundNum) {
-                const mdEntry = readLineageMd(loopId, roundNum);
-                if (mdEntry?.full_prompt) {
-                    entry.full_prompt = mdEntry.full_prompt;
-                }
             }
         }
         if (!finalResults.length)
@@ -500,7 +462,6 @@ export class LoopForgeEngine {
                 response: {
                     status: AgentStatus.ERROR,
                     prompt: null,
-                    analysis: null,
                     error: "Feedback mode requires a feedback payload.",
                 },
             };
@@ -545,7 +506,6 @@ export class LoopForgeEngine {
             this.state.circuit_breaker_count = 0;
         }
         logEvent("round_complete", {
-            technique: "feedback",
             success,
             loopId: loopId ?? "unknown",
             round: loopRound ?? this.state.call_count,
@@ -555,12 +515,6 @@ export class LoopForgeEngine {
             response: {
                 status: AgentStatus.OK,
                 prompt: `## Feedback Recorded\n\nSuccess: ${success}\nSignals: 1`,
-                analysis: makeAnalysis({
-                    technique: "feedback",
-                    rationale: `success=${success}`,
-                    independence: "n/a",
-                    cognitive_load: "low",
-                }),
                 error: null,
             },
         };
@@ -574,8 +528,8 @@ export class LoopForgeEngine {
      *  and emerged_subtasks for the compiler to consume next round.
      *  Call this BEFORE invokeLoopCompile for the next round so that
      *  hydrateLoopContext picks up the latest success flags. */
-    autoFeedback(selfEval, loopId, round, task) {
-        this.ensureInit({ task, mode: Mode.FEEDBACK, vault_config: makeVaultConfig(), feedback: null, skill_name: null, task_id: null });
+    autoFeedback(selfEval, loopId, round, task, roundTransaction) {
+        this.ensureInit({ task, mode: Mode.FEEDBACK, feedback: null, skill_name: null, task_id: null });
         const fb = makeExecutionFeedback({
             output: selfEval.output_summary,
             success: selfEval.success,
@@ -583,6 +537,27 @@ export class LoopForgeEngine {
             manual_fixes_needed: "",
         });
         const taskId = `loop:${loopId}:r${round}:feedback`;
+        const transactionId = typeof roundTransaction?.round_id === "string"
+            ? roundTransaction.round_id
+            : null;
+        const transactionPersisted = () => {
+            if (!transactionId)
+                return false;
+            return this.resolveBackend().queryEntries({
+                prefix: taskId,
+                feedbackOnly: true,
+            }).some((entry) => {
+                if (entry.task_id !== taskId)
+                    return false;
+                const lineage = entry.loop_lineage;
+                const transaction = lineage?.round_transaction;
+                return transaction !== null &&
+                    typeof transaction === "object" &&
+                    !Array.isArray(transaction) &&
+                    transaction.round_id === transactionId;
+            });
+        };
+        const alreadyCommitted = transactionPersisted();
         // Multi-agent: Merge sub-agent discovered constraints into the main constraint flow
         const subDiscovered = (selfEval.worker_results ?? [])
             .flatMap((w) => w.discoveredConstraints ?? [])
@@ -611,9 +586,21 @@ export class LoopForgeEngine {
             wrong_assumptions: selfEval.wrong_assumptions ?? [],
             // Multi-agent: Worker delegation results
             worker_results: selfEval.worker_results ?? [],
+            loop_lineage: roundTransaction
+                ? {
+                    round,
+                    round_id: roundTransaction.round_id,
+                    round_transaction: roundTransaction,
+                }
+                : {},
         };
-        this.persistFeedbackToVault(signal);
-        this.flushFeedbackBuffer();
+        if (!alreadyCommitted) {
+            this.persistFeedbackToVault(signal);
+            this.flushFeedbackBuffer();
+            if (transactionId && !transactionPersisted()) {
+                throw new Error(`Round feedback commit failed: ${transactionId}`);
+            }
+        }
         // Multi-agent: Auto-record delegation journal from worker_results
         if (selfEval.worker_results && selfEval.worker_results.length > 0) {
             const entries = selfEval.worker_results.map((w, i) => ({
@@ -627,6 +614,10 @@ export class LoopForgeEngine {
             }));
             this.recordDelegation(loopId, round, entries);
         }
+        // Replaying a committed transaction may repair derived delegation data,
+        // but must never apply the feedback to mutable engine state twice.
+        if (alreadyCommitted)
+            return fb.success;
         // Update state
         this.state.call_count++;
         this.state.success_trend.push(fb.success);
@@ -644,14 +635,13 @@ export class LoopForgeEngine {
             loopId,
             round,
             success: fb.success,
-            technique: this.state?.last_technique ?? "feedback",
         });
         return fb.success;
     }
     // ═══════════════════════════════════════════════════════════════════════
     // Loop Compile (public, primary)
     // ═══════════════════════════════════════════════════════════════════════
-    invokeLoopCompile(request, hydrateResults) {
+    invokeLoopCompile(request, hydrateResults, options = {}) {
         this.ensureInit(request);
         this.lastTask = request.task;
         // Build LoopCompileRequest from LoopForgeRequest extras
@@ -670,6 +660,18 @@ export class LoopForgeEngine {
             health_check_interval: extras.health_check_interval ?? 1,
             external_context: extras.external_context ?? "",
             max_rounds: extras.max_rounds ?? undefined,
+            verification_flags: Array.isArray(extras.verification_flags)
+                ? extras.verification_flags
+                : [],
+            attempt: typeof extras.attempt === "number"
+                ? Math.max(1, Math.trunc(extras.attempt))
+                : 1,
+            consecutive_rejections: typeof extras.consecutive_rejections === "number"
+                ? Math.max(0, Math.trunc(extras.consecutive_rejections))
+                : 0,
+            rejection_notice: typeof extras.rejection_notice === "string"
+                ? extras.rejection_notice
+                : "",
         });
         // Convert last_round_result if present
         const lastRR = extras.last_round_result;
@@ -742,84 +744,22 @@ export class LoopForgeEngine {
                 response: {
                     status: AgentStatus.ERROR,
                     prompt: null,
-                    analysis: null,
                     error: `loop_compile failed: ${exc}`,
                 },
             };
         }
-        // Build prompt text from response.
-        // Compile functions (buildL2Prompt / specialist compilers via buildHeader)
-        // already produce their own round-level headers with technique + identity.
-        const promptLines = [response.prompt];
-        if (response.warnings.length) {
-            promptLines.push("");
-            promptLines.push("### Warnings");
-            for (const w of response.warnings) {
-                promptLines.push(`- ⚠️ ${w}`);
-            }
-        }
-        // Verification gate flags (v1.6) — injected after compiler warnings
-        const verificationFlags = extras.verification_flags ?? [];
-        if (verificationFlags.length) {
-            promptLines.push("");
-            promptLines.push("### Verification Gate");
-            for (const f of verificationFlags) {
-                const icon = f.severity === "error" ? "🚫" : "⚠️";
-                promptLines.push(`- ${icon} [${f.check}] ${f.detail}`);
-            }
-            const hasError = verificationFlags.some((f) => f.severity === "error");
-            if (hasError) {
-                promptLines.push("");
-                promptLines.push("**Gate Verdict: CONTRADICTED** — this round's success flag has been excluded " +
-                    "from the success trend. Address each 🚫 flag explicitly in your next response.");
-            }
-        }
-        if (response.loop_health) {
-            const h = response.loop_health;
-            promptLines.push("");
-            promptLines.push("### Loop Health");
-            promptLines.push(`- Goal Alignment: ${h.goal_alignment.toFixed(2)}`);
-            promptLines.push(`- Constraint Integrity: ${h.constraint_integrity.toFixed(2)}`);
-            promptLines.push(`- Task Continuity: ${h.task_continuity.toFixed(2)}`);
-            promptLines.push(`- Drift Detected: ${h.drift_detected}`);
-            promptLines.push(`- Strategy Stability: ${h.strategy_stability}`);
-        }
-        if (response.task_alignment &&
-            response.task_alignment.escalation !== "none") {
-            promptLines.push("");
-            promptLines.push("### Task Alignment Advisory");
-            promptLines.push(`- Score: ${response.task_alignment.alignment_score.toFixed(2)}`);
-            promptLines.push(`- Escalation: ${response.task_alignment.escalation}`);
-            promptLines.push(`- ${response.task_alignment.warning}`);
-        }
-        if (response.suggested_next_task) {
-            promptLines.push("");
-            promptLines.push(`### Suggested Next Task\n${response.suggested_next_task}`);
-        }
         // Persist lineage to vault
-        this.persistLoopLineage(response, lcr);
-        // Track technique for status queries
-        if (this.state) {
-            this.state.last_technique = response.technique_used;
+        if (options.persistLineage !== false) {
+            this.persistLoopLineage(response, lcr);
         }
         return {
             status: AgentStatus.OK,
             response: {
                 status: AgentStatus.OK,
-                prompt: promptLines.join("\n"),
-                analysis: makeAnalysis({
-                    technique: response.technique_used,
-                    rationale: `Recompile level: ${response.recompile_level}`,
-                    independence: "n/a",
-                    cognitive_load: response.recompile_level === "l0"
-                        ? "low"
-                        : response.recompile_level === "l1"
-                            ? "medium"
-                            : "high",
-                    reference_file: response.reference_file,
-                }),
+                prompt: response.prompt,
                 error: null,
                 state_file_content: response.state_file_content,
+                prompt_artifact: response.prompt_artifact,
             },
         };
     }
@@ -848,7 +788,7 @@ export class LoopForgeEngine {
 // ═══════════════════════════════════════════════════════════════════════════
 // Factory
 // ═══════════════════════════════════════════════════════════════════════════
-export function createEngine(skillsDir = "skills", backend) {
-    return new LoopForgeEngine(skillsDir, backend);
+export function createEngine(store) {
+    return new LoopForgeEngine(store);
 }
 //# sourceMappingURL=engine.js.map

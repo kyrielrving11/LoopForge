@@ -48,6 +48,7 @@ function enforceSuccessWithRemainingCriteria(flags) {
         fix_instructions: "You set success=true but success criteria remain unmet. " +
             "Either: (a) complete the remaining criteria and re-submit your self-evaluation, " +
             "or (b) set success=false and honestly report what remains to be done.",
+        check: "success_with_remaining_criteria",
     });
 }
 /** R2: Same constraint violation appears in 3 consecutive rounds.
@@ -64,21 +65,34 @@ function enforceRecurringViolation(flags) {
             "You must: (a) explain WHY this violation keeps occurring, " +
             "and (b) propose a DIFFERENT approach than what you used in the last 3 rounds. " +
             "Do NOT retry the same strategy — it has failed 3 times.",
+        check: "recurring_violation",
     });
 }
 /** R3: Agent claims success but did nothing verifiable.
- *  Only fires when execution_evidence IS provided (structured self-eval path)
- *  but shows no files changed AND no tests run AND success=true.
- *  Skips when execution_evidence is undefined (heuristic fallback) —
- *  heuristic evaluations have no evidence by definition. */
+ *  v1.17: execution_evidence is now MANDATORY for structured self-evaluations.
+ *  Missing evidence when success=true → reject (agent must provide evidence).
+ *  Empty evidence (no files + no tests) when success=true → reject. */
 function enforceEmptySuccess(selfEval, _flags) {
     if (!selfEval.success)
         return null;
     const ev = selfEval.execution_evidence;
-    // Skip if no execution_evidence at all — this is the heuristic fallback
-    // case where the agent didn't provide structured evidence.
-    if (!ev)
-        return null;
+    // v1.17: Missing evidence when claiming success → reject.
+    // The agent MUST provide execution_evidence to back up a success claim.
+    if (!ev) {
+        return makeEnforcementResult({
+            action: "reject",
+            reason: "Agent claims success but provided no execution_evidence. " +
+                "Every successful round MUST include execution_evidence with " +
+                "files_changed, test_results, and progress_estimate.",
+            fix_instructions: "You must provide execution_evidence in your self-evaluation: " +
+                "(a) list the files you changed in execution_evidence.files_changed, " +
+                "(b) run tests and report results in execution_evidence.test_results, " +
+                "(c) estimate your progress in execution_evidence.progress_estimate. " +
+                "If you genuinely completed the task without file changes or tests, " +
+                "explain why in detail in your output_summary.",
+            check: "empty_success",
+        });
+    }
     const filesEmpty = ev.files_changed.length === 0;
     const testsNotRun = ev.test_results === null;
     if (!filesEmpty || !testsNotRun)
@@ -92,6 +106,7 @@ function enforceEmptySuccess(selfEval, _flags) {
             "and (b) run tests and report results in execution_evidence.test_results. " +
             "If you genuinely completed the task without file changes or tests, " +
             "explain why in detail in your output_summary.",
+        check: "empty_success",
     });
 }
 /** R4: Progress has stalled for 3+ consecutive rounds.
@@ -147,6 +162,7 @@ function enforceProgressStall(_selfEval, _flags, currentRound, vaultEntries, con
             reason: `Progress stalled for 3+ rounds ` +
                 `(${(p1 * 100).toFixed(0)}% → ${(p2 * 100).toFixed(0)}% → ${(p3 * 100).toFixed(0)}%) ` +
                 `and agent did not resolve after previous rejection. Terminating loop.`,
+            check: "progress_stall",
         });
     }
     return makeEnforcementResult({
@@ -159,6 +175,7 @@ function enforceProgressStall(_selfEval, _flags, currentRound, vaultEntries, con
             "(b) propose a DIFFERENT technique or task decomposition, and " +
             "(c) set a concrete, verifiable goal for the redo of this round. " +
             "Do NOT repeat the same approach — it has not moved progress forward.",
+        check: "progress_stall",
     });
 }
 /** R5: Two consecutive rejections → terminate.
@@ -169,8 +186,9 @@ function enforceMaxRejections(consecutiveRejections) {
         return null;
     return makeEnforcementResult({
         action: "terminate",
-        reason: `${consecutiveRejections} consecutive enforcement rejections without ` +
-            `resolution. The agent has been unable to correct the identified issues.`,
+        reason: `${consecutiveRejections} consecutive enforcement rejections for the ` +
+            `same issue without resolution. The agent has been unable to correct the identified issue.`,
+        check: "max_rejections",
     });
 }
 // ═══════════════════════════════════════════════════════════════════════════

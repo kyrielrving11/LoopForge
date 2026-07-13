@@ -6,6 +6,7 @@
  * EngineMetrics tracks silent-failure counters for observability.
  */
 import type { VaultBackend } from "./backends/interface.js";
+import type { LoopStore } from "./loop-store.js";
 import { type AgentLoopResult, type CriterionRevision, type ExecutionEvidence, type LoopForgeRequest, type SelfEvaluation, type SessionState } from "./protocol.js";
 /** Parse ExecutionEvidence from a raw JSON object. Shared by buildSelfEvaluation
  *  and invokeLoopCompile — both parse the same execution_evidence shape. */
@@ -56,7 +57,7 @@ export declare class LoopForgeEngine {
     private metrics;
     private feedbackWriteBuffer;
     lastTask: string | null;
-    constructor(_skillsDir?: string, backend?: VaultBackend);
+    constructor(storeOrBackend?: LoopStore | VaultBackend);
     private resolveBackend;
     /** Public accessor for the vault backend — used by runtime/verification gate. */
     getBackend(): VaultBackend;
@@ -78,9 +79,11 @@ export declare class LoopForgeEngine {
      *  and emerged_subtasks for the compiler to consume next round.
      *  Call this BEFORE invokeLoopCompile for the next round so that
      *  hydrateLoopContext picks up the latest success flags. */
-    autoFeedback(selfEval: SelfEvaluation, loopId: string, round: number, task: string): boolean;
-    invokeLoopCompile(request: LoopForgeRequest, hydrateResults?: Record<string, unknown> | null): AgentLoopResult;
+    autoFeedback(selfEval: SelfEvaluation, loopId: string, round: number, task: string, roundTransaction?: Record<string, unknown>): boolean;
+    invokeLoopCompile(request: LoopForgeRequest, hydrateResults?: Record<string, unknown> | null, options?: {
+        persistLineage?: boolean;
+    }): AgentLoopResult;
     shouldBreak(): boolean;
 }
-export declare function createEngine(skillsDir?: string, backend?: VaultBackend): LoopForgeEngine;
+export declare function createEngine(store?: LoopStore): LoopForgeEngine;
 //# sourceMappingURL=engine.d.ts.map

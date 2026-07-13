@@ -1,4 +1,4 @@
-/** LoopForge — Loop-Time Intelligence Layer for AI coding agents.
+/** LoopForge — Cognitive State Runtime for AI coding agents.
  *
  * TypeScript reference implementation v1.3.
  *
@@ -26,9 +26,6 @@
 export {
   Mode,
   AgentStatus,
-  Technique,
-  makeAnalysis,
-  makeVaultConfig,
   makeExecutionFeedback,
   makeSelfEvaluation,
   makeLoopObjective,
@@ -42,12 +39,14 @@ export {
   makeTaskId,
   toDict,
   SELF_EVAL_REGEX,
-  STOP_REASON_OUTCOME_MAP,
+  makeEvidenceSnapshot,
+  makeVerificationFlag,
+  makeVerificationResult,
+  makeEnforcementResult,
+  makeCheckpointSummary,
 } from "./protocol.js";
 
 export type {
-  Analysis,
-  VaultConfig,
   ExecutionFeedback,
   SelfEvaluation,
   LoopForgeRequest,
@@ -62,6 +61,13 @@ export type {
   SessionState,
   AgentLoopResult,
   WorkerResult,
+  EvidenceSnapshot,
+  VerificationFlag,
+  VerificationResult,
+  EnforcementResult,
+  CriterionRevision,
+  CheckpointSummary,
+  PromptArtifact,
 } from "./protocol.js";
 
 // Policy
@@ -70,52 +76,46 @@ export {
   loadPolicy,
   resetPolicy,
   DEFAULT_POLICY,
-  resolveAllowedPhases,
-  resolveInjectionPhase,
-  buildAccumulatedMemoryContext,
-  buildBaseMemoryWriteback,
+  writeStateFile,
 } from "./policy.js";
 
 export type {
   LoopPolicy,
   ConstraintsPolicy,
   SummaryPolicy,
-  TechniquePolicy,
   EnginePolicy,
   BackendPolicy,
-  MemoryInjectionPolicy,
-  MemoryInjectionTier,
-  MemoryWritebackPolicy,
+  RuntimePolicy,
+  PromptPolicy,
+  StateFilePolicy,
+  EvidencePolicy,
+  CommandEvidencePolicy,
+  McpPolicy,
 } from "./policy.js";
 
-// Backends
-export type { VaultBackend, VaultEntry } from "./backends/interface.js";
-export { FSBackend } from "./backends/fs.js";
-
-// Builder
+// Durable store
 export {
-  routeTechniqueAdaptive,
-  TECHNIQUE_REFERENCE,
-  SKILLS_DIR,
-} from "./builder.js";
+  FileLoopStore,
+  LOOP_STORE_SCHEMA_VERSION,
+} from "./loop-store.js";
+export type {
+  LoopStore,
+  LoopSessionDocument,
+  LoopRoundDocument,
+  LoopStoreMigrationResult,
+} from "./loop-store.js";
 
 // Loop Compiler
 export {
   compileLoop,
   decideLevel,
-  compileL2,
   alignTask,
   checkLoopHealth,
-  computeAdvisories,
   computeGoalTextHash,
   deriveGoalId,
   getPreviousRound,
   buildSelfEvalBlock,
   buildRollingSummary,
-  formatRollingSummaryForPrompt,
-  filterConstraintsForSubTask,
-  formatDelegationPrompt,
-  buildDelegationSummary,
 } from "./loop-compiler.js";
 
 // Replay
@@ -155,14 +155,71 @@ export type {
 export { McpServer } from "./mcp/server.js";
 export { SessionManager } from "./mcp/session.js";
 export type { McpSession, McpSessionSummary } from "./mcp/session.js";
-
-// Memory Bridge (v1.8)
+// EvidenceProvider (v1.18)
 export {
-  computeProjectHash,
-  findGitRoot,
-  detectClaudeMem,
-  createMemoryProvider,
-  createMemoryWriter,
-  autoConfigureMemory,
-  tryAutoConfigure,
-} from "./memory-bridge.js";
+  EvidenceCollector,
+  GitEvidenceProvider,
+  CommandEvidenceProvider,
+  registerEvidenceProvider,
+  unregisterEvidenceProvider,
+  extractFilesFromSnapshots,
+  diffSnapshots,
+  diffSnapshotCollections,
+} from "./evidence-provider.js";
+export type {
+  ProviderSnapshot,
+  EvidenceProvider,
+  EvidenceCaptureContext,
+  EvidenceCaptureResult,
+  EvidenceCollectOptions,
+  EvidenceProviderFactory,
+  CommandEvidenceData,
+} from "./evidence-provider.js";
+
+// Structured tracing and policy effectiveness metrics (v1.20)
+export {
+  logEvent,
+  startSpan,
+  setTraceSink,
+  getTraceSink,
+} from "./observability.js";
+export type {
+  LogEventData,
+  TraceStatus,
+  TraceRecord,
+  TraceSink,
+  TraceContext,
+  TraceSpan,
+} from "./observability.js";
+export {
+  PolicyMetricsCollector,
+  policyMetrics,
+  getPolicyMetrics,
+  resetPolicyMetrics,
+} from "./policy-metrics.js";
+export type { PolicyMetricsSnapshot } from "./policy-metrics.js";
+
+// Neutral ecosystem checkpoint bridge (v1.20)
+export {
+  COGNITIVE_CHECKPOINT_SCHEMA_VERSION,
+  createCognitiveCheckpoint,
+} from "./interop.js";
+export type {
+  CognitiveStateCheckpoint,
+  CognitiveCheckpointSink,
+} from "./interop.js";
+
+// Unified round transaction (v1.19)
+export {
+  ROUND_TRANSACTION_SCHEMA_VERSION,
+  RoundTransactionCoordinator,
+  makeRoundId,
+  prepareRoundTransaction,
+  parseRoundTransactionSnapshot,
+} from "./round-transaction.js";
+export type {
+  RoundTransactionPhase,
+  RoundTransactionSnapshot,
+  RoundTransactionInput,
+  RoundTransactionOutcome,
+} from "./round-transaction.js";

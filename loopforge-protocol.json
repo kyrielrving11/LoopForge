@@ -21,72 +21,6 @@
         "stalled"
       ]
     },
-    "Technique": {
-      "type": "string",
-      "enum": [
-        "zero-shot",
-        "few-shot",
-        "zero-shot-cot",
-        "few-shot-cot",
-        "step-back",
-        "least-to-most",
-        "tree-of-thought"
-      ]
-    },
-    "Analysis": {
-      "type": "object",
-      "properties": {
-        "technique": {
-          "type": "string"
-        },
-        "rationale": {
-          "type": "string"
-        },
-        "independence": {
-          "type": "string"
-        },
-        "cognitive_load": {
-          "type": "string"
-        },
-        "reference_file": {
-          "type": "string"
-        },
-        "was_rotated": {
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "technique",
-        "rationale",
-        "independence",
-        "cognitive_load",
-        "reference_file",
-        "was_rotated"
-      ]
-    },
-    "VaultConfig": {
-      "type": "object",
-      "properties": {
-        "project_vault": {
-          "type": "string"
-        },
-        "global_vault": {
-          "type": "string"
-        },
-        "skills_dir": {
-          "type": "string"
-        },
-        "no_global": {
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "project_vault",
-        "global_vault",
-        "skills_dir",
-        "no_global"
-      ]
-    },
     "ExecutionFeedback": {
       "type": "object",
       "properties": {
@@ -233,6 +167,9 @@
           "items": {
             "$ref": "#/$defs/WorkerResult"
           }
+        },
+        "next_action": {
+          "type": "string"
         }
       },
       "required": [
@@ -320,9 +257,6 @@
         "mode": {
           "$ref": "#/$defs/Mode"
         },
-        "vault_config": {
-          "$ref": "#/$defs/VaultConfig"
-        },
         "feedback": {
           "anyOf": [
             {
@@ -348,8 +282,7 @@
       },
       "required": [
         "task",
-        "mode",
-        "vault_config"
+        "mode"
       ],
       "additionalProperties": true
     },
@@ -552,6 +485,9 @@
         },
         "checkpoint_label": {
           "type": "string"
+        },
+        "next_action": {
+          "type": "string"
         }
       },
       "required": [
@@ -627,14 +563,26 @@
         "health_check_interval": {
           "type": "number"
         },
-        "vault_config": {
-          "$ref": "#/$defs/VaultConfig"
-        },
         "external_context": {
           "type": "string"
         },
         "max_rounds": {
           "type": "number"
+        },
+        "verification_flags": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/VerificationFlag"
+          }
+        },
+        "attempt": {
+          "type": "number"
+        },
+        "consecutive_rejections": {
+          "type": "number"
+        },
+        "rejection_notice": {
+          "type": "string"
         }
       },
       "required": [
@@ -649,8 +597,99 @@
         "new_since_last_round",
         "force_level",
         "health_check_interval",
-        "vault_config"
+        "attempt",
+        "consecutive_rejections",
+        "rejection_notice"
       ]
+    },
+    "PromptArtifact": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "type": "number"
+        },
+        "roundId": {
+          "type": "string"
+        },
+        "attempt": {
+          "type": "number"
+        },
+        "level": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "l0"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "l1"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "l2"
+              ]
+            }
+          ]
+        },
+        "levelReasons": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "renderedPrompt": {
+          "type": "string"
+        },
+        "promptHash": {
+          "type": "string"
+        },
+        "stateHash": {
+          "type": "string"
+        },
+        "basePromptVersion": {
+          "type": "string"
+        },
+        "includedSections": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "budgetChars": {
+          "type": "number"
+        },
+        "charCount": {
+          "type": "number"
+        },
+        "budgetExceeded": {
+          "type": "boolean"
+        },
+        "generatedAt": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "roundId",
+        "attempt",
+        "level",
+        "levelReasons",
+        "renderedPrompt",
+        "promptHash",
+        "stateHash",
+        "basePromptVersion",
+        "includedSections",
+        "budgetChars",
+        "charCount",
+        "budgetExceeded",
+        "generatedAt"
+      ],
+      "description": "Immutable record of the exact prompt delivered for one round attempt."
     },
     "LoopCompileResponse": {
       "type": "object",
@@ -684,12 +723,6 @@
           "items": {
             "type": "string"
           }
-        },
-        "technique_used": {
-          "type": "string"
-        },
-        "reference_file": {
-          "type": "string"
         },
         "loop_id": {
           "type": "string"
@@ -773,6 +806,9 @@
         },
         "state_file_content": {
           "type": "string"
+        },
+        "prompt_artifact": {
+          "$ref": "#/$defs/PromptArtifact"
         }
       },
       "required": [
@@ -783,8 +819,6 @@
         "lineage",
         "constraints_active",
         "constraints_retired",
-        "technique_used",
-        "reference_file",
         "loop_id",
         "round",
         "goal_id",
@@ -793,6 +827,42 @@
         "warnings",
         "error"
       ]
+    },
+    "EvidenceSnapshot": {
+      "type": "object",
+      "properties": {
+        "verified": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "pending": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "invalidated": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "discovered": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "verified",
+        "pending",
+        "invalidated",
+        "discovered"
+      ],
+      "description": "Aggregated evidence snapshot for the state file Evidence section.\nFour categories give the agent a clear picture of what's been confirmed,\nwhat remains, what was wrong, and what's newly discovered — all derived\nfrom accumulated SelfEvaluation data across rounds."
     },
     "LoopForgeResponse": {
       "type": "object",
@@ -806,16 +876,6 @@
             "null"
           ]
         },
-        "analysis": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Analysis"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "error": {
           "type": [
             "string",
@@ -824,6 +884,9 @@
         },
         "state_file_content": {
           "type": "string"
+        },
+        "prompt_artifact": {
+          "$ref": "#/$defs/PromptArtifact"
         }
       },
       "required": [
@@ -847,12 +910,6 @@
         },
         "current_version": {
           "type": "string"
-        },
-        "last_technique": {
-          "type": [
-            "string",
-            "null"
-          ]
         },
         "circuit_breaker_count": {
           "type": "number"
@@ -901,7 +958,8 @@
         "idle",
         "running",
         "stopped",
-        "stalled"
+        "stalled",
+        "paused"
       ]
     },
     "RoundContext": {
@@ -909,6 +967,9 @@
       "properties": {
         "round": {
           "type": "number"
+        },
+        "roundId": {
+          "type": "string"
         },
         "signal": {
           "type": "string"
@@ -926,13 +987,18 @@
     "StopReason": {
       "type": "string",
       "enum": [
-        "task_complete",
-        "circuit_breaker",
+        "completed",
+        "failed",
+        "blocked",
+        "cancelled",
         "max_rounds",
+        "circuit_breaker",
         "stalled",
-        "stopped",
         "executor_failure",
-        "enforcement_terminated"
+        "enforcement_terminated",
+        "paused",
+        "task_complete",
+        "stopped"
       ]
     },
     "EnforcementResult": {
@@ -965,6 +1031,9 @@
         },
         "fix_instructions": {
           "type": "string"
+        },
+        "check": {
+          "type": "string"
         }
       },
       "required": [
@@ -980,10 +1049,10 @@
         "round": {
           "type": "number"
         },
-        "level": {
+        "roundId": {
           "type": "string"
         },
-        "technique": {
+        "level": {
           "type": "string"
         },
         "prompt": {
@@ -993,7 +1062,6 @@
       "required": [
         "round",
         "level",
-        "technique",
         "prompt"
       ]
     },
@@ -1002,6 +1070,9 @@
       "properties": {
         "round": {
           "type": "number"
+        },
+        "roundId": {
+          "type": "string"
         },
         "roundSuccess": {
           "type": "boolean"
@@ -1138,11 +1209,14 @@
         "onHealthWarning": {
           "type": "string"
         },
-        "memoryProvider": {
-          "type": "string"
+        "contextProvider": {
+          "description": "Function signature: ExternalContextProvider. Omitted from JSON Schema."
         },
-        "memoryWriter": {
-          "type": "string"
+        "terminalSinks": {
+          "type": "array",
+          "items": {
+            "description": "Function signature: LoopTerminalSink. Omitted from JSON Schema."
+          }
         }
       },
       "required": [
@@ -1150,7 +1224,7 @@
         "execute"
       ]
     },
-    "MemoryProviderContext": {
+    "ExternalContextRequest": {
       "type": "object",
       "properties": {
         "loopId": {
@@ -1165,36 +1239,17 @@
         "domain": {
           "type": "string"
         },
-        "phase": {
-          "anyOf": [
-            {
-              "type": "number"
-            },
-            {
-              "type": "number"
-            },
-            {
-              "type": "number"
-            }
-          ]
-        },
-        "progressEstimate": {
-          "type": "number"
-        },
-        "accumulatedContext": {
-          "type": "string"
+        "lastEvaluation": {
+          "$ref": "#/$defs/SelfEvaluation"
         }
       },
       "required": [
         "loopId",
         "round",
         "task",
-        "domain",
-        "phase",
-        "progressEstimate",
-        "accumulatedContext"
+        "domain"
       ],
-      "description": "Context passed to the memoryProvider callback at each injection phase.\nContains enough loop state to construct a targeted semantic query."
+      "description": "Context supplied to an embedding-owned provider before compilation."
     },
     "RunResult": {
       "type": "object",
@@ -1222,7 +1277,7 @@
         "successTrajectory"
       ]
     },
-    "LoopMemoryWriteback": {
+    "LoopTerminalEvent": {
       "type": "object",
       "properties": {
         "loopId": {
@@ -1231,130 +1286,15 @@
         "task": {
           "type": "string"
         },
-        "outcome": {
-          "anyOf": [
-            {
-              "type": "string",
-              "enum": [
-                "completed"
-              ]
-            },
-            {
-              "type": "string",
-              "enum": [
-                "circuit_breaker"
-              ]
-            },
-            {
-              "type": "string",
-              "enum": [
-                "stalled"
-              ]
-            },
-            {
-              "type": "string",
-              "enum": [
-                "max_rounds"
-              ]
-            },
-            {
-              "type": "string",
-              "enum": [
-                "stopped"
-              ]
-            }
-          ]
-        },
-        "roundsCompleted": {
-          "type": "number"
-        },
-        "projectEntry": {
-          "$ref": "#/$defs/LoopMemoryWritebackProjectEntry"
-        },
-        "feedbackEntries": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/LoopMemoryWritebackFeedbackEntry"
-          }
-        },
-        "referenceEntry": {
-          "$ref": "#/$defs/LoopMemoryWritebackReferenceEntry"
+        "lastEvaluation": {
+          "$ref": "#/$defs/SelfEvaluation"
         }
       },
       "required": [
         "loopId",
-        "task",
-        "outcome",
-        "roundsCompleted",
-        "projectEntry",
-        "feedbackEntries",
-        "referenceEntry"
+        "task"
       ],
-      "description": "Structured payload written back to the long-term memory system\nwhen a loop terminates. Contains distilled knowledge suitable\nfor cross-task reuse."
-    },
-    "LoopMemoryWritebackProjectEntry": {
-      "type": "object",
-      "properties": {
-        "title": {
-          "type": "string"
-        },
-        "objective": {
-          "type": "string"
-        },
-        "keyOutcome": {
-          "type": "string"
-        },
-        "keyDiscoveries": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "date": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "title",
-        "objective",
-        "keyOutcome",
-        "keyDiscoveries",
-        "date"
-      ]
-    },
-    "LoopMemoryWritebackFeedbackEntry": {
-      "type": "object",
-      "properties": {
-        "rule": {
-          "type": "string"
-        },
-        "why": {
-          "type": "string"
-        },
-        "howToApply": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "rule",
-        "why",
-        "howToApply"
-      ]
-    },
-    "LoopMemoryWritebackReferenceEntry": {
-      "type": "object",
-      "properties": {
-        "description": {
-          "type": "string"
-        },
-        "vaultLocation": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "description",
-        "vaultLocation"
-      ]
+      "description": "Stable, provider-neutral terminal hook payload."
     },
     "VerificationFlag": {
       "type": "object",

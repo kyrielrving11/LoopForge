@@ -1,4 +1,4 @@
-/** LoopForge — Loop-Time Intelligence Layer for AI coding agents.
+/** LoopForge — Cognitive State Runtime for AI coding agents.
  *
  * TypeScript reference implementation v1.3.
  *
@@ -22,14 +22,13 @@
  *   server.start();
  */
 // Protocol types
-export { Mode, AgentStatus, Technique, makeAnalysis, makeVaultConfig, makeExecutionFeedback, makeSelfEvaluation, makeLoopObjective, makeLoopHealth, makeRollingSummary, makeTaskAlignment, makeLoopRoundResult, makeLoopCompileRequest, makeLoopCompileResponse, makeSessionState, makeTaskId, toDict, SELF_EVAL_REGEX, STOP_REASON_OUTCOME_MAP, } from "./protocol.js";
+export { Mode, AgentStatus, makeExecutionFeedback, makeSelfEvaluation, makeLoopObjective, makeLoopHealth, makeRollingSummary, makeTaskAlignment, makeLoopRoundResult, makeLoopCompileRequest, makeLoopCompileResponse, makeSessionState, makeTaskId, toDict, SELF_EVAL_REGEX, makeEvidenceSnapshot, makeVerificationFlag, makeVerificationResult, makeEnforcementResult, makeCheckpointSummary, } from "./protocol.js";
 // Policy
-export { getPolicy, loadPolicy, resetPolicy, DEFAULT_POLICY, resolveAllowedPhases, resolveInjectionPhase, buildAccumulatedMemoryContext, buildBaseMemoryWriteback, } from "./policy.js";
-export { FSBackend } from "./backends/fs.js";
-// Builder
-export { routeTechniqueAdaptive, TECHNIQUE_REFERENCE, SKILLS_DIR, } from "./builder.js";
+export { getPolicy, loadPolicy, resetPolicy, DEFAULT_POLICY, writeStateFile, } from "./policy.js";
+// Durable store
+export { FileLoopStore, LOOP_STORE_SCHEMA_VERSION, } from "./loop-store.js";
 // Loop Compiler
-export { compileLoop, decideLevel, compileL2, alignTask, checkLoopHealth, computeAdvisories, computeGoalTextHash, deriveGoalId, getPreviousRound, buildSelfEvalBlock, buildRollingSummary, formatRollingSummaryForPrompt, filterConstraintsForSubTask, formatDelegationPrompt, buildDelegationSummary, } from "./loop-compiler.js";
+export { compileLoop, decideLevel, alignTask, checkLoopHealth, computeGoalTextHash, deriveGoalId, getPreviousRound, buildSelfEvalBlock, buildRollingSummary, } from "./loop-compiler.js";
 // Replay
 export { ReplayBackend } from "./replay.js";
 // Engine
@@ -40,6 +39,13 @@ export { RuntimeStatus } from "./protocol.js";
 // MCP (v1.3)
 export { McpServer } from "./mcp/server.js";
 export { SessionManager } from "./mcp/session.js";
-// Memory Bridge (v1.8)
-export { computeProjectHash, findGitRoot, detectClaudeMem, createMemoryProvider, createMemoryWriter, autoConfigureMemory, tryAutoConfigure, } from "./memory-bridge.js";
+// EvidenceProvider (v1.18)
+export { EvidenceCollector, GitEvidenceProvider, CommandEvidenceProvider, registerEvidenceProvider, unregisterEvidenceProvider, extractFilesFromSnapshots, diffSnapshots, diffSnapshotCollections, } from "./evidence-provider.js";
+// Structured tracing and policy effectiveness metrics (v1.20)
+export { logEvent, startSpan, setTraceSink, getTraceSink, } from "./observability.js";
+export { PolicyMetricsCollector, policyMetrics, getPolicyMetrics, resetPolicyMetrics, } from "./policy-metrics.js";
+// Neutral ecosystem checkpoint bridge (v1.20)
+export { COGNITIVE_CHECKPOINT_SCHEMA_VERSION, createCognitiveCheckpoint, } from "./interop.js";
+// Unified round transaction (v1.19)
+export { ROUND_TRANSACTION_SCHEMA_VERSION, RoundTransactionCoordinator, makeRoundId, prepareRoundTransaction, parseRoundTransactionSnapshot, } from "./round-transaction.js";
 //# sourceMappingURL=index.js.map

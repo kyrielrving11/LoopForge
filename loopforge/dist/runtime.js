@@ -13,73 +13,23 @@
  *    const result = await rt.start();
  */
 import { EventEmitter } from "node:events";
-import { writeFileSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
 import { extractSelfEvaluation, heuristicSelfEvaluation, createEngine, } from "./engine.js";
-import { tokenize, jaccard } from "./loop-compiler.js";
-import { Mode, RuntimeStatus, makeLoopCompileRequest, makeLoopRoundResult, makeSelfEvaluation, makeVaultConfig, } from "./protocol.js";
-import { getPolicy, resolveAllowedPhases, resolveInjectionPhase, buildAccumulatedMemoryContext, buildBaseMemoryWriteback } from "./policy.js";
-import { verifySelfEvaluation } from "./verification-gate.js";
-import { enforceRound, buildRejectionPrompt } from "./enforcement-gate.js";
+import { Mode, RuntimeStatus, makeLoopCompileRequest, makeLoopRoundResult, makeSelfEvaluation, makeTaskId, } from "./protocol.js";
+import { getPolicy } from "./policy.js";
+import { prepareRoundTransaction, } from "./round-transaction.js";
+import { RoundDriver } from "./round-driver.js";
 import { logEvent } from "./observability.js";
-import { tryAutoConfigure } from "./memory-bridge.js";
+import { policyMetrics } from "./policy-metrics.js";
 // ═══════════════════════════════════════════════════════════════════════════
 // Helpers
 // ═══════════════════════════════════════════════════════════════════════════
-/** Build a writeback payload from the loop's final state.
- *  Uses shared base builder from policy.ts, then layers runtime-specific
- *  feedback entries from trajectory analysis on top. */
-function buildWritebackPayload(loopId, task, stopReason, result, discoveries = []) {
-    if (result.roundsCompleted < 1)
-        return null;
-    const wp = getPolicy().memory_writeback;
-    const base = buildBaseMemoryWriteback({
-        loopId, task, stopReason, roundsCompleted: result.roundsCompleted, discoveries,
-    });
-    // Build feedback entries from success trajectory patterns (runtime-specific)
-    const feedbackEntries = [];
-    const trajectory = result.successTrajectory;
-    if (trajectory.length >= 3) {
-        const firstHalf = trajectory.slice(0, Math.floor(trajectory.length / 2));
-        const secondHalf = trajectory.slice(Math.floor(trajectory.length / 2));
-        const firstRate = firstHalf.filter(Boolean).length / firstHalf.length;
-        const secondRate = secondHalf.filter(Boolean).length / secondHalf.length;
-        if (secondRate - firstRate > 0.3) {
-            feedbackEntries.push({
-                rule: `Success rate improved from ${(firstRate * 100).toFixed(0)}% to ${(secondRate * 100).toFixed(0)}% over ${trajectory.length} rounds`,
-                why: `Mid-loop strategy adjustment unlocked progress in task "${task.slice(0, 80)}"`,
-                howToApply: "Consider the strategy used in later rounds for similar tasks",
-            });
-        }
-    }
-    if (trajectory.length >= 3) {
-        const recent = trajectory.slice(-3);
-        if (recent.every((v) => v === false)) {
-            feedbackEntries.push({
-                rule: `Failed 3 consecutive rounds at end of loop`,
-                why: `Task "${task.slice(0, 80)}" stopped with reason '${stopReason}' — strategy may have stagnated`,
-                howToApply: "If re-attempting, start with a different technique than the one that produced the failures",
-            });
-        }
-    }
-    return {
-        ...base,
-        feedbackEntries: feedbackEntries.slice(0, wp.max_feedback_entries),
-    };
-}
-function autoLoopId(task) {
-    let slug = task.toLowerCase().trim().slice(0, 60);
-    slug = slug.replace(/[^a-z0-9\s-]/g, "");
-    slug = slug.replace(/\s+/g, "-");
-    return slug || "unnamed-loop";
-}
 function resolveConfig(raw) {
     const policy = getPolicy();
     const rtPolicy = policy.runtime;
     const config = {
         task: raw.task,
         execute: raw.execute,
-        loopId: raw.loopId || autoLoopId(raw.task),
+        loopId: raw.loopId || makeTaskId(raw.task),
         goalId: raw.goalId || "",
         maxRounds: raw.maxRounds ?? rtPolicy.max_rounds,
         roundTimeoutMs: raw.roundTimeoutMs ?? rtPolicy.round_timeout_ms,
@@ -96,18 +46,17 @@ function resolveConfig(raw) {
         onHeartbeat: raw.onHeartbeat,
         onTimeout: raw.onTimeout,
         onHealthWarning: raw.onHealthWarning,
-        memoryProvider: raw.memoryProvider,
-        memoryWriter: raw.memoryWriter,
+        contextProvider: raw.contextProvider,
+        terminalSinks: raw.terminalSinks ?? [],
     };
     // Auto-detect claude-mem if no explicit provider was given
-    if (!config.memoryProvider && !config.memoryWriter) {
-        const auto = tryAutoConfigure();
-        if (auto.memoryProvider)
-            config.memoryProvider = auto.memoryProvider;
-        if (auto.memoryWriter)
-            config.memoryWriter = auto.memoryWriter;
-    }
     return config;
+}
+class RoundStalledError extends Error {
+    constructor() {
+        super("Round exceeded timeout and stall grace period");
+        this.name = "RoundStalledError";
+    }
 }
 // ═══════════════════════════════════════════════════════════════════════════
 // LoopRuntime
@@ -115,6 +64,7 @@ function resolveConfig(raw) {
 export class LoopRuntime extends EventEmitter {
     config;
     engine;
+    roundDriver;
     _status = RuntimeStatus.IDLE;
     currentRound = 1;
     successTrajectory = [];
@@ -126,23 +76,28 @@ export class LoopRuntime extends EventEmitter {
     pendingVerificationFlags = [];
     // Enforcement gate state (v1.13)
     consecutiveRejections = 0;
+    /** Which enforcement check triggered the last rejection.
+     *  Only same-check rejections accumulate; a different check resets the counter. */
+    lastRejectionCheck = "";
     pendingRejectionNotice = "";
-    // Memory integration state (v1.7)
-    injectionCount = 0;
-    lastInjectionRound = 0;
-    injectedContexts = [];
-    phase2Triggered = false;
-    phase3Triggered = false;
+    roundSnapshot = null;
+    // Pause/resume state (v1.18)
+    pauseTimestamp = 0;
+    pauseRequested = false;
+    driverPromise = null;
+    // Explicit Agent-supplied context for the next compilation.
     pendingExternalContext = "";
     // Shared mutable state between the main loop and the heartbeat tick
     roundStartTime = 0;
     lastProgressTime = 0;
     activeCtx = null;
+    activeAbortController = null;
     timedOut = false;
     constructor(rawConfig) {
         super();
         this.config = resolveConfig(rawConfig);
         this.engine = createEngine();
+        this.roundDriver = new RoundDriver(this.engine);
     }
     get status() {
         return this._status;
@@ -153,64 +108,10 @@ export class LoopRuntime extends EventEmitter {
     getSuccessTrajectory() {
         return [...this.successTrajectory];
     }
-    // ── Memory Integration (v1.7) ──────────────────────────────────────────
-    /** Derive the current progress estimate from the last self evaluation.
-     *  Returns -1 if no progress data is available. */
-    getCurrentProgress() {
-        if (!this.lastSelfEval?.execution_evidence)
-            return -1;
-        const pe = this.lastSelfEval.execution_evidence.progress_estimate;
-        return typeof pe === "number" ? pe : -1;
-    }
-    /** Determine which memory injection phase (0/1/2/3) should fire this round.
-     *  Returns 0 if no injection should occur. Phase tracking (phase2Triggered /
-     *  phase3Triggered) is updated by the caller based on the returned phase. */
-    getInjectionPhase() {
-        const policy = getPolicy();
-        const mi = policy.memory_injection;
-        if (!mi.enabled)
-            return 0;
-        if (!this.config.memoryProvider)
-            return 0;
-        if (this.lastInjectionRound > 0 &&
-            this.currentRound - this.lastInjectionRound < mi.min_rounds_between_injections) {
-            return 0;
-        }
-        const allowedPhases = new Set(resolveAllowedPhases(this.config.maxRounds, mi.round_tiers));
-        const progress = this.getCurrentProgress();
-        return resolveInjectionPhase(this.currentRound, this.injectionCount, allowedPhases, progress, this.phase2Triggered, this.phase3Triggered, {
-            phase2: mi.phase_thresholds.phase2.threshold,
-            phase3: mi.phase_thresholds.phase3.threshold,
-        });
-    }
-    /** Build the accumulated context for constructing a targeted memory query.
-     *  Delegates to the shared buildAccumulatedMemoryContext() utility. */
-    buildAccumulatedContext() {
-        if (!this.lastSelfEval) {
-            return { recurringIssues: [], failedPatterns: [], keyLessons: [], remainingCriteria: [] };
-        }
-        return buildAccumulatedMemoryContext(this.lastSelfEval);
-    }
-    /** Deduplicate external context against previously injected contexts.
-     *  Returns empty string if the new context is too similar to any prior. */
-    dedupAndStoreContext(newContext) {
-        if (!newContext.trim())
-            return "";
-        const policy = getPolicy();
-        const threshold = policy.memory_injection.dedup_threshold;
-        const newTokens = tokenize(newContext);
-        for (const old of this.injectedContexts) {
-            const oldTokens = tokenize(old);
-            if (jaccard(newTokens, oldTokens) > threshold) {
-                return ""; // Too similar — skip
-            }
-        }
-        this.injectedContexts.push(newContext);
-        return newContext;
-    }
     // ── Lifecycle ──────────────────────────────────────────────────────────
     /** Start the loop. Returns when the loop terminates (task complete,
-     *  circuit breaker, max rounds, stalled, or manual stop). */
+     *  circuit breaker, max rounds, stalled, paused, or manual stop).
+     *  Can only be called from IDLE state. */
     async start() {
         if (this._status !== RuntimeStatus.IDLE) {
             throw new Error(`Cannot start: runtime is ${this._status}`);
@@ -219,130 +120,164 @@ export class LoopRuntime extends EventEmitter {
         this.registerSignalHandlers();
         this.startHeartbeat();
         this.emit("start");
+        return this.launchDriver(false);
+    }
+    /** Start the one allowed loop driver and clear its ownership on exit. */
+    launchDriver(isResume) {
+        if (this.driverPromise)
+            return this.driverPromise;
+        const driver = this._continue(isResume);
+        this.driverPromise = driver;
+        void driver.then(() => {
+            if (this.driverPromise === driver)
+                this.driverPromise = null;
+        }, () => {
+            if (this.driverPromise === driver)
+                this.driverPromise = null;
+        });
+        return driver;
+    }
+    /** Internal loop driver. Called by both start() (isResume=false) and
+     *  resume() (isResume=true). When resuming, skips the currentRound=1
+     *  reset — the loop picks up exactly where it left off. */
+    async _continue(isResume) {
         let stopReason = "max_rounds";
         let previousAgentOutput = null;
         let consecutiveErrors = 0;
         try {
-            for (this.currentRound = 1; this.currentRound <= this.config.maxRounds; this.currentRound++) {
-                if (this._status !== RuntimeStatus.RUNNING) {
-                    stopReason = this._status === RuntimeStatus.STALLED ? "stalled" : "stopped";
+            // When starting fresh (not resuming), reset to round 1
+            if (!isResume) {
+                this.currentRound = 1;
+            }
+            for (; this.currentRound <= this.config.maxRounds; this.currentRound++) {
+                if (this.pauseRequested) {
+                    this.pauseRequested = false;
+                    this._status = RuntimeStatus.PAUSED;
+                    stopReason = "paused";
                     break;
                 }
-                // ── v1.7: Memory Injection (before compile, only at L2 phases) ──
+                if (this._status !== RuntimeStatus.RUNNING) {
+                    if (this._status === RuntimeStatus.PAUSED) {
+                        stopReason = "paused";
+                    }
+                    else if (this._status === RuntimeStatus.STALLED) {
+                        stopReason = "stalled";
+                    }
+                    else {
+                        stopReason = "cancelled";
+                    }
+                    break;
+                }
+                // ── Explicit external context ─────────────────────────────────
                 this.pendingExternalContext = "";
-                const injectionPhase = this.getInjectionPhase();
-                if (injectionPhase !== 0) {
-                    // Track phase triggers
-                    if (injectionPhase === 2)
-                        this.phase2Triggered = true;
-                    if (injectionPhase === 3)
-                        this.phase3Triggered = true;
-                    const progress = this.getCurrentProgress();
+                if (this.config.contextProvider) {
                     try {
-                        const ctx = {
+                        this.pendingExternalContext = (await this.config.contextProvider({
                             loopId: this.config.loopId,
                             round: this.currentRound,
                             task: this.config.task,
                             domain: this.config.domain,
-                            phase: injectionPhase,
-                            progressEstimate: progress,
-                            accumulatedContext: this.buildAccumulatedContext(),
-                        };
-                        const rawContext = await this.config.memoryProvider(ctx);
-                        this.pendingExternalContext = this.dedupAndStoreContext(rawContext);
-                        if (this.pendingExternalContext) {
-                            this.injectionCount++;
-                            this.lastInjectionRound = this.currentRound;
-                            logEvent("memory_injected", {
-                                loopId: this.config.loopId,
-                                round: this.currentRound,
-                                phase: injectionPhase,
-                                injectionCount: this.injectionCount,
-                                contextLength: this.pendingExternalContext.length,
-                            });
-                        }
+                            lastEvaluation: this.lastSelfEval ?? undefined,
+                        })).trim();
                     }
                     catch {
-                        // memoryProvider failed — degrade gracefully, continue without context
+                        // Provider failures are isolated from loop execution.
                         this.pendingExternalContext = "";
-                        logEvent("memory_provider_error", {
+                        logEvent("context_provider_error", {
                             loopId: this.config.loopId,
                             round: this.currentRound,
                         });
                     }
                 }
                 // ── Compile ──────────────────────────────────────────────────
-                const lcr = this.buildCompileRequest(previousAgentOutput);
-                const compileResult = this.engine.invokeLoopCompile({
-                    task: this.config.task,
-                    mode: Mode.LOOP_COMPILE,
-                    vault_config: makeVaultConfig(),
-                    feedback: null,
-                    skill_name: null,
-                    task_id: null,
-                    loop_id: lcr.loop_id,
-                    round: lcr.round,
-                    goal_id: lcr.goal_id,
-                    domain: lcr.domain ?? "",
-                    plan_source: lcr.plan_source ?? null,
-                    constraints_from_plan: lcr.constraints_from_plan ?? [],
-                    health_check_interval: lcr.health_check_interval,
-                    last_round_result: (lcr.last_round_result ?? undefined),
-                    verification_flags: this.pendingVerificationFlags,
-                    external_context: this.pendingExternalContext || undefined,
-                    max_rounds: this.config.maxRounds,
-                });
-                // v1.14: Write state file if the compiler produced one and policy allows it
-                const sfContent = compileResult.response?.state_file_content;
-                if (sfContent && getPolicy().state_file.enabled) {
-                    const sfDir = join(process.cwd(), getPolicy().state_file.directory);
-                    mkdirSync(sfDir, { recursive: true });
-                    writeFileSync(join(sfDir, `${this.config.loopId}-state.md`), sfContent, "utf-8");
-                }
-                if (!compileResult.response?.prompt) {
-                    stopReason = "stalled";
-                    break;
-                }
-                let prompt = compileResult.response.prompt;
-                // If this is a redo of a rejected round, use ONLY the rejection prompt.
-                // The agent needs to fix a specific issue, not get a fresh compilation.
-                // Normal compilation resumes on the next round after enforcement accepts.
+                let prompt;
+                let level;
                 if (this.pendingRejectionNotice) {
-                    prompt = this.pendingRejectionNotice;
+                    if (!this.roundSnapshot || this.roundSnapshot.phase !== "rejected") {
+                        stopReason = "stalled";
+                        break;
+                    }
+                    const retryRequest = this.buildEngineCompileRequest(null);
+                    const prepared = await this.roundDriver.prepareRetry(retryRequest, this.roundSnapshot, this.pendingRejectionNotice, this.consecutiveRejections);
+                    if (!prepared) {
+                        stopReason = "stalled";
+                        break;
+                    }
+                    prompt = prepared.prompt;
+                    level = prepared.level;
+                    this.roundSnapshot = prepared.snapshot;
                 }
-                const analysis = compileResult.response.analysis;
-                const level = analysis?.rationale?.includes("l0")
-                    ? "l0"
-                    : analysis?.rationale?.includes("l1")
-                        ? "l1"
-                        : "l2";
-                const technique = analysis?.technique ?? "unknown";
+                else {
+                    const compileRequest = this.buildEngineCompileRequest(previousAgentOutput);
+                    const prepared = await this.roundDriver.prepare(compileRequest, this.config.loopId, this.currentRound);
+                    if (!prepared) {
+                        stopReason = "stalled";
+                        break;
+                    }
+                    prompt = prepared.prompt;
+                    level = prepared.level;
+                    this.roundSnapshot = prepared.snapshot;
+                }
                 // ── Emit round:start ──────────────────────────────────────────
-                const startInfo = { round: this.currentRound, level, technique, prompt };
+                if (!this.roundSnapshot) {
+                    this.roundSnapshot = prepareRoundTransaction(this.config.loopId, this.currentRound, []);
+                }
+                const roundId = this.roundSnapshot.roundId;
+                policyMetrics.recordStrategy(this.config.loopId, level);
+                const startInfo = {
+                    round: this.currentRound,
+                    roundId,
+                    level,
+                    prompt,
+                };
                 this.emit("round:start", startInfo);
                 this.config.onRoundStart?.(startInfo);
                 // ── Execute ───────────────────────────────────────────────────
                 this.roundStartTime = Date.now();
                 this.lastProgressTime = this.roundStartTime;
                 this.timedOut = false;
+                const abortController = new AbortController();
                 const ctx = {
                     round: this.currentRound,
-                    signal: { aborted: false },
+                    roundId,
+                    signal: abortController.signal,
                     reportProgress: (message) => {
                         this.lastProgressTime = Date.now();
                         void message; // consumed by heartbeat via lastProgressTime
                     },
                 };
                 this.activeCtx = ctx;
+                this.activeAbortController = abortController;
                 let agentOutput;
                 try {
-                    agentOutput = await this.config.execute(prompt, ctx);
+                    agentOutput = await this.executeWithDeadline(prompt, ctx);
                     consecutiveErrors = 0;
                 }
                 catch (err) {
+                    // Calls from timers/signal handlers can mutate status while this await
+                    // is pending; TypeScript's control-flow narrowing cannot observe that.
+                    const statusAfterExecution = this._status;
+                    // A cooperative executor may reject as soon as its AbortSignal fires,
+                    // winning the race against RoundStalledError.  The runtime's state is
+                    // authoritative in that case: timeout/stall is not an executor fault.
+                    if (err instanceof RoundStalledError ||
+                        this.timedOut ||
+                        statusAfterExecution === RuntimeStatus.STALLED) {
+                        this.activeCtx = null;
+                        this.activeAbortController = null;
+                        stopReason = "stalled";
+                        break;
+                    }
+                    if (statusAfterExecution === RuntimeStatus.STOPPED) {
+                        this.activeCtx = null;
+                        this.activeAbortController = null;
+                        stopReason = "cancelled";
+                        break;
+                    }
                     consecutiveErrors++;
                     const dur = Date.now() - this.roundStartTime;
                     this.activeCtx = null;
+                    this.activeAbortController = null;
                     // Emit round:complete with error info
                     const errInfo = {
                         round: this.currentRound,
@@ -362,13 +297,15 @@ export class LoopRuntime extends EventEmitter {
                         stopReason = "executor_failure";
                         break;
                     }
-                    // Record as a failed round so the next round's compilation
-                    // sees the failure context (forces L1/L2)
-                    previousAgentOutput = null;
+                    // Build a synthetic self-eval so the next round's compilation
+                    // sees the failure context (forces L1/L2). A null previousAgentOutput
+                    // would hide the crash from the compiler entirely.
+                    previousAgentOutput = `---loopforge-eval\n${JSON.stringify(errInfo.selfEval)}\n---end-loopforge-eval`;
                     continue;
                 }
                 const durationMs = Date.now() - this.roundStartTime;
                 this.activeCtx = null;
+                this.activeAbortController = null;
                 // ── Extract self-eval ─────────────────────────────────────────
                 let selfEval = extractSelfEvaluation(agentOutput);
                 let extractionSucceeded = selfEval !== null;
@@ -376,71 +313,70 @@ export class LoopRuntime extends EventEmitter {
                     selfEval = heuristicSelfEvaluation(agentOutput);
                     extractionSucceeded = false;
                 }
-                // ── Verification gate (v1.6 unified) + Enforcement (v1.13) ────
-                // Run BEFORE autoFeedback so rejected rounds don't pollute vault.
+                // ── Unified round transaction: evaluate → verify → commit/reject ──
                 this.pendingVerificationFlags = [];
-                let gateContradicted = false;
+                let roundSuccess = selfEval?.success ?? false;
                 if (selfEval !== null) {
-                    const vaultEntries = this.engine.getBackend().queryEntries({
-                        prefix: `loop:${this.config.loopId}:r`,
+                    const completed = await this.roundDriver.complete({
+                        snapshot: this.roundSnapshot,
+                        loopId: this.config.loopId,
+                        task: this.config.task,
+                        maxRounds: this.config.maxRounds,
+                        selfEval,
+                        extractionSucceeded,
+                        lastSelfEval: this.lastSelfEval ?? undefined,
+                        consecutiveRejections: this.consecutiveRejections,
+                        successTrajectory: this.successTrajectory,
                     });
-                    const verifyResult = verifySelfEvaluation(selfEval, this.currentRound, vaultEntries, this.lastSelfEval);
-                    this.pendingVerificationFlags = verifyResult.flags;
-                    if (verifyResult.verdict === "contradicted") {
-                        gateContradicted = true;
-                        logEvent("gate_contradicted", {
-                            loopId: this.config.loopId,
-                            round: this.currentRound,
-                            flags: verifyResult.flags.map((f) => f.check),
-                        });
+                    const outcome = completed.outcome;
+                    this.roundSnapshot = outcome.snapshot;
+                    const pr = outcome.result;
+                    policyMetrics.recordStrategyOutcome(this.config.loopId, level, pr, outcome.replayed);
+                    this.pendingVerificationFlags = pr.verificationFlags;
+                    roundSuccess = pr.roundSuccess;
+                    // Track per-rule rejections: only same-check rejections
+                    // accumulate. A different rejection reason resets the counter.
+                    if (pr.action === "reject" && pr.rejectionCheck) {
+                        this.consecutiveRejections =
+                            pr.rejectionCheck === this.lastRejectionCheck
+                                ? pr.newConsecutiveRejections
+                                : 1;
+                        this.lastRejectionCheck = pr.rejectionCheck;
                     }
-                    // ── Enforcement gate (v1.13) — before autoFeedback ──────────
-                    // Only run for structured self-evals, not heuristic fallback.
-                    if (extractionSucceeded) {
-                        const enforceResult = enforceRound(selfEval, verifyResult, this.currentRound, vaultEntries, this.consecutiveRejections);
-                        if (enforceResult.action === "reject") {
-                            this.consecutiveRejections++;
-                            this.pendingRejectionNotice = buildRejectionPrompt(this.currentRound, this.config.task, enforceResult);
-                            logEvent("enforcement_reject", {
-                                loopId: this.config.loopId,
-                                round: this.currentRound,
-                                reason: enforceResult.reason.slice(0, 120),
-                                consecutiveRejections: this.consecutiveRejections,
-                            });
-                            // Don't update lastSelfEval or successTrajectory.
-                            // Decrement currentRound so the for-loop increment returns
-                            // to the same round for the retry.
-                            this.currentRound--;
-                            continue;
-                        }
-                        if (enforceResult.action === "terminate") {
-                            stopReason = "enforcement_terminated";
-                            logEvent("session_end", {
-                                loopId: this.config.loopId,
-                                stopReason: "enforcement_terminated",
-                                round: this.currentRound,
-                            });
-                            break;
-                        }
-                        // Accept: reset rejection counter
-                        this.consecutiveRejections = 0;
-                        this.pendingRejectionNotice = "";
-                    } // end if (extractionSucceeded)
-                    this.lastSelfEval = selfEval;
+                    else {
+                        this.consecutiveRejections = pr.newConsecutiveRejections;
+                        if (pr.action !== "reject")
+                            this.lastRejectionCheck = "";
+                    }
+                    if (pr.newLastSelfEval)
+                        this.lastSelfEval = pr.newLastSelfEval;
+                    if (pr.shouldPushSuccessTrajectory)
+                        this.successTrajectory.push(roundSuccess);
+                    if (pr.action === "reject") {
+                        this.pendingRejectionNotice = pr.rejectionPrompt ?? "";
+                        this.currentRound--;
+                        continue;
+                    }
+                    // The retry was accepted. Future rounds must return to normal compile.
+                    this.pendingRejectionNotice = "";
+                    if (pr.action === "terminate") {
+                        stopReason = (pr.stopReason ?? "enforcement_terminated");
+                        break;
+                    }
+                    if (pr.action === "stop") {
+                        stopReason = (pr.stopReason ?? "stalled");
+                        break;
+                    }
                 }
-                // ── Auto-feedback (AFTER enforcement, only if accepted) ─────────
-                if (selfEval !== null) {
-                    this.engine.autoFeedback(selfEval, this.config.loopId, this.currentRound, this.config.task);
-                }
-                // Compute round success
-                const roundSuccess = selfEval?.success ?? false;
-                // Contradicted gate verdict: skip success trend (match MCP path behavior)
-                if (!gateContradicted) {
-                    this.successTrajectory.push(roundSuccess);
+                else {
+                    // Null selfEval: extraction completely failed
+                    stopReason = "stalled";
+                    break;
                 }
                 // ── Emit round:complete ───────────────────────────────────────
                 const completeInfo = {
                     round: this.currentRound,
+                    roundId,
                     roundSuccess,
                     selfEval,
                     durationMs,
@@ -452,22 +388,8 @@ export class LoopRuntime extends EventEmitter {
                     round: this.currentRound,
                     success: roundSuccess,
                     durationMs,
-                    technique: "loop_runtime",
                 });
-                // ── Check stop conditions ─────────────────────────────────────
-                // Extraction check FIRST — heuristic results are low-confidence
-                if (!extractionSucceeded) {
-                    stopReason = "stalled"; // extraction_failure mapped to stalled
-                    break;
-                }
-                if (selfEval && !selfEval.should_continue) {
-                    stopReason = "task_complete";
-                    break;
-                }
-                if (this.engine.shouldBreak()) {
-                    stopReason = "circuit_breaker";
-                    break;
-                }
+                // ── Post-round state ──────────────────────────────────────────
                 if (this.timedOut) {
                     // Next round will be forced L2 via the compile request
                     this.timedOut = false;
@@ -477,14 +399,17 @@ export class LoopRuntime extends EventEmitter {
         }
         finally {
             // ── Cleanup — always runs even if the loop body throws ──────────
-            this.stopHeartbeat();
-            this.unregisterSignalHandlers();
-            if (this._status === RuntimeStatus.RUNNING) {
-                this._status = RuntimeStatus.STOPPED;
+            // Only fully stop if we're not paused (paused loops stay alive)
+            if (this._status !== RuntimeStatus.PAUSED) {
+                this.stopHeartbeat();
+                this.unregisterSignalHandlers();
+                if (this._status === RuntimeStatus.RUNNING) {
+                    this._status = RuntimeStatus.STOPPED;
+                }
             }
         }
         const result = {
-            success: stopReason === "task_complete",
+            success: stopReason === "completed",
             stopReason,
             roundsCompleted: this.currentRound > this.config.maxRounds
                 ? this.config.maxRounds
@@ -492,48 +417,114 @@ export class LoopRuntime extends EventEmitter {
             successTrajectory: [...this.successTrajectory],
         };
         // ── v1.7: Memory Writeback ───────────────────────────────────────
-        const wp = getPolicy().memory_writeback;
-        if (wp.enabled && this.config.memoryWriter) {
-            const shouldWrite = wp.write_on_outcomes.includes(stopReason) ||
-                wp.write_on_outcomes.length === 0;
-            if (shouldWrite && result.roundsCompleted > 0) {
-                try {
-                    const lastEval = this.lastSelfEval;
-                    const discoveries = lastEval
-                        ? [
-                            ...(lastEval.wrong_assumptions ?? []),
-                            ...(lastEval.emerged_subtasks ?? []),
-                            ...(lastEval.discovered_constraints ?? []),
-                        ]
-                        : [];
-                    const payload = buildWritebackPayload(this.config.loopId, this.config.task, stopReason, result, discoveries);
-                    if (payload) {
-                        await this.config.memoryWriter(payload);
-                        logEvent("memory_writeback", {
-                            loopId: this.config.loopId,
-                            stopReason,
-                            feedbackCount: payload.feedbackEntries.length,
-                        });
-                    }
-                }
-                catch {
-                    // memoryWriter failed — degrade gracefully
-                    logEvent("memory_writeback_error", {
-                        loopId: this.config.loopId,
-                        stopReason,
-                    });
-                }
-            }
+        // Skip writeback for paused loops — they may be resumed later
+        if (stopReason !== "paused" && this.config.terminalSinks.length > 0) {
+            const event = {
+                ...result,
+                loopId: this.config.loopId,
+                task: this.config.task,
+                lastEvaluation: this.lastSelfEval ?? undefined,
+            };
+            await Promise.allSettled(this.config.terminalSinks.map((sink) => Promise.resolve(sink(event))));
         }
         this.emit("done", result);
         return result;
     }
+    /** Execute one round with a hard driver deadline. The AbortSignal lets a
+     *  cooperative executor stop early; the race guarantees the runtime itself
+     *  still resolves when an executor ignores cancellation. */
+    async executeWithDeadline(prompt, ctx) {
+        if (this.config.interactive) {
+            return this.config.execute(prompt, ctx);
+        }
+        const deadlineMs = this.config.roundTimeoutMs + this.config.stallGraceMs;
+        let timer = null;
+        const deadline = new Promise((_resolve, reject) => {
+            timer = setTimeout(() => {
+                const elapsed = Date.now() - this.roundStartTime;
+                this.triggerTimeout(elapsed);
+                this.triggerStall(elapsed);
+                reject(new RoundStalledError());
+            }, deadlineMs);
+        });
+        try {
+            return await Promise.race([this.config.execute(prompt, ctx), deadline]);
+        }
+        finally {
+            if (timer !== null)
+                clearTimeout(timer);
+        }
+    }
+    triggerTimeout(elapsed) {
+        if (this.timedOut)
+            return;
+        this.timedOut = true;
+        this.activeAbortController?.abort();
+        const timeoutInfo = {
+            round: this.currentRound,
+            elapsedMs: elapsed,
+        };
+        this.emit("timeout", timeoutInfo);
+        this.config.onTimeout?.(timeoutInfo);
+    }
+    triggerStall(elapsed) {
+        if (this._status === RuntimeStatus.STALLED)
+            return;
+        this._status = RuntimeStatus.STALLED;
+        const stallMsg = `Round ${this.currentRound} stalled after ${elapsed}ms`;
+        this.emit("stalled", {
+            reason: "round_timeout",
+            lastRound: this.currentRound,
+            elapsedMs: elapsed,
+            message: stallMsg,
+        });
+    }
     /** Stop the loop gracefully. Safe to call from any thread/timer. */
     stop() {
-        if (this._status === RuntimeStatus.RUNNING) {
+        if (this._status === RuntimeStatus.RUNNING ||
+            this._status === RuntimeStatus.PAUSED) {
+            const driverActive = this.driverPromise !== null;
+            this.pauseRequested = false;
+            this.activeAbortController?.abort();
             this._status = RuntimeStatus.STOPPED;
             this.emit("stop");
+            if (!driverActive) {
+                this.stopHeartbeat();
+                this.unregisterSignalHandlers();
+            }
         }
+    }
+    /** Pause the loop gracefully. Completes the current round, then suspends.
+     *  Safe to call from signal handlers or callbacks.
+     *  Only has effect when the loop is RUNNING. */
+    pause() {
+        if (this._status === RuntimeStatus.RUNNING && !this.pauseRequested) {
+            this.pauseRequested = true;
+            this.pauseTimestamp = Date.now();
+            this.emit("pause");
+        }
+    }
+    /** Resume a paused loop. Re-enters the main loop from currentRound.
+     *  The loop continues exactly where it was suspended. */
+    async resume() {
+        // A resume requested before the current round reaches its pause boundary
+        // cancels that pending pause and reuses the existing driver.
+        if (this._status === RuntimeStatus.RUNNING && this.pauseRequested) {
+            this.pauseRequested = false;
+            this.pauseTimestamp = 0;
+            this.emit("resume");
+            if (!this.driverPromise) {
+                throw new Error("Cannot resume: active runtime has no driver");
+            }
+            return this.driverPromise;
+        }
+        if (this._status !== RuntimeStatus.PAUSED) {
+            throw new Error(`Cannot resume: runtime is ${this._status}`);
+        }
+        this._status = RuntimeStatus.RUNNING;
+        this.pauseTimestamp = 0;
+        this.emit("resume");
+        return this.launchDriver(true);
     }
     // ── Internal: compile request builder ─────────────────────────────────
     buildCompileRequest(previousAgentOutput) {
@@ -546,7 +537,6 @@ export class LoopRuntime extends EventEmitter {
             plan_source: this.config.planSource ?? null,
             constraints_from_plan: this.config.constraintsFromPlan,
             health_check_interval: this.config.healthCheckInterval,
-            vault_config: makeVaultConfig(),
         });
         if (this.timedOut && this.currentRound > 1) {
             lcr.force_level = "l2";
@@ -575,10 +565,35 @@ export class LoopRuntime extends EventEmitter {
                     // v1.10: Checkpoint
                     compression_checkpoint: selfEval.compression_checkpoint ?? false,
                     checkpoint_label: selfEval.checkpoint_label ?? "",
+                    // v1.16: Agent's declared next action
+                    next_action: selfEval.next_action,
                 });
             }
         }
         return lcr;
+    }
+    /** Adapt the typed compiler request to the engine envelope once for both
+     * normal rounds and enforcement retry attempts. */
+    buildEngineCompileRequest(previousAgentOutput) {
+        const lcr = this.buildCompileRequest(previousAgentOutput);
+        return {
+            task: this.config.task,
+            mode: Mode.LOOP_COMPILE,
+            feedback: null,
+            skill_name: null,
+            task_id: null,
+            loop_id: lcr.loop_id,
+            round: lcr.round,
+            goal_id: lcr.goal_id,
+            domain: lcr.domain,
+            plan_source: lcr.plan_source,
+            constraints_from_plan: lcr.constraints_from_plan,
+            health_check_interval: lcr.health_check_interval,
+            last_round_result: lcr.last_round_result ?? undefined,
+            verification_flags: this.pendingVerificationFlags,
+            external_context: this.pendingExternalContext || undefined,
+            max_rounds: this.config.maxRounds,
+        };
     }
     // ── Internal: heartbeat ──────────────────────────────────────────────
     startHeartbeat() {
@@ -623,28 +638,12 @@ export class LoopRuntime extends EventEmitter {
             }
             // Timeout
             if (elapsed > this.config.roundTimeoutMs && !this.timedOut) {
-                this.timedOut = true;
-                if (this.activeCtx) {
-                    this.activeCtx.signal.aborted = true;
-                }
-                const timeoutInfo = {
-                    round: this.currentRound,
-                    elapsedMs: elapsed,
-                };
-                this.emit("timeout", timeoutInfo);
-                this.config.onTimeout?.(timeoutInfo);
+                this.triggerTimeout(elapsed);
             }
             // Stall — timeout + grace period elapsed, execute still hasn't returned
             if (this.activeCtx !== null &&
                 elapsed > this.config.roundTimeoutMs + this.config.stallGraceMs) {
-                this._status = RuntimeStatus.STALLED;
-                const stallMsg = `Round ${this.currentRound} stalled after ${elapsed}ms`;
-                this.emit("stalled", {
-                    reason: "round_timeout",
-                    lastRound: this.currentRound,
-                    elapsedMs: elapsed,
-                    message: stallMsg,
-                });
+                this.triggerStall(elapsed);
             }
         }
         catch {
@@ -660,7 +659,27 @@ export class LoopRuntime extends EventEmitter {
     // ── Internal: signal handlers ────────────────────────────────────────
     registerSignalHandlers() {
         this.sigintHandler = () => {
-            this.stop();
+            const policy = getPolicy();
+            const doubleTapMs = policy.runtime.pause_double_tap_ms;
+            const now = Date.now();
+            const withinDoubleTapWindow = doubleTapMs > 0 &&
+                this.pauseTimestamp > 0 &&
+                now - this.pauseTimestamp <= doubleTapMs;
+            // First SIGINT requests a boundary pause. A second signal stops only
+            // inside the configured window; after it expires, it starts a new window.
+            if ((this.pauseRequested || this._status === RuntimeStatus.PAUSED) &&
+                withinDoubleTapWindow) {
+                this.stop();
+            }
+            else if (doubleTapMs > 0 && this._status === RuntimeStatus.RUNNING) {
+                this.pause();
+            }
+            else if (doubleTapMs > 0 && this._status === RuntimeStatus.PAUSED) {
+                this.pauseTimestamp = now;
+            }
+            else {
+                this.stop();
+            }
         };
         this.sigtermHandler = () => {
             this.stop();

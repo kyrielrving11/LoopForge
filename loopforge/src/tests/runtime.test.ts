@@ -6,8 +6,11 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 
 import { LoopRuntime, run } from "../runtime.js";
+import { FileLoopStore } from "../loop-store.js";
+import { getPolicy } from "../policy.js";
 import { RuntimeStatus, makeSelfEvaluation } from "../protocol.js";
 import type {
   AgentExecutor,
@@ -106,7 +109,7 @@ describe("run() — convenience function", () => {
       maxRounds: 10,
     });
 
-    assert.equal(result.stopReason, "task_complete");
+    assert.equal(result.stopReason, "completed");
     assert.equal(result.success, true);
     assert.equal(result.roundsCompleted, 3);
     assert.equal(result.successTrajectory.length, 3);
@@ -125,7 +128,7 @@ describe("run() — convenience function", () => {
       maxRounds: 10,
     });
 
-    assert.equal(result.stopReason, "task_complete");
+    assert.equal(result.stopReason, "completed");
     assert.equal(result.roundsCompleted, 1);
   });
 
@@ -176,7 +179,7 @@ describe("run() — convenience function", () => {
     });
 
     // Should succeed — only 1 error, not 3 consecutive
-    assert.equal(result.stopReason, "task_complete");
+    assert.equal(result.stopReason, "completed");
     assert.equal(calls, 2);
   });
 });
@@ -197,7 +200,7 @@ describe("LoopRuntime", () => {
     assert.equal(rt.status, "idle");
 
     const result = await rt.start();
-    assert.equal(result.stopReason, "task_complete");
+    assert.equal(result.stopReason, "completed");
 
     // After start() resolves, runtime is stopped
     const finalStatus = rt.status;
@@ -222,7 +225,7 @@ describe("LoopRuntime", () => {
     });
 
     const result = await rt.start();
-    assert.equal(result.stopReason, "stopped");
+    assert.equal(result.stopReason, "cancelled");
     // stop() is called in round 2's onRoundComplete; the for-loop
     // increments to round 3 before checking status, so roundsCompleted
     // reflects the incremented counter
@@ -270,7 +273,7 @@ describe("Heartbeat & timeout", () => {
       },
     });
 
-    assert.equal(result.stopReason, "task_complete");
+    assert.equal(result.stopReason, "completed");
     // Should have received at least one heartbeat during the 150ms delay
     assert.ok(
       heartbeats.length >= 1,
@@ -297,7 +300,7 @@ describe("Heartbeat & timeout", () => {
       maxRounds: 10,
     });
 
-    assert.equal(result.stopReason, "task_complete");
+    assert.equal(result.stopReason, "completed");
     assert.ok(signalWasAborted, "signal.aborted should be true after timeout");
   });
 
@@ -319,7 +322,7 @@ describe("Heartbeat & timeout", () => {
       },
     });
 
-    assert.equal(result.stopReason, "task_complete");
+    assert.equal(result.stopReason, "completed");
     assert.equal(timeoutFired, false);
   });
 
@@ -339,7 +342,7 @@ describe("Heartbeat & timeout", () => {
       maxRounds: 10,
     });
 
-    assert.equal(result.stopReason, "task_complete");
+    assert.equal(result.stopReason, "completed");
     assert.ok(reported);
   });
 });
@@ -407,10 +410,115 @@ describe("Stall detection", () => {
       maxRounds: 10,
     });
 
-    // Should be stalled (status was set to STALLED but execute returned)
-    assert.ok(
-      ["stalled", "task_complete"].includes(result.stopReason),
-      `expected stalled or task_complete, got ${result.stopReason}`,
-    );
+    assert.equal(result.stopReason, "stalled");
+  });
+
+  it("settles even when the executor never resolves", async () => {
+    const started = Date.now();
+    const result = await run({
+      task: "Never resolves",
+      execute: async () => await new Promise<string>(() => {}),
+      roundTimeoutMs: 30,
+      heartbeatIntervalMs: 10,
+      stallGraceMs: 30,
+      maxRounds: 1,
+    });
+
+    assert.equal(result.stopReason, "stalled");
+    assert.ok(Date.now() - started < 500, "runtime should settle at the deadline");
+  });
+});
+
+describe("Pause/resume ownership", () => {
+  it("does not start a second driver when resume races a pending pause", async () => {
+    let calls = 0;
+    let active = 0;
+    let maxActive = 0;
+    let releaseFirst!: () => void;
+    let markStarted!: () => void;
+    const firstStarted = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const waitForRelease = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+
+    const rt = new LoopRuntime({
+      task: "Pause ownership",
+      interactive: true,
+      maxRounds: 2,
+      execute: async () => {
+        calls++;
+        active++;
+        maxActive = Math.max(maxActive, active);
+        markStarted();
+        await waitForRelease;
+        active--;
+        return makeAgentOutput({ success: false, should_continue: false });
+      },
+    });
+
+    const firstRun = rt.start();
+    await firstStarted;
+    rt.pause();
+    const resumedRun = rt.resume();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    assert.equal(calls, 1);
+    assert.equal(maxActive, 1);
+    releaseFirst();
+    const [firstResult, resumedResult] = await Promise.all([firstRun, resumedRun]);
+    assert.equal(firstResult.stopReason, "failed");
+    assert.equal(resumedResult.stopReason, "failed");
+  });
+});
+
+describe("Enforcement retry transaction", () => {
+  it("compiles a zero-commit L0 retry and clears rejection state after accept", async () => {
+    const loopId = `reject-${randomUUID()}`;
+    const prompts: string[] = [];
+    const roundIds: string[] = [];
+    const responses = [
+      makeAgentOutput({
+        success: true,
+        should_continue: true,
+        execution_evidence: {
+          files_changed: [],
+          test_results: null,
+          success_criteria_met: [],
+          success_criteria_remaining: ["still open"],
+          progress_estimate: 0.2,
+        },
+      }),
+      makeAgentOutput({ success: false, should_continue: true }),
+      makeAgentOutput({ success: false, should_continue: false }),
+    ];
+    let index = 0;
+
+    const result = await run({
+      task: "Enforcement retry",
+      loopId,
+      interactive: true,
+      maxRounds: 3,
+      execute: async (prompt, ctx) => {
+        prompts.push(prompt);
+        roundIds.push(ctx.roundId ?? "");
+        return responses[index++];
+      },
+    });
+
+    assert.equal(result.stopReason, "failed");
+    assert.match(prompts[1], /Level: L0 \| Attempt: 2/);
+    assert.match(prompts[1], /Retry Requirements/);
+    assert.match(prompts[1], /rejected|success criteria/i);
+    assert.doesNotMatch(prompts[2], /Round 1 .*REJECTED|enforcement gate/i);
+    assert.ok(roundIds[0]);
+    assert.equal(roundIds[0], roundIds[1]);
+    assert.notEqual(roundIds[1], roundIds[2]);
+
+    const entries = new FileLoopStore(getPolicy().backend.root_dir)
+      .listEntries(loopId);
+    const roundOne = entries.filter((entry) => entry.task_id === `loop:${loopId}:r1`);
+    assert.equal(roundOne.length, 1, "rejected retry must not duplicate r1 lineage");
   });
 });

@@ -1,305 +1,118 @@
 ---
 name: perception
-description: Multi-round autonomous loop driver powered by LoopForge MCP. Compiles context-aware prompts per iteration, tracks quality, inherits constraints, and stops when work is done — not when rounds run out. Supports single-agent and multi-agent (AgentTool / Coordinator) scenarios.
+description: Drive a recoverable multi-round coding task through LoopForge MCP while the Agent remains the execution owner.
 ---
 
-# Perception — Loop-Time Intelligence Skill
+# Perception
 
-**Perception** turns any AI agent into a self-aware multi-round executor. It
-drives the LoopForge MCP server (`loopforge-mcp`) to compile per-iteration
-prompts from running success trajectory, constraint inheritance, and drift
-detection — maintaining cognitive stability across long-horizon loops.
+Use LoopForge when a coding task needs several rounds, must survive context
+compression or process restart, or benefits from an auditable record of goals,
+constraints, evidence, and decisions.
 
-Works with Claude Code, Codex, and any MCP-capable host. Zero configuration
-beyond having `loopforge-mcp` registered as an MCP server.
+LoopForge maintains cognitive state. You remain the Agent that reads files,
+edits code, runs commands, delegates work, and decides how to reason.
 
-**Multi-Agent:** When you spawn sub-agents (AgentTool) or orchestrate Workers
-(Coordinator mode), LoopForge tracks delegation history, inherits constraints
-across Workers, and injects structured summaries into subsequent prompts.
-No separate mode required — LoopForge treats all agents the same.
+## Start
 
-## When to Activate
+Call `loopforge_start` with:
 
-Activate when the user says any of:
-- `/perception <task>` — start an autonomous multi-round loop
-- "do this in a loop", "keep going until done", "iterate on this"
-- Any task that clearly needs 3+ rounds (audit, refactor, migrate, review-and-fix cycles)
+- `task`: the complete user objective.
+- `constraints`: hard boundaries that must survive every round.
+- `maxRounds`: optional safety limit. The default is 20.
+- `domain`: optional context label.
 
-Also activate implicitly when the user's request is too large for a single
-round (e.g. "audit the entire codebase and fix every issue").
+Keep the returned `sessionId`, `roundId`, prompt, and level.
 
-## Core Workflow
+## Execute a round
 
-```
-┌──────────────────────────────────────────────────────────┐
-│  1. loopforge_start(task, constraints, maxRounds)         │
-│     → sessionId + Round 1 prompt                          │
-│                                                           │
-│  2. Execute the prompt (read, write, test, fix)           │
-│     Prepare a structured self-evaluation                  │
-│                                                           │
-│  3. loopforge_next(sessionId, evaluation, output?)        │
-│     → if prompt: go to step 2                             │
-│     → if prompt=null: loop ended, read stopReason         │
-│                                                           │
-│  After restart: loopforge_resume(loopId)                  │
-│     → picks up from last saved round                      │
-└──────────────────────────────────────────────────────────┘
-```
+1. Execute the returned prompt. Do real repository work.
+2. Use the available tools and reasoning approach that best fit the task.
+3. Check actual evidence before claiming success.
+4. Call `loopforge_next` with `sessionId` and a structured `evaluation`.
 
-### Step-by-step
+Minimal evaluation:
 
-**Step 1 — Start the loop:**
-```
-Call loopforge_start with:
-  task:        required — the full task description
-  maxRounds:   optional — default 20 from policy
-  constraints: optional — hard constraints as string[]
-  domain:      optional — domain hint (solidity, react, rust…)
-
-Keep the returned sessionId — you will need it for every subsequent call.
-```
-
-**Step 2 — Execute the round:**
-- **BEFORE executing the prompt**: Read `.loopforge/state/{loopId}-state.md`
-  for the loop's accumulated state — objective, constraints, progress, and
-  cross-round summary. This file is rewritten each round and is the single
-  source of truth for loop state. The prompt references this file; you must
-  read it to know the active constraints and progress.
-- Execute the compiled prompt exactly as you would any user task. Read files,
-  write code, run tests, fix bugs.
-
-After executing, prepare a structured self-evaluation. Pass it as the
-`evaluation` parameter to `loopforge_next` — do NOT embed it as a text block
-in the output. The `evaluation` parameter is a typed object with the fields
-described below.
-
-**New (v1.7+): Pass evaluation as a structured tool parameter.**
 ```json
 {
-  "success": true,
-  "output_summary": "Fixed 3 reentrancy bugs in withdraw() and deposit(). All 12 tests pass.",
+  "success": false,
+  "output_summary": "Implemented the parser and added 8 passing tests.",
   "constraint_violations": [],
-  "should_continue": true,
-  "discovered_constraints": [],
-  "objective_refinement": "",
-  "emerged_subtasks": [],
-  "execution_evidence": {
-    "files_changed": ["contracts/Token.sol", "test/Token.test.ts"],
-    "test_results": {"passed": 24, "failed": 0, "skipped": 0},
-    "success_criteria_met": ["No reentrancy vectors remain"],
-    "success_criteria_remaining": ["Access control verified", "Overflow checks complete"],
-    "progress_estimate": 0.4
-  },
-  "retracted_constraints": [],
-  "revised_success_criteria": [],
-  "wrong_assumptions": []
+  "should_continue": true
 }
 ```
 
-**Legacy (still supported):** Embed a `---loopforge-eval` block in output text
-when the agent cannot pass structured tool parameters. The new parameter form
-is preferred — it's validated by the MCP client before reaching the server.
+Important fields:
 
-**Field rules:**
+| Field | Rule |
+| --- | --- |
+| `success` | Use `true` only when the whole objective and every hard constraint are satisfied. |
+| `output_summary` | State what changed and what was verified. |
+| `constraint_violations` | Report real violations. Do not hide them to force progress. |
+| `should_continue` | Use `false` only when the entire task is complete. |
+| `execution_evidence` | Report changed files, test counts, met and remaining criteria, and progress when known. |
+| `discovered_constraints` | Add newly discovered guardrails. |
+| `objective_refinement` | Refine the objective when repository evidence changes its meaning. |
+| `wrong_assumptions` | Record assumptions disproved this round. |
+| `worker_results` | Record delegated subtask results and discoveries. |
 
-| Field | Type | Rule |
-|-------|------|------|
-| `success` | boolean | `true` ONLY if all hard constraints met AND the task goal achieved |
-| `output_summary` | string | Specific, actionable. What was DONE this round — not what was attempted |
-| `constraint_violations` | string[] | Constraints the agent actually violated this round. Be honest — hiding violations corrupts the success signal and defeats the circuit breaker |
-| `should_continue` | boolean | `false` ONLY when the ENTIRE task is complete. Partial progress = `true` |
-| `discovered_constraints` | string[] | **P0 (optional)** — New constraints discovered this round. They become active guardrails for future rounds. Example: `["All external calls must use SafeERC20"]`. Empty `[]` if none. |
-| `objective_refinement` | string | **P1 (optional)** — If this round deepened your understanding of what the task is really about, describe the refinement. APPENDED to (never replaces) the original objective. Empty `""` if unchanged. |
-| `emerged_subtasks` | string[] | **P2 (optional)** — Sub-problems that surfaced during execution and need separate attention. Feed into next-round task suggestions. Example: `["Audit upgrade proxy", "Verify timelock"]`. Empty `[]` if none. |
-| `execution_evidence` | object | **P4 (recommended)** — Structured record of what actually happened. `files_changed` (string[]), `test_results` ({passed, failed, skipped} | null), `success_criteria_met` (string[]), `success_criteria_remaining` (string[]), `progress_estimate` (0.0–1.0). Use this to give LoopForge real visibility into your progress. |
-| `retracted_constraints` | string[] | **P5 (optional)** — Constraints you now believe are wrong. Removed from active guardrails. Only retract with evidence. Empty `[]` if none. |
-| `revised_success_criteria` | object[] | **P5 (optional)** — Success criteria that need reformulation. Array of `{old: string, new: string}`. Applied to Loop Objective. Empty `[]` if none. |
-| `wrong_assumptions` | string[] | **P5 (optional)** — Assumptions from earlier rounds that turned out to be incorrect. Recorded as key lessons. Empty `[]` if none. |
-| `worker_results` | object[] | **Multi-Agent (optional)** — Results of sub-agent / Worker delegations this round. Each entry: `{ agentId, subAgentType, subTask, resultSummary, success, discoveredConstraints? }`. Engine auto-records to delegation journal. Empty `[]` if no delegations. |
+Do not embed an evaluation marker in ordinary output when the MCP client accepts
+the structured `evaluation` argument.
 
-**Why this matters:** The evaluation is validated by the MCP client before
-reaching the server — a missing or malformed evaluation causes an immediate
-error, not a silent stall. The circuit breaker uses `success` + `violations`
-to determine loop trajectory — lying here defeats the only mechanism that
-prevents infinite loops. The optional fields (P0–P5) enable cognitive
-evolution: discovering constraints, deepening understanding, surfacing
-sub-problems, tracking real progress, and correcting wrong assumptions as
-the loop executes.
+## Interpret the result
 
-**Step 3 — Advance to next round:**
-```
-Call loopforge_next with:
-  sessionId:  from loopforge_start
-  evaluation: REQUIRED — structured self-evaluation object (see field table below)
-  output:     OPTIONAL — raw output text for audit trail (can be omitted)
-```
+If `prompt` is non-null, execute it and submit the next evaluation.
 
-If the result has `prompt: null`, the loop has ended. Read `stopReason`:
-- `task_complete` — you reported should_continue=false. Work is done.
-- `circuit_breaker` — 3 consecutive failed rounds. Review your approach.
-- `max_rounds` — hit the round limit. Decide whether to extend or accept.
-- `stalled` — no valid self-evaluation provided. Check your evaluation parameter.
+If `enforcementAction` is `reject`, redo the same logical round. The round ID
+stays stable and the attempt number increases. Follow the retry requirements;
+the rejected attempt has not been committed.
 
-If the result has a non-null `prompt`, execute it and repeat from Step 2.
+If `prompt` is null, inspect `stopReason`:
 
-## Tool Reference
+| Reason | Meaning |
+| --- | --- |
+| `task_complete` | The complete objective was reported finished. |
+| `circuit_breaker` | Repeated failed rounds require a different approach or user input. |
+| `max_rounds` | The safety limit was reached. Summarize remaining work. |
+| `stalled` | Evaluation or execution did not produce a usable next state. |
+| `enforcement_terminated` | Repeated invalid claims or stalled progress terminated the loop. |
+| `paused` | The durable session remains available for resume. |
 
-| Tool | When to call | Key input | Key output |
-|------|-------------|-----------|------------|
-| `loopforge_start` | Beginning of every loop | `task`, `maxRounds?`, `constraints?` | `sessionId`, round 1 `prompt` |
-| `loopforge_next` | After executing every round | `sessionId`, `output` (with eval block) | next `prompt` or `null` + `stopReason` |
-| `loopforge_status` | Mid-loop checkpoint, user asks "how's it going" | `sessionId` | `round`, `successTrajectory`, `status`, `technique` |
-| `loopforge_stop` | User wants to abort, fatal error | `sessionId` | `roundsCompleted`, final trajectory |
-| `loopforge_list` | User asks "what loops are running" | — | `sessions[]` (includes vault-persisted) |
-| `loopforge_replay` | After loop ends, user asks "show me what happened" | `sessionId` | `timeline[]` with all rounds |
-| `loopforge_resume` | Resume a loop after process restart | `loopId` | next `prompt` or `null` + `stopReason` |
-| `loopforge_health` | Check loop health mid-run | `loopId` | goal alignment, constraint integrity, drift, strategy |
+## Prompt levels
 
-## Delegation Helpers (AgentTool Mode)
+- L0 is a same-round retry with the rejection reason and changed evidence.
+- L1 is the normal compact continuation view.
+- L2 is a full rehydration for the first round, a checkpoint, or a goal change.
 
-When you spawn sub-agents via `AgentTool` (Explore, General-purpose, Plan)
-during a loop round, use these helpers to improve delegation quality:
+These levels control state density only. LoopForge does not choose a reasoning
+technique for you.
 
-**Before delegating:**
-1. **Filter constraints** — not all active constraints apply to every sub-agent.
-   An Explore agent searching for deprecated APIs doesn't need "all files must
-   have a license header." Use `filterConstraintsForSubTask(allConstraints, subTask)`
-   to get only the relevant subset.
-2. **Format the prompt** — use `formatDelegationPrompt(subTask, subAgentType,
-   relevantConstraints, options?)` to produce a self-contained prompt. This is
-   critical: sub-agents cannot see your conversation. Every prompt must stand
-   alone — no "based on above," no "continue from previous."
+## Recovery and control
 
-**After delegating (in your self-evaluation):**
-Include `worker_results` in your evaluation to record what you delegated.
-The engine auto-detects this field and writes delegation journals to the vault:
+- Use `loopforge_status` to inspect the live round and trajectory.
+- Use `loopforge_pause` before an intentional interruption.
+- Use `loopforge_resume` with the loop ID to reconstruct a durable session.
+- Use `loopforge_list` after a client restart to find recoverable sessions.
+- Use `loopforge_replay` for the committed timeline.
+- Use `loopforge_health` to inspect goal alignment and drift.
+- Use `loopforge_stop` only for an intentional terminal stop.
 
-```json
-{
-  "worker_results": [
-    {
-      "agentId": "abc123",
-      "subAgentType": "explore",
-      "subTask": "Search for deprecated API usage in src/",
-      "resultSummary": "Found 12 deprecated calls across 8 files",
-      "success": true,
-      "discoveredConstraints": ["All API calls must be versioned"]
-    }
-  ]
-}
-```
+The optional `.loopforge/state/<loopId>-state.md` file is a readable derived
+view. The typed JSON session and round documents are the recovery truth. If the
+state file exists, it can help you review the full state, but do not assume it is
+enabled.
 
-This feeds into the delegation history table displayed in future rounds.
-Constraints discovered by sub-agents flow into the active constraint set
-automatically — they appear in future prompts alongside main-agent constraints.
-Delegation recording is lightweight — it's the main agent's memory,
-not sub-agent memory.
+## Delegation
 
-**Important:** These helpers are optional. If your sub-task is trivial (e.g.
-"read file X and report line 42"), a raw prompt is fine. Use the helpers when
-sub-tasks involve constraints, specific output formats, or results worth
-remembering across rounds.
-
-## Quality Signals (Read the Room)
-
-The prompt changes between rounds based on your trajectory. Pay attention to:
-
-- **Compile level** — `l0` (retry — honest failure, no new info, same prompt),
-  `l1` (continue — default path, state evolved, technique keyword-routed from Tier 1),
-  `l2` (restart — Round 1, checkpoint boundary, or goal_id change; full
-  context rebuild. **At L2**: LoopForge provides a Technique Selection block —
-  read `skills/prompt-techniques/SKILL.md`, freely choose the best reasoning
-  strategy for this round, read the corresponding reference file, and apply
-  the technique directly to the task). L2 means you have a new chance to
-  pick the right approach.
-- **Warnings** — constraint violations accumulating, task drift, quality
-  decline. These are the compiler begging you to course-correct.
-- **Technique autonomy (v1.15)** — at L2 restarts, you freely choose your
-  reasoning technique. LoopForge no longer auto-selects or forces technique
-  changes after failures. Read the technique catalog, pick what fits the
-  current challenge, and apply it. Trust your own judgment — you have the
-  full loop state in the state file.
-
-## Stop Condition Matrix
-
-| Condition | stopReason | What to do |
-|-----------|-----------|------------|
-| You set `should_continue: false` | `task_complete` | Report final results to user |
-| 3 consecutive failed rounds | `circuit_breaker` | Tell user the approach is stuck, suggest a different strategy |
-| Round count reached `maxRounds` | `max_rounds` | Summarize progress, ask user whether to extend |
-| No `---loopforge-eval` block found | `stalled` | Fix your output format and restart |
-| Enforcement gate rejected your eval | `enforcementAction: "reject"` | Read the rejection prompt's **Required Fix** section, redo the SAME round, re-submit a corrected self-evaluation |
-| Enforcement gate terminated loop | `enforcement_terminated` | Too many rejections or progress stalled — report to user and suggest a different approach |
-| User interrupts or fatal error | (call `loopforge_stop`) | Clean stop with trajectory preserved |
+Delegation does not create a separate LoopForge mode. Give each worker a
+self-contained subtask and relevant hard constraints. Add the returned result to
+`worker_results` so discoveries can enter the next canonical state.
 
 ## Rules
 
-1. **Always pass the evaluation parameter.** `loopforge_next` requires it.
-   If you omit it, the MCP client will reject the call with a schema error.
-2. **Read the state file every round.** Before executing the prompt, read
-   `.loopforge/state/{loopId}-state.md`. It contains the accumulated constraints,
-   progress, and cross-round summary. Skip this and you'll miss active guardrails.
-3. **Be honest in self-evaluation.** Lying about success or hiding violations
-   produces a false success signal. The enforcement gate will REJECT fake
-   successes, and the circuit breaker exists to stop bad loops.
-4. **One loop per task.** Don't reuse a sessionId across different tasks.
-5. **Execute the prompt you're given — and own your technique choice.** At L2
-   restarts, read the technique catalog and freely choose the best strategy.
-   At L1, follow the keyword-routed technique. The compiler provides context
-   and guardrails — you provide the reasoning strategy.
-6. **Call loopforge_next within the same turn.** Don't leave a round hanging
-   across conversation turns. The MCP server is in-memory.
-7. **After process restart, use loopforge_resume.** The session state is saved
-   to vault every round. Call `loopforge_resume` with the original `loopId` to
-   pick up where you left off — no need to restart from round 1.
-
-## Example
-
-```
-User: /perception "Audit the ERC20 token in contracts/Token.sol for security issues"
-
-Agent:
-  → loopforge_start({ task: "Audit ERC20 token in contracts/Token.sol for security issues",
-                       domain: "solidity",
-                       constraints: ["must not break existing tests", "follow check-effects-interactions"] })
-  ← { sessionId: "abc-123", round: 1, prompt: "## LoopForge Loop Compile — Round 1\n...", level: "l2" }
-
-  [Executes prompt: reads Token.sol, identifies 4 issues, discovers a new constraint]
-
-  → loopforge_next({ sessionId: "abc-123",
-      evaluation: {
-        success: false,
-        output_summary: "Found 4 potential issues: 2 reentrancy, 1 overflow, 1 access control. Not yet fixed.",
-        constraint_violations: [],
-        should_continue: true,
-        discovered_constraints: ["All _mint() calls must emit Transfer event per ERC20 spec"]
-      } })
-  ← { sessionId: "abc-123", round: 2, prompt: "## LoopForge Loop Compile — Round 2\n...", level: "l1" }
-
-  [Executes prompt: fixes 3 issues, deepens understanding of access control problem]
-
-  → loopforge_next({ sessionId: "abc-123",
-      evaluation: {
-        success: false,
-        output_summary: "Fixed reentrancy in withdraw() and overflow in calcReward(). Access control in setOwner() needs design discussion — discovered it's part of a larger upgradeability concern.",
-        constraint_violations: [],
-        should_continue: true,
-        objective_refinement: "Access control audit scope expanded: setOwner() is unprotected because the contract follows an upgradeable proxy pattern where owner is set via initializer — need to verify the initializer guard and proxy admin separately",
-        emerged_subtasks: ["Audit upgrade proxy initialization flow", "Verify proxy admin is not renounced without recovery path"]
-      } })
-  ← { sessionId: "abc-123", round: 3, prompt: "## LoopForge Loop Compile — Round 3\n  Suggested Next Task: Audit upgrade proxy initialization flow; Verify proxy admin is not renounced without recovery path\n...", level: "l0" }
-
-  [Executes prompt: audits proxy pattern, documents findings, all fixes pass tests]
-
-  → loopforge_next({ sessionId: "abc-123",
-      evaluation: {
-        success: true,
-        output_summary: "All fixable issues resolved. Proxy initialization verified — initializer modifier prevents double-init. Proxy admin held by multisig — low risk. 24/24 tests pass.",
-        constraint_violations: [],
-        should_continue: false
-      } })
-  ← { sessionId: "abc-123", round: 3, prompt: null, stopReason: "task_complete", roundSuccess: true }
-
-  Reports to user: "Audit complete in 3 rounds. 3 issues fixed, 1 design question flagged. Discovered 1 new constraint during audit. Objective deepened to include proxy pattern verification."
-```
+1. Execute the prompt instead of generating another prompt.
+2. Submit one honest structured evaluation after each attempt.
+3. Treat required command evidence and verification errors as authoritative.
+4. Keep one loop focused on one user objective.
+5. Do not advance a paused or stopped session through another process.
+6. Continue within the same Agent task when possible; LoopForge preserves state,
+   but it does not create a background Agent.

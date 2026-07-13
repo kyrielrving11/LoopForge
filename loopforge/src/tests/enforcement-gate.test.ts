@@ -215,10 +215,9 @@ describe("enforcement-gate — R3: empty success", () => {
     assert.equal(result.action, "accept");
   });
 
-  it("skips when execution_evidence is undefined (heuristic fallback)", () => {
-    // Heuristic self-evaluations have no execution_evidence.
-    // R3 should not fire in this case — it only fires when
-    // execution_evidence IS provided but shows empty work.
+  it("rejects when execution_evidence is undefined — evidence is now mandatory", () => {
+    // v1.17: execution_evidence is MANDATORY for structured self-evaluations.
+    // Missing evidence when success=true → reject (agent must provide evidence).
     const curr = makeSelfEvaluation({
       success: true,
       output_summary: "Done.",
@@ -228,7 +227,9 @@ describe("enforcement-gate — R3: empty success", () => {
     // Explicitly remove execution_evidence (default factory sets it)
     (curr as unknown as Record<string, unknown>).execution_evidence = undefined;
     const result = enforceRound(curr, trusted(), 2, [], 0);
-    assert.equal(result.action, "accept");
+    assert.equal(result.action, "reject");
+    assert.ok(result.reason.includes("no execution_evidence"),
+      `expected reason to mention missing evidence, got: ${result.reason}`);
   });
 });
 

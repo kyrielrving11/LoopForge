@@ -1,29 +1,88 @@
-/** LoopForge — Structured event logging (v1.7).
+/** Zero-dependency structured events and tracing.
  *
- *  JSON-line events to stderr for key lifecycle moments.
- *  Gated behind process.env.LOOPFORGE_LOG — silent by default.
- *
- *  Events:
- *    round_complete   — engine/runtime after feedback processed
- *    circuit_breaker  — shouldBreak() returns true
- *    gate_contradicted — verification gate returns contradicted verdict
- *    tier2_escalation — (deprecated v1.15) builder escalates to Tier 2 techniques
- *    vault_write_error — any catch in vault write paths
- *    session_start / session_end — MCP session lifecycle
- *
- *  Usage:
- *    LOOPFORGE_LOG=1 npm test
- *    LOOPFORGE_LOG=1 node my_script.js 2>&1 | grep '\[loopforge\]'
+ * Lifecycle events remain silent unless LOOPFORGE_LOG is set. Applications can
+ * install a TraceSink to receive the same events plus span start/end records
+ * without coupling LoopForge to a tracing SDK.
  */
-/** Emit a structured JSON event to stderr when LOOPFORGE_LOG is set. */
+import { randomUUID } from "node:crypto";
+let configuredSink = null;
+/** Install a process-wide sink. Passing null restores environment-gated stderr. */
+export function setTraceSink(sink) {
+    configuredSink = sink;
+}
+export function getTraceSink() {
+    return configuredSink;
+}
+function dispatch(record) {
+    try {
+        if (configuredSink) {
+            const pending = configuredSink.emit(record);
+            if (pending && typeof pending.then === "function") {
+                void pending.catch(() => undefined);
+            }
+            return;
+        }
+        if (process.env.LOOPFORGE_LOG) {
+            const output = record.kind === "event"
+                ? { ts: record.timestamp, event: record.name, ...record.attributes }
+                : record;
+            process.stderr.write(`[loopforge] ${JSON.stringify(output)}\n`);
+        }
+    }
+    catch {
+        // Observability must never change runtime behaviour.
+    }
+}
+/** Emit a structured lifecycle event. */
 export function logEvent(event, data = {}) {
-    if (!process.env.LOOPFORGE_LOG)
-        return;
-    const record = {
-        ts: new Date().toISOString(),
-        event,
-        ...data,
+    dispatch({
+        schemaVersion: 1,
+        timestamp: new Date().toISOString(),
+        kind: "event",
+        name: event,
+        attributes: data,
+    });
+}
+/** Start an explicitly-parented span. Span completion is idempotent. */
+export function startSpan(name, attributes = {}, parent) {
+    const context = {
+        traceId: parent?.traceId ?? randomUUID(),
+        spanId: randomUUID(),
     };
-    process.stderr.write(`[loopforge] ${JSON.stringify(record)}\n`);
+    const startedAt = Date.now();
+    dispatch({
+        schemaVersion: 1,
+        timestamp: new Date(startedAt).toISOString(),
+        kind: "span",
+        name,
+        traceId: context.traceId,
+        spanId: context.spanId,
+        parentSpanId: parent?.spanId,
+        phase: "start",
+        attributes,
+    });
+    let ended = false;
+    return {
+        context,
+        end(status = "ok", endAttributes = {}) {
+            if (ended)
+                return;
+            ended = true;
+            const endedAt = Date.now();
+            dispatch({
+                schemaVersion: 1,
+                timestamp: new Date(endedAt).toISOString(),
+                kind: "span",
+                name,
+                traceId: context.traceId,
+                spanId: context.spanId,
+                parentSpanId: parent?.spanId,
+                phase: "end",
+                status,
+                durationMs: endedAt - startedAt,
+                attributes: { ...attributes, ...endAttributes },
+            });
+        },
+    };
 }
 //# sourceMappingURL=observability.js.map

@@ -4,9 +4,6 @@ import assert from "node:assert/strict";
 import {
   Mode,
   AgentStatus,
-  Technique,
-  makeAnalysis,
-  makeVaultConfig,
   makeExecutionFeedback,
   makeLoopObjective,
   makeLoopHealth,
@@ -33,35 +30,9 @@ describe("Protocol — Enums", () => {
     assert.equal(AgentStatus.STALLED, "stalled");
   });
 
-  it("Technique has 7 values", () => {
-    assert.equal(Technique.ZERO_SHOT, "zero-shot");
-    assert.equal(Technique.TREE_OF_THOUGHT, "tree-of-thought");
-  });
 });
 
 describe("Protocol — Factory functions", () => {
-  it("makeAnalysis returns sensible defaults", () => {
-    const a = makeAnalysis();
-    assert.equal(a.technique, "zero-shot");
-    assert.equal(a.was_rotated, false);
-    assert.equal(a.independence, "independent");
-    assert.equal(a.cognitive_load, "low");
-  });
-
-  it("makeAnalysis accepts overrides", () => {
-    // was_rotated is deprecated (always false since v4.0) but overrides still work
-    const a = makeAnalysis({ technique: "few-shot", was_rotated: false });
-    assert.equal(a.technique, "few-shot");
-    assert.equal(a.was_rotated, false);
-  });
-
-  it("makeVaultConfig returns sensible defaults", () => {
-    const vc = makeVaultConfig();
-    assert.equal(vc.project_vault, ".promptcraft/prompt_vault.json");
-    assert.equal(vc.skills_dir, "skills");
-    assert.equal(vc.no_global, false);
-  });
-
   it("makeLoopCompileRequest returns sensible defaults", () => {
     const req = makeLoopCompileRequest();
     assert.equal(req.mode, "loop_compile");

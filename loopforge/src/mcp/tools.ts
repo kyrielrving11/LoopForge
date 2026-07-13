@@ -1,17 +1,18 @@
 /** LoopForge MCP — Tool definitions and handlers.
  *
- * 6 tools: start, next, status, stop, list, replay.
+ * 9 tools: start, next, status, stop, pause, list, replay, resume, health.
  * Each handler receives SessionManager + parsed input, returns the output object.
  */
 
 import type { SessionManager, StartInput } from "./session.js";
 import { buildSelfEvaluation } from "../engine.js";
+import { getPolicyMetrics } from "../policy-metrics.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Tool schemas (MCP JSON Schema format)
 // ═══════════════════════════════════════════════════════════════════════════
 
-export const TOOL_SCHEMAS = [
+const TOOL_BASE_SCHEMAS = [
   {
     name: "loopforge_start",
     description:
@@ -33,7 +34,7 @@ export const TOOL_SCHEMAS = [
         },
         domain: {
           type: "string" as const,
-          description: "Domain hint (e.g. 'solidity', 'react', 'rust'). Helps technique routing.",
+          description: "Domain hint (e.g. 'solidity', 'react', 'rust') for state context.",
         },
         planSource: {
           type: "string" as const,
@@ -184,7 +185,7 @@ export const TOOL_SCHEMAS = [
   {
     name: "loopforge_status",
     description:
-      "Get the current status of a loop session: round number, success trajectory, technique in use.",
+      "Get the current status of a loop session, including round identity and success trajectory.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -212,6 +213,21 @@ export const TOOL_SCHEMAS = [
     },
   },
   {
+    name: "loopforge_pause",
+    description:
+      "Pause a running loop session. The loop suspends at the next round boundary and its state is persisted to vault. Paused loops can be resumed with loopforge_resume. Use this to interrupt a long-running loop without losing progress.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        sessionId: {
+          type: "string" as const,
+          description: "Session ID to pause.",
+        },
+      },
+      required: ["sessionId"],
+    },
+  },
+  {
     name: "loopforge_list",
     description:
       "List all active loop sessions managed by this MCP server.",
@@ -224,7 +240,7 @@ export const TOOL_SCHEMAS = [
   {
     name: "loopforge_replay",
     description:
-      "Replay a completed or running loop session — returns the timeline of all rounds with technique, quality, and task data.",
+      "Replay a completed or running loop session as an auditable round timeline.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -239,7 +255,7 @@ export const TOOL_SCHEMAS = [
   {
     name: "loopforge_resume",
     description:
-      "Resume a loop from vault state after process restart. Returns the compiled prompt for the next round, or null with a stopReason if the loop is already complete.",
+      "Resume a loop from vault state. Works for both: (a) running sessions that were interrupted by a process restart, and (b) paused sessions (via loopforge_pause). Returns the compiled prompt for the next round, or null with a stopReason if the loop is already complete.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -267,6 +283,213 @@ export const TOOL_SCHEMAS = [
     },
   },
 ];
+
+type JsonSchema = Record<string, unknown>;
+
+const ADVANCE_OUTPUT_SCHEMA: JsonSchema = {
+  type: "object",
+  properties: {
+    error: { type: "string" },
+    sessionId: { type: "string" },
+    round: { type: "number" },
+    roundId: { type: ["string", "null"] },
+    prompt: { type: ["string", "null"] },
+    stopReason: { type: "string" },
+    level: { type: "string" },
+    roundSuccess: { type: "boolean" },
+    enforcementAction: { enum: ["accept", "reject", "terminate"] },
+    enforcementReason: { type: "string" },
+    warnings: { type: "array", items: { type: "string" } },
+  },
+  additionalProperties: true,
+};
+
+const TOOL_OUTPUT_SCHEMAS: Record<string, JsonSchema> = {
+  loopforge_start: ADVANCE_OUTPUT_SCHEMA,
+  loopforge_next: ADVANCE_OUTPUT_SCHEMA,
+  loopforge_resume: ADVANCE_OUTPUT_SCHEMA,
+  loopforge_status: {
+    type: "object",
+    properties: {
+      error: { type: "string" },
+      sessionId: { type: "string" },
+      loopId: { type: "string" },
+      round: { type: "number" },
+      roundId: { type: ["string", "null"] },
+      maxRounds: { type: "number" },
+      status: { enum: ["running", "stopped", "stalled", "paused"] },
+      successTrajectory: { type: "array", items: { type: "boolean" } },
+      lease: { type: ["object", "null"], additionalProperties: true },
+      metrics: { type: "object", additionalProperties: true },
+    },
+    additionalProperties: true,
+  },
+  loopforge_stop: {
+    type: "object",
+    properties: {
+      error: { type: "string" },
+      success: { type: "boolean" },
+      roundsCompleted: { type: "number" },
+      successTrajectory: { type: "array", items: { type: "boolean" } },
+    },
+    additionalProperties: true,
+  },
+  loopforge_pause: {
+    type: "object",
+    properties: {
+      error: { type: "string" },
+      sessionId: { type: "string" },
+      round: { type: "number" },
+      status: { type: "string" },
+    },
+    additionalProperties: true,
+  },
+  loopforge_list: {
+    type: "object",
+    properties: {
+      sessions: { type: "array", items: { type: "object", additionalProperties: true } },
+    },
+    required: ["sessions"],
+    additionalProperties: false,
+  },
+  loopforge_replay: {
+    type: "object",
+    properties: {
+      error: { type: "string" },
+      sessionId: { type: "string" },
+      loopId: { type: "string" },
+      timeline: { type: "array", items: { type: "object", additionalProperties: true } },
+    },
+    additionalProperties: true,
+  },
+  loopforge_health: {
+    type: "object",
+    properties: {
+      error: { type: "string" },
+      loopId: { type: "string" },
+      goal_alignment: { type: "object", additionalProperties: true },
+      constraint_integrity: { type: "object", additionalProperties: true },
+      drift_detected: { type: "boolean" },
+      strategy_stability: { type: "object", additionalProperties: true },
+      task_continuity: { type: "object", additionalProperties: true },
+      policy_metrics: { type: "object", additionalProperties: true },
+    },
+    additionalProperties: true,
+  },
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function closeObjectSchemas(schema: JsonSchema): JsonSchema {
+  const result: JsonSchema = { ...schema };
+  if (result.type === "object") {
+    result.additionalProperties = false;
+    if (isRecord(result.properties)) {
+      result.properties = Object.fromEntries(
+        Object.entries(result.properties).map(([key, value]) => [
+          key,
+          isRecord(value) ? closeObjectSchemas(value) : value,
+        ]),
+      );
+    }
+  }
+  if (result.type === "array" && isRecord(result.items)) {
+    result.items = closeObjectSchemas(result.items);
+  }
+  return result;
+}
+
+/** MCP tool contracts include strict input and structured output schemas. */
+export const TOOL_SCHEMAS = TOOL_BASE_SCHEMAS.map((schema) => ({
+  ...schema,
+  inputSchema: closeObjectSchemas(schema.inputSchema),
+  outputSchema: TOOL_OUTPUT_SCHEMAS[schema.name] ?? {
+    type: "object",
+    additionalProperties: true,
+  },
+}));
+
+export class ToolInputValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ToolInputValidationError";
+  }
+}
+
+function validateSchema(value: unknown, schema: JsonSchema, path: string): void {
+  const type = schema.type;
+  if (type === "object") {
+    if (!isRecord(value)) {
+      throw new ToolInputValidationError(`${path} must be an object`);
+    }
+    const properties = isRecord(schema.properties) ? schema.properties : {};
+    const required = Array.isArray(schema.required)
+      ? schema.required.filter((item): item is string => typeof item === "string")
+      : [];
+    for (const key of required) {
+      if (!(key in value)) {
+        throw new ToolInputValidationError(`${path}.${key} is required`);
+      }
+    }
+    if (schema.additionalProperties === false) {
+      for (const key of Object.keys(value)) {
+        if (!(key in properties)) {
+          throw new ToolInputValidationError(`${path}.${key} is not allowed`);
+        }
+      }
+    }
+    for (const [key, child] of Object.entries(properties)) {
+      if (key in value && isRecord(child)) {
+        validateSchema(value[key], child, `${path}.${key}`);
+      }
+    }
+    return;
+  }
+  if (type === "array") {
+    if (!Array.isArray(value)) {
+      throw new ToolInputValidationError(`${path} must be an array`);
+    }
+    if (isRecord(schema.items)) {
+      value.forEach((item, index) =>
+        validateSchema(item, schema.items as JsonSchema, `${path}[${index}]`));
+    }
+    return;
+  }
+  if (type === "string" && typeof value !== "string") {
+    throw new ToolInputValidationError(`${path} must be a string`);
+  }
+  if (type === "boolean" && typeof value !== "boolean") {
+    throw new ToolInputValidationError(`${path} must be a boolean`);
+  }
+  if (type === "number" || type === "integer") {
+    if (
+      typeof value !== "number" ||
+      !Number.isFinite(value) ||
+      (type === "integer" && !Number.isInteger(value))
+    ) {
+      throw new ToolInputValidationError(
+        `${path} must be ${type === "integer" ? "an integer" : "a number"}`,
+      );
+    }
+    if (typeof schema.minimum === "number" && value < schema.minimum) {
+      throw new ToolInputValidationError(`${path} must be >= ${schema.minimum}`);
+    }
+    if (typeof schema.maximum === "number" && value > schema.maximum) {
+      throw new ToolInputValidationError(`${path} must be <= ${schema.maximum}`);
+    }
+  }
+}
+
+export function validateToolInput(
+  name: string,
+  input: Record<string, unknown>,
+): void {
+  const contract = TOOL_SCHEMAS.find((schema) => schema.name === name);
+  if (!contract) throw new ToolInputValidationError(`Unknown tool: ${name}`);
+  validateSchema(input, contract.inputSchema, "arguments");
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Handler registry
@@ -311,12 +534,6 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
     }
 
     const result = await mgr.advance(sessionId, output, preExtractedEval);
-
-    // Clean up finished sessions
-    if (result.prompt === null) {
-      mgr.delete(sessionId);
-    }
-
     return { ...result };
   },
 
@@ -332,10 +549,11 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
       sessionId: session.sessionId,
       loopId: session.loopId,
       round: session.currentRound,
+      roundId: session.roundSnapshot?.roundId ?? null,
       maxRounds: session.maxRounds,
       status: session.status,
       successTrajectory: session.successTrajectory,
-      technique: session.engine.state?.last_technique ?? null,
+      lease: mgr.getLeaseStatus(session.loopId),
       metrics: {
         vaultWriteErrors: metrics.vaultWriteErrors,
         vaultWriteBytes: metrics.vaultWriteBytes,
@@ -343,6 +561,7 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
         feedbackBufferMaxSize: metrics.feedbackBufferMaxSize,
         hydrateCacheMisses: metrics.hydrateCacheMisses,
         silentAnalysisErrors: metrics.silentAnalysisErrors,
+        policy: getPolicyMetrics(session.loopId),
       },
     };
   },
@@ -359,6 +578,13 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
     mgr.delete(sessionId);
 
     return { success: true, roundsCompleted, successTrajectory };
+  },
+
+  async loopforge_pause(mgr, input): Promise<Record<string, unknown>> {
+    const sessionId = String(input.sessionId ?? "");
+    if (!sessionId) return { error: "sessionId is required" };
+    const result = mgr.pause(sessionId);
+    return { ...result };
   },
 
   async loopforge_list(mgr, _input): Promise<Record<string, unknown>> {
@@ -381,7 +607,12 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
     const loopId = String(input.loopId ?? "");
     if (!loopId) return { error: "loopId is required" };
 
-    const result = mgr.resume(loopId);
+    // Paused recovery must run first so the persisted status is atomically
+    // changed back to running before a prompt is returned.
+    let result = await mgr.unpause(loopId);
+    if (!result) {
+      result = mgr.resume(loopId);
+    }
     if (!result) return { error: `no saved session found for loop "${loopId}"` };
 
     return { ...result };

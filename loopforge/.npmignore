@@ -5,4 +5,3 @@ tsconfig.json
 *.test.d.ts
 *.test.d.ts.map
 *.test.js.map
-**/dist/tests/

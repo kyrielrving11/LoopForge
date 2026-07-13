@@ -1,5 +1,209 @@
 # Changelog
 
+## 2.0.0-rc.1 (2026-07-13)
+
+This release candidate changes LoopForge from a prompt-technique framework into
+a recoverable cognitive state runtime driven by an external Agent.
+
+### Breaking changes
+
+- Replaced `loopforge-mcp` with the unified `loopforge` command. Start the MCP
+  server with `loopforge mcp`.
+- Removed `Technique`, `Analysis`, `vault_config`, strategy routing, the
+  prompt-technique catalog, MCP Tasks, automatic memory discovery, and Markdown
+  lineage recovery.
+- Replaced the shared PromptCraft vault with typed per-loop JSON documents under
+  `.loopforge/loops/`. Use `loopforge migrate` to import a legacy vault without
+  deleting it.
+
+### Runtime and prompts
+
+- Added one canonical loop state and one prompt assembly pass. L0, L1, and L2
+  now control state density only.
+- Added stable round IDs, prompt artifacts, attempt numbers, before and after
+  evidence, zero-commit rejection, and idempotent recovery of committed rounds.
+- Runtime and MCP now share the same RoundDriver and round transaction path.
+- Fixed pause, resume, stop, concurrent next, timeout, stalled executor, signal,
+  and terminal cleanup state combinations.
+
+### Storage, evidence, and observability
+
+- Added atomic, locked, hash-isolated `FileLoopStore` session and round
+  documents. Markdown state files remain optional derived views.
+- Added async evidence isolation and explicit `CommandEvidenceProvider` support
+  with shell-free execution, workspace cwd checks, output limits, abort, and
+  required-command verification.
+- Added structured tracing, policy metrics, renewable cross-process session
+  leases, and portable checkpoint sinks without runtime dependencies.
+
+### MCP and CLI
+
+- Added strict runtime validation for MCP tool arguments and safe handling of
+  primitive JSON-RPC input.
+- MCP tools return structured output and serialized text. MCP Tasks are not
+  implemented because the client Agent owns long-running execution.
+- Added `init`, `doctor`, `inspect`, and `migrate` CLI commands.
+
+## v1.19.0 (2026-07-12)
+
+Execution Strategy Hints — L1 advisory mode gets lightweight, task-aware execution guidance
+instead of the single `"direct"` label. Perception SKILL.md trimmed from 310 to 203 lines
+with corrected L1 behavior description.
+
+### Execution Strategy Hints
+- **`ExecutionStrategy` type** — New type in `builder.ts`. Five strategies: `direct`,
+  `investigate`, `decompose`, `compare`, `verify`. Each provides a 2–3 sentence hint
+  without imposing a full reasoning technique framework.
+- **`detectStrategySignals(task)`** — New function. Keyword-based signal detection returning
+  `{ bug, rootCause, multiStep, compare, verify }` booleans. Uses prefix matching (`\bword`
+  without trailing `\b`) so "crashes", "errors", "migration" match correctly.
+- **`selectExecutionStrategy(task, override?)`** — New function. Priority-ordered heuristic:
+  rootCause → investigate, multiStep → decompose, compare → compare, verify → verify,
+  default → direct. `override` parameter allows users to pin a specific strategy via policy.
+- **`buildStrategyHintBlock(decision)`** — New function. Formats a markdown block with
+  `### Execution Strategy: [name]`, the hint text, and `"Execute the task directly.
+  Do not generate another prompt."` — an anti-meta-prompt guarantee.
+- **`SpecialistOpts.strategyHintBlock`** — New optional field. When provided, replaces the
+  generic "Execution Instructions" block in `compileGeneric()`. Undefined by default
+  (backward compatible).
+- **`compileL1()` advisory block** — When `technique.mode` is `"advisory"` (default),
+  computes a strategy hint via `selectExecutionStrategy()` + `buildStrategyHintBlock()`
+  and passes it to `compileGeneric()`. Legacy and disabled modes are unaffected.
+- **`TechniquePolicy.execution_strategy`** — New policy field. Accepts `"auto"` (default,
+  heuristic-driven) or a specific strategy name (`"direct"`, `"investigate"`, etc.).
+  Only applies in advisory mode; ignored in legacy and disabled modes.
+- **`loop_policy.json`** — Added `"execution_strategy": "auto"` to technique block.
+
+### Perception SKILL.md
+- **P1 Fix** — L1 description corrected from "technique keyword-routed from Tier 1" to
+  "direct execution (advisory mode, default) or keyword-routed Tier 1 (legacy mode)".
+  L2 technique selection softened from mandatory "read" to conditional "if available, read".
+  Rule 5 updated to say "follow the compiled prompt instructions" instead of "follow the
+  keyword-routed technique."
+- **P2 Trimming** — Trimmed from 310 lines to 203 lines. Removed marketing language,
+  legacy `---loopforge-eval` block note, standalone Tool Reference table (merged into
+  step-by-step). Collapsed Delegation Helpers from 44 lines to ~12 lines. Shortened
+  full worked example from 47 to ~18 lines. Condensed "Why this matters" editorial
+  to 2 sentences.
+
+### Tests
+- **332 tests** (was 286). 46 new tests:
+  - `strategy.test.ts` (new file): 16 signal detection tests + 18 strategy selection tests
+    (including priority ordering and override behavior) + 3 hint format tests.
+  - `loop-compiler.test.ts`: 9 integration tests covering L1 strategy hint injection
+    (investigate, direct, decompose, verify), legacy/disabled mode exclusion, policy
+    override, multi-round persistence, and anti-meta-prompt guarantee.
+
+### Documentation
+- Root README.md and README.zh-CN.md: v1.19 hero banner, Philosophy block, L1 description
+  in How It Works, Recompile Levels table, Execution Strategy Hints feature section,
+  Agent Technique Autonomy section updated. Test count: 286 → 332.
+
+---
+
+## v1.18.0 (2026-07-12)
+
+Pause/Resume + EvidenceProvider Interface — two structural improvements that build on the
+Phase 2 RoundCoordinator unification and mandatory evidence enforcement.
+
+### Pause/Resume
+- **`RuntimeStatus.PAUSED`** — New runtime status. Loop is suspended at round boundary,
+  signal handlers stay registered, memory writeback is skipped. Resumable from `currentRound`.
+- **`LoopRuntime.pause()` / `resume()`** — Pause suspends the loop at the next iteration;
+  resume re-enters via `_continue()` which picks up from `currentRound` without reset.
+  Paused loops keep heartbeat and signal handlers registered.
+- **SIGINT Double-Tap** — First `Ctrl+C` pauses (safe), second within `pause_double_tap_ms`
+  (default 3000ms) forces stop. Configurable via policy; set to 0 to disable (always stop).
+- **`SessionManager.pause()` / `unpause()`** — Pause persists session to vault with status
+  `"paused"`. Unpause reconstructs from vault and compiles the next prompt. `autoResumeAll()`
+  recovers both `"running"` and `"paused"` sessions on MCP server startup.
+- **`loopforge_pause` MCP tool** — New tool. Pause a running session with vault persistence.
+- **`loopforge_resume`** — Extended to handle both crash-recovery (running) and paused sessions.
+  First tries `resume()` for crash-recovery, falls back to `unpause()` for paused sessions.
+- **`McpSession.status`** — Added `"paused"` to status union. `McpSessionSummary` updated.
+- **`StopReason."paused"`** — New stop reason. `STOP_REASON_OUTCOME_MAP` and
+  `LoopMemoryWriteback.outcome` updated.
+- **`RuntimePolicy.pause_double_tap_ms`** — New policy field (default 3000).
+
+### EvidenceProvider Interface
+- **`EvidenceProvider`** — New interface. `name: string` + `capture(): ProviderSnapshot | null`.
+  Providers return null when unavailable (e.g. git not installed) — pipeline degrades gracefully.
+- **`ProviderSnapshot`** — New type. `{ provider, timestamp, files, data }`. Carries structured
+  evidence from each provider into the verification pipeline.
+- **`EvidenceCollector`** — Runs all configured providers, silently skips unavailable ones.
+  Used by both `runtime.ts` and `session.ts` instead of direct `captureGitModifiedFiles()` calls.
+- **`GitEvidenceProvider`** — Built-in provider wrapping `captureGitFileState()`. Captures
+  tracked, staged, and untracked file changes into a structured `ProviderSnapshot`.
+- **`extractFilesFromSnapshots()`** / `diffSnapshots()`** — Utility functions. Extract merged
+  file list from snapshots (backward compat with `runtimeFilesChanged`), and compute
+  before→after diffs for `runtime.ts`.
+- **`round-coordinator.ts`** — `RoundProcessInput` gains optional `evidenceSnapshots` field.
+  Passed through to `verifySelfEvaluation()`.
+- **`verification-gate.ts`** — `verifySelfEvaluation()` gains optional `evidenceSnapshots`
+  parameter. New `checkEvidenceIntegrity()` cross-validates agent-reported `files_changed`
+  against git provider snapshot. 7 checks total (was 6).
+- **`EvidencePolicy`** — New policy section. `providers: string[]` — which providers to enable.
+  Default: `["git"]`. Added to `DEFAULT_POLICY` and `loop_policy.json`.
+- **`runtime.ts` / `session.ts`** — Replaced direct `captureGitModifiedFiles()` calls with
+  `EvidenceCollector` + `GitEvidenceProvider`. Unused import removed from both files.
+
+### Exports
+- **`index.ts`** — New exports: `EvidenceCollector`, `GitEvidenceProvider`,
+  `extractFilesFromSnapshots`, `diffSnapshots` (values), `ProviderSnapshot`,
+  `EvidenceProvider` (types).
+
+### Tests
+- 286 tests (was 284). All existing tests pass without modification.
+
+---
+
+## v1.16.0 (2026-07-12)
+
+Cognitive State Runtime — the project repositions from "Prompt Compiler" to
+"State Runtime." Three Runtime-ification improvements make state management a
+Runtime guarantee instead of a Prompt request.
+
+### State File Inline Injection
+- **`StateFilePolicy.inline_in_prompt`** — New policy field (default `true`). When
+  enabled, the full state file content is prepended directly into the prompt —
+  the Agent no longer needs to remember to read `.loopforge/state/{id}-state.md`.
+  State injection is now a Runtime guarantee, not a Prompt request.
+- **`compileL1()` / `compileL2()`** — Conditionally inline state file content
+  based on `inline_in_prompt` policy. File is still written to disk as fallback.
+
+### Git Diff Auto-Detection
+- **`captureGitModifiedFiles()`** — New function in `verification-gate.ts`. Captures
+  `git diff --name-only` before and after each agent execution round.
+- **`checkFilesIntegrity()`** — New verification check. Compares agent-reported
+  `files_changed` against git reality. Raises `warn` flag on mismatch.
+  Gracefully degrades when git is unavailable (returns null → check skipped).
+- **`verifySelfEvaluation()`** — New optional 5th parameter `runtimeFilesChanged`.
+  Integrated into `runtime.ts` execute cycle.
+
+### Evidence Block
+- **`EvidenceSnapshot`** — New protocol type. Four categories: ✅ Verified,
+  🔄 Pending, ❌ Invalidated, 💡 Discovered — aggregated from accumulated
+  SelfEvaluation data.
+- **`buildEvidenceSnapshot()`** — New function in `loop-compiler.ts`. Derives
+  evidence from loop objective, last round result, and rolling summary.
+- **`renderStateFile()`** — Renders `## Evidence` section in state file with
+  four-quadrant view (empty categories hidden).
+
+### Agent Reflection — next_action
+- **`SelfEvaluation.next_action`** — New optional field. Agent declares its
+  intended next step ("下一轮我要调查缓存层").
+- **`LoopRoundResult.next_action`** — Carries the declaration forward.
+- **`renderStateFile()`** — Renders `## Agent's Declared Next Action` in state file.
+- **`compileL1()` / `compileL2()`** — Injects `### Your Declared Next Step`
+  block into the prompt.
+
+### Brand Repositioning
+- README, CLAUDE.md, package.json, README.zh-CN.md, perception SKILL.md —
+  repositioned from "Loop-Time Intelligence Layer / Prompt Compiler" to
+  "Cognitive State Runtime."
+
+---
+
 ## v1.15.0 (2026-07-09)
 
 Agent Technique Autonomy at L2 — the Agent now freely chooses reasoning strategies

@@ -16,7 +16,6 @@ function makeEntry(overrides: Partial<VaultEntry> = {}): VaultEntry {
       task: "Audit contract",
       constraints_active: ["check ownership"],
     },
-    technique_used: "few-shot-cot",
     success: true,
     ...overrides,
   };
@@ -43,24 +42,9 @@ describe("ReplayBackend — getRound", () => {
     assert.equal(result, null);
   });
 
-  it("enriches with full_prompt from markdown", () => {
-    backend.appendEntry(makeEntry());
-    backend.markdownFiles.set("test:r1", "## Compiled Prompt\n\nAudit the contract.");
-    const result = replay.getRound("test", 1);
-    assert.equal(result!.full_prompt, "## Compiled Prompt\n\nAudit the contract.");
-  });
-
-  it("falls back to markdown scan when JSON vault empty", () => {
-    backend.markdownScans.set("test", [
-      {
-        task_id: "loop:test:r1",
-        loop_lineage: { round: 1, goal_id: "audit", loop_id: "test" },
-        full_prompt: "## From Markdown",
-      },
-    ]);
-    const result = replay.getRound("test", 1);
-    assert.notEqual(result, null);
-    assert.equal(result!.full_prompt, "## From Markdown");
+  it("returns the prompt stored in the typed round projection", () => {
+    backend.appendEntry(makeEntry({ full_prompt: "## Compiled Prompt" }));
+    assert.equal(replay.getRound("test", 1)?.full_prompt, "## Compiled Prompt");
   });
 
   it("merges feedback success flag", () => {
@@ -113,13 +97,11 @@ describe("ReplayBackend — timeline", () => {
     backend.appendEntry(makeEntry({
       task_id: "loop:test:r3",
       loop_lineage: { loop_id: "test", round: 3, recompile_level: "l1", goal_id: "audit", task: "Fix bugs" },
-      technique_used: "few-shot",
       success: false,
     }));
     backend.appendEntry(makeEntry({
       task_id: "loop:test:r1",
       loop_lineage: { loop_id: "test", round: 1, recompile_level: "l2", goal_id: "audit", task: "Audit" },
-      technique_used: "few-shot-cot",
       success: true,
     }));
     const replay = new ReplayBackend(backend);
@@ -139,23 +121,6 @@ describe("ReplayBackend — timeline", () => {
     assert.deepEqual(tl, []);
   });
 
-  it("falls back to markdown scan for maxRound detection", () => {
-    const backend = new MemoryBackend();
-    // Provide all 5 rounds via markdown scan (simulating a loop with
-    // no JSON vault entries — all data from markdown lineage)
-    const mdEntries: VaultEntry[] = [];
-    for (let r = 1; r <= 5; r++) {
-      mdEntries.push({
-        task_id: `loop:test:r${r}`,
-        loop_lineage: { round: r, loop_id: "test", goal_id: "audit" },
-      });
-    }
-    backend.markdownScans.set("test", mdEntries);
-    const replay = new ReplayBackend(backend);
-    const results = replay.replay("test");
-    assert.equal(results.length, 5); // rounds 1-5, all from markdown
-    assert.equal(results[4]?.loop_lineage?.round, 5);
-  });
 });
 
 describe("ReplayBackend — diff", () => {
@@ -164,13 +129,11 @@ describe("ReplayBackend — diff", () => {
     backend.appendEntry(makeEntry({
       task_id: "loop:test:r1",
       loop_lineage: { loop_id: "test", round: 1, recompile_level: "l2", goal_id: "audit", task: "Audit ERC20", constraints_active: ["check ownership"] },
-      technique_used: "few-shot-cot",
       success: true,
     }));
     backend.appendEntry(makeEntry({
       task_id: "loop:test:r3",
       loop_lineage: { loop_id: "test", round: 3, recompile_level: "l1", goal_id: "audit", task: "Check flash loans", constraints_active: ["check ownership", "check flash loans"] },
-      technique_used: "few-shot",
       success: false,
     }));
     const replay = new ReplayBackend(backend);

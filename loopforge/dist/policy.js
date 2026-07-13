@@ -1,141 +1,29 @@
-/** Policy — externalised loop behaviour configuration.
- *
- * All tunable parameters live here instead of as module-level constants.
- */
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
-/** Resolve which injection phases are allowed for a given maxRounds.
- *  Uses the tiered strategy: finds the first tier where maxRounds ≤ tier.max_rounds,
- *  and returns its allowed_phases. If maxRounds exceeds all tiers, returns the
- *  last tier's phases. */
-export function resolveAllowedPhases(maxRounds, tiers) {
-    if (tiers.length === 0)
-        return [1]; // safety fallback
-    for (const tier of tiers) {
-        if (maxRounds <= tier.max_rounds)
-            return tier.allowed_phases;
-    }
-    return tiers[tiers.length - 1].allowed_phases;
-}
-/** Resolve which memory injection phase (1/2/3) should fire this round.
- *  Shared between LoopRuntime (runtime.ts) and SessionManager (mcp/session.ts).
- *  Returns the phase number, or 0 if no injection should occur this round.
- *
- *  @param currentRound       Current round number (1-based).
- *  @param injectionCount     How many injections have already occurred.
- *  @param allowedPhases      Phases allowed by the round-tier policy.
- *  @param progress           Current progress estimate (-1 if unavailable).
- *  @param phase2Triggered    Whether phase 2 has already fired in this loop.
- *  @param phase3Triggered    Whether phase 3 has already fired in this loop.
- *  @param thresholds         Policy threshold config for phase2/phase3. */
-export function resolveInjectionPhase(currentRound, injectionCount, allowedPhases, progress, phase2Triggered, phase3Triggered, thresholds) {
-    const maxInjections = allowedPhases.size;
-    if (injectionCount >= maxInjections)
-        return 0;
-    // Phase 1: round 1 only
-    if (currentRound === 1 && injectionCount === 0 && allowedPhases.has(1)) {
-        return 1;
-    }
-    const hasProgress = progress >= 0;
-    // Phase 2: progress threshold (only if allowed by tier and not yet triggered)
-    if (allowedPhases.has(2) &&
-        !phase2Triggered &&
-        hasProgress &&
-        progress >= thresholds.phase2) {
-        return 2;
-    }
-    // Phase 3: progress threshold (only if allowed by tier and not yet triggered)
-    if (allowedPhases.has(3) &&
-        !phase3Triggered &&
-        hasProgress &&
-        progress >= thresholds.phase3) {
-        return 3;
-    }
-    return 0;
-}
-/** Build accumulated context for a targeted memory query from a SelfEvaluation.
- *  Extracts recurring issues, key lessons, and remaining criteria.
- *  Shared between LoopRuntime (runtime.ts) and SessionManager (mcp/session.ts). */
-export function buildAccumulatedMemoryContext(selfEval) {
-    const recurringIssues = [];
-    const failedPatterns = [];
-    const keyLessons = [];
-    const remainingCriteria = [];
-    if (selfEval.constraint_violations.length) {
-        recurringIssues.push(...selfEval.constraint_violations);
-    }
-    if (selfEval.execution_evidence?.success_criteria_remaining?.length) {
-        remainingCriteria.push(...selfEval.execution_evidence.success_criteria_remaining);
-    }
-    if (selfEval.emerged_subtasks?.length) {
-        keyLessons.push(...selfEval.emerged_subtasks);
-    }
-    if (selfEval.wrong_assumptions?.length) {
-        keyLessons.push(...selfEval.wrong_assumptions.map((a) => `Wrong: ${a}`));
-    }
-    return { recurringIssues, failedPatterns, keyLessons, remainingCriteria };
-}
-/** Build a base LoopMemoryWriteback payload from loop terminal state.
- *  Shared between LoopRuntime (runtime.ts) and SessionManager (mcp/session.ts).
- *  Callers may layer additional feedback entries on top of the returned payload. */
-export function buildBaseMemoryWriteback(params) {
-    const wp = getPolicy().memory_writeback;
-    const outcome = (params.stopReason === "task_complete" ? "completed" :
-        params.stopReason === "circuit_breaker" ? "circuit_breaker" :
-            params.stopReason === "stalled" ? "stalled" :
-                params.stopReason === "max_rounds" ? "max_rounds" :
-                    "stopped");
-    return {
-        loopId: params.loopId,
-        task: params.task,
-        outcome,
-        roundsCompleted: params.roundsCompleted,
-        projectEntry: {
-            title: `${params.task.slice(0, 80)} — ${outcome}`,
-            objective: params.task.slice(0, 200),
-            keyOutcome: params.stopReason === "task_complete"
-                ? `Completed successfully in ${params.roundsCompleted} rounds.`
-                : `Terminated with reason '${params.stopReason}' after ${params.roundsCompleted} rounds.`,
-            keyDiscoveries: params.discoveries.slice(0, wp.max_discoveries_in_project),
-            date: new Date().toISOString().split("T")[0],
-        },
-        referenceEntry: {
-            description: `LoopForge vault data for "${params.task.slice(0, 80)}"`,
-            vaultLocation: `.promptcraft/prompt_vault.json → loop:${params.loopId}:*`,
-        },
-    };
-}
-// ═══════════════════════════════════════════════════════════════════════════
-// Default policy
-// ═══════════════════════════════════════════════════════════════════════════
+/** Externalized LoopForge runtime policy. */
+import { randomUUID } from "node:crypto";
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync, } from "node:fs";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 export const DEFAULT_POLICY = {
-    version: "1",
-    constraints: {
-        retire_window: 3,
-    },
-    summary: {
-        window: 5,
-        health_check_interval: 1,
-    },
-    technique: {
-        /** @deprecated v1.15 — no longer consumed. Retained for config compatibility. */
-        tier2_escalation_failures: 3,
-    },
-    engine: {
-        feedback_flush_interval: 5,
-        max_circuit_breaker: 3,
-    },
+    version: "2",
+    constraints: { retire_window: 3 },
+    summary: { window: 5, health_check_interval: 1 },
+    engine: { feedback_flush_interval: 5, max_circuit_breaker: 3 },
     runtime: {
         max_rounds: 20,
         round_timeout_ms: 600_000,
         heartbeat_interval_ms: 30_000,
         stall_grace_ms: 300_000,
         max_consecutive_errors: 3,
+        pause_double_tap_ms: 3000,
     },
-    backend: {
-        vault_path: ".promptcraft/prompt_vault.json",
-        global_vault_path: "~/.promptcraft/global_vault.json",
+    prompt: {
+        injection_mode: "adaptive",
+        full_refresh_interval: 5,
+        l0_max_chars: 3000,
+        l1_max_chars: 7000,
+        l2_max_chars: 18000,
+        base_prompt_version: "2.0.0",
     },
+    backend: { root_dir: ".loopforge" },
     evolution: {
         max_discovered_constraints_per_round: 5,
         max_active_constraints: 15,
@@ -144,90 +32,137 @@ export const DEFAULT_POLICY = {
         progress_stall_rounds: 2,
         progress_mismatch_threshold: 0.3,
     },
-    memory_injection: {
-        enabled: true,
-        min_rounds_between_injections: 1,
-        phase_thresholds: {
-            phase1: { trigger: "round_1" },
-            phase2: { trigger: "progress", threshold: 0.40 },
-            phase3: { trigger: "progress", threshold: 0.70 },
-        },
-        round_tiers: [
-            { max_rounds: 10, allowed_phases: [1] },
-            { max_rounds: 20, allowed_phases: [1, 3] },
-            { max_rounds: 30, allowed_phases: [1, 2, 3] },
-        ],
-        dedup_threshold: 0.6,
-        max_context_length: 2000,
-        section_title: "### Background Context (Long-Term Memory)",
-    },
-    memory_writeback: {
-        enabled: true,
-        max_feedback_entries: 5,
-        max_discoveries_in_project: 3,
-        write_on_outcomes: ["task_complete", "circuit_breaker", "max_rounds"],
-    },
-    checkpoint: {
-        max_carried_constraints: 10,
-        outcome_max_chars: 200,
-    },
+    checkpoint: { max_carried_constraints: 10, outcome_max_chars: 200 },
     state_file: {
         enabled: true,
         directory: ".loopforge/state",
         max_checkpoints: 5,
         max_summary_rounds: 5,
     },
+    evidence: { providers: ["git"], timeout_ms: 120_000, commands: [] },
+    mcp: {
+        session_lease_ms: 30_000,
+        session_lease_renew_interval_ms: 10_000,
+    },
 };
-// ═══════════════════════════════════════════════════════════════════════════
-// Deep merge — custom values override defaults, unset fields retain defaults
-// ═══════════════════════════════════════════════════════════════════════════
+/** Write a full default `loop_policy.json` to the target directory.
+ *
+ *  The written file contains every configurable key and its default value
+ *  so users can discover and tune the system without reading source code.
+ *  Skip creation when the file already exists unless `force` is true.
+ *
+ * @returns The resolved file path and whether it was freshly created.
+ */
+export function writeDefaultPolicy(targetDir, force = false) {
+    const target = resolve(targetDir, "loop_policy.json");
+    if (existsSync(target) && !force) {
+        return { path: target, created: false };
+    }
+    writeFileSync(target, JSON.stringify(DEFAULT_POLICY, null, 2) + "\n", "utf8");
+    return { path: target, created: true };
+}
 function deepMerge(defaults, overrides) {
     const result = { ...defaults };
     for (const key of Object.keys(overrides)) {
-        if (key in result &&
-            typeof result[key] === "object" &&
-            !Array.isArray(result[key]) &&
-            typeof overrides[key] === "object" &&
-            !Array.isArray(overrides[key]) &&
-            overrides[key] !== null) {
-            result[key] = deepMerge(result[key], overrides[key]);
+        const current = result[key];
+        const incoming = overrides[key];
+        if (key in result && current !== null && incoming !== null &&
+            typeof current === "object" && !Array.isArray(current) &&
+            typeof incoming === "object" && !Array.isArray(incoming)) {
+            result[key] = deepMerge(current, incoming);
         }
-        else {
-            result[key] = overrides[key];
+        else if (key in result) {
+            // Unknown legacy keys are deliberately ignored at the 2.0 boundary.
+            result[key] = incoming;
         }
     }
     return result;
 }
-// ═══════════════════════════════════════════════════════════════════════════
-// Loader
-// ═══════════════════════════════════════════════════════════════════════════
 export function loadPolicy(path) {
     const candidates = [path, "loop_policy.json"].filter(Boolean);
     for (const candidate of candidates) {
         try {
-            const resolved = resolve(candidate);
-            const raw = JSON.parse(readFileSync(resolved, "utf-8"));
+            const raw = JSON.parse(readFileSync(resolve(candidate), "utf8"));
             if (raw && typeof raw === "object" && !Array.isArray(raw)) {
                 return deepMerge(DEFAULT_POLICY, raw);
             }
         }
         catch {
-            // File not found or invalid — try next candidate
+            // Try the next candidate.
         }
     }
-    return { ...DEFAULT_POLICY };
+    return structuredClone(DEFAULT_POLICY);
 }
-// ═══════════════════════════════════════════════════════════════════════════
-// Module-level singleton — loaded once per session
-// ═══════════════════════════════════════════════════════════════════════════
-let _policy = null;
+let policy = null;
 export function getPolicy(path) {
-    if (_policy === null) {
-        _policy = loadPolicy(path);
-    }
-    return _policy;
+    policy ??= loadPolicy(path);
+    return policy;
 }
 export function resetPolicy() {
-    _policy = null;
+    policy = null;
+}
+const LOOP_ID_RE = /^[a-zA-Z0-9][-a-zA-Z0-9_:.]{0,127}$/;
+export function validateLoopId(loopId) {
+    if (typeof loopId !== "string" || !loopId) {
+        throw new Error("Invalid loopId: must be a non-empty string");
+    }
+    if (loopId.includes(".."))
+        throw new Error('Invalid loopId: ".." is not allowed');
+    if (loopId.includes("/") || loopId.includes("\\")) {
+        throw new Error("Invalid loopId: path separators are not allowed");
+    }
+    if (!LOOP_ID_RE.test(loopId)) {
+        throw new Error("Invalid loopId: use at most 128 alphanumeric, hyphen, underscore, colon, or dot characters");
+    }
+}
+export function resolveStateDirectory(workspaceRoot, configuredDirectory) {
+    const lexicalRoot = resolve(workspaceRoot);
+    const lexicalTarget = resolve(lexicalRoot, configuredDirectory);
+    const lexicalRelative = relative(lexicalRoot, lexicalTarget);
+    if (lexicalRelative === ".." || lexicalRelative.startsWith(`..${sep}`) ||
+        isAbsolute(lexicalRelative)) {
+        throw new Error("State file directory must stay within the workspace");
+    }
+    const realRoot = realpathSync(lexicalRoot);
+    let ancestor = lexicalTarget;
+    while (!existsSync(ancestor)) {
+        const parent = resolve(ancestor, "..");
+        if (parent === ancestor)
+            break;
+        ancestor = parent;
+    }
+    const projected = resolve(realpathSync(ancestor), relative(ancestor, lexicalTarget));
+    const realRelative = relative(realRoot, projected);
+    if (realRelative === ".." || realRelative.startsWith(`..${sep}`) ||
+        isAbsolute(realRelative)) {
+        throw new Error("State file directory resolves outside the workspace");
+    }
+    return lexicalTarget;
+}
+export function writeStateFile(loopId, content) {
+    if (!content)
+        return;
+    validateLoopId(loopId);
+    const config = getPolicy().state_file;
+    if (!config.enabled)
+        return;
+    const directory = resolveStateDirectory(process.cwd(), config.directory);
+    mkdirSync(directory, { recursive: true });
+    const verifiedDirectory = resolveStateDirectory(process.cwd(), config.directory);
+    const target = resolve(verifiedDirectory, `${loopId}-state.md`);
+    if (existsSync(target) && lstatSync(target).isSymbolicLink()) {
+        throw new Error("State file target must not be a symbolic link");
+    }
+    const temporary = resolve(verifiedDirectory, `.${loopId}-state.${process.pid}.${randomUUID()}.tmp`);
+    try {
+        writeFileSync(temporary, content, "utf8");
+        renameSync(temporary, target);
+    }
+    finally {
+        try {
+            rmSync(temporary, { force: true });
+        }
+        catch { /* best effort */ }
+    }
 }
 //# sourceMappingURL=policy.js.map

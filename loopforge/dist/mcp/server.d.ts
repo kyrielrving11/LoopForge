@@ -1,14 +1,17 @@
-/** LoopForge MCP — JSON-RPC transport over stdio.
+/** Minimal MCP JSON-RPC server for LoopForge tools.
  *
- * Implements the MCP protocol: initialize → tools/list → tools/call.
- * Uses node:readline for stdin, writes JSON-RPC responses to stdout.
- * All logging goes to stderr to keep stdout clean.
+ * LoopForge intentionally does not implement MCP Tasks: the external Agent
+ * owns long-running execution while LoopForge persists round state.
  */
 import type { VaultBackend } from "../backends/interface.js";
+import type { LoopStore } from "../loop-store.js";
 export declare class McpServer {
-    private mgr;
-    constructor(backend?: VaultBackend);
+    private readonly mgr;
+    private requestQueue;
+    constructor(storeOrBackend?: LoopStore | VaultBackend);
     start(): void;
+    private handleLine;
     private dispatch;
+    private executeTool;
 }
 //# sourceMappingURL=server.d.ts.map

@@ -17,6 +17,7 @@ import { RuntimeStatus, type RuntimeConfig, type RunResult } from "./protocol.js
 export declare class LoopRuntime extends EventEmitter {
     private config;
     private engine;
+    private roundDriver;
     private _status;
     private currentRound;
     private successTrajectory;
@@ -26,40 +27,53 @@ export declare class LoopRuntime extends EventEmitter {
     private lastSelfEval;
     private pendingVerificationFlags;
     private consecutiveRejections;
+    /** Which enforcement check triggered the last rejection.
+     *  Only same-check rejections accumulate; a different check resets the counter. */
+    private lastRejectionCheck;
     private pendingRejectionNotice;
-    private injectionCount;
-    private lastInjectionRound;
-    private injectedContexts;
-    private phase2Triggered;
-    private phase3Triggered;
+    private roundSnapshot;
+    private pauseTimestamp;
+    private pauseRequested;
+    private driverPromise;
     private pendingExternalContext;
     private roundStartTime;
     private lastProgressTime;
     private activeCtx;
+    private activeAbortController;
     private timedOut;
     constructor(rawConfig: RuntimeConfig);
     get status(): RuntimeStatus;
     getCurrentRound(): number;
     getSuccessTrajectory(): boolean[];
-    /** Derive the current progress estimate from the last self evaluation.
-     *  Returns -1 if no progress data is available. */
-    private getCurrentProgress;
-    /** Determine which memory injection phase (0/1/2/3) should fire this round.
-     *  Returns 0 if no injection should occur. Phase tracking (phase2Triggered /
-     *  phase3Triggered) is updated by the caller based on the returned phase. */
-    private getInjectionPhase;
-    /** Build the accumulated context for constructing a targeted memory query.
-     *  Delegates to the shared buildAccumulatedMemoryContext() utility. */
-    private buildAccumulatedContext;
-    /** Deduplicate external context against previously injected contexts.
-     *  Returns empty string if the new context is too similar to any prior. */
-    private dedupAndStoreContext;
     /** Start the loop. Returns when the loop terminates (task complete,
-     *  circuit breaker, max rounds, stalled, or manual stop). */
+     *  circuit breaker, max rounds, stalled, paused, or manual stop).
+     *  Can only be called from IDLE state. */
     start(): Promise<RunResult>;
+    /** Start the one allowed loop driver and clear its ownership on exit. */
+    private launchDriver;
+    /** Internal loop driver. Called by both start() (isResume=false) and
+     *  resume() (isResume=true). When resuming, skips the currentRound=1
+     *  reset — the loop picks up exactly where it left off. */
+    private _continue;
+    /** Execute one round with a hard driver deadline. The AbortSignal lets a
+     *  cooperative executor stop early; the race guarantees the runtime itself
+     *  still resolves when an executor ignores cancellation. */
+    private executeWithDeadline;
+    private triggerTimeout;
+    private triggerStall;
     /** Stop the loop gracefully. Safe to call from any thread/timer. */
     stop(): void;
+    /** Pause the loop gracefully. Completes the current round, then suspends.
+     *  Safe to call from signal handlers or callbacks.
+     *  Only has effect when the loop is RUNNING. */
+    pause(): void;
+    /** Resume a paused loop. Re-enters the main loop from currentRound.
+     *  The loop continues exactly where it was suspended. */
+    resume(): Promise<RunResult>;
     private buildCompileRequest;
+    /** Adapt the typed compiler request to the engine envelope once for both
+     * normal rounds and enforcement retry attempts. */
+    private buildEngineCompileRequest;
     private startHeartbeat;
     private heartbeatTick;
     private stopHeartbeat;

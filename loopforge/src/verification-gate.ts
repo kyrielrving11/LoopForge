@@ -13,7 +13,9 @@
  *                 must respond in the next round.
  */
 
+import { execSync } from "node:child_process";
 import type { VaultEntry } from "./backends/interface.js";
+import type { ProviderSnapshot } from "./evidence-provider.js";
 import type { SelfEvaluation, VerificationFlag, VerificationResult } from "./protocol.js";
 import { makeVerificationFlag, makeVerificationResult } from "./protocol.js";
 
@@ -37,6 +39,58 @@ function entryViolations(entry: VaultEntry): string[] {
   const viols = entry.constraint_violations;
   if (Array.isArray(viols)) return viols.filter((v: unknown) => typeof v === "string");
   return [];
+}
+
+/** v1.17: Result of capturing git file state across all three categories. */
+export interface GitFileState {
+  /** Tracked files modified but unstaged (git diff --name-only). */
+  tracked: string[];
+  /** Files in the staging area (git diff --cached --name-only). */
+  staged: string[];
+  /** Untracked files not yet known to git (git ls-files --others --exclude-standard). */
+  untracked: string[];
+}
+
+/** v1.17: Capture all git file state — modified, staged, and untracked.
+ *  Returns null if git is unavailable. Each list is sorted.
+ *  5-second timeout per command prevents hanging on large repos. */
+export function captureGitFileState(): GitFileState | null {
+  try {
+    const trackedOut = execSync("git diff --name-only", {
+      encoding: "utf-8",
+      timeout: 5000,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const stagedOut = execSync("git diff --cached --name-only", {
+      encoding: "utf-8",
+      timeout: 5000,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const untrackedOut = execSync("git ls-files --others --exclude-standard", {
+      encoding: "utf-8",
+      timeout: 5000,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    return {
+      tracked: trackedOut.trim().split("\n").filter(f => f.length > 0).sort(),
+      staged: stagedOut.trim().split("\n").filter(f => f.length > 0).sort(),
+      untracked: untrackedOut.trim().split("\n").filter(f => f.length > 0).sort(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** v1.16: Capture the current set of modified files according to git.
+ *  Returns a sorted array of relative file paths, or null if git is unavailable.
+ *  Delegates to `git diff --name-only` — no staging or committing.
+ *  5-second timeout prevents hanging on large repos.
+ *  @deprecated v1.17 — Use captureGitFileState() for full staged/untracked coverage. */
+export function captureGitModifiedFiles(): string[] | null {
+  const state = captureGitFileState();
+  if (!state) return null;
+  // Merge all categories into a single sorted list (backward compat)
+  return [...new Set([...state.tracked, ...state.staged, ...state.untracked])].sort();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -227,23 +281,175 @@ function checkRetractFreshConstraint(
   return null;
 }
 
+/** v1.16: Check 7 — Agent-reported files_changed doesn't match git reality.
+ *  Only fires when execution_evidence is present (structured self-eval path)
+ *  AND runtimeFilesChanged is non-null (git is available). */
+function checkFilesIntegrity(
+  selfEval: SelfEvaluation,
+  runtimeFilesChanged: string[] | null,
+): VerificationFlag | null {
+  if (!runtimeFilesChanged) return null;  // git unavailable, skip
+  if (!selfEval.execution_evidence) return null;  // heuristic fallback, skip
+
+  const reported = [...selfEval.execution_evidence.files_changed].sort();
+  const actual = [...runtimeFilesChanged].sort();
+
+  // Both empty → agent honestly reports no changes
+  if (reported.length === 0 && actual.length === 0) return null;
+
+  // Agent says no files, but git shows changes
+  if (reported.length === 0 && actual.length > 0) {
+    return makeVerificationFlag({
+      severity: "warn",
+      field: "files_changed",
+      check: "files_integrity",
+      detail:
+        `Agent reported no files changed but git shows: ${actual.join(", ")}`,
+    });
+  }
+
+  // Compare reported vs actual
+  const ghostFiles = reported.filter(f => !actual.includes(f));
+  const missedFiles = actual.filter(f => !reported.includes(f));
+
+  if (ghostFiles.length > 0 || missedFiles.length > 0) {
+    const parts: string[] = [];
+    if (ghostFiles.length > 0) parts.push(`unconfirmed: [${ghostFiles.join(", ")}]`);
+    if (missedFiles.length > 0) parts.push(`unreported: [${missedFiles.join(", ")}]`);
+    return makeVerificationFlag({
+      severity: "warn",
+      field: "files_changed",
+      check: "files_integrity",
+      detail: `Agent files_changed doesn't match git: ${parts.join("; ")}`,
+    });
+  }
+
+  return null;
+}
+
+/** v1.18: Cross-validate agent-reported files_changed against evidence
+ *  snapshots from all configured providers.
+ *
+ *  For the git provider: compares agent's execution_evidence.files_changed
+ *  against the git snapshot's merged file list (same logic as
+ *  checkFilesIntegrity but driven by ProviderSnapshot instead of
+ *  raw string array).
+ *
+ *  For other providers: contributes an informational flag noting the
+ *  provider ran but no structural cross-check is implemented yet. */
+function checkEvidenceIntegrity(
+  selfEval: SelfEvaluation,
+  evidenceSnapshots: ProviderSnapshot[],
+): VerificationFlag | null {
+  if (!selfEval.execution_evidence) return null;
+  if (evidenceSnapshots.length === 0) return null;
+
+  // Git provider cross-validation
+  const gitSnap = evidenceSnapshots.find((s) => s.provider === "git");
+  if (gitSnap) {
+    const reported = [...selfEval.execution_evidence.files_changed].sort();
+    const actual = [...gitSnap.files].sort();
+
+    if (reported.length === 0 && actual.length === 0) {
+      // Both empty — git is clean. Fall through to the
+      // non-git informational flag below instead of returning null early.
+    } else if (reported.length === 0 && actual.length > 0) {
+      return makeVerificationFlag({
+        severity: "warn",
+        field: "files_changed",
+        check: "evidence_integrity",
+        detail:
+          `Agent reported no files changed but evidence shows: ${actual.join(", ")}`,
+      });
+    } else {
+      const ghostFiles = reported.filter((f) => !actual.includes(f));
+      const missedFiles = actual.filter((f) => !reported.includes(f));
+
+      if (ghostFiles.length > 0 || missedFiles.length > 0) {
+        const parts: string[] = [];
+        if (ghostFiles.length > 0) parts.push(`unconfirmed: [${ghostFiles.join(", ")}]`);
+        if (missedFiles.length > 0) parts.push(`unreported: [${missedFiles.join(", ")}]`);
+        return makeVerificationFlag({
+          severity: "warn",
+          field: "files_changed",
+          check: "evidence_integrity",
+          detail: `Agent files_changed doesn't match evidence: ${parts.join("; ")}`,
+        });
+      }
+    }
+  }
+
+  // Non-git providers: emit an informational flag so the agent knows
+  // which providers ran. Structural cross-validation for non-git
+  // providers is not yet implemented; the flag is informational only.
+  const nonGitProviders = evidenceSnapshots
+    .filter((s) => s.provider !== "git")
+    .map((s) => s.provider);
+  if (nonGitProviders.length > 0) {
+    return makeVerificationFlag({
+      severity: "info",
+      field: "execution_evidence",
+      check: "evidence_integrity",
+      detail: `Evidence providers ran: ${nonGitProviders.join(", ")}. Automated cross-validation of agent claims against these providers is not yet implemented.`,
+    });
+  }
+
+  return null;
+}
+
+/** A required, explicitly configured verification command is authoritative
+ * when the Agent claims success. Optional commands remain observational. */
+function checkRequiredCommandEvidence(
+  selfEval: SelfEvaluation,
+  evidenceSnapshots: ProviderSnapshot[],
+): VerificationFlag | null {
+  if (!selfEval.success) return null;
+  for (const snapshot of evidenceSnapshots) {
+    if (snapshot.data.kind !== "command") continue;
+    if (snapshot.data.phase !== "after" || snapshot.data.required !== true) continue;
+    const status = snapshot.data.status;
+    if (status === "passed") continue;
+    const name = typeof snapshot.data.commandName === "string"
+      ? snapshot.data.commandName
+      : snapshot.provider;
+    const exitCode = typeof snapshot.data.exitCode === "number"
+      ? ` (exit ${snapshot.data.exitCode})`
+      : "";
+    return makeVerificationFlag({
+      severity: "error",
+      field: "execution_evidence",
+      check: "required_command_failed",
+      detail: `Agent claims success but required command "${name}" ${String(status)}${exitCode}`,
+    });
+  }
+  return null;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Main entry point
 // ═══════════════════════════════════════════════════════════════════════════
 
 /** Verify a SelfEvaluation against the loop's cross-round lineage.
  *
- * @param selfEval      The agent's self-evaluation for the current round.
- * @param currentRound  The current round number (1-based).
- * @param vaultEntries  Vault entries for this loop (non-feedback only).
- * @param prevSelfEval  The agent's self-evaluation from the previous round
- *                      (null for round 1).
- */
+ * @param selfEval             The agent's self-evaluation for the current round.
+ * @param currentRound         The current round number (1-based).
+ * @param vaultEntries         Vault entries for this loop (non-feedback only).
+ * @param prevSelfEval         The agent's self-evaluation from the previous round
+ *                             (null for round 1).
+ * @param runtimeFilesChanged  v1.16: Files detected as changed by git diff between
+ *                             before/after execute. null if git is unavailable.
+ *                             Used by checkFilesIntegrity to cross-validate
+ *                             agent-reported files_changed against reality.
+ * @param evidenceSnapshots    v1.18: Evidence snapshots from configured providers.
+ *                             Used by checkEvidenceIntegrity for multi-provider
+ *                             cross-validation. Defaults to empty array. */
 export function verifySelfEvaluation(
   selfEval: SelfEvaluation,
   currentRound: number,
   vaultEntries: VaultEntry[],
   prevSelfEval: SelfEvaluation | null = null,
+  runtimeFilesChanged: string[] | null = null,
+  evidenceSnapshots: ProviderSnapshot[] = [],
 ): VerificationResult {
   const flags: VerificationFlag[] = [];
 
@@ -262,6 +468,11 @@ export function verifySelfEvaluation(
     () => checkDuplicateConstraintDiscovery(selfEval, prevSelfEval, olderViolations),
     () => checkRecurringViolation(selfEval, prevSelfEval, vaultEntries, currentRound),
     () => checkRetractFreshConstraint(selfEval, prevSelfEval, currentRound),
+    // v1.16: Cross-validate agent-reported files_changed against git reality
+    () => checkFilesIntegrity(selfEval, runtimeFilesChanged),
+    // v1.18: Cross-validate against evidence snapshots from all providers
+    () => checkEvidenceIntegrity(selfEval, evidenceSnapshots),
+    () => checkRequiredCommandEvidence(selfEval, evidenceSnapshots),
   ];
 
   for (const run of checks) {

@@ -77,6 +77,9 @@ function evalParam(opts: {
 import { SessionManager } from "../mcp/session.js";
 import { TOOL_HANDLERS } from "../mcp/tools.js";
 import { resetPolicy } from "../policy.js";
+import type { SelfEvaluation } from "../protocol.js";
+import { RoundTransactionCoordinator } from "../round-transaction.js";
+import { SessionLeaseConflictError } from "../storage.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Tests
@@ -101,7 +104,6 @@ describe("MCP — loopforge_start", async () => {
     assert.equal(typeof result.prompt, "string");
     assert.ok((result.prompt as string).length > 0);
     assert.ok((result.prompt as string).includes("LoopForge"));
-    assert.equal(typeof result.technique, "string");
     assert.equal(typeof result.level, "string");
   });
 });
@@ -147,7 +149,7 @@ describe("MCP — multi-round lifecycle", async () => {
       output: agentOutput({ success: true, shouldContinue: false }),
     });
     assert.equal(r3.prompt, null);
-    assert.equal(r3.stopReason, "task_complete");
+    assert.equal(r3.stopReason, "completed");
     assert.equal(r3.round, 3);
   });
 
@@ -250,7 +252,7 @@ describe("MCP — multi-round lifecycle", async () => {
       evaluation: evalParam({ success: true, shouldContinue: false }),
     });
     assert.equal(r1.prompt, null);
-    assert.equal(r1.stopReason, "task_complete");
+    assert.equal(r1.stopReason, "completed");
   });
 
   it("next without evaluation or eval block in output → stalled", async () => {
@@ -289,7 +291,7 @@ describe("MCP — multi-round lifecycle", async () => {
     });
     assert.equal(r1.stopReason, undefined);
 
-    // Round 2 → stop
+    // Round 2 → stop (v1.17: must include execution_evidence for success=true)
     const r2 = await TOOL_HANDLERS.loopforge_next(mgr, {
       sessionId,
       evaluation: {
@@ -297,10 +299,17 @@ describe("MCP — multi-round lifecycle", async () => {
         output_summary: "All reentrancy bugs fixed. 24/24 tests pass.",
         constraint_violations: [],
         should_continue: false,
+        execution_evidence: {
+          files_changed: ["Token.sol"],
+          test_results: { passed: 24, failed: 0, skipped: 0 },
+          success_criteria_met: ["Reentrancy guard for deposit()", "Access control audit"],
+          success_criteria_remaining: [],
+          progress_estimate: 1.0,
+        },
       },
     });
     assert.equal(r2.prompt, null);
-    assert.equal(r2.stopReason, "task_complete");
+    assert.equal(r2.stopReason, "completed");
   });
 });
 
@@ -381,6 +390,7 @@ describe("MCP — session persistence (save / resume)", async () => {
     assert.ok(r1.prompt !== null);
 
     // New SessionManager (simulating process restart)
+    mgr.close();
     const mgr2 = new SessionManager(backend);
     const resumed = mgr2.resume("resume-after-create");
     assert.ok(resumed !== null, "resume should return a result");
@@ -398,6 +408,7 @@ describe("MCP — session persistence (save / resume)", async () => {
     assert.ok(r2.prompt !== null);
 
     // New SessionManager (process restart)
+    mgr.close();
     const mgr2 = new SessionManager(backend);
     const resumed = mgr2.resume("resume-mid");
     assert.ok(resumed !== null);
@@ -416,7 +427,7 @@ describe("MCP — session persistence (save / resume)", async () => {
     const resumed = mgr2.resume("resume-done");
     assert.ok(resumed !== null);
     assert.equal(resumed!.prompt, null);
-    assert.ok(resumed!.stopReason === "stopped" || resumed!.stopReason === "task_complete");
+    assert.ok(resumed!.stopReason === "stopped" || resumed!.stopReason === "completed");
   });
 
   it("resume() returns null for unknown loop", async () => {
@@ -427,13 +438,66 @@ describe("MCP — session persistence (save / resume)", async () => {
 
   it("save() upserts — only one session_state entry per loop", async () => {
     await mgr.create({ task: "Test task", loopId: "upsert-test" });
-    // Create another session for the same loop (simulating multiple sessions)
+    // A second live owner is fenced instead of overwriting the session.
     const mgr2 = new SessionManager(backend);
-    mgr2.create({ task: "Test task", loopId: "upsert-test" });
+    await assert.rejects(
+      () => mgr2.create({ task: "Test task", loopId: "upsert-test" }),
+      SessionLeaseConflictError,
+    );
 
     const entries = backend.queryEntries({ prefix: "loop:upsert-test:session" });
     const sessionEntries = entries.filter((e) => e.task_type === "session_state");
     assert.equal(sessionEntries.length, 1, "should only have one session_state entry per loop");
+  });
+
+  // ── v1.16: autoResumeAll ──────────────────────────────────────────────
+
+  it("autoResumeAll() recovers running sessions on startup", async () => {
+    // Create a session → saved to vault as session_state
+    await mgr.create({ task: "Auto-resume test", loopId: "auto-resume-running" });
+
+    // Simulate process restart with a fresh SessionManager on same backend
+    mgr.close();
+    const mgr2 = new SessionManager(backend);
+    const resumed = mgr2.autoResumeAll();
+    assert.equal(resumed, 1, "should resume one running session");
+
+    // Verify it's in the in-memory session list
+    const sessions = mgr2.list();
+    const found = sessions.find(s => s.loopId === "auto-resume-running");
+    assert.ok(found !== undefined, "resumed session should appear in list");
+    assert.equal(found!.status, "running");
+  });
+
+  it("autoResumeAll() does not recover stopped sessions", async () => {
+    // Create a session and advance it to task_complete so vault records status="stopped"
+    const start = await mgr.create({ task: "Stopped test", loopId: "auto-resume-stopped" });
+    const sid = String(start.sessionId);
+    await mgr.advance(sid, "done", {
+      success: true,
+      output_summary: "All done",
+      constraint_violations: [],
+      should_continue: false,  // triggers completed → status="stopped"
+      execution_evidence: {
+        files_changed: ["src/test.ts"],
+        test_results: { passed: 1, failed: 0, skipped: 0 },
+        success_criteria_met: [],
+        success_criteria_remaining: [],
+        progress_estimate: 1.0,
+      },
+    } as SelfEvaluation);
+
+    // Simulate restart — vault should have status="stopped"
+    const mgr2 = new SessionManager(backend);
+    const resumed = mgr2.autoResumeAll();
+    assert.equal(resumed, 0, "stopped session should not be auto-resumed");
+
+    // The stopped session might appear in list from vault, but it won't be "running"
+    const sessions = mgr2.list();
+    const found = sessions.find(s => s.loopId === "auto-resume-stopped");
+    if (found) {
+      assert.notEqual(found.status, "running");
+    }
   });
 });
 
@@ -508,7 +572,6 @@ describe("MCP — status / list / stop / replay", async () => {
     const timeline = result.timeline as Array<Record<string, unknown>>;
     assert.ok(timeline.length >= 1, "timeline should have entries");
     assert.equal(typeof timeline[0].round, "number");
-    assert.equal(typeof timeline[0].technique_used, "string");
   });
 });
 
@@ -531,6 +594,7 @@ describe("MCP — resume / list-vault / health", async () => {
     assert.ok("sessionId" in start);
 
     // Simulate new SessionManager (process restart)
+    mgr.close();
     const mgr2 = new SessionManager(backend);
     const result = await TOOL_HANDLERS.loopforge_resume(mgr2, {
       loopId: "resume-hdl-test",
@@ -586,16 +650,342 @@ describe("MCP — resume / list-vault / health", async () => {
     assert.ok("error" in result);
   });
 
-  it("loopforge_status shows technique after compiling", async () => {
+  it("loopforge_status shows the current round identity", async () => {
     const start = await TOOL_HANDLERS.loopforge_start(mgr, {
-      task: "Technique status test",
-      loopId: "technique-status",
+      task: "Round status test",
+      loopId: "round-status",
     });
     const sessionId = String(start.sessionId);
 
     const status = await TOOL_HANDLERS.loopforge_status(mgr, { sessionId });
-    const technique = status.technique as string;
-    assert.ok(typeof technique === "string", "technique should be a string");
-    assert.ok(technique.length > 0, "technique should not be empty");
+    assert.equal(typeof status.roundId, "string");
+  });
+});
+
+describe("MCP P0 lifecycle regressions", () => {
+  let backend: MemoryBackend;
+  let mgr: SessionManager;
+
+  const continuingEvaluation = (): SelfEvaluation => ({
+    success: false,
+    output_summary: "partial",
+    constraint_violations: [],
+    should_continue: true,
+    execution_evidence: {
+      files_changed: [],
+      test_results: null,
+      success_criteria_met: [],
+      success_criteria_remaining: ["remaining"],
+      progress_estimate: 0.4,
+    },
+  });
+
+  beforeEach(() => {
+    resetPolicy();
+    backend = new MemoryBackend();
+    mgr = new SessionManager(backend);
+  });
+
+  it("resumes a paused session as running and can advance", async () => {
+    const started = await mgr.create({
+      task: "Pause resume regression",
+      loopId: "pause-resume-regression",
+      maxRounds: 3,
+    });
+    assert.equal(mgr.pause(started.sessionId).status, "paused");
+
+    const restarted = new SessionManager(backend);
+    const resumed = await TOOL_HANDLERS.loopforge_resume(restarted, {
+      loopId: "pause-resume-regression",
+    });
+    const resumedId = String(resumed.sessionId);
+    assert.ok(resumed.prompt !== null);
+    assert.equal(restarted.get(resumedId)?.status, "running");
+
+    const next = await TOOL_HANDLERS.loopforge_next(restarted, {
+      sessionId: resumedId,
+      evaluation: evalParam({ success: false, shouldContinue: false }),
+    });
+    assert.equal(next.stopReason, "failed");
+  });
+
+  it("commits the terminal trajectory and keeps completed replay available", async () => {
+    const started = await TOOL_HANDLERS.loopforge_start(mgr, {
+      task: "Terminal replay regression",
+      loopId: "terminal-replay-regression",
+    });
+    const sessionId = String(started.sessionId);
+
+    const completed = await TOOL_HANDLERS.loopforge_next(mgr, {
+      sessionId,
+      evaluation: evalParam({ success: true, shouldContinue: false }),
+    });
+    assert.equal(completed.stopReason, "completed");
+    assert.deepEqual(mgr.get(sessionId)?.successTrajectory, [true]);
+
+    const replay = await TOOL_HANDLERS.loopforge_replay(mgr, { sessionId });
+    assert.ok(Array.isArray(replay.timeline));
+    assert.ok((replay.timeline as unknown[]).length >= 1);
+
+    const sessionEntry = backend.queryEntries({
+      prefix: "loop:terminal-replay-regression:session",
+    }).find((entry) => entry.task_type === "session_state");
+    assert.deepEqual(sessionEntry?.loop_lineage?.success_trajectory, [true]);
+  });
+
+  it("serializes concurrent advances for the same session", async () => {
+    const started = await mgr.create({
+      task: "Concurrent advance regression",
+      loopId: "concurrent-advance-regression",
+      maxRounds: 30,
+    });
+    const sessionId = started.sessionId;
+    let releaseProvider!: () => void;
+    let markProviderStarted!: () => void;
+    const providerStarted = new Promise<void>((resolve) => {
+      markProviderStarted = resolve;
+    });
+    const providerGate = new Promise<void>((resolve) => {
+      releaseProvider = resolve;
+    });
+    mgr.contextProvider = async () => {
+      markProviderStarted();
+      await providerGate;
+      return "";
+    };
+
+    const evaluation = {
+      success: false,
+      output_summary: "partial",
+      constraint_violations: [],
+      should_continue: true,
+      execution_evidence: {
+        files_changed: [],
+        test_results: null,
+        success_criteria_met: [],
+        success_criteria_remaining: ["remaining"],
+        progress_estimate: 0.4,
+      },
+    } as SelfEvaluation;
+
+    const first = mgr.advance(sessionId, "", evaluation);
+    await providerStarted;
+    let secondSettled = false;
+    const second = mgr.advance(sessionId, "", evaluation).then((result) => {
+      secondSettled = true;
+      return result;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    assert.equal(secondSettled, false);
+    assert.equal(mgr.get(sessionId)?.currentRound, 2);
+    releaseProvider();
+
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+    assert.equal(firstResult.round, 2);
+    assert.equal(secondResult.round, 3);
+    assert.equal(mgr.get(sessionId)?.currentRound, 3);
+  });
+
+  it("does not revive a session paused during an in-flight advance", async () => {
+    const started = await mgr.create({
+      task: "Pause during advance regression",
+      loopId: "pause-during-advance-regression",
+      maxRounds: 30,
+    });
+    let releaseProvider!: () => void;
+    let markProviderStarted!: () => void;
+    const providerStarted = new Promise<void>((resolve) => {
+      markProviderStarted = resolve;
+    });
+    const providerGate = new Promise<void>((resolve) => {
+      releaseProvider = resolve;
+    });
+    mgr.contextProvider = async () => {
+      markProviderStarted();
+      await providerGate;
+      return "";
+    };
+
+    const advancing = mgr.advance(
+      started.sessionId,
+      "",
+      continuingEvaluation(),
+    );
+    await providerStarted;
+    assert.equal(mgr.pause(started.sessionId).status, "paused");
+    releaseProvider();
+
+    const result = await advancing;
+    assert.equal(result.stopReason, "paused");
+    assert.equal(result.prompt, null);
+    assert.equal(mgr.get(started.sessionId)?.status, "paused");
+  });
+
+  it("does not revive a session stopped during an in-flight advance", async () => {
+    const started = await mgr.create({
+      task: "Stop during advance regression",
+      loopId: "stop-during-advance-regression",
+      maxRounds: 30,
+    });
+    let releaseProvider!: () => void;
+    let markProviderStarted!: () => void;
+    const providerStarted = new Promise<void>((resolve) => {
+      markProviderStarted = resolve;
+    });
+    const providerGate = new Promise<void>((resolve) => {
+      releaseProvider = resolve;
+    });
+    mgr.contextProvider = async () => {
+      markProviderStarted();
+      await providerGate;
+      return "";
+    };
+
+    const advancing = mgr.advance(
+      started.sessionId,
+      "",
+      continuingEvaluation(),
+    );
+    await providerStarted;
+    assert.equal(mgr.delete(started.sessionId), true);
+    releaseProvider();
+
+    const result = await advancing;
+    assert.equal(result.stopReason, "stopped");
+    assert.equal(result.prompt, null);
+    assert.equal(mgr.get(started.sessionId), undefined);
+  });
+
+  it("recovers a committed round after a crash without duplicate feedback", async () => {
+    const started = await mgr.create({
+      task: "Crash recovery transaction",
+      loopId: "crash-recovery-transaction",
+      maxRounds: 3,
+    });
+    const session = mgr.get(started.sessionId);
+    assert.ok(session?.roundSnapshot);
+
+    // Commit the round but deliberately skip SessionManager's state update,
+    // simulating a process death between feedback commit and session save.
+    const transaction = new RoundTransactionCoordinator(session.engine, backend);
+    const evaluation = continuingEvaluation();
+    const committed = transaction.process({
+      snapshot: session.roundSnapshot,
+      task: session.task,
+      maxRounds: session.maxRounds,
+      selfEval: evaluation,
+      extractionSucceeded: true,
+      consecutiveRejections: 0,
+      successTrajectory: [],
+      actualEvidence: session.evidenceBaseline ?? [],
+    });
+    assert.equal(committed.snapshot.phase, "committed");
+
+    mgr.close();
+    const restarted = new SessionManager(backend);
+    const resumed = restarted.resume("crash-recovery-transaction");
+    assert.ok(resumed);
+    assert.equal(resumed.sessionId, started.sessionId);
+    assert.equal(resumed.round, 2);
+    assert.notEqual(resumed.prompt, started.prompt);
+    assert.notEqual(resumed.roundId, started.roundId);
+    assert.equal(
+      backend.queryEntries({
+        prefix: "loop:crash-recovery-transaction:r1",
+        feedbackOnly: true,
+      }).length,
+      1,
+    );
+  });
+
+  it("restores the compiled retry attempt with the same round ID and zero commit", async () => {
+    const started = await mgr.create({
+      task: "Rejected round recovery",
+      loopId: "rejected-round-recovery",
+      maxRounds: 3,
+    });
+    const rejectedEvaluation: SelfEvaluation = {
+      success: true,
+      output_summary: "premature success",
+      constraint_violations: [],
+      should_continue: true,
+      execution_evidence: {
+        files_changed: ["src/change.ts"],
+        test_results: { passed: 1, failed: 0, skipped: 0 },
+        success_criteria_met: [],
+        success_criteria_remaining: ["still open"],
+        progress_estimate: 0.5,
+      },
+    };
+    const rejected = await mgr.advance(
+      started.sessionId,
+      "",
+      rejectedEvaluation,
+    );
+    assert.equal(rejected.enforcementAction, "reject");
+    assert.equal(rejected.roundId, started.roundId);
+    assert.equal(rejected.level, "l0");
+    assert.match(rejected.prompt ?? "", /Attempt: 2/);
+    assert.match(rejected.prompt ?? "", /Retry Requirements/);
+    const lineageBefore = backend.queryEntries({
+      prefix: "loop:rejected-round-recovery:r1",
+    }).filter((entry) => entry.task_id === "loop:rejected-round-recovery:r1").length;
+
+    mgr.close();
+    const restarted = new SessionManager(backend);
+    const resumed = restarted.resume("rejected-round-recovery");
+    assert.ok(resumed);
+    assert.equal(resumed.sessionId, started.sessionId);
+    assert.equal(resumed.prompt, rejected.prompt);
+    assert.equal(resumed.roundId, started.roundId);
+    assert.equal(resumed.level, "l0");
+    assert.equal(
+      backend.queryEntries({
+        prefix: "loop:rejected-round-recovery:r1",
+        feedbackOnly: true,
+      }).length,
+      0,
+    );
+
+    const accepted = await restarted.advance(
+      resumed.sessionId,
+      "",
+      continuingEvaluation(),
+    );
+    assert.equal(accepted.round, 2);
+    assert.notEqual(accepted.roundId, started.roundId);
+    const lineageAfter = backend.queryEntries({
+      prefix: "loop:rejected-round-recovery:r1",
+    }).filter((entry) => entry.task_id === "loop:rejected-round-recovery:r1").length;
+    assert.equal(lineageAfter, lineageBefore);
+  });
+
+  it("persists a session snapshot with one vault replacement", async () => {
+    class CountingBackend extends MemoryBackend {
+      writes = 0;
+      override writeVault(data: Record<string, unknown>): void {
+        this.writes++;
+        super.writeVault(data);
+      }
+    }
+
+    const counting = new CountingBackend();
+    const manager = new SessionManager(counting);
+    const started = await manager.create({
+      task: "Atomic session save",
+      loopId: "atomic-session-save",
+    });
+    const session = manager.get(started.sessionId);
+    assert.ok(session);
+    counting.writes = 0;
+    manager.save(session);
+    assert.equal(counting.writes, 1);
+
+    const persisted = counting.queryEntries({
+      prefix: "loop:atomic-session-save:session",
+    })[0]?.loop_lineage?.round_snapshot as Record<string, unknown> | undefined;
+    assert.equal(persisted?.schemaVersion, 1);
+    assert.equal(persisted?.roundId, started.roundId);
   });
 });

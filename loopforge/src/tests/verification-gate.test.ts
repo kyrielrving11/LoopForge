@@ -476,4 +476,72 @@ describe("verification-gate — verdict aggregation", () => {
     assert.equal(result.verdict, "trusted");
     assert.equal(result.flags.length, 0);
   });
+
+  // ── v1.16: files_integrity check ──────────────────────────────────────────
+
+  it("checkFilesIntegrity: flags mismatch when agent reports different files than git", () => {
+    const curr = se({
+      execution_evidence: makeExecutionEvidence({
+        files_changed: ["src/foo.ts", "src/bar.ts"],
+        progress_estimate: 0.5,
+      }),
+    });
+    // Git only detected src/foo.ts — agent falsely reported src/bar.ts
+    const result = verifySelfEvaluation(curr, 2, [], null, ["src/foo.ts"]);
+    assert.ok(result.flags.length >= 1);
+    const flag = result.flags.find(f => f.check === "files_integrity");
+    assert.ok(flag, "should have files_integrity flag");
+    assert.equal(flag!.severity, "warn");
+    assert.ok(flag!.detail.includes("src/bar.ts"), "should mention ghost file");
+  });
+
+  it("checkFilesIntegrity: flags when agent says no files but git shows changes", () => {
+    const curr = se({
+      execution_evidence: makeExecutionEvidence({
+        files_changed: [],
+        progress_estimate: 0.5,
+      }),
+    });
+    const result = verifySelfEvaluation(curr, 2, [], null, ["src/real.ts"]);
+    assert.ok(result.flags.length >= 1);
+    const flag = result.flags.find(f => f.check === "files_integrity");
+    assert.ok(flag, "should flag when agent reports empty but git shows files");
+  });
+
+  it("checkFilesIntegrity: no flag when both are empty", () => {
+    const curr = se({
+      execution_evidence: makeExecutionEvidence({
+        files_changed: [],
+        progress_estimate: 0.5,
+      }),
+    });
+    const result = verifySelfEvaluation(curr, 2, [], null, []);
+    const flag = result.flags.find(f => f.check === "files_integrity");
+    assert.equal(flag, undefined, "should not flag when both empty");
+  });
+
+  it("checkFilesIntegrity: no flag when git is unavailable (null)", () => {
+    const curr = se({
+      execution_evidence: makeExecutionEvidence({
+        files_changed: ["src/foo.ts"],
+        progress_estimate: 0.5,
+      }),
+    });
+    // null = git unavailable, should skip check entirely
+    const result = verifySelfEvaluation(curr, 2, [], null, null);
+    const flag = result.flags.find(f => f.check === "files_integrity");
+    assert.equal(flag, undefined, "should not flag when git unavailable");
+  });
+
+  it("checkFilesIntegrity: no flag when reported matches git exactly", () => {
+    const curr = se({
+      execution_evidence: makeExecutionEvidence({
+        files_changed: ["src/a.ts", "src/b.ts"],
+        progress_estimate: 0.5,
+      }),
+    });
+    const result = verifySelfEvaluation(curr, 2, [], null, ["src/a.ts", "src/b.ts"]);
+    const flag = result.flags.find(f => f.check === "files_integrity");
+    assert.equal(flag, undefined, "should not flag when files match");
+  });
 });

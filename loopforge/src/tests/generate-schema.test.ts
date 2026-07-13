@@ -43,9 +43,10 @@ describe("Generated JSON Schema — top-level", () => {
     assert.ok(String(schema.title ?? "").includes("LoopForge"));
   });
 
-  it("has 40 $defs (4 enums + 35 interfaces + 1 type alias)", () => {
+  it("includes the PromptArtifact wire contract", () => {
     const names = Object.keys(defs);
-    assert.equal(names.length, 40, `expected 40, got ${names.length}: ${names.join(", ")}`);
+    assert.equal(names.length, 36, `expected 36, got ${names.length}: ${names.join(", ")}`);
+    assert.ok(names.includes("PromptArtifact"));
   });
 });
 
@@ -66,13 +67,6 @@ describe("Enums", () => {
     assert.deepEqual(def("AgentStatus").enum, ["ok", "error", "stalled"]);
   });
 
-  it("Technique — 7 values", () => {
-    assert.equal(def("Technique").type, "string");
-    assert.deepEqual(def("Technique").enum, [
-      "zero-shot", "few-shot", "zero-shot-cot", "few-shot-cot",
-      "step-back", "least-to-most", "tree-of-thought",
-    ]);
-  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -80,12 +74,6 @@ describe("Enums", () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("Interface type correctness", () => {
-  it("Analysis — booleans are boolean, not string", () => {
-    assert.equal(def("Analysis").type, "object");
-    assert.equal(props("Analysis").was_rotated.type, "boolean",
-      "was_rotated should be boolean (hand-written schema had it as string)");
-  });
-
   it("LoopHealth — numbers are number, booleans are boolean", () => {
     const p = props("LoopHealth");
     assert.equal(p.goal_alignment.type, "number");
@@ -159,19 +147,8 @@ describe("$ref links", () => {
     assert.equal(nulls.length, 1);
   });
 
-  it("LoopCompileRequest.vault_config → VaultConfig ($ref)", () => {
-    assert.equal(props("LoopCompileRequest").vault_config.$ref, "#/$defs/VaultConfig");
-  });
-
   it("LoopForgeResponse.status → AgentStatus ($ref)", () => {
     assert.equal(props("LoopForgeResponse").status.$ref, "#/$defs/AgentStatus");
-  });
-
-  it("LoopForgeResponse.analysis → Analysis | null (anyOf)", () => {
-    const aProp = props("LoopForgeResponse").analysis;
-    assert.ok(aProp.anyOf);
-    const refs = (aProp.anyOf as Record<string, unknown>[]).map((x) => x.$ref).filter(Boolean);
-    assert.ok(refs.includes("#/$defs/Analysis"));
   });
 
   it("AgentLoopResult.response → LoopForgeResponse | null (anyOf)", () => {
@@ -211,19 +188,12 @@ describe("required arrays", () => {
     assert.ok(req.includes("loop_id"));
     assert.ok(req.includes("round"));
     assert.ok(req.includes("task"));
-    assert.ok(req.includes("vault_config"));
     // Optional (nullable) fields should NOT be in required
     assert.ok(!req.includes("loop_objective"));
     assert.ok(!req.includes("plan_source"));
     assert.ok(!req.includes("last_round_result"));
   });
 
-  it("Analysis — 6 required fields", () => {
-    const req = required("Analysis");
-    assert.equal(req.length, 6);
-    assert.ok(req.includes("was_rotated"));
-    assert.ok(req.includes("reference_file"));
-  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

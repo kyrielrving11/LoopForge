@@ -1,0 +1,257 @@
+/** Single-pass prompt renderer for canonical LoopForge state.
+ *
+ * L0/L1/L2 control state density only. Reasoning strategy belongs to the
+ * external Agent. Mandatory task, hard-constraint, and verification sections
+ * are never truncated; budgets are soft and overflow is recorded.
+ */
+import { createHash } from "node:crypto";
+import { hashCanonicalState } from "./canonical-state.js";
+export const PROMPT_ARTIFACT_SCHEMA_VERSION = 1;
+export const BASE_PROMPT_VERSION = "2.0.0";
+export const DEFAULT_PROMPT_BUDGETS = {
+    l0: 3000,
+    l1: 7000,
+    l2: 18000,
+};
+function section(title, body) {
+    return body.trim() ? `### ${title}\n${body.trim()}\n\n` : "";
+}
+function bullets(values, prefix = "- ") {
+    return values.map((value) => `${prefix}${value}`).join("\n");
+}
+function verificationText(state) {
+    const lines = state.verificationFlags.map((flag) => {
+        const icon = flag.severity === "error"
+            ? "🚫"
+            : flag.severity === "warn" ? "⚠️" : "ℹ️";
+        return `- ${icon} [${flag.check}] ${flag.detail}`;
+    });
+    if (state.verificationFlags.some((flag) => flag.severity === "error")) {
+        lines.push("- Gate Verdict: CONTRADICTED — resolve every error before claiming success.");
+    }
+    return lines.join("\n");
+}
+function activeNonHardConstraints(state) {
+    const hard = new Set(state.hardConstraints);
+    return state.activeConstraints.filter((value) => !hard.has(value));
+}
+function commonMandatorySections(state) {
+    const sections = [
+        {
+            id: "objective",
+            text: section("Objective", state.objective),
+            mandatory: true,
+        },
+        {
+            id: "current_task",
+            text: section("Current Task", state.currentTask),
+            mandatory: true,
+        },
+    ];
+    if (state.hardConstraints.length > 0) {
+        sections.push({
+            id: "hard_constraints",
+            text: section("Active Hard Constraints", bullets(state.hardConstraints)),
+            mandatory: true,
+        });
+    }
+    if (state.verificationFlags.length > 0) {
+        sections.push({
+            id: "verification",
+            text: section("Verification Gate", verificationText(state)),
+            mandatory: true,
+        });
+    }
+    return sections;
+}
+function l0Sections(state) {
+    const retryRequirements = [
+        ...state.blockers,
+        ...state.verificationFlags.map((flag) => flag.detail),
+    ];
+    const sections = commonMandatorySections(state);
+    if (retryRequirements.length > 0) {
+        sections.push({
+            id: "retry_requirements",
+            text: section("Retry Requirements", bullets(retryRequirements)),
+            mandatory: true,
+        });
+    }
+    if (state.changesSinceLastRound.length > 0) {
+        sections.push({
+            id: "changes",
+            text: section("New Evidence / Changes", bullets(state.changesSinceLastRound)),
+            mandatory: false,
+        });
+    }
+    return sections;
+}
+function l1Sections(state) {
+    const sections = commonMandatorySections(state);
+    const active = activeNonHardConstraints(state);
+    if (state.changesSinceLastRound.length > 0) {
+        sections.push({
+            id: "changes",
+            text: section("Changes Since Last Round", bullets(state.changesSinceLastRound)),
+            mandatory: false,
+        });
+    }
+    if (active.length > 0) {
+        sections.push({
+            id: "active_constraints",
+            text: section("Active Constraints / Success Criteria", bullets(active)),
+            mandatory: false,
+        });
+    }
+    if (state.remainingCriteria.length > 0) {
+        sections.push({
+            id: "remaining",
+            text: section("Remaining", bullets(state.remainingCriteria)),
+            mandatory: false,
+        });
+    }
+    if (state.blockers.length > 0) {
+        sections.push({
+            id: "blockers",
+            text: section("Blockers", bullets(state.blockers)),
+            mandatory: false,
+        });
+    }
+    if (state.discoveries.length > 0) {
+        sections.push({
+            id: "discoveries",
+            text: section("New Discoveries", bullets(state.discoveries)),
+            mandatory: false,
+        });
+    }
+    if (state.nextAction) {
+        sections.push({
+            id: "next_action",
+            text: section("Next Action", state.nextAction),
+            mandatory: false,
+        });
+    }
+    return sections;
+}
+function l2Sections(state, fullStateMarkdown) {
+    const sections = commonMandatorySections(state);
+    const fullState = fullStateMarkdown?.trim();
+    if (fullState) {
+        sections.push({
+            id: "full_state",
+            text: section("Full Rehydrated State", fullState),
+            mandatory: false,
+        });
+        return sections;
+    }
+    const groups = [
+        ["success_criteria", "Success Criteria", state.successCriteria],
+        ["active_constraints", "Active Constraints", activeNonHardConstraints(state)],
+        ["changes", "Changes Since Last Round", state.changesSinceLastRound],
+        ["remaining", "Remaining", state.remainingCriteria],
+        ["blockers", "Blockers", state.blockers],
+        ["discoveries", "Discoveries", state.discoveries],
+        ["rolling_outcomes", "Cross-Round Outcomes", state.rollingOutcomes],
+        ["recurring_issues", "Recurring Issues", state.recurringIssues],
+        ["failed_patterns", "Failed Patterns", state.failedPatterns],
+    ];
+    for (const [id, title, values] of groups) {
+        if (values.length > 0) {
+            sections.push({ id, text: section(title, bullets(values)), mandatory: false });
+        }
+    }
+    if (state.nextAction) {
+        sections.push({
+            id: "next_action",
+            text: section("Next Action", state.nextAction),
+            mandatory: false,
+        });
+    }
+    if (state.externalContext) {
+        sections.push({
+            id: "external_context",
+            text: section("External Context", state.externalContext),
+            mandatory: false,
+        });
+    }
+    return sections;
+}
+function selectSections(input) {
+    if (input.mode === "full") {
+        return l2Sections(input.state, input.fullStateMarkdown);
+    }
+    if (input.level === "l0")
+        return l0Sections(input.state);
+    if (input.level === "l1")
+        return l1Sections(input.state);
+    return l2Sections(input.state, input.fullStateMarkdown);
+}
+function renderWithinBudget(sections, fixedText, budget) {
+    const mandatory = sections.filter((item) => item.mandatory);
+    const optional = sections.filter((item) => !item.mandatory);
+    let rendered = fixedText + mandatory.map((item) => item.text).join("");
+    const included = mandatory.filter((item) => item.text).map((item) => item.id);
+    for (const item of optional) {
+        if (!item.text)
+            continue;
+        if (rendered.length + item.text.length <= budget) {
+            rendered += item.text;
+            included.push(item.id);
+        }
+    }
+    return { rendered, included };
+}
+export function assemblePromptArtifact(input) {
+    const mode = input.mode ?? "adaptive";
+    const budgets = { ...DEFAULT_PROMPT_BUDGETS, ...input.budgets };
+    const budget = budgets[input.level];
+    const stateHash = hashCanonicalState(input.state);
+    const attempt = Math.max(1, input.attempt ?? 1);
+    const header = [
+        `## LoopForge Round ${input.state.round}`,
+        `State: ${stateHash.slice(0, 12)} | Level: ${input.level.toUpperCase()} | Attempt: ${attempt}`,
+        "",
+    ].join("\n");
+    const sections = selectSections(input);
+    const pointer = input.state.stateFilePath
+        ? section("Full State", input.state.stateFilePath)
+        : "";
+    const evaluation = input.selfEvaluationBlock.trim()
+        ? `${input.selfEvaluationBlock.trim()}\n`
+        : "";
+    const footer = [
+        pointer,
+        "Execute the current task now. Do not generate another prompt.",
+        "When this attempt is finished, submit the structured LoopForge evaluation.",
+        "",
+        evaluation,
+    ].join("\n");
+    const fixedText = header;
+    const selected = mode === "pointer"
+        ? renderWithinBudget(sections.filter((item) => item.mandatory), fixedText, budget)
+        : renderWithinBudget(sections, fixedText, budget - footer.length);
+    const renderedPrompt = selected.rendered + footer;
+    const includedSections = [
+        ...selected.included,
+        ...(pointer ? ["state_pointer"] : []),
+        ...(evaluation ? ["self_evaluation"] : []),
+    ];
+    const promptHash = createHash("sha256").update(renderedPrompt).digest("hex");
+    return {
+        schemaVersion: PROMPT_ARTIFACT_SCHEMA_VERSION,
+        roundId: `loop:${input.state.loopId}:round:${input.state.round}`,
+        attempt,
+        level: input.level,
+        levelReasons: [...input.reasons],
+        renderedPrompt,
+        promptHash,
+        stateHash,
+        basePromptVersion: BASE_PROMPT_VERSION,
+        includedSections,
+        budgetChars: budget,
+        charCount: renderedPrompt.length,
+        budgetExceeded: renderedPrompt.length > budget,
+        generatedAt: Date.now(),
+    };
+}
+//# sourceMappingURL=prompt-assembler.js.map

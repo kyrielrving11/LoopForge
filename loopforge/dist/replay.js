@@ -16,23 +16,9 @@ export class ReplayBackend {
         const prefix = `loop:${loopId}:r${roundNum}`;
         const entries = this.backend.queryEntries({ prefix });
         const lineageEntries = entries.filter((e) => !String(e.task_id ?? "").endsWith(":feedback"));
-        if (!lineageEntries.length) {
-            // Try Markdown fallback
-            const mdResults = this.backend.scanLineageMd(loopId);
-            for (const entry of mdResults) {
-                const lineage = entry.loop_lineage ?? {};
-                if (lineage.round === roundNum)
-                    return entry;
-            }
+        if (!lineageEntries.length)
             return null;
-        }
         const entry = { ...lineageEntries[0] };
-        // Enrich with full prompt from Markdown
-        if (!entry.full_prompt) {
-            const mdContent = this.backend.readLineageMd(loopId, roundNum);
-            if (mdContent)
-                entry.full_prompt = mdContent;
-        }
         // Merge feedback success flag
         const fbEntries = this.backend.queryEntries({
             prefix,
@@ -75,7 +61,6 @@ export class ReplayBackend {
             timeline.push({
                 round: lineage.round ?? 0,
                 recompile_level: lineage.recompile_level ?? "l2",
-                technique_used: entry.technique_used ?? lineage.technique_used ?? "",
                 success: entry.success ?? lineage.success ?? false,
                 task: lineage.task ?? entry.task ?? "",
                 goal_id: lineage.goal_id ?? "",
@@ -120,7 +105,6 @@ export class ReplayBackend {
         const fields = [
             ["goal_id", "Goal ID"],
             ["recompile_level", "Recompile Level"],
-            ["technique_used", "Technique"],
             ["success", "Success"],
             ["task", "Task"],
         ];
@@ -181,16 +165,6 @@ export class ReplayBackend {
             const rnd = lineage.round;
             if (typeof rnd === "number" && rnd > maxR)
                 maxR = rnd;
-        }
-        // Also check Markdown fallback
-        if (maxR === 0) {
-            const mdEntries = this.backend.scanLineageMd(loopId);
-            for (const e of mdEntries) {
-                const lineage = (e.loop_lineage ?? {});
-                const rnd = lineage.round;
-                if (typeof rnd === "number" && rnd > maxR)
-                    maxR = rnd;
-            }
         }
         return maxR;
     }

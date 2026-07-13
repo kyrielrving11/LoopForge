@@ -1,7 +1,7 @@
 {
   "name": "loopforge",
-  "version": "1.15.1",
-  "description": "Loop-Time Intelligence Layer for AI coding agents — per-iteration prompt compiler with structured memory, constraint inheritance, and drift correction.",
+  "version": "2.0.0-rc.1",
+  "description": "Cognitive State Runtime for AI coding agents — maintains persistent, evolvable cognitive state (objectives, constraints, evidence, decisions) across long-horizon agent loops.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -24,10 +24,11 @@
     }
   },
   "bin": {
-    "loopforge-mcp": "./dist/mcp-server.js"
+    "loopforge": "./dist/cli.js"
   },
   "files": [
-    "dist",
+    "dist/",
+    "!dist/tests/",
     "skills",
     "loop_policy.json",
     "LICENSE"
@@ -35,22 +36,24 @@
   "scripts": {
     "build": "tsc && node dist/generate-schema.js",
     "generate-schema": "tsc && node dist/generate-schema.js",
-    "test": "tsc && node dist/generate-schema.js && node --test dist/tests/*.test.js && node -e \"require('fs').rmSync('.promptcraft',{recursive:true,force:true})\"",
+    "test": "tsc && node dist/generate-schema.js && node --test --test-concurrency=1 dist/tests/*.test.js",
     "test:watch": "tsc && node --test --watch dist/tests/*.test.js",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "prepack": "npm run build"
   },
   "repository": {
     "type": "git",
     "url": "https://github.com/kyrielrving11/LoopForge"
   },
   "keywords": [
-    "prompt-engineering",
+    "cognitive-state",
     "ai-agent",
-    "loop-compiler",
+    "durable-agent",
     "claude-code",
     "llm",
     "cognitive-stability",
-    "constraint-management"
+    "constraint-management",
+    "mcp"
   ],
   "engines": {
     "node": ">=18"

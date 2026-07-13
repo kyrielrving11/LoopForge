@@ -1,137 +1,214 @@
 # LoopForge
 
-**Loop-Time Intelligence Layer** for AI coding agents. Per-iteration prompt compiler
-with structured memory, constraint inheritance, and drift correction — maintains
-cognitive stability across long-horizon agent loops. Supports single-agent and
-multi-agent (AgentTool / Coordinator) scenarios.
+LoopForge is a cognitive state runtime for AI coding agents. It keeps a task's
+objective, constraints, evidence, decisions, progress, and recovery state stable
+across many Agent-driven rounds.
 
-Spec: [`../docs/loopforge-spec.md`](../docs/loopforge-spec.md)
+The Agent still reads code, edits files, runs tools, and decides how to reason.
+LoopForge does not provide a model, scheduler, or unattended worker. Its job is
+to make a long task resumable and auditable without letting the prompt become the
+only copy of the state.
 
-## Quick Start
+LoopForge 2.0 is currently available as `2.0.0-rc.1`. It requires Node.js 18 or
+newer and has no runtime dependencies.
+
+## Install
 
 ```bash
-npm install loopforge
-
-# MCP server (recommended)
-claude mcp add loopforge -- npx loopforge-mcp
-
-# CLI
-npx loopforge init
-npx loopforge compile '{"task":"Audit ERC20","loop_id":"audit","round":1,"goal_id":"audit"}'
-npx loopforge status
+npm install -g loopforge@next
+loopforge init --client claude
+claude mcp add loopforge -- npx loopforge mcp
 ```
 
-```typescript
-// Library API
-import { createEngine, ReplayBackend, FSBackend } from "loopforge";
+For Codex:
 
-const engine = createEngine();
-const result = engine.invokeLoopCompile({
-  task: "Audit ERC20 token",
-  mode: "loop_compile",
-  loop_id: "audit",
-  round: 1,
-  goal_id: "audit",
-});
+```bash
+loopforge init --client codex
+codex mcp add loopforge -- npx loopforge mcp
 ```
 
-## 3 Modes
+For another MCP client:
 
-| Mode | When | Returns |
-|------|------|---------|
-| `loop_compile` | Every agent loop iteration | Compiled prompt + recompile level + health + advisories |
-| `feedback` | After execution | Quality score → vault persistence |
-| `review` | Audit prompt quality | Structural checks + constraint compliance |
-
-## Recompile Levels
-
-- **L0 Fast Path** — goal unchanged, no new failures → reuse cached prompt
-- **L1 Patch** — new constraints or repair signals → patch previous prompt
-- **L2 Full Recompile** — round 1, goal changed, plan_source, strategy collapse → full build
-
-## Multi-Agent Support (v1.9)
-
-LoopForge treats all agents the same — whether a single agent, an agent spawning
-sub-agents via AgentTool, or a Coordinator orchestrating Workers. The core loop
-(compile → execute → self-eval → compile) is identical.
-
-### Delegation Helpers (AgentTool Mode)
-
-When the main agent spawns sub-agents, three optional helpers improve delegation quality:
-
-```typescript
-import {
-  filterConstraintsForSubTask,  // filter relevant constraints for a sub-task
-  formatDelegationPrompt,       // format a self-contained sub-agent prompt
-  recordDelegation,             // write delegation journal to vault
-  buildDelegationSummary,       // build delegation history table for prompts
-} from "loopforge";
+```bash
+loopforge init --client generic
 ```
 
-- **`filterConstraintsForSubTask(allConstraints, subTask, threshold?)`** — Jaccard-based constraint filter. Returns only constraints relevant to the sub-task (default threshold 0.15).
-- **`formatDelegationPrompt(subTask, subAgentType, constraints, options?)`** — Produces self-contained prompts for Explore / General-purpose / Plan sub-agents. No "based on above" references — sub-agents can't see the parent conversation.
-- **`recordDelegation(loopId, round, entries)`** — Engine method. Writes delegation journal to vault.
-- **`buildDelegationSummary(vaultContext)`** — Reads delegation history from vault and formats a summary table for injection into the next round's prompt.
+The generic command prints an MCP configuration fragment and installs the
+Perception skill under `.loopforge/skills/` unless `--target` is supplied.
 
-### Worker Results (Coordinator / Multi-Agent)
+## How a loop works
 
-The main agent reports sub-agent results via `worker_results` in its self-evaluation:
+1. The Agent calls `loopforge_start` with the task and hard constraints.
+2. LoopForge compiles one prompt from the canonical state.
+3. The Agent executes that prompt and submits a structured evaluation through
+   `loopforge_next`.
+4. LoopForge captures evidence, verifies the evaluation, enforces the round
+   boundary, and either commits, rejects, or stops the round.
+5. If work remains, the next prompt is compiled from the committed state.
+
+A rejected attempt keeps the same logical round ID, increments its attempt
+number, and commits no feedback. A process restart can recover the current prompt
+and the last committed decision without advancing the round twice.
+
+## Prompt views
+
+LoopForge renders exactly one prompt artifact for each attempt. L0, L1, and L2
+describe how much state is included, not which reasoning method the Agent must
+use.
+
+| Level | Use |
+| --- | --- |
+| L0 | Same-round retry with the rejection reason and changed evidence |
+| L1 | Normal continuation with a compact state capsule |
+| L2 | First round, checkpoint, goal change, or full state rehydration |
+
+Every artifact records its state hash, prompt hash, level reasons, included
+sections, character budget, round ID, and attempt number.
+
+## Durable storage
+
+Typed JSON documents are stored by loop under:
+
+```text
+.loopforge/
+  loops/<sha256(loopId)>/
+    metadata.json
+    session.json
+    rounds/<round>.json
+  state/<loopId>-state.md
+```
+
+The JSON session and round documents are the durable transaction truth. The
+Markdown state file is a human-readable derived view and may be disabled with
+`state_file.enabled`.
+
+To import a pre-2.0 vault without deleting it:
+
+```bash
+loopforge migrate
+loopforge migrate --from path/to/prompt_vault.json --json
+```
+
+The migration is idempotent and writes a marker under `.loopforge/migrations/`.
+
+## MCP tools
+
+The stdio server exposes synchronous Agent-driven tools:
+
+- `loopforge_start`
+- `loopforge_next`
+- `loopforge_status`
+- `loopforge_pause`
+- `loopforge_resume`
+- `loopforge_stop`
+- `loopforge_list`
+- `loopforge_replay`
+- `loopforge_health`
+
+Tool results include `structuredContent` and a serialized text block for older
+clients. LoopForge intentionally does not implement MCP Tasks. Long-running work
+belongs to the Agent that is already executing the user's task.
+
+Running sessions use renewable leases so two MCP processes cannot advance the
+same loop at once. Paused and running sessions can be reconstructed from the
+typed store after a restart.
+
+## Command evidence
+
+Git evidence is enabled by default. Verification commands are explicit and
+disabled unless added to `loop_policy.json`:
 
 ```json
 {
-  "success": true,
-  "output_summary": "Spawned 2 Workers. Worker A found 3 reentrancy bugs. Worker B fixed auth.",
-  "constraint_violations": [],
-  "should_continue": true,
-  "worker_results": [
-    {
-      "agentId": "abc123",
-      "subAgentType": "explore",
-      "subTask": "Search for security vulnerabilities",
-      "resultSummary": "Found 3 reentrancy bugs in withdraw(), deposit(), transfer()",
-      "success": true,
-      "discoveredConstraints": ["All external calls must use nonReentrant modifier"]
-    }
-  ]
+  "evidence": {
+    "providers": ["git"],
+    "timeout_ms": 120000,
+    "commands": [
+      {
+        "name": "tests",
+        "enabled": true,
+        "executable": "npm",
+        "args": ["test"],
+        "cwd": ".",
+        "phase": "after",
+        "required": true,
+        "timeout_ms": 120000,
+        "max_output_chars": 20000,
+        "success_exit_codes": [0]
+      }
+    ]
+  }
 }
 ```
 
-The engine auto-detects `worker_results` → writes to delegation journal → injects delegation
-history into the next round's compiled prompt. Constraints discovered by Workers flow into
-the active constraint set and appear in future prompts automatically.
+Commands run with `shell: false`. Their working directory must resolve inside
+the workspace. Output is capped at 20,000 characters and timeouts abort the
+child process. If an Agent claims success while a required command fails, times
+out, is missing, or has an invalid working directory, the verification verdict
+is `contradicted`.
 
-### Design Principle
-
-LoopForge does not distinguish between "single-agent mode" and "coordinator mode."
-The main agent — whatever its role — receives compiled prompts, executes, and reports
-results. LoopForge records, compresses, and injects. The agent decides.
-
-## CLI Commands
+## CLI
 
 ```bash
-loopforge init                     # Init vault
-loopforge compile '<json>'         # Compile prompt (or pipe via stdin)
-loopforge feedback '<json>'        # Record feedback
-loopforge run '<json>'              # Autonomous loop (v1.2)
-loopforge replay <loop-id>         # Loop timeline
-loopforge diff <loop-id> <a> <b>   # Diff two rounds
-loopforge review <loop-id> <rN>    # Audit stored prompt
-loopforge resume <loop-id>          # Resume loop from vault (v1.3.1)
-loopforge status                   # Vault health
+loopforge mcp
+loopforge init --client claude|codex|generic [--target DIR] [--force]
+loopforge doctor [--json]
+loopforge inspect LOOP_ID [--round N] [--prompt] [--json]
+loopforge migrate [--from PATH] [--json]
 ```
 
-## API Modules
+`inspect` hides full prompts unless `--prompt` is present. `doctor` checks the
+Node version, store permissions, Git availability, and configured command
+evidence paths without running verification commands.
 
-| Module | Import | Purpose |
-|--------|--------|---------|
-| `loopforge` | Main entry | `createEngine`, `compileLoop`, types |
-| `loopforge/compiler` | `compileLoop`, `decideLevel`, `buildDelegationSummary` | Pure-function compiler + delegation helpers |
-| `loopforge/replay` | `ReplayBackend` | Time-travel audit queries |
+## Library API
 
-## Zero Dependencies
+```typescript
+import { run } from "loopforge";
 
-No runtime dependencies — Node.js stdlib only. TypeScript strict mode.
-Tests use Node.js built-in test runner (`node:test`).
+const result = await run({
+  task: "Audit this repository and fix confirmed defects",
+  constraintsFromPlan: ["Do not change the public API"],
+  execute: async (prompt, context) => {
+    return agent.execute(prompt, { signal: context.signal });
+  },
+});
+```
+
+For an embedding that already owns long-term context or telemetry, use explicit
+hooks instead of auto-discovery:
+
+```typescript
+const result = await run({
+  task,
+  execute,
+  contextProvider: async ({ loopId, round, lastEvaluation }) => {
+    return myContextStore.read({ loopId, round, lastEvaluation });
+  },
+  terminalSinks: [async (event) => myTelemetry.record(event)],
+});
+```
+
+Custom evidence providers, trace sinks, checkpoint sinks, and `LoopStore`
+implementations remain dependency-free extension points.
+
+## Development
+
+```bash
+npm run check
+npm test
+npm pack --dry-run --json
+```
+
+The schema in `../loopforge-protocol.json` is generated from `src/protocol.ts`.
+Do not edit it by hand.
+
+## 2.0 compatibility boundary
+
+The 2.0 release removes the prompt-technique catalog, strategy heuristics, MCP
+Tasks, automatic memory discovery, global PromptCraft vaults, Markdown lineage
+fallbacks, `Technique` and `Analysis` wire fields, and the `loopforge-mcp`
+binary. Use `loopforge mcp`, the typed `FileLoopStore`, and explicit providers.
 
 ## License
 

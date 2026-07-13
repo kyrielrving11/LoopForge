@@ -17,12 +17,6 @@ function makeRequest(overrides: Record<string, unknown> = {}): import("../protoc
   return {
     task: "Audit ERC20 token",
     mode: Mode.LOOP_COMPILE,
-    vault_config: {
-      project_vault: ".promptcraft/prompt_vault.json",
-      global_vault: "~/.promptcraft/global_vault.json",
-      skills_dir: "skills",
-      no_global: false,
-    },
     feedback: null,
     skill_name: null,
     task_id: null,
@@ -34,7 +28,7 @@ describe("Engine — Initialisation", () => {
   beforeEach(() => resetPolicy());
 
   it("createEngine returns LoopForgeEngine instance", () => {
-    const engine = createEngine("skills");
+    const engine = createEngine();
     assert.ok(engine instanceof LoopForgeEngine);
     assert.equal(engine.state, null);
     assert.equal(engine.lastTask, null);
@@ -158,7 +152,8 @@ describe("Engine — Loop Compile mode", () => {
     });
     const result = engine.invokeLoopCompile(req);
     assert.equal(result.status, AgentStatus.OK);
-    assert.ok(result.response!.prompt!.includes("L2 Compile"));
+    assert.ok(result.response!.prompt!.includes("Level: L2"));
+    assert.equal(result.response!.prompt_artifact?.level, "l2");
   });
 
   it("includes loop health in prompt", () => {
@@ -296,9 +291,12 @@ describe("Engine — P0-P5 Cognitive Evolution (v1.7 E2E)", () => {
     assert.ok(stateFile!.includes("Progress Dashboard"), "P4: progress dashboard in state file");
     assert.ok(stateFile!.includes("1/3"), "P4: criteria count in state file");
     assert.ok(stateFile!.includes("Token.sol"), "P4: files_changed in state file");
-    // Thin prompt: progress dashboard should NOT be in the prompt text
+    // v1.16: With inline_in_prompt enabled (default), the state file content
+    // (including the progress dashboard) IS in the prompt — it's inlined as a
+    // Runtime guarantee. The state_file_content on the response is still set
+    // for disk writeback.
     const prompt = r2.response!.prompt!;
-    assert.ok(!prompt.includes("Progress Dashboard"), "P4: thin prompt — dashboard in state file only");
+    assert.ok(prompt.includes("Progress Dashboard"), "P4: dashboard inlined in prompt via state file");
   });
 
   it("P5: wrong_assumptions are forwarded to compiler as key lessons", () => {
@@ -370,15 +368,21 @@ describe("Engine — P0-P5 Cognitive Evolution (v1.7 E2E)", () => {
     } as unknown as LoopForgeRequest);
     assert.equal(r2.status, AgentStatus.OK);
     // The retracted constraint was discovered then immediately retracted — it should
-    // NOT appear in the active constraints section of the prompt.
+    // NOT appear in the prompt at all (not in active constraints, not in state file).
     const prompt = r2.response!.prompt!;
-    // If Active Constraints section exists, it shouldn't contain the retracted item
-    if (prompt.includes("Active Constraints")) {
-      const activeStart = prompt.indexOf("Active Constraints");
-      const nextSection = prompt.indexOf("###", activeStart + 10);
+    // Check the prompt body portion (after any inlined state file) for the
+    // Active Constraints block
+    const stateMarker = "*(State also saved to";
+    const searchStart = prompt.includes(stateMarker)
+      ? prompt.indexOf(stateMarker) + stateMarker.length
+      : 0;
+    const promptBody = prompt.slice(searchStart);
+    if (promptBody.includes("Active Constraints")) {
+      const activeStart = promptBody.indexOf("Active Constraints");
+      const nextSection = promptBody.indexOf("###", activeStart + 10);
       const activeBlock = nextSection >= 0
-        ? prompt.slice(activeStart, nextSection)
-        : prompt.slice(activeStart);
+        ? promptBody.slice(activeStart, nextSection)
+        : promptBody.slice(activeStart);
       assert.ok(!activeBlock.includes("No external deps"),
         "P5: retracted constraint still in active constraints block");
     }
@@ -410,4 +414,3 @@ describe("Engine — P0-P5 Cognitive Evolution (v1.7 E2E)", () => {
     assert.ok(prompt.includes("progress_regression"), "Warn flag check name missing");
   });
 });
-

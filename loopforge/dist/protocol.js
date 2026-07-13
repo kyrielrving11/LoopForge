@@ -17,36 +17,6 @@ export var AgentStatus;
     AgentStatus["ERROR"] = "error";
     AgentStatus["STALLED"] = "stalled";
 })(AgentStatus || (AgentStatus = {}));
-export var Technique;
-(function (Technique) {
-    Technique["ZERO_SHOT"] = "zero-shot";
-    Technique["FEW_SHOT"] = "few-shot";
-    Technique["ZERO_SHOT_COT"] = "zero-shot-cot";
-    Technique["FEW_SHOT_COT"] = "few-shot-cot";
-    Technique["STEP_BACK"] = "step-back";
-    Technique["LEAST_TO_MOST"] = "least-to-most";
-    Technique["TREE_OF_THOUGHT"] = "tree-of-thought";
-})(Technique || (Technique = {}));
-export function makeAnalysis(overrides = {}) {
-    return {
-        technique: "zero-shot",
-        rationale: "",
-        independence: "independent",
-        cognitive_load: "low",
-        reference_file: "",
-        was_rotated: false,
-        ...overrides,
-    };
-}
-export function makeVaultConfig(overrides = {}) {
-    return {
-        project_vault: ".promptcraft/prompt_vault.json",
-        global_vault: "~/.promptcraft/global_vault.json",
-        skills_dir: "skills",
-        no_global: false,
-        ...overrides,
-    };
-}
 export function makeExecutionFeedback(overrides = {}) {
     return {
         output: "",
@@ -92,6 +62,7 @@ export function makeSelfEvaluation(overrides = {}) {
         worker_results: [],
         compression_checkpoint: false,
         checkpoint_label: "",
+        next_action: undefined,
         ...overrides,
     };
 }
@@ -156,6 +127,7 @@ export function makeLoopRoundResult(overrides = {}) {
         worker_results: [],
         compression_checkpoint: false,
         checkpoint_label: "",
+        next_action: undefined,
         ...overrides,
     };
 }
@@ -175,8 +147,11 @@ export function makeLoopCompileRequest(overrides = {}) {
         last_round_result: null,
         force_level: "auto",
         health_check_interval: 1,
-        vault_config: makeVaultConfig(),
         external_context: "",
+        verification_flags: [],
+        attempt: 1,
+        consecutive_rejections: 0,
+        rejection_notice: "",
         ...overrides,
     };
 }
@@ -189,8 +164,6 @@ export function makeLoopCompileResponse(overrides = {}) {
         lineage: [],
         constraints_active: [],
         constraints_retired: [],
-        technique_used: "",
-        reference_file: "",
         loop_id: "",
         round: 0,
         goal_id: "",
@@ -205,8 +178,12 @@ export function makeLoopCompileResponse(overrides = {}) {
         warnings: [],
         error: "",
         state_file_content: undefined,
+        prompt_artifact: undefined,
         ...overrides,
     };
+}
+export function makeEvidenceSnapshot(overrides = {}) {
+    return { verified: [], pending: [], invalidated: [], discovered: [], ...overrides };
 }
 export function makeSessionState(taskId) {
     return {
@@ -214,7 +191,6 @@ export function makeSessionState(taskId) {
         call_count: 0,
         success_trend: [],
         current_version: "v1",
-        last_technique: null,
         circuit_breaker_count: 0,
         feedback_buffer: [],
     };
@@ -226,23 +202,31 @@ export var RuntimeStatus;
     RuntimeStatus["RUNNING"] = "running";
     RuntimeStatus["STOPPED"] = "stopped";
     RuntimeStatus["STALLED"] = "stalled";
+    /** v1.18: Loop is suspended — can be resumed from currentRound. */
+    RuntimeStatus["PAUSED"] = "paused";
 })(RuntimeStatus || (RuntimeStatus = {}));
 /** Map StopReason (internal) → MemoryWriteback outcome (wire format).
  *  Shared between runtime.ts and mcp/session.ts — single source of truth. */
-export const STOP_REASON_OUTCOME_MAP = {
-    task_complete: "completed",
+const LEGACY_STOP_REASON_OUTCOME_MAP = {
+    completed: "completed",
+    failed: "failed",
+    blocked: "blocked",
+    cancelled: "cancelled",
     circuit_breaker: "circuit_breaker",
     stalled: "stalled",
     max_rounds: "max_rounds",
-    stopped: "stopped",
-    executor_failure: "stopped",
-    enforcement_terminated: "stopped",
+    executor_failure: "failed",
+    enforcement_terminated: "enforcement_terminated",
+    paused: "paused",
+    task_complete: "completed",
+    stopped: "cancelled",
 };
 export function makeEnforcementResult(overrides = {}) {
     return {
         action: "accept",
         reason: "",
         fix_instructions: "",
+        check: "",
         ...overrides,
     };
 }

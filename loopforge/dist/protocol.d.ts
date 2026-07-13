@@ -14,32 +14,6 @@ export declare enum AgentStatus {
     ERROR = "error",
     STALLED = "stalled"
 }
-export declare enum Technique {
-    ZERO_SHOT = "zero-shot",
-    FEW_SHOT = "few-shot",
-    ZERO_SHOT_COT = "zero-shot-cot",
-    FEW_SHOT_COT = "few-shot-cot",
-    STEP_BACK = "step-back",
-    LEAST_TO_MOST = "least-to-most",
-    TREE_OF_THOUGHT = "tree-of-thought"
-}
-export interface Analysis {
-    technique: string;
-    rationale: string;
-    independence: string;
-    cognitive_load: string;
-    reference_file: string;
-    /** @deprecated Since v4.0 — no technique rotation. Always false. */
-    was_rotated: boolean;
-}
-export declare function makeAnalysis(overrides?: Partial<Analysis>): Analysis;
-export interface VaultConfig {
-    project_vault: string;
-    global_vault: string;
-    skills_dir: string;
-    no_global: boolean;
-}
-export declare function makeVaultConfig(overrides?: Partial<VaultConfig>): VaultConfig;
 export interface ExecutionFeedback {
     output: string;
     success: boolean;
@@ -135,6 +109,11 @@ export interface SelfEvaluation {
      *  The engine automatically writes these to the delegation journal.
      *  Omit or leave empty if no delegations occurred. */
     worker_results?: WorkerResult[];
+    /** v1.16: Agent's declared next action — what it plans to do in the
+     *  following round. Stored as loop state and rendered in the next prompt
+     *  so the agent's self-planning persists across rounds. Optional —
+     *  no next_action means the compiler generates the next task as before. */
+    next_action?: string;
 }
 /** v1.10: Checkpoint summary — a compressed snapshot of loop state at a
  *  subtask boundary. Declared by the Agent via self-evaluation, built by
@@ -164,7 +143,6 @@ export declare const SELF_EVAL_REGEX: RegExp;
 export interface LoopForgeRequest {
     task: string;
     mode: Mode;
-    vault_config: VaultConfig;
     feedback: ExecutionFeedback | null;
     skill_name: string | null;
     task_id: string | null;
@@ -240,6 +218,8 @@ export interface LoopRoundResult {
     compression_checkpoint?: boolean;
     /** v1.10: Human-readable label for the checkpoint. */
     checkpoint_label?: string;
+    /** v1.16: Agent's declared next action for the following round. */
+    next_action?: string;
 }
 export declare function makeLoopRoundResult(overrides?: Partial<LoopRoundResult>): LoopRoundResult;
 export interface LoopCompileRequest {
@@ -257,17 +237,42 @@ export interface LoopCompileRequest {
     last_round_result: LoopRoundResult | null;
     force_level: string;
     health_check_interval: number;
-    vault_config: VaultConfig;
-    /** Optional external context from a long-term memory system (e.g. claude-mem).
-     *  Injected into L2 prompts only. Ignored by L0/L1 compilers.
-     *  Populated by the caller (runtime / MCP session) via a memoryProvider callback. */
+    /** Optional context supplied explicitly by the embedding Agent. */
     external_context?: string;
     /** Maximum rounds for this loop. Used by the state file header to show
      *  accurate progress (Round X / Y). Falls back to max_summary_rounds * 2
      *  when not provided (callers that don't track maxRounds). */
     max_rounds?: number;
+    /** Verification findings from the previous attempt. Prompt compilation uses
+     *  these to select a rehydrate view and render the gate findings exactly
+     *  once as part of the final prompt. */
+    verification_flags?: VerificationFlag[];
+    /** One-based attempt within the same logical round. Enforcement rejection
+     * increments this without advancing `round`. */
+    attempt: number;
+    /** Consecutive zero-commit enforcement rejections for this round. */
+    consecutive_rejections: number;
+    /** Structured enforcement feedback rendered into retry prompts. */
+    rejection_notice: string;
 }
 export declare function makeLoopCompileRequest(overrides?: Partial<LoopCompileRequest>): LoopCompileRequest;
+/** Immutable record of the exact prompt delivered for one round attempt. */
+export interface PromptArtifact {
+    schemaVersion: 1;
+    roundId: string;
+    attempt: number;
+    level: "l0" | "l1" | "l2";
+    levelReasons: string[];
+    renderedPrompt: string;
+    promptHash: string;
+    stateHash: string;
+    basePromptVersion: string;
+    includedSections: string[];
+    budgetChars: number;
+    charCount: number;
+    budgetExceeded: boolean;
+    generatedAt: number;
+}
 export interface LoopCompileResponse {
     status: AgentStatus;
     prompt: string;
@@ -276,8 +281,6 @@ export interface LoopCompileResponse {
     lineage: string[];
     constraints_active: string[];
     constraints_retired: string[];
-    technique_used: string;
-    reference_file: string;
     loop_id: string;
     round: number;
     goal_id: string;
@@ -295,22 +298,39 @@ export interface LoopCompileResponse {
      *  (SessionManager or Runtime) to .loopforge/state/{loopId}-state.md.
      *  Undefined for L0/L1 compilations — only L2 produces state file content. */
     state_file_content?: string;
+    /** Exact, hashed prompt record used by transaction replay and audit. */
+    prompt_artifact?: PromptArtifact;
 }
 export declare function makeLoopCompileResponse(overrides?: Partial<LoopCompileResponse>): LoopCompileResponse;
+/** Aggregated evidence snapshot for the state file Evidence section.
+ *  Four categories give the agent a clear picture of what's been confirmed,
+ *  what remains, what was wrong, and what's newly discovered — all derived
+ *  from accumulated SelfEvaluation data across rounds. */
+export interface EvidenceSnapshot {
+    /** Criteria met + successful outcomes confirmed across rounds. */
+    verified: string[];
+    /** Criteria still unmet — work remaining. */
+    pending: string[];
+    /** Wrong assumptions + retracted constraints — things we were wrong about. */
+    invalidated: string[];
+    /** New constraints + emerged subtasks discovered this round. */
+    discovered: string[];
+}
+export declare function makeEvidenceSnapshot(overrides?: Partial<EvidenceSnapshot>): EvidenceSnapshot;
 export interface LoopForgeResponse {
     status: AgentStatus;
     prompt: string | null;
-    analysis: Analysis | null;
     error: string | null;
     /** v1.14: State file content from the compiler. Written to disk by the caller. */
     state_file_content?: string;
+    /** Exact prompt artifact produced by the compiler. */
+    prompt_artifact?: PromptArtifact;
 }
 export interface SessionState {
     task_id: string;
     call_count: number;
     success_trend: boolean[];
     current_version: string;
-    last_technique: string | null;
     circuit_breaker_count: number;
     feedback_buffer: Record<string, unknown>[];
 }
@@ -323,20 +343,28 @@ export declare enum RuntimeStatus {
     IDLE = "idle",
     RUNNING = "running",
     STOPPED = "stopped",
-    STALLED = "stalled"
+    STALLED = "stalled",
+    /** v1.18: Loop is suspended — can be resumed from currentRound. */
+    PAUSED = "paused"
 }
 export interface RoundContext {
     round: number;
+    /** Stable identity for the logical round; unchanged across reject retries. */
+    roundId?: string;
     signal: {
         aborted: boolean;
     };
     reportProgress: (message: string) => void;
 }
 export type AgentExecutor = (prompt: string, ctx: RoundContext) => Promise<string>;
-export type StopReason = "task_complete" | "circuit_breaker" | "max_rounds" | "stalled" | "stopped" | "executor_failure" | "enforcement_terminated";
-/** Map StopReason (internal) → MemoryWriteback outcome (wire format).
- *  Shared between runtime.ts and mcp/session.ts — single source of truth. */
-export declare const STOP_REASON_OUTCOME_MAP: Record<StopReason, LoopMemoryWriteback["outcome"]>;
+/** Why a loop stopped. Used by Runtime, MCP session, and vault persistence.
+ *  `completed` requires both success=true and should_continue=false.
+ *  `failed` is success=false + should_continue=false (agent gave up).
+ *  `cancelled` is manual stop via loopforge_stop.
+ *  Legacy aliases (backward-compat): `task_complete` → `completed`, `stopped` → `cancelled`. */
+export type StopReason = "completed" | "failed" | "blocked" | "cancelled" | "max_rounds" | "circuit_breaker" | "stalled" | "executor_failure" | "enforcement_terminated"
+/** v1.18: Loop was paused by user or signal. */
+ | "paused" | "task_complete" | "stopped";
 /** Result of round-boundary enforcement. Decides whether to accept the round,
  *  reject it (force the agent to redo the SAME round), or terminate the loop.
  *
@@ -353,16 +381,21 @@ export interface EnforcementResult {
     /** For reject: concrete instructions the agent must follow.
      *  Empty for accept and terminate. */
     fix_instructions: string;
+    /** Which enforcement rule fired. Empty for accept.
+     *  Used by callers to track consecutive rejections per-rule
+     *  so unrelated rejections don't accumulate toward the max. */
+    check?: string;
 }
 export declare function makeEnforcementResult(overrides?: Partial<EnforcementResult>): EnforcementResult;
 export interface RoundStartInfo {
     round: number;
+    roundId?: string;
     level: string;
-    technique: string;
     prompt: string;
 }
 export interface RoundCompleteInfo {
     round: number;
+    roundId?: string;
     roundSuccess: boolean;
     selfEval: SelfEvaluation | null;
     durationMs: number;
@@ -400,72 +433,34 @@ export interface RuntimeConfig {
     onHeartbeat?: (info: HeartbeatInfo) => void;
     onTimeout?: (info: TimeoutInfo) => void;
     onHealthWarning?: (warning: HealthWarning) => void;
-    /** Optional provider for long-term memory context retrieval.
-     *  Called at L2 compile rounds during designated injection phases.
-     *  Receives loop state for constructing a targeted query.
-     *  Return empty string to skip injection. */
-    memoryProvider?: (ctx: MemoryProviderContext) => Promise<string>;
-    /** Optional writer for persisting loop knowledge back to long-term memory.
-     *  Called once when the loop terminates (any stop reason).
-     *  Receives a structured writeback payload with project/feedback/reference entries. */
-    memoryWriter?: (payload: LoopMemoryWriteback) => Promise<void>;
+    /** Explicit provider for context owned by the embedding Agent. */
+    contextProvider?: ExternalContextProvider;
+    /** Explicit terminal observers; failures are isolated from the runtime. */
+    terminalSinks?: LoopTerminalSink[];
 }
-/** Context passed to the memoryProvider callback at each injection phase.
- *  Contains enough loop state to construct a targeted semantic query. */
-export interface MemoryProviderContext {
+/** Context supplied to an embedding-owned provider before compilation. */
+export interface ExternalContextRequest {
     loopId: string;
     round: number;
     task: string;
     domain: string;
-    /** Injection phase: 1 (start), 2 (mid), 3 (late). */
-    phase: 1 | 2 | 3;
-    /** Current progress estimate (0.0–1.0), or -1 if unavailable. */
-    progressEstimate: number;
-    /** Accumulated loop knowledge for constructing a differential query. */
-    accumulatedContext: {
-        recurringIssues: string[];
-        failedPatterns: string[];
-        keyLessons: string[];
-        remainingCriteria: string[];
-    };
+    /** The previously accepted evaluation, when one exists. */
+    lastEvaluation?: SelfEvaluation;
 }
+export type ExternalContextProvider = (request: ExternalContextRequest) => Promise<string>;
 export interface RunResult {
     success: boolean;
     stopReason: StopReason;
     roundsCompleted: number;
     successTrajectory: boolean[];
 }
-/** Structured payload written back to the long-term memory system
- *  when a loop terminates. Contains distilled knowledge suitable
- *  for cross-task reuse. */
-export interface LoopMemoryWriteback {
+/** Stable, provider-neutral terminal hook payload. */
+export interface LoopTerminalEvent extends RunResult {
     loopId: string;
     task: string;
-    outcome: "completed" | "circuit_breaker" | "stalled" | "max_rounds" | "stopped";
-    roundsCompleted: number;
-    /** Project-type memory entry — task outcome and key discoveries. */
-    projectEntry: LoopMemoryWritebackProjectEntry;
-    /** Feedback-type memory entries — tactical lessons learned. */
-    feedbackEntries: LoopMemoryWritebackFeedbackEntry[];
-    /** Reference-type memory entry — pointer to the vault for deep dives. */
-    referenceEntry: LoopMemoryWritebackReferenceEntry;
+    lastEvaluation?: SelfEvaluation;
 }
-export interface LoopMemoryWritebackProjectEntry {
-    title: string;
-    objective: string;
-    keyOutcome: string;
-    keyDiscoveries: string[];
-    date: string;
-}
-export interface LoopMemoryWritebackFeedbackEntry {
-    rule: string;
-    why: string;
-    howToApply: string;
-}
-export interface LoopMemoryWritebackReferenceEntry {
-    description: string;
-    vaultLocation: string;
-}
+export type LoopTerminalSink = (event: LoopTerminalEvent) => Promise<void> | void;
 /** A single flag raised during self-evaluation verification.
  *  Each flag identifies a specific inconsistency between the agent's
  *  self-reported data and the loop's cross-round lineage. */

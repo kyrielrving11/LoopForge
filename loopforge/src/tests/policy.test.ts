@@ -26,8 +26,8 @@ describe("Policy — Defaults", () => {
     assert.equal(DEFAULT_POLICY.engine.max_circuit_breaker, 3);
   });
 
-  it("DEFAULT_POLICY tier2_escalation_failures is set", () => {
-    assert.equal(DEFAULT_POLICY.technique.tier2_escalation_failures, 3);
+  it("uses the typed LoopStore root", () => {
+    assert.equal(DEFAULT_POLICY.backend.root_dir, ".loopforge");
   });
 });
 
@@ -58,6 +58,6 @@ describe("Policy — Loading", () => {
   it("loadPolicy returns defaults when given invalid path", () => {
     const policy = loadPolicy("/nonexistent/path.json");
     assert.equal(policy.constraints.retire_window, 3);
-    assert.equal(policy.version, "1");
+    assert.equal(policy.version, "2");
   });
 });

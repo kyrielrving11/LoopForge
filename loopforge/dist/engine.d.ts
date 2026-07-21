@@ -7,30 +7,8 @@
  */
 import type { VaultBackend } from "./backends/interface.js";
 import type { LoopStore } from "./loop-store.js";
-import { type AgentLoopResult, type CriterionRevision, type ExecutionEvidence, type LoopForgeRequest, type SelfEvaluation, type SessionState } from "./protocol.js";
-/** Parse ExecutionEvidence from a raw JSON object. Shared by buildSelfEvaluation
- *  and invokeLoopCompile — both parse the same execution_evidence shape. */
-export declare function parseExecutionEvidence(raw: Record<string, unknown> | undefined | null): ExecutionEvidence | undefined;
-/** Parse CriterionRevision[] from a raw JSON array. Shared by buildSelfEvaluation
- *  and invokeLoopCompile — both parse the same revised_success_criteria shape. */
-export declare function parseCriterionRevisions(raw: unknown): CriterionRevision[];
-/** Parse WorkerResult[] from a raw JSON array. Shared by buildSelfEvaluation
- *  and invokeLoopCompile — both parse the same worker_results shape. */
-export declare function parseWorkerResults(raw: unknown): import("./protocol.js").WorkerResult[];
-/** Extract a structured SelfEvaluation from agent output text.
- *  Returns null if no valid self-eval block is found.
- *  The agent is instructed to output JSON between the delimiters. */
-export declare function extractSelfEvaluation(text: string): SelfEvaluation | null;
-/** Build a SelfEvaluation from a parsed JSON object.
- *  Lenient parsing: missing optional fields get sensible defaults.
- *  Used by extractSelfEvaluation() (regex path) and MCP tool handler
- *  (structured evaluation parameter path). */
-export declare function buildSelfEvaluation(raw: Record<string, unknown>): SelfEvaluation;
-/** Fallback heuristic when structured self-eval extraction fails.
- *  Scans agent output for completion and error signals.
- *  Returns a low-confidence SelfEvaluation — the autonomous runner
- *  may choose to warn the user or continue cautiously. */
-export declare function heuristicSelfEvaluation(text: string): SelfEvaluation | null;
+import { type AgentLoopResult, type LoopForgeRequest, type SelfEvaluation, type SessionState } from "./protocol.js";
+export { parseExecutionEvidence, parseCriterionRevisions, parseWorkerResults, extractSelfEvaluation, buildSelfEvaluation, heuristicSelfEvaluation, } from "./self-eval.js";
 /** A single sub-agent delegation record (v1.9 — AgentTool mode). */
 export interface DelegationEntry {
     index: number;

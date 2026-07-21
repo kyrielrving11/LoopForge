@@ -6,7 +6,7 @@
 import { createInterface } from "node:readline";
 import { SessionManager } from "./session.js";
 import { TOOL_HANDLERS, TOOL_SCHEMAS, ToolInputValidationError, validateToolInput, } from "./tools.js";
-const SERVER_INFO = { name: "loopforge-mcp", version: "2.0.0" };
+const SERVER_INFO = { name: "loopforge-mcp", version: "2.0.1" };
 class JsonRpcError extends Error {
     code;
     constructor(code, message) {

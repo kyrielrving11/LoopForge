@@ -339,25 +339,7 @@ export interface AgentLoopResult {
     status: AgentStatus;
     response: LoopForgeResponse | null;
 }
-export declare enum RuntimeStatus {
-    IDLE = "idle",
-    RUNNING = "running",
-    STOPPED = "stopped",
-    STALLED = "stalled",
-    /** v1.18: Loop is suspended — can be resumed from currentRound. */
-    PAUSED = "paused"
-}
-export interface RoundContext {
-    round: number;
-    /** Stable identity for the logical round; unchanged across reject retries. */
-    roundId?: string;
-    signal: {
-        aborted: boolean;
-    };
-    reportProgress: (message: string) => void;
-}
-export type AgentExecutor = (prompt: string, ctx: RoundContext) => Promise<string>;
-/** Why a loop stopped. Used by Runtime, MCP session, and vault persistence.
+/** Why a loop stopped. Used by MCP session and vault persistence.
  *  `completed` requires both success=true and should_continue=false.
  *  `failed` is success=false + should_continue=false (agent gave up).
  *  `cancelled` is manual stop via loopforge_stop.
@@ -387,57 +369,6 @@ export interface EnforcementResult {
     check?: string;
 }
 export declare function makeEnforcementResult(overrides?: Partial<EnforcementResult>): EnforcementResult;
-export interface RoundStartInfo {
-    round: number;
-    roundId?: string;
-    level: string;
-    prompt: string;
-}
-export interface RoundCompleteInfo {
-    round: number;
-    roundId?: string;
-    roundSuccess: boolean;
-    selfEval: SelfEvaluation | null;
-    durationMs: number;
-}
-export interface HeartbeatInfo {
-    round: number;
-    elapsedMs: number;
-    sinceProgressMs: number;
-}
-export interface TimeoutInfo {
-    round: number;
-    elapsedMs: number;
-}
-export interface HealthWarning {
-    type: string;
-    message: string;
-}
-export interface RuntimeConfig {
-    task: string;
-    execute: AgentExecutor;
-    loopId?: string;
-    goalId?: string;
-    maxRounds?: number;
-    roundTimeoutMs?: number;
-    heartbeatIntervalMs?: number;
-    stallGraceMs?: number;
-    maxConsecutiveErrors?: number;
-    interactive?: boolean;
-    healthCheckInterval?: number;
-    planSource?: string;
-    constraintsFromPlan?: string[];
-    domain?: string;
-    onRoundStart?: (info: RoundStartInfo) => void;
-    onRoundComplete?: (info: RoundCompleteInfo) => void;
-    onHeartbeat?: (info: HeartbeatInfo) => void;
-    onTimeout?: (info: TimeoutInfo) => void;
-    onHealthWarning?: (warning: HealthWarning) => void;
-    /** Explicit provider for context owned by the embedding Agent. */
-    contextProvider?: ExternalContextProvider;
-    /** Explicit terminal observers; failures are isolated from the runtime. */
-    terminalSinks?: LoopTerminalSink[];
-}
 /** Context supplied to an embedding-owned provider before compilation. */
 export interface ExternalContextRequest {
     loopId: string;
@@ -448,14 +379,11 @@ export interface ExternalContextRequest {
     lastEvaluation?: SelfEvaluation;
 }
 export type ExternalContextProvider = (request: ExternalContextRequest) => Promise<string>;
-export interface RunResult {
+export interface LoopTerminalEvent {
     success: boolean;
     stopReason: StopReason;
     roundsCompleted: number;
     successTrajectory: boolean[];
-}
-/** Stable, provider-neutral terminal hook payload. */
-export interface LoopTerminalEvent extends RunResult {
     loopId: string;
     task: string;
     lastEvaluation?: SelfEvaluation;

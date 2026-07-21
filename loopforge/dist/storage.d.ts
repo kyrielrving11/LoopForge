@@ -1,5 +1,6 @@
 /** Persistence adapters for session state and committed round lookup. */
 import type { VaultBackend, VaultEntry } from "./backends/interface.js";
+import type { LoopStore } from "./loop-store.js";
 export interface SessionStateStore {
     load(loopId: string): VaultEntry | undefined;
     list(): VaultEntry[];
@@ -20,8 +21,8 @@ export interface RoundCommitStore {
     find(loopId: string, round: number): VaultEntry[];
 }
 export declare class VaultSessionStateStore implements SessionStateStore {
-    private readonly backend;
-    constructor(backend: VaultBackend);
+    private readonly store;
+    constructor(store: LoopStore);
     load(loopId: string): VaultEntry | undefined;
     list(): VaultEntry[];
     save(entry: VaultEntry, options?: SessionSaveOptions): void;

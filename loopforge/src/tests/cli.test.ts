@@ -24,10 +24,10 @@ describe("loopforge CLI", () => {
   it("exposes one versioned command surface", () => {
     const help = run(["--help"]);
     assert.equal(help.status, 0, help.stderr);
-    assert.match(help.stdout, /LoopForge 2\.0\.0-rc\.1/);
+    assert.match(help.stdout, /LoopForge 2\.0\.1/);
     assert.match(help.stdout, /loopforge mcp/);
     assert.match(help.stdout, /loopforge inspect/);
-    assert.equal(run(["--version"]).stdout.trim(), "2.0.0-rc.1");
+    assert.equal(run(["--version"]).stdout.trim(), "2.0.1");
   });
 
   it("returns machine-readable doctor results", () => {
@@ -101,7 +101,7 @@ describe("loopforge CLI", () => {
       const raw = JSON.parse(readFileSync(policyPath, "utf8"));
       assert.equal(raw.version, "2");
       assert.equal(raw.prompt.injection_mode, "adaptive");
-      assert.equal(raw.runtime.max_rounds, 20);
+      assert.equal(raw.engine.max_rounds, 20);
       assert.equal(raw.evidence.providers[0], "git");
     } finally {
       rmSync(root, { recursive: true, force: true });

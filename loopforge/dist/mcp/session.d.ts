@@ -57,9 +57,11 @@ export interface AdvanceResult {
     roundId?: string;
     prompt: string | null;
     stopReason?: string;
+    /** v2.0.1: Human-readable context for why the loop stopped.
+     *  Provides facts the agent can use to decide its next action,
+     *  without LoopForge prescribing a specific behavior. */
+    stopDetail?: string;
     level?: string;
-    /** @deprecated Use roundSuccess instead. Derived: roundSuccess ? 5 : 1 */
-    quality?: number;
     roundSuccess?: boolean;
     warnings?: string[];
     /** v1.13: Enforcement action for this round. accept/reject/terminate.
@@ -144,6 +146,29 @@ export declare class SessionManager {
      *    When provided (MCP path with evaluation parameter), skips regex extraction.
      *    When undefined (runtime/CLI path), falls back to regex extraction from output. */
     advance(sessionId: string, output: string, preExtractedEval?: SelfEvaluation): Promise<AdvanceResult>;
+    /** Extract a SelfEvaluation from agent output.
+     *  Structured param preferred → regex extraction → heuristic fallback.
+     *  Returns null only when both regex and heuristic returned null. */
+    private extractEvaluation;
+    /** Execute the round transaction and apply per-rule rejection tracking.
+     *  MUTATES: session.roundSnapshot, session.consecutiveRejections,
+     *           session.lastRejectionCheck, session.lastSelfEval,
+     *           session.successTrajectory */
+    private executeRoundTransaction;
+    /** Build a rejection result: compile a retry prompt, persist, return.
+     *  MUTATES: session.roundSnapshot, session.currentPrompt, session.currentLevel */
+    private buildRejectionResult;
+    /** Build a termination result: persist stopped status, notify sinks.
+     *  MUTATES: session.status, session.currentPrompt */
+    private buildTerminationResult;
+    /** Build a stop result: persist stopped/stalled status, notify sinks.
+     *  MUTATES: session.status, session.currentPrompt */
+    private buildStopResult;
+    /** Compile the next round's prompt and advance the session.
+     *  Includes the commit fence (pause/delete race guard) and context provider.
+     *  MUTATES: session.currentRound, session.currentPrompt, session.currentLevel,
+     *           session.evidenceBaseline, session.roundSnapshot */
+    private advanceToNextRound;
     private advanceUnlocked;
     /** Write back loop knowledge to long-term memory.
      *  Uses shared base builder from policy.ts. Called when a loop terminates. */

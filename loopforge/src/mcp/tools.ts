@@ -295,6 +295,7 @@ const ADVANCE_OUTPUT_SCHEMA: JsonSchema = {
     roundId: { type: ["string", "null"] },
     prompt: { type: ["string", "null"] },
     stopReason: { type: "string" },
+    stopDetail: { type: "string", description: "Human-readable context for why the loop stopped. Provides facts without prescribing a specific agent action." },
     level: { type: "string" },
     roundSuccess: { type: "boolean" },
     enforcementAction: { enum: ["accept", "reject", "terminate"] },

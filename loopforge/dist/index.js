@@ -26,16 +26,13 @@ export { Mode, AgentStatus, makeExecutionFeedback, makeSelfEvaluation, makeLoopO
 // Policy
 export { getPolicy, loadPolicy, resetPolicy, DEFAULT_POLICY, writeStateFile, } from "./policy.js";
 // Durable store
-export { FileLoopStore, LOOP_STORE_SCHEMA_VERSION, } from "./loop-store.js";
+export { FileLoopStore, LoopStoreBackend, VaultBackendLoopStore, LOOP_STORE_SCHEMA_VERSION, } from "./loop-store.js";
 // Loop Compiler
 export { compileLoop, decideLevel, alignTask, checkLoopHealth, computeGoalTextHash, deriveGoalId, getPreviousRound, buildSelfEvalBlock, buildRollingSummary, } from "./loop-compiler.js";
 // Replay
 export { ReplayBackend } from "./replay.js";
 // Engine
 export { LoopForgeEngine, createEngine, extractSelfEvaluation, heuristicSelfEvaluation, buildSelfEvaluation, parseExecutionEvidence, parseCriterionRevisions, parseWorkerResults, } from "./engine.js";
-// Runtime (v1.2)
-export { LoopRuntime, run } from "./runtime.js";
-export { RuntimeStatus } from "./protocol.js";
 // MCP (v1.3)
 export { McpServer } from "./mcp/server.js";
 export { SessionManager } from "./mcp/session.js";

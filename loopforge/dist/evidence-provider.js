@@ -6,14 +6,13 @@
  * additional evidence sources (test runners, linters, bundle analysis)
  * can be added without touching the verification pipeline.
  *
- * Built-in provider: GitEvidenceProvider — wraps existing
- * captureGitFileState() logic.
+ * Built-in provider: GitEvidenceProvider — git file state capture with
+ * parallel async execution (v2.0.1) and a synchronous fallback.
  */
 import { createHash } from "node:crypto";
 import { readFileSync, realpathSync, statSync } from "node:fs";
-import { spawn } from "node:child_process";
+import { spawn, execFile, execFileSync, } from "node:child_process";
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import { captureGitFileState } from "./verification-gate.js";
 import { getPolicy } from "./policy.js";
 import { logEvent, startSpan } from "./observability.js";
 import { policyMetrics } from "./policy-metrics.js";
@@ -309,44 +308,138 @@ export class CommandEvidenceProvider {
         };
     }
 }
+/** v2.0.1: Capture git file state using parallel async execFile.
+ *
+ * Runs three git commands concurrently via Promise.all. Uses a single
+ * timeout (shared across all commands) and an optional AbortSignal for
+ * early cancellation. Shell-free (execFile, not exec).
+ *
+ * On any command failure, returns null — the caller should treat git
+ * evidence as unavailable and degrade gracefully.
+ *
+ * Performance: wall-clock time is max(single-command), not sum(3).
+ * On a normal repo (~200ms/command): ~200ms vs ~600ms sequential.
+ * On Windows with antivirus (~4s/command): ~4s vs ~12s sequential. */
+export async function captureGitFileStateAsync(signal, timeoutMs) {
+    const timeout = timeoutMs ?? 15000;
+    const runGit = (args) => {
+        return new Promise((resolve, reject) => {
+            const child = execFile("git", [...args], {
+                encoding: "utf-8",
+                timeout,
+                signal,
+                windowsHide: true,
+            });
+            let stdout = "";
+            child.stdout?.on("data", (chunk) => {
+                stdout += chunk;
+            });
+            child.on("close", (code) => {
+                code === 0
+                    ? resolve(stdout)
+                    : reject(new Error(`git ${args[0]} exited ${code}`));
+            });
+            child.on("error", reject);
+        });
+    };
+    try {
+        const [tracked, staged, untracked] = await Promise.all([
+            runGit(["diff", "--name-only"]),
+            runGit(["diff", "--cached", "--name-only"]),
+            runGit(["ls-files", "--others", "--exclude-standard"]),
+        ]);
+        return {
+            tracked: tracked.trim().split("\n").filter((f) => f.length > 0).sort(),
+            staged: staged.trim().split("\n").filter((f) => f.length > 0).sort(),
+            untracked: untracked.trim().split("\n").filter((f) => f.length > 0).sort(),
+        };
+    }
+    catch {
+        return null;
+    }
+}
+/** v1.17 (sync): Capture git file state using sequential execFileSync.
+ *
+ * @deprecated Use captureGitFileStateAsync() for the primary path.
+ * This sync fallback exists for legacy callers that cannot be made async
+ * (e.g. reconstructSession during startup). Uses execFileSync — shell-free,
+ * unlike the old execSync-based implementation. */
+export function captureGitFileState() {
+    try {
+        const tracked = execFileSync("git", ["diff", "--name-only"], {
+            encoding: "utf-8",
+            timeout: 5000,
+        }).trim();
+        const staged = execFileSync("git", ["diff", "--cached", "--name-only"], {
+            encoding: "utf-8",
+            timeout: 5000,
+        }).trim();
+        const untracked = execFileSync("git", ["ls-files", "--others", "--exclude-standard"], {
+            encoding: "utf-8",
+            timeout: 5000,
+        }).trim();
+        return {
+            tracked: tracked.split("\n").filter((f) => f.length > 0).sort(),
+            staged: staged.split("\n").filter((f) => f.length > 0).sort(),
+            untracked: untracked.split("\n").filter((f) => f.length > 0).sort(),
+        };
+    }
+    catch {
+        return null;
+    }
+}
+/** v1.16: Capture modified files as a flat sorted array.
+ *  @deprecated v1.17 — Use captureGitFileState() for full coverage. */
+export function captureGitModifiedFiles() {
+    const state = captureGitFileState();
+    if (!state)
+        return null;
+    return [...new Set([...state.tracked, ...state.staged, ...state.untracked])].sort();
+}
 // ── Built-in: GitEvidenceProvider ──────────────────────────────────────────
-/** Captures git file state (tracked, staged, untracked) via existing
- *  captureGitFileState() logic. */
+/** Captures git file state (tracked, staged, untracked) via the async
+ *  captureGitFileStateAsync() when a context is provided, falling back
+ *  to the synchronous captureGitFileState() for legacy callers. */
 export class GitEvidenceProvider {
     name = "git";
-    capture() {
-        const state = captureGitFileState();
-        if (!state)
-            return null;
-        const files = [...new Set([
-                ...state.tracked,
-                ...state.staged,
-                ...state.untracked,
-            ])].sort();
-        const fingerprints = {};
-        for (const file of files) {
-            try {
-                const stat = statSync(file);
-                const hash = createHash("sha256").update(readFileSync(file)).digest("hex");
-                fingerprints[file] = `${stat.mode}:${hash}`;
+    capture(context) {
+        const capture = context
+            ? captureGitFileStateAsync(context.signal, context.timeoutMs)
+            : captureGitFileState();
+        const statePromise = capture instanceof Promise ? capture : Promise.resolve(capture);
+        return statePromise.then((state) => {
+            if (!state)
+                return null;
+            const files = [...new Set([
+                    ...state.tracked,
+                    ...state.staged,
+                    ...state.untracked,
+                ])].sort();
+            const fingerprints = {};
+            for (const file of files) {
+                try {
+                    const stat = statSync(file);
+                    const hash = createHash("sha256").update(readFileSync(file)).digest("hex");
+                    fingerprints[file] = `${stat.mode}:${hash}`;
+                }
+                catch {
+                    // Deleted files are evidence too.  A stable sentinel lets the diff
+                    // distinguish deleted/restored transitions across a round.
+                    fingerprints[file] = "missing";
+                }
             }
-            catch {
-                // Deleted files are evidence too.  A stable sentinel lets the diff
-                // distinguish deleted/restored transitions across a round.
-                fingerprints[file] = "missing";
-            }
-        }
-        return {
-            provider: "git",
-            timestamp: Date.now(),
-            files,
-            data: {
-                tracked: state.tracked,
-                staged: state.staged,
-                untracked: state.untracked,
-                fingerprints,
-            },
-        };
+            return {
+                provider: "git",
+                timestamp: Date.now(),
+                files,
+                data: {
+                    tracked: state.tracked,
+                    staged: state.staged,
+                    untracked: state.untracked,
+                    fingerprints,
+                },
+            };
+        }); // end of .then()
     }
 }
 registerEvidenceProvider("git", () => new GitEvidenceProvider());

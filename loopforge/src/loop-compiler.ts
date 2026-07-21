@@ -343,7 +343,8 @@ export function buildSelfEvalBlock(round: number): string {
   return [
     "### LoopForge Evaluation (Required)",
     "",
-    `After completing Round ${round}, submit JSON between these markers:`,
+    `After completing Round ${round}, replace the placeholder values below`,
+    "with your actual results and submit via `loopforge_next`.",
     "---loopforge-eval",
     JSON.stringify({
       success: false,
@@ -364,7 +365,8 @@ export function buildSelfEvalBlock(round: number): string {
     }, null, 2),
     "---end-loopforge-eval",
     "",
-    "Set success=true only when the full goal and hard constraints are verified.",
+    "IMPORTANT: Replace every <placeholder> with your actual data.",
+    "Set success=true only when the full goal and ALL hard constraints are verified.",
   ].join("\n");
 }
 

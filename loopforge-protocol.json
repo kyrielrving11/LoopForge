@@ -952,38 +952,6 @@
         "status"
       ]
     },
-    "RuntimeStatus": {
-      "type": "string",
-      "enum": [
-        "idle",
-        "running",
-        "stopped",
-        "stalled",
-        "paused"
-      ]
-    },
-    "RoundContext": {
-      "type": "object",
-      "properties": {
-        "round": {
-          "type": "number"
-        },
-        "roundId": {
-          "type": "string"
-        },
-        "signal": {
-          "type": "string"
-        },
-        "reportProgress": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "round",
-        "signal",
-        "reportProgress"
-      ]
-    },
     "StopReason": {
       "type": "string",
       "enum": [
@@ -1043,187 +1011,6 @@
       ],
       "description": "Result of round-boundary enforcement. Decides whether to accept the round,\nreject it (force the agent to redo the SAME round), or terminate the loop.\n\naccept:    round passes; proceed to next round as normal.\nreject:    agent's self-evaluation or output is invalid; the agent receives\n           a rejection prompt and must redo the same round. Round counter\n           does NOT increment.\nterminate: loop has reached an unrecoverable state; stop immediately with\n           stopReason \"enforcement_terminated\"."
     },
-    "RoundStartInfo": {
-      "type": "object",
-      "properties": {
-        "round": {
-          "type": "number"
-        },
-        "roundId": {
-          "type": "string"
-        },
-        "level": {
-          "type": "string"
-        },
-        "prompt": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "round",
-        "level",
-        "prompt"
-      ]
-    },
-    "RoundCompleteInfo": {
-      "type": "object",
-      "properties": {
-        "round": {
-          "type": "number"
-        },
-        "roundId": {
-          "type": "string"
-        },
-        "roundSuccess": {
-          "type": "boolean"
-        },
-        "selfEval": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/SelfEvaluation"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "durationMs": {
-          "type": "number"
-        }
-      },
-      "required": [
-        "round",
-        "roundSuccess",
-        "durationMs"
-      ]
-    },
-    "HeartbeatInfo": {
-      "type": "object",
-      "properties": {
-        "round": {
-          "type": "number"
-        },
-        "elapsedMs": {
-          "type": "number"
-        },
-        "sinceProgressMs": {
-          "type": "number"
-        }
-      },
-      "required": [
-        "round",
-        "elapsedMs",
-        "sinceProgressMs"
-      ]
-    },
-    "TimeoutInfo": {
-      "type": "object",
-      "properties": {
-        "round": {
-          "type": "number"
-        },
-        "elapsedMs": {
-          "type": "number"
-        }
-      },
-      "required": [
-        "round",
-        "elapsedMs"
-      ]
-    },
-    "HealthWarning": {
-      "type": "object",
-      "properties": {
-        "type": {
-          "type": "string"
-        },
-        "message": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "type",
-        "message"
-      ]
-    },
-    "RuntimeConfig": {
-      "type": "object",
-      "properties": {
-        "task": {
-          "type": "string"
-        },
-        "execute": {
-          "description": "Function signature: AgentExecutor. Omitted from JSON Schema."
-        },
-        "loopId": {
-          "type": "string"
-        },
-        "goalId": {
-          "type": "string"
-        },
-        "maxRounds": {
-          "type": "number"
-        },
-        "roundTimeoutMs": {
-          "type": "number"
-        },
-        "heartbeatIntervalMs": {
-          "type": "number"
-        },
-        "stallGraceMs": {
-          "type": "number"
-        },
-        "maxConsecutiveErrors": {
-          "type": "number"
-        },
-        "interactive": {
-          "type": "boolean"
-        },
-        "healthCheckInterval": {
-          "type": "number"
-        },
-        "planSource": {
-          "type": "string"
-        },
-        "constraintsFromPlan": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "domain": {
-          "type": "string"
-        },
-        "onRoundStart": {
-          "type": "string"
-        },
-        "onRoundComplete": {
-          "type": "string"
-        },
-        "onHeartbeat": {
-          "type": "string"
-        },
-        "onTimeout": {
-          "type": "string"
-        },
-        "onHealthWarning": {
-          "type": "string"
-        },
-        "contextProvider": {
-          "description": "Function signature: ExternalContextProvider. Omitted from JSON Schema."
-        },
-        "terminalSinks": {
-          "type": "array",
-          "items": {
-            "description": "Function signature: LoopTerminalSink. Omitted from JSON Schema."
-          }
-        }
-      },
-      "required": [
-        "task",
-        "execute"
-      ]
-    },
     "ExternalContextRequest": {
       "type": "object",
       "properties": {
@@ -1251,7 +1038,7 @@
       ],
       "description": "Context supplied to an embedding-owned provider before compilation."
     },
-    "RunResult": {
+    "LoopTerminalEvent": {
       "type": "object",
       "properties": {
         "success": {
@@ -1268,18 +1055,7 @@
           "items": {
             "type": "boolean"
           }
-        }
-      },
-      "required": [
-        "success",
-        "stopReason",
-        "roundsCompleted",
-        "successTrajectory"
-      ]
-    },
-    "LoopTerminalEvent": {
-      "type": "object",
-      "properties": {
+        },
         "loopId": {
           "type": "string"
         },
@@ -1291,10 +1067,13 @@
         }
       },
       "required": [
+        "success",
+        "stopReason",
+        "roundsCompleted",
+        "successTrajectory",
         "loopId",
         "task"
-      ],
-      "description": "Stable, provider-neutral terminal hook payload."
+      ]
     },
     "VerificationFlag": {
       "type": "object",

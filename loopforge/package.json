@@ -1,6 +1,6 @@
 {
   "name": "loopforge",
-  "version": "2.0.0-rc.1",
+  "version": "2.0.1",
   "description": "Cognitive State Runtime for AI coding agents — maintains persistent, evolvable cognitive state (objectives, constraints, evidence, decisions) across long-horizon agent loops.",
   "type": "module",
   "main": "./dist/index.js",
@@ -24,7 +24,7 @@
     }
   },
   "bin": {
-    "loopforge": "./dist/cli.js"
+    "loopforge": "dist/cli.js"
   },
   "files": [
     "dist/",
@@ -43,7 +43,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/kyrielrving11/LoopForge"
+    "url": "git+https://github.com/kyrielrving11/LoopForge.git"
   },
   "keywords": [
     "cognitive-state",

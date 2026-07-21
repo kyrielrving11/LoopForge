@@ -1,8 +1,54 @@
 # Changelog
 
-## 2.0.0-rc.1 (2026-07-13)
+## 2.0.1 (2026-07-21)
 
-This release candidate changes LoopForge from a prompt-technique framework into
+### Removed
+
+- **Deprecated `quality` field** from `AdvanceResult`. The `quality` field was
+  marked `@deprecated` in 2.0.0 and always derived from `roundSuccess`. MCP tool
+  consumers should use `roundSuccess` instead.
+
+### Added
+
+- **`stopDetail` field** in `AdvanceResult`. Each stop reason now carries a
+  human-readable explanation of what happened, giving the external Agent enough
+  context to decide its next action without LoopForge prescribing behavior.
+
+- **`## How to Complete This Round` section** in every compiled prompt. The
+  prompt now includes explicit instructions on how to submit results via
+  `loopforge_next`, what `success` and `should_continue` mean, and what to do
+  when a round is rejected.
+
+- **31 new tests** for the typed extraction pipeline (`loop-extras-parser.ts`).
+- **3 new tests** covering prompt hash determinism, attempt differentiation,
+  and L0 budget enforcement.
+
+### Changed
+
+- **Git evidence capture is now async and parallel.** Three git commands
+  (`diff`, `diff --cached`, `ls-files`) run concurrently via `execFile` instead
+  of sequentially via `execSync`. Wall-clock time drops from sum(3) to max(1)
+  command duration. A unified `AbortController` timeout replaces per-command
+  timeouts. All git commands are now shell-free (`execFile`, not `exec`).
+
+- **`engine.ts` extras parsing** extracted to `loop-extras-parser.ts`. The
+  `ExtractionContext` class provides typed field extraction with per-field
+  error collection — never throws, always returns best-effort defaults.
+
+- **`advanceUnlocked()` split** into 6 focused private methods
+  (`extractEvaluation`, `executeRoundTransaction`, `buildRejectionResult`,
+  `buildTerminationResult`, `buildStopResult`, `advanceToNextRound`).
+  The orchestrator is now ~40 lines.
+
+- **Self-evaluation template** now explicitly warns the Agent to replace
+  placeholder values with actual data.
+
+- `interop.ts` marked as `@experimental` in JSDoc and both README files.
+- Test count: 237 → 271.
+
+## 2.0.0 (2026-07-13)
+
+This release changes LoopForge from a prompt-technique framework into
 a recoverable cognitive state runtime driven by an external Agent.
 
 ### Breaking changes

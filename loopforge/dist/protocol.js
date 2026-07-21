@@ -195,32 +195,6 @@ export function makeSessionState(taskId) {
         feedback_buffer: [],
     };
 }
-// ── Runtime types (v1.2) ──────────────────────────────────────────────────────
-export var RuntimeStatus;
-(function (RuntimeStatus) {
-    RuntimeStatus["IDLE"] = "idle";
-    RuntimeStatus["RUNNING"] = "running";
-    RuntimeStatus["STOPPED"] = "stopped";
-    RuntimeStatus["STALLED"] = "stalled";
-    /** v1.18: Loop is suspended — can be resumed from currentRound. */
-    RuntimeStatus["PAUSED"] = "paused";
-})(RuntimeStatus || (RuntimeStatus = {}));
-/** Map StopReason (internal) → MemoryWriteback outcome (wire format).
- *  Shared between runtime.ts and mcp/session.ts — single source of truth. */
-const LEGACY_STOP_REASON_OUTCOME_MAP = {
-    completed: "completed",
-    failed: "failed",
-    blocked: "blocked",
-    cancelled: "cancelled",
-    circuit_breaker: "circuit_breaker",
-    stalled: "stalled",
-    max_rounds: "max_rounds",
-    executor_failure: "failed",
-    enforcement_terminated: "enforcement_terminated",
-    paused: "paused",
-    task_complete: "completed",
-    stopped: "cancelled",
-};
 export function makeEnforcementResult(overrides = {}) {
     return {
         action: "accept",

@@ -25,15 +25,7 @@ export interface SummaryPolicy {
 export interface EnginePolicy {
   feedback_flush_interval: number;
   max_circuit_breaker: number;
-}
-
-export interface RuntimePolicy {
   max_rounds: number;
-  round_timeout_ms: number;
-  heartbeat_interval_ms: number;
-  stall_grace_ms: number;
-  max_consecutive_errors: number;
-  pause_double_tap_ms: number;
 }
 
 /** Levels control state density only; reasoning strategy belongs to the Agent. */
@@ -102,7 +94,6 @@ export interface LoopPolicy {
   constraints: ConstraintsPolicy;
   summary: SummaryPolicy;
   engine: EnginePolicy;
-  runtime: RuntimePolicy;
   prompt: PromptPolicy;
   backend: BackendPolicy;
   evolution: EvolutionPolicy;
@@ -116,15 +107,7 @@ export const DEFAULT_POLICY: LoopPolicy = {
   version: "2",
   constraints: { retire_window: 3 },
   summary: { window: 5, health_check_interval: 1 },
-  engine: { feedback_flush_interval: 5, max_circuit_breaker: 3 },
-  runtime: {
-    max_rounds: 20,
-    round_timeout_ms: 600_000,
-    heartbeat_interval_ms: 30_000,
-    stall_grace_ms: 300_000,
-    max_consecutive_errors: 3,
-    pause_double_tap_ms: 3000,
-  },
+  engine: { feedback_flush_interval: 5, max_circuit_breaker: 3, max_rounds: 20 },
   prompt: {
     injection_mode: "adaptive",
     full_refresh_interval: 5,

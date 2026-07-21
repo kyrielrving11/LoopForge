@@ -8,175 +8,13 @@
 import { randomUUID } from "node:crypto";
 import { getPolicy } from "./policy.js";
 import { FileLoopStore, LoopStoreBackend } from "./loop-store.js";
-import { AgentStatus, Mode, makeExecutionEvidence, makeExecutionFeedback, makeLoopCompileRequest, makeLoopObjective, makeLoopRoundResult, makeSelfEvaluation, makeSessionState, makeTaskId, SELF_EVAL_REGEX, } from "./protocol.js";
+import { AgentStatus, Mode, makeExecutionFeedback, makeLoopCompileRequest, makeLoopObjective, makeLoopRoundResult, makeSessionState, makeTaskId, } from "./protocol.js";
 import { compileLoop } from "./loop-compiler.js";
 import { logEvent } from "./observability.js";
-// ═══════════════════════════════════════════════════════════════════════════
-// Shared helpers
-// ═══════════════════════════════════════════════════════════════════════════
-/** Parse ExecutionEvidence from a raw JSON object. Shared by buildSelfEvaluation
- *  and invokeLoopCompile — both parse the same execution_evidence shape. */
-export function parseExecutionEvidence(raw) {
-    if (!raw || typeof raw !== "object")
-        return undefined;
-    const testResults = raw.test_results;
-    return makeExecutionEvidence({
-        files_changed: Array.isArray(raw.files_changed)
-            ? raw.files_changed.filter((v) => typeof v === "string")
-            : [],
-        test_results: testResults && typeof testResults.passed === "number"
-            ? {
-                passed: testResults.passed,
-                failed: testResults.failed ?? 0,
-                skipped: testResults.skipped ?? 0,
-            }
-            : null,
-        success_criteria_met: Array.isArray(raw.success_criteria_met)
-            ? raw.success_criteria_met.filter((v) => typeof v === "string")
-            : [],
-        success_criteria_remaining: Array.isArray(raw.success_criteria_remaining)
-            ? raw.success_criteria_remaining.filter((v) => typeof v === "string")
-            : [],
-        progress_estimate: typeof raw.progress_estimate === "number"
-            ? Math.max(0, Math.min(1, raw.progress_estimate))
-            : 0.0,
-    });
-}
-/** Parse CriterionRevision[] from a raw JSON array. Shared by buildSelfEvaluation
- *  and invokeLoopCompile — both parse the same revised_success_criteria shape. */
-export function parseCriterionRevisions(raw) {
-    if (!Array.isArray(raw))
-        return [];
-    return raw
-        .filter((v) => typeof v === "object" && v !== null &&
-        typeof v.old === "string" &&
-        typeof v.new === "string")
-        .map((v) => {
-        const r = v;
-        return { old: r.old, new: r.new };
-    });
-}
-/** Parse WorkerResult[] from a raw JSON array. Shared by buildSelfEvaluation
- *  and invokeLoopCompile — both parse the same worker_results shape. */
-export function parseWorkerResults(raw) {
-    if (!Array.isArray(raw))
-        return [];
-    return raw
-        .filter((v) => typeof v === "object" && v !== null &&
-        typeof v.agentId === "string" &&
-        typeof v.subTask === "string" &&
-        typeof v.resultSummary === "string")
-        .map((v) => {
-        const w = v;
-        return {
-            agentId: w.agentId,
-            subAgentType: typeof w.subAgentType === "string" ? w.subAgentType : "general-purpose",
-            subTask: w.subTask,
-            resultSummary: w.resultSummary,
-            success: typeof w.success === "boolean" ? w.success : false,
-            discoveredConstraints: Array.isArray(w.discoveredConstraints)
-                ? w.discoveredConstraints.filter((c) => typeof c === "string")
-                : [],
-        };
-    });
-}
-// ═══════════════════════════════════════════════════════════════════════════
-// Self-Evaluation extraction (v1.1 — autonomous loop feedback)
-// ═══════════════════════════════════════════════════════════════════════════
-/** Extract a structured SelfEvaluation from agent output text.
- *  Returns null if no valid self-eval block is found.
- *  The agent is instructed to output JSON between the delimiters. */
-export function extractSelfEvaluation(text) {
-    const match = text.match(SELF_EVAL_REGEX);
-    if (!match)
-        return null;
-    try {
-        const raw = JSON.parse(match[1]);
-        // Validate required fields
-        if (typeof raw.success !== "boolean")
-            return null;
-        if (typeof raw.output_summary !== "string")
-            return null;
-        if (!Array.isArray(raw.constraint_violations))
-            return null;
-        if (typeof raw.should_continue !== "boolean")
-            return null;
-        return buildSelfEvaluation(raw);
-    }
-    catch {
-        return null;
-    }
-}
-/** Build a SelfEvaluation from a parsed JSON object.
- *  Lenient parsing: missing optional fields get sensible defaults.
- *  Used by extractSelfEvaluation() (regex path) and MCP tool handler
- *  (structured evaluation parameter path). */
-export function buildSelfEvaluation(raw) {
-    // P4: Parse execution evidence from raw JSON
-    const executionEvidence = parseExecutionEvidence(raw.execution_evidence);
-    // P5: Parse corrections
-    const retractedConstraints = Array.isArray(raw.retracted_constraints)
-        ? raw.retracted_constraints.filter((v) => typeof v === "string")
-        : [];
-    const revisedCriteria = parseCriterionRevisions(raw.revised_success_criteria);
-    const wrongAssumptions = Array.isArray(raw.wrong_assumptions)
-        ? raw.wrong_assumptions.filter((v) => typeof v === "string")
-        : [];
-    // Multi-agent: Parse worker delegation results
-    const workerResults = parseWorkerResults(raw.worker_results);
-    return makeSelfEvaluation({
-        success: typeof raw.success === "boolean" ? raw.success : false,
-        output_summary: typeof raw.output_summary === "string" ? raw.output_summary : "",
-        constraint_violations: Array.isArray(raw.constraint_violations)
-            ? raw.constraint_violations.filter((v) => typeof v === "string")
-            : [],
-        should_continue: typeof raw.should_continue === "boolean" ? raw.should_continue : true,
-        // P0–P2: Optional evolution fields
-        discovered_constraints: Array.isArray(raw.discovered_constraints)
-            ? raw.discovered_constraints.filter((v) => typeof v === "string")
-            : [],
-        objective_refinement: typeof raw.objective_refinement === "string"
-            ? raw.objective_refinement
-            : "",
-        emerged_subtasks: Array.isArray(raw.emerged_subtasks)
-            ? raw.emerged_subtasks.filter((v) => typeof v === "string")
-            : [],
-        // P4: Execution evidence
-        execution_evidence: executionEvidence,
-        // P5: Self-correction
-        retracted_constraints: retractedConstraints,
-        revised_success_criteria: revisedCriteria,
-        wrong_assumptions: wrongAssumptions,
-        // Multi-agent: Worker delegation results
-        worker_results: workerResults,
-        // v1.10: Checkpoint compression
-        compression_checkpoint: typeof raw.compression_checkpoint === "boolean" ? raw.compression_checkpoint : false,
-        checkpoint_label: typeof raw.checkpoint_label === "string" ? raw.checkpoint_label : "",
-        // v1.16: Agent's declared next action
-        next_action: typeof raw.next_action === "string" ? raw.next_action : undefined,
-    });
-}
-/** Fallback heuristic when structured self-eval extraction fails.
- *  Scans agent output for completion and error signals.
- *  Returns a low-confidence SelfEvaluation — the autonomous runner
- *  may choose to warn the user or continue cautiously. */
-export function heuristicSelfEvaluation(text) {
-    const lower = text.toLowerCase();
-    const hasError = /error|failed|exception|cannot|unable|失败|错误|异常/.test(lower);
-    const hasCompletion = /done|complete|finished|完成|成功/.test(lower);
-    const hasRemaining = /remaining|continue|still need|next|todo|剩余|继续|下一步/.test(lower);
-    // Extract a reasonable summary from the last meaningful paragraph
-    const paragraphs = text.split(/\n\n+/).filter((p) => p.trim().length > 30);
-    const summary = paragraphs.length > 0
-        ? paragraphs[paragraphs.length - 1].trim().slice(0, 300)
-        : text.trim().slice(0, 300);
-    return makeSelfEvaluation({
-        success: !hasError && (hasCompletion || !hasRemaining),
-        output_summary: summary || "[heuristic fallback — could not parse structured self-eval]",
-        constraint_violations: [],
-        should_continue: hasRemaining && !hasError,
-    });
-}
+import { parseExecutionEvidence, parseCriterionRevisions, parseWorkerResults, } from "./self-eval.js";
+import { parseLoopExtras } from "./loop-extras-parser.js";
+// ── Re-export self-evaluation utilities (moved to self-eval.ts) ──────────
+export { parseExecutionEvidence, parseCriterionRevisions, parseWorkerResults, extractSelfEvaluation, buildSelfEvaluation, heuristicSelfEvaluation, } from "./self-eval.js";
 function makeEngineMetrics() {
     return {
         vaultWriteErrors: 0,
@@ -644,82 +482,78 @@ export class LoopForgeEngine {
     invokeLoopCompile(request, hydrateResults, options = {}) {
         this.ensureInit(request);
         this.lastTask = request.task;
-        // Build LoopCompileRequest from LoopForgeRequest extras
+        // Parse extras via typed extraction pipeline (loop-extras-parser.ts).
+        // Errors are collected but never thrown — the compiler always gets
+        // best-effort defaults so a malformed request doesn't crash the engine.
         const extras = request;
-        const lcr = makeLoopCompileRequest({
-            loop_id: extras.loop_id ?? request.task_id ?? "",
-            round: extras.round ?? 1,
-            goal_id: extras.goal_id ?? "",
-            task: request.task,
-            domain: extras.domain ?? "",
-            next_task_proposal: extras.next_task_proposal ?? "",
-            plan_source: extras.plan_source ?? null,
-            constraints_from_plan: extras.constraints_from_plan ?? [],
-            new_since_last_round: extras.new_since_last_round ?? "",
-            force_level: extras.force_level ?? "auto",
-            health_check_interval: extras.health_check_interval ?? 1,
-            external_context: extras.external_context ?? "",
-            max_rounds: extras.max_rounds ?? undefined,
-            verification_flags: Array.isArray(extras.verification_flags)
-                ? extras.verification_flags
-                : [],
-            attempt: typeof extras.attempt === "number"
-                ? Math.max(1, Math.trunc(extras.attempt))
-                : 1,
-            consecutive_rejections: typeof extras.consecutive_rejections === "number"
-                ? Math.max(0, Math.trunc(extras.consecutive_rejections))
-                : 0,
-            rejection_notice: typeof extras.rejection_notice === "string"
-                ? extras.rejection_notice
-                : "",
-        });
-        // Convert last_round_result if present
-        const lastRR = extras.last_round_result;
-        if (lastRR) {
-            if (typeof lastRR === "object" && !Array.isArray(lastRR)) {
-                const rr = lastRR;
-                // Parse P4 execution evidence (shared helper)
-                const executionEvidence = parseExecutionEvidence(rr.execution_evidence);
-                // Parse P5 revised_success_criteria (shared parser)
-                const revisedCriteria = parseCriterionRevisions(rr.revised_success_criteria);
-                lcr.last_round_result = makeLoopRoundResult({
-                    round: rr.round ?? 0,
-                    success: rr.success ?? false,
-                    output_summary: rr.output_summary ?? "",
-                    constraint_violations: rr.constraint_violations ?? [],
-                    manual_fixes_needed: rr.manual_fixes_needed ?? "",
-                    // P0–P2: Cognitive evolution fields
-                    discovered_constraints: Array.isArray(rr.discovered_constraints)
-                        ? rr.discovered_constraints.filter((v) => typeof v === "string")
-                        : [],
-                    objective_refinement: typeof rr.objective_refinement === "string"
-                        ? rr.objective_refinement
-                        : "",
-                    emerged_subtasks: Array.isArray(rr.emerged_subtasks)
-                        ? rr.emerged_subtasks.filter((v) => typeof v === "string")
-                        : [],
-                    // P4: Execution evidence
-                    execution_evidence: executionEvidence,
-                    // P5: Self-correction
-                    retracted_constraints: Array.isArray(rr.retracted_constraints)
-                        ? rr.retracted_constraints.filter((v) => typeof v === "string")
-                        : [],
-                    revised_success_criteria: revisedCriteria,
-                    wrong_assumptions: Array.isArray(rr.wrong_assumptions)
-                        ? rr.wrong_assumptions.filter((v) => typeof v === "string")
-                        : [],
-                    // v1.10: Checkpoint boundary
-                    compression_checkpoint: typeof rr.compression_checkpoint === "boolean" ? rr.compression_checkpoint : false,
-                    checkpoint_label: typeof rr.checkpoint_label === "string" ? rr.checkpoint_label : "",
-                    // Multi-agent: Worker delegation results (shared parser)
-                    worker_results: parseWorkerResults(rr.worker_results),
-                });
-            }
+        const { parsed, ctx } = parseLoopExtras(extras, request.task_id ?? "");
+        if (ctx.errors.length > 0) {
+            logEvent("extras_parse_errors", {
+                errors: ctx.errors.map((e) => `${e.field}: ${e.message}`),
+            });
         }
-        // Convert loop_objective if present
-        const lo = extras.loop_objective;
-        if (lo && typeof lo === "object" && !Array.isArray(lo)) {
-            const obj = lo;
+        const lcr = makeLoopCompileRequest({
+            loop_id: parsed.loop_id,
+            round: parsed.round,
+            goal_id: parsed.goal_id,
+            task: request.task,
+            domain: parsed.domain,
+            next_task_proposal: parsed.next_task_proposal,
+            plan_source: parsed.plan_source,
+            constraints_from_plan: parsed.constraints_from_plan,
+            new_since_last_round: parsed.new_since_last_round,
+            force_level: parsed.force_level,
+            health_check_interval: parsed.health_check_interval,
+            external_context: parsed.external_context,
+            max_rounds: parsed.max_rounds,
+            verification_flags: parsed.verification_flags,
+            attempt: parsed.attempt,
+            consecutive_rejections: parsed.consecutive_rejections,
+            rejection_notice: parsed.rejection_notice,
+        });
+        // Convert last_round_result if present (object already validated by parser)
+        if (parsed.last_round_result) {
+            const rr = parsed.last_round_result;
+            // Parse P4 execution evidence (shared helper)
+            const executionEvidence = parseExecutionEvidence(rr.execution_evidence);
+            // Parse P5 revised_success_criteria (shared parser)
+            const revisedCriteria = parseCriterionRevisions(rr.revised_success_criteria);
+            lcr.last_round_result = makeLoopRoundResult({
+                round: rr.round ?? 0,
+                success: rr.success ?? false,
+                output_summary: rr.output_summary ?? "",
+                constraint_violations: rr.constraint_violations ?? [],
+                manual_fixes_needed: rr.manual_fixes_needed ?? "",
+                // P0–P2: Cognitive evolution fields
+                discovered_constraints: Array.isArray(rr.discovered_constraints)
+                    ? rr.discovered_constraints.filter((v) => typeof v === "string")
+                    : [],
+                objective_refinement: typeof rr.objective_refinement === "string"
+                    ? rr.objective_refinement
+                    : "",
+                emerged_subtasks: Array.isArray(rr.emerged_subtasks)
+                    ? rr.emerged_subtasks.filter((v) => typeof v === "string")
+                    : [],
+                // P4: Execution evidence
+                execution_evidence: executionEvidence,
+                // P5: Self-correction
+                retracted_constraints: Array.isArray(rr.retracted_constraints)
+                    ? rr.retracted_constraints.filter((v) => typeof v === "string")
+                    : [],
+                revised_success_criteria: revisedCriteria,
+                wrong_assumptions: Array.isArray(rr.wrong_assumptions)
+                    ? rr.wrong_assumptions.filter((v) => typeof v === "string")
+                    : [],
+                // v1.10: Checkpoint boundary
+                compression_checkpoint: typeof rr.compression_checkpoint === "boolean" ? rr.compression_checkpoint : false,
+                checkpoint_label: typeof rr.checkpoint_label === "string" ? rr.checkpoint_label : "",
+                // Multi-agent: Worker delegation results (shared parser)
+                worker_results: parseWorkerResults(rr.worker_results),
+            });
+        }
+        // Convert loop_objective if present (object already validated by parser)
+        if (parsed.loop_objective) {
+            const obj = parsed.loop_objective;
             lcr.loop_objective = makeLoopObjective({
                 objective: obj.objective ?? "",
                 success_criteria: obj.success_criteria ?? [],

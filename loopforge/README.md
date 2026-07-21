@@ -9,7 +9,7 @@ LoopForge does not provide a model, scheduler, or unattended worker. Its job is
 to make a long task resumable and auditable without letting the prompt become the
 only copy of the state.
 
-LoopForge 2.0 is currently available as `2.0.0-rc.1`. It requires Node.js 18 or
+LoopForge 2.0 is currently available as `2.0.0`. It requires Node.js 18 or
 newer and has no runtime dependencies.
 
 ## Install

@@ -9,7 +9,7 @@ Agent-driven rounds. It does not provide a model or unattended executor.
 - TypeScript only.
 - Node.js 18 or newer.
 - Zero runtime dependencies.
-- The npm package is in `LoopForge/` and is currently `2.0.0-rc.1`.
+- The npm package is in `LoopForge/` and is currently `2.0.1`.
 - Preserve user changes in a dirty worktree.
 - Edit `src/protocol.ts`, then run the build to regenerate
   `loopforge-protocol.json`.

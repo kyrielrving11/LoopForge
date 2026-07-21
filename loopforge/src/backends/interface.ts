@@ -1,4 +1,7 @@
-/** Internal projection used while engine query code moves onto typed LoopStore APIs. */
+/** @deprecated Use LoopStore from loop-store.js directly.
+ *
+ *  Kept for backward compatibility with modules that still reference
+ *  VaultBackend as a parameter type. New code should depend on LoopStore. */
 
 export interface VaultEntry {
   id?: string;
@@ -27,9 +30,6 @@ export interface VaultEntry {
 export interface VaultBackend {
   /** Optional atomic critical section used by storage adapters. */
   withLock?<T>(fn: () => T): T;
-  // JSON vault
-  readVault(): Record<string, unknown>;
-  writeVault(data: Record<string, unknown>): void;
 
   // Entry queries
   queryEntries(opts?: {

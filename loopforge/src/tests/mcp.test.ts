@@ -6,7 +6,8 @@
 
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { MemoryBackend } from "./_helpers.js";
+import { MemoryBackend, MemoryLoopStore } from "./_helpers.js";
+import type { LoopSessionDocument } from "../loop-store.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Helpers
@@ -126,7 +127,7 @@ describe("MCP — multi-round lifecycle", async () => {
     });
     const sessionId = String(start.sessionId);
 
-    // Round 1 → 2 (ascending quality [2, ...] avoids breaker)
+    // Round 1 → 2 (ascending success trajectory avoids breaker)
     const r1 = await TOOL_HANDLERS.loopforge_next(mgr, {
       sessionId,
       output: agentOutput({ success: false, violations: ["missed check"], shouldContinue: true }),
@@ -135,7 +136,7 @@ describe("MCP — multi-round lifecycle", async () => {
     assert.equal(r1.round, 2);
     assert.ok(typeof r1.prompt === "string");
 
-    // Round 2 → 3 (quality 5)
+    // Round 2 → 3 (roundSuccess true)
     const r2 = await TOOL_HANDLERS.loopforge_next(mgr, {
       sessionId,
       output: agentOutput({ success: true, shouldContinue: true }),
@@ -198,7 +199,7 @@ describe("MCP — multi-round lifecycle", async () => {
     });
     const sessionId = String(start.sessionId);
 
-    // Round 1 → 2 (use ascending quality to avoid breaker)
+    // Round 1 → 2 (use ascending successes to avoid breaker)
     const r1 = await TOOL_HANDLERS.loopforge_next(mgr, {
       sessionId,
       output: agentOutput({ success: false, violations: ["x"], shouldContinue: true }),
@@ -511,11 +512,11 @@ describe("MCP — status / list / stop / replay", async () => {
     mgr = new SessionManager(backend);
   });
 
-  it("status returns correct round, quality, status", async () => {
+  it("status returns correct round, roundSuccess, status", async () => {
     const start = await TOOL_HANDLERS.loopforge_start(mgr, { task: "Status test" });
     const sessionId = String(start.sessionId);
 
-    // Advance once to populate quality
+    // Advance once to populate roundSuccess and trajectory
     await TOOL_HANDLERS.loopforge_next(mgr, {
       sessionId,
       output: agentOutput({ success: true, shouldContinue: true }),
@@ -961,16 +962,16 @@ describe("MCP P0 lifecycle regressions", () => {
     assert.equal(lineageAfter, lineageBefore);
   });
 
-  it("persists a session snapshot with one vault replacement", async () => {
-    class CountingBackend extends MemoryBackend {
+  it("persists a session snapshot with one session write", async () => {
+    class CountingStore extends MemoryLoopStore {
       writes = 0;
-      override writeVault(data: Record<string, unknown>): void {
+      override writeSession(loopId: string, document: LoopSessionDocument): void {
         this.writes++;
-        super.writeVault(data);
+        super.writeSession(loopId, document);
       }
     }
 
-    const counting = new CountingBackend();
+    const counting = new CountingStore();
     const manager = new SessionManager(counting);
     const started = await manager.create({
       task: "Atomic session save",
@@ -982,9 +983,8 @@ describe("MCP P0 lifecycle regressions", () => {
     manager.save(session);
     assert.equal(counting.writes, 1);
 
-    const persisted = counting.queryEntries({
-      prefix: "loop:atomic-session-save:session",
-    })[0]?.loop_lineage?.round_snapshot as Record<string, unknown> | undefined;
+    const persisted = counting.readSession("atomic-session-save")
+      ?.entry?.loop_lineage?.round_snapshot as Record<string, unknown> | undefined;
     assert.equal(persisted?.schemaVersion, 1);
     assert.equal(persisted?.roundId, started.roundId);
   });

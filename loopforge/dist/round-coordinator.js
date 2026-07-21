@@ -1,7 +1,7 @@
 /** RoundCoordinator — Unified round-boundary state machine (v1.17).
  *
- * Encapsulates the shared round processing pipeline used by both
- * LoopRuntime (runtime.ts) and SessionManager (mcp/session.ts):
+ * Encapsulates the shared round processing pipeline used by
+ * SessionManager (mcp/session.ts):
  *
  *   verify → enforce → stop decision
  *
@@ -30,8 +30,8 @@ export class RoundCoordinator {
     /** Process a single round's self-evaluation through the decision pipeline:
      *  verify → enforce → stop decision.
      *
-     *  This is the single entry point called by both LoopRuntime and
-     *  SessionManager. The caller is responsible for:
+     *  This is the single entry point called by SessionManager.
+     *  The caller is responsible for:
      *  - Compiling the next prompt (if action is "continue")
      *  - Managing heartbeat / signal handlers (runtime only)
      *  - Memory injection (both paths, before calling processRound)

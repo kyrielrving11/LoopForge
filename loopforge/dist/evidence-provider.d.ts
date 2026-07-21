@@ -6,8 +6,8 @@
  * additional evidence sources (test runners, linters, bundle analysis)
  * can be added without touching the verification pipeline.
  *
- * Built-in provider: GitEvidenceProvider — wraps existing
- * captureGitFileState() logic.
+ * Built-in provider: GitEvidenceProvider — git file state capture with
+ * parallel async execution (v2.0.1) and a synchronous fallback.
  */
 import type { CommandEvidencePolicy } from "./policy.js";
 /** A snapshot of evidence captured by a single provider. */
@@ -93,11 +93,44 @@ export declare class CommandEvidenceProvider implements EvidenceProvider {
     capture(context?: EvidenceCaptureContext): Promise<ProviderSnapshot | null>;
     private snapshot;
 }
-/** Captures git file state (tracked, staged, untracked) via existing
- *  captureGitFileState() logic. */
+/** v1.17: Result of capturing git file state across all three categories. */
+export interface GitFileState {
+    /** Tracked files modified but unstaged (git diff --name-only). */
+    tracked: string[];
+    /** Files in the staging area (git diff --cached --name-only). */
+    staged: string[];
+    /** Untracked files not yet known to git (git ls-files --others --exclude-standard). */
+    untracked: string[];
+}
+/** v2.0.1: Capture git file state using parallel async execFile.
+ *
+ * Runs three git commands concurrently via Promise.all. Uses a single
+ * timeout (shared across all commands) and an optional AbortSignal for
+ * early cancellation. Shell-free (execFile, not exec).
+ *
+ * On any command failure, returns null — the caller should treat git
+ * evidence as unavailable and degrade gracefully.
+ *
+ * Performance: wall-clock time is max(single-command), not sum(3).
+ * On a normal repo (~200ms/command): ~200ms vs ~600ms sequential.
+ * On Windows with antivirus (~4s/command): ~4s vs ~12s sequential. */
+export declare function captureGitFileStateAsync(signal?: AbortSignal, timeoutMs?: number): Promise<GitFileState | null>;
+/** v1.17 (sync): Capture git file state using sequential execFileSync.
+ *
+ * @deprecated Use captureGitFileStateAsync() for the primary path.
+ * This sync fallback exists for legacy callers that cannot be made async
+ * (e.g. reconstructSession during startup). Uses execFileSync — shell-free,
+ * unlike the old execSync-based implementation. */
+export declare function captureGitFileState(): GitFileState | null;
+/** v1.16: Capture modified files as a flat sorted array.
+ *  @deprecated v1.17 — Use captureGitFileState() for full coverage. */
+export declare function captureGitModifiedFiles(): string[] | null;
+/** Captures git file state (tracked, staged, untracked) via the async
+ *  captureGitFileStateAsync() when a context is provided, falling back
+ *  to the synchronous captureGitFileState() for legacy callers. */
 export declare class GitEvidenceProvider implements EvidenceProvider {
     readonly name = "git";
-    capture(): ProviderSnapshot | null;
+    capture(context?: EvidenceCaptureContext): ProviderSnapshot | null | Promise<ProviderSnapshot | null>;
 }
 /** Extract merged file list from evidence snapshots for backward compat
  *  with runtimeFilesChanged (string[] | null).

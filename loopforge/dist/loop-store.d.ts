@@ -42,6 +42,7 @@ export interface LoopStore {
     appendEntries(entries: VaultEntry[]): number;
     replaceEntries(entries: VaultEntry[]): void;
     readSession(loopId: string): LoopSessionDocument | null;
+    writeSession(loopId: string, document: LoopSessionDocument): void;
     readRound(loopId: string, round: number): LoopRoundDocument | null;
     migrateLegacyVault(path?: string): LoopStoreMigrationResult;
 }
@@ -52,6 +53,7 @@ export declare class FileLoopStore implements LoopStore {
     withLock<T>(fn: () => T): T;
     listLoopIds(): string[];
     readSession(loopId: string): LoopSessionDocument | null;
+    writeSession(loopId: string, document: LoopSessionDocument): void;
     readRound(loopId: string, round: number): LoopRoundDocument | null;
     listEntries(loopId?: string): VaultEntry[];
     appendEntry(entry: VaultEntry): void;
@@ -63,14 +65,15 @@ export declare class FileLoopStore implements LoopStore {
     private readJson;
     private atomicWrite;
 }
-/** Compatibility adapter for legacy internal query code. Persistent truth is
- * still the typed per-loop documents above; no Markdown lineage is written. */
+/** @deprecated Use LoopStore directly.
+ *
+ *  Compatibility adapter so modules that still accept VaultBackend can
+ *  operate on a LoopStore. Persistent truth is the typed per-loop
+ *  documents; no Markdown lineage is written. */
 export declare class LoopStoreBackend implements VaultBackend {
     readonly store: LoopStore;
     constructor(store?: LoopStore);
     withLock<T>(fn: () => T): T;
-    readVault(): Record<string, unknown>;
-    writeVault(data: Record<string, unknown>): void;
     queryEntries(opts?: {
         prefix?: string;
         taskIdPattern?: string;
@@ -78,5 +81,24 @@ export declare class LoopStoreBackend implements VaultBackend {
     }): VaultEntry[];
     appendEntry(entry: VaultEntry): void;
     appendEntries(entries: VaultEntry[]): number;
+}
+/** Adapter that wraps a VaultBackend as a LoopStore for backward compat.
+ *
+ *  SessionManager uses this when a VaultBackend is provided directly so
+ *  VaultSessionStateStore can operate on typed session documents while
+ *  the underlying storage remains VaultBackend entries. */
+export declare class VaultBackendLoopStore implements LoopStore {
+    private readonly backend;
+    constructor(backend: VaultBackend);
+    withLock<T>(fn: () => T): T;
+    listLoopIds(): string[];
+    listEntries(loopId?: string): VaultEntry[];
+    appendEntry(entry: VaultEntry): void;
+    appendEntries(entries: VaultEntry[]): number;
+    replaceEntries(_entries: VaultEntry[]): void;
+    readSession(loopId: string): LoopSessionDocument | null;
+    writeSession(loopId: string, document: LoopSessionDocument): void;
+    readRound(loopId: string, round: number): LoopRoundDocument | null;
+    migrateLegacyVault(_path?: string): LoopStoreMigrationResult;
 }
 //# sourceMappingURL=loop-store.d.ts.map

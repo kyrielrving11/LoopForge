@@ -85,7 +85,6 @@ export type {
   SummaryPolicy,
   EnginePolicy,
   BackendPolicy,
-  RuntimePolicy,
   PromptPolicy,
   StateFilePolicy,
   EvidencePolicy,
@@ -96,6 +95,8 @@ export type {
 // Durable store
 export {
   FileLoopStore,
+  LoopStoreBackend,
+  VaultBackendLoopStore,
   LOOP_STORE_SCHEMA_VERSION,
 } from "./loop-store.js";
 export type {
@@ -135,21 +136,7 @@ export {
 
 export type { EngineMetrics, DelegationEntry } from "./engine.js";
 
-// Runtime (v1.2)
-export { LoopRuntime, run } from "./runtime.js";
-export { RuntimeStatus } from "./protocol.js";
-export type {
-  RoundContext,
-  AgentExecutor,
-  StopReason,
-  RoundStartInfo,
-  RoundCompleteInfo,
-  HeartbeatInfo,
-  TimeoutInfo,
-  HealthWarning,
-  RuntimeConfig,
-  RunResult,
-} from "./protocol.js";
+export type { StopReason } from "./protocol.js";
 
 // MCP (v1.3)
 export { McpServer } from "./mcp/server.js";

@@ -30,7 +30,7 @@ import {
 import type { SessionStateStore } from "../storage.js";
 import type { VaultEntry } from "../backends/interface.js";
 import { SessionManager } from "../mcp/session.js";
-import { MemoryBackend } from "./_helpers.js";
+import { MemoryBackend, MemoryLoopStore } from "./_helpers.js";
 
 function snapshot(provider: string): ProviderSnapshot {
   return {
@@ -194,7 +194,7 @@ describe("P2 pluggable storage", () => {
 
   it("provides vault adapters for session and round commit lookups", () => {
     const backend = new MemoryBackend();
-    const sessions = new VaultSessionStateStore(backend);
+    const sessions = new VaultSessionStateStore(new MemoryLoopStore());
     sessions.save({
       task_id: "loop:adapter:session",
       task_type: "session_state",
@@ -216,7 +216,7 @@ describe("P2 pluggable storage", () => {
 describe("P3 cross-process leases and checkpoint adapters", () => {
   it("atomically fences a second session owner until expiry", () => {
     const backend = new MemoryBackend();
-    const store = new VaultSessionStateStore(backend);
+    const store = new VaultSessionStateStore(new MemoryLoopStore());
     store.save({
       task_id: "loop:leased:session",
       task_type: "session_state",

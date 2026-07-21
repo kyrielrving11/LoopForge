@@ -142,4 +142,56 @@ describe("cognitive-state compiler", () => {
     });
     assert.deepEqual(rolling?.key_outcomes, ["[R2] accepted: Recovery now works"]);
   });
+
+  // ── PromptArtifact determinism + attempt differentiation ────────────────
+  // AGENTS.md hotspot: "Prompt changes require PromptArtifact budget,
+  // hashing, and same-round retry coverage."
+
+  it("produces deterministic prompt hashes for identical inputs", () => {
+    const request = makeLoopCompileRequest({
+      loop_id: "det",
+      round: 2,
+      task: "Implement atomic state",
+      constraints_from_plan: ["Preserve user data"],
+    });
+    const a = compileLoop(request, null);
+    const b = compileLoop(request, null);
+    assert.equal(a.prompt_artifact?.promptHash, b.prompt_artifact?.promptHash);
+    assert.equal(a.prompt, b.prompt);
+  });
+
+  it("produces different hashes for different attempt numbers on same round", () => {
+    const base = makeLoopCompileRequest({
+      loop_id: "attempts",
+      round: 3,
+      task: "Verify result",
+      rejection_notice: "Required command failed",
+    });
+    const a1 = compileLoop({ ...base, attempt: 1 }, null);
+    const a2 = compileLoop({ ...base, attempt: 2 }, null);
+    assert.notEqual(a1.prompt_artifact?.promptHash, a2.prompt_artifact?.promptHash);
+  });
+
+  it("honors L0 budget ceiling in prompt artifact", () => {
+    // L0 budget is 3000 chars. The compiler should respect this.
+    const response = compileLoop(makeLoopCompileRequest({
+      loop_id: "budget",
+      round: 3,
+      attempt: 2,
+      task: "Verify result",
+      rejection_notice: "Required command failed",
+      verification_flags: [{
+        severity: "error",
+        field: "success",
+        check: "required_evidence_failed",
+        detail: "npm test exited with code 1",
+      }],
+    }), null);
+    assert.equal(response.prompt_artifact?.level, "l0");
+    // L0 max is 3000 chars per policy — rendered prompt must be within budget
+    assert.ok(
+      (response.prompt?.length ?? 0) <= 3000,
+      `L0 prompt length ${response.prompt?.length} exceeds 3000 char budget`,
+    );
+  });
 });

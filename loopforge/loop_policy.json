@@ -2,15 +2,7 @@
   "version": "2",
   "constraints": { "retire_window": 3 },
   "summary": { "window": 5, "health_check_interval": 1 },
-  "engine": { "feedback_flush_interval": 5, "max_circuit_breaker": 3 },
-  "runtime": {
-    "max_rounds": 20,
-    "round_timeout_ms": 600000,
-    "heartbeat_interval_ms": 30000,
-    "stall_grace_ms": 300000,
-    "max_consecutive_errors": 3,
-    "pause_double_tap_ms": 3000
-  },
+  "engine": { "feedback_flush_interval": 5, "max_circuit_breaker": 3, "max_rounds": 20 },
   "prompt": {
     "injection_mode": "adaptive",
     "full_refresh_interval": 5,

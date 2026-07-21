@@ -274,13 +274,35 @@ export function assemblePromptArtifact(input: PromptAssemblyInput): PromptArtifa
   const evaluation = input.selfEvaluationBlock.trim()
     ? `${input.selfEvaluationBlock.trim()}\n`
     : "";
-  const footer = [
-    pointer,
-    "Execute the current task now. Do not generate another prompt.",
-    "When this attempt is finished, submit the structured LoopForge evaluation.",
+  const howToRespond = [
+    "## How to Complete This Round",
+    "",
+    "1. Execute the task described above. Do NOT generate another prompt or plan — act.",
+    "2. When finished, call the MCP tool **`loopforge_next`** with these parameters:",
+    "   - `sessionId`: the session ID from `loopforge_start`.",
+    "   - `evaluation`: a structured self-assessment object (see schema below).",
+    "",
+    "### Evaluation Rules",
+    "",
+    "- `success`: Set to **`true` ONLY** when ALL hard constraints are met AND",
+    "  the task goal is fully achieved. If anything remains incomplete, set `false`.",
+    "- `should_continue`: Set to **`false` ONLY** when the ENTIRE loop task is done.",
+    "  Partial progress or completed subtasks → `true`.",
+    "- `constraint_violations`: Be honest. List every constraint you actually violated.",
+    "- `execution_evidence.files_changed`: List files you modified — used for verification.",
+    "- `execution_evidence.test_results`: Report actual test runner output.",
+    "- `progress_estimate`: A number 0.0–1.0 reflecting overall task completion.",
+    "",
+    "### If the Prompt Says \"REJECTED\"",
+    "",
+    "- Re-execute the **same round**. Do NOT advance the round counter.",
+    "- Read the Required Fix section, address every issue, then submit again.",
+    "- Use `loopforge_next` with a corrected evaluation.",
     "",
     evaluation,
   ].join("\n");
+
+  const footer = [pointer, howToRespond].join("");
 
   const fixedText = header;
   const selected = mode === "pointer"

@@ -9,14 +9,7 @@ export interface SummaryPolicy {
 export interface EnginePolicy {
     feedback_flush_interval: number;
     max_circuit_breaker: number;
-}
-export interface RuntimePolicy {
     max_rounds: number;
-    round_timeout_ms: number;
-    heartbeat_interval_ms: number;
-    stall_grace_ms: number;
-    max_consecutive_errors: number;
-    pause_double_tap_ms: number;
 }
 /** Levels control state density only; reasoning strategy belongs to the Agent. */
 export interface PromptPolicy {
@@ -76,7 +69,6 @@ export interface LoopPolicy {
     constraints: ConstraintsPolicy;
     summary: SummaryPolicy;
     engine: EnginePolicy;
-    runtime: RuntimePolicy;
     prompt: PromptPolicy;
     backend: BackendPolicy;
     evolution: EvolutionPolicy;

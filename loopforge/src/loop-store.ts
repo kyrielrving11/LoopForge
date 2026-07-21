@@ -62,6 +62,7 @@ export interface LoopStore {
   appendEntries(entries: VaultEntry[]): number;
   replaceEntries(entries: VaultEntry[]): void;
   readSession(loopId: string): LoopSessionDocument | null;
+  writeSession(loopId: string, document: LoopSessionDocument): void;
   readRound(loopId: string, round: number): LoopRoundDocument | null;
   migrateLegacyVault(path?: string): LoopStoreMigrationResult;
 }
@@ -165,6 +166,11 @@ export class FileLoopStore implements LoopStore {
     if (!isRecord(value) || value.schemaVersion !== LOOP_STORE_SCHEMA_VERSION ||
         value.loopId !== loopId || !isRecord(value.entry)) return null;
     return value as unknown as LoopSessionDocument;
+  }
+
+  writeSession(loopId: string, document: LoopSessionDocument): void {
+    validateLoopId(loopId);
+    this.atomicWrite(join(this.loopDir(loopId), "session.json"), document);
   }
 
   readRound(loopId: string, round: number): LoopRoundDocument | null {
@@ -332,17 +338,15 @@ export class FileLoopStore implements LoopStore {
   }
 }
 
-/** Compatibility adapter for legacy internal query code. Persistent truth is
- * still the typed per-loop documents above; no Markdown lineage is written. */
+/** @deprecated Use LoopStore directly.
+ *
+ *  Compatibility adapter so modules that still accept VaultBackend can
+ *  operate on a LoopStore. Persistent truth is the typed per-loop
+ *  documents; no Markdown lineage is written. */
 export class LoopStoreBackend implements VaultBackend {
   constructor(readonly store: LoopStore = new FileLoopStore()) {}
 
   withLock<T>(fn: () => T): T { return this.store.withLock(fn); }
-  readVault(): Record<string, unknown> { return { entries: this.store.listEntries() }; }
-  writeVault(data: Record<string, unknown>): void {
-    const entries = Array.isArray(data.entries) ? data.entries.filter(isRecord) as VaultEntry[] : [];
-    this.store.replaceEntries(entries);
-  }
   queryEntries(opts?: {
     prefix?: string;
     taskIdPattern?: string;
@@ -359,4 +363,101 @@ export class LoopStoreBackend implements VaultBackend {
   }
   appendEntry(entry: VaultEntry): void { this.store.appendEntry(entry); }
   appendEntries(entries: VaultEntry[]): number { return this.store.appendEntries(entries); }
+}
+
+/** Adapter that wraps a VaultBackend as a LoopStore for backward compat.
+ *
+ *  SessionManager uses this when a VaultBackend is provided directly so
+ *  VaultSessionStateStore can operate on typed session documents while
+ *  the underlying storage remains VaultBackend entries. */
+export class VaultBackendLoopStore implements LoopStore {
+  constructor(private readonly backend: VaultBackend) {}
+
+  withLock<T>(fn: () => T): T {
+    return typeof this.backend.withLock === "function"
+      ? this.backend.withLock(fn)
+      : fn();
+  }
+
+  listLoopIds(): string[] {
+    return [...new Set(
+      this.backend.queryEntries()
+        .filter((e) => typeof e.loop_id === "string")
+        .map((e) => e.loop_id as string),
+    )].sort();
+  }
+
+  listEntries(loopId?: string): VaultEntry[] {
+    if (loopId) return this.backend.queryEntries({ prefix: `loop:${loopId}` });
+    return this.backend.queryEntries();
+  }
+
+  appendEntry(entry: VaultEntry): void { this.backend.appendEntry(entry); }
+  appendEntries(entries: VaultEntry[]): number { return this.backend.appendEntries(entries); }
+  replaceEntries(_entries: VaultEntry[]): void {
+    // Best-effort: not all VaultBackend implementations support bulk replace.
+    // The typed session path bypasses this method.
+  }
+
+  readSession(loopId: string): LoopSessionDocument | null {
+    const entry = this.backend.queryEntries({ prefix: `loop:${loopId}:session` })
+      .find((e) => e.task_type === "session_state" && e.loop_id === loopId);
+    if (!entry) return null;
+    return {
+      schemaVersion: LOOP_STORE_SCHEMA_VERSION,
+      loopId,
+      updatedAt: typeof entry.timestamp === "string"
+        ? entry.timestamp
+        : new Date().toISOString(),
+      entry,
+    };
+  }
+
+  writeSession(loopId: string, document: LoopSessionDocument): void {
+    const entry = document.entry;
+    // Ensure the entry carries identifying fields expected by queryEntries.
+    entry.task_type = "session_state";
+    entry.loop_id = loopId;
+    entry.task_id = `loop:${loopId}:session`;
+    // Session state lives in the vault entries list. The backend may
+    // provide readVault/writeVault as optional compat methods; if not,
+    // we fall back to appendEntry (which may create duplicates, but
+    // VaultSessionStateStore.load returns the first match).
+    const be = this.backend as unknown as Record<string, unknown>;
+    if (typeof be.readVault === "function" &&
+        typeof be.writeVault === "function") {
+      // Call via .call(be) so methods that reference `this` (e.g.
+      // MemoryBackend.readVault) keep their receiver.
+      const data = (be.readVault as () => Record<string, unknown>).call(be);
+      const entries = Array.isArray(data.entries)
+        ? data.entries as VaultEntry[]
+        : [];
+      const filtered = entries.filter(
+        (item) => !(item.task_type === "session_state" && item.loop_id === loopId),
+      );
+      (be.writeVault as (data: Record<string, unknown>) => void).call(
+        be,
+        { entries: [...filtered, entry] },
+      );
+      return;
+    }
+    this.backend.appendEntry(entry);
+  }
+
+  readRound(loopId: string, round: number): LoopRoundDocument | null {
+    const prefix = `loop:${loopId}:r${round}:`;
+    const entries = this.backend.queryEntries({ prefix });
+    if (entries.length === 0) return null;
+    return {
+      schemaVersion: LOOP_STORE_SCHEMA_VERSION,
+      loopId,
+      round,
+      updatedAt: entries[0].timestamp ?? new Date().toISOString(),
+      events: entries,
+    };
+  }
+
+  migrateLegacyVault(_path?: string): LoopStoreMigrationResult {
+    return { source: _path ?? "vault", imported: 0, skipped: 0, alreadyMigrated: true };
+  }
 }

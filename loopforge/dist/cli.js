@@ -8,7 +8,7 @@ import { initializeClient } from "./init.js";
 import { FileLoopStore } from "./loop-store.js";
 import { getPolicy, validateLoopId, writeDefaultPolicy } from "./policy.js";
 import { McpServer } from "./mcp/server.js";
-const VERSION = "2.0.0-rc.1";
+const VERSION = "2.0.1";
 const HELP = `LoopForge ${VERSION}
 
 Usage:

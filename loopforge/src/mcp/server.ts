@@ -15,7 +15,7 @@ import {
   validateToolInput,
 } from "./tools.js";
 
-const SERVER_INFO = { name: "loopforge-mcp", version: "2.0.0" };
+const SERVER_INFO = { name: "loopforge-mcp", version: "2.0.1" };
 
 interface JsonRpcRequest {
   jsonrpc: "2.0";

@@ -12,8 +12,11 @@
  *                 modified). Flags become hard constraints — the agent
  *                 must respond in the next round.
  */
-import { execSync } from "node:child_process";
 import { makeVerificationFlag, makeVerificationResult } from "./protocol.js";
+// Git capture functions moved to evidence-provider.ts (v2.0.1).
+// Re-export for backward compatibility — new code should import from
+// evidence-provider.ts directly.
+export { captureGitFileState, captureGitModifiedFiles, } from "./evidence-provider.js";
 // ═══════════════════════════════════════════════════════════════════════════
 // Helpers
 // ═══════════════════════════════════════════════════════════════════════════
@@ -33,48 +36,6 @@ function entryViolations(entry) {
     if (Array.isArray(viols))
         return viols.filter((v) => typeof v === "string");
     return [];
-}
-/** v1.17: Capture all git file state — modified, staged, and untracked.
- *  Returns null if git is unavailable. Each list is sorted.
- *  5-second timeout per command prevents hanging on large repos. */
-export function captureGitFileState() {
-    try {
-        const trackedOut = execSync("git diff --name-only", {
-            encoding: "utf-8",
-            timeout: 5000,
-            stdio: ["ignore", "pipe", "ignore"],
-        });
-        const stagedOut = execSync("git diff --cached --name-only", {
-            encoding: "utf-8",
-            timeout: 5000,
-            stdio: ["ignore", "pipe", "ignore"],
-        });
-        const untrackedOut = execSync("git ls-files --others --exclude-standard", {
-            encoding: "utf-8",
-            timeout: 5000,
-            stdio: ["ignore", "pipe", "ignore"],
-        });
-        return {
-            tracked: trackedOut.trim().split("\n").filter(f => f.length > 0).sort(),
-            staged: stagedOut.trim().split("\n").filter(f => f.length > 0).sort(),
-            untracked: untrackedOut.trim().split("\n").filter(f => f.length > 0).sort(),
-        };
-    }
-    catch {
-        return null;
-    }
-}
-/** v1.16: Capture the current set of modified files according to git.
- *  Returns a sorted array of relative file paths, or null if git is unavailable.
- *  Delegates to `git diff --name-only` — no staging or committing.
- *  5-second timeout prevents hanging on large repos.
- *  @deprecated v1.17 — Use captureGitFileState() for full staged/untracked coverage. */
-export function captureGitModifiedFiles() {
-    const state = captureGitFileState();
-    if (!state)
-        return null;
-    // Merge all categories into a single sorted list (backward compat)
-    return [...new Set([...state.tracked, ...state.staged, ...state.untracked])].sort();
 }
 // ═══════════════════════════════════════════════════════════════════════════
 // Individual checks — each returns a VerificationFlag or null
@@ -264,68 +225,47 @@ function checkFilesIntegrity(selfEval, runtimeFilesChanged) {
     }
     return null;
 }
-/** v1.18: Cross-validate agent-reported files_changed against evidence
- *  snapshots from all configured providers.
+/** v1.18: Cross-validate agent-reported files_changed against git evidence.
  *
- *  For the git provider: compares agent's execution_evidence.files_changed
- *  against the git snapshot's merged file list (same logic as
- *  checkFilesIntegrity but driven by ProviderSnapshot instead of
- *  raw string array).
+ *  Compares agent's execution_evidence.files_changed against the git
+ *  snapshot's merged file list (same logic as checkFilesIntegrity but
+ *  driven by ProviderSnapshot instead of raw string array).
  *
- *  For other providers: contributes an informational flag noting the
- *  provider ran but no structural cross-check is implemented yet. */
+ *  Non-git evidence providers are cross-validated separately by
+ *  checkCommandEvidenceIntegrity. */
 function checkEvidenceIntegrity(selfEval, evidenceSnapshots) {
     if (!selfEval.execution_evidence)
         return null;
     if (evidenceSnapshots.length === 0)
         return null;
-    // Git provider cross-validation
     const gitSnap = evidenceSnapshots.find((s) => s.provider === "git");
-    if (gitSnap) {
-        const reported = [...selfEval.execution_evidence.files_changed].sort();
-        const actual = [...gitSnap.files].sort();
-        if (reported.length === 0 && actual.length === 0) {
-            // Both empty — git is clean. Fall through to the
-            // non-git informational flag below instead of returning null early.
-        }
-        else if (reported.length === 0 && actual.length > 0) {
-            return makeVerificationFlag({
-                severity: "warn",
-                field: "files_changed",
-                check: "evidence_integrity",
-                detail: `Agent reported no files changed but evidence shows: ${actual.join(", ")}`,
-            });
-        }
-        else {
-            const ghostFiles = reported.filter((f) => !actual.includes(f));
-            const missedFiles = actual.filter((f) => !reported.includes(f));
-            if (ghostFiles.length > 0 || missedFiles.length > 0) {
-                const parts = [];
-                if (ghostFiles.length > 0)
-                    parts.push(`unconfirmed: [${ghostFiles.join(", ")}]`);
-                if (missedFiles.length > 0)
-                    parts.push(`unreported: [${missedFiles.join(", ")}]`);
-                return makeVerificationFlag({
-                    severity: "warn",
-                    field: "files_changed",
-                    check: "evidence_integrity",
-                    detail: `Agent files_changed doesn't match evidence: ${parts.join("; ")}`,
-                });
-            }
-        }
-    }
-    // Non-git providers: emit an informational flag so the agent knows
-    // which providers ran. Structural cross-validation for non-git
-    // providers is not yet implemented; the flag is informational only.
-    const nonGitProviders = evidenceSnapshots
-        .filter((s) => s.provider !== "git")
-        .map((s) => s.provider);
-    if (nonGitProviders.length > 0) {
+    if (!gitSnap)
+        return null;
+    const reported = [...selfEval.execution_evidence.files_changed].sort();
+    const actual = [...gitSnap.files].sort();
+    if (reported.length === 0 && actual.length === 0)
+        return null;
+    if (reported.length === 0 && actual.length > 0) {
         return makeVerificationFlag({
-            severity: "info",
-            field: "execution_evidence",
+            severity: "warn",
+            field: "files_changed",
             check: "evidence_integrity",
-            detail: `Evidence providers ran: ${nonGitProviders.join(", ")}. Automated cross-validation of agent claims against these providers is not yet implemented.`,
+            detail: `Agent reported no files changed but evidence shows: ${actual.join(", ")}`,
+        });
+    }
+    const ghostFiles = reported.filter((f) => !actual.includes(f));
+    const missedFiles = actual.filter((f) => !reported.includes(f));
+    if (ghostFiles.length > 0 || missedFiles.length > 0) {
+        const parts = [];
+        if (ghostFiles.length > 0)
+            parts.push(`unconfirmed: [${ghostFiles.join(", ")}]`);
+        if (missedFiles.length > 0)
+            parts.push(`unreported: [${missedFiles.join(", ")}]`);
+        return makeVerificationFlag({
+            severity: "warn",
+            field: "files_changed",
+            check: "evidence_integrity",
+            detail: `Agent files_changed doesn't match evidence: ${parts.join("; ")}`,
         });
     }
     return null;
@@ -354,6 +294,119 @@ function checkRequiredCommandEvidence(selfEval, evidenceSnapshots) {
             field: "execution_evidence",
             check: "required_command_failed",
             detail: `Agent claims success but required command "${name}" ${String(status)}${exitCode}`,
+        });
+    }
+    return null;
+}
+/** Best-effort parse of test counts from common test-runner output formats.
+ *
+ *  Scans the last 2000 characters of stdout (where summary lines typically
+ *  appear) and tries patterns in descending specificity order. Returns null
+ *  when the output format is unrecognized, stdout is empty, or a confident
+ *  parse cannot be made.
+ *
+ *  Recognized formats: Jest verbose/compact, Mocha, pytest/unittest, Go test,
+ *  and PHPUnit OK summaries. */
+export function parseTestOutput(stdout) {
+    if (!stdout)
+        return null;
+    const tail = stdout.length > 2000 ? stdout.slice(-2000) : stdout;
+    let match;
+    // 1. Jest verbose: "Tests: 1 failed, 8 passed, 9 total"
+    match = tail.match(/Tests:\s*(\d+)\s+failed,\s*(\d+)\s+passed,\s*(\d+)\s+total/i);
+    if (match) {
+        return { failed: Number(match[1]), passed: Number(match[2]), total: Number(match[3]), skipped: 0 };
+    }
+    // 2. Jest compact: "Tests: 8 passed, 9 total"
+    match = tail.match(/Tests:\s*(\d+)\s+passed,\s*(\d+)\s+total/i);
+    if (match) {
+        const passed = Number(match[1]);
+        const total = Number(match[2]);
+        return { passed, failed: total - passed, total, skipped: 0 };
+    }
+    // 3. Mocha: "8 passing" + optional "2 failing"
+    const mochaPass = tail.match(/(\d+)\s+passing/i);
+    if (mochaPass) {
+        const mochaFail = tail.match(/(\d+)\s+failing/i);
+        const passed = Number(mochaPass[1]);
+        const failed = mochaFail ? Number(mochaFail[1]) : 0;
+        return { passed, failed, total: passed + failed, skipped: 0 };
+    }
+    // 4. Go test: count "--- PASS:" and "--- FAIL:" lines
+    const goPassCount = (tail.match(/---\s+PASS:/g) || []).length;
+    const goFailCount = (tail.match(/---\s+FAIL:/g) || []).length;
+    if (goPassCount > 0 || goFailCount > 0) {
+        return { passed: goPassCount, failed: goFailCount, total: goPassCount + goFailCount, skipped: 0 };
+    }
+    // 5. pytest / unittest: "8 passed, 1 failed" or "8 passed"
+    match = tail.match(/(\d+)\s+passed[,;\s]+(\d+)\s+failed/i);
+    if (match) {
+        return { passed: Number(match[1]), failed: Number(match[2]), total: Number(match[1]) + Number(match[2]), skipped: 0 };
+    }
+    // pytest compact: "8 passed" (with a reasonable context hint)
+    match = tail.match(/(?:=\s+test session|\b(?:passed|failed)\b)/i);
+    if (match) {
+        const pCount = tail.match(/(\d+)\s+passed/i);
+        const fCount = tail.match(/(\d+)\s+failed/i);
+        if (pCount || fCount) {
+            const passed = pCount ? Number(pCount[1]) : 0;
+            const failed = fCount ? Number(fCount[1]) : 0;
+            return { passed, failed, total: passed + failed, skipped: 0 };
+        }
+    }
+    // 6. PHPUnit: "OK (8 tests, 16 assertions)"
+    match = tail.match(/OK\s*\((\d+)\s+tests?/i);
+    if (match) {
+        const total = Number(match[1]);
+        return { passed: total, failed: 0, total, skipped: 0 };
+    }
+    return null;
+}
+/** Cross-validate agent-reported test_results against command evidence output.
+ *
+ *  For each command provider whose status is "passed" and output is not
+ *  truncated, attempts to parse test counts from stdout. Mismatched counts
+ *  produce a warn-level flag; failures hidden by the agent (reported 0 failed
+ *  when the command shows >0) produce an error-level flag.
+ *
+ *  Non-command evidence providers are skipped (no structural cross-check is
+ *  defined for them yet). */
+function checkCommandEvidenceIntegrity(selfEval, evidenceSnapshots) {
+    const reported = selfEval.execution_evidence?.test_results;
+    if (!reported)
+        return null;
+    for (const snapshot of evidenceSnapshots) {
+        if (snapshot.data.kind !== "command")
+            continue;
+        if (snapshot.data.status !== "passed")
+            continue;
+        if (snapshot.data.truncated === true)
+            continue;
+        const stdout = typeof snapshot.data.stdout === "string" ? snapshot.data.stdout : "";
+        const parsed = parseTestOutput(stdout);
+        if (!parsed)
+            continue;
+        const mismatches = [];
+        if (parsed.passed !== reported.passed) {
+            mismatches.push(`passed: reported ${reported.passed}, command shows ${parsed.passed}`);
+        }
+        if (parsed.failed !== reported.failed) {
+            mismatches.push(`failed: reported ${reported.failed}, command shows ${parsed.failed}`);
+        }
+        if (mismatches.length === 0) {
+            // Counts match exactly — evidence supports the agent's claim.
+            continue;
+        }
+        const name = typeof snapshot.data.commandName === "string"
+            ? snapshot.data.commandName
+            : snapshot.provider;
+        // Agent hides failures → error. Other mismatch → warn.
+        const severity = parsed.failed > 0 && reported.failed === 0 ? "error" : "warn";
+        return makeVerificationFlag({
+            severity,
+            field: "test_results",
+            check: "command_evidence_mismatch",
+            detail: `Agent test_results don't match "${name}" output: ${mismatches.join("; ")}`,
         });
     }
     return null;
@@ -397,6 +450,8 @@ export function verifySelfEvaluation(selfEval, currentRound, vaultEntries, prevS
         // v1.18: Cross-validate against evidence snapshots from all providers
         () => checkEvidenceIntegrity(selfEval, evidenceSnapshots),
         () => checkRequiredCommandEvidence(selfEval, evidenceSnapshots),
+        // v2.0: Cross-validate agent-reported test_results against command output
+        () => checkCommandEvidenceIntegrity(selfEval, evidenceSnapshots),
     ];
     for (const run of checks) {
         const flag = run();

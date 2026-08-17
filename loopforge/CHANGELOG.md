@@ -1,8 +1,659 @@
 # Changelog
 
-## 2.0.0-rc.1 (2026-07-13)
+## 3.0.0 (2026-08-14)
 
-This release candidate changes LoopForge from a prompt-technique framework into
+**Planning-first workflow and evidence-governed completion.** LoopForge is now
+positioned as the state, constraint, plan-execution, and evidence governance
+layer for long-horizon tasks, while the external Agent remains responsible for
+all code reading, editing, testing, and engineering decisions.
+
+- Added process-level workspace/store binding to `loopforge_start` and
+  `loopforge_resume`, canonical workspace identity, recovery diagnostics, and
+  a non-authoritative Store locator without increasing the 12-tool MCP surface.
+- Routed policy, Git/command evidence, typed Store paths, and Markdown
+  projections through the bound workspace. Typed JSON remains the only
+  recoverable truth; incomplete or corrupt Stores stop recovery.
+- Added CLI `--workspace` and `--store-dir` support for MCP, doctor, inspect,
+  migrate, and explicit client registration.
+
+- Added workflow phases: planning, awaiting approval, executing, auditing, and
+  terminal. New sessions always use the v3 planning/report contract.
+- Added session-scoped approval policies: `risk_only` (the default) lets
+  low-risk revisions and stage refinements proceed automatically, while
+  `every_revision` enables explicit user review at every plan version. Fixed
+  high-risk tags remain mandatory approval gates in both modes.
+- Added structured versioned plans with stable `ps-*` IDs, DAG validation,
+  rolling refinement, acceptance/evidence requirements, and a 50-step limit.
+- Added fixed high-risk approval tags and exact `approvalId`/`planVersion`
+  fencing for destructive, migration, production, credential, external-side-
+  effect, and public API breaking work.
+- Added `loopforge_plan_submit`, `loopforge_plan_update`, and
+  `loopforge_plan_approve`; all advancing responses now include workflow state
+  and `requiredAction`.
+- Added one-active-step execution, structured step outcomes, plan-aware drift
+  priority, final audit gating, plan-aware replay/status/state Markdown, and
+  backtrack restoration of the effective plan revision.
+- Replaced the pre-release self-evaluation payload with a compact fenced
+  `roundId + report` contract. Runtime Git/command evidence is normalized into
+  a typed evidence envelope with stable `ac-*`, `er-*`, and `cr-*` claims.
+- Added deterministic `step_start`, `step_continue`, `step_retry`,
+  `refine_plan`, and `audit` prompt modes. Prompts remain per-attempt artifacts,
+- Added the adaptive `minimal`/`full` planning profiles, deterministic plan
+  change impact classification, structured plan-linter diagnostics, and
+  bounded repair hints for planning/refinement failures.
+- Added derived `ro-*` regression obligations from verified evidence checks;
+  later step completion and audit evidence now protect earlier passing checks
+  without adding a second persistence store.
+  while the approved step stays stable until its evidence closure is accepted.
+- Replaced subjective v3 progress stall checks with material evidence movement,
+  added derived workflow readiness/progress, capability preflight on
+  start/resume, and exact external-gate recovery through `loopforge_resume`.
+- Made the material-evidence stall window honor
+  `evolution.progress_stall_rounds` with a three-round default, and compare Git
+  content fingerprints so unchanged dirty paths do not reset the window.
+- Removed the audit-only requirement for a runtime check when every audit claim
+  already has other runtime-verified evidence. Agent-claimed checks remain
+  insufficient, and required commands and `ro-*` obligations still require a
+  verified passing check.
+- Replaced the JSON-in-string compiler `plan_source` bridge with a typed prompt
+  compilation context; removed dead Agent-trust and lexical-alignment compiler
+  state; and retained useful v3 outcomes/milestones as `ExecutionHistorySummary`.
+- Renamed the packaged skill to `$loopforge`. Client registration now requires
+  explicit `--register` and uses the installed absolute Node/CLI path.
+- Added workflow doctor checks, GitHub Actions CI, contribution/security
+  policies, UTF-8/LF attributes, and synchronized English/Chinese docs.
+- Removed pre-release session compatibility, embedded evaluation parsing,
+  direct-execution mode, the internal SelfEvaluation/sub-goal task model, and
+  dead v2 policy controls. Schema 1 and missing-workflow sessions remain
+  untouched on disk and are reported under `incompatibleSessions`.
+- Reduced the root package API to supported v3 plan/report/workflow types,
+  pure validators, stable claim IDs, and replay. Removed the
+  `loopforge/compiler` export; Engine, Compiler, SessionManager, normalized
+  evidence, and transaction types are internal implementation details.
+- Upgraded typed session and round transaction documents to schema 3. Report
+  parsing is strict at every nested level, and `contextRequest` now has one
+  canonical wire shape: `emphasize` and `confusion_points`.
+- Added refinement lineage (`refinesStepId`/`refinementLinks`), typed workflow
+  events, deterministic read-only governance graph replay, graph diagnostics,
+  and active-step graph-slice prompt context. The graph is derived only and
+  never schedules work or becomes a second persistence truth.
+- Version sources are unified at `3.0.0`. Zero runtime dependencies remain.
+
+## 2.11.0 (2026-08-05)
+
+**Stable IDs across constraints and criteria, strengthened drift clarification, and
+backtrack workspace restore.** Three reinforcing improvements that eliminate
+Jaccard false positives/negatives from constraint matching, prevent R7
+clarification abuse, and close the state-vs-filesystem consistency gap after
+backtrack.
+
+### Constraint & Criterion ID System — v2.11
+
+The sub-goal pattern (`sg-XXXXXXXX`, stable hash-derived IDs used for exact
+matching with Jaccard fallback) is now extended to constraints and criteria.
+This eliminates the four remaining Jaccard-only matching sites that caused
+false positives and false negatives.
+
+- **`ConstraintMeta.id`** — stable constraint ID (`c-XXXXXXXX`) derived from
+  text hash, populated by `manageConstraintLifecycle()`.
+- **`deriveConstraintId()` / `deriveCriterionId()` / `isConstraintId()` /
+  `isCriterionId()`** — ID derivation and pattern-matching helpers, same hash
+  strategy as `deriveSubGoalId()`.
+- **ID-first matching** — `findDiscoveredRound()`, `findLastViolatedRound()`,
+  `detectNewCriteria()`, and `matchEmphasize()` all try exact ID match first,
+  then fall back to Jaccard for backward compatibility.
+- **IDs rendered everywhere** — L1 prompts, L2 state file (Success Criteria,
+  Hard Constraints, Active Constraints, Inactive Constraints), and the
+  self-eval template all show IDs with `\`c-XXXXXXXX\`` / `\`cr-XXXXXXXX\`` tags.
+- **`constraint_id_enabled`** — new `EvolutionPolicy` field (default `true`).
+  Set to `false` to restore pre-v2.11 pure-Jaccard behavior.
+- **470 tests** (was 460). IDs are deterministic — same text always produces
+  same ID across rounds.
+
+### Drift Clarification Strengthening — v2.12
+
+R7 previously waived rejection for any `drift_clarification` ≥ 20 characters —
+trivially gameable with filler text. Now requires a **semantic anchor** and
+tracks consecutive weak clarifications.
+
+- **`hasSemanticAnchor()`** — checks for constraint/criterion/sub-goal IDs
+  (`c-`/`cr-`/`sg-XXXXXXXX`) or file paths in the clarification text.
+- **Substantive clarification = length ≥ 20 + anchor present** → accept,
+  `clarification_accepted: true` on EnforcementResult.
+- **Weak clarification = length ≥ 20 but no anchor** → increment streak.
+  Streak 1: reject with stronger instructions. Streak ≥
+  `drift_clarification_max_streak` (default 3): terminate.
+- **`driftClarificationStreak`** — new field on `McpSession`, persisted in
+  vault. Reset to 0 on any round without intent_drift.
+- **`drift_clarification_max_streak`** — new `EnginePolicy` field (default 3).
+  Set to 0 to disable the streak limit (pre-v2.12 behavior).
+- **479 tests** (was 470). Streak tracks substantiveness — genuine pivots with
+  recognized IDs don't count against the agent.
+
+### Backtrack Workspace Restore — v2.13
+
+Backtrack previously only reset LoopForge's vault state — the physical
+working directory retained changes from the failed rounds. Now the backtrack
+prompt includes concrete restore instructions, and the verification gate
+enforces the check on the next submission.
+
+- **Git HEAD capture** — `GitEvidenceProvider` now captures `git rev-parse HEAD`
+  as `head` in `ProviderSnapshot.data` for restore point tracking.
+- **Backtrack prompt rewrite** — `buildBacktrackPrompt()` now includes a
+  dedicated "Workspace Restore Required" section with concrete commands
+  (`git checkout -- . && git clean -fd`, `git stash` option), affected file
+  lists from skipped rounds, non-git fallback, and a verification warning.
+- **`checkBacktrackWorkspaceRestore()`** — new verification gate check. Compares
+  the agent's `files_changed` against skipped-round files. ≥ 3 overlap → error
+  flag → enforcement reject. 1–2 overlap → warn.
+- **`backtrackSkippedFiles`** — threaded through session → round driver →
+  round transaction → verification gate. Persisted in vault for crash recovery.
+- **`backtrack_auto_restore`** — new `EnginePolicy` field (default `false`).
+  DANGEROUS: when true, LoopForge auto-executes `git stash + reset --hard`
+  on backtrack. Default-off — the prompt + verification approach is the safe
+  default.
+- **491 tests** (was 479).
+
+### Policy additions
+
+```json
+{
+  "engine": {
+    "drift_clarification_max_streak": 3,
+    "backtrack_auto_restore": false
+  },
+  "evolution": {
+    "constraint_id_enabled": true
+  }
+}
+```
+
+## 2.10.0 (2026-08-05)
+
+**Prompt Requests and Backtrack.** Two interlocking mechanisms that give the
+model structured influence over its own prompts and a way to recover from dead
+ends without human intervention.
+
+### Prompt Requests (`prompt_requests` — v2.9)
+
+The model can now express information needs at the end of each round via a new
+optional `prompt_requests` field in SelfEvaluation:
+
+- **`emphasize`** — constraints, discoveries, or decisions the model needs
+  highlighted. Matched via Jaccard similarity against active state, pulled into
+  a "Critical Context" section. Pure reordering — zero token overhead.
+- **`expand`** — structured sections (`milestones`, `sub_goals`,
+  `constraint_lifecycle`, `agent_trust`, `progress`, `loop_synthesis`) the model
+  needs in full L2 detail while in L1 mode. Max 1 section in L1.
+- **`confusion_points`** — things the model is confused about. Rendered at the
+  prompt top as "Confusion Alerts" with auto-matched state section pointers.
+
+Level behavior: L2 honors all (emphasize ≤5, confusion ≤3). L1 honors limited
+(emphasize ≤3, expand ≤1, confusion first entry only). L0 ignores all.
+
+### Backtrack (`backtrack` — v2.10)
+
+When the enforcement gate detects a dead end (progress stall R4, flat terminal
+R5), instead of terminating the loop, the agent is now rolled back to the last
+**clean round** — an accepted round with no error-level verification flags:
+
+- **Safe restore point** — computed on-demand from vault entries. Scans
+  backwards from the current round, max depth 3 (policy-controlled). Skips
+  rounds with errors, rejections, or regressions.
+- **Lessons injected** — the backtrack prompt includes a "Why This Happened"
+  diagnosis and "What Must Change" guidance, specific to the trigger rule.
+- **Preserved discoveries** — `discovered_constraints` from skipped rounds
+  are merged into the restored state's active constraints.
+- **Terminate fallback** — if no clean round is found within maxDepth,
+  backtrack falls through to terminate.
+
+Backtrack only triggers from R4 and R5. R6 (max rejections), R1 (fake success),
+R3 (empty success), and R7 (intent drift) behavior is unchanged.
+
+### Policy additions
+
+```json
+{
+  "engine": {
+    "backtrack_enabled": true,
+    "backtrack_max_depth": 3,
+    "backtrack_preserve_discoveries": true
+  },
+  "prompt": {
+    "max_emphasize_l2": 5,
+    "max_emphasize_l1": 3,
+    "max_expand_l1": 1,
+    "max_confusion_points": 3
+  }
+}
+```
+
+## 2.8.0 (2026-08-05)
+
+**L2 Pointer Mode, Sub-Goal ID referencing, and Drift Clarification.** Three
+independent improvements that together reduce MCP tool result size by ~60% at
+L2, eliminate Jaccard-based semantic guessing for sub-goal matching, and give
+the agent a way to explain intentional pivots before enforcement rejects them.
+
+### L2 Pointer Mode (`l2_pointer_enabled`)
+
+When an L2 prompt's full state blob (~40K chars) is returned as an MCP tool
+result, it is a prime target for context compaction — and when it disappears,
+the agent loses all cognitive state. The pointer mode solves this by keeping
+the full state exclusively in `.loopforge/state/<loopId>-state.md` and
+rendering a structured dashboard in the prompt instead.
+
+- **New policy field `l2_pointer_enabled`** (default `true`). When enabled, L2
+  prompts skip the inline `fullStateMarkdown` blob and rely on the structured
+  path B sections. The state file remains the durable source of truth — it is
+  written every round regardless of level.
+- **Four missing sections added to L2 path B** (previously only available in
+  the full state markdown):
+  - **Progress Dashboard** — criteria met/remaining, completion estimate, test
+    results, files changed.
+  - **Retired Constraints** — constraints the agent has withdrawn, shown
+    struck-through.
+  - **Inactive Constraints** — discovered constraints demoted after prolonged
+    inactivity, with decay metadata (last violated, rounds inactive).
+  - **Agent Trust** — current trust score with visual bar, plus trend over the
+    last 10 rounds.
+- **L2 prompt size reduced from ~25–40K to ~15K** (60% reduction). The
+  structured dashboard is small enough to survive context compaction, and the
+  "⚠️ Read the full state file before acting" instruction (from P1) now has
+  genuine force — the model must read the file for complete state.
+- **`compileLoop()`** conditionally passes `fullStateMarkdown: undefined` when
+  `l2_pointer_enabled && level === "l2"`, forcing `l2Sections()` to take the
+  structured path B.
+- Backward compatible: set `"l2_pointer_enabled": false` in `loop_policy.json`
+  to restore the pre-2.8 inline blob behavior.
+
+### L0 / L1 / L2 Behavior Matrix
+
+| Level | Trigger | Prompt Content | ~Size | State File |
+|-------|---------|----------------|-------|------------|
+| **L0** | Retry after rejection, empty failed round | Objective + task + hard constraints + verification flags + retry requirements + optional changes | ~3K | Always written (full canonical state) |
+| **L1** | Normal continuation | L0 base + active constraints + remaining criteria + blockers + compact sub-goal dashboard (max 5, with IDs) + discoveries + rolling outcomes + recurring issues + next_action | ~7K | Always written |
+| **L2 (pointer)** | First round, plan boundary, recovery, periodic refresh, drift | L1 base + full structured dashboard: milestones, full sub-goal dashboard (with IDs), Progress Dashboard, Retired/Inactive Constraints, Agent Trust, loop synthesis | ~15K | Always written (sole source of full detail) |
+| **L2 (blob)** | `l2_pointer_enabled: false` | L1 base + monolithic full state markdown inline | ~40K | Always written (redundant with inline blob) |
+
+### Sub-Goal ID Referencing
+
+Sub-goals have always had stable IDs (`sg-XXXXXXXX` derived from description
+hash), but the agent never saw them — so `matchSubGoal()` had to guess which
+sub-goal the agent meant using Jaccard token similarity on natural-language
+descriptions. Now IDs are visible and matchable.
+
+- **Sub-goal IDs rendered in prompts** — L1 compact dashboard, L2 full
+  dashboard, and the state file all show `[\`sg-XXXXXXXX\`]` before each
+  sub-goal description. The agent can copy-paste IDs into its self-evaluation.
+- **`matchSubGoal()` now tries exact ID match first**, then falls back to
+  Jaccard similarity on descriptions. If the agent writes `"sg-a3f2b1c0"` in
+  `completed_subtasks`, it matches deterministically without any semantic guesswork.
+- **`buildSelfEvalBlock()` template updated** — placeholder values for
+  `completed_subtasks` / `blocked_subtasks` / `canceled_subtasks` now show the
+  ID format and reference the Sub-Goal Dashboard.
+- **Fully backward compatible** — the agent can still use natural-language
+  descriptions; Jaccard fallback is unchanged.
+
+### Drift Clarification
+
+When the verification gate detects intent-action drift (the agent said it would
+do X but did Y), the enforcement gate R7 would reject the round immediately —
+even if the pivot was intentional and well-reasoned. Now the agent gets a chance
+to explain.
+
+- **New `drift_clarification` field** on `SelfEvaluation` and
+  `LoopRoundResult`. Carried through the full pipeline: self-eval parsing →
+  vault persistence → round compilation.
+- **Conditional prompt injection** — `buildSelfEvalBlock()` now accepts an
+  optional `prevDriftFlags` parameter. When the previous round had
+  `intent_drift` or `subgoal_drift` flags, the self-eval template includes a
+  `drift_clarification` field and a "⚠️ Drift Detected" notice asking the
+  agent to explain the pivot.
+- **R7 enforcement softened** — `enforceIntentDrift()` now checks
+  `drift_clarification`. If the agent provides a substantive explanation (≥ 20
+  characters), the rejection is waived. Empty, absent, or too-short
+  clarifications still trigger the normal reject → terminate path.
+- **Clarification is not a free pass** — consecutive drift flags without
+  meaningful clarification still escalate to termination. And the verification
+  gate still produces drift flags honestly; only enforcement is affected.
+
+### File-Level Changes
+
+| File | Changes |
+|------|---------|
+| `protocol.ts` | `drift_clarification` field on `SelfEvaluation` + `LoopRoundResult`; sub-goal field comments updated for ID usage |
+| `self-eval.ts` | Parse `drift_clarification` in `buildSelfEvaluation()` |
+| `policy.ts` | New `l2_pointer_enabled` field on `PromptPolicy` (default `true`) |
+| `prompt-assembler.ts` | Sub-goal IDs in L1/L2 dashboards; 4 new sections in L2 path B (Progress, Retired, Inactive Constraints, Agent Trust) |
+| `canonical-state.ts` | Sub-goal IDs in state file sub-goal dashboard |
+| `loop-compiler.ts` | `matchSubGoal()` ID-first matching; `buildSelfEvalBlock()` drift injection + ID hints; `compileLoop()` L2 pointer mode |
+| `enforcement-gate.ts` | R7 accepts `drift_clarification` ≥ 20 chars |
+| `engine.ts` | Propagate `drift_clarification` to `LoopRoundResult` |
+| `mcp/session.ts` | Propagate `drift_clarification` through session pipeline |
+
+**429 tests (was 415). Zero new dependencies, zero new persistence formats,
+zero breaking protocol changes.**
+
+**Enforcement diagnostic feedback and human-in-the-loop escalation.** The
+enforcement gate now tells the agent *exactly* which claims don't match
+evidence, and escalating rules (R4/R5/R6) issue a "Seek Human Guidance"
+notice before terminating — giving the agent one more chance to course-correct.
+
+### Diagnostic Feedback
+
+- **`buildDiagnosticGap()`** — new helper that translates `VerificationFlag[]`
+  into a structured "Evidence Gap" section in the rejection prompt. Each
+  error/warn flag becomes a concrete claim-vs-evidence mismatch statement
+  (`🚫 [check] field — detail`), so the agent knows precisely what to fix
+  instead of retrying blindly.
+- **`buildRejectionPrompt()` now accepts `verificationFlags`** (optional,
+  default `[]`). When flags are present, the "Evidence Gap" section is
+  inserted between the enforcement reason and the required fix instructions.
+- **`RoundCoordinator.processRound()`** passes verification flags through to
+  `buildRejectionPrompt()` so the diagnostic gap is always populated on reject.
+
+### Enforcement Escalation ("Soft Pause")
+
+- **`enforcement_escalation_enabled`** — new `EnginePolicy` field (default
+  `true`). When enabled, enforcement rules that would destroy the loop now
+  issue one final escalated rejection urging the agent to seek human guidance.
+- **`buildEscalationNotice()`** — appends a "🆘 Escalation — Seek Human
+  Guidance" block to `fix_instructions`, telling the agent to pause and ask
+  a human before its next attempt.
+- **R4 (`enforceProgressStall`):** 2nd consecutive rejection now escalates
+  instead of terminating; 3rd terminates. (Was: 2nd → terminate.)
+- **R5 (`enforceProgressStallTerminal`):** now accepts `consecutiveRejections`;
+  1st detection escalates, 2nd terminates. (Was: immediate terminate.)
+- **R6 (`enforceMaxRejections`):** escalation on → 2 rejections escalate,
+  3 terminate. (Was: 2 rejections → terminate.) Disabled mode unchanged.
+
+Set `enforcement_escalation_enabled: false` to restore the pre-2.7 behaviour
+(exact same termination thresholds as 2.6).
+
+**412 tests (was 410). No protocol or persistence format changes.**
+
+## 2.6.0 (2026-07-27)
+
+**Slim-down release.** Eight redundant or dead-code areas removed — approximately
+400 lines deleted with zero functional loss.
+
+### Removed
+
+- **`CheckpointSummary`** — superseded by `MilestoneSummary` (kind: `agent_declared`)
+  since v2.5. Type, factory, and all exports deleted.
+- **`interop.ts`** — experimental cognitive checkpoint bridge with zero consumers.
+  `addCheckpointSink()` and all sink notification logic removed from `SessionManager`.
+- **`feedbackWriteBuffer`** — batch-write buffer in `LoopForgeEngine` that was
+  always flushed immediately. Replaced with direct `appendEntry()` write.
+- **`circuit_breaker_count`** — dead field on `SessionState` left over from the
+  v2.5 circuit breaker removal.
+- **`EngineMetrics` dead fields** — `vaultWriteTimeouts`, `vaultWriteBytes`,
+  `silentAnalysisErrors`, `hydrateCacheMisses` were initialised to 0 and never
+  incremented. Removed from metrics snapshots and MCP status output.
+- **`heuristicSelfEvaluation`** — 20-line keyword-matching fallback in
+  `self-eval.ts`. If the agent can't produce a structured self-evaluation,
+  the round now stalls immediately instead of guessing.
+- **`ReplayBackend.diff()`** — ~100-line round-to-round diff method with no
+  MCP tool or library API consumer.
+- **`observability.ts` span abstraction** — `startSpan` / `TraceSink` /
+  `TraceSpan` / `TraceContext` removed. The `TraceSink` pattern was called
+  once in production code. `logEvent` retained for structured lifecycle events.
+- **`feedbackBufferFlushes` / `feedbackBufferMaxSize`** — metrics removed along
+  with the write buffer.
+
+**410 tests (was 422). Protocol `$defs`: 29 (was 30).**
+
+## 2.5.0 (2026-07-27)
+
+**Code quality, documentation and functional enhancements** — six technical debt fixes plus
+four feature improvements across the compiler, enforcement gate, session pipeline, and policy layer.
+
+### Bug Fixes & Technical Debt (v2.5.0)
+
+- **Unified Jaccard similarity** (`token-utils.ts`): single `jaccardSimilarity()` function with
+  consistent CJK tokenization (`[a-z0-9㐀-鿿]+` covering Extension A). Replaces three duplicated
+  implementations with diverging Unicode ranges across `loop-compiler.ts`, `verification-gate.ts`,
+  and `canonical-state.ts`.
+- **Shared vault helpers**: `unique()` and `entryRound()` moved to `token-utils.ts`, eliminating
+  duplicated implementations across four source files.
+- **MemoryBackend prefix disambiguation**: `queryEntries()` no longer matches `r10`–`r19` when
+  the caller queries for `r1`. Only applies the digit-guard when the prefix itself ends with a digit.
+- **`progress_stall_threshold` reads from policy**: `enforcement-gate.ts` R4 now calls
+  `getPolicy().evolution.progress_stall_threshold` instead of hard-coding `0.05`.
+- **`VaultBackendLoopStore.readRound()` returns complete documents**: now parses `lineage`,
+  `feedback`, `transaction`, and `promptArtifact` — same structure as `FileLoopStore.readRound()`.
+- **`buildLoopRequest` uses factory**: `session.ts` now calls `makeLoopRoundResult()` instead
+  of inline object literal, eliminating drift risk when new `LoopRoundResult` fields are added.
+- **`replay.ts` removes phantom field access**: `entry.task` fallback removed — `VaultEntry`
+  does not have a top-level `task` property.
+- **`evidenceLatencyAvgMs` metric added**: `PolicyMetricsSnapshot` now includes
+  `evidenceLatencyAvgMs` (derived from `evidenceLatencyMs / evidenceCaptures`), replacing
+  the meaningless monotonically-accumulating raw sum.
+- **IEEE 754 epsilon comparison**: `enforceProgressStallTerminal()` (R5) switched from
+  strict `===` to `Math.abs(a - b) < 1e-10`, preventing false negatives from JSON round-trip
+  float drift.
+- **Unknown policy key warning**: `deepMerge()` now logs `console.warn` for keys not present
+  in the default policy — a typo like `"max_round"` instead of `"max_rounds"` is no longer silent.
+- **Removed legacy circuit breaker**: `shouldBreak()` method and all call sites deleted from
+  `engine.ts`. Stall detection is exclusively handled by enforcement gate R4/R5 using
+  `progress_estimate` gradients. `StopReason."circuit_breaker"` retained for backward-compat.
+- **`parseWarnings` replaced by structured data**: deleted the regex-based warning extractor
+  in `session.ts`. Warnings now flow from `LoopCompileResponse.warnings` → `LoopForgeResponse`
+  → `PreparedRound` → `McpSession.currentWarnings`. No more fragile prompt-format dependency.
+- **10 similarity thresholds externalized to policy**: six new `EvolutionPolicy` fields
+  (`criteria_dedup_threshold`, `subgoal_dedup_threshold`, `subgoal_match_threshold`,
+  `subgoal_auto_in_progress_threshold`, `constraint_match_threshold`,
+  `subgoal_drift_alignment_threshold`) replace hard-coded magic numbers in `loop-compiler.ts`
+  and `verification-gate.ts`.
+- **`withoutPrompts` pattern-based filtering**: replaced manual allow-list with regex
+  `\bprompt\b` match — any new prompt-text field is automatically redacted from CLI output.
+- **Heuristic mode partial enforcement**: `enforcement-gate.ts` now runs for ALL extractions,
+  not just structured ones. R3/R4/R5 self-skip when `skipEvidenceRules=true`; R1/R2/R6/R7
+  always execute, giving heuristic-mode loops minimum enforcement protection.
+- **Windows PID lease detection**: `isLeaseOwnerAlive()` now accepts optional
+  `leaseExpiresAt` parameter — on Windows where `process.kill(pid, 0)` returns ambiguous
+  `EPERM`, an expired lease overrides the "alive" assumption. `FileLoopStore` lock recovery
+  receives the same treatment.
+
+### Functional Enhancements (v2.5.0)
+
+- **L2 adaptive budget sub-goal factor**: formula extended to
+  `base + round×200 + milestones×1000 + subGoals×100`, capped at 40000.
+  Policy: `prompt.l2_adaptive_subgoal_factor` (default 100).
+- **Agent trust score**: `agent_trust_score` and `agent_trust_trend` derived from
+  verification gate flags each round. Formula: `1.0 - errors×0.15 - warns×0.03`.
+  Rendered in state file as "## Agent Trust" bar + trend line. Zero new persistence.
+- **Milestone/Checkpoint unification**: `CheckpointSummary` deprecated in favor of
+  `MilestoneSummary` (kind: `agent_declared`). `checkpoint()` function removed from
+  compiler (~30 lines). `canonical-state.ts` derives checkpoints from milestones.
+- **Stop reason refinement**: `SelfEvaluation.stop_reason` field added
+  (`"gave_up"` | `"blocked"` | `"needs_human_input"`). `"blocked"` maps to
+  `StopReason."blocked"` (previously unused). Backward-compat: absent `stop_reason`
+  defaults to `"failed"` behavior.
+
+### Documentation
+
+- Verification gate check count corrected (10 → 11) across all docs
+- Enforcement gate rules listed as R1–R7 throughout
+- Test count updated (417) in both README and Chinese README
+- Version references in `AGENTS.md` and `loopforge/README.md`
+
+**422 tests (was 417 in 2.4.0).**
+
+## 2.4.0 (2026-07-27)
+
+**Long-Horizon Task Infrastructure** — four compiler-level features that make LoopForge
+viable for 100+ round, multi-session agent tasks.
+
+### Hierarchical Summary (v2.1)
+
+Flat rolling-window summary replaced with three-tier hierarchical summary:
+
+- **Tier 1 — Recent Window**: detailed last N rounds (preserves existing `buildRollingSummary` behavior)
+- **Tier 2 — Milestone Summaries**: phase-boundary snapshots that survive window eviction. Three trigger signals in priority order: `agent_declared` (compression_checkpoint) > `criteria_milestone` (new success criteria detected via Jaccard semantic dedup at threshold 0.45) > `auto` (safety net every 20 rounds)
+- **Tier 3 — Loop Synthesis**: formulaic paragraph summarizing total rounds, phase count, overall progress, and constraint summary
+
+Milestones are rebuilt from vault entries each round — zero new persistence. Rendered in L2 prompts and always written to state file.
+
+**New types**: `MilestoneSummary` (label, round_range, outcome, carried/resolved constraints, progress_at_boundary, kind). Extended `RollingSummary` with `milestones` and `loop_synthesis`.
+
+**Policy**: `summary.milestone_interval` (20), `summary.max_milestones` (10), `summary.enable_loop_synthesis` (true).
+
+### Sub-Goal Structured Tracking (v2.2)
+
+`emerged_subtasks` upgraded from flat `string[]` to compiler-managed `SubGoal[]` with five-state lifecycle: `pending → in_progress → done | blocked | canceled`.
+
+- **Agent declares** via three new `string[]` fields: `completed_subtasks`, `blocked_subtasks`, `canceled_subtasks` — string arrays matched by description similarity, no structured JSON burden on agent
+- **Compiler derives**: `in_progress` from `next_action` match, `done` from `completed_subtasks` or `success_criteria_met` auto-complete, `blocked`/`canceled` from agent declarations
+- **Sub-Goal Dashboard**: rendered in L2 (full: in_progress + pending by age desc + blocked + recent 5 done + stats line) and L1 (compact: active only, max 5)
+- **Verification Gate**: new `checkSubGoalDrift` — warns when 3+ pending sub-goals exist but `next_action` aligns with none
+- **Milestone bridge**: all sub-goals done → auto `criteria_milestone` — no agent declaration needed
+
+**New types**: `SubGoal` (id, description, status, declared_at_round, status_changed_at_round, completed_at_round, priority). Extended `SelfEvaluation` and `LoopRoundResult`.
+
+**Policy**: `evolution.subgoal_auto_complete_threshold` (0.4), `evolution.subgoal_stale_rounds` (10), `evolution.max_subgoals_in_prompt` (10), `evolution.max_done_subgoals_in_prompt` (5).
+
+### Time-Aware Constraint Management (v2.3)
+
+Discovered constraints auto-demote to `inactive` after prolonged inactivity — removed from prompts but kept in state file.
+
+- **Source classification**: `constraintSource()` identifies hard/plan/criteria/discovered origin. Only discovered constraints auto-decay
+- **Inactivity detection**: scans vault entries for `last_violated_at_round`. No violation for `constraint_inactive_rounds` (default 15) → demote to inactive
+- **Re-activation**: inactive constraint violated again → auto re-promote to active
+- **Effect on prompts**: inactive constraints removed from `constraints_active` → automatically absent from L1/L2 prompts. State file renders full "Inactive Constraints" section with age metadata
+- **Zero new persistence**: all metadata reconstructed from vault entries each round
+
+**New types**: `ConstraintMeta` (text, discovered_at_round, last_violated_at_round, source, status). Extended `LoopCompileResponse`.
+
+**Policy**: `evolution.constraint_inactive_rounds` (15).
+
+### Adaptive L2 Prompt Budget (v2.4)
+
+L2 budget scales with loop complexity instead of static 18k chars:
+
+```
+adaptiveL2 = min(base + round × 200 + milestones × 1000, cap=40000)
+```
+
+- L0 (3000) and L1 (7000) unchanged — only L2 adapts
+- Short tasks (≤ 5 rounds): negligible change (19k)
+- Long tasks (80 rounds, 8 milestones): 40k budget (2.2× more context)
+- Hard cap at 40k prevents unbounded growth
+
+**Policy**: `prompt.l2_adaptive_enabled` (true), `prompt.l2_adaptive_round_factor` (200), `prompt.l2_adaptive_milestone_factor` (1000), `prompt.l2_adaptive_max_chars` (40000).
+
+### Cumulative scope
+
+All four features are compiler-level — no new storage formats, no sub-loop execution, no agent autonomy violation. The agent still owns execution; LoopForge provides progressively better cognitive infrastructure as tasks grow longer.
+
+**14 new protocol types, 298 tests (was 288 in 2.0.2).**
+
+## 2.0.2 (2026-07-23)
+
+### Changed
+
+- **Enforcement gate: progress-based stall detection replaces binary circuit breaker.**
+  The old binary-success circuit breaker (3 consecutive failures → stop) has been
+  removed from `RoundCoordinator`. It is replaced by two enforcement gate rules:
+  - **R4 `progress_stall`**: progress_estimate delta < 5% over 3 rounds → reject
+    on first occurrence (agent gets a chance to change approach), terminate on repeat.
+  - **R5 `progress_stall_terminal`**: progress_estimate delta = 0 for N consecutive
+    rounds → terminate immediately (agent is making zero forward motion).
+    These rules use `progress_estimate`, not the binary success flag, so they correctly
+    distinguish "task not done yet" from "agent is stuck".
+
+- **Removed `runtime` module** (`runtime.ts`) — the standalone event-driven Agent
+  executor is no longer part of LoopForge. All round processing now goes through
+  the MCP session path (`SessionManager → RoundDriver → RoundCoordinator`).
+
+- **Removed `RuntimePolicy`** from `loop_policy.json`. `max_rounds` moved to
+  `engine` policy section.
+
+- **Extracted `self-eval.ts`** — self-evaluation parsing helpers (`parseExecutionEvidence`,
+  `parseCriterionRevisions`, `parseWorkerResults`, `extractSelfEvaluation`,
+  `buildSelfEvaluation`, `heuristicSelfEvaluation`) moved from `engine.ts` to a
+  dedicated module.
+
+- **Added `loop-extras-parser.ts`** — typed request extraction pipeline with
+  structured error collection, replacing inline `Record<string, unknown>` casts in
+  `engine.ts`.
+
+- **MCP `evaluation` parameter** now includes `compression_checkpoint`, `checkpoint_label`,
+  and `next_action` fields.
+
+- **`AdvanceResult.stopDetail`** field added to provide human-readable context when a
+  loop stops.
+
+- **Intent-action drift detection** — the `next_action` field is no longer decorative.
+  Verification Gate check 11 (`intent_drift`) compares the previous round's declared
+  `next_action` with the current round's `output_summary` via Jaccard token similarity.
+  Below the configurable threshold (`evolution.intent_drift_threshold`, default 0.15),
+  a warn-level flag is raised. Enforcement Gate R7 (`intent_drift`) rejects on first
+  occurrence (agent must explain the pivot), terminates on repeat. This closes the
+  loop between "what I said I would do" and "what I actually did."
+
+### Added
+
+- **7 enforcement rules** (was 5): R1 success_with_remaining_criteria, R2 recurring_violation,
+  R3 empty_success, R4 progress_stall, R5 progress_stall_terminal, R6 max_rejections,
+  R7 intent_drift.
+
+- **10 verification checks**: check `intent_drift` detects when the agent
+  performs work unrelated to its declared next_action from the previous round.
+
+- **`evolution.intent_drift_threshold`** policy field (default: 0.15) — Jaccard token
+  similarity threshold for intent-action alignment.
+
+## 2.0.1 (2026-07-21)
+
+### Removed
+
+- **Deprecated `quality` field** from `AdvanceResult`. The `quality` field was
+  marked `@deprecated` in 2.0.0 and always derived from `roundSuccess`. MCP tool
+  consumers should use `roundSuccess` instead.
+
+### Added
+
+- **`stopDetail` field** in `AdvanceResult`. Each stop reason now carries a
+  human-readable explanation of what happened, giving the external Agent enough
+  context to decide its next action without LoopForge prescribing behavior.
+
+- **`## How to Complete This Round` section** in every compiled prompt. The
+  prompt now includes explicit instructions on how to submit results via
+  `loopforge_next`, what `success` and `should_continue` mean, and what to do
+  when a round is rejected.
+
+- **31 new tests** for the typed extraction pipeline (`loop-extras-parser.ts`).
+- **3 new tests** covering prompt hash determinism, attempt differentiation,
+  and L0 budget enforcement.
+
+### Changed
+
+- **Git evidence capture is now async and parallel.** Three git commands
+  (`diff`, `diff --cached`, `ls-files`) run concurrently via `execFile` instead
+  of sequentially via `execSync`. Wall-clock time drops from sum(3) to max(1)
+  command duration. A unified `AbortController` timeout replaces per-command
+  timeouts. All git commands are now shell-free (`execFile`, not `exec`).
+
+- **`engine.ts` extras parsing** extracted to `loop-extras-parser.ts`. The
+  `ExtractionContext` class provides typed field extraction with per-field
+  error collection — never throws, always returns best-effort defaults.
+
+- **`advanceUnlocked()` split** into 6 focused private methods
+  (`extractEvaluation`, `executeRoundTransaction`, `buildRejectionResult`,
+  `buildTerminationResult`, `buildStopResult`, `advanceToNextRound`).
+  The orchestrator is now ~40 lines.
+
+- **Self-evaluation template** now explicitly warns the Agent to replace
+  placeholder values with actual data.
+
+- `interop.ts` marked as `@experimental` in JSDoc and both README files.
+- Test count: 237 → 271.
+
+## 2.0.0 (2026-07-13)
+
+This release changes LoopForge from a prompt-technique framework into
 a recoverable cognitive state runtime driven by an external Agent.
 
 ### Breaking changes
@@ -204,6 +855,25 @@ Runtime guarantee instead of a Prompt request.
 
 ---
 
+## v1.15.1 (2026-07-09)
+
+Bug fixes and policy completeness for the Thin Prompt architecture.
+
+### Bug Fixes
+- **`state_file.enabled` now respected** — State files were written to disk regardless of the
+  `state_file.enabled` policy flag. Fixed in `runtime.ts` and `mcp/session.ts` (3 call sites)
+  to check `getPolicy().state_file.enabled` before writing.
+- **`enforcement-gate.ts` git tracking** — The enforcement gate module was untracked despite
+  being imported by `runtime.ts` and `mcp/session.ts`. Now staged in git.
+
+### Policy
+- **`loop_policy.json`** — Added missing `state_file` configuration section with defaults
+  (`enabled: true`, `directory: ".loopforge/state"`, `max_checkpoints: 5`, `max_summary_rounds: 5`).
+- **`write_on_outcomes`** — Corrected from `"completed"` to `"task_complete"` to match the
+  actual `StopReason` enum value. Previously `"completed"` never matched any stop reason.
+
+---
+
 ## v1.15.0 (2026-07-09)
 
 Agent Technique Autonomy at L2 — the Agent now freely chooses reasoning strategies
@@ -240,25 +910,6 @@ by reading the technique catalog instead of having LoopForge auto-select via key
 
 ### Observability
 - **`tier2_escalation`** event — Deprecated. No longer emitted.
-
----
-
-## v1.15.1 (2026-07-09)
-
-Bug fixes and policy completeness for the Thin Prompt architecture.
-
-### Bug Fixes
-- **`state_file.enabled` now respected** — State files were written to disk regardless of the
-  `state_file.enabled` policy flag. Fixed in `runtime.ts` and `mcp/session.ts` (3 call sites)
-  to check `getPolicy().state_file.enabled` before writing.
-- **`enforcement-gate.ts` git tracking** — The enforcement gate module was untracked despite
-  being imported by `runtime.ts` and `mcp/session.ts`. Now staged in git.
-
-### Policy
-- **`loop_policy.json`** — Added missing `state_file` configuration section with defaults
-  (`enabled: true`, `directory: ".loopforge/state"`, `max_checkpoints: 5`, `max_summary_rounds: 5`).
-- **`write_on_outcomes`** — Corrected from `"completed"` to `"task_complete"` to match the
-  actual `StopReason` enum value. Previously `"completed"` never matched any stop reason.
 
 ---
 

@@ -18,10 +18,7 @@ import {
 import type { RoundProcessResult } from "../round-coordinator.js";
 import {
   logEvent,
-  setTraceSink,
-  startSpan,
 } from "../observability.js";
-import type { TraceRecord, TraceSink } from "../observability.js";
 import {
   SessionLeaseConflictError,
   VaultRoundCommitStore,
@@ -30,7 +27,8 @@ import {
 import type { SessionStateStore } from "../storage.js";
 import type { VaultEntry } from "../backends/interface.js";
 import { SessionManager } from "../mcp/session.js";
-import { MemoryBackend } from "./_helpers.js";
+import { MemoryBackend, MemoryLoopStore } from "./_helpers.js";
+import { getPolicy, resetPolicy } from "../policy.js";
 
 function snapshot(provider: string): ProviderSnapshot {
   return {
@@ -43,11 +41,40 @@ function snapshot(provider: string): ProviderSnapshot {
 
 afterEach(() => {
   unregisterEvidenceProvider("async-test");
-  setTraceSink(null);
   resetPolicyMetrics();
 });
 
 describe("P2 async evidence", () => {
+  it("blocks workspace-configured subprocesses without host authorization", async () => {
+    const previous = process.env.LOOPFORGE_ALLOW_WORKSPACE_COMMANDS;
+    try {
+      delete process.env.LOOPFORGE_ALLOW_WORKSPACE_COMMANDS;
+      resetPolicy();
+      const policy = getPolicy();
+      policy.evidence.providers = [];
+      policy.evidence.commands = [{
+        name: "probe",
+        enabled: true,
+        executable: process.execPath,
+        args: ["-e", "process.stdout.write('ok')"],
+        phase: "after",
+        required: false,
+        timeout_ms: 1_000,
+        max_output_chars: 1_000,
+        success_exit_codes: [0],
+      }];
+      assert.deepEqual(await EvidenceCollector.fromPolicy().collectAsync({ timeoutMs: 100 }), []);
+      process.env.LOOPFORGE_ALLOW_WORKSPACE_COMMANDS = "1";
+      const allowed = await EvidenceCollector.fromPolicy().collectAsync({ timeoutMs: 1_000 });
+      assert.equal(allowed[0]?.provider, "command:probe");
+      assert.equal((allowed[0]?.data as { status?: string }).status, "passed");
+    } finally {
+      if (previous === undefined) delete process.env.LOOPFORGE_ALLOW_WORKSPACE_COMMANDS;
+      else process.env.LOOPFORGE_ALLOW_WORKSPACE_COMMANDS = previous;
+      resetPolicy();
+    }
+  });
+
   it("collects async providers and isolates failures", async () => {
     const providers: EvidenceProvider[] = [
       { name: "sync", capture: () => snapshot("sync") },
@@ -105,29 +132,7 @@ describe("P2 async evidence", () => {
   });
 });
 
-describe("P2 tracing", () => {
-  it("emits lifecycle events and idempotent span boundaries", () => {
-    const records: TraceRecord[] = [];
-    setTraceSink({ emit: (record) => { records.push(record); } });
-    logEvent("custom.event", { value: 1 });
-    const span = startSpan("custom.span", { phase: "test" });
-    span.end("ok", { result: "done" });
-    span.end("error");
-
-    assert.equal(records.filter((record) => record.kind === "event").length, 1);
-    assert.equal(records.filter((record) => record.kind === "span").length, 2);
-    assert.equal(records[1]?.traceId, records[2]?.traceId);
-  });
-
-  it("never lets a failing sink affect callers", () => {
-    const sink: TraceSink = { emit: () => { throw new Error("sink down"); } };
-    setTraceSink(sink);
-    assert.doesNotThrow(() => {
-      logEvent("safe");
-      startSpan("safe.span").end();
-    });
-  });
-});
+// v2.6: span tracing removed.
 
 describe("P2 policy effectiveness metrics", () => {
   it("calculates success and rejection rates per strategy", () => {
@@ -194,7 +199,7 @@ describe("P2 pluggable storage", () => {
 
   it("provides vault adapters for session and round commit lookups", () => {
     const backend = new MemoryBackend();
-    const sessions = new VaultSessionStateStore(backend);
+    const sessions = new VaultSessionStateStore(new MemoryLoopStore());
     sessions.save({
       task_id: "loop:adapter:session",
       task_type: "session_state",
@@ -213,10 +218,10 @@ describe("P2 pluggable storage", () => {
   });
 });
 
-describe("P3 cross-process leases and checkpoint adapters", () => {
+describe("P3 cross-process leases", () => {
   it("atomically fences a second session owner until expiry", () => {
     const backend = new MemoryBackend();
-    const store = new VaultSessionStateStore(backend);
+    const store = new VaultSessionStateStore(new MemoryLoopStore());
     store.save({
       task_id: "loop:leased:session",
       task_type: "session_state",
@@ -252,18 +257,5 @@ describe("P3 cross-process leases and checkpoint adapters", () => {
     second.close();
   });
 
-  it("emits portable cognitive checkpoints and isolates sink failures", async () => {
-    const backend = new MemoryBackend();
-    const manager = new SessionManager(backend);
-    const checkpoints: Array<{ loopId: string; schemaVersion: number }> = [];
-    manager.addCheckpointSink({
-      save: (checkpoint) => { checkpoints.push(checkpoint); },
-    });
-    manager.addCheckpointSink({ save: () => { throw new Error("offline"); } });
-
-    await manager.create({ task: "checkpoint bridge", loopId: "interop" });
-    assert.equal(checkpoints.at(-1)?.loopId, "interop");
-    assert.equal(checkpoints.at(-1)?.schemaVersion, 1);
-    manager.close();
-  });
+  // v2.6: checkpoint bridge (interop.ts) removed.
 });

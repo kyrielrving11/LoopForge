@@ -19,6 +19,8 @@ function empty(loopId) {
         evidenceFailures: 0,
         evidenceTimeouts: 0,
         evidenceLatencyMs: 0,
+        vaultWriteErrors: 0,
+        vaultWriteReasons: {},
         levels: {},
         strategyEffectiveness: {},
     };
@@ -81,6 +83,15 @@ export class PolicyMetricsCollector {
             increment(metric.evidenceOutcomesByProvider, `${provider}:${outcome}`);
         }
     }
+    /** Record a vault write failure. The reason distinguishes feedback_persist,
+     *  lineage_persist, and delegation_persist so operators can identify which
+     *  write path is failing. */
+    recordVaultWriteError(reason, loopId) {
+        for (const metric of this.targets(loopId)) {
+            metric.vaultWriteErrors++;
+            increment(metric.vaultWriteReasons, reason);
+        }
+    }
     recordStrategy(loopId, level) {
         for (const metric of this.targets(loopId)) {
             if (level)
@@ -125,6 +136,8 @@ export class PolicyMetricsCollector {
             strategyEffectiveness,
             acceptanceRate: attempts === 0 ? 0 : source.committedRounds / attempts,
             evidenceAvailabilityRate: evidence === 0 ? 0 : source.evidenceAvailable / evidence,
+            // evidenceLatencyMs is a raw sum; derive the average for consumers
+            evidenceLatencyAvgMs: evidence === 0 ? 0 : source.evidenceLatencyMs / evidence,
         };
     }
     reset(loopId) {

@@ -1,126 +1,111 @@
-/** Canonical cognitive state used to render both prompts and state projections.
- *
- * The canonical state is data, not Markdown. Prompt and state-file renderers
- * consume the same value so they cannot silently drift apart.
- */
+/** Canonical data used by prompt and Markdown projections. */
 import { createHash } from "node:crypto";
-export const CANONICAL_STATE_SCHEMA_VERSION = 1;
-function unique(values) {
-    return [...new Set(values.filter((value) => typeof value === "string" && value.trim().length > 0).map((value) => value.trim()))];
-}
-/** Deterministic JSON serialization used by state and prompt hashes. */
+import { unique } from "./token-utils.js";
+export const CANONICAL_STATE_SCHEMA_VERSION = 3;
 export function stableStringify(value) {
-    if (value === null || typeof value !== "object") {
+    if (value === null || typeof value !== "object")
         return JSON.stringify(value);
-    }
-    if (Array.isArray(value)) {
-        return `[${value.map((item) => stableStringify(item)).join(",")}]`;
-    }
+    if (Array.isArray(value))
+        return `[${value.map(stableStringify).join(",")}]`;
     const record = value;
-    const keys = Object.keys(record).sort();
-    return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`).join(",")}}`;
+    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`).join(",")}}`;
 }
 export function hashCanonicalState(state) {
     return createHash("sha256").update(stableStringify(state)).digest("hex");
 }
 function addList(lines, title, values) {
-    if (values.length === 0)
+    if (!values.length)
         return;
-    lines.push(`## ${title}`, "");
-    for (const value of values)
-        lines.push(`- ${value}`);
-    lines.push("");
+    lines.push(`## ${title}`, "", ...values.map((value) => `- ${value}`), "");
 }
-/** Human/Agent-readable materialized view. It is always reproducible from the
- * canonical state and is never consulted as transaction truth. */
+export function formatCompilationContext(context, fallbackTask) {
+    if (!context)
+        return fallbackTask;
+    const lines = [
+        `Plan version: ${context.planVersion ?? "none"}`,
+        `Prompt mode: ${context.promptMode}`,
+    ];
+    if (context.promptMode === "audit")
+        lines.push("LoopForge Final Audit");
+    if (context.activeStep) {
+        lines.push(`Step: ${context.activeStep.id}: ${context.activeStep.title}`, `Kind: ${context.activeStep.kind}`);
+        if (context.activeStep.scope.length)
+            lines.push(`Scope: ${context.activeStep.scope.join(", ")}`);
+        if (context.activeStep.acceptanceCriteria.length)
+            lines.push("Acceptance criteria:", ...context.activeStep.acceptanceCriteria.map((item) => `- ${item}`));
+        if (context.activeStep.evidenceRequirements.length)
+            lines.push("Evidence requirements:", ...context.activeStep.evidenceRequirements.map((item) => `- ${item}`));
+    }
+    if (context.evidenceGaps.length)
+        lines.push("Evidence gaps:", ...context.evidenceGaps.map((item) => `- ${item.id}: ${item.text}`));
+    if (context.failedChecks.length)
+        lines.push("Failed checks:", ...context.failedChecks.map((item) => `- ${item.name}: ${item.status}${item.summary ? ` - ${item.summary}` : ""}`));
+    lines.push(`Instruction: ${context.instruction}`);
+    return lines.join("\n");
+}
+/** Markdown is a rebuildable view. Typed session and round JSON is truth. */
 export function renderCanonicalStateMarkdown(state) {
     const lines = [
-        `# LoopForge State — ${state.loopId}`,
+        `# LoopForge State - ${state.loopId}`,
         "",
         `**Schema**: ${state.schemaVersion}`,
         `**Round**: ${state.round}/${state.maxRounds}`,
         `**Goal ID**: ${state.goalId}`,
         "",
-        "## Loop Objective",
+        "## Objective",
         "",
         state.objective,
         "",
-        "## Current Task",
+        "## Assigned Work",
         "",
-        state.currentTask,
+        formatCompilationContext(state.compilationContext, state.currentTask),
         "",
     ];
     addList(lines, "Success Criteria", state.successCriteria);
     addList(lines, "Hard Constraints", state.hardConstraints);
     addList(lines, "Active Constraints", state.activeConstraints);
-    addList(lines, "Changes Since Last Round", state.changesSinceLastRound);
-    if (state.progress.estimate !== null ||
-        state.progress.criteriaMet.length > 0 ||
-        state.progress.criteriaRemaining.length > 0 ||
-        state.progress.filesChanged.length > 0 ||
-        state.progress.tests !== null) {
-        const total = state.progress.criteriaMet.length + state.progress.criteriaRemaining.length;
-        lines.push("## Progress Dashboard", "");
-        if (total > 0) {
-            lines.push(`**Criteria**: ${state.progress.criteriaMet.length}/${total}`);
-        }
-        if (state.progress.estimate !== null) {
-            lines.push(`**Estimated Completion**: ${(state.progress.estimate * 100).toFixed(0)}%`);
-        }
-        if (state.progress.tests) {
-            lines.push(`**Tests**: ${state.progress.tests.passed} passed, ` +
-                `${state.progress.tests.failed} failed, ${state.progress.tests.skipped} skipped`);
-        }
-        if (state.progress.filesChanged.length > 0) {
-            lines.push("", "**Files Changed**:");
-            for (const file of state.progress.filesChanged)
-                lines.push(`- ${file}`);
-        }
-        lines.push("");
+    addList(lines, "Evidence Gaps", state.evidence.evidenceGaps);
+    addList(lines, "Covered Claims", state.evidence.coveredClaims);
+    addList(lines, "Files", state.evidence.files);
+    if (state.evidence.checks.length) {
+        addList(lines, "Checks", state.evidence.checks.map((check) => `${check.name}: ${check.status}${check.summary ? ` - ${check.summary}` : ""}`));
     }
-    addList(lines, "Remaining", state.remainingCriteria);
+    addList(lines, "Changes Since Last Round", state.changesSinceLastRound);
     addList(lines, "Blockers", state.blockers);
     addList(lines, "Discoveries", state.discoveries);
-    addList(lines, "Cross-Round Outcomes", state.rollingOutcomes);
+    addList(lines, "Recent Outcomes", state.rollingOutcomes);
     addList(lines, "Recurring Issues", state.recurringIssues);
     addList(lines, "Failed Patterns", state.failedPatterns);
-    addList(lines, "Retired Constraints", state.retiredConstraints);
-    if (state.nextAction) {
-        lines.push("## Next Action", "", state.nextAction, "");
+    if (state.verificationFlags.length) {
+        addList(lines, "Verification", state.verificationFlags.map((flag) => `[${flag.severity}] [${flag.check}] ${flag.detail}`));
     }
-    if (state.verificationFlags.length > 0) {
-        lines.push("## Verification", "");
-        for (const flag of state.verificationFlags) {
-            lines.push(`- [${flag.severity}] [${flag.check}] ${flag.detail}`);
+    if (state.milestones.length) {
+        lines.push("## Phase History", "");
+        for (const milestone of state.milestones) {
+            lines.push(`### ${milestone.label}`, `Rounds ${milestone.round_range.start}-${milestone.round_range.end}`, "", milestone.outcome, "");
         }
-        lines.push("");
     }
-    if (state.externalContext) {
+    if (state.loopSynthesis)
+        lines.push("## Loop Summary", "", state.loopSynthesis, "");
+    if (state.externalContext)
         lines.push("## External Context", "", state.externalContext, "");
+    if (state.graphSlice) {
+        lines.push("## Active Graph Slice", "", `Plan version: ${state.graphSlice.planVersion ?? "none"}`, `Active step: ${state.graphSlice.activeStepId ?? "audit"}`, `Parent outline: ${state.graphSlice.parentOutlineId ?? "none"}`, `Blocked descendants: ${state.graphSlice.blockedDescendantCount}`, "");
     }
     return lines.join("\n").trimEnd() + "\n";
 }
+function planEvidenceGaps(request) {
+    if (!request.report_claim_targets?.length)
+        return [];
+    const covered = new Set(request.last_evaluation?.evidenceEnvelope.claims.map((claim) => claim.targetId) ?? []);
+    return request.report_claim_targets.filter((target) => !covered.has(target.id))
+        .map((target) => `${target.id}: ${target.text}`);
+}
 export function createCanonicalLoopState(request, response, stateFilePath) {
-    const last = request.last_round_result;
+    const last = request.last_evaluation;
     const objective = response.loop_objective;
-    const verificationFlags = request.verification_flags ?? [];
-    const rolling = response.rolling_summary;
-    const executionEvidence = last?.execution_evidence;
-    const changes = unique([
-        request.new_since_last_round,
-        last?.output_summary,
-        ...(last?.wrong_assumptions ?? []).map((value) => `Corrected assumption: ${value}`),
-    ]);
-    const discoveries = unique([
-        ...(last?.discovered_constraints ?? []),
-        ...(last?.emerged_subtasks ?? []),
-    ]);
-    const blockers = unique([
-        ...(last?.constraint_violations ?? []),
-        last?.manual_fixes_needed,
-        request.rejection_notice,
-        ...response.warnings,
-    ]);
+    const report = last;
+    const discoveries = report?.discoveries;
     return {
         schemaVersion: CANONICAL_STATE_SCHEMA_VERSION,
         loopId: response.loop_id || request.loop_id,
@@ -130,32 +115,39 @@ export function createCanonicalLoopState(request, response, stateFilePath) {
         objective: objective?.objective || request.task,
         objectiveVersion: objective?.version ?? 1,
         currentTask: request.task,
+        compilationContext: request.compilation_context ?? null,
         successCriteria: unique(objective?.success_criteria ?? []),
         hardConstraints: unique(objective?.hard_constraints ?? []),
         activeConstraints: unique(response.constraints_active),
-        retiredConstraints: unique(response.constraints_retired),
-        changesSinceLastRound: changes,
-        remainingCriteria: unique(last?.execution_evidence?.success_criteria_remaining ?? []),
-        blockers,
-        verificationFlags,
-        discoveries,
-        nextAction: last?.next_action?.trim() || response.suggested_next_task,
-        rollingOutcomes: unique(rolling?.key_outcomes ?? []),
-        recurringIssues: unique(rolling?.recurring_issues ?? []),
-        failedPatterns: unique(rolling?.failed_patterns ?? []),
-        checkpoints: response.checkpoint_summary
-            ? [response.checkpoint_summary]
-            : [],
-        suggestedNextTask: response.suggested_next_task,
+        constraintMetadata: response.constraint_metadata ?? [],
+        changesSinceLastRound: unique([request.new_since_last_round, report?.summary]),
+        blockers: unique([
+            ...(report?.violations ?? []),
+            report?.status === "blocked" ? report.summary : "",
+            request.rejection_notice,
+            ...response.warnings,
+        ]),
+        verificationFlags: request.verification_flags ?? [],
+        discoveries: unique([
+            ...(discoveries?.wrongAssumptions ?? []).map((item) => `Corrected assumption: ${item}`),
+            ...(discoveries?.emergedWork ?? []),
+            ...(discoveries?.facts ?? []),
+            ...(discoveries?.newConstraints ?? []),
+        ]),
+        rollingOutcomes: unique(response.executionHistory.recentOutcomes),
+        recurringIssues: unique(response.executionHistory.blockedOutcomes),
+        failedPatterns: [],
+        milestones: response.executionHistory.milestones,
+        loopSynthesis: response.executionHistory.synthesis,
         externalContext: request.external_context?.trim() ?? "",
         stateFilePath,
-        progress: {
-            estimate: executionEvidence?.progress_estimate ?? null,
-            criteriaMet: unique(executionEvidence?.success_criteria_met ?? []),
-            criteriaRemaining: unique(executionEvidence?.success_criteria_remaining ?? []),
-            filesChanged: unique(executionEvidence?.files_changed ?? []),
-            tests: executionEvidence?.test_results ?? null,
+        evidence: {
+            files: unique(report?.evidenceEnvelope.files.value ?? []),
+            checks: report?.evidenceEnvelope.checks.value ?? [],
+            coveredClaims: unique(report?.evidenceEnvelope.claims.map((claim) => claim.targetId) ?? []),
+            evidenceGaps: planEvidenceGaps(request),
         },
+        graphSlice: request.graph_slice ?? null,
     };
 }
 //# sourceMappingURL=canonical-state.js.map

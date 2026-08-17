@@ -5,8 +5,8 @@
  * self-consistent JSON Schema. The generated schema is the single source of
  * truth for the wire protocol — it is regenerated on every build.
  *
- * Usage: node dist/generate-schema.js
- *   or:  npx tsx src/generate-schema.ts   (during development)
+ * Usage: node dist/generate-schema.js [--out PATH]
+ *   or:  npx tsx src/generate-schema.ts [--out PATH]   (during development)
  */
 export {};
 //# sourceMappingURL=generate-schema.d.ts.map

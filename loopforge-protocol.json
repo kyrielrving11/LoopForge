@@ -5,200 +5,346 @@
   "description": "JSON Schema for the LoopForge loop-compile protocol. Defines the wire format for all 3 modes (loop_compile, feedback, review) and internal types. Language-agnostic — reference implementation in TypeScript.",
   "type": "object",
   "$defs": {
-    "Mode": {
+    "WorkflowPhase": {
       "type": "string",
       "enum": [
-        "loop_compile",
-        "feedback"
-      ],
-      "description": "LoopForge-loop_compile — TypeScript protocol definitions.\n\nAll types exchanged between the Main Agent and LoopForge flow through\nthese interfaces. This is the contract layer — no implementation logic.\n\nv1.15: 40 types — 4 enums + 35 interfaces + 1 type alias."
+        "planning",
+        "awaiting_approval",
+        "executing",
+        "auditing",
+        "terminal"
+      ]
     },
-    "AgentStatus": {
+    "ApprovalPolicy": {
       "type": "string",
       "enum": [
-        "ok",
-        "error",
-        "stalled"
+        "risk_only",
+        "every_revision"
       ]
     },
-    "ExecutionFeedback": {
-      "type": "object",
-      "properties": {
-        "output": {
-          "type": "string"
-        },
-        "success": {
-          "type": "boolean"
-        },
-        "constraint_violations": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "manual_fixes_needed": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "output",
-        "success",
-        "constraint_violations",
-        "manual_fixes_needed"
+    "RequiredAction": {
+      "type": "string",
+      "enum": [
+        "submit_plan",
+        "approve_plan",
+        "execute_prompt",
+        "resubmit_round",
+        "restore_workspace",
+        "refine_plan",
+        "execute_audit",
+        "none"
       ]
     },
-    "ExecutionEvidence": {
+    "PlanRiskTag": {
+      "type": "string",
+      "enum": [
+        "destructive_workspace",
+        "data_migration",
+        "production_change",
+        "credentials_or_permissions",
+        "external_side_effect",
+        "public_api_break"
+      ]
+    },
+    "PlanStepKind": {
+      "type": "string",
+      "enum": [
+        "executable",
+        "outline",
+        "external_gate"
+      ]
+    },
+    "PlanStepStatus": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "ready",
+        "active",
+        "done",
+        "blocked",
+        "canceled"
+      ]
+    },
+    "EvaluationStepStatus": {
+      "type": "string",
+      "enum": [
+        "completed",
+        "blocked",
+        "in_progress"
+      ]
+    },
+    "WorkflowReadiness": {
+      "type": "string",
+      "enum": [
+        "planning",
+        "awaiting_approval",
+        "executing",
+        "blocked",
+        "awaiting_external_gate",
+        "ready_for_audit",
+        "auditing",
+        "completed"
+      ]
+    },
+    "RoundCheckReport": {
       "type": "object",
       "properties": {
-        "files_changed": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
+        "name": {
+          "type": "string"
         },
-        "test_results": {
-          "type": [
-            "string",
-            "null"
+        "status": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "passed"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "failed"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "not_run"
+              ]
+            }
           ]
         },
-        "success_criteria_met": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "success_criteria_remaining": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "progress_estimate": {
-          "type": "number"
-        }
-      },
-      "required": [
-        "files_changed",
-        "success_criteria_met",
-        "success_criteria_remaining",
-        "progress_estimate"
-      ],
-      "description": "P4: Structured execution evidence reported by the agent after each round.\nGives LoopForge visibility into what actually happened — files changed,\ntest results, success criteria met, and a subjective progress estimate.\nEnables the compiler to cross-validate agent claims and compute real progress."
-    },
-    "CriterionRevision": {
-      "type": "object",
-      "properties": {
-        "old": {
+        "summary": {
           "type": "string"
         },
-        "new": {
+        "counts": {
           "type": "string"
         }
       },
       "required": [
-        "old",
-        "new"
-      ],
-      "description": "P5: A revision to a success criterion — the old form and the new form.\nThe agent proposes this when it discovers the original criterion was\nwrong, unrealistic, or needs refinement."
+        "name",
+        "status"
+      ]
     },
-    "SelfEvaluation": {
+    "RoundEvidenceClaim": {
       "type": "object",
       "properties": {
-        "success": {
-          "type": "boolean"
-        },
-        "output_summary": {
+        "targetId": {
           "type": "string"
         },
-        "constraint_violations": {
+        "evidenceRefs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "targetId",
+        "evidenceRefs"
+      ]
+    },
+    "AgentEvidenceReport": {
+      "type": "object",
+      "properties": {
+        "files": {
           "type": "array",
           "items": {
             "type": "string"
           }
         },
-        "should_continue": {
-          "type": "boolean"
-        },
-        "discovered_constraints": {
+        "checks": {
           "type": "array",
           "items": {
-            "type": "string"
+            "$ref": "#/$defs/RoundCheckReport"
           }
         },
-        "objective_refinement": {
+        "claims": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RoundEvidenceClaim"
+          }
+        },
+        "noChangeReason": {
+          "type": "string"
+        }
+      }
+    },
+    "RoundBlocker": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "dependency"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "external"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "needs_human_input"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "plan_change"
+              ]
+            }
+          ]
+        },
+        "reason": {
           "type": "string"
         },
-        "emerged_subtasks": {
+        "references": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "kind",
+        "reason"
+      ]
+    },
+    "RoundDiscoveries": {
+      "type": "object",
+      "properties": {
+        "wrongAssumptions": {
           "type": "array",
           "items": {
             "type": "string"
           }
         },
-        "execution_evidence": {
-          "$ref": "#/$defs/ExecutionEvidence"
-        },
-        "retracted_constraints": {
+        "emergedWork": {
           "type": "array",
           "items": {
             "type": "string"
           }
         },
-        "revised_success_criteria": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/CriterionRevision"
-          }
-        },
-        "wrong_assumptions": {
+        "facts": {
           "type": "array",
           "items": {
             "type": "string"
           }
         },
-        "compression_checkpoint": {
-          "type": "boolean"
+        "newConstraints": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "PlanChangeRequest": {
+      "type": "object",
+      "properties": {
+        "timing": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "before_continue"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "next_boundary"
+              ]
+            }
+          ]
         },
-        "checkpoint_label": {
+        "reason": {
           "type": "string"
         },
-        "worker_results": {
+        "affectedIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "timing",
+        "reason",
+        "affectedIds"
+      ]
+    },
+    "RoundReportV1": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "$ref": "#/$defs/EvaluationStepStatus"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "violations": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "evidence": {
+          "$ref": "#/$defs/AgentEvidenceReport"
+        },
+        "blocker": {
+          "$ref": "#/$defs/RoundBlocker"
+        },
+        "discoveries": {
+          "$ref": "#/$defs/RoundDiscoveries"
+        },
+        "planChangeRequest": {
+          "$ref": "#/$defs/PlanChangeRequest"
+        },
+        "delegations": {
           "type": "array",
           "items": {
             "$ref": "#/$defs/WorkerResult"
           }
         },
-        "next_action": {
-          "type": "string"
+        "contextRequest": {
+          "$ref": "#/$defs/ContextRequest"
         }
       },
       "required": [
-        "success",
-        "output_summary",
-        "constraint_violations",
-        "should_continue"
+        "status",
+        "summary"
       ],
-      "description": "Structured self-evaluation embedded in compiled prompts.\nThe agent outputs this after completing each round.\nEvery field is consumed by at least one downstream function.\n\nv1.4 (P0–P2): Three new optional fields enable cognitive evolution.\nv1.5 (P4–P5): Execution evidence, progress tracking, and self-correction."
+      "description": "Compact v3 report authored by the external Agent."
     },
-    "CheckpointSummary": {
+    "MaterialAdvancementRecord": {
       "type": "object",
       "properties": {
-        "label": {
-          "type": "string"
-        },
-        "declared_at_round": {
+        "round": {
           "type": "number"
         },
-        "outcome": {
-          "type": "string"
+        "stepId": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
-        "carried_constraints": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
+        "planVersion": {
+          "type": [
+            "number",
+            "null"
+          ]
         },
-        "resolved_constraints": {
+        "material": {
+          "type": "boolean"
+        },
+        "signals": {
           "type": "array",
           "items": {
             "type": "string"
@@ -206,13 +352,776 @@
         }
       },
       "required": [
-        "label",
-        "declared_at_round",
-        "outcome",
-        "carried_constraints",
-        "resolved_constraints"
+        "round",
+        "material",
+        "signals"
+      ]
+    },
+    "ExternalGateBlock": {
+      "type": "object",
+      "properties": {
+        "stepId": {
+          "type": "string"
+        },
+        "planVersion": {
+          "type": "number"
+        },
+        "evidenceRequirements": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "blockedAt": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "stepId",
+        "planVersion",
+        "evidenceRequirements",
+        "blockedAt"
+      ]
+    },
+    "GateResolution": {
+      "type": "object",
+      "properties": {
+        "planVersion": {
+          "type": "number"
+        },
+        "stepId": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "evidenceReferences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "planVersion",
+        "stepId",
+        "summary",
+        "evidenceReferences"
+      ]
+    },
+    "WorkflowProgress": {
+      "type": "object",
+      "properties": {
+        "planVersion": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "planSteps": {
+          "type": "string"
+        },
+        "outlineRemaining": {
+          "type": "number"
+        },
+        "successCriteria": {
+          "type": "string"
+        },
+        "externalGates": {
+          "type": "string"
+        },
+        "readiness": {
+          "$ref": "#/$defs/WorkflowReadiness"
+        }
+      },
+      "required": [
+        "planSteps",
+        "outlineRemaining",
+        "successCriteria",
+        "externalGates",
+        "readiness"
+      ]
+    },
+    "CapabilityPreflight": {
+      "type": "object",
+      "properties": {
+        "serverVersion": {
+          "type": "string"
+        },
+        "reportContract": {
+          "type": "string",
+          "enum": [
+            "round_report_v1"
+          ]
+        },
+        "toolCount": {
+          "type": "number"
+        },
+        "workspaceBound": {
+          "type": "boolean"
+        },
+        "storeWritable": {
+          "type": "boolean"
+        },
+        "gitEvidence": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "available"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "disabled"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "unavailable"
+              ]
+            }
+          ]
+        },
+        "commandEvidence": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "configured"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "blocked"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "disabled"
+              ]
+            }
+          ]
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "serverVersion",
+        "reportContract",
+        "toolCount",
+        "workspaceBound",
+        "storeWritable",
+        "gitEvidence",
+        "commandEvidence",
+        "warnings"
+      ]
+    },
+    "PlanStep": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/PlanStepKind"
+        },
+        "dependsOn": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "scope": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "successCriteria": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "constraints": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "acceptanceCriteria": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "evidenceRequirements": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "refinement": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "outline"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "executable"
+              ]
+            }
+          ]
+        },
+        "riskTags": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PlanRiskTag"
+          }
+        },
+        "status": {
+          "$ref": "#/$defs/PlanStepStatus"
+        },
+        "refinesStepId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "kind",
+        "dependsOn",
+        "scope",
+        "successCriteria",
+        "constraints",
+        "acceptanceCriteria",
+        "evidenceRequirements",
+        "refinement",
+        "riskTags",
+        "status"
+      ]
+    },
+    "StructuredPlan": {
+      "type": "object",
+      "properties": {
+        "objective": {
+          "type": "string"
+        },
+        "successCriteria": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "constraints": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PlanStep"
+          }
+        }
+      },
+      "required": [
+        "objective",
+        "successCriteria",
+        "constraints",
+        "steps"
+      ]
+    },
+    "PlanApprovalRecord": {
+      "type": "object",
+      "properties": {
+        "approvalId": {
+          "type": "string"
+        },
+        "planVersion": {
+          "type": "number"
+        },
+        "decision": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "approved"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "rejected"
+              ]
+            }
+          ]
+        },
+        "decidedAt": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "approvalId",
+        "planVersion",
+        "decision",
+        "decidedAt",
+        "reason"
+      ]
+    },
+    "PlanRevisionRecord": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "number"
+        },
+        "baseVersion": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        },
+        "changeSummary": {
+          "type": "string"
+        },
+        "evidenceReferences": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "submittedAt": {
+          "type": "string"
+        },
+        "effectiveRound": {
+          "type": "number"
+        },
+        "plan": {
+          "$ref": "#/$defs/StructuredPlan"
+        },
+        "refinementLinks": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "changeImpact": {
+          "$ref": "#/$defs/PlanChangeImpact"
+        },
+        "changedPaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "version",
+        "reason",
+        "changeSummary",
+        "evidenceReferences",
+        "submittedAt",
+        "effectiveRound",
+        "plan",
+        "refinementLinks",
+        "changeImpact",
+        "changedPaths"
+      ]
+    },
+    "WorkflowState": {
+      "type": "object",
+      "properties": {
+        "phase": {
+          "$ref": "#/$defs/WorkflowPhase"
+        },
+        "approvalPolicy": {
+          "$ref": "#/$defs/ApprovalPolicy"
+        },
+        "planningProfile": {
+          "$ref": "#/$defs/PlanningProfile"
+        },
+        "planVersion": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "plan": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StructuredPlan"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "revisions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PlanRevisionRecord"
+          }
+        },
+        "approvalId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "approvalHistory": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PlanApprovalRecord"
+          }
+        },
+        "activeStepId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "planningPrompt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "planSource": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "baselineConstraints": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "pendingPlanChange": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlanChangeRequest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "queuedPlanChange": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlanChangeRequest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "auditVerifiedCriteria": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "blockingGate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExternalGateBlock"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "advancementHistory": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MaterialAdvancementRecord"
+          }
+        }
+      },
+      "required": [
+        "phase",
+        "approvalPolicy",
+        "planningProfile",
+        "revisions",
+        "approvalHistory",
+        "baselineConstraints",
+        "auditVerifiedCriteria",
+        "advancementHistory"
+      ]
+    },
+    "WorkspaceRuntimeSummary": {
+      "type": "object",
+      "properties": {
+        "serverVersion": {
+          "type": "string"
+        },
+        "bindingStatus": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "unbound"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "bound"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "mismatch"
+              ]
+            }
+          ]
+        },
+        "workspaceId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "workspaceRoot": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "workspaceFingerprint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "storeId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "storeRoot": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "bindingSource": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "explicit"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "git_root"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "cwd_legacy"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "serverVersion",
+        "bindingStatus"
       ],
-      "description": "v1.10: Checkpoint summary — a compressed snapshot of loop state at a\nsubtask boundary. Declared by the Agent via self-evaluation, built by\nthe compiler. Rendered as a fixed block that survives rolling-window\neviction, so constraints and outcomes from completed subtasks remain\nvisible in later rounds."
+      "description": "Process-level workspace/store identity used by the MCP runtime."
+    },
+    "WorkspaceBinding": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "type": "number"
+        },
+        "workspaceId": {
+          "type": "string"
+        },
+        "workspaceRoot": {
+          "type": "string"
+        },
+        "workspaceFingerprint": {
+          "type": "string"
+        },
+        "storeId": {
+          "type": "string"
+        },
+        "storeRoot": {
+          "type": "string"
+        },
+        "previousStoreRoots": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "boundAt": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "workspaceId",
+        "workspaceRoot",
+        "workspaceFingerprint",
+        "storeId",
+        "storeRoot",
+        "previousStoreRoots",
+        "boundAt"
+      ]
+    },
+    "StoreResolutionDiagnostic": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "session_not_found"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "session_version_unsupported"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "workspace_mismatch"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "session_corrupt"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "store_incomplete"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "orphan_markdown"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "ambiguous_loop"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "store_unreadable"
+              ]
+            }
+          ]
+        },
+        "current": {
+          "$ref": "#/$defs/WorkspaceRuntimeSummary"
+        },
+        "searchedStores": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "matches": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "orphanMarkdownPaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "recommendation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "code",
+        "current",
+        "searchedStores",
+        "matches",
+        "orphanMarkdownPaths",
+        "warnings"
+      ]
+    },
+    "ContextRequest": {
+      "type": "object",
+      "properties": {
+        "emphasize": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "confusion_points": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "description": "One-shot context request applied only to the immediately following prompt."
     },
     "WorkerResult": {
       "type": "object",
@@ -245,1137 +1154,7 @@
         "subTask",
         "resultSummary",
         "success"
-      ],
-      "description": "A single sub-agent / Worker delegation result (v1.9 — multi-agent)."
-    },
-    "LoopForgeRequest": {
-      "type": "object",
-      "properties": {
-        "task": {
-          "type": "string"
-        },
-        "mode": {
-          "$ref": "#/$defs/Mode"
-        },
-        "feedback": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ExecutionFeedback"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "skill_name": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "task_id": {
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "task",
-        "mode"
-      ],
-      "additionalProperties": true
-    },
-    "LoopObjective": {
-      "type": "object",
-      "properties": {
-        "objective": {
-          "type": "string"
-        },
-        "success_criteria": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "hard_constraints": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "created_at_round": {
-          "type": "number"
-        },
-        "loop_id": {
-          "type": "string"
-        },
-        "version": {
-          "type": "number"
-        },
-        "refinement_history": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        }
-      },
-      "required": [
-        "objective",
-        "success_criteria",
-        "hard_constraints",
-        "created_at_round",
-        "loop_id"
       ]
-    },
-    "LoopHealth": {
-      "type": "object",
-      "properties": {
-        "goal_alignment": {
-          "type": "number"
-        },
-        "constraint_integrity": {
-          "type": "number"
-        },
-        "drift_detected": {
-          "type": "boolean"
-        },
-        "strategy_stability": {
-          "type": "boolean"
-        },
-        "task_continuity": {
-          "type": "number"
-        },
-        "escalation_recommended": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "goal_alignment",
-        "constraint_integrity",
-        "drift_detected",
-        "strategy_stability",
-        "task_continuity",
-        "escalation_recommended"
-      ]
-    },
-    "RollingSummary": {
-      "type": "object",
-      "properties": {
-        "key_outcomes": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "recurring_issues": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "rounds_sampled": {
-          "type": "number"
-        },
-        "generated_at_round": {
-          "type": "number"
-        },
-        "failed_patterns": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        }
-      },
-      "required": [
-        "key_outcomes",
-        "recurring_issues",
-        "rounds_sampled",
-        "generated_at_round"
-      ]
-    },
-    "TaskAlignment": {
-      "type": "object",
-      "properties": {
-        "is_aligned": {
-          "type": "boolean"
-        },
-        "alignment_score": {
-          "type": "number"
-        },
-        "warning": {
-          "type": "string"
-        },
-        "escalation": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "is_aligned",
-        "alignment_score",
-        "warning",
-        "escalation"
-      ]
-    },
-    "LoopRoundResult": {
-      "type": "object",
-      "properties": {
-        "round": {
-          "type": "number"
-        },
-        "success": {
-          "type": "boolean"
-        },
-        "output_summary": {
-          "type": "string"
-        },
-        "constraint_violations": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "manual_fixes_needed": {
-          "type": "string"
-        },
-        "discovered_constraints": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "objective_refinement": {
-          "type": "string"
-        },
-        "emerged_subtasks": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "execution_evidence": {
-          "$ref": "#/$defs/ExecutionEvidence"
-        },
-        "retracted_constraints": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "revised_success_criteria": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/CriterionRevision"
-          }
-        },
-        "wrong_assumptions": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "worker_results": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/WorkerResult"
-          }
-        },
-        "compression_checkpoint": {
-          "type": "boolean"
-        },
-        "checkpoint_label": {
-          "type": "string"
-        },
-        "next_action": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "round",
-        "success",
-        "output_summary",
-        "constraint_violations",
-        "manual_fixes_needed"
-      ]
-    },
-    "LoopCompileRequest": {
-      "type": "object",
-      "properties": {
-        "mode": {
-          "$ref": "#/$defs/Mode"
-        },
-        "loop_id": {
-          "type": "string"
-        },
-        "round": {
-          "type": "number"
-        },
-        "goal_id": {
-          "type": "string"
-        },
-        "task": {
-          "type": "string"
-        },
-        "domain": {
-          "type": "string"
-        },
-        "next_task_proposal": {
-          "type": "string"
-        },
-        "loop_objective": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/LoopObjective"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "plan_source": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "constraints_from_plan": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "new_since_last_round": {
-          "type": "string"
-        },
-        "last_round_result": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/LoopRoundResult"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "force_level": {
-          "type": "string"
-        },
-        "health_check_interval": {
-          "type": "number"
-        },
-        "external_context": {
-          "type": "string"
-        },
-        "max_rounds": {
-          "type": "number"
-        },
-        "verification_flags": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/VerificationFlag"
-          }
-        },
-        "attempt": {
-          "type": "number"
-        },
-        "consecutive_rejections": {
-          "type": "number"
-        },
-        "rejection_notice": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "mode",
-        "loop_id",
-        "round",
-        "goal_id",
-        "task",
-        "domain",
-        "next_task_proposal",
-        "constraints_from_plan",
-        "new_since_last_round",
-        "force_level",
-        "health_check_interval",
-        "attempt",
-        "consecutive_rejections",
-        "rejection_notice"
-      ]
-    },
-    "PromptArtifact": {
-      "type": "object",
-      "properties": {
-        "schemaVersion": {
-          "type": "number"
-        },
-        "roundId": {
-          "type": "string"
-        },
-        "attempt": {
-          "type": "number"
-        },
-        "level": {
-          "anyOf": [
-            {
-              "type": "string",
-              "enum": [
-                "l0"
-              ]
-            },
-            {
-              "type": "string",
-              "enum": [
-                "l1"
-              ]
-            },
-            {
-              "type": "string",
-              "enum": [
-                "l2"
-              ]
-            }
-          ]
-        },
-        "levelReasons": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "renderedPrompt": {
-          "type": "string"
-        },
-        "promptHash": {
-          "type": "string"
-        },
-        "stateHash": {
-          "type": "string"
-        },
-        "basePromptVersion": {
-          "type": "string"
-        },
-        "includedSections": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "budgetChars": {
-          "type": "number"
-        },
-        "charCount": {
-          "type": "number"
-        },
-        "budgetExceeded": {
-          "type": "boolean"
-        },
-        "generatedAt": {
-          "type": "number"
-        }
-      },
-      "required": [
-        "schemaVersion",
-        "roundId",
-        "attempt",
-        "level",
-        "levelReasons",
-        "renderedPrompt",
-        "promptHash",
-        "stateHash",
-        "basePromptVersion",
-        "includedSections",
-        "budgetChars",
-        "charCount",
-        "budgetExceeded",
-        "generatedAt"
-      ],
-      "description": "Immutable record of the exact prompt delivered for one round attempt."
-    },
-    "LoopCompileResponse": {
-      "type": "object",
-      "properties": {
-        "status": {
-          "$ref": "#/$defs/AgentStatus"
-        },
-        "prompt": {
-          "type": "string"
-        },
-        "recompile_level": {
-          "type": "string"
-        },
-        "diff_from_previous": {
-          "type": "string"
-        },
-        "lineage": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "constraints_active": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "constraints_retired": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "loop_id": {
-          "type": "string"
-        },
-        "round": {
-          "type": "number"
-        },
-        "goal_id": {
-          "type": "string"
-        },
-        "goal_text_hash": {
-          "type": "string"
-        },
-        "loop_objective": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/LoopObjective"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "loop_health": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/LoopHealth"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "task_alignment": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/TaskAlignment"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "rolling_summary": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/RollingSummary"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "checkpoint_summary": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/CheckpointSummary"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "suggested_next_task": {
-          "type": "string"
-        },
-        "plan_source": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "warnings": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "error": {
-          "type": "string"
-        },
-        "state_file_content": {
-          "type": "string"
-        },
-        "prompt_artifact": {
-          "$ref": "#/$defs/PromptArtifact"
-        }
-      },
-      "required": [
-        "status",
-        "prompt",
-        "recompile_level",
-        "diff_from_previous",
-        "lineage",
-        "constraints_active",
-        "constraints_retired",
-        "loop_id",
-        "round",
-        "goal_id",
-        "goal_text_hash",
-        "suggested_next_task",
-        "warnings",
-        "error"
-      ]
-    },
-    "EvidenceSnapshot": {
-      "type": "object",
-      "properties": {
-        "verified": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "pending": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "invalidated": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "discovered": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        }
-      },
-      "required": [
-        "verified",
-        "pending",
-        "invalidated",
-        "discovered"
-      ],
-      "description": "Aggregated evidence snapshot for the state file Evidence section.\nFour categories give the agent a clear picture of what's been confirmed,\nwhat remains, what was wrong, and what's newly discovered — all derived\nfrom accumulated SelfEvaluation data across rounds."
-    },
-    "LoopForgeResponse": {
-      "type": "object",
-      "properties": {
-        "status": {
-          "$ref": "#/$defs/AgentStatus"
-        },
-        "prompt": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "error": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "state_file_content": {
-          "type": "string"
-        },
-        "prompt_artifact": {
-          "$ref": "#/$defs/PromptArtifact"
-        }
-      },
-      "required": [
-        "status"
-      ]
-    },
-    "SessionState": {
-      "type": "object",
-      "properties": {
-        "task_id": {
-          "type": "string"
-        },
-        "call_count": {
-          "type": "number"
-        },
-        "success_trend": {
-          "type": "array",
-          "items": {
-            "type": "boolean"
-          }
-        },
-        "current_version": {
-          "type": "string"
-        },
-        "circuit_breaker_count": {
-          "type": "number"
-        },
-        "feedback_buffer": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "additionalProperties": true
-          }
-        }
-      },
-      "required": [
-        "task_id",
-        "call_count",
-        "success_trend",
-        "current_version",
-        "circuit_breaker_count",
-        "feedback_buffer"
-      ]
-    },
-    "AgentLoopResult": {
-      "type": "object",
-      "properties": {
-        "status": {
-          "$ref": "#/$defs/AgentStatus"
-        },
-        "response": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/LoopForgeResponse"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      },
-      "required": [
-        "status"
-      ]
-    },
-    "RuntimeStatus": {
-      "type": "string",
-      "enum": [
-        "idle",
-        "running",
-        "stopped",
-        "stalled",
-        "paused"
-      ]
-    },
-    "RoundContext": {
-      "type": "object",
-      "properties": {
-        "round": {
-          "type": "number"
-        },
-        "roundId": {
-          "type": "string"
-        },
-        "signal": {
-          "type": "string"
-        },
-        "reportProgress": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "round",
-        "signal",
-        "reportProgress"
-      ]
-    },
-    "StopReason": {
-      "type": "string",
-      "enum": [
-        "completed",
-        "failed",
-        "blocked",
-        "cancelled",
-        "max_rounds",
-        "circuit_breaker",
-        "stalled",
-        "executor_failure",
-        "enforcement_terminated",
-        "paused",
-        "task_complete",
-        "stopped"
-      ]
-    },
-    "EnforcementResult": {
-      "type": "object",
-      "properties": {
-        "action": {
-          "anyOf": [
-            {
-              "type": "string",
-              "enum": [
-                "accept"
-              ]
-            },
-            {
-              "type": "string",
-              "enum": [
-                "reject"
-              ]
-            },
-            {
-              "type": "string",
-              "enum": [
-                "terminate"
-              ]
-            }
-          ]
-        },
-        "reason": {
-          "type": "string"
-        },
-        "fix_instructions": {
-          "type": "string"
-        },
-        "check": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "action",
-        "reason",
-        "fix_instructions"
-      ],
-      "description": "Result of round-boundary enforcement. Decides whether to accept the round,\nreject it (force the agent to redo the SAME round), or terminate the loop.\n\naccept:    round passes; proceed to next round as normal.\nreject:    agent's self-evaluation or output is invalid; the agent receives\n           a rejection prompt and must redo the same round. Round counter\n           does NOT increment.\nterminate: loop has reached an unrecoverable state; stop immediately with\n           stopReason \"enforcement_terminated\"."
-    },
-    "RoundStartInfo": {
-      "type": "object",
-      "properties": {
-        "round": {
-          "type": "number"
-        },
-        "roundId": {
-          "type": "string"
-        },
-        "level": {
-          "type": "string"
-        },
-        "prompt": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "round",
-        "level",
-        "prompt"
-      ]
-    },
-    "RoundCompleteInfo": {
-      "type": "object",
-      "properties": {
-        "round": {
-          "type": "number"
-        },
-        "roundId": {
-          "type": "string"
-        },
-        "roundSuccess": {
-          "type": "boolean"
-        },
-        "selfEval": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/SelfEvaluation"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "durationMs": {
-          "type": "number"
-        }
-      },
-      "required": [
-        "round",
-        "roundSuccess",
-        "durationMs"
-      ]
-    },
-    "HeartbeatInfo": {
-      "type": "object",
-      "properties": {
-        "round": {
-          "type": "number"
-        },
-        "elapsedMs": {
-          "type": "number"
-        },
-        "sinceProgressMs": {
-          "type": "number"
-        }
-      },
-      "required": [
-        "round",
-        "elapsedMs",
-        "sinceProgressMs"
-      ]
-    },
-    "TimeoutInfo": {
-      "type": "object",
-      "properties": {
-        "round": {
-          "type": "number"
-        },
-        "elapsedMs": {
-          "type": "number"
-        }
-      },
-      "required": [
-        "round",
-        "elapsedMs"
-      ]
-    },
-    "HealthWarning": {
-      "type": "object",
-      "properties": {
-        "type": {
-          "type": "string"
-        },
-        "message": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "type",
-        "message"
-      ]
-    },
-    "RuntimeConfig": {
-      "type": "object",
-      "properties": {
-        "task": {
-          "type": "string"
-        },
-        "execute": {
-          "description": "Function signature: AgentExecutor. Omitted from JSON Schema."
-        },
-        "loopId": {
-          "type": "string"
-        },
-        "goalId": {
-          "type": "string"
-        },
-        "maxRounds": {
-          "type": "number"
-        },
-        "roundTimeoutMs": {
-          "type": "number"
-        },
-        "heartbeatIntervalMs": {
-          "type": "number"
-        },
-        "stallGraceMs": {
-          "type": "number"
-        },
-        "maxConsecutiveErrors": {
-          "type": "number"
-        },
-        "interactive": {
-          "type": "boolean"
-        },
-        "healthCheckInterval": {
-          "type": "number"
-        },
-        "planSource": {
-          "type": "string"
-        },
-        "constraintsFromPlan": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "domain": {
-          "type": "string"
-        },
-        "onRoundStart": {
-          "type": "string"
-        },
-        "onRoundComplete": {
-          "type": "string"
-        },
-        "onHeartbeat": {
-          "type": "string"
-        },
-        "onTimeout": {
-          "type": "string"
-        },
-        "onHealthWarning": {
-          "type": "string"
-        },
-        "contextProvider": {
-          "description": "Function signature: ExternalContextProvider. Omitted from JSON Schema."
-        },
-        "terminalSinks": {
-          "type": "array",
-          "items": {
-            "description": "Function signature: LoopTerminalSink. Omitted from JSON Schema."
-          }
-        }
-      },
-      "required": [
-        "task",
-        "execute"
-      ]
-    },
-    "ExternalContextRequest": {
-      "type": "object",
-      "properties": {
-        "loopId": {
-          "type": "string"
-        },
-        "round": {
-          "type": "number"
-        },
-        "task": {
-          "type": "string"
-        },
-        "domain": {
-          "type": "string"
-        },
-        "lastEvaluation": {
-          "$ref": "#/$defs/SelfEvaluation"
-        }
-      },
-      "required": [
-        "loopId",
-        "round",
-        "task",
-        "domain"
-      ],
-      "description": "Context supplied to an embedding-owned provider before compilation."
-    },
-    "RunResult": {
-      "type": "object",
-      "properties": {
-        "success": {
-          "type": "boolean"
-        },
-        "stopReason": {
-          "$ref": "#/$defs/StopReason"
-        },
-        "roundsCompleted": {
-          "type": "number"
-        },
-        "successTrajectory": {
-          "type": "array",
-          "items": {
-            "type": "boolean"
-          }
-        }
-      },
-      "required": [
-        "success",
-        "stopReason",
-        "roundsCompleted",
-        "successTrajectory"
-      ]
-    },
-    "LoopTerminalEvent": {
-      "type": "object",
-      "properties": {
-        "loopId": {
-          "type": "string"
-        },
-        "task": {
-          "type": "string"
-        },
-        "lastEvaluation": {
-          "$ref": "#/$defs/SelfEvaluation"
-        }
-      },
-      "required": [
-        "loopId",
-        "task"
-      ],
-      "description": "Stable, provider-neutral terminal hook payload."
-    },
-    "VerificationFlag": {
-      "type": "object",
-      "properties": {
-        "severity": {
-          "anyOf": [
-            {
-              "type": "string",
-              "enum": [
-                "info"
-              ]
-            },
-            {
-              "type": "string",
-              "enum": [
-                "warn"
-              ]
-            },
-            {
-              "type": "string",
-              "enum": [
-                "error"
-              ]
-            }
-          ]
-        },
-        "field": {
-          "type": "string"
-        },
-        "check": {
-          "type": "string"
-        },
-        "detail": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "severity",
-        "field",
-        "check",
-        "detail"
-      ],
-      "description": "A single flag raised during self-evaluation verification.\nEach flag identifies a specific inconsistency between the agent's\nself-reported data and the loop's cross-round lineage."
-    },
-    "VerificationResult": {
-      "type": "object",
-      "properties": {
-        "verdict": {
-          "anyOf": [
-            {
-              "type": "string",
-              "enum": [
-                "trusted"
-              ]
-            },
-            {
-              "type": "string",
-              "enum": [
-                "suspect"
-              ]
-            },
-            {
-              "type": "string",
-              "enum": [
-                "contradicted"
-              ]
-            }
-          ]
-        },
-        "flags": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/VerificationFlag"
-          }
-        }
-      },
-      "required": [
-        "verdict",
-        "flags"
-      ],
-      "description": "Result of cross-round self-evaluation verification.\n\nVerdict semantics:\n- trusted:   all checks passed; flags are informational only.\n- suspect:   one or more warn-level flags; flags become warnings in the\n             next prompt so the agent can clarify.\n- contradicted: one or more error-level flags; the quality score for this\n                round is excluded from the quality trend (NOT modified).\n                Flags become hard constraints — the agent must respond."
     }
   }
 }

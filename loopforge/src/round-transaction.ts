@@ -8,23 +8,21 @@
 
 import type { VaultBackend, VaultEntry } from "./backends/interface.js";
 import { LoopForgeEngine } from "./engine.js";
-import {
-  diffSnapshotCollections,
-  extractFilesFromSnapshots,
-} from "./evidence-provider.js";
+import { diffSnapshotCollections } from "./evidence-provider.js";
 import type { ProviderSnapshot } from "./evidence-provider.js";
-import type { SelfEvaluation } from "./protocol.js";
+import type { NormalizedRoundEvaluation } from "./protocol.js";
 import type { PromptArtifact } from "./protocol.js";
 import {
   RoundCoordinator,
   type RoundProcessResult,
 } from "./round-coordinator.js";
-import { logEvent, startSpan } from "./observability.js";
+import { logEvent } from "./observability.js";
+import { isRecord } from "./token-utils.js";
 import { policyMetrics } from "./policy-metrics.js";
 import { VaultRoundCommitStore } from "./storage.js";
 import type { RoundCommitStore } from "./storage.js";
 
-export const ROUND_TRANSACTION_SCHEMA_VERSION = 1 as const;
+export const ROUND_TRANSACTION_SCHEMA_VERSION = 3 as const;
 
 export type RoundTransactionPhase =
   | "prepared"
@@ -39,12 +37,14 @@ export interface RoundTransactionSnapshot {
   roundId: string;
   loopId: string;
   round: number;
+  /** Incremented only when backtrack creates a new execution branch. */
+  executionEpoch: number;
   attempt: number;
   phase: RoundTransactionPhase;
   beforeEvidence: ProviderSnapshot[];
   afterEvidence?: ProviderSnapshot[];
   roundEvidence?: ProviderSnapshot[];
-  evaluation?: SelfEvaluation;
+  roundEvaluation?: NormalizedRoundEvaluation;
   result?: RoundProcessResult;
   createdAt: number;
   updatedAt: number;
@@ -56,11 +56,12 @@ export interface RoundTransactionInput {
   snapshot: RoundTransactionSnapshot;
   task: string;
   maxRounds: number;
-  selfEval: SelfEvaluation;
-  extractionSucceeded: boolean;
-  lastSelfEval?: SelfEvaluation;
+  evaluation: NormalizedRoundEvaluation;
+  previousEvaluation?: NormalizedRoundEvaluation;
   consecutiveRejections: number;
   successTrajectory: boolean[];
+  /** v2.13: Files from skipped backtrack rounds for restore check. */
+  backtrackSkippedFiles?: string[];
   actualEvidence: ProviderSnapshot[];
 }
 
@@ -71,11 +72,16 @@ export interface RoundTransactionOutcome {
   replayed: boolean;
 }
 
-export function makeRoundId(loopId: string, round: number): string {
+export function makeRoundId(loopId: string, round: number, executionEpoch = 0): string {
   if (!Number.isInteger(round) || round < 1) {
     throw new Error(`Invalid round number: ${round}`);
   }
-  return `loop:${loopId}:round:${round}`;
+  if (!Number.isInteger(executionEpoch) || executionEpoch < 0) {
+    throw new Error(`Invalid execution epoch: ${executionEpoch}`);
+  }
+  return executionEpoch === 0
+    ? `loop:${loopId}:round:${round}`
+    : `loop:${loopId}:epoch:${executionEpoch}:round:${round}`;
 }
 
 export function prepareRoundTransaction(
@@ -83,13 +89,15 @@ export function prepareRoundTransaction(
   round: number,
   beforeEvidence: ProviderSnapshot[],
   promptArtifact?: PromptArtifact,
+  executionEpoch = 0,
 ): RoundTransactionSnapshot {
   const now = Date.now();
   return {
     schemaVersion: ROUND_TRANSACTION_SCHEMA_VERSION,
-    roundId: makeRoundId(loopId, round),
+    roundId: makeRoundId(loopId, round, executionEpoch),
     loopId,
     round,
+    executionEpoch,
     attempt: 1,
     phase: promptArtifact ? "prompted" : "prepared",
     beforeEvidence,
@@ -125,20 +133,17 @@ export function prepareRejectedAttempt(
     phase: "prompted",
     afterEvidence: undefined,
     roundEvidence: undefined,
-    evaluation: undefined,
+    roundEvaluation: undefined,
     result: undefined,
     promptArtifact,
     updatedAt: Date.now(),
   };
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
 
 function isProcessResult(value: unknown): value is RoundProcessResult {
   if (!isRecord(value)) return false;
-  return ["continue", "stop", "reject", "terminate"].includes(
+  return ["continue", "stop", "reject", "terminate", "backtrack"].includes(
     String(value.action),
   ) && Array.isArray(value.verificationFlags);
 }
@@ -170,6 +175,8 @@ export function parseRoundTransactionSnapshot(
     return null;
   }
   if (!Number.isInteger(value.round) || (value.round as number) < 1) return null;
+  const executionEpoch = value.executionEpoch === undefined ? 0 : value.executionEpoch;
+  if (!Number.isInteger(executionEpoch) || (executionEpoch as number) < 0) return null;
   if (!Number.isInteger(value.attempt) || (value.attempt as number) < 1) return null;
   if (
     !["prepared", "prompted", "evaluated", "rejected", "committed", "terminated"]
@@ -201,11 +208,12 @@ export function parseRoundTransactionSnapshot(
 
   const snapshot = {
     ...value,
+    executionEpoch,
     beforeEvidence,
     afterEvidence,
     roundEvidence,
   } as unknown as RoundTransactionSnapshot;
-  if (snapshot.roundId !== makeRoundId(snapshot.loopId, snapshot.round)) {
+  if (snapshot.roundId !== makeRoundId(snapshot.loopId, snapshot.round, snapshot.executionEpoch)) {
     return null;
   }
   return snapshot;
@@ -226,27 +234,16 @@ export class RoundTransactionCoordinator {
 
   process(input: RoundTransactionInput): RoundTransactionOutcome {
     const { snapshot } = input;
-    const span = startSpan("round.transaction", {
-      loopId: snapshot.loopId,
-      round: snapshot.round,
-      roundId: snapshot.roundId,
-      attempt: snapshot.attempt,
-    });
     const finish = (outcome: RoundTransactionOutcome): RoundTransactionOutcome => {
       policyMetrics.recordRound(
         snapshot.loopId,
         outcome.result,
         outcome.replayed,
       );
-      span.end("ok", {
-        action: outcome.result.action,
-        replayed: outcome.replayed,
-        phase: outcome.snapshot.phase,
-      });
       return outcome;
     };
     try {
-    const expectedRoundId = makeRoundId(snapshot.loopId, snapshot.round);
+    const expectedRoundId = makeRoundId(snapshot.loopId, snapshot.round, snapshot.executionEpoch);
     if (snapshot.roundId !== expectedRoundId) {
       throw new Error(
         `Round snapshot identity mismatch: ${snapshot.roundId} !== ${expectedRoundId}`,
@@ -276,13 +273,12 @@ export class RoundTransactionCoordinator {
       task: input.task,
       currentRound: snapshot.round,
       maxRounds: input.maxRounds,
-      selfEval: input.selfEval,
-      extractionSucceeded: input.extractionSucceeded,
-      lastSelfEval: input.lastSelfEval,
+      evaluation: input.evaluation,
+      previousEvaluation: input.previousEvaluation,
       consecutiveRejections: input.consecutiveRejections,
-      runtimeFilesChanged: extractFilesFromSnapshots(roundEvidence),
       evidenceSnapshots: roundEvidence,
       successTrajectory: input.successTrajectory,
+      backtrackSkippedFiles: input.backtrackSkippedFiles,
     });
 
     const evaluated: RoundTransactionSnapshot = {
@@ -291,7 +287,7 @@ export class RoundTransactionCoordinator {
       phase: "evaluated",
       afterEvidence: input.actualEvidence,
       roundEvidence,
-      evaluation: input.selfEval,
+      roundEvaluation: input.evaluation,
       result,
       updatedAt: Date.now(),
     };
@@ -319,7 +315,7 @@ export class RoundTransactionCoordinator {
     };
 
     this.engine.autoFeedback(
-      input.selfEval,
+      input.evaluation,
       snapshot.loopId,
       snapshot.round,
       input.task,
@@ -338,28 +334,20 @@ export class RoundTransactionCoordinator {
     });
     return finish({ snapshot: committedSnapshot, result, replayed: false });
     } catch (error) {
-      span.end("error", { error: String(error) });
-      throw error;
+            throw error;
     }
   }
 
   /** Recover an already committed decision without evaluating or writing. */
   recover(snapshot: RoundTransactionSnapshot): RoundTransactionOutcome | null {
-    const span = startSpan("round.transaction.recover", {
-      loopId: snapshot.loopId,
-      round: snapshot.round,
-      roundId: snapshot.roundId,
-    });
     try {
       const outcome = this.readCommitted(snapshot);
       if (outcome) {
         policyMetrics.recordRound(snapshot.loopId, outcome.result, true);
       }
-      span.end("ok", { recovered: outcome !== null });
-      return outcome;
+            return outcome;
     } catch (error) {
-      span.end("error", { error: String(error) });
-      throw error;
+            throw error;
     }
   }
 

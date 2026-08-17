@@ -1,22 +1,15 @@
 /** Externalized LoopForge runtime policy. */
-export interface ConstraintsPolicy {
-    retire_window: number;
-}
+import type { WorkflowState } from "./protocol.js";
+import type { GovernanceGraphSummary } from "./governance-graph.js";
 export interface SummaryPolicy {
     window: number;
-    health_check_interval: number;
+    max_milestones: number;
 }
 export interface EnginePolicy {
-    feedback_flush_interval: number;
-    max_circuit_breaker: number;
-}
-export interface RuntimePolicy {
     max_rounds: number;
-    round_timeout_ms: number;
-    heartbeat_interval_ms: number;
-    stall_grace_ms: number;
-    max_consecutive_errors: number;
-    pause_double_tap_ms: number;
+    backtrack_enabled: boolean;
+    backtrack_max_depth: number;
+    backtrack_preserve_discoveries: boolean;
 }
 /** Levels control state density only; reasoning strategy belongs to the Agent. */
 export interface PromptPolicy {
@@ -25,6 +18,13 @@ export interface PromptPolicy {
     l0_max_chars: number;
     l1_max_chars: number;
     l2_max_chars: number;
+    l2_adaptive_enabled: boolean;
+    l2_adaptive_round_factor: number;
+    l2_adaptive_milestone_factor: number;
+    l2_adaptive_max_chars: number;
+    l2_pointer_enabled: boolean;
+    graph_slice_enabled: boolean;
+    graph_slice_max_chars: number;
     base_prompt_version: string;
 }
 export interface BackendPolicy {
@@ -32,23 +32,13 @@ export interface BackendPolicy {
     root_dir: string;
 }
 export interface EvolutionPolicy {
-    max_discovered_constraints_per_round: number;
     max_active_constraints: number;
-    max_objective_versions: number;
-    progress_stall_threshold: number;
     progress_stall_rounds: number;
-    progress_mismatch_threshold: number;
-}
-export interface CheckpointPolicy {
-    max_carried_constraints: number;
-    outcome_max_chars: number;
 }
 /** Human-readable derived state view. JSON LoopStore documents remain truth. */
 export interface StateFilePolicy {
     enabled: boolean;
     directory: string;
-    max_checkpoints: number;
-    max_summary_rounds: number;
 }
 export interface EvidencePolicy {
     providers: string[];
@@ -71,19 +61,23 @@ export interface McpPolicy {
     session_lease_ms: number;
     session_lease_renew_interval_ms: number;
 }
+export interface WorkflowPolicy {
+    executable_horizon: number;
+    max_plan_steps: number;
+    /** risk_only is the safe default; every_revision adds human review for all plan versions. */
+    approval_policy: "risk_only" | "every_revision";
+}
 export interface LoopPolicy {
     version: string;
-    constraints: ConstraintsPolicy;
     summary: SummaryPolicy;
     engine: EnginePolicy;
-    runtime: RuntimePolicy;
     prompt: PromptPolicy;
     backend: BackendPolicy;
     evolution: EvolutionPolicy;
-    checkpoint: CheckpointPolicy;
     state_file: StateFilePolicy;
     evidence: EvidencePolicy;
     mcp: McpPolicy;
+    workflow: WorkflowPolicy;
 }
 export declare const DEFAULT_POLICY: LoopPolicy;
 /** Write a full default `loop_policy.json` to the target directory.
@@ -101,7 +95,16 @@ export declare function writeDefaultPolicy(targetDir: string, force?: boolean): 
 export declare function loadPolicy(path?: string): LoopPolicy;
 export declare function getPolicy(path?: string): LoopPolicy;
 export declare function resetPolicy(): void;
+/** Bind the process policy lookup to a workspace after workspace validation. */
+export declare function bindPolicyWorkspace(workspaceRoot: string): LoopPolicy;
 export declare function validateLoopId(loopId: string): void;
 export declare function resolveStateDirectory(workspaceRoot: string, configuredDirectory: string): string;
-export declare function writeStateFile(loopId: string, content: string | undefined): void;
+export declare function writeStateFile(loopId: string, content: string | undefined, workspaceRoot?: string): void;
+/** Update the optional Markdown projection with v3 workflow state. The typed
+ * session/round JSON remains the durable truth. */
+export declare function writeWorkflowStateFile(loopId: string, workflow: WorkflowState, workspaceRoot?: string, graphSummary?: GovernanceGraphSummary, regressionSummary?: {
+    total: number;
+    verified: number;
+    gaps: number;
+}): void;
 //# sourceMappingURL=policy.d.ts.map

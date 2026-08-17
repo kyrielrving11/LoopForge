@@ -1,15 +1,9 @@
-/** LoopForge-loop_compile — TypeScript protocol definitions.
- *
- * All types exchanged between the Main Agent and LoopForge flow through
- * these interfaces. This is the contract layer — no implementation logic.
- *
- * v1.15: 40 types — 4 enums + 35 interfaces + 1 type alias.
- */
-// ── Enums ──────────────────────────────────────────────────────────────────
+/** Internal TypeScript contracts shared by the compiler, workflow runtime,
+ * evidence gates, and supported public protocol types. */
+// Enums
 export var Mode;
 (function (Mode) {
     Mode["LOOP_COMPILE"] = "loop_compile";
-    Mode["FEEDBACK"] = "feedback";
 })(Mode || (Mode = {}));
 export var AgentStatus;
 (function (AgentStatus) {
@@ -17,57 +11,9 @@ export var AgentStatus;
     AgentStatus["ERROR"] = "error";
     AgentStatus["STALLED"] = "stalled";
 })(AgentStatus || (AgentStatus = {}));
-export function makeExecutionFeedback(overrides = {}) {
-    return {
-        output: "",
-        success: false,
-        constraint_violations: [],
-        manual_fixes_needed: "",
-        ...overrides,
-    };
+export function isApprovalPolicy(value) {
+    return value === "risk_only" || value === "every_revision";
 }
-export function makeExecutionEvidence(overrides = {}) {
-    return {
-        files_changed: [],
-        test_results: null,
-        success_criteria_met: [],
-        success_criteria_remaining: [],
-        progress_estimate: 0.0,
-        ...overrides,
-    };
-}
-export function makeCheckpointSummary(overrides = {}) {
-    return {
-        label: "",
-        declared_at_round: 0,
-        outcome: "",
-        carried_constraints: [],
-        resolved_constraints: [],
-        ...overrides,
-    };
-}
-export function makeSelfEvaluation(overrides = {}) {
-    return {
-        success: false,
-        output_summary: "",
-        constraint_violations: [],
-        should_continue: true,
-        discovered_constraints: [],
-        objective_refinement: "",
-        emerged_subtasks: [],
-        execution_evidence: undefined,
-        retracted_constraints: [],
-        revised_success_criteria: [],
-        wrong_assumptions: [],
-        worker_results: [],
-        compression_checkpoint: false,
-        checkpoint_label: "",
-        next_action: undefined,
-        ...overrides,
-    };
-}
-/** Regex to extract a self-evaluation JSON block from agent output. */
-export const SELF_EVAL_REGEX = /---loopforge-eval\s*([\s\S]*?)\s*---end-loopforge-eval/;
 export function makeLoopObjective(overrides = {}) {
     return {
         objective: "",
@@ -80,54 +26,57 @@ export function makeLoopObjective(overrides = {}) {
         ...overrides,
     };
 }
-export function makeLoopHealth(overrides = {}) {
+export function makeMilestoneSummary(overrides = {}) {
     return {
-        goal_alignment: 1.0,
-        constraint_integrity: 1.0,
-        drift_detected: false,
-        strategy_stability: true,
-        task_continuity: 1.0,
-        escalation_recommended: "none",
-        ...overrides,
-    };
-}
-export function makeRollingSummary(overrides = {}) {
-    return {
-        key_outcomes: [],
-        recurring_issues: [],
-        rounds_sampled: 0,
+        label: "",
+        round_range: { start: 0, end: 0 },
+        outcome: "",
+        carried_constraints: [],
+        resolved_constraints: [],
+        kind: "auto",
         generated_at_round: 0,
-        failed_patterns: [],
         ...overrides,
     };
 }
-export function makeTaskAlignment(overrides = {}) {
+export function makeExecutionHistorySummary(overrides = {}) {
     return {
-        is_aligned: true,
-        alignment_score: 1.0,
-        warning: "",
-        escalation: "none",
+        recentOutcomes: [],
+        blockedOutcomes: [],
+        roundsSampled: 0,
+        latestRound: 0,
+        milestones: [],
+        synthesis: "",
         ...overrides,
     };
 }
-export function makeLoopRoundResult(overrides = {}) {
+export function makeConstraintMeta(overrides = {}) {
+    return {
+        id: "",
+        text: "",
+        discovered_at_round: 0,
+        last_violated_at_round: 0,
+        source: "plan",
+        status: "active",
+        ...overrides,
+    };
+}
+export function makeRoundHistoryEntry(overrides = {}) {
     return {
         round: 0,
-        success: false,
-        output_summary: "",
-        constraint_violations: [],
-        manual_fixes_needed: "",
-        discovered_constraints: [],
-        objective_refinement: "",
-        emerged_subtasks: [],
-        execution_evidence: undefined,
-        retracted_constraints: [],
-        revised_success_criteria: [],
-        wrong_assumptions: [],
-        worker_results: [],
-        compression_checkpoint: false,
-        checkpoint_label: "",
-        next_action: undefined,
+        status: "in_progress",
+        summary: "",
+        violations: [],
+        evidenceEnvelope: {
+            files: { value: [], confidence: "unavailable", source: "agent" },
+            fileFingerprints: {},
+            checks: { value: [], confidence: "unavailable", source: "agent" },
+            claims: [],
+            noChangeReason: null,
+            providerNames: [],
+            checkProvenance: {},
+            providerClaims: {},
+            contradictions: [],
+        },
         ...overrides,
     };
 }
@@ -136,17 +85,17 @@ export function makeLoopCompileRequest(overrides = {}) {
         mode: Mode.LOOP_COMPILE,
         loop_id: "",
         round: 1,
+        round_id: undefined,
         goal_id: "",
         task: "",
         domain: "",
-        next_task_proposal: "",
         loop_objective: null,
-        plan_source: null,
+        compilation_context: null,
+        plan_boundary: false,
         constraints_from_plan: [],
         new_since_last_round: "",
-        last_round_result: null,
+        last_evaluation: null,
         force_level: "auto",
-        health_check_interval: 1,
         external_context: "",
         verification_flags: [],
         attempt: 1,
@@ -163,18 +112,13 @@ export function makeLoopCompileResponse(overrides = {}) {
         diff_from_previous: "",
         lineage: [],
         constraints_active: [],
-        constraints_retired: [],
         loop_id: "",
         round: 0,
         goal_id: "",
         goal_text_hash: "",
         loop_objective: null,
-        loop_health: null,
-        task_alignment: null,
-        rolling_summary: null,
-        checkpoint_summary: null,
-        suggested_next_task: "",
-        plan_source: null,
+        executionHistory: makeExecutionHistorySummary(),
+        constraint_metadata: [],
         warnings: [],
         error: "",
         state_file_content: undefined,
@@ -182,45 +126,6 @@ export function makeLoopCompileResponse(overrides = {}) {
         ...overrides,
     };
 }
-export function makeEvidenceSnapshot(overrides = {}) {
-    return { verified: [], pending: [], invalidated: [], discovered: [], ...overrides };
-}
-export function makeSessionState(taskId) {
-    return {
-        task_id: taskId,
-        call_count: 0,
-        success_trend: [],
-        current_version: "v1",
-        circuit_breaker_count: 0,
-        feedback_buffer: [],
-    };
-}
-// ── Runtime types (v1.2) ──────────────────────────────────────────────────────
-export var RuntimeStatus;
-(function (RuntimeStatus) {
-    RuntimeStatus["IDLE"] = "idle";
-    RuntimeStatus["RUNNING"] = "running";
-    RuntimeStatus["STOPPED"] = "stopped";
-    RuntimeStatus["STALLED"] = "stalled";
-    /** v1.18: Loop is suspended — can be resumed from currentRound. */
-    RuntimeStatus["PAUSED"] = "paused";
-})(RuntimeStatus || (RuntimeStatus = {}));
-/** Map StopReason (internal) → MemoryWriteback outcome (wire format).
- *  Shared between runtime.ts and mcp/session.ts — single source of truth. */
-const LEGACY_STOP_REASON_OUTCOME_MAP = {
-    completed: "completed",
-    failed: "failed",
-    blocked: "blocked",
-    cancelled: "cancelled",
-    circuit_breaker: "circuit_breaker",
-    stalled: "stalled",
-    max_rounds: "max_rounds",
-    executor_failure: "failed",
-    enforcement_terminated: "enforcement_terminated",
-    paused: "paused",
-    task_complete: "completed",
-    stopped: "cancelled",
-};
 export function makeEnforcementResult(overrides = {}) {
     return {
         action: "accept",
@@ -246,8 +151,8 @@ export function makeVerificationResult(overrides = {}) {
         ...overrides,
     };
 }
-// ── Serialisation helpers ───────────────────────────────────────────────────
-export function toDict(obj) {
+// Serialization helpers
+function toDict(obj) {
     const result = {};
     for (const [key, value] of Object.entries(obj)) {
         if (value === null || value === undefined)
@@ -266,7 +171,7 @@ export function toDict(obj) {
     }
     return result;
 }
-// ── Factory helpers ─────────────────────────────────────────────────────────
+// Factory helpers
 export function makeTaskId(taskDescription) {
     let slug = taskDescription.toLowerCase().trim().slice(0, 60);
     slug = slug.replace(/[^a-z0-9\s-]/g, "");

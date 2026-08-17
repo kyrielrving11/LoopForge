@@ -5,10 +5,11 @@
  */
 import type { VaultBackend } from "../backends/interface.js";
 import type { LoopStore } from "../loop-store.js";
+import { WorkspaceRuntime } from "../workspace-runtime.js";
 export declare class McpServer {
     private readonly mgr;
     private requestQueue;
-    constructor(storeOrBackend?: LoopStore | VaultBackend);
+    constructor(storeOrBackend?: LoopStore | VaultBackend, runtime?: WorkspaceRuntime);
     start(): void;
     private handleLine;
     private dispatch;

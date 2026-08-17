@@ -1,10 +1,6 @@
-/** Canonical cognitive state used to render both prompts and state projections.
- *
- * The canonical state is data, not Markdown. Prompt and state-file renderers
- * consume the same value so they cannot silently drift apart.
- */
-import type { CheckpointSummary, LoopCompileRequest, LoopCompileResponse, VerificationFlag } from "./protocol.js";
-export declare const CANONICAL_STATE_SCHEMA_VERSION: 1;
+/** Canonical data used by prompt and Markdown projections. */
+import type { ConstraintMeta, GraphSliceSummary, LoopCompileRequest, LoopCompileResponse, MilestoneSummary, PromptCompilationContext, RoundCheckReport, VerificationFlag } from "./protocol.js";
+export declare const CANONICAL_STATE_SCHEMA_VERSION: 3;
 export interface CanonicalLoopState {
     schemaVersion: typeof CANONICAL_STATE_SCHEMA_VERSION;
     loopId: string;
@@ -14,40 +10,34 @@ export interface CanonicalLoopState {
     objective: string;
     objectiveVersion: number;
     currentTask: string;
+    compilationContext: PromptCompilationContext | null;
     successCriteria: string[];
     hardConstraints: string[];
     activeConstraints: string[];
-    retiredConstraints: string[];
+    constraintMetadata: ConstraintMeta[];
     changesSinceLastRound: string[];
-    remainingCriteria: string[];
     blockers: string[];
     verificationFlags: VerificationFlag[];
     discoveries: string[];
-    nextAction: string;
     rollingOutcomes: string[];
     recurringIssues: string[];
     failedPatterns: string[];
-    checkpoints: CheckpointSummary[];
-    suggestedNextTask: string;
+    milestones: MilestoneSummary[];
+    loopSynthesis: string;
     externalContext: string;
     stateFilePath: string;
-    progress: {
-        estimate: number | null;
-        criteriaMet: string[];
-        criteriaRemaining: string[];
-        filesChanged: string[];
-        tests: {
-            passed: number;
-            failed: number;
-            skipped: number;
-        } | null;
+    evidence: {
+        files: string[];
+        checks: RoundCheckReport[];
+        coveredClaims: string[];
+        evidenceGaps: string[];
     };
+    graphSlice: GraphSliceSummary | null;
 }
-/** Deterministic JSON serialization used by state and prompt hashes. */
 export declare function stableStringify(value: unknown): string;
 export declare function hashCanonicalState(state: CanonicalLoopState): string;
-/** Human/Agent-readable materialized view. It is always reproducible from the
- * canonical state and is never consulted as transaction truth. */
+export declare function formatCompilationContext(context: PromptCompilationContext | null, fallbackTask: string): string;
+/** Markdown is a rebuildable view. Typed session and round JSON is truth. */
 export declare function renderCanonicalStateMarkdown(state: CanonicalLoopState): string;
 export declare function createCanonicalLoopState(request: LoopCompileRequest, response: LoopCompileResponse, stateFilePath: string): CanonicalLoopState;
 //# sourceMappingURL=canonical-state.d.ts.map

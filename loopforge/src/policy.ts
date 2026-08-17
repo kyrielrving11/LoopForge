@@ -1,6 +1,10 @@
 /** Externalized LoopForge runtime policy. */
 
 import { randomUUID } from "node:crypto";
+import { isApprovalPolicy } from "./protocol.js";
+import type { WorkflowState } from "./protocol.js";
+import { computeWorkflowProgress } from "./plan.js";
+import type { GovernanceGraphSummary } from "./governance-graph.js";
 import {
   existsSync,
   lstatSync,
@@ -13,27 +17,37 @@ import {
 } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 
-export interface ConstraintsPolicy {
-  retire_window: number;
+function replaceFileWithRetry(temporary: string, target: string): void {
+  const retryable = new Set(["EPERM", "EACCES", "EBUSY"]);
+  const attempts = process.platform === "win32" ? 8 : 1;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      renameSync(temporary, target);
+      return;
+    } catch (error) {
+      const code = error && typeof error === "object" && "code" in error
+        ? String((error as { code?: unknown }).code)
+        : "";
+      if (!retryable.has(code) || attempt === attempts - 1) throw error;
+      // Windows scanners and readers can briefly retain the previous
+      // projection while the next round is being prepared. A bounded
+      // synchronous wait keeps the projection atomic without an unbounded
+      // retry loop or a runtime dependency.
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10 * (attempt + 1));
+    }
+  }
 }
 
 export interface SummaryPolicy {
   window: number;
-  health_check_interval: number;
+  max_milestones: number;
 }
 
 export interface EnginePolicy {
-  feedback_flush_interval: number;
-  max_circuit_breaker: number;
-}
-
-export interface RuntimePolicy {
   max_rounds: number;
-  round_timeout_ms: number;
-  heartbeat_interval_ms: number;
-  stall_grace_ms: number;
-  max_consecutive_errors: number;
-  pause_double_tap_ms: number;
+  backtrack_enabled: boolean;
+  backtrack_max_depth: number;
+  backtrack_preserve_discoveries: boolean;
 }
 
 /** Levels control state density only; reasoning strategy belongs to the Agent. */
@@ -43,6 +57,13 @@ export interface PromptPolicy {
   l0_max_chars: number;
   l1_max_chars: number;
   l2_max_chars: number;
+  l2_adaptive_enabled: boolean;
+  l2_adaptive_round_factor: number;
+  l2_adaptive_milestone_factor: number;
+  l2_adaptive_max_chars: number;
+  l2_pointer_enabled: boolean;
+  graph_slice_enabled: boolean;
+  graph_slice_max_chars: number;
   base_prompt_version: string;
 }
 
@@ -52,25 +73,14 @@ export interface BackendPolicy {
 }
 
 export interface EvolutionPolicy {
-  max_discovered_constraints_per_round: number;
   max_active_constraints: number;
-  max_objective_versions: number;
-  progress_stall_threshold: number;
   progress_stall_rounds: number;
-  progress_mismatch_threshold: number;
-}
-
-export interface CheckpointPolicy {
-  max_carried_constraints: number;
-  outcome_max_chars: number;
 }
 
 /** Human-readable derived state view. JSON LoopStore documents remain truth. */
 export interface StateFilePolicy {
   enabled: boolean;
   directory: string;
-  max_checkpoints: number;
-  max_summary_rounds: number;
 }
 
 export interface EvidencePolicy {
@@ -97,62 +107,63 @@ export interface McpPolicy {
   session_lease_renew_interval_ms: number;
 }
 
+export interface WorkflowPolicy {
+  executable_horizon: number;
+  max_plan_steps: number;
+  /** risk_only is the safe default; every_revision adds human review for all plan versions. */
+  approval_policy: "risk_only" | "every_revision";
+}
+
 export interface LoopPolicy {
   version: string;
-  constraints: ConstraintsPolicy;
   summary: SummaryPolicy;
   engine: EnginePolicy;
-  runtime: RuntimePolicy;
   prompt: PromptPolicy;
   backend: BackendPolicy;
   evolution: EvolutionPolicy;
-  checkpoint: CheckpointPolicy;
   state_file: StateFilePolicy;
   evidence: EvidencePolicy;
   mcp: McpPolicy;
+  workflow: WorkflowPolicy;
 }
 
 export const DEFAULT_POLICY: LoopPolicy = {
-  version: "2",
-  constraints: { retire_window: 3 },
-  summary: { window: 5, health_check_interval: 1 },
-  engine: { feedback_flush_interval: 5, max_circuit_breaker: 3 },
-  runtime: {
-    max_rounds: 20,
-    round_timeout_ms: 600_000,
-    heartbeat_interval_ms: 30_000,
-    stall_grace_ms: 300_000,
-    max_consecutive_errors: 3,
-    pause_double_tap_ms: 3000,
-  },
+  version: "3",
+  summary: { window: 5, max_milestones: 10 },
+  engine: { max_rounds: 20, backtrack_enabled: true, backtrack_max_depth: 3, backtrack_preserve_discoveries: true },
   prompt: {
     injection_mode: "adaptive",
-    full_refresh_interval: 5,
+    full_refresh_interval: 0,
     l0_max_chars: 3000,
     l1_max_chars: 7000,
     l2_max_chars: 18000,
-    base_prompt_version: "2.0.0",
+    l2_adaptive_enabled: true,
+    l2_adaptive_round_factor: 200,
+    l2_adaptive_milestone_factor: 1000,
+    l2_adaptive_max_chars: 40000,
+    l2_pointer_enabled: true,
+    graph_slice_enabled: true,
+    graph_slice_max_chars: 3000,
+    base_prompt_version: "3.0.0",
   },
   backend: { root_dir: ".loopforge" },
   evolution: {
-    max_discovered_constraints_per_round: 5,
     max_active_constraints: 15,
-    max_objective_versions: 10,
-    progress_stall_threshold: 0.05,
-    progress_stall_rounds: 2,
-    progress_mismatch_threshold: 0.3,
+    progress_stall_rounds: 3,
   },
-  checkpoint: { max_carried_constraints: 10, outcome_max_chars: 200 },
   state_file: {
     enabled: true,
     directory: ".loopforge/state",
-    max_checkpoints: 5,
-    max_summary_rounds: 5,
   },
   evidence: { providers: ["git"], timeout_ms: 120_000, commands: [] },
   mcp: {
     session_lease_ms: 30_000,
     session_lease_renew_interval_ms: 10_000,
+  },
+  workflow: {
+    executable_horizon: 3,
+    max_plan_steps: 50,
+    approval_policy: "risk_only",
   },
 };
 
@@ -191,23 +202,34 @@ function deepMerge<T>(defaults: T, overrides: Record<string, unknown>): T {
         incoming as Record<string, unknown>,
       );
     } else if (key in result) {
-      // Unknown legacy keys are deliberately ignored at the 2.0 boundary.
       result[key] = incoming;
+    } else {
+      // Warn on unknown keys — a typo like "max_round" instead of
+      // "max_rounds" would otherwise be silently ignored.
+      console.warn(`loopforge: ignoring unknown policy key "${key}". Check loop_policy.json for typos.`);
     }
   }
   return result as T;
 }
 
 export function loadPolicy(path?: string): LoopPolicy {
-  const candidates = [path, "loop_policy.json"].filter(Boolean) as string[];
+  const candidates = path ? [path] : ["loop_policy.json"];
   for (const candidate of candidates) {
+    let raw: unknown;
     try {
-      const raw = JSON.parse(readFileSync(resolve(candidate), "utf8"));
-      if (raw && typeof raw === "object" && !Array.isArray(raw)) {
-        return deepMerge(DEFAULT_POLICY, raw as Record<string, unknown>);
-      }
+      raw = JSON.parse(readFileSync(resolve(candidate), "utf8"));
     } catch {
       // Try the next candidate.
+      continue;
+    }
+    if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+      const merged = deepMerge(DEFAULT_POLICY, raw as Record<string, unknown>);
+      if (!isApprovalPolicy(merged.workflow.approval_policy)) {
+        throw new Error(
+          `Invalid workflow.approval_policy: expected "risk_only" or "every_revision"`,
+        );
+      }
+      return merged;
     }
   }
   return structuredClone(DEFAULT_POLICY);
@@ -216,12 +238,21 @@ export function loadPolicy(path?: string): LoopPolicy {
 let policy: LoopPolicy | null = null;
 
 export function getPolicy(path?: string): LoopPolicy {
-  policy ??= loadPolicy(path);
+  // Explicit path: always (re)load from that file.
+  // No path: cache the default lookup so loadPolicy only runs once.
+  if (path) return loadPolicy(path);
+  policy ??= loadPolicy();
   return policy;
 }
 
 export function resetPolicy(): void {
   policy = null;
+}
+
+/** Bind the process policy lookup to a workspace after workspace validation. */
+export function bindPolicyWorkspace(workspaceRoot: string): LoopPolicy {
+  policy = loadPolicy(resolve(workspaceRoot, "loop_policy.json"));
+  return policy;
 }
 
 const LOOP_ID_RE = /^[a-zA-Z0-9][-a-zA-Z0-9_:.]{0,127}$/;
@@ -273,14 +304,14 @@ export function resolveStateDirectory(
   return lexicalTarget;
 }
 
-export function writeStateFile(loopId: string, content: string | undefined): void {
+export function writeStateFile(loopId: string, content: string | undefined, workspaceRoot = process.cwd()): void {
   if (!content) return;
   validateLoopId(loopId);
   const config = getPolicy().state_file;
   if (!config.enabled) return;
-  const directory = resolveStateDirectory(process.cwd(), config.directory);
+  const directory = resolveStateDirectory(workspaceRoot, config.directory);
   mkdirSync(directory, { recursive: true });
-  const verifiedDirectory = resolveStateDirectory(process.cwd(), config.directory);
+  const verifiedDirectory = resolveStateDirectory(workspaceRoot, config.directory);
   const target = resolve(verifiedDirectory, `${loopId}-state.md`);
   if (existsSync(target) && lstatSync(target).isSymbolicLink()) {
     throw new Error("State file target must not be a symbolic link");
@@ -291,8 +322,65 @@ export function writeStateFile(loopId: string, content: string | undefined): voi
   );
   try {
     writeFileSync(temporary, content, "utf8");
-    renameSync(temporary, target);
+    replaceFileWithRetry(temporary, target);
   } finally {
     try { rmSync(temporary, { force: true }); } catch { /* best effort */ }
   }
+}
+
+/** Update the optional Markdown projection with v3 workflow state. The typed
+ * session/round JSON remains the durable truth. */
+export function writeWorkflowStateFile(
+  loopId: string,
+  workflow: WorkflowState,
+  workspaceRoot = process.cwd(),
+  graphSummary?: GovernanceGraphSummary,
+  regressionSummary?: { total: number; verified: number; gaps: number },
+): void {
+  validateLoopId(loopId);
+  const config = getPolicy().state_file;
+  if (!config.enabled) return;
+  const directory = resolveStateDirectory(workspaceRoot, config.directory);
+  const target = resolve(directory, `${loopId}-state.md`);
+  if (!existsSync(target)) return;
+  const current = readFileSync(target, "utf8");
+  const marker = "<!-- loopforge-workflow-v3 -->";
+  const base = current.includes(marker) ? current.slice(0, current.indexOf(marker)).trimEnd() : current.trimEnd();
+  const plan = workflow.plan;
+  const progress = computeWorkflowProgress(workflow);
+  const counts = plan ? {
+    ready: plan.steps.filter((step) => step.status === "ready" || step.status === "active").length,
+    blocked: plan.steps.filter((step) => step.status === "blocked").length,
+    done: plan.steps.filter((step) => step.status === "done" || step.status === "canceled").length,
+  } : { ready: 0, blocked: 0, done: 0 };
+  const approvalRows = workflow.approvalHistory.length
+    ? workflow.approvalHistory.map((item) => `- v${item.planVersion} ${item.decision} (${item.approvalId}): ${item.reason}`).join("\n")
+    : "- None";
+  const section = [
+    marker,
+    "## Workflow",
+    "",
+    `- Phase: ${workflow.phase}`,
+    `- Plan version: ${workflow.planVersion ?? "none"}`,
+    `- Active step: ${workflow.activeStepId ?? "none"}`,
+    `- Steps: ${counts.ready} ready / ${counts.blocked} blocked / ${counts.done} done`,
+    `- Readiness: ${progress.readiness}`,
+    `- Executable steps: ${progress.planSteps.done}/${progress.planSteps.total} done, ${progress.planSteps.blocked} blocked, ${progress.planSteps.canceled} canceled`,
+    `- Success criteria: ${progress.successCriteria.provisionallyMet}/${progress.successCriteria.total} provisional, ${progress.successCriteria.auditVerified} audit verified`,
+    `- External gates: ${progress.externalGates.satisfied}/${progress.externalGates.total} satisfied, ${progress.externalGates.blocked} blocked`,
+    `- Session hard constraints: ${workflow.baselineConstraints.length}`,
+    ...workflow.baselineConstraints.map((constraint) => `  - ${constraint}`),
+    ...(graphSummary ? [
+      `- Governance graph: ${graphSummary.nodeCount} nodes / ${graphSummary.edgeCount} edges`,
+      `- Graph diagnostics: ${graphSummary.errorCount} errors / ${graphSummary.warningCount} warnings`,
+      `- Blocked descendants: ${graphSummary.blockedDescendants}`,
+    ] : []),
+    ...(regressionSummary ? [`- Regression obligations: ${regressionSummary.verified}/${regressionSummary.total} verified, ${regressionSummary.gaps} gaps`] : []),
+    "",
+    "### Approval History",
+    "",
+    approvalRows,
+    "",
+  ].join("\n");
+  writeStateFile(loopId, `${base}\n\n${section}`, workspaceRoot);
 }

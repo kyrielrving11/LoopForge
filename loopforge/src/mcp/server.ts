@@ -14,8 +14,12 @@ import {
   ToolInputValidationError,
   validateToolInput,
 } from "./tools.js";
+import { isRecord } from "../token-utils.js";
+import { LOOPFORGE_VERSION } from "../version.js";
+import { WorkspaceRuntime } from "../workspace-runtime.js";
 
-const SERVER_INFO = { name: "loopforge-mcp", version: "2.0.0" };
+const SERVER_INFO = { name: "loopforge-mcp", version: LOOPFORGE_VERSION };
+const SERVER_INSTRUCTIONS = "Start with loopforge_start(workspaceRoot) or recover with loopforge_resume(loopId, workspaceRoot), then verify capabilityPreflight. Follow requiredAction through plan, approval, one active step, and final audit. Submit execution with the exact roundId plus compact report; only terminal=true ends the task. LoopForge governs state and evidence while the external Agent performs repository work.";
 
 interface JsonRpcRequest {
   jsonrpc: "2.0";
@@ -24,8 +28,19 @@ interface JsonRpcRequest {
   params?: Record<string, unknown>;
 }
 
+interface McpContentItem {
+  type: "text";
+  text: string;
+  annotations?: {
+    /** 0.0–1.0, higher = more important. Default 0.5. */
+    priority: number;
+    /** Intended recipient: "user", "assistant", or both. */
+    audience: string[];
+  };
+}
+
 interface McpToolResult {
-  content: Array<{ type: "text"; text: string }>;
+  content: McpContentItem[];
   structuredContent: Record<string, unknown>;
   isError: boolean;
 }
@@ -35,10 +50,6 @@ class JsonRpcError extends Error {
     super(message);
     this.name = "JsonRpcError";
   }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function isJsonRpcRequest(value: unknown): value is JsonRpcRequest {
@@ -70,8 +81,12 @@ export class McpServer {
   private readonly mgr: SessionManager;
   private requestQueue: Promise<void> = Promise.resolve();
 
-  constructor(storeOrBackend?: LoopStore | VaultBackend) {
-    this.mgr = new SessionManager(storeOrBackend);
+  constructor(storeOrBackend?: LoopStore | VaultBackend, runtime?: WorkspaceRuntime) {
+    this.mgr = new SessionManager(
+      storeOrBackend,
+      undefined,
+      runtime ?? (storeOrBackend ? undefined : new WorkspaceRuntime()),
+    );
   }
 
   start(): void {
@@ -121,6 +136,7 @@ export class McpServer {
         protocolVersion: requested === "2024-11-05" ? requested : "2025-11-25",
         capabilities: { tools: {} },
         serverInfo: SERVER_INFO,
+        instructions: SERVER_INSTRUCTIONS,
       };
     }
     if (req.method === "tools/list") return { tools: TOOL_SCHEMAS };
@@ -161,11 +177,66 @@ export class McpServer {
       }
       throw error;
     }
-    const output = await handler(this.mgr, args);
-    return {
-      content: [{ type: "text", text: JSON.stringify(output) }],
-      structuredContent: output,
-      isError: typeof output.error === "string",
-    };
+    if (this.mgr.runtime && !this.mgr.runtime.isBound && !["loopforge_start", "loopforge_resume", "loopforge_list"].includes(name)) {
+      const output = { error: "workspace_not_bound", runtime: this.mgr.getRuntimeSummary() };
+      return { content: [{ type: "text", text: JSON.stringify(output), annotations: { priority: 1.0, audience: ["user", "assistant"] } }], structuredContent: output, isError: true };
+    }
+    let output: Record<string, unknown>;
+    try {
+      output = await handler(this.mgr, args);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      let detail: Record<string, unknown> = { error: message };
+      try {
+        const parsed = JSON.parse(message);
+        if (isRecord(parsed)) detail = { ...parsed, error: parsed.error ?? parsed.code ?? "runtime_error" };
+      } catch { /* ordinary Error */ }
+      detail.runtime ??= this.mgr.getRuntimeSummary();
+      return { content: [{ type: "text", text: JSON.stringify(detail), annotations: { priority: 1.0, audience: ["user", "assistant"] } }], structuredContent: detail, isError: true };
+    }
+    const isError = typeof output.error === "string";
+
+    // Extract the compiled prompt (present in start/next/resume responses).
+    // MCP content annotations signal priority to the host so it can
+    // preserve critical assistant-facing content during compaction.
+    const prompt = typeof output.prompt === "string" && output.prompt.length > 0
+      ? output.prompt
+      : null;
+
+    const content: McpContentItem[] = [];
+
+    if (prompt) {
+      // Primary: the actionable prompt as raw text — no JSON wrapper so
+      // the model reads the instructions immediately.
+      content.push({
+        type: "text",
+        text: prompt,
+        annotations: { priority: 1.0, audience: ["assistant"] },
+      });
+
+      // Secondary: structured metadata (sessionId, round, level, warnings,
+      // enforcementAction, etc.) without the prompt.
+      const { prompt: _prompt, ...meta } = output;
+      content.push({
+        type: "text",
+        text: JSON.stringify(meta),
+        annotations: { priority: 0.3, audience: ["assistant"] },
+      });
+    } else if (isError) {
+      content.push({
+        type: "text",
+        text: JSON.stringify(output),
+        annotations: { priority: 1.0, audience: ["user", "assistant"] },
+      });
+    } else {
+      // Non-prompt tools (status, list, replay, health, pause)
+      content.push({
+        type: "text",
+        text: JSON.stringify(output),
+        annotations: { priority: 0.5, audience: ["assistant"] },
+      });
+    }
+
+    return { content, structuredContent: output, isError };
   }
 }

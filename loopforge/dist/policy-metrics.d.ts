@@ -19,6 +19,11 @@ export interface PolicyMetricsSnapshot {
     evidenceFailures: number;
     evidenceTimeouts: number;
     evidenceLatencyMs: number;
+    evidenceLatencyAvgMs: number;
+    /** Persistence errors — vault writes that failed silently. */
+    vaultWriteErrors: number;
+    /** Per-reason breakdown of persistence failures. */
+    vaultWriteReasons: Record<string, number>;
     levels: Record<string, number>;
     strategyEffectiveness: Record<string, {
         attempts: number;
@@ -35,6 +40,10 @@ export declare class PolicyMetricsCollector {
     private targets;
     recordRound(loopId: string, result: RoundProcessResult, replayed?: boolean): void;
     recordEvidence(provider: string, outcome: "available" | "unavailable" | "failure" | "timeout", latencyMs: number, loopId?: string): void;
+    /** Record a vault write failure. The reason distinguishes feedback_persist,
+     *  lineage_persist, and delegation_persist so operators can identify which
+     *  write path is failing. */
+    recordVaultWriteError(reason: string, loopId?: string): void;
     recordStrategy(loopId: string, level?: string): void;
     recordStrategyOutcome(loopId: string, level: string | undefined, result: RoundProcessResult, replayed?: boolean): void;
     snapshot(loopId?: string): PolicyMetricsSnapshot;

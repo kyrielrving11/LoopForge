@@ -4,6 +4,8 @@
  * Enables audit, comparison, and timeline analysis of loop rounds.
  */
 import type { VaultBackend, VaultEntry } from "./backends/interface.js";
+import type { GovernanceGraphView } from "./governance-graph.js";
+export type { GovernanceGraphDiagnostic, GovernanceGraphDiagnosticCode, GovernanceGraphEdge, GovernanceGraphEdgeKind, GovernanceGraphNode, GovernanceGraphNodeKind, GovernanceGraphSummary, GovernanceGraphView, } from "./governance-graph.js";
 export declare class ReplayBackend {
     private readonly backend;
     constructor(backend: VaultBackend);
@@ -13,7 +15,9 @@ export declare class ReplayBackend {
         end?: number;
     }): VaultEntry[];
     timeline(loopId: string): Record<string, unknown>[];
-    diff(loopId: string, roundA: number, roundB: number): Record<string, unknown>;
+    graph(loopId: string, options?: {
+        throughRound?: number;
+    }): GovernanceGraphView;
     private maxRound;
 }
 //# sourceMappingURL=replay.d.ts.map

@@ -1,271 +1,140 @@
-/** Enforcement Gate — Layer 2 round-boundary runtime enforcement (v1.13).
- *
- * Pure-function module. Receives the verification gate's findings plus
- * round-level context and decides whether to accept the round, reject it
- * (force the agent to redo), or terminate the loop.
- *
- * This is the "runtime" that prompt-only constraint systems lack.
- * Verification gate detects WHAT is wrong; enforcement gate decides
- * what to DO about it.
- *
- * Decision semantics:
- * - accept:    round passes all checks; advance to next round as normal.
- * - reject:    agent's self-evaluation or round output is invalid; the
- *              agent receives a rejection prompt and must redo the SAME
- *              round. Round counter does NOT increment.
- * - terminate: loop has reached an unrecoverable state; stop immediately
- *              with stopReason "enforcement_terminated".
- */
 import { makeEnforcementResult } from "./protocol.js";
 import { entryRound } from "./verification-gate.js";
-// ═══════════════════════════════════════════════════════════════════════════
-// Helpers
-// ═══════════════════════════════════════════════════════════════════════════
-/** Extract progress_estimate from a vault entry's execution_evidence.
- *  Returns null if no execution evidence is available. */
-function entryProgress(entry) {
-    const evidence = entry.execution_evidence;
-    if (!evidence)
+import { getPolicy } from "./policy.js";
+function entryAdvancement(entry) {
+    const value = entry.material_advancement;
+    if (!value || typeof value !== "object" || Array.isArray(value))
         return null;
-    const pe = evidence.progress_estimate;
-    return typeof pe === "number" ? pe : null;
+    const raw = value;
+    return typeof raw.stepId === "string" && typeof raw.material === "boolean"
+        ? { stepId: raw.stepId, material: raw.material }
+        : null;
 }
-// ═══════════════════════════════════════════════════════════════════════════
-// Individual enforcement rules — each returns EnforcementResult | null
-// Rules are ordered by priority. The first non-null result wins.
-// ═══════════════════════════════════════════════════════════════════════════
-/** R1: Agent claims success but success_criteria_remaining has items.
- *  This is a lie — the agent must either finish the criteria or
- *  set success=false honestly. Triggered by the verification gate's
- *  "success_with_remaining_criteria" error flag. */
-function enforceSuccessWithRemainingCriteria(flags) {
-    const flag = flags.find((f) => f.check === "success_with_remaining_criteria" && f.severity === "error");
-    if (!flag)
-        return null;
-    return makeEnforcementResult({
-        action: "reject",
-        reason: flag.detail,
-        fix_instructions: "You set success=true but success criteria remain unmet. " +
-            "Either: (a) complete the remaining criteria and re-submit your self-evaluation, " +
-            "or (b) set success=false and honestly report what remains to be done.",
-        check: "success_with_remaining_criteria",
-    });
+function flatline(evaluation, entries, window) {
+    const stepId = evaluation.activeStepId;
+    if (!stepId || evaluation.report.status !== "in_progress")
+        return false;
+    const history = entries
+        .map((entry) => ({ round: entryRound(entry), advancement: entryAdvancement(entry) }))
+        .filter((item) => item.round > 0 && item.advancement !== null && item.advancement.stepId === stepId)
+        .sort((a, b) => a.round - b.round)
+        .map((item) => item.advancement.material);
+    history.push(evaluation.materialAdvancement?.material ?? false);
+    return history.length >= window && history.slice(-window).every((material) => !material);
 }
-/** R2: Same constraint violation appears in 3 consecutive rounds.
- *  The agent is repeating the same mistake. Triggered by the verification
- *  gate's "recurring_violation" error flag. */
-function enforceRecurringViolation(flags) {
-    const flag = flags.find((f) => f.check === "recurring_violation" && f.severity === "error");
-    if (!flag)
-        return null;
-    return makeEnforcementResult({
-        action: "reject",
-        reason: flag.detail,
-        fix_instructions: "The same constraint violation has appeared in 3 consecutive rounds. " +
-            "You must: (a) explain WHY this violation keeps occurring, " +
-            "and (b) propose a DIFFERENT approach than what you used in the last 3 rounds. " +
-            "Do NOT retry the same strategy — it has failed 3 times.",
-        check: "recurring_violation",
-    });
+export function findSafeRestorePoint(currentRound, vaultEntries, maxDepth) {
+    const byRound = new Map();
+    for (const entry of vaultEntries) {
+        const round = entryRound(entry);
+        if (round > 0 && round < currentRound) {
+            byRound.set(round, [...(byRound.get(round) ?? []), entry]);
+        }
+    }
+    for (let round = currentRound - 1; round >= Math.max(1, currentRound - maxDepth); round--) {
+        const entries = byRound.get(round) ?? [];
+        const dirty = entries.some((entry) => {
+            const flags = Array.isArray(entry.verification_flags) ? entry.verification_flags : [];
+            return flags.some((flag) => flag && typeof flag === "object" &&
+                flag.severity === "error");
+        });
+        if (dirty || entries.length === 0)
+            continue;
+        const skippedDiscoveries = [];
+        for (let skipped = round + 1; skipped < currentRound; skipped++) {
+            for (const entry of byRound.get(skipped) ?? []) {
+                const report = entry.round_report;
+                if (!report || typeof report !== "object" || Array.isArray(report))
+                    continue;
+                const discoveries = report.discoveries;
+                if (!discoveries || typeof discoveries !== "object" || Array.isArray(discoveries))
+                    continue;
+                for (const value of Object.values(discoveries)) {
+                    if (Array.isArray(value)) {
+                        for (const item of value)
+                            if (typeof item === "string" && !skippedDiscoveries.includes(item))
+                                skippedDiscoveries.push(item);
+                    }
+                }
+            }
+        }
+        return { round, skippedDiscoveries };
+    }
+    return null;
 }
-/** R3: Agent claims success but did nothing verifiable.
- *  v1.17: execution_evidence is now MANDATORY for structured self-evaluations.
- *  Missing evidence when success=true → reject (agent must provide evidence).
- *  Empty evidence (no files + no tests) when success=true → reject. */
-function enforceEmptySuccess(selfEval, _flags) {
-    if (!selfEval.success)
-        return null;
-    const ev = selfEval.execution_evidence;
-    // v1.17: Missing evidence when claiming success → reject.
-    // The agent MUST provide execution_evidence to back up a success claim.
-    if (!ev) {
+export function buildBacktrackPrompt(currentRound, targetRound, trigger, discoveries = [], files = []) {
+    const lines = [
+        `## Round ${currentRound} - BACKTRACK REQUIRED`,
+        "",
+        `Restore the workspace to the last clean boundary after Round ${targetRound}.`,
+        `Trigger: ${trigger}.`,
+        "Do not reuse the failed approach. Preserve only independently verified discoveries.",
+    ];
+    if (discoveries.length)
+        lines.push("", "### Preserved discoveries", ...discoveries.map((item) => `- ${item}`));
+    if (files.length)
+        lines.push("", "### Files to restore or re-check", ...files.slice(0, 20).map((item) => `- ${item}`));
+    return lines.join("\n");
+}
+export function enforceRound(evaluation, verification, _currentRound, vaultEntries, consecutiveRejections) {
+    const error = verification.flags.find((flag) => flag.severity === "error");
+    if (error) {
+        if (consecutiveRejections >= 2) {
+            return makeEnforcementResult({
+                action: "terminate",
+                reason: `Repeated rejected round: ${error.detail}`,
+                check: "max_rejections",
+            });
+        }
         return makeEnforcementResult({
             action: "reject",
-            reason: "Agent claims success but provided no execution_evidence. " +
-                "Every successful round MUST include execution_evidence with " +
-                "files_changed, test_results, and progress_estimate.",
-            fix_instructions: "You must provide execution_evidence in your self-evaluation: " +
-                "(a) list the files you changed in execution_evidence.files_changed, " +
-                "(b) run tests and report results in execution_evidence.test_results, " +
-                "(c) estimate your progress in execution_evidence.progress_estimate. " +
-                "If you genuinely completed the task without file changes or tests, " +
-                "explain why in detail in your output_summary.",
-            check: "empty_success",
+            reason: error.detail,
+            fix_instructions: "Correct the evidence contradiction and resubmit the same roundId.",
+            check: error.check,
         });
     }
-    const filesEmpty = ev.files_changed.length === 0;
-    const testsNotRun = ev.test_results === null;
-    if (!filesEmpty || !testsNotRun)
-        return null;
-    return makeEnforcementResult({
-        action: "reject",
-        reason: "Agent claims success but execution_evidence shows no files changed " +
-            "and no tests were run. There is no verifiable evidence of work.",
-        fix_instructions: "You must provide verifiable evidence: " +
-            "(a) list the files you changed in execution_evidence.files_changed, " +
-            "and (b) run tests and report results in execution_evidence.test_results. " +
-            "If you genuinely completed the task without file changes or tests, " +
-            "explain why in detail in your output_summary.",
-        check: "empty_success",
-    });
-}
-/** R4: Progress has stalled for 3+ consecutive rounds.
- *  Detected by checking progress_estimate deltas across vault entries.
- *  First occurrence → REJECT (agent must change approach).
- *  Second consecutive occurrence → TERMINATE (agent cannot recover). */
-function enforceProgressStall(_selfEval, _flags, currentRound, vaultEntries, consecutiveRejections) {
-    // Need at least 3 rounds of history
-    if (currentRound < 3)
-        return null;
-    // Collect progress estimates for the last 3 completed rounds from vault
-    const progressByRound = new Map();
-    for (const entry of vaultEntries) {
-        const rnd = entryRound(entry);
-        // Only consider rounds before the current one
-        if (rnd < 1 || rnd >= currentRound)
-            continue;
-        const pe = entryProgress(entry);
-        if (pe !== null)
-            progressByRound.set(rnd, pe);
-    }
-    // Need at least 3 data points
-    if (progressByRound.size < 3)
-        return null;
-    // Get the three most recent rounds with progress data
-    const sortedRounds = [...progressByRound.keys()].sort((a, b) => a - b);
-    const last3 = sortedRounds.slice(-3);
-    if (last3.length < 3)
-        return null;
-    // Verify these are the actual last 3 rounds (contiguous with current)
-    // Accept rounds that are within [currentRound-3, currentRound-1]
-    const expectedMin = currentRound - 3;
-    const actualMin = last3[0];
-    // Allow up to 1 round gap (some rounds may not have progress data)
-    if (actualMin < expectedMin - 1 || last3[2] > currentRound - 1)
-        return null;
-    const p1 = progressByRound.get(last3[0]);
-    const p2 = progressByRound.get(last3[1]);
-    const p3 = progressByRound.get(last3[2]);
-    const stallThreshold = 0.05;
-    const delta12 = p2 - p1;
-    const delta23 = p3 - p2;
-    // Both deltas must be below threshold AND not near completion
-    const isStalling = delta12 < stallThreshold &&
-        delta23 < stallThreshold &&
-        p3 < 0.95;
-    if (!isStalling)
-        return null;
-    // If already rejected once for stall → escalate to terminate
-    if (consecutiveRejections >= 1) {
+    const violations = evaluation.report.violations ?? [];
+    if (evaluation.report.status === "completed" && violations.length) {
         return makeEnforcementResult({
-            action: "terminate",
-            reason: `Progress stalled for 3+ rounds ` +
-                `(${(p1 * 100).toFixed(0)}% → ${(p2 * 100).toFixed(0)}% → ${(p3 * 100).toFixed(0)}%) ` +
-                `and agent did not resolve after previous rejection. Terminating loop.`,
-            check: "progress_stall",
+            action: "reject",
+            reason: "A completed report cannot contain known constraint violations.",
+            fix_instructions: "Resolve the violations or report in_progress/blocked.",
+            check: "completion_with_violation",
         });
     }
-    return makeEnforcementResult({
-        action: "reject",
-        reason: `Progress has stalled: ${(p1 * 100).toFixed(0)}% → ` +
-            `${(p2 * 100).toFixed(0)}% → ${(p3 * 100).toFixed(0)}% over the ` +
-            `last 3 rounds (delta < ${(stallThreshold * 100).toFixed(0)}% each round).`,
-        fix_instructions: "Your progress has been flat for 3 rounds. You must: " +
-            "(a) explain what is blocking progress, " +
-            "(b) propose a DIFFERENT technique or task decomposition, and " +
-            "(c) set a concrete, verifiable goal for the redo of this round. " +
-            "Do NOT repeat the same approach — it has not moved progress forward.",
-        check: "progress_stall",
-    });
-}
-/** R5: Two consecutive rejections → terminate.
- *  The agent has been unable or unwilling to fix the identified issues
- *  across two consecutive enforcement rejections. */
-function enforceMaxRejections(consecutiveRejections) {
-    if (consecutiveRejections < 2)
-        return null;
-    return makeEnforcementResult({
-        action: "terminate",
-        reason: `${consecutiveRejections} consecutive enforcement rejections for the ` +
-            `same issue without resolution. The agent has been unable to correct the identified issue.`,
-        check: "max_rejections",
-    });
-}
-// ═══════════════════════════════════════════════════════════════════════════
-// Main entry point
-// ═══════════════════════════════════════════════════════════════════════════
-/** Enforce round-boundary rules based on the verification gate's findings
- *  and the agent's self-evaluation integrity.
- *
- *  Rules run in priority order (R1 → R5). The first rule that fires wins.
- *
- * @param selfEval              The agent's self-evaluation for the current round.
- * @param verifyResult          The verification gate's output (from verifySelfEvaluation).
- * @param currentRound          Current round number (1-based, BEFORE increment).
- * @param vaultEntries          Vault entries for this loop (used for progress tracking).
- * @param consecutiveRejections How many consecutive rounds have already been rejected.
- *                              Starts at 0; increments on each reject; resets on accept.
- */
-export function enforceRound(selfEval, verifyResult, currentRound, vaultEntries, consecutiveRejections = 0) {
-    const { flags } = verifyResult;
-    // Run enforcement rules in priority order.
-    // Earlier rules take higher precedence.
-    const rules = [
-        () => enforceSuccessWithRemainingCriteria(flags),
-        () => enforceRecurringViolation(flags),
-        () => enforceEmptySuccess(selfEval, flags),
-        () => enforceProgressStall(selfEval, flags, currentRound, vaultEntries, consecutiveRejections),
-        () => enforceMaxRejections(consecutiveRejections),
-    ];
-    for (const rule of rules) {
-        const result = rule();
-        if (result)
-            return result;
+    const stallWindow = Math.max(1, getPolicy().evolution.progress_stall_rounds);
+    if (flatline(evaluation, vaultEntries, stallWindow)) {
+        const repeated = consecutiveRejections > 0;
+        const reason = `The active step has ${stallWindow} accepted rounds without material evidence advancement.`;
+        if (getPolicy().engine.backtrack_enabled && repeated) {
+            return makeEnforcementResult({
+                action: "backtrack",
+                reason,
+                check: "evidence_stall",
+            });
+        }
+        return makeEnforcementResult({
+            action: "reject",
+            reason,
+            fix_instructions: "Produce a new verified claim, changed file, improved check, or justified plan change.",
+            check: "evidence_stall",
+        });
     }
-    // All rules passed — accept the round
-    return makeEnforcementResult({
-        action: "accept",
-        reason: "",
-        fix_instructions: "",
-    });
+    return makeEnforcementResult({ action: "accept" });
 }
-/** Build a rejection prompt for the agent.
- *
- *  The prompt clearly states the round was rejected, why, what the agent
- *  must fix, and that the agent must redo the SAME round (not advance).
- *
- * @param currentRound  The round number that was rejected (NOT incremented).
- * @param task          The original loop task description.
- * @param enforceResult The enforcement decision with reason and fix instructions.
- */
-export function buildRejectionPrompt(currentRound, task, enforceResult) {
-    const lines = [
-        "## ⛔ Round " + currentRound + " — REJECTED",
-        "",
-        "Your self-evaluation for Round " + currentRound +
-            " was **rejected** by the enforcement gate.",
+export function buildRejectionPrompt(currentRound, task, result, flags = []) {
+    const details = flags.map((flag) => `- [${flag.severity}] ${flag.check}: ${flag.detail}`);
+    return [
+        `## Round ${currentRound} - REJECTED`,
         "",
         "### Reason",
+        result.reason,
         "",
-        enforceResult.reason,
+        "### Evidence gaps",
+        ...(details.length ? details : ["- No additional verification flags."]),
         "",
-    ];
-    if (enforceResult.fix_instructions) {
-        lines.push("### Required Fix");
-        lines.push("");
-        lines.push(enforceResult.fix_instructions);
-        lines.push("");
-    }
-    lines.push("### Your Task (Round " + currentRound + " — Retry)");
-    lines.push("");
-    lines.push(task);
-    lines.push("");
-    lines.push("### Instructions");
-    lines.push("");
-    lines.push("1. Read and address each issue in **Required Fix** above.", "2. Re-execute **Round " + currentRound +
-        "** — do NOT advance to the next round.", "3. Submit a corrected self-evaluation via `loopforge_next`.", "4. Be honest in your self-evaluation — " +
-        "claiming success when criteria are unmet will be rejected again.", "5. If you believe this rejection is incorrect, " +
-        "explain why in your output_summary and the enforcement gate will re-evaluate.");
-    return lines.join("\n");
+        "### Retry",
+        `Continue the same task and roundId: ${task}`,
+        result.fix_instructions,
+    ].join("\n");
 }
 //# sourceMappingURL=enforcement-gate.js.map

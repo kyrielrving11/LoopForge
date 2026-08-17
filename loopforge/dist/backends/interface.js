@@ -1,3 +1,3 @@
-/** Internal projection used while engine query code moves onto typed LoopStore APIs. */
+/** Internal append/query entry shape used by compiler, replay, and adapters. */
 export {};
 //# sourceMappingURL=interface.js.map

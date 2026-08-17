@@ -8,7 +8,7 @@
 import type { VaultBackend } from "./backends/interface.js";
 import { LoopForgeEngine } from "./engine.js";
 import type { ProviderSnapshot } from "./evidence-provider.js";
-import type { LoopForgeRequest, PromptArtifact, SelfEvaluation } from "./protocol.js";
+import type { LoopForgeRequest, NormalizedRoundEvaluation, PromptArtifact } from "./protocol.js";
 import type { RoundTransactionOutcome, RoundTransactionSnapshot } from "./round-transaction.js";
 export interface PreparedRound {
     prompt: string;
@@ -17,17 +17,19 @@ export interface PreparedRound {
     evidenceBaseline: ProviderSnapshot[];
     snapshot: RoundTransactionSnapshot;
     stateFileContent?: string;
+    warnings?: string[];
 }
 export interface CompleteRoundInput {
     snapshot: RoundTransactionSnapshot;
     loopId: string;
     task: string;
     maxRounds: number;
-    selfEval: SelfEvaluation;
-    extractionSucceeded: boolean;
-    lastSelfEval?: SelfEvaluation;
+    evaluation: NormalizedRoundEvaluation;
+    previousEvaluation?: NormalizedRoundEvaluation;
     consecutiveRejections: number;
     successTrajectory: boolean[];
+    /** Files from skipped backtrack rounds for restore verification. */
+    backtrackSkippedFiles?: string[];
 }
 export interface CompletedRound {
     outcome: RoundTransactionOutcome;
@@ -35,12 +37,13 @@ export interface CompletedRound {
 }
 export declare class RoundDriver {
     private readonly engine;
+    private readonly workspaceRoot?;
     private readonly backend;
-    constructor(engine: LoopForgeEngine, backend?: VaultBackend);
-    prepare(request: LoopForgeRequest, loopId: string, round: number): Promise<PreparedRound | null>;
-    /** Synchronous fallback for legacy embedding APIs. Async evidence providers
-     * are deliberately skipped by EvidenceCollector.collect(). */
-    prepareSync(request: LoopForgeRequest, loopId: string, round: number): PreparedRound | null;
+    constructor(engine: LoopForgeEngine, backend?: VaultBackend, workspaceRoot?: string | undefined);
+    prepare(request: LoopForgeRequest, loopId: string, round: number, executionEpoch?: number): Promise<PreparedRound | null>;
+    /** Synchronous recovery path. Async evidence providers are deliberately
+     * skipped while reconstructing a persisted prompt. */
+    prepareSync(request: LoopForgeRequest, loopId: string, round: number, executionEpoch?: number): PreparedRound | null;
     private compile;
     /** Compile a fresh prompt for a zero-commit enforcement retry. The logical
      * round ID and before-evidence snapshot remain stable; only attempt changes. */

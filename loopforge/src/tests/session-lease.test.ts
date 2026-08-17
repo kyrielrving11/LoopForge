@@ -23,9 +23,8 @@ describe("cross-process session lease", () => {
     mkdirSync(dir, { recursive: true });
     cleanup.push(dir);
     const storeRoot = join(dir, "store");
-    const store = new VaultSessionStateStore(
-      new LoopStoreBackend(new FileLoopStore(storeRoot)),
-    );
+    const fileStore = new FileLoopStore(storeRoot);
+    const store = new VaultSessionStateStore(fileStore);
     store.save({
       task_id: "loop:cross-process:session",
       task_type: "session_state",
@@ -41,9 +40,9 @@ describe("cross-process session lease", () => {
     const loopStoreUrl = pathToFileURL(resolve("dist/loop-store.js")).href;
     const storageUrl = pathToFileURL(resolve("dist/storage.js")).href;
     const code = [
-      `import { FileLoopStore, LoopStoreBackend } from ${JSON.stringify(loopStoreUrl)}`,
+      `import { FileLoopStore } from ${JSON.stringify(loopStoreUrl)}`,
       `import { VaultSessionStateStore } from ${JSON.stringify(storageUrl)}`,
-      "const store = new VaultSessionStateStore(new LoopStoreBackend(new FileLoopStore(process.env.TEST_STORE)))",
+      "const store = new VaultSessionStateStore(new FileLoopStore(process.env.TEST_STORE))",
       "const result = store.acquireLease('cross-process', `${process.pid}:child`, 30000)",
       "process.stdout.write(result ? 'claimed' : 'blocked')",
     ].join(";\n");

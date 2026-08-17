@@ -21,6 +21,11 @@ export interface PolicyMetricsSnapshot {
   evidenceFailures: number;
   evidenceTimeouts: number;
   evidenceLatencyMs: number;
+  evidenceLatencyAvgMs: number;
+  /** Persistence errors — vault writes that failed silently. */
+  vaultWriteErrors: number;
+  /** Per-reason breakdown of persistence failures. */
+  vaultWriteReasons: Record<string, number>;
   levels: Record<string, number>;
   strategyEffectiveness: Record<string, {
     attempts: number;
@@ -34,7 +39,7 @@ export interface PolicyMetricsSnapshot {
 
 type MutableMetrics = Omit<
   PolicyMetricsSnapshot,
-  "acceptanceRate" | "evidenceAvailabilityRate" | "strategyEffectiveness"
+  "acceptanceRate" | "evidenceAvailabilityRate" | "evidenceLatencyAvgMs" | "strategyEffectiveness"
 > & {
   strategyEffectiveness: Record<string, {
     attempts: number;
@@ -63,6 +68,8 @@ function empty(loopId?: string): MutableMetrics {
     evidenceFailures: 0,
     evidenceTimeouts: 0,
     evidenceLatencyMs: 0,
+    vaultWriteErrors: 0,
+    vaultWriteReasons: {},
     levels: {},
     strategyEffectiveness: {},
   };
@@ -125,6 +132,16 @@ export class PolicyMetricsCollector {
     }
   }
 
+  /** Record a vault write failure. The reason distinguishes feedback_persist,
+   *  lineage_persist, and delegation_persist so operators can identify which
+   *  write path is failing. */
+  recordVaultWriteError(reason: string, loopId?: string): void {
+    for (const metric of this.targets(loopId)) {
+      metric.vaultWriteErrors++;
+      increment(metric.vaultWriteReasons, reason);
+    }
+  }
+
   recordStrategy(loopId: string, level?: string): void {
     for (const metric of this.targets(loopId)) {
       if (level) increment(metric.levels, level);
@@ -172,6 +189,8 @@ export class PolicyMetricsCollector {
       strategyEffectiveness,
       acceptanceRate: attempts === 0 ? 0 : source.committedRounds / attempts,
       evidenceAvailabilityRate: evidence === 0 ? 0 : source.evidenceAvailable / evidence,
+      // evidenceLatencyMs is a raw sum; derive the average for consumers
+      evidenceLatencyAvgMs: evidence === 0 ? 0 : source.evidenceLatencyMs / evidence,
     };
   }
 

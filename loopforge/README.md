@@ -1,214 +1,153 @@
-# LoopForge
+# LoopForge package
 
-LoopForge is a cognitive state runtime for AI coding agents. It keeps a task's
-objective, constraints, evidence, decisions, progress, and recovery state stable
-across many Agent-driven rounds.
+LoopForge v3 is a zero-runtime-dependency TypeScript runtime for governing
+long-horizon AI coding tasks. It persists approved objectives, constraints,
+structured plans, approvals, evidence, round transactions, and recovery state
+while an external Agent remains the execution owner.
 
-The Agent still reads code, edits files, runs tools, and decides how to reason.
-LoopForge does not provide a model, scheduler, or unattended worker. Its job is
-to make a long task resumable and auditable without letting the prompt become the
-only copy of the state.
-
-LoopForge 2.0 is currently available as `2.0.0-rc.1`. It requires Node.js 18 or
-newer and has no runtime dependencies.
+It does not provide a model, background Agent, MCP Tasks, automatic memory
+discovery, or code-level autonomous planning.
 
 ## Install
 
 ```bash
-npm install -g loopforge@next
-loopforge init --client claude
-claude mcp add loopforge -- npx loopforge mcp
-```
-
-For Codex:
-
-```bash
+npm install -g loopforge
 loopforge init --client codex
-codex mcp add loopforge -- npx loopforge mcp
+loopforge init --client codex --register
 ```
 
-For another MCP client:
+Use `--client claude` for Claude Code. Without `--register`, init only installs
+the `$loopforge` skill and prints the absolute-path registration command.
 
-```bash
-loopforge init --client generic
-```
-
-The generic command prints an MCP configuration fragment and installs the
-Perception skill under `.loopforge/skills/` unless `--target` is supplied.
-
-## How a loop works
-
-1. The Agent calls `loopforge_start` with the task and hard constraints.
-2. LoopForge compiles one prompt from the canonical state.
-3. The Agent executes that prompt and submits a structured evaluation through
-   `loopforge_next`.
-4. LoopForge captures evidence, verifies the evaluation, enforces the round
-   boundary, and either commits, rejects, or stops the round.
-5. If work remains, the next prompt is compiled from the committed state.
-
-A rejected attempt keeps the same logical round ID, increments its attempt
-number, and commits no feedback. A process restart can recover the current prompt
-and the last committed decision without advancing the round twice.
-
-## Prompt views
-
-LoopForge renders exactly one prompt artifact for each attempt. L0, L1, and L2
-describe how much state is included, not which reasoning method the Agent must
-use.
-
-| Level | Use |
-| --- | --- |
-| L0 | Same-round retry with the rejection reason and changed evidence |
-| L1 | Normal continuation with a compact state capsule |
-| L2 | First round, checkpoint, goal change, or full state rehydration |
-
-Every artifact records its state hash, prompt hash, level reasons, included
-sections, character budget, round ID, and attempt number.
-
-## Durable storage
-
-Typed JSON documents are stored by loop under:
+## Default workflow
 
 ```text
-.loopforge/
-  loops/<sha256(loopId)>/
-    metadata.json
-    session.json
-    rounds/<round>.json
-  state/<loopId>-state.md
+loopforge_start(workspaceRoot, ...)
+  -> planning prompt
+loopforge_plan_submit
+  -> executing Round 1 or awaiting_approval
+loopforge_plan_approve
+  -> executing Round 1
+loopforge_next(sessionId, roundId, report)
+  -> same-step continuation, retry, next step, refinement, audit, or terminal
 ```
 
-The JSON session and round documents are the durable transaction truth. The
-Markdown state file is a human-readable derived view and may be disabled with
-`state_file.enabled`.
+There is no direct-execution compatibility mode. Pre-release schema 1 or
+2, or missing-workflow sessions remain unchanged on disk, are reported as
+incompatible, and cannot be resumed by v3.
 
-To import a pre-2.0 vault without deleting it:
+The first submitted plan is the global topology. It contains the objective,
+constraints, criteria, real dependencies, and outline phases. Later updates
+refine that same versioned plan instead of creating separate phase plans. New
+executable children identify their source outline with `refinesStepId`;
+`dependsOn` is only for real artifact, decision, gate, or resource flow.
+
+## Commands
 
 ```bash
-loopforge migrate
-loopforge migrate --from path/to/prompt_vault.json --json
+loopforge mcp [--workspace DIR] [--store-dir DIR]
+loopforge init --client claude|codex|generic [--target DIR] [--register] [--force]
+loopforge doctor [--workspace DIR] [--store-dir DIR] [--client claude|codex] [--workflow] [--json]
+loopforge inspect LOOP_ID [--workspace DIR] [--store-dir DIR] [--round N] [--prompt] [--json]
+loopforge migrate [--workspace DIR] [--store-dir DIR] [--from PATH] [--json]
 ```
 
-The migration is idempotent and writes a marker under `.loopforge/migrations/`.
+## MCP contract
 
-## MCP tools
+The server exposes 12 tools: start, three plan tools, next, status, stop,
+pause, list, replay, resume, and health. Advancing responses include `phase`,
+`requiredAction`, `terminal`, `planVersion`, `activeStepId`, `roundId`, and
+`prompt`.
 
-The stdio server exposes synchronous Agent-driven tools:
+Approval policy is session-scoped. `risk_only` is the default: low-risk plan
+revisions and outline refinements continue automatically, while fixed
+high-risk tags always require user approval. Set
+`workflow.approval_policy: "every_revision"` in `loop_policy.json`, or pass
+`approvalPolicy: "every_revision"` to `loopforge_start`, to review every plan
+version. The selected policy is persisted with the session.
 
-- `loopforge_start`
-- `loopforge_next`
-- `loopforge_status`
-- `loopforge_pause`
-- `loopforge_resume`
-- `loopforge_stop`
-- `loopforge_list`
-- `loopforge_replay`
-- `loopforge_health`
+`loopforge_next` accepts only the exact returned `roundId` and a compact
+`RoundReportV1`. Completed steps must prove every `ac-*` and `er-*` claim. The
+final audit must prove every `cr-*` claim and required command. Completion is
+only possible from the audit phase.
 
-Tool results include `structuredContent` and a serialized text block for older
-clients. LoopForge intentionally does not implement MCP Tasks. Long-running work
-belongs to the Agent that is already executing the user's task.
+Verification establishes evidence provenance, consistency, constraint
+compliance, and workflow closure; it does not establish domain-level semantic
+correctness. Git evidence verifies reported file identity and content state,
+not behavior. Agent-claimed checks cannot complete an audit without runtime
+provenance, while required commands and `ro-*` obligations always require
+runtime-verified passing checks.
 
-Running sessions use renewable leases so two MCP processes cannot advance the
-same loop at once. Paused and running sessions can be reconstructed from the
-typed store after a restart.
+Each non-L0 prompt receives a bounded active-step graph slice. Replay exposes
+the deterministic read-only governance graph and diagnostics. Neither surface
+executes nodes, schedules Agents, or persists a second truth.
 
-## Command evidence
+Start and resume return `capabilityPreflight`, including server/report
+versions, tool count, workspace/Store state, and current Git/command evidence
+capability. A blocked external gate can be resumed with an exact
+`gateResolution`; a plan update cannot forge gate completion.
 
-Git evidence is enabled by default. Verification commands are explicit and
-disabled unless added to `loop_policy.json`:
+Workspace-configured command evidence is host-authorized. It remains blocked
+unless the MCP host explicitly sets `LOOPFORGE_ALLOW_WORKSPACE_COMMANDS=1`.
+When blocked, no configured workspace subprocess is launched and preflight
+reports `commandEvidence: "blocked"`.
 
-```json
-{
-  "evidence": {
-    "providers": ["git"],
-    "timeout_ms": 120000,
-    "commands": [
-      {
-        "name": "tests",
-        "enabled": true,
-        "executable": "npm",
-        "args": ["test"],
-        "cwd": ".",
-        "phase": "after",
-        "required": true,
-        "timeout_ms": 120000,
-        "max_output_chars": 20000,
-        "success_exit_codes": [0]
-      }
-    ]
-  }
-}
+## Library exports
+
+```ts
+import {
+  LOOPFORGE_VERSION,
+  stableClaimId,
+  validatePlan,
+  validateRoundReport,
+  type RoundReportV1,
+  type StructuredPlan,
+  type WorkflowProgress,
+} from "loopforge";
 ```
 
-Commands run with `shell: false`. Their working directory must resolve inside
-the workspace. Output is capped at 20,000 characters and timeouts abort the
-child process. If an Agent claims success while a required command fails, times
-out, is missing, or has an invalid working directory, the verification verdict
-is `contradicted`.
+The root package intentionally does not export Engine, Compiler,
+SessionManager, or normalized internal evaluation types.
+Supported subpaths are `loopforge/mcp` and `loopforge/replay`; there is no
+`loopforge/compiler` export.
 
-## CLI
+## Persistence
 
-```bash
-loopforge mcp
-loopforge init --client claude|codex|generic [--target DIR] [--force]
-loopforge doctor [--json]
-loopforge inspect LOOP_ID [--round N] [--prompt] [--json]
-loopforge migrate [--from PATH] [--json]
-```
+Schema 3 typed JSON session and round documents under `.loopforge/loops/` are
+the durable truth. Plan versions, refinement lineage, approvals, outcomes, and
+evidence relations are reconstructed from typed workflow events. The read-only
+governance graph is derived from those documents; it is not a second Store or
+an executor. `.loopforge/state/*-state.md` is an optional derived view and is
+ never a recovery source.
 
-`inspect` hides full prompts unless `--prompt` is present. `doctor` checks the
-Node version, store permissions, Git availability, and configured command
-evidence paths without running verification commands.
+New sessions use the minimal planning profile by default: the durable plan
+fixes the objective and constraints while exposing only the next one to three
+ready nodes. Later outlines are refined at a boundary; the full profile is
+available when a complete known topology is important. Verified evidence
+checks may derive `ro-*` regression obligations, rebuilt from events and round
+evidence and enforced again by later steps and final audit.
 
-## Library API
+Material advancement is evidence-based. A changed Git fingerprint, improved
+check, new verified claim, structured discovery, or step transition counts;
+repeated summaries, unchanged dirty paths, and `noChangeReason` alone do not.
+The default stall window is three accepted `in_progress` rounds and is
+controlled by `evolution.progress_stall_rounds`.
 
-```typescript
-import { run } from "loopforge";
-
-const result = await run({
-  task: "Audit this repository and fix confirmed defects",
-  constraintsFromPlan: ["Do not change the public API"],
-  execute: async (prompt, context) => {
-    return agent.execute(prompt, { signal: context.signal });
-  },
-});
-```
-
-For an embedding that already owns long-term context or telemetry, use explicit
-hooks instead of auto-discovery:
-
-```typescript
-const result = await run({
-  task,
-  execute,
-  contextProvider: async ({ loopId, round, lastEvaluation }) => {
-    return myContextStore.read({ loopId, round, lastEvaluation });
-  },
-  terminalSinks: [async (event) => myTelemetry.record(event)],
-});
-```
-
-Custom evidence providers, trace sinks, checkpoint sinks, and `LoopStore`
-implementations remain dependency-free extension points.
+Command evidence is disabled by default, uses an executable plus argument
+array with `shell: false`, and cannot run outside the bound workspace.
 
 ## Development
 
 ```bash
 npm run check
 npm test
+npm run build
 npm pack --dry-run --json
+git diff --exit-code -- dist ../loopforge-protocol.json
 ```
 
-The schema in `../loopforge-protocol.json` is generated from `src/protocol.ts`.
-Do not edit it by hand.
-
-## 2.0 compatibility boundary
-
-The 2.0 release removes the prompt-technique catalog, strategy heuristics, MCP
-Tasks, automatic memory discovery, global PromptCraft vaults, Markdown lineage
-fallbacks, `Technique` and `Analysis` wire fields, and the `loopforge-mcp`
-binary. Use `loopforge mcp`, the typed `FileLoopStore`, and explicit providers.
+The generated public protocol schema comes from `src/protocol.ts`; do not edit
+it by hand.
 
 ## License
 

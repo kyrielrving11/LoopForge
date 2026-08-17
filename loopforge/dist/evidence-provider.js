@@ -1,22 +1,25 @@
 /** EvidenceProvider — Pluggable evidence capture interface (v1.18).
  *
- * Before this module, evidence capture was hardcoded to git via
- * captureGitModifiedFiles() in two places (runtime.ts, session.ts).
  * This module defines an abstract EvidenceProvider interface so
  * additional evidence sources (test runners, linters, bundle analysis)
  * can be added without touching the verification pipeline.
  *
- * Built-in provider: GitEvidenceProvider — wraps existing
- * captureGitFileState() logic.
+ * Built-in provider: GitEvidenceProvider — git file state capture with
+ * parallel async execution (v2.0.1) and a synchronous fallback.
  */
 import { createHash } from "node:crypto";
 import { readFileSync, realpathSync, statSync } from "node:fs";
-import { spawn } from "node:child_process";
+import { spawn, execFile, execFileSync, } from "node:child_process";
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import { captureGitFileState } from "./verification-gate.js";
 import { getPolicy } from "./policy.js";
-import { logEvent, startSpan } from "./observability.js";
+import { logEvent } from "./observability.js";
 import { policyMetrics } from "./policy-metrics.js";
+/** Workspace policy may describe commands, but only the host can authorize
+ * executing them. This keeps repository-controlled JSON from granting itself
+ * subprocess capability. */
+export function workspaceCommandsAuthorized() {
+    return process.env.LOOPFORGE_ALLOW_WORKSPACE_COMMANDS === "1";
+}
 const providerFactories = new Map();
 /** Register a provider factory used by policy-driven collectors. */
 export function registerEvidenceProvider(name, factory) {
@@ -43,7 +46,7 @@ export class EvidenceCollector {
         this.providers = providers;
     }
     /** Build the collector described by loop_policy.json. Unknown provider
-     *  names are ignored so newer configs remain backward compatible. */
+     *  names are ignored so optional integrations remain non-fatal. */
     static fromProviderNames(providerNames) {
         const providers = [];
         for (const name of providerNames) {
@@ -54,7 +57,7 @@ export class EvidenceCollector {
         return new EvidenceCollector(providers);
     }
     /** Build built-ins and explicitly configured command providers. */
-    static fromPolicy() {
+    static fromPolicy(workspaceRoot) {
         const policy = getPolicy().evidence;
         const providerNames = Array.isArray(policy.providers)
             ? policy.providers.filter((name) => typeof name === "string")
@@ -62,8 +65,9 @@ export class EvidenceCollector {
         const providers = EvidenceCollector.fromProviderNames(providerNames).providers;
         const commands = Array.isArray(policy.commands) ? policy.commands : [];
         for (const command of commands) {
-            if (command?.enabled)
-                providers.push(new CommandEvidenceProvider(command));
+            if (command?.enabled && workspaceCommandsAuthorized()) {
+                providers.push(new CommandEvidenceProvider(command, workspaceRoot));
+            }
         }
         return new EvidenceCollector(providers);
     }
@@ -81,6 +85,7 @@ export class EvidenceCollector {
                     timeoutMs: options.timeoutMs ?? getPolicy().evidence.timeout_ms,
                     loopId: options.loopId,
                     phase: options.phase ?? "after",
+                    workspaceRoot: options.workspaceRoot,
                 });
                 if (snapshot && typeof snapshot.then === "function") {
                     // Async providers are not awaitable in the synchronous collect()
@@ -109,11 +114,6 @@ export class EvidenceCollector {
     async collectAsync(options = {}) {
         const timeoutMs = options.timeoutMs ?? getPolicy().evidence.timeout_ms;
         const captures = this.providers.map(async (provider) => {
-            const span = startSpan("evidence.capture", {
-                provider: provider.name,
-                loopId: options.loopId,
-                timeoutMs,
-            });
             const startedAt = Date.now();
             const controller = new AbortController();
             let timer;
@@ -124,6 +124,7 @@ export class EvidenceCollector {
                     timeoutMs,
                     loopId: options.loopId,
                     phase: options.phase ?? "after",
+                    workspaceRoot: options.workspaceRoot,
                 }));
                 const snapshot = timeoutMs > 0
                     ? await Promise.race([
@@ -141,7 +142,6 @@ export class EvidenceCollector {
                     ? "timeout"
                     : snapshot ? "available" : "unavailable";
                 policyMetrics.recordEvidence(provider.name, outcome, Date.now() - startedAt, options.loopId);
-                span.end(timedOut ? "cancelled" : "ok", { outcome });
                 if (timedOut) {
                     logEvent("evidence_provider_timeout", { provider: provider.name, timeoutMs });
                 }
@@ -149,7 +149,6 @@ export class EvidenceCollector {
             }
             catch (error) {
                 policyMetrics.recordEvidence(provider.name, "failure", Date.now() - startedAt, options.loopId);
-                span.end("error", { error: String(error) });
                 logEvent("evidence_provider_error", { provider: provider.name, error: String(error) });
                 return null;
             }
@@ -161,8 +160,8 @@ export class EvidenceCollector {
         return (await Promise.all(captures)).filter((snapshot) => snapshot !== null);
     }
 }
-function commandCwd(configured) {
-    const workspace = realpathSync(process.cwd());
+function commandCwd(configured, workspaceRoot = process.cwd()) {
+    const workspace = realpathSync(workspaceRoot);
     const lexical = resolve(workspace, configured ?? ".");
     const lexicalRelative = relative(workspace, lexical);
     if (lexicalRelative === ".." || lexicalRelative.startsWith(`..${sep}`) ||
@@ -179,9 +178,11 @@ function commandCwd(configured) {
 }
 /** Explicit, shell-free verification command. Disabled unless configured. */
 export class CommandEvidenceProvider {
+    workspaceRoot;
     name;
     config;
-    constructor(config) {
+    constructor(config, workspaceRoot) {
+        this.workspaceRoot = workspaceRoot;
         const name = typeof config.name === "string" && config.name.trim()
             ? config.name.trim()
             : "invalid-config";
@@ -222,7 +223,7 @@ export class CommandEvidenceProvider {
             return Promise.resolve(this.snapshot(phase, "missing", null, null, "", "Command executable is empty", false, 0));
         }
         try {
-            cwd = commandCwd(this.config.cwd);
+            cwd = commandCwd(this.config.cwd, this.workspaceRoot);
         }
         catch (error) {
             return Promise.resolve(this.snapshot(phase, "invalid_cwd", null, null, "", String(error), false, Date.now() - startedAt));
@@ -309,57 +310,172 @@ export class CommandEvidenceProvider {
         };
     }
 }
-// ── Built-in: GitEvidenceProvider ──────────────────────────────────────────
-/** Captures git file state (tracked, staged, untracked) via existing
- *  captureGitFileState() logic. */
-export class GitEvidenceProvider {
-    name = "git";
-    capture() {
-        const state = captureGitFileState();
-        if (!state)
-            return null;
-        const files = [...new Set([
-                ...state.tracked,
-                ...state.staged,
-                ...state.untracked,
-            ])].sort();
-        const fingerprints = {};
-        for (const file of files) {
-            try {
-                const stat = statSync(file);
-                const hash = createHash("sha256").update(readFileSync(file)).digest("hex");
-                fingerprints[file] = `${stat.mode}:${hash}`;
-            }
-            catch {
-                // Deleted files are evidence too.  A stable sentinel lets the diff
-                // distinguish deleted/restored transitions across a round.
-                fingerprints[file] = "missing";
-            }
+/** v2.0.1: Capture git file state using parallel async execFile.
+ *
+ * Runs three git commands concurrently via Promise.all. Uses a single
+ * timeout (shared across all commands) and an optional AbortSignal for
+ * early cancellation. Shell-free (execFile, not exec).
+ *
+ * On any command failure, returns null — the caller should treat git
+ * evidence as unavailable and degrade gracefully.
+ *
+ * Performance: wall-clock time is max(single-command), not sum(3).
+ * On a normal repo (~200ms/command): ~200ms vs ~600ms sequential.
+ * On Windows with antivirus (~4s/command): ~4s vs ~12s sequential. */
+export async function captureGitFileStateAsync(signal, timeoutMs, workspaceRoot) {
+    const timeout = timeoutMs ?? 15000;
+    const runGit = (args) => {
+        return new Promise((resolve, reject) => {
+            const child = execFile("git", [...args], {
+                encoding: "utf-8",
+                timeout,
+                signal,
+                windowsHide: true,
+                cwd: workspaceRoot,
+            });
+            let stdout = "";
+            child.stdout?.on("data", (chunk) => {
+                stdout += chunk;
+            });
+            child.on("close", (code) => {
+                code === 0
+                    ? resolve(stdout)
+                    : reject(new Error(`git ${args[0]} exited ${code}`));
+            });
+            child.on("error", reject);
+        });
+    };
+    try {
+        const [tracked, staged, untracked] = await Promise.all([
+            runGit(["diff", "--name-only"]),
+            runGit(["diff", "--cached", "--name-only"]),
+            runGit(["ls-files", "--others", "--exclude-standard"]),
+        ]);
+        // v2.13: Capture HEAD commit for backtrack restore (best-effort)
+        let head;
+        try {
+            const headOut = await runGit(["rev-parse", "HEAD"]);
+            head = headOut.trim() || undefined;
+        }
+        catch {
+            // Detached HEAD or non-repo — head stays undefined
         }
         return {
-            provider: "git",
-            timestamp: Date.now(),
-            files,
-            data: {
-                tracked: state.tracked,
-                staged: state.staged,
-                untracked: state.untracked,
-                fingerprints,
-            },
+            tracked: tracked.trim().split("\n").filter((f) => f.length > 0).sort(),
+            staged: staged.trim().split("\n").filter((f) => f.length > 0).sort(),
+            untracked: untracked.trim().split("\n").filter((f) => f.length > 0).sort(),
+            head,
         };
+    }
+    catch {
+        return null;
+    }
+}
+/** v1.17 (sync): Capture git file state using sequential execFileSync.
+ *
+ * @deprecated Use captureGitFileStateAsync() for the primary path.
+ * This sync fallback exists for legacy callers that cannot be made async
+ * (e.g. reconstructSession during startup). Uses execFileSync — shell-free,
+ * unlike the old execSync-based implementation. */
+export function captureGitFileState(workspaceRoot) {
+    try {
+        const tracked = execFileSync("git", ["diff", "--name-only"], {
+            encoding: "utf-8",
+            timeout: 5000,
+            cwd: workspaceRoot,
+        }).trim();
+        const staged = execFileSync("git", ["diff", "--cached", "--name-only"], {
+            encoding: "utf-8",
+            timeout: 5000,
+            cwd: workspaceRoot,
+        }).trim();
+        const untracked = execFileSync("git", ["ls-files", "--others", "--exclude-standard"], {
+            encoding: "utf-8",
+            timeout: 5000,
+            cwd: workspaceRoot,
+        }).trim();
+        // v2.13: Capture HEAD commit for backtrack restore point
+        let head;
+        try {
+            head = execFileSync("git", ["rev-parse", "HEAD"], {
+                encoding: "utf-8",
+                timeout: 5000,
+                cwd: workspaceRoot,
+            }).trim();
+        }
+        catch {
+            // Non-git repo or detached state — head stays undefined
+        }
+        return {
+            tracked: tracked.split("\n").filter((f) => f.length > 0).sort(),
+            staged: staged.split("\n").filter((f) => f.length > 0).sort(),
+            untracked: untracked.split("\n").filter((f) => f.length > 0).sort(),
+            head: head || undefined,
+        };
+    }
+    catch {
+        return null;
+    }
+}
+// ── Built-in: GitEvidenceProvider ──────────────────────────────────────────
+/** Captures git file state (tracked, staged, untracked) via the async
+ *  captureGitFileStateAsync() when a context is provided, falling back
+ *  to the synchronous captureGitFileState() for legacy callers. */
+export class GitEvidenceProvider {
+    name = "git";
+    capture(context) {
+        const workspaceRoot = context?.workspaceRoot;
+        const capture = context
+            ? captureGitFileStateAsync(context.signal, context.timeoutMs, context.workspaceRoot)
+            : captureGitFileState(workspaceRoot);
+        const statePromise = capture instanceof Promise ? capture : Promise.resolve(capture);
+        return statePromise.then((state) => {
+            if (!state)
+                return null;
+            const files = [...new Set([
+                    ...state.tracked,
+                    ...state.staged,
+                    ...state.untracked,
+                ])].sort();
+            const fingerprints = {};
+            for (const file of files) {
+                try {
+                    const absolute = workspaceRoot ? resolve(workspaceRoot, file) : file;
+                    const stat = statSync(absolute);
+                    const hash = createHash("sha256").update(readFileSync(absolute)).digest("hex");
+                    fingerprints[file] = `${stat.mode}:${hash}`;
+                }
+                catch {
+                    // Deleted files are evidence too.  A stable sentinel lets the diff
+                    // distinguish deleted/restored transitions across a round.
+                    fingerprints[file] = "missing";
+                }
+            }
+            return {
+                provider: "git",
+                timestamp: Date.now(),
+                files,
+                data: {
+                    tracked: state.tracked,
+                    staged: state.staged,
+                    untracked: state.untracked,
+                    fingerprints,
+                    // v2.13: HEAD commit hash for backtrack workspace restore
+                    head: state.head,
+                },
+            };
+        }); // end of .then()
     }
 }
 registerEvidenceProvider("git", () => new GitEvidenceProvider());
 // ── Utility ────────────────────────────────────────────────────────────────
-/** Extract merged file list from evidence snapshots for backward compat
- *  with runtimeFilesChanged (string[] | null).
- *
+/** Extract a merged file list from evidence snapshots.
  *  Looks for the "git" provider first; falls back to merging all
  *  providers' files arrays (deduplicated). */
 export function extractFilesFromSnapshots(snapshots) {
     if (snapshots.length === 0)
         return null;
-    // Prefer the git provider for backward compat
+    // Prefer the authoritative Git provider when available.
     const gitSnapshot = snapshots.find((s) => s.provider === "git");
     if (gitSnapshot)
         return [...gitSnapshot.files].sort();
@@ -371,9 +487,7 @@ export function extractFilesFromSnapshots(snapshots) {
     }
     return [...allFiles].sort();
 }
-/** Compute a diff between two evidence collections (before → after).
- *  Returns files that appeared in the after-snapshot but not the before.
- *  Used by runtime.ts to compute runtimeFilesChanged. */
+/** Compute a diff between two evidence collections. */
 function snapshotFingerprints(snapshot) {
     const value = snapshot.data.fingerprints;
     if (!value || typeof value !== "object" || Array.isArray(value))

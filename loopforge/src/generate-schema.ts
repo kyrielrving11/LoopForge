@@ -5,13 +5,43 @@
  * self-consistent JSON Schema. The generated schema is the single source of
  * truth for the wire protocol — it is regenerated on every build.
  *
- * Usage: node dist/generate-schema.js
- *   or:  npx tsx src/generate-schema.ts   (during development)
+ * Usage: node dist/generate-schema.js [--out PATH]
+ *   or:  npx tsx src/generate-schema.ts [--out PATH]   (during development)
  */
 
 import * as ts from "typescript";
 import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
+
+function resolveOutputPath(): string {
+  const args = process.argv.slice(2);
+  let outputArg: string | undefined;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--out") {
+      outputArg = args[index + 1];
+      if (!outputArg || outputArg.startsWith("--")) {
+        throw new Error("--out requires a file path");
+      }
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith("--out=")) {
+      outputArg = arg.slice("--out=".length);
+      if (!outputArg) throw new Error("--out requires a file path");
+      continue;
+    }
+    throw new Error(`Unknown argument: ${arg}`);
+  }
+
+  // The package build keeps the historical default: run from loopforge/ and
+  // write the tracked protocol next to the package directory. Verification
+  // uses --out to isolate its generated file in a temporary directory.
+  return outputArg
+    ? resolve(process.cwd(), outputArg)
+    : resolve(process.cwd(), "..", "loopforge-protocol.json");
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Schema types
@@ -333,8 +363,20 @@ function generateSchema(): void {
 
   const checker = program.getTypeChecker();
   const defs: Record<string, SchemaNode> = {};
+  const publicTypes = new Set([
+    "WorkflowPhase", "ApprovalPolicy", "RequiredAction", "PlanRiskTag", "PlanStepKind", "PlanStepStatus",
+    "EvaluationStepStatus", "WorkflowReadiness", "RoundCheckReport",
+    "RoundEvidenceClaim", "AgentEvidenceReport", "RoundBlocker", "RoundDiscoveries",
+    "PlanChangeRequest", "RoundReportV1", "MaterialAdvancementRecord", "ExternalGateBlock", "GateResolution",
+    "WorkflowProgress", "CapabilityPreflight", "PlanStep",
+    "StructuredPlan", "PlanApprovalRecord", "PlanRevisionRecord", "WorkflowState", "ContextRequest",
+    "WorkerResult", "WorkspaceRuntimeSummary", "WorkspaceBinding", "StoreResolutionDiagnostic",
+  ]);
 
   for (const stmt of sourceFile.statements) {
+    const named = stmt as ts.Statement & { name?: ts.Node };
+    const name = named.name && ts.isIdentifier(named.name) ? named.name.text : null;
+    if (!name || !publicTypes.has(name)) continue;
     if (ts.isEnumDeclaration(stmt)) {
       defs[stmt.name.text] = convertEnum(stmt);
     } else if (ts.isInterfaceDeclaration(stmt)) {
@@ -399,7 +441,7 @@ function generateSchema(): void {
     $defs: defs,
   };
 
-  const outputPath = resolve(process.cwd(), "..", "loopforge-protocol.json");
+  const outputPath = resolveOutputPath();
   writeFileSync(outputPath, JSON.stringify(schema, null, 2) + "\n");
   console.log(
     `Generated JSON Schema → ${outputPath} (${Object.keys(defs).length} $defs)`,

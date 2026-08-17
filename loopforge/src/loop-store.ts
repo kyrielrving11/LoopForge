@@ -25,8 +25,9 @@ import type { PromptArtifact } from "./protocol.js";
 import type { RoundTransactionSnapshot } from "./round-transaction.js";
 import { parseRoundTransactionSnapshot } from "./round-transaction.js";
 import { validateLoopId } from "./policy.js";
+import { isRecord } from "./token-utils.js";
 
-export const LOOP_STORE_SCHEMA_VERSION = 1 as const;
+export const LOOP_STORE_SCHEMA_VERSION = 3 as const;
 
 export interface LoopSessionDocument {
   schemaVersion: typeof LOOP_STORE_SCHEMA_VERSION;
@@ -54,6 +55,14 @@ export interface LoopStoreMigrationResult {
   alreadyMigrated: boolean;
 }
 
+export interface LoopStoreIntegrity {
+  code: "session_not_found" | "session_version_unsupported" | "session_corrupt" | "store_incomplete" | "store_unreadable" | null;
+  missingRounds: number[];
+  corruptRounds: number[];
+  metadataRebuilt: boolean;
+  foundSchemaVersion: number | null;
+}
+
 export interface LoopStore {
   withLock<T>(fn: () => T): T;
   listLoopIds(): string[];
@@ -62,12 +71,10 @@ export interface LoopStore {
   appendEntries(entries: VaultEntry[]): number;
   replaceEntries(entries: VaultEntry[]): void;
   readSession(loopId: string): LoopSessionDocument | null;
+  inspectLoop?(loopId: string): LoopStoreIntegrity;
+  writeSession(loopId: string, document: LoopSessionDocument): void;
   readRound(loopId: string, round: number): LoopRoundDocument | null;
   migrateLegacyVault(path?: string): LoopStoreMigrationResult;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function loopIdFromEntry(entry: VaultEntry): string | null {
@@ -122,8 +129,13 @@ export class FileLoopStore implements LoopStore {
           const owner = JSON.parse(readFileSync(ownerPath, "utf8")) as { pid?: unknown };
           const age = Date.now() - statSync(lockPath).mtimeMs;
           if (age > 5000 && typeof owner.pid === "number") {
-            try { process.kill(owner.pid, 0); } catch (error) {
-              stale = (error as NodeJS.ErrnoException).code !== "EPERM";
+            try { process.kill(owner.pid, 0); }
+            catch (error) {
+              // On Windows, EPERM may be returned for dead cross-user
+              // processes. Treat as stale when the lock is old regardless.
+              const code = (error as NodeJS.ErrnoException).code;
+              stale = code === "ESRCH"
+                || (code === "EPERM" && age > 10_000); // Windows safety: EPERM + old lock → stale
             }
           }
         } catch { stale = false; }
@@ -165,6 +177,45 @@ export class FileLoopStore implements LoopStore {
     if (!isRecord(value) || value.schemaVersion !== LOOP_STORE_SCHEMA_VERSION ||
         value.loopId !== loopId || !isRecord(value.entry)) return null;
     return value as unknown as LoopSessionDocument;
+  }
+
+  inspectLoop(loopId: string): LoopStoreIntegrity {
+    validateLoopId(loopId);
+    const dir = this.loopDir(loopId);
+    const sessionPath = join(dir, "session.json");
+    if (!existsSync(sessionPath)) return { code: "session_not_found", missingRounds: [], corruptRounds: [], metadataRebuilt: false, foundSchemaVersion: null };
+    try { readFileSync(sessionPath, "utf8"); } catch { return { code: "store_unreadable", missingRounds: [], corruptRounds: [], metadataRebuilt: false, foundSchemaVersion: null }; }
+    const rawSession = this.readJson(sessionPath);
+    if (!isRecord(rawSession)) return { code: "session_corrupt", missingRounds: [], corruptRounds: [], metadataRebuilt: false, foundSchemaVersion: null };
+    if (rawSession.schemaVersion !== LOOP_STORE_SCHEMA_VERSION) {
+      return {
+        code: "session_version_unsupported",
+        missingRounds: [],
+        corruptRounds: [],
+        metadataRebuilt: false,
+        foundSchemaVersion: typeof rawSession.schemaVersion === "number" ? rawSession.schemaVersion : null,
+      };
+    }
+    const session = this.readSession(loopId);
+    if (!session) return { code: "session_corrupt", missingRounds: [], corruptRounds: [], metadataRebuilt: false, foundSchemaVersion: LOOP_STORE_SCHEMA_VERSION };
+    let metadataRebuilt = false;
+    const metadataPath = join(dir, "metadata.json");
+    if (!existsSync(metadataPath)) {
+      this.atomicWrite(metadataPath, { schemaVersion: LOOP_STORE_SCHEMA_VERSION, loopId });
+      metadataRebuilt = true;
+    }
+    const roundsDir = join(dir, "rounds");
+    if (!existsSync(roundsDir)) return { code: null, missingRounds: [], corruptRounds: [], metadataRebuilt, foundSchemaVersion: LOOP_STORE_SCHEMA_VERSION };
+    const numbers = readdirSync(roundsDir).filter((name) => /^\d+\.json$/.test(name)).map((name) => Number(name.slice(0, -5))).sort((a, b) => a - b);
+    const corruptRounds = numbers.filter((round) => this.readRound(loopId, round) === null);
+    const missingRounds: number[] = [];
+    if (numbers.length > 0) for (let round = 1; round <= numbers[numbers.length - 1]; round++) if (!numbers.includes(round)) missingRounds.push(round);
+    return { code: corruptRounds.length || missingRounds.length ? "store_incomplete" : null, missingRounds, corruptRounds, metadataRebuilt, foundSchemaVersion: LOOP_STORE_SCHEMA_VERSION };
+  }
+
+  writeSession(loopId: string, document: LoopSessionDocument): void {
+    validateLoopId(loopId);
+    this.atomicWrite(join(this.loopDir(loopId), "session.json"), document);
   }
 
   readRound(loopId: string, round: number): LoopRoundDocument | null {
@@ -332,17 +383,15 @@ export class FileLoopStore implements LoopStore {
   }
 }
 
-/** Compatibility adapter for legacy internal query code. Persistent truth is
- * still the typed per-loop documents above; no Markdown lineage is written. */
+/** @deprecated Use LoopStore directly.
+ *
+ *  Compatibility adapter so modules that still accept VaultBackend can
+ *  operate on a LoopStore. Persistent truth is the typed per-loop
+ *  documents; no Markdown lineage is written. */
 export class LoopStoreBackend implements VaultBackend {
   constructor(readonly store: LoopStore = new FileLoopStore()) {}
 
   withLock<T>(fn: () => T): T { return this.store.withLock(fn); }
-  readVault(): Record<string, unknown> { return { entries: this.store.listEntries() }; }
-  writeVault(data: Record<string, unknown>): void {
-    const entries = Array.isArray(data.entries) ? data.entries.filter(isRecord) as VaultEntry[] : [];
-    this.store.replaceEntries(entries);
-  }
   queryEntries(opts?: {
     prefix?: string;
     taskIdPattern?: string;
@@ -359,4 +408,131 @@ export class LoopStoreBackend implements VaultBackend {
   }
   appendEntry(entry: VaultEntry): void { this.store.appendEntry(entry); }
   appendEntries(entries: VaultEntry[]): number { return this.store.appendEntries(entries); }
+}
+
+/** Adapter that presents an injected VaultBackend through the LoopStore API.
+ *
+ *  SessionManager uses this when a VaultBackend is provided directly so
+ *  VaultSessionStateStore can operate on typed session documents while
+ *  the underlying storage remains VaultBackend entries. */
+export class VaultBackendLoopStore implements LoopStore {
+  constructor(private readonly backend: VaultBackend) {}
+
+  withLock<T>(fn: () => T): T {
+    return typeof this.backend.withLock === "function"
+      ? this.backend.withLock(fn)
+      : fn();
+  }
+
+  listLoopIds(): string[] {
+    return [...new Set(
+      this.backend.queryEntries()
+        .filter((e) => typeof e.loop_id === "string")
+        .map((e) => e.loop_id as string),
+    )].sort();
+  }
+
+  listEntries(loopId?: string): VaultEntry[] {
+    if (loopId) return this.backend.queryEntries({ prefix: `loop:${loopId}` });
+    return this.backend.queryEntries();
+  }
+
+  appendEntry(entry: VaultEntry): void { this.backend.appendEntry(entry); }
+  appendEntries(entries: VaultEntry[]): number { return this.backend.appendEntries(entries); }
+  replaceEntries(_entries: VaultEntry[]): void {
+    throw new Error(
+      "VaultBackendLoopStore.replaceEntries is not supported. " +
+      "Use LoopStore (FileLoopStore) directly for bulk replace operations.",
+    );
+  }
+
+  readSession(loopId: string): LoopSessionDocument | null {
+    const entry = this.backend.queryEntries({ prefix: `loop:${loopId}:session` })
+      .find((e) => e.task_type === "session_state" && e.loop_id === loopId);
+    if (!entry) return null;
+    return {
+      schemaVersion: LOOP_STORE_SCHEMA_VERSION,
+      loopId,
+      updatedAt: typeof entry.timestamp === "string"
+        ? entry.timestamp
+        : new Date().toISOString(),
+      entry,
+    };
+  }
+
+  writeSession(loopId: string, document: LoopSessionDocument): void {
+    const entry = document.entry;
+    // Ensure the entry carries identifying fields expected by queryEntries.
+    entry.task_type = "session_state";
+    entry.loop_id = loopId;
+    entry.task_id = `loop:${loopId}:session`;
+    // Session state lives in the vault entries list. The backend may
+    // provide readVault/writeVault as optional adapter methods; if not,
+    // we fall back to appendEntry (which may create duplicates, but
+    // VaultSessionStateStore.load returns the first match).
+    const be = this.backend as unknown as Record<string, unknown>;
+    if (typeof be.readVault === "function" &&
+        typeof be.writeVault === "function") {
+      // Call via .call(be) so methods that reference `this` (e.g.
+      // MemoryBackend.readVault) keep their receiver.
+      const data = (be.readVault as () => Record<string, unknown>).call(be);
+      const entries = Array.isArray(data.entries)
+        ? data.entries as VaultEntry[]
+        : [];
+      const filtered = entries.filter(
+        (item) => !(item.task_type === "session_state" && item.loop_id === loopId),
+      );
+      (be.writeVault as (data: Record<string, unknown>) => void).call(
+        be,
+        { entries: [...filtered, entry] },
+      );
+      return;
+    }
+    this.backend.appendEntry(entry);
+  }
+
+  readRound(loopId: string, round: number): LoopRoundDocument | null {
+    const prefix = `loop:${loopId}:r${round}:`;
+    const entries = this.backend.queryEntries({ prefix });
+    if (entries.length === 0) return null;
+
+    // Separate lineage, feedback, and raw events — same structure as
+    // FileLoopStore.readRound so callers get consistent round documents
+    // regardless of backend.
+    const lineage = entries.find(
+      (e) => e.task_type === "loop_lineage" || e.task_id === `loop:${loopId}:r${round}`,
+    );
+    const feedback = entries.find(
+      (e) => String(e.task_id ?? "").endsWith(":feedback"),
+    );
+    const events = entries.filter(
+      (e) => e !== lineage && e !== feedback,
+    );
+
+    let transaction: RoundTransactionSnapshot | undefined;
+    const transactionRaw = feedback?.loop_lineage?.round_transaction ??
+      lineage?.loop_lineage?.round_transaction;
+    const transactionParsed = parseRoundTransactionSnapshot(
+      isRecord(transactionRaw) ? (transactionRaw as Record<string, unknown>).snapshot : undefined,
+    );
+    if (transactionParsed) {
+      transaction = transactionParsed;
+    }
+
+    return {
+      schemaVersion: LOOP_STORE_SCHEMA_VERSION,
+      loopId,
+      round,
+      updatedAt: entries[0].timestamp ?? new Date().toISOString(),
+      lineage: lineage as VaultEntry | undefined,
+      feedback: feedback as VaultEntry | undefined,
+      transaction,
+      promptArtifact: transaction?.promptArtifact,
+      events,
+    };
+  }
+
+  migrateLegacyVault(_path?: string): LoopStoreMigrationResult {
+    return { source: _path ?? "vault", imported: 0, skipped: 0, alreadyMigrated: true };
+  }
 }

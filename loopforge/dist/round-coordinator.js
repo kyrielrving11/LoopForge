@@ -1,184 +1,139 @@
-/** RoundCoordinator — Unified round-boundary state machine (v1.17).
- *
- * Encapsulates the shared round processing pipeline used by both
- * LoopRuntime (runtime.ts) and SessionManager (mcp/session.ts):
- *
- *   verify → enforce → stop decision
- *
- * Before this module, runtime.ts and session.ts each maintained their
- * own copy of the pipeline (~60 lines each). Drift between the two
- * paths (e.g. git verification only wired into one side) was a known
- * risk. The RoundCoordinator is the single source of truth.
- *
- * State transitions:
- *   RoundStarted → EvidenceCaptured → EvaluationSubmitted
- *   → VerificationCompleted → EnforcementDecided
- *
- * Persistence is owned by round-transaction.ts so reject paths remain
- * side-effect free and accepted decisions can be replayed idempotently.
- */
-import { verifySelfEvaluation } from "./verification-gate.js";
-import { enforceRound, buildRejectionPrompt } from "./enforcement-gate.js";
-import { logEvent } from "./observability.js";
+import { verifyRoundEvaluation, entryRound } from "./verification-gate.js";
+import { enforceRound, buildRejectionPrompt, findSafeRestorePoint, buildBacktrackPrompt, } from "./enforcement-gate.js";
 import { getPolicy } from "./policy.js";
-// ── RoundCoordinator ───────────────────────────────────────────────────────
+function filesFromEntry(entry) {
+    const envelope = entry.evidence_envelope;
+    if (!envelope || typeof envelope !== "object" || Array.isArray(envelope))
+        return [];
+    const files = envelope.files;
+    if (!files || typeof files !== "object" || Array.isArray(files))
+        return [];
+    const value = files.value;
+    return Array.isArray(value) ? value.filter((item) => typeof item === "string") : [];
+}
 export class RoundCoordinator {
     backend;
     constructor(backend) {
         this.backend = backend;
     }
-    /** Process a single round's self-evaluation through the decision pipeline:
-     *  verify → enforce → stop decision.
-     *
-     *  This is the single entry point called by both LoopRuntime and
-     *  SessionManager. The caller is responsible for:
-     *  - Compiling the next prompt (if action is "continue")
-     *  - Managing heartbeat / signal handlers (runtime only)
-     *  - Memory injection (both paths, before calling processRound)
-     *  - Transactional feedback commit (accepted rounds only)
-     *  - State file I/O (both paths, after compiling)
-     */
     processRound(input) {
-        const { loopId, task, currentRound, maxRounds, selfEval, extractionSucceeded, lastSelfEval, consecutiveRejections, runtimeFilesChanged, evidenceSnapshots, } = input;
-        const roundSuccess = selfEval.success ?? false;
-        // ── 1. Query vault entries ──────────────────────────────────────────
+        const { loopId, task, currentRound, maxRounds, evaluation, previousEvaluation, consecutiveRejections, } = input;
+        const roundSuccess = evaluation.report.status === "completed";
+        const prefix = `loop:${loopId}:r`;
         const vaultEntries = this.backend
-            ? this.backend.queryEntries({ prefix: `loop:${loopId}:r` })
+            ? [
+                ...this.backend.queryEntries({ prefix }),
+                ...this.backend.queryEntries({ prefix, feedbackOnly: true }),
+            ]
             : [];
-        // ── 2. Verification gate ────────────────────────────────────────────
-        const verifyResult = verifySelfEvaluation(selfEval, currentRound, vaultEntries, lastSelfEval ?? null, runtimeFilesChanged ?? null, evidenceSnapshots ?? []);
-        const verificationFlags = verifyResult.flags;
-        const gateContradicted = verifyResult.verdict === "contradicted";
-        if (gateContradicted) {
-            logEvent("gate_contradicted", {
-                loopId,
-                round: currentRound,
-                flags: verificationFlags.map((f) => f.check),
-            });
-        }
-        // ── 3. Enforcement gate (structured extractions only) ───────────────
-        // Heuristic evaluations have no reliable execution_evidence —
-        // enforcement rules that depend on evidence are skipped.
-        if (extractionSucceeded) {
-            const enforceResult = enforceRound(selfEval, verifyResult, currentRound, vaultEntries, consecutiveRejections);
-            if (enforceResult.action === "reject") {
-                const newRejections = consecutiveRejections + 1;
-                const rejectionPrompt = buildRejectionPrompt(currentRound, task, enforceResult);
-                logEvent("enforcement_reject", {
-                    loopId,
-                    round: currentRound,
-                    reason: enforceResult.reason.slice(0, 120),
-                    check: enforceResult.check ?? "",
-                    consecutiveRejections: newRejections,
-                });
-                return {
-                    action: "reject",
-                    rejectionPrompt,
-                    verificationFlags,
-                    enforcementAction: "reject",
-                    enforcementReason: enforceResult.reason,
-                    rejectionCheck: enforceResult.check,
-                    roundSuccess,
-                    gateContradicted,
-                    newConsecutiveRejections: newRejections,
-                    // Don't update lastSelfEval on reject — the agent redoes the same round
-                    newLastSelfEval: undefined,
-                    shouldPushSuccessTrajectory: false,
-                };
-            }
-            if (enforceResult.action === "terminate") {
-                logEvent("session_end", {
-                    loopId,
-                    stopReason: "enforcement_terminated",
-                    round: currentRound,
-                });
-                return {
-                    action: "terminate",
-                    stopReason: "enforcement_terminated",
-                    verificationFlags,
-                    enforcementAction: "terminate",
-                    enforcementReason: enforceResult.reason,
-                    rejectionCheck: enforceResult.check,
-                    roundSuccess,
-                    gateContradicted,
-                    newConsecutiveRejections: 0,
-                    newLastSelfEval: selfEval,
-                    shouldPushSuccessTrajectory: false,
-                };
-            }
-            // Accept: reset rejection counter
-            // (consecutiveRejections reset to 0 — caller persists)
-        }
-        // ── 4. Auto-feedback (AFTER enforcement, only if accepted) ──────────
-        // ── 5. Stop condition checks ────────────────────────────────────────
-        // 5a. Extraction failed → stalled
-        if (!extractionSucceeded) {
-            return {
-                action: "stop",
-                stopReason: "stalled",
-                verificationFlags,
-                roundSuccess,
-                gateContradicted,
-                newConsecutiveRejections: 0,
-                newLastSelfEval: selfEval,
-                shouldPushSuccessTrajectory: !gateContradicted,
-            };
-        }
-        // 5b. Agent says stop
-        if (!selfEval.should_continue) {
-            const reason = roundSuccess ? "completed" : "failed";
-            return {
-                action: "stop",
-                stopReason: reason,
-                verificationFlags,
-                roundSuccess,
-                gateContradicted,
-                newConsecutiveRejections: 0,
-                newLastSelfEval: selfEval,
-                shouldPushSuccessTrajectory: !gateContradicted,
-            };
-        }
-        // 5c. Circuit breaker
-        const projectedTrajectory = [...(input.successTrajectory ?? [])];
-        if (!gateContradicted)
-            projectedTrajectory.push(roundSuccess);
-        const breakerSize = getPolicy().engine.max_circuit_breaker;
-        const circuitBroken = projectedTrajectory.length >= breakerSize &&
-            projectedTrajectory.slice(-breakerSize).every((value) => !value);
-        if (circuitBroken) {
-            return {
-                action: "stop",
-                stopReason: "circuit_breaker",
-                verificationFlags,
-                roundSuccess,
-                gateContradicted,
-                newConsecutiveRejections: 0,
-                newLastSelfEval: selfEval,
-                shouldPushSuccessTrajectory: !gateContradicted,
-            };
-        }
-        // 5d. Max rounds reached
-        if (currentRound >= maxRounds) {
-            return {
-                action: "stop",
-                stopReason: "max_rounds",
-                verificationFlags,
-                roundSuccess,
-                gateContradicted,
-                newConsecutiveRejections: 0,
-                newLastSelfEval: selfEval,
-                shouldPushSuccessTrajectory: !gateContradicted,
-            };
-        }
-        // ── 6. Continue — caller compiles next round ────────────────────────
-        return {
-            action: "continue",
-            verificationFlags,
-            enforcementAction: "accept",
+        const verification = verifyRoundEvaluation(evaluation, currentRound, vaultEntries, previousEvaluation ?? null, input.evidenceSnapshots ?? [], input.backtrackSkippedFiles ?? []);
+        const gateContradicted = verification.verdict === "contradicted";
+        const enforcement = enforceRound(evaluation, verification, currentRound, vaultEntries, consecutiveRejections);
+        const base = {
+            verificationFlags: verification.flags,
             roundSuccess,
             gateContradicted,
+        };
+        if (enforcement.action === "reject") {
+            return {
+                ...base,
+                action: "reject",
+                rejectionPrompt: buildRejectionPrompt(currentRound, task, enforcement, verification.flags),
+                enforcementAction: "reject",
+                enforcementReason: enforcement.reason,
+                rejectionCheck: enforcement.check,
+                newConsecutiveRejections: consecutiveRejections + 1,
+                shouldPushSuccessTrajectory: false,
+            };
+        }
+        if (enforcement.action === "terminate") {
+            return {
+                ...base,
+                action: "terminate",
+                stopReason: "enforcement_terminated",
+                enforcementAction: "terminate",
+                enforcementReason: enforcement.reason,
+                rejectionCheck: enforcement.check,
+                newConsecutiveRejections: 0,
+                newLastEvaluation: evaluation,
+                shouldPushSuccessTrajectory: false,
+            };
+        }
+        if (enforcement.action === "backtrack") {
+            const restore = findSafeRestorePoint(currentRound, vaultEntries, getPolicy().engine.backtrack_max_depth);
+            if (!restore) {
+                return {
+                    ...base,
+                    action: "terminate",
+                    stopReason: "enforcement_terminated",
+                    enforcementAction: "terminate",
+                    enforcementReason: `${enforcement.reason} (no clean restore point)`,
+                    rejectionCheck: enforcement.check,
+                    newConsecutiveRejections: 0,
+                    newLastEvaluation: evaluation,
+                    shouldPushSuccessTrajectory: false,
+                };
+            }
+            const skippedFiles = vaultEntries
+                .filter((entry) => entryRound(entry) > restore.round && entryRound(entry) < currentRound)
+                .flatMap(filesFromEntry)
+                .filter((file, index, all) => all.indexOf(file) === index);
+            return {
+                ...base,
+                action: "backtrack",
+                backtrackPrompt: buildBacktrackPrompt(currentRound, restore.round, enforcement.check ?? "evidence_stall", getPolicy().engine.backtrack_preserve_discoveries ? restore.skippedDiscoveries : [], skippedFiles),
+                backtrackTarget: restore.round,
+                backtrackSkippedDiscoveries: getPolicy().engine.backtrack_preserve_discoveries
+                    ? restore.skippedDiscoveries
+                    : [],
+                backtrackSkippedFiles: skippedFiles,
+                backtrackTriggerRule: enforcement.check,
+                enforcementAction: "backtrack",
+                enforcementReason: enforcement.reason,
+                rejectionCheck: enforcement.check,
+                newConsecutiveRejections: 0,
+                shouldPushSuccessTrajectory: false,
+            };
+        }
+        if (evaluation.report.status === "blocked") {
+            return {
+                ...base,
+                action: "stop",
+                stopReason: "blocked",
+                enforcementAction: "accept",
+                newConsecutiveRejections: 0,
+                newLastEvaluation: evaluation,
+                shouldPushSuccessTrajectory: !gateContradicted,
+            };
+        }
+        if (evaluation.phase === "auditing" && evaluation.report.status === "completed") {
+            return {
+                ...base,
+                action: "stop",
+                stopReason: "completed",
+                enforcementAction: "accept",
+                newConsecutiveRejections: 0,
+                newLastEvaluation: evaluation,
+                shouldPushSuccessTrajectory: !gateContradicted,
+            };
+        }
+        if (currentRound >= maxRounds) {
+            return {
+                ...base,
+                action: "stop",
+                stopReason: "max_rounds",
+                enforcementAction: "accept",
+                newConsecutiveRejections: 0,
+                newLastEvaluation: evaluation,
+                shouldPushSuccessTrajectory: !gateContradicted,
+            };
+        }
+        return {
+            ...base,
+            action: "continue",
+            enforcementAction: "accept",
             newConsecutiveRejections: 0,
-            newLastSelfEval: selfEval,
+            newLastEvaluation: evaluation,
             shouldPushSuccessTrajectory: !gateContradicted,
         };
     }

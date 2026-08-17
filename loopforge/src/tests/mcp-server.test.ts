@@ -11,6 +11,7 @@ interface RpcResponse {
     serverInfo?: { name?: string };
     protocolVersion?: string;
     capabilities?: Record<string, unknown>;
+    instructions?: string;
   };
   error?: { code?: number };
 }
@@ -122,11 +123,9 @@ describe("MCP stdio input boundary", () => {
         name: "loopforge_next",
         arguments: {
           sessionId: "session",
-          evaluation: {
-            success: "yes",
-            output_summary: "done",
-            should_continue: false,
-            constraint_violations: [],
+          report: {
+            status: "invalid",
+            summary: "done",
           },
         },
       });
@@ -155,12 +154,22 @@ describe("MCP stdio input boundary", () => {
       const initResult = initialized.result as Record<string, unknown>;
       assert.equal(initResult.protocolVersion, "2025-11-25");
       assert.equal((initResult.capabilities as Record<string, unknown>).tasks, undefined);
+      assert.match(String(initResult.instructions), /loopforge_start/);
 
       const listed = await rpc.request("tools/list");
       const tools = ((listed.result as Record<string, unknown>).tools as Array<Record<string, unknown>>);
       const health = tools.find((tool) => tool.name === "loopforge_health");
+      const start = tools.find((tool) => tool.name === "loopforge_start");
+      const approve = tools.find((tool) => tool.name === "loopforge_plan_approve");
+      assert.equal(tools.length, 12);
+      assert.ok(tools.some((tool) => tool.name === "loopforge_plan_submit"));
       assert.ok(health?.outputSchema);
       assert.equal(health?.execution, undefined);
+      assert.equal(
+        ((start?.inputSchema as Record<string, unknown>).properties as Record<string, unknown>).planningEnabled,
+        undefined,
+      );
+      assert.equal((approve?.annotations as Record<string, unknown>).destructiveHint, true);
 
       const direct = await rpc.request("tools/call", {
         name: "loopforge_list",

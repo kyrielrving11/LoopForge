@@ -1,23 +1,24 @@
 /** EvidenceProvider — Pluggable evidence capture interface (v1.18).
  *
- * Before this module, evidence capture was hardcoded to git via
- * captureGitModifiedFiles() in two places (runtime.ts, session.ts).
  * This module defines an abstract EvidenceProvider interface so
  * additional evidence sources (test runners, linters, bundle analysis)
  * can be added without touching the verification pipeline.
  *
- * Built-in provider: GitEvidenceProvider — wraps existing
- * captureGitFileState() logic.
+ * Built-in provider: GitEvidenceProvider — git file state capture with
+ * parallel async execution (v2.0.1) and a synchronous fallback.
  */
 
 import { createHash } from "node:crypto";
 import { readFileSync, realpathSync, statSync } from "node:fs";
-import { spawn } from "node:child_process";
+import {
+  spawn,
+  execFile,
+  execFileSync,
+} from "node:child_process";
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import { captureGitFileState, type GitFileState } from "./verification-gate.js";
 import { getPolicy } from "./policy.js";
 import type { CommandEvidencePolicy } from "./policy.js";
-import { logEvent, startSpan } from "./observability.js";
+import { logEvent } from "./observability.js";
 import { policyMetrics } from "./policy-metrics.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -28,8 +29,7 @@ export interface ProviderSnapshot {
   provider: string;
   /** Unix-ms timestamp of capture. */
   timestamp: number;
-  /** File paths relevant to this evidence (for backward compat with
-   *  runtimeFilesChanged). */
+  /** File paths relevant to this evidence. */
   files: string[];
   /** Provider-specific structured data. */
   data: Record<string, unknown>;
@@ -45,6 +45,7 @@ export interface EvidenceCaptureContext {
   timeoutMs: number;
   loopId?: string;
   phase: "before" | "after";
+  workspaceRoot?: string;
 }
 
 export type EvidenceCaptureResult =
@@ -60,10 +61,18 @@ export interface EvidenceProvider {
   capture(context?: EvidenceCaptureContext): EvidenceCaptureResult;
 }
 
+/** Workspace policy may describe commands, but only the host can authorize
+ * executing them. This keeps repository-controlled JSON from granting itself
+ * subprocess capability. */
+export function workspaceCommandsAuthorized(): boolean {
+  return process.env.LOOPFORGE_ALLOW_WORKSPACE_COMMANDS === "1";
+}
+
 export interface EvidenceCollectOptions {
   timeoutMs?: number;
   loopId?: string;
   phase?: "before" | "after";
+  workspaceRoot?: string;
 }
 
 export type EvidenceProviderFactory = () => EvidenceProvider;
@@ -97,7 +106,7 @@ export class EvidenceCollector {
   constructor(private providers: EvidenceProvider[]) {}
 
   /** Build the collector described by loop_policy.json. Unknown provider
-   *  names are ignored so newer configs remain backward compatible. */
+   *  names are ignored so optional integrations remain non-fatal. */
   static fromProviderNames(providerNames: string[]): EvidenceCollector {
     const providers: EvidenceProvider[] = [];
     for (const name of providerNames) {
@@ -108,7 +117,7 @@ export class EvidenceCollector {
   }
 
   /** Build built-ins and explicitly configured command providers. */
-  static fromPolicy(): EvidenceCollector {
+  static fromPolicy(workspaceRoot?: string): EvidenceCollector {
     const policy = getPolicy().evidence;
     const providerNames = Array.isArray(policy.providers)
       ? policy.providers.filter((name): name is string => typeof name === "string")
@@ -116,7 +125,9 @@ export class EvidenceCollector {
     const providers = EvidenceCollector.fromProviderNames(providerNames).providers;
     const commands = Array.isArray(policy.commands) ? policy.commands : [];
     for (const command of commands) {
-      if (command?.enabled) providers.push(new CommandEvidenceProvider(command));
+      if (command?.enabled && workspaceCommandsAuthorized()) {
+        providers.push(new CommandEvidenceProvider(command, workspaceRoot));
+      }
     }
     return new EvidenceCollector(providers);
   }
@@ -135,6 +146,7 @@ export class EvidenceCollector {
           timeoutMs: options.timeoutMs ?? getPolicy().evidence.timeout_ms,
           loopId: options.loopId,
           phase: options.phase ?? "after",
+          workspaceRoot: options.workspaceRoot,
         });
         if (snapshot && typeof (snapshot as Promise<unknown>).then === "function") {
           // Async providers are not awaitable in the synchronous collect()
@@ -177,11 +189,6 @@ export class EvidenceCollector {
   async collectAsync(options: EvidenceCollectOptions = {}): Promise<ProviderSnapshot[]> {
     const timeoutMs = options.timeoutMs ?? getPolicy().evidence.timeout_ms;
     const captures = this.providers.map(async (provider) => {
-      const span = startSpan("evidence.capture", {
-        provider: provider.name,
-        loopId: options.loopId,
-        timeoutMs,
-      });
       const startedAt = Date.now();
       const controller = new AbortController();
       let timer: ReturnType<typeof setTimeout> | undefined;
@@ -192,6 +199,7 @@ export class EvidenceCollector {
           timeoutMs,
           loopId: options.loopId,
           phase: options.phase ?? "after",
+          workspaceRoot: options.workspaceRoot,
         }));
         const snapshot = timeoutMs > 0
           ? await Promise.race([
@@ -214,7 +222,6 @@ export class EvidenceCollector {
           Date.now() - startedAt,
           options.loopId,
         );
-        span.end(timedOut ? "cancelled" : "ok", { outcome });
         if (timedOut) {
           logEvent("evidence_provider_timeout", { provider: provider.name, timeoutMs });
         }
@@ -226,7 +233,6 @@ export class EvidenceCollector {
           Date.now() - startedAt,
           options.loopId,
         );
-        span.end("error", { error: String(error) });
         logEvent("evidence_provider_error", { provider: provider.name, error: String(error) });
         return null;
       } finally {
@@ -253,8 +259,8 @@ export interface CommandEvidenceData extends Record<string, unknown> {
   truncated: boolean;
 }
 
-function commandCwd(configured: string | undefined): string {
-  const workspace = realpathSync(process.cwd());
+function commandCwd(configured: string | undefined, workspaceRoot = process.cwd()): string {
+  const workspace = realpathSync(workspaceRoot);
   const lexical = resolve(workspace, configured ?? ".");
   const lexicalRelative = relative(workspace, lexical);
   if (
@@ -279,7 +285,7 @@ export class CommandEvidenceProvider implements EvidenceProvider {
   readonly name: string;
   private readonly config: CommandEvidencePolicy;
 
-  constructor(config: CommandEvidencePolicy) {
+  constructor(config: CommandEvidencePolicy, private readonly workspaceRoot?: string) {
     const name = typeof config.name === "string" && config.name.trim()
       ? config.name.trim()
       : "invalid-config";
@@ -333,7 +339,7 @@ export class CommandEvidenceProvider implements EvidenceProvider {
       ));
     }
     try {
-      cwd = commandCwd(this.config.cwd);
+      cwd = commandCwd(this.config.cwd, this.workspaceRoot);
     } catch (error) {
       return Promise.resolve(this.snapshot(
         phase,
@@ -447,17 +453,150 @@ export class CommandEvidenceProvider implements EvidenceProvider {
   }
 }
 
+// ── Git File State Capture ─────────────────────────────────────────────────
+
+/** v1.17: Result of capturing git file state across all three categories. */
+export interface GitFileState {
+  /** Tracked files modified but unstaged (git diff --name-only). */
+  tracked: string[];
+  /** Files in the staging area (git diff --cached --name-only). */
+  staged: string[];
+  /** Untracked files not yet known to git (git ls-files --others --exclude-standard). */
+  untracked: string[];
+  /** v2.13: HEAD commit hash for backtrack restore point.
+   *  undefined when git is unavailable or not a repository. */
+  head?: string;
+}
+
+/** v2.0.1: Capture git file state using parallel async execFile.
+ *
+ * Runs three git commands concurrently via Promise.all. Uses a single
+ * timeout (shared across all commands) and an optional AbortSignal for
+ * early cancellation. Shell-free (execFile, not exec).
+ *
+ * On any command failure, returns null — the caller should treat git
+ * evidence as unavailable and degrade gracefully.
+ *
+ * Performance: wall-clock time is max(single-command), not sum(3).
+ * On a normal repo (~200ms/command): ~200ms vs ~600ms sequential.
+ * On Windows with antivirus (~4s/command): ~4s vs ~12s sequential. */
+export async function captureGitFileStateAsync(
+  signal?: AbortSignal,
+  timeoutMs?: number,
+  workspaceRoot?: string,
+): Promise<GitFileState | null> {
+  const timeout = timeoutMs ?? 15000;
+
+  const runGit = (args: readonly string[]): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const child = execFile("git", [...args], {
+        encoding: "utf-8" as const,
+        timeout,
+        signal,
+        windowsHide: true,
+        cwd: workspaceRoot,
+      });
+      let stdout = "";
+      child.stdout?.on("data", (chunk: string) => {
+        stdout += chunk;
+      });
+      child.on("close", (code) => {
+        code === 0
+          ? resolve(stdout)
+          : reject(new Error(`git ${args[0]} exited ${code}`));
+      });
+      child.on("error", reject);
+    });
+  };
+
+  try {
+    const [tracked, staged, untracked] = await Promise.all([
+      runGit(["diff", "--name-only"]),
+      runGit(["diff", "--cached", "--name-only"]),
+      runGit(["ls-files", "--others", "--exclude-standard"]),
+    ]);
+    // v2.13: Capture HEAD commit for backtrack restore (best-effort)
+    let head: string | undefined;
+    try {
+      const headOut = await runGit(["rev-parse", "HEAD"]);
+      head = headOut.trim() || undefined;
+    } catch {
+      // Detached HEAD or non-repo — head stays undefined
+    }
+    return {
+      tracked: tracked.trim().split("\n").filter((f) => f.length > 0).sort(),
+      staged: staged.trim().split("\n").filter((f) => f.length > 0).sort(),
+      untracked: untracked.trim().split("\n").filter((f) => f.length > 0).sort(),
+      head,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** v1.17 (sync): Capture git file state using sequential execFileSync.
+ *
+ * @deprecated Use captureGitFileStateAsync() for the primary path.
+ * This sync fallback exists for legacy callers that cannot be made async
+ * (e.g. reconstructSession during startup). Uses execFileSync — shell-free,
+ * unlike the old execSync-based implementation. */
+export function captureGitFileState(workspaceRoot?: string): GitFileState | null {
+  try {
+    const tracked = execFileSync("git", ["diff", "--name-only"], {
+      encoding: "utf-8",
+      timeout: 5000,
+      cwd: workspaceRoot,
+    }).trim();
+    const staged = execFileSync("git", ["diff", "--cached", "--name-only"], {
+      encoding: "utf-8",
+      timeout: 5000,
+      cwd: workspaceRoot,
+    }).trim();
+    const untracked = execFileSync("git", ["ls-files", "--others", "--exclude-standard"], {
+      encoding: "utf-8",
+      timeout: 5000,
+      cwd: workspaceRoot,
+    }).trim();
+    // v2.13: Capture HEAD commit for backtrack restore point
+    let head: string | undefined;
+    try {
+      head = execFileSync("git", ["rev-parse", "HEAD"], {
+        encoding: "utf-8",
+        timeout: 5000,
+        cwd: workspaceRoot,
+      }).trim();
+    } catch {
+      // Non-git repo or detached state — head stays undefined
+    }
+    return {
+      tracked: tracked.split("\n").filter((f: string) => f.length > 0).sort(),
+      staged: staged.split("\n").filter((f: string) => f.length > 0).sort(),
+      untracked: untracked.split("\n").filter((f: string) => f.length > 0).sort(),
+      head: head || undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
 // ── Built-in: GitEvidenceProvider ──────────────────────────────────────────
 
-/** Captures git file state (tracked, staged, untracked) via existing
- *  captureGitFileState() logic. */
+/** Captures git file state (tracked, staged, untracked) via the async
+ *  captureGitFileStateAsync() when a context is provided, falling back
+ *  to the synchronous captureGitFileState() for legacy callers. */
 export class GitEvidenceProvider implements EvidenceProvider {
   readonly name = "git";
 
-  capture(): ProviderSnapshot | null {
-    const state: GitFileState | null = captureGitFileState();
-    if (!state) return null;
-    const files = [...new Set([
+  capture(context?: EvidenceCaptureContext): ProviderSnapshot | null | Promise<ProviderSnapshot | null> {
+    const workspaceRoot = context?.workspaceRoot;
+    const capture = context
+      ? captureGitFileStateAsync(context.signal, context.timeoutMs, context.workspaceRoot)
+      : captureGitFileState(workspaceRoot);
+    const statePromise = capture instanceof Promise ? capture : Promise.resolve(capture);
+
+    return statePromise.then((state: GitFileState | null): ProviderSnapshot | null => {
+      if (!state) return null;
+      const files = [...new Set([
       ...state.tracked,
       ...state.staged,
       ...state.untracked,
@@ -465,8 +604,9 @@ export class GitEvidenceProvider implements EvidenceProvider {
     const fingerprints: Record<string, string> = {};
     for (const file of files) {
       try {
-        const stat = statSync(file);
-        const hash = createHash("sha256").update(readFileSync(file)).digest("hex");
+        const absolute = workspaceRoot ? resolve(workspaceRoot, file) : file;
+        const stat = statSync(absolute);
+        const hash = createHash("sha256").update(readFileSync(absolute)).digest("hex");
         fingerprints[file] = `${stat.mode}:${hash}`;
       } catch {
         // Deleted files are evidence too.  A stable sentinel lets the diff
@@ -483,8 +623,11 @@ export class GitEvidenceProvider implements EvidenceProvider {
         staged: state.staged,
         untracked: state.untracked,
         fingerprints,
+        // v2.13: HEAD commit hash for backtrack workspace restore
+        head: state.head,
       },
     };
+    });  // end of .then()
   }
 }
 
@@ -492,16 +635,14 @@ registerEvidenceProvider("git", () => new GitEvidenceProvider());
 
 // ── Utility ────────────────────────────────────────────────────────────────
 
-/** Extract merged file list from evidence snapshots for backward compat
- *  with runtimeFilesChanged (string[] | null).
- *
+/** Extract a merged file list from evidence snapshots.
  *  Looks for the "git" provider first; falls back to merging all
  *  providers' files arrays (deduplicated). */
 export function extractFilesFromSnapshots(
   snapshots: ProviderSnapshot[],
 ): string[] | null {
   if (snapshots.length === 0) return null;
-  // Prefer the git provider for backward compat
+  // Prefer the authoritative Git provider when available.
   const gitSnapshot = snapshots.find((s) => s.provider === "git");
   if (gitSnapshot) return [...gitSnapshot.files].sort();
   // Fallback: merge all providers
@@ -512,9 +653,7 @@ export function extractFilesFromSnapshots(
   return [...allFiles].sort();
 }
 
-/** Compute a diff between two evidence collections (before → after).
- *  Returns files that appeared in the after-snapshot but not the before.
- *  Used by runtime.ts to compute runtimeFilesChanged. */
+/** Compute a diff between two evidence collections. */
 function snapshotFingerprints(
   snapshot: ProviderSnapshot,
 ): Record<string, string> | null {

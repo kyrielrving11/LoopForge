@@ -24,10 +24,10 @@ describe("loopforge CLI", () => {
   it("exposes one versioned command surface", () => {
     const help = run(["--help"]);
     assert.equal(help.status, 0, help.stderr);
-    assert.match(help.stdout, /LoopForge 2\.0\.0-rc\.1/);
+    assert.match(help.stdout, /LoopForge 3\.0\.0/);
     assert.match(help.stdout, /loopforge mcp/);
     assert.match(help.stdout, /loopforge inspect/);
-    assert.equal(run(["--version"]).stdout.trim(), "2.0.0-rc.1");
+    assert.equal(run(["--version"]).stdout.trim(), "3.0.0");
   });
 
   it("returns machine-readable doctor results", () => {
@@ -76,7 +76,7 @@ describe("loopforge CLI", () => {
     }
   });
 
-  it("installs only the Perception skill for a generic client", () => {
+  it("installs only the LoopForge skill for a generic client", () => {
     const root = temporaryDirectory();
     try {
       const target = join(root, "skills");
@@ -85,6 +85,8 @@ describe("loopforge CLI", () => {
       assert.equal(result.status, 0, result.stderr);
       assert.match(result.stdout, /Installed:/);
       assert.match(result.stdout, /"loopforge"/);
+      assert.doesNotMatch(result.stdout, /npx/);
+      assert.match(result.stdout, /dist(?:\\\\|\/)cli\.js/);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -99,9 +101,10 @@ describe("loopforge CLI", () => {
       const policyPath = join(root, "loop_policy.json");
       assert.ok(existsSync(policyPath), "loop_policy.json should exist");
       const raw = JSON.parse(readFileSync(policyPath, "utf8"));
-      assert.equal(raw.version, "2");
+      assert.equal(raw.version, "3");
+      assert.equal(raw.workflow.executable_horizon, 3);
       assert.equal(raw.prompt.injection_mode, "adaptive");
-      assert.equal(raw.runtime.max_rounds, 20);
+      assert.equal(raw.engine.max_rounds, 20);
       assert.equal(raw.evidence.providers[0], "git");
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -120,5 +123,12 @@ describe("loopforge CLI", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  it("runs the planning workflow doctor probe", () => {
+    const result = run(["doctor", "--workflow", "--json"]);
+    assert.equal(result.status, 0, result.stderr);
+    const report = JSON.parse(result.stdout) as { checks: Array<{ name: string; ok: boolean }> };
+    assert.equal(report.checks.find((check) => check.name === "workflow")?.ok, true);
   });
 });

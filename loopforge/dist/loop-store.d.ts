@@ -10,7 +10,7 @@
 import type { VaultBackend, VaultEntry } from "./backends/interface.js";
 import type { PromptArtifact } from "./protocol.js";
 import type { RoundTransactionSnapshot } from "./round-transaction.js";
-export declare const LOOP_STORE_SCHEMA_VERSION: 1;
+export declare const LOOP_STORE_SCHEMA_VERSION: 3;
 export interface LoopSessionDocument {
     schemaVersion: typeof LOOP_STORE_SCHEMA_VERSION;
     loopId: string;
@@ -34,6 +34,13 @@ export interface LoopStoreMigrationResult {
     skipped: number;
     alreadyMigrated: boolean;
 }
+export interface LoopStoreIntegrity {
+    code: "session_not_found" | "session_version_unsupported" | "session_corrupt" | "store_incomplete" | "store_unreadable" | null;
+    missingRounds: number[];
+    corruptRounds: number[];
+    metadataRebuilt: boolean;
+    foundSchemaVersion: number | null;
+}
 export interface LoopStore {
     withLock<T>(fn: () => T): T;
     listLoopIds(): string[];
@@ -42,6 +49,8 @@ export interface LoopStore {
     appendEntries(entries: VaultEntry[]): number;
     replaceEntries(entries: VaultEntry[]): void;
     readSession(loopId: string): LoopSessionDocument | null;
+    inspectLoop?(loopId: string): LoopStoreIntegrity;
+    writeSession(loopId: string, document: LoopSessionDocument): void;
     readRound(loopId: string, round: number): LoopRoundDocument | null;
     migrateLegacyVault(path?: string): LoopStoreMigrationResult;
 }
@@ -52,6 +61,8 @@ export declare class FileLoopStore implements LoopStore {
     withLock<T>(fn: () => T): T;
     listLoopIds(): string[];
     readSession(loopId: string): LoopSessionDocument | null;
+    inspectLoop(loopId: string): LoopStoreIntegrity;
+    writeSession(loopId: string, document: LoopSessionDocument): void;
     readRound(loopId: string, round: number): LoopRoundDocument | null;
     listEntries(loopId?: string): VaultEntry[];
     appendEntry(entry: VaultEntry): void;
@@ -63,14 +74,15 @@ export declare class FileLoopStore implements LoopStore {
     private readJson;
     private atomicWrite;
 }
-/** Compatibility adapter for legacy internal query code. Persistent truth is
- * still the typed per-loop documents above; no Markdown lineage is written. */
+/** @deprecated Use LoopStore directly.
+ *
+ *  Compatibility adapter so modules that still accept VaultBackend can
+ *  operate on a LoopStore. Persistent truth is the typed per-loop
+ *  documents; no Markdown lineage is written. */
 export declare class LoopStoreBackend implements VaultBackend {
     readonly store: LoopStore;
     constructor(store?: LoopStore);
     withLock<T>(fn: () => T): T;
-    readVault(): Record<string, unknown>;
-    writeVault(data: Record<string, unknown>): void;
     queryEntries(opts?: {
         prefix?: string;
         taskIdPattern?: string;
@@ -78,5 +90,24 @@ export declare class LoopStoreBackend implements VaultBackend {
     }): VaultEntry[];
     appendEntry(entry: VaultEntry): void;
     appendEntries(entries: VaultEntry[]): number;
+}
+/** Adapter that presents an injected VaultBackend through the LoopStore API.
+ *
+ *  SessionManager uses this when a VaultBackend is provided directly so
+ *  VaultSessionStateStore can operate on typed session documents while
+ *  the underlying storage remains VaultBackend entries. */
+export declare class VaultBackendLoopStore implements LoopStore {
+    private readonly backend;
+    constructor(backend: VaultBackend);
+    withLock<T>(fn: () => T): T;
+    listLoopIds(): string[];
+    listEntries(loopId?: string): VaultEntry[];
+    appendEntry(entry: VaultEntry): void;
+    appendEntries(entries: VaultEntry[]): number;
+    replaceEntries(_entries: VaultEntry[]): void;
+    readSession(loopId: string): LoopSessionDocument | null;
+    writeSession(loopId: string, document: LoopSessionDocument): void;
+    readRound(loopId: string, round: number): LoopRoundDocument | null;
+    migrateLegacyVault(_path?: string): LoopStoreMigrationResult;
 }
 //# sourceMappingURL=loop-store.d.ts.map

@@ -1,35 +1,18 @@
-/** Single-pass prompt renderer for canonical LoopForge state.
- *
- * L0/L1/L2 control state density only. Reasoning strategy belongs to the
- * external Agent. Mandatory task, hard-constraint, and verification sections
- * are never truncated; budgets are soft and overflow is recorded.
- */
+/** Single-pass renderer for v3 plan and evidence prompts. */
 
 import { createHash } from "node:crypto";
 import type { CanonicalLoopState } from "./canonical-state.js";
-import { hashCanonicalState } from "./canonical-state.js";
-import type { PromptArtifact } from "./protocol.js";
-import type {
-  PromptLevel,
-  PromptLevelReason,
-} from "./prompt-policy.js";
+import { formatCompilationContext, hashCanonicalState } from "./canonical-state.js";
+import type { ContextRequest, PromptArtifact, RoundPromptMode } from "./protocol.js";
+import type { PromptLevel, PromptLevelReason } from "./prompt-policy.js";
+import { LOOPFORGE_VERSION } from "./version.js";
 
 export const PROMPT_ARTIFACT_SCHEMA_VERSION = 1 as const;
-export const BASE_PROMPT_VERSION = "2.0.0";
-
+export const BASE_PROMPT_VERSION = LOOPFORGE_VERSION;
 export type InjectionMode = "adaptive" | "full" | "pointer";
 
-export interface PromptBudgets {
-  l0: number;
-  l1: number;
-  l2: number;
-}
-
-export const DEFAULT_PROMPT_BUDGETS: PromptBudgets = {
-  l0: 3000,
-  l1: 7000,
-  l2: 18000,
-};
+export interface PromptBudgets { l0: number; l1: number; l2: number }
+export const DEFAULT_PROMPT_BUDGETS: PromptBudgets = { l0: 3000, l1: 7000, l2: 18000 };
 
 export interface PromptAssemblyInput {
   state: CanonicalLoopState;
@@ -38,277 +21,157 @@ export interface PromptAssemblyInput {
   mode?: InjectionMode;
   budgets?: Partial<PromptBudgets>;
   attempt?: number;
-  selfEvaluationBlock: string;
+  roundId?: string;
+  reportInstructions: string;
+  reportMode: RoundPromptMode;
   fullStateMarkdown?: string;
-}
-
-interface Section {
-  id: string;
-  text: string;
-  mandatory: boolean;
+  contextRequest?: ContextRequest;
+  graphSliceMaxChars?: number;
 }
 
 function section(title: string, body: string): string {
   return body.trim() ? `### ${title}\n${body.trim()}\n\n` : "";
 }
 
-function bullets(values: string[], prefix = "- "): string {
-  return values.map((value) => `${prefix}${value}`).join("\n");
+function bullets(values: string[]): string {
+  return values.map((value) => `- ${value}`).join("\n");
 }
 
-function verificationText(state: CanonicalLoopState): string {
-  const lines = state.verificationFlags.map((flag) => {
-    const icon = flag.severity === "error"
-      ? "🚫"
-      : flag.severity === "warn" ? "⚠️" : "ℹ️";
-    return `- ${icon} [${flag.check}] ${flag.detail}`;
-  });
-  if (state.verificationFlags.some((flag) => flag.severity === "error")) {
-    lines.push(
-      "- Gate Verdict: CONTRADICTED — resolve every error before claiming success.",
-    );
-  }
-  return lines.join("\n");
-}
-
-function activeNonHardConstraints(state: CanonicalLoopState): string[] {
-  const hard = new Set(state.hardConstraints);
-  return state.activeConstraints.filter((value) => !hard.has(value));
-}
-
-function commonMandatorySections(state: CanonicalLoopState): Section[] {
-  const sections: Section[] = [
-    {
-      id: "objective",
-      text: section("Objective", state.objective),
-      mandatory: true,
-    },
-    {
-      id: "current_task",
-      text: section("Current Task", state.currentTask),
-      mandatory: true,
-    },
+function coreSections(state: CanonicalLoopState): string[] {
+  return [
+    section("Objective", state.objective),
+    section("Assigned Plan Step", formatCompilationContext(state.compilationContext, state.currentTask)),
+    section("Hard Constraints", bullets(state.hardConstraints)),
+    section("Evidence Gaps", bullets(state.evidence.evidenceGaps)),
+    section("Verification Findings", bullets(state.verificationFlags.map((flag) =>
+      `[${flag.severity}] ${flag.check}: ${flag.detail}`,
+    ))),
   ];
-
-  if (state.hardConstraints.length > 0) {
-    sections.push({
-      id: "hard_constraints",
-      text: section("Active Hard Constraints", bullets(state.hardConstraints)),
-      mandatory: true,
-    });
-  }
-  if (state.verificationFlags.length > 0) {
-    sections.push({
-      id: "verification",
-      text: section("Verification Gate", verificationText(state)),
-      mandatory: true,
-    });
-  }
-  return sections;
 }
 
-function l0Sections(state: CanonicalLoopState): Section[] {
-  const retryRequirements = [
-    ...state.blockers,
-    ...state.verificationFlags.map((flag) => flag.detail),
+function detailSections(state: CanonicalLoopState, level: PromptLevel): string[] {
+  if (level === "l0") {
+    return [
+      section("Retry Delta", bullets([...state.blockers, ...state.changesSinceLastRound])),
+    ];
+  }
+  const common = [
+    graphSliceSection(state, level),
+    section("Active Constraints", bullets(state.activeConstraints)),
+    section("Last Evidence", bullets([
+      ...state.evidence.coveredClaims.map((item) => `claim ${item}`),
+      ...state.evidence.files.map((item) => `file ${item}`),
+      ...state.evidence.checks.map((item) => `check ${item.name}: ${item.status}`),
+    ])),
+    section("Discoveries", bullets(state.discoveries)),
+    section("Recent Outcomes", bullets(state.rollingOutcomes)),
   ];
-  const sections = commonMandatorySections(state);
-  if (retryRequirements.length > 0) {
-    sections.push({
-      id: "retry_requirements",
-      text: section("Retry Requirements", bullets(retryRequirements)),
-      mandatory: true,
-    });
-  }
-  if (state.changesSinceLastRound.length > 0) {
-    sections.push({
-      id: "changes",
-      text: section("New Evidence / Changes", bullets(state.changesSinceLastRound)),
-      mandatory: false,
-    });
-  }
-  return sections;
-}
-
-function l1Sections(state: CanonicalLoopState): Section[] {
-  const sections = commonMandatorySections(state);
-  const active = activeNonHardConstraints(state);
-  if (state.changesSinceLastRound.length > 0) {
-    sections.push({
-      id: "changes",
-      text: section("Changes Since Last Round", bullets(state.changesSinceLastRound)),
-      mandatory: false,
-    });
-  }
-  if (active.length > 0) {
-    sections.push({
-      id: "active_constraints",
-      text: section("Active Constraints / Success Criteria", bullets(active)),
-      mandatory: false,
-    });
-  }
-  if (state.remainingCriteria.length > 0) {
-    sections.push({
-      id: "remaining",
-      text: section("Remaining", bullets(state.remainingCriteria)),
-      mandatory: false,
-    });
-  }
-  if (state.blockers.length > 0) {
-    sections.push({
-      id: "blockers",
-      text: section("Blockers", bullets(state.blockers)),
-      mandatory: false,
-    });
-  }
-  if (state.discoveries.length > 0) {
-    sections.push({
-      id: "discoveries",
-      text: section("New Discoveries", bullets(state.discoveries)),
-      mandatory: false,
-    });
-  }
-  if (state.nextAction) {
-    sections.push({
-      id: "next_action",
-      text: section("Next Action", state.nextAction),
-      mandatory: false,
-    });
-  }
-  return sections;
-}
-
-function l2Sections(
-  state: CanonicalLoopState,
-  fullStateMarkdown?: string,
-): Section[] {
-  const sections = commonMandatorySections(state);
-  const fullState = fullStateMarkdown?.trim();
-  if (fullState) {
-    sections.push({
-      id: "full_state",
-      text: section("Full Rehydrated State", fullState),
-      mandatory: false,
-    });
-    return sections;
-  }
-
-  const groups: Array<[string, string, string[]]> = [
-    ["success_criteria", "Success Criteria", state.successCriteria],
-    ["active_constraints", "Active Constraints", activeNonHardConstraints(state)],
-    ["changes", "Changes Since Last Round", state.changesSinceLastRound],
-    ["remaining", "Remaining", state.remainingCriteria],
-    ["blockers", "Blockers", state.blockers],
-    ["discoveries", "Discoveries", state.discoveries],
-    ["rolling_outcomes", "Cross-Round Outcomes", state.rollingOutcomes],
-    ["recurring_issues", "Recurring Issues", state.recurringIssues],
-    ["failed_patterns", "Failed Patterns", state.failedPatterns],
+  if (level === "l1") return common;
+  return [
+    ...common,
+    section("Success Criteria", bullets(state.successCriteria)),
+    section("Phase History", bullets(state.milestones.map((item) =>
+      `${item.label} (R${item.round_range.start}-R${item.round_range.end}): ${item.outcome}`,
+    ))),
+    section("Loop Summary", state.loopSynthesis),
+    section("External Context", state.externalContext),
   ];
-  for (const [id, title, values] of groups) {
-    if (values.length > 0) {
-      sections.push({ id, text: section(title, bullets(values)), mandatory: false });
-    }
+}
+
+function graphSliceSection(state: CanonicalLoopState, level: PromptLevel): string {
+  const graph = state.graphSlice;
+  if (!graph || level === "l0") return "";
+  const values = [
+    `Plan version: ${graph.planVersion ?? "none"}`,
+    `Active step: ${graph.activeStepId ?? "final audit"}`,
+    graph.parentOutlineId ? `Refined from: ${graph.parentOutlineId}` : "",
+    ...graph.dependencySummaries.map((item) => `Dependency: ${item}`),
+    graph.relevantConstraintIds.length ? `Relevant constraints: ${graph.relevantConstraintIds.join(", ")}` : "",
+    graph.requiredClaimIds.length ? `Required claims: ${graph.requiredClaimIds.join(", ")}` : "",
+    graph.uncoveredClaimIds.length ? `Uncovered claims: ${graph.uncoveredClaimIds.join(", ")}` : "Uncovered claims: none",
+    graph.regressionGapIds?.length ? `Regression gaps: ${graph.regressionGapIds.join(", ")}` : "Regression gaps: none",
+    graph.priorAttemptSummary ? `Prior attempt: ${graph.priorAttemptSummary}` : "",
+    `Blocked descendants: ${graph.blockedDescendantCount}`,
+  ].filter(Boolean);
+  return section("Active Graph Slice", bullets(values));
+}
+
+function contextSections(request: ContextRequest | undefined, state: CanonicalLoopState, level: PromptLevel): string[] {
+  if (!request || level === "l0") return [];
+  const sections: string[] = [];
+  if (request.confusion_points?.length) {
+    sections.push(section("Context Questions", bullets(request.confusion_points)));
   }
-  if (state.nextAction) {
-    sections.push({
-      id: "next_action",
-      text: section("Next Action", state.nextAction),
-      mandatory: false,
-    });
-  }
-  if (state.externalContext) {
-    sections.push({
-      id: "external_context",
-      text: section("External Context", state.externalContext),
-      mandatory: false,
-    });
+  if (request.emphasize?.length) {
+    const corpus = [
+      ...state.activeConstraints,
+      ...state.discoveries,
+      ...state.blockers,
+      ...state.evidence.evidenceGaps,
+    ];
+    const matched = corpus.filter((item) => request.emphasize!.some((needle) =>
+      item.toLowerCase().includes(needle.toLowerCase()) || needle.toLowerCase().includes(item.toLowerCase()),
+    ));
+    sections.push(section("Requested Context", bullets(matched.slice(0, level === "l2" ? 5 : 3))));
   }
   return sections;
 }
 
-function selectSections(input: PromptAssemblyInput): Section[] {
-  if (input.mode === "full") {
-    return l2Sections(input.state, input.fullStateMarkdown);
+function fit(sections: string[], budget: number): { text: string; included: string[] } {
+  let text = "";
+  const included: string[] = [];
+  for (let index = 0; index < sections.length; index++) {
+    const value = sections[index];
+    if (!value) continue;
+    if (text.length + value.length > budget && text.length > 0) break;
+    text += value;
+    included.push(`section_${index + 1}`);
   }
-  if (input.level === "l0") return l0Sections(input.state);
-  if (input.level === "l1") return l1Sections(input.state);
-  return l2Sections(input.state, input.fullStateMarkdown);
-}
-
-function renderWithinBudget(
-  sections: Section[],
-  fixedText: string,
-  budget: number,
-): { rendered: string; included: string[] } {
-  const mandatory = sections.filter((item) => item.mandatory);
-  const optional = sections.filter((item) => !item.mandatory);
-  let rendered = fixedText + mandatory.map((item) => item.text).join("");
-  const included = mandatory.filter((item) => item.text).map((item) => item.id);
-
-  for (const item of optional) {
-    if (!item.text) continue;
-    if (rendered.length + item.text.length <= budget) {
-      rendered += item.text;
-      included.push(item.id);
-    }
-  }
-  return { rendered, included };
+  return { text, included };
 }
 
 export function assemblePromptArtifact(input: PromptAssemblyInput): PromptArtifact {
-  const mode = input.mode ?? "adaptive";
   const budgets = { ...DEFAULT_PROMPT_BUDGETS, ...input.budgets };
   const budget = budgets[input.level];
   const stateHash = hashCanonicalState(input.state);
   const attempt = Math.max(1, input.attempt ?? 1);
   const header = [
     `## LoopForge Round ${input.state.round}`,
-    `State: ${stateHash.slice(0, 12)} | Level: ${input.level.toUpperCase()} | Attempt: ${attempt}`,
+    `Mode: ${input.reportMode} | Level: ${input.level.toUpperCase()} | Attempt: ${attempt}`,
+    `State: ${stateHash.slice(0, 12)}`,
+    input.state.stateFilePath ? `State projection: \`${input.state.stateFilePath}\`` : "",
     "",
-  ].join("\n");
-
-  const sections = selectSections(input);
-  const pointer = input.state.stateFilePath
-    ? section("Full State", input.state.stateFilePath)
-    : "";
-  const evaluation = input.selfEvaluationBlock.trim()
-    ? `${input.selfEvaluationBlock.trim()}\n`
-    : "";
+  ].filter(Boolean).join("\n") + "\n";
+  const mandatory = coreSections(input.state).join("");
   const footer = [
-    pointer,
-    "Execute the current task now. Do not generate another prompt.",
-    "When this attempt is finished, submit the structured LoopForge evaluation.",
+    input.reportInstructions.trim(),
     "",
-    evaluation,
+    "Execute only the assigned work. Submit the exact sessionId, roundId, and factual report to `loopforge_next`.",
   ].join("\n");
-
-  const fixedText = header;
-  const selected = mode === "pointer"
-    ? renderWithinBudget(
-        sections.filter((item) => item.mandatory),
-        fixedText,
-        budget,
-      )
-    : renderWithinBudget(sections, fixedText, budget - footer.length);
-  const renderedPrompt = selected.rendered + footer;
-  const includedSections = [
-    ...selected.included,
-    ...(pointer ? ["state_pointer"] : []),
-    ...(evaluation ? ["self_evaluation"] : []),
-  ];
-  const promptHash = createHash("sha256").update(renderedPrompt).digest("hex");
-
+  const available = Math.max(0, budget - header.length - mandatory.length - footer.length);
+  const graphLimit = Math.max(0, input.graphSliceMaxChars ?? 3000);
+  const graphSection = graphSliceSection(input.state, input.level).slice(0, graphLimit);
+  const details = fit([
+    ...contextSections(input.contextRequest, input.state, input.level),
+    graphSection,
+    ...detailSections(input.state, input.level).filter((item) => !item.startsWith("### Active Graph Slice")),
+  ], available);
+  const renderedPrompt = header + mandatory + details.text + footer + "\n";
   return {
     schemaVersion: PROMPT_ARTIFACT_SCHEMA_VERSION,
-    roundId: `loop:${input.state.loopId}:round:${input.state.round}`,
+    roundId: input.roundId ?? `loop:${input.state.loopId}:round:${input.state.round}`,
     attempt,
     level: input.level,
     levelReasons: [...input.reasons],
     renderedPrompt,
-    promptHash,
+    promptHash: createHash("sha256").update(renderedPrompt).digest("hex"),
     stateHash,
     basePromptVersion: BASE_PROMPT_VERSION,
-    includedSections,
+    includedSections: [
+      "objective", "assigned_plan_step", "hard_constraints", "evidence_gaps",
+      ...(renderedPrompt.includes("### Active Graph Slice") ? ["graph_slice"] : []),
+      ...details.included, "round_report",
+    ],
     budgetChars: budget,
     charCount: renderedPrompt.length,
     budgetExceeded: renderedPrompt.length > budget,

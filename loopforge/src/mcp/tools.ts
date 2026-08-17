@@ -1,22 +1,63 @@
 /** LoopForge MCP — Tool definitions and handlers.
  *
- * 9 tools: start, next, status, stop, pause, list, replay, resume, health.
+ * 12 tools: planning, execution, control, and audit surfaces.
  * Each handler receives SessionManager + parsed input, returns the output object.
  */
 
 import type { SessionManager, StartInput } from "./session.js";
-import { buildSelfEvaluation } from "../engine.js";
+import { parseRoundReport } from "../round-report.js";
 import { getPolicyMetrics } from "../policy-metrics.js";
+import { isRecord } from "../token-utils.js";
+import type { StructuredPlan } from "../protocol.js";
+import { computeWorkflowProgress } from "../plan.js";
+import { summarizeGovernanceGraph } from "../governance-graph.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Tool schemas (MCP JSON Schema format)
 // ═══════════════════════════════════════════════════════════════════════════
 
+const PLAN_STEP_SCHEMA = {
+  type: "object" as const,
+  properties: {
+    id: { type: "string" as const, description: "Stable ps-* plan step ID." },
+    title: { type: "string" as const },
+    kind: { type: "string" as const, enum: ["executable", "outline", "external_gate"] },
+    dependsOn: { type: "array" as const, items: { type: "string" as const } },
+    scope: { type: "array" as const, items: { type: "string" as const } },
+    successCriteria: { type: "array" as const, items: { type: "string" as const } },
+    constraints: { type: "array" as const, items: { type: "string" as const } },
+    acceptanceCriteria: { type: "array" as const, items: { type: "string" as const } },
+    evidenceRequirements: { type: "array" as const, items: { type: "string" as const } },
+    refinement: { type: "string" as const, enum: ["outline", "executable"] },
+    riskTags: {
+      type: "array" as const,
+      items: { type: "string" as const, enum: ["destructive_workspace", "data_migration", "production_change", "credentials_or_permissions", "external_side_effect", "public_api_break"] },
+    },
+    status: { type: "string" as const, enum: ["pending", "ready", "active", "done", "blocked", "canceled"] },
+    refinesStepId: {
+      type: "string" as const,
+      description: "Previous-version outline step expanded by this new step. Valid only in plan updates.",
+    },
+  },
+  required: ["id", "title", "kind", "dependsOn", "scope", "successCriteria", "constraints", "acceptanceCriteria", "evidenceRequirements", "refinement", "riskTags", "status"],
+};
+
+const PLAN_SCHEMA = {
+  type: "object" as const,
+  properties: {
+    objective: { type: "string" as const },
+    successCriteria: { type: "array" as const, items: { type: "string" as const } },
+    constraints: { type: "array" as const, items: { type: "string" as const } },
+    steps: { type: "array" as const, items: PLAN_STEP_SCHEMA },
+  },
+  required: ["objective", "successCriteria", "constraints", "steps"],
+};
+
 const TOOL_BASE_SCHEMAS = [
   {
     name: "loopforge_start",
     description:
-      "Start a new LoopForge loop session. Compiles the first-round prompt from the task description and returns it. Use this at the beginning of an autonomous multi-round coding loop.",
+      "Start a loop. Without a plan, returns a planning prompt; with a valid plan, prepares execution.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -45,141 +86,147 @@ const TOOL_BASE_SCHEMAS = [
           items: { type: "string" as const },
           description: "Hard constraints to enforce across all rounds.",
         },
+        plan: {
+          ...PLAN_SCHEMA,
+          description: "Optional complete structured plan. When omitted, start returns a planning prompt and consumes no engineering round.",
+        },
+        workspaceRoot: { type: "string" as const, description: "Target workspace directory. Required on an unbound MCP process." },
+        storeDir: { type: "string" as const, description: "Optional LoopForge store directory; relative paths resolve inside workspaceRoot." },
+        approvalPolicy: {
+          type: "string" as const,
+          enum: ["risk_only", "every_revision"],
+          description: "Approval mode: risk_only (default) or every_revision.",
+        },
+        planningProfile: {
+          type: "string" as const,
+          enum: ["minimal", "full"],
+          description: "Planning density: minimal (default) or full.",
+        },
       },
       required: ["task"],
     },
   },
   {
-    name: "loopforge_next",
-    description:
-      "Submit the output from the current round and advance to the next. Returns the next-round prompt, or null with a stopReason when the loop ends. The evaluation parameter provides structured self-assessment — prefer this over embedding a ---loopforge-eval block in the output text.",
+    name: "loopforge_plan_submit",
+    description: "Submit the initial structured plan produced during planning. Approval follows the session policy; fixed high-risk plans always pause.",
     inputSchema: {
       type: "object" as const,
       properties: {
-        sessionId: {
-          type: "string" as const,
-          description: "Session ID returned by loopforge_start.",
-        },
-        output: {
-          type: "string" as const,
-          description: "Optional. The agent's full output from executing the current round's prompt. May be omitted if evaluation parameter is provided.",
-        },
-        evaluation: {
+        sessionId: { type: "string" as const },
+        plan: PLAN_SCHEMA,
+        reason: { type: "string" as const },
+        changeSummary: { type: "string" as const },
+        evidenceReferences: { type: "array" as const, items: { type: "string" as const } },
+      },
+      required: ["sessionId", "plan"],
+    },
+  },
+  {
+    name: "loopforge_plan_update",
+    description: "Submit a full replacement plan against an exact baseVersion. Completed steps are immutable and stale versions are rejected.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        sessionId: { type: "string" as const },
+        baseVersion: { type: "integer" as const, minimum: 1 },
+        plan: PLAN_SCHEMA,
+        reason: { type: "string" as const },
+        changeSummary: { type: "string" as const },
+        evidenceReferences: { type: "array" as const, items: { type: "string" as const } },
+      },
+      required: ["sessionId", "baseVersion", "plan", "reason", "changeSummary", "evidenceReferences"],
+    },
+  },
+  {
+    name: "loopforge_plan_approve",
+    description: "Approve or reject the exact plan version identified by the server approvalId when policy requires review.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        sessionId: { type: "string" as const },
+        approvalId: { type: "string" as const },
+        planVersion: { type: "integer" as const, minimum: 1 },
+        decision: { type: "string" as const, enum: ["approved", "rejected"] },
+        reason: { type: "string" as const },
+      },
+      required: ["sessionId", "approvalId", "planVersion", "decision", "reason"],
+    },
+  },
+  {
+    name: "loopforge_next",
+    description:
+      "Submit the exact roundId and compact v3 report for the active execution or audit round.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        sessionId: { type: "string" as const },
+        roundId: { type: "string" as const },
+        report: {
           type: "object" as const,
-          description: "Structured self-evaluation for this round. Required for the loop to continue. Preferred over embedding ---loopforge-eval blocks in output text.",
-          required: ["success", "output_summary", "should_continue", "constraint_violations"],
+          required: ["status", "summary"],
           properties: {
-            success: {
-              type: "boolean" as const,
-              description: "true ONLY if all hard constraints met AND the task goal achieved.",
-            },
-            output_summary: {
-              type: "string" as const,
-              description: "Specific, actionable summary of what was DONE this round — not what was attempted.",
-            },
-            should_continue: {
-              type: "boolean" as const,
-              description: "false ONLY when the ENTIRE task is complete. Partial progress = true.",
-            },
-            constraint_violations: {
-              type: "array" as const,
-              items: { type: "string" as const },
-              description: "Constraints the agent actually violated this round. Be honest.",
-            },
-            discovered_constraints: {
-              type: "array" as const,
-              items: { type: "string" as const },
-              description: "Optional. New constraints discovered this round.",
-            },
-            objective_refinement: {
-              type: "string" as const,
-              description: "Optional. If this round deepened understanding of the task objective.",
-            },
-            emerged_subtasks: {
-              type: "array" as const,
-              items: { type: "string" as const },
-              description: "Optional. Sub-problems that surfaced during execution.",
-            },
-            execution_evidence: {
+            status: { type: "string" as const, enum: ["completed", "in_progress", "blocked"] },
+            summary: { type: "string" as const },
+            violations: { type: "array" as const, items: { type: "string" as const } },
+            evidence: {
               type: "object" as const,
-              description: "Optional. Structured record of what actually happened this round.",
               properties: {
-                files_changed: {
-                  type: "array" as const,
-                  items: { type: "string" as const },
-                  description: "Files modified this round.",
-                },
-                test_results: {
-                  type: "object" as const,
-                  description: "Test results from this round.",
-                  properties: {
-                    passed: { type: "integer" as const, minimum: 0, description: "Number of passing tests." },
-                    failed: { type: "integer" as const, minimum: 0, description: "Number of failing tests." },
-                    skipped: { type: "integer" as const, minimum: 0, description: "Number of skipped tests." },
+                files: { type: "array" as const, items: { type: "string" as const } },
+                checks: { type: "array" as const, items: {
+                  type: "object" as const, required: ["name", "status"], properties: {
+                    name: { type: "string" as const },
+                    status: { type: "string" as const, enum: ["passed", "failed", "not_run"] },
+                    summary: { type: "string" as const },
+                    counts: { type: "object" as const, required: ["passed", "failed", "skipped"], properties: {
+                      passed: { type: "integer" as const, minimum: 0 },
+                      failed: { type: "integer" as const, minimum: 0 },
+                      skipped: { type: "integer" as const, minimum: 0 },
+                    } },
                   },
-                },
-                success_criteria_met: {
-                  type: "array" as const,
-                  items: { type: "string" as const },
-                  description: "Success criteria satisfied this round.",
-                },
-                success_criteria_remaining: {
-                  type: "array" as const,
-                  items: { type: "string" as const },
-                  description: "Success criteria still outstanding.",
-                },
-                progress_estimate: {
-                  type: "number" as const,
-                  minimum: 0,
-                  maximum: 1,
-                  description: "Estimated progress toward task completion (0.0–1.0).",
-                },
-              },
-            },
-            retracted_constraints: {
-              type: "array" as const,
-              items: { type: "string" as const },
-              description: "Optional. Constraints the agent now believes are wrong.",
-            },
-            revised_success_criteria: {
-              type: "array" as const,
-              description: "Optional. Success criteria that need reformulation.",
-              items: {
-                type: "object" as const,
-                properties: {
-                  old: { type: "string" as const, description: "Original criterion." },
-                  new: { type: "string" as const, description: "Revised criterion." },
-                },
-              },
-            },
-            wrong_assumptions: {
-              type: "array" as const,
-              items: { type: "string" as const },
-              description: "Optional. Assumptions from earlier rounds that were incorrect.",
-            },
-            worker_results: {
-              type: "array" as const,
-              description: "Optional. Results of sub-agent / Worker delegations this round.",
-              items: {
-                type: "object" as const,
-                properties: {
-                  agentId: { type: "string" as const },
-                  subAgentType: { type: "string" as const },
-                  subTask: { type: "string" as const },
-                  resultSummary: { type: "string" as const },
-                  success: { type: "boolean" as const },
-                  discoveredConstraints: {
-                    type: "array" as const,
-                    items: { type: "string" as const },
+                } },
+                claims: { type: "array" as const, items: {
+                  type: "object" as const, required: ["targetId", "evidenceRefs"], properties: {
+                    targetId: { type: "string" as const },
+                    evidenceRefs: { type: "array" as const, items: { type: "string" as const } },
                   },
-                },
-                required: ["agentId", "subAgentType", "subTask", "resultSummary", "success"],
+                } },
+                noChangeReason: { type: "string" as const },
               },
             },
+            blocker: { type: "object" as const, required: ["kind", "reason"], properties: {
+              kind: { type: "string" as const, enum: ["dependency", "external", "needs_human_input", "plan_change"] },
+              reason: { type: "string" as const },
+              references: { type: "array" as const, items: { type: "string" as const } },
+            } },
+            discoveries: { type: "object" as const, properties: {
+              wrongAssumptions: { type: "array" as const, items: { type: "string" as const } },
+              emergedWork: { type: "array" as const, items: { type: "string" as const } },
+              facts: { type: "array" as const, items: { type: "string" as const } },
+              newConstraints: { type: "array" as const, items: { type: "string" as const } },
+            } },
+            planChangeRequest: { type: "object" as const, required: ["timing", "reason", "affectedIds"], properties: {
+              timing: { type: "string" as const, enum: ["before_continue", "next_boundary"] },
+              reason: { type: "string" as const },
+              affectedIds: { type: "array" as const, items: { type: "string" as const } },
+            } },
+            delegations: { type: "array" as const, items: {
+              type: "object" as const,
+              required: ["agentId", "subTask", "resultSummary", "success"],
+              properties: {
+                agentId: { type: "string" as const }, subAgentType: { type: "string" as const },
+                subTask: { type: "string" as const }, resultSummary: { type: "string" as const },
+                success: { type: "boolean" as const },
+                discoveredConstraints: { type: "array" as const, items: { type: "string" as const } },
+              },
+            } },
+            contextRequest: { type: "object" as const, properties: {
+              emphasize: { type: "array" as const, items: { type: "string" as const } },
+              confusion_points: { type: "array" as const, items: { type: "string" as const } },
+            } },
           },
         },
       },
-      required: ["sessionId", "evaluation"],
+      required: ["sessionId", "roundId", "report"],
     },
   },
   {
@@ -193,8 +240,12 @@ const TOOL_BASE_SCHEMAS = [
           type: "string" as const,
           description: "Session ID returned by loopforge_start.",
         },
+        loopId: {
+          type: "string" as const,
+          description: "Alternative persisted loop ID. Provide exactly one of sessionId or loopId.",
+        },
       },
-      required: ["sessionId"],
+      required: [],
     },
   },
   {
@@ -215,7 +266,7 @@ const TOOL_BASE_SCHEMAS = [
   {
     name: "loopforge_pause",
     description:
-      "Pause a running loop session. The loop suspends at the next round boundary and its state is persisted to vault. Paused loops can be resumed with loopforge_resume. Use this to interrupt a long-running loop without losing progress.",
+      "Pause a running session at its round boundary.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -255,13 +306,26 @@ const TOOL_BASE_SCHEMAS = [
   {
     name: "loopforge_resume",
     description:
-      "Resume a loop from vault state. Works for both: (a) running sessions that were interrupted by a process restart, and (b) paused sessions (via loopforge_pause). Returns the compiled prompt for the next round, or null with a stopReason if the loop is already complete.",
+      "Resume an interrupted, paused, or externally gated loop from typed state.",
     inputSchema: {
       type: "object" as const,
       properties: {
         loopId: {
           type: "string" as const,
           description: "Loop ID to resume. Must have a saved session_state entry from a previous start/run.",
+        },
+        workspaceRoot: { type: "string" as const, description: "Target workspace directory. Required on an unbound MCP process." },
+        storeDir: { type: "string" as const, description: "Optional LoopForge store directory; relative paths resolve inside workspaceRoot." },
+        gateResolution: {
+          type: "object" as const,
+          properties: {
+            planVersion: { type: "integer" as const, minimum: 1 },
+            stepId: { type: "string" as const },
+            summary: { type: "string" as const },
+            evidenceReferences: { type: "array" as const, minItems: 1, items: { type: "string" as const } },
+          },
+          required: ["planVersion", "stepId", "summary", "evidenceReferences"],
+          description: "Resolve exactly one terminal external gate with auditable evidence.",
         },
       },
       required: ["loopId"],
@@ -295,17 +359,29 @@ const ADVANCE_OUTPUT_SCHEMA: JsonSchema = {
     roundId: { type: ["string", "null"] },
     prompt: { type: ["string", "null"] },
     stopReason: { type: "string" },
+    stopDetail: { type: "string" },
     level: { type: "string" },
     roundSuccess: { type: "boolean" },
-    enforcementAction: { enum: ["accept", "reject", "terminate"] },
+    enforcementAction: { enum: ["accept", "reject", "terminate", "backtrack"] },
     enforcementReason: { type: "string" },
     warnings: { type: "array", items: { type: "string" } },
+    phase: { enum: ["planning", "awaiting_approval", "executing", "auditing", "terminal"] },
+    requiredAction: { enum: ["submit_plan", "approve_plan", "execute_prompt", "resubmit_round", "restore_workspace", "refine_plan", "execute_audit", "none"] },
+    terminal: { type: "boolean" },
+    planVersion: { type: ["number", "null"] },
+    activeStepId: { type: ["string", "null"] },
+    approvalId: { type: ["string", "null"] },
+    runtime: { type: ["object", "null"], additionalProperties: true },
+    capabilityPreflight: { type: "object", additionalProperties: true },
   },
   additionalProperties: true,
 };
 
 const TOOL_OUTPUT_SCHEMAS: Record<string, JsonSchema> = {
   loopforge_start: ADVANCE_OUTPUT_SCHEMA,
+  loopforge_plan_submit: ADVANCE_OUTPUT_SCHEMA,
+  loopforge_plan_update: ADVANCE_OUTPUT_SCHEMA,
+  loopforge_plan_approve: ADVANCE_OUTPUT_SCHEMA,
   loopforge_next: ADVANCE_OUTPUT_SCHEMA,
   loopforge_resume: ADVANCE_OUTPUT_SCHEMA,
   loopforge_status: {
@@ -318,9 +394,18 @@ const TOOL_OUTPUT_SCHEMAS: Record<string, JsonSchema> = {
       roundId: { type: ["string", "null"] },
       maxRounds: { type: "number" },
       status: { enum: ["running", "stopped", "stalled", "paused"] },
+      phase: { enum: ["planning", "awaiting_approval", "executing", "auditing", "terminal"] },
+      planVersion: { type: ["number", "null"] },
+      activeStepId: { type: ["string", "null"] },
+      approvalId: { type: ["string", "null"] },
+      approvalPolicy: { enum: ["risk_only", "every_revision"] },
+      planCounts: { type: "object", additionalProperties: true },
+      approvalHistory: { type: "array", items: { type: "object", additionalProperties: true } },
       successTrajectory: { type: "array", items: { type: "boolean" } },
       lease: { type: ["object", "null"], additionalProperties: true },
       metrics: { type: "object", additionalProperties: true },
+      runtime: { type: ["object", "null"], additionalProperties: true },
+      graphSummary: { type: "object", additionalProperties: true },
     },
     additionalProperties: true,
   },
@@ -348,6 +433,8 @@ const TOOL_OUTPUT_SCHEMAS: Record<string, JsonSchema> = {
     type: "object",
     properties: {
       sessions: { type: "array", items: { type: "object", additionalProperties: true } },
+      runtime: { type: ["object", "null"], additionalProperties: true },
+      hint: { type: "string" },
     },
     required: ["sessions"],
     additionalProperties: false,
@@ -359,6 +446,13 @@ const TOOL_OUTPUT_SCHEMAS: Record<string, JsonSchema> = {
       sessionId: { type: "string" },
       loopId: { type: "string" },
       timeline: { type: "array", items: { type: "object", additionalProperties: true } },
+      phase: { type: "string" },
+      planVersion: { type: ["number", "null"] },
+      activeStepId: { type: ["string", "null"] },
+      approvalId: { type: ["string", "null"] },
+      approvalHistory: { type: "array", items: { type: "object", additionalProperties: true } },
+      graph: { type: "object", additionalProperties: true },
+      graphSummary: { type: "object", additionalProperties: true },
     },
     additionalProperties: true,
   },
@@ -367,20 +461,19 @@ const TOOL_OUTPUT_SCHEMAS: Record<string, JsonSchema> = {
     properties: {
       error: { type: "string" },
       loopId: { type: "string" },
-      goal_alignment: { type: "object", additionalProperties: true },
+      workflow_alignment: { type: "object", additionalProperties: true },
       constraint_integrity: { type: "object", additionalProperties: true },
-      drift_detected: { type: "boolean" },
-      strategy_stability: { type: "object", additionalProperties: true },
-      task_continuity: { type: "object", additionalProperties: true },
+      evidence_integrity: { type: "object", additionalProperties: true },
+      stall_risk: { type: "object", additionalProperties: true },
+      readiness: { type: "string" },
+      progress: { type: "object", additionalProperties: true },
+      graphSummary: { type: "object", additionalProperties: true },
+      graphDiagnostics: { type: "array", items: { type: "object", additionalProperties: true } },
       policy_metrics: { type: "object", additionalProperties: true },
     },
     additionalProperties: true,
   },
 };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
 
 function closeObjectSchemas(schema: JsonSchema): JsonSchema {
   const result: JsonSchema = { ...schema };
@@ -404,6 +497,12 @@ function closeObjectSchemas(schema: JsonSchema): JsonSchema {
 /** MCP tool contracts include strict input and structured output schemas. */
 export const TOOL_SCHEMAS = TOOL_BASE_SCHEMAS.map((schema) => ({
   ...schema,
+  annotations: {
+    readOnlyHint: ["loopforge_status", "loopforge_list", "loopforge_replay", "loopforge_health"].includes(schema.name),
+    destructiveHint: ["loopforge_stop", "loopforge_plan_approve"].includes(schema.name),
+    idempotentHint: ["loopforge_status", "loopforge_list", "loopforge_replay", "loopforge_health"].includes(schema.name),
+    openWorldHint: false,
+  },
   inputSchema: closeObjectSchemas(schema.inputSchema),
   outputSchema: TOOL_OUTPUT_SCHEMAS[schema.name] ?? {
     type: "object",
@@ -460,6 +559,9 @@ function validateSchema(value: unknown, schema: JsonSchema, path: string): void 
   if (type === "string" && typeof value !== "string") {
     throw new ToolInputValidationError(`${path} must be a string`);
   }
+  if (typeof value === "string" && Array.isArray(schema.enum) && !schema.enum.includes(value)) {
+    throw new ToolInputValidationError(`${path} must be one of: ${schema.enum.join(", ")}`);
+  }
   if (type === "boolean" && typeof value !== "boolean") {
     throw new ToolInputValidationError(`${path} must be a boolean`);
   }
@@ -508,6 +610,11 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
       constraints: Array.isArray(input.constraints)
         ? (input.constraints as string[])
         : undefined,
+      plan: input.plan as StructuredPlan | undefined,
+      workspaceRoot: input.workspaceRoot as string | undefined,
+      storeDir: input.storeDir as string | undefined,
+      approvalPolicy: input.approvalPolicy as StartInput["approvalPolicy"],
+      planningProfile: input.planningProfile as StartInput["planningProfile"],
     };
 
     if (!startInput.task.trim()) {
@@ -515,34 +622,70 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
     }
 
     const result = await mgr.create(startInput);
-    return { ...result };
+    const presented = mgr.present(result);
+    return { ...presented, capabilityPreflight: mgr.getCapabilityPreflight(presented.sessionId) };
+  },
+
+  async loopforge_plan_submit(mgr, input): Promise<Record<string, unknown>> {
+    const sessionId = String(input.sessionId ?? "");
+    const result = await mgr.submitPlan(
+      sessionId,
+      input.plan as StructuredPlan,
+      typeof input.reason === "string" ? input.reason : "initial plan",
+      typeof input.changeSummary === "string" ? input.changeSummary : "Initial structured plan",
+      Array.isArray(input.evidenceReferences) ? input.evidenceReferences as string[] : [],
+    );
+    return { ...mgr.present(result, sessionId) };
+  },
+
+  async loopforge_plan_update(mgr, input): Promise<Record<string, unknown>> {
+    const sessionId = String(input.sessionId ?? "");
+    const result = await mgr.updatePlan(
+      sessionId,
+      Number(input.baseVersion),
+      input.plan as StructuredPlan,
+      String(input.reason ?? ""),
+      String(input.changeSummary ?? ""),
+      input.evidenceReferences as string[],
+    );
+    return { ...mgr.present(result, sessionId) };
+  },
+
+  async loopforge_plan_approve(mgr, input): Promise<Record<string, unknown>> {
+    const sessionId = String(input.sessionId ?? "");
+    const result = await mgr.approvePlan(
+      sessionId,
+      String(input.approvalId ?? ""),
+      Number(input.planVersion),
+      input.decision as "approved" | "rejected",
+      String(input.reason ?? ""),
+    );
+    return { ...mgr.present(result, sessionId) };
   },
 
   async loopforge_next(mgr, input): Promise<Record<string, unknown>> {
     const sessionId = String(input.sessionId ?? "");
-    const output = String(input.output ?? "");
-    const rawEval = input.evaluation as Record<string, unknown> | undefined;
+    const roundId = String(input.roundId ?? "");
+    const report = parseRoundReport(input.report);
 
     if (!sessionId) return { error: "sessionId is required" };
-
-    // Build SelfEvaluation from structured evaluation parameter
-    const preExtractedEval = rawEval ? buildSelfEvaluation(rawEval) : undefined;
-
-    // Require at least one of: evaluation parameter or output with embedded eval block
-    if (!preExtractedEval && !output.trim()) {
-      return { error: "Either evaluation parameter or output with ---loopforge-eval block is required" };
-    }
-
-    const result = await mgr.advance(sessionId, output, preExtractedEval);
-    return { ...result };
+    if (!roundId) return { error: "roundId is required" };
+    if (!report) return { error: "report is required and must match the v3 RoundReportV1 contract" };
+    const result = await mgr.advanceReport(sessionId, roundId, report);
+    return { ...mgr.present(result, sessionId) };
   },
 
   async loopforge_status(mgr, input): Promise<Record<string, unknown>> {
     const sessionId = String(input.sessionId ?? "");
-    if (!sessionId) return { error: "sessionId is required" };
+    const loopId = String(input.loopId ?? "");
+    if ((sessionId && loopId) || (!sessionId && !loopId)) return { error: "provide exactly one of sessionId or loopId" };
 
-    const session = mgr.get(sessionId);
-    if (!session) return { error: `session not found: ${sessionId}` };
+    const session = sessionId ? mgr.get(sessionId) : mgr.getByLoopId(loopId);
+    if (!session) {
+      const listed = mgr.list().find((item) => item.loopId === loopId);
+      if (!listed) return { error: `session not found: ${sessionId || loopId}`, runtime: mgr.getRuntimeSummary() };
+      return { ...listed, runtime: mgr.getRuntimeSummary() };
+    }
 
     const metrics = session.engine.getMetrics();
     return {
@@ -552,17 +695,31 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
       roundId: session.roundSnapshot?.roundId ?? null,
       maxRounds: session.maxRounds,
       status: session.status,
+      phase: session.workflow.phase,
+      planVersion: session.workflow.planVersion,
+      activeStepId: session.workflow.activeStepId,
+      approvalId: session.workflow.approvalId,
+      approvalPolicy: session.workflow.approvalPolicy,
+      planningProfile: session.workflow.planningProfile,
+      planCounts: session.workflow.plan ? {
+        ready: session.workflow.plan.steps.filter((step) => step.status === "ready" || step.status === "active").length,
+        blocked: session.workflow.plan.steps.filter((step) => step.status === "blocked").length,
+        done: session.workflow.plan.steps.filter((step) => step.status === "done" || step.status === "canceled").length,
+      } : { ready: 0, blocked: 0, done: 0 },
+      progress: computeWorkflowProgress(session.workflow),
+      approvalHistory: session.workflow.approvalHistory,
       successTrajectory: session.successTrajectory,
       lease: mgr.getLeaseStatus(session.loopId),
       metrics: {
         vaultWriteErrors: metrics.vaultWriteErrors,
-        vaultWriteBytes: metrics.vaultWriteBytes,
-        feedbackBufferFlushes: metrics.feedbackBufferFlushes,
-        feedbackBufferMaxSize: metrics.feedbackBufferMaxSize,
-        hydrateCacheMisses: metrics.hydrateCacheMisses,
-        silentAnalysisErrors: metrics.silentAnalysisErrors,
         policy: getPolicyMetrics(session.loopId),
       },
+      runtime: mgr.getRuntimeSummary(),
+      graphSummary: (() => {
+        const graph = mgr.governanceGraph(session.sessionId);
+        return graph ? summarizeGovernanceGraph(graph) : undefined;
+      })(),
+      regressionSummary: mgr.getRegressionSummary(session.sessionId),
     };
   },
 
@@ -589,7 +746,14 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
 
   async loopforge_list(mgr, _input): Promise<Record<string, unknown>> {
     const sessions = mgr.list();
-    return { sessions };
+    return {
+      sessions,
+      incompatibleSessions: mgr.listIncompatibleSessions(),
+      runtime: mgr.getRuntimeSummary(),
+      hint: sessions.length === 0 && mgr.getRuntimeSummary()?.bindingStatus === "unbound"
+        ? "Call loopforge_start or loopforge_resume with workspaceRoot."
+        : undefined,
+    };
   },
 
   async loopforge_replay(mgr, input): Promise<Record<string, unknown>> {
@@ -600,22 +764,50 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
     if (!session) return { error: `session not found: ${sessionId}` };
 
     const timeline = mgr.replayTimeline(sessionId) ?? [];
-    return { sessionId, loopId: session.loopId, timeline };
+    const graph = mgr.governanceGraph(sessionId);
+    return {
+      sessionId,
+      loopId: session.loopId,
+      phase: session.workflow.phase,
+      planVersion: session.workflow.planVersion,
+      activeStepId: session.workflow.activeStepId,
+      approvalId: session.workflow.approvalId,
+      approvalHistory: session.workflow.approvalHistory,
+      timeline,
+      graph,
+      graphSummary: graph ? summarizeGovernanceGraph(graph) : undefined,
+      regressionSummary: mgr.getRegressionSummary(session.sessionId),
+    };
   },
 
   async loopforge_resume(mgr, input): Promise<Record<string, unknown>> {
     const loopId = String(input.loopId ?? "");
     if (!loopId) return { error: "loopId is required" };
 
+    const gateResolution = input.gateResolution as import("../protocol.js").GateResolution | undefined;
+    if (gateResolution) {
+      const result = mgr.resumeWithWorkspace(
+        loopId,
+        input.workspaceRoot as string | undefined,
+        input.storeDir as string | undefined,
+        gateResolution,
+      );
+      if (!result) return { error: `no saved session found for loop "${loopId}"` };
+      const presented = mgr.present(result, result.sessionId);
+      return { ...presented, capabilityPreflight: mgr.getCapabilityPreflight(presented.sessionId) };
+    }
+
     // Paused recovery must run first so the persisted status is atomically
     // changed back to running before a prompt is returned.
-    let result = await mgr.unpause(loopId);
-    if (!result) {
-      result = mgr.resume(loopId);
-    }
+    let result = mgr.runtime?.isBound ? await mgr.unpause(loopId) : null;
+    if (!result) result = mgr.resumeWithWorkspace(loopId, input.workspaceRoot as string | undefined, input.storeDir as string | undefined);
+    if (result?.stopReason === "paused") result = await mgr.unpause(loopId);
+    if (!result) result = await mgr.unpause(loopId);
+    if (!result) result = mgr.resume(loopId);
     if (!result) return { error: `no saved session found for loop "${loopId}"` };
 
-    return { ...result };
+    const presented = mgr.present(result, result.sessionId);
+    return { ...presented, capabilityPreflight: mgr.getCapabilityPreflight(presented.sessionId) };
   },
 
   async loopforge_health(mgr, input): Promise<Record<string, unknown>> {

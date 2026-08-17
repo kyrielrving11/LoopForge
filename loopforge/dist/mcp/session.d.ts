@@ -1,33 +1,42 @@
-/** LoopForge MCP — Session manager.
+/** LoopForge MCP session manager.
  *
  * Each McpSession = one complete multi-round loop.
  * SessionManager holds Map<sessionId, McpSession> and drives
- * the advance() cycle: extract → feedback → check stop → compile next.
+ * The advance cycle validates a report, executes the transaction, and compiles the next prompt.
  */
 import { LoopForgeEngine } from "../engine.js";
 import type { VaultBackend } from "../backends/interface.js";
 import type { LoopStore } from "../loop-store.js";
-import type { SelfEvaluation, ExternalContextProvider, LoopTerminalSink } from "../protocol.js";
+import type { NormalizedRoundEvaluation, ExternalContextProvider, LoopTerminalSink, StructuredPlan, WorkflowState, RequiredAction, RoundReportV1, ApprovalPolicy, GateResolution, CapabilityPreflight, PlanningProfile, PlanDiagnostic, PlanChangeAssessment } from "../protocol.js";
+import { computeWorkflowProgress } from "../plan.js";
 import type { ProviderSnapshot } from "../evidence-provider.js";
 import type { RoundTransactionSnapshot } from "../round-transaction.js";
 import type { SessionStateStore } from "../storage.js";
-import type { CognitiveCheckpointSink } from "../interop.js";
+import { WorkspaceRuntime } from "../workspace-runtime.js";
+import type { WorkspaceRuntimeSummary } from "../protocol.js";
 export interface McpSession {
     sessionId: string;
     loopId: string;
     task: string;
     engine: LoopForgeEngine;
     currentRound: number;
+    /** Distinguishes post-backtrack branches that reuse logical round numbers. */
+    executionEpoch: number;
     maxRounds: number;
     successTrajectory: boolean[];
     status: "running" | "stopped" | "stalled" | "paused";
     createdAt: number;
-    /** Previous round's validated SelfEvaluation — used by verification gate. */
-    lastSelfEval?: SelfEvaluation;
+    /** Previous round's validated evaluation, used by the verification gate. */
+    lastEvaluation?: NormalizedRoundEvaluation;
     consecutiveRejections: number;
     /** Which enforcement check triggered the last rejection.
      *  Only same-check rejections accumulate toward the max. */
     lastRejectionCheck: string;
+    /** v2.13: Files changed in skipped rounds during the last backtrack.
+     *  The next round's verification gate checks that the agent did not
+     *  continue working on stale files without restoring the workspace.
+     *  Cleared after the first successful post-backtrack round. */
+    backtrackSkippedFiles: string[];
     /** Evidence baseline captured immediately before the agent receives a prompt. */
     evidenceBaseline?: ProviderSnapshot[];
     /** Schema-versioned transaction for the prompt currently held by the agent. */
@@ -35,12 +44,20 @@ export interface McpSession {
     /** Persisted prompt prevents resume from compiling the same round twice. */
     currentPrompt?: string | null;
     currentLevel?: string;
+    /** Structured warnings from the most recent compile, preferred over prompt parsing. */
+    currentWarnings?: string[];
+    /** v3 workflow state. Persisted sessions without this contract are unsupported. */
+    workflow: WorkflowState;
 }
 export interface McpSessionSummary {
     sessionId: string;
     loopId: string;
     round: number;
     status: "running" | "stopped" | "stalled" | "paused";
+    phase: WorkflowState["phase"];
+    planVersion: number | null;
+    activeStepId: string | null;
+    progress: ReturnType<typeof computeWorkflowProgress>;
 }
 export interface StartInput {
     task: string;
@@ -49,6 +66,12 @@ export interface StartInput {
     domain?: string;
     planSource?: string;
     constraints?: string[];
+    plan?: StructuredPlan;
+    workspaceRoot?: string;
+    storeDir?: string;
+    /** Session-local override; defaults to the workspace workflow policy. */
+    approvalPolicy?: ApprovalPolicy;
+    planningProfile?: PlanningProfile;
 }
 export interface AdvanceResult {
     sessionId: string;
@@ -57,18 +80,36 @@ export interface AdvanceResult {
     roundId?: string;
     prompt: string | null;
     stopReason?: string;
+    /** v2.0.1: Human-readable context for why the loop stopped.
+     *  Provides facts the agent can use to decide its next action,
+     *  without LoopForge prescribing a specific behavior. */
+    stopDetail?: string;
     level?: string;
-    /** @deprecated Use roundSuccess instead. Derived: roundSuccess ? 5 : 1 */
-    quality?: number;
     roundSuccess?: boolean;
     warnings?: string[];
     /** v1.13: Enforcement action for this round. accept/reject/terminate.
      *  When "reject", the prompt contains a rejection notice and the agent
      *  must redo the same round. Round counter does NOT increment. */
-    enforcementAction?: "accept" | "reject" | "terminate";
+    enforcementAction?: "accept" | "reject" | "terminate" | "backtrack";
     /** v1.13: When enforcementAction is "reject" or "terminate", the reason
      *  why the round was rejected or the loop was terminated. */
     enforcementReason?: string;
+    phase?: WorkflowState["phase"];
+    requiredAction?: RequiredAction;
+    terminal?: boolean;
+    planVersion?: number | null;
+    activeStepId?: string | null;
+    approvalId?: string | null;
+    approvalPolicy?: ApprovalPolicy;
+    planningProfile?: PlanningProfile;
+    runtime?: WorkspaceRuntimeSummary | null;
+    planDiagnostics?: PlanDiagnostic[];
+    planChangeAssessment?: PlanChangeAssessment;
+    regressionSummary?: {
+        total: number;
+        verified: number;
+        gaps: number;
+    };
 }
 export declare class SessionManager {
     private sessions;
@@ -76,19 +117,30 @@ export declare class SessionManager {
     private sessionQueues;
     private backend;
     private sessionStore;
+    private loopStore;
     private readonly ownerId;
-    private readonly leaseMs;
-    private readonly leaseRenewIntervalMs;
+    private leaseMs;
+    private leaseRenewIntervalMs;
     private leaseTimer;
-    private readonly checkpointSinks;
     /** Explicit context provider; never auto-discovered. */
     contextProvider?: ExternalContextProvider;
     private readonly terminalSinks;
-    constructor(storeOrBackend?: LoopStore | VaultBackend, sessionStore?: SessionStateStore);
+    readonly runtime?: WorkspaceRuntime;
+    constructor(storeOrBackend?: LoopStore | VaultBackend, sessionStore?: SessionStateStore, runtime?: WorkspaceRuntime);
+    /** Runtime summary is intentionally compact for unbound MCP processes. */
+    getRuntimeSummary(): WorkspaceRuntimeSummary | null;
+    getCapabilityPreflight(sessionId?: string): CapabilityPreflight;
+    getRegressionSummary(sessionId: string): {
+        total: number;
+        verified: number;
+        gaps: number;
+    } | null;
+    /** Bind the process and install a store only after path validation succeeds. */
+    bindWorkspace(workspaceRoot?: string, storeDir?: string): void;
+    private ensureWorkspaceForStart;
+    private sessionBinding;
     /** Stable process-local owner token used for cross-process session leases. */
     getOwnerId(): string;
-    /** Subscribe an external checkpointer; sink failures are isolated. */
-    addCheckpointSink(sink: CognitiveCheckpointSink): () => void;
     addTerminalSink(sink: LoopTerminalSink): () => void;
     /** Release owned sessions and stop lease maintenance. */
     close(): void;
@@ -98,13 +150,30 @@ export declare class SessionManager {
     private renewOwnedLeases;
     private leaseConflictResult;
     private withSessionQueue;
+    private withRunningSessionMutation;
+    /** Add the uniform v3 workflow envelope to every advancing response. */
+    present(result: AdvanceResult, sessionId?: string): AdvanceResult;
+    private recordWorkflowEvent;
+    private regressionObligations;
+    private applyAcceptedWorkflowStep;
+    private blockOnExternalGate;
+    private prepareWorkflowRoundSync;
+    private selectWorkflowPreparation;
+    private finishPreparedWorkflowRound;
+    private planningResult;
+    private prepareWorkflowRound;
     create(input: StartInput): Promise<AdvanceResult>;
+    submitPlan(sessionId: string, plan: StructuredPlan, reason?: string, changeSummary?: string, evidenceReferences?: string[]): Promise<AdvanceResult>;
+    updatePlan(sessionId: string, baseVersion: number, plan: StructuredPlan, reason: string, changeSummary: string, evidenceReferences: string[]): Promise<AdvanceResult>;
+    private acceptPlanRevision;
+    approvePlan(sessionId: string, approvalId: string, planVersion: number, decision: "approved" | "rejected", reason: string): Promise<AdvanceResult>;
     get(sessionId: string): McpSession | undefined;
+    getByLoopId(loopId: string): McpSession | undefined;
     getLeaseStatus(loopId: string): Record<string, unknown> | null;
     delete(sessionId: string): boolean;
     /** v1.18: Pause a running session. The session state is persisted to
      *  vault so it survives process restarts. Returns the session status.
-     *  Paused sessions cannot be advanced — they must be resumed first. */
+     * Paused sessions cannot advance until they are resumed. */
     pause(sessionId: string): {
         sessionId: string;
         round: number;
@@ -129,26 +198,58 @@ export declare class SessionManager {
     /** Resume a loop from vault state.
      *  Reconstructs the session and compiles the prompt for the next round.
      *  Returns null if no session_state entry exists for this loopId. */
+    resumeWithWorkspace(loopId: string, workspaceRoot?: string, storeDir?: string, gateResolution?: GateResolution): AdvanceResult | null;
+    private gateResolutionProblem;
+    private resolveExternalGate;
     resume(loopId: string): AdvanceResult | null;
     /** Auto-resume all "running" sessions from vault on server startup.
      *  Scans vault for session_state entries, reconstructs each as an in-memory
-     *  McpSession (without compiling — the next loopforge_next will do that).
+     * McpSession without compiling; the next loopforge_next call does that.
      *  Returns the number of sessions resumed. */
     autoResumeAll(): number;
     list(): McpSessionSummary[];
-    /** Get loop health for a loop (in-memory or vault).
-     *  Computes goal alignment, constraint integrity, drift, strategy stability. */
+    listIncompatibleSessions(): Array<{
+        loopId: string;
+        foundSchemaVersion: number | null;
+        requiredSchemaVersion: 3;
+    }>;
+    /** Derive workflow health from the approved plan and normalized evidence. */
     getHealth(loopId: string): Record<string, unknown> | null;
-    /** Core cycle: extract self-eval → record feedback → check stop → compile next.
-     *  @param preExtractedEval Optional pre-built SelfEvaluation from MCP tool parameter.
-     *    When provided (MCP path with evaluation parameter), skips regex extraction.
-     *    When undefined (runtime/CLI path), falls back to regex extraction from output. */
-    advance(sessionId: string, output: string, preExtractedEval?: SelfEvaluation): Promise<AdvanceResult>;
-    private advanceUnlocked;
+    /** v3 P1 compact-report entry point. Validation and round fencing run inside
+     * the per-session queue so concurrent/stale Agent results cannot cross steps. */
+    advanceReport(sessionId: string, roundId: string, report: RoundReportV1): Promise<AdvanceResult>;
+    /** Execute a validated normalized report through the transaction and gates. */
+    private executeRoundTransaction;
+    private recordAcceptedAdvancement;
+    /** Build a rejection result: compile a retry prompt, persist, return.
+     *  MUTATES: session.roundSnapshot, session.currentPrompt, session.currentLevel */
+    private buildRejectionResult;
+    /** Build a backtrack result by restoring the last clean round.
+     *  Resets the round counter to the restore target + 1, merges preserved
+     *  discoveries, compiles from the restored state, and injects the
+     *  backtrack prompt at the top.
+     *  MUTATES: session.currentRound, session.roundSnapshot,
+     *           session.currentPrompt, session.currentLevel,
+     *           session.consecutiveRejections, session.lastEvaluation */
+    private buildBacktrackResult;
+    /** Build a termination result: persist stopped status, notify sinks.
+     *  MUTATES: session.status, session.currentPrompt */
+    private buildTerminationResult;
+    /** Build a stop result: persist stopped/stalled status, notify sinks.
+     *  MUTATES: session.status, session.currentPrompt */
+    private buildStopResult;
+    /** Compile the next round's prompt and advance the session.
+     *  Includes the commit fence (pause/delete race guard) and context provider.
+     *  MUTATES: session.currentRound, session.currentPrompt, session.currentLevel,
+     *           session.evidenceBaseline, session.roundSnapshot */
+    private advanceToNextRound;
+    private advanceEvaluationUnlocked;
+    private restoreWorkflowToRound;
     /** Write back loop knowledge to long-term memory.
      *  Uses shared base builder from policy.ts. Called when a loop terminates. */
     private notifyTerminal;
-    /** Replay timeline for a session — creates ReplayBackend from the stored backend. */
+    /** Build the read-only replay timeline from the stored backend. */
     replayTimeline(sessionId: string): Record<string, unknown>[] | null;
+    governanceGraph(sessionId: string): import("../governance-graph.js").GovernanceGraphView | null;
 }
 //# sourceMappingURL=session.d.ts.map

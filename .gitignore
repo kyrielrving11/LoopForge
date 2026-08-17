@@ -8,6 +8,7 @@ node_modules/
 
 # Agent config (local preferences)
 .claude/settings.json
+.claude/settings.local.json
 
 # Compiled test output
 dist/tests/

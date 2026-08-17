@@ -3,6 +3,8 @@
  * Depends on VaultBackend interface — no direct filesystem access.
  * Enables audit, comparison, and timeline analysis of loop rounds.
  */
+import { buildGovernanceGraph } from "./governance-graph.js";
+import { parseWorkflowEventEntry } from "./workflow-events.js";
 // ═══════════════════════════════════════════════════════════════════════════
 // ReplayBackend
 // ═══════════════════════════════════════════════════════════════════════════
@@ -18,7 +20,10 @@ export class ReplayBackend {
         const lineageEntries = entries.filter((e) => !String(e.task_id ?? "").endsWith(":feedback"));
         if (!lineageEntries.length)
             return null;
-        const entry = { ...lineageEntries[0] };
+        const preferred = lineageEntries.find((entry) => entry.task_type === "loop_lineage")
+            ?? lineageEntries.find((entry) => entry.task_type === "feedback")
+            ?? lineageEntries[0];
+        const entry = { ...preferred };
         // Merge feedback success flag
         const fbEntries = this.backend.queryEntries({
             prefix,
@@ -58,102 +63,32 @@ export class ReplayBackend {
         const timeline = [];
         for (const entry of entries) {
             const lineage = (entry.loop_lineage ?? {});
+            const round = Number(lineage.round ?? 0);
+            const workflowEvents = this.backend.queryEntries({ prefix: `loop:${loopId}:r${round}:workflow:` });
+            const parsedWorkflow = workflowEvents.map(parseWorkflowEventEntry).filter((event) => event !== null);
+            const latestWorkflow = parsedWorkflow.at(-1);
             timeline.push({
-                round: lineage.round ?? 0,
+                round,
                 recompile_level: lineage.recompile_level ?? "l2",
                 success: entry.success ?? lineage.success ?? false,
-                task: lineage.task ?? entry.task ?? "",
+                task: lineage.task ?? "",
                 goal_id: lineage.goal_id ?? "",
+                phase: latestWorkflow?.phase ?? null,
+                plan_version: latestWorkflow?.planVersion ?? null,
+                active_step_id: latestWorkflow?.activeStepId ?? null,
+                workflow_events: parsedWorkflow.map((event) => ({
+                    type: event.eventType,
+                    step_id: "step_id" in event.payload ? event.payload.step_id : null,
+                    step_status: event.eventType === "step_result" ? event.payload.step_status : null,
+                })),
             });
         }
         timeline.sort((a, b) => a.round - b.round);
         return timeline;
     }
-    // ── Diff ───────────────────────────────────────────────────────────────
-    diff(loopId, roundA, roundB) {
-        const entryA = this.getRound(loopId, roundA);
-        const entryB = this.getRound(loopId, roundB);
-        if (entryA === null && entryB === null) {
-            return {
-                round_a: roundA,
-                round_b: roundB,
-                changes: [],
-                unchanged: [],
-                missing: "both",
-            };
-        }
-        if (entryA === null) {
-            return {
-                round_a: roundA,
-                round_b: roundB,
-                changes: [],
-                unchanged: [],
-                missing: "round_a",
-            };
-        }
-        if (entryB === null) {
-            return {
-                round_a: roundA,
-                round_b: roundB,
-                changes: [],
-                unchanged: [],
-                missing: "round_b",
-            };
-        }
-        const lineageA = (entryA.loop_lineage ?? {});
-        const lineageB = (entryB.loop_lineage ?? {});
-        const fields = [
-            ["goal_id", "Goal ID"],
-            ["recompile_level", "Recompile Level"],
-            ["success", "Success"],
-            ["task", "Task"],
-        ];
-        const changes = [];
-        const unchanged = [];
-        for (const [fieldKey, fieldLabel] of fields) {
-            const valA = fieldKey in lineageA
-                ? lineageA[fieldKey]
-                : entryA[fieldKey];
-            const valB = fieldKey in lineageB
-                ? lineageB[fieldKey]
-                : entryB[fieldKey];
-            if (valA !== valB) {
-                changes.push({
-                    field: fieldKey,
-                    label: fieldLabel,
-                    before: valA,
-                    after: valB,
-                });
-            }
-            else {
-                unchanged.push(fieldKey);
-            }
-        }
-        // Compare constraints
-        const constraintsA = lineageA.constraints_active ?? [];
-        const constraintsB = lineageB.constraints_active ?? [];
-        const added = constraintsB.filter((c) => !constraintsA.includes(c));
-        const removed = constraintsA.filter((c) => !constraintsB.includes(c));
-        if (added.length || removed.length) {
-            changes.push({
-                field: "constraints_active",
-                label: "Active Constraints",
-                before: constraintsA,
-                after: constraintsB,
-                added,
-                removed,
-            });
-        }
-        else if (JSON.stringify(constraintsA) === JSON.stringify(constraintsB)) {
-            unchanged.push("constraints_active");
-        }
-        return {
-            round_a: roundA,
-            round_b: roundB,
-            changes,
-            unchanged,
-            missing: null,
-        };
+    graph(loopId, options) {
+        const entries = this.backend.queryEntries({ prefix: `loop:${loopId}:` });
+        return buildGovernanceGraph(loopId, entries, options);
     }
     // ── Helpers ─────────────────────────────────────────────────────────────
     maxRound(loopId) {

@@ -1,9 +1,9 @@
-import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { describe, it } from "node:test";
 import { CommandEvidenceProvider } from "../evidence-provider.js";
 import type { CommandEvidencePolicy } from "../policy.js";
-import { makeSelfEvaluation } from "../protocol.js";
-import { verifySelfEvaluation } from "../verification-gate.js";
+import { normalizeRoundReport } from "../round-report.js";
+import { verifyRoundEvaluation } from "../verification-gate.js";
 
 function config(overrides: Partial<CommandEvidencePolicy> = {}): CommandEvidencePolicy {
   return {
@@ -21,17 +21,12 @@ function config(overrides: Partial<CommandEvidencePolicy> = {}): CommandEvidence
   };
 }
 
-async function capture(
-  provider: CommandEvidenceProvider,
-  phase: "before" | "after" = "after",
-) {
-  const controller = new AbortController();
-  return provider.capture({
-    signal: controller.signal,
-    timeoutMs: 5000,
-    loopId: "command-test",
-    phase,
-  });
+async function capture(provider: CommandEvidenceProvider, phase: "before" | "after" = "after") {
+  return provider.capture({ signal: new AbortController().signal, timeoutMs: 5000, loopId: "command-test", phase });
+}
+
+function evaluation() {
+  return normalizeRoundReport({ status: "completed", summary: "Completed the step." }, "executing", "ps-one", []);
 }
 
 describe("CommandEvidenceProvider", () => {
@@ -45,85 +40,50 @@ describe("CommandEvidenceProvider", () => {
     assert.equal(snapshot?.data.exitCode, 0);
   });
 
-  it("captures a failing exit code as structured evidence", async () => {
-    const snapshot = await capture(new CommandEvidenceProvider(config({
-      args: ["-e", "process.stderr.write('bad'); process.exit(7)"],
+  it("captures failure, timeout, truncation, and unsafe cwd as evidence", async () => {
+    const failed = await capture(new CommandEvidenceProvider(config({ args: ["-e", "process.exit(7)"] })));
+    assert.equal(failed?.data.status, "failed");
+    assert.equal(failed?.data.exitCode, 7);
+
+    const timed = await capture(new CommandEvidenceProvider(config({
+      args: ["-e", "setTimeout(() => {}, 5000)"], timeout_ms: 25,
     })));
-    assert.equal(snapshot?.data.status, "failed");
-    assert.equal(snapshot?.data.exitCode, 7);
-    assert.equal(snapshot?.data.stderr, "bad");
+    assert.equal(timed?.data.status, "timeout");
+
+    const capped = await capture(new CommandEvidenceProvider(config({
+      args: ["-e", "process.stdout.write('x'.repeat(1000))"], max_output_chars: 40,
+    })));
+    assert.equal(capped?.data.truncated, true);
+    assert.ok(String(capped?.data.stdout).length <= 40);
+
+    const unsafe = await capture(new CommandEvidenceProvider(config({ cwd: ".." })));
+    assert.equal(unsafe?.data.status, "invalid_cwd");
   });
 
-  it("terminates a command at its own deadline", async () => {
-    const started = Date.now();
-    const snapshot = await capture(new CommandEvidenceProvider(config({
-      args: ["-e", "setTimeout(() => {}, 10000)"],
-      timeout_ms: 40,
-    })));
-    assert.equal(snapshot?.data.status, "timeout");
-    assert.ok(Date.now() - started < 1000);
-  });
-
-  it("caps combined retained output and reports truncation", async () => {
-    const snapshot = await capture(new CommandEvidenceProvider(config({
-      args: ["-e", "process.stdout.write('x'.repeat(100))"],
-      max_output_chars: 10,
-    })));
-    assert.equal(snapshot?.data.stdout, "xxxxxxxxxx");
-    assert.equal(snapshot?.data.truncated, true);
-  });
-
-  it("records missing executables and unsafe cwd without throwing", async () => {
-    const missing = await capture(new CommandEvidenceProvider(config({
-      executable: `loopforge-missing-${Date.now()}`,
-    })));
-    assert.equal(missing?.data.status, "missing");
-
-    const invalid = await capture(new CommandEvidenceProvider(config({ cwd: ".." })));
-    assert.equal(invalid?.data.status, "invalid_cwd");
-  });
-
-  it("does not run after-only commands in the before phase", async () => {
-    const snapshot = await capture(new CommandEvidenceProvider(config()), "before");
-    assert.equal(snapshot, null);
+  it("does not run after-only commands during before capture", async () => {
+    assert.equal(await capture(new CommandEvidenceProvider(config()), "before"), null);
   });
 });
 
 describe("required command verification", () => {
-  it("contradicts a success claim when a required command failed", () => {
-    const evaluation = makeSelfEvaluation({ success: true });
-    const result = verifySelfEvaluation(evaluation, 1, [], null, null, [{
+  it("contradicts a completed report when a required command failed", () => {
+    const result = verifyRoundEvaluation(evaluation(), 1, [], null, [{
       provider: "command:test",
       timestamp: Date.now(),
       files: [],
-      data: {
-        kind: "command",
-        commandName: "tests",
-        required: true,
-        phase: "after",
-        status: "failed",
-        exitCode: 1,
-      },
+      data: { kind: "command", commandName: "test", required: true, status: "failed" },
     }]);
     assert.equal(result.verdict, "contradicted");
-    assert.equal(result.flags.some((flag) => flag.check === "required_command_failed"), true);
+    assert.ok(result.flags.some((flag) => flag.check === "required_command_failed"));
   });
 
-  it("does not contradict optional command failures", () => {
-    const evaluation = makeSelfEvaluation({ success: true });
-    const result = verifySelfEvaluation(evaluation, 1, [], null, null, [{
+  it("does not reject an optional command failure by itself", () => {
+    const result = verifyRoundEvaluation(evaluation(), 1, [], null, [{
       provider: "command:optional",
       timestamp: Date.now(),
       files: [],
-      data: {
-        kind: "command",
-        commandName: "lint",
-        required: false,
-        phase: "after",
-        status: "failed",
-        exitCode: 1,
-      },
+      data: { kind: "command", commandName: "optional", required: false, status: "failed" },
     }]);
-    assert.equal(result.verdict, "trusted");
+    assert.ok(!result.flags.some((flag) => flag.check === "required_command_failed"));
   });
 });

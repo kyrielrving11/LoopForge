@@ -1,32 +1,117 @@
 /** LoopForge MCP — Tool definitions and handlers.
  *
- * 9 tools: start, next, status, stop, pause, list, replay, resume, health.
+ * 12 tools: planning, execution, control, and audit surfaces.
  * Each handler receives SessionManager + parsed input, returns the output object.
  */
 import type { SessionManager } from "./session.js";
 type JsonSchema = Record<string, unknown>;
 /** MCP tool contracts include strict input and structured output schemas. */
 export declare const TOOL_SCHEMAS: ({
+    annotations: {
+        readOnlyHint: boolean;
+        destructiveHint: boolean;
+        idempotentHint: boolean;
+        openWorldHint: boolean;
+    };
     inputSchema: JsonSchema;
     outputSchema: JsonSchema;
     name: string;
     description: string;
 } | {
+    annotations: {
+        readOnlyHint: boolean;
+        destructiveHint: boolean;
+        idempotentHint: boolean;
+        openWorldHint: boolean;
+    };
     inputSchema: JsonSchema;
     outputSchema: JsonSchema;
     name: string;
     description: string;
 } | {
+    annotations: {
+        readOnlyHint: boolean;
+        destructiveHint: boolean;
+        idempotentHint: boolean;
+        openWorldHint: boolean;
+    };
     inputSchema: JsonSchema;
     outputSchema: JsonSchema;
     name: string;
     description: string;
 } | {
+    annotations: {
+        readOnlyHint: boolean;
+        destructiveHint: boolean;
+        idempotentHint: boolean;
+        openWorldHint: boolean;
+    };
     inputSchema: JsonSchema;
     outputSchema: JsonSchema;
     name: string;
     description: string;
 } | {
+    annotations: {
+        readOnlyHint: boolean;
+        destructiveHint: boolean;
+        idempotentHint: boolean;
+        openWorldHint: boolean;
+    };
+    inputSchema: JsonSchema;
+    outputSchema: JsonSchema;
+    name: string;
+    description: string;
+} | {
+    annotations: {
+        readOnlyHint: boolean;
+        destructiveHint: boolean;
+        idempotentHint: boolean;
+        openWorldHint: boolean;
+    };
+    inputSchema: JsonSchema;
+    outputSchema: JsonSchema;
+    name: string;
+    description: string;
+} | {
+    annotations: {
+        readOnlyHint: boolean;
+        destructiveHint: boolean;
+        idempotentHint: boolean;
+        openWorldHint: boolean;
+    };
+    inputSchema: JsonSchema;
+    outputSchema: JsonSchema;
+    name: string;
+    description: string;
+} | {
+    annotations: {
+        readOnlyHint: boolean;
+        destructiveHint: boolean;
+        idempotentHint: boolean;
+        openWorldHint: boolean;
+    };
+    inputSchema: JsonSchema;
+    outputSchema: JsonSchema;
+    name: string;
+    description: string;
+} | {
+    annotations: {
+        readOnlyHint: boolean;
+        destructiveHint: boolean;
+        idempotentHint: boolean;
+        openWorldHint: boolean;
+    };
+    inputSchema: JsonSchema;
+    outputSchema: JsonSchema;
+    name: string;
+    description: string;
+} | {
+    annotations: {
+        readOnlyHint: boolean;
+        destructiveHint: boolean;
+        idempotentHint: boolean;
+        openWorldHint: boolean;
+    };
     inputSchema: JsonSchema;
     outputSchema: JsonSchema;
     name: string;

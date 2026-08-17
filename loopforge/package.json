@@ -1,7 +1,7 @@
 {
   "name": "loopforge",
-  "version": "2.0.0-rc.1",
-  "description": "Cognitive State Runtime for AI coding agents — maintains persistent, evolvable cognitive state (objectives, constraints, evidence, decisions) across long-horizon agent loops.",
+  "version": "3.0.0",
+  "description": "State, constraint, plan-execution, and evidence governance for long-horizon AI coding tasks.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -9,10 +9,6 @@
     ".": {
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
-    },
-    "./compiler": {
-      "import": "./dist/loop-compiler.js",
-      "types": "./dist/loop-compiler.d.ts"
     },
     "./replay": {
       "import": "./dist/replay.js",
@@ -24,7 +20,7 @@
     }
   },
   "bin": {
-    "loopforge": "./dist/cli.js"
+    "loopforge": "dist/cli.js"
   },
   "files": [
     "dist/",
@@ -34,16 +30,17 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc && node dist/generate-schema.js",
-    "generate-schema": "tsc && node dist/generate-schema.js",
-    "test": "tsc && node dist/generate-schema.js && node --test --test-concurrency=1 dist/tests/*.test.js",
+    "clean": "node scripts/clean-dist.mjs",
+    "build": "npm run clean && tsc && node dist/generate-schema.js",
+    "generate-schema": "npm run clean && tsc && node dist/generate-schema.js",
+    "test": "npm run clean && tsc && node dist/generate-schema.js && node --test --test-concurrency=1 dist/tests/*.test.js",
     "test:watch": "tsc && node --test --watch dist/tests/*.test.js",
     "check": "tsc --noEmit",
     "prepack": "npm run build"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/kyrielrving11/LoopForge"
+    "url": "git+https://github.com/kyrielrving11/LoopForge.git"
   },
   "keywords": [
     "cognitive-state",
@@ -53,6 +50,8 @@
     "llm",
     "cognitive-stability",
     "constraint-management",
+    "plan-execution",
+    "evidence-governance",
     "mcp"
   ],
   "engines": {

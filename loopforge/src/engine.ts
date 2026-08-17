@@ -1,236 +1,19 @@
-/** LoopForge-loop_compile — Engine (outer loop manager).
- *
- * 2-mode engine with vault-backed loop lineage persistence.
- * invokeLoopCompile (primary), invokeFeedback.
- * Circuit breaker prevents infinite stall loops.
- * EngineMetrics tracks silent-failure counters for observability.
- */
-
 import { randomUUID } from "node:crypto";
-import { getPolicy } from "./policy.js";
 import type { VaultBackend, VaultEntry } from "./backends/interface.js";
 import { FileLoopStore, LoopStoreBackend } from "./loop-store.js";
 import type { LoopStore } from "./loop-store.js";
 import {
   AgentStatus,
-  Mode,
-  makeExecutionEvidence,
-  makeExecutionFeedback,
   makeLoopCompileRequest,
-  makeLoopObjective,
-  makeLoopRoundResult,
-  makeSelfEvaluation,
-  makeSessionState,
-  makeTaskId,
-  SELF_EVAL_REGEX,
   type AgentLoopResult,
-  type CriterionRevision,
-  type ExecutionEvidence,
-  type ExecutionFeedback,
   type LoopCompileRequest,
   type LoopCompileResponse,
   type LoopForgeRequest,
-  type SelfEvaluation,
-  type SessionState,
-  type VerificationFlag,
+  type NormalizedRoundEvaluation,
 } from "./protocol.js";
 import { compileLoop } from "./loop-compiler.js";
-import { logEvent } from "./observability.js";
+import { policyMetrics } from "./policy-metrics.js";
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Shared helpers
-// ═══════════════════════════════════════════════════════════════════════════
-
-/** Parse ExecutionEvidence from a raw JSON object. Shared by buildSelfEvaluation
- *  and invokeLoopCompile — both parse the same execution_evidence shape. */
-export function parseExecutionEvidence(
-  raw: Record<string, unknown> | undefined | null,
-): ExecutionEvidence | undefined {
-  if (!raw || typeof raw !== "object") return undefined;
-  const testResults = raw.test_results as Record<string, unknown> | undefined;
-  return makeExecutionEvidence({
-    files_changed: Array.isArray(raw.files_changed)
-      ? raw.files_changed.filter((v: unknown) => typeof v === "string")
-      : [],
-    test_results: testResults && typeof testResults.passed === "number"
-      ? {
-          passed: testResults.passed as number,
-          failed: (testResults.failed as number) ?? 0,
-          skipped: (testResults.skipped as number) ?? 0,
-        }
-      : null,
-    success_criteria_met: Array.isArray(raw.success_criteria_met)
-      ? raw.success_criteria_met.filter((v: unknown) => typeof v === "string")
-      : [],
-    success_criteria_remaining: Array.isArray(raw.success_criteria_remaining)
-      ? raw.success_criteria_remaining.filter((v: unknown) => typeof v === "string")
-      : [],
-    progress_estimate: typeof raw.progress_estimate === "number"
-      ? Math.max(0, Math.min(1, raw.progress_estimate))
-      : 0.0,
-  });
-}
-
-/** Parse CriterionRevision[] from a raw JSON array. Shared by buildSelfEvaluation
- *  and invokeLoopCompile — both parse the same revised_success_criteria shape. */
-export function parseCriterionRevisions(
-  raw: unknown,
-): CriterionRevision[] {
-  if (!Array.isArray(raw)) return [];
-  return raw
-    .filter((v: unknown) =>
-      typeof v === "object" && v !== null &&
-      typeof (v as Record<string, unknown>).old === "string" &&
-      typeof (v as Record<string, unknown>).new === "string")
-    .map((v: unknown) => {
-      const r = v as Record<string, unknown>;
-      return { old: r.old as string, new: r.new as string };
-    });
-}
-
-/** Parse WorkerResult[] from a raw JSON array. Shared by buildSelfEvaluation
- *  and invokeLoopCompile — both parse the same worker_results shape. */
-export function parseWorkerResults(
-  raw: unknown,
-): import("./protocol.js").WorkerResult[] {
-  if (!Array.isArray(raw)) return [];
-  return raw
-    .filter((v: unknown) =>
-      typeof v === "object" && v !== null &&
-      typeof (v as Record<string, unknown>).agentId === "string" &&
-      typeof (v as Record<string, unknown>).subTask === "string" &&
-      typeof (v as Record<string, unknown>).resultSummary === "string")
-    .map((v: unknown) => {
-      const w = v as Record<string, unknown>;
-      return {
-        agentId: w.agentId as string,
-        subAgentType: typeof w.subAgentType === "string" ? w.subAgentType : "general-purpose",
-        subTask: w.subTask as string,
-        resultSummary: w.resultSummary as string,
-        success: typeof w.success === "boolean" ? w.success : false,
-        discoveredConstraints: Array.isArray(w.discoveredConstraints)
-          ? w.discoveredConstraints.filter((c: unknown) => typeof c === "string")
-          : [],
-      };
-    });
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Self-Evaluation extraction (v1.1 — autonomous loop feedback)
-// ═══════════════════════════════════════════════════════════════════════════
-
-/** Extract a structured SelfEvaluation from agent output text.
- *  Returns null if no valid self-eval block is found.
- *  The agent is instructed to output JSON between the delimiters. */
-export function extractSelfEvaluation(text: string): SelfEvaluation | null {
-  const match = text.match(SELF_EVAL_REGEX);
-  if (!match) return null;
-
-  try {
-    const raw = JSON.parse(match[1]);
-    // Validate required fields
-    if (typeof raw.success !== "boolean") return null;
-    if (typeof raw.output_summary !== "string") return null;
-    if (!Array.isArray(raw.constraint_violations)) return null;
-    if (typeof raw.should_continue !== "boolean") return null;
-    return buildSelfEvaluation(raw);
-  } catch {
-    return null;
-  }
-}
-
-/** Build a SelfEvaluation from a parsed JSON object.
- *  Lenient parsing: missing optional fields get sensible defaults.
- *  Used by extractSelfEvaluation() (regex path) and MCP tool handler
- *  (structured evaluation parameter path). */
-export function buildSelfEvaluation(
-  raw: Record<string, unknown>,
-): SelfEvaluation {
-  // P4: Parse execution evidence from raw JSON
-  const executionEvidence = parseExecutionEvidence(
-    raw.execution_evidence as Record<string, unknown> | undefined,
-  );
-
-  // P5: Parse corrections
-  const retractedConstraints: string[] = Array.isArray(raw.retracted_constraints)
-    ? raw.retracted_constraints.filter((v: unknown) => typeof v === "string")
-    : [];
-  const revisedCriteria: CriterionRevision[] = parseCriterionRevisions(raw.revised_success_criteria);
-  const wrongAssumptions: string[] = Array.isArray(raw.wrong_assumptions)
-    ? raw.wrong_assumptions.filter((v: unknown) => typeof v === "string")
-    : [];
-
-  // Multi-agent: Parse worker delegation results
-  const workerResults = parseWorkerResults(raw.worker_results);
-
-  return makeSelfEvaluation({
-    success: typeof raw.success === "boolean" ? raw.success : false,
-    output_summary: typeof raw.output_summary === "string" ? raw.output_summary : "",
-    constraint_violations: Array.isArray(raw.constraint_violations)
-      ? raw.constraint_violations.filter((v: unknown) => typeof v === "string")
-      : [],
-    should_continue: typeof raw.should_continue === "boolean" ? raw.should_continue : true,
-    // P0–P2: Optional evolution fields
-    discovered_constraints: Array.isArray(raw.discovered_constraints)
-      ? raw.discovered_constraints.filter((v: unknown) => typeof v === "string")
-      : [],
-    objective_refinement: typeof raw.objective_refinement === "string"
-      ? raw.objective_refinement
-      : "",
-    emerged_subtasks: Array.isArray(raw.emerged_subtasks)
-      ? raw.emerged_subtasks.filter((v: unknown) => typeof v === "string")
-      : [],
-    // P4: Execution evidence
-    execution_evidence: executionEvidence,
-    // P5: Self-correction
-    retracted_constraints: retractedConstraints,
-    revised_success_criteria: revisedCriteria,
-    wrong_assumptions: wrongAssumptions,
-    // Multi-agent: Worker delegation results
-    worker_results: workerResults,
-    // v1.10: Checkpoint compression
-    compression_checkpoint:
-      typeof raw.compression_checkpoint === "boolean" ? raw.compression_checkpoint : false,
-    checkpoint_label:
-      typeof raw.checkpoint_label === "string" ? raw.checkpoint_label : "",
-    // v1.16: Agent's declared next action
-    next_action:
-      typeof raw.next_action === "string" ? raw.next_action : undefined,
-  });
-}
-
-/** Fallback heuristic when structured self-eval extraction fails.
- *  Scans agent output for completion and error signals.
- *  Returns a low-confidence SelfEvaluation — the autonomous runner
- *  may choose to warn the user or continue cautiously. */
-export function heuristicSelfEvaluation(text: string): SelfEvaluation | null {
-  const lower = text.toLowerCase();
-  const hasError =
-    /error|failed|exception|cannot|unable|失败|错误|异常/.test(lower);
-  const hasCompletion =
-    /done|complete|finished|完成|成功/.test(lower);
-  const hasRemaining =
-    /remaining|continue|still need|next|todo|剩余|继续|下一步/.test(lower);
-
-  // Extract a reasonable summary from the last meaningful paragraph
-  const paragraphs = text.split(/\n\n+/).filter((p) => p.trim().length > 30);
-  const summary = paragraphs.length > 0
-    ? paragraphs[paragraphs.length - 1].trim().slice(0, 300)
-    : text.trim().slice(0, 300);
-
-  return makeSelfEvaluation({
-    success: !hasError && (hasCompletion || !hasRemaining),
-    output_summary: summary || "[heuristic fallback — could not parse structured self-eval]",
-    constraint_violations: [],
-    should_continue: hasRemaining && !hasError,
-  });
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Engine Metrics
-// ═══════════════════════════════════════════════════════════════════════════
-
-/** A single sub-agent delegation record (v1.9 — AgentTool mode). */
 export interface DelegationEntry {
   index: number;
   agentId: string;
@@ -243,722 +26,220 @@ export interface DelegationEntry {
 
 export interface EngineMetrics {
   vaultWriteErrors: number;
-  vaultWriteTimeouts: number;
-  vaultWriteBytes: number;
-  silentAnalysisErrors: number;
-  hydrateCacheMisses: number;
-  feedbackBufferFlushes: number;
-  feedbackBufferMaxSize: number;
   sessionStart: number;
 }
 
-function makeEngineMetrics(): EngineMetrics {
-  return {
-    vaultWriteErrors: 0,
-    vaultWriteTimeouts: 0,
-    vaultWriteBytes: 0,
-    silentAnalysisErrors: 0,
-    hydrateCacheMisses: 0,
-    feedbackBufferFlushes: 0,
-    feedbackBufferMaxSize: 0,
-    sessionStart: Date.now(),
-  };
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// LoopForgeEngine
-// ═══════════════════════════════════════════════════════════════════════════
-
 export class LoopForgeEngine {
-  state: SessionState | null = null;
-  private backend: VaultBackend | null = null;
-  private metrics: EngineMetrics | null = null;
-  private feedbackWriteBuffer: VaultEntry[] = [];
-  lastTask: string | null = null;
+  private readonly backend: VaultBackend;
+  private readonly metrics: EngineMetrics = { vaultWriteErrors: 0, sessionStart: Date.now() };
 
   constructor(storeOrBackend?: LoopStore | VaultBackend) {
-    if (storeOrBackend) {
-      this.backend = "readSession" in storeOrBackend
-        ? new LoopStoreBackend(storeOrBackend)
-        : storeOrBackend;
+    if (storeOrBackend && "queryEntries" in storeOrBackend) {
+      this.backend = storeOrBackend;
+    } else {
+      this.backend = new LoopStoreBackend(storeOrBackend ?? new FileLoopStore());
     }
   }
 
-  private resolveBackend(): VaultBackend {
-    if (this.backend === null) {
-      this.backend = new LoopStoreBackend(
-        new FileLoopStore(getPolicy().backend.root_dir),
-      );
-    }
+  getBackend(): VaultBackend {
     return this.backend;
   }
 
-  /** Public accessor for the vault backend — used by runtime/verification gate. */
-  getBackend(): VaultBackend {
-    return this.resolveBackend();
-  }
-
-  /** Expose engine health counters for observability (MCP status, logging). */
   getMetrics(): EngineMetrics {
-    if (this.metrics === null) {
-      this.metrics = makeEngineMetrics();
-    }
-    return this.metrics;
+    return { ...this.metrics };
   }
-
-  private ensureInit(request: LoopForgeRequest): void {
-    if (this.state === null) {
-      this.state = makeSessionState(
-        request.task_id || makeTaskId(request.task),
-      );
-    }
-    if (this.metrics === null) {
-      this.metrics = makeEngineMetrics();
-    }
-  }
-
-  // ═══════════════════════════════════════════════════════════════════════
-  // Feedback persistence
-  // ═══════════════════════════════════════════════════════════════════════
-
-  private persistFeedbackToVault(signal: Record<string, unknown>): void {
-    if (this.metrics === null) {
-      this.metrics = makeEngineMetrics();
-    }
-
-    this.feedbackWriteBuffer.push(signal as VaultEntry);
-
-    const bufLen = this.feedbackWriteBuffer.length;
-    if (bufLen > this.metrics.feedbackBufferMaxSize) {
-      this.metrics.feedbackBufferMaxSize = bufLen;
-    }
-
-    const policy = getPolicy();
-    if (bufLen >= policy.engine.feedback_flush_interval) {
-      this.flushFeedbackBuffer();
-    }
-  }
-
-  flushFeedbackBuffer(): number {
-    if (!this.feedbackWriteBuffer.length) return 0;
-
-    const records = this.feedbackWriteBuffer.splice(0);
-    if (this.metrics) this.metrics.feedbackBufferFlushes++;
-
-    const now = new Date().toISOString().replace(/\.\d+Z$/, "");
-    const entries: VaultEntry[] = [];
-
-    for (const signal of records) {
-      try {
-        const entry: VaultEntry = {
-          id: randomUUID(),
-          task_id: (signal.task_id as string) ?? "feedback",
-          version_tag: "v1",
-          is_active: true,
-          timestamp: now,
-          user_intent: String(signal.task_type ?? "").slice(0, 200),
-          success: (signal.success as boolean) ?? false,
-          execution_feedback: JSON.stringify({
-            success: signal.success ?? false,
-            status:
-              (signal.success as boolean)
-                ? "success"
-                : "partial",
-            constraint_compliance: {
-              all_hard_constraints_met: !Array.isArray(signal.violations) || (signal.violations as unknown[]).length === 0,
-              violations: signal.violations ?? [],
-            },
-            output_summary: signal.task_type ?? "",
-            improvement_notes: signal.manual_fixes ?? "",
-          }),
-          task_type: (signal.task_type as string) ?? "",
-          tags: signal.skill_used ? [signal.skill_used as string] : [],
-          skill_used: (signal.skill_used as string) ?? "",
-          loop_id: signal.loop_id as string | undefined,
-          loop_lineage: (signal.loop_lineage as Record<string, unknown>) ?? {},
-        };
-        entries.push(entry);
-      } catch {
-        if (this.metrics) this.metrics.vaultWriteErrors++;
-        logEvent("vault_write_error", { error: "feedback_entry_build" });
-      }
-    }
-
-    if (entries.length > 0) {
-      try {
-        this.resolveBackend().appendEntries(entries);
-      } catch {
-        if (this.metrics) this.metrics.vaultWriteErrors += entries.length;
-        logEvent("vault_write_error", { error: "feedback_append_entries", count: entries.length });
-        return 0;
-      }
-    }
-
-    return entries.length;
-  }
-
-  // ═══════════════════════════════════════════════════════════════════════
-  // Lineage persistence
-  // ═══════════════════════════════════════════════════════════════════════
-
-  private persistLoopLineage(
-    response: LoopCompileResponse,
-    request: LoopCompileRequest,
-  ): boolean {
-    if (this.metrics === null) this.metrics = makeEngineMetrics();
-
-    const loopObjDict = response.loop_objective
-      ? (response.loop_objective as unknown as Record<string, unknown>)
-      : null;
-
-    const structuredLineage: Record<string, unknown> = {
-      loop_id: response.loop_id,
-      round: response.round,
-      goal_id: response.goal_id,
-      goal_text_hash: response.goal_text_hash,
-      recompile_level: response.recompile_level,
-      constraints_active: response.constraints_active,
-      task: request.task,
-      success: true,
-    };
-
-    let lastOutputSummary = "";
-    let lastViolations: string[] = [];
-    if (request.last_round_result) {
-      lastOutputSummary = request.last_round_result.output_summary || "";
-      lastViolations = request.last_round_result.constraint_violations || [];
-    }
-
-    const entry: VaultEntry = {
-      id: randomUUID(),
-      task_id: `loop:${response.loop_id}:r${response.round}`,
-      version_tag: "v1",
-      is_active: true,
-      timestamp: new Date().toISOString().replace(/\.\d+Z$/, ""),
-      user_intent: `loop_compile round ${response.round} — ${response.goal_id}`,
-      task_type: "loop_lineage",
-      loop_id: response.loop_id,
-      loop_lineage: structuredLineage,
-      loop_objective: loopObjDict,
-      task: request.task,
-      output_summary: lastOutputSummary,
-      constraint_violations: lastViolations,
-      tags: [response.loop_id, response.recompile_level, response.goal_id],
-    };
-
-    // 1. JSON vault write (primary)
-    let vaultOk = false;
-    try {
-      this.resolveBackend().appendEntry(entry);
-      vaultOk = true;
-    } catch {
-      if (this.metrics) this.metrics.vaultWriteErrors++;
-      logEvent("vault_write_error", { error: "persist_lineage_json" });
-    }
-
-    return vaultOk;
-  }
-
-  // ═══════════════════════════════════════════════════════════════════════
-  // Delegation journal (v1.9 — AgentTool mode)
-  // ═══════════════════════════════════════════════════════════════════════
-
-  /** Record sub-agent delegations for this round into the vault.
-   *  Written as a lightweight journal entry so the main agent's rolling
-   *  summary can reference delegation history in subsequent rounds. */
-  recordDelegation(
-    loopId: string,
-    round: number,
-    entries: DelegationEntry[],
-  ): void {
-    if (!entries.length) return;
-    const taskId = `loop:${loopId}:r${round}:delegations`;
-    const existing = this.resolveBackend().queryEntries({ prefix: taskId })
-      .some((candidate) => candidate.task_id === taskId);
-    if (existing) return;
-    const entry: VaultEntry = {
-      id: randomUUID(),
-      task_id: taskId,
-      version_tag: "v1",
-      is_active: true,
-      timestamp: new Date().toISOString().replace(/\.\d+Z$/, ""),
-      user_intent: `Delegation journal — round ${round}`,
-      task_type: "delegation_journal",
-      loop_id: loopId,
-      loop_lineage: {
-        round,
-        delegations: entries.map((e) => ({
-          index: e.index,
-          agentId: e.agentId,
-          subAgentType: e.subAgentType,
-          subTask: e.subTask,
-          resultSummary: e.resultSummary,
-          success: e.success,
-          discoveredConstraints: e.discoveredConstraints,
-        })),
-      },
-    };
-    try {
-      this.resolveBackend().appendEntry(entry);
-    } catch {
-      if (this.metrics) this.metrics.vaultWriteErrors++;
-      logEvent("vault_write_error", { error: "record_delegation" });
-    }
-  }
-
-  // ═══════════════════════════════════════════════════════════════════════
-  // Hydrate loop context from vault
-  // ═══════════════════════════════════════════════════════════════════════
 
   hydrateLoopContext(loopId: string): Record<string, unknown> | null {
-    const prefix = `loop:${loopId}:r`;
-    const results = this.resolveBackend().queryEntries({ prefix });
-
-    // Merge feedback success flags into lineage entries
-    const fbEntries = this.resolveBackend().queryEntries({
-      prefix,
-      feedbackOnly: true,
-    });
-    const fbSuccess = new Map<number, boolean>();
-    for (const fe of fbEntries) {
-      const tid = String(fe.task_id ?? "");
-      const parts = tid.split(":r");
-      if (parts.length >= 2) {
-        const roundStr = parts[1].split(":")[0];
-        const fbRound = parseInt(roundStr, 10);
-        if (!Number.isNaN(fbRound) && fe.success !== undefined) {
-          fbSuccess.set(fbRound, fe.success as boolean);
-        }
-      }
-    }
-
-    for (const entry of results) {
-      const lineage = (entry.loop_lineage ?? entry.lineage ?? {}) as Record<
-        string,
-        unknown
-      >;
-      const rnd = lineage.round as number;
-      if (rnd && fbSuccess.has(rnd)) {
-        (lineage as Record<string, unknown>).success = fbSuccess.get(rnd);
-        entry.success = fbSuccess.get(rnd);
-      }
-    }
-
-    const finalResults = results;
-
-    for (const entry of finalResults) {
-      const lineage = (entry.loop_lineage ?? entry.lineage ?? {}) as Record<
-        string,
-        unknown
-      >;
-      if (!entry.output_summary) {
-        entry.output_summary = (lineage.output_summary as string) ?? "";
-      }
-      if (!entry.constraint_violations) {
-        entry.constraint_violations =
-          (lineage.constraint_violations as string[]) ?? [];
-      }
-    }
-
-    if (!finalResults.length) return null;
-
-    return { results: finalResults, global_entries: [] };
+    const results = [
+      ...this.backend.queryEntries({ prefix: `loop:${loopId}:r` }),
+      ...this.backend.queryEntries({ prefix: `loop:${loopId}:r`, feedbackOnly: true }),
+    ];
+    return results.length ? { results } : null;
   }
 
-  // ═══════════════════════════════════════════════════════════════════════
-  // Feedback (public)
-  // ═══════════════════════════════════════════════════════════════════════
-
-  invokeFeedback(
-    request: LoopForgeRequest,
-    _hydrateResults?: Record<string, unknown> | null,
-  ): AgentLoopResult {
-    this.ensureInit(request);
-    this.lastTask = request.task;
-
-    const fb = request.feedback;
-    if (!fb) {
-      return {
-        status: AgentStatus.ERROR,
-        response: {
-          status: AgentStatus.ERROR,
-          prompt: null,
-          error: "Feedback mode requires a feedback payload.",
-        },
-      };
+  private append(entry: VaultEntry): void {
+    try {
+      this.backend.appendEntry(entry);
+    } catch {
+      this.metrics.vaultWriteErrors++;
+      policyMetrics.recordVaultWriteError("engine_append");
+      throw new Error(`LoopForge durable write failed for ${entry.task_id}`);
     }
+  }
 
-    const success = fb.success;
-    const violations = fb.constraint_violations ?? [];
-    const fixes = fb.manual_fixes_needed ?? "";
-
-    // Loop-aware task_id for feedback→lineage backfill
-    const loopId = (request as Record<string, unknown>).loop_id as
-      | string
-      | undefined;
-    const loopRound = (request as Record<string, unknown>).round as
-      | number
-      | undefined;
-    let taskId: string;
-    if (loopId && loopRound !== undefined) {
-      taskId = `loop:${loopId}:r${loopRound}:feedback`;
-    } else {
-      taskId = request.task_id ?? request.task.slice(0, 60);
-    }
-
-    const signal: Record<string, unknown> = {
-      task_id: taskId,
-      task_type: request.task.slice(0, 80),
-      success,
-      skill_used: request.skill_name ?? "",
-      violations,
-      manual_fixes: fixes,
-      loop_id: loopId,
-      round: loopRound,
-    };
-    this.persistFeedbackToVault(signal);
-
-    // Flush immediately so next compile cycle sees success flags
-    this.flushFeedbackBuffer();
-
-    // Update state
-    this.state!.call_count++;
-    this.state!.success_trend.push(success);
-    if (this.state!.success_trend.length > 20) {
-      this.state!.success_trend = this.state!.success_trend.slice(-20);
-    }
-
-    // Circuit breaker
-    if (this.shouldBreak()) {
-      this.state!.circuit_breaker_count++;
-    } else {
-      this.state!.circuit_breaker_count = 0;
-    }
-
-    logEvent("round_complete", {
-      success,
-      loopId: loopId ?? "unknown",
-      round: loopRound ?? this.state!.call_count,
-    });
-
-    return {
-      status: AgentStatus.OK,
-      response: {
-        status: AgentStatus.OK,
-        prompt: `## Feedback Recorded\n\nSuccess: ${success}\nSignals: 1`,
-        error: null,
+  private persistLineage(response: LoopCompileResponse, request: LoopCompileRequest): void {
+    this.append({
+      id: randomUUID(),
+      task_id: `loop:${response.loop_id}:r${response.round}`,
+      version_tag: "v3",
+      is_active: true,
+      timestamp: new Date().toISOString(),
+      user_intent: `compile round ${response.round}`,
+      task_type: "loop_lineage",
+      loop_id: response.loop_id,
+      task: request.task,
+      loop_objective: response.loop_objective as unknown as Record<string, unknown> | null,
+      loop_lineage: {
+        loop_id: response.loop_id,
+        round: response.round,
+        goal_id: response.goal_id,
+        goal_text_hash: response.goal_text_hash,
+        recompile_level: response.recompile_level,
+        constraints_active: response.constraints_active,
       },
-    };
+      tags: [response.loop_id, response.recompile_level, response.goal_id],
+    });
   }
 
-  // ═══════════════════════════════════════════════════════════════════════
-  // Auto-Feedback (v1.1 — autonomous loop, no human in the loop)
-  // ═══════════════════════════════════════════════════════════════════════
+  recordDelegation(loopId: string, round: number, entries: DelegationEntry[]): void {
+    if (!entries.length) return;
+    this.append({
+      id: randomUUID(),
+      task_id: `loop:${loopId}:r${round}:delegations`,
+      version_tag: "v3",
+      is_active: true,
+      timestamp: new Date().toISOString(),
+      user_intent: "delegation journal",
+      task_type: "delegation_journal",
+      loop_id: loopId,
+      loop_lineage: { round },
+      delegations: entries,
+    });
+  }
 
-  /** Record self-evaluation from agent output without human intervention.
-   *  Converts SelfEvaluation → ExecutionFeedback → vault persistence.
-   *  P0–P2: Also persists discovered_constraints, objective_refinement,
-   *  and emerged_subtasks for the compiler to consume next round.
-   *  Call this BEFORE invokeLoopCompile for the next round so that
-   *  hydrateLoopContext picks up the latest success flags. */
   autoFeedback(
-    selfEval: SelfEvaluation,
+    evaluation: NormalizedRoundEvaluation,
     loopId: string,
     round: number,
     task: string,
     roundTransaction?: Record<string, unknown>,
   ): boolean {
-    this.ensureInit({ task, mode: Mode.FEEDBACK, feedback: null, skill_name: null, task_id: null });
-
-    const fb: ExecutionFeedback = makeExecutionFeedback({
-      output: selfEval.output_summary,
-      success: selfEval.success,
-      constraint_violations: selfEval.constraint_violations,
-      manual_fixes_needed: "",
-    });
-
     const taskId = `loop:${loopId}:r${round}:feedback`;
-    const transactionId = typeof roundTransaction?.round_id === "string"
-      ? roundTransaction.round_id
-      : null;
-    const transactionPersisted = (): boolean => {
-      if (!transactionId) return false;
-      return this.resolveBackend().queryEntries({
-        prefix: taskId,
-        feedbackOnly: true,
-      }).some((entry) => {
-        if (entry.task_id !== taskId) return false;
-        const lineage = entry.loop_lineage;
-        const transaction = lineage?.round_transaction;
-        return transaction !== null &&
-          typeof transaction === "object" &&
-          !Array.isArray(transaction) &&
-          (transaction as Record<string, unknown>).round_id === transactionId;
-      });
-    };
-    const alreadyCommitted = transactionPersisted();
-
-    // Multi-agent: Merge sub-agent discovered constraints into the main constraint flow
-    const subDiscovered = (selfEval.worker_results ?? [])
-      .flatMap((w) => w.discoveredConstraints ?? [])
-      .filter((c) => c.length > 0);
-    const mergedDiscovered = [
-      ...new Set([...(selfEval.discovered_constraints ?? []), ...subDiscovered]),
-    ];
-
-    const signal: Record<string, unknown> = {
-      task_id: taskId,
-      task_type: task.slice(0, 80),
-      success: fb.success,
-      skill_used: "",
-      violations: selfEval.constraint_violations,
-      manual_fixes: "",
-      loop_id: loopId,
-      round,
-      // P0–P2: Evolution fields
-      discovered_constraints: mergedDiscovered,
-      objective_refinement: selfEval.objective_refinement ?? "",
-      emerged_subtasks: selfEval.emerged_subtasks ?? [],
-      // P4: Execution evidence
-      execution_evidence: selfEval.execution_evidence ?? null,
-      // P5: Self-correction
-      retracted_constraints: selfEval.retracted_constraints ?? [],
-      revised_success_criteria: selfEval.revised_success_criteria ?? [],
-      wrong_assumptions: selfEval.wrong_assumptions ?? [],
-      // Multi-agent: Worker delegation results
-      worker_results: selfEval.worker_results ?? [],
-      loop_lineage: roundTransaction
-        ? {
-            round,
-            round_id: roundTransaction.round_id,
-            round_transaction: roundTransaction,
-          }
-        : {},
-    };
-    if (!alreadyCommitted) {
-      this.persistFeedbackToVault(signal);
-      this.flushFeedbackBuffer();
-      if (transactionId && !transactionPersisted()) {
-        throw new Error(`Round feedback commit failed: ${transactionId}`);
-      }
-    }
-
-    // Multi-agent: Auto-record delegation journal from worker_results
-    if (selfEval.worker_results && selfEval.worker_results.length > 0) {
-      const entries = selfEval.worker_results.map((w, i) => ({
-        index: i + 1,
-        agentId: w.agentId,
-        subAgentType: w.subAgentType,
-        subTask: w.subTask,
-        resultSummary: w.resultSummary,
-        success: w.success,
-        discoveredConstraints: w.discoveredConstraints ?? [],
-      }));
-      this.recordDelegation(loopId, round, entries);
-    }
-
-    // Replaying a committed transaction may repair derived delegation data,
-    // but must never apply the feedback to mutable engine state twice.
-    if (alreadyCommitted) return fb.success;
-
-    // Update state
-    this.state!.call_count++;
-    this.state!.success_trend.push(fb.success);
-    if (this.state!.success_trend.length > 20) {
-      this.state!.success_trend = this.state!.success_trend.slice(-20);
-    }
-
-    // Circuit breaker
-    if (this.shouldBreak()) {
-      this.state!.circuit_breaker_count++;
-    } else {
-      this.state!.circuit_breaker_count = 0;
-    }
-
-    logEvent("round_complete", {
-      loopId,
-      round,
-      success: fb.success,
+    const transactionId = typeof roundTransaction?.round_id === "string" ? roundTransaction.round_id : null;
+    const alreadyCommitted = (): boolean => transactionId !== null && this.backend.queryEntries({
+      prefix: taskId,
+      feedbackOnly: true,
+    }).some((entry) => {
+      const transaction = entry.loop_lineage?.round_transaction;
+      return transaction && typeof transaction === "object" && !Array.isArray(transaction) &&
+        (transaction as Record<string, unknown>).round_id === transactionId;
     });
 
-    return fb.success;
-  }
+    if (!alreadyCommitted()) {
+      this.append({
+        id: randomUUID(),
+        task_id: taskId,
+        version_tag: "v3",
+        is_active: true,
+        timestamp: new Date().toISOString(),
+        user_intent: task.slice(0, 200),
+        task_type: "round_feedback",
+        loop_id: loopId,
+        round_report: evaluation.report,
+        evidence_envelope: evaluation.evidenceEnvelope,
+        material_advancement: evaluation.materialAdvancement ?? null,
+        delegations: evaluation.report.delegations ?? [],
+        loop_lineage: roundTransaction
+          ? { round, round_id: roundTransaction.round_id, round_transaction: roundTransaction }
+          : { round },
+      });
+      if (transactionId && !alreadyCommitted()) throw new Error(`Round feedback commit failed: ${transactionId}`);
+    }
 
-  // ═══════════════════════════════════════════════════════════════════════
-  // Loop Compile (public, primary)
-  // ═══════════════════════════════════════════════════════════════════════
+    const delegations = evaluation.report.delegations ?? [];
+    if (delegations.length) {
+      this.recordDelegation(loopId, round, delegations.map((item, index) => ({
+        index: index + 1,
+        agentId: item.agentId,
+        subAgentType: item.subAgentType,
+        subTask: item.subTask,
+        resultSummary: item.resultSummary,
+        success: item.success,
+        discoveredConstraints: item.discoveredConstraints ?? [],
+      })));
+    }
+
+    return evaluation.report.status === "completed";
+  }
 
   invokeLoopCompile(
     request: LoopForgeRequest,
     hydrateResults?: Record<string, unknown> | null,
     options: { persistLineage?: boolean } = {},
   ): AgentLoopResult {
-    this.ensureInit(request);
-    this.lastTask = request.task;
-
-    // Build LoopCompileRequest from LoopForgeRequest extras
-    const extras = request as Record<string, unknown>;
-    const lcr = makeLoopCompileRequest({
-      loop_id:
-        (extras.loop_id as string) ?? request.task_id ?? "",
-      round: (extras.round as number) ?? 1,
-      goal_id: (extras.goal_id as string) ?? "",
+    const raw = request as Record<string, unknown>;
+    const compiledRequest = makeLoopCompileRequest({
+      loop_id: typeof raw.loop_id === "string" ? raw.loop_id : "",
+      round: typeof raw.round === "number" ? raw.round : 1,
+      round_id: typeof raw.round_id === "string" ? raw.round_id : undefined,
+      goal_id: typeof raw.goal_id === "string" ? raw.goal_id : "",
       task: request.task,
-      domain: (extras.domain as string) ?? "",
-      next_task_proposal: (extras.next_task_proposal as string) ?? "",
-      plan_source: (extras.plan_source as string) ?? null,
-      constraints_from_plan:
-        (extras.constraints_from_plan as string[]) ?? [],
-      new_since_last_round: (extras.new_since_last_round as string) ?? "",
-      force_level: (extras.force_level as string) ?? "auto",
-      health_check_interval:
-        (extras.health_check_interval as number) ?? 1,
-      external_context: (extras.external_context as string) ?? "",
-      max_rounds: (extras.max_rounds as number) ?? undefined,
-      verification_flags: Array.isArray(extras.verification_flags)
-        ? (extras.verification_flags as VerificationFlag[])
+      domain: typeof raw.domain === "string" ? raw.domain : "",
+      loop_objective: raw.loop_objective && typeof raw.loop_objective === "object"
+        ? raw.loop_objective as LoopCompileRequest["loop_objective"]
+        : null,
+      compilation_context: raw.compilation_context && typeof raw.compilation_context === "object" && !Array.isArray(raw.compilation_context)
+        ? raw.compilation_context as LoopCompileRequest["compilation_context"]
+        : null,
+      plan_boundary: raw.plan_boundary === true,
+      constraints_from_plan: Array.isArray(raw.constraints_from_plan)
+        ? raw.constraints_from_plan.filter((item): item is string => typeof item === "string")
         : [],
-      attempt: typeof extras.attempt === "number"
-        ? Math.max(1, Math.trunc(extras.attempt))
-        : 1,
-      consecutive_rejections: typeof extras.consecutive_rejections === "number"
-        ? Math.max(0, Math.trunc(extras.consecutive_rejections))
-        : 0,
-      rejection_notice: typeof extras.rejection_notice === "string"
-        ? extras.rejection_notice
-        : "",
+      new_since_last_round: typeof raw.new_since_last_round === "string" ? raw.new_since_last_round : "",
+      last_evaluation: raw.last_evaluation && typeof raw.last_evaluation === "object"
+        ? raw.last_evaluation as LoopCompileRequest["last_evaluation"]
+        : null,
+      force_level: typeof raw.force_level === "string" ? raw.force_level : "auto",
+      external_context: typeof raw.external_context === "string" ? raw.external_context : "",
+      max_rounds: typeof raw.max_rounds === "number" ? raw.max_rounds : undefined,
+      verification_flags: Array.isArray(raw.verification_flags)
+        ? raw.verification_flags as LoopCompileRequest["verification_flags"]
+        : [],
+      attempt: typeof raw.attempt === "number" ? raw.attempt : 1,
+      consecutive_rejections: typeof raw.consecutive_rejections === "number" ? raw.consecutive_rejections : 0,
+      rejection_notice: typeof raw.rejection_notice === "string" ? raw.rejection_notice : "",
+      report_contract: raw.report_contract === "round_report_v1" ? "round_report_v1" : undefined,
+      report_mode: typeof raw.report_mode === "string"
+        ? raw.report_mode as LoopCompileRequest["report_mode"]
+        : undefined,
+      report_claim_targets: Array.isArray(raw.report_claim_targets)
+        ? raw.report_claim_targets as LoopCompileRequest["report_claim_targets"]
+        : [],
+      graph_slice: raw.graph_slice && typeof raw.graph_slice === "object" && !Array.isArray(raw.graph_slice)
+        ? raw.graph_slice as LoopCompileRequest["graph_slice"]
+        : undefined,
     });
 
-    // Convert last_round_result if present
-    const lastRR = extras.last_round_result;
-    if (lastRR) {
-      if (typeof lastRR === "object" && !Array.isArray(lastRR)) {
-        const rr = lastRR as Record<string, unknown>;
-        // Parse P4 execution evidence (shared helper)
-        const executionEvidence = parseExecutionEvidence(
-          rr.execution_evidence as Record<string, unknown> | undefined,
-        );
-        // Parse P5 revised_success_criteria (shared parser)
-        const revisedCriteria = parseCriterionRevisions(rr.revised_success_criteria);
-        lcr.last_round_result = makeLoopRoundResult({
-          round: (rr.round as number) ?? 0,
-          success: (rr.success as boolean) ?? false,
-          output_summary: (rr.output_summary as string) ?? "",
-          constraint_violations:
-            (rr.constraint_violations as string[]) ?? [],
-          manual_fixes_needed: (rr.manual_fixes_needed as string) ?? "",
-          // P0–P2: Cognitive evolution fields
-          discovered_constraints: Array.isArray(rr.discovered_constraints)
-            ? (rr.discovered_constraints as string[]).filter((v: unknown) => typeof v === "string")
-            : [],
-          objective_refinement: typeof rr.objective_refinement === "string"
-            ? rr.objective_refinement
-            : "",
-          emerged_subtasks: Array.isArray(rr.emerged_subtasks)
-            ? (rr.emerged_subtasks as string[]).filter((v: unknown) => typeof v === "string")
-            : [],
-          // P4: Execution evidence
-          execution_evidence: executionEvidence,
-          // P5: Self-correction
-          retracted_constraints: Array.isArray(rr.retracted_constraints)
-            ? (rr.retracted_constraints as string[]).filter((v: unknown) => typeof v === "string")
-            : [],
-          revised_success_criteria: revisedCriteria,
-          wrong_assumptions: Array.isArray(rr.wrong_assumptions)
-            ? (rr.wrong_assumptions as string[]).filter((v: unknown) => typeof v === "string")
-            : [],
-          // v1.10: Checkpoint boundary
-          compression_checkpoint:
-            typeof rr.compression_checkpoint === "boolean" ? rr.compression_checkpoint : false,
-          checkpoint_label:
-            typeof rr.checkpoint_label === "string" ? rr.checkpoint_label : "",
-          // Multi-agent: Worker delegation results (shared parser)
-          worker_results: parseWorkerResults(rr.worker_results),
-        });
-      }
-    }
-
-    // Convert loop_objective if present
-    const lo = extras.loop_objective;
-    if (lo && typeof lo === "object" && !Array.isArray(lo)) {
-      const obj = lo as Record<string, unknown>;
-      lcr.loop_objective = makeLoopObjective({
-        objective: (obj.objective as string) ?? "",
-        success_criteria: (obj.success_criteria as string[]) ?? [],
-        hard_constraints: (obj.hard_constraints as string[]) ?? [],
-        created_at_round: (obj.created_at_round as number) ?? 1,
-        loop_id: (obj.loop_id as string) ?? "",
-      });
-    }
-
-    // Hydrate vault context for cross-round memory
-    let context = hydrateResults ?? null;
-    if (context === null && lcr.loop_id && lcr.round > 1) {
-      context = this.hydrateLoopContext(lcr.loop_id);
-    }
-
-    // Delegate to pure-function compiler
-    let response: LoopCompileResponse;
+    const context = hydrateResults ?? (compiledRequest.round > 1
+      ? this.hydrateLoopContext(compiledRequest.loop_id)
+      : null);
     try {
-      response = compileLoop(lcr, context as Record<string, unknown> | null);
-    } catch (exc) {
+      const response = compileLoop(compiledRequest, context);
+      if (options.persistLineage !== false) this.persistLineage(response, compiledRequest);
+      return {
+        status: AgentStatus.OK,
+        response: {
+          status: AgentStatus.OK,
+          prompt: response.prompt,
+          error: null,
+          state_file_content: response.state_file_content,
+          prompt_artifact: response.prompt_artifact,
+          warnings: response.warnings,
+        },
+      };
+    } catch (error) {
       return {
         status: AgentStatus.ERROR,
         response: {
           status: AgentStatus.ERROR,
           prompt: null,
-          error: `loop_compile failed: ${exc}`,
+          error: `loop_compile failed: ${String(error)}`,
         },
       };
     }
-
-    // Persist lineage to vault
-    if (options.persistLineage !== false) {
-      this.persistLoopLineage(response, lcr);
-    }
-
-    return {
-      status: AgentStatus.OK,
-      response: {
-        status: AgentStatus.OK,
-        prompt: response.prompt,
-        error: null,
-        state_file_content: response.state_file_content,
-        prompt_artifact: response.prompt_artifact,
-      },
-    };
-  }
-
-  // ═══════════════════════════════════════════════════════════════════════
-  // Circuit breaker
-  // ═══════════════════════════════════════════════════════════════════════
-
-  shouldBreak(): boolean {
-    if (!this.state) return false;
-    const policy = getPolicy();
-    const maxCB = policy.engine.max_circuit_breaker;
-
-    if (this.state.success_trend.length < maxCB) return false;
-
-    const recent = this.state.success_trend.slice(-maxCB);
-    // Trip only when all recent rounds are failures (no false-positives on all-success)
-    const allFailed = recent.every((v) => v === false);
-    if (allFailed) {
-      logEvent("circuit_breaker", {
-        trend: recent,
-        totalRounds: this.state.success_trend.length,
-      });
-    }
-    return allFailed;
   }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Factory
-// ═══════════════════════════════════════════════════════════════════════════
-
-export function createEngine(
-  store?: LoopStore,
-): LoopForgeEngine {
+export function createEngine(store?: LoopStore | VaultBackend): LoopForgeEngine {
   return new LoopForgeEngine(store);
 }

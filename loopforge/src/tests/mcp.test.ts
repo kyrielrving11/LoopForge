@@ -1761,6 +1761,13 @@ describe("MCP — Round Contract flow", async () => {
       honest(["cr-login-works"], [], undefined),
     );
     assert.equal(r3.round, 3);
+    // v3.5: the completing round is machine-backed end-to-end — the "verify"
+    // command auto-ran and passed, so neither the completion flag nor
+    // premature_boundary may appear in round 3's prompt flag lines.
+    assert.ok(!String(r3.prompt ?? "").includes("contract_completion_unverified"),
+      "machine-backed completion must stay silent");
+    assert.ok(!String(r3.prompt ?? "").includes("premature_boundary"),
+      "machine-backed completion must not trip the boundary check");
     assert.ok(String(r3.prompt ?? "").includes("Build the auth module"),
       "round 3 must fall back to the original task as Current Task");
     assert.ok(!String(r3.prompt ?? "").includes("**Implement login flow**"),
@@ -1784,6 +1791,43 @@ describe("MCP — Round Contract flow", async () => {
     assert.ok(String(r3.prompt ?? "").includes("**Implement login flow**"),
       "the open ACTIVE contract must continue — B was premature");
     assert.ok(!String(r3.prompt ?? "").includes("**Implement the admin panel**"));
+    // v3.5: the premature replacement is no longer silent — round 3's prompt
+    // flag lines carry the warn (the round still advanced; warn never
+    // rejects).
+    assert.ok(String(r3.prompt ?? "").includes("contract_premature"),
+      "the ignored replacement must be surfaced as a warn");
+  });
+
+  it("v3.5: status exposes the active contract and replay rows carry the proposals", async () => {
+    const started = await mgr.create({
+      task: "Build the auth module",
+      loopId: "contract-display",
+      maxRounds: 4,
+    });
+    const a = CONTRACT("Implement login flow");
+    const r2 = await mgr.advance(started.sessionId, "", honest([], ["cr-login-works"], a));
+    assert.ok(String(r2.prompt ?? "").includes("**Implement login flow**"));
+
+    // Session view: the ACTIVE contract governing the next round.
+    const status = await TOOL_HANDLERS.loopforge_status(mgr, { sessionId: started.sessionId });
+    assert.equal(
+      (status.activeContract as { work_item?: string } | null)?.work_item,
+      "Implement login flow",
+      "the session view must expose the derived ACTIVE contract",
+    );
+
+    // Replay rows: the declaring round carries its proposal; the round
+    // without a contract carries none.
+    const replay = await TOOL_HANDLERS.loopforge_replay(mgr, { sessionId: started.sessionId });
+    const timeline = (replay.timeline as Array<Record<string, unknown>>) ?? [];
+    const row1 = timeline.find((t) => t.round === 1);
+    assert.equal(
+      (row1?.proposal as { work_item?: string } | null)?.work_item,
+      "Implement login flow",
+      "round 1's committed proposal must appear on its replay row",
+    );
+    const row2 = timeline.find((t) => t.round === 2);
+    assert.equal(row2?.proposal, undefined, "contract-less rounds carry no proposal key");
   });
 });
 

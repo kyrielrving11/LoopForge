@@ -1,4 +1,4 @@
-import { deriveItemId, jaccardSimilarity } from "./token-utils.js";
+import { deriveItemId, entryRound, isRecord, jaccardSimilarity } from "./token-utils.js";
 import { getPolicy } from "./policy.js";
 // ── Criterion reference matching ──────────────────────────────────────────
 // Mirrors criteriaMatch (loop-compiler.ts) without importing loop-compiler
@@ -66,5 +66,58 @@ export function deriveActiveRoundContract(committed) {
         // is a premature replacement and is ignored.
     }
     return active;
+}
+// ── Raw-vault committed view (shared by verification, session views) ───────
+/** Committed :feedback evals of rounds earlier than `currentRound`, in
+ *  ascending round order — the input for the ACTIVE-contract walker over
+ *  raw vault entries. Reads snapshot.evaluation (the only committed copy of
+ *  round_contract / outcome / met claims; top-level feedback fields do not
+ *  carry the contract) and skips rounds whose committed action was
+ *  "backtrack" — a roll-back directive, not an executed round. An eval
+ *  under verification is not committed yet, so it structurally can never
+ *  participate. Shared by the verification gate and the status/session
+ *  views — every consumer derives from the same adapter + walker so a
+ *  second interpretation of the committed record can never exist. */
+export function committedContractRounds(vaultEntries, currentRound) {
+    const byRound = new Map();
+    for (const entry of vaultEntries) {
+        const tid = String(entry.task_id ?? "");
+        if (!tid.endsWith(":feedback"))
+            continue;
+        const rnd = entryRound(entry);
+        if (!(rnd >= 1 && rnd < currentRound))
+            continue;
+        const raw = entry;
+        const lineage = raw.loop_lineage;
+        if (!isRecord(lineage))
+            continue;
+        const tx = lineage.round_transaction;
+        if (!isRecord(tx))
+            continue;
+        const result = tx.result;
+        if (isRecord(result) && result.action === "backtrack")
+            continue;
+        const snapshot = tx.snapshot;
+        if (!isRecord(snapshot))
+            continue;
+        const evaluation = snapshot.evaluation;
+        if (!isRecord(evaluation))
+            continue;
+        const proposal = evaluation.round_contract;
+        const outcome = evaluation.outcome;
+        const ev = evaluation.execution_evidence;
+        const met = isRecord(ev) && Array.isArray(ev.success_criteria_met)
+            ? ev.success_criteria_met.filter((v) => typeof v === "string")
+            : [];
+        const isOutcome = outcome === "success" || outcome === "partial" ||
+            outcome === "failed" || outcome === "blocked";
+        byRound.set(rnd, {
+            round: rnd,
+            proposal: isRecord(proposal) ? proposal : null,
+            outcome: isOutcome ? outcome : null,
+            met,
+        });
+    }
+    return [...byRound.values()].sort((a, b) => a.round - b.round);
 }
 //# sourceMappingURL=round-contract.js.map

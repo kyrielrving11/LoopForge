@@ -364,3 +364,150 @@ describe("Long-Horizon Verification", () => {
     ].join("\n"));
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v3.5 — Round Contract arc through the real CLI (own loop, own store)
+//
+// declare → active → machine-backed completion → proposal transition →
+// premature success rejected (retry keeps the ACTIVE contract) → terminal
+// completion. machine_backed_success "required" + the passing "verify"
+// command make completion claims machine-backed on every round.
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("Long-Horizon — Round Contract arc (v3.5)", () => {
+  let client: McpClient;
+  let storeDir: string;
+  let sessionId: string;
+  let roundId: string;
+
+  const CONTRACT = (workItem: string, doneWhen: string): Record<string, unknown> => ({
+    work_item: workItem,
+    done_when: [doneWhen],
+    verification_plan: ["verify"],
+    scope: ["src"],
+  });
+  const A = CONTRACT("Implement arg parsing", "cr-parse-args");
+  const B = CONTRACT("Implement output formatting", "cr-format-out");
+
+  before(() => {
+    storeDir = join(tmpdir(), `loopforge-contract-${randomUUID()}`);
+    mkdirSync(storeDir, { recursive: true });
+    writeFileSync(join(storeDir, "loop_policy.json"), JSON.stringify({
+      evidence: {
+        providers: ["git"],
+        timeout_ms: 120000,
+        commands: [testCommandProvider()],
+        machine_backed_success: "required",
+      },
+    }));
+    client = new McpClient(storeDir);
+  });
+  after(() => { client.close(); try { rmSync(storeDir, { recursive: true }); } catch { /* ok */ } });
+
+  const evalRound = (overrides: Record<string, unknown>): Record<string, unknown> => ({
+    success: false,
+    should_continue: true,
+    constraint_violations: [],
+    output_summary: "Worked the round.",
+    execution_evidence: {
+      files_changed: ["src/cli.ts"],
+      test_results: { passed: 1, failed: 0, skipped: 0 },
+      success_criteria_met: [],
+      success_criteria_remaining: ["cr-parse-args"],
+      progress_estimate: 0.3,
+    },
+    ...overrides,
+  });
+
+  it("drives the full contract arc end-to-end", async () => {
+    // R1 — declare A.
+    const r1 = await client.tool("loopforge_start", {
+      task: "Build the strkit CLI module",
+      maxRounds: 8,
+      domain: "typescript",
+    });
+    assert.ok(!r1.error);
+    sessionId = String(r1.sessionId);
+    roundId = String(r1.roundId);
+    const r2p = await client.tool("loopforge_next", { sessionId, roundId, evaluation: evalRound({
+      output_summary: "Scaffolded; declared the parsing contract.",
+      round_contract: A,
+    }) });
+    assert.ok(!r2p.error);
+    assert.equal(String(r2p.round), "2");
+    assert.ok(String(r2p.prompt ?? "").includes("**Implement arg parsing**"),
+      "round 2 must execute under the ACTIVE contract A");
+    roundId = String(r2p.roundId);
+
+    // R2 — partial restate under A.
+    const r3p = await client.tool("loopforge_next", { sessionId, roundId, evaluation: evalRound({
+      round_contract: A,
+      execution_evidence: {
+        files_changed: ["src/cli.ts"],
+        test_results: { passed: 1, failed: 0, skipped: 0 },
+        success_criteria_met: [],
+        success_criteria_remaining: ["cr-parse-args"],
+        progress_estimate: 0.4,
+      },
+    }) });
+    assert.ok(!r3p.error);
+    roundId = String(r3p.roundId);
+
+    // R3 — complete A (machine-backed by the auto-run verify command) and
+    // propose B.
+    const r4p = await client.tool("loopforge_next", { sessionId, roundId, evaluation: evalRound({
+      round_contract: B,
+      execution_evidence: {
+        files_changed: ["src/cli.ts"],
+        test_results: { passed: 1, failed: 0, skipped: 0 },
+        success_criteria_met: ["cr-parse-args"],
+        success_criteria_remaining: [],
+        progress_estimate: 0.6,
+      },
+    }) });
+    assert.ok(!r4p.error);
+    assert.ok(!String(r4p.prompt ?? "").includes("contract_completion_unverified"),
+      "machine-backed completion must not be flagged");
+    assert.ok(String(r4p.prompt ?? "").includes("**Implement output formatting**"),
+      "B must become the ACTIVE contract");
+    assert.ok(!String(r4p.prompt ?? "").includes("**Implement arg parsing**"),
+      "A must be closed, not re-rendered");
+    roundId = String(r4p.roundId);
+
+    // R4 — premature success under B → rejected; the L0 retry keeps B.
+    const rejected = await client.tool("loopforge_next", { sessionId, roundId, evaluation: evalRound({
+      success: true,
+      should_continue: true,
+      execution_evidence: {
+        files_changed: ["src/cli.ts"],
+        test_results: { passed: 1, failed: 0, skipped: 0 },
+        success_criteria_met: [],
+        success_criteria_remaining: ["cr-format-out"],
+        progress_estimate: 0.7,
+      },
+    }) });
+    assert.ok(!rejected.error);
+    assert.equal(String(rejected.enforcementAction ?? ""), "reject");
+    assert.equal(String(rejected.level ?? "").toLowerCase(), "l0");
+    assert.ok(String(rejected.prompt ?? "").includes("**Implement output formatting**"),
+      "the retry must keep the ACTIVE contract as Current Task");
+    assert.ok(!String(rejected.prompt ?? "").includes("round_contract"),
+      "L0 retry stays template-lean");
+    roundId = String(rejected.roundId);
+
+    // R5 — complete B and end the loop.
+    const done = await client.tool("loopforge_next", { sessionId, roundId, evaluation: evalRound({
+      success: true,
+      should_continue: false,
+      execution_evidence: {
+        files_changed: ["src/cli.ts"],
+        test_results: { passed: 1, failed: 0, skipped: 0 },
+        success_criteria_met: ["cr-format-out"],
+        success_criteria_remaining: [],
+        progress_estimate: 1.0,
+      },
+    }) });
+    assert.ok(!done.error);
+    assert.equal(String(done.stopReason ?? ""), "completed");
+  });
+});

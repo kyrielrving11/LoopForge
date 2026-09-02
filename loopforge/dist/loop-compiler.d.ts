@@ -70,6 +70,12 @@ level?: "l0" | "l1" | "l2",
  *  `activeContract != null`). Only then does the template ask the agent
  *  to restate/propose it — a generic empty contract template would invite
  *  placeholder submissions that trigger round_underspecified noise. */
-hasContract?: boolean): string;
+hasContract?: boolean, 
+/** v3.5: L2-only prose suggesting a Round Contract declaration when the
+ *  Current Task is NOT one (contract_nudge_on_l2 policy, computed at the
+ *  compileLoop call site). Mutually exclusive with hasContract. The prose
+ *  must never contain the JSON key name `round_contract` — contract-less
+ *  L2 tests assert its lowercase absence. */
+proposalNudge?: boolean): string;
 export declare function compileLoop(request: LoopCompileRequest, context: Record<string, unknown> | null): LoopCompileResponse;
 //# sourceMappingURL=loop-compiler.d.ts.map

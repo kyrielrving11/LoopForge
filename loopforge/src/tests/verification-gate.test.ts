@@ -18,6 +18,8 @@ import {
   CHECK_ROUND_UNVERIFIABLE,
   CHECK_ROUND_SCOPE_DRIFT,
   CHECK_PREMATURE_BOUNDARY,
+  CHECK_CONTRACT_COMPLETION_UNVERIFIED,
+  CHECK_CONTRACT_PREMATURE,
   normalizeScopeEntry,
   isFileInScope,
   collectOutOfScopeFiles,
@@ -1610,87 +1612,91 @@ describe("v3.3 — hasNewCriteriaCompletion", () => {
 // v3.3 — Round Contract checks
 // ═══════════════════════════════════════════════════════════════════════════
 
+/** Default policy has empty evidence.commands → "run-tests" is NOT
+ *  configured, which is what the round_unverifiable tests rely on.
+ *  v3.5 caveat: any test that calls withRunTestsConfigured() NEAR a
+ *  completing eval must pass a passing snapshot whose commandName matches
+ *  the plan — otherwise contract_completion_unverified fires (that is the
+ *  check working, not a fixture accident). */
+const contract = (overrides: Partial<RoundContract> = {}): RoundContract => ({
+  work_item: "Implement auth",
+  done_when: ["criterion A"],
+  verification_plan: ["run-tests"],
+  scope: ["src/auth"],
+  ...overrides,
+});
+
+const withRunTestsConfigured = (): void => {
+  setPolicyForTest({
+    ...DEFAULT_POLICY,
+    evidence: {
+      ...DEFAULT_POLICY.evidence,
+      commands: [{
+        name: "run-tests", enabled: true, executable: "node", args: ["test"],
+        phase: "after", required: false, timeout_ms: 1000,
+        max_output_chars: 1000, success_exit_codes: [0],
+      }],
+    },
+  });
+};
+
+/** v3.4: A committed :feedback entry carrying a full round-transaction
+ *  evaluation — the vault shape the ACTIVE-contract derivation reads.
+ *  A contract passed here was PROPOSED at `round` and therefore becomes
+ *  the ACTIVE contract for round+1 (declaration-round met claims never
+ *  satisfy its own proposal). */
+function committedRound(
+  round: number,
+  opts: {
+    contract?: RoundContract;
+    outcome?: SelfEvaluation["outcome"];
+    met?: string[];
+    action?: string;
+  } = {},
+): VaultEntry {
+  return {
+    task_id: `loop:cc:r${round}:feedback`,
+    loop_id: "cc",
+    loop_lineage: {
+      round,
+      round_transaction: {
+        schema_version: 1,
+        round_id: `loop:cc:round:${round}`,
+        snapshot: {
+          schemaVersion: 1,
+          roundId: `loop:cc:round:${round}`,
+          loopId: "cc",
+          round,
+          attempt: 1,
+          phase: "committed",
+          beforeEvidence: [],
+          roundEvidence: [],
+          createdAt: 0,
+          updatedAt: 0,
+          evaluation: makeSelfEvaluation({
+            success: false,
+            output_summary: `Committed round ${round}.`,
+            constraint_violations: [],
+            should_continue: true,
+            outcome: opts.outcome,
+            round_contract: opts.contract,
+            execution_evidence: makeExecutionEvidence({
+              files_changed: [],
+              test_results: { passed: 0, failed: 0, skipped: 0 },
+              success_criteria_met: opts.met ?? [],
+              success_criteria_remaining: [],
+              progress_estimate: 0.2,
+            }),
+          }),
+        },
+        result: { action: opts.action ?? "continue" },
+      },
+    },
+  };
+}
+
 describe("Round Contract checks (v3.3 proposal declaration + v3.4 active split)", () => {
   afterEach(() => resetPolicy());
-
-  /** Default policy has empty evidence.commands → "run-tests" is NOT
-   *  configured, which is what the round_unverifiable tests rely on. */
-  const contract = (overrides: Partial<RoundContract> = {}): RoundContract => ({
-    work_item: "Implement auth",
-    done_when: ["criterion A"],
-    verification_plan: ["run-tests"],
-    scope: ["src/auth"],
-    ...overrides,
-  });
-
-  const withRunTestsConfigured = (): void => {
-    setPolicyForTest({
-      ...DEFAULT_POLICY,
-      evidence: {
-        ...DEFAULT_POLICY.evidence,
-        commands: [{
-          name: "run-tests", enabled: true, executable: "node", args: ["test"],
-          phase: "after", required: false, timeout_ms: 1000,
-          max_output_chars: 1000, success_exit_codes: [0],
-        }],
-      },
-    });
-  };
-
-  /** v3.4: A committed :feedback entry carrying a full round-transaction
-   *  evaluation — the vault shape the ACTIVE-contract derivation reads.
-   *  A contract passed here was PROPOSED at `round` and therefore becomes
-   *  the ACTIVE contract for round+1 (declaration-round met claims never
-   *  satisfy its own proposal). */
-  function committedRound(
-    round: number,
-    opts: {
-      contract?: RoundContract;
-      outcome?: SelfEvaluation["outcome"];
-      met?: string[];
-      action?: string;
-    } = {},
-  ): VaultEntry {
-    return {
-      task_id: `loop:cc:r${round}:feedback`,
-      loop_id: "cc",
-      loop_lineage: {
-        round,
-        round_transaction: {
-          schema_version: 1,
-          round_id: `loop:cc:round:${round}`,
-          snapshot: {
-            schemaVersion: 1,
-            roundId: `loop:cc:round:${round}`,
-            loopId: "cc",
-            round,
-            attempt: 1,
-            phase: "committed",
-            beforeEvidence: [],
-            roundEvidence: [],
-            createdAt: 0,
-            updatedAt: 0,
-            evaluation: makeSelfEvaluation({
-              success: false,
-              output_summary: `Committed round ${round}.`,
-              constraint_violations: [],
-              should_continue: true,
-              outcome: opts.outcome,
-              round_contract: opts.contract,
-              execution_evidence: makeExecutionEvidence({
-                files_changed: [],
-                test_results: { passed: 0, failed: 0, skipped: 0 },
-                success_criteria_met: opts.met ?? [],
-                success_criteria_remaining: [],
-                progress_estimate: 0.2,
-              }),
-            }),
-          },
-          result: { action: opts.action ?? "continue" },
-        },
-      },
-    };
-  }
 
   it("round_underspecified: contract with empty done_when → warn", () => {
     const result = verifySelfEvaluation(
@@ -1865,5 +1871,277 @@ describe("Round Contract checks (v3.3 proposal declaration + v3.4 active split)"
     assert.ok(!isFileInScope("src/other.ts", ["src/auth"]));
     assert.deepEqual(collectOutOfScopeFiles(
       ["src/auth/login.ts", "src/other.ts"], ["src/auth"]), ["src/other.ts"]);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v3.5 — contract_completion_unverified: closing a contract is a success-
+// class claim and must be machine-backed (verification side)
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("v3.5 — contract_completion_unverified", () => {
+  afterEach(() => resetPolicy());
+
+  /** Contract under test with a single plan command. */
+  const done = ["criterion A"];
+  const plan = ["run-tests"];
+  const withRunTests = (): void => {
+    setPolicyForTest({
+      ...DEFAULT_POLICY,
+      evidence: {
+        ...DEFAULT_POLICY.evidence,
+        commands: [{
+          name: "run-tests", enabled: true, executable: "node", args: ["test"],
+          phase: "after", required: false, timeout_ms: 1000,
+          max_output_chars: 1000, success_exit_codes: [0],
+        }],
+      },
+    });
+  };
+  /** The ACTIVE contract, declared at committed round 1. */
+  const active = [committedRound(1, {
+    contract: contract({ done_when: done, verification_plan: plan }),
+  })];
+
+  it("completion with the plan command passing is silent", () => {
+    withRunTests();
+    const result = verifySelfEvaluation(
+      se({ execution_evidence: makeExecutionEvidence({
+        files_changed: ["src/auth.ts"],
+        test_results: { passed: 1, failed: 0, skipped: 0 },
+        success_criteria_met: done,
+        success_criteria_remaining: [],
+        progress_estimate: 0.5,
+      }) }),
+      2, active, null, [cmdSnap("passed", { commandName: "run-tests" })],
+    );
+    assert.ok(!result.flags.some((f) => f.check === CHECK_CONTRACT_COMPLETION_UNVERIFIED));
+    assert.ok(!result.flags.some((f) => f.check === CHECK_PREMATURE_BOUNDARY));
+  });
+
+  it("completion with the plan command failed → error naming it", () => {
+    withRunTests();
+    const result = verifySelfEvaluation(
+      se({ execution_evidence: makeExecutionEvidence({
+        files_changed: ["src/auth.ts"],
+        test_results: { passed: 0, failed: 1, skipped: 0 },
+        success_criteria_met: done,
+        success_criteria_remaining: [],
+        progress_estimate: 0.5,
+      }) }),
+      2, active, null, [cmdSnap("failed", { commandName: "run-tests" })],
+    );
+    const flag = result.flags.find((f) => f.check === CHECK_CONTRACT_COMPLETION_UNVERIFIED);
+    assert.ok(flag, "completion without a passing plan command must be flagged");
+    assert.equal(flag!.severity, "error");
+    assert.match(flag!.detail, /run-tests/);
+  });
+
+  it("completion with no snapshot for the plan name → error", () => {
+    withRunTests();
+    const result = verifySelfEvaluation(
+      se({ execution_evidence: makeExecutionEvidence({
+        files_changed: ["src/auth.ts"],
+        test_results: { passed: 1, failed: 0, skipped: 0 },
+        success_criteria_met: done,
+        success_criteria_remaining: [],
+        progress_estimate: 0.5,
+      }) }),
+      // Wrapper default snapshot passes but is named "test" — not the plan.
+      2, active, null, [cmdSnap("passed")],
+    );
+    const flag = result.flags.find((f) => f.check === CHECK_CONTRACT_COMPLETION_UNVERIFIED);
+    assert.ok(flag);
+    assert.equal(flag!.severity, "error");
+    assert.match(flag!.detail, /run-tests/);
+  });
+
+  it("fires regardless of success — the closure itself is the claim", () => {
+    withRunTests();
+    const partial = verifySelfEvaluation(
+      se({ success: false, execution_evidence: makeExecutionEvidence({
+        files_changed: ["src/auth.ts"],
+        test_results: { passed: 1, failed: 0, skipped: 0 },
+        success_criteria_met: done,
+        success_criteria_remaining: [],
+        progress_estimate: 0.5,
+      }) }),
+      2, active, null, [cmdSnap("passed")], // not the plan name
+    );
+    const flag = partial.flags.find((f) => f.check === CHECK_CONTRACT_COMPLETION_UNVERIFIED);
+    assert.ok(flag, "success=false must not shield an unverified closure");
+  });
+
+  it("machine_backed_success \"warn\" downgrades to warn", () => {
+    withRunTests();
+    setPolicyForTest({
+      ...getPolicy(),
+      evidence: { ...getPolicy().evidence, machine_backed_success: "warn" },
+    });
+    const result = verifySelfEvaluation(
+      se({ execution_evidence: makeExecutionEvidence({
+        files_changed: ["src/auth.ts"],
+        test_results: { passed: 1, failed: 0, skipped: 0 },
+        success_criteria_met: done,
+        success_criteria_remaining: [],
+        progress_estimate: 0.5,
+      }) }),
+      2, active, null, [cmdSnap("passed")],
+    );
+    const flag = result.flags.find((f) => f.check === CHECK_CONTRACT_COMPLETION_UNVERIFIED);
+    assert.ok(flag);
+    assert.equal(flag!.severity, "warn");
+  });
+
+  it("partial met (not all done_when) is silent", () => {
+    withRunTests();
+    const result = verifySelfEvaluation(
+      se({ execution_evidence: makeExecutionEvidence({
+        files_changed: ["src/auth.ts"],
+        test_results: { passed: 1, failed: 0, skipped: 0 },
+        success_criteria_met: [],
+        success_criteria_remaining: done,
+        progress_estimate: 0.3,
+      }) }),
+      2, active, null, [cmdSnap("passed")],
+    );
+    assert.ok(!result.flags.some((f) => f.check === CHECK_CONTRACT_COMPLETION_UNVERIFIED));
+  });
+
+  it("empty verification_plan is silent (declaration already warned)", () => {
+    withRunTests();
+    const noPlan = [committedRound(1, {
+      contract: contract({ done_when: done, verification_plan: [] }),
+    })];
+    const result = verifySelfEvaluation(
+      se({ execution_evidence: makeExecutionEvidence({
+        files_changed: ["src/auth.ts"],
+        test_results: { passed: 1, failed: 0, skipped: 0 },
+        success_criteria_met: done,
+        success_criteria_remaining: [],
+        progress_estimate: 0.5,
+      }) }),
+      2, noPlan, null, [cmdSnap("passed")],
+    );
+    assert.ok(!result.flags.some((f) => f.check === CHECK_CONTRACT_COMPLETION_UNVERIFIED));
+  });
+
+  it("fail open: plan name no longer configured+enabled is not required", () => {
+    // Default policy has NO commands → run-tests is unconfigured → silent.
+    const result = verifySelfEvaluation(
+      se({ execution_evidence: makeExecutionEvidence({
+        files_changed: ["src/auth.ts"],
+        test_results: { passed: 1, failed: 0, skipped: 0 },
+        success_criteria_met: done,
+        success_criteria_remaining: [],
+        progress_estimate: 0.5,
+      }) }),
+      2, active, null, [cmdSnap("passed")],
+    );
+    assert.ok(!result.flags.some((f) => f.check === CHECK_CONTRACT_COMPLETION_UNVERIFIED),
+      "cannot observe → not required");
+  });
+
+  it("success=true with zero evidence fires BOTH premature_boundary and completion flags", () => {
+    withRunTests();
+    const result = verifySelfEvaluation(
+      se({ execution_evidence: makeExecutionEvidence({
+        files_changed: ["src/auth.ts"],
+        test_results: { passed: 1, failed: 0, skipped: 0 },
+        success_criteria_met: done,
+        success_criteria_remaining: [],
+        progress_estimate: 0.9,
+      }) }),
+      2, active, null, [],
+    );
+    const completion = result.flags.find((f) => f.check === CHECK_CONTRACT_COMPLETION_UNVERIFIED);
+    const boundary = result.flags.find((f) => f.check === CHECK_PREMATURE_BOUNDARY);
+    assert.ok(completion, "completion flag must fire");
+    assert.equal(completion!.severity, "error");
+    assert.ok(boundary, "premature_boundary must also fire (round-uniform model)");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v3.5 — contract_premature: a different proposal while the ACTIVE contract
+// is open is surfaced (warn) — never silent, never rejecting
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("v3.5 — contract_premature warn", () => {
+  afterEach(() => resetPolicy());
+
+  const done = ["criterion A"];
+  const other = contract({ work_item: "Next slice", done_when: ["criterion B"], scope: ["src/other"] });
+  /** The ACTIVE contract, declared at committed round 1. */
+  const active = [committedRound(1, { contract: contract({ done_when: done }) })];
+
+  /** Eval that keeps the active contract open (nothing met, success=false). */
+  const openEval = (proposal?: RoundContract): SelfEvaluation => se({
+    success: false,
+    execution_evidence: makeExecutionEvidence({
+      files_changed: ["src/auth.ts"],
+      test_results: { passed: 1, failed: 0, skipped: 0 },
+      success_criteria_met: [],
+      success_criteria_remaining: done,
+      progress_estimate: 0.3,
+    }),
+    ...(proposal ? { round_contract: proposal } : {}),
+  });
+
+  it("different proposal while open → warn", () => {
+    const result = verifySelfEvaluation(openEval(other), 2, active);
+    const flag = result.flags.find((f) => f.check === CHECK_CONTRACT_PREMATURE);
+    assert.ok(flag, "premature replacement must be surfaced");
+    assert.equal(flag!.severity, "warn");
+    assert.match(flag!.detail, /ignored until the active contract is completed or blocked/);
+  });
+
+  it("identical restate is silent", () => {
+    const result = verifySelfEvaluation(
+      openEval(contract({ done_when: done, verification_plan: ["run-tests"], scope: ["src/auth"] })),
+      2, active,
+    );
+    assert.ok(!result.flags.some((f) => f.check === CHECK_CONTRACT_PREMATURE));
+  });
+
+  it("completion round proposing a different contract is silent (closure first)", () => {
+    const result = verifySelfEvaluation(se({
+      execution_evidence: makeExecutionEvidence({
+        files_changed: ["src/auth.ts"],
+        test_results: { passed: 1, failed: 0, skipped: 0 },
+        success_criteria_met: done,
+        success_criteria_remaining: [],
+        progress_estimate: 0.6,
+      }),
+      round_contract: other,
+    }), 2, active);
+    assert.ok(!result.flags.some((f) => f.check === CHECK_CONTRACT_PREMATURE),
+      "completing the active contract first makes the new proposal legitimate");
+  });
+
+  it("outcome=blocked with a different proposal is silent", () => {
+    const result = verifySelfEvaluation(se({
+      success: false,
+      outcome: "blocked",
+      blocker: "third-party dependency broken",
+      execution_evidence: makeExecutionEvidence({
+        files_changed: [],
+        test_results: { passed: 0, failed: 0, skipped: 0 },
+        success_criteria_met: [],
+        success_criteria_remaining: done,
+        progress_estimate: 0.3,
+      }),
+      round_contract: other,
+    }), 2, active);
+    assert.ok(!result.flags.some((f) => f.check === CHECK_CONTRACT_PREMATURE),
+      "blocking the active contract legitimizes the revision");
+  });
+
+  it("no proposal and no active contract are silent", () => {
+    const noProposal = verifySelfEvaluation(openEval(), 2, active);
+    assert.ok(!noProposal.flags.some((f) => f.check === CHECK_CONTRACT_PREMATURE));
+    const noActive = verifySelfEvaluation(openEval(other), 2, []);
+    assert.ok(!noActive.flags.some((f) => f.check === CHECK_CONTRACT_PREMATURE),
+      "round 1 declaring a proposal is a declaration, not a replacement");
   });
 });

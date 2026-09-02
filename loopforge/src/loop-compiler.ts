@@ -1403,6 +1403,12 @@ export function buildSelfEvalBlock(
    *  to restate/propose it — a generic empty contract template would invite
    *  placeholder submissions that trigger round_underspecified noise. */
   hasContract = false,
+  /** v3.5: L2-only prose suggesting a Round Contract declaration when the
+   *  Current Task is NOT one (contract_nudge_on_l2 policy, computed at the
+   *  compileLoop call site). Mutually exclusive with hasContract. The prose
+   *  must never contain the JSON key name `round_contract` — contract-less
+   *  L2 tests assert its lowercase absence. */
+  proposalNudge = false,
 ): string {
   const hasIntentDrift = prevDriftFlags?.some(f => f.check === "intent_drift") ?? false;
   const hasSubGoalDrift = prevDriftFlags?.some(f => f.check === "subgoal_drift") ?? false;
@@ -1492,6 +1498,17 @@ export function buildSelfEvalBlock(
   lines.push("Set success=true only when the full goal and ALL hard constraints are verified.");
   lines.push("Use IDs for exact matching: c-XXXXXXXX, cr-XXXXXXXX, sg-XXXXXXXX.");
   lines.push("For subtasks, use sub-goal IDs from the Sub-Goal Dashboard above.");
+  // v3.5: L2 contract-less nudge (prose only — never the JSON key name, so
+  // contract-less rounds keep their template-lean assertions).
+  if (proposalNudge) {
+    lines.push(
+      "",
+      "If the remaining work will span several rounds, consider declaring a",
+      "Round Contract for the next round — list its done_when items, the",
+      "verification_plan commands that will back them, and the scope. This",
+      "keeps each round's boundary machine-checkable.",
+    );
+  }
   if (restateContract) {
     lines.push(
       "Round Contract: restate the Current Task's contract UNCHANGED in",
@@ -1656,6 +1673,10 @@ export function compileLoop(
       // the ACTIVE contract (derived — not the previous submission's field,
       // which is a proposal and may differ from what this round executes).
       activeContract != null,
+      // v3.5: L2-only declaration nudge when nothing is active (policy-gated;
+      // mutually exclusive with the restate template above).
+      decision.level === "l2" && activeContract === null &&
+        getPolicy().prompt.contract_nudge_on_l2,
     ),
     fullStateMarkdown: l2Pointer ? undefined : markdown,
     // v2.9: Model's information needs from the previous round's SelfEvaluation

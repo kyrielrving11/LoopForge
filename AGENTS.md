@@ -16,8 +16,8 @@ Long-horizon agent tasks face three mutually-reinforcing failure modes:
 2. **Self-correction failure** — models cannot reliably improve themselves
    through introspection (Google DeepMind). Effective recovery requires an
    external verifier that never shares the agent's context. LoopForge provides
-   this via the verification gate (26 evidence cross-checks) and enforcement
-   gate (13 cognitive-integrity rules).
+   this via the verification gate (28 evidence cross-checks) and enforcement
+   gate (14 cognitive-integrity rules).
 
 3. **Compound error (p^N)** — each step's error becomes the next step's input.
    LoopForge partially addresses this via backtrack (v2.10: roll back to last
@@ -34,7 +34,7 @@ cannot provide for itself.
 - TypeScript only.
 - Node.js 18 or newer.
 - Zero runtime dependencies.
-- The npm package is in `loopforge/` and is currently `3.4.0`.
+- The npm package is in `loopforge/` and is currently `3.5.0`.
 - Preserve user changes in a dirty worktree.
 - Edit `src/protocol.ts`, then run the build to regenerate
   `loopforge-protocol.json`.
@@ -82,19 +82,29 @@ LoopForge/src/
                         (v3.4: ACTIVE Round Contract derived from committed
                         rounds — drives the Current Task and the L1/L2
                         restatement template on every compile path)
+                        (v3.5: L2 contract declaration nudge —
+                        prompt.contract_nudge_on_l2, default true)
   engine.ts             Engine state, feedback, and lineage projection
   round-driver.ts       Shared Runtime and MCP round preparation/completion
   round-transaction.ts  Stable round ID, attempts, evidence, commit recovery
+  round-contract.ts     v3.4: ACTIVE Round Contract derivation (proposal vs
+                        active walker, shared item matcher); v3.5: shared
+                        committedContractRounds raw-vault adapter — one
+                        adapter + one walker serve the gate, session views,
+                        and replay (view parity is test-locked)
   round-coordinator.ts  Verify, enforce, backtrack, and stop decision pipeline
                         (v2.10: backtrack action — roll back to last clean round)
-  verification-gate.ts  Cross-round and evidence consistency checks (26 checks)
+  verification-gate.ts  Cross-round and evidence consistency checks (28 checks)
                         (v2.2: subgoal_drift; v2.10: safe restore point detection)
                         (v2.12: claim provenance + backtrack git HEAD)
                         (v3.3: verification-domain integrity — entrypoint
                         tampering / test-file changes; Round Contract checks —
                         underspecified / unverifiable / scope drift /
                         premature boundary; R4/R5 exculpatory cross-check)
-  enforcement-gate.ts   Accept, reject, backtrack, or terminate rules (13 rules)
+                        (v3.5: contract_completion_unverified — closing a
+                        contract is a success-class claim; contract_premature
+                        warn — premature replacement is no longer silent)
+  enforcement-gate.ts   Accept, reject, backtrack, or terminate rules (14 rules)
                         (v2.14: R-EVID — required command failure /
                         self-contradictory claims reject before commit)
                         (v2.10: R4/R5 escalate to backtrack instead of terminate)
@@ -104,6 +114,9 @@ LoopForge/src/
                         (v3.3: R-C1 premature boundary — contract done_when
                         claimed without machine evidence; R-C2 scope drift —
                         out-of-scope git changes with clarification exemption)
+                        (v3.5: contract completion rule outranks R-C1;
+                        backtrack header names the blocked+revision channel
+                        for a stalled restored contract)
   evidence-claims.ts    v2.12: Derived claim provenance (verified/claimed/contradicted)
   cognitive-governance.ts v2.12: User/Agent gate classification + audit order
   loop-projection.ts    v2.12: Typed cognitive state projection (focus/todo/phase/…)
@@ -227,7 +240,8 @@ protocol.ts additions:
   closing eval's own proposal (if any) becomes active; with none the
   Current Task reverts to the original task text. A different proposal
   declared while the active contract is NOT closed is ignored (premature
-  replacement — no warning flag in v3.4; the durable work item wins). The
+  replacement — silent in v3.4, surfaced as a contract_premature warn in
+  v3.5; the durable work item wins either way). The
   declaration round's own met claims never satisfy its own proposal. The
   derivation (round-contract.ts) is pure over committed evals — rejected
   and in-flight submissions never participate.
@@ -259,6 +273,39 @@ protocol.ts additions:
   be read as a contract source again: the field's only truth lives in the
   committed snapshot's `evaluation`, and the derivation is its single
   consumer.
+- v3.5: **closing a Round Contract is a success-class claim and must be
+  machine-backed.** When a submission's met claims satisfy every done_when
+  of the ACTIVE contract whose verification_plan is non-empty,
+  `contract_completion_unverified` fires (error; warn under
+  `evidence.machine_backed_success: "warn"`) unless EVERY plan command name
+  was observed passing (after-phase command snapshot, untampered) in the
+  same round — regardless of the success flag. `no_change_reason` never
+  downgrades it: all done_when met contradicts "no change". Plan names no
+  longer configured+enabled are not required (fail open — cannot observe).
+  The enforcement rule rejects on the first occurrence and terminates on
+  the second consecutive (R-C1-style ladder) and is registered before R-C1.
+  The check observes that the commands ran, not what they verified — R-C1's
+  round-uniform claim model remains the content bound.
+- v3.5: a different contract proposed while the ACTIVE contract is open is
+  no longer silent — `contract_premature` (warn) fires when the eval
+  neither completes (all done_when met) nor blocks the ACTIVE contract yet
+  proposes a different one (equality is key-order-insensitive and
+  normalized through parseRoundContract on both sides). The walker still
+  ignores the premature proposal — the warn only surfaces the ignored
+  state. Completion and blocked rounds never warn (closure is checked
+  first, mirroring the walker's branch order).
+- v3.5: L2 contract-less prompts append a short suggestion to declare a
+  Round Contract for the next round when remaining work spans several
+  rounds. The prose is L2-only, never contains the JSON key name, and
+  L0/L1 prompts stay byte-identical to v3.4; L2 contract-less prompt
+  hashes intentionally change. Kill switch: `prompt.contract_nudge_on_l2`
+  (default true).
+- v3.5: after a backtrack, a restored Current Task that is a stalled Round
+  Contract is closed by declaring `outcome="blocked"` + blocker and
+  proposing the revised contract in the same submission (the walker
+  activates it next round); the backtrack header and the L2 eval template
+  both instruct this, and silently restating the stalled contract is
+  forbidden.
 - v3.2.1: a committed backtrack decision is a roll-back directive, not the
   round's outcome — the advance path's idempotency replay skips it, so the
   redo submission (same roundId) is evaluated, not replayed; crash recovery

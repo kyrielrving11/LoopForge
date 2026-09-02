@@ -16,7 +16,7 @@ import {
   makeLoopObjective,
   makeLoopRoundResult,
 } from "../protocol.js";
-import { getPolicy, resetPolicy } from "../policy.js";
+import { getPolicy, resetPolicy, setPolicyForTest, DEFAULT_POLICY } from "../policy.js";
 import { deriveItemId } from "../token-utils.js";
 
 describe("cognitive-state compiler", () => {
@@ -2093,5 +2093,201 @@ describe("Auto safety-net milestone — milestone-less loops (v3.3.1)", () => {
     const milestones = response.rolling_summary?.milestones ?? [];
     assert.equal(milestones.filter((m) => m.kind === "auto").length, 0,
       "gap 2 < interval 3 must not fire the net yet");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v3.5 — L2 contract declaration nudge + post-backtrack revision fixtures
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("v3.5 — L2 contract declaration nudge", () => {
+  beforeEach(() => resetPolicy());
+
+  const NUDGE = "consider declaring a";
+
+  it("appends nudge prose on an L2 contract-less block — without the JSON key name", () => {
+    const block = buildSelfEvalBlock(4, [], "l2", false, true);
+    assert.ok(block.includes(NUDGE), "nudge must be present");
+    assert.ok(block.includes("Round Contract"));
+    assert.ok(!block.includes("round_contract"),
+      "the prose must never contain the JSON key name (contract-less L2 tests rely on it)");
+  });
+
+  it("is off by default (no proposalNudge flag)", () => {
+    assert.ok(!buildSelfEvalBlock(4, [], "l2", false).includes(NUDGE));
+  });
+
+  it("never appears on L0/L1 compiles (the L2 gating lives at the call site)", () => {
+    // Round 3 with two contract-less committed rounds — force_level applies
+    // outside the round-1 first_round decision (which is always L2).
+    const ctx = {
+      results: [
+        {
+          loop_id: "nudge-loop",
+          task_id: "nudge-loop:r1",
+          task_type: "loop_lineage",
+          loop_lineage: { loop_id: "nudge-loop", round: 1, committed_action: "continue" },
+          execution_evidence: { files_changed: [], success_criteria_met: [] },
+        },
+        {
+          loop_id: "nudge-loop",
+          task_id: "nudge-loop:r2",
+          task_type: "loop_lineage",
+          loop_lineage: { loop_id: "nudge-loop", round: 2, committed_action: "continue" },
+          execution_evidence: { files_changed: [], success_criteria_met: [] },
+        },
+      ],
+      global_entries: [],
+    };
+    const mk = (level: "l0" | "l1" | "l2") => compileLoop(makeLoopCompileRequest({
+      loop_id: "nudge-loop",
+      round: 3,
+      task: "Plain one-round task",
+      force_level: level,
+    }), ctx as never);
+    assert.ok(!mk("l0").prompt.includes(NUDGE), "L0 stays lean");
+    assert.ok(!mk("l1").prompt.includes(NUDGE), "nudge is L2-only");
+    assert.ok(mk("l2").prompt.includes(NUDGE));
+  });
+
+  it("compileLoop nudges L2 contract-less compiles (policy default on)", () => {
+    const res = compileLoop(makeLoopCompileRequest({
+      loop_id: "nudge-loop",
+      round: 1,
+      task: "Plain one-round task",
+      force_level: "l2",
+    }), null);
+    assert.ok(res.prompt.includes(NUDGE));
+  });
+
+  it("does not nudge when an ACTIVE contract is the Current Task", () => {
+    const res = compileLoop(makeLoopCompileRequest({
+      loop_id: "nudge-loop",
+      round: 2,
+      task: "Plain one-round task",
+      force_level: "l2",
+    }), {
+      results: [{
+        loop_id: "nudge-loop",
+        task_id: "nudge-loop:r1",
+        task_type: "loop_lineage",
+        loop_lineage: {
+          loop_id: "nudge-loop",
+          round: 1,
+          committed_action: "continue",
+        },
+        round_contract: {
+          work_item: "Slice A",
+          done_when: ["cr-a-1"],
+          verification_plan: ["verify"],
+          scope: ["src/a"],
+        },
+        execution_evidence: { files_changed: [], success_criteria_met: [] },
+      }],
+      global_entries: [],
+    } as never);
+    assert.ok(res.prompt.includes("**Slice A**"), "active contract renders");
+    assert.ok(!res.prompt.includes(NUDGE), "no nudge when a contract is active");
+  });
+
+  it("kill switch: contract_nudge_on_l2=false restores pre-v3.5 L2 rendering", () => {
+    setPolicyForTest({
+      ...DEFAULT_POLICY,
+      prompt: { ...DEFAULT_POLICY.prompt, contract_nudge_on_l2: false },
+    });
+    const res = compileLoop(makeLoopCompileRequest({
+      loop_id: "nudge-loop",
+      round: 1,
+      task: "Plain one-round task",
+      force_level: "l2",
+    }), null);
+    assert.ok(!res.prompt.includes(NUDGE));
+  });
+});
+
+describe("v3.5 — post-backtrack contract revision (compile side)", () => {
+  /** Merged production-shape lineage entry (see the v3.4 derivation
+   *  describe above for the full pattern). */
+  const merged = (
+    round: number,
+    o: {
+      contract?: { work_item: string; done_when: string[]; verification_plan: string[]; scope: string[] };
+      outcome?: string;
+      met?: string[];
+      action?: string;
+    } = {},
+  ): Record<string, unknown> => {
+    const body: Record<string, unknown> = {
+      loop_id: "redo-cc",
+      task_id: `redo-cc:r${round}`,
+      task_type: "loop_lineage",
+      loop_lineage: {
+        loop_id: "redo-cc",
+        round,
+        committed_action: o.action ?? "continue",
+      },
+      execution_evidence: { files_changed: [], success_criteria_met: o.met ?? [] },
+    };
+    if (o.contract) {
+      (body.loop_lineage as Record<string, unknown>).round_contract = o.contract;
+      (body.loop_lineage as Record<string, unknown>).outcome = o.outcome;
+      body.round_contract = o.contract;
+      body.outcome = o.outcome;
+    }
+    return body;
+  };
+  const A = {
+    work_item: "Stalled slice",
+    done_when: ["cr-a-1"],
+    verification_plan: ["verify"],
+    scope: ["src/a"],
+  };
+  const B = {
+    work_item: "Revised slice",
+    done_when: ["cr-b-1"],
+    verification_plan: ["verify"],
+    scope: ["src/b"],
+  };
+
+  it("a blocked redo eval after backtrack rounds activates the revised contract", () => {
+    // r1: A declared (restore point) · r2/r3: committed backtrack rounds
+    // (skipped — their proposals must not leak) · r4: redo eval closes A with
+    // outcome=blocked and proposes B → round 5's Current Task is B.
+    const res = compileLoop(makeLoopCompileRequest({
+      loop_id: "redo-cc",
+      round: 5,
+      task: "Whole task",
+      force_level: "l2",
+    }), {
+      results: [
+        merged(1, { contract: A }),
+        merged(2, { action: "backtrack", contract: A }),
+        merged(3, { action: "backtrack", contract: A }),
+        merged(4, { outcome: "blocked", contract: B }),
+      ],
+      global_entries: [],
+    } as never);
+    assert.ok(res.prompt.includes("**Revised slice**"),
+      "the revised contract must become the Current Task");
+    assert.ok(!res.prompt.includes("**Stalled slice**"),
+      "the stalled contract must be closed, not re-rendered");
+  });
+
+  it("mid-redo (before the redo eval commits) the restore-point contract still renders", () => {
+    const res = compileLoop(makeLoopCompileRequest({
+      loop_id: "redo-cc",
+      round: 4, // the redo round — nothing committed at/after r4 yet
+      task: "Whole task",
+      force_level: "l2",
+    }), {
+      results: [
+        merged(1, { contract: A }),
+        merged(2, { action: "backtrack", contract: A }),
+        merged(3, { action: "backtrack", contract: A }),
+      ],
+      global_entries: [],
+    } as never);
+    assert.ok(res.prompt.includes("**Stalled slice**"),
+      "until the redo commits, the restore point's active contract governs");
   });
 });

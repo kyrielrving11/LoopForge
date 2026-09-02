@@ -8,7 +8,9 @@
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import type { RoundContract } from "../protocol.js";
+import type { VaultEntry } from "../loop-store.js";
 import {
+  committedContractRounds,
   contractItemMatches,
   contractDoneWhenSatisfied,
   deriveActiveRoundContract,
@@ -239,5 +241,285 @@ describe("deriveActiveRoundContract", () => {
     ];
     const active = deriveActiveRoundContract(history);
     assert.equal(active?.work_item, "Item A");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// committedContractRounds — raw :feedback vault adapter
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("committedContractRounds (raw :feedback view)", () => {
+  /** Raw committed :feedback entry — the shape on disk (snapshot.evaluation
+   *  is the only committed copy of round_contract/outcome/met claims). */
+  function feedbackRound(
+    round: number,
+    opts: {
+      contract?: RoundContract;
+      outcome?: CommittedRoundEvaluation["outcome"];
+      met?: string[];
+      action?: string;
+    } = {},
+  ): VaultEntry {
+    return {
+      task_id: `loop:adv:r${round}:feedback`,
+      loop_id: "adv",
+      loop_lineage: {
+        round,
+        round_transaction: {
+          schema_version: 1,
+          round_id: `loop:adv:round:${round}`,
+          snapshot: {
+            schemaVersion: 1,
+            roundId: `loop:adv:round:${round}`,
+            loopId: "adv",
+            round,
+            attempt: 1,
+            phase: "committed",
+            beforeEvidence: [],
+            roundEvidence: [],
+            createdAt: 0,
+            updatedAt: 0,
+            evaluation: {
+              success: false,
+              output_summary: `Round ${round}`,
+              constraint_violations: [],
+              should_continue: true,
+              outcome: opts.outcome ?? undefined,
+              round_contract: opts.contract,
+              execution_evidence: {
+                files_changed: [],
+                test_results: null,
+                success_criteria_met: opts.met ?? [],
+                success_criteria_remaining: [],
+                progress_estimate: 0.2,
+              },
+            },
+          },
+          result: { action: opts.action ?? "continue" },
+        },
+      },
+    };
+  }
+
+  it("parses committed evals into walker records, ascending by round", () => {
+    const records = committedContractRounds(
+      [
+        feedbackRound(2, { met: [] }),
+        feedbackRound(1, { contract: contract({ work_item: "Item A" }) }),
+      ],
+      3,
+    );
+    assert.deepEqual(records.map((r) => r.round), [1, 2]);
+    assert.equal(records[0]!.proposal?.work_item, "Item A");
+    assert.equal(records[1]!.proposal, null);
+  });
+
+  it("excludes non-:feedback ids and rounds at/above currentRound", () => {
+    const records = committedContractRounds(
+      [
+        { task_id: "loop:adv:r1", loop_lineage: { round: 1 } }, // lineage, not feedback
+        feedbackRound(1, {}),
+        feedbackRound(2, {}), // == currentRound → excluded
+      ],
+      2,
+    );
+    assert.deepEqual(records.map((r) => r.round), [1]);
+  });
+
+  it("skips rounds whose committed action was backtrack", () => {
+    const records = committedContractRounds(
+      [
+        feedbackRound(1, { contract: contract({ work_item: "Item A" }) }),
+        feedbackRound(2, { action: "backtrack", contract: contract({ work_item: "POISON" }) }),
+      ],
+      4,
+    );
+    assert.deepEqual(records.map((r) => r.round), [1]);
+  });
+
+  it("dedupes repeated entries for one round — last wins", () => {
+    const records = committedContractRounds(
+      [
+        feedbackRound(1, { contract: contract({ work_item: "First" }) }),
+        feedbackRound(1, { contract: contract({ work_item: "Last" }) }),
+      ],
+      2,
+    );
+    assert.equal(records.length, 1);
+    assert.equal(records[0]!.proposal?.work_item, "Last");
+  });
+
+  it("reads outcome and met claims from the committed evaluation", () => {
+    const records = committedContractRounds(
+      [feedbackRound(1, { outcome: "blocked", met: ["done"], contract: contract() })],
+      2,
+    );
+    assert.equal(records[0]!.outcome, "blocked");
+    assert.deepEqual(records[0]!.met, ["done"]);
+    assert.ok(records[0]!.proposal, "proposal must survive");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// View parity — raw :feedback view and merged lineage view must derive the
+// same ACTIVE contract from the same committed history. The engine merges
+// committed evals onto lineage entries (EVAL_MERGED_LINEAGE_FIELDS); if a
+// future engine change adds a field to feedback without merging it, the two
+// sides would silently diverge (Current Task shows A while the checks run
+// against B). This test locks the parity.
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("view parity — raw feedback and merged lineage derive the same active contract", () => {
+  const A = contract({ work_item: "Item A", done_when: [A_DONE_1, A_DONE_2] });
+  const C = contract({ work_item: "Item C", done_when: [idOf("Item C done")] });
+  const POISON = contract({ work_item: "POISON", done_when: [idOf("poison done")] });
+
+  /** Raw committed :feedback twin for the parity history. */
+  function feedbackRaw(
+    round: number,
+    opts: {
+      contract?: RoundContract;
+      outcome?: CommittedRoundEvaluation["outcome"];
+      met?: string[];
+      action?: string;
+    } = {},
+  ): VaultEntry {
+    return {
+      task_id: `loop:adv:r${round}:feedback`,
+      loop_id: "adv",
+      loop_lineage: {
+        round,
+        round_transaction: {
+          schema_version: 1,
+          round_id: `loop:adv:round:${round}`,
+          snapshot: {
+            schemaVersion: 1,
+            roundId: `loop:adv:round:${round}`,
+            loopId: "adv",
+            round,
+            attempt: 1,
+            phase: "committed",
+            beforeEvidence: [],
+            roundEvidence: [],
+            createdAt: 0,
+            updatedAt: 0,
+            evaluation: {
+              success: false,
+              output_summary: `Round ${round}`,
+              constraint_violations: [],
+              should_continue: true,
+              outcome: opts.outcome ?? undefined,
+              round_contract: opts.contract,
+              execution_evidence: {
+                files_changed: [],
+                test_results: null,
+                success_criteria_met: opts.met ?? [],
+                success_criteria_remaining: [],
+                progress_estimate: 0.2,
+              },
+            },
+          },
+          result: { action: opts.action ?? "continue" },
+        },
+      },
+    };
+  }
+
+  /** Merged production-shape lineage entry — mirrors engine hydration output
+   *  (fields top-level AND in loop_lineage, committed_action set, task_type
+   *  loop_lineage, non-:feedback task_id). */
+  function mergedRound(
+    round: number,
+    opts: {
+      contract?: RoundContract;
+      outcome?: CommittedRoundEvaluation["outcome"];
+      met?: string[];
+      action?: string;
+    },
+  ): Record<string, unknown> {
+    const lin: Record<string, unknown> = {
+      loop_id: "adv",
+      round,
+      committed_action: opts.action ?? "continue",
+      execution_evidence: { files_changed: [], success_criteria_met: opts.met ?? [] },
+    };
+    const body: Record<string, unknown> = {
+      loop_id: "adv",
+      task_id: `loop:adv:r${round}`,
+      task_type: "loop_lineage",
+      execution_evidence: { files_changed: [], success_criteria_met: opts.met ?? [] },
+    };
+    if (opts.contract) {
+      lin.round_contract = opts.contract;
+      lin.outcome = opts.outcome;
+      body.round_contract = opts.contract;
+      body.outcome = opts.outcome;
+    }
+    body.loop_lineage = lin;
+    return body;
+  }
+
+  /** Compile-side record extraction — mirrors loop-compiler.deriveActiveContract:
+   *  committed_action gate, backtrack skip, top-level-first then lineage. */
+  function mergedViewRecords(entries: Record<string, unknown>[]): CommittedRoundEvaluation[] {
+    const records: CommittedRoundEvaluation[] = [];
+    for (const entry of entries) {
+      const lin = (entry.loop_lineage ?? {}) as Record<string, unknown>;
+      const action = lin.committed_action;
+      if (typeof action !== "string" || action.length === 0) continue;
+      if (action === "backtrack") continue;
+      const rnd = typeof lin.round === "number" ? lin.round : 0;
+      const contract = entry.round_contract ?? lin.round_contract;
+      const outcome = entry.outcome ?? lin.outcome;
+      const ev = (entry.execution_evidence ?? lin.execution_evidence) as
+        | { success_criteria_met?: unknown }
+        | undefined;
+      const met = Array.isArray(ev?.success_criteria_met)
+        ? (ev!.success_criteria_met as unknown[]).filter((v): v is string => typeof v === "string")
+        : [];
+      const isOutcome =
+        outcome === "success" || outcome === "partial" ||
+        outcome === "failed" || outcome === "blocked";
+      records.push({
+        round: rnd,
+        proposal: contract && typeof contract === "object" && !Array.isArray(contract)
+          ? contract as RoundContract
+          : null,
+        outcome: isOutcome ? outcome : null,
+        met,
+      });
+    }
+    return records;
+  }
+
+  it("walks an identical history through both views to the same active contract", () => {
+    // r1: declare A · r2: partial restate · r3: committed backtrack carrying a
+    // POISON proposal (must be skipped by both views) · r4: blocked closes A,
+    // proposes C → active = C.
+    const raw: VaultEntry[] = [
+      feedbackRaw(1, { contract: A }),
+      feedbackRaw(2, { contract: A, met: [A_DONE_1] }),
+      feedbackRaw(3, { action: "backtrack", contract: POISON }),
+      feedbackRaw(4, { outcome: "blocked", contract: C }),
+    ];
+    const merged = [
+      mergedRound(1, { contract: A }),
+      mergedRound(2, { contract: A, met: [A_DONE_1] }),
+      mergedRound(3, { action: "backtrack", contract: POISON }),
+      mergedRound(4, { outcome: "blocked", contract: C }),
+    ];
+    const rawRecords = committedContractRounds(raw, 5);
+    const mergedRecords = mergedViewRecords(merged);
+    assert.deepEqual(
+      mergedRecords.map((r) => [r.round, r.proposal?.work_item ?? null, r.outcome]),
+      rawRecords.map((r) => [r.round, r.proposal?.work_item ?? null, r.outcome]),
+      "both views must extract the same committed history",
+    );
+    const fromRaw = deriveActiveRoundContract(rawRecords);
+    const fromMerged = deriveActiveRoundContract(mergedRecords);
+    assert.equal(fromMerged?.work_item, "Item C");
+    assert.equal(fromRaw?.work_item, fromMerged?.work_item,
+      "views must agree on the ACTIVE contract — a silent divergence would render A while checks run against B");
+    assert.equal(JSON.stringify(fromRaw), JSON.stringify(fromMerged));
   });
 });

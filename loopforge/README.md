@@ -2,7 +2,7 @@
 
 **A context window is not memory. Memory needs a runtime.**
 
-> **v3.3.0** — `npm install -g loopforge`. Node.js ≥ 18. Zero runtime dependencies.
+> **v3.5.0** — `npm install -g loopforge`. Node.js ≥ 18. Zero runtime dependencies.
 > [中文文档](../README.zh-CN.md)
 
 ---
@@ -97,7 +97,7 @@ available as a library for custom integrations.
 │               LoopForge round boundary                │
 │                                                       │
 │  Evidence → Verify → Enforce → Commit → Compile       │
-│  (Git/cmd) (26 checks) (13 rules) (vault) (next)    │
+│  (Git/cmd) (28 checks) (14 rules) (vault) (next)    │
 │                                                       │
 │  accept:  commit state, compile next round             │
 │  reject:  retry same round, zero state mutation        │

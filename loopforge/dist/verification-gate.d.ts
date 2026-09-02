@@ -63,6 +63,19 @@ export declare const CHECK_ROUND_SCOPE_DRIFT = "round_scope_drift";
  *  either claimed met without machine-verified evidence or silently dropped
  *  (not in success_criteria_met NOR success_criteria_remaining). Error. */
 export declare const CHECK_PREMATURE_BOUNDARY = "premature_boundary";
+/** v3.5: Closing a Round Contract is a success-class claim and must be
+ *  machine-backed. The eval's met claims satisfy every done_when of the
+ *  ACTIVE contract but its verification_plan commands did not pass this
+ *  round. Error; warn under evidence.machine_backed_success "warn"; never
+ *  downgraded by no_change_reason (all done_when met contradicts "no
+ *  change"). Fail-open: plan names no longer configured+enabled are not
+ *  required (cannot observe). */
+export declare const CHECK_CONTRACT_COMPLETION_UNVERIFIED = "contract_completion_unverified";
+/** v3.5: The ACTIVE contract is still open (not completed, not blocked)
+ *  while a different contract was proposed — the proposal is ignored until
+ *  the active one closes. Warn: the walker still ignores it; this only
+ *  surfaces the otherwise-silent state. */
+export declare const CHECK_CONTRACT_PREMATURE = "contract_premature";
 /** Extract the round number from a vault entry's loop_lineage.
  *  Returns 0 if the entry has no lineage or no round field.
  *  In practice, persistLoopLineage always writes round ≥ 1, so 0

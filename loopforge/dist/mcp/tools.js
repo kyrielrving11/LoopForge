@@ -489,6 +489,10 @@ export const TOOL_OUTPUT_SCHEMAS = {
             successTrajectory: { type: "array", items: { type: "boolean" } },
             lease: { type: ["object", "null"], additionalProperties: true },
             metrics: { type: "object", additionalProperties: true },
+            // v3.5: the ACTIVE Round Contract governing the next round (derived
+            // from committed rounds — null when the whole task is the Current
+            // Task).
+            activeContract: { type: ["object", "null"] },
         },
         additionalProperties: true,
     },
@@ -791,6 +795,10 @@ export const TOOL_HANDLERS = {
             status: session.status,
             successTrajectory: session.successTrajectory,
             lease: mgr.getLeaseStatus(session.loopId),
+            // v3.5: derived ACTIVE Round Contract (display-only — the compile and
+            // verification gates derive the same value from the same committed
+            // evals via the shared round-contract walker).
+            activeContract: mgr.getActiveContract(sessionId),
             projection: mgr.getProjection(sessionId),
             metrics: {
                 vaultWriteErrors: metrics.vaultWriteErrors,

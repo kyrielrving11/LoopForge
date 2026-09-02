@@ -1,5 +1,53 @@
 # Changelog
 
+## 3.5.0 (2026-09-02)
+
+Makes Round Contract closure a machine-backed, success-class claim and
+opens the revision channels around it — plus the machinery to find and
+audit contracts in the first place.
+
+### Machine-backed completion (P1a)
+
+- **Closing a contract requires its verification commands to pass.**
+  `contract_completion_unverified` (error; warn under
+  `evidence.machine_backed_success: "warn"`) fires when an eval's met
+  claims satisfy every `done_when` of the ACTIVE contract while a
+  verification_plan command was not observed passing (after-phase
+  command snapshot) in the same round — regardless of the `success`
+  flag. Enforcement rejects the first occurrence and terminates on the
+  second consecutive (R-C1-style ladder), registered before R-C1.
+  `no_change_reason` never downgrades it (all done_when met contradicts
+  "no change"); plan names no longer configured are not required (fail
+  open — cannot observe).
+- **Shared command evidence.** The raw-vault committed adapter
+  (`committedContractRounds`) moved to round-contract.ts — one adapter +
+  one walker now serve the verification gate, the session status view,
+  and a new view-parity test that locks the raw-`:feedback` view and the
+  engine's merged-lineage view against silent divergence.
+
+### Revision channels after failure (P1a′)
+
+- Backtrack prompts now tell the agent the sanctioned way to revise a
+  stalled restored contract: close it with `outcome="blocked"` + blocker
+  and declare the revised contract in the same submission (the walker
+  activates it next round). Silent restating of the stalled contract is
+  explicitly forbidden.
+
+### Visibility and guidance (P1b)
+
+- **Premature replacement is no longer silent.** `contract_premature`
+  (warn) fires when a different contract is proposed while the ACTIVE
+  contract is still open (completion and blocked rounds never warn).
+- **L2 declaration nudge.** Contract-less L2 prompts suggest declaring a
+  Round Contract when remaining work spans several rounds — prose only,
+  policy-gated (`prompt.contract_nudge_on_l2`, default true). L0/L1
+  prompts stay byte-identical to v3.4; L2 contract-less prompt hashes
+  intentionally change.
+- **Auditable surfaces.** `loopforge_status` (session view) exposes the
+  derived `activeContract`; replay timeline rows carry each round's
+  committed `proposal` — both read-only projections of the committed
+  evals, no new persistence.
+
 ## 3.4.0 (2026-09-02)
 
 Resolves the Round Contract's round-off-by-one semantics: a declared

@@ -1154,7 +1154,13 @@ level,
  *  `activeContract != null`). Only then does the template ask the agent
  *  to restate/propose it — a generic empty contract template would invite
  *  placeholder submissions that trigger round_underspecified noise. */
-hasContract = false) {
+hasContract = false, 
+/** v3.5: L2-only prose suggesting a Round Contract declaration when the
+ *  Current Task is NOT one (contract_nudge_on_l2 policy, computed at the
+ *  compileLoop call site). Mutually exclusive with hasContract. The prose
+ *  must never contain the JSON key name `round_contract` — contract-less
+ *  L2 tests assert its lowercase absence. */
+proposalNudge = false) {
     const hasIntentDrift = prevDriftFlags?.some(f => f.check === "intent_drift") ?? false;
     const hasSubGoalDrift = prevDriftFlags?.some(f => f.check === "subgoal_drift") ?? false;
     const needsClarification = hasIntentDrift || hasSubGoalDrift;
@@ -1229,6 +1235,11 @@ hasContract = false) {
     lines.push("Set success=true only when the full goal and ALL hard constraints are verified.");
     lines.push("Use IDs for exact matching: c-XXXXXXXX, cr-XXXXXXXX, sg-XXXXXXXX.");
     lines.push("For subtasks, use sub-goal IDs from the Sub-Goal Dashboard above.");
+    // v3.5: L2 contract-less nudge (prose only — never the JSON key name, so
+    // contract-less rounds keep their template-lean assertions).
+    if (proposalNudge) {
+        lines.push("", "If the remaining work will span several rounds, consider declaring a", "Round Contract for the next round — list its done_when items, the", "verification_plan commands that will back them, and the scope. This", "keeps each round's boundary machine-checkable.");
+    }
     if (restateContract) {
         lines.push("Round Contract: restate the Current Task's contract UNCHANGED in", "`round_contract` (work_item/done_when/verification_plan/scope) and run", "its Verify commands; list satisfied done_when items in", "`success_criteria_met`. When the current contract's done_when items are", "all satisfied, or the round is blocked (outcome=blocked + blocker),", "declare the NEXT round's contract instead (or omit `round_contract`", "when the whole task is done — the Current Task reverts to the", "original task).");
     }
@@ -1345,7 +1356,11 @@ export function compileLoop(request, context) {
         // v3.4: restate the contract only when this prompt's Current Task IS
         // the ACTIVE contract (derived — not the previous submission's field,
         // which is a proposal and may differ from what this round executes).
-        activeContract != null),
+        activeContract != null, 
+        // v3.5: L2-only declaration nudge when nothing is active (policy-gated;
+        // mutually exclusive with the restate template above).
+        decision.level === "l2" && activeContract === null &&
+            getPolicy().prompt.contract_nudge_on_l2),
         fullStateMarkdown: l2Pointer ? undefined : markdown,
         // v2.9: Model's information needs from the previous round's SelfEvaluation
         promptRequests: request.last_round_result?.prompt_requests,

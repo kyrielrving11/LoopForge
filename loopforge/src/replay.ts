@@ -6,6 +6,7 @@
 
 import { queryLoopEntries } from "./loop-store.js";
 import type { LoopStore, VaultEntry } from "./loop-store.js";
+import { parseRoundContract } from "./self-eval.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ReplayBackend
@@ -44,6 +45,28 @@ export class ReplayBackend {
         const lineage = (entry.loop_lineage ?? {}) as Record<string, unknown>;
         (lineage as Record<string, unknown>).success = fbSuccess;
         entry.loop_lineage = lineage;
+      }
+      // v3.5: surface the round's DECLARED Round Contract (the committed
+      // proposal) so replay/timeline can follow the contract arc. The
+      // contract lives only in the transaction snapshot — read it
+      // defensively and keep the parsed shape (same normalization the
+      // verification gate applies).
+      const raw = fbEntries[0] as unknown as Record<string, unknown>;
+      const fbLineage = raw.loop_lineage;
+      if (fbLineage && typeof fbLineage === "object" && !Array.isArray(fbLineage)) {
+        const tx = (fbLineage as Record<string, unknown>).round_transaction;
+        if (tx && typeof tx === "object" && !Array.isArray(tx)) {
+          const snapshot = (tx as Record<string, unknown>).snapshot;
+          if (snapshot && typeof snapshot === "object" && !Array.isArray(snapshot)) {
+            const evaluation = (snapshot as Record<string, unknown>).evaluation;
+            if (evaluation && typeof evaluation === "object" && !Array.isArray(evaluation)) {
+              const proposal = parseRoundContract(
+                (evaluation as Record<string, unknown>).round_contract,
+              );
+              if (proposal) entry.round_contract = proposal;
+            }
+          }
+        }
       }
     }
 
@@ -85,6 +108,9 @@ export class ReplayBackend {
         success: entry.success ?? lineage.success ?? false,
         task: (lineage.task as string) ?? "",
         goal_id: lineage.goal_id ?? "",
+        // v3.5: the round's declared contract (proposal for the next round),
+        // when it committed one — lets replay show the contract arc.
+        ...(entry.round_contract ? { proposal: entry.round_contract } : {}),
       });
     }
 

@@ -24,6 +24,7 @@
  * deriveActiveRoundContract.
  */
 import type { RoundContract, RoundOutcome } from "./protocol.js";
+import type { VaultEntry } from "./loop-store.js";
 /** One committed round's evaluation, in the shape both adapters produce. */
 export interface CommittedRoundEvaluation {
     round: number;
@@ -57,4 +58,15 @@ export declare function contractDoneWhenSatisfied(contract: RoundContract, met: 
  *  (a proposal never activates on its own declaration round — it becomes
  *  active only for the rounds that follow the commit). */
 export declare function deriveActiveRoundContract(committed: ReadonlyArray<CommittedRoundEvaluation>): RoundContract | null;
+/** Committed :feedback evals of rounds earlier than `currentRound`, in
+ *  ascending round order — the input for the ACTIVE-contract walker over
+ *  raw vault entries. Reads snapshot.evaluation (the only committed copy of
+ *  round_contract / outcome / met claims; top-level feedback fields do not
+ *  carry the contract) and skips rounds whose committed action was
+ *  "backtrack" — a roll-back directive, not an executed round. An eval
+ *  under verification is not committed yet, so it structurally can never
+ *  participate. Shared by the verification gate and the status/session
+ *  views — every consumer derives from the same adapter + walker so a
+ *  second interpretation of the committed record can never exist. */
+export declare function committedContractRounds(vaultEntries: VaultEntry[], currentRound: number): CommittedRoundEvaluation[];
 //# sourceMappingURL=round-contract.d.ts.map

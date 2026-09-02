@@ -87,6 +87,11 @@ export declare class SessionManager implements SessionRegistry {
     getProjection(sessionId: string): Record<string, unknown> | null;
     /** Read-only end-of-loop audit (verification view). Never writes. */
     getAudit(loopId: string): Record<string, unknown> | null;
+    /** v3.5: The ACTIVE Round Contract governing the session's next round —
+     *  derived from the committed :feedback evals (the SAME adapter + walker
+     *  the verification gate uses; display-only, zero persistence). Null when
+     *  nothing is active (whole-task round). */
+    getActiveContract(sessionId: string): import("../protocol.js").RoundContract | null;
     /** v2.12: Policy metrics that survive restarts — vault-derived round
      *  statistics (A4 port) folded with this process's live observations.
      *  Non-durable fields (evidence, vault errors) come from live only. */

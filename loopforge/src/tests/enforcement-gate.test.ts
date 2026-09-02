@@ -1057,6 +1057,22 @@ describe("buildBacktrackPrompt", () => {
     assert.ok(!prompt.includes("${"), "prompt must not contain any ${...} literal");
   });
 
+  // ── v3.5: stalled Round Contract revision channel ────────────────────────
+
+  it("tells the agent to close a stalled Round Contract via blocked + revision", () => {
+    for (const trigger of ["progress_stall", "progress_stall_terminal"]) {
+      const prompt = buildBacktrackPrompt(45, 42, trigger, []);
+      assert.ok(prompt.includes("Round Contract that caused the stall"),
+        `${trigger}: the stalled-contract bullet must appear`);
+      assert.ok(prompt.includes('outcome="blocked"'),
+        `${trigger}: the closed-with-blocked channel must be named`);
+      assert.ok(prompt.includes("REVISED contract"),
+        `${trigger}: declaring the revised contract in the same submission must be named`);
+      assert.ok(prompt.includes("silently restate the stalled contract"),
+        `${trigger}: the forbidden silent restate must be named`);
+    }
+  });
+
   // ── Trigger-rule guidance ────────────────────────────────────────────────
 
   it("renders stall-specific guidance for progress_stall", () => {
@@ -1819,5 +1835,81 @@ describe("v3.3 — Round Contract enforcement", () => {
     const repeated = enforceRound(weak, withFlag("round_scope_drift", "warn"), 3, [], 2);
     assert.equal(repeated.action, "terminate");
     assert.equal(repeated.check, "round_scope_drift");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v3.5 — contract_completion_unverified enforcement rule
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("v3.5 — contract completion enforcement", () => {
+  /** VerificationResult carrying one flag of the given check/severity. */
+  const withFlag = (check: string, severity: "warn" | "error" | "info" = "error"): VerificationResult =>
+    makeVerificationResult({
+      verdict: severity === "error" ? "contradicted" : "suspect",
+      flags: [makeVerificationFlag({
+        severity,
+        field: "round_contract",
+        check,
+        detail: `contract issue: ${check}`,
+      })],
+    });
+
+  /** Evidence-carrying eval — keeps R3 (empty_success) and R8 out of the
+   *  way so the injected flag is what the round trips. */
+  const claiming = (): SelfEvaluation => se({
+    execution_evidence: makeExecutionEvidence({
+      files_changed: ["src/auth.ts"],
+      test_results: { passed: 1, failed: 0, skipped: 0 },
+      success_criteria_met: ["criterion A"],
+      success_criteria_remaining: [],
+      progress_estimate: 0.9,
+    }),
+  });
+
+  it("completion-unverified error → reject with the contract's own wording", () => {
+    const result = enforceRound(
+      claiming(), withFlag("contract_completion_unverified"), 3, [], 0);
+    assert.equal(result.action, "reject");
+    assert.equal(result.check, "contract_completion_unverified");
+    assert.match(result.fix_instructions, /verification_plan/);
+    assert.match(result.fix_instructions, /no_change_reason/);
+  });
+
+  it("second consecutive completion-unverified → terminate", () => {
+    const first = enforceRound(
+      claiming(), withFlag("contract_completion_unverified"), 3, [], 0);
+    assert.equal(first.action, "reject");
+    const repeated = enforceRound(
+      claiming(), withFlag("contract_completion_unverified"), 3, [], 2);
+    assert.equal(repeated.action, "terminate");
+    assert.equal(repeated.check, "contract_completion_unverified");
+  });
+
+  it("completion-unverified outranks premature_boundary (registration order)", () => {
+    // A completing eval that also trips the boundary gets the completion
+    // reason first — the completion-truth question precedes boundary nuance.
+    const both = makeVerificationResult({
+      verdict: "contradicted",
+      flags: [
+        makeVerificationFlag({
+          severity: "error", field: "round_contract",
+          check: "premature_boundary", detail: "boundary",
+        }),
+        makeVerificationFlag({
+          severity: "error", field: "round_contract",
+          check: "contract_completion_unverified", detail: "completion",
+        }),
+      ],
+    });
+    const result = enforceRound(claiming(), both, 3, [], 0);
+    assert.equal(result.action, "reject");
+    assert.equal(result.check, "contract_completion_unverified");
+  });
+
+  it("contract_premature warn alone → accept (warn never rejects)", () => {
+    const result = enforceRound(
+      claiming(), withFlag("contract_premature", "warn"), 3, [], 0);
+    assert.equal(result.action, "accept");
   });
 });

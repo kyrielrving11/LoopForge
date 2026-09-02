@@ -20,6 +20,7 @@ import { buildLoopProjection } from "../loop-projection.js";
 import { listVerifiedClaims } from "../evidence-claims.js";
 import { buildAudit } from "../audit.js";
 import { checkLoopHealth } from "../loop-compiler.js";
+import { committedContractRounds, deriveActiveRoundContract, } from "../round-contract.js";
 import { getPolicy, validateLoopId } from "../policy.js";
 import { isRecord } from "../token-utils.js";
 import { makeLoopCompileRequest } from "../protocol.js";
@@ -620,6 +621,21 @@ export class SessionManager {
             return null;
         const audit = buildAudit(loopId, entries, this.loopStore);
         return { ...audit };
+    }
+    /** v3.5: The ACTIVE Round Contract governing the session's next round —
+     *  derived from the committed :feedback evals (the SAME adapter + walker
+     *  the verification gate uses; display-only, zero persistence). Null when
+     *  nothing is active (whole-task round). */
+    getActiveContract(sessionId) {
+        const session = this.sessions.get(sessionId);
+        if (!session)
+            return null;
+        const prefix = `loop:${session.loopId}:`;
+        const entries = [
+            ...queryLoopEntries(this.loopStore, session.loopId, { prefix }),
+            ...queryLoopEntries(this.loopStore, session.loopId, { prefix, feedbackOnly: true }),
+        ];
+        return deriveActiveRoundContract(committedContractRounds(entries, session.currentRound));
     }
     /** v2.12: Policy metrics that survive restarts — vault-derived round
      *  statistics (A4 port) folded with this process's live observations.

@@ -21,6 +21,7 @@ export const DEFAULT_POLICY = {
         l2_adaptive_subgoal_factor: 100,
         l2_pointer_enabled: true,
         l1_collapse_enabled: true,
+        contract_nudge_on_l2: true,
         max_emphasize_l2: 5,
         max_emphasize_l1: 3,
         max_expand_l1: 1,

@@ -16,9 +16,10 @@ import { getPolicy, isConfiguredCommand } from "./policy.js";
 import { makeVerificationFlag, makeVerificationResult } from "./protocol.js";
 import { jaccardSimilarity, tokenize, entryRound as sharedEntryRound, isRecord, machineGitMotionSeries } from "./token-utils.js";
 import { deriveSubGoalId, criteriaMatch } from "./loop-compiler.js";
-import { contractItemMatches, deriveActiveRoundContract, } from "./round-contract.js";
+import { committedContractRounds, contractDoneWhenSatisfied, contractItemMatches, deriveActiveRoundContract, } from "./round-contract.js";
+import { stableStringify } from "./canonical-state.js";
 import { deriveClaimView, resolveRoundFiles } from "./evidence-claims.js";
-import { effectiveSuccess } from "./self-eval.js";
+import { effectiveSuccess, parseRoundContract } from "./self-eval.js";
 // ═══════════════════════════════════════════════════════════════════════════
 // v2.12: Check-name constants — single source of truth so the enforcement
 // gate and audit can reference checks without string-literal drift.
@@ -80,6 +81,19 @@ export const CHECK_ROUND_SCOPE_DRIFT = "round_scope_drift";
  *  either claimed met without machine-verified evidence or silently dropped
  *  (not in success_criteria_met NOR success_criteria_remaining). Error. */
 export const CHECK_PREMATURE_BOUNDARY = "premature_boundary";
+/** v3.5: Closing a Round Contract is a success-class claim and must be
+ *  machine-backed. The eval's met claims satisfy every done_when of the
+ *  ACTIVE contract but its verification_plan commands did not pass this
+ *  round. Error; warn under evidence.machine_backed_success "warn"; never
+ *  downgraded by no_change_reason (all done_when met contradicts "no
+ *  change"). Fail-open: plan names no longer configured+enabled are not
+ *  required (cannot observe). */
+export const CHECK_CONTRACT_COMPLETION_UNVERIFIED = "contract_completion_unverified";
+/** v3.5: The ACTIVE contract is still open (not completed, not blocked)
+ *  while a different contract was proposed — the proposal is ignored until
+ *  the active one closes. Warn: the walker still ignores it; this only
+ *  surfaces the otherwise-silent state. */
+export const CHECK_CONTRACT_PREMATURE = "contract_premature";
 // ═══════════════════════════════════════════════════════════════════════════
 // Helpers
 // ═══════════════════════════════════════════════════════════════════════════
@@ -160,6 +174,27 @@ function passedAfterCommand(snapshots) {
         // v3.3: a command whose entrypoint changed this round is not machine
         // evidence — exclude it so providerStatus degrades to unavailable.
         !commandTampered(snapshot, git).entrypointModified) ?? null;
+}
+/** v3.5: Names of commands observed passing in the after-phase this round.
+ *  Tampered commands (entrypoint changed this round) are not machine
+ *  evidence and are excluded — the same rule passedAfterCommand applies. */
+function passedPlanCommandNames(snapshots) {
+    const git = snapshots.find((snapshot) => snapshot.provider === "git") ?? null;
+    const names = new Set();
+    for (const snapshot of snapshots) {
+        if (!isRecord(snapshot.data))
+            continue;
+        if (snapshot.data.kind !== "command")
+            continue;
+        if (snapshot.data.phase !== "after" || snapshot.data.status !== "passed")
+            continue;
+        if (commandTampered(snapshot, git).entrypointModified)
+            continue;
+        const name = snapshot.data.commandName;
+        if (typeof name === "string" && name.length > 0)
+            names.add(name);
+    }
+    return names;
 }
 /** v3.2: Derive the machine-verification status of a round. The verification
  *  capability is modeled explicitly (verified / unavailable / absent) instead
@@ -265,57 +300,6 @@ export function hasNewCriteriaCompletion(vaultEntries, currentRound, lookback) {
         }
     }
     return false;
-}
-// ── v3.4: ACTIVE Round Contract derivation (committed :feedback view) ──────
-/** Committed :feedback evals of rounds earlier than `currentRound`, in
- *  ascending round order — the input for the ACTIVE-contract walker at
- *  verification time. Reads snapshot.evaluation (the only committed copy of
- *  round_contract / outcome / met claims; top-level feedback fields do not
- *  carry the contract) and skips rounds whose committed action was
- *  "backtrack" — a roll-back directive, not an executed round. The eval
- *  under verification is not committed yet, so it structurally can never
- *  participate. */
-function committedContractRounds(vaultEntries, currentRound) {
-    const byRound = new Map();
-    for (const entry of vaultEntries) {
-        const tid = String(entry.task_id ?? "");
-        if (!tid.endsWith(":feedback"))
-            continue;
-        const rnd = entryRound(entry);
-        if (!(rnd >= 1 && rnd < currentRound))
-            continue;
-        const raw = entry;
-        const lineage = raw.loop_lineage;
-        if (!isRecord(lineage))
-            continue;
-        const tx = lineage.round_transaction;
-        if (!isRecord(tx))
-            continue;
-        const result = tx.result;
-        if (isRecord(result) && result.action === "backtrack")
-            continue;
-        const snapshot = tx.snapshot;
-        if (!isRecord(snapshot))
-            continue;
-        const evaluation = snapshot.evaluation;
-        if (!isRecord(evaluation))
-            continue;
-        const proposal = evaluation.round_contract;
-        const outcome = evaluation.outcome;
-        const ev = evaluation.execution_evidence;
-        const met = isRecord(ev) && Array.isArray(ev.success_criteria_met)
-            ? ev.success_criteria_met.filter((v) => typeof v === "string")
-            : [];
-        const isOutcome = outcome === "success" || outcome === "partial" ||
-            outcome === "failed" || outcome === "blocked";
-        byRound.set(rnd, {
-            round: rnd,
-            proposal: isRecord(proposal) ? proposal : null,
-            outcome: isOutcome ? outcome : null,
-            met,
-        });
-    }
-    return [...byRound.values()].sort((a, b) => a.round - b.round);
 }
 // ═══════════════════════════════════════════════════════════════════════════
 // Individual checks — each returns a VerificationFlag or null
@@ -1228,6 +1212,80 @@ function checkPrematureBoundary(activeContract, selfEval, claimView) {
             `or set success=false and list the items in success_criteria_remaining.`,
     });
 }
+/** v3.5: Closing a Round Contract is a success-class claim and must be
+ *  machine-backed. When the eval's met claims satisfy EVERY done_when of
+ *  the ACTIVE contract (the walker's close condition), each verification_plan
+ *  command must have been observed passing (after-phase command snapshot,
+ *  untampered) in the same round. Fires regardless of the success flag —
+ *  a claim-based closure that the machine cannot back must not advance the
+ *  contract state machine. Severity follows evidence.machine_backed_success
+ *  (the R8 tolerance switch). Deliberately no no_change_reason downgrade:
+ *  all done_when met contradicts "no change". Fail-open: a plan name that
+ *  is no longer a configured, enabled command cannot be observed and is
+ *  not required. The check observes that the commands ran, not what they
+ *  verified — R-C1's claim model remains the content bound. */
+function checkContractCompletionUnverified(activeContract, selfEval, evidenceSnapshots) {
+    if (!activeContract || activeContract.verification_plan.length === 0)
+        return null;
+    const met = selfEval.execution_evidence?.success_criteria_met ?? [];
+    if (!contractDoneWhenSatisfied(activeContract, met))
+        return null; // walker does not close
+    const required = activeContract.verification_plan
+        .filter((name) => isConfiguredCommand(name));
+    if (required.length === 0)
+        return null; // fail open — cannot observe
+    const passed = passedPlanCommandNames(evidenceSnapshots);
+    const missing = required.filter((name) => !passed.has(name));
+    if (missing.length === 0)
+        return null;
+    const severity = getPolicy().evidence.machine_backed_success === "warn"
+        ? "warn"
+        : "error";
+    return makeVerificationFlag({
+        severity,
+        field: "round_contract",
+        check: CHECK_CONTRACT_COMPLETION_UNVERIFIED,
+        detail: `Round Contract completion claimed (every done_when met), but verification_plan ` +
+            `command${missing.length > 1 ? "s" : ""} did not pass this round: ` +
+            `${missing.slice(0, 3).join(", ")}. Closing a contract is a success-class claim — ` +
+            `fix the underlying failure so the command${missing.length > 1 ? "s" : ""} pass and ` +
+            `resubmit; no_change_reason does not apply to completion claims.`,
+    });
+}
+/** v3.5: A different contract proposed while the ACTIVE contract is still
+ *  open. The walker ignores the premature proposal — this warn only makes
+ *  the ignored state visible to the agent. Silent when the eval closes the
+ *  active contract (all done_when met, or outcome=blocked — checked FIRST,
+ *  mirroring the walker), when no proposal is submitted, or when the
+ *  proposal equals the active contract (a restate). Equality is
+ *  key-order-insensitive and normalized through parseRoundContract on both
+ *  sides so committed-raw vs parsed-submission key-set drift cannot cause
+ *  spurious warns. */
+function checkContractPremature(activeContract, selfEval) {
+    if (!activeContract)
+        return null;
+    const met = selfEval.execution_evidence?.success_criteria_met ?? [];
+    if (contractDoneWhenSatisfied(activeContract, met))
+        return null; // closed
+    if (selfEval.outcome === "blocked")
+        return null; // closed
+    const proposal = selfEval.round_contract;
+    if (!proposal)
+        return null;
+    const same = stableStringify(parseRoundContract(activeContract)) ===
+        stableStringify(parseRoundContract(proposal));
+    if (same)
+        return null; // restate → continue
+    return makeVerificationFlag({
+        severity: "warn",
+        field: "round_contract",
+        check: CHECK_CONTRACT_PREMATURE,
+        detail: "The ACTIVE Round Contract is still open (not all done_when met, not blocked) " +
+            "while a different contract was proposed — it is ignored until the active " +
+            "contract is completed or blocked. Restate the active contract unchanged to " +
+            "continue it.",
+    });
+}
 // ═══════════════════════════════════════════════════════════════════════════
 // Main entry point
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1313,10 +1371,14 @@ backtrackTargetGitHead) {
         // v3.3: Round Contract checks. v3.4: split by target — structural
         // (warn) at proposal declaration, conformance against the derived
         // ACTIVE contract (scope_drift warn / premature_boundary error).
+        // v3.5: + completion machine-backing (error) and premature-replacement
+        // visibility (warn).
         () => checkRoundUnderspecified(selfEval),
         () => checkRoundUnverifiable(selfEval),
         () => checkRoundScopeDrift(activeContract, evidenceSnapshots),
         () => checkPrematureBoundary(activeContract, selfEval, claimView),
+        () => checkContractCompletionUnverified(activeContract, selfEval, evidenceSnapshots),
+        () => checkContractPremature(activeContract, selfEval),
     ];
     for (const run of checks) {
         const result = run();

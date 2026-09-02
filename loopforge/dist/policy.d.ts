@@ -87,6 +87,12 @@ export interface PromptPolicy {
      *  presentation) into one-line state-file pointers. Default: true.
      *  Set to false to restore pre-v3.2 full L1 rendering. */
     l1_collapse_enabled: boolean;
+    /** v3.5: When true, L2 prompts whose Current Task is NOT a Round Contract
+     *  append a short suggestion to declare one when the remaining work spans
+     *  several rounds. L2-only prose in the eval template tail — never the
+     *  JSON key name; L0/L1 prompts are unaffected (byte-identical to v3.4).
+     *  Default: true. Set to false to restore pre-v3.5 L2 rendering. */
+    contract_nudge_on_l2: boolean;
     /** v2.9: Max emphasize items when level is L2. Default: 5. */
     max_emphasize_l2: number;
     /** v2.9: Max emphasize items when level is L1. Default: 3. */

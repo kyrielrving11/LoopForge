@@ -17,7 +17,7 @@
  *              with stopReason "enforcement_terminated".
  */
 import { makeEnforcementResult } from "./protocol.js";
-import { entryRound, machineProgressSeries, hasNewCriteriaCompletion, CHECK_SUCCESS_WITH_REMAINING_CRITERIA, CHECK_RECURRING_VIOLATION, CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE, CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED, CHECK_REQUIRED_COMMAND_FAILED, CHECK_COMMAND_EVIDENCE_MISMATCH, CHECK_OUTCOME_SUCCESS_CONTRADICTION, CHECK_VERIFICATION_ENTRYPOINT_MODIFIED, CHECK_PREMATURE_BOUNDARY, CHECK_ROUND_SCOPE_DRIFT } from "./verification-gate.js";
+import { entryRound, machineProgressSeries, hasNewCriteriaCompletion, CHECK_SUCCESS_WITH_REMAINING_CRITERIA, CHECK_RECURRING_VIOLATION, CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE, CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED, CHECK_REQUIRED_COMMAND_FAILED, CHECK_COMMAND_EVIDENCE_MISMATCH, CHECK_OUTCOME_SUCCESS_CONTRADICTION, CHECK_VERIFICATION_ENTRYPOINT_MODIFIED, CHECK_PREMATURE_BOUNDARY, CHECK_ROUND_SCOPE_DRIFT, CHECK_CONTRACT_COMPLETION_UNVERIFIED } from "./verification-gate.js";
 import { effectiveSuccess } from "./self-eval.js";
 import { deriveConstraintId, deriveCriterionId, deriveSubGoalId } from "./loop-compiler.js";
 import { getPolicy } from "./policy.js";
@@ -270,7 +270,16 @@ gitHead) {
         "> with unrestored files will be **rejected**.", "");
     // ── What Must Change ──────────────────────────────────────────────────
     lines.push("### What Must Change", "", "- Do **NOT** repeat the approach used in the skipped rounds.", "- Try a **different** task decomposition or technique.", "- If the current sub-goal is stuck, consider canceling it " +
-        "(`canceled_subtasks`) and working on a different one.", "- Use the `prompt_requests.confusion_points` field in your self-evaluation " +
+        "(`canceled_subtasks`) and working on a different one.", 
+    // v3.5: the restored Current Task may be the very Round Contract that
+    // stalled — the agent must be told the sanctioned way to revise it
+    // (outcome=blocked closes the active contract; the revised proposal in
+    // the same submission becomes active next round). Without this the
+    // agent's revision would be silently ignored as premature.
+    "- If the restored Current Task is a Round Contract that caused the stall: " +
+        "close it in this submission with `outcome=\"blocked\"` (+ a blocker " +
+        "explaining why it stalled) and declare the REVISED contract in the " +
+        "same submission. Do **NOT** silently restate the stalled contract.", "- Use the `prompt_requests.confusion_points` field in your self-evaluation " +
         "to flag anything you don't understand about the task or the blockage.", "");
     // ── Preserved Discoveries ─────────────────────────────────────────────
     if (skippedDiscoveries.length > 0) {
@@ -475,6 +484,44 @@ function enforcePrematureBoundary(flags, consecutiveRejections) {
             "change was genuinely needed, declare no_change_reason. " +
             "Do NOT claim contract completion without machine evidence." + escalation,
         check: "premature_boundary",
+    });
+}
+/** v3.5: Round Contract completion claimed without its verification_plan
+ *  commands passing this round. The gate produced
+ *  contract_completion_unverified (error): the eval's met claims satisfy
+ *  every done_when of the ACTIVE contract, but the machine never observed
+ *  the plan's commands pass. Closing a contract is a success-class claim —
+ *  first occurrence → reject with fix instructions; second consecutive →
+ *  terminate (R-C1's ladder). Registered BEFORE R-C1: the completion-truth
+ *  question outranks boundary nuance. */
+function enforceContractCompletionUnverified(flags, consecutiveRejections) {
+    const flag = flags.find((f) => f.check === CHECK_CONTRACT_COMPLETION_UNVERIFIED && f.severity === "error");
+    if (!flag)
+        return null;
+    if (consecutiveRejections >= 2) {
+        return makeEnforcementResult({
+            action: "terminate",
+            reason: "Repeated unverified Round Contract completion claims — done_when items " +
+                "claimed complete while the verification_plan commands never passed.",
+            check: "contract_completion_unverified",
+        });
+    }
+    const escalation = getPolicy().engine.enforcement_escalation_enabled &&
+        consecutiveRejections >= 1
+        ? buildEscalationNotice()
+        : "";
+    return makeEnforcementResult({
+        action: "reject",
+        reason: flag.detail,
+        fix_instructions: "You claimed completion under the ACTIVE Round Contract, but its " +
+            "verification_plan commands did not pass this round. You must: (a) fix " +
+            "the underlying failure, re-run the contract's verification_plan " +
+            "commands (configured in loop_policy.json evidence.commands), and list " +
+            "satisfied done_when items in success_criteria_met; or (b) set " +
+            "success=false and list what remains in success_criteria_remaining. " +
+            "Completion claims are never accepted without machine verification — " +
+            "do NOT use no_change_reason for completion claims." + escalation,
+        check: "contract_completion_unverified",
     });
 }
 /** R-C2 (v3.3): Round Contract scope drift. The gate produced
@@ -1174,6 +1221,11 @@ driftClarificationStreak = 0) {
         // Runs before R8: when the entrypoint is tainted, R8 also fires (the
         // status degrades to unavailable), but this reason is more specific.
         () => enforceVerificationEntrypointTampered(flags),
+        // v3.5: contract completion claimed without its verification_plan
+        // commands passing — runs before R-C1: the completion-truth question
+        // outranks boundary nuance (a completing eval that also lies about its
+        // evidence gets the completion reason first).
+        () => enforceContractCompletionUnverified(flags, consecutiveRejections),
         // v3.3: R-C1 — contract boundary claimed prematurely (contract-specific
         // wording and check counting; runs before R8 so contract rounds get the
         // contract's own reason. R8 itself is untouched.)

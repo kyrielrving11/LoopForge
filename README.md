@@ -2,7 +2,7 @@
 
 **A context window is not memory. Memory needs a runtime.**
 
-> **v3.3.0** — `npm install -g loopforge`. Node.js ≥ 18. Zero runtime dependencies.
+> **v3.5.0** — `npm install -g loopforge`. Node.js ≥ 18. Zero runtime dependencies.
 > [中文文档](./README.zh-CN.md)
 
 ---
@@ -73,9 +73,9 @@ the vault.
 
 ### 2. External verification & enforcement
 
-The **verification gate** (26 cross-checks) compares every agent claim
+The **verification gate** (28 cross-checks) compares every agent claim
 against independent evidence — Git snapshots, test runner output, explicit
-verification commands. The **enforcement gate** (13 rules) decides what to do.
+verification commands. The **enforcement gate** (14 rules) decides what to do.
 Its focus is not "did the agent violate constraint X" — it detects what the
 agent cannot self-diagnose:
 
@@ -150,7 +150,7 @@ available as a library for custom integrations — see the
 │               LoopForge round boundary                │
 │                                                       │
 │  Evidence → Verify → Enforce → Commit → Compile       │
-│  (Git/cmd) (26 checks) (13 rules) (vault) (next)    │
+│  (Git/cmd) (28 checks) (14 rules) (vault) (next)    │
 │                                                       │
 │  accept:    commit state, compile next round           │
 │  reject:    retry same round, zero state mutation      │
@@ -186,7 +186,7 @@ phase-boundary milestones that survive rolling-window eviction.
 
 ### External verification & enforcement
 
-The verification gate runs 26 cross-checks against independent evidence:
+The verification gate runs 28 cross-checks against independent evidence:
 progress regression, empty-change-with-passing, success-with-remaining-criteria,
 success-without-verified-evidence (claims must be machine-backed; a declared
 `no_change_reason` is the honest escape hatch), outcome consistency (declared
@@ -212,7 +212,7 @@ the round still commits, but its success never enters the success trajectory.
 Stall detection (R4/R5) falls back to per-round git observations when
 self-reported progress is missing — checks degrade, they never disappear.
 
-The enforcement gate's 13 rules detect cognitive integrity failures: fake
+The enforcement gate's 14 rules detect cognitive integrity failures: fake
 success (R1), recurring violations (R2), empty success (R3), evidence
 contradiction (R-EVID), verification entrypoint tampering (R-EVID-VERIFY),
 contract boundary claimed prematurely (R-C1), success-without-verified-evidence
@@ -241,9 +241,19 @@ active contract: claiming a `done_when` item met without machine-verified
 evidence, or silently dropping it while claiming success, is
 `premature_boundary` (R-C1); changing files outside the active scope is
 `round_scope_drift` (R-C2), accepted only with a substantive
-`drift_clarification`. A different proposal declared while the active
-contract is open is ignored. No contract → byte-identical behavior, and
-R8's machine-evidence requirement still guards every success claim.
+`drift_clarification`. Since v3.5, closing a contract is itself a
+success-class claim: `contract_completion_unverified` fires unless every
+verification_plan command was observed passing in the same round, and a
+different proposal declared while the active contract is open is surfaced
+as a `contract_premature` warn (the contract is still ignored until
+completed or blocked). After a backtrack, a stalled restored contract is
+revised by closing it with `outcome="blocked"` + blocker and declaring the
+revised contract in the same submission. Contract-less L2 prompts suggest
+declaring a contract when the remaining work spans several rounds
+(`prompt.contract_nudge_on_l2`, default true); `loopforge_status` and
+`loopforge_replay` expose the derived active contract and each round's
+declared proposal. No contract → byte-identical behavior, and R8's
+machine-evidence requirement still guards every success claim.
 
 ### Recovery
 

@@ -2,7 +2,7 @@
 
 **Agent 的上下文窗口不是记忆，记忆需要一个运行时。**
 
-> **v3.3.0** — `npm install -g loopforge`。Node.js ≥ 18。零运行时依赖。
+> **v3.5.0** — `npm install -g loopforge`。Node.js ≥ 18。零运行时依赖。
 > [English](./README.md)
 
 ---
@@ -44,7 +44,7 @@ Agent 每轮的 self-evaluation 写入**类型化 JSON vault**。下一轮的 pr
 
 ### 2. 外部验证与执行
 
-**验证门**（26 项交叉检查）将 Agent 的每条声明与独立证据比对——Git 快照、测试运行器输出、显式验证命令。**执行门**（13 条规则）决定怎么办。它的核心不是"Agent 违反了约束 X"，而是检测 Agent 无法自我诊断的问题：
+**验证门**（28 项交叉检查）将 Agent 的每条声明与独立证据比对——Git 快照、测试运行器输出、显式验证命令。**执行门**（14 条规则）决定怎么办。它的核心不是"Agent 违反了约束 X"，而是检测 Agent 无法自我诊断的问题：
 
 - R1：声称成功但标准没满足 → **自欺**
 - R3：声称成功但没有可验证证据 → **空口无凭**
@@ -102,7 +102,7 @@ MCP 服务路径（`loopforge mcp`）是主要集成方式，提供完整的认�
 │                 LoopForge 轮次边界                     │
 │                                                       │
 │  证据采集 ──→ 验证门 ──→ 执行门 ──→ 状态提交 ──→ 编译   │
-│  (Git/命令)  (26项检查)  (13条规则)  (vault写入)  (下一轮) │
+│  (Git/命令)  (28项检查)  (14条规则)  (vault写入)  (下一轮) │
 │                                                       │
 │  接受:   提交状态，编译下一轮                              │
 │  拒绝:   同一轮重试，零状态变更                             │
@@ -130,11 +130,11 @@ MCP 服务路径（`loopforge mcp`）是主要集成方式，提供完整的认�
 
 ### 外部验证与执行
 
-验证门运行 26 项交叉检查：进度回退、空变更声称成功、成功但标准未满足、**成功无机器可验证证据**（claim 必须有测试/命令证据背书，`no_change_reason` 是诚实逃生口）、**声明 outcome 与旧布尔字段的一致性**（blocked 无 blocker 提示）、成功声明冲突、**retroactiveClaims 对错误轮次或旧轮次的 git 历史验证**、重复约束发现、反复违规、撤回刚发现的约束、证据完整性（Git）、必要命令失败、命令输出不一致、意图-行动漂移、子目标漂移、标准声称无机器背书、**回溯后工作区恢复检查（文件重叠 + git HEAD）**、自 v3.2 起的 **`success_unverified`**（本轮无机器验证观察的成功声明）、自 v3.3 起的**验证域完整性**（命令入口文件在同轮被改动、测试文件随通过的命令一起被改动）以及**四项 Round Contract 检查**（`round_underspecified`、`round_unverifiable`、`round_scope_drift`、`premature_boundary`）。
+验证门运行 28 项交叉检查：进度回退、空变更声称成功、成功但标准未满足、**成功无机器可验证证据**（claim 必须有测试/命令证据背书，`no_change_reason` 是诚实逃生口）、**声明 outcome 与旧布尔字段的一致性**（blocked 无 blocker 提示）、成功声明冲突、**retroactiveClaims 对错误轮次或旧轮次的 git 历史验证**、重复约束发现、反复违规、撤回刚发现的约束、证据完整性（Git）、必要命令失败、命令输出不一致、意图-行动漂移、子目标漂移、标准声称无机器背书、**回溯后工作区恢复检查（文件重叠 + git HEAD）**、自 v3.2 起的 **`success_unverified`**（本轮无机器验证观察的成功声明）、自 v3.3 起的**验证域完整性**（命令入口文件在同轮被改动、测试文件随通过的命令一起被改动）以及**四项 Round Contract 检查**（`round_underspecified`、`round_unverifiable`、`round_scope_drift`、`premature_boundary`）。
 
-执行门的 13 条规则检测认知诚信失败：虚假成功（R1）、反复违规（R2）、空口成功（R3）、**证据矛盾（R-EVID）**、**验证命令入口被篡改（R-EVID-VERIFY）**、**合同边界被提前声称（R-C1）**、**无机器证据的成功（R8）**、**合同范围越界（R-C2）**、进度停滞（R4）、完全静止（R5）、最大拒绝次数（R6）、意图漂移（R7）、**回溯后工作区未恢复（R9）**。R7 只在澄清引用了具体 ID 或文件路径时才接受转向——连续三次无锚点的弱澄清直接终止；R8 先拒绝、重复后终止；R9 要求先恢复工作区再继续。
+执行门的 14 条规则检测认知诚信失败：虚假成功（R1）、反复违规（R2）、空口成功（R3）、**证据矛盾（R-EVID）**、**验证命令入口被篡改（R-EVID-VERIFY）**、**合同边界被提前声称（R-C1）**、**无机器证据的成功（R8）**、**合同范围越界（R-C2）**、进度停滞（R4）、完全静止（R5）、最大拒绝次数（R6）、意图漂移（R7）、**回溯后工作区未恢复（R9）**。R7 只在澄清引用了具体 ID 或文件路径时才接受转向——连续三次无锚点的弱澄清直接终止；R8 先拒绝、重复后终止；R9 要求先恢复工作区再继续。
 
-自 v3.3 起，停滞判定（R4/R5）在证据路径上要求机器一致：窗口内有 git 运动或新完成的 criteria 即豁免停滞判定（仅豁免，绝不新增惩罚）。每轮还可以声明可选的 **Round Contract**——`done_when`（criteria ID）、`verification_plan`（已配置的证据命令名）、`scope`。自 v3.4 起，声明的合同是**对下一轮的提案**：只有声明轮提交后它才成为 **active 契约**——渲染为 Current Task（原始目标仍在 Objective 段）——并一直保持 active，直到某个已提交 eval 把全部 done_when 项列入 `success_criteria_met`（完成）或声明 `outcome=blocked`（阻塞）；随后该 eval 自己的新提案接管，或 Current Task 退回原始任务。active 契约在**每条编译路径**上都从已提交轮派生（reject 重试、resume、backtrack 都持续显示它）。完成声明被绑定到 active 契约：声称 done_when 满足但无机器验证证据、或在声称成功时静默丢弃 done_when 项 → `premature_boundary`（R-C1）；改动超出 active scope → `round_scope_drift`（R-C2），只有带实质 `drift_clarification` 才被接受。active 契约未关闭时提出的不同提案会被忽略。无合同 → 行为逐字节不变，R8 的机器证据要求仍然守护每一次成功声明。
+自 v3.3 起，停滞判定（R4/R5）在证据路径上要求机器一致：窗口内有 git 运动或新完成的 criteria 即豁免停滞判定（仅豁免，绝不新增惩罚）。每轮还可以声明可选的 **Round Contract**——`done_when`（criteria ID）、`verification_plan`（已配置的证据命令名）、`scope`。自 v3.4 起，声明的合同是**对下一轮的提案**：只有声明轮提交后它才成为 **active 契约**——渲染为 Current Task（原始目标仍在 Objective 段）——并一直保持 active，直到某个已提交 eval 把全部 done_when 项列入 `success_criteria_met`（完成）或声明 `outcome=blocked`（阻塞）；随后该 eval 自己的新提案接管，或 Current Task 退回原始任务。active 契约在**每条编译路径**上都从已提交轮派生（reject 重试、resume、backtrack 都持续显示它）。完成声明被绑定到 active 契约：声称 done_when 满足但无机器验证证据、或在声称成功时静默丢弃 done_when 项 → `premature_boundary`（R-C1）；改动超出 active scope → `round_scope_drift`（R-C2），只有带实质 `drift_clarification` 才被接受。自 v3.5 起，关闭契约本身也是成功级声明：若 verification_plan 命令没有全部在本轮被观察到通过 → `contract_completion_unverified`；active 契约未关闭时提出的不同提案不再静默——`contract_premature`（warn）会把它显性化（契约仍被忽略直到完成或阻塞）。回溯后若恢复的 Current Task 是导致停滞的契约，正确修法是 `outcome="blocked"` + blocker 关闭它，并在同一提交声明修订契约。无契约的 L2 prompt 会提示声明契约（`prompt.contract_nudge_on_l2`，默认开）；`loopforge_status` 与 `loopforge_replay` 现在暴露派生的 active 契约与每轮声明的提案。无合同 → 行为逐字节不变，R8 的机器证据要求仍然守护每一次成功声明。
 
 ### 恢复
 
@@ -144,7 +144,7 @@ MCP 服务路径（`loopforge mcp`）是主要集成方式，提供完整的认�
 
 L0（重试）/ L1（续行）/ L2（全量恢复）只控制状态密度——推理策略由 Agent 决定。每轮 Agent 可通过 `prompt_requests`（强调、展开、困惑点）表达信息需求。Compiler 在安全边界内重组 prompt——mandatory sections 永不被移除。
 
-九个 MCP 工具（`start` · `next` · `status` · `stop` · `pause` · `resume` · `replay` + `gate_check` · `gate_resolve`），返回 JSON content 块。`status` 是统一查看工具：`view=session|loop|all|audit`（原 `list`/`health` 并入，另含只读验证审计——claims/gates/verdict/序列完整性）。零运行时依赖——Node.js 标准库 only。所有阈值、预算、间隔集中在 `loop_policy.json`。807 测试。
+九个 MCP 工具（`start` · `next` · `status` · `stop` · `pause` · `resume` · `replay` + `gate_check` · `gate_resolve`），返回 JSON content 块。`status` 是统一查看工具：`view=session|loop|all|audit`（原 `list`/`health` 并入，另含只读验证审计——claims/gates/verdict/序列完整性）。零运行时依赖——Node.js 标准库 only。所有阈值、预算、间隔集中在 `loop_policy.json`。868 测试。
 
 ---
 

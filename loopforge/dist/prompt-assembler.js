@@ -98,6 +98,9 @@ const VERIFICATION_ACTIONS = {
     round_unverifiable: "Name only configured, enabled evidence.commands in verification_plan, or drop done_when items that cannot be machine-verified.",
     round_scope_drift: "Revert the out-of-scope file changes, or extend the contract scope to cover them and explain why in drift_clarification.",
     premature_boundary: "Run the contract's verification_plan commands and report real output before claiming done_when met; or set success=false and list the items in success_criteria_remaining; or declare no_change_reason.",
+    // v3.5 — contract completion machine-backing + premature-replacement warn
+    contract_completion_unverified: "Completion under the ACTIVE Round Contract requires its verification_plan commands to pass this round — fix the underlying failure so they pass and resubmit. Completion claims are not accepted without machine verification (no_change_reason does not apply).",
+    contract_premature: "The ACTIVE contract is still open — restate it unchanged to continue it; a different contract is ignored until the active one is completed or blocked.",
 };
 /** Fallback for unmapped check names (forward-compat with future checks). */
 const VERIFICATION_ACTION_FALLBACK = "Re-examine the flagged claim and correct your evaluation before resubmitting.";

@@ -37,7 +37,7 @@ describe("state file path boundary", () => {
     const workspace = temp("loopforge-state-root-");
     assert.throws(
       () => resolveStateDirectory(workspace, "../outside"),
-      /within the workspace/,
+      /leaves the workspace/,
     );
   });
 

@@ -10,10 +10,10 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { FileLoopStore } from "../loop-store.js";
+import { FileLoopStore, StorageCorruptionError } from "../loop-store.js";
 import { prepareRoundTransaction } from "../round-transaction.js";
 import type { PromptArtifact } from "../protocol.js";
-import type { VaultEntry } from "../backends/interface.js";
+import type { VaultEntry } from "../loop-store.js";
 
 function temporaryDirectory(): string {
   return mkdtempSync(join(tmpdir(), "loopforge-store-"));
@@ -151,6 +151,96 @@ describe("FileLoopStore", () => {
       assert.equal(store.migrateLegacyVault(legacy).alreadyMigrated, true);
     } finally {
       rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("surfaces corrupt JSON as StorageCorruptionError instead of silently repairing", () => {
+    const dir = temporaryDirectory();
+    try {
+      const store = new FileLoopStore(dir);
+      const loopId = "corrupt-loop";
+      store.writeSession(loopId, {
+        schemaVersion: 1,
+        loopId,
+        updatedAt: new Date().toISOString(),
+        entry: entry(loopId, `loop:${loopId}:session`, "session_state"),
+      });
+      const sessionPath = allFiles(dir).find((p) => p.endsWith("session.json"));
+      assert.ok(sessionPath, "session.json should exist");
+      writeFileSync(sessionPath, "{ corrupted json", "utf8");
+
+      // v2.14: corrupt JSON surfaces — it is never treated as "missing"
+      assert.throws(
+        () => store.readSession(loopId),
+        (error: unknown) =>
+          error instanceof StorageCorruptionError && error.kind === "invalid_json",
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to silently overwrite a corrupted round document", () => {
+    const dir = temporaryDirectory();
+    try {
+      const store = new FileLoopStore(dir);
+      const loopId = "corrupt-round";
+      // Commit a round so rounds/1.json exists
+      store.appendEntry(entry(loopId, `loop:${loopId}:r1`, "loop_lineage", { round: 1 }));
+      const roundPath = allFiles(dir).find((p) => p.endsWith("1.json"));
+      assert.ok(roundPath, "rounds/1.json should exist");
+      writeFileSync(roundPath, "{ corrupted json", "utf8");
+
+      // A later write for the same round must refuse — not overwrite the
+      // corrupted document with a fresh empty one (the pre-v2.14 behavior).
+      assert.throws(
+        () => store.appendEntry(entry(loopId, `loop:${loopId}:r1`, "loop_lineage", { round: 1 })),
+        (error: unknown) =>
+          error instanceof StorageCorruptionError && error.kind === "invalid_json",
+      );
+      assert.equal(
+        readFileSync(roundPath, "utf8"),
+        "{ corrupted json",
+        "corrupted document must remain untouched",
+      );
+
+      // A valid-JSON document with the wrong shape is invalid_format, not "missing"
+      writeFileSync(roundPath, JSON.stringify({ schemaVersion: 1, loopId: "other", round: 99 }), "utf8");
+      assert.throws(
+        () => store.readRound(loopId, 1),
+        (error: unknown) =>
+          error instanceof StorageCorruptionError && error.kind === "invalid_format",
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("discovers a session-only loop (no committed rounds) and orphaned dirs", () => {
+    const dir = temporaryDirectory();
+    try {
+      const store = new FileLoopStore(dir);
+      const loopId = "session-only";
+      store.writeSession(loopId, {
+        schemaVersion: 1,
+        loopId,
+        updatedAt: new Date().toISOString(),
+        entry: entry(loopId, `loop:${loopId}:session`, "session_state"),
+      });
+      // No rounds committed yet — the session alone must make the loop
+      // visible (previously listLoopIds required metadata.json, which was
+      // only written by the round path, orphaning created-but-uncommitted
+      // loops from list / auto-resume).
+      assert.deepEqual(store.listLoopIds(), [loopId]);
+
+      // Pre-v2.14 orphan: metadata.json missing (crash between writes) —
+      // listLoopIds recovers the loopId from the session document itself.
+      const metadataPath = allFiles(dir).find((p) => p.endsWith("metadata.json"));
+      assert.ok(metadataPath, "writeSession must stamp metadata.json");
+      rmSync(metadataPath);
+      assert.deepEqual(store.listLoopIds(), [loopId]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

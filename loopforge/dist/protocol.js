@@ -3,7 +3,7 @@
  * All types exchanged between the Main Agent and LoopForge flow through
  * these interfaces. This is the contract layer — no implementation logic.
  *
- * v1.15: 40 types — 4 enums + 35 interfaces + 1 type alias.
+ * v3.3: 41 types — 2 enums + 35 interfaces + 4 type aliases.
  */
 // ── Enums ──────────────────────────────────────────────────────────────────
 export var Mode;
@@ -36,13 +36,38 @@ export function makeExecutionEvidence(overrides = {}) {
         ...overrides,
     };
 }
-export function makeCheckpointSummary(overrides = {}) {
+export function makeLoopProjection(overrides = {}) {
+    return {
+        focus: null,
+        todo: [],
+        phase: null,
+        delegation: { pending: 0, last_results: [] },
+        handoff: { summary: "", verified: [], open_risks: [] },
+        ...overrides,
+    };
+}
+export function makeGateDecision(overrides = {}) {
+    return {
+        gateId: "",
+        kind: "user",
+        approved: false,
+        scope: [],
+        note: "",
+        decidedAt: new Date().toISOString(),
+        actionHash: "",
+        ...overrides,
+    };
+}
+export function makeMilestoneSummary(overrides = {}) {
     return {
         label: "",
-        declared_at_round: 0,
+        round_range: { start: 0, end: 0 },
         outcome: "",
         carried_constraints: [],
         resolved_constraints: [],
+        progress_at_boundary: 0,
+        kind: "auto",
+        generated_at_round: 0,
         ...overrides,
     };
 }
@@ -63,11 +88,31 @@ export function makeSelfEvaluation(overrides = {}) {
         compression_checkpoint: false,
         checkpoint_label: "",
         next_action: undefined,
+        completed_subtasks: [],
+        blocked_subtasks: [],
+        canceled_subtasks: [],
+        stop_reason: undefined,
+        outcome: undefined,
+        blocker: undefined,
+        retroactiveClaims: [],
+        no_change_reason: undefined,
+        drift_clarification: undefined,
+        prompt_requests: undefined,
+        round_contract: undefined,
         ...overrides,
     };
 }
 /** Regex to extract a self-evaluation JSON block from agent output. */
 export const SELF_EVAL_REGEX = /---loopforge-eval\s*([\s\S]*?)\s*---end-loopforge-eval/;
+export function makeCriterionStatus(overrides = {}) {
+    return {
+        id: "",
+        text: "",
+        status: "unknown",
+        related_subgoal_ids: [],
+        ...overrides,
+    };
+}
 export function makeLoopObjective(overrides = {}) {
     return {
         objective: "",
@@ -98,6 +143,30 @@ export function makeRollingSummary(overrides = {}) {
         rounds_sampled: 0,
         generated_at_round: 0,
         failed_patterns: [],
+        milestones: [],
+        loop_synthesis: "",
+        ...overrides,
+    };
+}
+export function makeSubGoal(overrides = {}) {
+    return {
+        id: "",
+        description: "",
+        status: "pending",
+        declared_at_round: 0,
+        status_changed_at_round: 0,
+        priority: 0,
+        ...overrides,
+    };
+}
+export function makeConstraintMeta(overrides = {}) {
+    return {
+        id: "",
+        text: "",
+        discovered_at_round: 0,
+        last_violated_at_round: 0,
+        source: "discovered",
+        status: "active",
         ...overrides,
     };
 }
@@ -107,6 +176,14 @@ export function makeTaskAlignment(overrides = {}) {
         alignment_score: 1.0,
         warning: "",
         escalation: "none",
+        ...overrides,
+    };
+}
+export function makeRoundContract(overrides = {}) {
+    return {
+        done_when: [],
+        verification_plan: [],
+        scope: [],
         ...overrides,
     };
 }
@@ -128,6 +205,16 @@ export function makeLoopRoundResult(overrides = {}) {
         compression_checkpoint: false,
         checkpoint_label: "",
         next_action: undefined,
+        completed_subtasks: [],
+        blocked_subtasks: [],
+        canceled_subtasks: [],
+        drift_clarification: undefined,
+        prompt_requests: undefined,
+        outcome: undefined,
+        blocker: undefined,
+        retroactiveClaims: [],
+        no_change_reason: undefined,
+        round_contract: undefined,
         ...overrides,
     };
 }
@@ -172,7 +259,11 @@ export function makeLoopCompileResponse(overrides = {}) {
         loop_health: null,
         task_alignment: null,
         rolling_summary: null,
-        checkpoint_summary: null,
+        sub_goals: [],
+        constraints_inactive: [],
+        constraint_metadata: [],
+        agent_trust_score: undefined,
+        agent_trust_trend: [],
         suggested_next_task: "",
         plan_source: null,
         warnings: [],
@@ -191,42 +282,16 @@ export function makeSessionState(taskId) {
         call_count: 0,
         success_trend: [],
         current_version: "v1",
-        circuit_breaker_count: 0,
         feedback_buffer: [],
     };
 }
-// ── Runtime types (v1.2) ──────────────────────────────────────────────────────
-export var RuntimeStatus;
-(function (RuntimeStatus) {
-    RuntimeStatus["IDLE"] = "idle";
-    RuntimeStatus["RUNNING"] = "running";
-    RuntimeStatus["STOPPED"] = "stopped";
-    RuntimeStatus["STALLED"] = "stalled";
-    /** v1.18: Loop is suspended — can be resumed from currentRound. */
-    RuntimeStatus["PAUSED"] = "paused";
-})(RuntimeStatus || (RuntimeStatus = {}));
-/** Map StopReason (internal) → MemoryWriteback outcome (wire format).
- *  Shared between runtime.ts and mcp/session.ts — single source of truth. */
-const LEGACY_STOP_REASON_OUTCOME_MAP = {
-    completed: "completed",
-    failed: "failed",
-    blocked: "blocked",
-    cancelled: "cancelled",
-    circuit_breaker: "circuit_breaker",
-    stalled: "stalled",
-    max_rounds: "max_rounds",
-    executor_failure: "failed",
-    enforcement_terminated: "enforcement_terminated",
-    paused: "paused",
-    task_complete: "completed",
-    stopped: "cancelled",
-};
 export function makeEnforcementResult(overrides = {}) {
     return {
         action: "accept",
         reason: "",
         fix_instructions: "",
         check: "",
+        clarification_accepted: false,
         ...overrides,
     };
 }
@@ -247,7 +312,7 @@ export function makeVerificationResult(overrides = {}) {
     };
 }
 // ── Serialisation helpers ───────────────────────────────────────────────────
-export function toDict(obj) {
+function toDict(obj) {
     const result = {};
     for (const [key, value] of Object.entries(obj)) {
         if (value === null || value === undefined)

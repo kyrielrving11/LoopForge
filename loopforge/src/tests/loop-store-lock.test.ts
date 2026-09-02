@@ -71,4 +71,19 @@ describe("FileLoopStore lock ownership", () => {
     assert.equal(existsSync(lockPath), false);
     assert.equal(store.readRound("lock-test", 1)?.round, 1);
   });
+
+  it("self-heals a lock dir orphaned by a crash between mkdir and owner write", () => {
+    const root = makeRoot();
+    const lockPath = join(root, ".store.lock");
+    // Crash window: the lock directory exists but owner.json was never
+    // written (process killed between mkdirSync and writeFileSync).
+    mkdirSync(lockPath);
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(lockPath, old, old);
+
+    const store = new FileLoopStore(root);
+    append(store);
+    assert.equal(existsSync(lockPath), false);
+    assert.equal(store.readRound("lock-test", 1)?.round, 1);
+  });
 });

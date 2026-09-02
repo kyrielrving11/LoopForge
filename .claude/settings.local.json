@@ -5,7 +5,15 @@
       "Bash(node dist/generate-schema.js)",
       "Bash(node --test dist/tests/*.test.js)",
       "Bash(npm run *)",
-      "Bash(npm test *)"
+      "Bash(npm test *)",
+      "Bash(node --test --test-concurrency=1 dist/tests/*.test.js)",
+      "Bash(echo \"EXIT:$?\")",
+      "Bash(node -e \"const {LoopForgeEngine} = require\\('./dist/index.js'\\); console.log\\('Engine exports:', Object.keys\\(LoopForgeEngine.prototype\\).join\\(', '\\)\\)\")",
+      "Bash(grep -n \"v2\\\\\\\\.0\\\\\\\\|2\\\\\\\\.0\\\\\\\\.\" README.md README.zh-CN.md AGENTS.md loopforge/README.md loopforge/CHANGELOG.md loopforge/package.json)",
+      "Read(//c/Users/ASUS/.codex/**)",
+      "Read(//c/Users/ASUS/**)",
+      "WebSearch",
+      "Bash(node --input-type=module -e ' *)"
     ]
   },
   "enabledPlugins": {

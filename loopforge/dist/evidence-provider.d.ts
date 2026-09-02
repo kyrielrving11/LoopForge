@@ -1,13 +1,11 @@
 /** EvidenceProvider — Pluggable evidence capture interface (v1.18).
  *
- * Before this module, evidence capture was hardcoded to git via
- * captureGitModifiedFiles() in two places (runtime.ts, session.ts).
  * This module defines an abstract EvidenceProvider interface so
  * additional evidence sources (test runners, linters, bundle analysis)
  * can be added without touching the verification pipeline.
  *
- * Built-in provider: GitEvidenceProvider — wraps existing
- * captureGitFileState() logic.
+ * Built-in provider: GitEvidenceProvider — git file state capture with
+ * parallel async execution (v2.0.1) and a synchronous fallback.
  */
 import type { CommandEvidencePolicy } from "./policy.js";
 /** A snapshot of evidence captured by a single provider. */
@@ -84,6 +82,13 @@ export interface CommandEvidenceData extends Record<string, unknown> {
     stdout: string;
     stderr: string;
     truncated: boolean;
+    /** v3.3: Workspace files this command depends on (resolved at capture
+     *  time from executable + args, plus package.json). The verification gate
+     *  cross-checks these against the round's git diff to detect verification
+     *  domain tampering — a command whose entrypoint changed this round is not
+     *  trustworthy. Forward-slash paths (git convention). Empty = unresolvable
+     *  (external command like `bash -c`) — the gate fails open. */
+    entrypointFiles: string[];
 }
 /** Explicit, shell-free verification command. Disabled unless configured. */
 export declare class CommandEvidenceProvider implements EvidenceProvider {
@@ -93,11 +98,44 @@ export declare class CommandEvidenceProvider implements EvidenceProvider {
     capture(context?: EvidenceCaptureContext): Promise<ProviderSnapshot | null>;
     private snapshot;
 }
-/** Captures git file state (tracked, staged, untracked) via existing
- *  captureGitFileState() logic. */
+/** v1.17: Result of capturing git file state across all three categories. */
+export interface GitFileState {
+    /** Tracked files modified but unstaged (git diff --name-only). */
+    tracked: string[];
+    /** Files in the staging area (git diff --cached --name-only). */
+    staged: string[];
+    /** Untracked files not yet known to git (git ls-files --others --exclude-standard). */
+    untracked: string[];
+    /** v2.13: HEAD commit hash for backtrack restore point.
+     *  undefined when git is unavailable or not a repository. */
+    head?: string;
+}
+/** v2.0.1: Capture git file state using parallel async execFile.
+ *
+ * Runs three git commands concurrently via Promise.all. Uses a single
+ * timeout (shared across all commands) and an optional AbortSignal for
+ * early cancellation. Shell-free (execFile, not exec).
+ *
+ * On any command failure, returns null — the caller should treat git
+ * evidence as unavailable and degrade gracefully.
+ *
+ * Performance: wall-clock time is max(single-command), not sum(3).
+ * On a normal repo (~200ms/command): ~200ms vs ~600ms sequential.
+ * On Windows with antivirus (~4s/command): ~4s vs ~12s sequential. */
+export declare function captureGitFileStateAsync(signal?: AbortSignal, timeoutMs?: number): Promise<GitFileState | null>;
+/** v1.17 (sync): Capture git file state using sequential execFileSync.
+ *
+ * @deprecated Use captureGitFileStateAsync() for the primary path.
+ * This sync fallback exists for legacy callers that cannot be made async
+ * (e.g. reconstructSession during startup). Uses execFileSync — shell-free,
+ * unlike the old execSync-based implementation. */
+export declare function captureGitFileState(): GitFileState | null;
+/** Captures git file state (tracked, staged, untracked) via the async
+ *  captureGitFileStateAsync() when a context is provided, falling back
+ *  to the synchronous captureGitFileState() for legacy callers. */
 export declare class GitEvidenceProvider implements EvidenceProvider {
     readonly name = "git";
-    capture(): ProviderSnapshot | null;
+    capture(context?: EvidenceCaptureContext): ProviderSnapshot | null | Promise<ProviderSnapshot | null>;
 }
 /** Extract merged file list from evidence snapshots for backward compat
  *  with runtimeFilesChanged (string[] | null).
@@ -110,4 +148,26 @@ export declare function extractFilesFromSnapshots(snapshots: ProviderSnapshot[])
  *  only added/removed/content-changed paths. */
 export declare function diffSnapshotCollections(before: ProviderSnapshot[], after: ProviderSnapshot[]): ProviderSnapshot[];
 export declare function diffSnapshots(before: ProviderSnapshot[], after: ProviderSnapshot[]): string[] | null;
+/** v3.3.1: Implement the v2.13 policy switch `engine.backtrack_auto_restore` —
+ *  automatically restore the workspace after a backtrack:
+ *  1. `git stash push -u` — every uncommitted change (tracked + untracked)
+ *     is preserved in a stash, never destroyed (an untracked file the agent
+ *     created in the failed rounds is not silently deleted).
+ *  2. `git reset --hard <restoreHead>` — when the failed rounds created
+ *     commits, discard them back to the clean round's commit (the v2.12
+ *     restore-point HEAD).
+ *
+ *  Runs only inside the workspace (cwd, shell: false, 30s timeout), and the
+ *  caller gates it behind the policy flag — DANGEROUS by design, off by
+ *  default. Failures are reported, never thrown: the verification gate still
+ *  checks workspace cleanliness afterwards, and the backtrack prompt already
+ *  instructs manual restore as the fallback. An empty workspace ("No local
+ *  changes") is not a failure. */
+export declare function runBacktrackAutoRestore(gitHead: string | undefined, round: number, 
+/** v3.3.1: workspace root; injectable so tests can run against a temp
+ *  repo. Defaults to the process cwd, matching the evidence providers. */
+cwd?: string): Promise<{
+    ok: boolean;
+    detail: string;
+}>;
 //# sourceMappingURL=evidence-provider.d.ts.map

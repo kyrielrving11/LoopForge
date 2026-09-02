@@ -11,6 +11,7 @@ interface RpcResponse {
     serverInfo?: { name?: string };
     protocolVersion?: string;
     capabilities?: Record<string, unknown>;
+    instructions?: string;
   };
   error?: { code?: number };
 }
@@ -112,12 +113,20 @@ describe("MCP stdio input boundary", () => {
     assert.equal(responses[3]?.result?.serverInfo?.name, "loopforge-mcp");
     assert.equal(responses[3]?.result?.protocolVersion, "2024-11-05");
     assert.equal(responses[3]?.result?.capabilities?.tasks, undefined);
+    assert.match(responses[3]?.result?.instructions ?? "", /loopforge_start/);
+    assert.match(responses[3]?.result?.instructions ?? "", /loopforge_next/);
   });
 
   it("rejects schema-invalid and unknown tool arguments with -32602", async () => {
     const rpc = spawnRpcServer();
     try {
-      await rpc.request("initialize", { protocolVersion: "2025-11-25" });
+      const initialized = await rpc.request("initialize", {
+        protocolVersion: "2025-06-18",
+      });
+      assert.equal(
+        (initialized.result as Record<string, unknown>).protocolVersion,
+        "2025-06-18",
+      );
       const wrongType = await rpc.request("tools/call", {
         name: "loopforge_next",
         arguments: {
@@ -136,11 +145,29 @@ describe("MCP stdio input boundary", () => {
       );
 
       const unknownField = await rpc.request("tools/call", {
-        name: "loopforge_list",
-        arguments: { unexpected: true },
+        name: "loopforge_status",
+        arguments: { view: "bogus" },
       });
       assert.equal(
         (unknownField.error as Record<string, unknown>).code,
+        -32602,
+      );
+
+      // v3.0.1: every submission must be anchored to a roundId.
+      const missingRoundId = await rpc.request("tools/call", {
+        name: "loopforge_next",
+        arguments: {
+          sessionId: "session",
+          evaluation: {
+            success: true,
+            output_summary: "done",
+            should_continue: false,
+            constraint_violations: [],
+          },
+        },
+      });
+      assert.equal(
+        (missingRoundId.error as Record<string, unknown>).code,
         -32602,
       );
     } finally {
@@ -148,38 +175,54 @@ describe("MCP stdio input boundary", () => {
     }
   });
 
-  it("supports structured output and explicitly rejects MCP task execution", async () => {
+  it("returns protocol-compatible tool output and rejects MCP task execution", async () => {
     const rpc = spawnRpcServer();
     try {
       const initialized = await rpc.request("initialize");
       const initResult = initialized.result as Record<string, unknown>;
-      assert.equal(initResult.protocolVersion, "2025-11-25");
+      assert.equal(initResult.protocolVersion, "2025-06-18");
       assert.equal((initResult.capabilities as Record<string, unknown>).tasks, undefined);
 
       const listed = await rpc.request("tools/list");
       const tools = ((listed.result as Record<string, unknown>).tools as Array<Record<string, unknown>>);
-      const health = tools.find((tool) => tool.name === "loopforge_health");
-      assert.ok(health?.outputSchema);
-      assert.equal(health?.execution, undefined);
+      const gate = tools.find((tool) => tool.name === "loopforge_gate_check");
+      assert.ok(gate?.outputSchema);
+      assert.equal(gate?.execution, undefined);
 
       const direct = await rpc.request("tools/call", {
-        name: "loopforge_list",
-        arguments: {},
+        name: "loopforge_status",
+        arguments: { view: "all" },
       });
       const directResult = direct.result as Record<string, unknown>;
-      const structured = directResult.structuredContent as Record<string, unknown>;
-      assert.ok(Array.isArray(structured.sessions));
+      assert.equal(directResult.isError, undefined);
+      assert.equal(directResult.structuredContent, undefined);
       const content = directResult.content as Array<{ text: string }>;
-      assert.deepEqual(JSON.parse(content[0].text), structured);
+      const structured = JSON.parse(content[0].text) as Record<string, unknown>;
+      assert.ok(Array.isArray(structured.sessions));
 
       const rejectedTask = await rpc.request("tools/call", {
-        name: "loopforge_health",
-        arguments: { loopId: "missing-task-loop" },
+        name: "loopforge_status",
+        arguments: { loopId: "missing-task-loop", view: "loop" },
         task: { ttl: 60_000 },
       });
       assert.equal((rejectedTask.error as Record<string, unknown>).code, -32602);
       const taskMethod = await rpc.request("tasks/get", { taskId: "missing" });
       assert.equal((taskMethod.error as Record<string, unknown>).code, -32601);
+    } finally {
+      await rpc.close();
+    }
+  });
+
+  it("falls back to the latest synchronous revision for unsupported versions", async () => {
+    const rpc = spawnRpcServer();
+    try {
+      const initialized = await rpc.request("initialize", {
+        protocolVersion: "2025-11-25",
+      });
+      assert.equal(
+        (initialized.result as Record<string, unknown>).protocolVersion,
+        "2025-06-18",
+      );
     } finally {
       await rpc.close();
     }

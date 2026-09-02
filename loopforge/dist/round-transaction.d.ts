@@ -5,7 +5,7 @@
  * feedback storage. The committed feedback embeds the decision so replay after
  * a process crash is idempotent.
  */
-import type { VaultBackend } from "./backends/interface.js";
+import type { LoopStore } from "./loop-store.js";
 import { LoopForgeEngine } from "./engine.js";
 import type { ProviderSnapshot } from "./evidence-provider.js";
 import type { SelfEvaluation } from "./protocol.js";
@@ -36,10 +36,16 @@ export interface RoundTransactionInput {
     task: string;
     maxRounds: number;
     selfEval: SelfEvaluation;
-    extractionSucceeded: boolean;
     lastSelfEval?: SelfEvaluation;
     consecutiveRejections: number;
     successTrajectory: boolean[];
+    /** v2.12: Current clarification streak for R7 escalation. */
+    driftClarificationStreak?: number;
+    /** v2.13: Files from skipped backtrack rounds for restore check. */
+    backtrackSkippedFiles?: string[];
+    /** v2.12: Git HEAD of the backtrack restore point. The verification gate
+     *  checks the workspace returns to this commit before accepting work. */
+    backtrackTargetGitHead?: string;
     actualEvidence: ProviderSnapshot[];
 }
 export interface RoundTransactionOutcome {
@@ -54,13 +60,14 @@ export declare function prepareRoundTransaction(loopId: string, round: number, b
  * its identity or evidence baseline. Evaluation fields belong to the previous
  * attempt and are cleared before the Agent receives the retry prompt. */
 export declare function prepareRejectedAttempt(rejected: RoundTransactionSnapshot, promptArtifact: PromptArtifact): RoundTransactionSnapshot;
+export declare function isProcessResult(value: unknown): value is RoundProcessResult;
 /** Parse a persisted snapshot without trusting arbitrary vault data. */
 export declare function parseRoundTransactionSnapshot(value: unknown): RoundTransactionSnapshot | null;
 export declare class RoundTransactionCoordinator {
     private readonly engine;
-    private readonly backend;
+    private readonly store;
     private readonly commitStore;
-    constructor(engine: LoopForgeEngine, backend?: VaultBackend, commitStore?: RoundCommitStore);
+    constructor(engine: LoopForgeEngine, store?: LoopStore, commitStore?: RoundCommitStore);
     process(input: RoundTransactionInput): RoundTransactionOutcome;
     /** Recover an already committed decision without evaluating or writing. */
     recover(snapshot: RoundTransactionSnapshot): RoundTransactionOutcome | null;

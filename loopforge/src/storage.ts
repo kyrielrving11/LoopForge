@@ -1,17 +1,29 @@
 /** Persistence adapters for session state and committed round lookup. */
 
-import type { VaultBackend, VaultEntry } from "./backends/interface.js";
+import { queryLoopEntries } from "./loop-store.js";
+import type { LoopStore, LoopSessionDocument, VaultEntry } from "./loop-store.js";
+import { LOOP_STORE_SCHEMA_VERSION } from "./loop-store.js";
 
-function isLeaseOwnerAlive(ownerId: string): boolean {
+function isLeaseOwnerAlive(ownerId: string, leaseExpiresAt?: number): boolean {
   const match = ownerId.match(/^(\d+):/);
-  if (!match) return true;
+  if (!match) return true; // No PID in ownerId — assume alive (safety)
   const pid = Number(match[1]);
   if (!Number.isInteger(pid) || pid <= 0) return true;
   try {
     process.kill(pid, 0);
     return true;
   } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "EPERM") {
+      // Windows may return EPERM for dead processes. If the lease has
+      // expired or is within 5 s of expiry, treat the owner as dead
+      // regardless so a new owner can acquire the session.
+      if (leaseExpiresAt !== undefined && leaseExpiresAt <= Date.now() + 5000) {
+        return false;
+      }
+      return true; // EPERM with lease remaining — assume alive
+    }
+    return false; // ESRCH or other — definitely dead
   }
 }
 
@@ -51,21 +63,20 @@ export interface RoundCommitStore {
 }
 
 export class VaultSessionStateStore implements SessionStateStore {
-  constructor(private readonly backend: VaultBackend) {}
+  constructor(private readonly store: LoopStore) {}
 
   load(loopId: string): VaultEntry | undefined {
-    return this.backend.queryEntries({ prefix: `loop:${loopId}:session` }).find(
-      (entry) =>
-        entry.task_type === "session_state" &&
-        entry.loop_id === loopId &&
-        entry.task_id === `loop:${loopId}:session`,
-    );
+    const session = this.store.readSession(loopId);
+    return session?.entry;
   }
 
   list(): VaultEntry[] {
-    return this.backend.queryEntries().filter(
-      (entry) => entry.task_type === "session_state",
-    );
+    const result: VaultEntry[] = [];
+    for (const loopId of this.store.listLoopIds()) {
+      const session = this.store.readSession(loopId);
+      if (session) result.push(session.entry);
+    }
+    return result;
   }
 
   save(entry: VaultEntry, options: SessionSaveOptions = {}): void {
@@ -74,15 +85,9 @@ export class VaultSessionStateStore implements SessionStateStore {
       throw new Error("Session state entry requires loop_id");
     }
     const write = () => {
-      const vault = this.backend.readVault();
-      const entries = Array.isArray(vault.entries)
-        ? vault.entries as VaultEntry[]
-        : [];
-      const existing = entries.find(
-        (item) => item.task_type === "session_state" && item.loop_id === loopId,
-      );
+      const existing = this.store.readSession(loopId);
       if (existing && options.expectedLeaseOwner) {
-        const lineage = this.lineage(existing);
+        const lineage = this.lineage(existing.entry);
         const owner = typeof lineage.lease_owner === "string"
           ? lineage.lease_owner
           : "";
@@ -90,19 +95,15 @@ export class VaultSessionStateStore implements SessionStateStore {
           throw new SessionLeaseConflictError(loopId);
         }
       }
-      vault.entries = [
-        ...entries.filter(
-          (item) => !(item.task_type === "session_state" && item.loop_id === loopId),
-        ),
+      const doc: LoopSessionDocument = {
+        schemaVersion: LOOP_STORE_SCHEMA_VERSION,
+        loopId,
+        updatedAt: new Date().toISOString(),
         entry,
-      ];
-      this.backend.writeVault(vault);
+      };
+      this.store.writeSession(loopId, doc);
     };
-    if (typeof this.backend.withLock === "function") {
-      this.backend.withLock(write);
-    } else {
-      write();
-    }
+    this.store.withLock(write);
   }
 
   acquireLease(
@@ -113,15 +114,9 @@ export class VaultSessionStateStore implements SessionStateStore {
   ): VaultEntry | undefined {
     let claimed: VaultEntry | undefined;
     const write = () => {
-      const vault = this.backend.readVault();
-      const entries = Array.isArray(vault.entries)
-        ? vault.entries as VaultEntry[]
-        : [];
-      const index = entries.findIndex(
-        (entry) => entry.task_type === "session_state" && entry.loop_id === loopId,
-      );
-      if (index < 0) return;
-      const entry = entries[index];
+      const session = this.store.readSession(loopId);
+      if (!session) return;
+      const entry = session.entry;
       const lineage = this.lineage(entry);
       const owner = typeof lineage.lease_owner === "string"
         ? lineage.lease_owner
@@ -148,13 +143,16 @@ export class VaultSessionStateStore implements SessionStateStore {
           lease_epoch: owner === ownerId ? previousEpoch : previousEpoch + 1,
         },
       };
-      entries[index] = updated;
-      vault.entries = entries;
-      this.backend.writeVault(vault);
+      const doc: LoopSessionDocument = {
+        schemaVersion: LOOP_STORE_SCHEMA_VERSION,
+        loopId,
+        updatedAt: new Date(now).toISOString(),
+        entry: updated,
+      };
+      this.store.writeSession(loopId, doc);
       claimed = updated;
     };
-    if (typeof this.backend.withLock === "function") this.backend.withLock(write);
-    else write();
+    this.store.withLock(write);
     return claimed;
   }
 
@@ -166,48 +164,40 @@ export class VaultSessionStateStore implements SessionStateStore {
   ): boolean {
     let renewed = false;
     const write = () => {
-      const vault = this.backend.readVault();
-      const entries = Array.isArray(vault.entries)
-        ? vault.entries as VaultEntry[]
-        : [];
-      const index = entries.findIndex(
-        (entry) => entry.task_type === "session_state" && entry.loop_id === loopId,
-      );
-      if (index < 0) return;
-      const entry = entries[index];
+      const session = this.store.readSession(loopId);
+      if (!session) return;
+      const entry = session.entry;
       const lineage = this.lineage(entry);
       if (lineage.lease_owner !== ownerId) return;
-      entries[index] = {
+      const updated: VaultEntry = {
         ...entry,
         loop_lineage: {
           ...lineage,
           lease_expires_at: now + Math.max(1, leaseMs),
         },
       };
-      vault.entries = entries;
-      this.backend.writeVault(vault);
+      const doc: LoopSessionDocument = {
+        schemaVersion: LOOP_STORE_SCHEMA_VERSION,
+        loopId,
+        updatedAt: new Date(now).toISOString(),
+        entry: updated,
+      };
+      this.store.writeSession(loopId, doc);
       renewed = true;
     };
-    if (typeof this.backend.withLock === "function") this.backend.withLock(write);
-    else write();
+    this.store.withLock(write);
     return renewed;
   }
 
   releaseLease(loopId: string, ownerId: string): boolean {
     let released = false;
     const write = () => {
-      const vault = this.backend.readVault();
-      const entries = Array.isArray(vault.entries)
-        ? vault.entries as VaultEntry[]
-        : [];
-      const index = entries.findIndex(
-        (entry) => entry.task_type === "session_state" && entry.loop_id === loopId,
-      );
-      if (index < 0) return;
-      const entry = entries[index];
+      const session = this.store.readSession(loopId);
+      if (!session) return;
+      const entry = session.entry;
       const lineage = this.lineage(entry);
       if (lineage.lease_owner !== ownerId) return;
-      entries[index] = {
+      const updated: VaultEntry = {
         ...entry,
         loop_lineage: {
           ...lineage,
@@ -215,12 +205,16 @@ export class VaultSessionStateStore implements SessionStateStore {
           lease_expires_at: 0,
         },
       };
-      vault.entries = entries;
-      this.backend.writeVault(vault);
+      const doc: LoopSessionDocument = {
+        schemaVersion: LOOP_STORE_SCHEMA_VERSION,
+        loopId,
+        updatedAt: new Date().toISOString(),
+        entry: updated,
+      };
+      this.store.writeSession(loopId, doc);
       released = true;
     };
-    if (typeof this.backend.withLock === "function") this.backend.withLock(write);
-    else write();
+    this.store.withLock(write);
     return released;
   }
 
@@ -234,10 +228,10 @@ export class VaultSessionStateStore implements SessionStateStore {
 }
 
 export class VaultRoundCommitStore implements RoundCommitStore {
-  constructor(private readonly backend: VaultBackend) {}
+  constructor(private readonly store: LoopStore) {}
 
   find(loopId: string, round: number): VaultEntry[] {
-    return this.backend.queryEntries({
+    return queryLoopEntries(this.store, loopId, {
       prefix: `loop:${loopId}:r${round}:feedback`,
       feedbackOnly: true,
     });

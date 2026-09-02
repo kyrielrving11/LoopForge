@@ -1,27 +1,28 @@
-/** ReplayBackend — time-travel queries over vault lineage.
+/** ReplayBackend — time-travel queries over loop lineage.
  *
- * Depends on VaultBackend interface — no direct filesystem access.
+ * Depends on LoopStore interface — no direct filesystem access.
  * Enables audit, comparison, and timeline analysis of loop rounds.
  */
 
-import type { VaultBackend, VaultEntry } from "./backends/interface.js";
+import { queryLoopEntries } from "./loop-store.js";
+import type { LoopStore, VaultEntry } from "./loop-store.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ReplayBackend
 // ═══════════════════════════════════════════════════════════════════════════
 
 export class ReplayBackend {
-  private readonly backend: VaultBackend;
+  private readonly store: LoopStore;
 
-  constructor(backend: VaultBackend) {
-    this.backend = backend;
+  constructor(store: LoopStore) {
+    this.store = store;
   }
 
   // ── Single-round lookup ────────────────────────────────────────────────
 
   getRound(loopId: string, roundNum: number): VaultEntry | null {
     const prefix = `loop:${loopId}:r${roundNum}`;
-    const entries = this.backend.queryEntries({ prefix });
+    const entries = queryLoopEntries(this.store, loopId, { prefix });
 
     const lineageEntries = entries.filter(
       (e) => !String(e.task_id ?? "").endsWith(":feedback"),
@@ -32,7 +33,7 @@ export class ReplayBackend {
     const entry = { ...lineageEntries[0] };
 
     // Merge feedback success flag
-    const fbEntries = this.backend.queryEntries({
+    const fbEntries = queryLoopEntries(this.store, loopId, {
       prefix,
       feedbackOnly: true,
     });
@@ -82,7 +83,7 @@ export class ReplayBackend {
         round: lineage.round ?? 0,
         recompile_level: lineage.recompile_level ?? "l2",
         success: entry.success ?? lineage.success ?? false,
-        task: lineage.task ?? entry.task ?? "",
+        task: (lineage.task as string) ?? "",
         goal_id: lineage.goal_id ?? "",
       });
     }
@@ -91,116 +92,11 @@ export class ReplayBackend {
     return timeline;
   }
 
-  // ── Diff ───────────────────────────────────────────────────────────────
-
-  diff(
-    loopId: string,
-    roundA: number,
-    roundB: number,
-  ): Record<string, unknown> {
-    const entryA = this.getRound(loopId, roundA);
-    const entryB = this.getRound(loopId, roundB);
-
-    if (entryA === null && entryB === null) {
-      return {
-        round_a: roundA,
-        round_b: roundB,
-        changes: [],
-        unchanged: [],
-        missing: "both",
-      };
-    }
-    if (entryA === null) {
-      return {
-        round_a: roundA,
-        round_b: roundB,
-        changes: [],
-        unchanged: [],
-        missing: "round_a",
-      };
-    }
-    if (entryB === null) {
-      return {
-        round_a: roundA,
-        round_b: roundB,
-        changes: [],
-        unchanged: [],
-        missing: "round_b",
-      };
-    }
-
-    const lineageA =
-      (entryA.loop_lineage ?? {}) as Record<string, unknown>;
-    const lineageB =
-      (entryB.loop_lineage ?? {}) as Record<string, unknown>;
-
-    const fields: [string, string][] = [
-      ["goal_id", "Goal ID"],
-      ["recompile_level", "Recompile Level"],
-      ["success", "Success"],
-      ["task", "Task"],
-    ];
-
-    const changes: Record<string, unknown>[] = [];
-    const unchanged: string[] = [];
-
-    for (const [fieldKey, fieldLabel] of fields) {
-      const valA =
-        fieldKey in lineageA
-          ? lineageA[fieldKey]
-          : (entryA as Record<string, unknown>)[fieldKey];
-      const valB =
-        fieldKey in lineageB
-          ? lineageB[fieldKey]
-          : (entryB as Record<string, unknown>)[fieldKey];
-
-      if (valA !== valB) {
-        changes.push({
-          field: fieldKey,
-          label: fieldLabel,
-          before: valA,
-          after: valB,
-        });
-      } else {
-        unchanged.push(fieldKey);
-      }
-    }
-
-    // Compare constraints
-    const constraintsA = (lineageA.constraints_active as string[]) ?? [];
-    const constraintsB = (lineageB.constraints_active as string[]) ?? [];
-    const added = constraintsB.filter((c) => !constraintsA.includes(c));
-    const removed = constraintsA.filter((c) => !constraintsB.includes(c));
-
-    if (added.length || removed.length) {
-      changes.push({
-        field: "constraints_active",
-        label: "Active Constraints",
-        before: constraintsA,
-        after: constraintsB,
-        added,
-        removed,
-      });
-    } else if (
-      JSON.stringify(constraintsA) === JSON.stringify(constraintsB)
-    ) {
-      unchanged.push("constraints_active");
-    }
-
-    return {
-      round_a: roundA,
-      round_b: roundB,
-      changes,
-      unchanged,
-      missing: null,
-    };
-  }
-
   // ── Helpers ─────────────────────────────────────────────────────────────
 
   private maxRound(loopId: string): number {
     const prefix = `loop:${loopId}:r`;
-    const entries = this.backend.queryEntries({ prefix });
+    const entries = queryLoopEntries(this.store, loopId, { prefix });
     let maxR = 0;
 
     for (const e of entries) {

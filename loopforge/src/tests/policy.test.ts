@@ -29,6 +29,15 @@ describe("Policy — Defaults", () => {
   it("uses the typed LoopStore root", () => {
     assert.equal(DEFAULT_POLICY.backend.root_dir, ".loopforge");
   });
+
+  it("v3.3: machine_backed_success defaults to required", () => {
+    assert.equal(DEFAULT_POLICY.evidence.machine_backed_success, "required");
+    // Old loop_policy.json files (missing the key) fall back to the default
+    // via deepMerge — no migration needed.
+    resetPolicy();
+    const policy = getPolicy("nonexistent_policy.json");
+    assert.equal(policy.evidence.machine_backed_success, "required");
+  });
 });
 
 describe("Policy — Loading", () => {

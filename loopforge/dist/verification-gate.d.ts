@@ -12,47 +12,148 @@
  *                 modified). Flags become hard constraints — the agent
  *                 must respond in the next round.
  */
-import type { VaultEntry } from "./backends/interface.js";
+import type { VaultEntry } from "./loop-store.js";
 import type { ProviderSnapshot } from "./evidence-provider.js";
 import type { SelfEvaluation, VerificationResult } from "./protocol.js";
+export declare const CHECK_PROGRESS_REGRESSION = "progress_regression";
+export declare const CHECK_EMPTY_CHANGE_WITH_PASSING = "empty_change_with_passing";
+export declare const CHECK_SUCCESS_WITH_REMAINING_CRITERIA = "success_with_remaining_criteria";
+export declare const CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE = "success_without_verified_evidence";
+export declare const CHECK_OUTCOME_SUCCESS_CONTRADICTION = "outcome_success_contradiction";
+export declare const CHECK_SUCCESS_CLAIM_CONFLICT = "success_claim_conflict";
+export declare const CHECK_BLOCKED_WITHOUT_BLOCKER = "blocked_without_blocker";
+export declare const CHECK_RETROACTIVE_CLAIM_BAD_ROUND = "retroactive_claim_bad_round";
+export declare const CHECK_RETROACTIVE_CLAIM_UNVERIFIED = "retroactive_claim_unverified";
+export declare const CHECK_DUPLICATE_CONSTRAINT_DISCOVERY = "duplicate_constraint_discovery";
+export declare const CHECK_RECURRING_VIOLATION = "recurring_violation";
+export declare const CHECK_RETRACT_FRESH_CONSTRAINT = "retract_fresh_constraint";
+export declare const CHECK_EVIDENCE_INTEGRITY = "evidence_integrity";
+export declare const CHECK_REQUIRED_COMMAND_FAILED = "required_command_failed";
+export declare const CHECK_COMMAND_EVIDENCE_MISMATCH = "command_evidence_mismatch";
+/** v3.3: Verification domain integrity — a command entrypoint (run-tests.sh,
+ *  package.json, …) changed in the same round the command ran. The runtime
+ *  executed a script the agent just rewrote, so the observation has no
+ *  stable baseline: error. Test-file changes are normal dev activity (TDD):
+ *  warn-only, see CHECK_TEST_FILES_MODIFIED. */
+export declare const CHECK_VERIFICATION_ENTRYPOINT_MODIFIED = "verification_entrypoint_modified";
+/** v3.3: Test files changed in the same round a verification command passed.
+ *  Warn-only — the command result stays usable. */
+export declare const CHECK_TEST_FILES_MODIFIED = "test_files_modified";
+export declare const CHECK_INTENT_DRIFT = "intent_drift";
+export declare const CHECK_SUBGOAL_DRIFT = "subgoal_drift";
+export declare const CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED = "backtrack_workspace_not_restored";
+export declare const CHECK_CRITERIA_CLAIMS_UNVERIFIED = "criteria_claims_unverified";
+/** v3.2: success declared with no machine-verified observation this round
+ *  (providerStatus ≠ verified). Warn-level: the round still commits, but its
+ *  success never enters the trajectory and trust drops. */
+export declare const CHECK_SUCCESS_UNVERIFIED = "success_unverified";
+/** Contract proposed with an empty done_when — nothing is promised, so
+ *  nothing can be verified at the boundary. Warn: the contract can be fixed
+ *  by re-declaring next round. */
+export declare const CHECK_ROUND_UNDERSPECIFIED = "round_underspecified";
+/** done_when items exist but verification_plan is empty or names commands
+ *  that are not configured AND enabled in policy.evidence.commands — the
+ *  completion claims could never be machine-checked. Warn. */
+export declare const CHECK_ROUND_UNVERIFIABLE = "round_unverifiable";
+/** The round's actual git changes include files outside the ACTIVE
+ *  contract's declared scope. Warn + drift_clarification exemption
+ *  (R7-style). */
+export declare const CHECK_ROUND_SCOPE_DRIFT = "round_scope_drift";
+/** success claimed under the ACTIVE contract whose done_when items are
+ *  either claimed met without machine-verified evidence or silently dropped
+ *  (not in success_criteria_met NOR success_criteria_remaining). Error. */
+export declare const CHECK_PREMATURE_BOUNDARY = "premature_boundary";
 /** Extract the round number from a vault entry's loop_lineage.
  *  Returns 0 if the entry has no lineage or no round field.
  *  In practice, persistLoopLineage always writes round ≥ 1, so 0
  *  unambiguously means "not a valid round entry" in this context.
  *  Exported for reuse by enforcement-gate.ts. */
 export declare function entryRound(entry: VaultEntry): number;
-/** v1.17: Result of capturing git file state across all three categories. */
-export interface GitFileState {
-    /** Tracked files modified but unstaged (git diff --name-only). */
-    tracked: string[];
-    /** Files in the staging area (git diff --cached --name-only). */
-    staged: string[];
-    /** Untracked files not yet known to git (git ls-files --others --exclude-standard). */
-    untracked: string[];
+/** Normalize a contract scope entry: backslashes → forward slashes, strip
+ *  leading "./", trim, strip trailing slashes. "." / "./" / "" normalize to
+ *  "" = the repository root (everything is in scope). */
+export declare function normalizeScopeEntry(path: string): string;
+/** Whether a git-diff file path falls inside any declared scope entry:
+ *  exact file match, or the file lives under a declared directory. The ""
+ *  entry (repo root) matches everything. Git paths are always workspace-
+ *  relative with forward slashes. */
+export declare function isFileInScope(file: string, scope: string[]): boolean;
+/** Git-diff files outside the declared scope (the round_scope_drift signal). */
+export declare function collectOutOfScopeFiles(files: string[], scope: string[]): string[];
+export interface EvidenceStatus {
+    /** Whether this round produced a machine-verified observation. */
+    providerStatus: "verified" | "unavailable" | "absent";
+    /** Git snapshot exists and diffed file changes this round. */
+    gitObserved: boolean;
+    /** A passed after-phase command snapshot exists. */
+    commandVerified: boolean;
+    /** Agent-reported test_results agree with a passed command's parsed stdout. */
+    testsMachineBacked: boolean;
+    /** Agent-reported files_changed equals the git diff set exactly. */
+    reportedFilesMatch: boolean;
 }
-/** v1.17: Capture all git file state — modified, staged, and untracked.
- *  Returns null if git is unavailable. Each list is sorted.
- *  5-second timeout per command prevents hanging on large repos. */
-export declare function captureGitFileState(): GitFileState | null;
-/** v1.16: Capture the current set of modified files according to git.
- *  Returns a sorted array of relative file paths, or null if git is unavailable.
- *  Delegates to `git diff --name-only` — no staging or committing.
- *  5-second timeout prevents hanging on large repos.
- *  @deprecated v1.17 — Use captureGitFileState() for full staged/untracked coverage. */
-export declare function captureGitModifiedFiles(): string[] | null;
+/** v3.2: Derive the machine-verification status of a round. The verification
+ *  capability is modeled explicitly (verified / unavailable / absent) instead
+ *  of letting evidence-dependent checks silently disappear when snapshots are
+ *  missing — the fix for the "weakest when it matters most" gap. */
+export declare function deriveEvidenceStatus(selfEval: SelfEvaluation, evidenceSnapshots: ProviderSnapshot[]): EvidenceStatus;
+/** v3.2: Per-round machine progress — whether git observed file changes in
+ *  each of the last `lookback` committed rounds, rebuilt from the feedback
+ *  entries' roundEvidence snapshots (already persisted at commit). Returns
+ *  null when fewer than `lookback` rounds carry git snapshots — the machine
+ *  signal is unavailable and callers (R4/R5) keep their legacy verdict.
+ *  v3.3: implementation moved to token-utils (machineGitMotionSeries) so the
+ *  compiler can read the same signal for the progress dashboard without an
+ *  import cycle; this export is now a thin delegation with unchanged
+ *  signature and semantics. */
+export declare function machineProgressSeries(vaultEntries: VaultEntry[], currentRound: number, lookback: number): boolean[] | null;
+/** v3.3: Whether any success criterion was newly reported met within the
+ *  last `lookback` committed rounds — a windowed "unit completion" signal
+ *  for R4/R5's exculpatory cross-check on the evidence path.
+ *
+ *  EXCULPATORY ONLY — this can veto a delta-based stall verdict; it never
+ *  grounds a rejection or termination. Reads only committed :feedback
+ *  entries (the current round's uncommitted self-report never participates,
+ *  so an unverified met claim cannot buy an exemption). Matching is
+ *  ID-first (cr-XXXXXXXX) with Jaccard fallback, mirroring the compiler's
+ *  criterion dedup. Returns false when the window has no criteria data. */
+export declare function hasNewCriteriaCompletion(vaultEntries: VaultEntry[], currentRound: number, lookback: number): boolean;
+interface ParsedTestCounts {
+    passed: number;
+    failed: number;
+    skipped: number;
+    total: number;
+}
+/** Best-effort parse of test counts from common test-runner output formats.
+ *
+ *  Scans the last 2000 characters of stdout (where summary lines typically
+ *  appear) and tries patterns in descending specificity order. Returns null
+ *  when the output format is unrecognized, stdout is empty, or a confident
+ *  parse cannot be made.
+ *
+ *  Recognized formats: Jest verbose/compact, Mocha, pytest/unittest, Go test,
+ *  and PHPUnit OK summaries. */
+export declare function parseTestOutput(stdout: string): ParsedTestCounts | null;
 /** Verify a SelfEvaluation against the loop's cross-round lineage.
  *
  * @param selfEval             The agent's self-evaluation for the current round.
  * @param currentRound         The current round number (1-based).
- * @param vaultEntries         Vault entries for this loop (non-feedback only).
+ * @param vaultEntries         Vault entries for this loop (committed lineage
+ *                             entries AND :feedback entries — the feedback
+ *                             entries feed the ACTIVE-contract derivation).
  * @param prevSelfEval         The agent's self-evaluation from the previous round
  *                             (null for round 1).
- * @param runtimeFilesChanged  v1.16: Files detected as changed by git diff between
- *                             before/after execute. null if git is unavailable.
- *                             Used by checkFilesIntegrity to cross-validate
- *                             agent-reported files_changed against reality.
  * @param evidenceSnapshots    v1.18: Evidence snapshots from configured providers.
  *                             Used by checkEvidenceIntegrity for multi-provider
  *                             cross-validation. Defaults to empty array. */
-export declare function verifySelfEvaluation(selfEval: SelfEvaluation, currentRound: number, vaultEntries: VaultEntry[], prevSelfEval?: SelfEvaluation | null, runtimeFilesChanged?: string[] | null, evidenceSnapshots?: ProviderSnapshot[]): VerificationResult;
+export declare function verifySelfEvaluation(selfEval: SelfEvaluation, currentRound: number, vaultEntries: VaultEntry[], prevSelfEval?: SelfEvaluation | null, evidenceSnapshots?: ProviderSnapshot[], 
+/** v2.13: Files from skipped backtrack rounds. If the agent's
+ *  files_changed overlaps significantly with these, the workspace
+ *  was not properly restored before working. */
+backtrackSkippedFiles?: string[], 
+/** v2.12: Git HEAD commit of the backtrack restore point. When set, the
+ *  current git snapshot must sit at this commit — otherwise the workspace
+ *  was not restored and the round cannot be accepted. */
+backtrackTargetGitHead?: string): VerificationResult;
+export {};
 //# sourceMappingURL=verification-gate.d.ts.map

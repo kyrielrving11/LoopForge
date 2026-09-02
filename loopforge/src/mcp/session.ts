@@ -3,207 +3,107 @@
  * Each McpSession = one complete multi-round loop.
  * SessionManager holds Map<sessionId, McpSession> and drives
  * the advance() cycle: extract → feedback → check stop → compile next.
+ *
+ * Since v2.14 the round state machine lives in RoundLifecycle
+ * (round-lifecycle.ts). SessionManager owns "who may touch a session":
+ * the in-memory registry, per-session serialization queue, and cross-process
+ * lease fencing. RoundLifecycle owns "what happens to a session": crash
+ * recovery, transaction execution, disposition result building, and the
+ * advance pipeline. All round processing still goes through the
+ * SessionManager → RoundDriver → RoundCoordinator path.
  */
 
 import { randomUUID } from "node:crypto";
-import { LoopForgeEngine, extractSelfEvaluation, heuristicSelfEvaluation } from "../engine.js";
-import { checkLoopHealth } from "../loop-compiler.js";
-import { getPolicy } from "../policy.js";
-import { Mode, makeLoopCompileRequest } from "../protocol.js";
-import { ReplayBackend } from "../replay.js";
-import type { VaultBackend, VaultEntry } from "../backends/interface.js";
-import { FileLoopStore, LoopStoreBackend } from "../loop-store.js";
-import type { LoopStore } from "../loop-store.js";
+import { LoopForgeEngine } from "../engine.js";
+import { deriveGate } from "../cognitive-governance.js";
+import { makeGateDecision, Mode } from "../protocol.js";
 import type {
-  LoopForgeRequest, SelfEvaluation, VerificationFlag,
-  ExternalContextProvider, LoopTerminalEvent, LoopTerminalSink,
+  ExternalContextProvider,
+  LoopForgeRequest,
+  LoopForgeResponse,
+  LoopTerminalSink,
+  SelfEvaluation,
 } from "../protocol.js";
-import { EvidenceCollector } from "../evidence-provider.js";
-import type { ProviderSnapshot } from "../evidence-provider.js";
-import {
-  parseRoundTransactionSnapshot,
-  prepareRoundTransaction,
-} from "../round-transaction.js";
-import type { RoundTransactionSnapshot } from "../round-transaction.js";
+import { buildLoopProjection } from "../loop-projection.js";
+import { listVerifiedClaims } from "../evidence-claims.js";
+import { buildAudit } from "../audit.js";
+import { checkLoopHealth } from "../loop-compiler.js";
+import { getPolicy, validateLoopId } from "../policy.js";
+import { isRecord } from "../token-utils.js";
+import { makeLoopCompileRequest } from "../protocol.js";
+import { ReplayBackend } from "../replay.js";
+import { FileLoopStore, queryLoopEntries } from "../loop-store.js";
+import type { LoopStore, VaultEntry } from "../loop-store.js";
+import { makeRoundId, prepareRoundTransaction } from "../round-transaction.js";
 import { RoundDriver } from "../round-driver.js";
 import { logEvent } from "../observability.js";
-import { policyMetrics } from "../policy-metrics.js";
+import {
+  policyMetrics,
+  derivePolicyMetrics,
+  mergePolicyMetrics,
+} from "../policy-metrics.js";
+import type { PolicyMetricsSnapshot } from "../policy-metrics.js";
 import {
   SessionLeaseConflictError,
   VaultSessionStateStore,
 } from "../storage.js";
 import type { SessionStateStore } from "../storage.js";
-import { createCognitiveCheckpoint } from "../interop.js";
-import type { CognitiveCheckpointSink } from "../interop.js";
+import { StorageCorruptionError } from "../loop-store.js";
+import { RoundLifecycle, buildLoopRequest } from "./round-lifecycle.js";
+import type {
+  McpSession,
+  McpSessionSummary,
+  StartInput,
+  AdvanceResult,
+  SessionRegistry,
+} from "./round-lifecycle.js";
 
-// ── Types ──────────────────────────────────────────────────────────────────
-
-export interface McpSession {
-  sessionId: string;
-  loopId: string;
-  task: string;
-  engine: LoopForgeEngine;
-  currentRound: number;
-  maxRounds: number;
-  successTrajectory: boolean[];
-  status: "running" | "stopped" | "stalled" | "paused";
-  createdAt: number;
-  /** Previous round's validated SelfEvaluation — used by verification gate. */
-  lastSelfEval?: SelfEvaluation;
-  // v1.13: Enforcement gate state
-  consecutiveRejections: number;
-  /** Which enforcement check triggered the last rejection.
-   *  Only same-check rejections accumulate toward the max. */
-  lastRejectionCheck: string;
-  /** Evidence baseline captured immediately before the agent receives a prompt. */
-  evidenceBaseline?: ProviderSnapshot[];
-  /** Schema-versioned transaction for the prompt currently held by the agent. */
-  roundSnapshot?: RoundTransactionSnapshot;
-  /** Persisted prompt prevents resume from compiling the same round twice. */
-  currentPrompt?: string | null;
-  currentLevel?: string;
-}
-
-export interface McpSessionSummary {
-  sessionId: string;
-  loopId: string;
-  round: number;
-  status: "running" | "stopped" | "stalled" | "paused";
-}
-
-export interface StartInput {
-  task: string;
-  loopId?: string;
-  maxRounds?: number;
-  domain?: string;
-  planSource?: string;
-  constraints?: string[];
-}
-
-export interface AdvanceResult {
-  sessionId: string;
-  round: number;
-  /** Stable logical identity; unchanged when enforcement retries the round. */
-  roundId?: string;
-  prompt: string | null;
-  stopReason?: string;
-  level?: string;
-  /** @deprecated Use roundSuccess instead. Derived: roundSuccess ? 5 : 1 */
-  quality?: number;
-  roundSuccess?: boolean;
-  warnings?: string[];
-  /** v1.13: Enforcement action for this round. accept/reject/terminate.
-   *  When "reject", the prompt contains a rejection notice and the agent
-   *  must redo the same round. Round counter does NOT increment. */
-  enforcementAction?: "accept" | "reject" | "terminate";
-  /** v1.13: When enforcementAction is "reject" or "terminate", the reason
-   *  why the round was rejected or the loop was terminated. */
-  enforcementReason?: string;
-}
-
-// ── Helpers ────────────────────────────────────────────────────────────────
-
-function buildLoopRequest(
-  session: McpSession,
-  lastEval?: SelfEvaluation,
-  _lastQuality?: number, // deprecated — kept for backward compat
-  verificationFlags?: VerificationFlag[],
-): Record<string, unknown> {
-  const req: Record<string, unknown> = {
-    task: session.task,
-    mode: Mode.LOOP_COMPILE,
-    feedback: null,
-    skill_name: null,
-    task_id: null,
-    loop_id: session.loopId,
-    round: session.currentRound,
-    max_rounds: session.maxRounds,
-    verification_flags: verificationFlags ?? [],
-  };
-
-  if (lastEval) {
-    req.last_round_result = {
-      round: session.currentRound - 1,
-      success: lastEval.success,
-      output_summary: lastEval.output_summary,
-      constraint_violations: lastEval.constraint_violations,
-      manual_fixes_needed: "",
-      // P0–P2: Forward evolution fields to next compile
-      // Merge sub-agent discovered constraints into the active set
-      discovered_constraints: [
-        ...new Set([
-          ...(lastEval.discovered_constraints ?? []),
-          ...(lastEval.worker_results ?? []).flatMap((w) => w.discoveredConstraints ?? []).filter((c) => c.length > 0),
-        ]),
-      ],
-      objective_refinement: lastEval.objective_refinement ?? "",
-      emerged_subtasks: lastEval.emerged_subtasks ?? [],
-      // P4: Execution evidence
-      execution_evidence: lastEval.execution_evidence ?? undefined,
-      // P5: Self-correction
-      retracted_constraints: lastEval.retracted_constraints ?? [],
-      revised_success_criteria: lastEval.revised_success_criteria ?? [],
-      wrong_assumptions: lastEval.wrong_assumptions ?? [],
-      // Multi-agent: Forward delegation results to next compile
-      worker_results: lastEval.worker_results ?? [],
-      // v1.10: Checkpoint boundary
-      compression_checkpoint: lastEval.compression_checkpoint ?? false,
-      checkpoint_label: lastEval.checkpoint_label ?? "",
-      // v1.16: Agent's declared next action
-      next_action: lastEval.next_action,
-    };
-  }
-
-  return req;
-}
-
-function parseWarnings(prompt: string | null): string[] {
-  if (!prompt) return [];
-  const warnings: string[] = [];
-  const warnSection = prompt.match(/### Warnings\n([\s\S]*?)(?=\n###|\n\*\*|$)/);
-  if (warnSection) {
-    for (const line of warnSection[1].split("\n")) {
-      const m = line.match(/- ⚠️\s*(.+)/);
-      if (m) warnings.push(m[1]);
-    }
-  }
-  return warnings;
-}
+// Public type surface preserved from before the v2.14 decomposition.
+export type {
+  McpSession,
+  McpSessionSummary,
+  StartInput,
+  AdvanceResult,
+} from "./round-lifecycle.js";
 
 // ── SessionManager ─────────────────────────────────────────────────────────
 
-export class SessionManager {
+export class SessionManager implements SessionRegistry {
   private sessions = new Map<string, McpSession>();
   /** Serializes state transitions for each session. */
   private sessionQueues = new Map<string, Promise<void>>();
-  private backend: VaultBackend | undefined;
+  private readonly loopStore: LoopStore;
   private sessionStore: SessionStateStore | undefined;
   private readonly ownerId = `${process.pid}:${randomUUID()}`;
   private readonly leaseMs: number;
   private readonly leaseRenewIntervalMs: number;
   private leaseTimer: ReturnType<typeof setInterval> | null = null;
-  private readonly checkpointSinks = new Set<CognitiveCheckpointSink>();
+  private readonly lifecycle: RoundLifecycle;
   /** Explicit context provider; never auto-discovered. */
   contextProvider?: ExternalContextProvider;
   private readonly terminalSinks = new Set<LoopTerminalSink>();
 
   constructor(
-    storeOrBackend?: LoopStore | VaultBackend,
+    store?: LoopStore,
     sessionStore?: SessionStateStore,
   ) {
-    const resolvedBackend = storeOrBackend
-      ? "readSession" in storeOrBackend
-        ? new LoopStoreBackend(storeOrBackend)
-        : storeOrBackend
-      : new LoopStoreBackend(new FileLoopStore(getPolicy().backend.root_dir));
-    this.backend = resolvedBackend;
-    this.sessionStore = sessionStore ?? new VaultSessionStateStore(resolvedBackend);
+    this.loopStore = store ?? new FileLoopStore(getPolicy().backend.root_dir);
+    this.sessionStore = sessionStore ?? new VaultSessionStateStore(this.loopStore);
     const mcpPolicy = getPolicy().mcp;
     this.leaseMs = Math.max(1, mcpPolicy.session_lease_ms);
     this.leaseRenewIntervalMs = Math.max(
       1,
       Math.min(mcpPolicy.session_lease_renew_interval_ms, this.leaseMs),
     );
+    this.lifecycle = new RoundLifecycle({
+      store: this.loopStore,
+      sessionStore: this.sessionStore,
+      registry: this,
+      terminalSinks: this.terminalSinks,
+      ownerId: this.ownerId,
+      leaseMs: this.leaseMs,
+      getContext: () => this.contextProvider,
+    });
     if (this.sessionStore?.renewLease) {
       this.leaseTimer = setInterval(
         () => this.renewOwnedLeases(),
@@ -216,12 +116,6 @@ export class SessionManager {
   /** Stable process-local owner token used for cross-process session leases. */
   getOwnerId(): string {
     return this.ownerId;
-  }
-
-  /** Subscribe an external checkpointer; sink failures are isolated. */
-  addCheckpointSink(sink: CognitiveCheckpointSink): () => void {
-    this.checkpointSinks.add(sink);
-    return () => this.checkpointSinks.delete(sink);
   }
 
   addTerminalSink(sink: LoopTerminalSink): () => void {
@@ -237,6 +131,19 @@ export class SessionManager {
       this.sessionStore?.releaseLease?.(session.loopId, this.ownerId);
     }
   }
+
+  // ── SessionRegistry (view for RoundLifecycle) ────────────────────────────
+
+  values(): Iterable<McpSession> {
+    return this.sessions.values();
+  }
+
+  /** Register (or replace) a session in the in-memory registry. */
+  upsert(session: McpSession): void {
+    this.sessions.set(session.sessionId, session);
+  }
+
+  // ── Lease helpers ────────────────────────────────────────────────────────
 
   private findSessionEntry(loopId: string): VaultEntry | undefined {
     return this.sessionStore?.load(loopId);
@@ -278,6 +185,7 @@ export class SessionManager {
       round: typeof lineage.current_round === "number" ? lineage.current_round : 0,
       prompt: null,
       stopReason: `session_owned_elsewhere:${loopId}`,
+      stopDetail: `Another process (PID ${entry?.loop_lineage ? (entry.loop_lineage as Record<string,unknown>).lease_owner ?? "unknown" : "unknown"}) holds the lease for loop "${loopId}". Wait for the lease to expire or stop the other process.`,
     };
   }
 
@@ -304,11 +212,46 @@ export class SessionManager {
     }
   }
 
+  // ── Lifecycle entry points ───────────────────────────────────────────────
+
   async create(input: StartInput): Promise<AdvanceResult> {
     const sessionId = randomUUID();
     const loopId = input.loopId ?? randomUUID();
-    const engine = new LoopForgeEngine(this.backend);
-    const maxRounds = input.maxRounds ?? getPolicy().runtime.max_rounds;
+
+    // v2.14: same-process duplicate guard. Cross-process duplicates are
+    // fenced by the lease (SessionLeaseConflictError on save); within one
+    // process the lease owner is identical, so a second create for the
+    // same loopId would silently overwrite the first session's persisted
+    // state and leave two in-memory sessions pointing at one loop.
+    const existing = [...this.sessions.values()].find((s) => s.loopId === loopId);
+    if (existing) {
+      return {
+        sessionId: "",
+        round: existing.currentRound,
+        prompt: null,
+        stopReason: `loop_already_running:${loopId}`,
+        stopDetail: `A session for loop "${loopId}" already exists in this process (session ${existing.sessionId}). Inspect or resume it instead of starting a duplicate.`,
+      };
+    }
+    // v3.2.1: pre-flight the cross-process lease BEFORE compiling — the
+    // compile persists round-1 lineage and the state file into the loop's
+    // vault, which would corrupt another process's live loop (round-1
+    // lineage replaced, metadata overwritten). Mirrors the save-time check
+    // (VaultSessionStateStore.save: a non-empty lease_owner that is not ours
+    // conflicts), so observable behavior is unchanged — only the side
+    // effects are avoided. The save below remains the atomic final gate.
+    const persistedSession = this.sessionStore?.load(loopId);
+    const persistedLineage = persistedSession?.loop_lineage;
+    const persistedOwner =
+      persistedLineage && typeof persistedLineage === "object" && !Array.isArray(persistedLineage)
+        ? (persistedLineage as Record<string, unknown>).lease_owner
+        : "";
+    if (typeof persistedOwner === "string" && persistedOwner && persistedOwner !== this.ownerId) {
+      throw new SessionLeaseConflictError(loopId);
+    }
+
+    const engine = new LoopForgeEngine(this.loopStore);
+    const maxRounds = input.maxRounds ?? getPolicy().engine.max_rounds;
 
     // Populate extra fields for the first round
     const request = buildLoopRequest({
@@ -316,6 +259,8 @@ export class SessionManager {
       maxRounds, successTrajectory: [], status: "running", createdAt: Date.now(),
       consecutiveRejections: 0,
       lastRejectionCheck: "",
+      driftClarificationStreak: 0,
+      backtrackSkippedFiles: [],
       evidenceBaseline: [],
     });
     request.domain = input.domain ?? "";
@@ -345,8 +290,8 @@ export class SessionManager {
       }
     }
 
-    const prepared = await new RoundDriver(engine, this.backend).prepare(
-      request as unknown as LoopForgeRequest,
+    const prepared = await new RoundDriver(engine, this.loopStore).prepare(
+      request,
       loopId,
       1,
     );
@@ -360,16 +305,30 @@ export class SessionManager {
       // v1.13: Enforcement gate state
       consecutiveRejections: 0,
       lastRejectionCheck: "",
+      driftClarificationStreak: 0,
+      backtrackSkippedFiles: [],
       evidenceBaseline,
       roundSnapshot: prepared?.snapshot ?? prepareRoundTransaction(loopId, 1, evidenceBaseline),
       currentPrompt: initialPrompt,
       currentLevel: initialLevel,
+      currentWarnings: prepared?.warnings ?? [],
+      lastCompileResponse: prepared?.compileResponse ?? null,
     };
     this.sessions.set(sessionId, session);
     policyMetrics.recordStrategy(loopId, initialLevel);
 
-    // Persist to vault for cross-process recovery
-    this.save(session);
+    // Persist to vault for cross-process recovery. The save is the atomic
+    // lease gate — a TOCTOU window between the pre-flight check above and
+    // this write can still lose the lease race to another process.
+    try {
+      this.lifecycle.save(session);
+    } catch (error) {
+      // v3.2.1: roll back the in-memory registration — a registered-but-
+      // unsaved session would make every later create for this loopId
+      // return loop_already_running until this process restarts.
+      this.sessions.delete(sessionId);
+      throw error;
+    }
 
     logEvent("session_start", {
       sessionId,
@@ -385,8 +344,7 @@ export class SessionManager {
       prompt: initialPrompt,
       level: initialLevel,
       roundSuccess: false,
-      quality: 0,
-      warnings: parseWarnings(initialPrompt),
+      warnings: prepared?.warnings ?? [],
     };
   }
 
@@ -418,9 +376,10 @@ export class SessionManager {
     const session = this.sessions.get(sessionId);
     if (!session) return false;
     session.status = "stopped";
-    this.save(session); // Persist stopped status to vault so autoResumeAll won't resurrect
-    void this.notifyTerminal(session, "cancelled");
+    this.lifecycle.save(session);
+    void this.lifecycle.notifyTerminal(session, "cancelled");
     this.sessions.delete(sessionId);
+    this.sessionQueues.delete(sessionId);
     logEvent("session_end", {
       sessionId,
       loopId: session.loopId,
@@ -440,7 +399,7 @@ export class SessionManager {
       return { sessionId, round: session.currentRound, status: session.status };
     }
     session.status = "paused";
-    this.save(session);
+    this.lifecycle.save(session);
     logEvent("session_paused", {
       sessionId,
       loopId: session.loopId,
@@ -449,344 +408,10 @@ export class SessionManager {
     return { sessionId, round: session.currentRound, status: "paused" };
   }
 
-  private restoredPromptResult(session: McpSession): AdvanceResult | null {
-    if (!session.currentPrompt) return null;
-    return {
-      sessionId: session.sessionId,
-      round: session.currentRound,
-      roundId: session.roundSnapshot?.roundId,
-      prompt: session.currentPrompt,
-      level: session.currentLevel ?? "l2",
-      quality: 0,
-      roundSuccess: undefined,
-      warnings: parseWarnings(session.currentPrompt),
-    };
-  }
-
-  /** Reconcile the crash window where feedback committed but session_state
-   *  still points at the old prompt. Returns null when no commit is pending. */
-  private reconcileCommittedRound(session: McpSession): AdvanceResult | null {
-    if (!session.roundSnapshot) return null;
-    const recovered = new RoundDriver(
-      session.engine,
-      this.backend,
-    ).recover(session.roundSnapshot);
-    if (!recovered) return null;
-
-    const pr = recovered.result;
-    session.roundSnapshot = recovered.snapshot;
-    // Replay the committed counter — but with per-rule tracking.
-    if (pr.action === "reject" && pr.rejectionCheck) {
-      session.consecutiveRejections =
-        pr.rejectionCheck === session.lastRejectionCheck
-          ? pr.newConsecutiveRejections
-          : 1;
-      session.lastRejectionCheck = pr.rejectionCheck;
-    } else {
-      session.consecutiveRejections = pr.newConsecutiveRejections;
-      if (pr.action !== "reject") session.lastRejectionCheck = "";
-    }
-    if (pr.newLastSelfEval) session.lastSelfEval = pr.newLastSelfEval;
-    if (
-      pr.shouldPushSuccessTrajectory &&
-      session.successTrajectory.length < session.currentRound
-    ) {
-      session.successTrajectory.push(pr.roundSuccess);
-    }
-    session.currentPrompt = null;
-
-    if (pr.action === "stop" || pr.action === "terminate") {
-      const reason = pr.action === "terminate"
-        ? "enforcement_terminated"
-        : pr.stopReason ?? "stalled";
-      session.status = reason === "stalled" ? "stalled" : "stopped";
-      this.save(session);
-      void this.notifyTerminal(session, reason);
-      return {
-        sessionId: session.sessionId,
-        round: session.currentRound,
-        roundId: recovered.snapshot.roundId,
-        prompt: null,
-        stopReason: reason,
-        roundSuccess: pr.roundSuccess,
-        quality: pr.roundSuccess ? 5 : 1,
-      };
-    }
-
-    if (pr.action !== "continue") return null;
-    session.currentRound++;
-    const request = buildLoopRequest(
-      session,
-      pr.newLastSelfEval,
-      pr.roundSuccess ? 5 : 1,
-      pr.verificationFlags,
-    );
-    const prepared = new RoundDriver(
-      session.engine,
-      this.backend,
-    ).prepareSync(
-      request as unknown as LoopForgeRequest,
-      session.loopId,
-      session.currentRound,
-    );
-    if (!prepared) {
-      session.status = "stalled";
-      this.save(session);
-      return {
-        sessionId: session.sessionId,
-        round: session.currentRound,
-        prompt: null,
-        stopReason: "stalled",
-      };
-    }
-    const prompt = prepared.prompt;
-    session.evidenceBaseline = prepared.evidenceBaseline;
-    session.roundSnapshot = prepared.snapshot;
-    session.currentPrompt = prompt;
-    session.currentLevel = prepared.level;
-    policyMetrics.recordStrategy(
-      session.loopId,
-      session.currentLevel,
-    );
-    this.save(session);
-
-    return {
-      sessionId: session.sessionId,
-      round: session.currentRound,
-      roundId: session.roundSnapshot.roundId,
-      prompt,
-      level: session.currentLevel,
-      roundSuccess: pr.roundSuccess,
-      quality: pr.roundSuccess ? 5 : 1,
-      warnings: parseWarnings(prompt),
-    };
-  }
-
-  /** v1.18: Resume a paused session. Reconstructs from vault state and
-   *  compiles the next prompt. Returns null if no paused session exists
-   *  for this loopId. */
-  async unpause(loopId: string): Promise<AdvanceResult | null> {
-    const persistedEntry = this.findSessionEntry(loopId);
-    if (!persistedEntry) return null;
-
-    const lineage = (persistedEntry.loop_lineage ?? {}) as Record<string, unknown>;
-    const status = (lineage.status as string) ?? "running";
-    if (status !== "paused") return null;
-    const sessionEntry = this.claimSessionEntry(loopId);
-    if (!sessionEntry) return this.leaseConflictResult(loopId, persistedEntry);
-
-    const session = this.reconstructSession(sessionEntry, true);
-    if (!session) return null;
-
-    // Set to running so advance() works
-    session.status = "running";
-    this.sessions.set(session.sessionId, session);
-
-    // Replace the sync-fallback evidence baseline with async evidence
-    // so resumed sessions don't silently drop async provider data.
-    try {
-      const asyncEvidence = await EvidenceCollector.fromPolicy().collectAsync({
-        loopId: session.loopId,
-        phase: "before",
-      });
-      if (asyncEvidence.length > 0) {
-        session.evidenceBaseline = asyncEvidence;
-        if (!session.roundSnapshot?.beforeEvidence?.length) {
-          session.roundSnapshot = prepareRoundTransaction(
-            session.loopId,
-            session.currentRound,
-            asyncEvidence,
-          );
-        }
-      }
-    } catch {
-      // Async evidence is best-effort; fall back to sync baseline.
-    }
-
-    const reconciled = this.reconcileCommittedRound(session);
-    if (reconciled) return reconciled;
-    const restored = this.restoredPromptResult(session);
-    if (restored) {
-      this.save(session);
-      return restored;
-    }
-
-    // Compile the next prompt from the current round state
-    const lcr = makeLoopCompileRequest({
-      loop_id: session.loopId,
-      round: session.currentRound,
-      goal_id: "",
-      task: session.task,
-      domain: undefined,
-      plan_source: null,
-      constraints_from_plan: [],
-      health_check_interval: 1,
-    });
-    const compileRequest = {
-      task: session.task,
-      mode: Mode.LOOP_COMPILE,
-      feedback: null,
-      skill_name: null,
-      task_id: null,
-      loop_id: lcr.loop_id,
-      round: lcr.round,
-      goal_id: lcr.goal_id,
-      domain: lcr.domain ?? "",
-      plan_source: lcr.plan_source ?? null,
-      constraints_from_plan: lcr.constraints_from_plan ?? [],
-      health_check_interval: lcr.health_check_interval,
-      max_rounds: session.maxRounds,
-    } as LoopForgeRequest;
-    const prepared = await new RoundDriver(
-      session.engine,
-      this.backend,
-    ).prepare(
-      compileRequest,
-      session.loopId,
-      session.currentRound,
-    );
-
-    if (!prepared) {
-      session.status = "stopped";
-      this.save(session);
-      void this.notifyTerminal(session, "stalled");
-      return { sessionId: session.sessionId, round: session.currentRound, prompt: null, stopReason: "stalled" };
-    }
-    const prompt = prepared.prompt;
-    const level = prepared.level;
-    session.evidenceBaseline = prepared.evidenceBaseline;
-    session.roundSnapshot = prepared.snapshot;
-    session.currentPrompt = prompt;
-    session.currentLevel = level;
-    policyMetrics.recordStrategy(session.loopId, level);
-    this.save(session);
-
-    return {
-      sessionId: session.sessionId,
-      round: session.currentRound,
-      roundId: session.roundSnapshot.roundId,
-      prompt,
-      level,
-      quality: 0,
-      roundSuccess: undefined,
-      warnings: [],
-    };
-  }
-
-  /** Persist session state to vault for cross-process recovery.
-   *  The filtered vault and replacement entry are written once under the
-   *  backend lock, so recovery never observes the old two-write gap. */
+  /** Persist session state to vault for cross-process recovery. Delegates to
+   *  the round lifecycle, which owns the durable session document shape. */
   save(session: McpSession): void {
-    if (!this.sessionStore) return;
-    const leaseActive = session.status === "running";
-    const sessionEntry: VaultEntry = {
-        task_id: `loop:${session.loopId}:session`,
-        task_type: "session_state",
-        timestamp: new Date().toISOString(),
-        loop_id: session.loopId,
-        task: session.task,
-        loop_lineage: {
-          session_id: session.sessionId,
-          current_round: session.currentRound,
-          max_rounds: session.maxRounds,
-          success_trajectory: session.successTrajectory,
-          status: session.status,
-          created_at: session.createdAt,
-          // v1.13: Enforcement gate state
-          consecutive_rejections: session.consecutiveRejections,
-          last_rejection_check: session.lastRejectionCheck,
-          // v1.19: durable round transaction state
-          round_snapshot: session.roundSnapshot ?? null,
-          last_self_eval: session.lastSelfEval ?? null,
-          current_prompt: session.currentPrompt ?? null,
-          current_level: session.currentLevel ?? "",
-          // v1.20: cross-process single-owner lease
-          lease_owner: leaseActive ? this.ownerId : "",
-          lease_expires_at: leaseActive ? Date.now() + this.leaseMs : 0,
-        },
-      };
-    this.sessionStore.save(sessionEntry, {
-      expectedLeaseOwner: this.ownerId,
-    });
-    if (this.checkpointSinks.size > 0) {
-      const checkpoint = createCognitiveCheckpoint(
-        session,
-        sessionEntry.timestamp as string,
-      );
-      for (const sink of this.checkpointSinks) {
-        try {
-          const pending = sink.save(checkpoint);
-          if (pending && typeof pending.then === "function") {
-            void pending.catch(() => undefined);
-          }
-        } catch {
-          // External adapters must not affect session durability.
-        }
-      }
-    }
-  }
-
-  /** Reconstruct a McpSession from a vault session_state entry.
-   *  Returns null if the entry is not "running" status.
-   *  Shared by resume() and autoResumeAll(). */
-  private reconstructSession(
-    entry: VaultEntry,
-    allowPaused = false,
-  ): McpSession | null {
-    const lineage = (entry.loop_lineage ?? {}) as Record<string, unknown>;
-    const status = (lineage.status as string) ?? "running";
-    if (status !== "running" && !(allowPaused && status === "paused")) {
-      return null;
-    }
-
-    const loopId = entry.loop_id as string;
-    const currentRound = (lineage.current_round as number) ?? 1;
-    const successTrajectory =
-      (lineage.success_trajectory as boolean[]) ?? (lineage.quality_trajectory as boolean[]) ?? [];
-    const task = (entry.task as string) ?? "";
-    const maxRounds =
-      (lineage.max_rounds as number) ?? getPolicy().runtime.max_rounds;
-    const roundSnapshot = parseRoundTransactionSnapshot(lineage.round_snapshot);
-    const fallbackEvidence = EvidenceCollector.fromProviderNames(
-      getPolicy().evidence.providers,
-    ).collect();
-    const persistedEval = lineage.last_self_eval;
-    const lastSelfEval =
-      persistedEval !== null &&
-      typeof persistedEval === "object" &&
-      !Array.isArray(persistedEval) &&
-      typeof (persistedEval as Record<string, unknown>).success === "boolean" &&
-      typeof (persistedEval as Record<string, unknown>).output_summary === "string"
-        ? persistedEval as SelfEvaluation
-        : undefined;
-
-    const engine = new LoopForgeEngine(this.backend);
-    return {
-      sessionId: typeof lineage.session_id === "string" && lineage.session_id
-        ? lineage.session_id
-        : randomUUID(),
-      loopId, task, engine,
-      currentRound, maxRounds, successTrajectory,
-      status: status as McpSession["status"],
-      createdAt: (lineage.created_at as number) ?? Date.now(),
-      consecutiveRejections: (lineage.consecutive_rejections as number) ?? 0,
-      lastRejectionCheck: typeof lineage.last_rejection_check === "string"
-        ? lineage.last_rejection_check
-        : "",
-      evidenceBaseline: roundSnapshot?.beforeEvidence ?? fallbackEvidence,
-      roundSnapshot: roundSnapshot ?? prepareRoundTransaction(
-        loopId,
-        currentRound,
-        fallbackEvidence,
-      ),
-      lastSelfEval,
-      currentPrompt: typeof lineage.current_prompt === "string"
-        ? lineage.current_prompt
-        : null,
-      currentLevel: typeof lineage.current_level === "string"
-        ? lineage.current_level
-        : undefined,
-    };
+    this.lifecycle.save(session);
   }
 
   /** Resume a loop from vault state.
@@ -802,7 +427,7 @@ export class SessionManager {
       : persistedEntry;
     if (!sessionEntry) return this.leaseConflictResult(loopId, persistedEntry);
 
-    const session = this.reconstructSession(sessionEntry);
+    const session = this.lifecycle.reconstructSession(sessionEntry);
     if (!session) {
       // was not "running" — return stopped/stalled status
       const lineage = (sessionEntry.loop_lineage ?? {}) as Record<string, unknown>;
@@ -813,52 +438,36 @@ export class SessionManager {
         round: currentRound,
         prompt: null,
         stopReason: status,
+        stopDetail: `Loop is not running (status: ${status}). It may have already completed or been stopped.`,
       };
     }
 
     this.sessions.set(session.sessionId, session);
 
-    const reconciled = this.reconcileCommittedRound(session);
-    if (reconciled) return reconciled;
+    return this.lifecycle.resume(session);
+  }
 
-    const restored = this.restoredPromptResult(session);
-    if (restored) return restored;
+  /** v1.18: Resume a paused session. Reconstructs from vault state and
+   *  compiles the next prompt. Returns null if no paused session exists
+   *  for this loopId. */
+  async unpause(loopId: string): Promise<AdvanceResult | null> {
+    const persistedEntry = this.findSessionEntry(loopId);
+    if (!persistedEntry) return null;
 
-    // Legacy session without a stored prompt: compile once, then persist it.
-    const request = buildLoopRequest(session);
-    const prepared = new RoundDriver(
-      session.engine,
-      this.backend,
-    ).prepareSync(
-      request as unknown as LoopForgeRequest,
-      session.loopId,
-      session.currentRound,
-    );
-    const prompt = prepared?.prompt ?? null;
-    session.evidenceBaseline = prepared?.evidenceBaseline ?? [];
-    session.roundSnapshot = prepared?.snapshot ?? prepareRoundTransaction(
-      session.loopId,
-      session.currentRound,
-      [],
-    );
-    session.currentPrompt = prompt;
-    session.currentLevel = prepared?.level ?? "l2";
-    policyMetrics.recordStrategy(
-      session.loopId,
-      session.currentLevel,
-    );
-    this.save(session);
+    const lineage = (persistedEntry.loop_lineage ?? {}) as Record<string, unknown>;
+    const status = (lineage.status as string) ?? "running";
+    if (status !== "paused") return null;
+    const sessionEntry = this.claimSessionEntry(loopId);
+    if (!sessionEntry) return this.leaseConflictResult(loopId, persistedEntry);
 
-    return {
-      sessionId: session.sessionId,
-      round: session.currentRound,
-      roundId: session.roundSnapshot.roundId,
-      prompt,
-      level: session.currentLevel,
-      roundSuccess: false,
-      quality: 0,
-      warnings: parseWarnings(prompt),
-    };
+    const session = this.lifecycle.reconstructSession(sessionEntry, true);
+    if (!session) return null;
+
+    // Set to running so advance() works
+    session.status = "running";
+    this.sessions.set(session.sessionId, session);
+
+    return this.lifecycle.unpause(session);
   }
 
   /** Auto-resume all "running" sessions from vault on server startup.
@@ -886,7 +495,19 @@ export class SessionManager {
       const claimedEntry = this.claimSessionEntry(lid);
       if (!claimedEntry) continue;
 
-      const session = this.reconstructSession(claimedEntry, true);
+      // v2.14: a bulk startup scan must not die on one corrupt loop —
+      // recoverable gaps are recorded and skipped; corrupted storage
+      // (invalid JSON/format/sequence) still surfaces to the caller.
+      let session: McpSession | null = null;
+      try {
+        session = this.lifecycle.reconstructSession(claimedEntry, true);
+      } catch (error) {
+        if (error instanceof StorageCorruptionError && error.recoverable) {
+          logEvent("session_skip_gap", { loopId: lid, error: error.message });
+          continue;
+        }
+        throw error;
+      }
       if (session) {
         this.sessions.set(session.sessionId, session);
         activeLoopIds.add(lid);
@@ -933,6 +554,182 @@ export class SessionManager {
     return result;
   }
 
+  // ── v2.12: User/Agent gates ────────────────────────────────────────────
+
+  /** Classify a flat gate text. Read-only — no vault writes. */
+  checkGate(gateText: string): Record<string, unknown> {
+    const { id, gate } = deriveGate(gateText);
+    return {
+      id,
+      kind: gate.kind,
+      ...(gate.kind === "user"
+        ? {
+            question: gate.question,
+            blockedScope: gate.blockedScope,
+            allowedWork: gate.allowedWork,
+          }
+        : {
+            problem: gate.problem,
+            requiredEvidence: gate.requiredEvidence,
+            suggestedResolution: gate.suggestedResolution,
+          }),
+    };
+  }
+
+  /** Record a user decision for a recorded gate. The gateId embeds the
+   *  canonicalized action hash — if the action changed, the match fails and
+   *  the old approval expires automatically. */
+  resolveGate(
+    sessionId: string,
+    gateId: string,
+    approved: boolean,
+    note?: string,
+  ): Record<string, unknown> {
+    const session = this.sessions.get(sessionId);
+    if (!session) return { error: `session not found: ${sessionId}` };
+    const prefix = `loop:${session.loopId}:gate:`;
+    const opened = queryLoopEntries(this.loopStore, session.loopId, { prefix })
+      .find((entry) => entry.task_type === "gate_opened" && entry.gate_id === gateId);
+    if (!opened) {
+      return { error: `no gate_opened record for gate ${gateId} — the gate may have expired or was never recorded` };
+    }
+    const actionText = typeof opened.gate_action === "string" ? opened.gate_action : "";
+    const { id, gate, actionHash } = deriveGate(actionText);
+    if (id !== gateId) {
+      return { error: "gateId does not match the recorded action — the action changed, old approvals expire" };
+    }
+    if (gate.kind !== "user") {
+      return { error: "agent gates are resolved by submitting the required evidence, not by user approval" };
+    }
+    const decision = makeGateDecision({
+      gateId,
+      kind: "user",
+      approved: approved === true,
+      scope: gate.blockedScope ?? [],
+      note: typeof note === "string" ? note : "",
+      decidedAt: new Date().toISOString(),
+      actionHash: actionHash ?? "",
+    });
+    const entry: VaultEntry = {
+      id: randomUUID(),
+      task_id: `loop:${session.loopId}:gate:${gateId}:decision`,
+      task_type: "gate_decision",
+      loop_id: session.loopId,
+      timestamp: new Date().toISOString(),
+      gate_id: gateId,
+      approved: decision.approved,
+      decision_note: decision.note,
+      gate_decision: decision,
+      loop_lineage: {
+        round: session.currentRound,
+        gate_id: gateId,
+        action_hash: actionHash,
+      },
+    };
+    this.loopStore.appendEntry(entry);
+    return { sessionId, loopId: session.loopId, gateId, approved: decision.approved };
+  }
+
+  // ── v2.12: Typed projection + audit ────────────────────────────────────
+
+  /** Typed cognitive state projection for an active session. Derived on
+   *  demand — zero persistence. Null when nothing meaningful exists yet. */
+  getProjection(sessionId: string): Record<string, unknown> | null {
+    const session = this.sessions.get(sessionId);
+    if (!session) return null;
+    const entries = queryLoopEntries(this.loopStore, session.loopId, { prefix: `loop:${session.loopId}:` });
+    let compileResponse: LoopForgeResponse | null = null;
+    // v3.0.1: the round boundary already compiled this round — derive the
+    // projection from that response instead of recompiling the whole vault.
+    // The cache is invalidated by every compile path (it is rebuilt with the
+    // new round's response); the artifact's deterministic roundId guards
+    // against stale reuse.
+    const cached = session.lastCompileResponse;
+    const expectedRoundId = session.roundSnapshot?.roundId
+      ?? makeRoundId(session.loopId, session.currentRound);
+    if (cached?.prompt_artifact && cached.prompt_artifact.roundId === expectedRoundId) {
+      compileResponse = cached;
+    } else {
+      try {
+        const request: LoopForgeRequest = {
+          task: session.task,
+          mode: Mode.LOOP_COMPILE,
+          feedback: null,
+          skill_name: null,
+          task_id: null,
+          loop_id: session.loopId,
+          round: session.currentRound,
+          max_rounds: session.maxRounds,
+          verification_flags: [],
+        };
+        const compiled = session.engine.invokeLoopCompile(request, undefined, { persistLineage: false });
+        compileResponse = compiled.response ?? null;
+      } catch {
+        compileResponse = null; // projection degrades gracefully
+      }
+    }
+    const openGates = this.lifecycle.listOpenGateDescriptions(session.loopId);
+    const projection = buildLoopProjection({
+      loopId: session.loopId,
+      currentRound: session.currentRound,
+      compileResponse,
+      vaultEntries: entries,
+      verifiedClaims: listVerifiedClaims(entries, session.loopId),
+      openGates,
+    });
+    return projection ? { ...projection } : null;
+  }
+
+  /** Read-only end-of-loop audit (verification view). Never writes. */
+  getAudit(loopId: string): Record<string, unknown> | null {
+    validateLoopId(loopId);
+    // v3.3.1: audit judges COMMITTED decisions, which live on :feedback
+    // entries — but queryLoopEntries excludes feedback by default, so the
+    // audit view structurally never saw a committed round (it always
+    // reported "passed" on empty history). Merge both result sets like the
+    // round coordinator does.
+    const prefix = `loop:${loopId}:`;
+    const entries = [
+      ...queryLoopEntries(this.loopStore, loopId, { prefix }),
+      ...queryLoopEntries(this.loopStore, loopId, { prefix, feedbackOnly: true }),
+    ];
+    // Zero committed decisions → nothing to audit. Returning null lets the
+    // tools layer report "no audit data" instead of the external auditor
+    // solemnly passing a loop that never ran (or a mistyped loopId).
+    const hasCommittedDecision = entries.some((entry) => {
+      const taskId = String(entry.task_id ?? "");
+      if (!taskId.endsWith(":feedback")) return false;
+      const lineage = isRecord(entry.loop_lineage) ? entry.loop_lineage : null;
+      const transaction = lineage && isRecord(lineage.round_transaction)
+        ? lineage.round_transaction
+        : null;
+      return transaction !== null && isRecord(transaction.result);
+    });
+    if (!hasCommittedDecision) return null;
+    const audit = buildAudit(loopId, entries, this.loopStore);
+    return { ...audit };
+  }
+
+  /** v2.12: Policy metrics that survive restarts — vault-derived round
+   *  statistics (A4 port) folded with this process's live observations.
+   *  Non-durable fields (evidence, vault errors) come from live only. */
+  getPolicyMetrics(loopId: string): PolicyMetricsSnapshot {
+    // v3.3.1: derived metrics judge committed decisions on :feedback entries,
+    // which queryLoopEntries excludes by default — merge both result sets so
+    // restart-surviving metrics actually see the committed rounds (before,
+    // derived.committedRounds was structurally 0 and the merge fell back to
+    // the live-only snapshot every time).
+    const prefix = `loop:${loopId}:`;
+    const entries = [
+      ...queryLoopEntries(this.loopStore, loopId, { prefix }),
+      ...queryLoopEntries(this.loopStore, loopId, { prefix, feedbackOnly: true }),
+    ];
+    const derived = derivePolicyMetrics(loopId, entries);
+    const live = policyMetrics.snapshot(loopId);
+    if (derived.committedRounds === 0) return live;
+    return mergePolicyMetrics(derived, live);
+  }
+
   /** Get loop health for a loop (in-memory or vault).
    *  Computes goal alignment, constraint integrity, drift, strategy stability. */
   getHealth(loopId: string): Record<string, unknown> | null {
@@ -961,7 +758,7 @@ export class SessionManager {
     if (!task) return null;
 
     // Hydrate vault context
-    const engine = new LoopForgeEngine(this.backend);
+    const engine = new LoopForgeEngine(this.loopStore);
     const vaultContext = engine.hydrateLoopContext(loopId);
 
     // Build a minimal request for health check
@@ -980,18 +777,24 @@ export class SessionManager {
       drift_detected: health.drift_detected,
       strategy_stability: health.strategy_stability,
       task_continuity: health.task_continuity,
-      policy_metrics: policyMetrics.snapshot(loopId),
+      policy_metrics: this.getPolicyMetrics(loopId),
     };
   }
 
   /** Core cycle: extract self-eval → record feedback → check stop → compile next.
+   *  The lease + per-session queue wrap the RoundLifecycle state machine.
    *  @param preExtractedEval Optional pre-built SelfEvaluation from MCP tool parameter.
    *    When provided (MCP path with evaluation parameter), skips regex extraction.
-   *    When undefined (runtime/CLI path), falls back to regex extraction from output. */
+   *    When undefined (runtime/CLI path), falls back to regex extraction from output.
+   *  @param roundId v3.0.1: The roundId of the round this submission reports on
+   *    (from the last start/next/resume response). Anchors the submission so a
+   *    stale or duplicate submission is not processed against a later round.
+   *    Optional for library callers — when absent the anchor check is skipped. */
   async advance(
     sessionId: string,
     output: string,
     preExtractedEval?: SelfEvaluation,
+    roundId?: string,
   ): Promise<AdvanceResult> {
     return this.withSessionQueue(sessionId, async () => {
       const session = this.sessions.get(sessionId);
@@ -1005,7 +808,7 @@ export class SessionManager {
         );
       }
       try {
-        return await this.advanceUnlocked(sessionId, output, preExtractedEval);
+        return await this.lifecycle.advance(sessionId, output, preExtractedEval, roundId);
       } catch (error) {
         if (error instanceof SessionLeaseConflictError) {
           return this.leaseConflictResult(error.loopId, this.findSessionEntry(error.loopId));
@@ -1015,276 +818,24 @@ export class SessionManager {
     });
   }
 
-  private async advanceUnlocked(
-    sessionId: string,
-    output: string,
-    preExtractedEval?: SelfEvaluation,
-  ): Promise<AdvanceResult> {
-    const session = this.sessions.get(sessionId);
-    if (!session) return { sessionId, round: 0, prompt: null, stopReason: "session_not_found" };
-    if (session.status !== "running") {
-      return { sessionId, round: session.currentRound, prompt: null, stopReason: session.status };
-    }
-
-    // 1. Extract self-evaluation (structured param preferred → regex → heuristic)
-    let extractionFailed = false;
-    let selfEval: SelfEvaluation | null;
-    if (preExtractedEval) {
-      selfEval = preExtractedEval;
-      extractionFailed = false;
-    } else {
-      const structured = extractSelfEvaluation(output);
-      extractionFailed = structured === null;
-      selfEval = structured ?? heuristicSelfEvaluation(output);
-    }
-
-    // Guard: if both extraction methods returned null, stop
-    if (!selfEval) {
-      session.status = "stalled";
-      this.save(session);
-      void this.notifyTerminal(session, "stalled");
-      logEvent("session_end", { sessionId, loopId: session.loopId, stopReason: "stalled", round: session.currentRound });
-      return { sessionId, round: session.currentRound, prompt: null, stopReason: "stalled", roundSuccess: false, quality: 0 };
-    }
-
-    // 1.5. Unified transaction: before → evaluate → verify → commit/reject.
-    const snapshot = session.roundSnapshot ?? prepareRoundTransaction(
-      session.loopId,
-      session.currentRound,
-      session.evidenceBaseline ?? [],
-    );
-    const completed = await new RoundDriver(
-      session.engine,
-      this.backend,
-    ).complete({
-      snapshot,
-      loopId: session.loopId,
-      task: session.task,
-      maxRounds: session.maxRounds,
-      selfEval,
-      extractionSucceeded: !extractionFailed,
-      lastSelfEval: session.lastSelfEval,
-      consecutiveRejections: session.consecutiveRejections,
-      successTrajectory: session.successTrajectory,
-    });
-    const outcome = completed.outcome;
-    const actualSnapshots = completed.actualEvidence;
-    session.roundSnapshot = outcome.snapshot;
-    const pr = outcome.result;
-    policyMetrics.recordStrategyOutcome(
-      session.loopId,
-      session.currentLevel,
-      pr,
-      outcome.replayed,
-    );
-
-    const verificationFlags = pr.verificationFlags;
-    // Track per-rule rejections: only same-check rejections
-    // accumulate. A different rejection reason resets the counter.
-    if (pr.action === "reject" && pr.rejectionCheck) {
-      session.consecutiveRejections =
-        pr.rejectionCheck === session.lastRejectionCheck
-          ? pr.newConsecutiveRejections
-          : 1;
-      session.lastRejectionCheck = pr.rejectionCheck;
-    } else {
-      session.consecutiveRejections = pr.newConsecutiveRejections;
-      if (pr.action !== "reject") session.lastRejectionCheck = "";
-    }
-    if (pr.newLastSelfEval) session.lastSelfEval = pr.newLastSelfEval;
-    if (pr.shouldPushSuccessTrajectory) {
-      session.successTrajectory.push(pr.roundSuccess);
-    }
-
-    // Handle enforcement actions
-    if (pr.action === "reject") {
-      const retryRequest = buildLoopRequest(
-        session,
-        undefined,
-        undefined,
-        verificationFlags,
-      );
-      const preparedRetry = await new RoundDriver(
-        session.engine,
-        this.backend,
-      ).prepareRetry(
-        retryRequest as LoopForgeRequest,
-        session.roundSnapshot,
-        pr.rejectionPrompt ?? "",
-        session.consecutiveRejections,
-      );
-      if (!preparedRetry) {
-        session.status = "stalled";
-        session.currentPrompt = null;
-        this.save(session);
-        return {
-          sessionId,
-          round: session.currentRound,
-          roundId: session.roundSnapshot.roundId,
-          prompt: null,
-          stopReason: "stalled",
-        };
-      }
-      session.roundSnapshot = preparedRetry.snapshot;
-      session.currentPrompt = preparedRetry.prompt;
-      session.currentLevel = preparedRetry.level;
-      this.save(session);
-      return {
-        sessionId,
-        round: session.currentRound,
-        roundId: session.roundSnapshot.roundId,
-        prompt: preparedRetry.prompt,
-        level: preparedRetry.level,
-        enforcementAction: "reject",
-        enforcementReason: pr.enforcementReason,
-      };
-    }
-
-    // Accepted rounds advance the before-snapshot. Rejected rounds retain the
-    // original baseline so their retry is still a zero-commit transaction.
-    session.evidenceBaseline = actualSnapshots;
-
-    if (pr.action === "terminate") {
-      session.status = "stopped";
-      session.currentPrompt = null;
-      this.save(session);
-      void this.notifyTerminal(session, "enforcement_terminated");
-      logEvent("session_end", {
-        sessionId, loopId: session.loopId,
-        stopReason: "enforcement_terminated", round: session.currentRound,
-      });
-      return {
-        sessionId,
-        round: session.currentRound,
-        roundId: session.roundSnapshot.roundId,
-        prompt: null,
-        stopReason: "enforcement_terminated",
-        enforcementAction: "terminate",
-        enforcementReason: pr.enforcementReason,
-      };
-    }
-
-    if (pr.action === "stop") {
-      const reason = pr.stopReason ?? "stalled";
-      session.status = reason === "stalled" ? "stalled" : "stopped";
-      session.currentPrompt = null;
-      this.save(session);
-      void this.notifyTerminal(session, reason);
-      logEvent("session_end", { sessionId, loopId: session.loopId, stopReason: reason, round: session.currentRound });
-      return { sessionId, round: session.currentRound, roundId: session.roundSnapshot.roundId, prompt: null, stopReason: reason, roundSuccess: pr.roundSuccess, quality: pr.roundSuccess ? 5 : 1 };
-    }
-
-    const roundSuccess = pr.roundSuccess;
-
-    // Feedback + decision metadata were committed by the transaction layer.
-
-    // Build deprecated quality alias for backward compat
-    const deprecatedQuality = roundSuccess ? 5 : 1;
-
-    // 4. Compile next round after the accepted commit.
-    session.currentRound++;
-    session.currentPrompt = null;
-
-    // v1.8: Memory injection for phases 2/3 — tier-aware
-    let externalCtx = "";
-    if (this.contextProvider) {
-      try {
-        externalCtx = (await this.contextProvider({
-          loopId: session.loopId,
-          round: session.currentRound,
-          task: session.task,
-          domain: "",
-          lastEvaluation: selfEval,
-        })).trim();
-      } catch {
-        logEvent("context_provider_error", {
-          loopId: session.loopId,
-          round: session.currentRound,
-        });
-      }
-    }
-
-    // pause()/delete() are intentionally synchronous for API compatibility.
-    // They may run while the memory provider above is awaited.  Treat the
-    // session map + status as a commit fence so an in-flight advance cannot
-    // compile/save another round after a terminal lifecycle transition.
-    if (this.sessions.get(sessionId) !== session || session.status !== "running") {
-      return {
-        sessionId,
-        round: session.currentRound,
-        prompt: null,
-        stopReason: session.status,
-        roundSuccess,
-        quality: deprecatedQuality,
-      };
-    }
-
-    const request = buildLoopRequest(session, selfEval, deprecatedQuality, verificationFlags);
-    if (externalCtx) {
-      request.external_context = externalCtx;
-    }
-    const prepared = await new RoundDriver(
-      session.engine,
-      this.backend,
-    ).prepare(
-      request as unknown as LoopForgeRequest,
-      session.loopId,
-      session.currentRound,
-    );
-    const nextPrompt = prepared?.prompt ?? null;
-    const nextLevel = prepared?.level ?? "l2";
-    const nextBaseline = prepared?.evidenceBaseline ?? actualSnapshots;
-    session.evidenceBaseline = nextBaseline;
-    session.roundSnapshot = prepared?.snapshot ?? prepareRoundTransaction(
-      session.loopId,
-      session.currentRound,
-      nextBaseline,
-    );
-    session.currentPrompt = nextPrompt;
-    session.currentLevel = nextLevel;
-    policyMetrics.recordStrategy(session.loopId, nextLevel);
-
-    this.save(session);
-
-    return {
-      sessionId,
-      round: session.currentRound,
-      roundId: session.roundSnapshot.roundId,
-      prompt: nextPrompt,
-      level: nextLevel,
-      roundSuccess,
-      quality: deprecatedQuality,
-      warnings: parseWarnings(nextPrompt),
-    };
-  }
-
-  /** Write back loop knowledge to long-term memory.
-   *  Uses shared base builder from policy.ts. Called when a loop terminates. */
-  private async notifyTerminal(
-    session: McpSession,
-    stopReason: string,
-  ): Promise<void> {
-    if (this.terminalSinks.size === 0) return;
-    const event: LoopTerminalEvent = {
-      loopId: session.loopId,
-      task: session.task,
-      success: stopReason === "completed",
-      stopReason: stopReason as LoopTerminalEvent["stopReason"],
-      roundsCompleted: session.currentRound,
-      successTrajectory: [...session.successTrajectory],
-      lastEvaluation: session.lastSelfEval,
-    };
-    await Promise.allSettled(
-      [...this.terminalSinks].map((sink) => Promise.resolve(sink(event))),
-    );
-  }
-
   /** Replay timeline for a session — creates ReplayBackend from the stored backend. */
   replayTimeline(sessionId: string): Record<string, unknown>[] | null {
     const session = this.sessions.get(sessionId);
     if (!session) return null;
 
-    const replay = new ReplayBackend(this.backend!);
-    return replay.timeline(session.loopId);
+    return this.replayByLoop(session.loopId);
+  }
+
+  /** v3.3.1: Replay a loop straight from the vault — no in-memory session
+   *  needed. Time travel over committed rounds is a property of the store
+   *  (ReplayBackend reads round documents), so a process restart must not
+   *  revoke it: the session registry was an artificial prerequisite that
+   *  made every vault loop unreplayable after restart.
+   *  Returns null when the loop has no committed rounds. */
+  replayByLoop(loopId: string): Record<string, unknown>[] | null {
+    validateLoopId(loopId);
+    const replay = new ReplayBackend(this.loopStore);
+    const timeline = replay.timeline(loopId);
+    return timeline.length > 0 ? timeline : null;
   }
 }

@@ -11,3 +11,6 @@ node_modules/
 
 # Compiled test output
 dist/tests/
+
+# verify:artifacts temp build dir
+.verify-artifacts-tmp/

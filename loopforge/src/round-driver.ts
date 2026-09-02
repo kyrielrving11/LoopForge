@@ -6,7 +6,7 @@
  * in their adapters.
  */
 
-import type { VaultBackend } from "./backends/interface.js";
+import type { LoopStore } from "./loop-store.js";
 import { LoopForgeEngine } from "./engine.js";
 import { EvidenceCollector } from "./evidence-provider.js";
 import type { ProviderSnapshot } from "./evidence-provider.js";
@@ -34,6 +34,10 @@ export interface PreparedRound {
   evidenceBaseline: ProviderSnapshot[];
   snapshot: RoundTransactionSnapshot;
   stateFileContent?: string;
+  warnings?: string[];
+  /** v3.0.1: The full compile response. Callers may cache it (e.g. for the
+   *  typed projection) instead of recompiling for derived views. */
+  compileResponse?: LoopForgeResponse;
 }
 
 export interface CompleteRoundInput {
@@ -42,10 +46,15 @@ export interface CompleteRoundInput {
   task: string;
   maxRounds: number;
   selfEval: SelfEvaluation;
-  extractionSucceeded: boolean;
   lastSelfEval?: SelfEvaluation;
   consecutiveRejections: number;
   successTrajectory: boolean[];
+  /** v2.12: Current clarification streak for R7 escalation. */
+  driftClarificationStreak?: number;
+  /** v2.13: Files from skipped backtrack rounds for restore check. */
+  backtrackSkippedFiles?: string[];
+  /** v2.12: Git HEAD of the backtrack restore point (workspace restore check). */
+  backtrackTargetGitHead?: string;
 }
 
 export interface CompletedRound {
@@ -54,10 +63,10 @@ export interface CompletedRound {
 }
 
 export class RoundDriver {
-  private readonly backend: VaultBackend;
+  private readonly store: LoopStore;
 
-  constructor(private readonly engine: LoopForgeEngine, backend?: VaultBackend) {
-    this.backend = backend ?? engine.getBackend();
+  constructor(private readonly engine: LoopForgeEngine, store?: LoopStore) {
+    this.store = store ?? engine.getStore();
   }
 
   async prepare(
@@ -65,9 +74,14 @@ export class RoundDriver {
     loopId: string,
     round: number,
   ): Promise<PreparedRound | null> {
-    const response = this.compile(request, loopId, true);
+    // v3.0.1: compile (CPU-bound) and before-evidence collection (external
+    // process spawns) run concurrently — the git/command spawns were the
+    // latency tail behind the old compile-first, evidence-second order.
+    const [response, evidenceBaseline] = await Promise.all([
+      Promise.resolve().then(() => this.compile(request, loopId, true)),
+      this.collectEvidence(loopId, "before"),
+    ]);
     if (!response) return null;
-    const evidenceBaseline = await this.collectEvidence(loopId, "before");
     return this.finishPrepare(response, loopId, round, evidenceBaseline);
   }
 
@@ -128,6 +142,8 @@ export class RoundDriver {
       evidenceBaseline: rejected.beforeEvidence,
       snapshot,
       stateFileContent: response.state_file_content,
+      warnings: response.warnings,
+      compileResponse: response,
     };
   }
 
@@ -151,6 +167,8 @@ export class RoundDriver {
       evidenceBaseline,
       snapshot,
       stateFileContent: response.state_file_content,
+      warnings: response.warnings,
+      compileResponse: response,
     };
   }
 
@@ -158,18 +176,20 @@ export class RoundDriver {
     const actualEvidence = await this.collectEvidence(input.loopId, "after");
     const transaction = new RoundTransactionCoordinator(
       this.engine,
-      this.backend,
+      this.store,
     );
     const outcome = transaction.process({
       snapshot: input.snapshot,
       task: input.task,
       maxRounds: input.maxRounds,
       selfEval: input.selfEval,
-      extractionSucceeded: input.extractionSucceeded,
       lastSelfEval: input.lastSelfEval,
       consecutiveRejections: input.consecutiveRejections,
       successTrajectory: input.successTrajectory,
       actualEvidence,
+      driftClarificationStreak: input.driftClarificationStreak,
+      backtrackSkippedFiles: input.backtrackSkippedFiles,
+      backtrackTargetGitHead: input.backtrackTargetGitHead,
     });
     return { outcome, actualEvidence };
   }
@@ -177,7 +197,7 @@ export class RoundDriver {
   recover(snapshot: RoundTransactionSnapshot): RoundTransactionOutcome | null {
     return new RoundTransactionCoordinator(
       this.engine,
-      this.backend,
+      this.store,
     ).recover(snapshot);
   }
 

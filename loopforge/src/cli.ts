@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 /** Unified LoopForge command line. */
 
-import { accessSync, constants, existsSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { accessSync, constants, existsSync, realpathSync, statSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { containInWorkspace } from "./workspace.js";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { initializeClient, type InitClient } from "./init.js";
@@ -10,7 +11,7 @@ import { FileLoopStore } from "./loop-store.js";
 import { getPolicy, validateLoopId, writeDefaultPolicy } from "./policy.js";
 import { McpServer } from "./mcp/server.js";
 
-const VERSION = "2.0.0-rc.1";
+const VERSION = "3.3.0";
 
 const HELP = `LoopForge ${VERSION}
 
@@ -42,7 +43,20 @@ function withoutPrompts(value: unknown): unknown {
   if (!value || typeof value !== "object") return value;
   const result: Record<string, unknown> = {};
   for (const [key, child] of Object.entries(value)) {
-    if (["promptArtifact", "renderedPrompt", "current_prompt", "full_prompt"].includes(key)) {
+    // v2.14: filter every key CONTAINING "prompt" (case-insensitive
+    // substring). The old \bprompt\b word-boundary regex never matched
+    // underscore or camelCase keys (full_prompt, current_prompt,
+    // renderedPrompt, currentPrompt), so the filter was a silent no-op and
+    // `inspect --round N` leaked full prompt text. Prompt artifacts are
+    // kept as metadata only — renderedPrompt IS the prompt text itself.
+    if (/prompt/i.test(key)) {
+      // Prompt artifacts are kept as metadata only (level, hashes) — the
+      // rendered text is the prompt itself.
+      if ((key === "promptArtifact" || key === "prompt_artifact") &&
+          child !== null && typeof child === "object" && !Array.isArray(child)) {
+        const { renderedPrompt: _text, ...metadata } = child as Record<string, unknown>;
+        if (Object.keys(metadata).length > 0) result[key] = metadata;
+      }
       continue;
     }
     result[key] = withoutPrompts(child);
@@ -51,21 +65,8 @@ function withoutPrompts(value: unknown): unknown {
 }
 
 function ensureInsideWorkspace(configured: string): string {
-  const workspace = realpathSync(process.cwd());
-  const lexical = resolve(workspace, configured);
-  const lexicalRelative = relative(workspace, lexical);
-  if (
-    lexicalRelative === ".." || lexicalRelative.startsWith(`..${sep}`) ||
-    isAbsolute(lexicalRelative)
-  ) throw new Error("path leaves the workspace");
-  if (!existsSync(lexical)) return lexical;
-  const actual = realpathSync(lexical);
-  const actualRelative = relative(workspace, actual);
-  if (
-    actualRelative === ".." || actualRelative.startsWith(`..${sep}`) ||
-    isAbsolute(actualRelative)
-  ) throw new Error("path resolves outside the workspace");
-  return actual;
+  // v3.3.1: delegated to the single shared containment check (workspace.ts).
+  return containInWorkspace(process.cwd(), configured);
 }
 
 function doctor(json: boolean): number {
@@ -137,7 +138,18 @@ function doctor(json: boolean): number {
 }
 
 function inspect(args: string[]): void {
-  const loopId = args.find((arg) => !arg.startsWith("-"));
+  // v3.3.1: option VALUES (e.g. "--round 2") are not positional arguments.
+  // Previously `inspect --round 2 my-loop` took "2" as the LOOP_ID and
+  // reported "round not found: 2#2" while never reading my-loop.
+  const optionValues = new Set<string>();
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--round" && i + 1 < args.length) {
+      optionValues.add(args[i + 1]);
+    }
+  }
+  const loopId = args.find(
+    (arg) => !arg.startsWith("-") && !optionValues.has(arg),
+  );
   if (!loopId) throw new Error("inspect requires LOOP_ID");
   validateLoopId(loopId);
   const roundText = option(args, "--round");

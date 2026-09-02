@@ -5,10 +5,10 @@
  * as heartbeats, executor deadlines, MCP leases, and response formatting stay
  * in their adapters.
  */
-import type { VaultBackend } from "./backends/interface.js";
+import type { LoopStore } from "./loop-store.js";
 import { LoopForgeEngine } from "./engine.js";
 import type { ProviderSnapshot } from "./evidence-provider.js";
-import type { LoopForgeRequest, PromptArtifact, SelfEvaluation } from "./protocol.js";
+import type { LoopForgeRequest, LoopForgeResponse, PromptArtifact, SelfEvaluation } from "./protocol.js";
 import type { RoundTransactionOutcome, RoundTransactionSnapshot } from "./round-transaction.js";
 export interface PreparedRound {
     prompt: string;
@@ -17,6 +17,10 @@ export interface PreparedRound {
     evidenceBaseline: ProviderSnapshot[];
     snapshot: RoundTransactionSnapshot;
     stateFileContent?: string;
+    warnings?: string[];
+    /** v3.0.1: The full compile response. Callers may cache it (e.g. for the
+     *  typed projection) instead of recompiling for derived views. */
+    compileResponse?: LoopForgeResponse;
 }
 export interface CompleteRoundInput {
     snapshot: RoundTransactionSnapshot;
@@ -24,10 +28,15 @@ export interface CompleteRoundInput {
     task: string;
     maxRounds: number;
     selfEval: SelfEvaluation;
-    extractionSucceeded: boolean;
     lastSelfEval?: SelfEvaluation;
     consecutiveRejections: number;
     successTrajectory: boolean[];
+    /** v2.12: Current clarification streak for R7 escalation. */
+    driftClarificationStreak?: number;
+    /** v2.13: Files from skipped backtrack rounds for restore check. */
+    backtrackSkippedFiles?: string[];
+    /** v2.12: Git HEAD of the backtrack restore point (workspace restore check). */
+    backtrackTargetGitHead?: string;
 }
 export interface CompletedRound {
     outcome: RoundTransactionOutcome;
@@ -35,8 +44,8 @@ export interface CompletedRound {
 }
 export declare class RoundDriver {
     private readonly engine;
-    private readonly backend;
-    constructor(engine: LoopForgeEngine, backend?: VaultBackend);
+    private readonly store;
+    constructor(engine: LoopForgeEngine, store?: LoopStore);
     prepare(request: LoopForgeRequest, loopId: string, round: number): Promise<PreparedRound | null>;
     /** Synchronous fallback for legacy embedding APIs. Async evidence providers
      * are deliberately skipped by EvidenceCollector.collect(). */

@@ -1,448 +1,274 @@
 # LoopForge
 
-**A recoverable cognitive state runtime for AI coding agents.**
+**A context window is not memory. Memory needs a runtime.**
 
-[中文文档](./README.zh-CN.md) | [Package documentation](./LoopForge/README.md) | [Protocol schema](./loopforge-protocol.json)
+> **v3.3.0** — `npm install -g loopforge`. Node.js ≥ 18. Zero runtime dependencies.
+> [中文文档](./README.zh-CN.md)
 
-AI coding agents are good at completing a focused request. Long tasks are harder. After several rounds, the original objective gets compressed, newly discovered constraints disappear, a failed approach gets retried, or the Agent declares success before the repository evidence supports it. A process restart can erase the only useful copy of the plan.
+---
 
-LoopForge gives the Agent a durable round boundary. It records the objective, success criteria, constraints, evidence, decisions, progress, corrections, and recovery state outside the model context. The Agent still reads the repository, edits files, runs commands, and chooses how to reason. LoopForge keeps the work coherent and recoverable while that Agent remains in control.
+## The real problems with long-horizon tasks
 
-The current workspace contains the `2.0.0-rc.1` release candidate. The npm package lives in [`LoopForge/`](./LoopForge/), requires Node.js 18 or newer, uses TypeScript, and has zero runtime dependencies.
+Any AI coding agent, given a long enough task, hits three walls. Not because
+the model isn't smart enough. Not because the context window isn't large
+enough. These are **architectural** problems.
 
-## What LoopForge helps with
+### Problem 1: The summary cascade
 
-LoopForge is useful when a coding task lasts long enough for state management to become part of the problem:
+Context fills up → compress. Fills up again → compress again. The third
+compression is a summary of a summary of a summary. Every cycle evaporates
+information — critical constraints get silently deleted because the summarizer
+judged them "no longer relevant." Researchers found that after 3–4 summary
+cycles, constraint violation rates spike from 0% to 59%. The agent doesn't
+know what it forgot, because the forgetting itself was compressed away.
 
-- A repository audit spans architecture, correctness, security, tests, documentation, and release checks.
-- A refactor must preserve public APIs and other constraints across many edits.
-- A migration uncovers new requirements while implementation is already in progress.
-- A difficult defect needs several hypotheses, experiments, and rejected attempts.
-- The Agent may be interrupted, compact its context, restart, or continue in a later session.
-- Success claims need to be checked against Git changes and real verification commands.
-- A team needs an auditable record of what each round changed, learned, rejected, and committed.
+**This is what happens when you treat cognitive state as context. The bucket
+always leaks.**
 
-For short requests that fit in one Agent turn, LoopForge may be unnecessary. Its value appears when the task has enough history that losing or distorting that history would change the outcome.
+### Problem 2: Self-correction doesn't work
 
-## What it does and where the boundary is
+Google DeepMind's conclusion is clear: models cannot reliably improve
+themselves through introspection. They talk themselves out of correct answers.
+Effective recovery requires an **external verifier** — an independent observer
+that doesn't share the agent's context, doesn't participate in its reasoning,
+and only looks at inputs and outputs. The verifier must never be the same
+context that made the mistake.
 
-| LoopForge does | The external Agent does |
-| --- | --- |
-| Stores the canonical objective and evolving cognitive state | Reads source code and documentation |
-| Compiles the next prompt from committed state | Chooses a reasoning approach |
-| Captures Git and configured command evidence | Edits files and runs tools |
-| Verifies self-evaluation across rounds | Reports an honest structured evaluation |
-| Accepts, rejects, or terminates a round | Redoes rejected work when required |
-| Persists round transactions and recovery data | Decides when to ask the user for help |
-| Provides pause, resume, replay, health, and inspection | Remains the owner of the user task |
+### Problem 3: Compound error (p^N)
 
-LoopForge is not a model, coding Agent, job scheduler, or unattended worker. It deliberately does not create a second Agent in the background. The Agent already connected to the user's repository remains the execution owner.
+If each step succeeds with probability p, N sequential steps succeed with
+probability p^N. METR found that frontier agents nail nearly 100% of tasks
+a human finishes in under 4 minutes, then crater to under 10% on tasks taking
+more than 4 hours. Small errors at each step become the correct input for the
+next step. The agent builds on errors, each step looking locally reasonable,
+while the entire trajectory is fiction.
 
-## How one loop works
+**These three problems amplify each other. The summary cascade loses
+information → lost information becomes errors → the agent can't self-correct
+because those errors look reasonable within its own context.**
 
-```mermaid
-flowchart TD
-    A["Agent receives a LoopForge prompt"] --> B["Agent inspects, edits, and runs tools"]
-    B --> C["Agent submits structured self-evaluation"]
-    C --> D["LoopForge captures evidence"]
-    D --> E["Verification checks claims against history and evidence"]
-    E --> F{"Round decision"}
-    F -->|accept| G["Commit state and compile the next prompt"]
-    F -->|reject| H["Keep the same round ID and compile a retry"]
-    F -->|stop| I["Persist the terminal state and trajectory"]
-    G --> A
-    H --> A
+---
+
+## What LoopForge does about it
+
+LoopForge runs **outside** the agent. It provides a typed vault that survives
+context compression, an external verification-and-enforcement pipeline the
+agent cannot self-provide, and a recovery system that walks back from dead
+ends without human intervention.
+
+### 1. Vault → compile, not summary → summary
+
+Each round's self-evaluation is written to a **typed JSON vault**. The next
+round's prompt is not a compressed version of the previous prompt — it's
+**recompiled from the vault**. Milestones are recomputed from raw vault
+entries, not chained from prior summaries. Constraints, criteria, and
+sub-goals carry stable hash-derived IDs (`c-` / `cr-` / `sg-XXXXXXXX`) for
+exact matching across rounds. Delete the state file and it regenerates from
+the vault.
+
+```
+❌ Traditional: prompt → summary → next prompt → re-summarize → …
+✅ LoopForge:  prompt → vault entry → next prompt (recompiled from vault)
 ```
 
-Each logical round has a stable `roundId`. If enforcement rejects an attempt, LoopForge increments the attempt number but does not advance the round or commit its feedback. An accepted attempt updates the canonical state exactly once. Persisted decisions make restart recovery idempotent, so resuming a loop does not advance the same round twice.
+### 2. External verification & enforcement
+
+The **verification gate** (26 cross-checks) compares every agent claim
+against independent evidence — Git snapshots, test runner output, explicit
+verification commands. The **enforcement gate** (13 rules) decides what to do.
+Its focus is not "did the agent violate constraint X" — it detects what the
+agent cannot self-diagnose:
+
+- R1: Claimed success but criteria remain unmet → **self-deception**
+- R3: Claimed success with no verifiable evidence → **empty claim**
+- R4: Flat progress for 3 rounds → **stalled without knowing it**
+- R5: Zero forward motion → **going through the motions**
+- R7: Said X, did Y → **intent and actions disconnected**
+
+**The agent is the system that produced those narratives. It cannot detect
+these patterns from the inside.**
+
+### 3. Recovery: reject, backtrack, resume
+
+**Zero-commit rejection** — a rejected round writes nothing to the vault. The
+round ID stays stable, the attempt counter increments, and the next prompt
+includes a diagnostic gap showing exactly what didn't match.
+
+**Backtrack** — when progress stalls (R4/R5), the loop rolls back to the last
+clean round instead of terminating. A diagnosis of why the path failed is
+injected. The backtrack prompt includes workspace restore commands with
+affected file lists; the next submission is rejected if the workspace wasn't
+restored. Valid discoveries from skipped rounds are preserved.
+
+**Pause / Resume / Replay** — cross-process session leases. Idempotent resume
+after interruption. Time-travel queries over committed rounds.
+
+---
+
+## What LoopForge is not
+
+- ❌ **Not a memory system** — the state file is a derived view. The vault is
+  truth. No RAG, no vector DB.
+- ❌ **Not a context compressor** — doesn't compress prompts or do smart
+  summarization. Recompiles from vault, not from the previous prompt.
+- ❌ **Not a constraint tracker** — constraints are one signal the verification
+  gate monitors. The core value is external judgment.
+- ❌ **Not a replacement for the agent** — the agent still reads code, edits
+  files, runs tools, and decides how to reason. LoopForge owns the **round
+  boundary**.
+
+---
+
+## Install
+
+```bash
+npm install -g loopforge
+loopforge init --client claude
+claude mcp add loopforge -- npx loopforge mcp
+```
+
+Works with Claude Code, Codex CLI, or any MCP-compatible client.
+
+The MCP server path (`loopforge mcp`) is the primary integration. It provides
+the full cognitive infrastructure: verification gate, enforcement gate,
+backtrack, evidence collection, and crash recovery. The engine is also
+available as a library for custom integrations — see the
+[API reference](./loopforge/README.md).
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────┐
+│                  Agent executes round                 │
+│  Reads code · Edits files · Runs tools · Reasons      │
+└──────────────────────┬──────────────────────────────┘
+                       │ Agent submits SelfEvaluation
+                       ▼
+┌─────────────────────────────────────────────────────┐
+│               LoopForge round boundary                │
+│                                                       │
+│  Evidence → Verify → Enforce → Commit → Compile       │
+│  (Git/cmd) (26 checks) (13 rules) (vault) (next)    │
+│                                                       │
+│  accept:    commit state, compile next round           │
+│  reject:    retry same round, zero state mutation      │
+│  backtrack: roll back, restore workspace, inject diag  │
+│  terminate: persist terminal state                     │
+└──────────────────────┬──────────────────────────────┘
+                       │ Recompile prompt from vault
+                       ▼
+┌─────────────────────────────────────────────────────┐
+│             Vault (typed JSON persistence)            │
+│  loops/<id>/rounds/<n>.json · session.json · policy   │
+│  Source of truth. Not a summary chain.                 │
+└─────────────────────────────────────────────────────┘
+```
+
+---
 
 ## Core capabilities
 
-### Canonical cognitive state
-
-LoopForge keeps one typed state model that both prompt rendering and the human-readable state file consume. The state includes:
-
-- The original objective, objective version, and refinement history.
-- Success criteria and the criteria still remaining.
-- Hard constraints, active constraints, and retired constraints.
-- Changes since the previous accepted round.
-- New discoveries, emerged subtasks, blockers, and wrong assumptions.
-- Progress estimates, changed files, and reported test results.
-- Cross-round outcomes, recurring issues, and failed patterns.
-- Verification findings, checkpoints, the next action, and optional external context.
-
-Markdown is a derived view. It cannot silently become a second recovery truth.
-
-### One prompt artifact per attempt
-
-Every attempt produces one immutable `PromptArtifact`. It records the exact rendered prompt together with its prompt hash, canonical state hash, round ID, attempt number, state level, included sections, character budget, and generation time. This makes it possible to answer which state produced a prompt and whether two attempts received the same instructions.
-
-L0, L1, and L2 control how much state the Agent receives:
-
-| Level | When it is used | What the Agent receives |
-| --- | --- | --- |
-| L0 | A rejected attempt must redo the same logical round | Rejection requirements and information that changed since the previous attempt |
-| L1 | Normal continuation | A compact state capsule with the current task, constraints, progress, and next action |
-| L2 | First round, checkpoint, goal change, or full refresh | The full canonical state needed to rehydrate the task |
-
-These levels do not choose chain-of-thought, tree search, or any other prompt technique. Reasoning belongs to the Agent.
-
-### Cross-round verification
-
-The verification gate compares the current self-evaluation with committed history and captured evidence. It can flag:
-
-- A large unexplained progress regression.
-- A success claim with passing tests but no changed files.
-- A success claim while criteria remain unfinished.
-- A constraint reported as newly discovered even though it was already known.
-- The same constraint violation recurring for three rounds.
-- A constraint retracted immediately after discovery.
-- Reported file changes that do not match Git evidence.
-- Reported evidence that does not match provider snapshots.
-- A required verification command that failed, timed out, is missing, or has an invalid working directory.
-
-Findings are aggregated into `trusted`, `suspect`, or `contradicted` verdicts. Warnings can continue into the next prompt. Contradictions reach the enforcement gate before feedback is committed.
-
-### Round-boundary enforcement
-
-Verification describes inconsistencies. Enforcement decides what happens next. The current rules reject fake completion, recurring violations, unverifiable success, and stalled progress. Repeated rejection or a stall that the Agent cannot resolve can terminate the loop with `enforcement_terminated`.
-
-Rejected attempts do not update the success trajectory, constraint history, rolling summary, or durable round result. This zero-commit rule prevents an invalid evaluation from contaminating later prompts.
-
-### Evidence from the workspace
-
-Git evidence is enabled by default. LoopForge captures tracked, staged, and untracked file state at round boundaries and compares before and after snapshots, including files that were already dirty before the round.
-
-Command evidence is optional and explicit. A project can configure tests, builds, linters, type checks, or another executable as authoritative evidence. Commands:
-
-- Run with `shell: false` and an executable plus argument array.
-- Use a working directory that must remain inside the workspace after real-path resolution.
-- Have a deadline and terminate the child process on timeout.
-- Retain bounded output, with a hard maximum of 20,000 characters.
-- Produce structured statuses such as `passed`, `failed`, `timeout`, `missing`, `invalid_cwd`, and `aborted`.
-- Can be marked `required`, causing a failed result to contradict an Agent success claim.
-
-### Durable recovery and process ownership
-
-The default `FileLoopStore` writes typed JSON with temporary-file plus rename semantics. Loop IDs are mapped to SHA-256 directory names, avoiding prefix collisions and unsafe path construction. A store lock protects writes, and renewable session leases prevent two MCP processes from advancing the same loop concurrently.
-
-Running and paused sessions can be reconstructed after an MCP process restart. Pause preserves the current transaction. Resume returns the correct prompt without resetting progress. Stop and cleanup paths are idempotent.
-
-### Replay, inspection, health, and tracing
-
-LoopForge exposes the committed timeline for debugging and audit work. You can inspect a session, read one round, compare progress, and replay decisions without relying on the Agent's current context. Full prompts are redacted by default from CLI inspection and only shown with an explicit flag.
-
-The runtime also supports structured tracing, policy effectiveness metrics, terminal event sinks, external context providers, cognitive checkpoint sinks, custom evidence providers, and custom `LoopStore` implementations.
-
-## Quick start from this repository
-
-```bash
-git clone https://github.com/kyrielrving11/LoopForge.git
-cd LoopForge/LoopForge
-npm install
-npm run build
-npm link
-loopforge doctor
-```
-
-`npm link` makes the local `loopforge` command available while developing the release candidate. When using a published package build, install it globally and run the same CLI commands.
-
-Install the Perception skill and print the MCP registration command for your client:
-
-```bash
-# Claude Code
-loopforge init --client claude
-claude mcp add loopforge -- npx loopforge mcp
-
-# Codex
-loopforge init --client codex
-codex mcp add loopforge -- npx loopforge mcp
-```
-
-For another MCP client:
-
-```bash
-loopforge init --client generic
-```
-
-The generic command installs the skill under `.loopforge/skills/perception/` and prints a standard `mcpServers` configuration fragment. Use `--target DIR` to choose another skill directory and `--force` to replace an existing copy.
-
-The store root is relative to the MCP server's working directory. Start or configure the server from the repository whose loop state you want to manage.
-
-## Using LoopForge through an Agent
-
-After registration, ask the Agent to use LoopForge for a task that needs several rounds. A useful request is specific about the objective and durable constraints:
-
-```text
-Use LoopForge to audit this TypeScript package, fix confirmed correctness bugs,
-preserve the public API, run the existing checks, and continue until every
-confirmed issue is either fixed or documented as blocked.
-```
-
-The Agent starts a session through MCP:
-
-```json
-{
-  "task": "Audit this TypeScript package and fix confirmed correctness bugs",
-  "constraints": [
-    "Preserve the public API",
-    "Do not replace the zero-dependency runtime design",
-    "Run the existing checks before claiming completion"
-  ],
-  "maxRounds": 12,
-  "domain": "typescript"
-}
-```
-
-After doing real repository work, the Agent submits a structured evaluation:
-
-```json
-{
-  "sessionId": "SESSION_ID",
-  "evaluation": {
-    "success": false,
-    "output_summary": "Fixed the resume race and added a regression test. The restart path still needs verification.",
-    "should_continue": true,
-    "constraint_violations": [],
-    "discovered_constraints": [
-      "A resumed session must retain the original round ID"
-    ],
-    "execution_evidence": {
-      "files_changed": [
-        "src/runtime.ts",
-        "src/tests/runtime.test.ts"
-      ],
-      "test_results": {
-        "passed": 18,
-        "failed": 0,
-        "skipped": 0
-      },
-      "success_criteria_met": [
-        "Pause and resume no longer create a second driver"
-      ],
-      "success_criteria_remaining": [
-        "Verify recovery after a process restart"
-      ],
-      "progress_estimate": 0.7
-    }
-  }
-}
-```
-
-LoopForge returns the next prompt, a same-round rejection prompt, or a terminal reason. The Agent continues inside the same user task.
-
-## MCP tools
-
-The stdio server exposes nine synchronous, Agent-driven tools:
-
-| Tool | Main input | Purpose |
-| --- | --- | --- |
-| `loopforge_start` | `task`, optional `constraints`, `maxRounds`, `domain`, `loopId`, `planSource` | Create a loop and compile round 1 |
-| `loopforge_next` | `sessionId`, structured `evaluation` | Verify and close the current attempt, then return the next prompt |
-| `loopforge_status` | `sessionId` | Read round identity, status, trajectory, lease, and metrics |
-| `loopforge_pause` | `sessionId` | Persist a running session at the next round boundary |
-| `loopforge_resume` | `loopId` | Reconstruct an interrupted or paused session |
-| `loopforge_stop` | `sessionId` | Intentionally end a session and return its trajectory |
-| `loopforge_list` | none | List sessions known to the current MCP server |
-| `loopforge_replay` | `sessionId` | Return an auditable committed timeline |
-| `loopforge_health` | `loopId` | Check alignment, constraint integrity, drift, stability, and continuity |
-
-Tool results include MCP `structuredContent` and a serialized text block for older clients. Input is validated at the server boundary; primitive JSON and malformed evaluation objects return tool errors rather than crashing the server.
-
-LoopForge does not implement MCP Tasks. It expects the client Agent to call the next tool after it completes each round.
-
-## CLI reference
-
-```bash
-loopforge mcp
-loopforge init --client claude|codex|generic [--target DIR] [--force]
-loopforge doctor [--json]
-loopforge inspect LOOP_ID [--round N] [--prompt] [--json]
-loopforge migrate [--from PATH] [--json]
-```
-
-| Command | What it does |
-| --- | --- |
-| `mcp` | Starts the JSON-RPC MCP server over standard input and output |
-| `init` | Installs the Perception skill and prints client registration details |
-| `doctor` | Checks Node.js, store permissions, Git availability, and configured command paths without running those commands |
-| `inspect` | Reads a session summary or one typed round document; prompts stay hidden unless `--prompt` is present |
-| `migrate` | Imports a legacy `.promptcraft/prompt_vault.json` into the typed store without deleting the source |
-
-Use `--json` for automation and scripts. Migration is idempotent and records a marker under `.loopforge/migrations/`.
-
-## Storage layout
-
-```text
-.loopforge/
-  loops/
-    <sha256(loopId)>/
-      metadata.json
-      session.json
-      rounds/
-        1.json
-        2.json
-  migrations/
-  state/
-    <loopId>-state.md
-```
-
-`metadata.json`, `session.json`, and the round documents are the durable transaction truth. The Markdown file is a replaceable view for humans and Agents. Disable it with `state_file.enabled` if a project only wants typed storage.
-
-Each round document can retain the stable transaction snapshot, prompt artifact, evaluation, verification verdict, enforcement decision, and committed lineage needed for inspection or replay.
-
-## Configuring verification commands
-
-LoopForge reads `loop_policy.json` from the working directory. Git evidence is enabled by default. Commands remain disabled until explicitly configured:
-
-```json
-{
-  "evidence": {
-    "providers": ["git"],
-    "timeout_ms": 120000,
-    "commands": [
-      {
-        "name": "typecheck",
-        "enabled": true,
-        "executable": "npm",
-        "args": ["run", "check"],
-        "cwd": ".",
-        "phase": "after",
-        "required": true,
-        "timeout_ms": 120000,
-        "max_output_chars": 12000,
-        "success_exit_codes": [0]
-      }
-    ]
-  }
-}
-```
-
-Use `npm.cmd` as the executable when the Windows environment requires the command shim explicitly. `loopforge doctor` validates the configured name, executable shape, and working directory without executing the verification command.
-
-Other policy sections control maximum rounds, round deadlines, heartbeat and stall timing, prompt budgets, full-state refresh intervals, state-file output, constraint retirement, and MCP lease timing. See [`LoopForge/loop_policy.json`](./LoopForge/loop_policy.json) for the complete default policy.
-
-## Library API
-
-Projects that already own Agent execution can embed the runtime directly:
-
-```typescript
-import { run } from "loopforge";
-
-const result = await run({
-  task: "Audit this repository and fix confirmed defects",
-  constraintsFromPlan: [
-    "Do not change the public API",
-    "Do not remove existing regression coverage"
-  ],
-  maxRounds: 10,
-  execute: async (prompt, context) => {
-    return agent.execute(prompt, { signal: context.signal });
-  },
-  onRoundStart: ({ round, roundId, level }) => {
-    console.log({ round, roundId, level });
-  },
-  onHeartbeat: ({ round, elapsedMs }) => {
-    console.log(`round ${round}: ${elapsedMs}ms`);
-  }
-});
-
-console.log(result.stopReason, result.successTrajectory);
-```
-
-External context and terminal telemetry are explicit hooks:
-
-```typescript
-const result = await run({
-  task,
-  execute,
-  contextProvider: async ({ loopId, round, lastEvaluation }) => {
-    return contextStore.read({ loopId, round, lastEvaluation });
-  },
-  terminalSinks: [
-    async (event) => telemetry.record(event)
-  ]
-});
-```
-
-The public package also exposes the compiler, runtime, replay backend, MCP server, `FileLoopStore`, evidence provider registry, command evidence provider, tracing hooks, policy metrics, cognitive checkpoint bridge, and round transaction primitives. Public subpath exports are available from `loopforge/compiler`, `loopforge/replay`, and `loopforge/mcp`.
-
-## Can it handle long-horizon tasks?
-
-Yes, when the task remains Agent-driven and has a bounded objective. LoopForge preserves enough state to continue through many rounds, context compression, an intentional pause, or a process restart. The default policy allows 20 rounds and can be changed per session or policy.
-
-Good long-horizon use has four properties:
-
-1. One loop owns one clear user objective.
-2. Hard constraints and success criteria are stated at the start and refined only when evidence changes them.
-3. Each round performs real work and submits evidence instead of only producing another plan.
-4. The client Agent remains available to execute the next prompt or the user resumes it later.
-
-LoopForge does not keep an Agent running after the client task ends. It does not schedule machines, manage credentials, or replace human approval for risky operations. A custom store or checkpoint sink can integrate it with a larger platform, but execution ownership stays outside LoopForge.
-
-For a very large program of work, create separate loops for independent objectives and let the Agent carry explicit outcomes between them. Avoid putting an entire roadmap into one endless session.
-
-## Practical use cases
-
-### Repository audit and repair
-
-Start with correctness, security, compatibility, and release constraints. Each round can inspect one subsystem, fix confirmed findings, and record which risks remain. Git and command evidence keep a clean audit trail, while replay shows why a finding was accepted, rejected, or deferred.
-
-### Large refactor with compatibility constraints
-
-Put public API, package size, runtime dependency, and supported Node.js requirements into hard constraints. When implementation uncovers a new compatibility boundary, add it as a discovered constraint. L2 rehydration makes those constraints visible again at checkpoints.
-
-### Difficult debugging session
-
-Record each hypothesis in the round summary and put disproved assumptions in `wrong_assumptions`. A recurring failure or flat progress triggers a different approach instead of allowing the Agent to repeat the same experiment indefinitely.
-
-### Migration or release preparation
-
-Track schema changes, compatibility tasks, documentation, packaging, and verification commands as success criteria. Required build or test evidence prevents a release-complete claim when the configured command failed.
-
-### Work interrupted by context limits
-
-Pause the session or let the MCP process restart. The next Agent can resume from typed state, read the derived state file, inspect earlier rounds, and receive an L2 prompt without reconstructing the task from chat history.
-
-## Safety and operational boundaries
-
-- LoopForge does not sandbox the external Agent. Tool permissions still belong to the Agent host.
-- Command evidence never uses a shell, but the configured executable itself must still be trusted.
-- Command and state-file paths are checked against lexical and resolved workspace boundaries, including symlink or junction escapes.
-- Store locking and session leases prevent accidental concurrent advancement; they are not a distributed consensus system.
-- Prompt inspection is redacted by default because prompts may contain repository context.
-- Zero runtime dependencies reduce the installed attack surface, but projects should still review the package and policy before use.
-- The 2.0 line is currently a release candidate. Test it on non-critical work before relying on it for production workflows.
-
-## Development and validation
-
-```bash
-cd LoopForge
-npm run check
-npm test
-npm pack --dry-run --json
-```
-
-`npm test` compiles TypeScript, regenerates the protocol schema, and runs the Node.js test suite serially. The protocol file at [`loopforge-protocol.json`](./loopforge-protocol.json) is generated from `LoopForge/src/protocol.ts` and should not be edited by hand.
-
-The package currently publishes the compiled runtime, Perception skill, default policy, and type declarations. Compiled tests are excluded from the npm package.
-
-## 2.0 compatibility boundary
-
-The 2.0 design removes the prompt-technique catalog, strategy keyword routing, MCP Tasks, automatic memory discovery, the global PromptCraft vault, Markdown recovery fallbacks, and the old `loopforge-mcp` binary. Use the unified `loopforge` CLI, `loopforge mcp`, typed `FileLoopStore`, structured evaluation, and explicit providers.
-
-Legacy vaults can be migrated without deleting their source data:
-
-```bash
-loopforge migrate
-loopforge migrate --from path/to/prompt_vault.json --json
-```
-
-## Project direction
-
-LoopForge is focused on recoverable and auditable cognitive state for Agents. Near-term work should improve storage adapters, evidence providers, interoperability, tracing, and real-world client integration without turning the project into another model host or background orchestration platform.
-
-Issues, test cases, provider implementations, client setup notes, and reports from long multi-round tasks are useful contributions.
+### Durable cognitive state
+
+Every round's self-evaluation is written to the vault. The next prompt is
+recompiled from vault entries — milestones aren't "summaries of summaries,"
+sub-goal states aren't "compressed then compressed again." Stable IDs
+(`c-` / `cr-` / `sg-XXXXXXXX`) enable exact matching of constraints,
+criteria, and sub-goals across rounds — no Jaccard false positives.
+
+The compiler tracks sub-goals through a five-state lifecycle (pending →
+in_progress → done / blocked / canceled), manages constraint decay
+(discovered constraints demote to inactive after prolonged irrelevance, then
+auto-reactivate on violation), and builds hierarchical summaries with
+phase-boundary milestones that survive rolling-window eviction.
+
+### External verification & enforcement
+
+The verification gate runs 26 cross-checks against independent evidence:
+progress regression, empty-change-with-passing, success-with-remaining-criteria,
+success-without-verified-evidence (claims must be machine-backed; a declared
+`no_change_reason` is the honest escape hatch), outcome consistency (declared
+outcome vs legacy boolean, blocked-without-blocker), success-claim conflict,
+retroactive claims (wrong target round, and prior-round criteria verified
+against git history), duplicate constraint discovery, recurring violations,
+retract-fresh-constraint, evidence integrity (Git), required command evidence,
+command evidence mismatch, intent-action drift, sub-goal drift, unverified
+criteria claims, post-backtrack workspace restore (file overlap and git HEAD),
+and — since v3.2 — `success_unverified` (a success claim with no
+machine-verified observation this round). Since v3.3 the gate also verifies
+verification-domain integrity (command entrypoint changed in the round it
+ran; test files changed alongside a passing command) and the four Round
+Contract checks (`round_underspecified`, `round_unverifiable`,
+`round_scope_drift`, `premature_boundary`).
+
+Since v3.2 the runtime derives a machine-verification status per round
+(`providerStatus`: verified / unavailable / absent) from the already-collected
+snapshots — a success claim with no machine-verified observation fires the
+`success_unverified` warn (never self-skips, even on heuristic extraction);
+the round still commits, but its success never enters the success trajectory.
+`no_change_reason` remains the honest escape hatch for docs-only rounds.
+Stall detection (R4/R5) falls back to per-round git observations when
+self-reported progress is missing — checks degrade, they never disappear.
+
+The enforcement gate's 13 rules detect cognitive integrity failures: fake
+success (R1), recurring violations (R2), empty success (R3), evidence
+contradiction (R-EVID), verification entrypoint tampering (R-EVID-VERIFY),
+contract boundary claimed prematurely (R-C1), success-without-verified-evidence
+(R8), contract scope drift (R-C2), progress stall (R4), terminal flatline (R5),
+max rejections (R6), intent drift (R7), and post-backtrack workspace not
+restored (R9). R7 accepts intentional pivots only when the drift clarification
+references concrete IDs or file paths — three consecutive weak clarifications
+without anchors terminate the loop. R8 rejects first, then terminates on
+repeat. R9 backtracks again instead of accepting unrestored work.
+
+Since v3.3, the stall verdicts (R4/R5) additionally require machine agreement
+on the evidence path: observed git motion or a newly met criterion within the
+window vetoes a delta-based stall (exculpatory only — never new punishment).
+And every round may declare an optional **Round Contract** — `done_when`
+(criterion IDs), `verification_plan` (configured evidence command names),
+`scope`. Since v3.4 the declared contract is a *proposal for the next
+round*: it becomes the **active** contract — rendered as the Current Task,
+the original objective stays in the Objective section — only after the
+declaring round commits, and it stays active until a committed eval lists
+every `done_when` item in `success_criteria_met` (complete) or reports
+`outcome=blocked`; then the closing eval's own proposal takes over, or the
+Current Task reverts to the original task. The active contract is derived
+from committed rounds on every compile path, so rejections, retries,
+resume, and backtrack keep showing it. Completion claims are bound to the
+active contract: claiming a `done_when` item met without machine-verified
+evidence, or silently dropping it while claiming success, is
+`premature_boundary` (R-C1); changing files outside the active scope is
+`round_scope_drift` (R-C2), accepted only with a substantive
+`drift_clarification`. A different proposal declared while the active
+contract is open is ignored. No contract → byte-identical behavior, and
+R8's machine-evidence requirement still guards every success claim.
+
+### Recovery
+
+Rejected rounds commit nothing. Stalled progress triggers backtrack to the
+last clean round with a diagnosis injected. The backtrack prompt includes
+workspace restore instructions; the next submission is verified for workspace
+cleanliness. Sessions survive process restarts via renewable cross-process
+leases — resume picks up exactly where you left off.
+
+### Agent autonomy
+
+L0 (retry) / L1 (continuation) / L2 (full rehydration) control state density
+only — reasoning strategy belongs to the agent. Each round, the agent can
+express information needs via `prompt_requests` (emphasize, expand,
+confusion_points). The compiler reorders the prompt within safety boundaries;
+mandatory sections are never removed.
+
+Nine MCP tools (`start` · `next` · `status` · `stop` · `pause` · `resume` ·
+`replay` + `gate_check` · `gate_resolve`) returning JSON content blocks.
+`status` is the unified inspection tool: `view=session|loop|all|audit`
+(formerly `list`/`health`, plus the new read-only verification audit).
+Zero runtime dependencies — Node.js stdlib only. All thresholds, budgets,
+and intervals live in `loop_policy.json`. 807 tests.
+
+---
 
 ## License
 

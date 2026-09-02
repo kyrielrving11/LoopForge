@@ -1,26 +1,31 @@
 /** Externalized LoopForge runtime policy. */
 import { randomUUID } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync, } from "node:fs";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync, } from "node:fs";
+import { resolve } from "node:path";
+import { containInWorkspace } from "./workspace.js";
 export const DEFAULT_POLICY = {
     version: "2",
     constraints: { retire_window: 3 },
-    summary: { window: 5, health_check_interval: 1 },
-    engine: { feedback_flush_interval: 5, max_circuit_breaker: 3 },
-    runtime: {
-        max_rounds: 20,
-        round_timeout_ms: 600_000,
-        heartbeat_interval_ms: 30_000,
-        stall_grace_ms: 300_000,
-        max_consecutive_errors: 3,
-        pause_double_tap_ms: 3000,
-    },
+    summary: { window: 5, health_check_interval: 1, milestone_interval: 20, max_milestones: 10, milestone_head_count: 3, milestone_tail_count: 3, enable_loop_synthesis: true },
+    engine: { feedback_flush_interval: 5, max_circuit_breaker: 3, max_rounds: 20, enforcement_escalation_enabled: true, backtrack_enabled: true, backtrack_max_depth: 3, backtrack_preserve_discoveries: true, drift_clarification_max_streak: 3, backtrack_auto_restore: false },
     prompt: {
         injection_mode: "adaptive",
-        full_refresh_interval: 5,
+        full_refresh_interval: 0,
         l0_max_chars: 3000,
         l1_max_chars: 7000,
         l2_max_chars: 18000,
+        l2_adaptive_enabled: true,
+        l2_adaptive_round_factor: 200,
+        l2_adaptive_milestone_factor: 1000,
+        l2_adaptive_max_chars: 40000,
+        l2_adaptive_subgoal_factor: 100,
+        l2_pointer_enabled: true,
+        l1_collapse_enabled: true,
+        max_emphasize_l2: 5,
+        max_emphasize_l1: 3,
+        max_expand_l1: 1,
+        max_confusion_points: 3,
+        confusion_section_threshold: 0.15,
         base_prompt_version: "2.0.0",
     },
     backend: { root_dir: ".loopforge" },
@@ -31,18 +36,35 @@ export const DEFAULT_POLICY = {
         progress_stall_threshold: 0.05,
         progress_stall_rounds: 2,
         progress_mismatch_threshold: 0.3,
+        task_continuity_threshold: 0.2,
+        intent_drift_threshold: 0.15,
+        criteria_dedup_threshold: 0.45,
+        subgoal_dedup_threshold: 0.6,
+        subgoal_match_threshold: 0.5,
+        subgoal_auto_in_progress_threshold: 0.4,
+        subgoal_auto_complete_threshold: 0.4,
+        constraint_match_threshold: 0.5,
+        subgoal_drift_alignment_threshold: 0.3,
+        subgoal_stale_rounds: 10,
+        max_subgoals_in_prompt: 10,
+        max_done_subgoals_in_prompt: 5,
+        constraint_inactive_rounds: 15,
+        constraint_id_enabled: true,
     },
-    checkpoint: { max_carried_constraints: 10, outcome_max_chars: 200 },
+    checkpoint: { outcome_max_chars: 200 },
     state_file: {
         enabled: true,
         directory: ".loopforge/state",
         max_checkpoints: 5,
         max_summary_rounds: 5,
     },
-    evidence: { providers: ["git"], timeout_ms: 120_000, commands: [] },
+    evidence: { providers: ["git"], timeout_ms: 120_000, commands: [], machine_backed_success: "required" },
     mcp: {
         session_lease_ms: 30_000,
         session_lease_renew_interval_ms: 10_000,
+    },
+    gate: {
+        enabled: true,
     },
 };
 /** Write a full default `loop_policy.json` to the target directory.
@@ -72,8 +94,12 @@ function deepMerge(defaults, overrides) {
             result[key] = deepMerge(current, incoming);
         }
         else if (key in result) {
-            // Unknown legacy keys are deliberately ignored at the 2.0 boundary.
             result[key] = incoming;
+        }
+        else {
+            // Warn on unknown keys — a typo like "max_round" instead of
+            // "max_rounds" would otherwise be silently ignored.
+            console.warn(`loopforge: ignoring unknown policy key "${key}". Check loop_policy.json for typos.`);
         }
     }
     return result;
@@ -95,11 +121,27 @@ export function loadPolicy(path) {
 }
 let policy = null;
 export function getPolicy(path) {
-    policy ??= loadPolicy(path);
+    // Explicit path: always (re)load from that file.
+    // No path: cache the default lookup so loadPolicy only runs once.
+    if (path)
+        return loadPolicy(path);
+    policy ??= loadPolicy();
     return policy;
 }
 export function resetPolicy() {
     policy = null;
+}
+/** v3.2: Test-only injection — mirrors resetPolicy so tests can exercise a
+ *  specific policy configuration (e.g. l1_collapse_enabled=false). */
+export function setPolicyForTest(next) {
+    policy = next;
+}
+/** v3.3: Whether a command name is configured AND enabled in the current
+ *  policy's evidence.commands. The machine-checkable predicate behind the
+ *  round_contract verification_plan (round_unverifiable otherwise). */
+export function isConfiguredCommand(name) {
+    const commands = getPolicy().evidence?.commands ?? [];
+    return commands.some((c) => c.enabled && c.name === name);
 }
 const LOOP_ID_RE = /^[a-zA-Z0-9][-a-zA-Z0-9_:.]{0,127}$/;
 export function validateLoopId(loopId) {
@@ -116,28 +158,12 @@ export function validateLoopId(loopId) {
     }
 }
 export function resolveStateDirectory(workspaceRoot, configuredDirectory) {
-    const lexicalRoot = resolve(workspaceRoot);
-    const lexicalTarget = resolve(lexicalRoot, configuredDirectory);
-    const lexicalRelative = relative(lexicalRoot, lexicalTarget);
-    if (lexicalRelative === ".." || lexicalRelative.startsWith(`..${sep}`) ||
-        isAbsolute(lexicalRelative)) {
-        throw new Error("State file directory must stay within the workspace");
-    }
-    const realRoot = realpathSync(lexicalRoot);
-    let ancestor = lexicalTarget;
-    while (!existsSync(ancestor)) {
-        const parent = resolve(ancestor, "..");
-        if (parent === ancestor)
-            break;
-        ancestor = parent;
-    }
-    const projected = resolve(realpathSync(ancestor), relative(ancestor, lexicalTarget));
-    const realRelative = relative(realRoot, projected);
-    if (realRelative === ".." || realRelative.startsWith(`..${sep}`) ||
-        isAbsolute(realRelative)) {
-        throw new Error("State file directory resolves outside the workspace");
-    }
-    return lexicalTarget;
+    // v3.3.1: delegated to the single shared containment check (workspace.ts).
+    // Behavior note: an EXISTING configured directory now resolves through
+    // symlinks to its real location (the old implementation returned the
+    // lexical path) — writes can never land behind the workspace's back via a
+    // symlinked alias. Absent first-run directories keep the lexical path.
+    return containInWorkspace(workspaceRoot, configuredDirectory);
 }
 export function writeStateFile(loopId, content) {
     if (!content)
@@ -148,12 +174,13 @@ export function writeStateFile(loopId, content) {
         return;
     const directory = resolveStateDirectory(process.cwd(), config.directory);
     mkdirSync(directory, { recursive: true });
-    const verifiedDirectory = resolveStateDirectory(process.cwd(), config.directory);
-    const target = resolve(verifiedDirectory, `${loopId}-state.md`);
+    // v3.3.1: the double resolveStateDirectory call was redundant — the
+    // containment check is pure; one resolution serves mkdir, target, tmp.
+    const target = resolve(directory, `${loopId}-state.md`);
     if (existsSync(target) && lstatSync(target).isSymbolicLink()) {
         throw new Error("State file target must not be a symbolic link");
     }
-    const temporary = resolve(verifiedDirectory, `.${loopId}-state.${process.pid}.${randomUUID()}.tmp`);
+    const temporary = resolve(directory, `.${loopId}-state.${process.pid}.${randomUUID()}.tmp`);
     try {
         writeFileSync(temporary, content, "utf8");
         renameSync(temporary, target);

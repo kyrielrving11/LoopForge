@@ -322,7 +322,12 @@ function generateSchema() {
         type: "object",
         $defs: defs,
     };
-    const outputPath = resolve(process.cwd(), "..", "loopforge-protocol.json");
+    // Optional --out PATH argument (used by scripts/verify-artifacts.mjs to
+    // generate into a temporary directory without touching the repo file).
+    const outArgIndex = process.argv.indexOf("--out");
+    const outputPath = outArgIndex !== -1 && process.argv[outArgIndex + 1]
+        ? resolve(process.argv[outArgIndex + 1])
+        : resolve(process.cwd(), "..", "loopforge-protocol.json");
     writeFileSync(outputPath, JSON.stringify(schema, null, 2) + "\n");
     console.log(`Generated JSON Schema → ${outputPath} (${Object.keys(defs).length} $defs)`);
 }

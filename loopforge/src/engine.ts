@@ -8,223 +8,47 @@
 
 import { randomUUID } from "node:crypto";
 import { getPolicy } from "./policy.js";
-import type { VaultBackend, VaultEntry } from "./backends/interface.js";
-import { FileLoopStore, LoopStoreBackend } from "./loop-store.js";
-import type { LoopStore } from "./loop-store.js";
+import { FileLoopStore, queryLoopEntries } from "./loop-store.js";
+import type { LoopStore, VaultEntry } from "./loop-store.js";
 import {
   AgentStatus,
   Mode,
-  makeExecutionEvidence,
   makeExecutionFeedback,
   makeLoopCompileRequest,
   makeLoopObjective,
   makeLoopRoundResult,
-  makeSelfEvaluation,
   makeSessionState,
   makeTaskId,
-  SELF_EVAL_REGEX,
   type AgentLoopResult,
-  type CriterionRevision,
-  type ExecutionEvidence,
   type ExecutionFeedback,
   type LoopCompileRequest,
   type LoopCompileResponse,
   type LoopForgeRequest,
   type SelfEvaluation,
   type SessionState,
-  type VerificationFlag,
 } from "./protocol.js";
 import { compileLoop } from "./loop-compiler.js";
 import { logEvent } from "./observability.js";
+import { isRecord } from "./token-utils.js";
+import { isProcessResult, parseRoundTransactionSnapshot } from "./round-transaction.js";
+import { policyMetrics } from "./policy-metrics.js";
+import {
+  parseExecutionEvidence,
+  parseCriterionRevisions,
+  parseWorkerResults,
+  parseRoundContract,
+  parsePromptRequests,
+} from "./self-eval.js";
+import { parseLoopExtras } from "./loop-extras-parser.js";
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Shared helpers
-// ═══════════════════════════════════════════════════════════════════════════
-
-/** Parse ExecutionEvidence from a raw JSON object. Shared by buildSelfEvaluation
- *  and invokeLoopCompile — both parse the same execution_evidence shape. */
-export function parseExecutionEvidence(
-  raw: Record<string, unknown> | undefined | null,
-): ExecutionEvidence | undefined {
-  if (!raw || typeof raw !== "object") return undefined;
-  const testResults = raw.test_results as Record<string, unknown> | undefined;
-  return makeExecutionEvidence({
-    files_changed: Array.isArray(raw.files_changed)
-      ? raw.files_changed.filter((v: unknown) => typeof v === "string")
-      : [],
-    test_results: testResults && typeof testResults.passed === "number"
-      ? {
-          passed: testResults.passed as number,
-          failed: (testResults.failed as number) ?? 0,
-          skipped: (testResults.skipped as number) ?? 0,
-        }
-      : null,
-    success_criteria_met: Array.isArray(raw.success_criteria_met)
-      ? raw.success_criteria_met.filter((v: unknown) => typeof v === "string")
-      : [],
-    success_criteria_remaining: Array.isArray(raw.success_criteria_remaining)
-      ? raw.success_criteria_remaining.filter((v: unknown) => typeof v === "string")
-      : [],
-    progress_estimate: typeof raw.progress_estimate === "number"
-      ? Math.max(0, Math.min(1, raw.progress_estimate))
-      : 0.0,
-  });
-}
-
-/** Parse CriterionRevision[] from a raw JSON array. Shared by buildSelfEvaluation
- *  and invokeLoopCompile — both parse the same revised_success_criteria shape. */
-export function parseCriterionRevisions(
-  raw: unknown,
-): CriterionRevision[] {
-  if (!Array.isArray(raw)) return [];
-  return raw
-    .filter((v: unknown) =>
-      typeof v === "object" && v !== null &&
-      typeof (v as Record<string, unknown>).old === "string" &&
-      typeof (v as Record<string, unknown>).new === "string")
-    .map((v: unknown) => {
-      const r = v as Record<string, unknown>;
-      return { old: r.old as string, new: r.new as string };
-    });
-}
-
-/** Parse WorkerResult[] from a raw JSON array. Shared by buildSelfEvaluation
- *  and invokeLoopCompile — both parse the same worker_results shape. */
-export function parseWorkerResults(
-  raw: unknown,
-): import("./protocol.js").WorkerResult[] {
-  if (!Array.isArray(raw)) return [];
-  return raw
-    .filter((v: unknown) =>
-      typeof v === "object" && v !== null &&
-      typeof (v as Record<string, unknown>).agentId === "string" &&
-      typeof (v as Record<string, unknown>).subTask === "string" &&
-      typeof (v as Record<string, unknown>).resultSummary === "string")
-    .map((v: unknown) => {
-      const w = v as Record<string, unknown>;
-      return {
-        agentId: w.agentId as string,
-        subAgentType: typeof w.subAgentType === "string" ? w.subAgentType : "general-purpose",
-        subTask: w.subTask as string,
-        resultSummary: w.resultSummary as string,
-        success: typeof w.success === "boolean" ? w.success : false,
-        discoveredConstraints: Array.isArray(w.discoveredConstraints)
-          ? w.discoveredConstraints.filter((c: unknown) => typeof c === "string")
-          : [],
-      };
-    });
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Self-Evaluation extraction (v1.1 — autonomous loop feedback)
-// ═══════════════════════════════════════════════════════════════════════════
-
-/** Extract a structured SelfEvaluation from agent output text.
- *  Returns null if no valid self-eval block is found.
- *  The agent is instructed to output JSON between the delimiters. */
-export function extractSelfEvaluation(text: string): SelfEvaluation | null {
-  const match = text.match(SELF_EVAL_REGEX);
-  if (!match) return null;
-
-  try {
-    const raw = JSON.parse(match[1]);
-    // Validate required fields
-    if (typeof raw.success !== "boolean") return null;
-    if (typeof raw.output_summary !== "string") return null;
-    if (!Array.isArray(raw.constraint_violations)) return null;
-    if (typeof raw.should_continue !== "boolean") return null;
-    return buildSelfEvaluation(raw);
-  } catch {
-    return null;
-  }
-}
-
-/** Build a SelfEvaluation from a parsed JSON object.
- *  Lenient parsing: missing optional fields get sensible defaults.
- *  Used by extractSelfEvaluation() (regex path) and MCP tool handler
- *  (structured evaluation parameter path). */
-export function buildSelfEvaluation(
-  raw: Record<string, unknown>,
-): SelfEvaluation {
-  // P4: Parse execution evidence from raw JSON
-  const executionEvidence = parseExecutionEvidence(
-    raw.execution_evidence as Record<string, unknown> | undefined,
-  );
-
-  // P5: Parse corrections
-  const retractedConstraints: string[] = Array.isArray(raw.retracted_constraints)
-    ? raw.retracted_constraints.filter((v: unknown) => typeof v === "string")
-    : [];
-  const revisedCriteria: CriterionRevision[] = parseCriterionRevisions(raw.revised_success_criteria);
-  const wrongAssumptions: string[] = Array.isArray(raw.wrong_assumptions)
-    ? raw.wrong_assumptions.filter((v: unknown) => typeof v === "string")
-    : [];
-
-  // Multi-agent: Parse worker delegation results
-  const workerResults = parseWorkerResults(raw.worker_results);
-
-  return makeSelfEvaluation({
-    success: typeof raw.success === "boolean" ? raw.success : false,
-    output_summary: typeof raw.output_summary === "string" ? raw.output_summary : "",
-    constraint_violations: Array.isArray(raw.constraint_violations)
-      ? raw.constraint_violations.filter((v: unknown) => typeof v === "string")
-      : [],
-    should_continue: typeof raw.should_continue === "boolean" ? raw.should_continue : true,
-    // P0–P2: Optional evolution fields
-    discovered_constraints: Array.isArray(raw.discovered_constraints)
-      ? raw.discovered_constraints.filter((v: unknown) => typeof v === "string")
-      : [],
-    objective_refinement: typeof raw.objective_refinement === "string"
-      ? raw.objective_refinement
-      : "",
-    emerged_subtasks: Array.isArray(raw.emerged_subtasks)
-      ? raw.emerged_subtasks.filter((v: unknown) => typeof v === "string")
-      : [],
-    // P4: Execution evidence
-    execution_evidence: executionEvidence,
-    // P5: Self-correction
-    retracted_constraints: retractedConstraints,
-    revised_success_criteria: revisedCriteria,
-    wrong_assumptions: wrongAssumptions,
-    // Multi-agent: Worker delegation results
-    worker_results: workerResults,
-    // v1.10: Checkpoint compression
-    compression_checkpoint:
-      typeof raw.compression_checkpoint === "boolean" ? raw.compression_checkpoint : false,
-    checkpoint_label:
-      typeof raw.checkpoint_label === "string" ? raw.checkpoint_label : "",
-    // v1.16: Agent's declared next action
-    next_action:
-      typeof raw.next_action === "string" ? raw.next_action : undefined,
-  });
-}
-
-/** Fallback heuristic when structured self-eval extraction fails.
- *  Scans agent output for completion and error signals.
- *  Returns a low-confidence SelfEvaluation — the autonomous runner
- *  may choose to warn the user or continue cautiously. */
-export function heuristicSelfEvaluation(text: string): SelfEvaluation | null {
-  const lower = text.toLowerCase();
-  const hasError =
-    /error|failed|exception|cannot|unable|失败|错误|异常/.test(lower);
-  const hasCompletion =
-    /done|complete|finished|完成|成功/.test(lower);
-  const hasRemaining =
-    /remaining|continue|still need|next|todo|剩余|继续|下一步/.test(lower);
-
-  // Extract a reasonable summary from the last meaningful paragraph
-  const paragraphs = text.split(/\n\n+/).filter((p) => p.trim().length > 30);
-  const summary = paragraphs.length > 0
-    ? paragraphs[paragraphs.length - 1].trim().slice(0, 300)
-    : text.trim().slice(0, 300);
-
-  return makeSelfEvaluation({
-    success: !hasError && (hasCompletion || !hasRemaining),
-    output_summary: summary || "[heuristic fallback — could not parse structured self-eval]",
-    constraint_violations: [],
-    should_continue: hasRemaining && !hasError,
-  });
-}
+// ── Re-export self-evaluation utilities (moved to self-eval.ts) ──────────
+export {
+  parseExecutionEvidence,
+  parseCriterionRevisions,
+  parseWorkerResults,
+  extractSelfEvaluation,
+  buildSelfEvaluation,
+} from "./self-eval.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Engine Metrics
@@ -238,29 +62,20 @@ export interface DelegationEntry {
   subTask: string;
   resultSummary: string;
   success: boolean;
+  /** v2.12: Worker outcome (audit/projection data source). Derived from
+   *  success when absent. */
+  outcome?: "success" | "partial" | "failed";
   discoveredConstraints: string[];
 }
 
 export interface EngineMetrics {
   vaultWriteErrors: number;
-  vaultWriteTimeouts: number;
-  vaultWriteBytes: number;
-  silentAnalysisErrors: number;
-  hydrateCacheMisses: number;
-  feedbackBufferFlushes: number;
-  feedbackBufferMaxSize: number;
   sessionStart: number;
 }
 
 function makeEngineMetrics(): EngineMetrics {
   return {
     vaultWriteErrors: 0,
-    vaultWriteTimeouts: 0,
-    vaultWriteBytes: 0,
-    silentAnalysisErrors: 0,
-    hydrateCacheMisses: 0,
-    feedbackBufferFlushes: 0,
-    feedbackBufferMaxSize: 0,
     sessionStart: Date.now(),
   };
 }
@@ -271,31 +86,25 @@ function makeEngineMetrics(): EngineMetrics {
 
 export class LoopForgeEngine {
   state: SessionState | null = null;
-  private backend: VaultBackend | null = null;
+  private store: LoopStore | null = null;
   private metrics: EngineMetrics | null = null;
-  private feedbackWriteBuffer: VaultEntry[] = [];
   lastTask: string | null = null;
 
-  constructor(storeOrBackend?: LoopStore | VaultBackend) {
-    if (storeOrBackend) {
-      this.backend = "readSession" in storeOrBackend
-        ? new LoopStoreBackend(storeOrBackend)
-        : storeOrBackend;
-    }
+  constructor(store?: LoopStore) {
+    this.store = store ?? null;
   }
 
-  private resolveBackend(): VaultBackend {
-    if (this.backend === null) {
-      this.backend = new LoopStoreBackend(
-        new FileLoopStore(getPolicy().backend.root_dir),
-      );
+  private resolveStore(): LoopStore {
+    if (this.store === null) {
+      this.store = new FileLoopStore(getPolicy().backend.root_dir);
     }
-    return this.backend;
+    return this.store;
   }
 
-  /** Public accessor for the vault backend — used by runtime/verification gate. */
-  getBackend(): VaultBackend {
-    return this.resolveBackend();
+  /** Public accessor for the loop store — used by the round transaction
+   *  coordinator and round driver. */
+  getStore(): LoopStore {
+    return this.resolveStore();
   }
 
   /** Expose engine health counters for observability (MCP status, logging). */
@@ -321,80 +130,77 @@ export class LoopForgeEngine {
   // Feedback persistence
   // ═══════════════════════════════════════════════════════════════════════
 
-  private persistFeedbackToVault(signal: Record<string, unknown>): void {
+  private persistFeedbackToVault(signal: Record<string, unknown>): boolean {
     if (this.metrics === null) {
       this.metrics = makeEngineMetrics();
     }
-
-    this.feedbackWriteBuffer.push(signal as VaultEntry);
-
-    const bufLen = this.feedbackWriteBuffer.length;
-    if (bufLen > this.metrics.feedbackBufferMaxSize) {
-      this.metrics.feedbackBufferMaxSize = bufLen;
-    }
-
-    const policy = getPolicy();
-    if (bufLen >= policy.engine.feedback_flush_interval) {
-      this.flushFeedbackBuffer();
+    // v2.6: write directly — the buffer was always flushed immediately
+    // (autoFeedback calls persistFeedbackToVault then immediately flushFeedbackBuffer).
+    const entry = this.buildFeedbackEntry(signal);
+    if (!entry) return false;
+    try {
+      this.resolveStore().appendEntry(entry);
+      // v3.3.1: a feedback write that replaces an already-cached round
+      // (a backtrack redo reuses the same roundId, per the v3.2.1 replace
+      // semantics) leaves the hydration cache holding the stale merged
+      // entry — coveredRound has already passed that round, so the
+      // incremental path never re-reads it and the compiler would keep
+      // seeing the rolled-back decision (forced L2, stale state) for the
+      // rest of the process. Invalidate so the next compile rehydrates.
+      this.invalidateHydrationCacheForFeedback(String(entry.task_id ?? ""));
+      return true;
+    } catch (error) {
+      if (this.metrics) this.metrics.vaultWriteErrors++;
+      console.warn(`LoopForge: vault write failed (feedback_persist) — ${error}`);
+      logEvent("vault_write_error", { error: "feedback_persist" });
+      policyMetrics.recordVaultWriteError("feedback_persist");
+      return false;
     }
   }
 
-  flushFeedbackBuffer(): number {
-    if (!this.feedbackWriteBuffer.length) return 0;
-
-    const records = this.feedbackWriteBuffer.splice(0);
-    if (this.metrics) this.metrics.feedbackBufferFlushes++;
-
-    const now = new Date().toISOString().replace(/\.\d+Z$/, "");
-    const entries: VaultEntry[] = [];
-
-    for (const signal of records) {
-      try {
-        const entry: VaultEntry = {
-          id: randomUUID(),
-          task_id: (signal.task_id as string) ?? "feedback",
-          version_tag: "v1",
-          is_active: true,
-          timestamp: now,
-          user_intent: String(signal.task_type ?? "").slice(0, 200),
-          success: (signal.success as boolean) ?? false,
-          execution_feedback: JSON.stringify({
-            success: signal.success ?? false,
-            status:
-              (signal.success as boolean)
-                ? "success"
-                : "partial",
-            constraint_compliance: {
-              all_hard_constraints_met: !Array.isArray(signal.violations) || (signal.violations as unknown[]).length === 0,
-              violations: signal.violations ?? [],
-            },
-            output_summary: signal.task_type ?? "",
-            improvement_notes: signal.manual_fixes ?? "",
-          }),
-          task_type: (signal.task_type as string) ?? "",
-          tags: signal.skill_used ? [signal.skill_used as string] : [],
-          skill_used: (signal.skill_used as string) ?? "",
-          loop_id: signal.loop_id as string | undefined,
-          loop_lineage: (signal.loop_lineage as Record<string, unknown>) ?? {},
-        };
-        entries.push(entry);
-      } catch {
-        if (this.metrics) this.metrics.vaultWriteErrors++;
-        logEvent("vault_write_error", { error: "feedback_entry_build" });
-      }
+  private buildFeedbackEntry(signal: Record<string, unknown>): VaultEntry | null {
+    try {
+      return {
+        id: randomUUID(),
+        task_id: (signal.task_id as string) ?? "feedback",
+        version_tag: "v1",
+        is_active: true,
+        timestamp: new Date().toISOString().replace(/\.\d+Z$/, ""),
+        user_intent: String(signal.task_type ?? "").slice(0, 200),
+        success: (signal.success as boolean) ?? false,
+        execution_feedback: JSON.stringify({
+          success: signal.success ?? false,
+          status: (signal.success as boolean) ? "success" : "partial",
+          constraint_compliance: {
+            all_hard_constraints_met: !Array.isArray(signal.violations) || (signal.violations as unknown[]).length === 0,
+            violations: signal.violations ?? [],
+          },
+          output_summary: signal.task_type ?? "",
+          improvement_notes: signal.manual_fixes ?? "",
+        }),
+        task_type: (signal.task_type as string) ?? "",
+        tags: signal.skill_used ? [signal.skill_used as string] : [],
+        skill_used: (signal.skill_used as string) ?? "",
+        loop_id: signal.loop_id as string | undefined,
+        loop_lineage: (signal.loop_lineage as Record<string, unknown>) ?? {},
+        // Persist execution_evidence so the enforcement gate (R4/R5) can
+        // read progress_estimate from vault entries across rounds.
+        execution_evidence: signal.execution_evidence ?? null,
+        discovered_constraints: signal.discovered_constraints ?? [],
+        emerged_subtasks: signal.emerged_subtasks ?? [],
+        // v3.2.1: persisted so the subgoal_drift check can read prior
+        // rounds' completed/canceled sub-goals from committed entries.
+        completed_subtasks: signal.completed_subtasks ?? [],
+        blocked_subtasks: signal.blocked_subtasks ?? [],
+        canceled_subtasks: signal.canceled_subtasks ?? [],
+        retracted_constraints: signal.retracted_constraints ?? [],
+        worker_results: signal.worker_results ?? [],
+      };
+    } catch {
+      if (this.metrics) this.metrics.vaultWriteErrors++;
+      logEvent("vault_write_error", { error: "feedback_entry_build" });
+      return null;
     }
-
-    if (entries.length > 0) {
-      try {
-        this.resolveBackend().appendEntries(entries);
-      } catch {
-        if (this.metrics) this.metrics.vaultWriteErrors += entries.length;
-        logEvent("vault_write_error", { error: "feedback_append_entries", count: entries.length });
-        return 0;
-      }
-    }
-
-    return entries.length;
   }
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -421,6 +227,17 @@ export class LoopForgeEngine {
       task: request.task,
       success: true,
     };
+
+    // v3.2: Persist what this round's prompt actually presented (L1 only —
+    // L0/L2 compiles leave the artifact field undefined). The next L1 compile
+    // reads these as its collapse diff baseline. Field extension of the
+    // existing lineage entry — no new persistence format.
+    const presented = response.prompt_artifact?.presentedState;
+    if (presented) {
+      structuredLineage.presented_constraint_ids = presented.constraintIds;
+      structuredLineage.presented_subgoals = presented.subGoals;
+      structuredLineage.presented_milestone_ranges = presented.milestoneRanges;
+    }
 
     let lastOutputSummary = "";
     let lastViolations: string[] = [];
@@ -449,11 +266,13 @@ export class LoopForgeEngine {
     // 1. JSON vault write (primary)
     let vaultOk = false;
     try {
-      this.resolveBackend().appendEntry(entry);
+      this.resolveStore().appendEntry(entry);
       vaultOk = true;
-    } catch {
+    } catch (error) {
       if (this.metrics) this.metrics.vaultWriteErrors++;
+      console.warn(`LoopForge: vault write failed (lineage_persist) — ${error}`);
       logEvent("vault_write_error", { error: "persist_lineage_json" });
+      policyMetrics.recordVaultWriteError("lineage_persist");
     }
 
     return vaultOk;
@@ -473,7 +292,7 @@ export class LoopForgeEngine {
   ): void {
     if (!entries.length) return;
     const taskId = `loop:${loopId}:r${round}:delegations`;
-    const existing = this.resolveBackend().queryEntries({ prefix: taskId })
+    const existing = queryLoopEntries(this.resolveStore(), loopId, { prefix: taskId })
       .some((candidate) => candidate.task_id === taskId);
     if (existing) return;
     const entry: VaultEntry = {
@@ -494,15 +313,18 @@ export class LoopForgeEngine {
           subTask: e.subTask,
           resultSummary: e.resultSummary,
           success: e.success,
+          outcome: e.outcome ?? (e.success ? "success" : "failed"),
           discoveredConstraints: e.discoveredConstraints,
         })),
       },
     };
     try {
-      this.resolveBackend().appendEntry(entry);
-    } catch {
+      this.resolveStore().appendEntry(entry);
+    } catch (error) {
       if (this.metrics) this.metrics.vaultWriteErrors++;
+      console.warn(`LoopForge: vault write failed (delegation_persist) — ${error}`);
       logEvent("vault_write_error", { error: "record_delegation" });
+      policyMetrics.recordVaultWriteError("delegation_persist");
     }
   }
 
@@ -510,47 +332,172 @@ export class LoopForgeEngine {
   // Hydrate loop context from vault
   // ═══════════════════════════════════════════════════════════════════════
 
-  hydrateLoopContext(loopId: string): Record<string, unknown> | null {
-    const prefix = `loop:${loopId}:r`;
-    const results = this.resolveBackend().queryEntries({ prefix });
+  /** Eval-owned fields merged from the committed round decision onto the
+   *  lineage entry. These are the agent's report of what happened during the
+   *  round; compile-time lineage fields (constraints_active, goal_text_hash,
+   *  recompile_level, …) are left untouched. */
+  private static readonly EVAL_MERGED_LINEAGE_FIELDS = [
+    "execution_evidence",
+    "compression_checkpoint",
+    "checkpoint_label",
+    "discovered_constraints",
+    "emerged_subtasks",
+    "retracted_constraints",
+    "wrong_assumptions",
+    "completed_subtasks",
+    "blocked_subtasks",
+    "canceled_subtasks",
+    "next_action",
+    "objective_refinement",
+    "outcome",
+    "blocker",
+    "drift_clarification",
+    "revised_success_criteria",
+    "worker_results",
+    "prompt_requests",
+    "round_contract",
+  ] as const;
 
-    // Merge feedback success flags into lineage entries
-    const fbEntries = this.resolveBackend().queryEntries({
-      prefix,
-      feedbackOnly: true,
-    });
-    const fbSuccess = new Map<number, boolean>();
-    for (const fe of fbEntries) {
-      const tid = String(fe.task_id ?? "");
-      const parts = tid.split(":r");
-      if (parts.length >= 2) {
-        const roundStr = parts[1].split(":")[0];
-        const fbRound = parseInt(roundStr, 10);
-        if (!Number.isNaN(fbRound) && fe.success !== undefined) {
-          fbSuccess.set(fbRound, fe.success as boolean);
-        }
+  /** Merge the committed round decision (feedback entry) into the compile-time
+   *  lineage entry so the compiler and projections see the full per-round
+   *  truth: verification flags, round success, and the agent's own evaluation. */
+  private mergeCommittedRound(
+    entry: VaultEntry,
+    lineage: Record<string, unknown>,
+    fb: VaultEntry,
+  ): void {
+    const fbLineage = isRecord(fb.loop_lineage) ? fb.loop_lineage : null;
+    const rt = fbLineage && isRecord(fbLineage.round_transaction)
+      ? fbLineage.round_transaction
+      : null;
+    const result = rt && isProcessResult(rt.result) ? rt.result : null;
+    const snapshot = rt ? parseRoundTransactionSnapshot(rt.snapshot) : null;
+    const evaluation = snapshot && isRecord(snapshot.evaluation)
+      ? snapshot.evaluation
+      : null;
+
+    if (result) {
+      if (
+        Array.isArray(result.verificationFlags) &&
+        result.verificationFlags.length > 0
+      ) {
+        entry.verification_flags = result.verificationFlags;
       }
+      if (typeof result.roundSuccess === "boolean") {
+        entry.success = result.roundSuccess;
+        lineage.success = result.roundSuccess;
+      }
+      // The committed decision's action — lets the compiler detect a
+      // post-backtrack recovery boundary (L2 rehydration) without a
+      // second persistence format.
+      lineage.committed_action = result.action;
+    }
+    if (!evaluation) return;
+    for (const key of LoopForgeEngine.EVAL_MERGED_LINEAGE_FIELDS) {
+      const value = evaluation[key];
+      if (value === undefined) continue;
+      lineage[key] = value;
+      entry[key] = value;
+    }
+    if (typeof evaluation.success === "boolean") {
+      entry.success = evaluation.success;
+      lineage.success = evaluation.success;
+    }
+    if (typeof evaluation.output_summary === "string" && evaluation.output_summary) {
+      entry.output_summary = evaluation.output_summary;
+    }
+    if (Array.isArray(evaluation.constraint_violations)) {
+      entry.constraint_violations = evaluation.constraint_violations;
+    }
+  }
+
+  /** v3.0.1: Per-engine hydration cache. The vault is append-only per round —
+   *  between two compiles of one loop only the newest round(s) changed. The
+   *  cache holds the merged lineage entries (the exact shape the compiler
+   *  consumes; feedback bodies are merged in, never returned), so a long-lived
+   *  process compiles incrementally: one round document read per round
+   *  boundary instead of the full history. Nothing is persisted; a fresh
+   *  engine hydrates fully once. `coveredRound` is the highest CONTIGUOUS
+   *  COMMITTED round (feedback merged) whose entries are in the cache — the
+   *  compiler only reads rounds below the compile round, so
+   *  `coveredRound >= round - 1` means the cache is complete for that compile.
+   *  Lineage-only entries of not-yet-committed rounds may trail the cache but
+   *  never advance coveredRound (a later read replaces them post-commit). */
+  private hydrationCache: {
+    loopId: string;
+    coveredRound: number;
+    entries: VaultEntry[];
+  } | null = null;
+
+  /** v3.3.1: Drop the hydration cache when a feedback write targets a round
+   *  the cache has already merged (coveredRound >= round). Cache entries are
+   *  LINEAGE task_ids (loop:…:rN), so a task_id collision test could never
+   *  fire for feedback writes (loop:…:rN:feedback) — the round number is the
+   *  real collision signal. A backtrack redo reuses the roundId and REPLACES
+   *  the round's committed feedback (v3.2.1 semantics); without this the
+   *  fast path (coveredRound >= compileRound - 1) would serve the stale
+   *  rolled-back entry for the rest of the process. A genuinely new round
+   *  (round = coveredRound + 1) lands past the cache point and is merged by
+   *  the next incremental read — no invalidation. Lineage writes never
+   *  invalidate: they precede the commit by design. */
+  private invalidateHydrationCacheForFeedback(taskId: string): void {
+    const cache = this.hydrationCache;
+    if (!cache) return;
+    const round = LoopForgeEngine.feedbackRound(taskId);
+    if (round !== null && cache.coveredRound >= round) {
+      this.hydrationCache = null;
+    }
+  }
+
+  /** The round a feedback entry belongs to, or null. */
+  private static feedbackRound(taskId: string): number | null {
+    const parts = taskId.split(":r");
+    if (parts.length < 2) return null;
+    const roundStr = parts[1].split(":")[0];
+    const round = parseInt(roundStr, 10);
+    return Number.isNaN(round) ? null : round;
+  }
+
+  /** Highest contiguous round (from 1) present in the given feedback entries. */
+  private static contiguousCommittedRound(fbEntries: VaultEntry[]): number {
+    const committed = new Set<number>();
+    for (const fe of fbEntries) {
+      const round = LoopForgeEngine.feedbackRound(String(fe.task_id ?? ""));
+      if (round !== null) committed.add(round);
+    }
+    let covered = 0;
+    while (committed.has(covered + 1)) covered++;
+    return covered;
+  }
+
+  /** Merge committed feedback entries into lineage entries and apply the
+   *  legacy output_summary / constraint_violations backfill. Shared by the
+   *  full and incremental hydration paths so both produce identical shapes.
+   *
+   *  The round commit entry (`loop:<id>:r<N>:feedback`) carries the full
+   *  committed decision — verification flags, round success, and the agent's
+   *  SelfEvaluation — which the compiler needs to derive milestones,
+   *  constraint decay, sub-goal accumulation, and rolling summaries. Without
+   *  this merge the cross-round features only see the 8 compile-time lineage
+   *  fields. */
+  private buildMergedEntries(
+    fresh: VaultEntry[],
+    fbFresh: VaultEntry[],
+  ): VaultEntry[] {
+    const fbByRound = new Map<number, VaultEntry>();
+    for (const fe of fbFresh) {
+      const fbRound = LoopForgeEngine.feedbackRound(String(fe.task_id ?? ""));
+      if (fbRound !== null) fbByRound.set(fbRound, fe);
     }
 
-    for (const entry of results) {
+    for (const entry of fresh) {
       const lineage = (entry.loop_lineage ?? entry.lineage ?? {}) as Record<
         string,
         unknown
       >;
       const rnd = lineage.round as number;
-      if (rnd && fbSuccess.has(rnd)) {
-        (lineage as Record<string, unknown>).success = fbSuccess.get(rnd);
-        entry.success = fbSuccess.get(rnd);
-      }
-    }
-
-    const finalResults = results;
-
-    for (const entry of finalResults) {
-      const lineage = (entry.loop_lineage ?? entry.lineage ?? {}) as Record<
-        string,
-        unknown
-      >;
+      const fb = rnd ? fbByRound.get(rnd) : undefined;
+      if (fb) this.mergeCommittedRound(entry, lineage, fb);
       if (!entry.output_summary) {
         entry.output_summary = (lineage.output_summary as string) ?? "";
       }
@@ -559,10 +506,70 @@ export class LoopForgeEngine {
           (lineage.constraint_violations as string[]) ?? [];
       }
     }
+    return fresh;
+  }
 
-    if (!finalResults.length) return null;
+  hydrateLoopContext(loopId: string, round?: number): Record<string, unknown> | null {
+    const store = this.resolveStore();
+    const prefix = `loop:${loopId}:r`;
 
-    return { results: finalResults, global_entries: [] };
+    // v3.0.1: cached hydration — fast path when the cache already covers the
+    // requested round (same-round retries), incremental read of only the
+    // rounds committed since the cache point otherwise.
+    if (round !== undefined && this.hydrationCache?.loopId === loopId) {
+      const cache = this.hydrationCache;
+      if (cache.coveredRound >= round - 1) {
+        return { results: cache.entries, global_entries: [] };
+      }
+      const sinceRound = cache.coveredRound + 1;
+      const fresh = queryLoopEntries(store, loopId, { prefix, sinceRound });
+      const freshFb = queryLoopEntries(store, loopId, {
+        prefix,
+        sinceRound,
+        feedbackOnly: true,
+      });
+      const merged = this.buildMergedEntries(fresh, freshFb);
+      for (const entry of merged) {
+        const tid = String(entry.task_id ?? "");
+        // Replace-by-task_id: a round read earlier as a lineage-only entry
+        // (not yet committed) must be replaced by its post-commit merged
+        // version — a stale unmerged entry would silently drop the round's
+        // committed decision (verification flags, committed_action, eval).
+        const index = cache.entries.findIndex((e) => String(e.task_id ?? "") === tid);
+        if (index >= 0) cache.entries[index] = entry;
+        else cache.entries.push(entry);
+      }
+      // Advance coveredRound only for rounds that actually committed since
+      // the cache point — the fresh reads start at coveredRound + 1, so the
+      // contiguous run extends from there.
+      const freshCommitted = new Set<number>();
+      for (const fe of freshFb) {
+        const r = LoopForgeEngine.feedbackRound(String(fe.task_id ?? ""));
+        if (r !== null) freshCommitted.add(r);
+      }
+      while (freshCommitted.has(cache.coveredRound + 1)) cache.coveredRound++;
+      return { results: cache.entries, global_entries: [] };
+    }
+
+    // Full path — cold engine, different loop, or a round-less hydrate (e.g.
+    // health checks). Merge all feedback entries, dedupe by task_id (round
+    // documents hold the latest write per key), and cache the merged view.
+    // coveredRound counts only contiguous COMMITTED rounds — lineage-only
+    // entries of uncommitted rounds may trail the cache but must not make the
+    // fast path serve unmerged state.
+    const results = queryLoopEntries(store, loopId, { prefix });
+    const fbEntries = queryLoopEntries(store, loopId, { prefix, feedbackOnly: true });
+    const merged = this.buildMergedEntries(results, fbEntries);
+    if (!merged.length) return null;
+    const byTaskId = new Map<string, VaultEntry>();
+    for (const entry of merged) byTaskId.set(String(entry.task_id ?? ""), entry);
+    const entries = [...byTaskId.values()];
+    this.hydrationCache = {
+      loopId,
+      coveredRound: LoopForgeEngine.contiguousCommittedRound(fbEntries),
+      entries,
+    };
+    return { results: entries, global_entries: [] };
   }
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -599,12 +606,20 @@ export class LoopForgeEngine {
     const loopRound = (request as Record<string, unknown>).round as
       | number
       | undefined;
-    let taskId: string;
-    if (loopId && loopRound !== undefined) {
-      taskId = `loop:${loopId}:r${loopRound}:feedback`;
-    } else {
-      taskId = request.task_id ?? request.task.slice(0, 60);
+    // v2.14: feedback entries are loop-scoped — a request without loop_id
+    // and round can never be persisted. Fail loudly instead of reporting
+    // "Feedback Recorded" for a write that was silently dropped.
+    if (!loopId || loopRound === undefined) {
+      return {
+        status: AgentStatus.ERROR,
+        response: {
+          status: AgentStatus.ERROR,
+          prompt: null,
+          error: "Feedback requires loop_id and round — feedback entries are loop-scoped.",
+        },
+      };
     }
+    const taskId = `loop:${loopId}:r${loopRound}:feedback`;
 
     const signal: Record<string, unknown> = {
       task_id: taskId,
@@ -616,23 +631,23 @@ export class LoopForgeEngine {
       loop_id: loopId,
       round: loopRound,
     };
-    this.persistFeedbackToVault(signal);
-
-    // Flush immediately so next compile cycle sees success flags
-    this.flushFeedbackBuffer();
+    const persisted = this.persistFeedbackToVault(signal);
+    if (!persisted) {
+      return {
+        status: AgentStatus.ERROR,
+        response: {
+          status: AgentStatus.ERROR,
+          prompt: null,
+          error: "Feedback could not be persisted to the loop store — the round was not recorded.",
+        },
+      };
+    }
 
     // Update state
     this.state!.call_count++;
     this.state!.success_trend.push(success);
     if (this.state!.success_trend.length > 20) {
       this.state!.success_trend = this.state!.success_trend.slice(-20);
-    }
-
-    // Circuit breaker
-    if (this.shouldBreak()) {
-      this.state!.circuit_breaker_count++;
-    } else {
-      this.state!.circuit_breaker_count = 0;
     }
 
     logEvent("round_complete", {
@@ -681,13 +696,16 @@ export class LoopForgeEngine {
     const transactionId = typeof roundTransaction?.round_id === "string"
       ? roundTransaction.round_id
       : null;
-    const transactionPersisted = (): boolean => {
+    const transactionPersisted = (
+      filter?: (entry: VaultEntry) => boolean,
+    ): boolean => {
       if (!transactionId) return false;
-      return this.resolveBackend().queryEntries({
+      return queryLoopEntries(this.resolveStore(), loopId, {
         prefix: taskId,
         feedbackOnly: true,
       }).some((entry) => {
         if (entry.task_id !== taskId) return false;
+        if (filter && !filter(entry)) return false;
         const lineage = entry.loop_lineage;
         const transaction = lineage?.round_transaction;
         return transaction !== null &&
@@ -696,7 +714,18 @@ export class LoopForgeEngine {
           (transaction as Record<string, unknown>).round_id === transactionId;
       });
     };
-    const alreadyCommitted = transactionPersisted();
+    // v3.2.1: a committed backtrack decision is a roll-back directive, not
+    // the round's outcome. The redo submission reuses the same roundId and
+    // must REPLACE the backtrack entry in the vault — otherwise the stale
+    // entry keeps poisoning the R4/R5 progress window and the redo's work
+    // never lands (it is replayed or its data is ignored forever).
+    const alreadyCommitted = transactionPersisted((entry) => {
+      const transaction = isRecord(entry.loop_lineage)
+        ? entry.loop_lineage.round_transaction
+        : null;
+      const result = isRecord(transaction) ? transaction.result : null;
+      return !(isRecord(result) && result.action === "backtrack");
+    });
 
     // Multi-agent: Merge sub-agent discovered constraints into the main constraint flow
     const subDiscovered = (selfEval.worker_results ?? [])
@@ -719,6 +748,13 @@ export class LoopForgeEngine {
       discovered_constraints: mergedDiscovered,
       objective_refinement: selfEval.objective_refinement ?? "",
       emerged_subtasks: selfEval.emerged_subtasks ?? [],
+      // v3.2.1: persist the sub-goal lifecycle fields — the subgoal_drift
+      // check reads them from committed feedback entries; before this they
+      // were never written, so prior rounds' completed/canceled sub-goals
+      // were invisible and the pending set grew stale.
+      completed_subtasks: selfEval.completed_subtasks ?? [],
+      blocked_subtasks: selfEval.blocked_subtasks ?? [],
+      canceled_subtasks: selfEval.canceled_subtasks ?? [],
       // P4: Execution evidence
       execution_evidence: selfEval.execution_evidence ?? null,
       // P5: Self-correction
@@ -727,6 +763,8 @@ export class LoopForgeEngine {
       wrong_assumptions: selfEval.wrong_assumptions ?? [],
       // Multi-agent: Worker delegation results
       worker_results: selfEval.worker_results ?? [],
+      // v2.12: Tri-state outcome (audit data source)
+      outcome: selfEval.outcome,
       loop_lineage: roundTransaction
         ? {
             round,
@@ -737,7 +775,6 @@ export class LoopForgeEngine {
     };
     if (!alreadyCommitted) {
       this.persistFeedbackToVault(signal);
-      this.flushFeedbackBuffer();
       if (transactionId && !transactionPersisted()) {
         throw new Error(`Round feedback commit failed: ${transactionId}`);
       }
@@ -752,6 +789,7 @@ export class LoopForgeEngine {
         subTask: w.subTask,
         resultSummary: w.resultSummary,
         success: w.success,
+        outcome: w.outcome,
         discoveredConstraints: w.discoveredConstraints ?? [],
       }));
       this.recordDelegation(loopId, round, entries);
@@ -768,12 +806,9 @@ export class LoopForgeEngine {
       this.state!.success_trend = this.state!.success_trend.slice(-20);
     }
 
-    // Circuit breaker
-    if (this.shouldBreak()) {
-      this.state!.circuit_breaker_count++;
-    } else {
-      this.state!.circuit_breaker_count = 0;
-    }
+    // v2.5: Old binary-success circuit breaker removed — stalled loops
+    // are now detected by the enforcement gate (R4/R5) using
+    // progress_estimate gradients rather than success=true/false count.
 
     logEvent("round_complete", {
       loopId,
@@ -796,92 +831,132 @@ export class LoopForgeEngine {
     this.ensureInit(request);
     this.lastTask = request.task;
 
-    // Build LoopCompileRequest from LoopForgeRequest extras
+    // Parse extras via typed extraction pipeline (loop-extras-parser.ts).
+    // Errors are collected but never thrown — the compiler always gets
+    // best-effort defaults so a malformed request doesn't crash the engine.
     const extras = request as Record<string, unknown>;
-    const lcr = makeLoopCompileRequest({
-      loop_id:
-        (extras.loop_id as string) ?? request.task_id ?? "",
-      round: (extras.round as number) ?? 1,
-      goal_id: (extras.goal_id as string) ?? "",
-      task: request.task,
-      domain: (extras.domain as string) ?? "",
-      next_task_proposal: (extras.next_task_proposal as string) ?? "",
-      plan_source: (extras.plan_source as string) ?? null,
-      constraints_from_plan:
-        (extras.constraints_from_plan as string[]) ?? [],
-      new_since_last_round: (extras.new_since_last_round as string) ?? "",
-      force_level: (extras.force_level as string) ?? "auto",
-      health_check_interval:
-        (extras.health_check_interval as number) ?? 1,
-      external_context: (extras.external_context as string) ?? "",
-      max_rounds: (extras.max_rounds as number) ?? undefined,
-      verification_flags: Array.isArray(extras.verification_flags)
-        ? (extras.verification_flags as VerificationFlag[])
-        : [],
-      attempt: typeof extras.attempt === "number"
-        ? Math.max(1, Math.trunc(extras.attempt))
-        : 1,
-      consecutive_rejections: typeof extras.consecutive_rejections === "number"
-        ? Math.max(0, Math.trunc(extras.consecutive_rejections))
-        : 0,
-      rejection_notice: typeof extras.rejection_notice === "string"
-        ? extras.rejection_notice
-        : "",
-    });
-
-    // Convert last_round_result if present
-    const lastRR = extras.last_round_result;
-    if (lastRR) {
-      if (typeof lastRR === "object" && !Array.isArray(lastRR)) {
-        const rr = lastRR as Record<string, unknown>;
-        // Parse P4 execution evidence (shared helper)
-        const executionEvidence = parseExecutionEvidence(
-          rr.execution_evidence as Record<string, unknown> | undefined,
-        );
-        // Parse P5 revised_success_criteria (shared parser)
-        const revisedCriteria = parseCriterionRevisions(rr.revised_success_criteria);
-        lcr.last_round_result = makeLoopRoundResult({
-          round: (rr.round as number) ?? 0,
-          success: (rr.success as boolean) ?? false,
-          output_summary: (rr.output_summary as string) ?? "",
-          constraint_violations:
-            (rr.constraint_violations as string[]) ?? [],
-          manual_fixes_needed: (rr.manual_fixes_needed as string) ?? "",
-          // P0–P2: Cognitive evolution fields
-          discovered_constraints: Array.isArray(rr.discovered_constraints)
-            ? (rr.discovered_constraints as string[]).filter((v: unknown) => typeof v === "string")
-            : [],
-          objective_refinement: typeof rr.objective_refinement === "string"
-            ? rr.objective_refinement
-            : "",
-          emerged_subtasks: Array.isArray(rr.emerged_subtasks)
-            ? (rr.emerged_subtasks as string[]).filter((v: unknown) => typeof v === "string")
-            : [],
-          // P4: Execution evidence
-          execution_evidence: executionEvidence,
-          // P5: Self-correction
-          retracted_constraints: Array.isArray(rr.retracted_constraints)
-            ? (rr.retracted_constraints as string[]).filter((v: unknown) => typeof v === "string")
-            : [],
-          revised_success_criteria: revisedCriteria,
-          wrong_assumptions: Array.isArray(rr.wrong_assumptions)
-            ? (rr.wrong_assumptions as string[]).filter((v: unknown) => typeof v === "string")
-            : [],
-          // v1.10: Checkpoint boundary
-          compression_checkpoint:
-            typeof rr.compression_checkpoint === "boolean" ? rr.compression_checkpoint : false,
-          checkpoint_label:
-            typeof rr.checkpoint_label === "string" ? rr.checkpoint_label : "",
-          // Multi-agent: Worker delegation results (shared parser)
-          worker_results: parseWorkerResults(rr.worker_results),
-        });
-      }
+    const { parsed, ctx } = parseLoopExtras(
+      extras,
+      request.task_id ?? "",
+    );
+    if (ctx.errors.length > 0) {
+      logEvent("extras_parse_errors", {
+        errors: ctx.errors.map((e) => `${e.field}: ${e.message}`),
+      });
     }
 
-    // Convert loop_objective if present
-    const lo = extras.loop_objective;
-    if (lo && typeof lo === "object" && !Array.isArray(lo)) {
-      const obj = lo as Record<string, unknown>;
+    const lcr = makeLoopCompileRequest({
+      loop_id: parsed.loop_id,
+      round: parsed.round,
+      goal_id: parsed.goal_id,
+      task: request.task,
+      domain: parsed.domain,
+      next_task_proposal: parsed.next_task_proposal,
+      plan_source: parsed.plan_source,
+      constraints_from_plan: parsed.constraints_from_plan,
+      new_since_last_round: parsed.new_since_last_round,
+      force_level: parsed.force_level,
+      health_check_interval: parsed.health_check_interval,
+      external_context: parsed.external_context,
+      max_rounds: parsed.max_rounds,
+      verification_flags: parsed.verification_flags,
+      attempt: parsed.attempt,
+      consecutive_rejections: parsed.consecutive_rejections,
+      rejection_notice: parsed.rejection_notice,
+    });
+
+    // Convert last_round_result if present (object already validated by parser)
+    if (parsed.last_round_result) {
+      const rr = parsed.last_round_result;
+      // Parse P4 execution evidence (shared helper)
+      const executionEvidence = parseExecutionEvidence(
+        rr.execution_evidence as Record<string, unknown> | undefined,
+      );
+      // Parse P5 revised_success_criteria (shared parser)
+      const revisedCriteria = parseCriterionRevisions(rr.revised_success_criteria);
+      lcr.last_round_result = makeLoopRoundResult({
+        round: (rr.round as number) ?? 0,
+        success: (rr.success as boolean) ?? false,
+        output_summary: (rr.output_summary as string) ?? "",
+        constraint_violations:
+          (rr.constraint_violations as string[]) ?? [],
+        manual_fixes_needed: (rr.manual_fixes_needed as string) ?? "",
+        // P0–P2: Cognitive evolution fields
+        discovered_constraints: Array.isArray(rr.discovered_constraints)
+          ? (rr.discovered_constraints as string[]).filter((v: unknown) => typeof v === "string")
+          : [],
+        objective_refinement: typeof rr.objective_refinement === "string"
+          ? rr.objective_refinement
+          : "",
+        emerged_subtasks: Array.isArray(rr.emerged_subtasks)
+          ? (rr.emerged_subtasks as string[]).filter((v: unknown) => typeof v === "string")
+          : [],
+        // P4: Execution evidence
+        execution_evidence: executionEvidence,
+        // P5: Self-correction
+        retracted_constraints: Array.isArray(rr.retracted_constraints)
+          ? (rr.retracted_constraints as string[]).filter((v: unknown) => typeof v === "string")
+          : [],
+        revised_success_criteria: revisedCriteria,
+        wrong_assumptions: Array.isArray(rr.wrong_assumptions)
+          ? (rr.wrong_assumptions as string[]).filter((v: unknown) => typeof v === "string")
+          : [],
+        // v1.10: Checkpoint boundary
+        compression_checkpoint:
+          typeof rr.compression_checkpoint === "boolean" ? rr.compression_checkpoint : false,
+        checkpoint_label:
+          typeof rr.checkpoint_label === "string" ? rr.checkpoint_label : "",
+        // v2.2: Sub-goal lifecycle
+        completed_subtasks: Array.isArray(rr.completed_subtasks)
+          ? (rr.completed_subtasks as string[]).filter((v: unknown) => typeof v === "string")
+          : [],
+        blocked_subtasks: Array.isArray(rr.blocked_subtasks)
+          ? (rr.blocked_subtasks as string[]).filter((v: unknown) => typeof v === "string")
+          : [],
+        canceled_subtasks: Array.isArray(rr.canceled_subtasks)
+          ? (rr.canceled_subtasks as string[]).filter((v: unknown) => typeof v === "string")
+          : [],
+        // v2.8: Drift clarification
+        drift_clarification: typeof rr.drift_clarification === "string"
+          ? rr.drift_clarification
+          : undefined,
+        // Multi-agent: Worker delegation results (shared parser)
+        worker_results: parseWorkerResults(rr.worker_results),
+        // v2.12: Tri-state outcome + blocker + retroactive claims
+        outcome: rr.outcome === "success" || rr.outcome === "partial" ||
+          rr.outcome === "failed" || rr.outcome === "blocked"
+          ? rr.outcome
+          : undefined,
+        blocker: typeof rr.blocker === "string" && rr.blocker.trim().length > 0
+          ? rr.blocker.slice(0, 500)
+          : undefined,
+        retroactiveClaims: Array.isArray(rr.retroactiveClaims)
+          ? (rr.retroactiveClaims as Array<Record<string, unknown>>)
+            .filter((item) => isRecord(item) &&
+              typeof item.round === "number" && item.round >= 1 &&
+              typeof item.claim === "string" && item.claim.length > 0)
+            .map((item) => ({ round: item.round as number, claim: (item.claim as string).slice(0, 500) }))
+            .slice(0, 20)
+          : [],
+        // v3.3: Round Contract (shared lenient parser)
+        round_contract: parseRoundContract(rr.round_contract),
+        // v3.3.1: next_action + prompt_requests — this whitelist rebuild
+        // previously dropped them, and since EVERY compile path (MCP
+        // advance/retry/backtrack + Runtime) funnels through
+        // invokeLoopCompile, the compiler never saw them on the production
+        // path: "Next Action" never rendered, suggested_next_task stayed
+        // empty, sub-goal Phase-3 auto in_progress never fired, and
+        // prompt_requests (emphasize/expand/confusion_points) were never
+        // consumed. Unit tests fed compileLoop directly, so 783 greens
+        // missed the gap. Shared lenient parsers mirror the other fields.
+        next_action: typeof rr.next_action === "string" ? rr.next_action : undefined,
+        prompt_requests: parsePromptRequests(rr.prompt_requests),
+      });
+    }
+
+    // Convert loop_objective if present (object already validated by parser)
+    if (parsed.loop_objective) {
+      const obj = parsed.loop_objective;
       lcr.loop_objective = makeLoopObjective({
         objective: (obj.objective as string) ?? "",
         success_criteria: (obj.success_criteria as string[]) ?? [],
@@ -894,7 +969,10 @@ export class LoopForgeEngine {
     // Hydrate vault context for cross-round memory
     let context = hydrateResults ?? null;
     if (context === null && lcr.loop_id && lcr.round > 1) {
-      context = this.hydrateLoopContext(lcr.loop_id);
+      // v3.0.1: the compile round anchors the hydration cache — warm caches
+      // skip the read entirely; otherwise only rounds committed since the
+      // last hydration are read.
+      context = this.hydrateLoopContext(lcr.loop_id, lcr.round);
     }
 
     // Delegate to pure-function compiler
@@ -925,32 +1003,16 @@ export class LoopForgeEngine {
         error: null,
         state_file_content: response.state_file_content,
         prompt_artifact: response.prompt_artifact,
+        warnings: response.warnings,
+        // v2.12: Pass the compiler's derived state through for typed
+        // projections (consumed by getProjection without re-persisting).
+        rolling_summary: response.rolling_summary,
+        sub_goals: response.sub_goals,
+        suggested_next_task: response.suggested_next_task,
       },
     };
   }
 
-  // ═══════════════════════════════════════════════════════════════════════
-  // Circuit breaker
-  // ═══════════════════════════════════════════════════════════════════════
-
-  shouldBreak(): boolean {
-    if (!this.state) return false;
-    const policy = getPolicy();
-    const maxCB = policy.engine.max_circuit_breaker;
-
-    if (this.state.success_trend.length < maxCB) return false;
-
-    const recent = this.state.success_trend.slice(-maxCB);
-    // Trip only when all recent rounds are failures (no false-positives on all-success)
-    const allFailed = recent.every((v) => v === false);
-    if (allFailed) {
-      logEvent("circuit_breaker", {
-        trend: recent,
-        totalRounds: this.state.success_trend.length,
-      });
-    }
-    return allFailed;
-  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

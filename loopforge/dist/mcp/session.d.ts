@@ -3,95 +3,44 @@
  * Each McpSession = one complete multi-round loop.
  * SessionManager holds Map<sessionId, McpSession> and drives
  * the advance() cycle: extract → feedback → check stop → compile next.
+ *
+ * Since v2.14 the round state machine lives in RoundLifecycle
+ * (round-lifecycle.ts). SessionManager owns "who may touch a session":
+ * the in-memory registry, per-session serialization queue, and cross-process
+ * lease fencing. RoundLifecycle owns "what happens to a session": crash
+ * recovery, transaction execution, disposition result building, and the
+ * advance pipeline. All round processing still goes through the
+ * SessionManager → RoundDriver → RoundCoordinator path.
  */
-import { LoopForgeEngine } from "../engine.js";
-import type { VaultBackend } from "../backends/interface.js";
+import type { ExternalContextProvider, LoopTerminalSink, SelfEvaluation } from "../protocol.js";
 import type { LoopStore } from "../loop-store.js";
-import type { SelfEvaluation, ExternalContextProvider, LoopTerminalSink } from "../protocol.js";
-import type { ProviderSnapshot } from "../evidence-provider.js";
-import type { RoundTransactionSnapshot } from "../round-transaction.js";
+import type { PolicyMetricsSnapshot } from "../policy-metrics.js";
 import type { SessionStateStore } from "../storage.js";
-import type { CognitiveCheckpointSink } from "../interop.js";
-export interface McpSession {
-    sessionId: string;
-    loopId: string;
-    task: string;
-    engine: LoopForgeEngine;
-    currentRound: number;
-    maxRounds: number;
-    successTrajectory: boolean[];
-    status: "running" | "stopped" | "stalled" | "paused";
-    createdAt: number;
-    /** Previous round's validated SelfEvaluation — used by verification gate. */
-    lastSelfEval?: SelfEvaluation;
-    consecutiveRejections: number;
-    /** Which enforcement check triggered the last rejection.
-     *  Only same-check rejections accumulate toward the max. */
-    lastRejectionCheck: string;
-    /** Evidence baseline captured immediately before the agent receives a prompt. */
-    evidenceBaseline?: ProviderSnapshot[];
-    /** Schema-versioned transaction for the prompt currently held by the agent. */
-    roundSnapshot?: RoundTransactionSnapshot;
-    /** Persisted prompt prevents resume from compiling the same round twice. */
-    currentPrompt?: string | null;
-    currentLevel?: string;
-}
-export interface McpSessionSummary {
-    sessionId: string;
-    loopId: string;
-    round: number;
-    status: "running" | "stopped" | "stalled" | "paused";
-}
-export interface StartInput {
-    task: string;
-    loopId?: string;
-    maxRounds?: number;
-    domain?: string;
-    planSource?: string;
-    constraints?: string[];
-}
-export interface AdvanceResult {
-    sessionId: string;
-    round: number;
-    /** Stable logical identity; unchanged when enforcement retries the round. */
-    roundId?: string;
-    prompt: string | null;
-    stopReason?: string;
-    level?: string;
-    /** @deprecated Use roundSuccess instead. Derived: roundSuccess ? 5 : 1 */
-    quality?: number;
-    roundSuccess?: boolean;
-    warnings?: string[];
-    /** v1.13: Enforcement action for this round. accept/reject/terminate.
-     *  When "reject", the prompt contains a rejection notice and the agent
-     *  must redo the same round. Round counter does NOT increment. */
-    enforcementAction?: "accept" | "reject" | "terminate";
-    /** v1.13: When enforcementAction is "reject" or "terminate", the reason
-     *  why the round was rejected or the loop was terminated. */
-    enforcementReason?: string;
-}
-export declare class SessionManager {
+import type { McpSession, McpSessionSummary, StartInput, AdvanceResult, SessionRegistry } from "./round-lifecycle.js";
+export type { McpSession, McpSessionSummary, StartInput, AdvanceResult, } from "./round-lifecycle.js";
+export declare class SessionManager implements SessionRegistry {
     private sessions;
     /** Serializes state transitions for each session. */
     private sessionQueues;
-    private backend;
+    private readonly loopStore;
     private sessionStore;
     private readonly ownerId;
     private readonly leaseMs;
     private readonly leaseRenewIntervalMs;
     private leaseTimer;
-    private readonly checkpointSinks;
+    private readonly lifecycle;
     /** Explicit context provider; never auto-discovered. */
     contextProvider?: ExternalContextProvider;
     private readonly terminalSinks;
-    constructor(storeOrBackend?: LoopStore | VaultBackend, sessionStore?: SessionStateStore);
+    constructor(store?: LoopStore, sessionStore?: SessionStateStore);
     /** Stable process-local owner token used for cross-process session leases. */
     getOwnerId(): string;
-    /** Subscribe an external checkpointer; sink failures are isolated. */
-    addCheckpointSink(sink: CognitiveCheckpointSink): () => void;
     addTerminalSink(sink: LoopTerminalSink): () => void;
     /** Release owned sessions and stop lease maintenance. */
     close(): void;
+    values(): Iterable<McpSession>;
+    /** Register (or replace) a session in the in-memory registry. */
+    upsert(session: McpSession): void;
     private findSessionEntry;
     private claimSessionEntry;
     private renewSessionLease;
@@ -110,45 +59,59 @@ export declare class SessionManager {
         round: number;
         status: string;
     };
-    private restoredPromptResult;
-    /** Reconcile the crash window where feedback committed but session_state
-     *  still points at the old prompt. Returns null when no commit is pending. */
-    private reconcileCommittedRound;
-    /** v1.18: Resume a paused session. Reconstructs from vault state and
-     *  compiles the next prompt. Returns null if no paused session exists
-     *  for this loopId. */
-    unpause(loopId: string): Promise<AdvanceResult | null>;
-    /** Persist session state to vault for cross-process recovery.
-     *  The filtered vault and replacement entry are written once under the
-     *  backend lock, so recovery never observes the old two-write gap. */
+    /** Persist session state to vault for cross-process recovery. Delegates to
+     *  the round lifecycle, which owns the durable session document shape. */
     save(session: McpSession): void;
-    /** Reconstruct a McpSession from a vault session_state entry.
-     *  Returns null if the entry is not "running" status.
-     *  Shared by resume() and autoResumeAll(). */
-    private reconstructSession;
     /** Resume a loop from vault state.
      *  Reconstructs the session and compiles the prompt for the next round.
      *  Returns null if no session_state entry exists for this loopId. */
     resume(loopId: string): AdvanceResult | null;
+    /** v1.18: Resume a paused session. Reconstructs from vault state and
+     *  compiles the next prompt. Returns null if no paused session exists
+     *  for this loopId. */
+    unpause(loopId: string): Promise<AdvanceResult | null>;
     /** Auto-resume all "running" sessions from vault on server startup.
      *  Scans vault for session_state entries, reconstructs each as an in-memory
      *  McpSession (without compiling — the next loopforge_next will do that).
      *  Returns the number of sessions resumed. */
     autoResumeAll(): number;
     list(): McpSessionSummary[];
+    /** Classify a flat gate text. Read-only — no vault writes. */
+    checkGate(gateText: string): Record<string, unknown>;
+    /** Record a user decision for a recorded gate. The gateId embeds the
+     *  canonicalized action hash — if the action changed, the match fails and
+     *  the old approval expires automatically. */
+    resolveGate(sessionId: string, gateId: string, approved: boolean, note?: string): Record<string, unknown>;
+    /** Typed cognitive state projection for an active session. Derived on
+     *  demand — zero persistence. Null when nothing meaningful exists yet. */
+    getProjection(sessionId: string): Record<string, unknown> | null;
+    /** Read-only end-of-loop audit (verification view). Never writes. */
+    getAudit(loopId: string): Record<string, unknown> | null;
+    /** v2.12: Policy metrics that survive restarts — vault-derived round
+     *  statistics (A4 port) folded with this process's live observations.
+     *  Non-durable fields (evidence, vault errors) come from live only. */
+    getPolicyMetrics(loopId: string): PolicyMetricsSnapshot;
     /** Get loop health for a loop (in-memory or vault).
      *  Computes goal alignment, constraint integrity, drift, strategy stability. */
     getHealth(loopId: string): Record<string, unknown> | null;
     /** Core cycle: extract self-eval → record feedback → check stop → compile next.
+     *  The lease + per-session queue wrap the RoundLifecycle state machine.
      *  @param preExtractedEval Optional pre-built SelfEvaluation from MCP tool parameter.
      *    When provided (MCP path with evaluation parameter), skips regex extraction.
-     *    When undefined (runtime/CLI path), falls back to regex extraction from output. */
-    advance(sessionId: string, output: string, preExtractedEval?: SelfEvaluation): Promise<AdvanceResult>;
-    private advanceUnlocked;
-    /** Write back loop knowledge to long-term memory.
-     *  Uses shared base builder from policy.ts. Called when a loop terminates. */
-    private notifyTerminal;
+     *    When undefined (runtime/CLI path), falls back to regex extraction from output.
+     *  @param roundId v3.0.1: The roundId of the round this submission reports on
+     *    (from the last start/next/resume response). Anchors the submission so a
+     *    stale or duplicate submission is not processed against a later round.
+     *    Optional for library callers — when absent the anchor check is skipped. */
+    advance(sessionId: string, output: string, preExtractedEval?: SelfEvaluation, roundId?: string): Promise<AdvanceResult>;
     /** Replay timeline for a session — creates ReplayBackend from the stored backend. */
     replayTimeline(sessionId: string): Record<string, unknown>[] | null;
+    /** v3.3.1: Replay a loop straight from the vault — no in-memory session
+     *  needed. Time travel over committed rounds is a property of the store
+     *  (ReplayBackend reads round documents), so a process restart must not
+     *  revoke it: the session registry was an artificial prerequisite that
+     *  made every vault loop unreplayable after restart.
+     *  Returns null when the loop has no committed rounds. */
+    replayByLoop(loopId: string): Record<string, unknown>[] | null;
 }
 //# sourceMappingURL=session.d.ts.map

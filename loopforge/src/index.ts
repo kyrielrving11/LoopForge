@@ -1,6 +1,6 @@
 /** LoopForge — Cognitive State Runtime for AI coding agents.
  *
- * TypeScript reference implementation v1.3.
+ * TypeScript reference implementation v3.3.0
  *
  * Usage:
  *   import { LoopForgeEngine, ReplayBackend, compileLoop } from "loopforge";
@@ -9,14 +9,7 @@
  *   const engine = createEngine();
  *   const response = engine.invokeLoopCompile(request);
  *
- *   // v1.2: Autonomous loop
- *   import { run } from "loopforge";
- *   const result = await run({
- *     task: "Audit ERC20 token",
- *     execute: async (prompt) => await callAiApi(prompt),
- *   });
- *
- *   // v1.3: MCP server
+ *   // MCP server (primary integration path)
  *   import { McpServer, SessionManager } from "loopforge";
  *   const server = new McpServer();
  *   server.start();
@@ -37,13 +30,14 @@ export {
   makeLoopCompileResponse,
   makeSessionState,
   makeTaskId,
-  toDict,
   SELF_EVAL_REGEX,
   makeEvidenceSnapshot,
   makeVerificationFlag,
   makeVerificationResult,
   makeEnforcementResult,
-  makeCheckpointSummary,
+  makeMilestoneSummary,
+  makeSubGoal,
+  makeConstraintMeta,
 } from "./protocol.js";
 
 export type {
@@ -66,7 +60,9 @@ export type {
   VerificationResult,
   EnforcementResult,
   CriterionRevision,
-  CheckpointSummary,
+  MilestoneSummary,
+  SubGoal,
+  ConstraintMeta,
   PromptArtifact,
 } from "./protocol.js";
 
@@ -85,7 +81,6 @@ export type {
   SummaryPolicy,
   EnginePolicy,
   BackendPolicy,
-  RuntimePolicy,
   PromptPolicy,
   StateFilePolicy,
   EvidencePolicy,
@@ -96,6 +91,7 @@ export type {
 // Durable store
 export {
   FileLoopStore,
+  queryLoopEntries,
   LOOP_STORE_SCHEMA_VERSION,
 } from "./loop-store.js";
 export type {
@@ -103,6 +99,7 @@ export type {
   LoopSessionDocument,
   LoopRoundDocument,
   LoopStoreMigrationResult,
+  VaultEntry,
 } from "./loop-store.js";
 
 // Loop Compiler
@@ -126,7 +123,6 @@ export {
   LoopForgeEngine,
   createEngine,
   extractSelfEvaluation,
-  heuristicSelfEvaluation,
   buildSelfEvaluation,
   parseExecutionEvidence,
   parseCriterionRevisions,
@@ -135,21 +131,7 @@ export {
 
 export type { EngineMetrics, DelegationEntry } from "./engine.js";
 
-// Runtime (v1.2)
-export { LoopRuntime, run } from "./runtime.js";
-export { RuntimeStatus } from "./protocol.js";
-export type {
-  RoundContext,
-  AgentExecutor,
-  StopReason,
-  RoundStartInfo,
-  RoundCompleteInfo,
-  HeartbeatInfo,
-  TimeoutInfo,
-  HealthWarning,
-  RuntimeConfig,
-  RunResult,
-} from "./protocol.js";
+export type { StopReason } from "./protocol.js";
 
 // MCP (v1.3)
 export { McpServer } from "./mcp/server.js";
@@ -179,17 +161,9 @@ export type {
 // Structured tracing and policy effectiveness metrics (v1.20)
 export {
   logEvent,
-  startSpan,
-  setTraceSink,
-  getTraceSink,
 } from "./observability.js";
 export type {
   LogEventData,
-  TraceStatus,
-  TraceRecord,
-  TraceSink,
-  TraceContext,
-  TraceSpan,
 } from "./observability.js";
 export {
   PolicyMetricsCollector,
@@ -198,16 +172,6 @@ export {
   resetPolicyMetrics,
 } from "./policy-metrics.js";
 export type { PolicyMetricsSnapshot } from "./policy-metrics.js";
-
-// Neutral ecosystem checkpoint bridge (v1.20)
-export {
-  COGNITIVE_CHECKPOINT_SCHEMA_VERSION,
-  createCognitiveCheckpoint,
-} from "./interop.js";
-export type {
-  CognitiveStateCheckpoint,
-  CognitiveCheckpointSink,
-} from "./interop.js";
 
 // Unified round transaction (v1.19)
 export {

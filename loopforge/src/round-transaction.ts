@@ -6,12 +6,9 @@
  * a process crash is idempotent.
  */
 
-import type { VaultBackend, VaultEntry } from "./backends/interface.js";
+import type { LoopStore, VaultEntry } from "./loop-store.js";
 import { LoopForgeEngine } from "./engine.js";
-import {
-  diffSnapshotCollections,
-  extractFilesFromSnapshots,
-} from "./evidence-provider.js";
+import { diffSnapshotCollections } from "./evidence-provider.js";
 import type { ProviderSnapshot } from "./evidence-provider.js";
 import type { SelfEvaluation } from "./protocol.js";
 import type { PromptArtifact } from "./protocol.js";
@@ -19,7 +16,8 @@ import {
   RoundCoordinator,
   type RoundProcessResult,
 } from "./round-coordinator.js";
-import { logEvent, startSpan } from "./observability.js";
+import { logEvent } from "./observability.js";
+import { isRecord } from "./token-utils.js";
 import { policyMetrics } from "./policy-metrics.js";
 import { VaultRoundCommitStore } from "./storage.js";
 import type { RoundCommitStore } from "./storage.js";
@@ -57,10 +55,16 @@ export interface RoundTransactionInput {
   task: string;
   maxRounds: number;
   selfEval: SelfEvaluation;
-  extractionSucceeded: boolean;
   lastSelfEval?: SelfEvaluation;
   consecutiveRejections: number;
   successTrajectory: boolean[];
+  /** v2.12: Current clarification streak for R7 escalation. */
+  driftClarificationStreak?: number;
+  /** v2.13: Files from skipped backtrack rounds for restore check. */
+  backtrackSkippedFiles?: string[];
+  /** v2.12: Git HEAD of the backtrack restore point. The verification gate
+   *  checks the workspace returns to this commit before accepting work. */
+  backtrackTargetGitHead?: string;
   actualEvidence: ProviderSnapshot[];
 }
 
@@ -132,13 +136,10 @@ export function prepareRejectedAttempt(
   };
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
 
-function isProcessResult(value: unknown): value is RoundProcessResult {
+export function isProcessResult(value: unknown): value is RoundProcessResult {
   if (!isRecord(value)) return false;
-  return ["continue", "stop", "reject", "terminate"].includes(
+  return ["continue", "stop", "reject", "terminate", "backtrack"].includes(
     String(value.action),
   ) && Array.isArray(value.verificationFlags);
 }
@@ -212,40 +213,28 @@ export function parseRoundTransactionSnapshot(
 }
 
 export class RoundTransactionCoordinator {
-  private readonly backend: VaultBackend;
+  private readonly store: LoopStore;
   private readonly commitStore: RoundCommitStore;
 
   constructor(
     private readonly engine: LoopForgeEngine,
-    backend?: VaultBackend,
+    store?: LoopStore,
     commitStore?: RoundCommitStore,
   ) {
-    this.backend = backend ?? engine.getBackend();
-    this.commitStore = commitStore ?? new VaultRoundCommitStore(this.backend);
+    this.store = store ?? engine.getStore();
+    this.commitStore = commitStore ?? new VaultRoundCommitStore(this.store);
   }
 
   process(input: RoundTransactionInput): RoundTransactionOutcome {
     const { snapshot } = input;
-    const span = startSpan("round.transaction", {
-      loopId: snapshot.loopId,
-      round: snapshot.round,
-      roundId: snapshot.roundId,
-      attempt: snapshot.attempt,
-    });
     const finish = (outcome: RoundTransactionOutcome): RoundTransactionOutcome => {
       policyMetrics.recordRound(
         snapshot.loopId,
         outcome.result,
         outcome.replayed,
       );
-      span.end("ok", {
-        action: outcome.result.action,
-        replayed: outcome.replayed,
-        phase: outcome.snapshot.phase,
-      });
       return outcome;
     };
-    try {
     const expectedRoundId = makeRoundId(snapshot.loopId, snapshot.round);
     if (snapshot.roundId !== expectedRoundId) {
       throw new Error(
@@ -253,7 +242,11 @@ export class RoundTransactionCoordinator {
       );
     }
 
-    const committed = this.readCommitted(snapshot);
+    // v3.2.1: idempotency replay skips committed backtrack decisions — a
+    // backtrack rolls the round back for a redo; the redo submission carries
+    // the same roundId and must be evaluated, not replayed as the old
+    // roll-back directive (which would discard the agent's fix forever).
+    const committed = this.readCommitted(snapshot, { skipBacktrack: true });
     if (committed) {
       logEvent("round_transaction_replay", {
         loopId: snapshot.loopId,
@@ -270,20 +263,20 @@ export class RoundTransactionCoordinator {
       snapshot.beforeEvidence,
       input.actualEvidence,
     );
-    const coordinator = new RoundCoordinator(this.backend);
+    const coordinator = new RoundCoordinator(this.store);
     const result = coordinator.processRound({
       loopId: snapshot.loopId,
       task: input.task,
       currentRound: snapshot.round,
       maxRounds: input.maxRounds,
       selfEval: input.selfEval,
-      extractionSucceeded: input.extractionSucceeded,
       lastSelfEval: input.lastSelfEval,
       consecutiveRejections: input.consecutiveRejections,
-      runtimeFilesChanged: extractFilesFromSnapshots(roundEvidence),
       evidenceSnapshots: roundEvidence,
       successTrajectory: input.successTrajectory,
-    });
+      backtrackSkippedFiles: input.backtrackSkippedFiles,
+      backtrackTargetGitHead: input.backtrackTargetGitHead,
+    }, input.driftClarificationStreak ?? 0);
 
     const evaluated: RoundTransactionSnapshot = {
       ...snapshot,
@@ -337,40 +330,30 @@ export class RoundTransactionCoordinator {
       action: result.action,
     });
     return finish({ snapshot: committedSnapshot, result, replayed: false });
-    } catch (error) {
-      span.end("error", { error: String(error) });
-      throw error;
-    }
   }
 
   /** Recover an already committed decision without evaluating or writing. */
   recover(snapshot: RoundTransactionSnapshot): RoundTransactionOutcome | null {
-    const span = startSpan("round.transaction.recover", {
-      loopId: snapshot.loopId,
-      round: snapshot.round,
-      roundId: snapshot.roundId,
-    });
-    try {
-      const outcome = this.readCommitted(snapshot);
-      if (outcome) {
-        policyMetrics.recordRound(snapshot.loopId, outcome.result, true);
-      }
-      span.end("ok", { recovered: outcome !== null });
-      return outcome;
-    } catch (error) {
-      span.end("error", { error: String(error) });
-      throw error;
+    const outcome = this.readCommitted(snapshot);
+    if (outcome) {
+      policyMetrics.recordRound(snapshot.loopId, outcome.result, true);
     }
+    return outcome;
   }
 
   private readCommitted(
     expected: RoundTransactionSnapshot,
+    opts?: { skipBacktrack?: boolean },
   ): RoundTransactionOutcome | null {
     const taskId = `loop:${expected.loopId}:r${expected.round}:feedback`;
     const entries = this.commitStore.find(expected.loopId, expected.round);
     for (const entry of entries) {
       if (entry.task_id !== taskId) continue;
-      const outcome = this.outcomeFromEntry(entry, expected.roundId);
+      const outcome = this.outcomeFromEntry(
+        entry,
+        expected.roundId,
+        opts?.skipBacktrack === true,
+      );
       if (outcome) return outcome;
     }
     return null;
@@ -379,6 +362,7 @@ export class RoundTransactionCoordinator {
   private outcomeFromEntry(
     entry: VaultEntry,
     expectedRoundId: string,
+    skipBacktrack = false,
   ): RoundTransactionOutcome | null {
     const lineage = isRecord(entry.loop_lineage) ? entry.loop_lineage : null;
     const transaction = lineage && isRecord(lineage.round_transaction)
@@ -388,6 +372,15 @@ export class RoundTransactionCoordinator {
     const snapshot = parseRoundTransactionSnapshot(transaction.snapshot);
     const result = transaction.result;
     if (!snapshot || !isProcessResult(result)) return null;
+    // v3.2.1: a committed backtrack is a roll-back directive, not a terminal
+    // decision. The restored round reuses the same roundId, so replaying it
+    // would silently discard the agent's redo submission and re-emit the
+    // backtrack prompt forever (the redo's work is never evaluated, and the
+    // R4/R9 terminate guards never run because evaluation is short-circuited).
+    // Crash recovery still replays backtracks (recover() → reconcileCommittedRound
+    // resets the round counter from the committed decision); only the advance
+    // path skips them so the redo is evaluated normally.
+    if (skipBacktrack && result.action === "backtrack") return null;
     return { snapshot, result, replayed: true };
   }
 }

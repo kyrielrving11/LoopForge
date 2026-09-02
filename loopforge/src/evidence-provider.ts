@@ -1,23 +1,25 @@
 /** EvidenceProvider — Pluggable evidence capture interface (v1.18).
  *
- * Before this module, evidence capture was hardcoded to git via
- * captureGitModifiedFiles() in two places (runtime.ts, session.ts).
  * This module defines an abstract EvidenceProvider interface so
  * additional evidence sources (test runners, linters, bundle analysis)
  * can be added without touching the verification pipeline.
  *
- * Built-in provider: GitEvidenceProvider — wraps existing
- * captureGitFileState() logic.
+ * Built-in provider: GitEvidenceProvider — git file state capture with
+ * parallel async execution (v2.0.1) and a synchronous fallback.
  */
 
 import { createHash } from "node:crypto";
 import { readFileSync, realpathSync, statSync } from "node:fs";
-import { spawn } from "node:child_process";
+import {
+  spawn,
+  execFile,
+  execFileSync,
+} from "node:child_process";
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import { captureGitFileState, type GitFileState } from "./verification-gate.js";
+import { containInWorkspace } from "./workspace.js";
 import { getPolicy } from "./policy.js";
 import type { CommandEvidencePolicy } from "./policy.js";
-import { logEvent, startSpan } from "./observability.js";
+import { logEvent } from "./observability.js";
 import { policyMetrics } from "./policy-metrics.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -177,11 +179,6 @@ export class EvidenceCollector {
   async collectAsync(options: EvidenceCollectOptions = {}): Promise<ProviderSnapshot[]> {
     const timeoutMs = options.timeoutMs ?? getPolicy().evidence.timeout_ms;
     const captures = this.providers.map(async (provider) => {
-      const span = startSpan("evidence.capture", {
-        provider: provider.name,
-        loopId: options.loopId,
-        timeoutMs,
-      });
       const startedAt = Date.now();
       const controller = new AbortController();
       let timer: ReturnType<typeof setTimeout> | undefined;
@@ -214,7 +211,6 @@ export class EvidenceCollector {
           Date.now() - startedAt,
           options.loopId,
         );
-        span.end(timedOut ? "cancelled" : "ok", { outcome });
         if (timedOut) {
           logEvent("evidence_provider_timeout", { provider: provider.name, timeoutMs });
         }
@@ -226,7 +222,6 @@ export class EvidenceCollector {
           Date.now() - startedAt,
           options.loopId,
         );
-        span.end("error", { error: String(error) });
         logEvent("evidence_provider_error", { provider: provider.name, error: String(error) });
         return null;
       } finally {
@@ -251,27 +246,59 @@ export interface CommandEvidenceData extends Record<string, unknown> {
   stdout: string;
   stderr: string;
   truncated: boolean;
+  /** v3.3: Workspace files this command depends on (resolved at capture
+   *  time from executable + args, plus package.json). The verification gate
+   *  cross-checks these against the round's git diff to detect verification
+   *  domain tampering — a command whose entrypoint changed this round is not
+   *  trustworthy. Forward-slash paths (git convention). Empty = unresolvable
+   *  (external command like `bash -c`) — the gate fails open. */
+  entrypointFiles: string[];
 }
 
 function commandCwd(configured: string | undefined): string {
-  const workspace = realpathSync(process.cwd());
-  const lexical = resolve(workspace, configured ?? ".");
-  const lexicalRelative = relative(workspace, lexical);
-  if (
-    lexicalRelative === ".." || lexicalRelative.startsWith(`..${sep}`) ||
-    isAbsolute(lexicalRelative)
-  ) {
-    throw new Error("command cwd must stay within the workspace");
-  }
-  const actual = realpathSync(lexical);
-  const actualRelative = relative(workspace, actual);
-  if (
-    actualRelative === ".." || actualRelative.startsWith(`..${sep}`) ||
-    isAbsolute(actualRelative) || !statSync(actual).isDirectory()
-  ) {
+  // v3.3.1: delegated to the shared containment check (workspace.ts) — the
+  // command execution boundary must use the same double check as every
+  // other workspace path, not a private copy. The cwd must additionally be
+  // an existing directory (commands spawn inside it).
+  const actual = containInWorkspace(process.cwd(), configured ?? ".");
+  if (!statSync(actual).isDirectory()) {
     throw new Error("command cwd resolves outside the workspace");
   }
   return actual;
+}
+
+/** v3.3: Resolve the workspace files a verification command depends on.
+ *  Candidates: every arg that resolves to an existing file inside the
+ *  workspace, a path-shaped executable (e.g. "./scripts/verify.mjs"), and
+ *  package.json (npm test / script indirection). Directories and non-workspace
+ *  paths are skipped. Returns forward-slash paths (git convention) so the
+ *  gate can intersect them with the round's git diff. Empty result = the
+ *  command's entrypoint cannot be observed (external command) — fail open. */
+function resolveEntrypointFiles(
+  executable: string,
+  args: string[],
+  cwd: string,
+): string[] {
+  // v3.3.1: entrypoint containment uses the shared workspace check.
+  const workspace = process.cwd();
+  const candidates = [...args];
+  if (executable.includes("/") || executable.includes("\\")) {
+    candidates.unshift(executable);
+  }
+  candidates.push("package.json");
+  const found: string[] = [];
+  for (const candidate of candidates) {
+    try {
+      const actual = containInWorkspace(workspace, resolve(cwd, candidate));
+      if (statSync(actual).isDirectory()) continue;
+      const rel = relative(realpathSync(workspace), actual).split(sep).join("/");
+      if (!found.includes(rel)) found.push(rel);
+    } catch {
+      // Not a resolvable workspace file (absent or outside) — not an
+      // entrypoint candidate.
+    }
+  }
+  return found;
 }
 
 /** Explicit, shell-free verification command. Disabled unless configured. */
@@ -330,6 +357,7 @@ export class CommandEvidenceProvider implements EvidenceProvider {
         "Command executable is empty",
         false,
         0,
+        [],
       ));
     }
     try {
@@ -344,8 +372,15 @@ export class CommandEvidenceProvider implements EvidenceProvider {
         String(error),
         false,
         Date.now() - startedAt,
+        [],
       ));
     }
+    // v3.3: Workspace entrypoint files for tamper detection at the gate.
+    const entrypointFiles = resolveEntrypointFiles(
+      this.config.executable,
+      this.config.args,
+      cwd,
+    );
 
     return new Promise((resolveCapture) => {
       let stdout = "";
@@ -390,6 +425,7 @@ export class CommandEvidenceProvider implements EvidenceProvider {
           stderr,
           truncated,
           Date.now() - startedAt,
+          entrypointFiles,
         ));
       };
       const abort = (): void => {
@@ -425,6 +461,7 @@ export class CommandEvidenceProvider implements EvidenceProvider {
     stderr: string,
     truncated: boolean,
     durationMs: number,
+    entrypointFiles: string[],
   ): ProviderSnapshot {
     return {
       provider: this.name,
@@ -442,22 +479,149 @@ export class CommandEvidenceProvider implements EvidenceProvider {
         stdout,
         stderr,
         truncated,
+        entrypointFiles,
       } satisfies CommandEvidenceData,
     };
   }
 }
 
+// ── Git File State Capture ─────────────────────────────────────────────────
+
+/** v1.17: Result of capturing git file state across all three categories. */
+export interface GitFileState {
+  /** Tracked files modified but unstaged (git diff --name-only). */
+  tracked: string[];
+  /** Files in the staging area (git diff --cached --name-only). */
+  staged: string[];
+  /** Untracked files not yet known to git (git ls-files --others --exclude-standard). */
+  untracked: string[];
+  /** v2.13: HEAD commit hash for backtrack restore point.
+   *  undefined when git is unavailable or not a repository. */
+  head?: string;
+}
+
+/** v2.0.1: Capture git file state using parallel async execFile.
+ *
+ * Runs three git commands concurrently via Promise.all. Uses a single
+ * timeout (shared across all commands) and an optional AbortSignal for
+ * early cancellation. Shell-free (execFile, not exec).
+ *
+ * On any command failure, returns null — the caller should treat git
+ * evidence as unavailable and degrade gracefully.
+ *
+ * Performance: wall-clock time is max(single-command), not sum(3).
+ * On a normal repo (~200ms/command): ~200ms vs ~600ms sequential.
+ * On Windows with antivirus (~4s/command): ~4s vs ~12s sequential. */
+export async function captureGitFileStateAsync(
+  signal?: AbortSignal,
+  timeoutMs?: number,
+): Promise<GitFileState | null> {
+  const timeout = timeoutMs ?? 15000;
+
+  const runGit = (args: readonly string[]): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const child = execFile("git", [...args], {
+        encoding: "utf-8" as const,
+        timeout,
+        signal,
+        windowsHide: true,
+      });
+      let stdout = "";
+      child.stdout?.on("data", (chunk: string) => {
+        stdout += chunk;
+      });
+      child.on("close", (code) => {
+        code === 0
+          ? resolve(stdout)
+          : reject(new Error(`git ${args[0]} exited ${code}`));
+      });
+      child.on("error", reject);
+    });
+  };
+
+  try {
+    const [tracked, staged, untracked] = await Promise.all([
+      runGit(["diff", "--name-only"]),
+      runGit(["diff", "--cached", "--name-only"]),
+      runGit(["ls-files", "--others", "--exclude-standard"]),
+    ]);
+    // v2.13: Capture HEAD commit for backtrack restore (best-effort)
+    let head: string | undefined;
+    try {
+      const headOut = await runGit(["rev-parse", "HEAD"]);
+      head = headOut.trim() || undefined;
+    } catch {
+      // Detached HEAD or non-repo — head stays undefined
+    }
+    return {
+      tracked: tracked.trim().split("\n").filter((f) => f.length > 0).sort(),
+      staged: staged.trim().split("\n").filter((f) => f.length > 0).sort(),
+      untracked: untracked.trim().split("\n").filter((f) => f.length > 0).sort(),
+      head,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** v1.17 (sync): Capture git file state using sequential execFileSync.
+ *
+ * @deprecated Use captureGitFileStateAsync() for the primary path.
+ * This sync fallback exists for legacy callers that cannot be made async
+ * (e.g. reconstructSession during startup). Uses execFileSync — shell-free,
+ * unlike the old execSync-based implementation. */
+export function captureGitFileState(): GitFileState | null {
+  try {
+    const tracked = execFileSync("git", ["diff", "--name-only"], {
+      encoding: "utf-8",
+      timeout: 5000,
+    }).trim();
+    const staged = execFileSync("git", ["diff", "--cached", "--name-only"], {
+      encoding: "utf-8",
+      timeout: 5000,
+    }).trim();
+    const untracked = execFileSync("git", ["ls-files", "--others", "--exclude-standard"], {
+      encoding: "utf-8",
+      timeout: 5000,
+    }).trim();
+    // v2.13: Capture HEAD commit for backtrack restore point
+    let head: string | undefined;
+    try {
+      head = execFileSync("git", ["rev-parse", "HEAD"], {
+        encoding: "utf-8",
+        timeout: 5000,
+      }).trim();
+    } catch {
+      // Non-git repo or detached state — head stays undefined
+    }
+    return {
+      tracked: tracked.split("\n").filter((f: string) => f.length > 0).sort(),
+      staged: staged.split("\n").filter((f: string) => f.length > 0).sort(),
+      untracked: untracked.split("\n").filter((f: string) => f.length > 0).sort(),
+      head: head || undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
 // ── Built-in: GitEvidenceProvider ──────────────────────────────────────────
 
-/** Captures git file state (tracked, staged, untracked) via existing
- *  captureGitFileState() logic. */
+/** Captures git file state (tracked, staged, untracked) via the async
+ *  captureGitFileStateAsync() when a context is provided, falling back
+ *  to the synchronous captureGitFileState() for legacy callers. */
 export class GitEvidenceProvider implements EvidenceProvider {
   readonly name = "git";
 
-  capture(): ProviderSnapshot | null {
-    const state: GitFileState | null = captureGitFileState();
-    if (!state) return null;
-    const files = [...new Set([
+  capture(context?: EvidenceCaptureContext): ProviderSnapshot | null | Promise<ProviderSnapshot | null> {
+    const capture = context
+      ? captureGitFileStateAsync(context.signal, context.timeoutMs)
+      : captureGitFileState();
+    const statePromise = capture instanceof Promise ? capture : Promise.resolve(capture);
+
+    return statePromise.then((state: GitFileState | null): ProviderSnapshot | null => {
+      if (!state) return null;
+      const files = [...new Set([
       ...state.tracked,
       ...state.staged,
       ...state.untracked,
@@ -483,8 +647,11 @@ export class GitEvidenceProvider implements EvidenceProvider {
         staged: state.staged,
         untracked: state.untracked,
         fingerprints,
+        // v2.13: HEAD commit hash for backtrack workspace restore
+        head: state.head,
       },
     };
+    });  // end of .then()
   }
 }
 
@@ -566,4 +733,61 @@ export function diffSnapshots(
   after: ProviderSnapshot[],
 ): string[] | null {
   return extractFilesFromSnapshots(diffSnapshotCollections(before, after));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v3.3.1: Backtrack auto-restore (engine.backtrack_auto_restore)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** v3.3.1: Implement the v2.13 policy switch `engine.backtrack_auto_restore` —
+ *  automatically restore the workspace after a backtrack:
+ *  1. `git stash push -u` — every uncommitted change (tracked + untracked)
+ *     is preserved in a stash, never destroyed (an untracked file the agent
+ *     created in the failed rounds is not silently deleted).
+ *  2. `git reset --hard <restoreHead>` — when the failed rounds created
+ *     commits, discard them back to the clean round's commit (the v2.12
+ *     restore-point HEAD).
+ *
+ *  Runs only inside the workspace (cwd, shell: false, 30s timeout), and the
+ *  caller gates it behind the policy flag — DANGEROUS by design, off by
+ *  default. Failures are reported, never thrown: the verification gate still
+ *  checks workspace cleanliness afterwards, and the backtrack prompt already
+ *  instructs manual restore as the fallback. An empty workspace ("No local
+ *  changes") is not a failure. */
+export async function runBacktrackAutoRestore(
+  gitHead: string | undefined,
+  round: number,
+  /** v3.3.1: workspace root; injectable so tests can run against a temp
+   *  repo. Defaults to the process cwd, matching the evidence providers. */
+  cwd = process.cwd(),
+): Promise<{ ok: boolean; detail: string }> {
+  const run = (args: string[]): Promise<{ ok: boolean; out: string }> =>
+    new Promise((resolvePromise) => {
+      execFile("git", args, {
+        cwd,
+        shell: false,
+        timeout: 30_000,
+      }, (error, stdout, stderr) => {
+        if (error) {
+          resolvePromise({ ok: false, out: String(stderr || error.message) });
+          return;
+        }
+        resolvePromise({ ok: true, out: String(stdout) });
+      });
+    });
+
+  const steps: string[] = [];
+  const stash = await run(["stash", "push", "-u", "-m", `loopforge-backtrack-round-${round}`]);
+  const workspaceWasClean = stash.out.includes("No local changes");
+  steps.push(
+    `stash: ${workspaceWasClean ? "clean (nothing to stash)" : stash.ok ? "ok" : `failed — ${stash.out.trim()}`}`,
+  );
+  if (gitHead) {
+    const reset = await run(["reset", "--hard", gitHead]);
+    steps.push(
+      `reset --hard ${gitHead.slice(0, 12)}: ${reset.ok ? "ok" : `failed — ${reset.out.trim()}`}`,
+    );
+    return { ok: reset.ok, detail: steps.join("; ") };
+  }
+  return { ok: workspaceWasClean || stash.ok, detail: steps.join("; ") };
 }

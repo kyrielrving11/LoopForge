@@ -5,18 +5,59 @@ export interface ConstraintsPolicy {
 export interface SummaryPolicy {
     window: number;
     health_check_interval: number;
+    /** v2.1: Rounds between automatic safety-net milestones.
+     *  Default 20. Only fires when no agent_declared or criteria_milestone
+     *  has been created for this many rounds. */
+    milestone_interval: number;
+    /** v2.1: Maximum number of milestone summaries to accumulate.
+     *  Oldest milestones are evicted when the cap is exceeded. */
+    max_milestones: number;
+    /** v3.0.1: L1 milestone sampling — when milestones exceed max_milestones,
+     *  keep this many of the OLDEST milestones as history anchors. The same
+     *  count of the NEWEST is always kept; the middle is sampled evenly. */
+    milestone_head_count: number;
+    /** v3.0.1: L1 milestone sampling — this many of the NEWEST milestones are
+     *  always kept when the cap is exceeded. */
+    milestone_tail_count: number;
+    /** v2.1: Enable the loop_synthesis paragraph in L2 prompts and state files. */
+    enable_loop_synthesis: boolean;
 }
 export interface EnginePolicy {
     feedback_flush_interval: number;
     max_circuit_breaker: number;
-}
-export interface RuntimePolicy {
     max_rounds: number;
-    round_timeout_ms: number;
-    heartbeat_interval_ms: number;
-    stall_grace_ms: number;
-    max_consecutive_errors: number;
-    pause_double_tap_ms: number;
+    /** v2.7: When true, enforcement rules that would terminate (R4 2nd strike,
+     *  R5 flatline, R6 max rejections) instead issue one final escalated
+     *  rejection with a "Seek Human Guidance" notice before terminating.
+     *  This gives the agent one extra chance to course-correct with human
+     *  input rather than being terminated immediately. Default: true. */
+    enforcement_escalation_enabled: boolean;
+    /** v2.10: When true, R4 (progress stall) and R5 (flat terminal) escalate
+     *  to backtrack instead of reject. The agent is rolled back to the last
+     *  clean round with lessons injected. Set to false to restore pre-v2.10
+     *  behavior (escalated reject without backtrack). Default: true. */
+    backtrack_enabled: boolean;
+    /** v2.10: Max rounds to search backwards for a safe restore point.
+     *  If no clean round is found within this depth, backtrack falls through
+     *  to terminate. Default: 3. */
+    backtrack_max_depth: number;
+    /** v2.10: When true, discovered_constraints from skipped rounds are
+     *  preserved and merged into the restored state's active constraints.
+     *  Default: true. */
+    backtrack_preserve_discoveries: boolean;
+    /** v2.12: Max consecutive rounds where drift_clarification waives R7
+     *  before the loop is terminated. When the agent submits weak clarifications
+     *  (≥ 20 chars but no semantic anchors like constraint IDs or file paths)
+     *  for this many consecutive rounds, the loop terminates. Set to 0 to
+     *  disable the streak limit (pre-v2.12 behavior — any ≥ 20 char
+     *  clarification always waives). Default: 3. */
+    drift_clarification_max_streak: number;
+    /** v2.13: When true, LoopForge automatically executes git stash + reset
+     *  on backtrack to restore the workspace to the clean round's commit.
+     *  DANGEROUS: mutates the working tree directly. Default: false.
+     *  When false (default), the backtrack prompt instructs the agent to
+     *  restore manually, and the verification gate enforces the check. */
+    backtrack_auto_restore: boolean;
 }
 /** Levels control state density only; reasoning strategy belongs to the Agent. */
 export interface PromptPolicy {
@@ -25,6 +66,38 @@ export interface PromptPolicy {
     l0_max_chars: number;
     l1_max_chars: number;
     l2_max_chars: number;
+    /** v2.4: Enable adaptive L2 budget scaling with loop complexity.
+     *  Grows with round count + milestone count up to l2_adaptive_max_chars. */
+    l2_adaptive_enabled: boolean;
+    /** v2.4: Additional L2 chars per completed round. Default: 200. */
+    l2_adaptive_round_factor: number;
+    /** v2.4: Additional L2 chars per milestone. Default: 1000. */
+    l2_adaptive_milestone_factor: number;
+    /** v2.4: Absolute ceiling for adaptive L2 budget. Default: 40000. */
+    l2_adaptive_max_chars: number;
+    /** v2.5: Additional L2 chars per tracked sub-goal. Default: 100. */
+    l2_adaptive_subgoal_factor: number;
+    /** v2.8: When true, L2 prompts skip inline fullStateMarkdown and
+     *  instruct the agent to read the state file instead. Structured
+     *  sections (milestones, sub-goals, trust, progress) are still
+     *  rendered. Default: true. Set to false to restore pre-v2.8 L2
+     *  behavior. */
+    l2_pointer_enabled: boolean;
+    /** v3.2: Collapse unchanged L1 content (vs the previous round's persisted
+     *  presentation) into one-line state-file pointers. Default: true.
+     *  Set to false to restore pre-v3.2 full L1 rendering. */
+    l1_collapse_enabled: boolean;
+    /** v2.9: Max emphasize items when level is L2. Default: 5. */
+    max_emphasize_l2: number;
+    /** v2.9: Max emphasize items when level is L1. Default: 3. */
+    max_emphasize_l1: number;
+    /** v2.9: Max expand sections when level is L1. Default: 1. */
+    max_expand_l1: number;
+    /** v2.9: Max confusion points rendered. Default: 3. */
+    max_confusion_points: number;
+    /** v2.14: Jaccard threshold for pointing a confusion point at its
+     *  best-matching state section. Default: 0.15 (15%). */
+    confusion_section_threshold: number;
     base_prompt_version: string;
 }
 export interface BackendPolicy {
@@ -38,9 +111,55 @@ export interface EvolutionPolicy {
     progress_stall_threshold: number;
     progress_stall_rounds: number;
     progress_mismatch_threshold: number;
+    /** v2.14: Jaccard threshold for task continuity in checkLoopHealth —
+     *  below this, the loop is considered drifting. Default: 0.2. */
+    task_continuity_threshold: number;
+    /** v2.1: Jaccard token similarity threshold for intent-action drift
+     *  detection. When the previous round's next_action and the current
+     *  round's output_summary have similarity below this threshold, a
+     *  verification flag is raised. Default: 0.15 (15%). */
+    intent_drift_threshold: number;
+    /** v2.2: Jaccard similarity threshold for auto-completing a sub-goal
+     *  when a success_criteria is met. Default: 0.4. */
+    subgoal_auto_complete_threshold: number;
+    /** v2.5: Jaccard threshold for detecting genuinely new success criteria
+     *  between rounds. Used by detectNewCriteria(). Default: 0.45. */
+    criteria_dedup_threshold: number;
+    /** v2.5: Jaccard threshold for deduplicating new sub-goals against
+     *  existing ones. Used when accumulating emerged_subtasks. Default: 0.6. */
+    subgoal_dedup_threshold: number;
+    /** v2.5: Jaccard threshold for matching agent-declared status changes
+     *  (completed/blocked/canceled) to existing sub-goals. Default: 0.5. */
+    subgoal_match_threshold: number;
+    /** v2.5: Jaccard threshold for auto-promoting a pending sub-goal to
+     *  in_progress when next_action aligns. Default: 0.4. */
+    subgoal_auto_in_progress_threshold: number;
+    /** v2.5: Jaccard threshold for matching constraints during discovery
+     *  and violation tracking. Default: 0.5. */
+    constraint_match_threshold: number;
+    /** v2.5: Jaccard threshold for checkSubGoalDrift — next_action must
+     *  exceed this to be considered "aligned" with a pending sub-goal.
+     *  Default: 0.3. */
+    subgoal_drift_alignment_threshold: number;
+    /** v2.2: Number of rounds a sub-goal can stay pending before
+     *  being flagged as stale in prompts. Default: 10. */
+    subgoal_stale_rounds: number;
+    /** v2.2: Maximum sub-goals to render in prompt. Default: 10. */
+    max_subgoals_in_prompt: number;
+    /** v2.2: Maximum completed sub-goals to render in prompt. Default: 5. */
+    max_done_subgoals_in_prompt: number;
+    /** v2.3: Number of rounds without violation before a discovered
+     *  constraint is demoted to inactive. Hard/plan/criteria constraints
+     *  are never auto-demoted. Default: 15. */
+    constraint_inactive_rounds: number;
+    /** v2.11: When true, constraints and criteria are assigned stable IDs
+     *  (c-XXXXXXXX, cr-XXXXXXXX) rendered in prompts. The agent is encouraged
+     *  to reference IDs for exact matching; Jaccard similarity remains as
+     *  fallback for backward compatibility. Set to false to restore pre-v2.11
+     *  pure-text + Jaccard behavior. Default: true. */
+    constraint_id_enabled: boolean;
 }
 export interface CheckpointPolicy {
-    max_carried_constraints: number;
     outcome_max_chars: number;
 }
 /** Human-readable derived state view. JSON LoopStore documents remain truth. */
@@ -54,6 +173,14 @@ export interface EvidencePolicy {
     providers: string[];
     timeout_ms: number;
     commands: CommandEvidencePolicy[];
+    /** v3.3: How a success claim with zero machine-backed evidence is treated.
+     *  "required" (default): the runtime rejects/terminates via R8 — a success
+     *  claim must be backed by a passed after-phase command (or a declared
+     *  no_change_reason). "warn": the flag downgrades to warn — the round
+     *  commits, but its success never enters the trajectory and trust drops.
+     *  The machine-evidence tightening itself is unconditional; this switch
+     *  only controls the rejection/tolerance policy. */
+    machine_backed_success: "required" | "warn";
 }
 export interface CommandEvidencePolicy {
     name: string;
@@ -71,12 +198,16 @@ export interface McpPolicy {
     session_lease_ms: number;
     session_lease_renew_interval_ms: number;
 }
+/** v2.12: User/Agent gate governance. The gate is a record layer — it never
+ *  blocks the verify→enforce→stop decision flow. */
+export interface GatePolicy {
+    enabled: boolean;
+}
 export interface LoopPolicy {
     version: string;
     constraints: ConstraintsPolicy;
     summary: SummaryPolicy;
     engine: EnginePolicy;
-    runtime: RuntimePolicy;
     prompt: PromptPolicy;
     backend: BackendPolicy;
     evolution: EvolutionPolicy;
@@ -84,6 +215,7 @@ export interface LoopPolicy {
     state_file: StateFilePolicy;
     evidence: EvidencePolicy;
     mcp: McpPolicy;
+    gate: GatePolicy;
 }
 export declare const DEFAULT_POLICY: LoopPolicy;
 /** Write a full default `loop_policy.json` to the target directory.
@@ -101,6 +233,13 @@ export declare function writeDefaultPolicy(targetDir: string, force?: boolean): 
 export declare function loadPolicy(path?: string): LoopPolicy;
 export declare function getPolicy(path?: string): LoopPolicy;
 export declare function resetPolicy(): void;
+/** v3.2: Test-only injection — mirrors resetPolicy so tests can exercise a
+ *  specific policy configuration (e.g. l1_collapse_enabled=false). */
+export declare function setPolicyForTest(next: LoopPolicy): void;
+/** v3.3: Whether a command name is configured AND enabled in the current
+ *  policy's evidence.commands. The machine-checkable predicate behind the
+ *  round_contract verification_plan (round_unverifiable otherwise). */
+export declare function isConfiguredCommand(name: string): boolean;
 export declare function validateLoopId(loopId: string): void;
 export declare function resolveStateDirectory(workspaceRoot: string, configuredDirectory: string): string;
 export declare function writeStateFile(loopId: string, content: string | undefined): void;

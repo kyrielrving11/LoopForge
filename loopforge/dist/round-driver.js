@@ -10,16 +10,21 @@ import { getPolicy, writeStateFile } from "./policy.js";
 import { prepareRejectedAttempt, prepareRoundTransaction, RoundTransactionCoordinator, } from "./round-transaction.js";
 export class RoundDriver {
     engine;
-    backend;
-    constructor(engine, backend) {
+    store;
+    constructor(engine, store) {
         this.engine = engine;
-        this.backend = backend ?? engine.getBackend();
+        this.store = store ?? engine.getStore();
     }
     async prepare(request, loopId, round) {
-        const response = this.compile(request, loopId, true);
+        // v3.0.1: compile (CPU-bound) and before-evidence collection (external
+        // process spawns) run concurrently — the git/command spawns were the
+        // latency tail behind the old compile-first, evidence-second order.
+        const [response, evidenceBaseline] = await Promise.all([
+            Promise.resolve().then(() => this.compile(request, loopId, true)),
+            this.collectEvidence(loopId, "before"),
+        ]);
         if (!response)
             return null;
-        const evidenceBaseline = await this.collectEvidence(loopId, "before");
         return this.finishPrepare(response, loopId, round, evidenceBaseline);
     }
     /** Synchronous fallback for legacy embedding APIs. Async evidence providers
@@ -61,6 +66,8 @@ export class RoundDriver {
             evidenceBaseline: rejected.beforeEvidence,
             snapshot,
             stateFileContent: response.state_file_content,
+            warnings: response.warnings,
+            compileResponse: response,
         };
     }
     finishPrepare(response, loopId, round, evidenceBaseline) {
@@ -73,26 +80,30 @@ export class RoundDriver {
             evidenceBaseline,
             snapshot,
             stateFileContent: response.state_file_content,
+            warnings: response.warnings,
+            compileResponse: response,
         };
     }
     async complete(input) {
         const actualEvidence = await this.collectEvidence(input.loopId, "after");
-        const transaction = new RoundTransactionCoordinator(this.engine, this.backend);
+        const transaction = new RoundTransactionCoordinator(this.engine, this.store);
         const outcome = transaction.process({
             snapshot: input.snapshot,
             task: input.task,
             maxRounds: input.maxRounds,
             selfEval: input.selfEval,
-            extractionSucceeded: input.extractionSucceeded,
             lastSelfEval: input.lastSelfEval,
             consecutiveRejections: input.consecutiveRejections,
             successTrajectory: input.successTrajectory,
             actualEvidence,
+            driftClarificationStreak: input.driftClarificationStreak,
+            backtrackSkippedFiles: input.backtrackSkippedFiles,
+            backtrackTargetGitHead: input.backtrackTargetGitHead,
         });
         return { outcome, actualEvidence };
     }
     recover(snapshot) {
-        return new RoundTransactionCoordinator(this.engine, this.backend).recover(snapshot);
+        return new RoundTransactionCoordinator(this.engine, this.store).recover(snapshot);
     }
     collectEvidence(loopId, phase) {
         return EvidenceCollector.fromPolicy().collectAsync({ loopId, phase });

@@ -45,8 +45,11 @@ describe("Generated JSON Schema — top-level", () => {
 
   it("includes the PromptArtifact wire contract", () => {
     const names = Object.keys(defs);
-    assert.equal(names.length, 36, `expected 36, got ${names.length}: ${names.join(", ")}`);
+    // v3.3: RoundContract joined the $defs (37 → 38).
+    assert.equal(names.length, 38, `expected 38, got ${names.length}: ${names.join(", ")}`);
     assert.ok(names.includes("PromptArtifact"));
+    assert.ok(names.includes("RoundOutcome"));
+    assert.ok(names.includes("RoundContract"));
   });
 });
 

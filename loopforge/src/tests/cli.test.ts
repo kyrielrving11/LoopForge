@@ -24,10 +24,10 @@ describe("loopforge CLI", () => {
   it("exposes one versioned command surface", () => {
     const help = run(["--help"]);
     assert.equal(help.status, 0, help.stderr);
-    assert.match(help.stdout, /LoopForge 2\.0\.0-rc\.1/);
+    assert.match(help.stdout, /LoopForge 3\.3\.0/);
     assert.match(help.stdout, /loopforge mcp/);
     assert.match(help.stdout, /loopforge inspect/);
-    assert.equal(run(["--version"]).stdout.trim(), "2.0.0-rc.1");
+    assert.equal(run(["--version"]).stdout.trim(), "3.3.0");
   });
 
   it("returns machine-readable doctor results", () => {
@@ -53,6 +53,85 @@ describe("loopforge CLI", () => {
       const document = JSON.parse(result.stdout) as { round: number; promptArtifact?: unknown };
       assert.equal(document.round, 1);
       assert.equal(document.promptArtifact, undefined);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("inspect accepts options BEFORE the LOOP_ID (v3.3.1)", () => {
+    const root = temporaryDirectory();
+    try {
+      const store = new FileLoopStore(join(root, ".loopforge"));
+      store.appendEntry({
+        task_id: "loop:inspect-me:r1",
+        task_type: "loop_lineage",
+        loop_id: "inspect-me",
+        loop_lineage: { round: 1, task: "inspect" },
+      });
+      // Regression: `inspect --round 1 inspect-me` took the option VALUE "1"
+      // as the LOOP_ID (first non-dash argument) and reported
+      // "round not found: 1#1" — the real loop was never read.
+      const result = run(["inspect", "--round", "1", "inspect-me", "--json"], root);
+      assert.equal(result.status, 0, result.stderr);
+      const document = JSON.parse(result.stdout) as { round: number };
+      assert.equal(document.round, 1);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("inspect hides prompt TEXT even when the round carries a prompt artifact", () => {
+    const root = temporaryDirectory();
+    try {
+      const store = new FileLoopStore(join(root, ".loopforge"));
+      // A committed round whose transaction carries a full prompt artifact —
+      // the shape that previously leaked renderedPrompt through the
+      // whitelisted promptArtifact key (the old \bprompt\b filter never
+      // matched underscore/camelCase keys at all).
+      store.appendEntry({
+        task_id: "loop:inspect-me:r1:feedback",
+        task_type: "feedback",
+        loop_id: "inspect-me",
+        loop_lineage: {
+          round: 1,
+          round_transaction: {
+            schema_version: 1,
+            round_id: "loop:inspect-me:round:1",
+            snapshot: {
+              schemaVersion: 1,
+              roundId: "loop:inspect-me:round:1",
+              loopId: "inspect-me",
+              round: 1,
+              attempt: 1,
+              phase: "committed",
+              beforeEvidence: [],
+              promptArtifact: {
+                schemaVersion: 1,
+                roundId: "loop:inspect-me:round:1",
+                attempt: 1,
+                level: "l2",
+                renderedPrompt: "TOP-SECRET-PROMPT-TEXT",
+                promptHash: "abc123",
+                stateHash: "def456",
+              },
+              createdAt: Date.now(),
+              updatedAt: Date.now(),
+            },
+            result: { action: "continue", verificationFlags: [] },
+          },
+        },
+      });
+      const result = run(["inspect", "inspect-me", "--round", "1", "--json"], root);
+      assert.equal(result.status, 0, result.stderr);
+      assert.ok(!result.stdout.includes("TOP-SECRET-PROMPT-TEXT"),
+        "prompt text must not leak without --prompt");
+      const document = JSON.parse(result.stdout) as {
+        promptArtifact?: { level?: string; promptHash?: string; renderedPrompt?: string };
+      };
+      assert.equal(document.promptArtifact?.level, "l2", "artifact metadata is preserved");
+      assert.equal(document.promptArtifact?.promptHash, "abc123", "hash metadata is preserved");
+      assert.equal(document.promptArtifact?.renderedPrompt, undefined,
+        "rendered text is stripped from the artifact");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -101,7 +180,7 @@ describe("loopforge CLI", () => {
       const raw = JSON.parse(readFileSync(policyPath, "utf8"));
       assert.equal(raw.version, "2");
       assert.equal(raw.prompt.injection_mode, "adaptive");
-      assert.equal(raw.runtime.max_rounds, 20);
+      assert.equal(raw.engine.max_rounds, 20);
       assert.equal(raw.evidence.providers[0], "git");
     } finally {
       rmSync(root, { recursive: true, force: true });

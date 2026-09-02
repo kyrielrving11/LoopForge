@@ -4,9 +4,27 @@
  * owns long-running execution while LoopForge persists round state.
  */
 import { createInterface } from "node:readline";
+import { appendFileSync } from "node:fs";
 import { SessionManager } from "./session.js";
-import { TOOL_HANDLERS, TOOL_SCHEMAS, ToolInputValidationError, validateToolInput, } from "./tools.js";
-const SERVER_INFO = { name: "loopforge-mcp", version: "2.0.0" };
+import { TOOL_HANDLERS, TOOL_SCHEMAS, ToolInputValidationError, validateToolInput, validateToolOutput, } from "./tools.js";
+import { isRecord } from "../token-utils.js";
+const SERVER_INFO = { name: "loopforge-mcp", version: "3.3.0" };
+const SUPPORTED_PROTOCOL_VERSIONS = new Set([
+    "2024-11-05",
+    "2025-03-26",
+    "2025-06-18",
+]);
+const LATEST_PROTOCOL_VERSION = "2025-06-18";
+export const SERVER_INSTRUCTIONS = [
+    "Use LoopForge directly for long-running work. Start by calling loopforge_status ",
+    "with view=all to list loops, then loopforge_status for a matching session or ",
+    "loopforge_start for a new one. ",
+    "Before each agent-process boundary, call loopforge_next with the roundId from ",
+    "the most recent response, honest evidence, remaining criteria, and a concrete ",
+    "next action. Follow reject or backtrack prompts and retry loopforge_next. ",
+    "Keep one LoopForge session across outer agent rounds. ",
+    "Do not replace these MCP calls with shell or CLI wrappers.",
+].join("");
 class JsonRpcError extends Error {
     code;
     constructor(code, message) {
@@ -14,9 +32,6 @@ class JsonRpcError extends Error {
         this.code = code;
         this.name = "JsonRpcError";
     }
-}
-function isRecord(value) {
-    return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 function isJsonRpcRequest(value) {
     if (!isRecord(value))
@@ -37,8 +52,8 @@ function okResponse(id, result) {
 export class McpServer {
     mgr;
     requestQueue = Promise.resolve();
-    constructor(storeOrBackend) {
-        this.mgr = new SessionManager(storeOrBackend);
+    constructor(store) {
+        this.mgr = new SessionManager(store);
     }
     start() {
         const resumed = this.mgr.autoResumeAll();
@@ -57,6 +72,7 @@ export class McpServer {
         process.stderr.write(`[loopforge-mcp] v${SERVER_INFO.version} started\n`);
     }
     async handleLine(line) {
+        this.trace("request", line);
         let parsed;
         try {
             parsed = JSON.parse(line);
@@ -73,21 +89,44 @@ export class McpServer {
             return;
         try {
             const result = await this.dispatch(parsed);
-            process.stdout.write(okResponse(parsed.id, result) + "\n");
+            const response = okResponse(parsed.id, result);
+            this.trace("response", response);
+            process.stdout.write(response + "\n");
         }
         catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             const code = error instanceof JsonRpcError ? error.code : -32603;
-            process.stdout.write(errorResponse(parsed.id, code, message) + "\n");
+            const response = errorResponse(parsed.id, code, message);
+            this.trace("response", response);
+            process.stdout.write(response + "\n");
+        }
+    }
+    trace(direction, payload) {
+        const path = process.env.LOOPFORGE_MCP_TRACE;
+        if (!path || !payload)
+            return;
+        try {
+            appendFileSync(path, `${JSON.stringify({ direction, payload })}\n`, "utf8");
+        }
+        catch {
+            // Diagnostics must never change MCP behavior.
         }
     }
     async dispatch(req) {
         if (req.method === "initialize") {
-            const requested = req.params?.protocolVersion;
+            const requestedVersion = typeof req.params?.protocolVersion === "string"
+                ? req.params.protocolVersion
+                : "";
+            const protocolVersion = SUPPORTED_PROTOCOL_VERSIONS.has(requestedVersion)
+                ? requestedVersion
+                : LATEST_PROTOCOL_VERSION;
             return {
-                protocolVersion: requested === "2024-11-05" ? requested : "2025-11-25",
+                // Negotiate the client's synchronous MCP revision. LoopForge does not
+                // advertise Tasks, so newer task-capable revisions remain unsupported.
+                protocolVersion,
                 capabilities: { tools: {} },
                 serverInfo: SERVER_INFO,
+                instructions: SERVER_INSTRUCTIONS,
             };
         }
         if (req.method === "tools/list")
@@ -121,11 +160,62 @@ export class McpServer {
             throw error;
         }
         const output = await handler(this.mgr, args);
-        return {
-            content: [{ type: "text", text: JSON.stringify(output) }],
-            structuredContent: output,
-            isError: typeof output.error === "string",
-        };
+        // v2.14: enforce the declared output contracts — a handler output that
+        // violates its outputSchema is a contract bug, surfaced as a clean
+        // JSON-RPC error instead of silently shipping a schema-violating result.
+        try {
+            validateToolOutput(name, output);
+        }
+        catch (error) {
+            if (error instanceof ToolInputValidationError) {
+                throw new JsonRpcError(-32603, `Tool "${name}" returned schema-violating output: ${error.message}`);
+            }
+            throw error;
+        }
+        const isError = typeof output.error === "string";
+        // Extract the compiled prompt (present in start/next/resume responses).
+        // MCP content annotations signal priority to the host so it can
+        // preserve critical assistant-facing content during compaction.
+        const prompt = typeof output.prompt === "string" && output.prompt.length > 0
+            ? output.prompt
+            : null;
+        const content = [];
+        if (prompt) {
+            // Primary: the actionable prompt as raw text — no JSON wrapper so
+            // the model reads the instructions immediately.
+            content.push({
+                type: "text",
+                text: prompt,
+                annotations: { priority: 1.0, audience: ["assistant"] },
+            });
+            // Secondary: structured metadata (sessionId, round, level, warnings,
+            // enforcementAction, etc.) without the prompt.
+            const { prompt: _prompt, ...meta } = output;
+            content.push({
+                type: "text",
+                text: JSON.stringify(meta),
+                annotations: { priority: 0.3, audience: ["assistant"] },
+            });
+        }
+        else if (isError) {
+            content.push({
+                type: "text",
+                text: JSON.stringify(output),
+                annotations: { priority: 1.0, audience: ["user", "assistant"] },
+            });
+        }
+        else {
+            // Non-prompt tools (status, list, replay, health, pause)
+            content.push({
+                type: "text",
+                text: JSON.stringify(output),
+                annotations: { priority: 0.5, audience: ["assistant"] },
+            });
+        }
+        // Protocol 2024-11-05 defines CallToolResult as content plus optional
+        // isError. Newer structuredContent fields make strict older clients reject
+        // otherwise valid success responses as an unknown result variant.
+        return isError ? { content, isError: true } : { content };
     }
 }
 //# sourceMappingURL=server.js.map

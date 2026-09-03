@@ -2,7 +2,7 @@
 
 **A context window is not memory. Memory needs a runtime.**
 
-> **v3.5.0** — `npm install -g loopforge`. Node.js ≥ 18. Zero runtime dependencies.
+**v3.6.0** — `npm install -g loopforge`. Node.js ≥ 18. Zero runtime dependencies.
 > [中文文档](./README.zh-CN.md)
 
 ---
@@ -73,7 +73,7 @@ the vault.
 
 ### 2. External verification & enforcement
 
-The **verification gate** (28 cross-checks) compares every agent claim
+The **verification gate** (27 cross-checks) compares every agent claim
 against independent evidence — Git snapshots, test runner output, explicit
 verification commands. The **enforcement gate** (14 rules) decides what to do.
 Its focus is not "did the agent violate constraint X" — it detects what the
@@ -150,7 +150,7 @@ available as a library for custom integrations — see the
 │               LoopForge round boundary                │
 │                                                       │
 │  Evidence → Verify → Enforce → Commit → Compile       │
-│  (Git/cmd) (28 checks) (14 rules) (vault) (next)    │
+│  (Git/cmd) (27 checks) (14 rules) (vault) (next)    │
 │                                                       │
 │  accept:    commit state, compile next round           │
 │  reject:    retry same round, zero state mutation      │
@@ -186,7 +186,7 @@ phase-boundary milestones that survive rolling-window eviction.
 
 ### External verification & enforcement
 
-The verification gate runs 28 cross-checks against independent evidence:
+The verification gate runs 27 cross-checks against independent evidence:
 progress regression, empty-change-with-passing, success-with-remaining-criteria,
 success-without-verified-evidence (claims must be machine-backed; a declared
 `no_change_reason` is the honest escape hatch), outcome consistency (declared
@@ -196,8 +196,9 @@ against git history), duplicate constraint discovery, recurring violations,
 retract-fresh-constraint, evidence integrity (Git), required command evidence,
 command evidence mismatch, intent-action drift, sub-goal drift, unverified
 criteria claims, post-backtrack workspace restore (file overlap and git HEAD),
-and — since v3.2 — `success_unverified` (a success claim with no
-machine-verified observation this round). Since v3.3 the gate also verifies
+and — since v3.2 — success without a machine-verified observation this round
+(`success_without_verified_evidence`, keyed on the runtime `providerStatus`
+since v3.6 — the merged `success_unverified` lens). Since v3.3 the gate also verifies
 verification-domain integrity (command entrypoint changed in the round it
 ran; test files changed alongside a passing command) and the four Round
 Contract checks (`round_underspecified`, `round_unverifiable`,
@@ -205,10 +206,13 @@ Contract checks (`round_underspecified`, `round_unverifiable`,
 
 Since v3.2 the runtime derives a machine-verification status per round
 (`providerStatus`: verified / unavailable / absent) from the already-collected
-snapshots — a success claim with no machine-verified observation fires the
-`success_unverified` warn (never self-skips, even on heuristic extraction);
-the round still commits, but its success never enters the success trajectory.
-`no_change_reason` remains the honest escape hatch for docs-only rounds.
+snapshots — a success claim with no machine-verified observation fires
+`success_without_verified_evidence` (v3.6: `success_unverified` merged in;
+never self-skips, and an entrypoint-tampered command is not machine
+evidence); under `machine_backed_success: "required"` it rejects, under
+"warn" the round still commits but its success never enters the success
+trajectory. `no_change_reason` remains the honest escape hatch — for R8
+success claims only; contract checks refuse it (v3.6).
 Stall detection (R4/R5) falls back to per-round git observations when
 self-reported progress is missing — checks degrade, they never disappear.
 

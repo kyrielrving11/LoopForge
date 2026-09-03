@@ -1,5 +1,35 @@
 # Changelog
 
+## 3.6.0 (2026-09-02)
+
+The deletion batch — self-reported data no longer buys machine verdicts or
+masquerades as machine display.
+
+- **R4/R5 stall exemptions are git-motion only.** The criteria-completion
+  arm of the exculpatory cross-check (`hasNewCriteriaCompletion`) is gone:
+  a self-reported criterion completion can no longer veto a stall verdict —
+  claims never buy machine verdicts. The rejection reason now reads "no
+  machine-observed git motion in rounds X–Y".
+- **`boundary_reason` removed from RoundContract** (audit-only, never
+  checked); `MachineStatus` loses its dead null arms ("unavailable" was
+  unreachable — absence was already signalled by the object being absent).
+- **`no_change_reason` converges on the R8 family.** It downgrades R8's
+  success claim to info (the one honored site, now test-locked) and
+  suppresses nothing else; `premature_boundary` no longer downgrades to
+  info — declaring "no change" while silently dropping contract done_when
+  items contradicts itself — and contract-facing guidance no longer
+  suggests it.
+- **`success_unverified` merged into R8.** `success_without_verified_evidence`
+  is now keyed on the runtime `providerStatus` (tamper-aware: an
+  entrypoint-tampered command is not machine evidence — the coverage that
+  previously lived in `success_unverified` alone). Its warn-level
+  trajectory exclusion moved with it; the check never self-skips. One
+  success-without-evidence posture, one flag, one enforcement voice.
+- **Round Stats columns are source-labeled** in L2 prompts: files & Δ are
+  agent-reported, rejected attempts are machine-recorded, and the Machine
+  (git) row above stays the machine-observed signal.
+- 27 verification checks / 14 rules; docs, changelog, version 3.6.0.
+
 ## 3.5.1 (2026-09-02)
 
 Redundancy cleanup: the display derivations now read TRUE data in the

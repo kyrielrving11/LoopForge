@@ -43,10 +43,6 @@ export declare const CHECK_INTENT_DRIFT = "intent_drift";
 export declare const CHECK_SUBGOAL_DRIFT = "subgoal_drift";
 export declare const CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED = "backtrack_workspace_not_restored";
 export declare const CHECK_CRITERIA_CLAIMS_UNVERIFIED = "criteria_claims_unverified";
-/** v3.2: success declared with no machine-verified observation this round
- *  (providerStatus ≠ verified). Warn-level: the round still commits, but its
- *  success never enters the trajectory and trust drops. */
-export declare const CHECK_SUCCESS_UNVERIFIED = "success_unverified";
 /** Contract proposed with an empty done_when — nothing is promised, so
  *  nothing can be verified at the boundary. Warn: the contract can be fixed
  *  by re-declaring next round. */
@@ -120,17 +116,6 @@ export declare function deriveEvidenceStatus(selfEval: SelfEvaluation, evidenceS
  *  import cycle; this export is now a thin delegation with unchanged
  *  signature and semantics. */
 export declare function machineProgressSeries(vaultEntries: VaultEntry[], currentRound: number, lookback: number): boolean[] | null;
-/** v3.3: Whether any success criterion was newly reported met within the
- *  last `lookback` committed rounds — a windowed "unit completion" signal
- *  for R4/R5's exculpatory cross-check on the evidence path.
- *
- *  EXCULPATORY ONLY — this can veto a delta-based stall verdict; it never
- *  grounds a rejection or termination. Reads only committed :feedback
- *  entries (the current round's uncommitted self-report never participates,
- *  so an unverified met claim cannot buy an exemption). Matching is
- *  ID-first (cr-XXXXXXXX) with Jaccard fallback, mirroring the compiler's
- *  criterion dedup. Returns false when the window has no criteria data. */
-export declare function hasNewCriteriaCompletion(vaultEntries: VaultEntry[], currentRound: number, lookback: number): boolean;
 interface ParsedTestCounts {
     passed: number;
     failed: number;

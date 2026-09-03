@@ -299,10 +299,6 @@ const TOOL_BASE_SCHEMAS = [
                   items: { type: "string" as const },
                   description: "Files/directories this round may touch (workspace-relative; './' and trailing slashes accepted). Out-of-scope git changes trigger round_scope_drift. Max 50 items.",
                 },
-                boundary_reason: {
-                  type: "string" as const,
-                  description: "Optional. Why this boundary is a good commit point. Audit/agent discipline only — never checked. Max 500 chars.",
-                },
               },
               required: ["done_when", "verification_plan", "scope"],
             },

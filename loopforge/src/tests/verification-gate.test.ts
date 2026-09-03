@@ -9,7 +9,7 @@ import {
 } from "../protocol.js";
 import type { VaultEntry } from "../loop-store.js";
 import { committedFeedbackRound as committedRound } from "./_helpers.js";
-import { verifySelfEvaluation as rawVerifySelfEvaluation, parseTestOutput, deriveEvidenceStatus, machineProgressSeries, hasNewCriteriaCompletion, CHECK_SUCCESS_UNVERIFIED, CHECK_VERIFICATION_ENTRYPOINT_MODIFIED, CHECK_TEST_FILES_MODIFIED, CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE } from "../verification-gate.js";
+import { verifySelfEvaluation as rawVerifySelfEvaluation, parseTestOutput, deriveEvidenceStatus, machineProgressSeries, CHECK_VERIFICATION_ENTRYPOINT_MODIFIED, CHECK_TEST_FILES_MODIFIED, CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE } from "../verification-gate.js";
 import type { ProviderSnapshot } from "../evidence-provider.js";
 import { computeGoalTextHash, deriveCriterionId } from "../loop-compiler.js";
 import { resetPolicy, getPolicy, setPolicyForTest, DEFAULT_POLICY } from "../policy.js";
@@ -1331,55 +1331,6 @@ describe("v3.2 — deriveEvidenceStatus", () => {
   });
 });
 
-describe("v3.2 — success_unverified check", () => {
-  const hasUnverified = (result: { flags: VerificationFlag[] }): boolean =>
-    result.flags.some((f) => f.check === CHECK_SUCCESS_UNVERIFIED && f.severity === "warn");
-
-  it("flags success with no machine observation (absent)", () => {
-    // v3.3: with machine_backed_success=required, R8 also fires (error) —
-    // the verdict is contradicted, but the unverified warn is still present.
-    const result = verifySelfEvaluation(se(), 2, [], null, []);
-    assert.ok(hasUnverified(result), "absent provider must flag unverified success");
-    assert.equal(result.verdict, "contradicted");
-  });
-
-  it("flags success with an observation-less snapshot (unavailable)", () => {
-    const result = verifySelfEvaluation(se(), 2, [], null, [gitSnap([])]);
-    assert.ok(hasUnverified(result));
-  });
-
-  it("stays silent when a passed after-command backs the success (verified)", () => {
-    const result = verifySelfEvaluation(se(), 2, [], null, [cmdSnap("passed")]);
-    assert.ok(!hasUnverified(result));
-  });
-
-  it("flags git-only observation as unverified (v3.3)", () => {
-    const result = verifySelfEvaluation(se(), 2, [], null, [gitSnap(["src/a.ts"])]);
-    assert.ok(hasUnverified(result), "git-only must not count as machine verification");
-  });
-
-  it("stays silent with a declared no_change_reason", () => {
-    const result = verifySelfEvaluation(se({ no_change_reason: "docs-only round" }), 2, [], null);
-    assert.ok(!hasUnverified(result));
-  });
-
-  it("stays silent when success is false", () => {
-    const result = verifySelfEvaluation(se({ success: false }), 2, [], null);
-    assert.ok(!hasUnverified(result));
-  });
-
-  it("does not alter the contradicted verdict", () => {
-    const result = verifySelfEvaluation(se({
-      execution_evidence: makeExecutionEvidence({
-        files_changed: ["src/a.ts"],
-        test_results: { passed: 1, failed: 0, skipped: 0 },
-        success_criteria_met: [],
-        success_criteria_remaining: ["still open"],
-      }),
-    }), 2, [], null, [gitSnap(["src/a.ts"])]);
-    assert.equal(result.verdict, "contradicted"); // success_with_remaining_criteria error
-  });
-});
 
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1483,6 +1434,40 @@ describe("v3.3 — machine_backed_success switch", () => {
     assert.ok(!result.flags.some((f) =>
       f.check === CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE && f.severity === "error"));
   });
+
+  it("v3.6: a declared no_change_reason is the R8-family escape → info", () => {
+    // The single honored downgrade site (contract checks refuse it).
+    const result = verifySelfEvaluation(
+      se({ no_change_reason: "documentation-only round" }),
+      2, [], null, [gitSnap(["src/a.ts"])],
+    );
+    const flag = result.flags.find((f) => f.check === CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE);
+    assert.ok(flag, "R8 flag must fire even with no_change_reason");
+    assert.equal(flag!.severity, "info");
+    assert.equal(result.verdict, "suspect");
+  });
+
+  it("v3.6: an entrypoint-tampered command is NOT machine evidence (merged lens)", () => {
+    // v3.6: this coverage moved from success_unverified into R8 — a passed
+    // command whose entrypoint the agent rewrote this round degrades
+    // providerStatus to unavailable, so R8 fires.
+    const git = gitSnap(["run-tests.sh"]);
+    const cmd = cmdSnap("passed", { entrypointFiles: ["run-tests.sh"] });
+    const result = verifySelfEvaluation(se(), 2, [], null, [git, cmd]);
+    const flag = result.flags.find((f) => f.check === CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE);
+    assert.ok(flag, "tampered command must not count as machine evidence");
+    assert.equal(flag!.severity, "error");
+    assert.ok(result.flags.some((f) => f.check === CHECK_VERIFICATION_ENTRYPOINT_MODIFIED),
+      "the entrypoint-tampering error also fires");
+  });
+
+  it("success=false never fires R8", () => {
+    const result = verifySelfEvaluation(
+      se({ success: false }),
+      2, [], null, [gitSnap(["src/a.ts"])],
+    );
+    assert.ok(!result.flags.some((f) => f.check === CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE));
+  });
 });
 
 
@@ -1542,74 +1527,9 @@ describe("v3.3 — verification domain integrity", () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// v3.3 — hasNewCriteriaCompletion (R4/R5 exculpatory signal)
 // ═══════════════════════════════════════════════════════════════════════════
 
-describe("v3.3 — hasNewCriteriaCompletion", () => {
-  const criteriaRound = (round: number, met: string[]): VaultEntry => ({
-    task_id: `loop:mp:r${round}:feedback`,
-    loop_id: "mp",
-    loop_lineage: {
-      round,
-      round_transaction: {
-        schema_version: 1,
-        round_id: `loop:mp:round:${round}`,
-        snapshot: {
-          schemaVersion: 1,
-          roundId: `loop:mp:round:${round}`,
-          loopId: "mp",
-          round,
-          attempt: 1,
-          phase: "committed",
-          beforeEvidence: [],
-          roundEvidence: [],
-          createdAt: 0,
-          updatedAt: 0,
-        },
-      },
-    },
-    execution_evidence: {
-      files_changed: [],
-      test_results: null,
-      success_criteria_met: met,
-      success_criteria_remaining: [],
-      progress_estimate: 0.5,
-    },
-  });
 
-  it("detects a newly met criterion inside the window between adjacent rounds", () => {
-    const entries = [
-      criteriaRound(1, []),
-      criteriaRound(2, []),
-      criteriaRound(3, ["auth module completed"]),
-    ];
-    assert.equal(hasNewCriteriaCompletion(entries, 4, 3), true);
-  });
-
-  it("returns false when no entries or no criteria data exist in the window", () => {
-    assert.equal(hasNewCriteriaCompletion([], 4, 3), false);
-    const entries = [criteriaRound(1, []), criteriaRound(2, []), criteriaRound(3, [])];
-    assert.equal(hasNewCriteriaCompletion(entries, 4, 3), false);
-  });
-
-  it("does not count criteria first met before the window; ID-first matching dedups rewording", () => {
-    // Criterion first met at round 1 — before the window [2, 4] — so later
-    // repetitions (as text and as its derived cr-ID) must not count as new.
-    const id = deriveCriterionId("auth module completed");
-    const entries = [
-      criteriaRound(1, ["auth module completed"]),
-      criteriaRound(2, ["auth module completed"]),
-      criteriaRound(3, [id]),
-      criteriaRound(4, []),
-    ];
-    assert.equal(hasNewCriteriaCompletion(entries, 5, 3), false);
-    // A genuinely new criterion inside the window still fires.
-    const withNew = [...entries, criteriaRound(4, ["rate limiting added"])];
-    assert.equal(hasNewCriteriaCompletion(withNew, 5, 3), true);
-  });
-});
-
-// ═══════════════════════════════════════════════════════════════════════════
 // v3.3 — Round Contract checks
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -1757,10 +1677,10 @@ describe("Round Contract checks (v3.3 proposal declaration + v3.4 active split)"
       "items listed in remaining are R1's domain, not premature_boundary");
   });
 
-  it("premature_boundary: no_change_reason downgrades to info (dropped-item path)", () => {
-    // v3.5.1: fixture is MIXED (A met with machine evidence via the wrapper
-    // default, B silently dropped) — the full-met no_change_reason case is
-    // owned by the completion check, which deliberately never downgrades.
+  it("premature_boundary: no_change_reason does NOT downgrade (v3.6)", () => {
+    // v3.6: the escape hatch belongs to the R8 success-claim family alone —
+    // a declared "no change" contradicts silently dropping contract
+    // done_when items, so the boundary claim errors even with it.
     const active = [committedRound(1, {
       contract: contract({ done_when: ["criterion A", "criterion B"] }),
     })];
@@ -1770,7 +1690,7 @@ describe("Round Contract checks (v3.3 proposal declaration + v3.4 active split)"
     }), 2, active);
     const flag = result.flags.find((f) => f.check === CHECK_PREMATURE_BOUNDARY);
     assert.ok(flag);
-    assert.equal(flag!.severity, "info");
+    assert.equal(flag!.severity, "error");
   });
 
   it("round_scope_drift: git changes fully inside the ACTIVE scope → silent", () => {

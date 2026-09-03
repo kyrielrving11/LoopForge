@@ -1448,7 +1448,6 @@ export function buildSelfEvalBlock(
       done_when: [],
       verification_plan: [],
       scope: [],
-      boundary_reason: "",
     };
   }
 

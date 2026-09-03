@@ -1195,7 +1195,6 @@ proposalNudge = false) {
             done_when: [],
             verification_plan: [],
             scope: [],
-            boundary_reason: "",
         };
     }
     // v2.8: Inject drift clarification field when previous round had drift flags

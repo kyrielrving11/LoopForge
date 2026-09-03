@@ -32,11 +32,13 @@ export interface RoundStat {
 }
 /** v3.3: Machine git-motion cross-check over the last committed rounds.
  *  Display-only companion to the R4/R5 exculpatory signal. Optional:
- *  absent when no committed rounds carry git snapshots. */
+ *  absent when no committed rounds carry git snapshots — the object, when
+ *  present, always carries definite values (v3.6: the null arms were dead —
+ *  the derive path returns undefined wholesale instead of null fields). */
 export interface MachineStatus {
     windowRounds: number;
-    gitMotion: boolean | null;
-    motionRounds: number | null;
+    gitMotion: boolean;
+    motionRounds: number;
 }
 export interface CanonicalLoopState {
     schemaVersion: typeof CANONICAL_STATE_SCHEMA_VERSION;

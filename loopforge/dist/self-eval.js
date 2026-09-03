@@ -274,9 +274,6 @@ export function parseRoundContract(raw) {
         done_when: capStrings(obj.done_when, 200, 20),
         verification_plan: capStrings(obj.verification_plan, 200, 20),
         scope: capStrings(obj.scope, 500, 50),
-        boundary_reason: typeof obj.boundary_reason === "string" && obj.boundary_reason.trim().length > 0
-            ? obj.boundary_reason.trim().slice(0, 500)
-            : undefined,
     };
 }
 /** Parse a PromptRequests object from raw JSON input.

@@ -125,9 +125,6 @@
           "items": {
             "type": "string"
           }
-        },
-        "boundary_reason": {
-          "type": "string"
         }
       },
       "required": [
@@ -135,7 +132,7 @@
         "verification_plan",
         "scope"
       ],
-      "description": "v3.3: Round Contract. v3.4 semantics: the field on a submission is a\nPROPOSAL for the NEXT round — it becomes the ACTIVE contract (rendered\nas the Current Task and checked for execution conformance) only after\nthe declaring round commits, and stays active until a committed eval\nlists every done_when item in success_criteria_met (complete) or\nreports outcome=\"blocked\". While active it is restated unchanged each\nround; on completion or block, the next contract is declared instead.\nThe ACTIVE contract is machine-derived from committed rounds\n(round-contract.ts) — never read from last_round_result. Optional:\nabsent = no contract this round, all contract checks stay silent and\nrendering is identical to a contract-less round.\n\nEvery field is machine-checkable except boundary_reason (audit only):\n- done_when items are claimed satisfied by listing them in\n  execution_evidence.success_criteria_met (verified per-round claim\n  model); leaving them out while success is claimed is premature_boundary\n  against the ACTIVE contract.\n- verification_plan names must reference configured, enabled\n  evidence.commands (round_unverifiable otherwise).\n- scope lists the files/directories the round may touch; actual git\n  changes outside it trigger round_scope_drift against the ACTIVE\n  contract."
+      "description": "v3.3: Round Contract. v3.4 semantics: the field on a submission is a\nPROPOSAL for the NEXT round — it becomes the ACTIVE contract (rendered\nas the Current Task and checked for execution conformance) only after\nthe declaring round commits, and stays active until a committed eval\nlists every done_when item in success_criteria_met (complete) or\nreports outcome=\"blocked\". While active it is restated unchanged each\nround; on completion or block, the next contract is declared instead.\nThe ACTIVE contract is machine-derived from committed rounds\n(round-contract.ts) — never read from last_round_result. Optional:\nabsent = no contract this round, all contract checks stay silent and\nrendering is identical to a contract-less round.\n\nEvery field is machine-checkable:\n- done_when items are claimed satisfied by listing them in\n  execution_evidence.success_criteria_met (verified per-round claim\n  model); leaving them out while success is claimed is premature_boundary\n  against the ACTIVE contract.\n- verification_plan names must reference configured, enabled\n  evidence.commands (round_unverifiable otherwise).\n- scope lists the files/directories the round may touch; actual git\n  changes outside it trigger round_scope_drift against the ACTIVE\n  contract."
     },
     "SelfEvaluation": {
       "type": "object",

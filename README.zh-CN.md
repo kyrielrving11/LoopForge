@@ -2,7 +2,7 @@
 
 **Agent 的上下文窗口不是记忆，记忆需要一个运行时。**
 
-> **v3.5.0** — `npm install -g loopforge`。Node.js ≥ 18。零运行时依赖。
+**v3.6.0** — `npm install -g loopforge`。Node.js ≥ 18。零运行时依赖。
 > [English](./README.md)
 
 ---
@@ -44,7 +44,7 @@ Agent 每轮的 self-evaluation 写入**类型化 JSON vault**。下一轮的 pr
 
 ### 2. 外部验证与执行
 
-**验证门**（28 项交叉检查）将 Agent 的每条声明与独立证据比对——Git 快照、测试运行器输出、显式验证命令。**执行门**（14 条规则）决定怎么办。它的核心不是"Agent 违反了约束 X"，而是检测 Agent 无法自我诊断的问题：
+**验证门**（27 项交叉检查）将 Agent 的每条声明与独立证据比对——Git 快照、测试运行器输出、显式验证命令。**执行门**（14 条规则）决定怎么办。它的核心不是"Agent 违反了约束 X"，而是检测 Agent 无法自我诊断的问题：
 
 - R1：声称成功但标准没满足 → **自欺**
 - R3：声称成功但没有可验证证据 → **空口无凭**
@@ -102,7 +102,7 @@ MCP 服务路径（`loopforge mcp`）是主要集成方式，提供完整的认�
 │                 LoopForge 轮次边界                     │
 │                                                       │
 │  证据采集 ──→ 验证门 ──→ 执行门 ──→ 状态提交 ──→ 编译   │
-│  (Git/命令)  (28项检查)  (14条规则)  (vault写入)  (下一轮) │
+│  (Git/命令)  (27项检查)  (14条规则)  (vault写入)  (下一轮) │
 │                                                       │
 │  接受:   提交状态，编译下一轮                              │
 │  拒绝:   同一轮重试，零状态变更                             │
@@ -130,7 +130,7 @@ MCP 服务路径（`loopforge mcp`）是主要集成方式，提供完整的认�
 
 ### 外部验证与执行
 
-验证门运行 28 项交叉检查：进度回退、空变更声称成功、成功但标准未满足、**成功无机器可验证证据**（claim 必须有测试/命令证据背书，`no_change_reason` 是诚实逃生口）、**声明 outcome 与旧布尔字段的一致性**（blocked 无 blocker 提示）、成功声明冲突、**retroactiveClaims 对错误轮次或旧轮次的 git 历史验证**、重复约束发现、反复违规、撤回刚发现的约束、证据完整性（Git）、必要命令失败、命令输出不一致、意图-行动漂移、子目标漂移、标准声称无机器背书、**回溯后工作区恢复检查（文件重叠 + git HEAD）**、自 v3.2 起的 **`success_unverified`**（本轮无机器验证观察的成功声明）、自 v3.3 起的**验证域完整性**（命令入口文件在同轮被改动、测试文件随通过的命令一起被改动）以及**四项 Round Contract 检查**（`round_underspecified`、`round_unverifiable`、`round_scope_drift`、`premature_boundary`）。
+验证门运行 27 项交叉检查：进度回退、空变更声称成功、成功但标准未满足、**成功无机器可验证证据**（claim 必须有测试/命令证据背书，`no_change_reason` 是诚实逃生口）、**声明 outcome 与旧布尔字段的一致性**（blocked 无 blocker 提示）、成功声明冲突、**retroactiveClaims 对错误轮次或旧轮次的 git 历史验证**、重复约束发现、反复违规、撤回刚发现的约束、证据完整性（Git）、必要命令失败、命令输出不一致、意图-行动漂移、子目标漂移、标准声称无机器背书、**回溯后工作区恢复检查（文件重叠 + git HEAD）**、自 v3.2 起、v3.6 并入 R8 的 **`success_without_verified_evidence`**（本轮无机器验证观察的成功声明，按运行时 providerStatus 判定；篡改入口的命令不算机器证据）、自 v3.3 起的**验证域完整性**（命令入口文件在同轮被改动、测试文件随通过的命令一起被改动）以及**四项 Round Contract 检查**（`round_underspecified`、`round_unverifiable`、`round_scope_drift`、`premature_boundary`）。
 
 执行门的 14 条规则检测认知诚信失败：虚假成功（R1）、反复违规（R2）、空口成功（R3）、**证据矛盾（R-EVID）**、**验证命令入口被篡改（R-EVID-VERIFY）**、**合同边界被提前声称（R-C1）**、**无机器证据的成功（R8）**、**合同范围越界（R-C2）**、进度停滞（R4）、完全静止（R5）、最大拒绝次数（R6）、意图漂移（R7）、**回溯后工作区未恢复（R9）**。R7 只在澄清引用了具体 ID 或文件路径时才接受转向——连续三次无锚点的弱澄清直接终止；R8 先拒绝、重复后终止；R9 要求先恢复工作区再继续。
 
@@ -144,7 +144,7 @@ MCP 服务路径（`loopforge mcp`）是主要集成方式，提供完整的认�
 
 L0（重试）/ L1（续行）/ L2（全量恢复）只控制状态密度——推理策略由 Agent 决定。每轮 Agent 可通过 `prompt_requests`（强调、展开、困惑点）表达信息需求。Compiler 在安全边界内重组 prompt——mandatory sections 永不被移除。
 
-九个 MCP 工具（`start` · `next` · `status` · `stop` · `pause` · `resume` · `replay` + `gate_check` · `gate_resolve`），返回 JSON content 块。`status` 是统一查看工具：`view=session|loop|all|audit`（原 `list`/`health` 并入，另含只读验证审计——claims/gates/verdict/序列完整性）。零运行时依赖——Node.js 标准库 only。所有阈值、预算、间隔集中在 `loop_policy.json`。868 测试。
+九个 MCP 工具（`start` · `next` · `status` · `stop` · `pause` · `resume` · `replay` + `gate_check` · `gate_resolve`），返回 JSON content 块。`status` 是统一查看工具：`view=session|loop|all|audit`（原 `list`/`health` 并入，另含只读验证审计——claims/gates/verdict/序列完整性）。零运行时依赖——Node.js 标准库 only。所有阈值、预算、间隔集中在 `loop_policy.json`。865 测试。
 
 ---
 

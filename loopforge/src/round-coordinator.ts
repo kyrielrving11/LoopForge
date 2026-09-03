@@ -28,7 +28,7 @@ import type {
   VerificationFlag,
   VerificationResult,
 } from "./protocol.js";
-import { CHECK_SUCCESS_UNVERIFIED, verifySelfEvaluation, entryRound } from "./verification-gate.js";
+import { CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE, verifySelfEvaluation, entryRound } from "./verification-gate.js";
 import { effectiveSuccess } from "./self-eval.js";
 import {
   enforceRound,
@@ -121,9 +121,11 @@ export interface RoundProcessResult {
   backtrackSkippedFiles?: string[];
 }
 
-/** v3.2: Whether a round's success enters the success trajectory. Excluded
- *  when the gate contradicted the round, or when the success claim carries no
- *  machine-verified observation (success_unverified warn) — an
+/** v3.2/v3.6: Whether a round's success enters the success trajectory.
+ *  Excluded when the gate contradicted the round, or when the success claim
+ *  carries no machine-verified observation — the merged R8 check fires a
+ *  warn under machine_backed_success "warn" (v3.6: success_unverified merged
+ *  into R8; its warn-level trajectory exclusion moved with it) — an
  *  accepted-but-unverified round is not evidence of progress. */
 function shouldPushSuccess(
   gateContradicted: boolean,
@@ -131,7 +133,9 @@ function shouldPushSuccess(
 ): boolean {
   if (gateContradicted) return false;
   return !verificationFlags.some(
-    (flag) => flag.severity === "warn" && flag.check === CHECK_SUCCESS_UNVERIFIED,
+    (flag) =>
+      flag.severity === "warn" &&
+      flag.check === CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE,
   );
 }
 

@@ -1688,17 +1688,20 @@ describe("v3.3 — R4/R5 exculpatory machine cross-check", () => {
     assert.equal(result!.action, "accept", "git motion exculpates the delta-based stall");
   });
 
-  it("does not fire R4 when a criterion was newly completed in the window (no git motion)", () => {
+  it("v3.6: a newly completed criterion does NOT exculpate the stall (git motion only)", () => {
+    // Self-reported criteria completions never buy a machine verdict — only
+    // observed git motion can veto the delta-based stall.
     const entries = [
       machineRound(1, 0.30, []),
       machineRound(2, 0.31, []),
       machineRound(3, 0.32, [], ["auth module completed"]),
     ];
     const result = enforceRound(se({ success: false }), trusted(), 4, entries, 0);
-    assert.equal(result!.action, "accept", "a newly met criterion exculpates the stall");
+    assert.equal(result!.action, "reject");
+    assert.equal(result!.check, "progress_stall");
   });
 
-  it("R4 reason annotates the missing machine signal when git is flat and no criterion completed", () => {
+  it("R4 reason annotates the missing machine signal when git is flat", () => {
     const entries = [
       machineRound(1, 0.30, []),
       machineRound(2, 0.31, []),
@@ -1709,21 +1712,21 @@ describe("v3.3 — R4/R5 exculpatory machine cross-check", () => {
     assert.equal(result!.check, "progress_stall");
     assert.match(
       result!.reason,
-      /no machine-observed git motion or criteria completion in rounds 1–3/,
+      /no machine-observed git motion in rounds 1–3/,
     );
   });
 
-  it("R5 flatline is excluded by a criterion completion over the breaker window", () => {
-    // Exactly-flat progress would flatline R5 (and stall R4); the criterion
-    // completed at round 3 exculpates both — R4's exclusion must not let R5
-    // fire later in the same round.
+  it("v3.6: R5 flatline is NOT excluded by a criterion completion over the breaker window", () => {
+    // v3.6: criteria no longer exculpate — an exactly-flat run with only a
+    // self-reported completion stalls on R4 and flatlines R5.
     const entries = [
       machineRound(1, 0.30, []),
       machineRound(2, 0.30, []),
       machineRound(3, 0.30, [], ["auth module completed"]),
     ];
     const result = enforceRound(se({ success: false }), trusted(), 4, entries, 0);
-    assert.equal(result!.action, "accept", "criteria completion exculpates the flatline");
+    assert.equal(result!.action, "reject");
+    assert.equal(result!.check, "progress_stall");
   });
 
   it("R5 flatline is excluded by git motion over the breaker window", () => {

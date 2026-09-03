@@ -160,8 +160,6 @@ const VERIFICATION_ACTIONS: Readonly<Record<string, string>> = {
     "Re-run the verification command on the changed entrypoint, or revert the entrypoint change and re-run.",
   test_files_modified:
     "Re-run the verification command after the test-file changes and report the fresh output.",
-  success_unverified:
-    "Back the success claim with a machine-verified observation (passed command), or declare no_change_reason.",
   round_underspecified:
     "Declare this round's contract with a non-empty done_when list — what must be true when the round is done?",
   round_unverifiable:
@@ -169,7 +167,7 @@ const VERIFICATION_ACTIONS: Readonly<Record<string, string>> = {
   round_scope_drift:
     "Revert the out-of-scope file changes, or extend the contract scope to cover them and explain why in drift_clarification.",
   premature_boundary:
-    "Run the contract's verification_plan commands and report real output before claiming done_when met; or set success=false and list the items in success_criteria_remaining; or declare no_change_reason.",
+    "Run the contract's verification_plan commands and report real output before claiming done_when met; or set success=false and list the items in success_criteria_remaining (no_change_reason does not apply to contract claims).",
   // v3.5 — contract completion machine-backing + premature-replacement warn
   contract_completion_unverified:
     "Completion under the ACTIVE Round Contract requires its verification_plan commands to pass this round — fix the underlying failure so they pass and resubmit. Completion claims are not accepted without machine verification (no_change_reason does not apply).",
@@ -746,14 +744,13 @@ function l2Sections(
       lines.push("**Signal source**: self-reported estimate (unverified until machine-backed)");
     }
     // v3.3: machine side of the comparison — git motion over committed
-    // rounds and committed-history criterion completions.
+    // rounds (v3.6: the object always carries definite values — no
+    // "unavailable" arm).
     if (state.machineStatus) {
       const ms = state.machineStatus;
-      const motion = ms.gitMotion === null
-        ? "unavailable"
-        : ms.gitMotion
-          ? `changes in ${ms.motionRounds}/${ms.windowRounds} recent committed rounds`
-          : `no git changes in the last ${ms.windowRounds} committed rounds`;
+      const motion = ms.gitMotion
+        ? `changes in ${ms.motionRounds}/${ms.windowRounds} recent committed rounds`
+        : `no git changes in the last ${ms.windowRounds} committed rounds`;
       lines.push(`**Machine (git)**: ${motion}`);
     }
     if (state.criterionStatuses.length > 0) {
@@ -798,6 +795,8 @@ function l2Sections(
 
   // v3.3: Per-round statistics — lets the agent calibrate round granularity
   // (files per round, rejected attempts, self-reported progress deltas).
+  // v3.6: source-labeled — files/Δ are agent-reported; only rejected
+  // attempts (and the Machine (git) row above) are machine-recorded.
   if (state.roundStats && state.roundStats.length > 0) {
     const statLines = state.roundStats.map((stat) => {
       const parts: string[] = [];
@@ -812,6 +811,10 @@ function l2Sections(
       }
       return `- R${stat.round}: ${parts.length > 0 ? parts.join(", ") : "no data"}`;
     });
+    statLines.push(
+      "> files & Δ are agent-reported; rejected attempts are machine-recorded " +
+      "(the Machine (git) row above is machine-observed)",
+    );
     sections.push({
       id: "round_stats",
       text: section("Round Stats", statLines.join("\n")),

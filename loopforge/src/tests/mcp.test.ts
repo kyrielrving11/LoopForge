@@ -1614,7 +1614,6 @@ describe("MCP — Round Contract flow", async () => {
       done_when: ["cr-auth-login"],
       verification_plan: ["run-tests"],
       scope: ["src/auth"],
-      boundary_reason: "vertical slice",
     };
     assert.doesNotThrow(() => {
       validateToolInput("loopforge_next", {

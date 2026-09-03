@@ -207,11 +207,6 @@ export function renderCanonicalStateMarkdown(state) {
         "## Current Task",
         "",
         state.currentTask,
-        // v3.3: boundary_reason is audit/agent discipline material — the state
-        // file records it, prompts do not (prompt budget is for the task).
-        ...(state.roundContract?.boundary_reason
-            ? [`> Contract boundary: ${state.roundContract.boundary_reason}`, ""]
-            : []),
     ];
     // v2.11: Success Criteria and Constraints render with stable IDs for exact agent matching
     addListWithIds(lines, "Success Criteria", state.successCriteria, "cr");
@@ -235,14 +230,12 @@ export function renderCanonicalStateMarkdown(state) {
             lines.push("**Signal source**: self-reported estimate (unverified until machine-backed)");
         }
         // v3.3: machine side of the comparison — git motion over committed rounds
-        // and committed-history criterion completions (from criterionStatuses).
+        // (v3.6: the object always carries definite values — no "unavailable" arm).
         if (state.machineStatus) {
             const ms = state.machineStatus;
-            const motion = ms.gitMotion === null
-                ? "unavailable"
-                : ms.gitMotion
-                    ? `changes observed in ${ms.motionRounds}/${ms.windowRounds} recent committed rounds`
-                    : `no git changes in the last ${ms.windowRounds} committed rounds`;
+            const motion = ms.gitMotion
+                ? `changes observed in ${ms.motionRounds}/${ms.windowRounds} recent committed rounds`
+                : `no git changes in the last ${ms.windowRounds} committed rounds`;
             lines.push(`**Machine (git)**: ${motion}`);
         }
         if (state.criterionStatuses.length > 0) {

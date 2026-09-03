@@ -97,7 +97,7 @@ available as a library for custom integrations.
 │               LoopForge round boundary                │
 │                                                       │
 │  Evidence → Verify → Enforce → Commit → Compile       │
-│  (Git/cmd) (28 checks) (14 rules) (vault) (next)    │
+│  (Git/cmd) (27 checks) (14 rules) (vault) (next)    │
 │                                                       │
 │  accept:  commit state, compile next round             │
 │  reject:  retry same round, zero state mutation        │

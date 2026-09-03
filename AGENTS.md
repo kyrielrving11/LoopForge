@@ -16,7 +16,7 @@ Long-horizon agent tasks face three mutually-reinforcing failure modes:
 2. **Self-correction failure** — models cannot reliably improve themselves
    through introspection (Google DeepMind). Effective recovery requires an
    external verifier that never shares the agent's context. LoopForge provides
-   this via the verification gate (28 evidence cross-checks) and enforcement
+   this via the verification gate (27 evidence cross-checks) and enforcement
    gate (14 cognitive-integrity rules).
 
 3. **Compound error (p^N)** — each step's error becomes the next step's input.
@@ -34,7 +34,7 @@ cannot provide for itself.
 - TypeScript only.
 - Node.js 18 or newer.
 - Zero runtime dependencies.
-- The npm package is in `loopforge/` and is currently `3.5.1`.
+- The npm package is in `loopforge/` and is currently `3.6.0`.
 - Preserve user changes in a dirty worktree.
 - Edit `src/protocol.ts`, then run the build to regenerate
   `loopforge-protocol.json`.
@@ -97,7 +97,7 @@ LoopForge/src/
                         session views, and replay (view parity test-locked)
   round-coordinator.ts  Verify, enforce, backtrack, and stop decision pipeline
                         (v2.10: backtrack action — roll back to last clean round)
-  verification-gate.ts  Cross-round and evidence consistency checks (28 checks)
+  verification-gate.ts  Cross-round and evidence consistency checks (27 checks)
                         (v2.2: subgoal_drift; v2.10: safe restore point detection)
                         (v2.12: claim provenance + backtrack git HEAD)
                         (v3.3: verification-domain integrity — entrypoint
@@ -116,7 +116,9 @@ LoopForge/src/
                         (v2.10: R4/R5 escalate to backtrack instead of terminate)
                         (v2.12: R8 evidence-less success, R9 workspace restore)
                         (v3.3: R4/R5 exculpatory machine cross-check —
-                        git motion or a newly met criterion vetoes a stall)
+                        git motion vetoes a stall — v3.6: criteria
+                        completions no longer exculpate (self-reports
+                        never buy machine verdicts))
                         (v3.3: R-C1 premature boundary — contract done_when
                         claimed without machine evidence; R-C2 scope drift —
                         out-of-scope git changes with clarification exemption)
@@ -168,8 +170,9 @@ protocol.ts additions:
   +4 RoundProcessResult fields: backtrackPrompt, backtrackTarget,
     backtrackSkippedDiscoveries, backtrackTriggerRule (v2.10)
   RoundContract         v3.3: optional per-round contract
-                        (work_item / done_when / verification_plan / scope /
-                        boundary_reason) on SelfEvaluation + LoopRoundResult
+                        (work_item / done_when / verification_plan / scope —
+                        v3.6: boundary_reason removed, audit-only dead field)
+                        on SelfEvaluation + LoopRoundResult
                         (v3.4: a submission's round_contract is a PROPOSAL
                         for the next round — it becomes ACTIVE only after the
                         declaring round commits, drives the Current Task and
@@ -204,32 +207,38 @@ protocol.ts additions:
 - v3.2: the Goal → Criteria vertical view (`criterion_statuses`) and the
   Lessons Learned list (`lessons`) are compiler-derived, zero-persistence,
   presentation fields — they never upgrade or create enforcement outcomes.
-  v3.3: where derived completion information participates in enforcement
-  (the R4/R5 exculpatory cross-check), it is **exculpatory only**: it may
-  veto a delta-based stall verdict when the machine window shows git motion
-  or a newly met criterion, and it never constitutes new grounds for
-  rejection or termination. Criterion IDs follow `constraint_id_enabled`
-  like every other ID-rendering path.
-- v3.2: the runtime derives a machine-verification status per round
+  v3.3/v3.6: where derived completion information participates in
+  enforcement (the R4/R5 exculpatory cross-check), it is **exculpatory
+  only** and **machine-only**: it may veto a delta-based stall verdict when
+  the machine window shows observed git motion — a self-reported criterion
+  completion never does (v3.6 removed the criteria arm; claims never buy
+  machine verdicts). It never constitutes new grounds for rejection or
+  termination. Criterion IDs follow `constraint_id_enabled` like every
+  other ID-rendering path.
+- v3.2/v3.6: the runtime derives a machine-verification status per round
   (`deriveEvidenceStatus`: providerStatus verified/unavailable/absent) from
   the already-collected snapshots — the agent supplies no new fields.
-  A success claim without a machine-verified observation fires the
-  `success_unverified` warn (never self-skips, even on heuristic extraction);
-  the round still commits, but its success never enters the success
-  trajectory and trust drops. `no_change_reason` is the escape hatch.
+  A success claim without a machine-verified observation fires
+  `success_without_verified_evidence` keyed on providerStatus (v3.6: the
+  `success_unverified` warn merged into R8 — the runtime lens is
+  tamper-aware: an entrypoint-tampered command is NOT machine evidence; the
+  check never self-skips, even on heuristic extraction). Severity follows
+  `machine_backed_success`: error rejects; warn commits but the success
+  never enters the trajectory and trust drops. `no_change_reason` is the
+  escape hatch — honored HERE ONLY (contract checks refuse it, v3.6).
 - v3.2: R4/R5 on the heuristic-extraction path fall back to machine progress
   (`machineProgressSeries`: per-round git observations rebuilt from committed
   feedback snapshots) instead of self-skipping — three consecutive rounds
   without git changes is a stall. No git signal → the rule keeps skipping
   (the machine cannot observe).
-- v3.3: on the evidence path (`skipEvidenceRules=false`) the delta-based
-  stall verdict additionally consults the machine window before it fires —
-  when committed git snapshots cover the window, observed git motion OR a
-  newly met criterion within the window (`hasNewCriteriaCompletion`, ID-first
-  matching over committed `:feedback` entries only) means the round is
-  NOT stalled; the rejection/backtrack reason then annotates the missing
-  machine signal. When the machine signal is unavailable the legacy
-  delta verdict stands unchanged. Exculpatory only — never new punishment.
+- v3.3/v3.6: on the evidence path the delta-based stall verdict additionally
+  consults the machine window before it fires — when committed git
+  snapshots cover the window, observed git motion means the round is NOT
+  stalled (v3.6: git motion only — `hasNewCriteriaCompletion` removed);
+  the rejection/backtrack reason then annotates the missing machine signal
+  ("no machine-observed git motion in rounds X–Y"). When the machine
+  signal is unavailable the legacy delta verdict stands unchanged.
+  Exculpatory only — never new punishment.
 - v3.4: **Round Contracts are proposals, not reports.** An eval without
   `round_contract` leaves all four contract checks silent and rendering
   byte-identical to a contract-less round (the canonical `roundContract`
@@ -268,8 +277,10 @@ protocol.ts additions:
   (every done_when claimed) no longer fires premature_boundary — it is
   owned by contract_completion_unverified (which also fires on
   success=false); premature_boundary stays for mixed and silently-dropped
-  claims. `no_change_reason` downgrades premature_boundary to info (the R8
-  escape-hatch family) but NEVER exempts scope_drift — it is a fact check,
+  claims. v3.6: `no_change_reason` NEVER downgrades premature_boundary —
+  the info escape hatch belongs to the R8 success-claim family alone
+  (declaring "no change" while silently dropping contract done_when items
+  contradicts itself). It also NEVER exempts scope_drift — a fact check,
   not a success-class claim.
 - v3.4: rejection/retry (L0/L2), resume, unpause, and backtrack compiles
   derive the same ACTIVE contract from committed rounds (no

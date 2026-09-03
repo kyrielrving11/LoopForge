@@ -461,12 +461,10 @@ describe("v3.3 — round_contract parsing", () => {
       done_when: ["cr-auth-login", 42, "", "cr-auth-logout"],
       verification_plan: ["run-tests"],
       scope: ["src/auth", null],
-      boundary_reason: "vertical slice",
     });
     assert.deepEqual(parsed?.done_when, ["cr-auth-login", "cr-auth-logout"]);
     assert.deepEqual(parsed?.scope, ["src/auth"]);
     assert.equal(parsed?.work_item, "Implement auth");
-    assert.equal(parsed?.boundary_reason, "vertical slice");
   });
 
   it("parseRoundContract: caps overlong items and array lengths", () => {

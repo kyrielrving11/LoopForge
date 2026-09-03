@@ -62,7 +62,7 @@ export interface CriterionRevision {
  *  absent = no contract this round, all contract checks stay silent and
  *  rendering is identical to a contract-less round.
  *
- *  Every field is machine-checkable except boundary_reason (audit only):
+ *  Every field is machine-checkable:
  *  - done_when items are claimed satisfied by listing them in
  *    execution_evidence.success_criteria_met (verified per-round claim
  *    model); leaving them out while success is claimed is premature_boundary
@@ -86,9 +86,6 @@ export interface RoundContract {
      *  forward or back slashes, "./" prefix and trailing slashes accepted).
      *  Out-of-scope git changes = round_scope_drift. ≤ 50 items. */
     scope: string[];
-    /** Why this boundary is a good commit point — audit/agent discipline
-     *  only, never checked, rendered in the state file only. ≤ 500 chars. */
-    boundary_reason?: string;
 }
 /** Structured self-evaluation embedded in compiled prompts.
  *  The agent outputs this after completing each round.

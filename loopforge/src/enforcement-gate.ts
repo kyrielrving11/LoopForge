@@ -25,7 +25,7 @@ import type {
   VerificationResult,
 } from "./protocol.js";
 import { makeEnforcementResult } from "./protocol.js";
-import { entryRound, machineProgressSeries, hasNewCriteriaCompletion, CHECK_SUCCESS_WITH_REMAINING_CRITERIA, CHECK_RECURRING_VIOLATION, CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE, CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED, CHECK_REQUIRED_COMMAND_FAILED, CHECK_COMMAND_EVIDENCE_MISMATCH, CHECK_OUTCOME_SUCCESS_CONTRADICTION, CHECK_VERIFICATION_ENTRYPOINT_MODIFIED, CHECK_PREMATURE_BOUNDARY, CHECK_ROUND_SCOPE_DRIFT, CHECK_CONTRACT_COMPLETION_UNVERIFIED } from "./verification-gate.js";
+import { entryRound, machineProgressSeries, CHECK_SUCCESS_WITH_REMAINING_CRITERIA, CHECK_RECURRING_VIOLATION, CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE, CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED, CHECK_REQUIRED_COMMAND_FAILED, CHECK_COMMAND_EVIDENCE_MISMATCH, CHECK_OUTCOME_SUCCESS_CONTRADICTION, CHECK_VERIFICATION_ENTRYPOINT_MODIFIED, CHECK_PREMATURE_BOUNDARY, CHECK_ROUND_SCOPE_DRIFT, CHECK_CONTRACT_COMPLETION_UNVERIFIED } from "./verification-gate.js";
 import { effectiveSuccess } from "./self-eval.js";
 import { deriveConstraintId, deriveCriterionId, deriveSubGoalId } from "./loop-compiler.js";
 import { getPolicy } from "./policy.js";
@@ -647,9 +647,9 @@ function enforcePrematureBoundary(
       "verification_plan commands (configured in loop_policy.json " +
       "evidence.commands) and report their actual output, listing satisfied " +
       "done_when items in success_criteria_met; or (b) set success=false and " +
-      "list what remains in success_criteria_remaining; or (c) if no code " +
-      "change was genuinely needed, declare no_change_reason. " +
-      "Do NOT claim contract completion without machine evidence." + escalation,
+      "list what remains in success_criteria_remaining. " +
+      "Do NOT claim contract completion without machine evidence " +
+      "(no_change_reason does not apply to contract claims)." + escalation,
     check: "premature_boundary",
   });
 }
@@ -858,17 +858,17 @@ function enforceProgressStall(
 
   // v3.3: Exculpatory machine cross-check. The delta-based stall verdict
   // requires machine agreement: when committed git snapshots cover the
-  // window, observed git motion OR a newly met criterion within the window
-  // means work is happening — not stalled. When the machine signal is
-  // unavailable the legacy verdict stands.
+  // window, observed git motion means work is happening — not stalled.
+  // v3.6: git-motion only — a self-reported criterion completion no longer
+  // buys a stall exemption (claims never buy machine verdicts). When the
+  // machine signal is unavailable the legacy verdict stands.
   if (isStalling) {
     const machine = machineProgressSeries(vaultEntries, currentRound, 3);
     if (machine !== null) {
-      if (machine.some(Boolean) ||
-          hasNewCriteriaCompletion(vaultEntries, currentRound, 3)) {
+      if (machine.some(Boolean)) {
         isStalling = false;
       } else {
-        stallDetail += ` — no machine-observed git motion or criteria completion in rounds ${currentRound - 3}–${currentRound - 1}`;
+        stallDetail += ` — no machine-observed git motion in rounds ${currentRound - 3}–${currentRound - 1}`;
       }
     }
   }
@@ -1031,16 +1031,15 @@ function enforceProgressStallTerminal(
   }
 
   // v3.3: Exculpatory machine cross-check — mirrors R4: a flatline verdict
-  // requires machine agreement over the breaker window. Git motion or a
-  // newly met criterion = work is happening.
+  // requires machine agreement over the breaker window. v3.6: git motion
+  // only (self-reported criteria completions never buy a stall exemption).
   if (allFlat) {
     const machine = machineProgressSeries(vaultEntries, currentRound, breakerSize);
     if (machine !== null) {
-      if (machine.some(Boolean) ||
-          hasNewCriteriaCompletion(vaultEntries, currentRound, breakerSize)) {
+      if (machine.some(Boolean)) {
         allFlat = false;
       } else {
-        flatDetail += ` — no machine-observed git motion or criteria completion in rounds ${currentRound - breakerSize}–${currentRound - 1}`;
+        flatDetail += ` — no machine-observed git motion in rounds ${currentRound - breakerSize}–${currentRound - 1}`;
       }
     }
   }

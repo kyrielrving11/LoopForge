@@ -15,7 +15,7 @@
 import { getPolicy, isConfiguredCommand } from "./policy.js";
 import { makeVerificationFlag, makeVerificationResult } from "./protocol.js";
 import { jaccardSimilarity, tokenize, entryRound as sharedEntryRound, isRecord, machineGitMotionSeries } from "./token-utils.js";
-import { deriveSubGoalId, criteriaMatch } from "./loop-compiler.js";
+import { deriveSubGoalId } from "./loop-compiler.js";
 import { committedContractRounds, contractDoneWhenSatisfied, contractItemMatches, deriveActiveRoundContract, } from "./round-contract.js";
 import { stableStringify } from "./canonical-state.js";
 import { deriveClaimView, resolveRoundFiles } from "./evidence-claims.js";
@@ -52,10 +52,6 @@ export const CHECK_INTENT_DRIFT = "intent_drift";
 export const CHECK_SUBGOAL_DRIFT = "subgoal_drift";
 export const CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED = "backtrack_workspace_not_restored";
 export const CHECK_CRITERIA_CLAIMS_UNVERIFIED = "criteria_claims_unverified";
-/** v3.2: success declared with no machine-verified observation this round
- *  (providerStatus ≠ verified). Warn-level: the round still commits, but its
- *  success never enters the trajectory and trust drops. */
-export const CHECK_SUCCESS_UNVERIFIED = "success_unverified";
 // v3.3 — Round Contract checks. v3.4: split by target. The submission's own
 // round_contract is a PROPOSAL for the NEXT round and is checked only
 // structurally at declaration (underspecified / unverifiable). Execution
@@ -230,7 +226,7 @@ export function deriveEvidenceStatus(selfEval, evidenceSnapshots) {
     // after-phase command (observed by the runtime itself) upgrades a round.
     // Any other snapshot presence is "unavailable": the machine saw activity
     // (or nothing at all this round) but could not verify the success claim,
-    // so success_unverified warns and trust drops.
+    // so R8 warns and trust drops (v3.6: merged success_unverified semantics).
     const providerStatus = evidenceSnapshots.length === 0
         ? "absent"
         : commandVerified
@@ -255,51 +251,6 @@ export function deriveEvidenceStatus(selfEval, evidenceSnapshots) {
  *  signature and semantics. */
 export function machineProgressSeries(vaultEntries, currentRound, lookback) {
     return machineGitMotionSeries(vaultEntries, currentRound, lookback);
-}
-/** Read success_criteria_met from a vault entry's execution_evidence
- *  (direct field only — the feedback entries written by persistLoopLineage
- *  carry it at the top level). */
-function entryCriteriaMet(entry) {
-    const ev = entry.execution_evidence;
-    if (!ev || typeof ev !== "object" || Array.isArray(ev))
-        return [];
-    const arr = ev.success_criteria_met;
-    return Array.isArray(arr) ? arr.filter((v) => typeof v === "string") : [];
-}
-/** v3.3: Whether any success criterion was newly reported met within the
- *  last `lookback` committed rounds — a windowed "unit completion" signal
- *  for R4/R5's exculpatory cross-check on the evidence path.
- *
- *  EXCULPATORY ONLY — this can veto a delta-based stall verdict; it never
- *  grounds a rejection or termination. Reads only committed :feedback
- *  entries (the current round's uncommitted self-report never participates,
- *  so an unverified met claim cannot buy an exemption). Matching is
- *  ID-first (cr-XXXXXXXX) with Jaccard fallback, mirroring the compiler's
- *  criterion dedup. Returns false when the window has no criteria data. */
-export function hasNewCriteriaCompletion(vaultEntries, currentRound, lookback) {
-    const windowStart = currentRound - lookback;
-    const committed = vaultEntries
-        .filter((entry) => {
-        const tid = String(entry.task_id ?? "");
-        if (!tid.endsWith(":feedback"))
-            return false;
-        const rnd = entryRound(entry);
-        return rnd >= 1 && rnd < currentRound;
-    })
-        .sort((a, b) => entryRound(a) - entryRound(b));
-    // Anything first met before the window is already seen and cannot be new.
-    const seen = [];
-    for (const entry of committed) {
-        const rnd = entryRound(entry);
-        for (const item of entryCriteriaMet(entry)) {
-            const isNew = !seen.some((prior) => criteriaMatch(item, prior));
-            if (isNew && rnd >= windowStart)
-                return true;
-            if (isNew)
-                seen.push(item);
-        }
-    }
-    return false;
 }
 // ═══════════════════════════════════════════════════════════════════════════
 // Individual checks — each returns a VerificationFlag or null
@@ -457,14 +408,23 @@ function checkRetroactiveClaims(selfEval, vaultEntries, currentRound) {
     // hid all but the first problem until the next round.
     return flags.length > 0 ? flags : null;
 }
-/** v2.12: success with zero machine-verifiable evidence. The agent claims
- *  completion but nothing the runtime observed backs it — no verified claims
- *  (test evidence), no test results, no required commands. A declared
- *  no_change_reason is the honest escape hatch: it downgrades to info. */
-function checkSuccessWithoutVerifiedEvidence(selfEval, claimView) {
+/** v2.12/v3.6: success without a machine-verified observation. The agent
+ *  claims completion but the runtime observed no machine evidence for it.
+ *  v3.6: the trigger is the runtime-derived providerStatus (verified /
+ *  unavailable / absent) — the v3.2 success_unverified check merged here.
+ *  ProviderStatus "verified" requires an UNTAMPERED passed after-command, so
+ *  an entrypoint-tampered command no longer counts as machine evidence
+ *  (that coverage previously lived in success_unverified alone); the check
+ *  never self-skips on the heuristic-extraction path. Severity follows
+ *  evidence.machine_backed_success — "required" rejects (error), "warn"
+ *  tolerates with a warn (round commits, success excluded from the
+ *  trajectory, trust drops). A declared no_change_reason is the honest
+ *  escape hatch: it downgrades to info. no_change_reason is honored HERE
+ *  ONLY — contract checks refuse it (v3.6). */
+function checkSuccessWithoutVerifiedEvidence(selfEval, status) {
     if (!effectiveSuccess(selfEval))
         return null;
-    if (claimView.verifiedCount > 0 || claimView.hasMachineEvidence)
+    if (status.providerStatus === "verified")
         return null;
     const noChange = typeof selfEval.no_change_reason === "string" &&
         selfEval.no_change_reason.trim().length > 0;
@@ -482,31 +442,7 @@ function checkSuccessWithoutVerifiedEvidence(selfEval, claimView) {
         check: CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE,
         detail: noChange
             ? "success with zero verified claims (no_change_reason declared)"
-            : "success with zero verified claims and no test evidence",
-    });
-}
-/** v3.2: success declared but no machine-verified observation this round.
- *  Unlike R8 (which keys off the agent's SELF-REPORTED test_results), this
- *  keys off the runtime-derived providerStatus: git diff observed, or a
- *  passed after-command. Warn-level by design — the round commits, but its
- *  success never enters the trajectory (and trust drops). A declared
- *  no_change_reason is the honest escape hatch, mirroring R8.
- *  Crucially this check does NOT self-skip on the heuristic-extraction path:
- *  an unstructured success claim without machine observation is flagged
- *  exactly the same — the check degrades, it never disappears. */
-function checkSuccessUnverified(selfEval, status) {
-    if (!effectiveSuccess(selfEval))
-        return null;
-    if (typeof selfEval.no_change_reason === "string" &&
-        selfEval.no_change_reason.trim().length > 0)
-        return null;
-    if (status.providerStatus === "verified")
-        return null;
-    return makeVerificationFlag({
-        severity: "warn",
-        field: "success",
-        check: CHECK_SUCCESS_UNVERIFIED,
-        detail: `success declared but no machine-verified observation this round (providerStatus: ${status.providerStatus})`,
+            : `success declared but no machine-verified observation this round (providerStatus: ${status.providerStatus})`,
     });
 }
 function checkDuplicateConstraintDiscovery(selfEval, prevSelfEval, olderViolations) {
@@ -1166,14 +1102,16 @@ function checkRoundScopeDrift(activeContract, evidenceSnapshots) {
 /** success claimed under the ACTIVE contract whose done_when items were not
  *  honestly and verifiably completed: claimed met with no machine-verified
  *  evidence this round, or silently dropped (present in neither
- *  success_criteria_met nor success_criteria_remaining). Declaring
- *  no_change_reason downgrades to info (the R8 escape hatch semantics).
+ *  success_criteria_met nor success_criteria_remaining).
  *  v3.4: targets the derived ACTIVE contract (the round's real boundary) —
  *  a proposal declared on a round without an active contract is never
  *  checked for conformance against work the round did not do under it.
  *  v3.5.1: a fully-met posture (every done_when claimed satisfied) is owned
  *  by contract_completion_unverified — this check stays for mixed and
- *  silently-dropped success claims only. */
+ *  silently-dropped success claims only.
+ *  v3.6: no_change_reason never downgrades this check — the escape hatch
+ *  belongs to the R8 success-claim family alone; a declared "no change"
+ *  contradicts silently dropping contract done_when items. */
 function checkPrematureBoundary(activeContract, selfEval, claimView) {
     if (!activeContract || activeContract.done_when.length === 0)
         return null;
@@ -1210,9 +1148,8 @@ function checkPrematureBoundary(activeContract, selfEval, claimView) {
     }
     if (problems.length === 0)
         return null;
-    const severity = selfEval.no_change_reason ? "info" : "error";
     return makeVerificationFlag({
-        severity,
+        severity: "error",
         field: "round_contract",
         check: CHECK_PREMATURE_BOUNDARY,
         detail: `Round Contract boundary claimed prematurely: ${problems.slice(0, 3).join("; ")}. ` +
@@ -1336,7 +1273,8 @@ backtrackTargetGitHead) {
     // are backed by machine evidence (pure derivation, not persisted).
     const claimView = deriveClaimView(selfEval, evidenceSnapshots);
     // v3.2: Runtime machine-verification status (git observed / command passed /
-    // absent). Feeds the success_unverified check that never self-skips.
+    // absent). v3.6: feeds the merged R8 check (providerStatus lens) that
+    // never self-skips.
     const evidenceStatus = deriveEvidenceStatus(selfEval, evidenceSnapshots);
     // Run all checks
     // v3.3.1: a check may return several flags (checkRetroactiveClaims raises
@@ -1347,10 +1285,9 @@ backtrackTargetGitHead) {
         () => checkProgressRegression(selfEval, prevSelfEval),
         () => checkEmptyChangeWithPassing(selfEval),
         () => checkSuccessWithRemainingCriteria(selfEval),
-        // v2.12: success with zero verified claims and no test evidence
-        () => checkSuccessWithoutVerifiedEvidence(selfEval, claimView),
-        // v3.2: success without a machine-verified observation (never self-skips)
-        () => checkSuccessUnverified(selfEval, evidenceStatus),
+        // v2.12/v3.6: success without a machine-verified observation — the merged
+        // success_unverified semantics (runtime providerStatus lens, tamper-aware)
+        () => checkSuccessWithoutVerifiedEvidence(selfEval, evidenceStatus),
         // v2.12: criteria met but none machine-verified (mild criterion-specific rule)
         () => checkUnverifiedCriteriaClaims(selfEval, claimView),
         // v2.12: declared outcome vs legacy boolean consistency

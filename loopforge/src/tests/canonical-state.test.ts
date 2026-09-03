@@ -412,7 +412,6 @@ describe("Round Contract state (v3.3 rendering, v3.4 active source)", () => {
     done_when: ["cr-auth-login", "cr-auth-logout"],
     verification_plan: ["run-tests"],
     scope: ["src/auth"],
-    boundary_reason: "verifiable vertical slice — auth is independently testable",
   };
 
   /** v3.4: The ACTIVE contract arrives in the derived bag (computed by
@@ -477,12 +476,6 @@ describe("Round Contract state (v3.3 rendering, v3.4 active source)", () => {
     const active2 = withActiveContract();
     assert.equal(hashCanonicalState(active1), hashCanonicalState(active2));
     assert.notEqual(hashCanonicalState(state), hashCanonicalState(active1));
-  });
-
-  it("state file records boundary_reason under Current Task", () => {
-    const state = withActiveContract();
-    const md = renderCanonicalStateMarkdown(state);
-    assert.match(md, /> Contract boundary: verifiable vertical slice/);
   });
 
   it("formatRoundContract renders compactly and omits empty arrays", () => {

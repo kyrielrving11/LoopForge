@@ -17,6 +17,7 @@ import {
   makeLoopRoundResult,
 } from "../protocol.js";
 import { getPolicy, resetPolicy, setPolicyForTest, DEFAULT_POLICY } from "../policy.js";
+import { mergedLineageRound } from "./_helpers.js";
 import { deriveItemId } from "../token-utils.js";
 
 describe("cognitive-state compiler", () => {
@@ -1890,30 +1891,19 @@ describe("v3.3 — round stats and machine status threading", () => {
     // lineage.round_evidence onto merged lineage entries (raw :feedback
     // entries never reach the compile view). Before the stamp, this fixture
     // rendered "— rejected attempts" and no Machine row at all.
-    const mergedRound = (round: number, attempt: number, gitMotion: boolean): Record<string, unknown> => ({
-      loop_id: "stats-loop",
-      task_id: `stats-loop:r${round}`,
-      task_type: "loop_lineage",
-      loop_lineage: {
-        loop_id: "stats-loop",
-        round,
-        committed_action: "continue",
+    const mergedRound = (round: number, attempt: number, gitMotion: boolean): Record<string, unknown> =>
+      mergedLineageRound(round, {
+        loopId: "stats-loop",
         attempt,
-        round_evidence: [{
+        files: [`src/r${round}.ts`],
+        progress: 0.2 + round * 0.1,
+        roundEvidence: [{
           provider: "git",
           timestamp: Date.now(),
           files: gitMotion ? [`src/r${round}.ts`] : [],
           data: {},
         }],
-      },
-      execution_evidence: {
-        files_changed: [`src/r${round}.ts`],
-        test_results: { passed: 1, failed: 0, skipped: 0 },
-        success_criteria_met: [],
-        success_criteria_remaining: [],
-        progress_estimate: 0.2 + round * 0.1,
-      },
-    });
+      });
     const response = compileLoop(makeLoopCompileRequest({
       loop_id: "stats-loop",
       round: 4,
@@ -1959,46 +1949,9 @@ describe("v3.3 — Round Contract eval template", () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("v3.4 — ACTIVE Round Contract derivation (compileLoop)", () => {
-  /** Merged production-shape lineage entry — engine hydration merges the
-   *  committed eval onto the round's lineage entry (fields top-level AND in
-   *  loop_lineage) and stamps committed_action. */
-  const mergedRound = (
-    round: number,
-    o: {
-      contract?: { work_item: string; done_when: string[]; verification_plan: string[]; scope: string[] };
-      outcome?: string;
-      met?: string[];
-      action?: string;
-    } = {},
-  ): Record<string, unknown> => {
-    const body: Record<string, unknown> = {
-      loop_id: "derive-cc",
-      task_id: `derive-cc:r${round}`,
-      task_type: "loop_lineage",
-      loop_lineage: {
-        loop_id: "derive-cc",
-        round,
-        committed_action: o.action ?? "continue",
-      },
-      execution_evidence: {
-        files_changed: [],
-        success_criteria_met: o.met ?? [],
-      },
-    };
-    if (o.contract) {
-      body.loop_lineage = {
-        ...(body.loop_lineage as Record<string, unknown>),
-        round_contract: o.contract,
-        outcome: o.outcome,
-      };
-      body.round_contract = o.contract;
-      body.outcome = o.outcome;
-    } else if (o.outcome) {
-      body.outcome = o.outcome;
-    }
-    return body;
-  };
-
+  /** Merged production-shape lineage entry (shared fixture, derive-cc loop). */
+  const mergedRound = (r: number, o: Parameters<typeof mergedLineageRound>[1] = {}) =>
+    mergedLineageRound(r, { loopId: "derive-cc", ...o });
   const A = {
     work_item: "Slice A",
     done_when: ["cr-a-1", "cr-a-2"],
@@ -2012,7 +1965,6 @@ describe("v3.4 — ACTIVE Round Contract derivation (compileLoop)", () => {
     scope: ["src/b"],
   };
   const TASK = "Build the whole thing";
-
   const compileAt = (
     round: number,
     level: "l0" | "l1" | "l2",
@@ -2255,36 +2207,9 @@ describe("v3.5 — L2 contract declaration nudge", () => {
 });
 
 describe("v3.5 — post-backtrack contract revision (compile side)", () => {
-  /** Merged production-shape lineage entry (see the v3.4 derivation
-   *  describe above for the full pattern). */
-  const merged = (
-    round: number,
-    o: {
-      contract?: { work_item: string; done_when: string[]; verification_plan: string[]; scope: string[] };
-      outcome?: string;
-      met?: string[];
-      action?: string;
-    } = {},
-  ): Record<string, unknown> => {
-    const body: Record<string, unknown> = {
-      loop_id: "redo-cc",
-      task_id: `redo-cc:r${round}`,
-      task_type: "loop_lineage",
-      loop_lineage: {
-        loop_id: "redo-cc",
-        round,
-        committed_action: o.action ?? "continue",
-      },
-      execution_evidence: { files_changed: [], success_criteria_met: o.met ?? [] },
-    };
-    if (o.contract) {
-      (body.loop_lineage as Record<string, unknown>).round_contract = o.contract;
-      (body.loop_lineage as Record<string, unknown>).outcome = o.outcome;
-      body.round_contract = o.contract;
-      body.outcome = o.outcome;
-    }
-    return body;
-  };
+  /** Merged production-shape lineage entry (shared fixture, redo-cc loop). */
+  const merged = (r: number, o: Parameters<typeof mergedLineageRound>[1] = {}) =>
+    mergedLineageRound(r, { loopId: "redo-cc", ...o });
   const A = {
     work_item: "Stalled slice",
     done_when: ["cr-a-1"],

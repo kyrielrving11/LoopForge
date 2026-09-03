@@ -342,6 +342,13 @@ protocol.ts additions:
   on regression, i.e. negative deltas) or after a future window/threshold
   split. It is the reserved severity tier, not dead code; do not delete it
   without first covering the threshold-0 configuration.
+- v3.5.1: **DORMANT by default (insurance, not features)** — do not extend,
+  re-verify beyond existing coverage, or add new invariants for:
+  `engine.backtrack_auto_restore` (destructive auto-reset, off by default,
+  wired v3.3.1), the R5 threshold-0 ladder (reserved tier, active only when
+  `evolution.progress_stall_threshold <= 0`), and the auto safety-net
+  milestone (v3.3.1, milestone-less loops). Keep them compiling and their
+  existing tests green; treat their absence of real-world use as intended.
 - v3.2.1: `autoFeedback`'s "already committed" idempotency check ignores
   backtrack decisions — the redo's feedback replaces the stale backtrack
   entry in the round document.

@@ -8,6 +8,7 @@ import {
   type VerificationFlag,
 } from "../protocol.js";
 import type { VaultEntry } from "../loop-store.js";
+import { committedFeedbackRound as committedRound } from "./_helpers.js";
 import { verifySelfEvaluation as rawVerifySelfEvaluation, parseTestOutput, deriveEvidenceStatus, machineProgressSeries, hasNewCriteriaCompletion, CHECK_SUCCESS_UNVERIFIED, CHECK_VERIFICATION_ENTRYPOINT_MODIFIED, CHECK_TEST_FILES_MODIFIED, CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE } from "../verification-gate.js";
 import type { ProviderSnapshot } from "../evidence-provider.js";
 import { computeGoalTextHash, deriveCriterionId } from "../loop-compiler.js";
@@ -1639,61 +1640,6 @@ const withRunTestsConfigured = (): void => {
     },
   });
 };
-
-/** v3.4: A committed :feedback entry carrying a full round-transaction
- *  evaluation — the vault shape the ACTIVE-contract derivation reads.
- *  A contract passed here was PROPOSED at `round` and therefore becomes
- *  the ACTIVE contract for round+1 (declaration-round met claims never
- *  satisfy its own proposal). */
-function committedRound(
-  round: number,
-  opts: {
-    contract?: RoundContract;
-    outcome?: SelfEvaluation["outcome"];
-    met?: string[];
-    action?: string;
-  } = {},
-): VaultEntry {
-  return {
-    task_id: `loop:cc:r${round}:feedback`,
-    loop_id: "cc",
-    loop_lineage: {
-      round,
-      round_transaction: {
-        schema_version: 1,
-        round_id: `loop:cc:round:${round}`,
-        snapshot: {
-          schemaVersion: 1,
-          roundId: `loop:cc:round:${round}`,
-          loopId: "cc",
-          round,
-          attempt: 1,
-          phase: "committed",
-          beforeEvidence: [],
-          roundEvidence: [],
-          createdAt: 0,
-          updatedAt: 0,
-          evaluation: makeSelfEvaluation({
-            success: false,
-            output_summary: `Committed round ${round}.`,
-            constraint_violations: [],
-            should_continue: true,
-            outcome: opts.outcome,
-            round_contract: opts.contract,
-            execution_evidence: makeExecutionEvidence({
-              files_changed: [],
-              test_results: { passed: 0, failed: 0, skipped: 0 },
-              success_criteria_met: opts.met ?? [],
-              success_criteria_remaining: [],
-              progress_estimate: 0.2,
-            }),
-          }),
-        },
-        result: { action: opts.action ?? "continue" },
-      },
-    },
-  };
-}
 
 describe("Round Contract checks (v3.3 proposal declaration + v3.4 active split)", () => {
   afterEach(() => resetPolicy());

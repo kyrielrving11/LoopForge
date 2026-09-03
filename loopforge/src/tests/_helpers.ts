@@ -15,7 +15,137 @@ import type {
   VaultEntry,
 } from "../loop-store.js";
 import { LOOP_STORE_SCHEMA_VERSION } from "../loop-store.js";
+import { makeExecutionEvidence, makeSelfEvaluation } from "../protocol.js";
+import type { RoundContract, RoundOutcome } from "../protocol.js";
 import { getPolicy } from "../policy.js";
+
+// ── v3.5.1: shared committed-round fixtures ─────────────────────────────────
+// One builder each for the two vault entry shapes every contract/dashboard
+// suite needs — previously each test file carried its own ~35-line twin
+// (feedbackRound / feedbackRaw / committedRound / mergedRound), and a change
+// to the committed shape had to be mirrored in three files.
+
+/** v3.5.1: Raw committed :feedback vault entry — the shape on disk.
+ *  snapshot.evaluation is the only committed copy of round_contract /
+ *  outcome / met claims; snapshot.attempt + snapshot.roundEvidence carry
+ *  the machine-observed data the engine stamps onto merged lineage entries
+ *  at hydration. A contract passed here was PROPOSED at `round` and becomes
+ *  the ACTIVE contract for round+1 (declaration-round met claims never
+ *  satisfy its own proposal). */
+export function committedFeedbackRound(
+  round: number,
+  opts: {
+    contract?: RoundContract;
+    outcome?: RoundOutcome;
+    met?: string[];
+    action?: string;
+    attempt?: number;
+    roundEvidence?: unknown[];
+    files?: string[];
+    progress?: number;
+    loopId?: string;
+  } = {},
+): VaultEntry {
+  const loopId = opts.loopId ?? "cc";
+  return {
+    task_id: `loop:${loopId}:r${round}:feedback`,
+    loop_id: loopId,
+    loop_lineage: {
+      round,
+      round_transaction: {
+        schema_version: 1,
+        round_id: `loop:${loopId}:round:${round}`,
+        snapshot: {
+          schemaVersion: 1,
+          roundId: `loop:${loopId}:round:${round}`,
+          loopId,
+          round,
+          attempt: opts.attempt ?? 1,
+          phase: "committed",
+          beforeEvidence: [],
+          roundEvidence: opts.roundEvidence,
+          createdAt: 0,
+          updatedAt: 0,
+          evaluation: makeSelfEvaluation({
+            success: false,
+            output_summary: `Committed round ${round}.`,
+            constraint_violations: [],
+            should_continue: true,
+            outcome: opts.outcome,
+            round_contract: opts.contract,
+            execution_evidence: makeExecutionEvidence({
+              files_changed: opts.files ?? [],
+              test_results: { passed: 0, failed: 0, skipped: 0 },
+              success_criteria_met: opts.met ?? [],
+              success_criteria_remaining: [],
+              progress_estimate: opts.progress ?? 0.2,
+            }),
+          }),
+        },
+        result: { action: opts.action ?? "continue" },
+      },
+    },
+  };
+}
+
+/** v3.5.1: Merged production-shape lineage entry — engine hydration merges
+ *  a committed eval onto the round's lineage entry (fields top-level AND in
+ *  loop_lineage) and stamps committed_action, and since v3.5.1 also
+ *  lineage.attempt / lineage.round_evidence (the compile-view dashboard
+ *  data). The compile-side contract extraction (mergedEntryEvaluation) and
+ *  the dashboard readers consume exactly this shape. */
+export function mergedLineageRound(
+  round: number,
+  opts: {
+    contract?: RoundContract;
+    outcome?: RoundOutcome;
+    met?: string[];
+    action?: string;
+    /** false → omit committed_action (an uncommitted compile-time entry). */
+    committed?: boolean;
+    attempt?: number;
+    roundEvidence?: unknown[];
+    files?: string[];
+    progress?: number;
+    loopId?: string;
+  } = {},
+): Record<string, unknown> {
+  const loopId = opts.loopId ?? "me";
+  const lin: Record<string, unknown> = {
+    loop_id: loopId,
+    round,
+    ...(opts.committed === false
+      ? {}
+      : { committed_action: opts.action ?? "continue" }),
+    execution_evidence: {
+      files_changed: opts.files ?? [],
+      test_results: { passed: 0, failed: 0, skipped: 0 },
+      success_criteria_met: opts.met ?? [],
+      success_criteria_remaining: [],
+      progress_estimate: opts.progress ?? 0.2,
+    },
+  };
+  if (opts.contract) lin.round_contract = opts.contract;
+  if (opts.outcome !== undefined) lin.outcome = opts.outcome;
+  if (opts.attempt !== undefined) lin.attempt = opts.attempt;
+  if (opts.roundEvidence !== undefined) lin.round_evidence = opts.roundEvidence;
+  const body: Record<string, unknown> = {
+    loop_id: loopId,
+    task_id: `${loopId}:r${round}`,
+    task_type: "loop_lineage",
+    execution_evidence: {
+      files_changed: opts.files ?? [],
+      test_results: { passed: 0, failed: 0, skipped: 0 },
+      success_criteria_met: opts.met ?? [],
+      success_criteria_remaining: [],
+      progress_estimate: opts.progress ?? 0.2,
+    },
+  };
+  if (opts.contract) body.round_contract = opts.contract;
+  if (opts.outcome !== undefined) body.outcome = opts.outcome;
+  body.loop_lineage = lin;
+  return body;
+}
 
 /** v3.3: Install a real after-phase verification command on the current
  *  policy so end-to-end tests exercise the machine-backed-success path.

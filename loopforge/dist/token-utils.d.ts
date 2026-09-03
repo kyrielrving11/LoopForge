@@ -30,6 +30,12 @@ export declare function entryRound(entry: Record<string, unknown>): number;
 /** v3.3: Per-round machine git motion — whether git observed file changes
  *  in each of the last `lookback` committed rounds, rebuilt from the
  *  feedback entries' roundEvidence snapshots (already persisted at commit).
+ *  v3.5.1: also reads the merged lineage stamp (lineage.round_evidence) the
+ *  engine writes at hydration — the compile-time view never sees raw
+ *  :feedback entries, so without the stamp the Machine (git) dashboard row
+ *  silently vanished in production prompts. The gate side (raw vault
+ *  entries) keeps reading the transaction path; raw lineage entries carry
+ *  no stamp and are skipped either way.
  *  Returns null when fewer than `lookback` rounds carry git snapshots — the
  *  machine signal is unavailable and callers (R4/R5) keep their legacy
  *  verdict. Lives in token-utils so both the enforcement gate and the

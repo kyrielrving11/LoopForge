@@ -1333,13 +1333,16 @@ function checkRoundScopeDrift(
 }
 
 /** success claimed under the ACTIVE contract whose done_when items were not
- *  honestly and verifiably completed: either claimed met with no
- *  machine-verified evidence this round, or silently dropped (present in
- *  neither success_criteria_met nor success_criteria_remaining). Declaring
+ *  honestly and verifiably completed: claimed met with no machine-verified
+ *  evidence this round, or silently dropped (present in neither
+ *  success_criteria_met nor success_criteria_remaining). Declaring
  *  no_change_reason downgrades to info (the R8 escape hatch semantics).
  *  v3.4: targets the derived ACTIVE contract (the round's real boundary) —
  *  a proposal declared on a round without an active contract is never
- *  checked for conformance against work the round did not do under it. */
+ *  checked for conformance against work the round did not do under it.
+ *  v3.5.1: a fully-met posture (every done_when claimed satisfied) is owned
+ *  by contract_completion_unverified — this check stays for mixed and
+ *  silently-dropped success claims only. */
 function checkPrematureBoundary(
   activeContract: RoundContract | null,
   selfEval: SelfEvaluation,
@@ -1349,6 +1352,10 @@ function checkPrematureBoundary(
   if (!effectiveSuccess(selfEval)) return null;
   const ev = selfEval.execution_evidence;
   const met = ev?.success_criteria_met ?? [];
+  // v3.5.1: full-met → the completion check owns the posture (it also fires
+  // on success=false, so nothing is lost — and under machine_backed_success
+  // "warn" the same tolerance applies on both sides).
+  if (contractDoneWhenSatisfied(activeContract, met)) return null;
   const remaining = ev?.success_criteria_remaining ?? [];
   const problems: string[] = [];
   for (const item of activeContract.done_when) {

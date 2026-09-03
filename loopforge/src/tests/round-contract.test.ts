@@ -14,6 +14,7 @@ import {
   contractItemMatches,
   contractDoneWhenSatisfied,
   deriveActiveRoundContract,
+  mergedEntryEvaluation,
   type CommittedRoundEvaluation,
 } from "../round-contract.js";
 import { criteriaMatch } from "../loop-compiler.js";
@@ -459,39 +460,6 @@ describe("view parity — raw feedback and merged lineage derive the same active
     return body;
   }
 
-  /** Compile-side record extraction — mirrors loop-compiler.deriveActiveContract:
-   *  committed_action gate, backtrack skip, top-level-first then lineage. */
-  function mergedViewRecords(entries: Record<string, unknown>[]): CommittedRoundEvaluation[] {
-    const records: CommittedRoundEvaluation[] = [];
-    for (const entry of entries) {
-      const lin = (entry.loop_lineage ?? {}) as Record<string, unknown>;
-      const action = lin.committed_action;
-      if (typeof action !== "string" || action.length === 0) continue;
-      if (action === "backtrack") continue;
-      const rnd = typeof lin.round === "number" ? lin.round : 0;
-      const contract = entry.round_contract ?? lin.round_contract;
-      const outcome = entry.outcome ?? lin.outcome;
-      const ev = (entry.execution_evidence ?? lin.execution_evidence) as
-        | { success_criteria_met?: unknown }
-        | undefined;
-      const met = Array.isArray(ev?.success_criteria_met)
-        ? (ev!.success_criteria_met as unknown[]).filter((v): v is string => typeof v === "string")
-        : [];
-      const isOutcome =
-        outcome === "success" || outcome === "partial" ||
-        outcome === "failed" || outcome === "blocked";
-      records.push({
-        round: rnd,
-        proposal: contract && typeof contract === "object" && !Array.isArray(contract)
-          ? contract as RoundContract
-          : null,
-        outcome: isOutcome ? outcome : null,
-        met,
-      });
-    }
-    return records;
-  }
-
   it("walks an identical history through both views to the same active contract", () => {
     // r1: declare A · r2: partial restate · r3: committed backtrack carrying a
     // POISON proposal (must be skipped by both views) · r4: blocked closes A,
@@ -509,7 +477,12 @@ describe("view parity — raw feedback and merged lineage derive the same active
       mergedRound(4, { outcome: "blocked", contract: C }),
     ];
     const rawRecords = committedContractRounds(raw, 5);
-    const mergedRecords = mergedViewRecords(merged);
+    // v3.5.1: the merged view goes through the SHARED extraction
+    // (mergedEntryEvaluation — loop-compiler.deriveActiveContract calls the
+    // same function), never a test-side copy that could drift from it.
+    const mergedRecords = merged
+      .map((entry) => mergedEntryEvaluation(entry))
+      .filter((r): r is CommittedRoundEvaluation => r !== null);
     assert.deepEqual(
       mergedRecords.map((r) => [r.round, r.proposal?.work_item ?? null, r.outcome]),
       rawRecords.map((r) => [r.round, r.proposal?.work_item ?? null, r.outcome]),
@@ -521,5 +494,78 @@ describe("view parity — raw feedback and merged lineage derive the same active
     assert.equal(fromRaw?.work_item, fromMerged?.work_item,
       "views must agree on the ACTIVE contract — a silent divergence would render A while checks run against B");
     assert.equal(JSON.stringify(fromRaw), JSON.stringify(fromMerged));
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// mergedEntryEvaluation — shared compile-side extraction
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("mergedEntryEvaluation (shared compile-side extraction)", () => {
+  const A = contract({ work_item: "Item A", done_when: [A_DONE_1] });
+
+  /** Minimal merged lineage entry. */
+  const merged = (
+    round: number,
+    o: {
+      contract?: RoundContract;
+      outcome?: CommittedRoundEvaluation["outcome"];
+      met?: string[];
+      action?: string;
+      committed?: boolean;
+    } = {},
+  ): Record<string, unknown> => {
+    const lin: Record<string, unknown> = {
+      loop_id: "me",
+      round,
+      ...(o.committed === false ? {} : { committed_action: o.action ?? "continue" }),
+      execution_evidence: { files_changed: [], success_criteria_met: o.met ?? [] },
+    };
+    const body: Record<string, unknown> = {
+      loop_id: "me",
+      task_id: `me:r${round}`,
+      task_type: "loop_lineage",
+      execution_evidence: { files_changed: [], success_criteria_met: o.met ?? [] },
+    };
+    if (o.contract) {
+      lin.round_contract = o.contract;
+      lin.outcome = o.outcome;
+      body.round_contract = o.contract;
+      body.outcome = o.outcome;
+    }
+    body.loop_lineage = lin;
+    return body;
+  };
+
+  it("extracts committed merged entries; skips uncommitted and backtrack entries", () => {
+    assert.equal(mergedEntryEvaluation(merged(1, { committed: false })), null,
+      "no committed_action → not a committed round");
+    assert.equal(mergedEntryEvaluation(merged(1, { action: "backtrack" })), null,
+      "backtrack rounds are roll-back directives");
+    const record = mergedEntryEvaluation(merged(1, { contract: A, met: [A_DONE_1] }));
+    assert.ok(record);
+    assert.equal(record!.round, 1);
+    assert.equal(record!.proposal?.work_item, "Item A");
+    assert.deepEqual(record!.met, [A_DONE_1]);
+    assert.equal(mergedEntryEvaluation(null), null);
+    assert.equal(mergedEntryEvaluation("nope"), null);
+  });
+
+  it("top-level fields win over the lineage copy when they disagree", () => {
+    // Engine hydration writes merged fields to BOTH; if they ever disagree,
+    // the top-level copy is authoritative (house read pattern).
+    const entry = merged(1, { contract: A });
+    const lin = entry.loop_lineage as Record<string, unknown>;
+    lin.round_contract = contract({ work_item: "Lineage copy" });
+    const record = mergedEntryEvaluation(entry);
+    assert.equal(record!.proposal?.work_item, "Item A",
+      "the top-level round_contract must win");
+  });
+
+  it("outcome is validated against the allowed set", () => {
+    const bad = merged(1, { contract: A });
+    (bad.loop_lineage as Record<string, unknown>).outcome = "mystery-state";
+    const record = mergedEntryEvaluation(bad);
+    assert.equal(record!.outcome, null);
   });
 });

@@ -34,7 +34,7 @@ cannot provide for itself.
 - TypeScript only.
 - Node.js 18 or newer.
 - Zero runtime dependencies.
-- The npm package is in `loopforge/` and is currently `3.5.0`.
+- The npm package is in `loopforge/` and is currently `3.5.1`.
 - Preserve user changes in a dirty worktree.
 - Edit `src/protocol.ts`, then run the build to regenerate
   `loopforge-protocol.json`.
@@ -68,6 +68,8 @@ LoopForge/src/
   token-utils.ts        Shared Jaccard similarity, dedup, entry helpers (v2.5)
                         (v3.3: machineGitMotionSeries — per-round git motion
                         for the R4/R5 exculpatory cross-check and dashboard)
+                        (v3.5.1: reads the merged lineage round_evidence
+                        stamp — the Machine row is real in production views)
   prompt-policy.ts      L0/L1/L2 view selection
   prompt-assembler.ts   Single-pass PromptArtifact renderer
                         (v2.9: prompt_requests — model-expressed information needs)
@@ -89,9 +91,10 @@ LoopForge/src/
   round-transaction.ts  Stable round ID, attempts, evidence, commit recovery
   round-contract.ts     v3.4: ACTIVE Round Contract derivation (proposal vs
                         active walker, shared item matcher); v3.5: shared
-                        committedContractRounds raw-vault adapter — one
-                        adapter + one walker serve the gate, session views,
-                        and replay (view parity is test-locked)
+                        committedContractRounds raw-vault adapter; v3.5.1:
+                        shared mergedEntryEvaluation — one adapter, one
+                        walker, one extraction serve the gate, compiler,
+                        session views, and replay (view parity test-locked)
   round-coordinator.ts  Verify, enforce, backtrack, and stop decision pipeline
                         (v2.10: backtrack action — roll back to last clean round)
   verification-gate.ts  Cross-round and evidence consistency checks (28 checks)
@@ -104,6 +107,9 @@ LoopForge/src/
                         (v3.5: contract_completion_unverified — closing a
                         contract is a success-class claim; contract_premature
                         warn — premature replacement is no longer silent)
+                        (v3.5.1: premature_boundary narrowed to mixed /
+                        silently-dropped claims — full-met is owned by the
+                        completion check)
   enforcement-gate.ts   Accept, reject, backtrack, or terminate rules (14 rules)
                         (v2.14: R-EVID — required command failure /
                         self-contradictory claims reject before commit)
@@ -258,10 +264,13 @@ protocol.ts additions:
   substantive drift_clarification (R7-style anchors, ≥ 20 chars);
   premature_boundary fires when success is claimed while active done_when
   items are claimed met without round-level machine verification, or
-  silently dropped (neither met nor remaining). `no_change_reason`
-  downgrades premature_boundary to info (the R8 escape-hatch family) but
-  NEVER exempts scope_drift — it is a fact check, not a success-class
-  claim.
+  silently dropped (neither met nor remaining). v3.5.1: a FULLY-met posture
+  (every done_when claimed) no longer fires premature_boundary — it is
+  owned by contract_completion_unverified (which also fires on
+  success=false); premature_boundary stays for mixed and silently-dropped
+  claims. `no_change_reason` downgrades premature_boundary to info (the R8
+  escape-hatch family) but NEVER exempts scope_drift — it is a fact check,
+  not a success-class claim.
 - v3.4: rejection/retry (L0/L2), resume, unpause, and backtrack compiles
   derive the same ACTIVE contract from committed rounds (no
   `last_round_result` needed), so a contract round's re-compiles keep

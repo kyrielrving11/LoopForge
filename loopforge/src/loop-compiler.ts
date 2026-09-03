@@ -39,6 +39,7 @@ import {
 import type { MachineStatus, PresentedStateSnapshot, RoundStat } from "./canonical-state.js";
 import {
   deriveActiveRoundContract,
+  mergedEntryEvaluation,
   type CommittedRoundEvaluation,
 } from "./round-contract.js";
 import { assemblePromptArtifact } from "./prompt-assembler.js";
@@ -419,13 +420,17 @@ function deriveRoundStats(
     const progress = typeof rawProgress === "number" ? rawProgress : null;
     // snapshot.attempt counts the committed attempt (>= 1); rejections
     // before commit are attempt - 1. Parsed defensively like the machine
-    // git-motion scan in token-utils.
+    // git-motion scan in token-utils. v3.5.1: fall back to the merged
+    // lineage stamp (lineage.attempt) written by engine hydration — the
+    // compile view never sees the raw :feedback transaction.
     const lin = entry.loop_lineage ?? entry.lineage;
     const rt = isRecord(lin) ? lin.round_transaction : null;
     const snapshot = isRecord(rt) ? rt.snapshot : null;
     const attempt = isRecord(snapshot) && typeof snapshot.attempt === "number"
       ? snapshot.attempt
-      : null;
+      : isRecord(lin) && typeof lin.attempt === "number"
+        ? lin.attempt
+        : null;
     stats.push({
       round: rnd,
       filesChangedCount: Array.isArray(files) ? files.length : null,
@@ -473,23 +478,10 @@ function deriveActiveContract(
   for (let rnd = 1; rnd < currentRound; rnd++) {
     const entry = roundCanonicalEntry(entries, rnd);
     if (!entry) continue;
-    const lin = lineage(entry);
-    const action = lin.committed_action ?? entry.committed_action;
-    if (typeof action !== "string" || action.length === 0) continue;
-    if (action === "backtrack") continue;
-    // Merged entries carry the eval fields both top-level and in lineage —
-    // read top-level first, lineage fallback (house field-reader pattern).
-    const contract = entry.round_contract ?? lin.round_contract;
-    const outcome = entry.outcome ?? lin.outcome;
-    const isOutcome =
-      outcome === "success" || outcome === "partial" ||
-      outcome === "failed" || outcome === "blocked";
-    evaluations.push({
-      round: rnd,
-      proposal: isRecord(contract) ? contract as unknown as RoundContract : null,
-      outcome: isOutcome ? outcome : null,
-      met: entryCriteriaMet(entry),
-    });
+    // v3.5.1: extraction shared with the view-parity test (round-contract.ts)
+    // — committed_action gate, backtrack skip, top-level/lineage reads.
+    const record = mergedEntryEvaluation(entry);
+    if (record) evaluations.push(record);
   }
   return deriveActiveRoundContract(evaluations);
 }

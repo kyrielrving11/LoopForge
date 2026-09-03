@@ -252,3 +252,51 @@ describe("Hydration cache — backtrack redo replace (v3.3.1)", () => {
     );
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v3.5.1 — hydration stamps machine-observed data onto merged lineage entries
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("v3.5.1 — hydration stamps attempt/roundEvidence for the compile view", () => {
+  beforeEach(() => resetPolicy());
+
+  it("merged lineage entries carry lineage.attempt after a committed round", async () => {
+    const store = new FileLoopStore(join(tmpdir(), `loopforge-stamp-${randomUUID()}`));
+    const mgr = new SessionManager(store);
+    const started = await mgr.create({ task: "Stamp check", loopId: "stamp-check" });
+    const sessionId = started.sessionId;
+
+    // One rejected attempt then an accepted one → committed attempt = 2.
+    const rejected = await mgr.advance(sessionId, "", {
+      success: true,
+      output_summary: "premature success",
+      constraint_violations: [],
+      should_continue: true,
+      execution_evidence: {
+        files_changed: [],
+        test_results: { passed: 0, failed: 0, skipped: 0 },
+        success_criteria_met: [],
+        success_criteria_remaining: ["more"],
+        progress_estimate: 0.1,
+      },
+    });
+    assert.equal(rejected.enforcementAction, "reject");
+    const accepted = await mgr.advance(sessionId, "", continuingEvaluation());
+    assert.equal(accepted.round, 2);
+
+    // A fresh engine hydrates from disk and must re-derive the same stamp —
+    // the compile view's Round Stats / Machine rows depend on it.
+    const engine = new LoopForgeEngine(store);
+    const hydrated = engine.hydrateLoopContext("stamp-check", 2);
+    const results = ((hydrated as { results?: unknown }).results ?? []) as Array<Record<string, unknown>>;
+    const r1 = results.find((entry) => {
+      const lin = (entry.loop_lineage ?? {}) as Record<string, unknown>;
+      return lin.round === 1;
+    });
+    assert.ok(r1, "round-1 merged entry must be in the hydrated view");
+    const lin1 = (r1!.loop_lineage ?? {}) as Record<string, unknown>;
+    assert.equal(lin1.attempt, 2,
+      "the committed attempt (rejection + redo) must be stamped for the compile view");
+    assert.equal(typeof lin1.attempt, "number");
+  });
+});

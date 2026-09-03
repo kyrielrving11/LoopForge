@@ -1745,17 +1745,23 @@ describe("Round Contract checks (v3.3 proposal declaration + v3.4 active split)"
   // ── rounds), never the submission's own proposal. The eval under test is
   // ── round 2 executing under a contract proposed at round 1. ─────────────
 
-  it("premature_boundary: active done_when claimed met with zero machine evidence → error", () => {
-    // Round 2 executes under ACTIVE "criterion A"; success=true, "criterion
-    // A" IS in success_criteria_met, but no passed command snapshot →
-    // round-uniform claim model says unverified.
-    const active = [committedRound(1, { contract: contract() })];
+  it("premature_boundary: MIXED claims (one met without evidence, one dropped) → error", () => {
+    // Round 2 executes under ACTIVE [criterion A, criterion B]; success=true,
+    // "criterion A" IS in success_criteria_met (no machine evidence), and
+    // "criterion B" is neither met nor remaining. NOT a full-met posture —
+    // v3.5.1: full-met is owned by contract_completion_unverified.
+    const active = [committedRound(1, {
+      contract: contract({ done_when: ["criterion A", "criterion B"] }),
+    })];
     const result = verifySelfEvaluation(
-      se({ round_contract: contract() }), 2, active, null, []);
+      se({ round_contract: contract({ done_when: ["criterion A", "criterion B"] }) }),
+      2, active, null, []);
     const flag = result.flags.find((f) => f.check === CHECK_PREMATURE_BOUNDARY);
-    assert.ok(flag, "met-without-evidence claim must be flagged");
+    assert.ok(flag, "mixed boundary claim must be flagged");
     assert.equal(flag!.severity, "error");
-    assert.match(flag!.detail, /criterion A/);
+    assert.match(flag!.detail, /criterion A|criteria/);
+    assert.ok(!result.flags.some((f) => f.check === CHECK_CONTRACT_COMPLETION_UNVERIFIED),
+      "not all done_when met → completion check stays silent");
   });
 
   it("premature_boundary: same eval with NO active contract stays silent", () => {
@@ -1805,12 +1811,17 @@ describe("Round Contract checks (v3.3 proposal declaration + v3.4 active split)"
       "items listed in remaining are R1's domain, not premature_boundary");
   });
 
-  it("premature_boundary: no_change_reason downgrades to info", () => {
-    const active = [committedRound(1, { contract: contract() })];
+  it("premature_boundary: no_change_reason downgrades to info (dropped-item path)", () => {
+    // v3.5.1: fixture is MIXED (A met with machine evidence via the wrapper
+    // default, B silently dropped) — the full-met no_change_reason case is
+    // owned by the completion check, which deliberately never downgrades.
+    const active = [committedRound(1, {
+      contract: contract({ done_when: ["criterion A", "criterion B"] }),
+    })];
     const result = verifySelfEvaluation(se({
       no_change_reason: "documentation-only round",
-      round_contract: contract(),
-    }), 2, active, null, []);
+      round_contract: contract({ done_when: ["criterion A", "criterion B"] }),
+    }), 2, active);
     const flag = result.flags.find((f) => f.check === CHECK_PREMATURE_BOUNDARY);
     assert.ok(flag);
     assert.equal(flag!.severity, "info");
@@ -2042,7 +2053,10 @@ describe("v3.5 — contract_completion_unverified", () => {
       "cannot observe → not required");
   });
 
-  it("success=true with zero evidence fires BOTH premature_boundary and completion flags", () => {
+  it("success=true full-met with zero evidence fires completion; R-C1 stays silent", () => {
+    // v3.5.1: the full-met posture is owned by contract_completion_unverified
+    // — premature_boundary no longer double-fires on it (it stays for mixed /
+    // silently-dropped claims). One posture, one flag, one enforcement voice.
     withRunTests();
     const result = verifySelfEvaluation(
       se({ execution_evidence: makeExecutionEvidence({
@@ -2058,7 +2072,8 @@ describe("v3.5 — contract_completion_unverified", () => {
     const boundary = result.flags.find((f) => f.check === CHECK_PREMATURE_BOUNDARY);
     assert.ok(completion, "completion flag must fire");
     assert.equal(completion!.severity, "error");
-    assert.ok(boundary, "premature_boundary must also fire (round-uniform model)");
+    assert.equal(boundary, undefined,
+      "premature_boundary must not fire on a fully-met posture");
   });
 });
 

@@ -309,6 +309,18 @@ export class LoopForgeEngine {
             // second persistence format.
             lineage.committed_action = result.action;
         }
+        if (snapshot) {
+            // v3.5.1: compile-side display readers (Round Stats rejected attempts,
+            // the Machine (git) dashboard row) never see raw :feedback entries —
+            // only this merged view — so the machine-observed data they need is
+            // stamped here. In-memory only (hydration cache; disk lineage entries
+            // never carry the stamp — a fresh hydration re-derives it identically
+            // from the feedback entry's transaction snapshot).
+            lineage.attempt = snapshot.attempt;
+            if (Array.isArray(snapshot.roundEvidence) && snapshot.roundEvidence.length > 0) {
+                lineage.round_evidence = snapshot.roundEvidence;
+            }
+        }
         if (!evaluation)
             return;
         for (const key of LoopForgeEngine.EVAL_MERGED_LINEAGE_FIELDS) {

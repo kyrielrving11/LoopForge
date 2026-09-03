@@ -1,5 +1,45 @@
 # Changelog
 
+## 3.5.1 (2026-09-02)
+
+Redundancy cleanup: the display derivations now read TRUE data in the
+production compile view, the contract-extraction logic exists once instead
+of once-in-production-plus-a-test-mirror, and two checks no longer
+double-fire on the same posture.
+
+### Dashboard data feed (display rows are real again)
+
+- `Round Stats` rejected-attempt counts and the `Machine (git)` dashboard
+  row silently vanished in production prompts: engine hydration merges
+  committed decisions onto lineage entries and never exposes raw
+  `:feedback` entries, so the compile-side readers (which parse the
+  feedback transaction) found nothing — the rows only rendered in unit
+  tests that feed raw fixtures. Hydration now stamps
+  `lineage.attempt` / `lineage.round_evidence` onto merged lineage entries
+  (in-memory only — disk lineage is untouched, a fresh hydration
+  re-derives the same stamp from the feedback entry), and the readers
+  (`machineGitMotionSeries`, `deriveRoundStats`) fall back to the stamp.
+- Regression locks: a merged-view compile fixture renders "1 rejected
+  attempt" and "Machine (git): changes in 2/3…", and a real
+  reject-then-commit flow leaves `lineage.attempt = 2` on the hydrated
+  entry.
+
+### One extraction, not two
+
+- `mergedEntryEvaluation` (round-contract.ts) is the single compile-side
+  merged-entry extraction; `deriveActiveContract` delegates to it and the
+  view-parity test calls it directly instead of carrying a test-side copy
+  that could silently drift from production.
+
+### One posture, one flag
+
+- `premature_boundary` no longer fires on a fully-met posture (every
+  done_when claimed) — `contract_completion_unverified` owns it (it also
+  fires on `success=false`, and honors the same `machine_backed_success`
+  tolerance). R-C1 stays for mixed and silently-dropped success claims;
+  the earlier double-flag posture had two errors where enforcement only
+  ever voiced one.
+
 ## 3.5.0 (2026-09-02)
 
 Makes Round Contract closure a machine-backed, success-class claim and

@@ -91,6 +91,12 @@ export function entryRound(entry: Record<string, unknown>): number {
 /** v3.3: Per-round machine git motion — whether git observed file changes
  *  in each of the last `lookback` committed rounds, rebuilt from the
  *  feedback entries' roundEvidence snapshots (already persisted at commit).
+ *  v3.5.1: also reads the merged lineage stamp (lineage.round_evidence) the
+ *  engine writes at hydration — the compile-time view never sees raw
+ *  :feedback entries, so without the stamp the Machine (git) dashboard row
+ *  silently vanished in production prompts. The gate side (raw vault
+ *  entries) keeps reading the transaction path; raw lineage entries carry
+ *  no stamp and are skipped either way.
  *  Returns null when fewer than `lookback` rounds carry git snapshots — the
  *  machine signal is unavailable and callers (R4/R5) keep their legacy
  *  verdict. Lives in token-utils so both the enforcement gate and the
@@ -104,16 +110,21 @@ export function machineGitMotionSeries(
 ): boolean[] | null {
   const byRound = new Map<number, boolean>();
   for (const entry of entries) {
-    const tid = String(entry.task_id ?? "");
-    if (!tid.endsWith(":feedback")) continue;
     const rnd = entryRound(entry);
     if (rnd <= 0 || rnd >= currentRound) continue;
-    const rt = isRecord(entry.loop_lineage)
-      ? (entry.loop_lineage as Record<string, unknown>).round_transaction
-      : null;
-    const snapshot = isRecord(rt) ? rt.snapshot : null;
-    const roundEvidence = isRecord(snapshot) ? snapshot.roundEvidence : null;
-    if (!Array.isArray(roundEvidence)) continue;
+    const lin = isRecord(entry.loop_lineage) ? entry.loop_lineage : null;
+    const rt = lin && isRecord(lin.round_transaction) ? lin.round_transaction : null;
+    const snapshot = rt && isRecord(rt.snapshot) ? rt.snapshot : null;
+    // v3.5.1: two evidence arms — the raw :feedback transaction path and
+    // the merged lineage stamp written by engine hydration. An entry with
+    // neither carries no machine observation and is skipped (raw lineage
+    // entries on disk have no stamp).
+    const roundEvidence = Array.isArray(snapshot?.roundEvidence)
+      ? snapshot.roundEvidence
+      : Array.isArray(lin?.round_evidence)
+        ? lin.round_evidence
+        : null;
+    if (!roundEvidence) continue;
     const git = (roundEvidence as unknown[]).find((value) =>
       isRecord(value) && value.provider === "git");
     if (!git) continue;

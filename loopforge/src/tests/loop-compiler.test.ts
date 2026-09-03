@@ -1884,6 +1884,55 @@ describe("v3.3 — round stats and machine status threading", () => {
     assert.equal(a.prompt_artifact?.promptHash, b.prompt_artifact?.promptHash);
     assert.equal(a.state_file_content, b.state_file_content);
   });
+
+  it("v3.5.1: renders rejected attempts and the Machine (git) row from MERGED entries", () => {
+    // Production shape regression: engine hydration stamps lineage.attempt /
+    // lineage.round_evidence onto merged lineage entries (raw :feedback
+    // entries never reach the compile view). Before the stamp, this fixture
+    // rendered "— rejected attempts" and no Machine row at all.
+    const mergedRound = (round: number, attempt: number, gitMotion: boolean): Record<string, unknown> => ({
+      loop_id: "stats-loop",
+      task_id: `stats-loop:r${round}`,
+      task_type: "loop_lineage",
+      loop_lineage: {
+        loop_id: "stats-loop",
+        round,
+        committed_action: "continue",
+        attempt,
+        round_evidence: [{
+          provider: "git",
+          timestamp: Date.now(),
+          files: gitMotion ? [`src/r${round}.ts`] : [],
+          data: {},
+        }],
+      },
+      execution_evidence: {
+        files_changed: [`src/r${round}.ts`],
+        test_results: { passed: 1, failed: 0, skipped: 0 },
+        success_criteria_met: [],
+        success_criteria_remaining: [],
+        progress_estimate: 0.2 + round * 0.1,
+      },
+    });
+    const response = compileLoop(makeLoopCompileRequest({
+      loop_id: "stats-loop",
+      round: 4,
+      task: "Derive stats",
+      force_level: "l2",
+    }), {
+      results: [
+        mergedRound(1, 2, true), // 1 rejected attempt before commit
+        mergedRound(2, 1, true),
+        mergedRound(3, 1, false), // committed, but no git motion that round
+      ],
+      global_entries: [],
+    } as never);
+    assert.match(response.prompt, /- R1: 1 file, 1 rejected attempt/);
+    assert.match(response.prompt, /Machine \(git\)/);
+    assert.match(response.prompt, /changes in 2\/3 recent committed rounds/,
+      "R1+R2 moved; R3 recorded no motion");
+    assert.match(response.state_file_content ?? "", /Machine \(git\)/);
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

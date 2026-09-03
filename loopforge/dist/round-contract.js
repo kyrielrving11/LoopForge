@@ -120,4 +120,43 @@ export function committedContractRounds(vaultEntries, currentRound) {
     }
     return [...byRound.values()].sort((a, b) => a.round - b.round);
 }
+/** v3.5.1: Extract ONE merged lineage entry into walker-record shape —
+ *  shared by loop-compiler.deriveActiveContract and the view-parity test so
+ *  the extraction logic exists once (a test-side copy would silently drift
+ *  from production). Rules mirror committedContractRounds' contract for the
+ *  compile-side view: only entries with a committed decision participate
+ *  (committed_action gate), backtrack rounds are roll-back directives and
+ *  are skipped, and eval fields are read top-level first with the lineage
+ *  fallback (engine hydration writes merged fields to both). Null when the
+ *  entry is not a committed merged round. */
+export function mergedEntryEvaluation(entry) {
+    if (!isRecord(entry))
+        return null;
+    const raw = entry;
+    const linRaw = raw.loop_lineage ?? raw.lineage;
+    const lin = isRecord(linRaw) ? linRaw : {};
+    const action = lin.committed_action ?? raw.committed_action;
+    if (typeof action !== "string" || action.length === 0)
+        return null;
+    if (action === "backtrack")
+        return null;
+    const rnd = lin.round;
+    if (typeof rnd !== "number" || !Number.isInteger(rnd) || rnd < 1)
+        return null;
+    const contract = raw.round_contract ?? lin.round_contract;
+    const outcome = raw.outcome ?? lin.outcome;
+    const evRaw = raw.execution_evidence ?? lin.execution_evidence;
+    const ev = isRecord(evRaw) ? evRaw : null;
+    const met = ev && Array.isArray(ev.success_criteria_met)
+        ? ev.success_criteria_met.filter((v) => typeof v === "string")
+        : [];
+    const isOutcome = outcome === "success" || outcome === "partial" ||
+        outcome === "failed" || outcome === "blocked";
+    return {
+        round: rnd,
+        proposal: isRecord(contract) ? contract : null,
+        outcome: isOutcome ? outcome : null,
+        met,
+    };
+}
 //# sourceMappingURL=round-contract.js.map

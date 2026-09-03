@@ -69,4 +69,14 @@ export declare function deriveActiveRoundContract(committed: ReadonlyArray<Commi
  *  views — every consumer derives from the same adapter + walker so a
  *  second interpretation of the committed record can never exist. */
 export declare function committedContractRounds(vaultEntries: VaultEntry[], currentRound: number): CommittedRoundEvaluation[];
+/** v3.5.1: Extract ONE merged lineage entry into walker-record shape —
+ *  shared by loop-compiler.deriveActiveContract and the view-parity test so
+ *  the extraction logic exists once (a test-side copy would silently drift
+ *  from production). Rules mirror committedContractRounds' contract for the
+ *  compile-side view: only entries with a committed decision participate
+ *  (committed_action gate), backtrack rounds are roll-back directives and
+ *  are skipped, and eval fields are read top-level first with the lineage
+ *  fallback (engine hydration writes merged fields to both). Null when the
+ *  entry is not a committed merged round. */
+export declare function mergedEntryEvaluation(entry: unknown): CommittedRoundEvaluation | null;
 //# sourceMappingURL=round-contract.d.ts.map

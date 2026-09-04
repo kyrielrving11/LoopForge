@@ -274,7 +274,7 @@
         "constraint_violations",
         "should_continue"
       ],
-      "description": "Structured self-evaluation embedded in compiled prompts.\nThe agent outputs this after completing each round.\nEvery field is consumed by at least one downstream function.\n\nv1.4 (P0–P2): Three new optional fields enable cognitive evolution.\nv1.5 (P4–P5): Execution evidence, progress tracking, and self-correction."
+      "description": "Structured self-evaluation submitted at the round boundary.\nThe agent outputs this after completing each round.\nEvery field is consumed by at least one downstream function.\n\nv1.4 (P0–P2): Three new optional fields enable cognitive evolution.\nv1.5 (P4–P5): Execution evidence, progress tracking, and self-correction."
     },
     "RoundOutcome": {
       "type": "string",
@@ -566,49 +566,6 @@
             "type": "string"
           }
         },
-        "expand": {
-          "type": "array",
-          "items": {
-            "anyOf": [
-              {
-                "type": "string",
-                "enum": [
-                  "milestones"
-                ]
-              },
-              {
-                "type": "string",
-                "enum": [
-                  "sub_goals"
-                ]
-              },
-              {
-                "type": "string",
-                "enum": [
-                  "constraint_lifecycle"
-                ]
-              },
-              {
-                "type": "string",
-                "enum": [
-                  "agent_trust"
-                ]
-              },
-              {
-                "type": "string",
-                "enum": [
-                  "progress"
-                ]
-              },
-              {
-                "type": "string",
-                "enum": [
-                  "loop_synthesis"
-                ]
-              }
-            ]
-          }
-        },
         "confusion_points": {
           "type": "array",
           "items": {
@@ -775,7 +732,8 @@
         "task",
         "mode"
       ],
-      "additionalProperties": true
+      "additionalProperties": true,
+      "description": "Regex to extract a self-evaluation JSON block from agent output."
     },
     "LoopObjective": {
       "type": "object",
@@ -977,9 +935,6 @@
           "items": {
             "$ref": "#/$defs/MilestoneSummary"
           }
-        },
-        "loop_synthesis": {
-          "type": "string"
         }
       },
       "required": [
@@ -1258,9 +1213,6 @@
         },
         "no_change_reason": {
           "type": "string"
-        },
-        "round_contract": {
-          "$ref": "#/$defs/RoundContract"
         }
       },
       "required": [
@@ -1699,6 +1651,16 @@
             "type": "string"
           }
         },
+        "loop_objective": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LoopObjective"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "rolling_summary": {
           "anyOf": [
             {
@@ -1713,6 +1675,12 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/SubGoal"
+          }
+        },
+        "criterion_statuses": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CriterionStatus"
           }
         },
         "suggested_next_task": {
@@ -1786,13 +1754,9 @@
         "blocked",
         "cancelled",
         "max_rounds",
-        "circuit_breaker",
         "stalled",
-        "executor_failure",
         "enforcement_terminated",
-        "paused",
-        "task_complete",
-        "stopped"
+        "paused"
       ]
     },
     "EnforcementResult": {

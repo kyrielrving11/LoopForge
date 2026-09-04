@@ -1,15 +1,12 @@
-/** Tests for self-eval — structured extraction and heuristic fallback. */
+/** Tests for self-eval — structured normalization helpers. */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
-  extractSelfEvaluation,
   buildSelfEvaluation,
   parseExecutionEvidence,
   parseRoundContract,
   effectiveOutcome,
-  inferOutcomeFromText,
-  extractSelfEvaluationWithDiagnostics,
-  collectSelfEvalGaps,
+  validateCoreSelfEvaluation,
 } from "../self-eval.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -195,13 +192,11 @@ describe("buildSelfEvaluation", () => {
       should_continue: true,
       prompt_requests: {
         emphasize: ["SafeERC20", "gas optimization"],
-        expand: ["milestones", "sub_goals"],
         confusion_points: ["Why is milestone 3 complete?"],
       },
     });
     assert.ok(result.prompt_requests);
     assert.deepEqual(result.prompt_requests!.emphasize, ["SafeERC20", "gas optimization"]);
-    assert.deepEqual(result.prompt_requests!.expand, ["milestones", "sub_goals"]);
     assert.deepEqual(result.prompt_requests!.confusion_points, ["Why is milestone 3 complete?"]);
   });
 
@@ -221,20 +216,9 @@ describe("buildSelfEvaluation", () => {
       output_summary: "done",
       constraint_violations: [],
       should_continue: true,
-      prompt_requests: { emphasize: [], expand: [], confusion_points: [] },
+      prompt_requests: { emphasize: [], confusion_points: [] },
     });
     assert.equal(result.prompt_requests, undefined);
-  });
-
-  it("filters invalid expand values", () => {
-    const result = buildSelfEvaluation({
-      success: false,
-      output_summary: "done",
-      constraint_violations: [],
-      should_continue: true,
-      prompt_requests: { expand: ["milestones", "invalid_section", "sub_goals"] },
-    });
-    assert.deepEqual(result.prompt_requests!.expand, ["milestones", "sub_goals"]);
   });
 
   it("ignores non-object prompt_requests", () => {
@@ -264,85 +248,6 @@ describe("buildSelfEvaluation", () => {
     assert.ok(result.prompt_requests!.confusion_points!.length <= 5);
   });
 });
-
-// ═══════════════════════════════════════════════════════════════════════════
-// extractSelfEvaluation
-// ═══════════════════════════════════════════════════════════════════════════
-
-describe("extractSelfEvaluation", () => {
-  const delimiter = "---loopforge-eval\n";
-  const endDelim = "\n---end-loopforge-eval";
-
-  it("extracts a valid eval block from agent output", () => {
-    const output = `Some agent text\n${delimiter}${
-      JSON.stringify({
-        success: true,
-        output_summary: "all done",
-        constraint_violations: [],
-        should_continue: false,
-      })
-    }${endDelim}\nMore text.`;
-    const result = extractSelfEvaluation(output);
-    assert.ok(result);
-    assert.equal(result!.success, true);
-    assert.equal(result!.should_continue, false);
-  });
-
-  it("returns null when no eval block found", () => {
-    const result = extractSelfEvaluation("just some text without delimiters");
-    assert.equal(result, null);
-  });
-
-  it("returns null for invalid JSON in eval block", () => {
-    const result = extractSelfEvaluation(`${delimiter}{not json}${endDelim}`);
-    assert.equal(result, null);
-  });
-
-  it("returns null when required fields are wrong type", () => {
-    const result = extractSelfEvaluation(`${delimiter}${
-      JSON.stringify({
-        success: "not boolean",
-        output_summary: 123,
-        constraint_violations: "not array",
-        should_continue: "not boolean",
-      })
-    }${endDelim}`);
-    assert.equal(result, null);
-  });
-
-  it("returns null when success field is missing", () => {
-    const result = extractSelfEvaluation(`${delimiter}${
-      JSON.stringify({
-        output_summary: "done",
-        constraint_violations: [],
-        should_continue: false,
-      })
-    }${endDelim}`);
-    assert.equal(result, null);
-  });
-
-  it("parses optional fields when present", () => {
-    const output = `${delimiter}${
-      JSON.stringify({
-        success: true,
-        output_summary: "done",
-        constraint_violations: [],
-        should_continue: true,
-        discovered_constraints: ["new rule"],
-        execution_evidence: {
-          files_changed: ["a.ts"],
-          progress_estimate: 0.7,
-        },
-      })
-    }${endDelim}`;
-    const result = extractSelfEvaluation(output);
-    assert.ok(result);
-    assert.deepEqual(result!.discovered_constraints, ["new rule"]);
-    assert.equal(result!.execution_evidence!.progress_estimate, 0.7);
-  });
-});
-
-// v2.6: heuristicSelfEvaluation removed.
 
 // ═══════════════════════════════════════════════════════════════════════════
 // v2.12: Tri-state outcome / blocker / retroactive claims
@@ -387,66 +292,20 @@ describe("v2.12 outcome parsing", () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// v2.12: Tolerant diagnostics (infer / reason / gaps)
+// v2.12: Tolerant field diagnostics
 // ═══════════════════════════════════════════════════════════════════════════
 
-describe("v2.12 diagnostic helpers", () => {
-  it("infers outcome from Chinese success keywords", () => {
-    const inferred = inferOutcomeFromText("任务完成，所有测试通过");
-    assert.equal(inferred?.outcome, "success");
-  });
-
-  it("infers outcome from English failure keywords", () => {
-    const inferred = inferOutcomeFromText("failed: cannot resolve import");
-    assert.equal(inferred?.outcome, "failed");
-  });
-
-  it("defaults to partial without keywords", () => {
-    const inferred = inferOutcomeFromText("做了部分工作");
-    assert.equal(inferred?.outcome, "partial");
-  });
-
-  it("returns null for empty text and truncates summary at 200 chars", () => {
-    assert.equal(inferOutcomeFromText(""), null);
-    const long = inferOutcomeFromText("x".repeat(500));
-    assert.ok(long!.summary.length <= 200);
-    assert.ok(long!.summary.endsWith("..."));
-  });
-
-  it("reports the three extraction failure reasons", () => {
-    assert.equal(extractSelfEvaluationWithDiagnostics("no block here").reason, "no_eval_block");
-    assert.equal(
-      extractSelfEvaluationWithDiagnostics("---loopforge-eval\n{not json\n---end-loopforge-eval").reason,
-      "json_parse_failed",
-    );
-    assert.equal(
-      extractSelfEvaluationWithDiagnostics(
-        "---loopforge-eval\n{\"success\":true}\n---end-loopforge-eval",
-      ).reason,
-      "missing_required_fields",
-    );
-  });
-
-  it("extracts a valid block without a reason", () => {
-    const result = extractSelfEvaluationWithDiagnostics(
-      "---loopforge-eval\n" +
-      JSON.stringify({ success: true, output_summary: "done", constraint_violations: [], should_continue: false }) +
-      "\n---end-loopforge-eval",
-    );
-    assert.equal(result.reason, null);
-    assert.ok(result.selfEval);
-  });
-
-  it("collects field-level gaps without changing acceptance", () => {
-    const gaps = collectSelfEvalGaps({
+describe("core evaluation validation", () => {
+  it("reports only required field gaps", () => {
+    const validation = validateCoreSelfEvaluation({
       success: "yes", // wrong type
       output_summary: "ok",
       constraint_violations: "not-array",
       should_continue: true,
       outcome: 42, // wrong type
     });
-    const fields = gaps.map((g) => g.field).sort();
-    assert.deepEqual(fields, ["constraint_violations", "outcome", "success"]);
+    assert.deepEqual(validation.missing, []);
+    assert.deepEqual(validation.invalid.map((g) => g.field).sort(), ["constraint_violations", "success"]);
   });
 });
 

@@ -1,27 +1,34 @@
-/** Tests for ReplayBackend — time-travel queries. */
-import { describe, it, beforeEach } from "node:test";
+import { beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { ReplayBackend } from "../replay.js";
-import { MemoryLoopStore } from "./_helpers.js";
 import type { VaultEntry } from "../loop-store.js";
+import { committedFeedbackRound, MemoryLoopStore } from "./_helpers.js";
 
-function makeEntry(overrides: Partial<VaultEntry> = {}): VaultEntry {
+function lineage(round: number, overrides: Partial<VaultEntry> = {}): VaultEntry {
   return {
-    task_id: "loop:test:r1",
+    task_id: `loop:test:r${round}`,
+    loop_id: "test",
     loop_lineage: {
       loop_id: "test",
-      round: 1,
+      round,
       goal_id: "audit",
-      recompile_level: "l2",
-      task: "Audit contract",
-      constraints_active: ["check ownership"],
+      recompile_level: round === 1 ? "l2" : "l1",
+      task: `Round ${round}`,
     },
-    success: true,
     ...overrides,
   };
 }
 
-describe("ReplayBackend — getRound", () => {
+function appendRound(
+  store: MemoryLoopStore,
+  round: number,
+  overrides: Partial<VaultEntry> = {},
+): void {
+  store.appendEntry(lineage(round, overrides));
+  store.appendEntry(committedFeedbackRound(round, { loopId: "test" }));
+}
+
+describe("ReplayBackend", () => {
   let store: MemoryLoopStore;
   let replay: ReplayBackend;
 
@@ -30,117 +37,58 @@ describe("ReplayBackend — getRound", () => {
     replay = new ReplayBackend(store);
   });
 
-  it("returns entry for existing round", () => {
-    store.appendEntry(makeEntry());
-    const result = replay.getRound("test", 1);
-    assert.notEqual(result, null);
-    assert.equal(result!.task_id, "loop:test:r1");
+  it("returns only committed rounds", () => {
+    store.appendEntry(lineage(1));
+    assert.equal(replay.getRound("test", 1), null);
+    store.appendEntry(committedFeedbackRound(1, { loopId: "test" }));
+    assert.equal(replay.getRound("test", 1)?.task_id, "loop:test:r1");
   });
 
-  it("returns null for missing round", () => {
-    const result = replay.getRound("test", 99);
-    assert.equal(result, null);
+  it("does not confuse round 1 with round 10", () => {
+    appendRound(store, 10);
+    appendRound(store, 1);
+    assert.equal(replay.getRound("test", 1)?.loop_lineage?.round, 1);
+    assert.equal(replay.getRound("test", 10)?.loop_lineage?.round, 10);
   });
 
-  it("does not confuse round 1 with round 10 when both exist", () => {
-    // Append round 10 BEFORE round 1 so the flat entry list is in
-    // adversarial order — "loop:test:r1" must not prefix-match
-    // "loop:test:r10" (digit guard in queryLoopEntries).
-    store.appendEntry(makeEntry({
-      task_id: "loop:test:r10",
-      loop_lineage: { loop_id: "test", round: 10, goal_id: "g10" },
-    }));
-    store.appendEntry(makeEntry({
-      task_id: "loop:test:r1",
-      loop_lineage: { loop_id: "test", round: 1, goal_id: "g1" },
-    }));
-    const round1 = replay.getRound("test", 1);
-    assert.equal(round1?.loop_lineage?.round, 1);
-    assert.equal(round1?.task_id, "loop:test:r1");
-    const round10 = replay.getRound("test", 10);
-    assert.equal(round10?.loop_lineage?.round, 10);
-    assert.equal(round10?.task_id, "loop:test:r10");
-  });
-
-  it("returns the prompt stored in the typed round projection", () => {
-    store.appendEntry(makeEntry({ full_prompt: "## Compiled Prompt" }));
+  it("preserves the prompt projection and merges committed facts", () => {
+    appendRound(store, 1, { full_prompt: "## Compiled Prompt" });
+    const feedback = store.listEntries("test").find((entry) =>
+      String(entry.task_id).endsWith(":feedback"));
+    const transaction = feedback?.loop_lineage?.round_transaction as Record<string, unknown>;
+    (transaction.result as Record<string, unknown>).roundSuccess = true;
     assert.equal(replay.getRound("test", 1)?.full_prompt, "## Compiled Prompt");
+    assert.equal(replay.getRound("test", 1)?.success, true);
   });
 
-  it("merges feedback success flag", () => {
-    store.appendEntry(makeEntry({ success: false }));
-    store.appendEntry({
-      task_id: "loop:test:r1:feedback",
-      success: true,
-    });
-    const result = replay.getRound("test", 1);
-    assert.equal(result!.success, true);
-  });
-});
-
-describe("ReplayBackend — replay", () => {
-  it("returns all rounds in range", () => {
-    const store = new MemoryLoopStore();
-    store.appendEntry(makeEntry({ task_id: "loop:test:r1", loop_lineage: { loop_id: "test", round: 1 } }));
-    store.appendEntry(makeEntry({ task_id: "loop:test:r2", loop_lineage: { loop_id: "test", round: 2 } }));
-    store.appendEntry(makeEntry({ task_id: "loop:test:r3", loop_lineage: { loop_id: "test", round: 3 } }));
-    const replay = new ReplayBackend(store);
-
-    const results = replay.replay("test");
-    assert.equal(results.length, 3);
+  it("replays committed rounds in a selected range", () => {
+    for (let round = 1; round <= 5; round++) appendRound(store, round);
+    assert.equal(replay.replay("test").length, 5);
+    assert.deepEqual(
+      replay.replay("test", { start: 2, end: 4 })
+        .map((entry) => entry.loop_lineage?.round),
+      [2, 3, 4],
+    );
   });
 
-  it("respects start/end range", () => {
-    const store = new MemoryLoopStore();
-    for (let i = 1; i <= 5; i++) {
-      store.appendEntry(makeEntry({
-        task_id: `loop:test:r${i}`,
-        loop_lineage: { loop_id: "test", round: i },
-      }));
-    }
-    const replay = new ReplayBackend(store);
-
-    const results = replay.replay("test", { start: 2, end: 4 });
-    assert.equal(results.length, 3);
+  it("excludes rolled-back rounds", () => {
+    store.appendEntry(lineage(1));
+    store.appendEntry(committedFeedbackRound(1, { loopId: "test", action: "backtrack" }));
+    assert.deepEqual(replay.replay("test"), []);
   });
 
-  it("returns empty array for empty loop", () => {
-    const store = new MemoryLoopStore();
-    const replay = new ReplayBackend(store);
-    assert.deepEqual(replay.replay("nonexistent"), []);
+  it("returns a sorted factual timeline", () => {
+    appendRound(store, 3);
+    appendRound(store, 1);
+    const timeline = replay.timeline("test");
+    assert.deepEqual(timeline.map((row) => row.round), [1, 3]);
+    assert.equal(timeline[0]?.recompile_level, "l2");
+    assert.equal(timeline[1]?.recompile_level, "l1");
+  });
+
+  it("returns empty views for an unknown loop", () => {
+    assert.equal(replay.getRound("missing", 1), null);
+    assert.deepEqual(replay.replay("missing"), []);
+    assert.deepEqual(replay.timeline("missing"), []);
   });
 });
-
-describe("ReplayBackend — timeline", () => {
-  it("returns sorted summary entries", () => {
-    const store = new MemoryLoopStore();
-    store.appendEntry(makeEntry({
-      task_id: "loop:test:r3",
-      loop_lineage: { loop_id: "test", round: 3, recompile_level: "l1", goal_id: "audit", task: "Fix bugs" },
-      success: false,
-    }));
-    store.appendEntry(makeEntry({
-      task_id: "loop:test:r1",
-      loop_lineage: { loop_id: "test", round: 1, recompile_level: "l2", goal_id: "audit", task: "Audit" },
-      success: true,
-    }));
-    const replay = new ReplayBackend(store);
-
-    const tl = replay.timeline("test");
-    assert.equal(tl.length, 2);
-    assert.equal(tl[0].round, 1);
-    assert.equal(tl[1].round, 3);
-    assert.equal(tl[0].recompile_level, "l2");
-    assert.equal(tl[1].recompile_level, "l1");
-  });
-
-  it("returns empty array for unknown loop", () => {
-    const store = new MemoryLoopStore();
-    const replay = new ReplayBackend(store);
-    const tl = replay.timeline("nonexistent");
-    assert.deepEqual(tl, []);
-  });
-
-});
-
-// v2.6: ReplayBackend.diff() removed — no tool or API exposed it.

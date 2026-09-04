@@ -104,39 +104,6 @@ describe("P2 async evidence", () => {
 
 // v2.6: span tracing removed.
 
-describe("P2 policy effectiveness metrics", () => {
-  it("calculates success and rejection rates per strategy", () => {
-    const metrics = new PolicyMetricsCollector();
-    const accepted: RoundProcessResult = {
-      action: "continue",
-      verificationFlags: [],
-      enforcementAction: "accept",
-      roundSuccess: true,
-      gateContradicted: false,
-      newConsecutiveRejections: 0,
-      shouldPushSuccessTrajectory: true,
-    };
-    const rejected: RoundProcessResult = {
-      ...accepted,
-      action: "reject",
-      enforcementAction: "reject",
-      roundSuccess: false,
-      shouldPushSuccessTrajectory: false,
-    };
-    metrics.recordStrategyOutcome("strategy-loop", "l1", accepted);
-    metrics.recordStrategyOutcome("strategy-loop", "l1", rejected);
-
-    const effectiveness = metrics.snapshot("strategy-loop")
-      .strategyEffectiveness.l1;
-    assert.deepEqual(effectiveness, {
-      attempts: 2,
-      successes: 1,
-      rejections: 1,
-      successRate: 0.5,
-    });
-  });
-});
-
 class MemorySessionStore implements SessionStateStore {
   readonly entries = new Map<string, VaultEntry>();
   load(loopId: string): VaultEntry | undefined { return this.entries.get(loopId); }

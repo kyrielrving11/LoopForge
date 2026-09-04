@@ -1,178 +1,131 @@
-/** v2.12: Typed cognitive state projection — pure derivation tests. */
-
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { deriveCognitiveFacts } from "../cognitive-facts.js";
 import { buildLoopProjection } from "../loop-projection.js";
-import type { LoopForgeResponse } from "../protocol.js";
-import { makeLoopProjection, AgentStatus } from "../protocol.js";
-import type { VaultEntry } from "../loop-store.js";
+import type { CommittedRoundView } from "../committed-round.js";
+import { makeLoopCompileResponse, makeSelfEvaluation } from "../protocol.js";
 
-function lineageEntry(
-  round: number,
-  overrides: Record<string, unknown> = {},
-): VaultEntry {
-  return {
-    id: `loop:proj-loop:r${round}`,
-    task_id: `loop:proj-loop:r${round}`,
-    task_type: "loop_lineage",
-    loop_id: "proj-loop",
-    timestamp: new Date().toISOString(),
-    loop_lineage: { round },
+function round(number: number, overrides: Record<string, unknown> = {}): CommittedRoundView {
+  const evaluation = makeSelfEvaluation({
+    success: false,
+    output_summary: `round ${number}`,
+    constraint_violations: [],
+    should_continue: true,
     ...overrides,
+  });
+  return {
+    source: "feedback",
+    sourceEntry: {},
+    loopId: "projection",
+    round: number,
+    roundId: `loop:projection:round:${number}`,
+    attempt: 1,
+    promptArtifact: null,
+    evaluation,
+    executionEvidence: evaluation.execution_evidence ?? null,
+    verificationFlags: [],
+    result: null,
+    action: "continue",
+    success: evaluation.success,
+    outcome: evaluation.outcome ?? (evaluation.success ? "success" : "failed"),
+    contractProposal: null,
+    beforeEvidence: [],
+    afterEvidence: [],
+    roundEvidence: [],
   };
 }
 
-function compileResponse(overrides: Partial<LoopForgeResponse> = {}): LoopForgeResponse {
-  return {
-    status: AgentStatus.OK,
-    prompt: "prompt",
-    error: null,
-    ...overrides,
-  };
-}
-
-describe("buildLoopProjection", () => {
-  it("derives focus from the last non-failed round", () => {
-    const entries = [
-      lineageEntry(1, { output_summary: "round one", success: true }),
-      lineageEntry(2, { output_summary: "round two failed", success: false }),
-      lineageEntry(3, { output_summary: "round three", success: true }),
-    ];
-    const projection = buildLoopProjection({
-      loopId: "proj-loop",
-      currentRound: 4,
-      compileResponse: compileResponse(),
-      vaultEntries: entries,
-    });
-    assert.equal(projection?.focus?.what, "round three");
-    assert.equal(projection?.focus?.since_round, 3);
+describe("cognitive facts and projection", () => {
+  it("returns null for an empty fact set", () => {
+    const facts = deriveCognitiveFacts({ compileResponse: null, rounds: [] });
+    assert.equal(buildLoopProjection(facts), null);
   });
 
-  it("returns null focus for an empty loop", () => {
-    const projection = buildLoopProjection({
-      loopId: "proj-loop",
-      currentRound: 1,
+  it("derives focus and agent intent from committed rounds", () => {
+    const facts = deriveCognitiveFacts({
       compileResponse: null,
-      vaultEntries: [],
+      rounds: [round(1, { outcome: "partial", output_summary: "implemented parser", next_action: "run tests" })],
     });
-    assert.equal(projection, null);
+    const projection = buildLoopProjection(facts)!;
+    assert.equal(projection.focus?.what, "implemented parser");
+    assert.equal(projection.focus?.since_round, 1);
+    assert.ok(projection.todo.some((item) => item.item === "run tests"));
   });
 
-  it("derives todo from pending/blocked sub-goals (derived) and next_action (agent intent)", () => {
-    const response = compileResponse({
+  it("deduplicates and prioritizes todo facts", () => {
+    const response = makeLoopCompileResponse({
       sub_goals: [
-        { id: "sg-a", description: "audit cache", status: "pending", declared_at_round: 1, status_changed_at_round: 1, priority: 3 },
-        { id: "sg-b", description: "fix resume", status: "blocked", declared_at_round: 1, status_changed_at_round: 2, priority: 5 },
-        { id: "sg-c", description: "done task", status: "done", declared_at_round: 1, status_changed_at_round: 2, priority: 5 },
-      ],
+        { id: "sg-a", description: "fix parser", status: "pending", priority: 2 },
+        { id: "sg-b", description: "repair build", status: "blocked", priority: 1 },
+      ] as never,
     });
-    const entries = [lineageEntry(2, { next_action: "verify migration" })];
-    const projection = buildLoopProjection({
-      loopId: "proj-loop",
-      currentRound: 3,
+    const facts = deriveCognitiveFacts({
       compileResponse: response,
-      vaultEntries: entries,
+      rounds: [round(1, { next_action: "fix parser" })],
     });
-    const todo = projection!.todo;
-    const derived = todo.filter((t) => t.source === "derived");
-    const intent = todo.filter((t) => t.source === "agent_intent");
-    assert.equal(derived.length, 2);
-    assert.ok(derived.some((t) => t.item === "audit cache" && t.reason === "pending sub-goal"));
-    assert.ok(derived.some((t) => t.item === "fix resume" && t.reason === "blocked sub-goal"));
-    assert.equal(intent[0]?.item, "verify migration");
-    assert.equal(intent[0]?.priority, 0);
-    assert.ok(todo.every((t) => t.id.startsWith("todo-")));
+    assert.equal(facts.todo.filter((item) => item.item === "fix parser").length, 1);
+    assert.equal(facts.todo[0]?.item, "repair build");
   });
 
-  it("derives phase boundaries from milestones", () => {
-    const response = compileResponse({
+  it("derives phase, delegation, and handoff from shared facts", () => {
+    const response = makeLoopCompileResponse({
+      loop_objective: {
+        objective: "finish parser",
+        success_criteria: ["parser passes"],
+        hard_constraints: [],
+        created_at_round: 1,
+        loop_id: "projection",
+      },
+      criterion_statuses: [{
+        id: "cr-12345678",
+        text: "parser passes",
+        status: "remaining",
+        related_subgoal_ids: [],
+      }],
       rolling_summary: {
-        key_outcomes: [],
-        recurring_issues: [],
-        rounds_sampled: 5,
-        generated_at_round: 5,
-        milestones: [
-          { label: "Analysis", round_range: { start: 1, end: 3 }, kind: "agent_declared", outcome: "ok", progress_at_boundary: 0.4, carried_constraints: [], resolved_constraints: [], generated_at_round: 3 },
-          { label: "Implementation", round_range: { start: 4, end: 5 }, kind: "agent_declared", outcome: "ok", progress_at_boundary: 0.8, carried_constraints: [], resolved_constraints: [], generated_at_round: 5 },
-        ],
-      },
+        key_outcomes: ["latest outcome"],
+        recurring_issues: ["risk"],
+        milestones: [{ label: "foundation", round_range: { start: 1, end: 2 } }],
+      } as never,
     });
-    const projection = buildLoopProjection({
-      loopId: "proj-loop",
-      currentRound: 6,
+    const facts = deriveCognitiveFacts({
       compileResponse: response,
-      vaultEntries: [],
+      rounds: [round(2, {
+        worker_results: [{
+          agentId: "worker-1",
+          subAgentType: "general-purpose",
+          subTask: "inspect",
+          resultSummary: "needs follow-up",
+          success: false,
+          outcome: "partial",
+          discoveredConstraints: [],
+        }],
+      })],
+      verifiedClaims: ["cr-12345678"],
+      openGates: ["publish package"],
     });
-    assert.equal(projection?.phase?.boundaries.length, 2);
-    assert.equal(projection?.phase?.label, "Implementation");
+    const projection = buildLoopProjection(facts)!;
+    assert.equal(projection.phase?.current, "foundation");
+    assert.equal(projection.delegation.pending, 1);
+    assert.match(projection.handoff.summary, /Current task: finish parser/);
+    assert.match(projection.handoff.summary, /Latest outcome: latest outcome/);
+    assert.match(projection.handoff.summary, /Remaining criteria: parser passes/);
+    assert.deepEqual(projection.handoff.verified, ["cr-12345678"]);
+    assert.ok(projection.handoff.open_risks.some((risk) => risk.includes("publish package")));
   });
 
-  it("derives delegation as a record view from delegation journals", () => {
-    const journal: VaultEntry = {
-      id: "loop:proj-loop:r2:delegations",
-      task_id: "loop:proj-loop:r2:delegations",
-      task_type: "delegation_journal",
-      loop_id: "proj-loop",
-      timestamp: new Date().toISOString(),
-      loop_lineage: {
-        round: 2,
-        delegations: [
-          { index: 1, agentId: "w1", subTask: "write tests", resultSummary: "done", success: true, outcome: "success" },
-          { index: 2, agentId: "w2", subTask: "refactor", resultSummary: "blocked", success: false, outcome: "failed" },
-        ],
-      },
-    };
-    const projection = buildLoopProjection({
-      loopId: "proj-loop",
-      currentRound: 3,
-      compileResponse: compileResponse(),
-      vaultEntries: [journal],
+  it("does not collapse a verified-only or risk-only handoff", () => {
+    const verified = deriveCognitiveFacts({
+      compileResponse: null,
+      rounds: [],
+      verifiedClaims: ["cr-12345678"],
     });
-    assert.equal(projection?.delegation.pending, 1);
-    assert.equal(projection?.delegation.last_results.length, 2);
-    assert.equal(projection?.delegation.last_results[0].outcome, "success");
-    assert.equal(projection?.delegation.last_results[0].round, 2);
-  });
-
-  it("passes verified cr-IDs and open gates into the handoff", () => {
-    const response = compileResponse({
-      rolling_summary: {
-        key_outcomes: [],
-        recurring_issues: ["flaky test"],
-        rounds_sampled: 3,
-        generated_at_round: 3,
-        loop_synthesis: "task at 60%",
-      },
+    assert.ok(buildLoopProjection(verified));
+    const risks = deriveCognitiveFacts({
+      compileResponse: null,
+      rounds: [],
+      openGates: ["needs approval"],
     });
-    const projection = buildLoopProjection({
-      loopId: "proj-loop",
-      currentRound: 4,
-      compileResponse: response,
-      vaultEntries: [],
-      verifiedClaims: ["cr-abcdef12"],
-      openGates: ["Deploy to production"],
-    });
-    assert.equal(projection?.handoff.summary, "task at 60%");
-    assert.deepEqual(projection?.handoff.verified, ["cr-abcdef12"]);
-    assert.ok(projection?.handoff.open_risks.includes("flaky test"));
-    assert.ok(projection?.handoff.open_risks.some((r) => r.includes("Deploy to production")));
-  });
-
-  it("returns null when nothing meaningful can be derived", () => {
-    const projection = buildLoopProjection({
-      loopId: "proj-loop",
-      currentRound: 1,
-      compileResponse: compileResponse(),
-      vaultEntries: [],
-    });
-    assert.equal(projection, null);
-  });
-
-  it("makeLoopProjection factory provides empty defaults", () => {
-    const defaults = makeLoopProjection({});
-    assert.deepEqual(defaults.delegation, { pending: 0, last_results: [] });
-    assert.deepEqual(defaults.handoff, { summary: "", verified: [], open_risks: [] });
-    assert.equal(defaults.focus, null);
-    assert.deepEqual(defaults.todo, []);
+    assert.ok(buildLoopProjection(risks));
   });
 });

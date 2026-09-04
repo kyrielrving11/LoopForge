@@ -8,37 +8,10 @@
 import { eventSequence, StorageCorruptionError } from "./loop-store.js";
 import { auditOrder, deriveGate } from "./cognitive-governance.js";
 import { rederiveClaimViewWithFlags, listVerifiedClaims } from "./evidence-claims.js";
-import { effectiveOutcome } from "./self-eval.js";
 import { isRecord, entryRound as sharedEntryRound } from "./token-utils.js";
+import { decodeCommittedRound } from "./committed-round.js";
 function entryRound(entry) {
     return sharedEntryRound(entry);
-}
-/** Committed transaction payload from a feedback entry. */
-function committedTransaction(entry) {
-    if (!isRecord(entry.loop_lineage))
-        return null;
-    const transaction = entry.loop_lineage.round_transaction;
-    if (!isRecord(transaction) || !isRecord(transaction.snapshot))
-        return null;
-    const snapshot = transaction.snapshot;
-    const evaluation = isRecord(snapshot.evaluation)
-        ? snapshot.evaluation
-        : null;
-    const result = isRecord(snapshot.result) ? snapshot.result : null;
-    const flags = Array.isArray(result?.verificationFlags)
-        ? result.verificationFlags
-        : [];
-    const evidence = Array.isArray(snapshot.afterEvidence)
-        ? snapshot.afterEvidence
-        : Array.isArray(snapshot.roundEvidence)
-            ? snapshot.roundEvidence
-            : [];
-    return {
-        evaluation,
-        flags,
-        afterEvidence: evidence,
-        action: typeof result?.action === "string" ? result.action : undefined,
-    };
 }
 /** Build the audit from committed vault entries. Pure, read-only.
  *  @param store Optional LoopStore — when provided, sequence integrity is
@@ -51,7 +24,7 @@ export function buildAudit(loopId, entries, store) {
         const taskId = String(entry.task_id ?? "");
         if (!taskId.startsWith(`loop:${loopId}:r`) || !taskId.endsWith(":feedback"))
             continue;
-        const committed = committedTransaction(entry);
+        const committed = decodeCommittedRound(entry);
         if (!committed)
             continue;
         // v2.14: rounds committed with action="backtrack" were rolled back —
@@ -60,11 +33,11 @@ export function buildAudit(loopId, entries, store) {
         if (committed.action === "backtrack")
             continue;
         const round = entryRound(entry);
-        const outcome = committed.evaluation
-            ? effectiveOutcome(committed.evaluation)
-            : "unknown";
+        const outcome = committed.outcome ?? "unknown";
         const claimView = committed.evaluation
-            ? rederiveClaimViewWithFlags(committed.evaluation, committed.afterEvidence, committed.flags)
+            ? rederiveClaimViewWithFlags(committed.evaluation, (committed.afterEvidence.length > 0
+                ? committed.afterEvidence
+                : committed.roundEvidence), committed.verificationFlags)
             : null;
         rounds.push({
             round,
@@ -75,7 +48,7 @@ export function buildAudit(loopId, entries, store) {
                     status: claim.status === "verified" ? "verified" : "unverified",
                 }))
                 : [],
-            checks: committed.flags.map((flag) => ({
+            checks: committed.verificationFlags.map((flag) => ({
                 check: flag.check,
                 severity: flag.severity,
                 verdict: flag.severity === "error" ? "failed" : flag.severity,

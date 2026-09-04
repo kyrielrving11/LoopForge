@@ -23,9 +23,9 @@
  * their entry shape into CommittedRoundEvaluation before calling
  * deriveActiveRoundContract.
  */
+import type { CommittedRoundView } from "./committed-round.js";
 import type { RoundContract, RoundOutcome } from "./protocol.js";
-import type { VaultEntry } from "./loop-store.js";
-import { deriveItemId, entryRound, isRecord, jaccardSimilarity } from "./token-utils.js";
+import { deriveItemId, jaccardSimilarity } from "./token-utils.js";
 import { getPolicy } from "./policy.js";
 
 /** One committed round's evaluation, in the shape both adapters produce. */
@@ -116,93 +116,15 @@ export function deriveActiveRoundContract(
   return active;
 }
 
-// ── Raw-vault committed view (shared by verification, session views) ───────
-
-/** Committed :feedback evals of rounds earlier than `currentRound`, in
- *  ascending round order — the input for the ACTIVE-contract walker over
- *  raw vault entries. Reads snapshot.evaluation (the only committed copy of
- *  round_contract / outcome / met claims; top-level feedback fields do not
- *  carry the contract) and skips rounds whose committed action was
- *  "backtrack" — a roll-back directive, not an executed round. An eval
- *  under verification is not committed yet, so it structurally can never
- *  participate. Shared by the verification gate and the status/session
- *  views — every consumer derives from the same adapter + walker so a
- *  second interpretation of the committed record can never exist. */
-export function committedContractRounds(
-  vaultEntries: VaultEntry[],
-  currentRound: number,
+/** Narrow the shared committed-round view to the contract state machine's
+ * inputs. Contract code never interprets persistence envelopes itself. */
+export function contractRoundEvaluations(
+  rounds: ReadonlyArray<CommittedRoundView>,
 ): CommittedRoundEvaluation[] {
-  const byRound = new Map<number, CommittedRoundEvaluation>();
-  for (const entry of vaultEntries) {
-    const tid = String(entry.task_id ?? "");
-    if (!tid.endsWith(":feedback")) continue;
-    const rnd = entryRound(entry as unknown as Record<string, unknown>);
-    if (!(rnd >= 1 && rnd < currentRound)) continue;
-    const raw = entry as unknown as Record<string, unknown>;
-    const lineage = raw.loop_lineage;
-    if (!isRecord(lineage)) continue;
-    const tx = lineage.round_transaction;
-    if (!isRecord(tx)) continue;
-    const result = tx.result;
-    if (isRecord(result) && result.action === "backtrack") continue;
-    const snapshot = tx.snapshot;
-    if (!isRecord(snapshot)) continue;
-    const evaluation = snapshot.evaluation;
-    if (!isRecord(evaluation)) continue;
-    const proposal = evaluation.round_contract;
-    const outcome = evaluation.outcome;
-    const ev = evaluation.execution_evidence;
-    const met = isRecord(ev) && Array.isArray(ev.success_criteria_met)
-      ? ev.success_criteria_met.filter((v: unknown): v is string => typeof v === "string")
-      : [];
-    const isOutcome =
-      outcome === "success" || outcome === "partial" ||
-      outcome === "failed" || outcome === "blocked";
-    byRound.set(rnd, {
-      round: rnd,
-      proposal: isRecord(proposal) ? proposal as unknown as RoundContract : null,
-      outcome: isOutcome ? outcome : null,
-      met,
-    });
-  }
-  return [...byRound.values()].sort((a, b) => a.round - b.round);
-}
-
-/** v3.5.1: Extract ONE merged lineage entry into walker-record shape —
- *  shared by loop-compiler.deriveActiveContract and the view-parity test so
- *  the extraction logic exists once (a test-side copy would silently drift
- *  from production). Rules mirror committedContractRounds' contract for the
- *  compile-side view: only entries with a committed decision participate
- *  (committed_action gate), backtrack rounds are roll-back directives and
- *  are skipped, and eval fields are read top-level first with the lineage
- *  fallback (engine hydration writes merged fields to both). Null when the
- *  entry is not a committed merged round. */
-export function mergedEntryEvaluation(
-  entry: unknown,
-): CommittedRoundEvaluation | null {
-  if (!isRecord(entry)) return null;
-  const raw = entry as Record<string, unknown>;
-  const linRaw = raw.loop_lineage ?? raw.lineage;
-  const lin = isRecord(linRaw) ? linRaw : {};
-  const action = lin.committed_action ?? raw.committed_action;
-  if (typeof action !== "string" || action.length === 0) return null;
-  if (action === "backtrack") return null;
-  const rnd = lin.round;
-  if (typeof rnd !== "number" || !Number.isInteger(rnd) || rnd < 1) return null;
-  const contract = raw.round_contract ?? lin.round_contract;
-  const outcome = raw.outcome ?? lin.outcome;
-  const evRaw = raw.execution_evidence ?? lin.execution_evidence;
-  const ev = isRecord(evRaw) ? evRaw : null;
-  const met = ev && Array.isArray(ev.success_criteria_met)
-    ? ev.success_criteria_met.filter((v: unknown): v is string => typeof v === "string")
-    : [];
-  const isOutcome =
-    outcome === "success" || outcome === "partial" ||
-    outcome === "failed" || outcome === "blocked";
-  return {
-    round: rnd,
-    proposal: isRecord(contract) ? contract as unknown as RoundContract : null,
-    outcome: isOutcome ? outcome : null,
-    met,
-  };
+  return rounds.map((view) => ({
+    round: view.round,
+    proposal: view.contractProposal,
+    outcome: view.outcome,
+    met: view.executionEvidence?.success_criteria_met ?? [],
+  }));
 }

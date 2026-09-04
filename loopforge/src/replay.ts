@@ -6,7 +6,7 @@
 
 import { queryLoopEntries } from "./loop-store.js";
 import type { LoopStore, VaultEntry } from "./loop-store.js";
-import { parseRoundContract } from "./self-eval.js";
+import { committedRoundsFromEntries, decodeCommittedRound } from "./committed-round.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ReplayBackend
@@ -29,46 +29,23 @@ export class ReplayBackend {
       (e) => !String(e.task_id ?? "").endsWith(":feedback"),
     );
 
-    if (!lineageEntries.length) return null;
-
-    const entry = { ...lineageEntries[0] };
-
-    // Merge feedback success flag
     const fbEntries = queryLoopEntries(this.store, loopId, {
       prefix,
       feedbackOnly: true,
     });
-    if (fbEntries.length) {
-      const fbSuccess = fbEntries[0].success;
-      if (fbSuccess !== undefined) {
-        entry.success = fbSuccess;
-        const lineage = (entry.loop_lineage ?? {}) as Record<string, unknown>;
-        (lineage as Record<string, unknown>).success = fbSuccess;
-        entry.loop_lineage = lineage;
-      }
-      // v3.5: surface the round's DECLARED Round Contract (the committed
-      // proposal) so replay/timeline can follow the contract arc. The
-      // contract lives only in the transaction snapshot — read it
-      // defensively and keep the parsed shape (same normalization the
-      // verification gate applies).
-      const raw = fbEntries[0] as unknown as Record<string, unknown>;
-      const fbLineage = raw.loop_lineage;
-      if (fbLineage && typeof fbLineage === "object" && !Array.isArray(fbLineage)) {
-        const tx = (fbLineage as Record<string, unknown>).round_transaction;
-        if (tx && typeof tx === "object" && !Array.isArray(tx)) {
-          const snapshot = (tx as Record<string, unknown>).snapshot;
-          if (snapshot && typeof snapshot === "object" && !Array.isArray(snapshot)) {
-            const evaluation = (snapshot as Record<string, unknown>).evaluation;
-            if (evaluation && typeof evaluation === "object" && !Array.isArray(evaluation)) {
-              const proposal = parseRoundContract(
-                (evaluation as Record<string, unknown>).round_contract,
-              );
-              if (proposal) entry.round_contract = proposal;
-            }
-          }
-        }
-      }
-    }
+    const committed = fbEntries.map(decodeCommittedRound)
+      .find((view) => view?.round === roundNum && view.action !== "backtrack");
+    if (!committed) return null;
+    const base = lineageEntries[0] ?? committed.sourceEntry;
+    const entry = { ...base } as VaultEntry;
+    entry.success = committed.success;
+    entry.output_summary = committed.evaluation?.output_summary ?? entry.output_summary;
+    entry.round_contract = committed.contractProposal ?? undefined;
+    entry.loop_lineage = {
+      ...(entry.loop_lineage ?? {}),
+      success: committed.success,
+      committed_action: committed.action,
+    };
 
     return entry;
   }
@@ -122,15 +99,8 @@ export class ReplayBackend {
 
   private maxRound(loopId: string): number {
     const prefix = `loop:${loopId}:r`;
-    const entries = queryLoopEntries(this.store, loopId, { prefix });
-    let maxR = 0;
-
-    for (const e of entries) {
-      const lineage = (e.loop_lineage ?? {}) as Record<string, unknown>;
-      const rnd = lineage.round as number;
-      if (typeof rnd === "number" && rnd > maxR) maxR = rnd;
-    }
-
-    return maxR;
+    const feedback = queryLoopEntries(this.store, loopId, { prefix, feedbackOnly: true });
+    const rounds = committedRoundsFromEntries(feedback);
+    return rounds.length > 0 ? rounds[rounds.length - 1]!.round : 0;
   }
 }

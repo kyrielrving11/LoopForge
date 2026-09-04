@@ -101,9 +101,8 @@ export declare class SessionManager implements SessionRegistry {
     getHealth(loopId: string): Record<string, unknown> | null;
     /** Core cycle: extract self-eval → record feedback → check stop → compile next.
      *  The lease + per-session queue wrap the RoundLifecycle state machine.
-     *  @param preExtractedEval Optional pre-built SelfEvaluation from MCP tool parameter.
-     *    When provided (MCP path with evaluation parameter), skips regex extraction.
-     *    When undefined (runtime/CLI path), falls back to regex extraction from output.
+     *  @param preExtractedEval Structured SelfEvaluation supplied by the caller.
+     *    An absent value is returned as evaluation_invalid without mutating state.
      *  @param roundId v3.0.1: The roundId of the round this submission reports on
      *    (from the last start/next/resume response). Anchors the submission so a
      *    stale or duplicate submission is not processed against a later round.

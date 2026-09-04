@@ -2,8 +2,8 @@
  *
  * 2-mode engine with vault-backed loop lineage persistence.
  * invokeLoopCompile (primary), invokeFeedback.
- * Circuit breaker prevents infinite stall loops.
- * EngineMetrics tracks silent-failure counters for observability.
+ * Enforcement gates prevent infinite stall loops; EngineMetrics records
+ * silent-failure counters for observability.
  */
 import { randomUUID } from "node:crypto";
 import { getPolicy } from "./policy.js";
@@ -12,12 +12,12 @@ import { AgentStatus, Mode, makeExecutionFeedback, makeLoopCompileRequest, makeL
 import { compileLoop } from "./loop-compiler.js";
 import { logEvent } from "./observability.js";
 import { isRecord } from "./token-utils.js";
-import { isProcessResult, parseRoundTransactionSnapshot } from "./round-transaction.js";
+import { decodeCommittedRound } from "./committed-round.js";
 import { policyMetrics } from "./policy-metrics.js";
-import { parseExecutionEvidence, parseCriterionRevisions, parseWorkerResults, parseRoundContract, parsePromptRequests, } from "./self-eval.js";
+import { parseExecutionEvidence, parseCriterionRevisions, parseWorkerResults, parsePromptRequests, } from "./self-eval.js";
 import { parseLoopExtras } from "./loop-extras-parser.js";
 // ── Re-export self-evaluation utilities (moved to self-eval.ts) ──────────
-export { parseExecutionEvidence, parseCriterionRevisions, parseWorkerResults, extractSelfEvaluation, buildSelfEvaluation, } from "./self-eval.js";
+export { parseExecutionEvidence, parseCriterionRevisions, parseWorkerResults, buildSelfEvaluation, } from "./self-eval.js";
 function makeEngineMetrics() {
     return {
         vaultWriteErrors: 0,
@@ -286,15 +286,9 @@ export class LoopForgeEngine {
      *  lineage entry so the compiler and projections see the full per-round
      *  truth: verification flags, round success, and the agent's own evaluation. */
     mergeCommittedRound(entry, lineage, fb) {
-        const fbLineage = isRecord(fb.loop_lineage) ? fb.loop_lineage : null;
-        const rt = fbLineage && isRecord(fbLineage.round_transaction)
-            ? fbLineage.round_transaction
-            : null;
-        const result = rt && isProcessResult(rt.result) ? rt.result : null;
-        const snapshot = rt ? parseRoundTransactionSnapshot(rt.snapshot) : null;
-        const evaluation = snapshot && isRecord(snapshot.evaluation)
-            ? snapshot.evaluation
-            : null;
+        const committed = decodeCommittedRound(fb);
+        const result = committed?.result ?? null;
+        const evaluation = committed?.evaluation ?? null;
         if (result) {
             if (Array.isArray(result.verificationFlags) &&
                 result.verificationFlags.length > 0) {
@@ -309,16 +303,16 @@ export class LoopForgeEngine {
             // second persistence format.
             lineage.committed_action = result.action;
         }
-        if (snapshot) {
+        if (committed) {
             // v3.5.1: compile-side display readers (Round Stats rejected attempts,
             // the Machine (git) dashboard row) never see raw :feedback entries —
             // only this merged view — so the machine-observed data they need is
             // stamped here. In-memory only (hydration cache; disk lineage entries
             // never carry the stamp — a fresh hydration re-derives it identically
             // from the feedback entry's transaction snapshot).
-            lineage.attempt = snapshot.attempt;
-            if (Array.isArray(snapshot.roundEvidence) && snapshot.roundEvidence.length > 0) {
-                lineage.round_evidence = snapshot.roundEvidence;
+            lineage.attempt = committed.attempt;
+            if (committed.roundEvidence.length > 0) {
+                lineage.round_evidence = committed.roundEvidence;
             }
         }
         if (!evaluation)
@@ -397,7 +391,7 @@ export class LoopForgeEngine {
         return covered;
     }
     /** Merge committed feedback entries into lineage entries and apply the
-     *  legacy output_summary / constraint_violations backfill. Shared by the
+     *  canonical output_summary / constraint_violations projection. Shared by the
      *  full and incremental hydration paths so both produce identical shapes.
      *
      *  The round commit entry (`loop:<id>:r<N>:feedback`) carries the full
@@ -813,15 +807,13 @@ export class LoopForgeEngine {
                         .map((item) => ({ round: item.round, claim: item.claim.slice(0, 500) }))
                         .slice(0, 20)
                     : [],
-                // v3.3: Round Contract (shared lenient parser)
-                round_contract: parseRoundContract(rr.round_contract),
                 // v3.3.1: next_action + prompt_requests — this whitelist rebuild
                 // previously dropped them, and since EVERY compile path (MCP
                 // advance/retry/backtrack + Runtime) funnels through
                 // invokeLoopCompile, the compiler never saw them on the production
                 // path: "Next Action" never rendered, suggested_next_task stayed
                 // empty, sub-goal Phase-3 auto in_progress never fired, and
-                // prompt_requests (emphasize/expand/confusion_points) were never
+                // prompt_requests (emphasize/confusion_points) were never
                 // consumed. Unit tests fed compileLoop directly, so 783 greens
                 // missed the gap. Shared lenient parsers mirror the other fields.
                 next_action: typeof rr.next_action === "string" ? rr.next_action : undefined,
@@ -877,8 +869,10 @@ export class LoopForgeEngine {
                 warnings: response.warnings,
                 // v2.12: Pass the compiler's derived state through for typed
                 // projections (consumed by getProjection without re-persisting).
+                loop_objective: response.loop_objective,
                 rolling_summary: response.rolling_summary,
                 sub_goals: response.sub_goals,
+                criterion_statuses: response.criterion_statuses,
                 suggested_next_task: response.suggested_next_task,
             },
         };

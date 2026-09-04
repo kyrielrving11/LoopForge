@@ -117,7 +117,7 @@ describe("MCP stdio input boundary", () => {
     assert.match(responses[3]?.result?.instructions ?? "", /loopforge_next/);
   });
 
-  it("rejects schema-invalid and unknown tool arguments with -32602", async () => {
+  it("returns retryable evaluation errors while rejecting other invalid arguments", async () => {
     const rpc = spawnRpcServer();
     try {
       const initialized = await rpc.request("initialize", {
@@ -131,6 +131,7 @@ describe("MCP stdio input boundary", () => {
         name: "loopforge_next",
         arguments: {
           sessionId: "session",
+          roundId: "loop:test:round:1",
           evaluation: {
             success: "yes",
             output_summary: "done",
@@ -139,9 +140,16 @@ describe("MCP stdio input boundary", () => {
           },
         },
       });
-      assert.equal(
-        (wrongType.error as Record<string, unknown>).code,
-        -32602,
+      assert.equal(wrongType.error, undefined);
+      const wrongTypeResult = wrongType.result as Record<string, unknown>;
+      assert.equal(wrongTypeResult.isError, true);
+      const wrongTypeContent = wrongTypeResult.content as Array<{ text: string }>;
+      const evaluationError = JSON.parse(wrongTypeContent[0]!.text) as Record<string, unknown>;
+      assert.equal(evaluationError.error, "evaluation_invalid");
+      assert.deepEqual(
+        ((evaluationError.details as Record<string, unknown>).invalid as Array<Record<string, unknown>>)
+          .map((item) => item.field),
+        ["success"],
       );
 
       const unknownField = await rpc.request("tools/call", {

@@ -38,16 +38,23 @@ import {
 } from "./canonical-state.js";
 import type { MachineStatus, PresentedStateSnapshot, RoundStat } from "./canonical-state.js";
 import {
+  decodeCommittedRound,
+  decodeMergedRound,
+  type CommittedRoundView,
+  machineGitMotionSeries,
+  mergedRoundsFromEntries,
+} from "./committed-round.js";
+import type { VaultEntry } from "./loop-store.js";
+import {
+  contractRoundEvaluations,
   deriveActiveRoundContract,
-  mergedEntryEvaluation,
-  type CommittedRoundEvaluation,
 } from "./round-contract.js";
 import { assemblePromptArtifact } from "./prompt-assembler.js";
 import {
   decidePromptLevel,
   type PromptLevelDecision,
 } from "./prompt-policy.js";
-import { deriveItemId, STABLE_ID_RE, jaccardSimilarity, unique, entryRound, isRecord, machineGitMotionSeries } from "./token-utils.js";
+import { deriveItemId, STABLE_ID_RE, jaccardSimilarity, unique, entryRound, isRecord } from "./token-utils.js";
 
 type Entry = Record<string, unknown>;
 
@@ -89,16 +96,14 @@ function loopEntries(loopId: string, context: Record<string, unknown> | null): E
  *  compile-time fields; round-level consumers that matched on the round
  *  number alone could hit them first (they sort after the lineage entry of
  *  the same round), producing an empty goal_id / task / constraints_active
- *  and forcing spurious L2 recovery. Legacy fallback: a :feedback-shaped
- *  entry when no lineage entry exists (pre-hydration raw views). */
+ *  and forcing spurious L2 recovery. A direct :feedback entry is accepted
+ *  when the caller supplies a raw committed view instead of hydration. */
 function roundCanonicalEntry(entries: Entry[], round: number): Entry | null {
   const candidates = entries.filter((entry) => entryRound(entry) === round);
   return (
     candidates.find((entry) => entry.task_type === "loop_lineage") ??
     candidates.find((entry) => String(entry.task_id ?? "").endsWith(":feedback")) ??
-    // Legacy fallback: pre-task_type lineage entries (old vaults and test
-    // fixtures shaped before task_type was standardized) carry no type —
-    // they are the round's compile-time view, not an event. Known event
+    // Untyped compiler inputs are treated as round views, not events. Known event
     // types (delegation journals, gate records) are excluded explicitly so
     // they can never shadow a round again.
     candidates.find((entry) => {
@@ -107,6 +112,13 @@ function roundCanonicalEntry(entries: Entry[], round: number): Entry | null {
     }) ??
     null
   );
+}
+
+/** Return the canonical read model when an entry is a committed round.
+ * Uncommitted compiler lineage has no durable decision yet and deliberately
+ * remains on the local compile path; it cannot be treated as history. */
+function committedView(entry: Entry): CommittedRoundView | null {
+  return decodeMergedRound(entry) ?? decodeCommittedRound(entry as unknown as VaultEntry);
 }
 
 export function computeGoalTextHash(text: string): string {
@@ -123,9 +135,8 @@ export function deriveGoalId(loopId: string, task: string, explicit = ""): strin
 
 /** v3.2: Read the previous round's persisted L1 presentation snapshot — the
  *  diff baseline for L1 collapse. Returns null when the previous round's
- *  lineage entry exists but lacks all three presented_* fields (old-format
- *  entries, L0/L2 compiles) — callers then render in full, which keeps
- *  existing fixtures and pre-v3.2 loops on the full-render path. */
+ *  lineage entry lacks the three presented_* fields (as on L0/L2 compiles),
+ *  so callers render the full L1 state. */
 export function readPresentedBaseline(
   loopId: string,
   round: number,
@@ -305,6 +316,8 @@ function evolveConstraints(
 /** Extract execution_evidence from a vault entry, handling both direct-field
  *  and lineage-nested shapes. Returns null when absent. */
 function entryExecutionEvidence(entry: Entry): Record<string, unknown> | null {
+  const view = committedView(entry);
+  if (view) return view.executionEvidence as Record<string, unknown> | null;
   const direct = entry.execution_evidence;
   if (direct && typeof direct === "object" && !Array.isArray(direct)) {
     return direct as Record<string, unknown>;
@@ -319,6 +332,9 @@ function entryExecutionEvidence(entry: Entry): Record<string, unknown> | null {
 
 /** Read success_criteria_met from an entry's execution_evidence. */
 function entryCriteriaMet(entry: Entry): string[] {
+  const view = committedView(entry);
+  if (view) return view.executionEvidence?.success_criteria_met
+    ?.filter((value): value is string => typeof value === "string") ?? [];
   const ev = entryExecutionEvidence(entry);
   if (!ev) return [];
   const arr = ev.success_criteria_met;
@@ -327,6 +343,9 @@ function entryCriteriaMet(entry: Entry): string[] {
 
 /** Read success_criteria_remaining from an entry's execution_evidence. */
 function entryCriteriaRemaining(entry: Entry): string[] {
+  const view = committedView(entry);
+  if (view) return view.executionEvidence?.success_criteria_remaining
+    ?.filter((value): value is string => typeof value === "string") ?? [];
   const ev = entryExecutionEvidence(entry);
   if (!ev) return [];
   const arr = ev.success_criteria_remaining;
@@ -350,17 +369,20 @@ export function deriveLessons(
   const warns = new Map<string, number[]>();
   for (const entry of entries) {
     const rnd = entryRound(entry);
-    const viols = Array.isArray(entry.constraint_violations)
-      ? entry.constraint_violations.filter((v): v is string => typeof v === "string")
-      : [];
+    const view = committedView(entry);
+    const viols = view
+      ? view.constraintViolations ?? []
+      : Array.isArray(entry.constraint_violations)
+        ? entry.constraint_violations.filter((v): v is string => typeof v === "string")
+        : [];
     for (const text of viols) {
       const list = violations.get(text) ?? [];
       list.push(rnd);
       violations.set(text, list);
     }
-    const flags = Array.isArray(entry.verification_flags)
-      ? entry.verification_flags
-      : [];
+    const flags = view
+      ? view.verificationFlags
+      : Array.isArray(entry.verification_flags) ? entry.verification_flags : [];
     for (const flag of flags) {
       const target = flag.severity === "error"
         ? errors
@@ -397,44 +419,20 @@ export function deriveLessons(
  *  preferring the :feedback entry when both lineage and feedback entries
  *  exist. Zero persistence — re-derived from committed entries. */
 function deriveRoundStats(
-  entries: readonly Record<string, unknown>[],
-  currentRound: number,
+  rounds: ReadonlyArray<CommittedRoundView>,
   window = 5,
 ): RoundStat[] {
-  const byRound = new Map<number, Record<string, unknown>>();
-  for (const entry of entries) {
-    const rnd = entryRound(entry);
-    if (rnd < 1 || rnd >= currentRound) continue;
-    const tid = String(entry.task_id ?? "");
-    const existing = byRound.get(rnd);
-    if (!existing || tid.endsWith(":feedback")) byRound.set(rnd, entry);
-  }
-  const rounds = [...byRound.keys()].sort((a, b) => a - b).slice(-window);
   const stats: RoundStat[] = [];
   let prevProgress: number | null = null;
-  for (const rnd of rounds) {
-    const entry = byRound.get(rnd)!;
-    const ev = entryExecutionEvidence(entry);
+  for (const round of rounds.slice(-window)) {
+    const ev = round.executionEvidence;
     const files = ev?.files_changed;
     const rawProgress = ev?.progress_estimate;
     const progress = typeof rawProgress === "number" ? rawProgress : null;
-    // snapshot.attempt counts the committed attempt (>= 1); rejections
-    // before commit are attempt - 1. Parsed defensively like the machine
-    // git-motion scan in token-utils. v3.5.1: fall back to the merged
-    // lineage stamp (lineage.attempt) written by engine hydration — the
-    // compile view never sees the raw :feedback transaction.
-    const lin = entry.loop_lineage ?? entry.lineage;
-    const rt = isRecord(lin) ? lin.round_transaction : null;
-    const snapshot = isRecord(rt) ? rt.snapshot : null;
-    const attempt = isRecord(snapshot) && typeof snapshot.attempt === "number"
-      ? snapshot.attempt
-      : isRecord(lin) && typeof lin.attempt === "number"
-        ? lin.attempt
-        : null;
     stats.push({
-      round: rnd,
+      round: round.round,
       filesChangedCount: Array.isArray(files) ? files.length : null,
-      rejectedAttempts: attempt !== null && attempt >= 1 ? attempt - 1 : null,
+      rejectedAttempts: round.attempt >= 1 ? round.attempt - 1 : null,
       progressDelta: progress !== null && prevProgress !== null
         ? Number((progress - prevProgress).toFixed(3))
         : null,
@@ -449,10 +447,10 @@ function deriveRoundStats(
  *  — the dashboard then shows no machine row. Display-only companion to the
  *  R4/R5 exculpatory signal. */
 function deriveMachineStatus(
-  entries: readonly Record<string, unknown>[],
+  rounds: ReadonlyArray<CommittedRoundView>,
   currentRound: number,
 ): MachineStatus | undefined {
-  const series = machineGitMotionSeries(entries, currentRound, 3);
+  const series = machineGitMotionSeries(rounds, currentRound, 3);
   if (series === null) return undefined;
   const motionRounds = series.filter(Boolean).length;
   return { windowRounds: 3, gitMotion: motionRounds > 0, motionRounds };
@@ -474,16 +472,12 @@ function deriveActiveContract(
   currentRound: number,
 ): RoundContract | null {
   const entries = loopEntries(loopId, context);
-  const evaluations: CommittedRoundEvaluation[] = [];
-  for (let rnd = 1; rnd < currentRound; rnd++) {
-    const entry = roundCanonicalEntry(entries, rnd);
-    if (!entry) continue;
-    // v3.5.1: extraction shared with the view-parity test (round-contract.ts)
-    // — committed_action gate, backtrack skip, top-level/lineage reads.
-    const record = mergedEntryEvaluation(entry);
-    if (record) evaluations.push(record);
-  }
-  return deriveActiveRoundContract(evaluations);
+  const canonical = Array.from({ length: Math.max(0, currentRound - 1) }, (_, index) =>
+    roundCanonicalEntry(entries, index + 1),
+  ).filter((entry): entry is Entry => entry !== null);
+  return deriveActiveRoundContract(contractRoundEvaluations(
+    mergedRoundsFromEntries(canonical, currentRound),
+  ));
 }
 
 /** v3.2: Derive per-criterion status — the "goal → criteria → evidence"
@@ -563,7 +557,7 @@ export function criteriaMatch(a: string, b: string): boolean {
 /** Detect newly met criteria by comparing the current entry's
  *  success_criteria_met against the previous entry's.
  *  v2.11: ID-first matching (cr-XXXXXXXX) with Jaccard similarity
- *  fallback for backward compatibility.
+ *  fallback for natural-language references.
  *  Returns empty array when there is no previous entry — the first
  *  entry's criteria are the baseline, not a "new" event. */
 function detectNewCriteria(current: Entry, previous: Entry | null): string[] {
@@ -582,6 +576,8 @@ function detectNewCriteria(current: Entry, previous: Entry | null): string[] {
 
 /** Read constraints_active from an entry's lineage. */
 function entryActiveConstraints(entry: Entry): string[] {
+  const view = committedView(entry);
+  if (view) return view.activeConstraints ?? [];
   const lin = lineage(entry);
   const arr = lin.constraints_active;
   return Array.isArray(arr) ? arr.filter((v): v is string => typeof v === "string") : [];
@@ -589,6 +585,8 @@ function entryActiveConstraints(entry: Entry): string[] {
 
 /** Read retracted_constraints from an entry. */
 function entryRetractedConstraints(entry: Entry): string[] {
+  const view = committedView(entry);
+  if (view) return view.retractedConstraints ?? [];
   const direct = entry.retracted_constraints;
   if (Array.isArray(direct)) return direct.filter((v): v is string => typeof v === "string");
   const lin = lineage(entry);
@@ -614,9 +612,10 @@ function buildMilestoneFromEntries(
   kind: MilestoneSummary["kind"],
 ): MilestoneSummary {
   const last = phaseEntries.at(-1);
-  const outcomeRaw = last
-    ? (typeof last.output_summary === "string" ? last.output_summary : "")
-    : "";
+  const lastView = last ? committedView(last) : null;
+  const outcomeRaw = lastView
+    ? (lastView.outputSummary ?? "")
+    : last && typeof last.output_summary === "string" ? last.output_summary : "";
   const outcomeMax = getPolicy().checkpoint.outcome_max_chars;
   const outcome = outcomeRaw.length > outcomeMax
     ? outcomeRaw.slice(0, outcomeMax) + "…"
@@ -712,23 +711,28 @@ export function buildRollingSummary(
   const outcomes: string[] = [];
   const issues: string[] = [];
   for (const entry of windowEntries) {
+    const view = committedView(entry);
     const data = lineage(entry);
     const round = entryRound(entry);
-    const success = entry.success ?? data.success;
-    const summary = typeof entry.output_summary === "string"
-      ? entry.output_summary
-      : typeof data.output_summary === "string" ? data.output_summary : "";
+    const success = view ? view.success : entry.success ?? data.success;
+    const summary = view
+      ? view.outputSummary ?? ""
+      : typeof entry.output_summary === "string"
+        ? entry.output_summary
+        : typeof data.output_summary === "string" ? data.output_summary : "";
     // v2.12: Declared outcome wins the label; the default wording stays
     // "accepted" for zero regression on existing loop output.
-    const declared = entry.outcome;
+    const declared = view ? view.outcome : entry.outcome;
     const outcomeLabel = declared === "success" || declared === "partial" ||
       declared === "failed" || declared === "blocked"
       ? declared
       : success === false ? "failed" : "accepted";
     if (summary) outcomes.push(`[R${round}] ${outcomeLabel}: ${summary}`);
-    const violations = Array.isArray(entry.constraint_violations)
-      ? entry.constraint_violations
-      : Array.isArray(data.constraint_violations) ? data.constraint_violations : [];
+    const violations = view
+      ? view.constraintViolations ?? []
+      : Array.isArray(entry.constraint_violations)
+        ? entry.constraint_violations
+        : Array.isArray(data.constraint_violations) ? data.constraint_violations : [];
     issues.push(...violations.filter((item): item is string => typeof item === "string"));
   }
 
@@ -820,27 +824,6 @@ export function buildRollingSummary(
   // loop's memory skeleton and must not be truncated.
   const cappedMilestones = sampleMilestones(milestones, policy, level);
 
-  // ── Phase 3: Loop Synthesis (formulaic) ──
-  let loopSynthesis = "";
-  if (policy.enable_loop_synthesis && currentRound > 1) {
-    const totalRounds = currentRound - 1;
-    const phaseCount = cappedMilestones.length;
-    const lastProgress = completedEntries.length > 0
-      ? entryProgressEstimate(completedEntries[completedEntries.length - 1])
-      : 0;
-    const activeCount = completedEntries.length > 0
-      ? entryActiveConstraints(completedEntries[completedEntries.length - 1]).length
-      : 0;
-    const totalResolved = cappedMilestones.reduce(
-      (sum, m) => sum + m.resolved_constraints.length,
-      0,
-    );
-    loopSynthesis =
-      `Loop spans ${totalRounds} rounds across ${phaseCount} phases. ` +
-      `Overall progress: ${(lastProgress * 100).toFixed(0)}%. ` +
-      `${activeCount} active constraints, ${totalResolved} resolved across all phases.`;
-  }
-
   if (windowEntries.length === 0 && cappedMilestones.length === 0) return null;
 
   return makeRollingSummary({
@@ -850,7 +833,6 @@ export function buildRollingSummary(
     generated_at_round: currentRound,
     failed_patterns: [],
     milestones: cappedMilestones,
-    loop_synthesis: loopSynthesis || undefined,
   });
 }
 
@@ -890,6 +872,8 @@ export function isCriterionId(ref: string): boolean {
 
 /** Read emerged_subtasks from a vault entry (handles direct + lineage nesting). */
 function entryEmergedSubtasks(entry: Entry): string[] {
+  const view = committedView(entry);
+  if (view) return view.emergedSubtasks ?? [];
   const direct = entry.emerged_subtasks;
   if (Array.isArray(direct)) return direct.filter((v): v is string => typeof v === "string");
   const lin = lineage(entry);
@@ -900,6 +884,8 @@ function entryEmergedSubtasks(entry: Entry): string[] {
 
 /** Read completed_subtasks from an entry. */
 function entryCompletedSubtasks(entry: Entry): string[] {
+  const view = committedView(entry);
+  if (view) return view.completedSubtasks ?? [];
   const direct = entry.completed_subtasks;
   if (Array.isArray(direct)) return direct.filter((v): v is string => typeof v === "string");
   return [];
@@ -907,6 +893,8 @@ function entryCompletedSubtasks(entry: Entry): string[] {
 
 /** Read blocked_subtasks from an entry. */
 function entryBlockedSubtasks(entry: Entry): string[] {
+  const view = committedView(entry);
+  if (view) return view.blockedSubtasks ?? [];
   const direct = entry.blocked_subtasks;
   if (Array.isArray(direct)) return direct.filter((v): v is string => typeof v === "string");
   return [];
@@ -914,6 +902,8 @@ function entryBlockedSubtasks(entry: Entry): string[] {
 
 /** Read canceled_subtasks from an entry. */
 function entryCanceledSubtasks(entry: Entry): string[] {
+  const view = committedView(entry);
+  if (view) return view.canceledSubtasks ?? [];
   const direct = entry.canceled_subtasks;
   if (Array.isArray(direct)) return direct.filter((v): v is string => typeof v === "string");
   return [];
@@ -1128,16 +1118,19 @@ function findDiscoveredRound(
   for (const entry of vaultEntries) {
     const rnd = entryRound(entry);
     if (rnd < 1) continue;
-    const discovered = Array.isArray(entry.discovered_constraints)
-      ? entry.discovered_constraints.filter((v: unknown) => typeof v === "string")
-      : [];
+    const view = committedView(entry);
+    const discovered = view
+      ? view.discoveredConstraints ?? []
+      : Array.isArray(entry.discovered_constraints)
+        ? entry.discovered_constraints.filter((v: unknown) => typeof v === "string")
+        : [];
     for (const d of discovered) {
       // Phase 1: exact ID match (v2.11)
       if (d === targetId || deriveConstraintId(d) === targetId) {
         if (earliest === 0 || rnd < earliest) earliest = rnd;
         break;
       }
-      // Phase 2: Jaccard fallback (backward compatibility)
+      // Phase 2: Jaccard fallback for natural-language references.
       if (jaccardSimilarity(text, d) >= getPolicy().evolution.constraint_match_threshold) {
         if (earliest === 0 || rnd < earliest) earliest = rnd;
         break;
@@ -1170,9 +1163,12 @@ function findLastViolatedRound(
   for (const entry of vaultEntries) {
     const rnd = entryRound(entry);
     if (rnd < 1) continue;
-    const violations = Array.isArray(entry.constraint_violations)
-      ? entry.constraint_violations.filter((v: unknown) => typeof v === "string")
-      : [];
+    const view = committedView(entry);
+    const violations = view
+      ? view.constraintViolations ?? []
+      : Array.isArray(entry.constraint_violations)
+        ? entry.constraint_violations.filter((v: unknown) => typeof v === "string")
+        : [];
     for (const v of violations) {
       if (matchesConstraintText(text, v)) {
         if (rnd > latest) latest = rnd;
@@ -1467,7 +1463,7 @@ export function buildSelfEvalBlock(
     "### LoopForge Evaluation (Required)",
     "",
     `After completing Round ${round}, replace the placeholder values below`,
-    "with your actual results and submit via `loopforge_next`.",
+    "with your actual results and pass this object as `loopforge_next.evaluation`.",
   ];
 
   if (needsClarification) {
@@ -1481,9 +1477,9 @@ export function buildSelfEvalBlock(
     );
   }
 
-  lines.push("---loopforge-eval");
+  lines.push("```json");
   lines.push(JSON.stringify(evalObj, null, 2));
-  lines.push("---end-loopforge-eval");
+  lines.push("```");
   lines.push("");
   lines.push("IMPORTANT: Replace every <placeholder> with your actual data.");
   lines.push("Set success=true only when the full goal and ALL hard constraints are verified.");
@@ -1573,19 +1569,18 @@ export function compileLoop(
   // No new persistence; reconstructed same as milestones/sub-goals.
   const completedEntries = loopEntries(request.loop_id, context)
     .filter((e) => entryRound(e) >= 1 && entryRound(e) < request.round);
+  const committedRounds = mergedRoundsFromEntries(completedEntries, request.round);
   const trend: number[] = [];
-  for (const entry of completedEntries.slice(-10)) {
-    const viols = Array.isArray(entry.constraint_violations)
-      ? entry.constraint_violations.filter((v: unknown) => typeof v === "string")
-      : [];
+  for (const round of committedRounds.slice(-10)) {
+    const viols = round.evaluation?.constraint_violations ?? [];
     // Simple proxy: no violations = perfect trust, each violation = -0.1
     const score = Math.max(0, 1.0 - viols.length * 0.1);
     trend.push(Number(score.toFixed(2)));
   }
 
   // v3.3: Round stats + machine git-motion status (display-only, derived).
-  const roundStats = deriveRoundStats(completedEntries, request.round);
-  const machineStatus = deriveMachineStatus(completedEntries, request.round);
+  const roundStats = deriveRoundStats(committedRounds);
+  const machineStatus = deriveMachineStatus(committedRounds, request.round);
   // v3.4: ACTIVE Round Contract for this compile — derived from committed
   // rounds, so rejection retries / resume / unpause / backtrack compiles
   // (no last_round_result) keep showing the contract as Current Task, and a

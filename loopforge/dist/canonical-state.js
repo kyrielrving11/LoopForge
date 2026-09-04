@@ -174,7 +174,7 @@ export function formatRoundContract(contract) {
 // v3.3.1: Shared presentation atoms
 // ═══════════════════════════════════════════════════════════════════════════
 /** The trust bar line ("██████░░░░ 60%"). The L2 Agent Trust section and the
- *  L1 expand renderer used to carry private copies of this formula — shared
+ *  detailed L1 renderer used to carry private copies of this formula — shared
  *  here so a formatting change is made once (module contract: renderers must
  *  not silently drift apart). */
 export function trustBarLine(score) {
@@ -184,7 +184,7 @@ export function trustBarLine(score) {
     return `${bar} ${(score * 100).toFixed(0)}%`;
 }
 /** Milestone heading line ("**🏁 Round 7** (Rounds 3–7, 60%)"). Shared by the
- *  L2 Phase History and the L1 expand renderer; the expand copy previously
+ *  L2 Phase History and the detailed L1 renderer; the L1 copy previously
  *  rendered the range as "R3–R7", a format only this heading used. */
 export function milestoneHeading(milestone) {
     const kindIcon = milestone.kind === "agent_declared"
@@ -380,9 +380,6 @@ export function renderCanonicalStateMarkdown(state) {
             : "—";
         lines.push("## Agent Trust", "", `${bar} ${(state.agentTrustScore * 100).toFixed(0)}%`, `Trend (last ${state.agentTrustTrend.length}): ${state.agentTrustTrend.join(" → ")}`, `Average: ${avg}`, "");
     }
-    if (state.loopSynthesis) {
-        lines.push("## Loop Summary", "", state.loopSynthesis, "");
-    }
     if (state.externalContext) {
         lines.push("## External Context", "", state.externalContext, "");
     }
@@ -443,7 +440,6 @@ derived) {
         recurringIssues: unique(rolling?.recurring_issues ?? []),
         failedPatterns: unique(rolling?.failed_patterns ?? []),
         milestones: rolling?.milestones ?? [],
-        loopSynthesis: rolling?.loop_synthesis ?? "",
         subGoals: response.sub_goals ?? [],
         criterionStatuses: response.criterion_statuses ?? [],
         lessons: response.lessons ?? [],

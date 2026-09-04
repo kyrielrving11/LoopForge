@@ -51,71 +51,106 @@ because those errors look reasonable within its own context.**
 
 ## What LoopForge does about it
 
-LoopForge runs **outside** the agent. It provides a typed vault that survives
-context compression, an external verification-and-enforcement pipeline the
-agent cannot self-provide, and a recovery system that walks back from dead
-ends without human intervention.
+LoopForge runs outside the agent and owns the boundary between rounds. It
+accepts a structured report, collects evidence, checks the report, decides
+whether the round may commit, and recompiles the next prompt from committed
+facts.
 
-### 1. Vault → compile, not summary → summary
+The runtime keeps two sources deliberately separate:
 
-Each round's self-evaluation is written to a **typed JSON vault**. The next
-round's prompt is not a compressed version of the previous prompt — it's
-**recompiled from the vault**. Milestones are recomputed from raw vault
-entries, not chained from prior summaries. Constraints, criteria, and
-sub-goals carry stable hash-derived IDs (`c-` / `cr-` / `sg-XXXXXXXX`) for
-exact matching across rounds. Delete the state file and it regenerates from
-the vault.
+- **One factual source:** committed typed round documents in the Vault.
+- **One cognitive source:** Canonical State compiled from those committed
+  facts.
 
+This separation prevents a presentation view, metric, or model narrative from
+quietly becoming a second history.
+
+### 1. One factual source
+
+`loopforge_next` accepts a structured `evaluation`. Four core fields are
+strict: `success`, `output_summary`, `constraint_violations`, and
+`should_continue`. Optional fields are normalized by the runtime. Missing or
+mistyped core fields return `evaluation_invalid`; the agent can correct the
+payload and resubmit it with the same `roundId`. This path does not save the
+session, write a round, run either gate, or change rejection and metrics state.
+
+After validation, LoopForge collects Git and command evidence, runs the
+verification and enforcement gates, and commits only an allowed round. The
+committed round documents are the durable record. Rejected and in-flight
+attempts do not join that record, and rolled-back backtrack decisions are
+excluded from final history views.
+
+All historical readers use the same internal `CommittedRoundView`. It decodes,
+orders, deduplicates, and filters round documents once for Replay, Audit,
+Metrics, contracts, compilation, and gate history. It is a read model, not a
+second persistence format.
+
+### 2. One cognitive source
+
+The compiler evolves Canonical State from committed facts. Objectives,
+constraints, evidence, milestones, sub-goals, decisions, and progress enter the
+next prompt through this state, rather than through a summary of the previous
+prompt.
+
+`DerivedCognitiveFacts` derives focus, todo, phase, delegation, and handoff from
+Canonical State and committed rounds. The prompt, optional state file, and
+status projection consume the same facts. Deleting the state file loses no
+truth because LoopForge can regenerate it.
+
+Stable IDs (`c-`, `cr-`, and `sg-XXXXXXXX`) provide exact references where the
+agent supplies them. Natural-language references still use policy-controlled
+similarity matching as a fallback.
+
+```text
+Traditional: prompt -> summary -> next prompt -> another summary
+LoopForge:    committed rounds -> Canonical State -> next prompt
 ```
-❌ Traditional: prompt → summary → next prompt → re-summarize → …
-✅ LoopForge:  prompt → vault entry → next prompt (recompiled from vault)
-```
 
-### 2. External verification & enforcement
+### 3. External verification and enforcement
 
-The **verification gate** (27 cross-checks) compares every agent claim
-against independent evidence — Git snapshots, test runner output, explicit
-verification commands. The **enforcement gate** (14 rules) decides what to do.
-Its focus is not "did the agent violate constraint X" — it detects what the
-agent cannot self-diagnose:
+The verification gate runs 27 evidence cross-checks against Git snapshots,
+test output, and explicitly configured commands. The enforcement gate applies
+14 cognitive-integrity rules to decide whether to accept, reject, backtrack, or
+terminate. These rules cover unsupported success claims, evidence
+contradictions, intent drift, contract violations, and stalled progress.
 
-- R1: Claimed success but criteria remain unmet → **self-deception**
-- R3: Claimed success with no verifiable evidence → **empty claim**
-- R4: Flat progress for 3 rounds → **stalled without knowing it**
-- R5: Zero forward motion → **going through the motions**
-- R7: Said X, did Y → **intent and actions disconnected**
+Round Contracts let a committed round propose bounded work for the next round.
+The active contract is derived from committed history, remains active through
+retry and resume, and closes only when its criteria are claimed complete or the
+agent reports it blocked. Contract completion with a verification plan must be
+backed by passing observations from that round.
 
-**The agent is the system that produced those narratives. It cannot detect
-these patterns from the inside.**
+Machine evidence can excuse a progress-stall verdict when Git motion is
+observed. Self-reported progress cannot create a machine verdict or cancel one.
 
-### 3. Recovery: reject, backtrack, resume
+### 4. Recovery without rewriting history
 
-**Zero-commit rejection** — a rejected round writes nothing to the vault. The
-round ID stays stable, the attempt counter increments, and the next prompt
-includes a diagnostic gap showing exactly what didn't match.
+A rejected submission keeps the same logical `roundId`, increments its attempt,
+and commits no round. The agent receives a focused retry prompt.
 
-**Backtrack** — when progress stalls (R4/R5), the loop rolls back to the last
-clean round instead of terminating. A diagnosis of why the path failed is
-injected. The backtrack prompt includes workspace restore commands with
-affected file lists; the next submission is rejected if the workspace wasn't
-restored. Valid discoveries from skipped rounds are preserved.
+R4 and R5 can backtrack to the last clean committed round. LoopForge injects a
+diagnosis, identifies affected files, and verifies workspace restoration on the
+next submission. Valid discoveries from skipped rounds are preserved, while
+the rolled-back path stays out of final history.
 
-**Pause / Resume / Replay** — cross-process session leases. Idempotent resume
-after interruption. Time-travel queries over committed rounds.
+Durable sessions, owned locks, renewable leases, and idempotent replay let the
+agent resume after process interruption without skipping or double-committing
+a round.
 
 ---
 
 ## What LoopForge is not
 
-- ❌ **Not a memory system** — the state file is a derived view. The vault is
-  truth. No RAG, no vector DB.
-- ❌ **Not a context compressor** — doesn't compress prompts or do smart
-  summarization. Recompiles from vault, not from the previous prompt.
-- ❌ **Not a constraint tracker** — constraints are one signal the verification
-  gate monitors. The core value is external judgment.
-- ❌ **Not a replacement for the agent** — the agent still reads code, edits
-  files, runs tools, and decides how to reason. LoopForge owns the **round
-  boundary**.
+- **Not a memory database.** The optional state file is derived. Committed
+  round documents hold facts, and Canonical State supplies runtime cognition.
+  LoopForge has no RAG or vector database.
+- **Not a context compressor.** It recompiles prompts from typed state instead
+  of compressing the prior prompt.
+- **Not a constraint tracker.** Constraints are one input to external
+  verification and enforcement, not the product boundary.
+- **Not an agent or unattended executor.** The external agent reads code,
+  edits files, runs tools, and chooses its reasoning. LoopForge governs round
+  transitions.
 
 ---
 
@@ -139,148 +174,105 @@ available as a library for custom integrations — see the
 
 ## Architecture
 
+```text
+External agent
+  executes work and submits structured evaluation
+                         |
+                         v
+Evaluation boundary
+  strict core fields, lenient optional normalization
+  invalid -> retry same roundId, no state mutation
+                         |
+                         v
+Round boundary
+  collect evidence -> verification gate -> enforcement gate
+                         |
+             +-----------+-----------+
+             |                       |
+      reject/terminate          accept/stop/backtrack
+      no round commit            commit transaction decision
+                                       |
+                                       v
+Committed round documents
+  single durable factual source
+                                       |
+                                       v
+CommittedRoundView
+  one decoder and one history policy
+                         |
+              +----------+----------+
+              |          |          |
+       Canonical State  Replay   Audit / Metrics
+       cognitive source timeline evidence / diagnostics
+              |
+              v
+DerivedCognitiveFacts
+  focus, todo, phase, delegation, handoff
+              |
+              v
+PromptArtifact / state file / status projection
+              |
+              v
+External agent, next round
 ```
-┌─────────────────────────────────────────────────────┐
-│                  Agent executes round                 │
-│  Reads code · Edits files · Runs tools · Reasons      │
-└──────────────────────┬──────────────────────────────┘
-                       │ Agent submits SelfEvaluation
-                       ▼
-┌─────────────────────────────────────────────────────┐
-│               LoopForge round boundary                │
-│                                                       │
-│  Evidence → Verify → Enforce → Commit → Compile       │
-│  (Git/cmd) (27 checks) (14 rules) (vault) (next)    │
-│                                                       │
-│  accept:    commit state, compile next round           │
-│  reject:    retry same round, zero state mutation      │
-│  backtrack: roll back, restore workspace, inject diag  │
-│  terminate: persist terminal state                     │
-└──────────────────────┬──────────────────────────────┘
-                       │ Recompile prompt from vault
-                       ▼
-┌─────────────────────────────────────────────────────┐
-│             Vault (typed JSON persistence)            │
-│  loops/<id>/rounds/<n>.json · session.json · policy   │
-│  Source of truth. Not a summary chain.                 │
-└─────────────────────────────────────────────────────┘
-```
+
+The current-round gates also inspect the submitted evaluation and fresh
+evidence before commit. Their historical inputs still come through the shared
+committed-round view.
 
 ---
 
 ## Core capabilities
 
-### Durable cognitive state
+### Structured round protocol
 
-Every round's self-evaluation is written to the vault. The next prompt is
-recompiled from vault entries — milestones aren't "summaries of summaries,"
-sub-goal states aren't "compressed then compressed again." Stable IDs
-(`c-` / `cr-` / `sg-XXXXXXXX`) enable exact matching of constraints,
-criteria, and sub-goals across rounds — no Jaccard false positives.
+The MCP boundary validates primitive JSON arguments and structured tool
+outputs. The four required evaluation fields are strict, while optional
+evaluation detail is normalized and bounded. Format errors are retryable and
+cannot contaminate round state.
 
-The compiler tracks sub-goals through a five-state lifecycle (pending →
-in_progress → done / blocked / canceled), manages constraint decay
-(discovered constraints demote to inactive after prolonged irrelevance, then
-auto-reactivate on violation), and builds hierarchical summaries with
-phase-boundary milestones that survive rolling-window eviction.
+### Deterministic state reconstruction
 
-### External verification & enforcement
+The compiler reconstructs state from committed rounds. It tracks five-state
+sub-goals, time-aware discovered constraints, phase milestones, evidence,
+trust, and the active Round Contract without adding another persistence model.
+L0, L1, and L2 select prompt density only. They do not prescribe a reasoning
+technique.
 
-The verification gate runs 27 cross-checks against independent evidence:
-progress regression, empty-change-with-passing, success-with-remaining-criteria,
-success-without-verified-evidence (claims must be machine-backed; a declared
-`no_change_reason` is the honest escape hatch), outcome consistency (declared
-outcome vs legacy boolean, blocked-without-blocker), success-claim conflict,
-retroactive claims (wrong target round, and prior-round criteria verified
-against git history), duplicate constraint discovery, recurring violations,
-retract-fresh-constraint, evidence integrity (Git), required command evidence,
-command evidence mismatch, intent-action drift, sub-goal drift, unverified
-criteria claims, post-backtrack workspace restore (file overlap and git HEAD),
-and — since v3.2 — success without a machine-verified observation this round
-(`success_without_verified_evidence`, keyed on the runtime `providerStatus`
-since v3.6 — the merged `success_unverified` lens). Since v3.3 the gate also verifies
-verification-domain integrity (command entrypoint changed in the round it
-ran; test files changed alongside a passing command) and the four Round
-Contract checks (`round_underspecified`, `round_unverifiable`,
-`round_scope_drift`, `premature_boundary`).
+### Evidence-backed decisions
 
-Since v3.2 the runtime derives a machine-verification status per round
-(`providerStatus`: verified / unavailable / absent) from the already-collected
-snapshots — a success claim with no machine-verified observation fires
-`success_without_verified_evidence` (v3.6: `success_unverified` merged in;
-never self-skips, and an entrypoint-tampered command is not machine
-evidence); under `machine_backed_success: "required"` it rejects, under
-"warn" the round still commits but its success never enters the success
-trajectory. `no_change_reason` remains the honest escape hatch — for R8
-success claims only; contract checks refuse it (v3.6).
-Stall detection (R4/R5) falls back to per-round git observations when
-self-reported progress is missing — checks degrade, they never disappear.
+Verification derives claim provenance and machine status from collected
+snapshots. Enforcement turns those findings into accept, reject, backtrack, or
+terminate decisions. Metrics remain diagnostic and never decide correctness,
+gate outcomes, stop conditions, or contracts.
 
-The enforcement gate's 14 rules detect cognitive integrity failures: fake
-success (R1), recurring violations (R2), empty success (R3), evidence
-contradiction (R-EVID), verification entrypoint tampering (R-EVID-VERIFY),
-contract boundary claimed prematurely (R-C1), success-without-verified-evidence
-(R8), contract scope drift (R-C2), progress stall (R4), terminal flatline (R5),
-max rejections (R6), intent drift (R7), and post-backtrack workspace not
-restored (R9). R7 accepts intentional pivots only when the drift clarification
-references concrete IDs or file paths — three consecutive weak clarifications
-without anchors terminate the loop. R8 rejects first, then terminates on
-repeat. R9 backtracks again instead of accepting unrestored work.
+### Separate observation views
 
-Since v3.3, the stall verdicts (R4/R5) additionally require machine agreement
-on the evidence path: observed git motion or a newly met criterion within the
-window vetoes a delta-based stall (exculpatory only — never new punishment).
-And every round may declare an optional **Round Contract** — `done_when`
-(criterion IDs), `verification_plan` (configured evidence command names),
-`scope`. Since v3.4 the declared contract is a *proposal for the next
-round*: it becomes the **active** contract — rendered as the Current Task,
-the original objective stays in the Objective section — only after the
-declaring round commits, and it stays active until a committed eval lists
-every `done_when` item in `success_criteria_met` (complete) or reports
-`outcome=blocked`; then the closing eval's own proposal takes over, or the
-Current Task reverts to the original task. The active contract is derived
-from committed rounds on every compile path, so rejections, retries,
-resume, and backtrack keep showing it. Completion claims are bound to the
-active contract: claiming a `done_when` item met without machine-verified
-evidence, or silently dropping it while claiming success, is
-`premature_boundary` (R-C1); changing files outside the active scope is
-`round_scope_drift` (R-C2), accepted only with a substantive
-`drift_clarification`. Since v3.5, closing a contract is itself a
-success-class claim: `contract_completion_unverified` fires unless every
-verification_plan command was observed passing in the same round, and a
-different proposal declared while the active contract is open is surfaced
-as a `contract_premature` warn (the contract is still ignored until
-completed or blocked). After a backtrack, a stalled restored contract is
-revised by closing it with `outcome="blocked"` + blocker and declaring the
-revised contract in the same submission. Contract-less L2 prompts suggest
-declaring a contract when the remaining work spans several rounds
-(`prompt.contract_nudge_on_l2`, default true); `loopforge_status` and
-`loopforge_replay` expose the derived active contract and each round's
-declared proposal. No contract → byte-identical behavior, and R8's
-machine-evidence requirement still guards every success claim.
+Replay answers what happened by exposing the committed timeline and round
+diffs. Audit answers whether the final facts are complete and whether claims
+have supporting evidence. Status projects the current cognitive state. These
+interfaces stay separate because they answer different questions, but they
+share the same committed-round decoder and filtering policy.
 
-### Recovery
+### Controlled recovery
 
-Rejected rounds commit nothing. Stalled progress triggers backtrack to the
-last clean round with a diagnosis injected. The backtrack prompt includes
-workspace restore instructions; the next submission is verified for workspace
-cleanliness. Sessions survive process restarts via renewable cross-process
-leases — resume picks up exactly where you left off.
+Retries preserve the logical round identity. Backtrack restores the last clean
+round, carries forward valid discoveries, and checks that the workspace matches
+the restore target. Session documents, monotonic round sequences, atomic
+writes, locks, and renewable leases protect restart and concurrency paths.
 
-### Agent autonomy
+### Agent-owned execution
 
-L0 (retry) / L1 (continuation) / L2 (full rehydration) control state density
-only — reasoning strategy belongs to the agent. Each round, the agent can
-express information needs via `prompt_requests` (emphasize, expand,
-confusion_points). The compiler reorders the prompt within safety boundaries;
-mandatory sections are never removed.
+The external agent remains responsible for planning and tool use. It can ask
+the compiler to emphasize known state or surface confusion points, but cannot
+remove mandatory prompt sections or bypass the budget. LoopForge does not run
+a background agent.
 
-Nine MCP tools (`start` · `next` · `status` · `stop` · `pause` · `resume` ·
-`replay` + `gate_check` · `gate_resolve`) returning JSON content blocks.
-`status` is the unified inspection tool: `view=session|loop|all|audit`
-(formerly `list`/`health`, plus the new read-only verification audit).
-Zero runtime dependencies — Node.js stdlib only. All thresholds, budgets,
-and intervals live in `loop_policy.json`. 807 tests.
+Nine MCP tools expose the runtime: `start`, `next`, `status`, `stop`, `pause`,
+`resume`, `replay`, `gate_check`, and `gate_resolve`. `status` provides
+`session`, `loop`, `all`, and `audit` views. The package uses only the Node.js
+standard library at runtime, and policy controls thresholds, budgets, and
+intervals.
 
 ---
 

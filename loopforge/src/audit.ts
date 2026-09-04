@@ -10,10 +10,9 @@ import type { LoopStore } from "./loop-store.js";
 import { eventSequence, StorageCorruptionError } from "./loop-store.js";
 import { auditOrder, deriveGate } from "./cognitive-governance.js";
 import { rederiveClaimViewWithFlags, listVerifiedClaims } from "./evidence-claims.js";
-import { effectiveOutcome } from "./self-eval.js";
 import type { VaultEntry } from "./loop-store.js";
-import type { SelfEvaluation, VerificationFlag } from "./protocol.js";
 import { isRecord, entryRound as sharedEntryRound } from "./token-utils.js";
+import { decodeCommittedRound } from "./committed-round.js";
 
 export interface AuditRound {
   round: number;
@@ -47,37 +46,6 @@ function entryRound(entry: VaultEntry): number {
   return sharedEntryRound(entry as unknown as Record<string, unknown>);
 }
 
-/** Committed transaction payload from a feedback entry. */
-function committedTransaction(entry: VaultEntry): {
-  evaluation: SelfEvaluation | null;
-  flags: VerificationFlag[];
-  afterEvidence: unknown[];
-  action?: string;
-} | null {
-  if (!isRecord(entry.loop_lineage)) return null;
-  const transaction = entry.loop_lineage.round_transaction;
-  if (!isRecord(transaction) || !isRecord(transaction.snapshot)) return null;
-  const snapshot = transaction.snapshot as Record<string, unknown>;
-  const evaluation = isRecord(snapshot.evaluation)
-    ? snapshot.evaluation as unknown as SelfEvaluation
-    : null;
-  const result = isRecord(snapshot.result) ? snapshot.result : null;
-  const flags = Array.isArray(result?.verificationFlags)
-    ? result.verificationFlags as VerificationFlag[]
-    : [];
-  const evidence = Array.isArray(snapshot.afterEvidence)
-    ? snapshot.afterEvidence as unknown[]
-    : Array.isArray(snapshot.roundEvidence)
-      ? snapshot.roundEvidence as unknown[]
-      : [];
-  return {
-    evaluation,
-    flags,
-    afterEvidence: evidence,
-    action: typeof result?.action === "string" ? result.action : undefined,
-  };
-}
-
 /** Build the audit from committed vault entries. Pure, read-only.
  *  @param store Optional LoopStore — when provided, sequence integrity is
  *  checked and provenanceAvailable becomes true. */
@@ -93,21 +61,21 @@ export function buildAudit(
   for (const entry of ordered) {
     const taskId = String(entry.task_id ?? "");
     if (!taskId.startsWith(`loop:${loopId}:r`) || !taskId.endsWith(":feedback")) continue;
-    const committed = committedTransaction(entry);
+    const committed = decodeCommittedRound(entry);
     if (!committed) continue;
     // v2.14: rounds committed with action="backtrack" were rolled back —
     // they are not part of the loop's final history. Counting them would
     // inflate the round list and let their error flags flip the verdict.
     if (committed.action === "backtrack") continue;
     const round = entryRound(entry);
-    const outcome = committed.evaluation
-      ? effectiveOutcome(committed.evaluation)
-      : "unknown";
+    const outcome = committed.outcome ?? "unknown";
     const claimView = committed.evaluation
       ? rederiveClaimViewWithFlags(
           committed.evaluation,
-          committed.afterEvidence as never[],
-          committed.flags,
+          (committed.afterEvidence.length > 0
+            ? committed.afterEvidence
+            : committed.roundEvidence) as never[],
+          committed.verificationFlags,
         )
       : null;
     rounds.push({
@@ -119,7 +87,7 @@ export function buildAudit(
             status: claim.status === "verified" ? "verified" as const : "unverified" as const,
           }))
         : [],
-      checks: committed.flags.map((flag) => ({
+      checks: committed.verificationFlags.map((flag) => ({
         check: flag.check,
         severity: flag.severity,
         verdict: flag.severity === "error" ? "failed" as const : flag.severity as "warn" | "info",

@@ -4,7 +4,7 @@
  * multi-round loop lifecycle through JSON-RPC over stdio:
  *
  *   start → next(accept) → next(reject) → next(accept after retry)
- *   → pause → resume → next(task_complete) → status → replay → health
+ *   → pause → resume → next(completed) → status → replay → health
  *
  * Each tool call is verified against the structured output schema.
  * This is the definitive "does it work end-to-end" test.
@@ -364,7 +364,7 @@ describe("E2E MCP lifecycle", () => {
 
   // ── Final round: Task complete ──────────────────────────────────────────────
 
-  it("final round — task_complete when should_continue=false", async () => {
+  it("final round — completed when should_continue=false", async () => {
     const result = await client.tool("loopforge_next", {
       sessionId,
       roundId,
@@ -390,10 +390,10 @@ describe("E2E MCP lifecycle", () => {
     });
 
     assert.ok(!result.error, `unexpected error: ${String(result.error)}`);
-    // When task_complete stops the loop, stopReason is set and prompt is null.
+    // A completed loop returns a stop reason and no prompt.
     assert.ok(
-      result.stopReason === "completed" || result.stopReason === "task_complete",
-      `expected completed/task_complete stopReason, got ${String(result.stopReason)}`,
+      result.stopReason === "completed",
+      `expected completed stopReason, got ${String(result.stopReason)}`,
     );
     assert.equal(result.prompt, null);
   });
@@ -404,7 +404,7 @@ describe("E2E MCP lifecycle", () => {
     const result = await client.tool("loopforge_status", { sessionId });
 
     assert.ok(!result.error, `unexpected error: ${String(result.error)}`);
-    // After task_complete, status should be "stopped".
+    // After completion, status should be "stopped".
     // (If the round was already complete from a previous run, it may be "paused".)
     assert.ok(
       result.status === "stopped" || result.status === "paused",

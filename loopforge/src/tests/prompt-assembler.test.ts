@@ -43,7 +43,6 @@ function minimalState(overrides: Partial<CanonicalLoopState> = {}): CanonicalLoo
     recurringIssues: [],
     failedPatterns: [],
     milestones: [],
-    loopSynthesis: "",
     subGoals: [],
     criterionStatuses: [],
     lessons: [],
@@ -257,7 +256,7 @@ describe("assemblePromptArtifact — L2", () => {
     assert.ok(!artifact.renderedPrompt.includes("Full Rehydrated State"));
   });
 
-  it("renders full state blob when fullStateMarkdown is provided (backward compat)", () => {
+  it("renders full state blob when fullStateMarkdown is provided", () => {
     const md = "# Full State\nThe complete cognitive state.";
     const artifact = assemblePromptArtifact(input({
       level: "l2",
@@ -410,18 +409,6 @@ describe("assemblePromptArtifact — prompt_requests L2", () => {
     assert.ok(artifact.includedSections.includes("critical_context"));
   });
 
-  it("ignores expand in L2 (already expanded)", () => {
-    const artifact = assemblePromptArtifact(input({
-      level: "l2",
-      state: minimalState({ milestones: [{ label: "Phase 1", round_range: { start: 1, end: 5 }, outcome: "done", carried_constraints: [], resolved_constraints: [], progress_at_boundary: 0.5, kind: "agent_declared", generated_at_round: 5 }] }),
-      promptRequests: {
-        expand: ["milestones"],
-      },
-    }));
-    // Should NOT have an "expand:" entry in includedSections for L2
-    const expandEntries = artifact.includedSections.filter((s) => s.startsWith("expand:"));
-    assert.equal(expandEntries.length, 0);
-  });
 });
 
 describe("assemblePromptArtifact — prompt_requests L1", () => {
@@ -436,37 +423,6 @@ describe("assemblePromptArtifact — prompt_requests L1", () => {
     // Second confusion point should be collapsed
     assert.ok(artifact.renderedPrompt.includes("1 more confusion point"));
     assert.ok(!artifact.renderedPrompt.includes("also confused about B"));
-  });
-
-  it("expands a single section when requested", () => {
-    const artifact = assemblePromptArtifact(input({
-      level: "l1",
-      state: minimalState({
-        loopSynthesis: "Loop spans 15 rounds across 3 phases.",
-      }),
-      promptRequests: {
-        expand: ["loop_synthesis"],
-      },
-    }));
-    assert.ok(artifact.includedSections.some((s) => s === "expand:loop_synthesis"));
-    assert.ok(artifact.renderedPrompt.includes("Loop spans"));
-  });
-
-  it("only expands first section when multiple requested in L1", () => {
-    const artifact = assemblePromptArtifact(input({
-      level: "l1",
-      state: minimalState({
-        milestones: [{ label: "P1", round_range: { start: 1, end: 3 }, outcome: "ok", carried_constraints: [], resolved_constraints: [], progress_at_boundary: 0.3, kind: "auto", generated_at_round: 3 }],
-        loopSynthesis: "Synthesis text.",
-      }),
-      promptRequests: {
-        expand: ["milestones", "loop_synthesis"],
-      },
-    }));
-    // Only the first expand entry should be rendered
-    const expandEntries = artifact.includedSections.filter((s) => s.startsWith("expand:"));
-    assert.equal(expandEntries.length, 1);
-    assert.equal(expandEntries[0], "expand:milestones");
   });
 
   it("caps emphasize at L1 limit (3)", () => {
@@ -492,7 +448,6 @@ describe("assemblePromptArtifact — prompt_requests L0", () => {
       promptRequests: {
         confusion_points: ["I am confused"],
         emphasize: ["important constraint"],
-        expand: ["milestones"],
       },
     }));
     assert.ok(!artifact.renderedPrompt.includes("⚠️ Confusion Alerts"));
@@ -501,7 +456,7 @@ describe("assemblePromptArtifact — prompt_requests L0", () => {
   });
 });
 
-describe("assemblePromptArtifact — prompt_requests backward compatibility", () => {
+describe("assemblePromptArtifact — optional prompt_requests", () => {
   it("renders normally when promptRequests is undefined", () => {
     const artifact = assemblePromptArtifact(input({
       level: "l2",
@@ -515,7 +470,7 @@ describe("assemblePromptArtifact — prompt_requests backward compatibility", ()
   it("renders normally with empty prompt_requests fields", () => {
     const artifact = assemblePromptArtifact(input({
       level: "l2",
-      promptRequests: { emphasize: [], expand: [], confusion_points: [] },
+      promptRequests: { emphasize: [], confusion_points: [] },
     }));
     assert.ok(artifact.renderedPrompt.includes("Objective"));
     assert.ok(!artifact.renderedPrompt.includes("⚠️ Confusion Alerts"));

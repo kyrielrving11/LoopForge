@@ -15,7 +15,6 @@ import {
   makeLoopCompileRequest,
   makeLoopCompileResponse,
   makeLoopObjective,
-  makeLoopRoundResult,
   type LoopCompileRequest,
   type LoopCompileResponse,
 } from "../protocol.js";
@@ -154,7 +153,6 @@ describe("createCanonicalLoopState", () => {
         rounds_sampled: 1,
         generated_at_round: 2,
         milestones: [],
-        loop_synthesis: "Loop spans 1 round.",
       },
     }), "test.md");
     assert.ok(state.rollingOutcomes.length > 0);
@@ -343,7 +341,6 @@ describe("v3.3 — Roadmap and derived state", () => {
       key_outcomes: [],
       recurring_issues: [],
       failed_patterns: [],
-      loop_synthesis: "",
       rounds_sampled: 4,
       generated_at_round: 4,
     },
@@ -431,37 +428,6 @@ describe("Round Contract state (v3.3 rendering, v3.4 active source)", () => {
     assert.ok(state.currentTask.includes("- Scope: src/auth"));
     assert.ok(!state.currentTask.includes("Fix bugs in auth module"),
       "the original task is NOT the Current Task on a contract round");
-  });
-
-  it("derived active wins even when last_round_result.round_contract differs", () => {
-    // Defense-in-depth for the v3.4 second-source-of-truth elimination: the
-    // stale field (still legal on the request type) must never drive the
-    // Current Task again. Pre-v3.4 the renderer read this field, so a
-    // request carrying STALE would have shown STALE.
-    const staleRequest = request({
-      round: 3,
-      last_round_result: makeLoopRoundResult({
-        round: 2,
-        success: false,
-        output_summary: "Started auth module",
-        constraint_violations: [],
-        manual_fixes_needed: "",
-        round_contract: { work_item: "STALE", done_when: ["x"], verification_plan: [], scope: [] },
-      }),
-    });
-    assert.equal(staleRequest.last_round_result?.round_contract?.work_item, "STALE",
-      "fixture must actually carry the stale field to prove it is ignored");
-    // No derived active → original task, never STALE.
-    const stale = createCanonicalLoopState(staleRequest, response({ round: 3 }), "test.md");
-    assert.equal(stale.currentTask, "Fix bugs in auth module");
-    assert.ok(!stale.currentTask.includes("STALE"));
-    // Derived active wins over the stale field.
-    const derived = createCanonicalLoopState(staleRequest, response({ round: 3 }), "test.md", {
-      roundContract: contract,
-    });
-    assert.equal(derived.roundContract?.work_item, "Implement auth");
-    assert.ok(derived.currentTask.includes("**Implement auth**"));
-    assert.ok(!derived.currentTask.includes("STALE"));
   });
 
   it("no contract → original task text and no roundContract key (hash-neutral)", () => {

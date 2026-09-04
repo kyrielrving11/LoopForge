@@ -16,7 +16,7 @@ import type {
 } from "../loop-store.js";
 import { LOOP_STORE_SCHEMA_VERSION } from "../loop-store.js";
 import { makeExecutionEvidence, makeSelfEvaluation } from "../protocol.js";
-import type { RoundContract, RoundOutcome } from "../protocol.js";
+import type { RoundContract, RoundOutcome, VerificationFlag } from "../protocol.js";
 import { getPolicy } from "../policy.js";
 
 // ── v3.5.1: shared committed-round fixtures ─────────────────────────────────
@@ -43,6 +43,9 @@ export function committedFeedbackRound(
     roundEvidence?: unknown[];
     files?: string[];
     progress?: number;
+    noExecutionEvidence?: boolean;
+    discoveredConstraints?: string[];
+    verificationFlags?: VerificationFlag[];
     loopId?: string;
   } = {},
 ): VaultEntry {
@@ -73,16 +76,22 @@ export function committedFeedbackRound(
             should_continue: true,
             outcome: opts.outcome,
             round_contract: opts.contract,
-            execution_evidence: makeExecutionEvidence({
-              files_changed: opts.files ?? [],
-              test_results: { passed: 0, failed: 0, skipped: 0 },
-              success_criteria_met: opts.met ?? [],
-              success_criteria_remaining: [],
-              progress_estimate: opts.progress ?? 0.2,
-            }),
+            discovered_constraints: opts.discoveredConstraints ?? [],
+            execution_evidence: opts.noExecutionEvidence
+              ? undefined
+              : makeExecutionEvidence({
+                  files_changed: opts.files ?? [],
+                  test_results: { passed: 0, failed: 0, skipped: 0 },
+                  success_criteria_met: opts.met ?? [],
+                  success_criteria_remaining: [],
+                  progress_estimate: opts.progress ?? 0.2,
+                }),
           }),
         },
-        result: { action: opts.action ?? "continue" },
+        result: {
+          action: opts.action ?? "continue",
+          verificationFlags: opts.verificationFlags ?? [],
+        },
       },
     },
   };
@@ -114,6 +123,7 @@ export function mergedLineageRound(
   const lin: Record<string, unknown> = {
     loop_id: loopId,
     round,
+    success: false,
     ...(opts.committed === false
       ? {}
       : { committed_action: opts.action ?? "continue" }),
@@ -133,6 +143,7 @@ export function mergedLineageRound(
     loop_id: loopId,
     task_id: `${loopId}:r${round}`,
     task_type: "loop_lineage",
+    success: false,
     execution_evidence: {
       files_changed: opts.files ?? [],
       test_results: { passed: 0, failed: 0, skipped: 0 },

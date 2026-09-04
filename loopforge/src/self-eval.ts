@@ -1,16 +1,10 @@
-/** Self-evaluation extraction and parsing — pure functions.
- *
- * These functions parse an Agent's raw output into a structured
- * SelfEvaluation. They have no dependency on Engine state, file I/O,
- * or external services. They are shared by both the MCP tool handler
- * (which receives structured JSON directly) and the legacy invoke
- * path (which regex-scans free-text Agent output).
+/** Structured self-evaluation parsing and normalization — pure functions.
+ * The MCP boundary validates required fields before these helpers run.
  */
 
 import {
   makeExecutionEvidence,
   makeSelfEvaluation,
-  SELF_EVAL_REGEX,
   type CriterionRevision,
   type ExecutionEvidence,
   type PromptRequests,
@@ -20,6 +14,29 @@ import {
 } from "./protocol.js";
 
 // ── Raw parsing helpers ───────────────────────────────────────────────────
+
+function boundedString(value: unknown, maxChars: number): string | undefined {
+  return typeof value === "string" ? value.slice(0, maxChars) : undefined;
+}
+
+function boundedStringArray(
+  value: unknown,
+  maxItems: number,
+  maxChars: number,
+): string[] {
+  return Array.isArray(value)
+    ? value
+        .filter((item): item is string => typeof item === "string")
+        .map((item) => item.slice(0, maxChars))
+        .slice(0, maxItems)
+    : [];
+}
+
+function nonNegativeInteger(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.max(0, Math.trunc(value))
+    : 0;
+}
 
 /** v2.12: Parse retroactive claims — {round ≥ 1, claim non-empty}, capped at
  *  20 entries. Invalid entries are silently dropped (lenient parsing). */
@@ -44,26 +61,25 @@ function parseRetroactiveClaims(raw: unknown): { round: number; claim: string }[
 export function parseExecutionEvidence(
   raw: Record<string, unknown> | undefined | null,
 ): ExecutionEvidence | undefined {
-  if (!raw || typeof raw !== "object") return undefined;
-  const testResults = raw.test_results as Record<string, unknown> | undefined;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const testResults = raw.test_results && typeof raw.test_results === "object" &&
+      !Array.isArray(raw.test_results)
+    ? raw.test_results as Record<string, unknown>
+    : undefined;
   return makeExecutionEvidence({
-    files_changed: Array.isArray(raw.files_changed)
-      ? raw.files_changed.filter((v: unknown) => typeof v === "string")
-      : [],
-    test_results: testResults && typeof testResults.passed === "number"
+    files_changed: boundedStringArray(raw.files_changed, 200, 500),
+    test_results: testResults && typeof testResults.passed === "number" &&
+        Number.isFinite(testResults.passed)
       ? {
-          passed: testResults.passed as number,
-          failed: (testResults.failed as number) ?? 0,
-          skipped: (testResults.skipped as number) ?? 0,
+          passed: nonNegativeInteger(testResults.passed),
+          failed: nonNegativeInteger(testResults.failed),
+          skipped: nonNegativeInteger(testResults.skipped),
         }
       : null,
-    success_criteria_met: Array.isArray(raw.success_criteria_met)
-      ? raw.success_criteria_met.filter((v: unknown) => typeof v === "string")
-      : [],
-    success_criteria_remaining: Array.isArray(raw.success_criteria_remaining)
-      ? raw.success_criteria_remaining.filter((v: unknown) => typeof v === "string")
-      : [],
-    progress_estimate: typeof raw.progress_estimate === "number"
+    success_criteria_met: boundedStringArray(raw.success_criteria_met, 100, 500),
+    success_criteria_remaining: boundedStringArray(raw.success_criteria_remaining, 100, 500),
+    progress_estimate: typeof raw.progress_estimate === "number" &&
+        Number.isFinite(raw.progress_estimate)
       ? Math.max(0, Math.min(1, raw.progress_estimate))
       : 0.0,
   });
@@ -79,9 +95,10 @@ export function parseCriterionRevisions(
       typeof v === "object" && v !== null &&
       typeof (v as Record<string, unknown>).old === "string" &&
       typeof (v as Record<string, unknown>).new === "string")
+    .slice(0, 20)
     .map((v: unknown) => {
       const r = v as Record<string, unknown>;
-      return { old: r.old as string, new: r.new as string };
+      return { old: (r.old as string).slice(0, 500), new: (r.new as string).slice(0, 500) };
     });
 }
 
@@ -96,32 +113,24 @@ export function parseWorkerResults(
       typeof (v as Record<string, unknown>).agentId === "string" &&
       typeof (v as Record<string, unknown>).subTask === "string" &&
       typeof (v as Record<string, unknown>).resultSummary === "string")
+    .slice(0, 20)
     .map((v: unknown) => {
       const w = v as Record<string, unknown>;
       return {
-        agentId: w.agentId as string,
-        subAgentType: typeof w.subAgentType === "string" ? w.subAgentType : "general-purpose",
-        subTask: w.subTask as string,
-        resultSummary: w.resultSummary as string,
+        agentId: (w.agentId as string).slice(0, 200),
+        subAgentType: typeof w.subAgentType === "string"
+          ? w.subAgentType.slice(0, 100)
+          : "general-purpose",
+        subTask: (w.subTask as string).slice(0, 500),
+        resultSummary: (w.resultSummary as string).slice(0, 1000),
         success: typeof w.success === "boolean" ? w.success : false,
         // v2.12: Declared outcome wins; derived from success when absent.
         outcome: w.outcome === "success" || w.outcome === "partial" || w.outcome === "failed"
           ? w.outcome
           : undefined,
-        discoveredConstraints: Array.isArray(w.discoveredConstraints)
-          ? w.discoveredConstraints.filter((c: unknown) => typeof c === "string")
-          : [],
+        discoveredConstraints: boundedStringArray(w.discoveredConstraints, 50, 500),
       };
     });
-}
-
-// ── Self-evaluation extraction ───────────────────────────────────────────
-
-/** Extract a structured SelfEvaluation from agent output text.
- *  Returns null if no valid self-eval block is found.
- *  The agent is instructed to output JSON between the delimiters. */
-export function extractSelfEvaluation(text: string): SelfEvaluation | null {
-  return extractSelfEvaluationWithDiagnostics(text).selfEval;
 }
 
 /** v2.12: The effective round outcome — declared outcome wins, otherwise
@@ -142,81 +151,38 @@ export function effectiveSuccess(selfEval: SelfEvaluation): boolean {
   return effectiveOutcome(selfEval) === "success";
 }
 
-/** v2.12: Minimal outcome inference from free text — DIAGNOSTICS ONLY.
- *  The runtime never guesses state from text; this only tells the agent
- *  what was recognizable so it can resubmit a structured evaluation. */
-export function inferOutcomeFromText(
-  text: string,
-): { outcome: "success" | "partial" | "failed"; summary: string } | null {
-  const trimmed = typeof text === "string" ? text.trim() : "";
-  if (trimmed.length === 0) return null;
-  let outcome: "success" | "partial" | "failed" = "partial";
-  // NOTE: \b is ASCII-word based, so CJK keywords are matched without it.
-  if (/(?:completed?|success|done|finished)\b|完成|成功/i.test(trimmed)) outcome = "success";
-  else if (/(?:failed?|error|cannot|unable)\b|失败|错误/i.test(trimmed)) outcome = "failed";
-  const summary = trimmed.length > 200 ? `${trimmed.slice(0, 197)}...` : trimmed;
-  return { outcome, summary };
+/** Required evaluation fields are the only format boundary. Optional fields
+ * are deliberately normalized by buildSelfEvaluation instead of rejecting a
+ * round for a non-authoritative reporting detail. */
+export interface EvaluationValidation {
+  missing: string[];
+  invalid: Array<{ field: string; expected: string }>;
 }
 
-/** v2.12: Why structured extraction failed — for actionable diagnostics. */
-export type ExtractionFailureReason =
-  | "no_eval_block"
-  | "json_parse_failed"
-  | "missing_required_fields";
-
-/** v2.12: Extraction with a structured failure reason. Behavior identical
- *  to extractSelfEvaluation on success; the reason powers the stalled
- *  diagnostic message so the agent knows exactly what to fix. */
-export function extractSelfEvaluationWithDiagnostics(
-  text: string,
-): { selfEval: SelfEvaluation | null; reason: ExtractionFailureReason | null } {
-  const match = text.match(SELF_EVAL_REGEX);
-  if (!match) return { selfEval: null, reason: "no_eval_block" };
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(match[1]);
-  } catch {
-    return { selfEval: null, reason: "json_parse_failed" };
-  }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    return { selfEval: null, reason: "json_parse_failed" };
-  }
-  const record = parsed as Record<string, unknown>;
-  if (typeof record.success !== "boolean" ||
-      typeof record.output_summary !== "string" ||
-      !Array.isArray(record.constraint_violations) ||
-      typeof record.should_continue !== "boolean") {
-    return { selfEval: null, reason: "missing_required_fields" };
-  }
-  return { selfEval: buildSelfEvaluation(record), reason: null };
-}
-
-/** v2.12: Field-level validation gaps — diagnostics only. Collects what
- *  buildSelfEvaluation silently tolerates, without changing acceptance. */
-export function collectSelfEvalGaps(
+export function validateCoreSelfEvaluation(
   raw: Record<string, unknown>,
-): { field: string; issue: string }[] {
-  const gaps: { field: string; issue: string }[] = [];
-  if (typeof raw.success !== "boolean") gaps.push({ field: "success", issue: "must be a boolean" });
-  if (typeof raw.output_summary !== "string") {
-    gaps.push({ field: "output_summary", issue: "must be a string" });
+): EvaluationValidation {
+  const missing: string[] = [];
+  const invalid: Array<{ field: string; expected: string }> = [];
+  const required = ["success", "output_summary", "constraint_violations", "should_continue"] as const;
+  for (const field of required) {
+    if (!(field in raw)) missing.push(field);
   }
-  if (!Array.isArray(raw.constraint_violations)) {
-    gaps.push({ field: "constraint_violations", issue: "must be an array" });
+  if ("success" in raw && typeof raw.success !== "boolean") {
+    invalid.push({ field: "success", expected: "boolean" });
   }
-  if (typeof raw.should_continue !== "boolean") {
-    gaps.push({ field: "should_continue", issue: "must be a boolean" });
+  if ("output_summary" in raw && typeof raw.output_summary !== "string") {
+    invalid.push({ field: "output_summary", expected: "string" });
   }
-  if (raw.outcome !== undefined && typeof raw.outcome !== "string") {
-    gaps.push({ field: "outcome", issue: "must be a string enum (success|partial|failed|blocked)" });
+  if ("constraint_violations" in raw &&
+      (!Array.isArray(raw.constraint_violations) ||
+       raw.constraint_violations.some((value) => typeof value !== "string"))) {
+    invalid.push({ field: "constraint_violations", expected: "array of strings" });
   }
-  if (raw.blocker !== undefined && typeof raw.blocker !== "string") {
-    gaps.push({ field: "blocker", issue: "must be a string" });
+  if ("should_continue" in raw && typeof raw.should_continue !== "boolean") {
+    invalid.push({ field: "should_continue", expected: "boolean" });
   }
-  if (raw.retroactiveClaims !== undefined && !Array.isArray(raw.retroactiveClaims)) {
-    gaps.push({ field: "retroactiveClaims", issue: "must be an array of {round, claim}" });
-  }
-  return gaps;
+  return { missing, invalid };
 }
 
 /** Build a SelfEvaluation from a parsed JSON object.
@@ -228,13 +194,9 @@ export function buildSelfEvaluation(
     raw.execution_evidence as Record<string, unknown> | undefined,
   );
 
-  const retractedConstraints: string[] = Array.isArray(raw.retracted_constraints)
-    ? raw.retracted_constraints.filter((v: unknown) => typeof v === "string")
-    : [];
+  const retractedConstraints = boundedStringArray(raw.retracted_constraints, 50, 500);
   const revisedCriteria: CriterionRevision[] = parseCriterionRevisions(raw.revised_success_criteria);
-  const wrongAssumptions: string[] = Array.isArray(raw.wrong_assumptions)
-    ? raw.wrong_assumptions.filter((v: unknown) => typeof v === "string")
-    : [];
+  const wrongAssumptions = boundedStringArray(raw.wrong_assumptions, 50, 500);
   const workerResults = parseWorkerResults(raw.worker_results);
 
   return makeSelfEvaluation({
@@ -244,15 +206,9 @@ export function buildSelfEvaluation(
       ? raw.constraint_violations.filter((v: unknown) => typeof v === "string")
       : [],
     should_continue: typeof raw.should_continue === "boolean" ? raw.should_continue : true,
-    discovered_constraints: Array.isArray(raw.discovered_constraints)
-      ? raw.discovered_constraints.filter((v: unknown) => typeof v === "string")
-      : [],
-    objective_refinement: typeof raw.objective_refinement === "string"
-      ? raw.objective_refinement
-      : "",
-    emerged_subtasks: Array.isArray(raw.emerged_subtasks)
-      ? raw.emerged_subtasks.filter((v: unknown) => typeof v === "string")
-      : [],
+    discovered_constraints: boundedStringArray(raw.discovered_constraints, 50, 500),
+    objective_refinement: boundedString(raw.objective_refinement, 1000) ?? "",
+    emerged_subtasks: boundedStringArray(raw.emerged_subtasks, 50, 500),
     execution_evidence: executionEvidence,
     retracted_constraints: retractedConstraints,
     revised_success_criteria: revisedCriteria,
@@ -260,19 +216,11 @@ export function buildSelfEvaluation(
     worker_results: workerResults,
     compression_checkpoint:
       typeof raw.compression_checkpoint === "boolean" ? raw.compression_checkpoint : false,
-    checkpoint_label:
-      typeof raw.checkpoint_label === "string" ? raw.checkpoint_label : "",
-    next_action:
-      typeof raw.next_action === "string" ? raw.next_action : undefined,
-    completed_subtasks: Array.isArray(raw.completed_subtasks)
-      ? raw.completed_subtasks.filter((v: unknown) => typeof v === "string")
-      : [],
-    blocked_subtasks: Array.isArray(raw.blocked_subtasks)
-      ? raw.blocked_subtasks.filter((v: unknown) => typeof v === "string")
-      : [],
-    canceled_subtasks: Array.isArray(raw.canceled_subtasks)
-      ? raw.canceled_subtasks.filter((v: unknown) => typeof v === "string")
-      : [],
+    checkpoint_label: boundedString(raw.checkpoint_label, 200) ?? "",
+    next_action: boundedString(raw.next_action, 500),
+    completed_subtasks: boundedStringArray(raw.completed_subtasks, 50, 500),
+    blocked_subtasks: boundedStringArray(raw.blocked_subtasks, 50, 500),
+    canceled_subtasks: boundedStringArray(raw.canceled_subtasks, 50, 500),
     stop_reason:
       raw.stop_reason === "gave_up" || raw.stop_reason === "blocked" || raw.stop_reason === "needs_human_input"
         ? raw.stop_reason
@@ -291,8 +239,7 @@ export function buildSelfEvaluation(
       typeof raw.no_change_reason === "string" && raw.no_change_reason.trim().length > 0
         ? raw.no_change_reason.slice(0, 200)
         : undefined,
-    drift_clarification:
-      typeof raw.drift_clarification === "string" ? raw.drift_clarification : undefined,
+    drift_clarification: boundedString(raw.drift_clarification, 1000),
     prompt_requests: parsePromptRequests(raw.prompt_requests),
     round_contract: parseRoundContract(raw.round_contract),
   });
@@ -340,28 +287,16 @@ export function parsePromptRequests(
 ): PromptRequests | undefined {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
   const obj = raw as Record<string, unknown>;
-  const emphasize = Array.isArray(obj.emphasize)
-    ? obj.emphasize.filter((v: unknown) => typeof v === "string").slice(0, 10)
-    : [];
-  const validExpands = new Set([
-    "milestones", "sub_goals", "constraint_lifecycle",
-    "agent_trust", "progress", "loop_synthesis",
-  ]);
-  const expand = Array.isArray(obj.expand)
-    ? obj.expand.filter((v: unknown): v is NonNullable<PromptRequests["expand"]>[number] =>
-        typeof v === "string" && validExpands.has(v))
-    : [];
-  const confusionPoints = Array.isArray(obj.confusion_points)
-    ? obj.confusion_points.filter((v: unknown) => typeof v === "string").slice(0, 5)
-    : [];
+  const emphasize = boundedStringArray(obj.emphasize, 5, 500);
+  const confusionPoints = boundedStringArray(obj.confusion_points, 3, 200);
   // Return undefined when all fields are empty — semantically equivalent
   // to "not set", avoids carrying an empty object through the pipeline.
-  if (emphasize.length === 0 && expand.length === 0 && confusionPoints.length === 0) {
+  if (emphasize.length === 0 && confusionPoints.length === 0) {
     return undefined;
   }
-  return { emphasize, expand, confusion_points: confusionPoints };
+  return { emphasize, confusion_points: confusionPoints };
 }
 
-// v2.6: heuristicSelfEvaluation removed — if structured extraction fails,
-// the round is stalled. The 20-line keyword heuristic was dead weight; an
-// agent that can't produce a structured self-evaluation is genuinely stuck.
+// Free-text inference is intentionally absent. Invalid core fields are
+// rejected before round advancement and may be resubmitted with the same
+// roundId without changing session, gate, metric, or vault state.

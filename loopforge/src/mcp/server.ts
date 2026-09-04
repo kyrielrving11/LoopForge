@@ -12,12 +12,12 @@ import {
   TOOL_HANDLERS,
   TOOL_SCHEMAS,
   ToolInputValidationError,
-  validateToolInput,
+  validateToolDispatchInput,
   validateToolOutput,
 } from "./tools.js";
 import { isRecord } from "../token-utils.js";
 
-const SERVER_INFO = { name: "loopforge-mcp", version: "3.3.0" };
+const SERVER_INFO = { name: "loopforge-mcp", version: "3.6.0" };
 const SUPPORTED_PROTOCOL_VERSIONS = new Set([
   "2024-11-05",
   "2025-03-26",
@@ -201,7 +201,7 @@ export class McpServer {
     const handler = TOOL_HANDLERS[name];
     if (!handler) throw new JsonRpcError(-32602, `Unknown tool: ${name}`);
     try {
-      validateToolInput(name, args);
+      validateToolDispatchInput(name, args);
     } catch (error) {
       if (error instanceof ToolInputValidationError) {
         throw new JsonRpcError(-32602, error.message);

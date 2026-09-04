@@ -2,7 +2,7 @@
 
 **A context window is not memory. Memory needs a runtime.**
 
-> **v3.5.0** — `npm install -g loopforge`. Node.js ≥ 18. Zero runtime dependencies.
+> **v3.6.0** — `npm install -g loopforge`. Node.js ≥ 18. Zero runtime dependencies.
 > [中文文档](../README.zh-CN.md)
 
 ---
@@ -29,41 +29,51 @@ If each step succeeds with probability p, N sequential steps succeed with probab
 
 ## What LoopForge does about it
 
-LoopForge doesn't compete on context window size. It runs **outside** the agent and provides three things:
+LoopForge runs outside the agent and owns the boundary between rounds. Its
+design has two explicit sources:
 
-### 1. Breaks the summary cascade: Vault → compile, not summary → summary
+- **One factual source:** committed typed round documents in the Vault.
+- **One cognitive source:** Canonical State compiled from those facts.
 
-Each round's self-evaluation is written to a **typed vault** (JSON documents). The next round's prompt is not generated from the previous prompt's summary — it's **recompiled from the vault**. Milestones aren't summaries of summaries; they're recomputed from raw vault entries. Constraints and criteria carry stable IDs (`c-XXXXXXXX`, `cr-XXXXXXXX`) for exact matching — no Jaccard guesswork.
+`loopforge_next` accepts a structured evaluation. The core fields `success`,
+`output_summary`, `constraint_violations`, and `should_continue` are strict;
+optional fields are normalized. Invalid input returns `evaluation_invalid` and
+can be corrected with the same `roundId` without saving session state, writing
+a round, entering either gate, or changing metrics.
 
+Valid submissions pass through evidence collection, 27 verification checks,
+and 14 enforcement rules. Only an allowed round joins committed history. The
+shared internal `CommittedRoundView` gives Replay, Audit, Metrics, contracts,
+the compiler, and gate history one decoder and one filtering policy. It does
+not create another storage format.
+
+The compiler evolves Canonical State from committed history, then derives
+focus, todo, phase, delegation, and handoff for prompts and status views. The
+next prompt therefore comes from typed cognitive state, not from a summary of
+the previous prompt.
+
+```text
+Traditional: prompt -> summary -> next prompt -> another summary
+LoopForge:    committed rounds -> Canonical State -> next prompt
 ```
-❌ Traditional: prompt → summary → next prompt → re-summarize → … (information evaporates each cycle)
-✅ LoopForge:  prompt → vault entry → next prompt (recompiled from vault, zero evaporation)
-```
 
-### 2. External judgment: the perspective the agent cannot provide for itself
-
-The verification gate cross-checks every agent claim against independent evidence — Git snapshots, test runner output, explicit verification commands. The enforcement gate detects what the agent cannot self-diagnose:
-
-- R1: You claimed success but criteria remain unmet → **you're deceiving yourself**
-- R3: You claimed success with no verifiable evidence → **your claim is empty**
-- R4: You've been stuck for 3 rounds → **you're stalled and you don't know it**
-- R5: Your progress is exactly zero → **you're going through the motions**
-- R7: You said you'd do X but did Y → **your intent and actions are disconnected**
-
-**The agent cannot self-detect these. The agent is the system that produced those narratives. External judgment is necessary.**
-
-### 3. Walk back from dead ends
-
-Progress stall or flatline → roll back to the last clean round instead of terminating. A diagnosis of why the path failed is injected. The backtrack prompt includes concrete workspace restore commands — `git checkout -- . && git clean -fd` with affected file lists. The verification gate checks that the workspace was actually restored before the next submission. Valid discoveries from skipped rounds are preserved.
+The verification gate compares claims with Git snapshots, test output, and
+configured command evidence. The enforcement gate can accept, reject,
+backtrack, or terminate. A rejected submission commits nothing. R4 and R5 can
+restore the last clean round, inject a diagnosis, and verify workspace
+restoration before work continues.
 
 ---
 
 ## What LoopForge is not
 
-- ❌ **Not a memory system** — the state file is a derived view. The vault is truth. No RAG, no vector DB.
-- ❌ **Not a context compressor** — doesn't compress prompts, doesn't do smart summarization. Recompiles from vault, not from the previous prompt.
-- ❌ **Not a constraint tracker** — constraints are one signal the verification gate monitors. The core value is external judgment.
-- ❌ **Not a replacement for the agent** — the agent still reads code, edits files, runs tools, and decides how to reason. LoopForge owns the **round boundary**.
+- **Not a memory database.** The optional state file is derived. Committed
+  rounds hold facts, and Canonical State supplies runtime cognition.
+- **Not a context compressor.** It recompiles prompts from typed state instead
+  of compressing the prior prompt.
+- **Not a constraint tracker.** Constraints are one input to external judgment.
+- **Not an agent or unattended executor.** The external agent owns planning,
+  code changes, and tool use. LoopForge governs round transitions.
 
 ---
 
@@ -86,54 +96,44 @@ available as a library for custom integrations.
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────┐
-│                  Agent executes round                 │
-│  Reads code · Edits files · Runs tools · Reasons      │
-└──────────────────────┬──────────────────────────────┘
-                       │ Agent submits SelfEvaluation
-                       ▼
-┌─────────────────────────────────────────────────────┐
-│               LoopForge round boundary                │
-│                                                       │
-│  Evidence → Verify → Enforce → Commit → Compile       │
-│  (Git/cmd) (27 checks) (14 rules) (vault) (next)    │
-│                                                       │
-│  accept:  commit state, compile next round             │
-│  reject:  retry same round, zero state mutation        │
-│  backtrack: roll back to last clean round, restore     │
-│  terminate: persist terminal state                     │
-└──────────────────────┬──────────────────────────────┘
-                       │ Recompile prompt from vault
-                       ▼
-┌─────────────────────────────────────────────────────┐
-│             Vault (typed JSON persistence)            │
-│  loops/<id>/rounds/<n>.json · session.json · policy   │
-│  Source of truth. Not a summary chain.                 │
-└─────────────────────────────────────────────────────┘
+```text
+External agent
+  -> structured evaluation
+  -> evidence / verification / enforcement
+  -> accept, reject, backtrack, or terminate
+       reject / terminate: no round commit
+       accept / stop / backtrack: commit transaction decision
+  -> committed round documents        [factual source]
+  -> CommittedRoundView                [shared read model]
+       -> Replay                       [what happened]
+       -> Audit / Metrics              [evidence and diagnostics]
+       -> Canonical State              [cognitive source]
+            -> DerivedCognitiveFacts
+            -> prompt / state file / status
+            -> external agent, next round
 ```
 
 ---
 
 ## Key capabilities
 
-**Vault → compile, not summary → summary.** Every round's self-evaluation is written to the vault. The next prompt is recompiled from vault entries. Stable IDs (`c-` / `cr-` / `sg-XXXXXXXX`) enable exact constraint, criterion, and sub-goal matching — no Jaccard false positives.
-
-**External judgment.** The verification gate cross-checks agent claims against independent evidence. The enforcement gate detects cognitive integrity violations — progress stalls, intent-action gaps, empty success claims. The judge never shares the agent's context.
-
-**Model expresses information needs.** Each round, the agent tells the compiler: what to emphasize, which sections to expand, where it's confused. The compiler reorders within safety boundaries — mandatory sections untouched, budget respected.
-
-**Walk back from dead ends.** Progress stall → roll back to last clean round with a diagnosis. Workspace restore is prompted and verified — the next submission is rejected if files from skipped rounds are still dirty.
-
-**Substantive drift, not filler.** R7 accepts intentional pivots only when the clarification references concrete IDs or file paths. Three consecutive weak clarifications terminate the loop.
-
-**Thin prompt, fat state file.** L0 (retry) / L1 (continuation) / L2 (full rehydration) control density only — reasoning strategy belongs to the agent. Truth is in the vault.
-
-**Pause · Resume · Replay.** Cross-process session leases. Idempotent resume after interruption. Time-travel queries over committed rounds.
-
-**Nine MCP tools.** `start` · `next` · `status` · `stop` · `pause` · `resume` · `replay` + `gate_check` · `gate_resolve`. `status` is the unified inspection tool (`view=session|loop|all|audit`). Every tool returns JSON content blocks.
-
-**Zero dependencies. Policy-driven.** Node.js stdlib only. All thresholds, budgets, and intervals live in `loop_policy.json`. 783 tests.
+- Structured evaluation with strict core fields, lenient optional normalization,
+  and retryable `evaluation_invalid` responses.
+- One committed-round history for the compiler, contracts, gates, Replay,
+  Audit, and Metrics.
+- One Canonical State for prompts, the optional state file, and current-status
+  cognition.
+- Evidence-backed accept, reject, backtrack, and terminate decisions, including
+  Round Contract and workspace-restore checks.
+- L0, L1, and L2 prompt density, five-state sub-goals, constraint lifecycle,
+  milestones, and agent-requested emphasis or confusion points.
+- Separate Replay and Audit views. Replay answers what happened; Audit checks
+  evidence and completeness.
+- Durable sessions with atomic round documents, sequence checks, owned locks,
+  renewable leases, pause, resume, and idempotent recovery.
+- Nine MCP tools: `start`, `next`, `status`, `stop`, `pause`, `resume`, `replay`,
+  `gate_check`, and `gate_resolve`.
+- Zero runtime dependencies. Policy controls thresholds, budgets, and intervals.
 
 ---
 

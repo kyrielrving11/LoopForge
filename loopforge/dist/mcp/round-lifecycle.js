@@ -6,13 +6,11 @@
  * leases); this class owns "what happens to a session" (state machine,
  * recovery, result building).
  *
- * Every method was moved verbatim from SessionManager. Only reference paths
- * changed (this.sessions.* → registry.*, this.ownerId / this.leaseMs →
- * constructor deps, this.contextProvider → getContext()).
+ * The lifecycle depends on a narrow registry and explicit stores/providers;
+ * session ownership, queues, and leases remain in SessionManager.
  */
 import { randomUUID } from "node:crypto";
-import { LoopForgeEngine, extractSelfEvaluation } from "../engine.js";
-import { extractSelfEvaluationWithDiagnostics, inferOutcomeFromText, } from "../self-eval.js";
+import { LoopForgeEngine } from "../engine.js";
 import { deriveGate } from "../cognitive-governance.js";
 import { Mode, makeLoopCompileRequest, makeLoopRoundResult, } from "../protocol.js";
 import { EvidenceCollector, runBacktrackAutoRestore } from "../evidence-provider.js";
@@ -167,7 +165,9 @@ export class RoundLifecycle {
         // only reachable through the read-only audit.
         checkRoundSequence(this.store, loopId);
         const currentRound = lineage.current_round ?? 1;
-        const successTrajectory = lineage.success_trajectory ?? lineage.quality_trajectory ?? [];
+        const successTrajectory = Array.isArray(lineage.success_trajectory)
+            ? lineage.success_trajectory.filter((value) => typeof value === "boolean")
+            : [];
         const task = entry.task ?? "";
         const maxRounds = lineage.max_rounds ?? getPolicy().engine.max_rounds;
         const roundSnapshot = parseRoundTransactionSnapshot(lineage.round_snapshot);
@@ -345,8 +345,8 @@ export class RoundLifecycle {
         }, pr.roundSuccess);
     }
     /** Resume tail: the session has been reconstructed and registered. Reconcile
-     *  a committed-but-undelivered round, restore the held prompt, or compile
-     *  the next prompt from current round state (legacy path). */
+     *  a committed-but-undelivered round, restore the held prompt, or recover a
+     *  missing prompt from current round state. */
     resume(session) {
         const reconciled = this.reconcileCommittedRound(session);
         if (reconciled)
@@ -354,7 +354,7 @@ export class RoundLifecycle {
         const restored = this.restoredPromptResult(session);
         if (restored)
             return restored;
-        // Legacy session without a stored prompt: compile once, then persist it.
+        // Missing held prompt: compile once, then persist it.
         const request = buildLoopRequest(session);
         const prepared = new RoundDriver(session.engine, this.store).prepareSync(request, session.loopId, session.currentRound);
         const prompt = prepared?.prompt ?? null;
@@ -483,17 +483,10 @@ export class RoundLifecycle {
             ? entry.gate_action
             : String(entry.gate_id ?? ""));
     }
-    /** Extract a SelfEvaluation from agent output.
-     *  Structured param preferred → regex extraction from the output text.
-     *  Returns null when neither produced one — the caller stalls the round
-     *  (v2.6 design: the runtime never guesses state from text, so an
-     *  unparseable submission is a stalled round, not a partially-executed
-     *  one; the old extractionFailed/"partial enforcement" plumbing was
-     *  removed in v3.3.1 as unreachable). */
-    extractEvaluation(output, preExtractedEval) {
-        if (preExtractedEval)
-            return preExtractedEval;
-        return extractSelfEvaluation(output);
+    /** The boundary supplies the typed evaluation. Free-text parsing is
+     *  deliberately not part of the round state machine. */
+    extractEvaluation(_output, preExtractedEval) {
+        return preExtractedEval ?? null;
     }
     /** Execute the round transaction and apply per-rule rejection tracking.
      *  MUTATES: session.roundSnapshot, session.consecutiveRejections,
@@ -518,7 +511,6 @@ export class RoundLifecycle {
         const actualEvidence = completed.actualEvidence;
         session.roundSnapshot = outcome.snapshot;
         const pr = outcome.result;
-        policyMetrics.recordStrategyOutcome(session.loopId, session.currentLevel, pr, outcome.replayed);
         // v2.12: Clarification streak tracking — independent of rejection tracking.
         // Reset on rounds without intent_drift; track substantive vs weak clarifications.
         this.updateClarificationStreak(session, pr);
@@ -746,11 +738,9 @@ export class RoundLifecycle {
             sessionId, round: session.currentRound,
             roundId: session.roundSnapshot?.roundId,
             prompt: null, stopReason: reason,
-            stopDetail: pr.stopReason === "circuit_breaker"
-                ? `${pr.roundSuccess ? "No" : "All"} recent rounds failed, triggering the circuit breaker.`
-                : pr.stopReason === "max_rounds"
-                    ? "The configured maximum number of rounds has been reached."
-                    : `Loop stopped: ${reason}.`,
+            stopDetail: pr.stopReason === "max_rounds"
+                ? "The configured maximum number of rounds has been reached."
+                : `Loop stopped: ${reason}.`,
             roundSuccess: pr.roundSuccess,
         };
     }
@@ -833,12 +823,8 @@ export class RoundLifecycle {
         if (session.status !== "running" && session.status !== "stalled") {
             return { sessionId, round: session.currentRound, prompt: null, stopReason: session.status, stopDetail: `Session is ${session.status}. Use loopforge_resume to restart a paused session, or loopforge_start for a new task.` };
         }
-        // v3.3.1: a stalled session is a submission awaiting correction, not a
-        // terminal state — extraction failed BEFORE the round transaction, so
-        // nothing was committed and the round did not advance. The stall detail
-        // tells the agent to resubmit a properly structured evaluation; honor
-        // that by reactivating the session and processing the resubmission
-        // against the SAME round (its roundSnapshot anchor is intact).
+        // A stalled compiler preparation is retryable against the same held
+        // round. Format errors never set this status; they return before advance.
         if (session.status === "stalled") {
             session.status = "running";
         }
@@ -880,37 +866,14 @@ export class RoundLifecycle {
         // ── 2. Extract self-evaluation ───────────────────────────────────────
         const extracted = this.extractEvaluation(output, preExtractedEval);
         if (!extracted) {
-            session.status = "stalled";
-            this.save(session);
-            void this.notifyTerminal(session, "stalled");
-            logEvent("session_end", { sessionId, loopId: session.loopId, stopReason: "stalled", round: session.currentRound });
-            // v2.12: Actionable diagnostics — the state machine still stalls (the
-            // runtime never guesses state from text), but the agent learns exactly
-            // what was wrong and what was recognizable.
-            let stopDetail = "Self-evaluation could not be extracted from agent output.";
-            const diag = extractSelfEvaluationWithDiagnostics(output);
-            if (diag.reason)
-                stopDetail += ` Reason: ${diag.reason}.`;
-            const inferred = inferOutcomeFromText(output);
-            if (inferred) {
-                stopDetail += ` From your output text I can see outcome=${inferred.outcome}` +
-                    ` (summary preview: "${inferred.summary.slice(0, 80)}..."). ` +
-                    "Please resubmit a properly structured SelfEvaluation via the " +
-                    "evaluation parameter of loopforge_next, or embed the " +
-                    "---loopforge-eval block in your output.";
-            }
-            // v3.3.1: carry the round anchor in the stalled result — loopforge_next
-            // REQUIRES sessionId + roundId, so a result without roundId made the
-            // resubmission the detail text asks for impossible to construct.
             return {
                 sessionId,
                 round: session.currentRound,
                 roundId: session.roundSnapshot?.roundId
                     ?? makeRoundId(session.loopId, session.currentRound),
                 prompt: null,
-                stopReason: "stalled",
-                stopDetail,
-                roundSuccess: false,
+                stopReason: "evaluation_invalid",
+                stopDetail: "A structured evaluation object is required. Resubmit the same roundId with success, output_summary, constraint_violations, and should_continue.",
             };
         }
         const selfEval = extracted;

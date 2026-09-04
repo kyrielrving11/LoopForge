@@ -98,12 +98,10 @@ describe("Interface type correctness", () => {
     assert.equal(p.alignment_score.type, "number");
   });
 
-  it("LoopRoundResult — round is number, success is boolean (quality_score removed v1.12)", () => {
+  it("LoopRoundResult — round is number and success is boolean", () => {
     const p = props("LoopRoundResult");
     assert.equal(p.round.type, "number");
     assert.equal(p.success.type, "boolean");
-    // quality_score field has been removed — verify it's gone
-    assert.equal(p.quality_score, undefined);
   });
 });
 
@@ -131,8 +129,6 @@ describe("Array properties", () => {
     const p = props("RollingSummary");
     assert.equal(p.key_outcomes.type, "array");
     assert.equal((p.key_outcomes.items as Record<string, unknown>).type, "string");
-    // quality_trajectory and trajectory_direction removed in v1.12
-    assert.equal(p.quality_trajectory, undefined);
   });
 });
 

@@ -230,9 +230,6 @@ export class RoundCoordinator {
         // (consecutiveRejections reset to 0 — caller persists)
         // ── 4. Auto-feedback (AFTER enforcement, only if accepted) ──────────
         // ── 5. Stop condition checks ────────────────────────────────────────
-        // (v3.3.1: the old 5a "extraction failed → stalled" branch was removed —
-        // extraction failures stall upstream in round-lifecycle, before the
-        // transaction, so this branch was unreachable.)
         // 5b. Agent says stop
         if (!selfEval.should_continue) {
             let reason;
@@ -259,12 +256,8 @@ export class RoundCoordinator {
         }
         // 5c. Max rounds reached
         //
-        // NOTE: The binary-success circuit breaker previously at 5c is removed.
-        // Genuine agent stalls are now detected by the enforcement gate via
-        // enforceProgressStall (R4: delta < 5% → reject → terminate on repeat)
-        // and enforceProgressStallTerminal (R5: delta = 0 for N rounds → terminate).
-        // These use progress_estimate, not the binary success flag, so they
-        // correctly distinguish "task not done yet" from "agent is stuck".
+        // Progress stalls are handled before this point by the R4 delta tier and
+        // R5 flatline tier. Max rounds is an independent hard boundary.
         if (currentRound >= maxRounds) {
             return {
                 action: "stop",

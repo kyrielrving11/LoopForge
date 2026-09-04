@@ -1,6 +1,6 @@
 /** LoopForge — Cognitive State Runtime for AI coding agents.
  *
- * TypeScript reference implementation v3.3.0
+ * TypeScript reference implementation v3.6.0
  *
  * Usage:
  *   import { LoopForgeEngine, ReplayBackend, compileLoop } from "loopforge";
@@ -30,7 +30,6 @@ export {
   makeLoopCompileResponse,
   makeSessionState,
   makeTaskId,
-  SELF_EVAL_REGEX,
   makeEvidenceSnapshot,
   makeVerificationFlag,
   makeVerificationResult,
@@ -122,7 +121,6 @@ export { ReplayBackend } from "./replay.js";
 export {
   LoopForgeEngine,
   createEngine,
-  extractSelfEvaluation,
   buildSelfEvaluation,
   parseExecutionEvidence,
   parseCriterionRevisions,

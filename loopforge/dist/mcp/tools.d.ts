@@ -58,6 +58,13 @@ export declare class ToolInputValidationError extends Error {
     constructor(message: string);
 }
 export declare function validateToolInput(name: string, input: Record<string, unknown>): void;
+/** Validate a server dispatch without turning a malformed evaluation into a
+ * JSON-RPC transport error. The advertised schema stays strict so clients can
+ * construct valid calls; the runtime envelope validates every outer argument,
+ * then lets loopforge_next return its retryable evaluation_invalid payload for
+ * core evaluation mistakes. Once the core is valid, the full schema still
+ * rejects unknown fields and other contract violations. */
+export declare function validateToolDispatchInput(name: string, input: Record<string, unknown>): void;
 /** Validate a handler's output against the tool's declared output schema.
  *  v2.14: the schemas were advertised in tools/list but never enforced —
  *  a mismatched output silently violated the declared contract. Throws

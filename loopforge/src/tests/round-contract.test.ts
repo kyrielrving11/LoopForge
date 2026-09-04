@@ -14,16 +14,32 @@ import {
   mergedLineageRound as merged,
 } from "./_helpers.js";
 import {
-  committedContractRounds,
+  contractRoundEvaluations,
   contractItemMatches,
   contractDoneWhenSatisfied,
   deriveActiveRoundContract,
-  mergedEntryEvaluation,
   type CommittedRoundEvaluation,
 } from "../round-contract.js";
+import {
+  committedRoundsFromEntries,
+  decodeMergedRound,
+} from "../committed-round.js";
 import { criteriaMatch } from "../loop-compiler.js";
 import { deriveItemId } from "../token-utils.js";
 import { resetPolicy } from "../policy.js";
+
+function committedContractRounds(
+  entries: VaultEntry[],
+  currentRound: number,
+): CommittedRoundEvaluation[] {
+  return contractRoundEvaluations(committedRoundsFromEntries(entries, currentRound));
+}
+
+function mergedEntryEvaluation(entry: unknown): CommittedRoundEvaluation | null {
+  const view = decodeMergedRound(entry);
+  if (!view || view.action === "backtrack") return null;
+  return contractRoundEvaluations([view])[0] ?? null;
+}
 
 /** Contract factory: done_when items given, sensible defaults otherwise. */
 function contract(overrides: Partial<RoundContract> = {}): RoundContract {
@@ -400,10 +416,10 @@ describe("mergedEntryEvaluation (shared compile-side extraction)", () => {
       "the top-level round_contract must win");
   });
 
-  it("outcome is validated against the allowed set", () => {
+  it("invalid declared outcomes fall back to the effective success outcome", () => {
     const bad = merged(1, { contract: A });
     (bad.loop_lineage as Record<string, unknown>).outcome = "mystery-state";
     const record = mergedEntryEvaluation(bad);
-    assert.equal(record!.outcome, null);
+    assert.equal(record!.outcome, "failed");
   });
 });

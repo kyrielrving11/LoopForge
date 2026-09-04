@@ -6,8 +6,8 @@ import { containInWorkspace } from "./workspace.js";
 export const DEFAULT_POLICY = {
     version: "2",
     constraints: { retire_window: 3 },
-    summary: { window: 5, health_check_interval: 1, milestone_interval: 20, max_milestones: 10, milestone_head_count: 3, milestone_tail_count: 3, enable_loop_synthesis: true },
-    engine: { feedback_flush_interval: 5, max_circuit_breaker: 3, max_rounds: 20, enforcement_escalation_enabled: true, backtrack_enabled: true, backtrack_max_depth: 3, backtrack_preserve_discoveries: true, drift_clarification_max_streak: 3, backtrack_auto_restore: false },
+    summary: { window: 5, health_check_interval: 1, milestone_interval: 20, max_milestones: 10, milestone_head_count: 3, milestone_tail_count: 3 },
+    engine: { stall_lookback_rounds: 3, max_rounds: 20, enforcement_escalation_enabled: true, backtrack_enabled: true, backtrack_max_depth: 3, backtrack_preserve_discoveries: true, drift_clarification_max_streak: 3, backtrack_auto_restore: false },
     prompt: {
         injection_mode: "adaptive",
         full_refresh_interval: 0,
@@ -24,10 +24,8 @@ export const DEFAULT_POLICY = {
         contract_nudge_on_l2: true,
         max_emphasize_l2: 5,
         max_emphasize_l1: 3,
-        max_expand_l1: 1,
         max_confusion_points: 3,
         confusion_section_threshold: 0.15,
-        base_prompt_version: "2.0.0",
     },
     backend: { root_dir: ".loopforge" },
     evolution: {
@@ -35,7 +33,6 @@ export const DEFAULT_POLICY = {
         max_active_constraints: 15,
         max_objective_versions: 10,
         progress_stall_threshold: 0.05,
-        progress_stall_rounds: 2,
         progress_mismatch_threshold: 0.3,
         task_continuity_threshold: 0.2,
         intent_drift_threshold: 0.15,
@@ -46,9 +43,6 @@ export const DEFAULT_POLICY = {
         subgoal_auto_complete_threshold: 0.4,
         constraint_match_threshold: 0.5,
         subgoal_drift_alignment_threshold: 0.3,
-        subgoal_stale_rounds: 10,
-        max_subgoals_in_prompt: 10,
-        max_done_subgoals_in_prompt: 5,
         constraint_inactive_rounds: 15,
         constraint_id_enabled: true,
     },
@@ -56,8 +50,6 @@ export const DEFAULT_POLICY = {
     state_file: {
         enabled: true,
         directory: ".loopforge/state",
-        max_checkpoints: 5,
-        max_summary_rounds: 5,
     },
     evidence: { providers: ["git"], timeout_ms: 120_000, commands: [], machine_backed_success: "required" },
     mcp: {

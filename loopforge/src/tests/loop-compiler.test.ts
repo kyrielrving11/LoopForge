@@ -17,7 +17,7 @@ import {
   makeLoopRoundResult,
 } from "../protocol.js";
 import { getPolicy, resetPolicy, setPolicyForTest, DEFAULT_POLICY } from "../policy.js";
-import { mergedLineageRound } from "./_helpers.js";
+import { committedFeedbackRound, mergedLineageRound } from "./_helpers.js";
 import { deriveItemId } from "../token-utils.js";
 
 describe("cognitive-state compiler", () => {
@@ -27,6 +27,32 @@ describe("cognitive-state compiler", () => {
     assert.equal(computeGoalTextHash("A  durable task"), computeGoalTextHash("A durable task"));
     assert.equal(deriveGoalId("loop", "Task", "explicit"), "explicit");
     assert.match(deriveGoalId("loop", "Durable Task"), /^loop:/);
+  });
+
+  it("derives the same rolling facts from durable feedback and hydrated lineage", () => {
+    const feedback = committedFeedbackRound(1, {
+      loopId: "round-parity",
+      files: ["src/index.ts"],
+      progress: 0.4,
+      met: ["criterion-a"],
+    });
+    const merged = mergedLineageRound(1, {
+      loopId: "round-parity",
+      files: ["src/index.ts"],
+      progress: 0.4,
+      met: ["criterion-a"],
+    });
+    const summary = "Committed round 1.";
+    merged.output_summary = summary;
+    (merged.loop_lineage as Record<string, unknown>).output_summary = summary;
+
+    const fromFeedback = buildRollingSummary("round-parity", 2, {
+      results: [feedback as unknown as Record<string, unknown>],
+    });
+    const fromMerged = buildRollingSummary("round-parity", 2, {
+      results: [merged],
+    });
+    assert.deepEqual(fromFeedback, fromMerged);
   });
 
   it("uses L2 first, L1 for normal continuation, and L0 for empty failed retry", () => {
@@ -431,111 +457,6 @@ describe("cognitive-state compiler", () => {
     assert.match(critMs[0].label, /Integration done/);
   });
 
-  it("includes loop_synthesis when enabled", () => {
-    const rolling = buildRollingSummary("synth", 6, {
-      results: [
-        {
-          loop_id: "synth",
-          output_summary: "Phase 1 done",
-          success: true,
-          loop_lineage: {
-            loop_id: "synth",
-            round: 1,
-            constraints_active: ["C1", "C2"],
-            compression_checkpoint: true,
-            checkpoint_label: "Phase 1",
-          },
-          constraint_violations: [],
-          execution_evidence: {
-            files_changed: ["a.ts"],
-            test_results: null,
-            success_criteria_met: [],
-            success_criteria_remaining: [],
-            progress_estimate: 0.25,
-          },
-          retracted_constraints: ["Old constraint"],
-        },
-        {
-          loop_id: "synth",
-          output_summary: "Round 2 work",
-          success: true,
-          loop_lineage: {
-            loop_id: "synth",
-            round: 2,
-            constraints_active: ["C1", "C2"],
-          },
-          constraint_violations: [],
-          execution_evidence: {
-            files_changed: ["b.ts"],
-            test_results: null,
-            success_criteria_met: [],
-            success_criteria_remaining: [],
-            progress_estimate: 0.35,
-          },
-        },
-        {
-          loop_id: "synth",
-          output_summary: "Round 3 work",
-          success: true,
-          loop_lineage: {
-            loop_id: "synth",
-            round: 3,
-            constraints_active: ["C1"],
-          },
-          constraint_violations: [],
-          execution_evidence: {
-            files_changed: ["c.ts"],
-            test_results: { passed: 5, failed: 0, skipped: 0 },
-            success_criteria_met: [],
-            success_criteria_remaining: [],
-            progress_estimate: 0.50,
-          },
-        },
-        {
-          loop_id: "synth",
-          output_summary: "Round 4 work",
-          success: true,
-          loop_lineage: {
-            loop_id: "synth",
-            round: 4,
-            constraints_active: ["C1"],
-          },
-          constraint_violations: [],
-          execution_evidence: {
-            files_changed: ["d.ts"],
-            test_results: null,
-            success_criteria_met: [],
-            success_criteria_remaining: [],
-            progress_estimate: 0.75,
-          },
-        },
-        {
-          loop_id: "synth",
-          output_summary: "Round 5 work",
-          success: true,
-          loop_lineage: {
-            loop_id: "synth",
-            round: 5,
-            constraints_active: ["C1"],
-          },
-          constraint_violations: [],
-          execution_evidence: {
-            files_changed: ["e.ts"],
-            test_results: { passed: 10, failed: 0, skipped: 0 },
-            success_criteria_met: [],
-            success_criteria_remaining: [],
-            progress_estimate: 0.90,
-          },
-        },
-      ],
-    });
-    assert.ok(rolling, "should produce a rolling summary");
-    assert.ok(rolling!.loop_synthesis, "should include loop_synthesis");
-    assert.match(rolling!.loop_synthesis!, /spans 5 rounds/);
-    assert.match(rolling!.loop_synthesis!, /across \d+ phases/);
-    assert.match(rolling!.loop_synthesis!, /Overall progress: 90%/);
-  });
-
   it("caps milestones at max_milestones (10 by default)", () => {
     // Create 15 entries each with compression_checkpoint to force 15 milestones
     const entries: Record<string, unknown>[] = [];
@@ -700,8 +621,6 @@ describe("cognitive-state compiler", () => {
     });
     assert.ok(rolling, "should produce a rolling summary");
     assert.deepEqual(rolling!.milestones ?? [], []);
-    // Loop synthesis is generated for any loop with >1 round when enabled
-    assert.ok(rolling!.loop_synthesis, "loop_synthesis should be generated for completed rounds");
   });
 
   it("L2 prompt includes milestones section", () => {
@@ -773,8 +692,8 @@ describe("cognitive-state compiler", () => {
     assert.match(response.prompt, /Phase History/);
     assert.match(response.prompt, /Data Layer/);
     assert.match(response.prompt, /30%/);
-    // L2 should also include Loop Summary when enabled
-    assert.match(response.prompt, /Loop Summary/);
+    // L2 includes the durable phase history; formulaic loop synthesis is removed.
+    assert.match(response.prompt, /Phase History/);
   });
 
   it("L1 prompt includes recent rounds but not milestones", () => {
@@ -821,10 +740,9 @@ describe("cognitive-state compiler", () => {
         },
       ],
     });
-    // L1 should show recent rounds but NOT Phase History or Loop Summary
+    // L1 should show recent rounds but NOT Phase History
     assert.match(response.prompt, /Recent Rounds/);
     assert.doesNotMatch(response.prompt, /Phase History/);
-    assert.doesNotMatch(response.prompt, /Loop Summary/);
     // L1 should not mention the old checkpoint label from round 1
     assert.doesNotMatch(response.prompt, /Core Module/);
   });
@@ -864,7 +782,6 @@ describe("cognitive-state compiler", () => {
     // L0 should contain NO summary sections — just task + rejection
     assert.doesNotMatch(response.prompt, /Recent Rounds/);
     assert.doesNotMatch(response.prompt, /Phase History/);
-    assert.doesNotMatch(response.prompt, /Loop Summary/);
     assert.doesNotMatch(response.prompt, /Cross-Round Outcomes/);
     assert.doesNotMatch(response.prompt, /Recurring Issues/);
     assert.match(response.prompt, /REJECTED|Required verification command failed/);
@@ -1462,7 +1379,7 @@ describe("v3.2 — L1 collapse diff baseline", () => {
     assert.equal(second.prompt_artifact!.promptHash, first.prompt_artifact!.promptHash);
   });
 
-  it("renders in full when the round-1 lineage has no presented fields (old format)", () => {
+  it("renders in full when the prior round has no L1 presented fields", () => {
     const response = compileLoop(makeLoopCompileRequest({
       loop_id: "collapse-old",
       round: 2,
@@ -1472,7 +1389,7 @@ describe("v3.2 — L1 collapse diff baseline", () => {
       results: [r1Entry("collapse-old", null)],
     });
     const p = response.prompt;
-    assert.ok(p.includes("Tests must pass"), "old-format baseline → full render");
+    assert.ok(p.includes("Tests must pass"), "missing L1 baseline → full render");
     assert.ok(!p.includes("unchanged constraints"), "no collapse line without presented fields");
   });
 });
@@ -1799,43 +1716,18 @@ describe("manageConstraintLifecycle — current-round violations (v3.2.1)", () =
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("v3.3 — round stats and machine status threading", () => {
-  /** Committed feedback entry carrying git snapshots + execution evidence —
-   *  the vault shape deriveRoundStats / deriveMachineStatus read. */
+  /** Hydrated committed entry carrying the facts used by both dashboards. */
   const feedbackEntry = (
     round: number,
     files: string[],
     progress: number,
     attempt: number,
-  ): Record<string, unknown> => ({
-    loop_id: "stats-loop",
-    task_id: `stats-loop:r${round}:feedback`,
-    loop_lineage: {
-      loop_id: "stats-loop",
-      round,
-      round_transaction: {
-        schema_version: 1,
-        round_id: `stats-loop:round:${round}`,
-        snapshot: {
-          schemaVersion: 1,
-          roundId: `stats-loop:round:${round}`,
-          loopId: "stats-loop",
-          round,
-          attempt,
-          phase: "committed",
-          beforeEvidence: [],
-          roundEvidence: [{ provider: "git", timestamp: Date.now(), files, data: {} }],
-          createdAt: 0,
-          updatedAt: 0,
-        },
-      },
-    },
-    execution_evidence: {
-      files_changed: files,
-      test_results: { passed: 1, failed: 0, skipped: 0 },
-      success_criteria_met: [],
-      success_criteria_remaining: [],
-      progress_estimate: progress,
-    },
+  ): Record<string, unknown> => mergedLineageRound(round, {
+    loopId: "stats-loop",
+    attempt,
+    files,
+    progress,
+    roundEvidence: [{ provider: "git", timestamp: Date.now(), files, data: {} }],
   });
 
   it("derives round stats and machine git-motion from committed context entries", () => {

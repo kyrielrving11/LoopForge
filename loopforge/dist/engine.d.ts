@@ -2,12 +2,12 @@
  *
  * 2-mode engine with vault-backed loop lineage persistence.
  * invokeLoopCompile (primary), invokeFeedback.
- * Circuit breaker prevents infinite stall loops.
- * EngineMetrics tracks silent-failure counters for observability.
+ * Enforcement gates prevent infinite stall loops; EngineMetrics records
+ * silent-failure counters for observability.
  */
 import type { LoopStore } from "./loop-store.js";
 import { type AgentLoopResult, type LoopForgeRequest, type SelfEvaluation, type SessionState } from "./protocol.js";
-export { parseExecutionEvidence, parseCriterionRevisions, parseWorkerResults, extractSelfEvaluation, buildSelfEvaluation, } from "./self-eval.js";
+export { parseExecutionEvidence, parseCriterionRevisions, parseWorkerResults, buildSelfEvaluation, } from "./self-eval.js";
 /** A single sub-agent delegation record (v1.9 — AgentTool mode). */
 export interface DelegationEntry {
     index: number;
@@ -84,7 +84,7 @@ export declare class LoopForgeEngine {
     /** Highest contiguous round (from 1) present in the given feedback entries. */
     private static contiguousCommittedRound;
     /** Merge committed feedback entries into lineage entries and apply the
-     *  legacy output_summary / constraint_violations backfill. Shared by the
+     *  canonical output_summary / constraint_violations projection. Shared by the
      *  full and incremental hydration paths so both produce identical shapes.
      *
      *  The round commit entry (`loop:<id>:r<N>:feedback`) carries the full

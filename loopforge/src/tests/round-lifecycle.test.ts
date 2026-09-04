@@ -74,7 +74,6 @@ function makeSessionEntry(overrides: {
   loopId: string;
   status?: McpSession["status"];
   currentRound?: number;
-  qualityTrajectory?: boolean[];
   sessionId?: string;
   currentPrompt?: string | null;
   roundSnapshot?: Record<string, unknown> | null;
@@ -90,7 +89,6 @@ function makeSessionEntry(overrides: {
       current_round: overrides.currentRound ?? 1,
       max_rounds: 20,
       success_trajectory: [],
-      quality_trajectory: overrides.qualityTrajectory ?? [],
       status: overrides.status ?? "running",
       created_at: Date.now(),
       consecutive_rejections: 0,
@@ -186,21 +184,6 @@ describe("RoundLifecycle — reconstructSession", async () => {
     const stopped = makeSessionEntry({ loopId: "loop-s", status: "stopped" });
     assert.equal(lifecycle.reconstructSession(stopped), null);
     assert.equal(lifecycle.reconstructSession(stopped, true), null);
-  });
-
-  it("falls back to legacy fields and generated ids", () => {
-    const entry = makeSessionEntry({
-      loopId: "loop-legacy",
-      qualityTrajectory: [true, false],
-    });
-    // True legacy entries predate success_trajectory — the key is absent
-    delete (entry.loop_lineage as Record<string, unknown>).success_trajectory;
-
-    const session = lifecycle.reconstructSession(entry)!;
-    assert.deepEqual(session.successTrajectory, [true, false], "quality_trajectory fallback");
-    assert.ok(session.sessionId.length > 0, "sessionId generated when missing");
-    assert.ok(session.roundSnapshot, "fallback transaction built from policy providers");
-    assert.ok(session.evidenceBaseline!.length >= 0);
   });
 
   it("round-trips save → reconstruct across a process restart", () => {
@@ -355,7 +338,7 @@ describe("RoundLifecycle — resume / crash window", async () => {
     assert.equal(session.currentPrompt, "HELD-PROMPT", "prompt not consumed");
   });
 
-  it("resume legacy path compiles round 1 and persists the prompt", () => {
+  it("resume recovers a missing round-1 prompt and persists it", () => {
     const session: McpSession = {
       sessionId: "sess-legacy-resume",
       loopId: "loop-legacy-resume",

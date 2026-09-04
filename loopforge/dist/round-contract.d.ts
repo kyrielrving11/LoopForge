@@ -23,8 +23,8 @@
  * their entry shape into CommittedRoundEvaluation before calling
  * deriveActiveRoundContract.
  */
+import type { CommittedRoundView } from "./committed-round.js";
 import type { RoundContract, RoundOutcome } from "./protocol.js";
-import type { VaultEntry } from "./loop-store.js";
 /** One committed round's evaluation, in the shape both adapters produce. */
 export interface CommittedRoundEvaluation {
     round: number;
@@ -58,25 +58,7 @@ export declare function contractDoneWhenSatisfied(contract: RoundContract, met: 
  *  (a proposal never activates on its own declaration round — it becomes
  *  active only for the rounds that follow the commit). */
 export declare function deriveActiveRoundContract(committed: ReadonlyArray<CommittedRoundEvaluation>): RoundContract | null;
-/** Committed :feedback evals of rounds earlier than `currentRound`, in
- *  ascending round order — the input for the ACTIVE-contract walker over
- *  raw vault entries. Reads snapshot.evaluation (the only committed copy of
- *  round_contract / outcome / met claims; top-level feedback fields do not
- *  carry the contract) and skips rounds whose committed action was
- *  "backtrack" — a roll-back directive, not an executed round. An eval
- *  under verification is not committed yet, so it structurally can never
- *  participate. Shared by the verification gate and the status/session
- *  views — every consumer derives from the same adapter + walker so a
- *  second interpretation of the committed record can never exist. */
-export declare function committedContractRounds(vaultEntries: VaultEntry[], currentRound: number): CommittedRoundEvaluation[];
-/** v3.5.1: Extract ONE merged lineage entry into walker-record shape —
- *  shared by loop-compiler.deriveActiveContract and the view-parity test so
- *  the extraction logic exists once (a test-side copy would silently drift
- *  from production). Rules mirror committedContractRounds' contract for the
- *  compile-side view: only entries with a committed decision participate
- *  (committed_action gate), backtrack rounds are roll-back directives and
- *  are skipped, and eval fields are read top-level first with the lineage
- *  fallback (engine hydration writes merged fields to both). Null when the
- *  entry is not a committed merged round. */
-export declare function mergedEntryEvaluation(entry: unknown): CommittedRoundEvaluation | null;
+/** Narrow the shared committed-round view to the contract state machine's
+ * inputs. Contract code never interprets persistence envelopes itself. */
+export declare function contractRoundEvaluations(rounds: ReadonlyArray<CommittedRoundView>): CommittedRoundEvaluation[];
 //# sourceMappingURL=round-contract.d.ts.map

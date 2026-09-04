@@ -21,6 +21,7 @@ import {
 } from "../enforcement-gate.js";
 import { deriveConstraintId, deriveCriterionId, deriveSubGoalId } from "../loop-compiler.js";
 import { verifyBacktrackPrompt } from "./_backtrack-asserts.js";
+import { committedFeedbackRound } from "./_helpers.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Helpers
@@ -77,21 +78,11 @@ function vaultRound(
   round: number,
   progressEstimate?: number,
 ): VaultEntry {
-  const entry: VaultEntry = {
-    task_id: `loop:test-loop:r${round}`,
-    loop_id: "test-loop",
-    loop_lineage: { round, success: true, task: "test task" },
-  };
-  if (typeof progressEstimate === "number") {
-    entry.execution_evidence = {
-      files_changed: ["src/foo.ts"],
-      test_results: { passed: 1, failed: 0, skipped: 0 },
-      success_criteria_met: [],
-      success_criteria_remaining: [],
-      progress_estimate: progressEstimate,
-    };
-  }
-  return entry;
+  return committedFeedbackRound(round, {
+    loopId: "test-loop",
+    files: ["src/foo.ts"],
+    progress: progressEstimate,
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -335,10 +326,10 @@ describe("enforcement-gate — R4: progress stall", () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// R5: max rejections
+// R6: max rejections
 // ═══════════════════════════════════════════════════════════════════════════
 
-describe("enforcement-gate — R5: max rejections", () => {
+describe("enforcement-gate — R6: max rejections", () => {
   it("escalates after 2 consecutive rejections instead of terminating", () => {
     const curr = se({ success: false });
     // v2.7: consecutiveRejections=2 now escalates (reject + guidance) instead
@@ -831,48 +822,24 @@ describe("findSafeRestorePoint", () => {
   // commit, so a committed round's decision is action "continue" and its
   // dirtiness shows in the committed verification flags).
   function cleanRound(rnd: number): VaultEntry {
-    return {
-      task_id: `loop:test:r${rnd}:feedback`,
-      task_type: "round_entry",
-      timestamp: new Date().toISOString(),
-      success: true,
-      task: "test task",
-      output_summary: `Round ${rnd} done`,
-      constraint_violations: [],
-      constraint_violations_entry: [],
-      loop_id: "test",
-      loop_lineage: {
-        round: rnd,
-        task: `Round ${rnd}`,
-        success: true,
-        round_transaction: {
-          result: { action: "continue", verificationFlags: [] },
-        },
-      },
-    };
+    return committedFeedbackRound(rnd, { loopId: "test" });
   }
 
-  function dirtyRound(rnd: number, severity: "warn" | "error" = "error"): VaultEntry {
-    return {
-      task_id: `loop:test:r${rnd}:feedback`,
-      task_type: "round_entry",
-      timestamp: new Date().toISOString(),
-      success: false,
-      task: "test task",
-      output_summary: `Round ${rnd} failed`,
-      constraint_violations: ["bad thing"],
-      constraint_violations_entry: ["bad thing"],
-      loop_id: "test",
-      loop_lineage: {
-        round: rnd,
-        task: `Round ${rnd}`,
-        success: false,
-        round_transaction: {
-          result: { action: "continue", verificationFlags: [] },
-        },
-      },
-      verification_flags: [{ check: "test_flag", detail: "error", severity }],
-    };
+  function dirtyRound(
+    rnd: number,
+    severity: "warn" | "error" = "error",
+    discoveries: string[] = [],
+  ): VaultEntry {
+    return committedFeedbackRound(rnd, {
+      loopId: "test",
+      discoveredConstraints: discoveries,
+      verificationFlags: [{
+        check: "test_flag",
+        field: "round",
+        detail: "error",
+        severity,
+      }],
+    });
   }
 
   it("returns the most recent clean round (current - 1)", () => {
@@ -905,7 +872,7 @@ describe("findSafeRestorePoint", () => {
       cleanRound(1),
       cleanRound(2),
       cleanRound(3),       // clean — restore target
-      { ...dirtyRound(4), discovered_constraints: ["discovery from r4"] },
+      dirtyRound(4, "error", ["discovery from r4"]),
     ];
     const result = findSafeRestorePoint(5, vault, 3);
     assert.ok(result);
@@ -948,20 +915,11 @@ describe("findSafeRestorePoint", () => {
     const vault = [
       cleanRound(1),
       cleanRound(2),       // clean
-      {                       // round 3: has error flag → not clean
-        ...cleanRound(3),
-        success: false,
-        verification_flags: [{ check: "test", detail: "error", severity: "error" }],
-      },
-      cleanRound(4),       // round 4: clean but... wait, this is the one we're at
+      dirtyRound(3),
     ];
-    // currentRound=5, round 4 is clean, so restore to 4
-    const result = findSafeRestorePoint(5, vault, 3);
+    const result = findSafeRestorePoint(4, vault, 3);
     assert.ok(result);
-    // Round 4 is clean, round 3 is skipped (has errors)
-    // Actually wait - we're scanning backwards from currentRound-1
-    // depth=1: round 4 (clean) → found!
-    assert.equal(result!.round, 4);
+    assert.equal(result!.round, 2);
   });
 
   // ═════════════════════════════════════════════════════════════════════════
@@ -1015,7 +973,7 @@ describe("findSafeRestorePoint", () => {
       lineageRound(3),
       cleanRound(3),     // clean restore target
       lineageRound(4),
-      { ...dirtyRound(4), discovered_constraints: ["discovery from r4"] },
+      dirtyRound(4, "error", ["discovery from r4"]),
     ];
     const result = findSafeRestorePoint(5, vault, 3);
     assert.ok(result);
@@ -1060,7 +1018,7 @@ describe("buildBacktrackPrompt", () => {
   // ── v3.5: stalled Round Contract revision channel ────────────────────────
 
   it("tells the agent to close a stalled Round Contract via blocked + revision", () => {
-    for (const trigger of ["progress_stall", "progress_stall_terminal"]) {
+    for (const trigger of ["progress_stall", "progress_flatline"]) {
       const prompt = buildBacktrackPrompt(45, 42, trigger, []);
       assert.ok(prompt.includes("Round Contract that caused the stall"),
         `${trigger}: the stalled-contract bullet must appear`);
@@ -1085,8 +1043,8 @@ describe("buildBacktrackPrompt", () => {
       "progress_stall should NOT include terminal-level language");
   });
 
-  it("renders radical-change guidance for progress_stall_terminal", () => {
-    const prompt = buildBacktrackPrompt(50, 45, "progress_stall_terminal", []);
+  it("renders radical-change guidance for progress_flatline", () => {
+    const prompt = buildBacktrackPrompt(50, 45, "progress_flatline", []);
     verifyBacktrackPrompt(prompt, 50, 45, [
       "radically different",
       "zero forward motion",
@@ -1134,7 +1092,7 @@ describe("buildBacktrackPrompt", () => {
 describe("enforcement-gate — v2.12 effective success", () => {
   it("R3 accepts outcome=partial without execution evidence (declared non-success)", () => {
     const selfEval = makeSelfEvaluation({
-      success: true, // legacy boolean contradicts, but outcome wins
+      success: true, // Core flag contradicts the optional outcome, which wins.
       outcome: "partial",
       output_summary: "partial progress",
       constraint_violations: [],
@@ -1144,7 +1102,7 @@ describe("enforcement-gate — v2.12 effective success", () => {
     assert.equal(result.action, "accept");
   });
 
-  it("R3 still rejects legacy success=true with no evidence (no outcome declared)", () => {
+  it("R3 rejects success=true with no evidence when outcome is omitted", () => {
     const selfEval = makeSelfEvaluation({
       success: true,
       output_summary: "done",
@@ -1584,29 +1542,11 @@ describe("enforcement-gate — R9: workspace restore guard", () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("v3.2 — R4 machine progress fallback", () => {
-  const feedbackRound = (round: number, gitFiles: string[]): VaultEntry => ({
-    task_id: `loop:test-loop:r${round}:feedback`,
-    loop_id: "test-loop",
-    loop_lineage: {
-      round,
-      round_transaction: {
-        schema_version: 1,
-        round_id: `loop:test-loop:round:${round}`,
-        snapshot: {
-          schemaVersion: 1,
-          roundId: `loop:test-loop:round:${round}`,
-          loopId: "test-loop",
-          round,
-          attempt: 1,
-          phase: "committed",
-          beforeEvidence: [],
-          roundEvidence: [{ provider: "git", timestamp: Date.now(), files: gitFiles, data: {} }],
-          createdAt: 0,
-          updatedAt: 0,
-        },
-      },
-    },
-  });
+  const feedbackRound = (round: number, gitFiles: string[]): VaultEntry =>
+    committedFeedbackRound(round, {
+      loopId: "test-loop",
+      roundEvidence: [{ provider: "git", timestamp: Date.now(), files: gitFiles, data: {} }],
+    });
 
   it("detects stall from three rounds without git changes on the heuristic path", () => {
     const entries = [feedbackRound(1, []), feedbackRound(2, []), feedbackRound(3, [])];
@@ -1622,12 +1562,12 @@ describe("v3.2 — R4 machine progress fallback", () => {
     assert.equal(result!.action, "accept", "observed changes → no stall");
   });
 
-  it("keeps the legacy skip when no git snapshots exist", () => {
+  it("skips when no git snapshots exist", () => {
     const entries = [
-      { task_id: "loop:test-loop:r1:feedback", loop_id: "test-loop", loop_lineage: { round: 1, round_transaction: { snapshot: { roundEvidence: [] } } } },
-      { task_id: "loop:test-loop:r2:feedback", loop_id: "test-loop", loop_lineage: { round: 2, round_transaction: { snapshot: { roundEvidence: [] } } } },
-      { task_id: "loop:test-loop:r3:feedback", loop_id: "test-loop", loop_lineage: { round: 3, round_transaction: { snapshot: { roundEvidence: [] } } } },
-    ] as VaultEntry[];
+      committedFeedbackRound(1, { loopId: "test-loop", roundEvidence: [], noExecutionEvidence: true }),
+      committedFeedbackRound(2, { loopId: "test-loop", roundEvidence: [], noExecutionEvidence: true }),
+      committedFeedbackRound(3, { loopId: "test-loop", roundEvidence: [], noExecutionEvidence: true }),
+    ];
     const result = enforceRound(se({ success: false }), trusted(), 4, entries, 0);
     assert.equal(result!.action, "accept", "no git signal → the rule keeps skipping");
   });
@@ -1647,35 +1587,12 @@ describe("v3.3 — R4/R5 exculpatory machine cross-check", () => {
     progress: number,
     gitFiles: string[],
     met: string[] = [],
-  ): VaultEntry => ({
-    task_id: `loop:test-loop:r${round}:feedback`,
-    loop_id: "test-loop",
-    loop_lineage: {
-      round,
-      round_transaction: {
-        schema_version: 1,
-        round_id: `loop:test-loop:round:${round}`,
-        snapshot: {
-          schemaVersion: 1,
-          roundId: `loop:test-loop:round:${round}`,
-          loopId: "test-loop",
-          round,
-          attempt: 1,
-          phase: "committed",
-          beforeEvidence: [],
-          roundEvidence: [{ provider: "git", timestamp: Date.now(), files: gitFiles, data: {} }],
-          createdAt: 0,
-          updatedAt: 0,
-        },
-      },
-    },
-    execution_evidence: {
-      files_changed: gitFiles,
-      test_results: { passed: 1, failed: 0, skipped: 0 },
-      success_criteria_met: met,
-      success_criteria_remaining: [],
-      progress_estimate: progress,
-    },
+  ): VaultEntry => committedFeedbackRound(round, {
+    loopId: "test-loop",
+    files: gitFiles,
+    progress,
+    met,
+    roundEvidence: [{ provider: "git", timestamp: Date.now(), files: gitFiles, data: {} }],
   });
 
   it("does not fire R4 when git motion was observed in the window (evidence path)", () => {

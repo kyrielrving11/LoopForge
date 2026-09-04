@@ -34,13 +34,11 @@ export interface SummaryPolicy {
   /** v3.0.1: L1 milestone sampling — this many of the NEWEST milestones are
    *  always kept when the cap is exceeded. */
   milestone_tail_count: number;
-  /** v2.1: Enable the loop_synthesis paragraph in L2 prompts and state files. */
-  enable_loop_synthesis: boolean;
 }
 
 export interface EnginePolicy {
-  feedback_flush_interval: number;
-  max_circuit_breaker: number;
+  /** Number of committed rounds inspected for progress stalls. */
+  stall_lookback_rounds: number;
   max_rounds: number;
   /** v2.7: When true, enforcement rules that would terminate (R4 2nd strike,
    *  R5 flatline, R6 max rejections) instead issue one final escalated
@@ -114,14 +112,11 @@ export interface PromptPolicy {
   max_emphasize_l2: number;
   /** v2.9: Max emphasize items when level is L1. Default: 3. */
   max_emphasize_l1: number;
-  /** v2.9: Max expand sections when level is L1. Default: 1. */
-  max_expand_l1: number;
   /** v2.9: Max confusion points rendered. Default: 3. */
   max_confusion_points: number;
   /** v2.14: Jaccard threshold for pointing a confusion point at its
    *  best-matching state section. Default: 0.15 (15%). */
   confusion_section_threshold: number;
-  base_prompt_version: string;
 }
 
 export interface BackendPolicy {
@@ -134,7 +129,6 @@ export interface EvolutionPolicy {
   max_active_constraints: number;
   max_objective_versions: number;
   progress_stall_threshold: number;
-  progress_stall_rounds: number;
   progress_mismatch_threshold: number;
   /** v2.14: Jaccard threshold for task continuity in checkLoopHealth —
    *  below this, the loop is considered drifting. Default: 0.2. */
@@ -166,22 +160,14 @@ export interface EvolutionPolicy {
    *  exceed this to be considered "aligned" with a pending sub-goal.
    *  Default: 0.3. */
   subgoal_drift_alignment_threshold: number;
-  /** v2.2: Number of rounds a sub-goal can stay pending before
-   *  being flagged as stale in prompts. Default: 10. */
-  subgoal_stale_rounds: number;
-  /** v2.2: Maximum sub-goals to render in prompt. Default: 10. */
-  max_subgoals_in_prompt: number;
-  /** v2.2: Maximum completed sub-goals to render in prompt. Default: 5. */
-  max_done_subgoals_in_prompt: number;
   /** v2.3: Number of rounds without violation before a discovered
    *  constraint is demoted to inactive. Hard/plan/criteria constraints
    *  are never auto-demoted. Default: 15. */
   constraint_inactive_rounds: number;
   /** v2.11: When true, constraints and criteria are assigned stable IDs
    *  (c-XXXXXXXX, cr-XXXXXXXX) rendered in prompts. The agent is encouraged
-   *  to reference IDs for exact matching; Jaccard similarity remains as
-   *  fallback for backward compatibility. Set to false to restore pre-v2.11
-   *  pure-text + Jaccard behavior. Default: true. */
+   *  to reference IDs for exact matching; natural-language references use
+   *  Jaccard similarity. Default: true. */
   constraint_id_enabled: boolean;
 }
 
@@ -193,8 +179,6 @@ export interface CheckpointPolicy {
 export interface StateFilePolicy {
   enabled: boolean;
   directory: string;
-  max_checkpoints: number;
-  max_summary_rounds: number;
 }
 
 export interface EvidencePolicy {
@@ -253,8 +237,8 @@ export interface LoopPolicy {
 export const DEFAULT_POLICY: LoopPolicy = {
   version: "2",
   constraints: { retire_window: 3 },
-  summary: { window: 5, health_check_interval: 1, milestone_interval: 20, max_milestones: 10, milestone_head_count: 3, milestone_tail_count: 3, enable_loop_synthesis: true },
-  engine: { feedback_flush_interval: 5, max_circuit_breaker: 3, max_rounds: 20, enforcement_escalation_enabled: true, backtrack_enabled: true, backtrack_max_depth: 3, backtrack_preserve_discoveries: true, drift_clarification_max_streak: 3, backtrack_auto_restore: false },
+  summary: { window: 5, health_check_interval: 1, milestone_interval: 20, max_milestones: 10, milestone_head_count: 3, milestone_tail_count: 3 },
+  engine: { stall_lookback_rounds: 3, max_rounds: 20, enforcement_escalation_enabled: true, backtrack_enabled: true, backtrack_max_depth: 3, backtrack_preserve_discoveries: true, drift_clarification_max_streak: 3, backtrack_auto_restore: false },
   prompt: {
     injection_mode: "adaptive",
     full_refresh_interval: 0,
@@ -271,10 +255,8 @@ export const DEFAULT_POLICY: LoopPolicy = {
     contract_nudge_on_l2: true,
     max_emphasize_l2: 5,
     max_emphasize_l1: 3,
-    max_expand_l1: 1,
     max_confusion_points: 3,
     confusion_section_threshold: 0.15,
-    base_prompt_version: "2.0.0",
   },
   backend: { root_dir: ".loopforge" },
   evolution: {
@@ -282,7 +264,6 @@ export const DEFAULT_POLICY: LoopPolicy = {
     max_active_constraints: 15,
     max_objective_versions: 10,
     progress_stall_threshold: 0.05,
-    progress_stall_rounds: 2,
     progress_mismatch_threshold: 0.3,
     task_continuity_threshold: 0.2,
     intent_drift_threshold: 0.15,
@@ -293,9 +274,6 @@ export const DEFAULT_POLICY: LoopPolicy = {
     subgoal_auto_complete_threshold: 0.4,
     constraint_match_threshold: 0.5,
     subgoal_drift_alignment_threshold: 0.3,
-    subgoal_stale_rounds: 10,
-    max_subgoals_in_prompt: 10,
-    max_done_subgoals_in_prompt: 5,
     constraint_inactive_rounds: 15,
     constraint_id_enabled: true,
   },
@@ -303,8 +281,6 @@ export const DEFAULT_POLICY: LoopPolicy = {
   state_file: {
     enabled: true,
     directory: ".loopforge/state",
-    max_checkpoints: 5,
-    max_summary_rounds: 5,
   },
   evidence: { providers: ["git"], timeout_ms: 120_000, commands: [], machine_backed_success: "required" },
   mcp: {

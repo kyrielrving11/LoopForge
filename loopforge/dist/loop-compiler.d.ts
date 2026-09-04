@@ -18,9 +18,8 @@ export declare function computeGoalTextHash(text: string): string;
 export declare function deriveGoalId(loopId: string, task: string, explicit?: string): string;
 /** v3.2: Read the previous round's persisted L1 presentation snapshot — the
  *  diff baseline for L1 collapse. Returns null when the previous round's
- *  lineage entry exists but lacks all three presented_* fields (old-format
- *  entries, L0/L2 compiles) — callers then render in full, which keeps
- *  existing fixtures and pre-v3.2 loops on the full-render path. */
+ *  lineage entry lacks the three presented_* fields (as on L0/L2 compiles),
+ *  so callers render the full L1 state. */
 export declare function readPresentedBaseline(loopId: string, round: number, context: Record<string, unknown> | null): PresentedStateSnapshot | null;
 export declare function getPreviousRound(loopId: string, round: number, context: Record<string, unknown> | null): PreviousRound | null;
 /** v3.2: Deterministic lessons learned — constraints violated repeatedly or

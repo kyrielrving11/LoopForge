@@ -26,12 +26,6 @@ export interface PolicyMetricsSnapshot {
     /** Per-reason breakdown of persistence failures. */
     vaultWriteReasons: Record<string, number>;
     levels: Record<string, number>;
-    strategyEffectiveness: Record<string, {
-        attempts: number;
-        successes: number;
-        rejections: number;
-        successRate: number;
-    }>;
     acceptanceRate: number;
     evidenceAvailabilityRate: number;
 }
@@ -46,7 +40,6 @@ export declare class PolicyMetricsCollector {
      *  write path is failing. */
     recordVaultWriteError(reason: string, loopId?: string): void;
     recordStrategy(loopId: string, level?: string): void;
-    recordStrategyOutcome(loopId: string, level: string | undefined, result: RoundProcessResult, replayed?: boolean): void;
     snapshot(loopId?: string): PolicyMetricsSnapshot;
     reset(loopId?: string): void;
 }

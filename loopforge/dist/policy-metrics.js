@@ -1,5 +1,5 @@
 /** In-process policy effectiveness metrics with no runtime dependency. */
-import { isRecord } from "./token-utils.js";
+import { committedRoundsFromEntries } from "./committed-round.js";
 function empty(loopId) {
     return {
         loopId,
@@ -23,7 +23,6 @@ function empty(loopId) {
         vaultWriteErrors: 0,
         vaultWriteReasons: {},
         levels: {},
-        strategyEffectiveness: {},
     };
 }
 function increment(target, key) {
@@ -105,24 +104,6 @@ export class PolicyMetricsCollector {
                 increment(metric.levels, level);
         }
     }
-    recordStrategyOutcome(loopId, level, result, replayed = false) {
-        if (replayed)
-            return;
-        const key = level ?? "unknown";
-        for (const metric of this.targets(loopId)) {
-            const current = metric.strategyEffectiveness[key] ?? {
-                attempts: 0,
-                successes: 0,
-                rejections: 0,
-            };
-            current.attempts++;
-            if (result.roundSuccess && result.action !== "reject")
-                current.successes++;
-            if (result.action === "reject")
-                current.rejections++;
-            metric.strategyEffectiveness[key] = current;
-        }
-    }
     snapshot(loopId) {
         const source = loopId ? this.loops.get(loopId) ?? empty(loopId) : this.aggregate;
         return snapshotFrom(source);
@@ -140,20 +121,12 @@ export class PolicyMetricsCollector {
 function snapshotFrom(source) {
     const attempts = source.roundAttempts;
     const evidence = source.evidenceCaptures;
-    const strategyEffectiveness = {};
-    for (const [key, value] of Object.entries(source.strategyEffectiveness)) {
-        strategyEffectiveness[key] = {
-            ...value,
-            successRate: value.attempts === 0 ? 0 : value.successes / value.attempts,
-        };
-    }
     return {
         ...source,
         verificationFlags: { ...source.verificationFlags },
         enforcementReasons: { ...source.enforcementReasons },
         evidenceOutcomesByProvider: { ...source.evidenceOutcomesByProvider },
         levels: { ...source.levels },
-        strategyEffectiveness,
         acceptanceRate: attempts === 0 ? 0 : source.committedRounds / attempts,
         evidenceAvailabilityRate: evidence === 0 ? 0 : source.evidenceAvailable / evidence,
         // evidenceLatencyMs is a raw sum; derive the average for consumers
@@ -166,24 +139,11 @@ function snapshotFrom(source) {
  *  restarted process reports nonzero metrics for persisted loops. */
 export function derivePolicyMetrics(loopId, entries) {
     const metric = empty(loopId);
-    for (const entry of entries) {
-        const taskId = String(entry.task_id ?? "");
-        if (!taskId.startsWith(`loop:${loopId}:r`) || !taskId.endsWith(":feedback"))
+    for (const round of committedRoundsFromEntries(entries)) {
+        if (round.loopId !== loopId)
             continue;
-        if (!isRecord(entry.loop_lineage))
-            continue;
-        const transaction = entry.loop_lineage.round_transaction;
-        if (!isRecord(transaction) || !isRecord(transaction.snapshot))
-            continue;
-        const snapshot = transaction.snapshot;
-        const result = isRecord(snapshot.result) ? snapshot.result : null;
+        const result = round.result;
         if (!result)
-            continue;
-        // v2.14: rounds committed with action="backtrack" were rolled back and
-        // are not part of the loop's committed progress — exclude them from
-        // committed-round statistics (their redo, when it commits, replaces
-        // the same round document).
-        if (result.action === "backtrack")
             continue;
         metric.roundAttempts++;
         metric.committedRounds++;
@@ -195,19 +155,14 @@ export function derivePolicyMetrics(loopId, entries) {
             metric.successfulRounds++;
         if (result.gateContradicted === true)
             metric.contradictedRounds++;
-        if (Array.isArray(result.verificationFlags)) {
-            for (const flag of result.verificationFlags) {
-                if (isRecord(flag) && typeof flag.check === "string") {
-                    increment(metric.verificationFlags, flag.check);
-                }
-            }
+        for (const flag of round.verificationFlags) {
+            increment(metric.verificationFlags, flag.check);
         }
         if (typeof result.enforcementReason === "string" && result.enforcementReason.length > 0) {
             increment(metric.enforcementReasons, result.enforcementReason);
         }
-        const artifact = isRecord(snapshot.promptArtifact) ? snapshot.promptArtifact : null;
-        if (artifact && typeof artifact.level === "string") {
-            increment(metric.levels, artifact.level);
+        if (round.promptArtifact?.level) {
+            increment(metric.levels, round.promptArtifact.level);
         }
     }
     return snapshotFrom(metric);
@@ -248,7 +203,6 @@ export function mergePolicyMetrics(derived, live) {
         vaultWriteErrors: live.vaultWriteErrors,
         vaultWriteReasons: { ...live.vaultWriteReasons },
         levels: { ...derived.levels },
-        strategyEffectiveness: { ...derived.strategyEffectiveness },
     };
     return snapshotFrom(merged);
 }

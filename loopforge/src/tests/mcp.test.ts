@@ -14,39 +14,17 @@ import type { LoopSessionDocument } from "../loop-store.js";
 // Helpers
 // ═══════════════════════════════════════════════════════════════════════════
 
-/** Build agent output with a valid self-eval block. */
+/** Build plain agent output. The authoritative report is the structured eval. */
 function agentOutput(opts: {
   success?: boolean;
   violations?: string[];
   shouldContinue?: boolean;
   body?: string;
 }): string {
-  const hasSuccess = opts.success ?? true;
-  const evalBlock = {
-    success: hasSuccess,
-    output_summary: opts.body ?? "Completed the task successfully.",
-    constraint_violations: opts.violations ?? [],
-    should_continue: opts.shouldContinue ?? true,
-    // Include minimal execution evidence so enforcement gate R3
-    // (empty success) doesn't reject valid test rounds.
-    execution_evidence: hasSuccess ? {
-      files_changed: ["src/test.ts"],
-      test_results: { passed: 1, failed: 0, skipped: 0 },
-      success_criteria_met: [],
-      success_criteria_remaining: [],
-      progress_estimate: 0.5,
-    } : undefined,
-  };
-  return [
-    opts.body ?? "## Round Output\n\nAll checks passed.",
-    "",
-    "---loopforge-eval",
-    JSON.stringify(evalBlock),
-    "---end-loopforge-eval",
-  ].join("\n");
+  return opts.body ?? "## Round Output\n\nAll checks passed.";
 }
 
-/** Build agent output without a self-eval block (triggers stalled). */
+/** Build agent output without a structured evaluation (triggers stalled internally). */
 function agentOutputNoEval(body?: string): string {
   return body ?? "## Round Output\n\nTask done. No eval block here.";
 }
@@ -57,7 +35,7 @@ function evalParam(opts: {
   violations?: string[];
   shouldContinue?: boolean;
   body?: string;
-}): Record<string, unknown> {
+}): SelfEvaluation {
   const hasSuccess = opts.success ?? true;
   return {
     success: hasSuccess,
@@ -83,6 +61,7 @@ import { resetPolicy, getPolicy } from "../policy.js";
 import type { SelfEvaluation } from "../protocol.js";
 import { RoundTransactionCoordinator } from "../round-transaction.js";
 import { SessionLeaseConflictError } from "../storage.js";
+import { deriveGate } from "../cognitive-governance.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Tests
@@ -113,6 +92,54 @@ describe("MCP — loopforge_start", async () => {
   });
 });
 
+describe("MCP — durable gate resolution", async () => {
+  it("resolves a persisted gate after the owning process is recreated", async () => {
+    resetPolicy();
+    installTestCommandProvider();
+    const store = new MemoryLoopStore();
+    const first = new SessionManager(store);
+    const started = await TOOL_HANDLERS.loopforge_start(first, {
+      task: "Review the release workflow",
+    });
+    const sessionId = String(started.sessionId);
+    const loopId = String(store.listLoopIds()[0] ?? "");
+    const action = "publish the release to production";
+    const { id: gateId } = deriveGate(action);
+    const advanced = await TOOL_HANDLERS.loopforge_next(first, {
+      sessionId,
+      roundId: String(started.roundId),
+      output: "The release needs explicit production authorization.",
+      evaluation: {
+        success: false,
+        output_summary: "Blocked pending production authorization.",
+        constraint_violations: [],
+        should_continue: true,
+        outcome: "blocked",
+        blocker: action,
+      },
+    });
+    assert.equal(advanced.stopReason, undefined);
+    assert.ok(store.entries.some((entry) => entry.task_type === "gate_opened" && entry.gate_id === gateId));
+
+    // Release the first owner's lease, then use a fresh manager as a process
+    // restart. The new manager has no in-memory session registry entry.
+    first.close();
+    const restarted = new SessionManager(store);
+    const resolved = restarted.resolveGate(sessionId, gateId, true, "approved");
+    assert.deepEqual(resolved, {
+      sessionId,
+      loopId,
+      gateId,
+      approved: true,
+    });
+    const decision = store.entries.find((entry) => entry.task_type === "gate_decision");
+    assert.ok(decision);
+    assert.equal(decision?.loop_id, loopId);
+    assert.equal((decision?.loop_lineage as Record<string, unknown>)?.round, 1);
+    restarted.close();
+  });
+});
+
 describe("MCP — multi-round lifecycle", async () => {
   let store: MemoryLoopStore;
   let mgr: SessionManager;
@@ -125,7 +152,7 @@ describe("MCP — multi-round lifecycle", async () => {
     mgr = new SessionManager(store);
   });
 
-  it("start → next × 3 → task_complete", async () => {
+  it("start → next × 3 → completed", async () => {
     // Round 1
     const start = await TOOL_HANDLERS.loopforge_start(mgr, {
       task: "Audit ERC20",
@@ -138,6 +165,7 @@ describe("MCP — multi-round lifecycle", async () => {
       sessionId,
       roundId: String(start.roundId),
       output: agentOutput({ success: false, violations: ["missed check"], shouldContinue: true }),
+      evaluation: evalParam({ success: false, violations: ["missed check"], shouldContinue: true }),
     });
     assert.equal(r1.stopReason, undefined, "round 2 should not stop");
     assert.equal(r1.round, 2);
@@ -148,6 +176,7 @@ describe("MCP — multi-round lifecycle", async () => {
       sessionId,
       roundId: String(r1.roundId),
       output: agentOutput({ success: true, shouldContinue: true }),
+      evaluation: evalParam({ success: true, shouldContinue: true }),
     });
     assert.equal(r2.stopReason, undefined, "round 3 should not stop");
     assert.equal(r2.round, 3);
@@ -157,13 +186,14 @@ describe("MCP — multi-round lifecycle", async () => {
       sessionId,
       roundId: String(r2.roundId),
       output: agentOutput({ success: true, shouldContinue: false }),
+      evaluation: evalParam({ success: true, shouldContinue: false }),
     });
     assert.equal(r3.prompt, null);
     assert.equal(r3.stopReason, "completed");
     assert.equal(r3.round, 3);
   });
 
-  it("next without eval block → stalled", async () => {
+  it("next without structured evaluation → input error", async () => {
     const start = await TOOL_HANDLERS.loopforge_start(mgr, { task: "Test stalled" });
     const sessionId = String(start.sessionId);
 
@@ -173,8 +203,48 @@ describe("MCP — multi-round lifecycle", async () => {
       output: agentOutputNoEval(),
     });
 
-    assert.equal(result.prompt, null);
-    assert.equal(result.stopReason, "stalled");
+    assert.equal(result.error, "evaluation_invalid");
+    assert.deepEqual((result.details as Record<string, unknown>).missing, ["evaluation"]);
+  });
+
+  it("rejects malformed core fields without consuming the round", async () => {
+    const start = await TOOL_HANDLERS.loopforge_start(mgr, { task: "Core validation" });
+    const result = await TOOL_HANDLERS.loopforge_next(mgr, {
+      sessionId: start.sessionId,
+      roundId: start.roundId,
+      evaluation: {
+        success: "false",
+        output_summary: "invalid core types",
+        constraint_violations: ["valid", 42],
+        should_continue: true,
+      },
+    });
+    assert.equal(result.error, "evaluation_invalid");
+    assert.deepEqual(
+      (result.details as { invalid: Array<{ field: string }> }).invalid.map((item) => item.field),
+      ["success", "constraint_violations"],
+    );
+    const status = mgr.get(String(start.sessionId));
+    assert.equal(status?.status, "running");
+    assert.equal(status?.currentRound, 1);
+  });
+
+  it("normalizes malformed optional fields instead of rejecting the round", async () => {
+    const start = await TOOL_HANDLERS.loopforge_start(mgr, { task: "Optional validation" });
+    const result = await TOOL_HANDLERS.loopforge_next(mgr, {
+      sessionId: start.sessionId,
+      roundId: start.roundId,
+      evaluation: {
+        success: false,
+        output_summary: "core report is valid",
+        constraint_violations: [],
+        should_continue: true,
+        outcome: 42,
+        blocker: ["invalid optional value"],
+      },
+    });
+    assert.equal(result.error, undefined);
+    assert.equal(result.round, 2);
   });
 
   it("3 consecutive success=false rounds continue normally (no false-positive circuit breaker)", async () => {
@@ -193,6 +263,7 @@ describe("MCP — multi-round lifecycle", async () => {
         sessionId,
         roundId,
         output: agentOutput({ success: false, shouldContinue: true }),
+        evaluation: evalParam({ success: false, shouldContinue: true }),
       });
       roundId = String(advanced.roundId);
     }
@@ -200,6 +271,7 @@ describe("MCP — multi-round lifecycle", async () => {
       sessionId,
       roundId,
       output: agentOutput({ success: false, shouldContinue: true }),
+      evaluation: evalParam({ success: false, shouldContinue: true }),
     });
 
     // Loop continues — no false-positive circuit breaker.
@@ -220,6 +292,7 @@ describe("MCP — multi-round lifecycle", async () => {
       sessionId,
       roundId: String(start.roundId),
       output: agentOutput({ success: false, violations: ["x"], shouldContinue: true }),
+      evaluation: evalParam({ success: false, violations: ["x"], shouldContinue: true }),
     });
     assert.equal(r1.stopReason, undefined);
 
@@ -228,6 +301,7 @@ describe("MCP — multi-round lifecycle", async () => {
       sessionId,
       roundId: String(r1.roundId),
       output: agentOutput({ success: true, shouldContinue: true }),
+      evaluation: evalParam({ success: true, shouldContinue: true }),
     });
     assert.equal(r2.prompt, null);
     assert.equal(r2.stopReason, "max_rounds");
@@ -264,7 +338,7 @@ describe("MCP — multi-round lifecycle", async () => {
     assert.equal(r1.round, 2);
   });
 
-  it("next with evaluation → task_complete when shouldContinue=false", async () => {
+  it("next with evaluation → completed when shouldContinue=false", async () => {
     const start = await TOOL_HANDLERS.loopforge_start(mgr, { task: "Eval complete test" });
     const sessionId = String(start.sessionId);
 
@@ -277,7 +351,7 @@ describe("MCP — multi-round lifecycle", async () => {
     assert.equal(r1.stopReason, "completed");
   });
 
-  it("next without evaluation or eval block in output → stalled", async () => {
+  it("next without structured evaluation returns a format error", async () => {
     const start = await TOOL_HANDLERS.loopforge_start(mgr, { task: "No eval stall" });
     const sessionId = String(start.sessionId);
 
@@ -286,8 +360,7 @@ describe("MCP — multi-round lifecycle", async () => {
       roundId: String(start.roundId),
       output: agentOutputNoEval("Just some text without any eval"),
     });
-    assert.equal(result.prompt, null);
-    assert.equal(result.stopReason, "stalled");
+    assert.equal(result.error, "evaluation_invalid");
   });
 
   it("next with evaluation parameter (multi-round with discoveries)", async () => {
@@ -337,31 +410,25 @@ describe("MCP — multi-round lifecycle", async () => {
     assert.equal(r2.stopReason, "completed");
   });
 
-  it("a stalled session accepts a corrected resubmission (v3.3.1)", async () => {
-    // Regression: an unparseable submission stalled the session AND the
-    // stalled result omitted roundId — loopforge_next requires roundId, so
-    // the resubmission its own stopDetail asked for was impossible to build;
-    // resume/unpause reject stalled, leaving the loop a tombstone.
-    const start = await TOOL_HANDLERS.loopforge_start(mgr, { task: "Test stalled recovery" });
+  it("a rejected format submission can be corrected with the same roundId", async () => {
+    const start = await TOOL_HANDLERS.loopforge_start(mgr, { task: "Test format recovery" });
     const sessionId = String(start.sessionId);
 
-    const stalled = await TOOL_HANDLERS.loopforge_next(mgr, {
+    const invalid = await TOOL_HANDLERS.loopforge_next(mgr, {
       sessionId,
       roundId: String(start.roundId),
       output: agentOutputNoEval("Round output without an eval block."),
     });
-    assert.equal(stalled.stopReason, "stalled");
-    assert.equal(typeof stalled.roundId, "string",
-      "the stalled result must carry the round anchor so a resubmission can be constructed");
+    assert.equal(invalid.error, "evaluation_invalid");
 
     // Corrected submission against the SAME session and round.
     const recovered = await TOOL_HANDLERS.loopforge_next(mgr, {
       sessionId,
-      roundId: String(stalled.roundId),
+      roundId: String(start.roundId),
       evaluation: evalParam({ success: false, shouldContinue: true }),
     });
     assert.notEqual(recovered.stopReason, "stalled",
-      "the corrected resubmission must be processed, not stalled again");
+      "the corrected resubmission must be processed normally");
     assert.notEqual(recovered.stopReason, "session_not_found");
     assert.equal(recovered.round, 2, "the round must advance after recovery");
     assert.ok(typeof recovered.prompt === "string" && recovered.prompt.length > 0,
@@ -466,7 +533,7 @@ describe("MCP — session persistence (save / resume)", async () => {
     // Advance round 1 → compiles round 2
     const r2 = await mgr.advance(sessionId, agentOutput({
       success: false, shouldContinue: true,
-    }));
+    }), evalParam({ success: false, shouldContinue: true }));
     assert.ok(r2.prompt !== null);
     assert.equal(r2.round, 2);
 
@@ -479,13 +546,13 @@ describe("MCP — session persistence (save / resume)", async () => {
     assert.ok(st.length >= 1, "success trajectory should have at least 1 entry");
   });
 
-  it("advance() saves stopped status when task_complete", async () => {
+  it("advance() saves stopped status when completed", async () => {
     const r1 = await mgr.create({ task: "Test task", loopId: "complete-persist" });
     const sessionId = r1.sessionId;
 
     await mgr.advance(sessionId, agentOutput({
       success: true, shouldContinue: false,
-    }));
+    }), evalParam({ success: true, shouldContinue: false }));
 
     const entries = queryLoopEntries(store, "complete-persist", { prefix: "loop:complete-persist:session" });
     const sessionEntry = entries.find((e) => e.task_type === "session_state");
@@ -494,17 +561,27 @@ describe("MCP — session persistence (save / resume)", async () => {
     assert.equal(lineage.status, "stopped");
   });
 
-  it("advance() saves stalled status when no eval block", async () => {
+  it("advance() leaves the session running when evaluation is absent", async () => {
     const r1 = await mgr.create({ task: "Test task", loopId: "stall-persist" });
     const sessionId = r1.sessionId;
+    const beforeEntries = JSON.stringify(store.listEntries("stall-persist"));
+    const beforeMetrics = JSON.stringify(mgr.getPolicyMetrics("stall-persist"));
+    const beforeRoundDocuments = store.rounds.size;
 
-    await mgr.advance(sessionId, agentOutputNoEval("Just some text"));
+    const invalid = await mgr.advance(sessionId, agentOutputNoEval("Just some text"));
+    assert.equal(invalid.stopReason, "evaluation_invalid");
+    assert.equal(JSON.stringify(store.listEntries("stall-persist")), beforeEntries,
+      "format errors must not save session or vault state");
+    assert.equal(JSON.stringify(mgr.getPolicyMetrics("stall-persist")), beforeMetrics,
+      "format errors must not affect metrics");
+    assert.equal(store.rounds.size, beforeRoundDocuments,
+      "format errors must not create a round document");
 
     const entries = queryLoopEntries(store, "stall-persist", { prefix: "loop:stall-persist:session" });
     const sessionEntry = entries.find((e) => e.task_type === "session_state");
     assert.ok(sessionEntry !== undefined);
     const lineage = sessionEntry!.loop_lineage as Record<string, unknown>;
-    assert.equal(lineage.status, "stalled");
+    assert.equal(lineage.status, "running");
   });
 
   it("resume() returns prompt for next round after create", async () => {
@@ -526,7 +603,7 @@ describe("MCP — session persistence (save / resume)", async () => {
     const r1 = await mgr.create({ task: "Test task", loopId: "resume-mid" });
     const r2 = await mgr.advance(r1.sessionId, agentOutput({
       success: true, shouldContinue: true,
-    }));
+    }), evalParam({ success: true, shouldContinue: true }));
     assert.equal(r2.round, 2);
     assert.ok(r2.prompt !== null);
 
@@ -544,7 +621,7 @@ describe("MCP — session persistence (save / resume)", async () => {
     const r1 = await mgr.create({ task: "Test task", loopId: "resume-done" });
     await mgr.advance(r1.sessionId, agentOutput({
       success: true, shouldContinue: false,
-    }));
+    }), evalParam({ success: true, shouldContinue: false }));
 
     const mgr2 = new SessionManager(store);
     const resumed = mgr2.resume("resume-done");
@@ -593,7 +670,7 @@ describe("MCP — session persistence (save / resume)", async () => {
   });
 
   it("autoResumeAll() does not recover stopped sessions", async () => {
-    // Create a session and advance it to task_complete so vault records status="stopped"
+    // Create a session and complete it so vault records status="stopped".
     const start = await mgr.create({ task: "Stopped test", loopId: "auto-resume-stopped" });
     const sid = String(start.sessionId);
     await mgr.advance(sid, "done", {
@@ -645,6 +722,7 @@ describe("MCP — status / list / stop / replay", async () => {
       sessionId,
       roundId: String(start.roundId),
       output: agentOutput({ success: false, shouldContinue: true }),
+      evaluation: evalParam({ success: false, shouldContinue: true }),
     });
 
     const status = await TOOL_HANDLERS.loopforge_status(mgr, { sessionId });
@@ -673,6 +751,7 @@ describe("MCP — status / list / stop / replay", async () => {
       sessionId,
       roundId: String(start.roundId),
       output: agentOutput({ success: false, shouldContinue: true }),
+      evaluation: evalParam({ success: false, shouldContinue: true }),
     });
 
     const result = await TOOL_HANDLERS.loopforge_stop(mgr, { sessionId });
@@ -694,6 +773,7 @@ describe("MCP — status / list / stop / replay", async () => {
       sessionId,
       roundId: String(start.roundId),
       output: agentOutput({ success: true, shouldContinue: true }),
+      evaluation: evalParam({ success: true, shouldContinue: true }),
     });
 
     const result = await TOOL_HANDLERS.loopforge_replay(mgr, { sessionId });
@@ -1326,6 +1406,7 @@ describe("MCP — v3.2 unverified success trajectory", () => {
       sessionId,
       roundId: String(start.roundId),
       output: agentOutput({ success: true, shouldContinue: true }),
+      evaluation: evalParam({ success: true, shouldContinue: true }),
     });
     assert.equal(advanced.round, 2, "unverified success still advances the loop");
     const status = await TOOL_HANDLERS.loopforge_status(mgr, { sessionId });
@@ -1337,6 +1418,7 @@ describe("MCP — v3.2 unverified success trajectory", () => {
       sessionId,
       roundId: String(advanced.roundId),
       output: agentOutput({ success: false, shouldContinue: true }),
+      evaluation: evalParam({ success: false, shouldContinue: true }),
     });
     const status2 = await TOOL_HANDLERS.loopforge_status(mgr, { sessionId });
     assert.deepEqual(status2.successTrajectory, [false],
@@ -1346,8 +1428,8 @@ describe("MCP — v3.2 unverified success trajectory", () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// v3.2.1: tool contract fixes — server instructions reference only real
-// tools, and loopforge_next accepts the output-with-embedded-eval path.
+// Tool contract fixes — server instructions reference only real tools, and
+// loopforge_next requires a structured evaluation at the MCP boundary.
 // ═══════════════════════════════════════════════════════════════════════════
 describe("MCP — tool contract (v3.2.1)", async () => {
   it("server instructions do not reference the nonexistent loopforge_list tool", () => {
@@ -1359,17 +1441,50 @@ describe("MCP — tool contract (v3.2.1)", async () => {
       "loopforge_status must exist (list functionality moved into it)");
   });
 
-  it("loopforge_next schema accepts output without the evaluation parameter", () => {
-    // The embedded ---loopforge-eval path is only reachable if schema
-    // validation lets an output-only submission through — the handler
-    // requires EITHER evaluation OR output-with-eval-block.
+  it("loopforge_next schema requires the evaluation parameter", () => {
+    assert.throws(() => {
+      validateToolInput("loopforge_next", {
+        sessionId: "s1",
+        roundId: "r1",
+        output: "## Round Output",
+      });
+    }, /evaluation is required/);
+
     assert.doesNotThrow(() => {
       validateToolInput("loopforge_next", {
         sessionId: "s1",
         roundId: "r1",
-        output: "## Round Output\n\n---loopforge-eval\n...",
+        evaluation: evalParam({ success: false, shouldContinue: true }),
       });
-    }, "evaluation must not be required at the schema level");
+    });
+
+    assert.throws(() => {
+      validateToolInput("loopforge_next", {
+        sessionId: "s1",
+        roundId: "r1",
+        evaluation: {
+          success: "false",
+          output_summary: "invalid core",
+          constraint_violations: [],
+          should_continue: true,
+        },
+      });
+    }, /evaluation\.success must be boolean/);
+
+    assert.doesNotThrow(() => {
+      validateToolInput("loopforge_next", {
+        sessionId: "s1",
+        roundId: "r1",
+        evaluation: {
+          success: false,
+          output_summary: "valid core",
+          constraint_violations: [],
+          should_continue: true,
+          outcome: 42,
+          execution_evidence: "malformed optional value",
+        },
+      });
+    }, "optional evaluation fields must reach runtime normalization");
 
     // sessionId + roundId remain required.
     assert.throws(() => {
@@ -1647,16 +1762,7 @@ describe("MCP — Round Contract flow", async () => {
         scope: ["src/auth"],
       },
     };
-    const output = [
-      "## Round Output",
-      "Scaffolded the auth module.",
-      "",
-      "---loopforge-eval",
-      JSON.stringify(evalBlock),
-      "---end-loopforge-eval",
-    ].join("\n");
-
-    const r2 = await mgr.advance(sessionId, output);
+    const r2 = await mgr.advance(sessionId, "Scaffolded the auth module.", evalBlock);
     assert.ok(r2.prompt !== null);
     assert.equal(r2.round, 2);
     assert.ok(r2.prompt.includes("**Implement login flow**"),
@@ -1668,7 +1774,11 @@ describe("MCP — Round Contract flow", async () => {
   it("a contract-less round stays byte-identical to pre-contract rendering", async () => {
     const r1 = await mgr.create({ task: "Plain task", loopId: "contract-none" });
     const sessionId = r1.sessionId;
-    const r2 = await mgr.advance(sessionId, agentOutput({ success: false }));
+    const r2 = await mgr.advance(
+      sessionId,
+      agentOutput({ success: false }),
+      evalParam({ success: false, shouldContinue: true }),
+    );
     assert.ok(r2.prompt !== null);
     assert.ok(r2.prompt.includes("Plain task"), "original task stays the Current Task");
     assert.ok(!r2.prompt.includes("Round Contract"), "no contract template without a contract");

@@ -29,7 +29,7 @@ export function verifyBacktrackPrompt(
   );
 
   // Progress stall range — only for non-terminal triggers.
-  // progress_stall_terminal uses different wording (no explicit range).
+  // progress_flatline uses different wording (no explicit range).
 
   // git stash command (was double-quoted — THE bug)
   assert.ok(

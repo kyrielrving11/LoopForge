@@ -31,45 +31,60 @@ Google DeepMind 的结论很明确：模型通过自省无法可靠改进自己�
 
 ## LoopForge 的解法
 
-LoopForge 在 Agent **外部**运行。它提供一个类型化 vault（survive 上下文压缩）、一个 Agent 无法自提供的外部验证与执行管线、以及一个无需人工干预就能从死胡同回退的恢复系统。
+LoopForge 在 Agent 外部运行，并负责轮次之间的边界。它接收结构化报告，采集证据，检查报告，决定轮次是否可以提交，再从已提交事实重新编译下一轮 prompt。
 
-### 1. Vault → 编译，不是摘要 → 摘要
+运行时刻意分开两份来源：
 
-Agent 每轮的 self-evaluation 写入**类型化 JSON vault**。下一轮的 prompt 不是上一轮 prompt 的压缩版——是从 vault **重新编译**的。Milestone 从原始 vault entries 重新计算，不是摘要链的产物。约束、标准和子目标都有稳定的 hash 派生 ID（`c-` / `cr-` / `sg-XXXXXXXX`），跨轮精确匹配。删掉状态文件，可以从 vault 重建。
+- **一份事实来源：** Vault 中已提交的类型化轮次文档。
+- **一份认知来源：** 从这些已提交事实编译出的 Canonical State。
+
+这样，展示视图、指标或模型叙述都不会悄悄变成第二套历史。
+
+### 1. 一份事实来源
+
+`loopforge_next` 接收结构化 `evaluation`。四个核心字段严格校验：`success`、`output_summary`、`constraint_violations` 和 `should_continue`。其余字段由运行时归一化。核心字段缺失或类型错误时返回 `evaluation_invalid`，Agent 修正后可以用同一个 `roundId` 重试。这条路径不会保存 session、写入轮次、进入验证门或执行门，也不会改变拒绝计数和指标状态。
+
+通过格式校验后，LoopForge 采集 Git 与命令证据，运行验证门和执行门，只提交被允许的轮次。已提交轮次文档是持久记录。被拒绝和进行中的尝试不会进入记录，回溯指令也会从最终历史视图中排除。
+
+所有历史读取都使用同一个内部 `CommittedRoundView`。它统一解码、排序、去重和过滤轮次文档，供 Replay、Audit、Metrics、契约、编译和门的历史判断使用。它是只读模型，不是新的持久化格式。
+
+### 2. 一份认知来源
+
+Compiler 从已提交事实演化 Canonical State。目标、约束、证据、Milestone、子目标、决策和进度都通过这份状态进入下一轮 prompt，而不是通过上一轮 prompt 的摘要进入。
+
+`DerivedCognitiveFacts` 从 Canonical State 和已提交轮次派生 focus、todo、phase、delegation 和 handoff。prompt、可选 state file 与 status projection 使用同一份事实。删除 state file 不会丢失真相，因为它可以重新生成。
+
+稳定 ID（`c-`、`cr-`、`sg-XXXXXXXX`）在 Agent 提供时用于精确引用。自然语言引用仍保留由策略控制的相似度匹配作为回退。
 
 ```
-❌ 传统做法：prompt → 摘要 → 下一轮 prompt → 再摘要 → …
-✅ LoopForge：prompt → vault entry → 下一轮 prompt（从 vault 重新编译）
+传统做法：prompt -> 摘要 -> 下一轮 prompt -> 再次摘要
+LoopForge：已提交轮次 -> Canonical State -> 下一轮 prompt
 ```
 
-### 2. 外部验证与执行
+### 3. 外部验证与执行
 
-**验证门**（27 项交叉检查）将 Agent 的每条声明与独立证据比对——Git 快照、测试运行器输出、显式验证命令。**执行门**（14 条规则）决定怎么办。它的核心不是"Agent 违反了约束 X"，而是检测 Agent 无法自我诊断的问题：
+验证门针对 Git 快照、测试输出和显式配置的命令运行 27 项证据交叉检查。执行门应用 14 条认知完整性规则，决定接受、拒绝、回溯或终止。规则覆盖无证据的成功声明、证据矛盾、意图漂移、契约违规和进度停滞。
 
-- R1：声称成功但标准没满足 → **自欺**
-- R3：声称成功但没有可验证证据 → **空口无凭**
-- R4：连续 3 轮停滞 → **已经卡住了但自己不知道**
-- R5：进度完全为零 → **假装在工作**
-- R7：说要做 X 实际做了 Y → **意图和行动脱节**
+Round Contract 允许已提交轮次为下一轮提出有边界的工作。Active Contract 始终从已提交历史派生，在重试和恢复期间保持一致，直到其条件被声明完成或 Agent 报告阻塞。带有 verification_plan 的契约完成必须由本轮通过的机器观察支持。
 
-**Agent 就是产生这些叙述的那个系统。它无法从内部检测这些模式。**
+机器证据观察到 Git 运动时，可以豁免进度停滞判定。Agent 自报的进度不能创造机器判定，也不能取消机器判定。
 
-### 3. 恢复：拒绝、回溯、续接
+### 4. 不改写历史的恢复
 
-**拒绝即零提交**——被拒绝的轮次不写入 vault。轮次 ID 不变，尝试计数递增，下一轮 prompt 包含诊断差距说明，精确指出哪里不匹配。
+被拒绝的提交保留逻辑 `roundId`，只增加 attempt，不提交轮次。Agent 会收到针对性的重试 prompt。
 
-**自动回溯**——进度停滞（R4/R5）时，状态机回滚到上一个干净轮次而非直接终止。注入"为什么走不通"的诊断。回溯 prompt 包含工作区恢复指令和受影响的文件列表；下一轮提交如未恢复工作区将被拒绝。跳过的轮次中发现的有效知识会被保留。
+R4 和 R5 可以回溯到最后一个干净的已提交轮次。LoopForge 注入诊断，列出受影响文件，并在下一次提交前验证工作区恢复。跳过轮次中的有效发现会被保留，而回溯路径不会进入最终历史。
 
-**暂停 / 恢复 / 回放**——跨进程 session lease。中断后 idempotent resume。已提交轮次的时间旅行查询。
+持久 session、拥有者锁、可续租 lease 和幂等恢复支持进程中断后的继续执行，不跳过也不重复提交轮次。
 
 ---
 
 ## LoopForge 不是
 
-- ❌ **不是记忆系统**——状态文件是派生视图，vault 是真相。不搞 RAG、不搞向量数据库。
-- ❌ **不是上下文压缩器**——不压缩 prompt，不搞智能摘要。从 vault 重新编译，不是从上一轮 prompt 摘要。
-- ❌ **不是约束跟踪器**——约束只是验证门关注的信号之一。核心价值是外部裁判。
-- ❌ **不替代 Agent**——Agent 仍然读代码、改文件、跑工具、决定如何推理。LoopForge 拥有**轮次边界**。
+- **不是记忆数据库。** State file 是派生视图。已提交轮次保存事实，Canonical State 提供运行时认知。LoopForge 不使用 RAG 或向量数据库。
+- **不是上下文压缩器。** 它从类型化状态重新编译 prompt，而不是压缩上一轮 prompt。
+- **不是约束跟踪器。** 约束只是外部验证与执行的一项输入，不是产品边界。
+- **不是 Agent 或无人值守执行器。** Agent 负责读代码、改文件、跑工具和选择推理方式，LoopForge 负责轮次转换。
 
 ---
 
@@ -83,68 +98,59 @@ claude mcp add loopforge -- npx loopforge mcp
 
 支持 Claude Code、Codex CLI 以及任何兼容 MCP 的客户端。
 
-MCP 服务路径（`loopforge mcp`）是主要集成方式，提供完整的认知基础设施：
-验证门、执行门、回溯、证据收集和崩溃恢复。引擎也可作为
-库用于自定义集成 — 详见 [API 参考](./loopforge/README.md)。
+MCP 服务路径（`loopforge mcp`）是主要集成方式，提供验证门、执行门、回溯、证据收集和崩溃恢复。引擎也可作为库用于自定义集成，详见 [API 参考](./loopforge/README.md)。
 
 ---
 
 ## 架构
 
+```text
+外部 Agent
+  -> 提交结构化 evaluation
+  -> 证据采集 / 验证门 / 执行门
+       拒绝 / 终止：不提交轮次
+       接受 / 停止 / 回溯：提交交易决定
+  -> 已提交轮次文档                [事实来源]
+  -> CommittedRoundView             [共享只读模型]
+       -> Replay                    [发生了什么]
+       -> Audit / Metrics           [证据与诊断]
+       -> Canonical State           [认知来源]
+            -> DerivedCognitiveFacts
+            -> prompt / state file / status
+            -> 外部 Agent，下一轮
 ```
-┌─────────────────────────────────────────────────────┐
-│                    Agent 执行轮次                      │
-│  读代码 · 改文件 · 跑工具 · 决定如何推理                  │
-└──────────────────────┬──────────────────────────────┘
-                       │ Agent 提交 SelfEvaluation
-                       ▼
-┌─────────────────────────────────────────────────────┐
-│                 LoopForge 轮次边界                     │
-│                                                       │
-│  证据采集 ──→ 验证门 ──→ 执行门 ──→ 状态提交 ──→ 编译   │
-│  (Git/命令)  (27项检查)  (14条规则)  (vault写入)  (下一轮) │
-│                                                       │
-│  接受:   提交状态，编译下一轮                              │
-│  拒绝:   同一轮重试，零状态变更                             │
-│  回溯:   回退到干净轮次，恢复工作区，注入诊断                  │
-│  终止:   持久化终态                                      │
-└──────────────────────┬──────────────────────────────┘
-                       │ 从 vault 重新编译 prompt
-                       ▼
-┌─────────────────────────────────────────────────────┐
-│               Vault（类型化 JSON 持久化）                │
-│  loops/<id>/rounds/<n>.json · session.json · 策略文件   │
-│  真相来源。不是摘要链。状态文件是派生视图。                    │
-└─────────────────────────────────────────────────────┘
-```
+
+当前轮次的门还会检查提交的 evaluation 和新采集的证据。它们对历史的读取仍然通过共享的 committed-round view。
 
 ---
 
 ## 核心能力
 
-### 持久化认知状态
+### 结构化轮次协议
 
-每一轮的自我评估写入 vault。下一轮 prompt 从 vault entries 重新编译——Milestone 不是"摘要的摘要"，子目标状态不是"压缩后的压缩"。稳定 ID（`c-` / `cr-` / `sg-XXXXXXXX`）实现约束、标准和子目标的跨轮精确匹配——消灭 Jaccard 假阳性。
+MCP 边界校验基础 JSON 参数和结构化工具输出。四个必填 evaluation 字段严格校验，其余字段宽松归一化并限制长度。格式错误可以重试，不会污染轮次状态。
 
-编译器跟踪子目标的五态生命周期（pending → in_progress → done / blocked / canceled），管理约束衰减（已发现的约束长期未被违反则降级为 inactive，再次违反时自动重新激活），并构建带阶段边界 Milestone 的分层摘要——Milestone 不会随滚动窗口被驱逐。
+### 确定性的状态重建
 
-### 外部验证与执行
+Compiler 从已提交轮次重建状态，跟踪五态子目标、发现约束的生命周期、阶段 Milestone、证据、信任度和 Active Round Contract，不增加另一种持久化模型。L0、L1、L2 只选择 prompt 密度，不规定推理策略。
 
-验证门运行 27 项交叉检查：进度回退、空变更声称成功、成功但标准未满足、**成功无机器可验证证据**（claim 必须有测试/命令证据背书，`no_change_reason` 是诚实逃生口）、**声明 outcome 与旧布尔字段的一致性**（blocked 无 blocker 提示）、成功声明冲突、**retroactiveClaims 对错误轮次或旧轮次的 git 历史验证**、重复约束发现、反复违规、撤回刚发现的约束、证据完整性（Git）、必要命令失败、命令输出不一致、意图-行动漂移、子目标漂移、标准声称无机器背书、**回溯后工作区恢复检查（文件重叠 + git HEAD）**、自 v3.2 起、v3.6 并入 R8 的 **`success_without_verified_evidence`**（本轮无机器验证观察的成功声明，按运行时 providerStatus 判定；篡改入口的命令不算机器证据）、自 v3.3 起的**验证域完整性**（命令入口文件在同轮被改动、测试文件随通过的命令一起被改动）以及**四项 Round Contract 检查**（`round_underspecified`、`round_unverifiable`、`round_scope_drift`、`premature_boundary`）。
+### 证据支持的决定
 
-执行门的 14 条规则检测认知诚信失败：虚假成功（R1）、反复违规（R2）、空口成功（R3）、**证据矛盾（R-EVID）**、**验证命令入口被篡改（R-EVID-VERIFY）**、**合同边界被提前声称（R-C1）**、**无机器证据的成功（R8）**、**合同范围越界（R-C2）**、进度停滞（R4）、完全静止（R5）、最大拒绝次数（R6）、意图漂移（R7）、**回溯后工作区未恢复（R9）**。R7 只在澄清引用了具体 ID 或文件路径时才接受转向——连续三次无锚点的弱澄清直接终止；R8 先拒绝、重复后终止；R9 要求先恢复工作区再继续。
+验证门从已采集快照派生声明来源和机器状态。执行门把结果转换为接受、拒绝、回溯或终止。Metrics 只用于诊断，不参与正确性、门结果、停止条件或契约推导。
 
-自 v3.3 起，停滞判定（R4/R5）在证据路径上要求机器一致：窗口内有 git 运动或新完成的 criteria 即豁免停滞判定（仅豁免，绝不新增惩罚）。每轮还可以声明可选的 **Round Contract**——`done_when`（criteria ID）、`verification_plan`（已配置的证据命令名）、`scope`。自 v3.4 起，声明的合同是**对下一轮的提案**：只有声明轮提交后它才成为 **active 契约**——渲染为 Current Task（原始目标仍在 Objective 段）——并一直保持 active，直到某个已提交 eval 把全部 done_when 项列入 `success_criteria_met`（完成）或声明 `outcome=blocked`（阻塞）；随后该 eval 自己的新提案接管，或 Current Task 退回原始任务。active 契约在**每条编译路径**上都从已提交轮派生（reject 重试、resume、backtrack 都持续显示它）。完成声明被绑定到 active 契约：声称 done_when 满足但无机器验证证据、或在声称成功时静默丢弃 done_when 项 → `premature_boundary`（R-C1）；改动超出 active scope → `round_scope_drift`（R-C2），只有带实质 `drift_clarification` 才被接受。自 v3.5 起，关闭契约本身也是成功级声明：若 verification_plan 命令没有全部在本轮被观察到通过 → `contract_completion_unverified`；active 契约未关闭时提出的不同提案不再静默——`contract_premature`（warn）会把它显性化（契约仍被忽略直到完成或阻塞）。回溯后若恢复的 Current Task 是导致停滞的契约，正确修法是 `outcome="blocked"` + blocker 关闭它，并在同一提交声明修订契约。无契约的 L2 prompt 会提示声明契约（`prompt.contract_nudge_on_l2`，默认开）；`loopforge_status` 与 `loopforge_replay` 现在暴露派生的 active 契约与每轮声明的提案。无合同 → 行为逐字节不变，R8 的机器证据要求仍然守护每一次成功声明。
+### 分开的观察视图
 
-### 恢复
+Replay 通过已提交时间线和轮次 diff 回答“发生了什么”。Audit 回答最终事实是否完整、声明是否有证据支持。Status 展示当前认知状态。三者回答的问题不同，但共享同一个 committed-round 解码器和过滤策略。
 
-被拒绝的轮次什么都不提交。停滞触发自动回溯，回退到上一个干净轮次并注入诊断。回溯 prompt 包含工作区恢复指令；下一轮提交会验证工作区是否确实恢复了。Session 通过可续租约跨进程存活——resume 精确接上中断的位置。
+### 受控恢复
 
-### Agent 自主权
+重试保留逻辑轮次身份。回溯恢复最后一个干净轮次，保留有效发现，并检查工作区是否回到恢复目标。Session 文档、单调序列、原子写入、锁和可续租 lease 保护重启与并发路径。
 
-L0（重试）/ L1（续行）/ L2（全量恢复）只控制状态密度——推理策略由 Agent 决定。每轮 Agent 可通过 `prompt_requests`（强调、展开、困惑点）表达信息需求。Compiler 在安全边界内重组 prompt——mandatory sections 永不被移除。
+### Agent 负责执行
 
-九个 MCP 工具（`start` · `next` · `status` · `stop` · `pause` · `resume` · `replay` + `gate_check` · `gate_resolve`），返回 JSON content 块。`status` 是统一查看工具：`view=session|loop|all|audit`（原 `list`/`health` 并入，另含只读验证审计——claims/gates/verdict/序列完整性）。零运行时依赖——Node.js 标准库 only。所有阈值、预算、间隔集中在 `loop_policy.json`。865 测试。
+外部 Agent 负责规划和工具使用。它可以让 Compiler 强调已有状态或暴露困惑点，但不能移除必需 prompt 段落或绕过预算。LoopForge 不运行后台 Agent。
+
+九个 MCP 工具：`start`、`next`、`status`、`stop`、`pause`、`resume`、`replay`、`gate_check` 和 `gate_resolve`。`status` 提供 `session`、`loop`、`all` 和 `audit` 视图。运行时只使用 Node.js 标准库，阈值、预算和间隔由 `loop_policy.json` 控制。
 
 ---
 

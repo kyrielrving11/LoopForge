@@ -1136,7 +1136,7 @@ describe("verification-gate — v2.12 outcome consistency", () => {
     });
     const result = verifySelfEvaluation(curr, 2, [], null);
     // outcome wins: the success-class check must not fire; the declared
-    // non-success vs legacy success=true does produce a warn conflict flag.
+    // non-success vs the core success=true flag produces a warning.
     assert.ok(!result.flags.some((f) => f.check === "success_with_remaining_criteria"));
     assert.ok(result.flags.some((f) => f.check === "success_claim_conflict"));
     assert.equal(result.verdict, "suspect");
@@ -1152,7 +1152,7 @@ describe("verification-gate — v2.12 outcome consistency", () => {
     assert.ok(result.flags.some((f) => f.check === "outcome_success_contradiction"));
   });
 
-  it("warns when outcome=failed but success=true (compat conflict)", () => {
+  it("warns when outcome=failed but success=true (inconsistent claim)", () => {
     const curr = se({
       success: true,
       outcome: "failed",
@@ -1338,29 +1338,11 @@ describe("v3.2 — deriveEvidenceStatus", () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("v3.2 — machineProgressSeries", () => {
-  const feedbackRound = (round: number, gitFiles: string[]): VaultEntry => ({
-    task_id: `loop:mp:r${round}:feedback`,
-    loop_id: "mp",
-    loop_lineage: {
-      round,
-      round_transaction: {
-        schema_version: 1,
-        round_id: `loop:mp:round:${round}`,
-        snapshot: {
-          schemaVersion: 1,
-          roundId: `loop:mp:round:${round}`,
-          loopId: "mp",
-          round,
-          attempt: 1,
-          phase: "committed",
-          beforeEvidence: [],
-          roundEvidence: [{ provider: "git", timestamp: Date.now(), files: gitFiles, data: {} }],
-          createdAt: 0,
-          updatedAt: 0,
-        },
-      },
-    },
-  });
+  const feedbackRound = (round: number, gitFiles: string[]): VaultEntry =>
+    committedRound(round, {
+      loopId: "mp",
+      roundEvidence: [{ provider: "git", timestamp: Date.now(), files: gitFiles, data: {} }],
+    });
 
   it("reports per-round git observations for the lookback window", () => {
     const series = machineProgressSeries(

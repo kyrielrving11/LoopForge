@@ -24,10 +24,10 @@ describe("loopforge CLI", () => {
   it("exposes one versioned command surface", () => {
     const help = run(["--help"]);
     assert.equal(help.status, 0, help.stderr);
-    assert.match(help.stdout, /LoopForge 3\.3\.0/);
+    assert.match(help.stdout, /LoopForge 3\.6\.0/);
     assert.match(help.stdout, /loopforge mcp/);
     assert.match(help.stdout, /loopforge inspect/);
-    assert.equal(run(["--version"]).stdout.trim(), "3.3.0");
+    assert.equal(run(["--version"]).stdout.trim(), "3.6.0");
   });
 
   it("returns machine-readable doctor results", () => {

@@ -18,10 +18,11 @@ import type { ProviderSnapshot } from "./evidence-provider.js";
 import { getPolicy, isConfiguredCommand } from "./policy.js";
 import type { RoundContract, SelfEvaluation, VerificationFlag, VerificationResult } from "./protocol.js";
 import { makeVerificationFlag, makeVerificationResult } from "./protocol.js";
-import { jaccardSimilarity, tokenize, entryRound as sharedEntryRound, isRecord, machineGitMotionSeries } from "./token-utils.js";
+import { jaccardSimilarity, tokenize, entryRound as sharedEntryRound, isRecord } from "./token-utils.js";
 import { computeGoalTextHash, deriveSubGoalId } from "./loop-compiler.js";
+import { committedRoundsFromEntries, machineGitMotionSeries } from "./committed-round.js";
 import {
-  committedContractRounds,
+  contractRoundEvaluations,
   contractDoneWhenSatisfied,
   contractItemMatches,
   deriveActiveRoundContract,
@@ -283,21 +284,17 @@ export function deriveEvidenceStatus(
   };
 }
 
-/** v3.2: Per-round machine progress — whether git observed file changes in
- *  each of the last `lookback` committed rounds, rebuilt from the feedback
- *  entries' roundEvidence snapshots (already persisted at commit). Returns
- *  null when fewer than `lookback` rounds carry git snapshots — the machine
- *  signal is unavailable and callers (R4/R5) keep their legacy verdict.
- *  v3.3: implementation moved to token-utils (machineGitMotionSeries) so the
- *  compiler can read the same signal for the progress dashboard without an
- *  import cycle; this export is now a thin delegation with unchanged
- *  signature and semantics. */
+/** Per-round machine progress over decoded committed history. */
 export function machineProgressSeries(
   vaultEntries: VaultEntry[],
   currentRound: number,
   lookback: number,
 ): boolean[] | null {
-  return machineGitMotionSeries(vaultEntries, currentRound, lookback);
+  return machineGitMotionSeries(
+    committedRoundsFromEntries(vaultEntries, currentRound),
+    currentRound,
+    lookback,
+  );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -392,9 +389,9 @@ function checkUnverifiedCriteriaClaims(
   });
 }
 
-/** v2.12: Declared outcome vs legacy boolean consistency. A declared success
- *  with success=false is a self-contradiction (error); a declared non-success
- *  with success=true is a compat conflict (warn). Also: outcome==="blocked"
+/** Declared outcome vs the core success flag. A declared success with
+ *  success=false is a self-contradiction (error); a declared non-success with
+ *  success=true is an inconsistent claim (warn). Also: outcome==="blocked"
  *  without a blocker description gets a warn so the next prompt asks for it. */
 function checkOutcomeConsistency(
   selfEval: SelfEvaluation,
@@ -1447,7 +1444,7 @@ export function verifySelfEvaluation(
   // (the eval under verification is not yet committed, so it structurally
   // cannot influence the derivation).
   const activeContract = deriveActiveRoundContract(
-    committedContractRounds(vaultEntries, currentRound),
+    contractRoundEvaluations(committedRoundsFromEntries(vaultEntries, currentRound)),
   );
 
   // v2.12: Derived claim provenance — which reported criteria completions
@@ -1472,7 +1469,7 @@ export function verifySelfEvaluation(
     () => checkSuccessWithoutVerifiedEvidence(selfEval, evidenceStatus),
     // v2.12: criteria met but none machine-verified (mild criterion-specific rule)
     () => checkUnverifiedCriteriaClaims(selfEval, claimView),
-    // v2.12: declared outcome vs legacy boolean consistency
+    // Declared outcome vs the required core success flag.
     () => checkOutcomeConsistency(selfEval),
     // v2.12: retroactive claims against prior rounds
     () => checkRetroactiveClaims(selfEval, vaultEntries, currentRound),

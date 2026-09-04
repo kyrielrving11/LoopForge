@@ -102,8 +102,6 @@ export function makeSelfEvaluation(overrides = {}) {
         ...overrides,
     };
 }
-/** Regex to extract a self-evaluation JSON block from agent output. */
-export const SELF_EVAL_REGEX = /---loopforge-eval\s*([\s\S]*?)\s*---end-loopforge-eval/;
 export function makeCriterionStatus(overrides = {}) {
     return {
         id: "",
@@ -144,7 +142,6 @@ export function makeRollingSummary(overrides = {}) {
         generated_at_round: 0,
         failed_patterns: [],
         milestones: [],
-        loop_synthesis: "",
         ...overrides,
     };
 }
@@ -214,7 +211,6 @@ export function makeLoopRoundResult(overrides = {}) {
         blocker: undefined,
         retroactiveClaims: [],
         no_change_reason: undefined,
-        round_contract: undefined,
         ...overrides,
     };
 }

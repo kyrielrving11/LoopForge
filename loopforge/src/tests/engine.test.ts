@@ -517,7 +517,7 @@ describe("Engine — last_round_result boundary (v3.3.1)", () => {
     // invokeLoopCompile silently dropped next_action and prompt_requests.
     // Every compile path funnels through this boundary, so on the real MCP
     // flow the "Next Action" section, suggested_next_task, sub-goal auto
-    // in_progress, and prompt_requests (emphasize / expand /
+    // in_progress, and prompt_requests (emphasize /
     // confusion_points) never reached the compiler — unit tests fed
     // compileLoop directly and missed the gap.
     const engine = createEngine();
@@ -535,7 +535,6 @@ describe("Engine — last_round_result boundary (v3.3.1)", () => {
         discovered_constraints: ["auth module"],
         prompt_requests: {
           emphasize: ["auth module"],
-          expand: ["progress"],
           confusion_points: ["What does machine-backed evidence mean?"],
         },
       }),

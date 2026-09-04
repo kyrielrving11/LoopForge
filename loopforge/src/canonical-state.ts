@@ -87,8 +87,6 @@ export interface CanonicalLoopState {
   failedPatterns: string[];
   /** v2.1: Phase-boundary milestone summaries that survive window eviction. */
   milestones: MilestoneSummary[];
-  /** v2.1: Single-paragraph loop-level synthesis (formulaic). */
-  loopSynthesis: string;
   /** v2.2: Structured sub-goals with compiler-managed lifecycle. */
   subGoals: SubGoal[];
   /** v3.2: Derived per-criterion status (goal → criteria → evidence view). */
@@ -306,7 +304,7 @@ export function formatRoundContract(contract: RoundContract): string {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /** The trust bar line ("██████░░░░ 60%"). The L2 Agent Trust section and the
- *  L1 expand renderer used to carry private copies of this formula — shared
+ *  detailed L1 renderer used to carry private copies of this formula — shared
  *  here so a formatting change is made once (module contract: renderers must
  *  not silently drift apart). */
 export function trustBarLine(score: number): string {
@@ -317,7 +315,7 @@ export function trustBarLine(score: number): string {
 }
 
 /** Milestone heading line ("**🏁 Round 7** (Rounds 3–7, 60%)"). Shared by the
- *  L2 Phase History and the L1 expand renderer; the expand copy previously
+ *  L2 Phase History and the detailed L1 renderer; the L1 copy previously
  *  rendered the range as "R3–R7", a format only this heading used. */
 export function milestoneHeading(milestone: MilestoneSummary): string {
   const kindIcon = milestone.kind === "agent_declared"
@@ -533,9 +531,6 @@ export function renderCanonicalStateMarkdown(state: CanonicalLoopState): string 
       "",
     );
   }
-  if (state.loopSynthesis) {
-    lines.push("## Loop Summary", "", state.loopSynthesis, "");
-  }
   if (state.externalContext) {
     lines.push("## External Context", "", state.externalContext, "");
   }
@@ -618,7 +613,6 @@ export function createCanonicalLoopState(
     recurringIssues: unique(rolling?.recurring_issues ?? []),
     failedPatterns: unique(rolling?.failed_patterns ?? []),
     milestones: rolling?.milestones ?? [],
-    loopSynthesis: rolling?.loop_synthesis ?? "",
     subGoals: response.sub_goals ?? [],
     criterionStatuses: response.criterion_statuses ?? [],
     lessons: response.lessons ?? [],

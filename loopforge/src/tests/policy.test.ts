@@ -21,9 +21,8 @@ describe("Policy — Defaults", () => {
     assert.equal(DEFAULT_POLICY.summary.health_check_interval, 1);
   });
 
-  it("DEFAULT_POLICY has correct engine values", () => {
-    assert.equal(DEFAULT_POLICY.engine.feedback_flush_interval, 5);
-    assert.equal(DEFAULT_POLICY.engine.max_circuit_breaker, 3);
+  it("DEFAULT_POLICY has the stall lookback window", () => {
+    assert.equal(DEFAULT_POLICY.engine.stall_lookback_rounds, 3);
   });
 
   it("uses the typed LoopStore root", () => {

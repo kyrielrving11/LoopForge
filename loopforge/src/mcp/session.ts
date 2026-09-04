@@ -25,16 +25,21 @@ import type {
   SelfEvaluation,
 } from "../protocol.js";
 import { buildLoopProjection } from "../loop-projection.js";
+import { deriveCognitiveFacts } from "../cognitive-facts.js";
 import { listVerifiedClaims } from "../evidence-claims.js";
 import { buildAudit } from "../audit.js";
 import { checkLoopHealth } from "../loop-compiler.js";
+import { committedRoundsFromEntries } from "../committed-round.js";
 import {
-  committedContractRounds,
+  contractRoundEvaluations,
   deriveActiveRoundContract,
-  type CommittedRoundEvaluation,
 } from "../round-contract.js";
 import { getPolicy, validateLoopId } from "../policy.js";
 import { isRecord } from "../token-utils.js";
+import {
+  buildSelfEvaluation,
+  validateCoreSelfEvaluation,
+} from "../self-eval.js";
 import { makeLoopCompileRequest } from "../protocol.js";
 import { ReplayBackend } from "../replay.js";
 import { FileLoopStore, queryLoopEntries } from "../loop-store.js";
@@ -591,48 +596,84 @@ export class SessionManager implements SessionRegistry {
     note?: string,
   ): Record<string, unknown> {
     const session = this.sessions.get(sessionId);
-    if (!session) return { error: `session not found: ${sessionId}` };
-    const prefix = `loop:${session.loopId}:gate:`;
-    const opened = queryLoopEntries(this.loopStore, session.loopId, { prefix })
-      .find((entry) => entry.task_type === "gate_opened" && entry.gate_id === gateId);
-    if (!opened) {
-      return { error: `no gate_opened record for gate ${gateId} — the gate may have expired or was never recorded` };
+    let loopId = session?.loopId;
+    let currentRound = session?.currentRound ?? 0;
+    let temporaryLease = false;
+
+    // A gate is durable independently of the process that opened it. On a
+    // cold process, locate the owning session by its persisted session_id and
+    // claim a short lease for the decision write; no in-memory reconstruction
+    // is needed for this read/append operation.
+    let persistedEntry: VaultEntry | undefined;
+    if (!session) {
+      persistedEntry = this.sessionStore?.list().find((entry) => {
+        if (entry.task_type !== "session_state") return false;
+        const lineage = isRecord(entry.loop_lineage) ? entry.loop_lineage : {};
+        return lineage.session_id === sessionId;
+      });
+      loopId = persistedEntry?.loop_id;
+      if (!loopId) return { error: `session not found: ${sessionId}` };
+      const claimed = this.claimSessionEntry(loopId);
+      if (!claimed) {
+        return { ...this.leaseConflictResult(loopId, persistedEntry) };
+      }
+      temporaryLease = true;
+      const lineage = isRecord(claimed.loop_lineage) ? claimed.loop_lineage : {};
+      currentRound = typeof lineage.current_round === "number"
+        ? lineage.current_round
+        : 0;
     }
-    const actionText = typeof opened.gate_action === "string" ? opened.gate_action : "";
-    const { id, gate, actionHash } = deriveGate(actionText);
-    if (id !== gateId) {
-      return { error: "gateId does not match the recorded action — the action changed, old approvals expire" };
-    }
-    if (gate.kind !== "user") {
-      return { error: "agent gates are resolved by submitting the required evidence, not by user approval" };
-    }
-    const decision = makeGateDecision({
-      gateId,
-      kind: "user",
-      approved: approved === true,
-      scope: gate.blockedScope ?? [],
-      note: typeof note === "string" ? note : "",
-      decidedAt: new Date().toISOString(),
-      actionHash: actionHash ?? "",
-    });
-    const entry: VaultEntry = {
-      id: randomUUID(),
-      task_id: `loop:${session.loopId}:gate:${gateId}:decision`,
-      task_type: "gate_decision",
-      loop_id: session.loopId,
-      timestamp: new Date().toISOString(),
-      gate_id: gateId,
-      approved: decision.approved,
-      decision_note: decision.note,
-      gate_decision: decision,
-      loop_lineage: {
-        round: session.currentRound,
+
+    if (!loopId) return { error: `session not found: ${sessionId}` };
+    try {
+      const prefix = `loop:${loopId}:gate:`;
+      const opened = queryLoopEntries(this.loopStore, loopId, { prefix })
+        .find((entry) => entry.task_type === "gate_opened" && entry.gate_id === gateId);
+      if (!opened) {
+        return { error: `no gate_opened record for gate ${gateId} — the gate may have expired or was never recorded` };
+      }
+      const actionText = typeof opened.gate_action === "string" ? opened.gate_action : "";
+      const openedLineage = isRecord(opened.loop_lineage) ? opened.loop_lineage : {};
+      const gateRound = typeof openedLineage.round === "number"
+        ? openedLineage.round
+        : currentRound;
+      const { id, gate, actionHash } = deriveGate(actionText);
+      if (id !== gateId) {
+        return { error: "gateId does not match the recorded action — the action changed, old approvals expire" };
+      }
+      if (gate.kind !== "user") {
+        return { error: "agent gates are resolved by submitting the required evidence, not by user approval" };
+      }
+      const decision = makeGateDecision({
+        gateId,
+        kind: "user",
+        approved: approved === true,
+        scope: gate.blockedScope ?? [],
+        note: typeof note === "string" ? note : "",
+        decidedAt: new Date().toISOString(),
+        actionHash: actionHash ?? "",
+      });
+      const entry: VaultEntry = {
+        id: randomUUID(),
+        task_id: `loop:${loopId}:gate:${gateId}:decision`,
+        task_type: "gate_decision",
+        loop_id: loopId,
+        timestamp: new Date().toISOString(),
         gate_id: gateId,
-        action_hash: actionHash,
-      },
-    };
-    this.loopStore.appendEntry(entry);
-    return { sessionId, loopId: session.loopId, gateId, approved: decision.approved };
+        approved: decision.approved,
+        decision_note: decision.note,
+        gate_decision: decision,
+        loop_lineage: {
+          round: gateRound,
+          gate_id: gateId,
+          action_hash: actionHash,
+        },
+      };
+      this.loopStore.appendEntry(entry);
+      return { sessionId, loopId, gateId, approved: decision.approved };
+    } finally {
+      if (temporaryLease) this.sessionStore?.releaseLease?.(loopId, this.ownerId);
+    }
   }
 
   // ── v2.12: Typed projection + audit ────────────────────────────────────
@@ -642,7 +683,11 @@ export class SessionManager implements SessionRegistry {
   getProjection(sessionId: string): Record<string, unknown> | null {
     const session = this.sessions.get(sessionId);
     if (!session) return null;
-    const entries = queryLoopEntries(this.loopStore, session.loopId, { prefix: `loop:${session.loopId}:` });
+    const prefix = `loop:${session.loopId}:`;
+    const entries = [
+      ...queryLoopEntries(this.loopStore, session.loopId, { prefix }),
+      ...queryLoopEntries(this.loopStore, session.loopId, { prefix, feedbackOnly: true }),
+    ];
     let compileResponse: LoopForgeResponse | null = null;
     // v3.0.1: the round boundary already compiled this round — derive the
     // projection from that response instead of recompiling the whole vault.
@@ -674,14 +719,12 @@ export class SessionManager implements SessionRegistry {
       }
     }
     const openGates = this.lifecycle.listOpenGateDescriptions(session.loopId);
-    const projection = buildLoopProjection({
-      loopId: session.loopId,
-      currentRound: session.currentRound,
+    const projection = buildLoopProjection(deriveCognitiveFacts({
       compileResponse,
-      vaultEntries: entries,
+      rounds: committedRoundsFromEntries(entries, session.currentRound),
       verifiedClaims: listVerifiedClaims(entries, session.loopId),
       openGates,
-    });
+    }));
     return projection ? { ...projection } : null;
   }
 
@@ -701,15 +744,7 @@ export class SessionManager implements SessionRegistry {
     // Zero committed decisions → nothing to audit. Returning null lets the
     // tools layer report "no audit data" instead of the external auditor
     // solemnly passing a loop that never ran (or a mistyped loopId).
-    const hasCommittedDecision = entries.some((entry) => {
-      const taskId = String(entry.task_id ?? "");
-      if (!taskId.endsWith(":feedback")) return false;
-      const lineage = isRecord(entry.loop_lineage) ? entry.loop_lineage : null;
-      const transaction = lineage && isRecord(lineage.round_transaction)
-        ? lineage.round_transaction
-        : null;
-      return transaction !== null && isRecord(transaction.result);
-    });
+    const hasCommittedDecision = committedRoundsFromEntries(entries).length > 0;
     if (!hasCommittedDecision) return null;
     const audit = buildAudit(loopId, entries, this.loopStore);
     return { ...audit };
@@ -728,7 +763,7 @@ export class SessionManager implements SessionRegistry {
       ...queryLoopEntries(this.loopStore, session.loopId, { prefix, feedbackOnly: true }),
     ];
     return deriveActiveRoundContract(
-      committedContractRounds(entries, session.currentRound),
+      contractRoundEvaluations(committedRoundsFromEntries(entries, session.currentRound)),
     );
   }
 
@@ -805,9 +840,8 @@ export class SessionManager implements SessionRegistry {
 
   /** Core cycle: extract self-eval → record feedback → check stop → compile next.
    *  The lease + per-session queue wrap the RoundLifecycle state machine.
-   *  @param preExtractedEval Optional pre-built SelfEvaluation from MCP tool parameter.
-   *    When provided (MCP path with evaluation parameter), skips regex extraction.
-   *    When undefined (runtime/CLI path), falls back to regex extraction from output.
+   *  @param preExtractedEval Structured SelfEvaluation supplied by the caller.
+   *    An absent value is returned as evaluation_invalid without mutating state.
    *  @param roundId v3.0.1: The roundId of the round this submission reports on
    *    (from the last start/next/resume response). Anchors the submission so a
    *    stale or duplicate submission is not processed against a later round.
@@ -818,6 +852,35 @@ export class SessionManager implements SessionRegistry {
     preExtractedEval?: SelfEvaluation,
     roundId?: string,
   ): Promise<AdvanceResult> {
+    const current = this.sessions.get(sessionId);
+    if (current && (current.status === "running" || current.status === "stalled")) {
+      const rawEvaluation: unknown = preExtractedEval;
+      if (!isRecord(rawEvaluation)) {
+        return {
+          sessionId,
+          round: current.currentRound,
+          roundId: current.roundSnapshot?.roundId
+            ?? makeRoundId(current.loopId, current.currentRound),
+          prompt: null,
+          stopReason: "evaluation_invalid",
+          stopDetail: "A structured evaluation object is required. Resubmit the same roundId with success, output_summary, constraint_violations, and should_continue.",
+        };
+      }
+      const validation = validateCoreSelfEvaluation(rawEvaluation);
+      if (validation.missing.length > 0 || validation.invalid.length > 0) {
+        return {
+          sessionId,
+          round: current.currentRound,
+          roundId: current.roundSnapshot?.roundId
+            ?? makeRoundId(current.loopId, current.currentRound),
+          prompt: null,
+          stopReason: "evaluation_invalid",
+          stopDetail: "The structured evaluation has missing or invalid core fields. Correct it and resubmit the same roundId.",
+        };
+      }
+      preExtractedEval = buildSelfEvaluation(rawEvaluation);
+    }
+
     return this.withSessionQueue(sessionId, async () => {
       const session = this.sessions.get(sessionId);
       if (

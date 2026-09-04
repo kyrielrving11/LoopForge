@@ -87,7 +87,7 @@ export interface RoundContract {
      *  Out-of-scope git changes = round_scope_drift. ≤ 50 items. */
     scope: string[];
 }
-/** Structured self-evaluation embedded in compiled prompts.
+/** Structured self-evaluation submitted at the round boundary.
  *  The agent outputs this after completing each round.
  *  Every field is consumed by at least one downstream function.
  *
@@ -170,8 +170,7 @@ export interface SelfEvaluation {
     /** v2.12: Declared tri-state outcome. When absent, derived from success
      *  (true → "success", false → "failed"). "partial" and "blocked" can only
      *  be declared explicitly. A declared non-success outcome suppresses the
-     *  success-class verification checks even when success=true (the boolean
-     *  is kept for backward compatibility). */
+     *  success-class verification checks even when success=true. */
     outcome?: RoundOutcome;
     /** v2.12: Flat blocker description, meaningful only when outcome==="blocked".
      *  Also feeds the user/agent gate classification (P2). ≤ 500 chars. */
@@ -195,9 +194,8 @@ export interface SelfEvaluation {
      *  Used by the enforcement gate R7 to distinguish intentional pivots
      *  from unacknowledged drift. */
     drift_clarification?: string;
-    /** v2.9: Model's information needs for the next round's prompt.
-     *  Consumed by the Compiler — not durable across rounds.
-     *  Omit or leave empty if the model has no specific requests. */
+    /** Model's information needs for the next round's prompt.
+     *  Consumed by the Compiler — not durable across rounds. */
     prompt_requests?: PromptRequests;
     /** v3.3: Round Contract. v3.4: a PROPOSAL for the NEXT round's contract
      *  (restated unchanged while the current one is active; a new one after
@@ -302,9 +300,6 @@ export interface PromptRequests {
      *  only reordered. Max entries: policy-driven (L2: 5, L1: 3).
      *  L0: ignored. */
     emphasize?: string[];
-    /** Structured sections to expand to full detail.
-     *  L2: ignored (already expanded). L1: max 1 section. L0: ignored. */
-    expand?: ("milestones" | "sub_goals" | "constraint_lifecycle" | "agent_trust" | "progress" | "loop_synthesis")[];
     /** Things the model is confused about. Rendered at the prompt top
      *  as "Confusion Alerts" before the Objective section. Compiler
      *  auto-matches each entry against state sections and provides
@@ -359,7 +354,6 @@ export interface WorkerResult {
 }
 export declare function makeSelfEvaluation(overrides?: Partial<SelfEvaluation>): SelfEvaluation;
 /** Regex to extract a self-evaluation JSON block from agent output. */
-export declare const SELF_EVAL_REGEX: RegExp;
 export interface LoopForgeRequest {
     task: string;
     mode: Mode;
@@ -436,10 +430,6 @@ export interface RollingSummary {
      *  (agent_declared > criteria_milestone > auto). Rendered in L2 prompts
      *  and always written to the state file. */
     milestones?: MilestoneSummary[];
-    /** v2.1: Single-paragraph structural synthesis of the entire loop.
-     *  Generated at L2 level. Formulaic, not NLP. Contains round count,
-     *  phase count, overall progress, and active constraint summary. */
-    loop_synthesis?: string;
 }
 export declare function makeRollingSummary(overrides?: Partial<RollingSummary>): RollingSummary;
 /** v2.2: A structured sub-goal tracked by the compiler across rounds.
@@ -531,7 +521,7 @@ export interface LoopRoundResult {
     /** v2.8: Agent's explanation for intent/subgoal drift detected in
      *  the previous round. Carried forward from SelfEvaluation. */
     drift_clarification?: string;
-    /** v2.9: Model's information needs for the next round's prompt.
+    /** Model's information needs for the next round's prompt.
      *  Carried forward from SelfEvaluation. Consumed by the Compiler. */
     prompt_requests?: PromptRequests;
     /** v2.12: Declared tri-state outcome. Carried forward from SelfEvaluation. */
@@ -546,11 +536,6 @@ export interface LoopRoundResult {
     /** v2.12: Declared reason for success without machine evidence.
      *  Carried forward from SelfEvaluation. */
     no_change_reason?: string;
-    /** v3.3: Round Contract. v3.4: LEGACY — never populated since v3.4
-     *  (buildLoopRequest no longer forwards it). The ACTIVE contract is
-     *  derived from committed rounds at compile time; reading this field as a
-     *  contract source reintroduces the second truth the derivation replaced. */
-    round_contract?: RoundContract;
 }
 export declare function makeRoundContract(overrides?: Partial<RoundContract>): RoundContract;
 export declare function makeLoopRoundResult(overrides?: Partial<LoopRoundResult>): LoopRoundResult;
@@ -572,8 +557,7 @@ export interface LoopCompileRequest {
     /** Optional context supplied explicitly by the embedding Agent. */
     external_context?: string;
     /** Maximum rounds for this loop. Used by the state file header to show
-     *  accurate progress (Round X / Y). Falls back to max_summary_rounds * 2
-     *  when not provided (callers that don't track maxRounds). */
+     *  accurate progress (Round X / Y). */
     max_rounds?: number;
     /** Verification findings from the previous attempt. Prompt compilation uses
      *  these to select a rehydrate view and render the gate findings exactly
@@ -686,8 +670,10 @@ export interface LoopForgeResponse {
     warnings?: string[];
     /** v2.12: Compiler-derived state passed through for typed projections
      *  (zero extra persistence — derived fresh each compile). */
+    loop_objective?: LoopObjective | null;
     rolling_summary?: RollingSummary | null;
     sub_goals?: SubGoal[];
+    criterion_statuses?: CriterionStatus[];
     suggested_next_task?: string;
 }
 export interface SessionState {
@@ -705,11 +691,10 @@ export interface AgentLoopResult {
 /** Why a loop stopped. Used by MCP session and vault persistence.
  *  `completed` requires both success=true and should_continue=false.
  *  `failed` is success=false + should_continue=false (agent gave up).
- *  `cancelled` is manual stop via loopforge_stop.
- *  Legacy aliases (backward-compat): `task_complete` → `completed`, `stopped` → `cancelled`. */
-export type StopReason = "completed" | "failed" | "blocked" | "cancelled" | "max_rounds" | "circuit_breaker" | "stalled" | "executor_failure" | "enforcement_terminated"
-/** v1.18: Loop was paused by user or signal. */
- | "paused" | "task_complete" | "stopped";
+ *  `cancelled` is manual stop via loopforge_stop. */
+export type StopReason = "completed" | "failed" | "blocked" | "cancelled" | "max_rounds" | "stalled" | "enforcement_terminated"
+/** Loop was paused by user or signal. */
+ | "paused";
 /** Result of round-boundary enforcement. Decides whether to accept the round,
  *  reject it (force the agent to redo the SAME round), or terminate the loop.
  *

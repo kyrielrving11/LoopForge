@@ -38,8 +38,6 @@ export interface VaultEntry {
   timestamp?: string;
   user_intent?: string;
   task_type?: string;
-  /** @deprecated Use `success` field instead. Kept for reading old vault data. */
-  quality_score?: number;
   success?: boolean;
   skill_used?: string;
   loop_id?: string;
@@ -628,4 +626,3 @@ export class FileLoopStore implements LoopStore {
     }
   }
 }
-

@@ -6,9 +6,8 @@
  * leases); this class owns "what happens to a session" (state machine,
  * recovery, result building).
  *
- * Every method was moved verbatim from SessionManager. Only reference paths
- * changed (this.sessions.* → registry.*, this.ownerId / this.leaseMs →
- * constructor deps, this.contextProvider → getContext()).
+ * The lifecycle depends on a narrow registry and explicit stores/providers;
+ * session ownership, queues, and leases remain in SessionManager.
  */
 import { LoopForgeEngine } from "../engine.js";
 import type { LoopForgeRequest, LoopForgeResponse, SelfEvaluation, VerificationFlag, ExternalContextProvider, LoopTerminalSink } from "../protocol.js";
@@ -143,8 +142,8 @@ export declare class RoundLifecycle {
      *  still points at the old prompt. Returns null when no commit is pending. */
     private reconcileCommittedRound;
     /** Resume tail: the session has been reconstructed and registered. Reconcile
-     *  a committed-but-undelivered round, restore the held prompt, or compile
-     *  the next prompt from current round state (legacy path). */
+     *  a committed-but-undelivered round, restore the held prompt, or recover a
+     *  missing prompt from current round state. */
     resume(session: McpSession): AdvanceResult;
     /** Unpause tail: the session has been reconstructed and registered with
      *  status "running". Refresh async evidence, reconcile a committed round,
@@ -156,13 +155,8 @@ export declare class RoundLifecycle {
     private recordGateFromBlocked;
     /** Undecided user gate descriptions for a loop (recorded but unresolved). */
     listOpenGateDescriptions(loopId: string): string[];
-    /** Extract a SelfEvaluation from agent output.
-     *  Structured param preferred → regex extraction from the output text.
-     *  Returns null when neither produced one — the caller stalls the round
-     *  (v2.6 design: the runtime never guesses state from text, so an
-     *  unparseable submission is a stalled round, not a partially-executed
-     *  one; the old extractionFailed/"partial enforcement" plumbing was
-     *  removed in v3.3.1 as unreachable). */
+    /** The boundary supplies the typed evaluation. Free-text parsing is
+     *  deliberately not part of the round state machine. */
     private extractEvaluation;
     /** Execute the round transaction and apply per-rule rejection tracking.
      *  MUTATES: session.roundSnapshot, session.consecutiveRejections,

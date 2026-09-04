@@ -22,30 +22,18 @@ import { effectiveSuccess } from "./self-eval.js";
 import { deriveConstraintId, deriveCriterionId, deriveSubGoalId } from "./loop-compiler.js";
 import { getPolicy } from "./policy.js";
 import { STABLE_ID_RE, isRecord } from "./token-utils.js";
-import { isProcessResult } from "./round-transaction.js";
+import { committedRoundsFromEntries, decodeCommittedRound, } from "./committed-round.js";
 // ═══════════════════════════════════════════════════════════════════════════
 // Helpers
 // ═══════════════════════════════════════════════════════════════════════════
-/** Extract progress_estimate from a vault entry's execution_evidence.
- *  Returns null if no execution evidence is available. */
-function entryProgress(entry) {
-    const evidence = entry.execution_evidence;
-    if (!evidence)
-        return null;
-    const pe = evidence.progress_estimate;
-    return typeof pe === "number" ? pe : null;
-}
 /** Collect progress estimates from vault entries into a round→estimate map.
- *  Shared by R4 (progress_stall) and R5 (progress_stall_terminal). */
+ *  Shared by R4 (progress_stall) and R5 (progress_flatline). */
 function collectProgressByRound(vaultEntries, currentRound) {
     const progressByRound = new Map();
-    for (const entry of vaultEntries) {
-        const rnd = entryRound(entry);
-        if (rnd < 1 || rnd >= currentRound)
-            continue;
-        const pe = entryProgress(entry);
-        if (pe !== null)
-            progressByRound.set(rnd, pe);
+    for (const round of committedRoundsFromEntries(vaultEntries, currentRound)) {
+        const progress = round.executionEvidence?.progress_estimate;
+        if (typeof progress === "number")
+            progressByRound.set(round.round, progress);
     }
     return progressByRound;
 }
@@ -73,13 +61,7 @@ function progressWindow(vaultEntries, currentRound, selfEval) {
  *  decision under loop_lineage.round_transaction; lineage entries carry
  *  nothing at the top level. */
 function committedRoundResult(entry) {
-    const lineage = isRecord(entry.loop_lineage) ? entry.loop_lineage : null;
-    const rt = lineage && isRecord(lineage.round_transaction)
-        ? lineage.round_transaction
-        : null;
-    if (!rt)
-        return null;
-    return isProcessResult(rt.result) ? rt.result : null;
+    return decodeCommittedRound(entry)?.result ?? null;
 }
 /** True when a backtrack already committed at or after the current round —
  *  i.e. the loop is re-walking territory the system already rolled back
@@ -91,7 +73,7 @@ function hasCommittedBacktrack(vaultEntries, currentRound) {
         return committedRoundResult(entry)?.action === "backtrack";
     });
 }
-/** Check whether a vault entry represents a "clean" round that can serve
+/** Check whether a committed round represents a clean restore point.
  *  as a safe restore point. A clean round was accepted (not rejected)
  *  and had no error-level verification flags.
  *
@@ -101,76 +83,30 @@ function hasCommittedBacktrack(vaultEntries, currentRound) {
  *  valid backtrack target (the most common backtrack trigger is exactly a
  *  run of such rounds). Rejected/terminated rounds never commit, and
  *  rolled-back rounds are excluded below. */
-function isCleanRound(entry) {
-    const committed = committedRoundResult(entry);
-    // A rolled-back round (already backtracked) is not a valid restore point.
-    if (committed?.action === "backtrack")
-        return false;
-    // Rejected/terminated rounds are not clean. (They never commit in the
-    // real vault — this guards legacy or mixed-shape data.)
-    if (committed && (committed.action === "reject" || committed.action === "terminate")) {
-        return false;
-    }
-    // Rounds with error-level verification flags are not clean
-    const flags = Array.isArray(entry.verification_flags)
-        ? entry.verification_flags
-        : committed?.verificationFlags ?? [];
-    for (const f of flags) {
-        if (f !== null && typeof f === "object" &&
-            f.severity === "error")
-            return false;
-    }
-    return true;
+function isCleanRound(round) {
+    return !round.verificationFlags.some((flag) => flag.severity === "error");
 }
 /** Scan backwards from currentRound to find the most recent clean round.
  *  Collects discovered_constraints from skipped rounds along the way.
  *  Returns null when no clean round is found within maxDepth. */
 export function findSafeRestorePoint(currentRound, vaultEntries, maxDepth) {
-    // v3.2.1: exclude compile-time lineage entries — every committed round
-    // writes one (engine.ts hardcodes `success: true` on it, and it carries no
-    // round_transaction), and it precedes the feedback entry in the flat view.
-    // Treating it as a decision made every round look clean, so the restore
-    // point was always currentRound-1: dirty/rejected rounds were never
-    // skipped, depth > 1 never collected skippedDiscoveries, and the restore
-    // prompt's file list (round-coordinator) was always empty.
-    // v3.3.1: only entries that carry a committed decision (or evidence of
-    // one) may rank as restore points. The v3.2.1 filter excluded compile-time
-    // lineage entries, but event/journal entries (delegation journals, gate
-    // records) also share the round number while carrying no decision and no
-    // flags — they passed isCleanRound vacuously and could shadow the round's
-    // real dirty feedback entry. A committed round's decision lives on its
-    // :feedback entry (raw view) or on a lineage entry with a persisted
-    // round_transaction (legacy merged shapes); everything else is not a
-    // round outcome.
-    const completed = vaultEntries
-        .filter((e) => {
-        const rnd = entryRound(e);
-        if (rnd < 1 || rnd >= currentRound)
-            return false;
-        const tid = String(e.task_id ?? "");
-        if (tid.endsWith(":feedback"))
-            return true;
-        const lin = isRecord(e.loop_lineage) ? e.loop_lineage : null;
-        return lin !== null && isRecord(lin.round_transaction);
-    })
-        .sort((a, b) => entryRound(b) - entryRound(a)); // newest first
+    const completed = committedRoundsFromEntries(vaultEntries, currentRound)
+        .sort((a, b) => b.round - a.round);
     const skippedDiscoveries = [];
     for (let depth = 1; depth <= maxDepth; depth++) {
         const targetRound = currentRound - depth;
         if (targetRound < 1)
             break;
-        const entry = completed.find((e) => entryRound(e) === targetRound);
-        if (!entry)
+        const round = completed.find((item) => item.round === targetRound);
+        if (!round)
             continue;
         // Collect discoveries from rounds we're about to skip (depth > 1)
         if (depth > 1) {
             for (let d = 1; d < depth; d++) {
                 const skippedRound = currentRound - d;
-                const skippedEntry = completed.find((e) => entryRound(e) === skippedRound);
-                if (skippedEntry) {
-                    const discovered = Array.isArray(skippedEntry.discovered_constraints)
-                        ? skippedEntry.discovered_constraints.filter((v) => typeof v === "string")
-                        : [];
+                const skippedEntry = completed.find((item) => item.round === skippedRound);
+                if (skippedEntry?.evaluation) {
+                    const discovered = skippedEntry.evaluation.discovered_constraints ?? [];
                     for (const item of discovered) {
                         if (!skippedDiscoveries.includes(item))
                             skippedDiscoveries.push(item);
@@ -178,7 +114,7 @@ export function findSafeRestorePoint(currentRound, vaultEntries, maxDepth) {
                 }
             }
         }
-        if (isCleanRound(entry)) {
+        if (isCleanRound(round)) {
             return { round: targetRound, skippedDiscoveries };
         }
     }
@@ -189,23 +125,13 @@ export function findSafeRestorePoint(currentRound, vaultEntries, maxDepth) {
  *  evidence as fallback). Returns null when the round has no git snapshot
  *  or no committed feedback entry. */
 export function findBacktrackTargetGitHead(restoreRound, vaultEntries) {
-    const feedback = vaultEntries.find((entry) => String(entry.task_id ?? "") === `loop:${entry.loop_id}:r${restoreRound}:feedback`);
-    const lineage = feedback && isRecord(feedback.loop_lineage)
-        ? feedback.loop_lineage
-        : null;
-    const transaction = lineage && isRecord(lineage.round_transaction)
-        ? lineage.round_transaction
-        : null;
-    const snapshot = transaction && isRecord(transaction.snapshot)
-        ? transaction.snapshot
-        : null;
-    if (!snapshot)
+    const committed = committedRoundsFromEntries(vaultEntries)
+        .find((view) => view.round === restoreRound);
+    if (!committed)
         return null;
-    const evidence = Array.isArray(snapshot.afterEvidence) && snapshot.afterEvidence.length > 0
-        ? snapshot.afterEvidence
-        : Array.isArray(snapshot.beforeEvidence)
-            ? snapshot.beforeEvidence
-            : [];
+    const evidence = committed.afterEvidence.length > 0
+        ? committed.afterEvidence
+        : committed.beforeEvidence;
     for (const item of evidence) {
         if (!isRecord(item) || item.provider !== "git" || !isRecord(item.data))
             continue;
@@ -237,7 +163,7 @@ gitHead) {
             `The work done in those rounds produced no verifiable progress — ` +
             `no new files changed, no criteria met.`, "", "The approach used in those rounds **did not work**. It should not be repeated.", "");
     }
-    else if (triggerRule === "progress_stall_terminal") {
+    else if (triggerRule === "progress_flatline") {
         lines.push("### Why This Happened", "", `Progress was completely flat for multiple rounds leading up to Round ${fromRound}. ` +
             `The agent made **zero forward motion** — the task is not advancing.`, "", "A **radically different** strategy is needed. The previous approach produced nothing.", "");
     }
@@ -608,284 +534,124 @@ function enforceBacktrackNotRestored(flags, vaultEntries = [], currentRound = 0)
         check: "backtrack_workspace_not_restored",
     });
 }
-/** R4: Progress has stalled for 3+ consecutive rounds.
- *  Detected by checking progress_estimate deltas across vault entries.
- *  First occurrence → REJECT (agent must change approach).
- *  Second consecutive occurrence → TERMINATE (agent cannot recover). */
-function enforceProgressStall(selfEval, _flags, currentRound, vaultEntries, consecutiveRejections) {
-    // Need at least 3 rounds of history
-    if (currentRound < 3)
+/** Shared R4/R5 observation pipeline. Machine git motion is exculpatory
+ * only: it may veto a self-reported stall but can never create one. */
+function evaluateStallWindow(tier, selfEval, currentRound, vaultEntries) {
+    const window = tier === "progress_stall"
+        ? 3
+        : Math.max(1, getPolicy().engine.stall_lookback_rounds);
+    if (currentRound < window)
         return null;
-    let isStalling = false;
-    let stallDetail = "";
-    let stallThreshold = 0;
-    // Evidence path: three reported progress estimates within the window.
     const progressByRound = progressWindow(vaultEntries, currentRound, selfEval);
-    if (progressByRound.size >= 3) {
-        const sortedRounds = [...progressByRound.keys()].sort((a, b) => a - b);
-        const last3 = sortedRounds.slice(-3);
-        // Require all three data points to be within [currentRound-3, currentRound-1].
-        // (collectProgressByRound already filters rnd < currentRound, so the upper
-        // bound is always satisfied — the lower bound is the real continuity guard.)
-        const expectedMin = currentRound - 3;
-        if (last3[0] < expectedMin)
+    let stalled = false;
+    let detail = "";
+    const threshold = getPolicy().evolution.progress_stall_threshold;
+    if (progressByRound.size >= window) {
+        const recent = [...progressByRound.keys()].sort((a, b) => a - b).slice(-window);
+        if (recent[0] < currentRound - window)
             return null;
-        const p1 = progressByRound.get(last3[0]);
-        const p2 = progressByRound.get(last3[1]);
-        const p3 = progressByRound.get(last3[2]);
-        stallThreshold = getPolicy().evolution.progress_stall_threshold;
-        const delta12 = p2 - p1;
-        const delta23 = p3 - p2;
-        // Both deltas must be below threshold AND not near completion
-        isStalling = delta12 < stallThreshold && delta23 < stallThreshold && p3 < 0.95;
-        stallDetail = `${(p1 * 100).toFixed(0)}% → ${(p2 * 100).toFixed(0)}% → ${(p3 * 100).toFixed(0)}%`;
-    }
-    else {
-        // v3.2/v3.3.1: rounds without execution_evidence (the agent omitted it,
-        // or a legacy client) — the machine decides from committed git
-        // observations instead of self-skipping: three consecutive rounds with
-        // no git change is a stall. No git signal → skip (the machine cannot
-        // observe). This branch is reachable by real evidence-less rounds; the
-        // old skipEvidenceRules flag that gated it was never set on the
-        // production path (extraction failures stall upstream), which silently
-        // disabled the fallback the v3.2 invariant promises.
-        const machine = machineProgressSeries(vaultEntries, currentRound, 3);
-        if (machine === null)
+        const values = recent.map((round) => progressByRound.get(round));
+        if (values[values.length - 1] >= 0.95)
             return null;
-        isStalling = machine.every((value) => !value);
-        stallDetail = "no machine-observed changes in the last 3 rounds";
-    }
-    // v3.3: Exculpatory machine cross-check. The delta-based stall verdict
-    // requires machine agreement: when committed git snapshots cover the
-    // window, observed git motion means work is happening — not stalled.
-    // v3.6: git-motion only — a self-reported criterion completion no longer
-    // buys a stall exemption (claims never buy machine verdicts). When the
-    // machine signal is unavailable the legacy verdict stands.
-    if (isStalling) {
-        const machine = machineProgressSeries(vaultEntries, currentRound, 3);
-        if (machine !== null) {
-            if (machine.some(Boolean)) {
-                isStalling = false;
-            }
-            else {
-                stallDetail += ` — no machine-observed git motion in rounds ${currentRound - 3}–${currentRound - 1}`;
-            }
+        if (tier === "progress_stall") {
+            stalled = values.slice(1).every((value, index) => value - values[index] < threshold);
+            detail = values.map((value) => `${(value * 100).toFixed(0)}%`).join(" → ");
+        }
+        else {
+            const first = values[0];
+            stalled = values.every((value) => Math.abs(value - first) < 1e-10);
+            detail = `completely flat at ${(first * 100).toFixed(0)}%`;
         }
     }
-    if (!isStalling)
+    else {
+        const machine = machineProgressSeries(vaultEntries, currentRound, window);
+        if (machine === null)
+            return null;
+        stalled = machine.every((value) => !value);
+        detail = tier === "progress_stall"
+            ? `no machine-observed changes in the last ${window} rounds`
+            : `no machine-observed changes for ${window} consecutive rounds`;
+    }
+    if (!stalled)
         return null;
+    const machine = machineProgressSeries(vaultEntries, currentRound, window);
+    if (machine?.some(Boolean))
+        return null;
+    if (machine !== null) {
+        detail += ` — no machine-observed git motion in rounds ${currentRound - window}–${currentRound - 1}`;
+    }
+    return { tier, detail, window, threshold };
+}
+/** Shared R4/R5 escalation and backtrack deadlock guard. The flatline tier
+ * keeps its steeper threshold-0 ladder while using the same mechanics. */
+function resolveStallDisposition(verdict, currentRound, vaultEntries, consecutiveRejections) {
+    const { tier, detail, window, threshold } = verdict;
+    const flatline = tier === "progress_flatline";
     const escalation = getPolicy().engine.enforcement_escalation_enabled;
-    // v2.7: When escalation is enabled, give one extra rejection round with a
-    // "Seek Human Guidance" notice before terminating. This lets the agent
-    // course-correct with human input rather than being killed immediately.
-    if (consecutiveRejections >= 2) {
+    const stalledReason = flatline
+        ? `Progress has been ${detail} for ${window} consecutive rounds.`
+        : `Progress has stalled: ${detail} over the last ${window} rounds` +
+            `${threshold > 0 ? ` (delta < ${(threshold * 100).toFixed(0)}% each round)` : ""}.`;
+    if ((flatline && consecutiveRejections >= 1) || consecutiveRejections >= 2) {
         return makeEnforcementResult({
             action: "terminate",
-            reason: `Progress stalled for 3+ rounds ` +
-                `(${stallDetail}) ` +
-                `and agent did not resolve after escalation. Terminating loop.`,
-            check: "progress_stall",
+            reason: `${stalledReason} The stall persisted after escalation. Terminating loop.`,
+            check: tier,
         });
     }
-    if (consecutiveRejections >= 1 && escalation) {
-        // v2.10: When backtrack is enabled, escalate to backtrack instead of
-        // reject. The agent is rolled back to the last clean round with lessons
-        // injected, rather than redoing the same round with an escalation notice.
-        if (getPolicy().engine.backtrack_enabled) {
-            // v2.14: A backtrack that already committed for this round (the loop
-            // is re-walking rolled-back territory with the same stall) must not
-            // loop forever — terminate instead. Without this, consecutive
-            // rejections reset on every backtrack and the R4 cycle has no exit.
-            if (hasCommittedBacktrack(vaultEntries, currentRound)) {
-                return makeEnforcementResult({
-                    action: "terminate",
-                    reason: `Progress has stalled over the last 3 rounds ` +
-                        `(${stallDetail}) and a backtrack already fired for ` +
-                        `this round. The stall persists after rollback — terminating.`,
-                    check: "progress_stall",
-                });
-            }
+    if (consecutiveRejections >= 1 && !escalation) {
+        return makeEnforcementResult({
+            action: "terminate",
+            reason: `${stalledReason} The stall persisted after the previous rejection. Terminating loop.`,
+            check: tier,
+        });
+    }
+    const escalated = flatline ? escalation : consecutiveRejections >= 1 && escalation;
+    if (escalated && getPolicy().engine.backtrack_enabled) {
+        if (hasCommittedBacktrack(vaultEntries, currentRound)) {
             return makeEnforcementResult({
-                action: "backtrack",
-                reason: `Progress has stalled: ${stallDetail} over the last 3 rounds` +
-                    `${stallThreshold > 0 ? ` (delta < ${(stallThreshold * 100).toFixed(0)}% each round)` : ""}.`,
-                fix_instructions: "Your progress has been flat for 3 rounds. You are being rolled back " +
-                    "to the last clean round. Do NOT repeat the approach that led to the stall. " +
-                    "Choose a different technique or task decomposition.",
-                check: "progress_stall",
+                action: "terminate",
+                reason: `${stalledReason} A backtrack already fired for this round; the stall persists after rollback.`,
+                check: tier,
             });
         }
         return makeEnforcementResult({
-            action: "reject",
-            reason: `Progress has stalled: ${stallDetail} over the last 3 rounds` +
-                `${stallThreshold > 0 ? ` (delta < ${(stallThreshold * 100).toFixed(0)}% each round)` : ""}.`,
-            fix_instructions: "Your progress has been flat for 3 rounds. You must: " +
-                "(a) explain what is blocking progress, " +
-                "(b) propose a DIFFERENT technique or task decomposition, and " +
-                "(c) set a concrete, verifiable goal for the redo of this round. " +
-                "Do NOT repeat the same approach — it has not moved progress forward." +
-                buildEscalationNotice(),
-            check: "progress_stall",
+            action: "backtrack",
+            reason: stalledReason,
+            fix_instructions: flatline
+                ? "Progress is exactly flat. After rollback, choose a radically different approach."
+                : "After rollback, do not repeat the stalled approach; choose a different technique or task decomposition.",
+            check: tier,
         });
     }
-    if (consecutiveRejections >= 1) {
+    if (flatline && !escalation) {
         return makeEnforcementResult({
             action: "terminate",
-            reason: `Progress stalled for 3+ rounds ` +
-                `(${stallDetail}) ` +
-                `and agent did not resolve after previous rejection. Terminating loop.`,
-            check: "progress_stall",
+            reason: `${stalledReason} The agent is making zero forward motion and cannot recover.`,
+            check: tier,
         });
     }
     return makeEnforcementResult({
         action: "reject",
-        reason: `Progress has stalled: ${stallDetail} over the last 3 rounds` +
-            `${stallThreshold > 0 ? ` (delta < ${(stallThreshold * 100).toFixed(0)}% each round)` : ""}.`,
-        fix_instructions: "Your progress has been flat for 3 rounds. You must: " +
-            "(a) explain what is blocking progress, " +
-            "(b) propose a DIFFERENT technique or task decomposition, and " +
-            "(c) set a concrete, verifiable goal for the redo of this round. " +
-            "Do NOT repeat the same approach — it has not moved progress forward.",
-        check: "progress_stall",
+        reason: stalledReason,
+        fix_instructions: (flatline
+            ? "Explain the fundamental blocker, choose a radically different approach, and set a concrete verifiable goal."
+            : "Explain the blocker, choose a different technique or task decomposition, and set a concrete verifiable goal for this retry.") +
+            (escalated ? buildEscalationNotice() : ""),
+        check: tier,
     });
 }
-/** R5: Progress completely stalled (delta = 0) for N consecutive rounds —
- *  the "flat terminal" severity tier. Its flatness predicate (all window
- *  values equal within epsilon) is a strict subset of R4's stall predicate
- *  (deltas below progress_stall_threshold), and its window mirrors R4's
- *  (breakerSize == 3 by default, both with the same exculpatory machine
- *  veto). R4 is evaluated FIRST in the priority array, so under the default
- *  ladder every flat run is handled by R4 — first occurrence rejects, the
- *  second escalates (backtrack with v2.10 semantics) — and R5's own steeper
- *  ladder (terminate on the second consecutive flatline) is not reached.
- *  That reject-then-escalate rhythm is the product contract (backtrack-e2e
- *  locks it for exactly-flat runs).
- *
- *  R5 remains the reserved severity tier, not dead code: it is the ONLY
- *  stall guard when R4's delta gate is closed (`progress_stall_threshold
- *  <= 0` — R4 then fires only on negative deltas, i.e. regression, and a
- *  flat run reaches R5), and it is where a future window/threshold split
- *  (breakerSize > 3) would express the flat-specific escalation. Its
- *  ladder: termination on the second consecutive flatline detection;
- *  with enforcement_escalation_enabled the first occurrence issues an
- *  escalated rejection (backtrack under v2.10) instead of terminating.
- *
- *  Uses the engine.max_circuit_breaker policy value as the lookback window. */
-function enforceProgressStallTerminal(selfEval, _flags, currentRound, vaultEntries, consecutiveRejections) {
-    const breakerSize = getPolicy().engine.max_circuit_breaker;
-    if (currentRound < breakerSize || vaultEntries.length < breakerSize)
-        return null;
-    let allFlat = false;
-    let flatDetail = "";
-    // Evidence path: `breakerSize` reported progress estimates in the window.
-    const progressByRound = progressWindow(vaultEntries, currentRound, selfEval);
-    if (progressByRound.size >= breakerSize) {
-        const sortedRounds = [...progressByRound.keys()].sort((a, b) => a - b);
-        const recent = sortedRounds.slice(-breakerSize);
-        // v2.14: continuity guard (mirrors R4) — "consecutive" means the most
-        // recent rounds. Rounds without execution_evidence are unknown motion,
-        // not zero motion; taking "the last N rounds that happened to report
-        // progress" terminated loops whose recent rounds simply had no data.
-        if (recent[0] < currentRound - breakerSize)
-            return null;
-        // Check that progress values are ALL identical (delta = 0).
-        // Use epsilon comparison — JSON round-trips can produce float drift
-        // (e.g. 0.3 vs 0.30000000000000004) that would defeat strict === .
-        const EPSILON = 1e-10;
-        const first = progressByRound.get(recent[0]);
-        allFlat = recent.every((r) => Math.abs((progressByRound.get(r) ?? 0) - first) < EPSILON);
-        if (!allFlat || first >= 0.95)
-            return null;
-        flatDetail = `completely flat at ${(first * 100).toFixed(0)}%`;
-    }
-    else {
-        // v3.2/v3.3.1: evidence-less rounds — machine git-motion flatline over
-        // the breaker window (reachable by real evidence-less rounds; see the
-        // R4 comment — the old flag-gated branch never ran on the production
-        // path). No git signal → skip (the machine cannot observe).
-        const machine = machineProgressSeries(vaultEntries, currentRound, breakerSize);
-        if (machine === null)
-            return null;
-        allFlat = machine.every((value) => !value);
-        flatDetail = `no machine-observed changes for ${breakerSize} consecutive rounds`;
-    }
-    // v3.3: Exculpatory machine cross-check — mirrors R4: a flatline verdict
-    // requires machine agreement over the breaker window. v3.6: git motion
-    // only (self-reported criteria completions never buy a stall exemption).
-    if (allFlat) {
-        const machine = machineProgressSeries(vaultEntries, currentRound, breakerSize);
-        if (machine !== null) {
-            if (machine.some(Boolean)) {
-                allFlat = false;
-            }
-            else {
-                flatDetail += ` — no machine-observed git motion in rounds ${currentRound - breakerSize}–${currentRound - 1}`;
-            }
-        }
-    }
-    if (!allFlat)
-        return null;
-    const escalation = getPolicy().engine.enforcement_escalation_enabled;
-    // v2.7: When escalation is enabled, give one rejection round with a
-    // "Seek Human Guidance" notice before terminating.
-    if (consecutiveRejections >= 1) {
-        return makeEnforcementResult({
-            action: "terminate",
-            reason: `Progress has been ${flatDetail} ` +
-                `for ${breakerSize} consecutive rounds and agent did not resolve ` +
-                `after escalation. The agent is making zero forward motion.`,
-            check: "progress_stall_terminal",
-        });
-    }
-    if (escalation) {
-        // v2.10: When backtrack is enabled, escalate to backtrack instead of
-        // reject. The agent is rolled back to the last clean round with a
-        // "radically different strategy" lesson injected.
-        if (getPolicy().engine.backtrack_enabled) {
-            // v2.14: Same deadlock guard as R4 — a backtrack that already fired
-            // for this round means the loop is re-walking rolled-back territory.
-            if (hasCommittedBacktrack(vaultEntries, currentRound)) {
-                return makeEnforcementResult({
-                    action: "terminate",
-                    reason: `Progress has been ${flatDetail} ` +
-                        `for ${breakerSize} consecutive rounds and a backtrack already ` +
-                        `fired for this round. Flatline persists after rollback — ` +
-                        `terminating the loop.`,
-                    check: "progress_stall_terminal",
-                });
-            }
-            return makeEnforcementResult({
-                action: "backtrack",
-                reason: `Progress has been ${flatDetail} ` +
-                    `for ${breakerSize} consecutive rounds. The agent is making zero ` +
-                    `forward motion.`,
-                fix_instructions: "Your progress has been exactly flat — zero forward motion. " +
-                    "You are being rolled back to the last clean round. " +
-                    "Choose a RADICALLY different approach. The previous one produced nothing.",
-                check: "progress_stall_terminal",
-            });
-        }
-        return makeEnforcementResult({
-            action: "reject",
-            reason: `Progress has been ${flatDetail} ` +
-                `for ${breakerSize} consecutive rounds. The agent is making zero ` +
-                `forward motion.`,
-            fix_instructions: "Your progress has been exactly flat — you are making zero forward " +
-                "motion. You must: (a) explain what is fundamentally blocking you, " +
-                "(b) propose a radically different approach, and " +
-                "(c) set a concrete verifiable goal. " +
-                "Do NOT resubmit the same output." +
-                buildEscalationNotice(),
-            check: "progress_stall_terminal",
-        });
-    }
-    return makeEnforcementResult({
-        action: "terminate",
-        reason: `Progress has been ${flatDetail} ` +
-            `for ${breakerSize} consecutive rounds. The agent is making zero ` +
-            `forward motion and cannot recover.`,
-        check: "progress_stall_terminal",
-    });
+function enforceProgressStall(selfEval, _flags, currentRound, vaultEntries, consecutiveRejections) {
+    const verdict = evaluateStallWindow("progress_stall", selfEval, currentRound, vaultEntries);
+    return verdict
+        ? resolveStallDisposition(verdict, currentRound, vaultEntries, consecutiveRejections)
+        : null;
+}
+function enforceProgressFlatline(selfEval, _flags, currentRound, vaultEntries, consecutiveRejections) {
+    const verdict = evaluateStallWindow("progress_flatline", selfEval, currentRound, vaultEntries);
+    return verdict
+        ? resolveStallDisposition(verdict, currentRound, vaultEntries, consecutiveRejections)
+        : null;
 }
 /** R6: Two consecutive rejections → escalate (v2.7) or terminate.
  *
@@ -1239,7 +1005,7 @@ driftClarificationStreak = 0) {
         // tier (see its doc comment: active when progress_stall_threshold <= 0
         // or after a future window split).
         () => enforceProgressStall(selfEval, flags, currentRound, vaultEntries, consecutiveRejections),
-        () => enforceProgressStallTerminal(selfEval, flags, currentRound, vaultEntries, consecutiveRejections),
+        () => enforceProgressFlatline(selfEval, flags, currentRound, vaultEntries, consecutiveRejections),
         () => enforceMaxRejections(consecutiveRejections),
         () => enforceIntentDrift(flags, selfEval, consecutiveRejections, driftClarificationStreak, vaultEntries),
         // v2.12: R9 — post-backtrack workspace not restored

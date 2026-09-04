@@ -106,15 +106,7 @@ export interface EvidenceStatus {
  *  of letting evidence-dependent checks silently disappear when snapshots are
  *  missing — the fix for the "weakest when it matters most" gap. */
 export declare function deriveEvidenceStatus(selfEval: SelfEvaluation, evidenceSnapshots: ProviderSnapshot[]): EvidenceStatus;
-/** v3.2: Per-round machine progress — whether git observed file changes in
- *  each of the last `lookback` committed rounds, rebuilt from the feedback
- *  entries' roundEvidence snapshots (already persisted at commit). Returns
- *  null when fewer than `lookback` rounds carry git snapshots — the machine
- *  signal is unavailable and callers (R4/R5) keep their legacy verdict.
- *  v3.3: implementation moved to token-utils (machineGitMotionSeries) so the
- *  compiler can read the same signal for the progress dashboard without an
- *  import cycle; this export is now a thin delegation with unchanged
- *  signature and semantics. */
+/** Per-round machine progress over decoded committed history. */
 export declare function machineProgressSeries(vaultEntries: VaultEntry[], currentRound: number, lookback: number): boolean[] | null;
 interface ParsedTestCounts {
     passed: number;

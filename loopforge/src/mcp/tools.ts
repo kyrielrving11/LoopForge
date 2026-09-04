@@ -8,7 +8,7 @@
 
 import type { SessionManager, StartInput } from "./session.js";
 import { buildSelfEvaluation } from "../engine.js";
-import { collectSelfEvalGaps } from "../self-eval.js";
+import { validateCoreSelfEvaluation } from "../self-eval.js";
 import { isRecord } from "../token-utils.js";
 import { validateLoopId } from "../policy.js";
 
@@ -57,7 +57,7 @@ const TOOL_BASE_SCHEMAS = [
   {
     name: "loopforge_next",
     description:
-      "Submit the output from the current round and advance to the next. Returns the next-round prompt, or null with a stopReason when the loop ends. The evaluation parameter provides structured self-assessment — prefer this over embedding a ---loopforge-eval block in the output text.",
+      "Submit the output from the current round and advance to the next. Returns the next-round prompt, or null with a stopReason when the loop ends. A structured evaluation is required; output is optional supporting context.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -71,11 +71,11 @@ const TOOL_BASE_SCHEMAS = [
         },
         output: {
           type: "string" as const,
-          description: "Optional. The agent's full output from executing the current round's prompt. May be omitted if evaluation parameter is provided.",
+          description: "Optional. The agent's full output from executing the current round's prompt. The structured evaluation is the authoritative report.",
         },
         evaluation: {
           type: "object" as const,
-          description: "Structured self-evaluation for this round. Either this or an output containing a ---loopforge-eval block is required for the loop to continue. Preferred over embedding ---loopforge-eval blocks in output text.",
+          description: "Required structured self-evaluation for this round. Free-text or embedded evaluation blocks are not accepted.",
           required: ["success", "output_summary", "should_continue", "constraint_violations"],
           properties: {
             success: {
@@ -261,14 +261,6 @@ const TOOL_BASE_SCHEMAS = [
                   items: { type: "string" as const },
                   description: "Constraints, discoveries, or decisions that need emphasis in the next prompt. Matched by meaning — not exact text. Matched items appear in a 'Critical Context' section. Max 5 entries. Pure reordering — no token overhead.",
                 },
-                expand: {
-                  type: "array" as const,
-                  items: {
-                    type: "string" as const,
-                    enum: ["milestones", "sub_goals", "constraint_lifecycle", "agent_trust", "progress", "loop_synthesis"],
-                  },
-                  description: "Sections to expand to full detail in the next prompt. Useful when you need full context on a specific area (e.g. full sub-goal dashboard when replanning). L1 max 1 section. L2 already expanded — redundant. L0 ignored.",
-                },
                 confusion_points: {
                   type: "array" as const,
                   items: { type: "string" as const },
@@ -305,11 +297,7 @@ const TOOL_BASE_SCHEMAS = [
           },
         },
       },
-      // v3.2.1: evaluation is optional at the schema level — the handler
-      // requires EITHER the evaluation parameter OR output containing a
-      // ---loopforge-eval block. Requiring it here made the embedded-block
-      // path dead code (input validation rejected it before the handler).
-      required: ["sessionId", "roundId"],
+      required: ["sessionId", "roundId", "evaluation"],
     },
   },
   {
@@ -456,6 +444,7 @@ const ADVANCE_OUTPUT_SCHEMA: JsonSchema = {
   type: "object",
   properties: {
     error: { type: "string" },
+    details: { type: "object", additionalProperties: true },
     sessionId: { type: "string" },
     round: { type: "number" },
     roundId: { type: ["string", "null"] },
@@ -467,11 +456,6 @@ const ADVANCE_OUTPUT_SCHEMA: JsonSchema = {
     enforcementAction: { enum: ["accept", "reject", "terminate", "backtrack"] },
     enforcementReason: { type: ["string", "null"] },
     warnings: { type: "array", items: { type: "string" } },
-    parseGaps: {
-      type: "array",
-      items: { type: "object", additionalProperties: true },
-      description: "v2.12: Field-level format diagnostics for tolerated evaluation issues.",
-    },
     projection: {
       type: "object",
       additionalProperties: true,
@@ -586,10 +570,37 @@ function closeObjectSchemas(schema: JsonSchema): JsonSchema {
   return result;
 }
 
+const CORE_EVALUATION_FIELDS = new Set([
+  "success",
+  "output_summary",
+  "constraint_violations",
+  "should_continue",
+]);
+
+/** Keep the four authoritative fields schema-strict while leaving optional
+ * reporting fields available for buildSelfEvaluation's lossy normalization.
+ * Their descriptions remain in tools/list, but malformed optional values do
+ * not become JSON-RPC argument failures before the runtime can ignore them. */
+function prepareInputSchema(name: string, schema: JsonSchema): JsonSchema {
+  const result = closeObjectSchemas(schema);
+  if (name !== "loopforge_next" || !isRecord(result.properties)) return result;
+  const evaluation = result.properties.evaluation;
+  if (!isRecord(evaluation) || !isRecord(evaluation.properties)) return result;
+  evaluation.properties = Object.fromEntries(
+    Object.entries(evaluation.properties).map(([field, value]) => {
+      if (CORE_EVALUATION_FIELDS.has(field) || !isRecord(value)) return [field, value];
+      return [field, typeof value.description === "string"
+        ? { description: value.description }
+        : {}];
+    }),
+  );
+  return result;
+}
+
 /** MCP tool contracts include strict input and structured output schemas. */
 export const TOOL_SCHEMAS = TOOL_BASE_SCHEMAS.map((schema) => ({
   ...schema,
-  inputSchema: closeObjectSchemas(schema.inputSchema),
+  inputSchema: prepareInputSchema(schema.name, schema.inputSchema),
   outputSchema: TOOL_OUTPUT_SCHEMAS[schema.name] ?? {
     type: "object",
     additionalProperties: true,
@@ -688,6 +699,37 @@ export function validateToolInput(
   validateSchema(input, contract.inputSchema, "arguments");
 }
 
+/** Validate a server dispatch without turning a malformed evaluation into a
+ * JSON-RPC transport error. The advertised schema stays strict so clients can
+ * construct valid calls; the runtime envelope validates every outer argument,
+ * then lets loopforge_next return its retryable evaluation_invalid payload for
+ * core evaluation mistakes. Once the core is valid, the full schema still
+ * rejects unknown fields and other contract violations. */
+export function validateToolDispatchInput(
+  name: string,
+  input: Record<string, unknown>,
+): void {
+  if (name !== "loopforge_next") {
+    validateToolInput(name, input);
+    return;
+  }
+  const contract = TOOL_SCHEMAS.find((schema) => schema.name === name);
+  if (!contract) throw new ToolInputValidationError(`Unknown tool: ${name}`);
+  const properties = isRecord(contract.inputSchema.properties)
+    ? contract.inputSchema.properties
+    : {};
+  validateSchema(input, {
+    ...contract.inputSchema,
+    required: ["sessionId", "roundId"],
+    properties: { ...properties, evaluation: {} },
+  }, "arguments");
+
+  if (!isRecord(input.evaluation)) return;
+  const validation = validateCoreSelfEvaluation(input.evaluation);
+  if (validation.missing.length > 0 || validation.invalid.length > 0) return;
+  validateSchema(input, contract.inputSchema, "arguments");
+}
+
 /** Validate a handler's output against the tool's declared output schema.
  *  v2.14: the schemas were advertised in tools/list but never enforced —
  *  a mismatched output silently violated the declared contract. Throws
@@ -765,13 +807,27 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
       return { error: "roundId is required — pass the roundId from the most recent loopforge_start / loopforge_next / loopforge_resume / loopforge_status response" };
     }
 
-    // Build SelfEvaluation from structured evaluation parameter
-    const preExtractedEval = rawEval ? buildSelfEvaluation(rawEval) : undefined;
-
-    // Require at least one of: evaluation parameter or output with embedded eval block
-    if (!preExtractedEval && !output.trim()) {
-      return { error: "Either evaluation parameter or output with ---loopforge-eval block is required" };
+    if (!rawEval || typeof rawEval !== "object" || Array.isArray(rawEval)) {
+      return {
+        error: "evaluation_invalid",
+        details: {
+          missing: ["evaluation"],
+          invalid: [{ field: "evaluation", expected: "object" }],
+        },
+        sessionId,
+        roundId,
+      };
     }
+    const validation = validateCoreSelfEvaluation(rawEval);
+    if (validation.missing.length > 0 || validation.invalid.length > 0) {
+      return {
+        error: "evaluation_invalid",
+        details: validation,
+        sessionId,
+        roundId,
+      };
+    }
+    const preExtractedEval = buildSelfEvaluation(rawEval);
 
     const result = await mgr.advance(sessionId, output, preExtractedEval, roundId);
 
@@ -781,21 +837,6 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
     if (result.enforcementAction !== "reject" && result.enforcementAction !== "terminate" &&
         result.stopReason !== "session_not_found" && result.stopReason !== "stalled") {
       projection = mgr.getProjection(sessionId);
-    }
-
-    // v2.12: Field-level diagnostics for tolerated format issues. The
-    // lenient parser still accepts the evaluation — the gaps are surfaced
-    // as structured warnings so the agent can correct its template.
-    if (rawEval) {
-      const gaps = collectSelfEvalGaps(rawEval);
-      if (gaps.length > 0) {
-        return {
-          ...result,
-          projection,
-          warnings: [...(result.warnings ?? []), ...gaps.map((g) => `[${g.field}] ${g.issue}`)],
-          parseGaps: gaps,
-        };
-      }
     }
 
     return projection ? { ...result, projection } : { ...result };

@@ -9,7 +9,7 @@ import { initializeClient } from "./init.js";
 import { FileLoopStore } from "./loop-store.js";
 import { getPolicy, validateLoopId, writeDefaultPolicy } from "./policy.js";
 import { McpServer } from "./mcp/server.js";
-const VERSION = "3.3.0";
+const VERSION = "3.6.0";
 const HELP = `LoopForge ${VERSION}
 
 Usage:

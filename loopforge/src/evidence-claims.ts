@@ -16,6 +16,7 @@
  */
 
 import type { VaultEntry } from "./loop-store.js";
+import { committedRoundsFromEntries } from "./committed-round.js";
 import type { ProviderSnapshot } from "./evidence-provider.js";
 import type { SelfEvaluation, VerificationFlag } from "./protocol.js";
 import { isRecord } from "./token-utils.js";
@@ -112,13 +113,6 @@ export function rederiveClaimViewWithFlags(
   return view;
 }
 
-function committedTransaction(entry: VaultEntry): Record<string, unknown> | null {
-  if (!isRecord(entry.loop_lineage)) return null;
-  const transaction = entry.loop_lineage.round_transaction;
-  if (!isRecord(transaction) || !isRecord(transaction.snapshot)) return null;
-  return transaction;
-}
-
 /** Files actually changed in a committed round (git provider, after evidence
  *  preferred). Returns null when the round has no observable git snapshot. */
 export function resolveRoundFiles(
@@ -126,18 +120,14 @@ export function resolveRoundFiles(
   loopId: string,
   round: number,
 ): string[] | null {
-  const feedback = vaultEntries.find((entry) =>
-    String(entry.task_id ?? "") === `loop:${loopId}:r${round}:feedback`);
-  const transaction = feedback ? committedTransaction(feedback) : null;
-  if (!transaction) return null;
-  const snapshot = transaction.snapshot as Record<string, unknown>;
-  const evidence = Array.isArray(snapshot.afterEvidence)
-    ? snapshot.afterEvidence as unknown[]
-    : Array.isArray(snapshot.roundEvidence)
-      ? snapshot.roundEvidence as unknown[]
-      : Array.isArray(snapshot.beforeEvidence)
-        ? snapshot.beforeEvidence as unknown[]
-        : [];
+  const committed = committedRoundsFromEntries(vaultEntries)
+    .find((view) => view.loopId === loopId && view.round === round);
+  if (!committed) return null;
+  const evidence = committed.afterEvidence.length > 0
+    ? committed.afterEvidence
+    : committed.roundEvidence.length > 0
+      ? committed.roundEvidence
+      : committed.beforeEvidence;
   const git = evidence.find((item) =>
     isRecord(item) && item.provider === "git" && Array.isArray(item.files)) as
     Record<string, unknown> | undefined;
@@ -153,26 +143,15 @@ export function listVerifiedClaims(
   loopId: string,
 ): string[] {
   const verified = new Set<string>();
-  for (const entry of vaultEntries) {
-    const taskId = String(entry.task_id ?? "");
-    if (!taskId.startsWith(`loop:${loopId}:r`) || !taskId.endsWith(":feedback")) continue;
-    const transaction = committedTransaction(entry);
-    if (!transaction) continue;
-    const snapshot = transaction.snapshot as Record<string, unknown>;
-    const evaluation = isRecord(snapshot.evaluation)
-      ? snapshot.evaluation as unknown as SelfEvaluation
-      : null;
-    const result = isRecord(snapshot.result) ? snapshot.result : null;
-    if (!evaluation || !result || !Array.isArray(result.verificationFlags)) continue;
-    const evidence = Array.isArray(snapshot.afterEvidence)
-      ? snapshot.afterEvidence as ProviderSnapshot[]
-      : Array.isArray(snapshot.roundEvidence)
-        ? snapshot.roundEvidence as ProviderSnapshot[]
-        : [];
+  for (const round of committedRoundsFromEntries(vaultEntries)) {
+    if (round.loopId !== loopId || !round.evaluation) continue;
+    const evidence = round.afterEvidence.length > 0
+      ? round.afterEvidence
+      : round.roundEvidence;
     const view = rederiveClaimViewWithFlags(
-      evaluation,
+      round.evaluation,
       evidence,
-      result.verificationFlags as VerificationFlag[],
+      round.verificationFlags,
     );
     for (const claim of view.claims) {
       if (claim.status === "verified") verified.add(claim.targetId);

@@ -88,57 +88,6 @@ export function entryRound(entry: Record<string, unknown>): number {
   return typeof rnd === "number" && Number.isInteger(rnd) ? rnd : 0;
 }
 
-/** v3.3: Per-round machine git motion — whether git observed file changes
- *  in each of the last `lookback` committed rounds, rebuilt from the
- *  feedback entries' roundEvidence snapshots (already persisted at commit).
- *  v3.5.1: also reads the merged lineage stamp (lineage.round_evidence) the
- *  engine writes at hydration — the compile-time view never sees raw
- *  :feedback entries, so without the stamp the Machine (git) dashboard row
- *  silently vanished in production prompts. The gate side (raw vault
- *  entries) keeps reading the transaction path; raw lineage entries carry
- *  no stamp and are skipped either way.
- *  Returns null when fewer than `lookback` rounds carry git snapshots — the
- *  machine signal is unavailable and callers (R4/R5) keep their legacy
- *  verdict. Lives in token-utils so both the enforcement gate and the
- *  compiler can read the signal without an import cycle; the snapshot
- *  shape is parsed defensively because no storage type must be imported
- *  here. */
-export function machineGitMotionSeries(
-  entries: readonly Record<string, unknown>[],
-  currentRound: number,
-  lookback: number,
-): boolean[] | null {
-  const byRound = new Map<number, boolean>();
-  for (const entry of entries) {
-    const rnd = entryRound(entry);
-    if (rnd <= 0 || rnd >= currentRound) continue;
-    const lin = isRecord(entry.loop_lineage) ? entry.loop_lineage : null;
-    const rt = lin && isRecord(lin.round_transaction) ? lin.round_transaction : null;
-    const snapshot = rt && isRecord(rt.snapshot) ? rt.snapshot : null;
-    // v3.5.1: two evidence arms — the raw :feedback transaction path and
-    // the merged lineage stamp written by engine hydration. An entry with
-    // neither carries no machine observation and is skipped (raw lineage
-    // entries on disk have no stamp).
-    const roundEvidence = Array.isArray(snapshot?.roundEvidence)
-      ? snapshot.roundEvidence
-      : Array.isArray(lin?.round_evidence)
-        ? lin.round_evidence
-        : null;
-    if (!roundEvidence) continue;
-    const git = (roundEvidence as unknown[]).find((value) =>
-      isRecord(value) && value.provider === "git");
-    if (!git) continue;
-    const gitFiles = (git as Record<string, unknown>).files;
-    byRound.set(rnd, Array.isArray(gitFiles) && gitFiles.length > 0);
-  }
-  if (byRound.size < lookback) return null;
-  const sorted = [...byRound.keys()].sort((a, b) => a - b);
-  const recent = sorted.slice(-lookback);
-  // Continuity: the recent rounds must be the actual last `lookback` rounds.
-  if (recent[0] < currentRound - lookback) return null;
-  return recent.map((round) => byRound.get(round)!);
-}
-
 // ── Stable ID derivation (v2.14: single source of truth) ───────────────────
 
 /** Stable 8-hex item ID derived from normalized text — used for

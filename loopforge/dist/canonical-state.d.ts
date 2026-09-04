@@ -68,8 +68,6 @@ export interface CanonicalLoopState {
     failedPatterns: string[];
     /** v2.1: Phase-boundary milestone summaries that survive window eviction. */
     milestones: MilestoneSummary[];
-    /** v2.1: Single-paragraph loop-level synthesis (formulaic). */
-    loopSynthesis: string;
     /** v2.2: Structured sub-goals with compiler-managed lifecycle. */
     subGoals: SubGoal[];
     /** v3.2: Derived per-criterion status (goal → criteria → evidence view). */
@@ -131,12 +129,12 @@ export declare function buildRoadmap(state: CanonicalLoopState): string[];
  *  lives in the Objective section. Empty arrays render no line. */
 export declare function formatRoundContract(contract: RoundContract): string;
 /** The trust bar line ("██████░░░░ 60%"). The L2 Agent Trust section and the
- *  L1 expand renderer used to carry private copies of this formula — shared
+ *  detailed L1 renderer used to carry private copies of this formula — shared
  *  here so a formatting change is made once (module contract: renderers must
  *  not silently drift apart). */
 export declare function trustBarLine(score: number): string;
 /** Milestone heading line ("**🏁 Round 7** (Rounds 3–7, 60%)"). Shared by the
- *  L2 Phase History and the L1 expand renderer; the expand copy previously
+ *  L2 Phase History and the detailed L1 renderer; the L1 copy previously
  *  rendered the range as "R3–R7", a format only this heading used. */
 export declare function milestoneHeading(milestone: MilestoneSummary): string;
 export declare function renderCanonicalStateMarkdown(state: CanonicalLoopState): string;

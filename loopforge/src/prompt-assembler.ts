@@ -700,13 +700,6 @@ function l2Sections(
       mandatory: false,
     });
   }
-  if (state.loopSynthesis) {
-    sections.push({
-      id: "loop_synthesis",
-      text: section("Loop Summary", state.loopSynthesis),
-      mandatory: false,
-    });
-  }
   if (state.nextAction) {
     sections.push({
       id: "next_action",
@@ -954,7 +947,7 @@ function matchEmphasize(
 function renderConfusionAlerts(
   points: string[],
   state: CanonicalLoopState,
-  expandAll: boolean,
+  fullDensity: boolean,
 ): string {
   if (points.length === 0) return "";
   const lines: string[] = [
@@ -973,12 +966,11 @@ function renderConfusionAlerts(
     { keyword: "criteria", label: "Success Criteria", ref: "## Success Criteria" },
     { keyword: "phase", label: "Phase History", ref: "## Phase History" },
     { keyword: "objective", label: "Loop Objective", ref: "## Loop Objective" },
-    { keyword: "loop", label: "Loop Summary", ref: "## Loop Summary" },
   ];
 
   // v2.14: L2 renders up to the policy cap (was: every confusion point,
   // unbounded by max_confusion_points); L1 keeps a single alert.
-  const shown = expandAll
+  const shown = fullDensity
     ? points.slice(0, getPolicy().prompt.max_confusion_points)
     : points.slice(0, 1);
   for (const point of shown) {
@@ -998,7 +990,7 @@ function renderConfusionAlerts(
     lines.push("");
   }
 
-  if (!expandAll && points.length > 1) {
+  if (!fullDensity && points.length > 1) {
     lines.push(`*… and ${points.length - 1} more confusion point(s) — see state file.*`);
     lines.push("");
   }
@@ -1024,99 +1016,6 @@ function renderCriticalContext(
   }
   lines.push("");
   return lines.join("\n");
-}
-
-/** Expand a specific section to L2-level detail within a L1 prompt.
- *  Returns the expanded section text, or empty string if the section
- *  has no content to expand. */
-function renderExpandedSection(
-  sectionName: NonNullable<PromptRequests["expand"]>[number],
-  state: CanonicalLoopState,
-): string {
-  switch (sectionName) {
-    case "milestones": {
-      if (state.milestones.length === 0) return "";
-      const text = state.milestones
-        .map((m) => {
-          const lines = [
-            milestoneHeading(m),
-            `  Outcome: ${m.outcome}`,
-          ];
-          if (m.carried_constraints.length > 0) lines.push(`  Carried: ${m.carried_constraints.slice(0, 3).join("; ")}`);
-          if (m.resolved_constraints.length > 0) lines.push(`  Resolved: ${m.resolved_constraints.slice(0, 3).join("; ")}`);
-          return lines.join("\n");
-        })
-        .join("\n\n");
-      return section("Expanded Phase History", text);
-    }
-    case "sub_goals": {
-      if (state.subGoals.length === 0) return "";
-      const lines: string[] = [];
-      for (const sg of state.subGoals) {
-        const icon =
-          sg.status === "in_progress" ? "🔄" :
-          sg.status === "done" ? "✅" :
-          sg.status === "blocked" ? "🚫" :
-          sg.status === "canceled" ? "❌" : "⏳";
-        const stale = sg.status === "pending" && state.round - sg.declared_at_round >= 10 ? " ⚠️ stale" : "";
-        const detail = sg.status === "done" && sg.completed_at_round
-          ? ` (done, R${sg.completed_at_round})`
-          : sg.status === "in_progress" ? ` (since R${sg.status_changed_at_round})`
-          : sg.status === "pending" ? ` (since R${sg.declared_at_round})`
-          : sg.status === "blocked" ? ` (blocked R${sg.status_changed_at_round})`
-          : ` (canceled R${sg.status_changed_at_round})`;
-        lines.push(`- ${icon} [\`${sg.id}\`] ${sg.description}${detail}${stale}`);
-      }
-      return section("Expanded Sub-Goal Dashboard", lines.join("\n"));
-    }
-    case "constraint_lifecycle": {
-      if (state.inactiveConstraints.length === 0 && state.retiredConstraints.length === 0) return "";
-      const lines: string[] = [];
-      if (state.inactiveConstraints.length > 0) {
-        lines.push("**Inactive (auto-decayed):**");
-        for (const c of state.inactiveConstraints) {
-          const meta = state.constraintMetadata.find((m) => m.text === c);
-          const age = meta ? state.round - (meta.last_violated_at_round || meta.discovered_at_round || 0) : "?";
-          lines.push(`- ${c} (${age} rounds inactive)`);
-        }
-      }
-      if (state.retiredConstraints.length > 0) {
-        lines.push("**Retired:**");
-        for (const c of state.retiredConstraints) lines.push(`- ~${c}~`);
-      }
-      return section("Constraint Lifecycle", lines.join("\n"));
-    }
-    case "agent_trust": {
-      if (state.agentTrustScore === undefined) return "";
-      const lines = [
-        trustBarLine(state.agentTrustScore),
-      ];
-      if (state.agentTrustTrend.length > 0) {
-        lines.push(`Trend: ${state.agentTrustTrend.join(" → ")}`);
-      }
-      return section("Agent Trust (Expanded)", lines.join("\n"));
-    }
-    case "progress": {
-      const p = state.progress;
-      if (p.estimate === null && p.criteriaMet.length === 0 && p.criteriaRemaining.length === 0) return "";
-      const lines: string[] = [];
-      const total = p.criteriaMet.length + p.criteriaRemaining.length;
-      if (total > 0) lines.push(`**Criteria**: ${p.criteriaMet.length}/${total} met`);
-      if (p.estimate !== null) lines.push(`**Estimate**: ${(p.estimate * 100).toFixed(0)}%`);
-      if (p.tests) lines.push(`**Tests**: ${p.tests.passed} passed, ${p.tests.failed} failed, ${p.tests.skipped} skipped`);
-      if (p.filesChanged.length > 0) {
-        lines.push("**Files Changed**:");
-        for (const f of p.filesChanged.slice(0, 10)) lines.push(`- ${f}`);
-      }
-      return section("Progress Dashboard (Expanded)", lines.join("\n"));
-    }
-    case "loop_synthesis": {
-      if (!state.loopSynthesis) return "";
-      return section("Loop Summary", state.loopSynthesis);
-    }
-    default:
-      return "";
-  }
 }
 
 export function assemblePromptArtifact(input: PromptAssemblyInput): PromptArtifact {
@@ -1277,12 +1176,6 @@ export function assemblePromptArtifact(input: PromptAssemblyInput): PromptArtifa
     };
   }
 
-  // Expand: L1 only, max 1 section (L2 already expanded, L0 ignored)
-  const expandCap = levelIsL1 ? policy.max_expand_l1 : 0;
-  const expandedSection = (pr?.expand?.length && expandCap > 0)
-    ? renderExpandedSection(pr.expand[0], input.state)
-    : "";
-
   // Inject confusion alerts into the header area (before mandatory sections)
   const fixedText = header + confusionText;
 
@@ -1305,13 +1198,12 @@ export function assemblePromptArtifact(input: PromptAssemblyInput): PromptArtifa
         fixedText,
         budget,
       )
-    : renderWithinBudget(augmentedSections, fixedText, budget - footer.length - expandedSection.length);
-  const renderedPrompt = selected.rendered + expandedSection + footer;
+    : renderWithinBudget(augmentedSections, fixedText, budget - footer.length);
+  const renderedPrompt = selected.rendered + footer;
   const includedSections = [
     ...selected.included,
     ...(confusionText ? ["confusion_alerts"] : []),
     ...(criticalContextText ? ["critical_context"] : []),
-    ...(expandedSection ? [`expand:${pr?.expand?.[0] ?? ""}`] : []),
     ...(pointer ? ["state_pointer"] : []),
     ...(evaluation ? ["self_evaluation"] : []),
   ];

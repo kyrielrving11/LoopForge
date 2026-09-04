@@ -7,7 +7,7 @@ import { createHash } from "node:crypto";
 import { getPolicy } from "./policy.js";
 import { AgentStatus, makeLoopCompileResponse, makeLoopHealth, makeLoopObjective, makeConstraintMeta, makeMilestoneSummary, makeRollingSummary, makeSubGoal, makeTaskAlignment, } from "./protocol.js";
 import { createCanonicalLoopState, renderCanonicalStateMarkdown, } from "./canonical-state.js";
-import { decodeMergedRound, machineGitMotionSeries, mergedRoundsFromEntries, } from "./committed-round.js";
+import { decodeCommittedRound, decodeMergedRound, machineGitMotionSeries, mergedRoundsFromEntries, } from "./committed-round.js";
 import { contractRoundEvaluations, deriveActiveRoundContract, } from "./round-contract.js";
 import { assemblePromptArtifact } from "./prompt-assembler.js";
 import { decidePromptLevel, } from "./prompt-policy.js";
@@ -55,7 +55,7 @@ function roundCanonicalEntry(entries, round) {
  * Uncommitted compiler lineage has no durable decision yet and deliberately
  * remains on the local compile path; it cannot be treated as history. */
 function committedView(entry) {
-    return decodeMergedRound(entry);
+    return decodeMergedRound(entry) ?? decodeCommittedRound(entry);
 }
 export function computeGoalTextHash(text) {
     const normalized = text.trim().replace(/\s+/g, " ").toLowerCase();

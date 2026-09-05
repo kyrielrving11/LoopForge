@@ -35,4 +35,8 @@ export declare function entryRound(entry: unknown): number;
 export declare function deriveItemId(text: string): string;
 /** Stable-ID shape shared by constraint/criterion/sub-goal references. */
 export declare const STABLE_ID_RE: RegExp;
+/** Extract the distinct file-path-like tokens from text. The module-local
+ *  /g regex is safe to share across callers: matchAll always consumes the
+ *  string to exhaustion, which resets lastIndex before any later use. */
+export declare function extractFilePathTokens(text: string): string[];
 //# sourceMappingURL=token-utils.d.ts.map

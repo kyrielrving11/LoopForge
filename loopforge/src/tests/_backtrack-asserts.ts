@@ -31,10 +31,11 @@ export function verifyBacktrackPrompt(
   // Progress stall range — only for non-terminal triggers.
   // progress_flatline uses different wording (no explicit range).
 
-  // git stash command (was double-quoted — THE bug)
+  // git stash command (was double-quoted — THE bug; -u keeps untracked files
+  // in the safety net since the alternative discards them permanently)
   assert.ok(
     prompt.includes(
-      `git stash push -m "backtrack-safety-net-round-${fromRound}"`,
+      `git stash push -u -m "backtrack-safety-net-round-${fromRound}"`,
     ),
     `prompt must contain stash command with round ${fromRound}`,
   );

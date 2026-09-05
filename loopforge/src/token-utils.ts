@@ -105,3 +105,19 @@ export function deriveItemId(text: string): string {
 
 /** Stable-ID shape shared by constraint/criterion/sub-goal references. */
 export const STABLE_ID_RE = /^(c|cr|sg)-[a-f0-9]{8}$/;
+
+// ── File-path token extraction ──────────────────────────────────────────────
+
+/** File-path-like token pattern (e.g. "src/auth/login.ts"). Previously
+ *  duplicated as literals in verification-gate.ts and enforcement-gate.ts;
+ *  consolidation must not change the pattern (deterministic matching). */
+const FILE_PATH_TOKEN_RE = /[\w./-]+\.[a-z]{2,6}\b/gi;
+
+/** Extract the distinct file-path-like tokens from text. The module-local
+ *  /g regex is safe to share across callers: matchAll always consumes the
+ *  string to exhaustion, which resets lastIndex before any later use. */
+export function extractFilePathTokens(text: string): string[] {
+  const found = new Set<string>();
+  for (const match of text.matchAll(FILE_PATH_TOKEN_RE)) found.add(match[0]);
+  return [...found];
+}

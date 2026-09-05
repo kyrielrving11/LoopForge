@@ -23,7 +23,9 @@ file changes, tool use, and reasoning.
 - TypeScript only.
 - Node.js 18 or newer.
 - Zero runtime dependencies.
-- The npm package is in `loopforge/` and the current version is `3.7.0`.
+- The npm package is in `loopforge/`; its current version is the `version`
+  field of `loopforge/package.json` (single source — do not duplicate it in
+  prose).
 - Preserve user changes in a dirty worktree.
 - Edit `loopforge/src/protocol.ts` before changing protocol fields, then run the
   build to regenerate `loopforge-protocol.json` and `loopforge/dist/`.

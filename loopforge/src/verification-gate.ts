@@ -24,7 +24,7 @@ import type { ProviderSnapshot } from "./evidence-provider.js";
 import { getPolicy, isConfiguredCommand } from "./policy.js";
 import type { RoundContract, SelfEvaluation, VerificationFlag, VerificationResult } from "./protocol.js";
 import { makeVerificationFlag, makeVerificationResult } from "./protocol.js";
-import { jaccardSimilarity, tokenize, isRecord, entryRound } from "./token-utils.js";
+import { jaccardSimilarity, tokenize, isRecord, entryRound, extractFilePathTokens } from "./token-utils.js";
 import { computeGoalTextHash, deriveSubGoalId } from "./loop-compiler.js";
 import { committedRoundsFromEntries, machineGitMotionSeries, entryViolations } from "./committed-round.js";
 import {
@@ -468,7 +468,7 @@ function checkRetroactiveClaims(
       }));
       continue;
     }
-    const paths = extractFilePaths(claim.claim);
+    const paths = extractFilePathTokens(claim.claim);
     const unverified = paths.filter((path) =>
       !observed.some((file) => file === path || file.endsWith(path) || path.endsWith(file)));
     if (paths.length > 0 && unverified.length > 0) {
@@ -750,11 +750,6 @@ function extractSubGoalIds(text: string): string[] {
   return [...new Set(text.toLowerCase().match(/sg-[a-f0-9]{8}/g) ?? [])];
 }
 
-/** Extract file-path-like tokens (e.g. "src/auth/login.ts") from text. */
-function extractFilePaths(text: string): string[] {
-  return [...new Set(text.match(/[\w./-]+\.[a-z]{2,6}\b/gi) ?? [])];
-}
-
 /** Whether a changed path looks like a test file. */
 function isTestFile(path: string): boolean {
   return /\.(test|spec)\.[a-z0-9]+$/i.test(path) ||
@@ -839,7 +834,7 @@ function checkIntentDrift(
   }
 
   // ── Signal 2: file paths named in next_action appear in files_changed
-  const intentPaths = extractFilePaths(intent);
+  const intentPaths = extractFilePathTokens(intent);
   if (intentPaths.length > 0 && filesChanged.length > 0) {
     const pathMatched = intentPaths.some((p) =>
       filesChanged.some((f) => f === p || f.endsWith(p) || p.endsWith(f)));

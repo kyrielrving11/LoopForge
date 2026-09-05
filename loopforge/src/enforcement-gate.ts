@@ -29,7 +29,7 @@ import { machineProgressSeries, CHECK_SUCCESS_WITH_REMAINING_CRITERIA, CHECK_REC
 import { effectiveSuccess } from "./self-eval.js";
 import { deriveConstraintId, deriveCriterionId, deriveSubGoalId } from "./loop-compiler.js";
 import { getPolicy } from "./policy.js";
-import { STABLE_ID_RE, isRecord, entryRound } from "./token-utils.js";
+import { STABLE_ID_RE, isRecord, entryRound, extractFilePathTokens } from "./token-utils.js";
 import type { RoundProcessResult } from "./round-coordinator.js";
 import {
   committedRoundsFromEntries,
@@ -246,15 +246,18 @@ export function buildBacktrackPrompt(
     "**To restore a clean workspace, run:**",
     "",
     "```bash",
-    "# Option A: Discard all uncommitted changes (recommended)",
-    "git checkout -- .",
-    "git clean -fd",
+    "# Option A: Keep everything as a safety net (recommended) — reversible",
+    `git stash push -u -m "backtrack-safety-net-round-${fromRound}"`,
     "",
-    "# Option B: If you have unrelated work to keep",
-    `git stash push -m "backtrack-safety-net-round-${fromRound}"`,
+    "# Option B: Discard ALL uncommitted AND untracked changes (permanent)",
     "git checkout -- .",
     "git clean -fd",
     "```",
+    "",
+    "> Option A is a safety net — do NOT `git stash pop` before submitting " +
+    "the next round: the skipped work would look unrestored and be rejected. " +
+    "Restore only files you own after the next round commits, via " +
+    "`git checkout stash@{0} -- <path>`.",
     "",
   );
   // v2.12: Restore to the exact commit observed at the clean round.
@@ -901,8 +904,8 @@ function extractAnchors(clarification: string): string[] {
   for (const match of clarification.matchAll(/[c]r?-[a-f0-9]{8}|sg-[a-f0-9]{8}/gi)) {
     anchors.add(match[0].toLowerCase());
   }
-  for (const match of clarification.matchAll(/[\w./-]+\.[a-z]{2,6}\b/gi)) {
-    anchors.add(match[0]);
+  for (const path of extractFilePathTokens(clarification)) {
+    anchors.add(path);
   }
   return [...anchors];
 }
@@ -1195,7 +1198,6 @@ function buildDiagnosticGap(flags: VerificationFlag[]): string {
 // ═══════════════════════════════════════════════════════════════════════════
 
 type RuleCategory =
-  | "evaluation_consistency"
   | "evidence_contradiction"
   | "contract_scope"
   | "plan_drift"
@@ -1223,8 +1225,12 @@ interface RuleRow {
 }
 
 const RULE_TABLE: readonly RuleRow[] = [
-  { category: "evaluation_consistency", checks: ["success_with_remaining_criteria"], ladder: "uniform", terminalAfter: 2, noticeOnRepeat: true },
-  { category: "evaluation_consistency", checks: ["recurring_violation"], ladder: "uniform", terminalAfter: 2, noticeOnRepeat: true },
+  // R1/R2 join the contradiction umbrella per the documented four-class model
+  // (AGENTS/README/CHANGELOG): a row's category is its enforcement action
+  // class, NOT the trigger check's gate domain — claim-vs-self-reported-facts
+  // rows (outcome_success_contradiction included) belong to this class too.
+  { category: "evidence_contradiction", checks: ["success_with_remaining_criteria"], ladder: "uniform", terminalAfter: 2, noticeOnRepeat: true },
+  { category: "evidence_contradiction", checks: ["recurring_violation"], ladder: "uniform", terminalAfter: 2, noticeOnRepeat: true },
   { category: "evidence_contradiction", checks: ["required_command_failed", "command_evidence_mismatch", "outcome_success_contradiction"], ladder: "uniform", terminalAfter: 2, noticeOnRepeat: true },
   { category: "evidence_contradiction", checks: ["verification_entrypoint_modified"], ladder: "uniform", terminalAfter: 2, noticeOnRepeat: true },
   { category: "contract_scope", checks: ["contract_completion_unverified"], ladder: "internal" },

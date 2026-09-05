@@ -1,7 +1,7 @@
 # LoopForge development guide
 
 Read [`AGENTS.md`](./AGENTS.md) before changing this repository. It contains the
-current 3.7.0 architecture, commands, invariants, storage layout, and required
+current architecture, commands, invariants, storage layout, and required
 regression coverage.
 
 The most important boundary is simple: the external Agent executes the task;

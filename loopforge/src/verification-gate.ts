@@ -11,6 +11,12 @@
  *                 this round is excluded from the success trend (NOT
  *                 modified). Flags become hard constraints — the agent
  *                 must respond in the next round.
+ *
+ * v3.7: every check belongs to one of four verification domains (CHECK_DOMAIN
+ * below): evaluation consistency / evidence integrity / plan & contract /
+ * progress & recovery. A domain describes a check's semantic job — it never
+ * changes run order or verdict aggregation. Round Contract checks are further
+ * framed as declaration / execution / closure stages in their doc comments.
  */
 
 import type { VaultEntry } from "./loop-store.js";
@@ -18,9 +24,9 @@ import type { ProviderSnapshot } from "./evidence-provider.js";
 import { getPolicy, isConfiguredCommand } from "./policy.js";
 import type { RoundContract, SelfEvaluation, VerificationFlag, VerificationResult } from "./protocol.js";
 import { makeVerificationFlag, makeVerificationResult } from "./protocol.js";
-import { jaccardSimilarity, tokenize, entryRound as sharedEntryRound, isRecord } from "./token-utils.js";
+import { jaccardSimilarity, tokenize, isRecord, entryRound } from "./token-utils.js";
 import { computeGoalTextHash, deriveSubGoalId } from "./loop-compiler.js";
-import { committedRoundsFromEntries, machineGitMotionSeries } from "./committed-round.js";
+import { committedRoundsFromEntries, machineGitMotionSeries, entryViolations } from "./committed-round.js";
 import {
   contractRoundEvaluations,
   contractDoneWhenSatisfied,
@@ -34,14 +40,22 @@ import { effectiveSuccess, parseRoundContract } from "./self-eval.js";
 // ═══════════════════════════════════════════════════════════════════════════
 // v2.12: Check-name constants — single source of truth so the enforcement
 // gate and audit can reference checks without string-literal drift.
+//
+// v3.7: every check belongs to one of four verification domains (CHECK_DOMAIN
+// below). The flag set was converged from 27 to 24:
+// - progress_regression removed — self-report-only decoration; machine-side
+//   progress policing lives in the enforcement gate's progress stall row.
+// - empty_change_with_passing removed — success without machine backing is
+//   already covered by the success-evidence arms below.
+// - success_claim_conflict merged into outcome_success_contradiction.
 // ═══════════════════════════════════════════════════════════════════════════
 
-export const CHECK_PROGRESS_REGRESSION = "progress_regression";
-export const CHECK_EMPTY_CHANGE_WITH_PASSING = "empty_change_with_passing";
 export const CHECK_SUCCESS_WITH_REMAINING_CRITERIA = "success_with_remaining_criteria";
 export const CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE = "success_without_verified_evidence";
+// v3.7: single id for the outcome-vs-success axis — error when a declared
+// success contradicts success=false, warn when success=true but the outcome
+// declares a non-success (the former success_claim_conflict direction).
 export const CHECK_OUTCOME_SUCCESS_CONTRADICTION = "outcome_success_contradiction";
-export const CHECK_SUCCESS_CLAIM_CONFLICT = "success_claim_conflict";
 export const CHECK_BLOCKED_WITHOUT_BLOCKER = "blocked_without_blocker";
 export const CHECK_RETROACTIVE_CLAIM_BAD_ROUND = "retroactive_claim_bad_round";
 export const CHECK_RETROACTIVE_CLAIM_UNVERIFIED = "retroactive_claim_unverified";
@@ -73,6 +87,13 @@ export const CHECK_CRITERIA_CLAIMS_UNVERIFIED = "criteria_claims_unverified";
 // silent when their target is absent: contract-less rounds behave exactly
 // as before these checks existed, and round 1 (no committed rounds → no
 // active contract) never produces declaration off-by-one noise.
+// v3.7: the checks are framed as three contract stages — Declaration
+// (proposal quality: round_underspecified / round_unverifiable /
+// contract_premature), Execution (conformance under the ACTIVE contract:
+// round_scope_drift; premature_boundary's silently-dropped arm), Closure
+// (completion truth: contract_completion_unverified; premature_boundary's
+// claimed-met-unverified arm). The framing is documentation only — no phase
+// field exists on the contract.
 /** Contract proposed with an empty done_when — nothing is promised, so
  *  nothing can be verified at the boundary. Warn: the contract can be fixed
  *  by re-declaring next round. */
@@ -104,25 +125,58 @@ export const CHECK_CONTRACT_COMPLETION_UNVERIFIED = "contract_completion_unverif
 export const CHECK_CONTRACT_PREMATURE = "contract_premature";
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Helpers
+// v3.7: Four-domain membership map — the single source for docs, tests, and
+// any consumer that needs the domain of a check id. Grouping is semantic
+// only: run order and verdict aggregation live in verifySelfEvaluation.
 // ═══════════════════════════════════════════════════════════════════════════
 
-/** Extract the round number from a vault entry's loop_lineage.
- *  Returns 0 if the entry has no lineage or no round field.
- *  In practice, persistLoopLineage always writes round ≥ 1, so 0
- *  unambiguously means "not a valid round entry" in this context.
- *  Exported for reuse by enforcement-gate.ts. */
-export function entryRound(entry: VaultEntry): number {
-  return sharedEntryRound(entry as unknown as Record<string, unknown>);
-}
+export type VerificationDomain =
+  /** The declaration is self-consistent (and consistent with committed facts). */
+  | "evaluation_consistency"
+  /** Machine evidence and the agent's claims about it. */
+  | "evidence_integrity"
+  /** Plan conformance: intent/sub-goal drift (two detection bases under the
+   *  "plan drift" label) and the Round Contract declaration/execution/closure
+   *  checks. */
+  | "plan_contract"
+  /** Workspace restore after backtrack. Machine-side progress enforcement
+   *  (the stall evaluator) lives in the enforcement gate, not here. */
+  | "progress_recovery";
 
-/** Read constraint_violations from a vault entry (entry-level, stored from
- *  the previous round's last_round_result at persist time). */
-function entryViolations(entry: VaultEntry): string[] {
-  const viols = entry.constraint_violations;
-  if (Array.isArray(viols)) return viols.filter((v: unknown) => typeof v === "string");
-  return [];
-}
+export const CHECK_DOMAIN: Readonly<Record<string, VerificationDomain>> = {
+  // ── evaluation_consistency ────────────────────────────────────────────────
+  [CHECK_SUCCESS_WITH_REMAINING_CRITERIA]: "evaluation_consistency",
+  [CHECK_OUTCOME_SUCCESS_CONTRADICTION]: "evaluation_consistency",
+  [CHECK_BLOCKED_WITHOUT_BLOCKER]: "evaluation_consistency",
+  [CHECK_RETROACTIVE_CLAIM_BAD_ROUND]: "evaluation_consistency",
+  [CHECK_RETROACTIVE_CLAIM_UNVERIFIED]: "evaluation_consistency",
+  [CHECK_DUPLICATE_CONSTRAINT_DISCOVERY]: "evaluation_consistency",
+  [CHECK_RECURRING_VIOLATION]: "evaluation_consistency",
+  [CHECK_RETRACT_FRESH_CONSTRAINT]: "evaluation_consistency",
+  // ── evidence_integrity ────────────────────────────────────────────────────
+  [CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE]: "evidence_integrity",
+  [CHECK_CRITERIA_CLAIMS_UNVERIFIED]: "evidence_integrity",
+  [CHECK_EVIDENCE_INTEGRITY]: "evidence_integrity",
+  [CHECK_REQUIRED_COMMAND_FAILED]: "evidence_integrity",
+  [CHECK_COMMAND_EVIDENCE_MISMATCH]: "evidence_integrity",
+  [CHECK_VERIFICATION_ENTRYPOINT_MODIFIED]: "evidence_integrity",
+  [CHECK_TEST_FILES_MODIFIED]: "evidence_integrity",
+  // ── plan_contract ─────────────────────────────────────────────────────────
+  [CHECK_INTENT_DRIFT]: "plan_contract",
+  [CHECK_SUBGOAL_DRIFT]: "plan_contract",
+  [CHECK_ROUND_UNDERSPECIFIED]: "plan_contract",
+  [CHECK_ROUND_UNVERIFIABLE]: "plan_contract",
+  [CHECK_ROUND_SCOPE_DRIFT]: "plan_contract",
+  [CHECK_PREMATURE_BOUNDARY]: "plan_contract",
+  [CHECK_CONTRACT_COMPLETION_UNVERIFIED]: "plan_contract",
+  [CHECK_CONTRACT_PREMATURE]: "plan_contract",
+  // ── progress_recovery ─────────────────────────────────────────────────────
+  [CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED]: "progress_recovery",
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Helpers
+// ═══════════════════════════════════════════════════════════════════════════
 
 // ── v3.3: Round Contract scope matching ─────────────────────────────────────
 
@@ -301,54 +355,6 @@ export function machineProgressSeries(
 // Individual checks — each returns a VerificationFlag or null
 // ═══════════════════════════════════════════════════════════════════════════
 
-function checkProgressRegression(
-  selfEval: SelfEvaluation,
-  prevSelfEval: SelfEvaluation | null,
-): VerificationFlag | null {
-  if (!prevSelfEval?.execution_evidence) return null;
-  if (!selfEval.execution_evidence) return null;
-
-  const prevProgress = prevSelfEval.execution_evidence.progress_estimate;
-  const currProgress = selfEval.execution_evidence.progress_estimate;
-
-  if (typeof prevProgress !== "number" || typeof currProgress !== "number") return null;
-  // Use delta with epsilon to avoid IEEE 754 rounding issues (0.8 - 0.2 > 0.6 in float)
-  if (prevProgress - currProgress <= 0.2 + 1e-10) return null;
-
-  return makeVerificationFlag({
-    severity: "warn",
-    field: "progress_estimate",
-    check: CHECK_PROGRESS_REGRESSION,
-    detail:
-      `Progress dropped from ${prevProgress.toFixed(2)} to ` +
-      `${currProgress.toFixed(2)} (delta: ${(currProgress - prevProgress).toFixed(2)})`,
-  });
-}
-
-function checkEmptyChangeWithPassing(
-  selfEval: SelfEvaluation,
-): VerificationFlag | null {
-  const ev = selfEval.execution_evidence;
-  if (!ev) return null;
-
-  const filesEmpty = ev.files_changed.length === 0;
-  const testsAllPass =
-    ev.test_results !== null &&
-    ev.test_results.failed === 0 &&
-    ev.test_results.passed > 0;
-
-  if (!filesEmpty || !testsAllPass || !effectiveSuccess(selfEval)) return null;
-
-  return makeVerificationFlag({
-    severity: "warn",
-    field: "execution_evidence",
-    check: CHECK_EMPTY_CHANGE_WITH_PASSING,
-    detail:
-      "Agent claims success with no files changed and all tests passing — " +
-      "verify that work was actually performed",
-  });
-}
-
 function checkSuccessWithRemainingCriteria(
   selfEval: SelfEvaluation,
 ): VerificationFlag | null {
@@ -389,10 +395,12 @@ function checkUnverifiedCriteriaClaims(
   });
 }
 
-/** Declared outcome vs the core success flag. A declared success with
- *  success=false is a self-contradiction (error); a declared non-success with
- *  success=true is an inconsistent claim (warn). Also: outcome==="blocked"
- *  without a blocker description gets a warn so the next prompt asks for it. */
+/** Declared outcome vs the core success flag — one check id for the whole
+ *  axis (v3.7: the former success_claim_conflict warn direction merged here).
+ *  A declared success with success=false is a self-contradiction (error);
+ *  success=true with a non-success outcome is an inconsistent claim (warn).
+ *  Also: outcome==="blocked" without a blocker description gets a warn so the
+ *  next prompt asks for it. */
 function checkOutcomeConsistency(
   selfEval: SelfEvaluation,
 ): VerificationFlag | null {
@@ -409,7 +417,7 @@ function checkOutcomeConsistency(
     return makeVerificationFlag({
       severity: "warn",
       field: "success",
-      check: CHECK_SUCCESS_CLAIM_CONFLICT,
+      check: CHECK_OUTCOME_SUCCESS_CONTRADICTION,
       detail: `outcome=${outcome} but success=true — the declared outcome wins`,
     });
   }
@@ -478,24 +486,48 @@ function checkRetroactiveClaims(
   return flags.length > 0 ? flags : null;
 }
 
-/** v2.12/v3.6: success without a machine-verified observation. The agent
- *  claims completion but the runtime observed no machine evidence for it.
- *  v3.6: the trigger is the runtime-derived providerStatus (verified /
- *  unavailable / absent) — the v3.2 success_unverified check merged here.
- *  ProviderStatus "verified" requires an UNTAMPERED passed after-command, so
- *  an entrypoint-tampered command no longer counts as machine evidence
- *  (that coverage previously lived in success_unverified alone); the check
- *  never self-skips on the heuristic-extraction path. Severity follows
- *  evidence.machine_backed_success — "required" rejects (error), "warn"
- *  tolerates with a warn (round commits, success excluded from the
- *  trajectory, trust drops). A declared no_change_reason is the honest
- *  escape hatch: it downgrades to info. no_change_reason is honored HERE
- *  ONLY — contract checks refuse it (v3.6). */
+/** v2.12/v3.6/v3.7: success without machine backing — the single
+ *  "success evidence" semantic. Two arms, evaluated in order:
+ *  1. Empty/missing-evidence arm (v3.7: absorbed the enforcement-only
+ *     empty_success rule): success=true with NO execution_evidence at all, or
+ *     with files_changed empty AND test_results null, is an error
+ *     unconditionally — BEFORE the providerStatus early-exit, so a passed
+ *     command never rescues it (execution_evidence stays mandatory), and
+ *     neither evidence.machine_backed_success "warn" nor a declared
+ *     no_change_reason downgrades it ("no change" with literally no evidence
+ *     recorded is still an unbacked claim).
+ *  2. Claims arm (v3.6): success=true but the runtime observed no machine
+ *     evidence for it. The trigger is the runtime-derived providerStatus
+ *     (verified / unavailable / absent) — "verified" requires an UNTAMPERED
+ *     passed after-command, so an entrypoint-tampered command no longer
+ *     counts as machine evidence. Severity follows evidence.machine_backed_
+ *     success — "required" rejects (error), "warn" tolerates with a warn
+ *     (round commits, success excluded from the trajectory, trust drops). A
+ *     declared no_change_reason is the honest escape hatch: it downgrades to
+ *     info. no_change_reason is honored HERE ONLY — contract checks refuse it. */
 function checkSuccessWithoutVerifiedEvidence(
   selfEval: SelfEvaluation,
   status: EvidenceStatus,
 ): VerificationFlag | null {
   if (!effectiveSuccess(selfEval)) return null;
+
+  // v3.7: empty/missing-evidence arm (ex-R3 empty_success posture).
+  const ev = selfEval.execution_evidence;
+  if (!ev || (ev.files_changed.length === 0 && ev.test_results === null)) {
+    return makeVerificationFlag({
+      severity: "error",
+      field: "success",
+      check: CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE,
+      detail: ev
+        ? "Agent claims success but execution_evidence shows no files changed " +
+          "and no tests were run. There is no verifiable evidence of work."
+        : "Agent claims success but provided no execution_evidence. " +
+          "Every successful round MUST include execution_evidence with " +
+          "files_changed, test_results, and progress_estimate.",
+    });
+  }
+
+  // Claims arm (v3.6).
   if (status.providerStatus === "verified") return null;
   const noChange = typeof selfEval.no_change_reason === "string" &&
     selfEval.no_change_reason.trim().length > 0;
@@ -1461,11 +1493,9 @@ export function verifySelfEvaluation(
   // the list at the first problem, hiding every other bad retroactive claim
   // from the agent until the next round.
   const checks: Array<() => VerificationFlag | VerificationFlag[] | null> = [
-    () => checkProgressRegression(selfEval, prevSelfEval),
-    () => checkEmptyChangeWithPassing(selfEval),
     () => checkSuccessWithRemainingCriteria(selfEval),
-    // v2.12/v3.6: success without a machine-verified observation — the merged
-    // success_unverified semantics (runtime providerStatus lens, tamper-aware)
+    // v2.12/v3.6/v3.7: the single success-evidence semantic — empty/missing-
+    // evidence arm (ex-R3) + claims arm (providerStatus lens, tamper-aware)
     () => checkSuccessWithoutVerifiedEvidence(selfEval, evidenceStatus),
     // v2.12: criteria met but none machine-verified (mild criterion-specific rule)
     () => checkUnverifiedCriteriaClaims(selfEval, claimView),

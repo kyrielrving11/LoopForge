@@ -389,7 +389,6 @@ export interface CriterionStatus {
     /** Sub-goals whose description matches this criterion (Jaccard). */
     related_subgoal_ids: string[];
 }
-export declare function makeCriterionStatus(overrides?: Partial<CriterionStatus>): CriterionStatus;
 /** v3.2: A deterministic "lesson learned" — a constraint or verification
  *  check that failed repeatedly across rounds. Rendered in the prompt to
  *  immunize the agent against repeating the same mistakes. Zero persistence:
@@ -453,10 +452,10 @@ export interface SubGoal {
     priority: number;
 }
 export declare function makeSubGoal(overrides?: Partial<SubGoal>): SubGoal;
-/** v2.3: Per-constraint lifecycle metadata derived by the compiler.
+/** v2.3: Per-constraint lifecycle metadata for the active constraint set.
  *  Reconstructed each round from vault entries — no new persistence.
- *  Discovered constraints without violations for N rounds are demoted
- *  to inactive; hard/plan/criteria constraints never auto-decay. */
+ *  v3.7: the time-aware decay arm (status inactive / discovered_at_round)
+ *  was removed — active constraints never auto-demote. */
 export interface ConstraintMeta {
     /** v2.11: Stable identifier derived from text hash (c-XXXXXXXX).
      *  Enables exact ID-first matching by the agent and compiler.
@@ -464,16 +463,11 @@ export interface ConstraintMeta {
     id: string;
     /** Normalized constraint text (the key). */
     text: string;
-    /** Which round this constraint was first discovered/added. */
-    discovered_at_round: number;
     /** Which round this constraint was last violated by the agent.
      *  0 if never violated. */
     last_violated_at_round: number;
-    /** Origin — determines whether auto-decay applies. */
+    /** Origin — criteria texts carry the cr-XXXXXXXX namespace (v3.3.1). */
     source: "hard" | "plan" | "criteria" | "discovered";
-    /** Compiler-derived status. Inactive constraints are removed from
-     *  prompts but kept in the state file. */
-    status: "active" | "inactive";
 }
 export declare function makeConstraintMeta(overrides?: Partial<ConstraintMeta>): ConstraintMeta;
 export interface TaskAlignment {
@@ -537,7 +531,6 @@ export interface LoopRoundResult {
      *  Carried forward from SelfEvaluation. */
     no_change_reason?: string;
 }
-export declare function makeRoundContract(overrides?: Partial<RoundContract>): RoundContract;
 export declare function makeLoopRoundResult(overrides?: Partial<LoopRoundResult>): LoopRoundResult;
 export interface LoopCompileRequest {
     mode: Mode;
@@ -578,16 +571,9 @@ export interface PromptArtifact {
     roundId: string;
     attempt: number;
     level: "l0" | "l1" | "l2";
-    levelReasons: string[];
     renderedPrompt: string;
     promptHash: string;
     stateHash: string;
-    basePromptVersion: string;
-    includedSections: string[];
-    budgetChars: number;
-    charCount: number;
-    budgetExceeded: boolean;
-    generatedAt: number;
     /** v3.2: What the rendered prompt actually presented (L1 only). Persisted
      *  on the lineage entry as the diff baseline for L1 collapse. Absent for
      *  L0/L2 compiles. */
@@ -612,9 +598,6 @@ export interface LoopCompileResponse {
     /** v2.2: Structured sub-goals tracked across rounds. Compiler-managed
      *  lifecycle with derived status. Rendered as Sub-Goal Dashboard. */
     sub_goals?: SubGoal[];
-    /** v2.3: Constraints demoted to inactive after prolonged inactivity.
-     *  Removed from prompts; kept in state file. Auto-reactivated on violation. */
-    constraints_inactive?: string[];
     /** v2.3: Per-constraint lifecycle metadata for state file rendering. */
     constraint_metadata?: ConstraintMeta[];
     /** v2.5: Current round's agent trust score [0, 1]. Derived from verification
@@ -680,8 +663,6 @@ export interface SessionState {
     task_id: string;
     call_count: number;
     success_trend: boolean[];
-    current_version: string;
-    feedback_buffer: Record<string, unknown>[];
 }
 export declare function makeSessionState(taskId: string): SessionState;
 export interface AgentLoopResult {
@@ -749,7 +730,7 @@ export interface VerificationFlag {
     severity: "info" | "warn" | "error";
     /** Which SelfEvaluation field triggered this flag (e.g. "progress_estimate"). */
     field: string;
-    /** Check name for debugging / audit (e.g. "progress_regression"). */
+    /** Check name for debugging / audit (e.g. "outcome_success_contradiction"). */
     check: string;
     /** Human-readable description of the inconsistency found. */
     detail: string;

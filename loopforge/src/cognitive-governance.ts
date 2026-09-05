@@ -11,11 +11,7 @@ import { createHash } from "node:crypto";
 import { computeGoalTextHash } from "./loop-compiler.js";
 import type { DerivedGate, GateActionDescriptor } from "./protocol.js";
 import type { VaultEntry } from "./loop-store.js";
-import { entryRound as sharedEntryRound } from "./token-utils.js";
-
-export function entryRound(entry: VaultEntry): number {
-  return sharedEntryRound(entry as unknown as Record<string, unknown>);
-}
+import { entryRound } from "./token-utils.js";
 
 /** Effects that always require human authorization. */
 const USER_EFFECTS = new Set<GateActionDescriptor["effects"][number]>([

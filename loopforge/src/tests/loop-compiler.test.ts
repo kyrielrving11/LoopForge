@@ -1642,10 +1642,11 @@ describe("manageConstraintLifecycle — current-round violations (v3.2.1)", () =
     );
   });
 
-  it("reactivates a decayed discovered constraint when violated this round", () => {
-    // Round 1 discovers the constraint; rounds 2–17 never mention it again
-    // (past constraint_inactive_rounds=15) → inactive. Round 18 violates it
-    // in last_round_result → must re-enter the active set.
+  it("keeps a quiet discovered constraint active (v3.7: decay removed)", () => {
+    // Round 1 discovers the constraint; rounds 2–17 never mention it again.
+    // Pre-v3.7 constraint_inactive_rounds (15) would have demoted it to
+    // inactive; the time-aware decay was removed — discovered constraints
+    // stay in the active set until the agent retracts them.
     // The active set propagates via previous round's constraints_active —
     // fixture mirrors the real lineage chain.
     const discoveredText = "Rate limit login attempts";
@@ -1681,33 +1682,20 @@ describe("manageConstraintLifecycle — current-round violations (v3.2.1)", () =
       constraints_from_plan: [] as string[],
     });
 
-    // Without a current-round violation the constraint stays inactive.
-    const inactive = compileLoop({ ...base, last_round_result: makeLoopRoundResult({
+    const quiet = compileLoop({ ...base, last_round_result: makeLoopRoundResult({
       round: 17,
       success: true,
       output_summary: "Quiet rounds",
       constraint_violations: [],
     }) }, { results });
-    const inactiveMeta = inactive.constraint_metadata ?? [];
     assert.ok(
-      inactiveMeta.some((m) => m.text === discoveredText && m.status === "inactive"),
-      "decayed constraint should be inactive without a fresh violation",
+      (quiet.constraints_active ?? []).includes(discoveredText),
+      "a quiet discovered constraint must stay active (no decay)",
     );
-
-    // With a current-round violation it re-activates with the round stamp.
-    const reactivated = compileLoop({ ...base, last_round_result: makeLoopRoundResult({
-      round: 17,
-      success: false,
-      output_summary: "Brute force hit",
-      constraint_violations: [discoveredText],
-    }) }, { results });
-    const activeMeta = reactivated.constraint_metadata ?? [];
-    const meta = activeMeta.find((m) => m.text === discoveredText);
-    assert.ok(meta, "reactivated constraint must be in metadata");
-    assert.equal(meta!.status, "active",
-      "decayed constraint violated this round must re-activate");
-    assert.equal(meta!.last_violated_at_round, 18,
-      "reactivation must stamp last_violated_at_round = currentRound");
+    const meta = (quiet.constraint_metadata ?? []).find((m) => m.text === discoveredText);
+    assert.ok(meta, "constraint must still carry metadata");
+    assert.equal(meta!.source, "discovered");
+    assert.equal(meta!.last_violated_at_round, 0, "never violated");
   });
 });
 

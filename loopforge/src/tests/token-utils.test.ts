@@ -137,14 +137,10 @@ describe("entryRound", () => {
     assert.equal(entryRound(entry), 5);
   });
 
-  it("reads round from legacy lineage field", () => {
+  it("returns 0 when the legacy top-level lineage alias is used", () => {
+    // v3.7: the legacy `lineage` alias was removed — only loop_lineage counts.
     const entry = { lineage: { round: 3 } };
-    assert.equal(entryRound(entry), 3);
-  });
-
-  it("prefers loop_lineage over lineage", () => {
-    const entry = { loop_lineage: { round: 5 }, lineage: { round: 3 } };
-    assert.equal(entryRound(entry), 5);
+    assert.equal(entryRound(entry), 0);
   });
 
   it("returns 0 when no lineage exists", () => {

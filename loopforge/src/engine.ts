@@ -495,10 +495,8 @@ export class LoopForgeEngine {
     }
 
     for (const entry of fresh) {
-      const lineage = (entry.loop_lineage ?? entry.lineage ?? {}) as Record<
-        string,
-        unknown
-      >;
+      // v3.7: the legacy top-level `lineage` alias was removed.
+      const lineage = (entry.loop_lineage ?? {}) as Record<string, unknown>;
       const rnd = lineage.round as number;
       const fb = rnd ? fbByRound.get(rnd) : undefined;
       if (fb) this.mergeCommittedRound(entry, lineage, fb);

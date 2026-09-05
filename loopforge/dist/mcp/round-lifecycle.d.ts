@@ -139,12 +139,17 @@ export declare class RoundLifecycle {
     private persistPrepared;
     private restoredPromptResult;
     /** Reconcile the crash window where feedback committed but session_state
-     *  still points at the old prompt. Returns null when no commit is pending. */
+     *  still points at the old prompt. Returns null when no commit is pending.
+     *  v3.7: async — the continue-after-crash branch compiles through
+     *  RoundDriver.prepare (the sync prepareSync fallback was removed). */
     private reconcileCommittedRound;
     /** Resume tail: the session has been reconstructed and registered. Reconcile
      *  a committed-but-undelivered round, restore the held prompt, or recover a
-     *  missing prompt from current round state. */
-    resume(session: McpSession): AdvanceResult;
+     *  missing prompt from current round state. v3.7: async — compilation runs
+     *  through RoundDriver.prepare like unpause (the prepareSync fallback was
+     *  removed); a failed compile now degrades to the same stalled terminal
+     *  result unpause returns instead of persisting a null prompt. */
+    resume(session: McpSession): Promise<AdvanceResult>;
     /** Unpause tail: the session has been reconstructed and registered with
      *  status "running". Refresh async evidence, reconcile a committed round,
      *  restore the held prompt, or compile the next prompt. */

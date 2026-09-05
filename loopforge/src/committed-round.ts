@@ -145,8 +145,9 @@ export function decodeCommittedRound(entry: VaultEntry): CommittedRoundView | nu
 export function decodeMergedRound(entry: unknown): CommittedRoundView | null {
   if (!isRecord(entry)) return null;
   const raw = entry as Record<string, unknown>;
-  const lineageValue = raw.loop_lineage ?? raw.lineage;
-  const lineage = isRecord(lineageValue) ? lineageValue : {};
+  // v3.7: the legacy top-level `lineage` alias was removed — committed
+  // entries always carry `loop_lineage`.
+  const lineage = isRecord(raw.loop_lineage) ? raw.loop_lineage : {};
   const action = committedAction(lineage.committed_action ?? raw.committed_action);
   if (!action) return null;
   const round = entryRound(raw);
@@ -229,6 +230,111 @@ export function decodeMergedRound(entry: unknown): CommittedRoundView | null {
 
 /** Normalize committed history: rollback directives disappear, later records
  * replace earlier records for the same logical round, and output is ascending. */
+/** Decode a committed round from either representation: an engine-hydrated
+ *  merged lineage entry first (decodeMergedRound), then a durable :feedback
+ *  entry. Compile-side callers used to inline this chain as a private
+ *  `committedView` helper. */
+export function decodeRound(entry: unknown): CommittedRoundView | null {
+  return decodeMergedRound(entry) ?? decodeCommittedRound(entry as VaultEntry);
+}
+
+/** Lineage sub-object of an entry (`loop_lineage`; v3.7: the legacy
+ *  top-level `lineage` alias was removed), or {} when absent. */
+export function entryLineage(entry: unknown): Record<string, unknown> {
+  if (!isRecord(entry)) return {};
+  const value = entry.loop_lineage;
+  return isRecord(value) ? value : {};
+}
+
+/** Extract execution_evidence from an entry, handling both direct-field and
+ *  lineage-nested shapes. The decoded committed view wins when the entry is
+ *  a committed round. Returns null when absent. Moved from loop-compiler so
+ *  field-shape interpretation lives in this module only. */
+export function entryExecutionEvidence(entry: unknown): Record<string, unknown> | null {
+  const view = decodeRound(entry);
+  if (view) return view.executionEvidence as Record<string, unknown> | null;
+  const record = isRecord(entry) ? entry : {};
+  const direct = record.execution_evidence;
+  if (isRecord(direct)) return direct;
+  const nested = entryLineage(entry).execution_evidence;
+  return isRecord(nested) ? nested : null;
+}
+
+/** Read success_criteria_met from an entry's execution_evidence. */
+export function entryCriteriaMet(entry: unknown): string[] {
+  const view = decodeRound(entry);
+  if (view) return view.executionEvidence?.success_criteria_met
+    ?.filter((value): value is string => typeof value === "string") ?? [];
+  const ev = entryExecutionEvidence(entry);
+  if (!ev) return [];
+  const arr = ev.success_criteria_met;
+  return Array.isArray(arr) ? arr.filter((v): v is string => typeof v === "string") : [];
+}
+
+/** Read success_criteria_remaining from an entry's execution_evidence. */
+export function entryCriteriaRemaining(entry: unknown): string[] {
+  const view = decodeRound(entry);
+  if (view) return view.executionEvidence?.success_criteria_remaining
+    ?.filter((value): value is string => typeof value === "string") ?? [];
+  const ev = entryExecutionEvidence(entry);
+  if (!ev) return [];
+  const arr = ev.success_criteria_remaining;
+  return Array.isArray(arr) ? arr.filter((v): v is string => typeof v === "string") : [];
+}
+
+/** Read constraints_active from an entry's lineage. */
+export function entryActiveConstraints(entry: unknown): string[] {
+  const view = decodeRound(entry);
+  if (view) return view.activeConstraints ?? [];
+  const arr = entryLineage(entry).constraints_active;
+  return Array.isArray(arr) ? arr.filter((v): v is string => typeof v === "string") : [];
+}
+
+/** Read retracted_constraints from an entry (direct field, else nested in
+ *  the lineage). */
+export function entryRetractedConstraints(entry: unknown): string[] {
+  const view = decodeRound(entry);
+  if (view) return view.retractedConstraints ?? [];
+  const record = isRecord(entry) ? entry : {};
+  const direct = record.retracted_constraints;
+  if (Array.isArray(direct)) return direct.filter((v): v is string => typeof v === "string");
+  const nested = entryLineage(entry).retracted_constraints;
+  if (Array.isArray(nested)) return nested.filter((v): v is string => typeof v === "string");
+  return [];
+}
+
+/** Read progress_estimate from an entry's execution_evidence (0 when
+ *  absent). */
+export function entryProgressEstimate(entry: unknown): number {
+  const ev = entryExecutionEvidence(entry);
+  if (!ev) return 0;
+  const pe = ev.progress_estimate;
+  return typeof pe === "number" ? pe : 0;
+}
+
+/** Read emerged_subtasks from an entry (handles direct + lineage nesting). */
+export function entryEmergedSubtasks(entry: unknown): string[] {
+  const view = decodeRound(entry);
+  if (view) return view.emergedSubtasks ?? [];
+  const record = isRecord(entry) ? entry : {};
+  const direct = record.emerged_subtasks;
+  if (Array.isArray(direct)) return direct.filter((v): v is string => typeof v === "string");
+  const nested = entryLineage(entry).emerged_subtasks;
+  if (Array.isArray(nested)) return nested.filter((v): v is string => typeof v === "string");
+  return [];
+}
+
+/** Read constraint_violations from an entry (entry-level, stored from the
+ *  previous round's last_round_result at persist time — distinct from the
+ *  evaluation-level violations on the committed view). Moved from
+ *  verification-gate so lineage-shape reads live in this module only. */
+export function entryViolations(entry: unknown): string[] {
+  const record = isRecord(entry) ? entry : {};
+  const viols = record.constraint_violations;
+  if (Array.isArray(viols)) return viols.filter((v: unknown) => typeof v === "string");
+  return [];
+}
+
 export function historyRounds(
   views: Iterable<CommittedRoundView | null>,
   beforeRound = Number.POSITIVE_INFINITY,
@@ -246,6 +352,22 @@ export function committedRoundsFromEntries(
   beforeRound = Number.POSITIVE_INFINITY,
 ): CommittedRoundView[] {
   return historyRounds(entries.map(decodeCommittedRound), beforeRound);
+}
+
+/** The machine-evidence set that best represents a committed round: the
+ *  after-phase evidence (captured post-execution), else the round's committed
+ *  diff evidence, else the pre-round baseline. Shared selector for the
+ *  evidence-fallback chains that audit, claims, and backtrack-restore each
+ *  used to inline with subtly different tiers — the enforcement-gate variant
+ *  previously skipped roundEvidence entirely. Distinct from
+ *  machineGitMotionSeries, which deliberately reads roundEvidence alone for
+ *  the diffed motion signal. */
+export function machineEvidenceForRound(
+  view: CommittedRoundView,
+): ProviderSnapshot[] {
+  if (view.afterEvidence.length > 0) return view.afterEvidence;
+  if (view.roundEvidence.length > 0) return view.roundEvidence;
+  return view.beforeEvidence;
 }
 
 export function mergedRoundsFromEntries(

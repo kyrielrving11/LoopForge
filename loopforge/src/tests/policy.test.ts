@@ -69,3 +69,30 @@ describe("Policy — Loading", () => {
     assert.equal(policy.version, "2");
   });
 });
+
+describe("Policy — v3.7 shipped sample", () => {
+  beforeEach(() => resetPolicy());
+
+  it("loads loop_policy.json without unknown-key warnings and inherits defaults", () => {
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message?: unknown, ...rest: unknown[]) => {
+      warnings.push(String(message));
+      originalWarn(message, ...rest);
+    };
+    try {
+      const policy = loadPolicy("loop_policy.json");
+      // v3.7: the stale keys (injection_mode, subgoal_auto_*, 
+      // constraint_inactive_rounds) were removed — no unknown-key warnings.
+      assert.deepEqual(warnings, []);
+      assert.equal(policy.version, "2");
+      // Keys absent from the sample file inherit from DEFAULT_POLICY.
+      assert.equal(policy.engine.backtrack_enabled, true);
+      assert.equal(policy.prompt.l2_pointer_enabled, true);
+      assert.equal(policy.evolution.constraint_id_enabled, true);
+      assert.equal(policy.gate.enabled, true);
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+});

@@ -311,7 +311,7 @@ describe("RoundLifecycle — resume / crash window", async () => {
     lifecycle = makeLifecycle(store, makeRegistry());
   });
 
-  it("resume returns the held prompt without recompiling", () => {
+  it("resume returns the held prompt without recompiling", async () => {
     const session: McpSession = {
       sessionId: "sess-held",
       loopId: "loop-held",
@@ -332,13 +332,13 @@ describe("RoundLifecycle — resume / crash window", async () => {
       currentLevel: "l2",
     };
 
-    const result = lifecycle.resume(session);
+    const result = await lifecycle.resume(session);
     assert.equal(result.prompt, "HELD-PROMPT");
     assert.equal(result.round, 2);
     assert.equal(session.currentPrompt, "HELD-PROMPT", "prompt not consumed");
   });
 
-  it("resume recovers a missing round-1 prompt and persists it", () => {
+  it("resume recovers a missing round-1 prompt and persists it", async () => {
     const session: McpSession = {
       sessionId: "sess-legacy-resume",
       loopId: "loop-legacy-resume",
@@ -356,7 +356,7 @@ describe("RoundLifecycle — resume / crash window", async () => {
       evidenceBaseline: [],
     };
 
-    const result = lifecycle.resume(session);
+    const result = await lifecycle.resume(session);
     assert.ok(result.prompt, "legacy resume compiles a prompt");
     assert.ok(result.prompt!.includes("LoopForge"));
     assert.equal(result.round, 1);
@@ -393,7 +393,7 @@ describe("RoundLifecycle — resume / crash window", async () => {
     sessionStore.acquireLease("crash-cont", "test-owner", 60_000);
     const entry = sessionStore.load("crash-cont")!;
     const recovered = restarted.reconstructSession(entry)!;
-    const result = restarted.resume(recovered);
+    const result = await restarted.resume(recovered);
 
     assert.equal(result.round, 2, "committed continue advances to the next round");
     assert.ok(result.prompt, "next round prompt compiled");
@@ -422,7 +422,7 @@ describe("RoundLifecycle — resume / crash window", async () => {
     sessionStore.acquireLease("crash-stop", "test-owner", 60_000);
     const entry = sessionStore.load("crash-stop")!;
     const recovered = restarted.reconstructSession(entry)!;
-    const result = restarted.resume(recovered);
+    const result = await restarted.resume(recovered);
 
     assert.equal(result.prompt, null);
     assert.equal(result.stopReason, "completed");

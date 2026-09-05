@@ -57,16 +57,9 @@ describe("FileLoopStore", () => {
         roundId: `loop:${loopId}:round:1`,
         attempt: 1,
         level: "l2",
-        levelReasons: ["first_round"],
         renderedPrompt: "prompt",
         promptHash: "prompt-hash",
         stateHash: "state-hash",
-        basePromptVersion: "2.0.0",
-        includedSections: ["objective"],
-        budgetChars: 100,
-        charCount: 6,
-        budgetExceeded: false,
-        generatedAt: Date.now(),
       };
       const snapshot = {
         ...prepareRoundTransaction(loopId, 1, [], artifact),
@@ -121,34 +114,6 @@ describe("FileLoopStore", () => {
       assert.deepEqual(store.listLoopIds(), ["alpha", "alpha-long"]);
       assert.equal(store.listEntries("alpha").length, 1);
       assert.equal(readdirSync(join(root, "loops")).length, 2);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  it("imports a legacy vault once without deleting the source", () => {
-    const root = temporaryDirectory();
-    try {
-      const legacy = join(root, "legacy.json");
-      const storeRoot = join(root, "new-store");
-      const legacyEntry = entry(
-        "migrated",
-        "loop:migrated:r1",
-        "loop_lineage",
-        { round: 1 },
-      );
-      writeFileSync(legacy, JSON.stringify({ entries: [legacyEntry] }), "utf8");
-      const store = new FileLoopStore(storeRoot);
-
-      assert.deepEqual(store.migrateLegacyVault(legacy), {
-        source: legacy,
-        imported: 1,
-        skipped: 0,
-        alreadyMigrated: false,
-      });
-      assert.equal(store.listEntries("migrated").length, 1);
-      assert.equal(JSON.parse(readFileSync(legacy, "utf8")).entries.length, 1);
-      assert.equal(store.migrateLegacyVault(legacy).alreadyMigrated, true);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

@@ -290,25 +290,6 @@ export function renderCanonicalStateMarkdown(state) {
         lines.push("");
     }
     addList(lines, "Retired Constraints", state.retiredConstraints);
-    if (state.inactiveConstraints.length > 0) {
-        lines.push("## Inactive Constraints", "");
-        lines.push("> Demoted after prolonged inactivity. Removed from prompts ", "but kept here. Auto-reactivated if violated again.", "");
-        const idEnabled = getPolicy().evolution.constraint_id_enabled;
-        for (const c of state.inactiveConstraints) {
-            const meta = state.constraintMetadata.find((m) => m.text === c);
-            const age = meta
-                ? state.round - (meta.last_violated_at_round || meta.discovered_at_round || 0)
-                : "?";
-            const lastV = meta?.last_violated_at_round
-                ? `last violated R${meta.last_violated_at_round}`
-                : "never violated";
-            const idLabel = idEnabled && meta?.id
-                ? `[\`${meta.id}\`] `
-                : "";
-            lines.push(`- ${idLabel}${c} (${lastV}, ${age} rounds inactive)`);
-        }
-        lines.push("");
-    }
     if (state.nextAction) {
         lines.push("## Next Action", "", state.nextAction, "");
     }
@@ -428,7 +409,6 @@ derived) {
         hardConstraints: unique(objective?.hard_constraints ?? []),
         activeConstraints: unique(response.constraints_active),
         retiredConstraints: unique(response.constraints_retired),
-        inactiveConstraints: unique(response.constraints_inactive ?? []),
         constraintMetadata: response.constraint_metadata ?? [],
         changesSinceLastRound: changes,
         remainingCriteria: unique(last?.execution_evidence?.success_criteria_remaining ?? []),

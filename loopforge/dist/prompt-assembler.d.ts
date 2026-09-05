@@ -9,8 +9,6 @@ import type { PromptArtifact, PromptRequests } from "./protocol.js";
 import type { ConstraintMeta, MilestoneSummary, SubGoal } from "./protocol.js";
 import type { PromptLevel, PromptLevelReason } from "./prompt-policy.js";
 export declare const PROMPT_ARTIFACT_SCHEMA_VERSION: 1;
-export declare const BASE_PROMPT_VERSION = "2.0.0";
-export type InjectionMode = "adaptive" | "full" | "pointer";
 export interface PromptBudgets {
     l0: number;
     l1: number;
@@ -21,7 +19,6 @@ export interface PromptAssemblyInput {
     state: CanonicalLoopState;
     level: PromptLevel;
     reasons: PromptLevelReason[];
-    mode?: InjectionMode;
     budgets?: Partial<PromptBudgets>;
     attempt?: number;
     selfEvaluationBlock: string;

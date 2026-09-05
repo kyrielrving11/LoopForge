@@ -87,10 +87,11 @@ export function isRecord(value) {
 }
 // ── Vault entry helpers ────────────────────────────────────────────────────
 /** Extract the round number from a vault entry-like object by reading
- *  `loop_lineage.round` (with `lineage.round` fallback). Returns 0 if
- *  the entry has no recognizable round field. */
+ *  `loop_lineage.round` (v3.7: the legacy `lineage` alias was removed).
+ *  Returns 0 if the entry has no recognizable round field. */
 export function entryRound(entry) {
-    const lin = (entry.loop_lineage ?? entry.lineage ?? {});
+    const record = isRecord(entry) ? entry : {};
+    const lin = (record.loop_lineage ?? {});
     const rnd = lin.round;
     return typeof rnd === "number" && Number.isInteger(rnd) ? rnd : 0;
 }

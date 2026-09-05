@@ -135,8 +135,9 @@ observed passing in the closing round.
 
 ## Backtrack
 
-R4 or R5 progress stalls can trigger backtrack to the last clean committed
-round. The prompt includes a diagnosis and workspace-restore requirements.
+A progress stall (stalled or exactly-flat window over the lookback rounds)
+can trigger backtrack to the last clean committed round. The prompt includes a
+diagnosis and workspace-restore requirements.
 
 When backtrack occurs:
 
@@ -154,7 +155,8 @@ with `outcome: "blocked"` and a blocker while proposing the revision.
 The verification gate compares the previous `next_action` with the current
 work. When intentionally changing direction, provide a substantive
 `drift_clarification` with a concrete constraint, criterion, sub-goal ID, or
-file path. Three consecutive weak clarifications terminate the loop.
+file path that actually exists in your report or the vault. Three consecutive
+weak clarifications terminate the loop.
 
 ## Interpret results
 

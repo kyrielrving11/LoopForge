@@ -69,12 +69,6 @@ export interface LoopRoundDocument {
     promptArtifact?: PromptArtifact;
     events: VaultEntry[];
 }
-export interface LoopStoreMigrationResult {
-    source: string;
-    imported: number;
-    skipped: number;
-    alreadyMigrated: boolean;
-}
 export interface LoopStore {
     withLock<T>(fn: () => T): T;
     listLoopIds(): string[];
@@ -95,12 +89,12 @@ export interface LoopStore {
     writeSession(loopId: string, document: LoopSessionDocument): void;
     readRound(loopId: string, round: number): LoopRoundDocument | null;
     /** v2.12: Per-round sequence stamps for continuity checking. Backends
-     *  without round documents return [] (legacy → exempt from checks). */
+     *  without round documents return []. v3.7: all loops are stamped — the
+     *  legacy exemption and the vault migration API were removed. */
     listRoundSequences(loopId: string): Array<{
         round: number;
         sequence?: number;
     }>;
-    migrateLegacyVault(path?: string): LoopStoreMigrationResult;
 }
 /** Filter a loop's flat entry view with the legacy VaultBackend query
  *  options. Derived read-only view over the single durable truth (typed
@@ -118,14 +112,16 @@ export declare function queryLoopEntries(store: LoopStore, loopId: string, opts?
  *  on gaps (recoverable) or mixed-format corruption; returns [] for loops
  *  with no rounds. Consumed by audit (sequenceComplete) and resume. */
 export declare function eventSequence(store: LoopStore, loopId: string): number[];
-/** v2.12: Validate that a loop's round documents form a contiguous sequence
- *  from 1 to max. Legacy loops (no sequence stamps at all) are exempt.
- *  Mixed stamping is allowed only monotonically: rounds below the first
- *  stamped round are treated as legacy; once stamping begins it must not
- *  stop. Throws StorageCorruptionError on violation. */
+/** v2.12/v3.7: Validate that a loop's round documents form a contiguous
+ *  sequence 1..max where every document carries a valid stamp
+ *  (sequence === round). An unstamped/mismatched document is corrupted
+ *  (sequence_invalid); missing rounds are a recoverable gap (sequence_gap,
+ *  autoResumeAll skips the loop gracefully). v3.7: the legacy exemptions
+ *  (all-unstamped loops, monotonic upgrade from an unstamped prefix) were
+ *  removed together with the legacy vault migration API — all loops are
+ *  new-format and stamping is mandatory. Throws StorageCorruptionError. */
 export declare function checkRoundSequence(store: LoopStore, loopId: string): {
-    complete: boolean;
-    legacy: boolean;
+    complete: true;
 };
 export declare class FileLoopStore implements LoopStore {
     readonly root: string;
@@ -145,7 +141,6 @@ export declare class FileLoopStore implements LoopStore {
     }): VaultEntry[];
     appendEntry(entry: VaultEntry): void;
     appendEntries(entries: VaultEntry[]): number;
-    migrateLegacyVault(path?: string): LoopStoreMigrationResult;
     private writeEntry;
     private loopDir;
     /** Read a JSON document, distinguishing missing from corrupt.

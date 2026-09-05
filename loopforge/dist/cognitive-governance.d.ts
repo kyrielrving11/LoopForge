@@ -8,7 +8,6 @@
  */
 import type { DerivedGate, GateActionDescriptor } from "./protocol.js";
 import type { VaultEntry } from "./loop-store.js";
-export declare function entryRound(entry: VaultEntry): number;
 /** Stable gate ID from canonicalized gate text (gate- + sha256 slice 12). */
 export declare function deriveGateId(text: string): string;
 /** Stable todo item ID (todo- + sha256 slice 8) for the LoopProjection. */

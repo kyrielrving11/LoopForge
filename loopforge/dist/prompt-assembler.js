@@ -9,7 +9,6 @@ import { buildRoadmap, hashCanonicalState, milestoneHeading, trustBarLine } from
 import { deriveItemId, STABLE_ID_RE, jaccardSimilarity } from "./token-utils.js";
 import { getPolicy } from "./policy.js";
 export const PROMPT_ARTIFACT_SCHEMA_VERSION = 1;
-export const BASE_PROMPT_VERSION = "2.0.0";
 export const DEFAULT_PROMPT_BUDGETS = {
     l0: 3000,
     l1: 7000,
@@ -70,12 +69,9 @@ function bulletsWithIdentities(values, metadata) {
  *  iterates the verification-gate module's CHECK_ exports (no hardcoded
  *  list — a new constant can never silently lack an action entry). */
 const VERIFICATION_ACTIONS = {
-    progress_regression: "Correct progress_estimate or explain the change in output_summary.",
-    empty_change_with_passing: "Report the actual files_changed, or set success=false with the real state.",
     success_with_remaining_criteria: "Complete the remaining criteria before claiming success, or set success=false and report what remains.",
-    success_without_verified_evidence: "Back the success claim with machine-verifiable evidence: run tests or a required verification command and report the actual output.",
+    success_without_verified_evidence: "Back the success claim with machine-verifiable evidence: run tests or a required verification command and report the actual output. If you genuinely performed no work, provide execution_evidence and declare no_change_reason.",
     outcome_success_contradiction: "Reconcile the declared outcome with the success flag and resubmit an honest evaluation.",
-    success_claim_conflict: "Align the success claim with your own evaluation data before resubmitting.",
     blocked_without_blocker: "State the concrete blocker, or drop the blocked outcome.",
     retroactive_claim_bad_round: "Correct the referenced round number, or withdraw the retroactive claim.",
     retroactive_claim_unverified: "Provide evidence for the retroactive claim, or withdraw it.",
@@ -681,28 +677,6 @@ function l2Sections(state, fullStateMarkdown) {
             mandatory: false,
         });
     }
-    // Inactive Constraints (with decay metadata)
-    if (state.inactiveConstraints.length > 0) {
-        const lines = [
-            "> Demoted after prolonged inactivity. Auto-reactivated if violated again.",
-            "",
-        ];
-        for (const c of state.inactiveConstraints) {
-            const meta = state.constraintMetadata.find((m) => m.text === c);
-            const age = meta
-                ? state.round - (meta.last_violated_at_round || meta.discovered_at_round || 0)
-                : "?";
-            const lastV = meta?.last_violated_at_round
-                ? `last violated R${meta.last_violated_at_round}`
-                : "never violated";
-            lines.push(`- ${c} (${lastV}, ${age} rounds inactive)`);
-        }
-        sections.push({
-            id: "inactive_constraints",
-            text: section("Inactive Constraints", lines.join("\n")),
-            mandatory: false,
-        });
-    }
     // Agent Trust Score + Trend
     if (state.agentTrustScore !== undefined) {
         const lines = [
@@ -723,9 +697,6 @@ function l2Sections(state, fullStateMarkdown) {
     return sections;
 }
 function selectSections(input, emphasized) {
-    if (input.mode === "full") {
-        return l2Sections(input.state, input.fullStateMarkdown);
-    }
     if (input.level === "l0")
         return l0Sections(input.state);
     if (input.level === "l1") {
@@ -853,15 +824,14 @@ function renderCriticalContext(emphasized, state) {
     return lines.join("\n");
 }
 export function assemblePromptArtifact(input) {
-    const mode = input.mode ?? "adaptive";
     const budgets = { ...DEFAULT_PROMPT_BUDGETS, ...input.budgets };
     const budget = budgets[input.level];
     const stateHash = hashCanonicalState(input.state);
     const attempt = Math.max(1, input.attempt ?? 1);
     // ── State file reference + conditional read instruction ────────────
-    // L2 rounds (full rehydration), recovery, rejection, drift, and pointer
-    // mode all benefit from the model reading the durable state file rather
-    // than relying on potentially-compacted conversation history.
+    // L2 rounds (full rehydration), recovery, rejection, and drift all
+    // benefit from the model reading the durable state file rather than
+    // relying on potentially-compacted conversation history.
     const fullContextReasons = new Set([
         "first_round", "plan_boundary", "checkpoint_boundary", "goal_changed",
         "missing_previous_state", "verification_contradicted",
@@ -869,7 +839,6 @@ export function assemblePromptArtifact(input) {
         "periodic_refresh",
     ]);
     const needsFullContext = input.level === "l2"
-        || input.mode === "pointer"
         || input.reasons.some((r) => fullContextReasons.has(r));
     const stateFilePath = input.state.stateFilePath;
     // v3.2: L1 annotates the pointer with the round the freshly-regenerated
@@ -1005,33 +974,17 @@ export function assemblePromptArtifact(input) {
             ...sections,
         ];
     }
-    const selected = mode === "pointer"
-        ? renderWithinBudget(augmentedSections.filter((item) => item.mandatory), fixedText, budget)
-        : renderWithinBudget(augmentedSections, fixedText, budget - footer.length);
+    const selected = renderWithinBudget(augmentedSections, fixedText, budget - footer.length);
     const renderedPrompt = selected.rendered + footer;
-    const includedSections = [
-        ...selected.included,
-        ...(confusionText ? ["confusion_alerts"] : []),
-        ...(criticalContextText ? ["critical_context"] : []),
-        ...(pointer ? ["state_pointer"] : []),
-        ...(evaluation ? ["self_evaluation"] : []),
-    ];
     const promptHash = createHash("sha256").update(renderedPrompt).digest("hex");
     return {
         schemaVersion: PROMPT_ARTIFACT_SCHEMA_VERSION,
         roundId: `loop:${input.state.loopId}:round:${input.state.round}`,
         attempt,
         level: input.level,
-        levelReasons: [...input.reasons],
         renderedPrompt,
         promptHash,
         stateHash,
-        basePromptVersion: BASE_PROMPT_VERSION,
-        includedSections,
-        budgetChars: budget,
-        charCount: renderedPrompt.length,
-        budgetExceeded: renderedPrompt.length > budget,
-        generatedAt: Date.now(),
         ...(presentedState ? { presentedState } : {}),
     };
 }

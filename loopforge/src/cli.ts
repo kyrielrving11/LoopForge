@@ -11,7 +11,7 @@ import { FileLoopStore } from "./loop-store.js";
 import { getPolicy, validateLoopId, writeDefaultPolicy } from "./policy.js";
 import { McpServer } from "./mcp/server.js";
 
-const VERSION = "3.6.0";
+const VERSION = "3.7.0";
 
 const HELP = `LoopForge ${VERSION}
 
@@ -20,7 +20,6 @@ Usage:
   loopforge init --client claude|codex|generic [--target DIR] [--force]
   loopforge doctor [--json]
   loopforge inspect LOOP_ID [--round N] [--prompt] [--json]
-  loopforge migrate [--from PATH] [--json]
 `;
 
 function option(args: string[], name: string): string | undefined {
@@ -194,12 +193,6 @@ function init(args: string[]): void {
   );
 }
 
-function migrate(args: string[]): void {
-  const source = option(args, "--from") ?? ".promptcraft/prompt_vault.json";
-  const result = new FileLoopStore(getPolicy().backend.root_dir).migrateLegacyVault(source);
-  print(result, has(args, "--json"));
-}
-
 export function main(argv = process.argv.slice(2)): void {
   const [command, ...args] = argv;
   if (!command || command === "help" || command === "--help" || command === "-h") {
@@ -220,7 +213,6 @@ export function main(argv = process.argv.slice(2)): void {
     return;
   }
   if (command === "inspect") return inspect(args);
-  if (command === "migrate") return migrate(args);
   throw new Error(`Unknown command: ${command}\n\n${HELP}`);
 }
 

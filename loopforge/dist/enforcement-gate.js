@@ -17,17 +17,16 @@
  *              with stopReason "enforcement_terminated".
  */
 import { makeEnforcementResult } from "./protocol.js";
-import { entryRound, machineProgressSeries, CHECK_SUCCESS_WITH_REMAINING_CRITERIA, CHECK_RECURRING_VIOLATION, CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE, CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED, CHECK_REQUIRED_COMMAND_FAILED, CHECK_COMMAND_EVIDENCE_MISMATCH, CHECK_OUTCOME_SUCCESS_CONTRADICTION, CHECK_VERIFICATION_ENTRYPOINT_MODIFIED, CHECK_PREMATURE_BOUNDARY, CHECK_ROUND_SCOPE_DRIFT, CHECK_CONTRACT_COMPLETION_UNVERIFIED } from "./verification-gate.js";
-import { effectiveSuccess } from "./self-eval.js";
+import { machineProgressSeries, CHECK_SUCCESS_WITH_REMAINING_CRITERIA, CHECK_RECURRING_VIOLATION, CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE, CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED, CHECK_REQUIRED_COMMAND_FAILED, CHECK_COMMAND_EVIDENCE_MISMATCH, CHECK_OUTCOME_SUCCESS_CONTRADICTION, CHECK_VERIFICATION_ENTRYPOINT_MODIFIED, CHECK_PREMATURE_BOUNDARY, CHECK_ROUND_SCOPE_DRIFT, CHECK_CONTRACT_COMPLETION_UNVERIFIED } from "./verification-gate.js";
 import { deriveConstraintId, deriveCriterionId, deriveSubGoalId } from "./loop-compiler.js";
 import { getPolicy } from "./policy.js";
-import { STABLE_ID_RE, isRecord } from "./token-utils.js";
-import { committedRoundsFromEntries, decodeCommittedRound, } from "./committed-round.js";
+import { STABLE_ID_RE, isRecord, entryRound } from "./token-utils.js";
+import { committedRoundsFromEntries, decodeCommittedRound, machineEvidenceForRound, } from "./committed-round.js";
 // ═══════════════════════════════════════════════════════════════════════════
 // Helpers
 // ═══════════════════════════════════════════════════════════════════════════
 /** Collect progress estimates from vault entries into a round→estimate map.
- *  Shared by R4 (progress_stall) and R5 (progress_flatline). */
+ *  Shared by the progress evaluator's stall and flatline tiers. */
 function collectProgressByRound(vaultEntries, currentRound) {
     const progressByRound = new Map();
     for (const round of committedRoundsFromEntries(vaultEntries, currentRound)) {
@@ -129,9 +128,7 @@ export function findBacktrackTargetGitHead(restoreRound, vaultEntries) {
         .find((view) => view.round === restoreRound);
     if (!committed)
         return null;
-    const evidence = committed.afterEvidence.length > 0
-        ? committed.afterEvidence
-        : committed.beforeEvidence;
+    const evidence = machineEvidenceForRound(committed);
     for (const item of evidence) {
         if (!isRecord(item) || item.provider !== "git" || !isRecord(item.data))
             continue;
@@ -158,14 +155,15 @@ gitHead) {
         "",
     ];
     // ── Why This Happened ────────────────────────────────────────────────
+    // v3.7: stall and flatline are one evaluator emitting progress_stall; the
+    // former flatline-specific wording ("zero forward motion → radically
+    // different strategy") is folded into the single section — the disposition
+    // tier still distinguishes the enforcement reason itself.
     if (triggerRule === "progress_stall") {
-        lines.push("### Why This Happened", "", `Progress stalled over rounds ${toRound + 1}–${fromRound}. ` +
-            `The work done in those rounds produced no verifiable progress — ` +
-            `no new files changed, no criteria met.`, "", "The approach used in those rounds **did not work**. It should not be repeated.", "");
-    }
-    else if (triggerRule === "progress_flatline") {
-        lines.push("### Why This Happened", "", `Progress was completely flat for multiple rounds leading up to Round ${fromRound}. ` +
-            `The agent made **zero forward motion** — the task is not advancing.`, "", "A **radically different** strategy is needed. The previous approach produced nothing.", "");
+        lines.push("### Why This Happened", "", `Progress stalled over rounds ${toRound + 1}–${fromRound}: the work ` +
+            `produced no verifiable forward motion — no new files changed, no ` +
+            `criteria met, no progress estimates moving.`, "", "The approach used in those rounds **did not work**. It should not be " +
+            "repeated — a **radically different** strategy is needed.", "");
     }
     // ── v2.13: Workspace Restore ──────────────────────────────────────────
     lines.push("### ⚠️ Workspace Restore Required", "", `Your working directory still contains changes from the **failed** ` +
@@ -305,51 +303,12 @@ function enforceVerificationEntrypointTampered(flags) {
         check: "verification_entrypoint_modified",
     });
 }
-/** R3: Agent claims success but did nothing verifiable.
- *  v1.17: execution_evidence is now MANDATORY for structured self-evaluations.
- *  Missing evidence when success=true → reject (agent must provide evidence).
- *  Empty evidence (no files + no tests) when success=true → reject. */
-function enforceEmptySuccess(selfEval, _flags) {
-    if (!effectiveSuccess(selfEval))
-        return null;
-    const ev = selfEval.execution_evidence;
-    // v1.17: Missing evidence when claiming success → reject.
-    // The agent MUST provide execution_evidence to back up a success claim.
-    if (!ev) {
-        return makeEnforcementResult({
-            action: "reject",
-            reason: "Agent claims success but provided no execution_evidence. " +
-                "Every successful round MUST include execution_evidence with " +
-                "files_changed, test_results, and progress_estimate.",
-            fix_instructions: "You must provide execution_evidence in your self-evaluation: " +
-                "(a) list the files you changed in execution_evidence.files_changed, " +
-                "(b) run tests and report results in execution_evidence.test_results, " +
-                "(c) estimate your progress in execution_evidence.progress_estimate. " +
-                "If you genuinely completed the task without file changes or tests, " +
-                "explain why in detail in your output_summary.",
-            check: "empty_success",
-        });
-    }
-    const filesEmpty = ev.files_changed.length === 0;
-    const testsNotRun = ev.test_results === null;
-    if (!filesEmpty || !testsNotRun)
-        return null;
-    return makeEnforcementResult({
-        action: "reject",
-        reason: "Agent claims success but execution_evidence shows no files changed " +
-            "and no tests were run. There is no verifiable evidence of work.",
-        fix_instructions: "You must provide verifiable evidence: " +
-            "(a) list the files you changed in execution_evidence.files_changed, " +
-            "and (b) run tests and report results in execution_evidence.test_results. " +
-            "If you genuinely completed the task without file changes or tests, " +
-            "explain why in detail in your output_summary.",
-        check: "empty_success",
-    });
-}
-/** R8 (v2.12): Success claimed without any machine-verifiable evidence.
- *  The verification gate produced success_without_verified_evidence (error):
- *  zero verified claims, no test results. First occurrence → reject with
- *  concrete evidence requirements; second consecutive → terminate. */
+/** R8 (v2.12/v3.7): The single success-evidence row. The verification gate
+ *  produced success_without_verified_evidence (error) — either the empty/
+ *  missing-evidence arm (v3.7: the ex-R3 empty_success posture moved into
+ *  checkSuccessWithoutVerifiedEvidence) or the claims arm (zero verified
+ *  claims). First occurrence → reject with concrete evidence requirements;
+ *  second consecutive → terminate. */
 function enforceSuccessWithoutVerifiedEvidence(flags, consecutiveRejections) {
     const flag = flags.find((f) => f.check === CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE && f.severity === "error");
     if (!flag)
@@ -534,8 +493,9 @@ function enforceBacktrackNotRestored(flags, vaultEntries = [], currentRound = 0)
         check: "backtrack_workspace_not_restored",
     });
 }
-/** Shared R4/R5 observation pipeline. Machine git motion is exculpatory
- * only: it may veto a self-reported stall but can never create one. */
+/** Shared observation pipeline for the progress evaluator (stall window,
+ *  flatline tier). Machine git motion is exculpatory only: it may veto a
+ *  self-reported stall but can never create one. */
 function evaluateStallWindow(tier, selfEval, currentRound, vaultEntries) {
     const window = tier === "progress_stall"
         ? 3
@@ -582,8 +542,9 @@ function evaluateStallWindow(tier, selfEval, currentRound, vaultEntries) {
     }
     return { tier, detail, window, threshold };
 }
-/** Shared R4/R5 escalation and backtrack deadlock guard. The flatline tier
- * keeps its steeper threshold-0 ladder while using the same mechanics. */
+/** Shared progress escalation and backtrack deadlock guard (v3.7: one
+ * evaluator). The flatline tier keeps its steeper threshold-0 ladder while
+ * using the same mechanics — the tier is an internal diagnostic only. */
 function resolveStallDisposition(verdict, currentRound, vaultEntries, consecutiveRejections) {
     const { tier, detail, window, threshold } = verdict;
     const flatline = tier === "progress_flatline";
@@ -592,18 +553,21 @@ function resolveStallDisposition(verdict, currentRound, vaultEntries, consecutiv
         ? `Progress has been ${detail} for ${window} consecutive rounds.`
         : `Progress has stalled: ${detail} over the last ${window} rounds` +
             `${threshold > 0 ? ` (delta < ${(threshold * 100).toFixed(0)}% each round)` : ""}.`;
+    // v3.7: both tiers emit the single progress_stall check id — the tier
+    // survives only in the reason/fix wording (former progress_flatline id).
+    const check = "progress_stall";
     if ((flatline && consecutiveRejections >= 1) || consecutiveRejections >= 2) {
         return makeEnforcementResult({
             action: "terminate",
             reason: `${stalledReason} The stall persisted after escalation. Terminating loop.`,
-            check: tier,
+            check,
         });
     }
     if (consecutiveRejections >= 1 && !escalation) {
         return makeEnforcementResult({
             action: "terminate",
             reason: `${stalledReason} The stall persisted after the previous rejection. Terminating loop.`,
-            check: tier,
+            check,
         });
     }
     const escalated = flatline ? escalation : consecutiveRejections >= 1 && escalation;
@@ -612,7 +576,7 @@ function resolveStallDisposition(verdict, currentRound, vaultEntries, consecutiv
             return makeEnforcementResult({
                 action: "terminate",
                 reason: `${stalledReason} A backtrack already fired for this round; the stall persists after rollback.`,
-                check: tier,
+                check,
             });
         }
         return makeEnforcementResult({
@@ -621,14 +585,14 @@ function resolveStallDisposition(verdict, currentRound, vaultEntries, consecutiv
             fix_instructions: flatline
                 ? "Progress is exactly flat. After rollback, choose a radically different approach."
                 : "After rollback, do not repeat the stalled approach; choose a different technique or task decomposition.",
-            check: tier,
+            check,
         });
     }
     if (flatline && !escalation) {
         return makeEnforcementResult({
             action: "terminate",
             reason: `${stalledReason} The agent is making zero forward motion and cannot recover.`,
-            check: tier,
+            check,
         });
     }
     return makeEnforcementResult({
@@ -638,17 +602,20 @@ function resolveStallDisposition(verdict, currentRound, vaultEntries, consecutiv
             ? "Explain the fundamental blocker, choose a radically different approach, and set a concrete verifiable goal."
             : "Explain the blocker, choose a different technique or task decomposition, and set a concrete verifiable goal for this retry.") +
             (escalated ? buildEscalationNotice() : ""),
-        check: tier,
+        check,
     });
 }
+/** v3.7: The single progress evaluator (former R4 stall and R5 flatline rows
+ *  merged into one). The stall-tier window is consulted first — under the
+ *  default positive threshold its predicate covers exactly-flat runs too,
+ *  reproducing the v3.6 R4-before-R5 shadowing; the flatline tier is
+ *  consulted only when the stall predicate cannot hold (threshold ≤ 0,
+ *  shorter lookback configs), where it applies its steeper disposition
+ *  ladder. Machine git motion is exculpatory only — it may veto a
+ *  self-reported stall but can never create one. */
 function enforceProgressStall(selfEval, _flags, currentRound, vaultEntries, consecutiveRejections) {
-    const verdict = evaluateStallWindow("progress_stall", selfEval, currentRound, vaultEntries);
-    return verdict
-        ? resolveStallDisposition(verdict, currentRound, vaultEntries, consecutiveRejections)
-        : null;
-}
-function enforceProgressFlatline(selfEval, _flags, currentRound, vaultEntries, consecutiveRejections) {
-    const verdict = evaluateStallWindow("progress_flatline", selfEval, currentRound, vaultEntries);
+    const verdict = evaluateStallWindow("progress_stall", selfEval, currentRound, vaultEntries)
+        ?? evaluateStallWindow("progress_flatline", selfEval, currentRound, vaultEntries);
     return verdict
         ? resolveStallDisposition(verdict, currentRound, vaultEntries, consecutiveRejections)
         : null;
@@ -951,6 +918,25 @@ function buildDiagnosticGap(flags) {
     lines.push("");
     return lines.join("\n");
 }
+const RULE_TABLE = [
+    { category: "evaluation_consistency", checks: ["success_with_remaining_criteria"], ladder: "uniform", terminalAfter: 2, noticeOnRepeat: true },
+    { category: "evaluation_consistency", checks: ["recurring_violation"], ladder: "uniform", terminalAfter: 2, noticeOnRepeat: true },
+    { category: "evidence_contradiction", checks: ["required_command_failed", "command_evidence_mismatch", "outcome_success_contradiction"], ladder: "uniform", terminalAfter: 2, noticeOnRepeat: true },
+    { category: "evidence_contradiction", checks: ["verification_entrypoint_modified"], ladder: "uniform", terminalAfter: 2, noticeOnRepeat: true },
+    { category: "contract_scope", checks: ["contract_completion_unverified"], ladder: "internal" },
+    { category: "contract_scope", checks: ["premature_boundary"], ladder: "internal" },
+    { category: "evidence_contradiction", checks: ["success_without_verified_evidence"], ladder: "internal" },
+    { category: "contract_scope", checks: ["round_scope_drift"], ladder: "internal", clarificationAllowed: true },
+    { category: "progress_recovery", checks: ["progress_stall"], ladder: "internal", backtrackAllowed: true },
+    { category: "progress_recovery", checks: ["max_rejections"], ladder: "counter" },
+    { category: "plan_drift", checks: ["intent_drift"], ladder: "internal", clarificationAllowed: true },
+    { category: "progress_recovery", checks: ["backtrack_workspace_not_restored"], ladder: "internal", backtrackAllowed: true },
+];
+const RULE_TABLE_BY_ID = new Map();
+for (const row of RULE_TABLE) {
+    for (const id of row.checks)
+        RULE_TABLE_BY_ID.set(id, row);
+}
 // ═══════════════════════════════════════════════════════════════════════════
 // Main entry point
 // ═══════════════════════════════════════════════════════════════════════════
@@ -972,80 +958,77 @@ export function enforceRound(selfEval, verifyResult, currentRound, vaultEntries,
 /** v2.12: Current clarification streak for R7 escalation. */
 driftClarificationStreak = 0) {
     const { flags } = verifyResult;
-    // Run enforcement rules in priority order.
-    // Earlier rules take higher precedence.
+    // Run enforcement rules in priority order — the array order IS the
+    // priority; the R-labels in the comments are historical (RULE_TABLE is
+    // the semantic description). The first rule that fires wins.
     const rules = [
         () => enforceSuccessWithRemainingCriteria(flags),
         () => enforceRecurringViolation(flags),
-        () => enforceEmptySuccess(selfEval, flags),
-        // v2.14: R-EVID — a required command failure or self-contradictory
-        // outcome claim contradicts the success claim before commit
+        // v2.14: R-EVID — a required command failure, hidden test failures, or
+        // a self-contradictory outcome claim contradicts the success claim
         () => enforceEvidenceContradiction(flags),
         // v3.3: R-EVID-VERIFY — the verification command entrypoint changed in
-        // the same round it ran; its result cannot back the success claim.
-        // Runs before R8: when the entrypoint is tainted, R8 also fires (the
-        // status degrades to unavailable), but this reason is more specific.
+        // the same round it ran. Runs before R8: when the entrypoint is tainted
+        // R8 also fires, but this reason is more specific.
         () => enforceVerificationEntrypointTampered(flags),
         // v3.5: contract completion claimed without its verification_plan
         // commands passing — runs before R-C1: the completion-truth question
-        // outranks boundary nuance (a completing eval that also lies about its
-        // evidence gets the completion reason first).
+        // outranks boundary nuance.
         () => enforceContractCompletionUnverified(flags, consecutiveRejections),
         // v3.3: R-C1 — contract boundary claimed prematurely (contract-specific
         // wording and check counting; runs before R8 so contract rounds get the
-        // contract's own reason. R8 itself is untouched.)
+        // contract's own reason.)
         () => enforcePrematureBoundary(flags, consecutiveRejections),
-        // v2.12: R8 — success with zero machine-verifiable evidence
+        // v2.12/v3.7: R8 — the single success-evidence row (empty/missing-evidence
+        // arm merged from the former R3 empty_success posture + claims arm)
         () => enforceSuccessWithoutVerifiedEvidence(flags, consecutiveRejections),
         // v3.3: R-C2 — files changed outside the contract's declared scope
         () => enforceScopeDrift(flags, selfEval, consecutiveRejections, vaultEntries),
-        // v3.3.1: R4 is evaluated first and its stall predicate contains R5's
-        // flatness predicate — under the default ladder R4 proxies for flat runs
-        // too (reject → backtrack/terminate). R5 stays as the reserved severity
-        // tier (see its doc comment: active when progress_stall_threshold <= 0
-        // or after a future window split).
+        // v3.7: single progress evaluator (former R4/R5 slots merged) —
+        // reject → backtrack → terminate with the deadlock guard
         () => enforceProgressStall(selfEval, flags, currentRound, vaultEntries, consecutiveRejections),
-        () => enforceProgressFlatline(selfEval, flags, currentRound, vaultEntries, consecutiveRejections),
+        // R6: rejection-counter catch-all (evaluated only when no row above
+        // fired — a clean-looking round carrying a high persisted counter)
         () => enforceMaxRejections(consecutiveRejections),
+        // v2.12: R7 — intent drift; its weak-clarification streak is a separate
+        // counter and never mixes with the global rejection count
         () => enforceIntentDrift(flags, selfEval, consecutiveRejections, driftClarificationStreak, vaultEntries),
         // v2.12: R9 — post-backtrack workspace not restored
         () => enforceBacktrackNotRestored(flags, vaultEntries, currentRound),
     ];
-    // v3.3.1: rules without an internal escalation ladder (R1/R2/R3/R-EVID/
-    // R-EVID-VERIFY) reject on EVERY occurrence of their check, and the
-    // generic R6 ladder sits AFTER them in this priority array — R6 is only
-    // evaluated when no earlier rule fires, which a persistent offender's
-    // round never is. The documented "same-check rejections accumulate toward
-    // R6" (per-check counter the session maintains) was therefore unreachable
-    // and a repeat offender was rejected forever without a terminating step.
-    // Escalate these rules' rejects on the session's consecutive-rejection
-    // count, mirroring the R8/R7 three-strike rhythm: reject, reject
-    // (escalation notice), terminate on the third consecutive occurrence.
-    // Rules with their own ladder (R4/R5/R6/R7/R8/R9/R-C1/R-C2) are untouched.
-    const UNLADDERED_REJECT_CHECKS = new Set([
-        "success_with_remaining_criteria", // R1
-        "recurring_violation", // R2
-        "empty_success", // R3
-        "required_command_failed", // R-EVID
-        "command_evidence_mismatch", // R-EVID
-        "outcome_success_contradiction", // R-EVID
-        "verification_entrypoint_modified", // R-EVID-VERIFY
-    ]);
+    // v3.7: uniform-ladder escalation. Rows without their own escalation
+    // ladder (R1/R2/R-EVID/R-EVID-VERIFY) escalate on the session's
+    // consecutive-rejection count: repeat rejections carry the escalation
+    // notice (when enabled — the pre-v3.7 comment promised this notice but the
+    // UNLADDERED name-set patch never appended it), and a third consecutive
+    // occurrence terminates. This replaces the UNLADDERED_REJECT_CHECKS patch,
+    // which existed because the generic R6 ladder sits AFTER these rows and a
+    // persistent offender's round never reached it. Rows with their own ladder
+    // (RULE_TABLE.ladder === "internal" / "counter") are untouched.
     for (const rule of rules) {
-        const result = rule();
+        let result = rule();
         if (!result)
             continue;
-        if (result.action === "reject" &&
-            consecutiveRejections >= 2 &&
-            result.check !== undefined &&
-            UNLADDERED_REJECT_CHECKS.has(result.check)) {
-            return makeEnforcementResult({
-                action: "terminate",
-                reason: `${consecutiveRejections + 1} consecutive rejections for the same ` +
-                    `issue (${result.check}) without resolution — the agent cannot ` +
-                    `correct it even after escalation.`,
-                check: result.check,
-            });
+        const row = result.check !== undefined
+            ? RULE_TABLE_BY_ID.get(result.check)
+            : undefined;
+        if (result.action === "reject" && row && row.ladder === "uniform") {
+            if (consecutiveRejections >= (row.terminalAfter ?? 2)) {
+                return makeEnforcementResult({
+                    action: "terminate",
+                    reason: `${consecutiveRejections + 1} consecutive rejections for the same ` +
+                        `issue (${result.check}) without resolution — the agent cannot ` +
+                        `correct it even after escalation.`,
+                    check: result.check,
+                });
+            }
+            if (consecutiveRejections >= 1 && row.noticeOnRepeat &&
+                getPolicy().engine.enforcement_escalation_enabled) {
+                result = makeEnforcementResult({
+                    ...result,
+                    fix_instructions: result.fix_instructions + buildEscalationNotice(),
+                });
+            }
         }
         return result;
     }

@@ -8,11 +8,8 @@
 import { eventSequence, StorageCorruptionError } from "./loop-store.js";
 import { auditOrder, deriveGate } from "./cognitive-governance.js";
 import { rederiveClaimViewWithFlags, listVerifiedClaims } from "./evidence-claims.js";
-import { isRecord, entryRound as sharedEntryRound } from "./token-utils.js";
-import { decodeCommittedRound } from "./committed-round.js";
-function entryRound(entry) {
-    return sharedEntryRound(entry);
-}
+import { isRecord, entryRound } from "./token-utils.js";
+import { decodeCommittedRound, machineEvidenceForRound } from "./committed-round.js";
 /** Build the audit from committed vault entries. Pure, read-only.
  *  @param store Optional LoopStore — when provided, sequence integrity is
  *  checked and provenanceAvailable becomes true. */
@@ -35,9 +32,7 @@ export function buildAudit(loopId, entries, store) {
         const round = entryRound(entry);
         const outcome = committed.outcome ?? "unknown";
         const claimView = committed.evaluation
-            ? rederiveClaimViewWithFlags(committed.evaluation, (committed.afterEvidence.length > 0
-                ? committed.afterEvidence
-                : committed.roundEvidence), committed.verificationFlags)
+            ? rederiveClaimViewWithFlags(committed.evaluation, machineEvidenceForRound(committed), committed.verificationFlags)
             : null;
         rounds.push({
             round,

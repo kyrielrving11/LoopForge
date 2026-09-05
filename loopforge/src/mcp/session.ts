@@ -425,9 +425,10 @@ export class SessionManager implements SessionRegistry {
   }
 
   /** Resume a loop from vault state.
-   *  Reconstructs the session and compiles the prompt for the next round.
+   *  Reconstructs the session and compiles the prompt for the next round
+   *  (async — compilation collects evidence through RoundDriver.prepare).
    *  Returns null if no session_state entry exists for this loopId. */
-  resume(loopId: string): AdvanceResult | null {
+  async resume(loopId: string): Promise<AdvanceResult | null> {
     const persistedEntry = this.findSessionEntry(loopId);
     if (!persistedEntry) return null;
     const persistedLineage = (persistedEntry.loop_lineage ?? {}) as Record<string, unknown>;

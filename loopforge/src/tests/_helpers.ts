@@ -11,7 +11,6 @@ import type {
   LoopStore,
   LoopSessionDocument,
   LoopRoundDocument,
-  LoopStoreMigrationResult,
   VaultEntry,
 } from "../loop-store.js";
 import { LOOP_STORE_SCHEMA_VERSION } from "../loop-store.js";
@@ -276,8 +275,5 @@ export class MemoryLoopStore implements LoopStore {
       .filter(([key]) => key.startsWith(`${loopId}:`))
       .map(([key, doc]) => ({ round: doc.round, sequence: doc.sequence }))
       .sort((a, b) => a.round - b.round);
-  }
-  migrateLegacyVault(_path?: string): LoopStoreMigrationResult {
-    return { source: _path ?? "memory", imported: 0, skipped: 0, alreadyMigrated: true };
   }
 }

@@ -76,7 +76,6 @@ export interface EnginePolicy {
 
 /** Levels control state density only; reasoning strategy belongs to the Agent. */
 export interface PromptPolicy {
-  injection_mode: "adaptive" | "full" | "pointer";
   full_refresh_interval: number;
   l0_max_chars: number;
   l1_max_chars: number;
@@ -138,9 +137,6 @@ export interface EvolutionPolicy {
    *  round's output_summary have similarity below this threshold, a
    *  verification flag is raised. Default: 0.15 (15%). */
   intent_drift_threshold: number;
-  /** v2.2: Jaccard similarity threshold for auto-completing a sub-goal
-   *  when a success_criteria is met. Default: 0.4. */
-  subgoal_auto_complete_threshold: number;
   /** v2.5: Jaccard threshold for detecting genuinely new success criteria
    *  between rounds. Used by detectNewCriteria(). Default: 0.45. */
   criteria_dedup_threshold: number;
@@ -150,9 +146,6 @@ export interface EvolutionPolicy {
   /** v2.5: Jaccard threshold for matching agent-declared status changes
    *  (completed/blocked/canceled) to existing sub-goals. Default: 0.5. */
   subgoal_match_threshold: number;
-  /** v2.5: Jaccard threshold for auto-promoting a pending sub-goal to
-   *  in_progress when next_action aligns. Default: 0.4. */
-  subgoal_auto_in_progress_threshold: number;
   /** v2.5: Jaccard threshold for matching constraints during discovery
    *  and violation tracking. Default: 0.5. */
   constraint_match_threshold: number;
@@ -160,10 +153,6 @@ export interface EvolutionPolicy {
    *  exceed this to be considered "aligned" with a pending sub-goal.
    *  Default: 0.3. */
   subgoal_drift_alignment_threshold: number;
-  /** v2.3: Number of rounds without violation before a discovered
-   *  constraint is demoted to inactive. Hard/plan/criteria constraints
-   *  are never auto-demoted. Default: 15. */
-  constraint_inactive_rounds: number;
   /** v2.11: When true, constraints and criteria are assigned stable IDs
    *  (c-XXXXXXXX, cr-XXXXXXXX) rendered in prompts. The agent is encouraged
    *  to reference IDs for exact matching; natural-language references use
@@ -240,7 +229,6 @@ export const DEFAULT_POLICY: LoopPolicy = {
   summary: { window: 5, health_check_interval: 1, milestone_interval: 20, max_milestones: 10, milestone_head_count: 3, milestone_tail_count: 3 },
   engine: { stall_lookback_rounds: 3, max_rounds: 20, enforcement_escalation_enabled: true, backtrack_enabled: true, backtrack_max_depth: 3, backtrack_preserve_discoveries: true, drift_clarification_max_streak: 3, backtrack_auto_restore: false },
   prompt: {
-    injection_mode: "adaptive",
     full_refresh_interval: 0,
     l0_max_chars: 3000,
     l1_max_chars: 7000,
@@ -270,11 +258,8 @@ export const DEFAULT_POLICY: LoopPolicy = {
     criteria_dedup_threshold: 0.45,
     subgoal_dedup_threshold: 0.6,
     subgoal_match_threshold: 0.5,
-    subgoal_auto_in_progress_threshold: 0.4,
-    subgoal_auto_complete_threshold: 0.4,
     constraint_match_threshold: 0.5,
     subgoal_drift_alignment_threshold: 0.3,
-    constraint_inactive_rounds: 15,
     constraint_id_enabled: true,
   },
   checkpoint: { outcome_max_chars: 200 },

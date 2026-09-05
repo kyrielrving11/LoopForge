@@ -31,7 +31,6 @@ function minimalState(overrides: Partial<CanonicalLoopState> = {}): CanonicalLoo
     hardConstraints: ["no runtime deps"],
     activeConstraints: ["no runtime deps", "all tests pass"],
     retiredConstraints: [],
-    inactiveConstraints: [],
     constraintMetadata: [],
     changesSinceLastRound: [],
     remainingCriteria: [],
@@ -67,7 +66,6 @@ function input(overrides: Partial<PromptAssemblyInput> = {}): PromptAssemblyInpu
     state: minimalState(),
     level: "l2",
     reasons: ["first_round"],
-    mode: "adaptive",
     attempt: 1,
     selfEvaluationBlock: "",
     ...overrides,
@@ -97,15 +95,9 @@ describe("assemblePromptArtifact — L0", () => {
     assert.ok(artifact.renderedPrompt.includes("Retry Requirements"));
   });
 
-  it("respects L0 budget of 3000 characters", () => {
+  it("keeps L0 prompts within the 3000-character budget", () => {
     const artifact = assemblePromptArtifact(input({ level: "l0" }));
-    assert.equal(artifact.budgetChars, 3000);
-  });
-
-  it("records included sections", () => {
-    const artifact = assemblePromptArtifact(input({ level: "l0" }));
-    assert.ok(artifact.includedSections.includes("objective"));
-    assert.ok(artifact.includedSections.includes("current_task"));
+    assert.ok(artifact.renderedPrompt.length <= 3000);
   });
 });
 
@@ -121,9 +113,9 @@ describe("assemblePromptArtifact — L1", () => {
     assert.equal(artifact.level, "l1");
   });
 
-  it("respects L1 budget of 7000 characters", () => {
+  it("keeps L1 prompts within the 7000-character budget", () => {
     const artifact = assemblePromptArtifact(input({ level: "l1" }));
-    assert.equal(artifact.budgetChars, 7000);
+    assert.ok(artifact.renderedPrompt.length <= 7000);
   });
 
   it("includes sub-goals when present (compact, max 5)", () => {
@@ -203,9 +195,9 @@ describe("assemblePromptArtifact — L2", () => {
     assert.ok(artifact.renderedPrompt.includes("Failed Patterns"));
   });
 
-  it("respects L2 budget", () => {
+  it("keeps L2 prompts within the L2 budget", () => {
     const artifact = assemblePromptArtifact(input({ level: "l2" }));
-    assert.equal(artifact.budgetChars, DEFAULT_PROMPT_BUDGETS.l2);
+    assert.ok(artifact.renderedPrompt.length <= DEFAULT_PROMPT_BUDGETS.l2);
   });
 
   // ── v2.8: L2 pointer mode — path B structured rendering ──────────────
@@ -222,12 +214,6 @@ describe("assemblePromptArtifact — L2", () => {
           declared_at_round: 1, status_changed_at_round: 3,
           completed_at_round: 3, priority: 0 },
       ],
-      inactiveConstraints: ["old-constraint"],
-      constraintMetadata: [{
-        id: "c-oldcons", text: "old-constraint", discovered_at_round: 1,
-        last_violated_at_round: 0, source: "discovered" as const,
-        status: "inactive" as const,
-      }],
       agentTrustScore: 0.85,
       agentTrustTrend: [0.9, 0.85],
       progress: {
@@ -248,7 +234,6 @@ describe("assemblePromptArtifact — L2", () => {
     // v2.8 gap fills
     assert.ok(artifact.renderedPrompt.includes("Progress Dashboard"));
     assert.ok(artifact.renderedPrompt.includes("60%"));
-    assert.ok(artifact.renderedPrompt.includes("Inactive Constraints"));
     assert.ok(artifact.renderedPrompt.includes("Agent Trust"));
     assert.ok(artifact.renderedPrompt.includes("85%"));
     assert.ok(artifact.renderedPrompt.includes("Retired Constraints"));
@@ -303,23 +288,18 @@ describe("assemblePromptArtifact — metadata", () => {
     assert.equal(a.stateHash, b.stateHash);
   });
 
-  it("records budget exceeded when applicable", () => {
-    const artifact = assemblePromptArtifact(input({
-      level: "l0",
-      budgets: { l0: 10 },
-    }));
-    assert.ok(artifact.budgetExceeded);
+  it("drops optional sections under a tight budget", () => {
+    const state = minimalState({ changesSinceLastRound: ["added auth.ts"] });
+    const tight = assemblePromptArtifact(input({ level: "l0", budgets: { l0: 10 }, state }));
+    const ample = assemblePromptArtifact(input({ level: "l0", state }));
+    assert.ok(ample.renderedPrompt.includes("New Evidence / Changes"));
+    assert.ok(!tight.renderedPrompt.includes("New Evidence / Changes"));
+    assert.ok(tight.renderedPrompt.includes("Current Task"));
   });
 
   it("includes how-to-complete footer", () => {
     const artifact = assemblePromptArtifact(input());
     assert.ok(artifact.renderedPrompt.includes("How to Complete This Round"));
-  });
-
-  it("includes level reasons", () => {
-    const artifact = assemblePromptArtifact(input({ reasons: ["first_round", "plan_boundary"] }));
-    assert.ok(artifact.levelReasons.includes("first_round"));
-    assert.ok(artifact.levelReasons.includes("plan_boundary"));
   });
 
   it("mandatory sections are always included even under budget", () => {
@@ -393,7 +373,7 @@ describe("assemblePromptArtifact — prompt_requests L2", () => {
       `emphasized success criterion must render exactly once (Critical Context only), got ${criteriaCount}`);
   });
 
-  it("includes confusion_alerts and critical_context in includedSections", () => {
+  it("renders confusion alerts and critical context when requested", () => {
     const artifact = assemblePromptArtifact(input({
       level: "l2",
       state: minimalState({
@@ -405,8 +385,8 @@ describe("assemblePromptArtifact — prompt_requests L2", () => {
         emphasize: ["SafeERC20 required for external calls"],
       },
     }));
-    assert.ok(artifact.includedSections.includes("confusion_alerts"));
-    assert.ok(artifact.includedSections.includes("critical_context"));
+    assert.ok(artifact.renderedPrompt.includes("Confusion Alerts"));
+    assert.ok(artifact.renderedPrompt.includes("Critical Context"));
   });
 
 });
@@ -543,10 +523,10 @@ describe("v3.2 — verification flag actions", () => {
     const artifact = assemblePromptArtifact(input({
       level: "l2",
       state: minimalState({
-        verificationFlags: [flag("warn", "progress_regression")],
+        verificationFlags: [flag("warn", "subgoal_drift")],
       }),
     }));
-    assert.match(artifact.renderedPrompt, /→ Action: Correct progress_estimate/);
+    assert.match(artifact.renderedPrompt, /→ Action: Reconcile the sub-goal list/);
   });
 
   it("does not append a continuation to info flags", () => {
@@ -567,7 +547,7 @@ describe("v3.2 — verification flag actions", () => {
       state: minimalState({
         verificationFlags: [
           flag("error", "success_with_remaining_criteria"),
-          flag("warn", "progress_regression"),
+          flag("warn", "blocked_without_blocker"),
         ],
       }),
     }));
@@ -601,11 +581,17 @@ describe("v3.2 — verification flag actions", () => {
     // v3.3: iterate the module's CHECK_* exports instead of a hardcoded
     // list — a new constant can never silently miss an action entry again
     // (the pre-v3.3 list had already drifted behind by three v3.3 checks).
-    const checks = Object.keys(verificationGate)
-      .filter((key) => key.startsWith("CHECK_"))
-      .map((key) => (verificationGate as unknown as Record<string, string>)[key]);
-    assert.ok(checks.length >= 26,
-      `expected all CHECK_* constants, got ${checks.length}`);
+    // v3.7: the flag set converged 27 → 24 (progress_regression and
+    // empty_change_with_passing removed, success_claim_conflict merged into
+    // outcome_success_contradiction) — the floor follows the surviving set.
+    const exports = verificationGate as unknown as Record<string, unknown>;
+    const checks = Object.keys(exports)
+      .filter((key) => key.startsWith("CHECK_") && typeof exports[key] === "string")
+      .map((key) => exports[key] as string);
+    // v3.7 note: CHECK_DOMAIN (the domain map) is also a CHECK_-prefixed
+    // export but is not a check id — filtered above by the string check.
+    assert.ok(checks.length === 24,
+      `expected the 24 surviving CHECK_* constants, got ${checks.length}`);
     for (const check of checks) {
       const action = verificationActionFor(check);
       assert.ok(
@@ -660,7 +646,7 @@ describe("v3.2 — L1 diff-collapse", () => {
       constraintMetadata: [
         ...meta,
         { id: `c-${deriveItemId("New constraint added")}`, text: "New constraint added",
-          discovered_at_round: 3, last_violated_at_round: 0, source: "discovered" as const, status: "active" as const },
+          last_violated_at_round: 0, source: "discovered" as const },
       ],
       hardConstraints: [],
     });
@@ -828,7 +814,7 @@ describe("v3.2 — L1 diff-collapse", () => {
       constraintMetadata: [
         ...meta,
         { id: `c-${deriveItemId("Another active one")}`, text: "Another active one",
-          discovered_at_round: 2, last_violated_at_round: 0, source: "discovered" as const, status: "active" as const },
+          last_violated_at_round: 0, source: "discovered" as const },
       ],
       hardConstraints: [],
     });
@@ -903,7 +889,6 @@ describe("v3.3 — Roadmap section", () => {
     const artifact = assemblePromptArtifact(input({
       level: "l2", fullStateMarkdown: undefined, state: roadmapState(),
     }));
-    assert.ok(artifact.includedSections.includes("roadmap"));
     assert.ok(artifact.renderedPrompt.includes("### Roadmap"));
     assert.ok(artifact.renderedPrompt.includes("Position: round 7/20"));
     assert.ok(artifact.renderedPrompt.includes("3 rounds since the last milestone boundary"));
@@ -913,19 +898,16 @@ describe("v3.3 — Roadmap section", () => {
 
   it("renders Roadmap in L1 when data present and omits it when absent", () => {
     const artifact = assemblePromptArtifact(input({ level: "l1", state: roadmapState() }));
-    assert.ok(artifact.includedSections.includes("roadmap"));
     assert.ok(artifact.renderedPrompt.includes("### Roadmap"));
 
     const empty = assemblePromptArtifact(input({ level: "l1", state: minimalState() }));
-    assert.ok(!empty.includedSections.includes("roadmap"));
     assert.ok(!empty.renderedPrompt.includes("Roadmap"));
   });
 
-  it("empty roadmap adds nothing to budget or includedSections (L2)", () => {
+  it("empty roadmap renders nothing (L2)", () => {
     const artifact = assemblePromptArtifact(input({
       level: "l2", fullStateMarkdown: undefined, state: minimalState(),
     }));
-    assert.ok(!artifact.includedSections.includes("roadmap"));
     assert.ok(!artifact.renderedPrompt.includes("Roadmap"));
   });
 
@@ -974,14 +956,12 @@ describe("v3.3 — machine dashboard rows and round stats", () => {
     const artifact = assemblePromptArtifact(input({
       level: "l2", fullStateMarkdown: undefined, state: withStats,
     }));
-    assert.ok(artifact.includedSections.includes("round_stats"));
     assert.ok(artifact.renderedPrompt.includes("R12: 3 files, 1 rejected attempt, Δ+0.10"));
     assert.ok(artifact.renderedPrompt.includes("R13: 0 files, Δ-0.05"));
 
     const without = assemblePromptArtifact(input({
       level: "l2", fullStateMarkdown: undefined, state: minimalState(),
     }));
-    assert.ok(!without.includedSections.includes("round_stats"));
     assert.ok(!without.renderedPrompt.includes("Round Stats"));
   });
 });

@@ -2,7 +2,7 @@
 
 **A context window is not memory. Memory needs a runtime.**
 
-**v3.6.0** — `npm install -g loopforge`. Node.js ≥ 18. Zero runtime dependencies.
+**v3.7.0** — `npm install -g loopforge`. Node.js ≥ 18. Zero runtime dependencies.
 > [中文文档](./README.zh-CN.md)
 
 ---
@@ -108,11 +108,17 @@ LoopForge:    committed rounds -> Canonical State -> next prompt
 
 ### 3. External verification and enforcement
 
-The verification gate runs 27 evidence cross-checks against Git snapshots,
-test output, and explicitly configured commands. The enforcement gate applies
-14 cognitive-integrity rules to decide whether to accept, reject, backtrack, or
-terminate. These rules cover unsupported success claims, evidence
-contradictions, intent drift, contract violations, and stalled progress.
+The verification gate organizes its checks into four verification domains —
+evaluation consistency, evidence integrity, plan & contract conformance, and
+progress & recovery — against Git snapshots, test output, and explicitly
+configured commands. The enforcement gate turns those findings into accept,
+reject, backtrack, or terminate decisions through one ordered strategy table
+whose rows fall into four action classes: evidence contradiction, contract &
+scope, plan drift, and progress recovery. A single success-evidence policy
+covers unbacked success claims (a passed command or a declared
+`no_change_reason` is the only backing), a single stall evaluator covers both
+stalled and exactly-flat progress windows, and contract checks are framed as
+declaration / execution / closure stages.
 
 Round Contracts let a committed round propose bounded work for the next round.
 The active contract is derived from committed history, remains active through
@@ -128,10 +134,10 @@ observed. Self-reported progress cannot create a machine verdict or cancel one.
 A rejected submission keeps the same logical `roundId`, increments its attempt,
 and commits no round. The agent receives a focused retry prompt.
 
-R4 and R5 can backtrack to the last clean committed round. LoopForge injects a
-diagnosis, identifies affected files, and verifies workspace restoration on the
-next submission. Valid discoveries from skipped rounds are preserved, while
-the rolled-back path stays out of final history.
+A stalled-progress evaluator can backtrack to the last clean committed round.
+LoopForge injects a diagnosis, identifies affected files, and verifies
+workspace restoration on the next submission. Valid discoveries from skipped
+rounds are preserved, while the rolled-back path stays out of final history.
 
 Durable sessions, owned locks, renewable leases, and idempotent replay let the
 agent resume after process interruption without skipping or double-committing

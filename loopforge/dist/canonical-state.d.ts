@@ -53,8 +53,6 @@ export interface CanonicalLoopState {
     hardConstraints: string[];
     activeConstraints: string[];
     retiredConstraints: string[];
-    /** v2.3: Constraints demoted to inactive after prolonged inactivity. */
-    inactiveConstraints: string[];
     /** v2.3: Per-constraint lifecycle metadata. */
     constraintMetadata: ConstraintMeta[];
     changesSinceLastRound: string[];

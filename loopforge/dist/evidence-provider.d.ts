@@ -48,11 +48,12 @@ export type EvidenceProviderFactory = () => EvidenceProvider;
 /** Register a provider factory used by policy-driven collectors. */
 export declare function registerEvidenceProvider(name: string, factory: EvidenceProviderFactory): void;
 export declare function unregisterEvidenceProvider(name: string): boolean;
-/** Collects evidence from all configured providers.
+/** Collects evidence from all configured providers (always async — the
+ *  synchronous collect() was removed in v3.7).
  *
  * Usage:
  *   const collector = new EvidenceCollector([new GitEvidenceProvider()]);
- *   const snapshots = collector.collect();
+ *   const snapshots = await collector.collectAsync({ phase: "before" });
  *   // snapshots = [{ provider: "git", files: [...], data: {...} }]
  */
 export declare class EvidenceCollector {
@@ -63,10 +64,6 @@ export declare class EvidenceCollector {
     static fromProviderNames(providerNames: string[]): EvidenceCollector;
     /** Build built-ins and explicitly configured command providers. */
     static fromPolicy(): EvidenceCollector;
-    /** Run all providers and return non-null snapshots.
-     *  Providers that return null (e.g. git not available) are silently
-     *  skipped — the caller handles missing evidence. */
-    collect(options?: EvidenceCollectOptions): ProviderSnapshot[];
     /** Capture all providers concurrently with per-provider timeout isolation. */
     collectAsync(options?: EvidenceCollectOptions): Promise<ProviderSnapshot[]>;
 }
@@ -123,19 +120,11 @@ export interface GitFileState {
  * On a normal repo (~200ms/command): ~200ms vs ~600ms sequential.
  * On Windows with antivirus (~4s/command): ~4s vs ~12s sequential. */
 export declare function captureGitFileStateAsync(signal?: AbortSignal, timeoutMs?: number): Promise<GitFileState | null>;
-/** v1.17 (sync): Capture git file state using sequential execFileSync.
- *
- * @deprecated Use captureGitFileStateAsync() for the primary path.
- * This sync fallback exists for legacy callers that cannot be made async
- * (e.g. reconstructSession during startup). Uses execFileSync — shell-free,
- * unlike the old execSync-based implementation. */
-export declare function captureGitFileState(): GitFileState | null;
-/** Captures git file state (tracked, staged, untracked) via the async
- *  captureGitFileStateAsync() when a context is provided, falling back
- *  to the synchronous captureGitFileState() for legacy callers. */
+/** v3.7: async capture only — the synchronous captureGitFileState() fallback
+ *  was removed together with the sync lifecycle (prepareSync). */
 export declare class GitEvidenceProvider implements EvidenceProvider {
     readonly name = "git";
-    capture(context?: EvidenceCaptureContext): ProviderSnapshot | null | Promise<ProviderSnapshot | null>;
+    capture(context?: EvidenceCaptureContext): Promise<ProviderSnapshot | null>;
 }
 /** Extract merged file list from evidence snapshots for backward compat
  *  with runtimeFilesChanged (string[] | null).

@@ -209,6 +209,7 @@ describe("MCP — multi-round lifecycle", async () => {
 
   it("rejects malformed core fields without consuming the round", async () => {
     const start = await TOOL_HANDLERS.loopforge_start(mgr, { task: "Core validation" });
+    const entriesBefore = store.listEntries().length;
     const result = await TOOL_HANDLERS.loopforge_next(mgr, {
       sessionId: start.sessionId,
       roundId: start.roundId,
@@ -227,6 +228,12 @@ describe("MCP — multi-round lifecycle", async () => {
     const status = mgr.get(String(start.sessionId));
     assert.equal(status?.status, "running");
     assert.equal(status?.currentRound, 1);
+    // v3.7: an invalid evaluation returns BEFORE the gates and must write
+    // nothing — no vault/session entry, no metrics, no rejection state.
+    assert.equal(store.listEntries().length, entriesBefore,
+      "invalid evaluation must not append any vault/session entry");
+    assert.equal(status?.consecutiveRejections, 0, "no rejection state");
+    assert.equal(status?.roundSnapshot?.roundId, start.roundId, "round not consumed");
   });
 
   it("normalizes malformed optional fields instead of rejecting the round", async () => {
@@ -592,7 +599,7 @@ describe("MCP — session persistence (save / resume)", async () => {
     // New SessionManager (simulating process restart)
     mgr.close();
     const mgr2 = new SessionManager(store);
-    const resumed = mgr2.resume("resume-after-create");
+    const resumed = await mgr2.resume("resume-after-create");
     assert.ok(resumed !== null, "resume should return a result");
     assert.ok(resumed!.prompt !== null, "resume should return a compiled prompt");
     assert.equal(resumed!.round, 1, "should compile round 1 again");
@@ -610,7 +617,7 @@ describe("MCP — session persistence (save / resume)", async () => {
     // New SessionManager (process restart)
     mgr.close();
     const mgr2 = new SessionManager(store);
-    const resumed = mgr2.resume("resume-mid");
+    const resumed = await mgr2.resume("resume-mid");
     assert.ok(resumed !== null);
     assert.equal(resumed!.round, 2, "should pick up at round 2");
     assert.ok(resumed!.prompt !== null);
@@ -624,7 +631,7 @@ describe("MCP — session persistence (save / resume)", async () => {
     }), evalParam({ success: true, shouldContinue: false }));
 
     const mgr2 = new SessionManager(store);
-    const resumed = mgr2.resume("resume-done");
+    const resumed = await mgr2.resume("resume-done");
     assert.ok(resumed !== null);
     assert.equal(resumed!.prompt, null);
     assert.ok(resumed!.stopReason === "stopped" || resumed!.stopReason === "completed");
@@ -632,7 +639,7 @@ describe("MCP — session persistence (save / resume)", async () => {
 
   it("resume() returns null for unknown loop", async () => {
     const mgr2 = new SessionManager(store);
-    const result = mgr2.resume("nonexistent-loop");
+    const result = await mgr2.resume("nonexistent-loop");
     assert.equal(result, null);
   });
 
@@ -1104,7 +1111,7 @@ describe("MCP P0 lifecycle regressions", () => {
 
     mgr.close();
     const restarted = new SessionManager(store);
-    const resumed = restarted.resume("crash-recovery-transaction");
+    const resumed = await restarted.resume("crash-recovery-transaction");
     assert.ok(resumed);
     assert.equal(resumed.sessionId, started.sessionId);
     assert.equal(resumed.round, 2);
@@ -1154,7 +1161,7 @@ describe("MCP P0 lifecycle regressions", () => {
 
     mgr.close();
     const restarted = new SessionManager(store);
-    const resumed = restarted.resume("rejected-round-recovery");
+    const resumed = await restarted.resume("rejected-round-recovery");
     assert.ok(resumed);
     assert.equal(resumed.sessionId, started.sessionId);
     assert.equal(resumed.prompt, rejected.prompt);

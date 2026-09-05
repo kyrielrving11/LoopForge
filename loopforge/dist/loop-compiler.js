@@ -7,7 +7,7 @@ import { createHash } from "node:crypto";
 import { getPolicy } from "./policy.js";
 import { AgentStatus, makeLoopCompileResponse, makeLoopHealth, makeLoopObjective, makeConstraintMeta, makeMilestoneSummary, makeRollingSummary, makeSubGoal, makeTaskAlignment, } from "./protocol.js";
 import { createCanonicalLoopState, renderCanonicalStateMarkdown, } from "./canonical-state.js";
-import { decodeCommittedRound, decodeMergedRound, machineGitMotionSeries, mergedRoundsFromEntries, } from "./committed-round.js";
+import { decodeRound, entryLineage, entryCriteriaMet, entryCriteriaRemaining, entryActiveConstraints, entryRetractedConstraints, entryProgressEstimate, entryEmergedSubtasks, machineGitMotionSeries, mergedRoundsFromEntries, } from "./committed-round.js";
 import { contractRoundEvaluations, deriveActiveRoundContract, } from "./round-contract.js";
 import { assemblePromptArtifact } from "./prompt-assembler.js";
 import { decidePromptLevel, } from "./prompt-policy.js";
@@ -17,15 +17,9 @@ function contextEntries(context) {
         return [];
     return context.results.filter((value) => value !== null && typeof value === "object" && !Array.isArray(value));
 }
-function lineage(entry) {
-    const value = entry.loop_lineage ?? entry.lineage;
-    return value !== null && typeof value === "object" && !Array.isArray(value)
-        ? value
-        : {};
-}
 function loopEntries(loopId, context) {
     return contextEntries(context)
-        .filter((entry) => entry.loop_id === loopId || lineage(entry).loop_id === loopId)
+        .filter((entry) => entry.loop_id === loopId || entryLineage(entry).loop_id === loopId)
         .sort((a, b) => entryRound(a) - entryRound(b));
 }
 /** v3.3.1: The canonical entry for a round — its compile-time lineage entry
@@ -51,12 +45,6 @@ function roundCanonicalEntry(entries, round) {
         }) ??
         null);
 }
-/** Return the canonical read model when an entry is a committed round.
- * Uncommitted compiler lineage has no durable decision yet and deliberately
- * remains on the local compile path; it cannot be treated as history. */
-function committedView(entry) {
-    return decodeMergedRound(entry) ?? decodeCommittedRound(entry);
-}
 export function computeGoalTextHash(text) {
     const normalized = text.trim().replace(/\s+/g, " ").toLowerCase();
     return createHash("sha256").update(normalized).digest("hex").slice(0, 12);
@@ -75,7 +63,7 @@ export function readPresentedBaseline(loopId, round, context) {
     const entry = roundCanonicalEntry(loopEntries(loopId, context), round - 1);
     if (!entry)
         return null;
-    const data = lineage(entry);
+    const data = entryLineage(entry);
     const constraintIds = data.presented_constraint_ids;
     const subGoals = data.presented_subgoals;
     const milestoneRanges = data.presented_milestone_ranges;
@@ -97,7 +85,7 @@ export function getPreviousRound(loopId, round, context) {
     const entry = roundCanonicalEntry(loopEntries(loopId, context), round);
     if (!entry)
         return null;
-    const data = lineage(entry);
+    const data = entryLineage(entry);
     return {
         round,
         goal_id: typeof data.goal_id === "string" ? data.goal_id : "",
@@ -188,7 +176,7 @@ function evolveConstraints(request, objective, previous, context) {
     const lastRetractedRound = new Map();
     if (window > 0) {
         for (const entry of loopEntries(request.loop_id, context)) {
-            const retractedList = lineage(entry).retracted_constraints;
+            const retractedList = entryLineage(entry).retracted_constraints;
             if (!Array.isArray(retractedList))
                 continue;
             const rnd = entryRound(entry);
@@ -221,47 +209,6 @@ function evolveConstraints(request, objective, previous, context) {
 // ═══════════════════════════════════════════════════════════════════════════
 // Hierarchical Summary (v2.1)
 // ═══════════════════════════════════════════════════════════════════════════
-/** Extract execution_evidence from a vault entry, handling both direct-field
- *  and lineage-nested shapes. Returns null when absent. */
-function entryExecutionEvidence(entry) {
-    const view = committedView(entry);
-    if (view)
-        return view.executionEvidence;
-    const direct = entry.execution_evidence;
-    if (direct && typeof direct === "object" && !Array.isArray(direct)) {
-        return direct;
-    }
-    const lin = lineage(entry);
-    const nested = lin.execution_evidence;
-    if (nested && typeof nested === "object" && !Array.isArray(nested)) {
-        return nested;
-    }
-    return null;
-}
-/** Read success_criteria_met from an entry's execution_evidence. */
-function entryCriteriaMet(entry) {
-    const view = committedView(entry);
-    if (view)
-        return view.executionEvidence?.success_criteria_met
-            ?.filter((value) => typeof value === "string") ?? [];
-    const ev = entryExecutionEvidence(entry);
-    if (!ev)
-        return [];
-    const arr = ev.success_criteria_met;
-    return Array.isArray(arr) ? arr.filter((v) => typeof v === "string") : [];
-}
-/** Read success_criteria_remaining from an entry's execution_evidence. */
-function entryCriteriaRemaining(entry) {
-    const view = committedView(entry);
-    if (view)
-        return view.executionEvidence?.success_criteria_remaining
-            ?.filter((value) => typeof value === "string") ?? [];
-    const ev = entryExecutionEvidence(entry);
-    if (!ev)
-        return [];
-    const arr = ev.success_criteria_remaining;
-    return Array.isArray(arr) ? arr.filter((v) => typeof v === "string") : [];
-}
 /** v3.2: Deterministic lessons learned — constraints violated repeatedly or
  *  verification checks failing repeatedly across rounds (full history, unlike
  *  the enforcement gate's R2 3-round window). Presentation only: the output
@@ -273,7 +220,7 @@ export function deriveLessons(loopId, context, currentRound) {
     const warns = new Map();
     for (const entry of entries) {
         const rnd = entryRound(entry);
-        const view = committedView(entry);
+        const view = decodeRound(entry);
         const viols = view
             ? view.constraintViolations ?? []
             : Array.isArray(entry.constraint_violations)
@@ -454,41 +401,10 @@ function detectNewCriteria(current, previous) {
         return currMet;
     return currMet.filter((curr) => prevMet.every((prev) => !criteriaMatch(curr, prev)));
 }
-/** Read constraints_active from an entry's lineage. */
-function entryActiveConstraints(entry) {
-    const view = committedView(entry);
-    if (view)
-        return view.activeConstraints ?? [];
-    const lin = lineage(entry);
-    const arr = lin.constraints_active;
-    return Array.isArray(arr) ? arr.filter((v) => typeof v === "string") : [];
-}
-/** Read retracted_constraints from an entry. */
-function entryRetractedConstraints(entry) {
-    const view = committedView(entry);
-    if (view)
-        return view.retractedConstraints ?? [];
-    const direct = entry.retracted_constraints;
-    if (Array.isArray(direct))
-        return direct.filter((v) => typeof v === "string");
-    const lin = lineage(entry);
-    const nested = lin.retracted_constraints;
-    if (Array.isArray(nested))
-        return nested.filter((v) => typeof v === "string");
-    return [];
-}
-/** Read progress_estimate from an entry's execution_evidence. */
-function entryProgressEstimate(entry) {
-    const ev = entryExecutionEvidence(entry);
-    if (!ev)
-        return 0;
-    const pe = ev.progress_estimate;
-    return typeof pe === "number" ? pe : 0;
-}
 /** Build a single MilestoneSummary from a range of completed round entries. */
 function buildMilestoneFromEntries(phaseEntries, startRound, endRound, label, kind) {
     const last = phaseEntries.at(-1);
-    const lastView = last ? committedView(last) : null;
+    const lastView = last ? decodeRound(last) : null;
     const outcomeRaw = lastView
         ? (lastView.outputSummary ?? "")
         : last && typeof last.output_summary === "string" ? last.output_summary : "";
@@ -572,8 +488,8 @@ export function buildRollingSummary(loopId, currentRound, context, sinceRound = 
     const outcomes = [];
     const issues = [];
     for (const entry of windowEntries) {
-        const view = committedView(entry);
-        const data = lineage(entry);
+        const view = decodeRound(entry);
+        const data = entryLineage(entry);
         const round = entryRound(entry);
         const success = view ? view.success : entry.success ?? data.success;
         const summary = view
@@ -606,7 +522,7 @@ export function buildRollingSummary(loopId, currentRound, context, sinceRound = 
     for (let i = 0; i < completedEntries.length; i++) {
         const entry = completedEntries[i];
         const rnd = entryRound(entry);
-        const lin = lineage(entry);
+        const lin = entryLineage(entry);
         // Signal 1: Agent-declared checkpoint
         const isAgentCheckpoint = lin.compression_checkpoint === true;
         // Signal 2: New criteria met (compare with previous vault entry)
@@ -685,59 +601,12 @@ export function deriveConstraintId(text) {
 export function deriveCriterionId(text) {
     return "cr-" + deriveItemId(text);
 }
-/** v2.11: Check whether a user-provided reference looks like a constraint ID.
- *  Matches the pattern c-XXXXXXXX where X is a hex digit. */
-export function isConstraintId(ref) {
-    return /^c-[a-f0-9]{8}$/.test(ref);
-}
 /** v2.11: Check whether a user-provided reference looks like a criterion ID.
- *  Matches the pattern cr-XXXXXXXX where X is a hex digit. */
-export function isCriterionId(ref) {
+ *  Matches the pattern cr-XXXXXXXX where X is a hex digit. Module-local:
+ *  consumers with the same need (round-contract.ts) keep their own copy to
+ *  avoid an import cycle. */
+function isCriterionId(ref) {
     return /^cr-[a-f0-9]{8}$/.test(ref);
-}
-/** Read emerged_subtasks from a vault entry (handles direct + lineage nesting). */
-function entryEmergedSubtasks(entry) {
-    const view = committedView(entry);
-    if (view)
-        return view.emergedSubtasks ?? [];
-    const direct = entry.emerged_subtasks;
-    if (Array.isArray(direct))
-        return direct.filter((v) => typeof v === "string");
-    const lin = lineage(entry);
-    const nested = lin.emerged_subtasks;
-    if (Array.isArray(nested))
-        return nested.filter((v) => typeof v === "string");
-    return [];
-}
-/** Read completed_subtasks from an entry. */
-function entryCompletedSubtasks(entry) {
-    const view = committedView(entry);
-    if (view)
-        return view.completedSubtasks ?? [];
-    const direct = entry.completed_subtasks;
-    if (Array.isArray(direct))
-        return direct.filter((v) => typeof v === "string");
-    return [];
-}
-/** Read blocked_subtasks from an entry. */
-function entryBlockedSubtasks(entry) {
-    const view = committedView(entry);
-    if (view)
-        return view.blockedSubtasks ?? [];
-    const direct = entry.blocked_subtasks;
-    if (Array.isArray(direct))
-        return direct.filter((v) => typeof v === "string");
-    return [];
-}
-/** Read canceled_subtasks from an entry. */
-function entryCanceledSubtasks(entry) {
-    const view = committedView(entry);
-    if (view)
-        return view.canceledSubtasks ?? [];
-    const direct = entry.canceled_subtasks;
-    if (Array.isArray(direct))
-        return direct.filter((v) => typeof v === "string");
-    return [];
 }
 /**
  * Match a user-provided sub-task reference against existing SubGoals.
@@ -846,35 +715,10 @@ function manageSubGoals(loopId, currentRound, lastRoundResult, vaultContext) {
                 subGoals[idx].status_changed_at_round = rnd;
             }
         }
-        // Phase 3 — Auto-derive: next_action match → in_progress
-        const nextAction = lastRoundResult.next_action?.trim();
-        if (nextAction) {
-            for (const sg of subGoals) {
-                if (sg.status === "pending") {
-                    if (jaccardSimilarity(nextAction, sg.description) >= policy.subgoal_auto_in_progress_threshold) {
-                        sg.status = "in_progress";
-                        sg.status_changed_at_round = rnd;
-                        break; // Only one sub-goal can be in_progress at a time
-                    }
-                }
-            }
-        }
-        // Phase 4 — Auto-complete: new criteria match → done
-        const newCriteria = lastRoundResult.execution_evidence?.success_criteria_met ?? [];
-        if (newCriteria.length > 0) {
-            for (const sg of subGoals) {
-                if (sg.status === "pending" || sg.status === "in_progress") {
-                    for (const crit of newCriteria) {
-                        if (jaccardSimilarity(crit, sg.description) >= policy.subgoal_auto_complete_threshold) {
-                            sg.status = "done";
-                            sg.status_changed_at_round = rnd;
-                            sg.completed_at_round = rnd;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
+        // v3.7: no auto status inference. The v2.3 fuzzy heuristics
+        // (next_action Jaccard → in_progress, criteria Jaccard → done) were
+        // removed — they fabricated dashboard motion the machine never
+        // verified. Statuses change only via the agent declarations above.
     }
     // Sort for display: in_progress first, then pending by age desc, then blocked, then done, then canceled
     subGoals.sort((a, b) => {
@@ -915,40 +759,6 @@ function constraintSource(text, objective, constraintsFromPlan) {
         return "criteria";
     return "discovered";
 }
-/** Find the earliest round a constraint was discovered by scanning vault entries.
- *  v2.11: ID-first matching. Checks exact constraint ID match (c-XXXXXXXX)
- *  against the derived ID of each vault entry's discovered_constraints, then
- *  falls back to Jaccard similarity on text. */
-function findDiscoveredRound(text, vaultEntries) {
-    const targetId = deriveConstraintId(text);
-    let earliest = 0;
-    for (const entry of vaultEntries) {
-        const rnd = entryRound(entry);
-        if (rnd < 1)
-            continue;
-        const view = committedView(entry);
-        const discovered = view
-            ? view.discoveredConstraints ?? []
-            : Array.isArray(entry.discovered_constraints)
-                ? entry.discovered_constraints.filter((v) => typeof v === "string")
-                : [];
-        for (const d of discovered) {
-            // Phase 1: exact ID match (v2.11)
-            if (d === targetId || deriveConstraintId(d) === targetId) {
-                if (earliest === 0 || rnd < earliest)
-                    earliest = rnd;
-                break;
-            }
-            // Phase 2: Jaccard fallback for natural-language references.
-            if (jaccardSimilarity(text, d) >= getPolicy().evolution.constraint_match_threshold) {
-                if (earliest === 0 || rnd < earliest)
-                    earliest = rnd;
-                break;
-            }
-        }
-    }
-    return earliest;
-}
 /** Find the latest round a constraint was violated by scanning vault entries.
  *  v2.11: ID-first matching. Checks exact constraint ID match (c-XXXXXXXX)
  *  against the derived ID of each vault entry's constraint_violations, then
@@ -969,7 +779,7 @@ function findLastViolatedRound(text, vaultEntries) {
         const rnd = entryRound(entry);
         if (rnd < 1)
             continue;
-        const view = committedView(entry);
+        const view = decodeRound(entry);
         const violations = view
             ? view.constraintViolations ?? []
             : Array.isArray(entry.constraint_violations)
@@ -986,15 +796,17 @@ function findLastViolatedRound(text, vaultEntries) {
     return latest;
 }
 /**
- * Manage constraint lifecycle with time-aware decay.
+ * Manage constraint lifecycle metadata for the active set.
  *
- * Discovered constraints that haven't been violated for N rounds are demoted
- * to inactive — removed from prompts but kept in state. Hard/plan/criteria
- * constraints never auto-decay. Inactive constraints are auto-reactivated
- * if violated again in the current round.
+ * v3.7: the v2.3 time-aware decay (discovered constraints demoted to
+ * inactive after N quiet rounds, auto-reactivation on a fresh violation)
+ * is gone — every active constraint stays active. What remains is the
+ * display metadata the v3 prompt surface needs: per-text source
+ * classification (v3.3.1: criteria texts carry the cr-XXXXXXXX namespace),
+ * and last_violated_at_round for the L1 collapse "(violated this round)"
+ * annotation (diffConstraints compares it to the current round).
  */
 function manageConstraintLifecycle(active, objective, constraintsFromPlan, vaultContext, currentRound, lastRoundViolations = []) {
-    const policy = getPolicy().evolution;
     const allEntries = loopEntries(objective.loop_id || "", vaultContext);
     const completedEntries = allEntries.filter((e) => entryRound(e) >= 1 && entryRound(e) < currentRound);
     const metadata = [];
@@ -1004,57 +816,25 @@ function manageConstraintLifecycle(active, objective, constraintsFromPlan, vault
         // as a violation at currentRound — the previous rounds' scan cannot see
         // it (this round is not committed yet). This makes the L1 collapse
         // render "(violated this round)" (diffConstraints compares
-        // last_violated_at_round === round) and re-activates decayed
-        // discovered constraints.
+        // last_violated_at_round === round).
         const violatedThisRound = lastRoundViolations.some((v) => matchesConstraintText(text, v));
-        // Structural constraints never decay
-        if (source === "hard" || source === "plan" || source === "criteria") {
-            // v3.3.1: one text, one identity — a success-criterion text that also
-            // lives in the merged active set belongs to the cr-XXXXXXXX namespace
-            // (its own Success Criteria section and the verification gate's
-            // criteriaMatch are ID-first on cr-). Rendering it under c-XXXXXXXX in
-            // the active list meant the same text carried two IDs in one prompt,
-            // and an agent echoing the active-list ID into success_criteria_met
-            // could never match.
-            metadata.push(makeConstraintMeta({
-                id: source === "criteria" ? deriveCriterionId(text) : deriveConstraintId(text),
-                text,
-                discovered_at_round: objective.created_at_round || 1,
-                last_violated_at_round: violatedThisRound
-                    ? currentRound
-                    : findLastViolatedRound(text, completedEntries),
-                source,
-                status: "active",
-            }));
-            continue;
-        }
-        // Discovered constraints: check for inactivity
-        const discoveredAt = findDiscoveredRound(text, completedEntries);
-        const lastViolated = violatedThisRound
-            ? currentRound
-            : findLastViolatedRound(text, completedEntries);
-        const roundsSinceRelevant = lastViolated > 0
-            ? currentRound - lastViolated
-            : currentRound - (discoveredAt || currentRound);
-        const status = roundsSinceRelevant > policy.constraint_inactive_rounds
-            ? "inactive"
-            : "active";
+        // v3.3.1: one text, one identity — a success-criterion text that also
+        // lives in the merged active set belongs to the cr-XXXXXXXX namespace
+        // (its own Success Criteria section and the verification gate's
+        // criteriaMatch are ID-first on cr-). Rendering it under c-XXXXXXXX in
+        // the active list meant the same text carried two IDs in one prompt,
+        // and an agent echoing the active-list ID into success_criteria_met
+        // could never match.
         metadata.push(makeConstraintMeta({
-            id: deriveConstraintId(text),
+            id: source === "criteria" ? deriveCriterionId(text) : deriveConstraintId(text),
             text,
-            discovered_at_round: discoveredAt || 0,
-            last_violated_at_round: lastViolated,
-            source: "discovered",
-            status,
+            last_violated_at_round: violatedThisRound
+                ? currentRound
+                : findLastViolatedRound(text, completedEntries),
+            source,
         }));
     }
-    const newActive = metadata
-        .filter((m) => m.status === "active")
-        .map((m) => m.text);
-    const inactive = metadata
-        .filter((m) => m.status === "inactive")
-        .map((m) => m.text);
-    return { active: newActive, inactive, metadata };
+    return { active, metadata };
 }
 export function alignTask(proposedTask, request, context) {
     const objective = request.loop_objective ?? latestObjective(request.loop_id, context);
@@ -1099,7 +879,7 @@ function levelDecision(request, context) {
         last?.revised_success_criteria?.length ||
         last?.wrong_assumptions?.length);
     const lastFullRound = loopEntries(request.loop_id, context)
-        .filter((entry) => lineage(entry).recompile_level === "l2")
+        .filter((entry) => entryLineage(entry).recompile_level === "l2")
         .map(entryRound)
         .filter((round) => round < request.round)
         .at(-1) ?? 1;
@@ -1108,7 +888,7 @@ function levelDecision(request, context) {
     // rehydration (the decidePromptLevel recovery_boundary branch existed
     // but no caller ever set it).
     const recoveryBoundary = loopEntries(request.loop_id, context)
-        .some((entry) => lineage(entry).committed_action === "backtrack" &&
+        .some((entry) => entryLineage(entry).committed_action === "backtrack" &&
         entryRound(entry) === request.round);
     return decidePromptLevel({
         round: request.round,
@@ -1285,7 +1065,6 @@ export function compileLoop(request, context) {
         lineage: [`${request.loop_id}:r${request.round}`],
         constraints_active: constraintLifecycle.active,
         constraints_retired: constraints.retired,
-        constraints_inactive: constraintLifecycle.inactive,
         constraint_metadata: constraintLifecycle.metadata,
         loop_id: request.loop_id,
         round: request.round,
@@ -1329,7 +1108,6 @@ export function compileLoop(request, context) {
         state,
         level: decision.level,
         reasons: decision.reasons,
-        mode: policy.prompt.injection_mode,
         budgets: {
             l0: policy.prompt.l0_max_chars,
             l1: policy.prompt.l1_max_chars,

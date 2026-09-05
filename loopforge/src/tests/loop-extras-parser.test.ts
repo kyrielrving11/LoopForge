@@ -178,9 +178,9 @@ describe("parseLoopExtras", () => {
       max_rounds: 15,
       verification_flags: [{
         severity: "warn",
-        field: "progress",
-        check: "progress_regression",
-        detail: "Progress dropped",
+        field: "blocker",
+        check: "blocked_without_blocker",
+        detail: "blocker missing",
       }],
       attempt: 2,
       consecutive_rejections: 1,

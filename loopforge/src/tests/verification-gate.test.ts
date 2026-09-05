@@ -21,10 +21,12 @@ import {
   CHECK_PREMATURE_BOUNDARY,
   CHECK_CONTRACT_COMPLETION_UNVERIFIED,
   CHECK_CONTRACT_PREMATURE,
+  CHECK_DOMAIN,
   normalizeScopeEntry,
   isFileInScope,
   collectOutOfScopeFiles,
 } from "../verification-gate.js";
+import * as verificationGate from "../verification-gate.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Helpers
@@ -194,129 +196,7 @@ describe("verification-gate — happy path", () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Check 1: Progress regression
-// ═══════════════════════════════════════════════════════════════════════════
-
-describe("verification-gate — progress regression", () => {
-  it("flags when estimate drops > 0.2", () => {
-    const curr = se({
-      execution_evidence: makeExecutionEvidence({ progress_estimate: 0.3, test_results: { passed: 1, failed: 0, skipped: 0 }, files_changed: ["src/a.ts"] }),
-    });
-    const prev = se({
-      execution_evidence: makeExecutionEvidence({ progress_estimate: 0.8, test_results: { passed: 1, failed: 0, skipped: 0 }, files_changed: ["src/a.ts"] }),
-    });
-
-    const result = verifySelfEvaluation(curr, 2, [], prev);
-    assert.equal(result.verdict, "suspect");
-    const flag = result.flags.find((f) => f.check === "progress_regression");
-    assert.ok(flag);
-    assert.equal(flag.field, "progress_estimate");
-    assert.equal(flag.severity, "warn");
-  });
-
-  it("does not flag when estimate drops ≤ 0.2", () => {
-    const curr = se({
-      execution_evidence: makeExecutionEvidence({ progress_estimate: 0.6, test_results: { passed: 1, failed: 0, skipped: 0 }, files_changed: ["src/a.ts"] }),
-    });
-    const prev = se({
-      execution_evidence: makeExecutionEvidence({ progress_estimate: 0.8, test_results: { passed: 1, failed: 0, skipped: 0 }, files_changed: ["src/a.ts"] }),
-    });
-
-    const result = verifySelfEvaluation(curr, 2, [], prev, [gitSnap(), cmdSnap("passed")]);
-    assert.equal(result.verdict, "trusted");
-  });
-
-  it("does not flag when estimate increases", () => {
-    const curr = se({
-      execution_evidence: makeExecutionEvidence({ progress_estimate: 0.9, test_results: { passed: 1, failed: 0, skipped: 0 }, files_changed: ["src/a.ts"] }),
-    });
-    const prev = se({
-      execution_evidence: makeExecutionEvidence({ progress_estimate: 0.5, test_results: { passed: 1, failed: 0, skipped: 0 }, files_changed: ["src/a.ts"] }),
-    });
-
-    const result = verifySelfEvaluation(curr, 2, [], prev, [gitSnap(), cmdSnap("passed")]);
-    assert.equal(result.verdict, "trusted");
-  });
-
-  it("does not flag when no previous execution evidence", () => {
-    const curr = se({
-      execution_evidence: makeExecutionEvidence({ progress_estimate: 0.3, test_results: { passed: 1, failed: 0, skipped: 0 }, files_changed: ["src/a.ts"] }),
-    });
-    const prev = se({ execution_evidence: undefined });
-
-    const result = verifySelfEvaluation(curr, 2, [], prev, [gitSnap(), cmdSnap("passed")]);
-    assert.equal(result.verdict, "trusted");
-  });
-});
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Check 2: Empty change + all passing
-// ═══════════════════════════════════════════════════════════════════════════
-
-describe("verification-gate — empty change with passing tests", () => {
-  it("flags when no files changed, all tests pass, and success is true", () => {
-    const curr = se({
-      success: true,
-      execution_evidence: makeExecutionEvidence({
-        files_changed: [],
-        test_results: { passed: 5, failed: 0, skipped: 0 },
-      }),
-    });
-
-    const result = verifySelfEvaluation(curr, 2, [], null);
-    assert.equal(result.verdict, "suspect");
-    const flag = result.flags.find((f) => f.check === "empty_change_with_passing");
-    assert.ok(flag);
-    assert.equal(flag.severity, "warn");
-  });
-
-  it("does not flag when tests have failures", () => {
-    const curr = se({
-      success: false,
-      execution_evidence: makeExecutionEvidence({
-        files_changed: [],
-        test_results: { passed: 3, failed: 1, skipped: 0 },
-      }),
-    });
-
-    // Command stdout must agree with the reported counts, or the
-    // command_evidence_mismatch warn fires and the verdict leaves trusted.
-    const result = verifySelfEvaluation(curr, 2, [], null,
-      [gitSnap([]), cmdSnap("passed", { stdout: "Tests: 3 passed, 1 failed" })]);
-    assert.equal(result.verdict, "trusted");
-  });
-
-  it("does not flag when files were changed", () => {
-    const curr = se({
-      success: true,
-      execution_evidence: makeExecutionEvidence({
-        files_changed: ["src/foo.ts"],
-        test_results: { passed: 5, failed: 0, skipped: 0 },
-      }),
-    });
-
-    const result = verifySelfEvaluation(curr, 2, [], null);
-    const flag = result.flags.find((f) => f.check === "empty_change_with_passing");
-    assert.equal(flag, undefined);
-  });
-
-  it("does not flag when success is false", () => {
-    const curr = se({
-      success: false,
-      execution_evidence: makeExecutionEvidence({
-        files_changed: [],
-        test_results: { passed: 5, failed: 0, skipped: 0 },
-      }),
-    });
-
-    const result = verifySelfEvaluation(curr, 2, [], null,
-      [gitSnap([]), cmdSnap("passed", { stdout: "Tests: 5 passed, 5 total" })]);
-    assert.equal(result.verdict, "trusted");
-  });
-});
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Check 3: Success with remaining criteria
+// Success with remaining criteria
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("verification-gate — success with remaining criteria", () => {
@@ -1138,7 +1018,10 @@ describe("verification-gate — v2.12 outcome consistency", () => {
     // outcome wins: the success-class check must not fire; the declared
     // non-success vs the core success=true flag produces a warning.
     assert.ok(!result.flags.some((f) => f.check === "success_with_remaining_criteria"));
-    assert.ok(result.flags.some((f) => f.check === "success_claim_conflict"));
+    // v3.7: the warn direction shares the outcome_success_contradiction id.
+    const warnFlag = result.flags.find((f) => f.check === "outcome_success_contradiction");
+    assert.ok(warnFlag);
+    assert.equal(warnFlag.severity, "warn");
     assert.equal(result.verdict, "suspect");
   });
 
@@ -1159,7 +1042,11 @@ describe("verification-gate — v2.12 outcome consistency", () => {
     });
     const result = verifySelfEvaluation(curr, 2, [], null);
     assert.equal(result.verdict, "suspect");
-    assert.ok(result.flags.some((f) => f.check === "success_claim_conflict"));
+    // v3.7: the warn direction shares the outcome_success_contradiction id.
+    const warnFlag = result.flags.find((f) => f.check === "outcome_success_contradiction");
+    assert.ok(warnFlag);
+    assert.equal(warnFlag.severity, "warn");
+    assert.ok(warnFlag.detail.includes("failed"));
   });
 
   it("warns when outcome=blocked without a blocker description", () => {
@@ -2006,5 +1893,134 @@ describe("v3.5 — contract_premature warn", () => {
     const noActive = verifySelfEvaluation(openEval(other), 2, []);
     assert.ok(!noActive.flags.some((f) => f.check === CHECK_CONTRACT_PREMATURE),
       "round 1 declaring a proposal is a declaration, not a replacement");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v3.7 — CHECK_DOMAIN coverage: every surviving check belongs to exactly one
+// of the four verification domains.
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("verification-gate — v3.7 CHECK_DOMAIN membership", () => {
+  it("maps every surviving CHECK_* constant into one of the four domains", () => {
+    const exports = verificationGate as unknown as Record<string, unknown>;
+    const constants = Object.keys(exports)
+      .filter((key) => key.startsWith("CHECK_") && typeof exports[key] === "string");
+    assert.equal(constants.length, 24, "the surviving check set is 24");
+    const domains = new Set<string>();
+    for (const key of constants) {
+      const id = exports[key] as string;
+      const domain = CHECK_DOMAIN[id];
+      assert.ok(domain, `check "${id}" has no domain`);
+      domains.add(domain);
+    }
+    assert.deepEqual(
+      [...domains].sort(),
+      ["evaluation_consistency", "evidence_integrity", "plan_contract", "progress_recovery"],
+      "all four domains are populated",
+    );
+  });
+
+  it("has no orphan domain entries and the expected domain sizes", () => {
+    const counts: Record<string, number> = {};
+    for (const domain of Object.values(CHECK_DOMAIN)) counts[domain] = (counts[domain] ?? 0) + 1;
+    assert.equal(Object.keys(CHECK_DOMAIN).length, 24, "CHECK_DOMAIN covers exactly the 24 checks");
+    assert.deepEqual(counts, {
+      evaluation_consistency: 8,
+      evidence_integrity: 7,
+      plan_contract: 8,
+      progress_recovery: 1,
+    });
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v3.7 — success-evidence merge: the empty/missing-evidence arm absorbed the
+// former enforcement-only empty_success (R3) posture. These rows lock the
+// arm's boundaries — unconditional error (policy switch and no_change_reason
+// do NOT downgrade it), evaluated BEFORE the machine-verified early exit,
+// and suppressed by the declared outcome (effectiveSuccess).
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("verification-gate — v3.7 success-evidence merge (empty arm)", () => {
+  afterEach(() => resetPolicy());
+
+  const successNoEvidence = (overrides: Partial<SelfEvaluation> = {}): SelfEvaluation =>
+    se({
+      success: true,
+      execution_evidence: makeExecutionEvidence({
+        files_changed: [],
+        test_results: null,
+        progress_estimate: 0.5,
+      }),
+      ...overrides,
+    });
+
+  const emptyArmFlag = (result: ReturnType<typeof rawVerifySelfEvaluation>) =>
+    result.flags.find((f) =>
+      f.check === CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE && f.severity === "error");
+
+  it("errors when success=true with no files changed and no tests run", () => {
+    const result = verifySelfEvaluation(successNoEvidence(), 2);
+    assert.equal(result.verdict, "contradicted");
+    assert.ok(emptyArmFlag(result), "empty arm must fire");
+  });
+
+  it("errors when success=true carries no execution_evidence at all (mandatory)", () => {
+    const bare = se({ success: true });
+    (bare as unknown as Record<string, unknown>).execution_evidence = undefined;
+    const result = verifySelfEvaluation(bare, 2);
+    assert.equal(result.verdict, "contradicted");
+    const flag = emptyArmFlag(result);
+    assert.ok(flag);
+    assert.ok(flag.detail.includes("no execution_evidence"),
+      `detail should say evidence is missing, got: ${flag.detail}`);
+  });
+
+  it("still errors under machine_backed_success=warn (empty arm is unconditional)", () => {
+    const p = structuredClone(getPolicy());
+    p.evidence.machine_backed_success = "warn";
+    setPolicyForTest(p);
+    const result = verifySelfEvaluation(successNoEvidence(), 2);
+    assert.equal(result.verdict, "contradicted");
+    assert.ok(emptyArmFlag(result), "empty arm is not the policy-tolerated claims arm");
+  });
+
+  it("still errors when no_change_reason is declared (no change with zero evidence is unbacked)", () => {
+    const result = verifySelfEvaluation(
+      successNoEvidence({ no_change_reason: "Nothing needed changing." }),
+      2,
+    );
+    assert.equal(result.verdict, "contradicted");
+    assert.ok(emptyArmFlag(result), "no_change_reason only downgrades the claims arm");
+  });
+
+  it("still errors when a machine command verified this round (evidence stays mandatory)", () => {
+    // The empty arm runs BEFORE the providerStatus==="verified" early exit —
+    // a passed command never rescues a success claim that recorded no work.
+    const result = verifySelfEvaluation(successNoEvidence(), 2, [], null, [cmdSnap("passed")]);
+    assert.equal(result.verdict, "contradicted");
+    assert.ok(emptyArmFlag(result));
+  });
+
+  it("stays silent when the declared outcome wins (outcome=partial suppresses the arm)", () => {
+    const result = verifySelfEvaluation(successNoEvidence({ outcome: "partial" }), 2);
+    assert.ok(!emptyArmFlag(result), "effectiveSuccess=false suppresses the whole check");
+  });
+
+  it("stays silent when execution_evidence is non-empty (claims arm owns the posture)", () => {
+    const result = verifySelfEvaluation(
+      se({
+        success: true,
+        execution_evidence: makeExecutionEvidence({
+          files_changed: ["src/foo.ts"],
+          test_results: { passed: 1, failed: 0, skipped: 0 },
+        }),
+      }),
+      2,
+      [], null, [cmdSnap("passed")],
+    );
+    assert.ok(!emptyArmFlag(result));
+    assert.equal(result.verdict, "trusted");
   });
 });

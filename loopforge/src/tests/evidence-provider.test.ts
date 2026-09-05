@@ -42,8 +42,8 @@ describe("EvidenceProvider round diffs", () => {
     assert.deepEqual(diffSnapshots(before, after), ["src/restored.ts"]);
   });
 
-  it("honours an empty evidence provider policy", () => {
-    assert.deepEqual(EvidenceCollector.fromProviderNames([]).collect(), []);
+  it("honours an empty evidence provider policy", async () => {
+    assert.deepEqual(await EvidenceCollector.fromProviderNames([]).collectAsync(), []);
   });
 });
 

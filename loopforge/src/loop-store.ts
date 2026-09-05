@@ -122,13 +122,6 @@ export interface LoopRoundDocument {
   events: VaultEntry[];
 }
 
-export interface LoopStoreMigrationResult {
-  source: string;
-  imported: number;
-  skipped: number;
-  alreadyMigrated: boolean;
-}
-
 export interface LoopStore {
   withLock<T>(fn: () => T): T;
   listLoopIds(): string[];
@@ -147,9 +140,9 @@ export interface LoopStore {
   writeSession(loopId: string, document: LoopSessionDocument): void;
   readRound(loopId: string, round: number): LoopRoundDocument | null;
   /** v2.12: Per-round sequence stamps for continuity checking. Backends
-   *  without round documents return [] (legacy → exempt from checks). */
+   *  without round documents return []. v3.7: all loops are stamped — the
+   *  legacy exemption and the vault migration API were removed. */
   listRoundSequences(loopId: string): Array<{ round: number; sequence?: number }>;
-  migrateLegacyVault(path?: string): LoopStoreMigrationResult;
 }
 
 /** Filter a loop's flat entry view with the legacy VaultBackend query
@@ -197,33 +190,32 @@ export function eventSequence(store: LoopStore, loopId: string): number[] {
   return store.listRoundSequences(loopId).map((doc) => doc.round);
 }
 
-/** v2.12: Validate that a loop's round documents form a contiguous sequence
- *  from 1 to max. Legacy loops (no sequence stamps at all) are exempt.
- *  Mixed stamping is allowed only monotonically: rounds below the first
- *  stamped round are treated as legacy; once stamping begins it must not
- *  stop. Throws StorageCorruptionError on violation. */
+/** v2.12/v3.7: Validate that a loop's round documents form a contiguous
+ *  sequence 1..max where every document carries a valid stamp
+ *  (sequence === round). An unstamped/mismatched document is corrupted
+ *  (sequence_invalid); missing rounds are a recoverable gap (sequence_gap,
+ *  autoResumeAll skips the loop gracefully). v3.7: the legacy exemptions
+ *  (all-unstamped loops, monotonic upgrade from an unstamped prefix) were
+ *  removed together with the legacy vault migration API — all loops are
+ *  new-format and stamping is mandatory. Throws StorageCorruptionError. */
 export function checkRoundSequence(
   store: LoopStore,
   loopId: string,
-): { complete: boolean; legacy: boolean } {
+): { complete: true } {
   const docs = store.listRoundSequences(loopId);
-  const stamped = docs.filter((doc) => doc.sequence !== undefined);
-  if (stamped.length === 0) return { complete: true, legacy: true };
-  const firstStamped = Math.min(...stamped.map((doc) => doc.round));
-  // Any round at or after the first stamped round must itself be stamped.
   for (const doc of docs) {
-    if (doc.round >= firstStamped && doc.sequence === undefined) {
+    if (doc.sequence !== doc.round) {
       throw new StorageCorruptionError(
         "sequence_invalid",
-        `Loop ${loopId}: round ${doc.round} is missing its sequence stamp ` +
-        `while round ${firstStamped} is stamped (mixed format)`,
+        `Loop ${loopId}: round ${doc.round} is missing or has an invalid ` +
+        `sequence stamp (expected ${doc.round}, got ${String(doc.sequence)})`,
       );
     }
   }
-  const stampedRounds = stamped.map((doc) => doc.round);
-  const max = Math.max(...stampedRounds);
-  const present = new Set(docs.filter((doc) => doc.round >= firstStamped).map((doc) => doc.round));
-  for (let round = firstStamped; round <= max; round++) {
+  const rounds = docs.map((doc) => doc.round).sort((a, b) => a - b);
+  const max = rounds.length > 0 ? rounds[rounds.length - 1] : 0;
+  const present = new Set(rounds);
+  for (let round = 1; round <= max; round++) {
     if (!present.has(round)) {
       throw new StorageCorruptionError(
         "sequence_gap",
@@ -231,19 +223,7 @@ export function checkRoundSequence(
       );
     }
   }
-  // v2.14: rounds below the first stamped round are exempt ONLY for loops
-  // without a runtime session document — migration imports may legitimately
-  // start at any round, but migration never writes session documents.
-  // A stamped loop WITH a session always began at round 1 (write-time
-  // continuity), so missing rounds 1..N-1 mean deletion, not import.
-  if (firstStamped > 1 && store.readSession(loopId)) {
-    throw new StorageCorruptionError(
-      "sequence_gap",
-      `Loop ${loopId}: rounds 1..${firstStamped - 1} are missing ` +
-      `(first stamped round is ${firstStamped})`,
-    );
-  }
-  return { complete: true, legacy: false };
+  return { complete: true };
 }
 
 function loopIdFromEntry(entry: VaultEntry): string | null {
@@ -487,40 +467,7 @@ export class FileLoopStore implements LoopStore {
     });
   }
 
-  migrateLegacyVault(path = ".promptcraft/prompt_vault.json"): LoopStoreMigrationResult {
-    const source = resolve(path);
-    const marker = join(this.root, "migrations", "promptcraft-v1.json");
-    if (existsSync(marker)) {
-      return { source, imported: 0, skipped: 0, alreadyMigrated: true };
-    }
-    let imported = 0;
-    let skipped = 0;
-    const raw = this.readJson(source);
-    const entries = isRecord(raw) && Array.isArray(raw.entries)
-      ? raw.entries.filter(isRecord) as VaultEntry[]
-      : [];
-    this.withLock(() => {
-      const existing = new Set(this.listEntries().map((entry) => String(entry.task_id ?? "")));
-      for (const entry of entries) {
-        if (!loopIdFromEntry(entry) || existing.has(String(entry.task_id ?? ""))) {
-          skipped++;
-          continue;
-        }
-        this.writeEntry(entry, { allowGap: true });
-        imported++;
-      }
-      this.atomicWrite(marker, {
-        schemaVersion: LOOP_STORE_SCHEMA_VERSION,
-        source,
-        imported,
-        skipped,
-        migratedAt: new Date().toISOString(),
-      });
-    });
-    return { source, imported, skipped, alreadyMigrated: false };
-  }
-
-  private writeEntry(entry: VaultEntry, opts?: { allowGap?: boolean }): void {
+  private writeEntry(entry: VaultEntry): void {
     const loopId = loopIdFromEntry(entry);
     if (!loopId) throw new Error("LoopStore only accepts loop-scoped entries");
     validateLoopId(loopId);
@@ -542,9 +489,10 @@ export class FileLoopStore implements LoopStore {
     const round = roundFromEntry(entry);
     if (!round) throw new Error(`Loop entry has no round: ${entry.task_id ?? "unknown"}`);
     // v2.12: monotonic write-time check — a stamped loop may not skip its
-    // predecessor. Legacy imports (allowGap) bypass this; the load-time
-    // scan in checkRoundSequence remains the backstop.
-    if (!opts?.allowGap && round > 1) {
+    // predecessor. v3.7: the legacy-import (allowGap) bypass was removed
+    // with migrateLegacyVault; the load-time scan in checkRoundSequence
+    // remains the backstop.
+    if (round > 1) {
       const previous = this.readRound(loopId, round - 1);
       if (!previous && this.listRoundSequences(loopId).some((doc) => doc.sequence !== undefined)) {
         throw new StorageCorruptionError(

@@ -8,10 +8,7 @@
  */
 import { createHash } from "node:crypto";
 import { computeGoalTextHash } from "./loop-compiler.js";
-import { entryRound as sharedEntryRound } from "./token-utils.js";
-export function entryRound(entry) {
-    return sharedEntryRound(entry);
-}
+import { entryRound } from "./token-utils.js";
 /** Effects that always require human authorization. */
 const USER_EFFECTS = new Set([
     "production", "credentials", "data_migration", "public_api", "publish",

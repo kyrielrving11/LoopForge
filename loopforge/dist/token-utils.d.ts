@@ -24,9 +24,9 @@ export declare function unique(values: Array<string | null | undefined>): string
  *  transaction modules to validate JSON-deserialized data before field access. */
 export declare function isRecord(value: unknown): value is Record<string, unknown>;
 /** Extract the round number from a vault entry-like object by reading
- *  `loop_lineage.round` (with `lineage.round` fallback). Returns 0 if
- *  the entry has no recognizable round field. */
-export declare function entryRound(entry: Record<string, unknown>): number;
+ *  `loop_lineage.round` (v3.7: the legacy `lineage` alias was removed).
+ *  Returns 0 if the entry has no recognizable round field. */
+export declare function entryRound(entry: unknown): number;
 /** Stable 8-hex item ID derived from normalized text — used for
  *  c-/cr-/sg-XXXXXXXX constraint, criterion, and sub-goal IDs.
  *  Previously copy-pasted in prompt-assembler, canonical-state, and

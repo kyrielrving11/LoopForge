@@ -2,7 +2,7 @@
 
 **A context window is not memory. Memory needs a runtime.**
 
-> **v3.6.0** — `npm install -g loopforge`. Node.js ≥ 18. Zero runtime dependencies.
+> **v3.7.0** — `npm install -g loopforge`. Node.js ≥ 18. Zero runtime dependencies.
 > [中文文档](../README.zh-CN.md)
 
 ---
@@ -41,11 +41,14 @@ optional fields are normalized. Invalid input returns `evaluation_invalid` and
 can be corrected with the same `roundId` without saving session state, writing
 a round, entering either gate, or changing metrics.
 
-Valid submissions pass through evidence collection, 27 verification checks,
-and 14 enforcement rules. Only an allowed round joins committed history. The
-shared internal `CommittedRoundView` gives Replay, Audit, Metrics, contracts,
-the compiler, and gate history one decoder and one filtering policy. It does
-not create another storage format.
+Valid submissions pass through evidence collection, a verification gate
+organized into four domains (evaluation consistency, evidence integrity, plan
+& contract, progress & recovery), and an enforcement gate driven by one
+ordered strategy table across four action classes (evidence contradiction,
+contract & scope, plan drift, progress recovery). Only an allowed round joins
+committed history. The shared internal `CommittedRoundView` gives Replay,
+Audit, Metrics, contracts, the compiler, and gate history one decoder and one
+filtering policy. It does not create another storage format.
 
 The compiler evolves Canonical State from committed history, then derives
 focus, todo, phase, delegation, and handoff for prompts and status views. The
@@ -59,9 +62,9 @@ LoopForge:    committed rounds -> Canonical State -> next prompt
 
 The verification gate compares claims with Git snapshots, test output, and
 configured command evidence. The enforcement gate can accept, reject,
-backtrack, or terminate. A rejected submission commits nothing. R4 and R5 can
-restore the last clean round, inject a diagnosis, and verify workspace
-restoration before work continues.
+backtrack, or terminate. A rejected submission commits nothing. A stalled-
+progress evaluator can restore the last clean round, inject a diagnosis, and
+verify workspace restoration before work continues.
 
 ---
 

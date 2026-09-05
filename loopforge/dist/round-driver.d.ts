@@ -47,9 +47,6 @@ export declare class RoundDriver {
     private readonly store;
     constructor(engine: LoopForgeEngine, store?: LoopStore);
     prepare(request: LoopForgeRequest, loopId: string, round: number): Promise<PreparedRound | null>;
-    /** Synchronous fallback for legacy embedding APIs. Async evidence providers
-     * are deliberately skipped by EvidenceCollector.collect(). */
-    prepareSync(request: LoopForgeRequest, loopId: string, round: number): PreparedRound | null;
     private compile;
     /** Compile a fresh prompt for a zero-commit enforcement retry. The logical
      * round ID and before-evidence snapshot remain stable; only attempt changes. */

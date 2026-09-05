@@ -24,10 +24,10 @@ describe("loopforge CLI", () => {
   it("exposes one versioned command surface", () => {
     const help = run(["--help"]);
     assert.equal(help.status, 0, help.stderr);
-    assert.match(help.stdout, /LoopForge 3\.6\.0/);
+    assert.match(help.stdout, /LoopForge 3\.7\.0/);
     assert.match(help.stdout, /loopforge mcp/);
     assert.match(help.stdout, /loopforge inspect/);
-    assert.equal(run(["--version"]).stdout.trim(), "3.6.0");
+    assert.equal(run(["--version"]).stdout.trim(), "3.7.0");
   });
 
   it("returns machine-readable doctor results", () => {
@@ -137,24 +137,6 @@ describe("loopforge CLI", () => {
     }
   });
 
-  it("migrates a legacy vault once", () => {
-    const root = temporaryDirectory();
-    try {
-      const source = join(root, "legacy.json");
-      writeFileSync(source, JSON.stringify({ entries: [{
-        task_id: "loop:migrated-cli:r1",
-        task_type: "loop_lineage",
-        loop_id: "migrated-cli",
-        loop_lineage: { round: 1 },
-      }] }), "utf8");
-      const result = run(["migrate", "--from", source, "--json"], root);
-      assert.equal(result.status, 0, result.stderr);
-      assert.equal(JSON.parse(result.stdout).imported, 1);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
   it("installs only the Perception skill for a generic client", () => {
     const root = temporaryDirectory();
     try {
@@ -179,7 +161,6 @@ describe("loopforge CLI", () => {
       assert.ok(existsSync(policyPath), "loop_policy.json should exist");
       const raw = JSON.parse(readFileSync(policyPath, "utf8"));
       assert.equal(raw.version, "2");
-      assert.equal(raw.prompt.injection_mode, "adaptive");
       assert.equal(raw.engine.max_rounds, 20);
       assert.equal(raw.evidence.providers[0], "git");
     } finally {

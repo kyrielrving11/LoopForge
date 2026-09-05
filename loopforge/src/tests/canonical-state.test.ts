@@ -138,11 +138,9 @@ describe("createCanonicalLoopState", () => {
     const state = createCanonicalLoopState(request(), response({
       constraints_active: ["c1", "c2"],
       constraints_retired: ["old"],
-      constraints_inactive: ["stale"],
     }), "test.md");
     assert.deepEqual(state.activeConstraints, ["c1", "c2"]);
     assert.deepEqual(state.retiredConstraints, ["old"]);
-    assert.deepEqual(state.inactiveConstraints, ["stale"]);
   });
 
   it("propagates rolling summary data", () => {

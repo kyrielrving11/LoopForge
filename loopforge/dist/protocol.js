@@ -102,15 +102,6 @@ export function makeSelfEvaluation(overrides = {}) {
         ...overrides,
     };
 }
-export function makeCriterionStatus(overrides = {}) {
-    return {
-        id: "",
-        text: "",
-        status: "unknown",
-        related_subgoal_ids: [],
-        ...overrides,
-    };
-}
 export function makeLoopObjective(overrides = {}) {
     return {
         objective: "",
@@ -160,10 +151,8 @@ export function makeConstraintMeta(overrides = {}) {
     return {
         id: "",
         text: "",
-        discovered_at_round: 0,
         last_violated_at_round: 0,
         source: "discovered",
-        status: "active",
         ...overrides,
     };
 }
@@ -173,14 +162,6 @@ export function makeTaskAlignment(overrides = {}) {
         alignment_score: 1.0,
         warning: "",
         escalation: "none",
-        ...overrides,
-    };
-}
-export function makeRoundContract(overrides = {}) {
-    return {
-        done_when: [],
-        verification_plan: [],
-        scope: [],
         ...overrides,
     };
 }
@@ -256,7 +237,6 @@ export function makeLoopCompileResponse(overrides = {}) {
         task_alignment: null,
         rolling_summary: null,
         sub_goals: [],
-        constraints_inactive: [],
         constraint_metadata: [],
         agent_trust_score: undefined,
         agent_trust_trend: [],
@@ -277,8 +257,6 @@ export function makeSessionState(taskId) {
         task_id: taskId,
         call_count: 0,
         success_trend: [],
-        current_version: "v1",
-        feedback_buffer: [],
     };
 }
 export function makeEnforcementResult(overrides = {}) {

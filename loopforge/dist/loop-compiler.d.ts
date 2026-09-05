@@ -50,12 +50,6 @@ export declare function deriveConstraintId(text: string): string;
 /** v2.11: Derive a stable criterion ID from its text hash (cr-XXXXXXXX).
  *  Same hash strategy as SubGoal — deterministic across rounds. */
 export declare function deriveCriterionId(text: string): string;
-/** v2.11: Check whether a user-provided reference looks like a constraint ID.
- *  Matches the pattern c-XXXXXXXX where X is a hex digit. */
-export declare function isConstraintId(ref: string): boolean;
-/** v2.11: Check whether a user-provided reference looks like a criterion ID.
- *  Matches the pattern cr-XXXXXXXX where X is a hex digit. */
-export declare function isCriterionId(ref: string): boolean;
 export declare function alignTask(proposedTask: string, request: LoopCompileRequest, context: Record<string, unknown> | null): TaskAlignment;
 export declare function checkLoopHealth(loopId: string, request: LoopCompileRequest, context: Record<string, unknown> | null): LoopHealth;
 export declare function decideLevel(request: LoopCompileRequest, context: Record<string, unknown> | null): "l0" | "l1" | "l2";

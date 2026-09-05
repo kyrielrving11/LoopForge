@@ -408,7 +408,8 @@ export class LoopForgeEngine {
                 fbByRound.set(fbRound, fe);
         }
         for (const entry of fresh) {
-            const lineage = (entry.loop_lineage ?? entry.lineage ?? {});
+            // v3.7: the legacy top-level `lineage` alias was removed.
+            const lineage = (entry.loop_lineage ?? {});
             const rnd = lineage.round;
             const fb = rnd ? fbByRound.get(rnd) : undefined;
             if (fb)

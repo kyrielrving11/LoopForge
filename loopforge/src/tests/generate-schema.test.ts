@@ -194,17 +194,3 @@ describe("required arrays", () => {
   });
 
 });
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Record<string, unknown> special case
-// ═══════════════════════════════════════════════════════════════════════════
-
-describe("Record<string, unknown> handling", () => {
-  it("SessionState.feedback_buffer is array of objects with additionalProperties", () => {
-    const fb = props("SessionState").feedback_buffer;
-    assert.equal(fb.type, "array");
-    const items = fb.items as Record<string, unknown>;
-    assert.equal(items.type, "object");
-    assert.equal(items.additionalProperties, true);
-  });
-});

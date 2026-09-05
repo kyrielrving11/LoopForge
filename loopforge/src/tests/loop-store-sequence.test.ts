@@ -91,7 +91,7 @@ describe("loop-store sequence integrity", () => {
       }
       const doc = store.readRound("loop-a", 2);
       assert.equal(doc?.sequence, 2);
-      assert.deepEqual(checkRoundSequence(store, "loop-a"), { complete: true, legacy: false });
+      assert.deepEqual(checkRoundSequence(store, "loop-a"), { complete: true });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -138,13 +138,22 @@ describe("loop-store sequence integrity", () => {
     }
   });
 
-  it("exempts legacy loops with no sequence stamps", () => {
+  it("throws corrupted sequence_invalid for a round document without a stamp", () => {
+    // v3.7: the legacy no-stamp exemption was removed — every round must be
+    // stamped with sequence === round.
     const dir = temporaryDirectory();
     try {
       const store = new FileLoopStore(dir);
       writeLegacyRound(store, "legacy-loop", 1);
-      writeLegacyRound(store, "legacy-loop", 3); // gap, but no stamps → exempt
-      assert.deepEqual(checkRoundSequence(store, "legacy-loop"), { complete: true, legacy: true });
+      assert.throws(
+        () => checkRoundSequence(store, "legacy-loop"),
+        (error: unknown) => {
+          assert.ok(error instanceof StorageCorruptionError);
+          assert.equal(error.kind, "sequence_invalid");
+          assert.equal(error.recoverable, false);
+          return true;
+        },
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -170,16 +179,23 @@ describe("loop-store sequence integrity", () => {
     }
   });
 
-  it("allows monotonic legacy upgrade: unstamped rounds then stamped rounds", () => {
+  it("rejects an unstamped legacy prefix before a stamped round", () => {
+    // v3.7: the monotonic upgrade path was removed — an unstamped prefix is
+    // corrupted, not upgradeable.
     const dir = temporaryDirectory();
     try {
       const store = new FileLoopStore(dir);
       writeLegacyRound(store, "loop-a", 1);
       writeLegacyRound(store, "loop-a", 2);
       store.appendEntry(entry("loop-a", 3, "feedback")); // stamps round 3
-      const result = checkRoundSequence(store, "loop-a");
-      assert.equal(result.complete, true);
-      assert.equal(result.legacy, false);
+      assert.throws(
+        () => checkRoundSequence(store, "loop-a"),
+        (error: unknown) => {
+          assert.ok(error instanceof StorageCorruptionError);
+          assert.equal(error.kind, "sequence_invalid");
+          return true;
+        },
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -219,7 +235,10 @@ describe("loop-store sequence integrity", () => {
     }
   });
 
-  it("flags a prefix gap for runtime loops (session exists) but not for imported loops", () => {
+  it("flags a prefix gap as recoverable for every loop shape", () => {
+    // v3.7: the import carve-out was removed with the migration API — a
+    // loop starting at round 3 (missing rounds 1-2) is a recoverable gap
+    // whether or not a runtime session document exists.
     const dir = temporaryDirectory();
     try {
       const store = new FileLoopStore(dir);
@@ -228,16 +247,15 @@ describe("loop-store sequence integrity", () => {
       store.appendEntry(entry(loopId, 3, "loop_lineage"));
       store.appendEntry(entry(loopId, 4, "loop_lineage"));
       store.appendEntry(entry(loopId, 5, "loop_lineage"));
-      // Without a session document this is a legitimate import shape
-      // (migration may start at any round and never writes sessions)
-      assert.deepEqual(checkRoundSequence(store, loopId), {
-        complete: true,
-        legacy: false,
-      });
+      assert.throws(
+        () => checkRoundSequence(store, loopId),
+        (error: unknown) =>
+          error instanceof StorageCorruptionError &&
+          error.kind === "sequence_gap" &&
+          error.message.includes("at 1"),
+      );
 
-      // A runtime loop always starts at round 1 — a session document proves
-      // the loop was created through the runtime, so missing rounds 1-2
-      // mean deletion, not import.
+      // Same verdict for a loop with a session document.
       store.writeSession(loopId, {
         schemaVersion: 1,
         loopId,
@@ -254,7 +272,7 @@ describe("loop-store sequence integrity", () => {
         (error: unknown) =>
           error instanceof StorageCorruptionError &&
           error.kind === "sequence_gap" &&
-          error.message.includes("rounds 1..2"),
+          error.message.includes("at 1"),
       );
     } finally {
       rmSync(dir, { recursive: true, force: true });

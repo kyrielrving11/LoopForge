@@ -11,16 +11,19 @@
  *                 this round is excluded from the success trend (NOT
  *                 modified). Flags become hard constraints — the agent
  *                 must respond in the next round.
+ *
+ * v3.7: every check belongs to one of four verification domains (CHECK_DOMAIN
+ * below): evaluation consistency / evidence integrity / plan & contract /
+ * progress & recovery. A domain describes a check's semantic job — it never
+ * changes run order or verdict aggregation. Round Contract checks are further
+ * framed as declaration / execution / closure stages in their doc comments.
  */
 import type { VaultEntry } from "./loop-store.js";
 import type { ProviderSnapshot } from "./evidence-provider.js";
 import type { SelfEvaluation, VerificationResult } from "./protocol.js";
-export declare const CHECK_PROGRESS_REGRESSION = "progress_regression";
-export declare const CHECK_EMPTY_CHANGE_WITH_PASSING = "empty_change_with_passing";
 export declare const CHECK_SUCCESS_WITH_REMAINING_CRITERIA = "success_with_remaining_criteria";
 export declare const CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE = "success_without_verified_evidence";
 export declare const CHECK_OUTCOME_SUCCESS_CONTRADICTION = "outcome_success_contradiction";
-export declare const CHECK_SUCCESS_CLAIM_CONFLICT = "success_claim_conflict";
 export declare const CHECK_BLOCKED_WITHOUT_BLOCKER = "blocked_without_blocker";
 export declare const CHECK_RETROACTIVE_CLAIM_BAD_ROUND = "retroactive_claim_bad_round";
 export declare const CHECK_RETROACTIVE_CLAIM_UNVERIFIED = "retroactive_claim_unverified";
@@ -72,12 +75,19 @@ export declare const CHECK_CONTRACT_COMPLETION_UNVERIFIED = "contract_completion
  *  the active one closes. Warn: the walker still ignores it; this only
  *  surfaces the otherwise-silent state. */
 export declare const CHECK_CONTRACT_PREMATURE = "contract_premature";
-/** Extract the round number from a vault entry's loop_lineage.
- *  Returns 0 if the entry has no lineage or no round field.
- *  In practice, persistLoopLineage always writes round ≥ 1, so 0
- *  unambiguously means "not a valid round entry" in this context.
- *  Exported for reuse by enforcement-gate.ts. */
-export declare function entryRound(entry: VaultEntry): number;
+export type VerificationDomain = 
+/** The declaration is self-consistent (and consistent with committed facts). */
+"evaluation_consistency"
+/** Machine evidence and the agent's claims about it. */
+ | "evidence_integrity"
+/** Plan conformance: intent/sub-goal drift (two detection bases under the
+ *  "plan drift" label) and the Round Contract declaration/execution/closure
+ *  checks. */
+ | "plan_contract"
+/** Workspace restore after backtrack. Machine-side progress enforcement
+ *  (the stall evaluator) lives in the enforcement gate, not here. */
+ | "progress_recovery";
+export declare const CHECK_DOMAIN: Readonly<Record<string, VerificationDomain>>;
 /** Normalize a contract scope entry: backslashes → forward slashes, strip
  *  leading "./", trim, strip trailing slashes. "." / "./" / "" normalize to
  *  "" = the repository root (everything is in scope). */

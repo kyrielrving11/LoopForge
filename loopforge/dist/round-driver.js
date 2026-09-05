@@ -6,7 +6,7 @@
  * in their adapters.
  */
 import { EvidenceCollector } from "./evidence-provider.js";
-import { getPolicy, writeStateFile } from "./policy.js";
+import { writeStateFile } from "./policy.js";
 import { prepareRejectedAttempt, prepareRoundTransaction, RoundTransactionCoordinator, } from "./round-transaction.js";
 export class RoundDriver {
     engine;
@@ -25,15 +25,6 @@ export class RoundDriver {
         ]);
         if (!response)
             return null;
-        return this.finishPrepare(response, loopId, round, evidenceBaseline);
-    }
-    /** Synchronous fallback for legacy embedding APIs. Async evidence providers
-     * are deliberately skipped by EvidenceCollector.collect(). */
-    prepareSync(request, loopId, round) {
-        const response = this.compile(request, loopId, true);
-        if (!response)
-            return null;
-        const evidenceBaseline = EvidenceCollector.fromProviderNames(getPolicy().evidence.providers).collect({ loopId });
         return this.finishPrepare(response, loopId, round, evidenceBaseline);
     }
     compile(request, loopId, persistLineage) {

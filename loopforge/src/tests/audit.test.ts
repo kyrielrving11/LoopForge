@@ -185,7 +185,7 @@ describe("buildAudit", () => {
       committedFeedback(
         1,
         { success: true, output_summary: "stalled work", constraint_violations: [], should_continue: true },
-        [{ severity: "error", check: "progress_regression", field: "progress_estimate", detail: "stalled" }],
+        [{ severity: "error", check: "success_with_remaining_criteria", field: "success", detail: "stalled" }],
         "backtrack",
       ),
       committedFeedback(

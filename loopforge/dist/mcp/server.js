@@ -8,7 +8,7 @@ import { appendFileSync } from "node:fs";
 import { SessionManager } from "./session.js";
 import { TOOL_HANDLERS, TOOL_SCHEMAS, ToolInputValidationError, validateToolDispatchInput, validateToolOutput, } from "./tools.js";
 import { isRecord } from "../token-utils.js";
-const SERVER_INFO = { name: "loopforge-mcp", version: "3.6.0" };
+const SERVER_INFO = { name: "loopforge-mcp", version: "3.7.0" };
 const SUPPORTED_PROTOCOL_VERSIONS = new Set([
     "2024-11-05",
     "2025-03-26",

@@ -171,7 +171,11 @@ export class RoundLifecycle {
         const task = entry.task ?? "";
         const maxRounds = lineage.max_rounds ?? getPolicy().engine.max_rounds;
         const roundSnapshot = parseRoundTransactionSnapshot(lineage.round_snapshot);
-        const fallbackEvidence = EvidenceCollector.fromProviderNames(getPolicy().evidence.providers).collect();
+        // v3.7: the synchronous evidence fallback was removed (async providers
+        // could never be collected synchronously — they were skipped and logged
+        // as failures). Every path that needs evidence re-collects asynchronously
+        // through prepare()/unpause(); a missing snapshot starts with no baseline.
+        const fallbackEvidence = [];
         const persistedEval = lineage.last_self_eval;
         const lastSelfEval = persistedEval !== null &&
             typeof persistedEval === "object" &&
@@ -246,8 +250,10 @@ export class RoundLifecycle {
         };
     }
     /** Reconcile the crash window where feedback committed but session_state
-     *  still points at the old prompt. Returns null when no commit is pending. */
-    reconcileCommittedRound(session) {
+     *  still points at the old prompt. Returns null when no commit is pending.
+     *  v3.7: async — the continue-after-crash branch compiles through
+     *  RoundDriver.prepare (the sync prepareSync fallback was removed). */
+    async reconcileCommittedRound(session) {
         if (!session.roundSnapshot)
             return null;
         const recovered = new RoundDriver(session.engine, this.store).recover(session.roundSnapshot);
@@ -324,7 +330,7 @@ export class RoundLifecycle {
             session.currentRound = recovered.snapshot.round + 1;
         }
         const request = buildLoopRequest(session, pr.newLastSelfEval, pr.verificationFlags);
-        const prepared = new RoundDriver(session.engine, this.store).prepareSync(request, session.loopId, session.currentRound);
+        const prepared = await new RoundDriver(session.engine, this.store).prepare(request, session.loopId, session.currentRound);
         if (!prepared) {
             session.status = "stalled";
             this.save(session);
@@ -333,7 +339,7 @@ export class RoundLifecycle {
                 round: session.currentRound,
                 prompt: null,
                 stopReason: "stalled",
-                stopDetail: "RoundDriver.prepareSync returned null — prompt compilation failed during crash recovery. The session state may be inconsistent.",
+                stopDetail: "RoundDriver.prepare returned null — prompt compilation failed during crash recovery. The session state may be inconsistent.",
             };
         }
         return this.persistPrepared(session, {
@@ -346,25 +352,37 @@ export class RoundLifecycle {
     }
     /** Resume tail: the session has been reconstructed and registered. Reconcile
      *  a committed-but-undelivered round, restore the held prompt, or recover a
-     *  missing prompt from current round state. */
-    resume(session) {
-        const reconciled = this.reconcileCommittedRound(session);
+     *  missing prompt from current round state. v3.7: async — compilation runs
+     *  through RoundDriver.prepare like unpause (the prepareSync fallback was
+     *  removed); a failed compile now degrades to the same stalled terminal
+     *  result unpause returns instead of persisting a null prompt. */
+    async resume(session) {
+        const reconciled = await this.reconcileCommittedRound(session);
         if (reconciled)
             return reconciled;
         const restored = this.restoredPromptResult(session);
         if (restored)
             return restored;
-        // Missing held prompt: compile once, then persist it.
+        // Missing held prompt: compile (async) once, then persist it.
         const request = buildLoopRequest(session);
-        const prepared = new RoundDriver(session.engine, this.store).prepareSync(request, session.loopId, session.currentRound);
-        const prompt = prepared?.prompt ?? null;
-        const baseline = prepared?.evidenceBaseline ?? [];
-        const snapshot = prepared?.snapshot ?? prepareRoundTransaction(session.loopId, session.currentRound, []);
+        const prepared = await new RoundDriver(session.engine, this.store).prepare(request, session.loopId, session.currentRound);
+        if (!prepared) {
+            session.status = "stopped";
+            this.save(session);
+            void this.notifyTerminal(session, "stalled");
+            return {
+                sessionId: session.sessionId,
+                round: session.currentRound,
+                prompt: null,
+                stopReason: "stalled",
+                stopDetail: "RoundDriver.prepare returned null during resume — the compiler could not produce a prompt.",
+            };
+        }
         return this.persistPrepared(session, {
-            prompt,
-            level: prepared?.level ?? "l2",
-            baseline,
-            snapshot,
+            prompt: prepared.prompt,
+            level: prepared.level,
+            baseline: prepared.evidenceBaseline,
+            snapshot: prepared.snapshot,
             warnings: prepared?.warnings ?? [],
         }, false);
     }
@@ -389,7 +407,7 @@ export class RoundLifecycle {
         catch {
             // Async evidence is best-effort; fall back to sync baseline.
         }
-        const reconciled = this.reconcileCommittedRound(session);
+        const reconciled = await this.reconcileCommittedRound(session);
         if (reconciled)
             return reconciled;
         const restored = this.restoredPromptResult(session);

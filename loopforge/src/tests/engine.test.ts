@@ -442,8 +442,8 @@ describe("Engine — P0-P5 Cognitive Evolution (v1.7 E2E)", () => {
       verification_flags: [
         { severity: "error", field: "success", check: "success_with_remaining_criteria",
           detail: "Agent claims success but 2 criteria remain unmet: Access control, Overflow" },
-        { severity: "warn", field: "progress_estimate", check: "progress_regression",
-          detail: "Progress dropped from 0.50 to 0.20" },
+        { severity: "warn", field: "blocker", check: "blocked_without_blocker",
+          detail: "outcome=blocked but no blocker description" },
       ],
     } as unknown as LoopForgeRequest);
     assert.equal(result.status, AgentStatus.OK);
@@ -451,11 +451,11 @@ describe("Engine — P0-P5 Cognitive Evolution (v1.7 E2E)", () => {
     assert.ok(prompt.includes("Verification Gate"), "Gate section missing");
     assert.ok(prompt.includes("🚫"), "Error flag icon missing");
     assert.ok(prompt.includes("CONTRADICTED"), "Contradicted verdict message missing");
-    assert.ok(prompt.includes("progress_regression"), "Warn flag check name missing");
+    assert.ok(prompt.includes("blocked_without_blocker"), "Warn flag check name missing");
     // v3.2: error/warn flags carry actionable continuation lines.
     assert.ok(prompt.includes("→ Fix: Complete the remaining criteria"),
       "error flag must carry a Fix instruction");
-    assert.ok(prompt.includes("→ Action: Correct progress_estimate"),
+    assert.ok(prompt.includes("→ Action: State the concrete blocker"),
       "warn flag must carry an Action instruction");
   });
 });

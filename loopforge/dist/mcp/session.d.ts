@@ -63,9 +63,10 @@ export declare class SessionManager implements SessionRegistry {
      *  the round lifecycle, which owns the durable session document shape. */
     save(session: McpSession): void;
     /** Resume a loop from vault state.
-     *  Reconstructs the session and compiles the prompt for the next round.
+     *  Reconstructs the session and compiles the prompt for the next round
+     *  (async — compilation collects evidence through RoundDriver.prepare).
      *  Returns null if no session_state entry exists for this loopId. */
-    resume(loopId: string): AdvanceResult | null;
+    resume(loopId: string): Promise<AdvanceResult | null>;
     /** v1.18: Resume a paused session. Reconstructs from vault state and
      *  compiles the next prompt. Returns null if no paused session exists
      *  for this loopId. */

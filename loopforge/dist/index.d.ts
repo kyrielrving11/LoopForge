@@ -1,6 +1,6 @@
 /** LoopForge — Cognitive State Runtime for AI coding agents.
  *
- * TypeScript reference implementation v3.6.0
+ * TypeScript reference implementation v3.7.0
  *
  * Usage:
  *   import { LoopForgeEngine, ReplayBackend, compileLoop } from "loopforge";
@@ -19,7 +19,7 @@ export type { ExecutionFeedback, SelfEvaluation, LoopForgeRequest, LoopObjective
 export { getPolicy, loadPolicy, resetPolicy, DEFAULT_POLICY, writeStateFile, } from "./policy.js";
 export type { LoopPolicy, ConstraintsPolicy, SummaryPolicy, EnginePolicy, BackendPolicy, PromptPolicy, StateFilePolicy, EvidencePolicy, CommandEvidencePolicy, McpPolicy, } from "./policy.js";
 export { FileLoopStore, queryLoopEntries, LOOP_STORE_SCHEMA_VERSION, } from "./loop-store.js";
-export type { LoopStore, LoopSessionDocument, LoopRoundDocument, LoopStoreMigrationResult, VaultEntry, } from "./loop-store.js";
+export type { LoopStore, LoopSessionDocument, LoopRoundDocument, VaultEntry, } from "./loop-store.js";
 export { compileLoop, decideLevel, alignTask, checkLoopHealth, computeGoalTextHash, deriveGoalId, getPreviousRound, buildSelfEvalBlock, buildRollingSummary, } from "./loop-compiler.js";
 export { ReplayBackend } from "./replay.js";
 export { LoopForgeEngine, createEngine, buildSelfEvaluation, parseExecutionEvidence, parseCriterionRevisions, parseWorkerResults, } from "./engine.js";

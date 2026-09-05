@@ -1019,9 +1019,6 @@
         "text": {
           "type": "string"
         },
-        "discovered_at_round": {
-          "type": "number"
-        },
         "last_violated_at_round": {
           "type": "number"
         },
@@ -1052,33 +1049,15 @@
               ]
             }
           ]
-        },
-        "status": {
-          "anyOf": [
-            {
-              "type": "string",
-              "enum": [
-                "active"
-              ]
-            },
-            {
-              "type": "string",
-              "enum": [
-                "inactive"
-              ]
-            }
-          ]
         }
       },
       "required": [
         "id",
         "text",
-        "discovered_at_round",
         "last_violated_at_round",
-        "source",
-        "status"
+        "source"
       ],
-      "description": "v2.3: Per-constraint lifecycle metadata derived by the compiler.\nReconstructed each round from vault entries — no new persistence.\nDiscovered constraints without violations for N rounds are demoted\nto inactive; hard/plan/criteria constraints never auto-decay."
+      "description": "v2.3: Per-constraint lifecycle metadata for the active constraint set.\nReconstructed each round from vault entries — no new persistence.\nv3.7: the time-aware decay arm (status inactive / discovered_at_round)\nwas removed — active constraints never auto-demote."
     },
     "TaskAlignment": {
       "type": "object",
@@ -1361,12 +1340,6 @@
             }
           ]
         },
-        "levelReasons": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
         "renderedPrompt": {
           "type": "string"
         },
@@ -1375,27 +1348,6 @@
         },
         "stateHash": {
           "type": "string"
-        },
-        "basePromptVersion": {
-          "type": "string"
-        },
-        "includedSections": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "budgetChars": {
-          "type": "number"
-        },
-        "charCount": {
-          "type": "number"
-        },
-        "budgetExceeded": {
-          "type": "boolean"
-        },
-        "generatedAt": {
-          "type": "number"
         },
         "presentedState": {
           "$ref": "#/$defs/PresentedStateSnapshot"
@@ -1406,16 +1358,9 @@
         "roundId",
         "attempt",
         "level",
-        "levelReasons",
         "renderedPrompt",
         "promptHash",
-        "stateHash",
-        "basePromptVersion",
-        "includedSections",
-        "budgetChars",
-        "charCount",
-        "budgetExceeded",
-        "generatedAt"
+        "stateHash"
       ],
       "description": "Immutable record of the exact prompt delivered for one round attempt."
     },
@@ -1508,12 +1453,6 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/SubGoal"
-          }
-        },
-        "constraints_inactive": {
-          "type": "array",
-          "items": {
-            "type": "string"
           }
         },
         "constraint_metadata": {
@@ -1705,24 +1644,12 @@
           "items": {
             "type": "boolean"
           }
-        },
-        "current_version": {
-          "type": "string"
-        },
-        "feedback_buffer": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "additionalProperties": true
-          }
         }
       },
       "required": [
         "task_id",
         "call_count",
-        "success_trend",
-        "current_version",
-        "feedback_buffer"
+        "success_trend"
       ]
     },
     "AgentLoopResult": {

@@ -909,7 +909,7 @@ export const TOOL_HANDLERS = {
         // changed back to running before a prompt is returned.
         let result = await mgr.unpause(loopId);
         if (!result) {
-            result = mgr.resume(loopId);
+            result = await mgr.resume(loopId);
         }
         if (!result)
             return { error: `no saved session found for loop "${loopId}"` };

@@ -23,7 +23,7 @@ file changes, tool use, and reasoning.
 - TypeScript only.
 - Node.js 18 or newer.
 - Zero runtime dependencies.
-- The npm package is in `loopforge/` and the current version is `3.6.0`.
+- The npm package is in `loopforge/` and the current version is `3.7.0`.
 - Preserve user changes in a dirty worktree.
 - Edit `loopforge/src/protocol.ts` before changing protocol fields, then run the
   build to regenerate `loopforge-protocol.json` and `loopforge/dist/`.
@@ -68,13 +68,18 @@ loopforge/src/
   round-contract.ts     Active Round Contract derivation and item matching
   round-coordinator.ts  Verification, enforcement, recovery, and stop decisions
   verification-gate.ts  Independent evidence and cross-round consistency checks
-  enforcement-gate.ts   Cognitive-integrity disposition rules
+                        (four verification domains: evaluation consistency /
+                        evidence integrity / plan & contract / progress &
+                        recovery)
+  enforcement-gate.ts   Disposition rules over an in-process strategy table
+                        (four action classes: evidence contradiction / contract
+                        & scope / plan drift / progress recovery)
   evidence-claims.ts    Derived claim provenance and verified-claim views
   cognitive-governance.ts User and agent gate classification
   loop-projection.ts    Typed adapter over DerivedCognitiveFacts
   audit.ts              Read-only completeness and evidence audit
   replay.ts             Read-only committed timeline and diff queries
-  loop-store.ts         Atomic typed JSON persistence and migrations
+  loop-store.ts         Atomic typed JSON persistence
   evidence-provider.ts  Git, custom, and explicit command evidence providers
   policy.ts             Runtime policy and derived state-file writes
   observability.ts      Structured tracing
@@ -151,22 +156,33 @@ crash.
 ## Evidence and gates
 
 The verification gate compares claims with independent Git snapshots, test
-output, and explicitly configured command evidence. The enforcement gate turns
-verification results into accept, reject, backtrack, or terminate decisions.
-
-Machine evidence can excuse a progress-stall verdict when the machine window
-observes Git motion. Agent-reported progress cannot create a machine verdict or
-cancel one. A success claim without a machine-verified observation is handled
-by the R8 success-evidence policy. `no_change_reason` is an R8-only escape
-hatch; it does not excuse contract completion, scope drift, or silently dropped
-contract claims.
+output, and explicitly configured command evidence. Its checks are organized
+into four verification domains: evaluation consistency, evidence integrity,
+plan & contract conformance, and progress & recovery. The enforcement gate
+turns verification results into accept, reject, backtrack, or terminate
+decisions through one ordered in-process strategy table; its rows fall into
+four action classes (evidence contradiction, contract & scope, plan drift,
+progress recovery). Rule numbers are historical — v3.7 documents semantics,
+not numbered rules. Success evidence is a single policy: a success claim with
+no machine-verified observation, or with empty/missing evidence, is handled
+by the success-evidence check; `no_change_reason` is that check's escape hatch
+for the claims arm only — it does not excuse contract completion, scope drift,
+silently dropped contract claims, or a success claim that recorded no
+execution evidence at all. Progress enforcement is a single stall evaluator:
+a window without machine git motion and without self-reported progress motion
+rejects, then backtracks or terminates; git motion can excuse a stall verdict,
+agent-reported progress alone cannot create or cancel one.
 
 Round Contracts are proposals for the next round. A proposal becomes active
 only after its declaring round commits. The active contract is derived from
 committed rounds on every compile path, including retry, resume, and backtrack.
-It closes when a committed evaluation completes its `done_when` items or
-reports `outcome: "blocked"`. A verification plan must be observed passing in
-the closing round. A different proposal while the active contract is open is
+Contract checks are framed in three stages — Declaration (proposal
+verifiability: done_when and verification_plan), Execution (scope conformance,
+done_when not dropped), Closure (every done_when met and the verification plan
+observed passing) — a documentation framing only; no phase field exists. It
+closes when a committed evaluation completes its `done_when` items or reports
+`outcome: "blocked"`. A verification plan must be observed passing in the
+closing round. A different proposal while the active contract is open is
 ignored and surfaced as a warning.
 
 ## Prompt levels and projections
@@ -189,14 +205,16 @@ truth.
     session.json
     rounds/<round>.json
   state/<loopId>-state.md
-  migrations/
 ```
 
-Round documents carry monotonic sequence stamps. Writes are atomic and protected
+Every round document carries a monotonic sequence stamp (`sequence === round`);
+unstamped rounds are corrupted and missing rounds are a recoverable gap. The
+legacy PromptCraft vault migration API and CLI command were removed in v3.7 —
+imported legacy loops are no longer supported. Writes are atomic and protected
 by owned locks. MCP mutations are serialized per session and fenced by
 renewable cross-process leases. Command evidence is disabled by default, uses
 an executable plus arguments with `shell: false`, and is restricted to the
-workspace.
+workspace. Evidence collection is always asynchronous.
 
 The primary integration is the synchronous MCP server:
 
@@ -223,7 +241,7 @@ external agent remains the execution owner.
   input, same-round retry, and state-unchanged tests.
 - Transaction changes require reject, backtrack, replay, concurrent next,
   pause, stop, and restart coverage.
-- Store changes require atomicity, sequence-gap, migration, lock ownership, and
+- Store changes require atomicity, sequence-gap, lock ownership, and
   cross-process lease coverage.
 - Evidence changes require timeout, abort, unavailable provider, output cap,
   workspace boundary, and contradiction coverage.

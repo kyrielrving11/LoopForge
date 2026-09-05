@@ -28,7 +28,8 @@ import type {
   VerificationFlag,
   VerificationResult,
 } from "./protocol.js";
-import { CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE, verifySelfEvaluation, entryRound } from "./verification-gate.js";
+import { CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE, verifySelfEvaluation } from "./verification-gate.js";
+import { entryRound } from "./token-utils.js";
 import { effectiveSuccess } from "./self-eval.js";
 import {
   enforceRound,

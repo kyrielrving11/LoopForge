@@ -9,7 +9,7 @@
  */
 import { createHash } from "node:crypto";
 import { readFileSync, realpathSync, statSync } from "node:fs";
-import { spawn, execFile, execFileSync, } from "node:child_process";
+import { spawn, execFile, } from "node:child_process";
 import { relative, resolve, sep } from "node:path";
 import { containInWorkspace } from "./workspace.js";
 import { getPolicy } from "./policy.js";
@@ -28,11 +28,12 @@ export function unregisterEvidenceProvider(name) {
     return providerFactories.delete(name);
 }
 // ── EvidenceCollector ──────────────────────────────────────────────────────
-/** Collects evidence from all configured providers.
+/** Collects evidence from all configured providers (always async — the
+ *  synchronous collect() was removed in v3.7).
  *
  * Usage:
  *   const collector = new EvidenceCollector([new GitEvidenceProvider()]);
- *   const snapshots = collector.collect();
+ *   const snapshots = await collector.collectAsync({ phase: "before" });
  *   // snapshots = [{ provider: "git", files: [...], data: {...} }]
  */
 export class EvidenceCollector {
@@ -65,44 +66,10 @@ export class EvidenceCollector {
         }
         return new EvidenceCollector(providers);
     }
-    /** Run all providers and return non-null snapshots.
-     *  Providers that return null (e.g. git not available) are silently
-     *  skipped — the caller handles missing evidence. */
-    collect(options = {}) {
-        const results = [];
-        for (const p of this.providers) {
-            const startedAt = Date.now();
-            const controller = new AbortController();
-            try {
-                const snapshot = p.capture({
-                    signal: controller.signal,
-                    timeoutMs: options.timeoutMs ?? getPolicy().evidence.timeout_ms,
-                    loopId: options.loopId,
-                    phase: options.phase ?? "after",
-                });
-                if (snapshot && typeof snapshot.then === "function") {
-                    // Async providers are not awaitable in the synchronous collect()
-                    // path. Log and skip — callers who need async providers must use
-                    // collectAsync() instead. Session recovery via reconstructSession()
-                    // uses collect() as a fallback; the unpause() path replaces it
-                    // with async evidence after reconstruction.
-                    void snapshot.catch(() => undefined);
-                    policyMetrics.recordEvidence(p.name, "failure", Date.now() - startedAt, options.loopId);
-                    logEvent("evidence_async_provider_in_sync_collect", { provider: p.name });
-                    continue;
-                }
-                const syncSnapshot = snapshot;
-                policyMetrics.recordEvidence(p.name, syncSnapshot ? "available" : "unavailable", Date.now() - startedAt, options.loopId);
-                if (syncSnapshot)
-                    results.push(syncSnapshot);
-            }
-            catch (error) {
-                policyMetrics.recordEvidence(p.name, "failure", Date.now() - startedAt, options.loopId);
-                logEvent("evidence_provider_error", { provider: p.name, error: String(error) });
-            }
-        }
-        return results;
-    }
+    // v3.7: the synchronous collect() was removed with the sync lifecycle
+    // (prepareSync / captureGitFileState) — evidence collection is always
+    // async (collectAsync). It never worked for async providers anyway: they
+    // were silently skipped and recorded as failures.
     /** Capture all providers concurrently with per-provider timeout isolation. */
     async collectAsync(options = {}) {
         const timeoutMs = options.timeoutMs ?? getPolicy().evidence.timeout_ms;
@@ -390,60 +357,13 @@ export async function captureGitFileStateAsync(signal, timeoutMs) {
         return null;
     }
 }
-/** v1.17 (sync): Capture git file state using sequential execFileSync.
- *
- * @deprecated Use captureGitFileStateAsync() for the primary path.
- * This sync fallback exists for legacy callers that cannot be made async
- * (e.g. reconstructSession during startup). Uses execFileSync — shell-free,
- * unlike the old execSync-based implementation. */
-export function captureGitFileState() {
-    try {
-        const tracked = execFileSync("git", ["diff", "--name-only"], {
-            encoding: "utf-8",
-            timeout: 5000,
-        }).trim();
-        const staged = execFileSync("git", ["diff", "--cached", "--name-only"], {
-            encoding: "utf-8",
-            timeout: 5000,
-        }).trim();
-        const untracked = execFileSync("git", ["ls-files", "--others", "--exclude-standard"], {
-            encoding: "utf-8",
-            timeout: 5000,
-        }).trim();
-        // v2.13: Capture HEAD commit for backtrack restore point
-        let head;
-        try {
-            head = execFileSync("git", ["rev-parse", "HEAD"], {
-                encoding: "utf-8",
-                timeout: 5000,
-            }).trim();
-        }
-        catch {
-            // Non-git repo or detached state — head stays undefined
-        }
-        return {
-            tracked: tracked.split("\n").filter((f) => f.length > 0).sort(),
-            staged: staged.split("\n").filter((f) => f.length > 0).sort(),
-            untracked: untracked.split("\n").filter((f) => f.length > 0).sort(),
-            head: head || undefined,
-        };
-    }
-    catch {
-        return null;
-    }
-}
 // ── Built-in: GitEvidenceProvider ──────────────────────────────────────────
-/** Captures git file state (tracked, staged, untracked) via the async
- *  captureGitFileStateAsync() when a context is provided, falling back
- *  to the synchronous captureGitFileState() for legacy callers. */
+/** v3.7: async capture only — the synchronous captureGitFileState() fallback
+ *  was removed together with the sync lifecycle (prepareSync). */
 export class GitEvidenceProvider {
     name = "git";
     capture(context) {
-        const capture = context
-            ? captureGitFileStateAsync(context.signal, context.timeoutMs)
-            : captureGitFileState();
-        const statePromise = capture instanceof Promise ? capture : Promise.resolve(capture);
-        return statePromise.then((state) => {
+        return captureGitFileStateAsync(context?.signal, context?.timeoutMs).then((state) => {
             if (!state)
                 return null;
             const files = [...new Set([
@@ -477,7 +397,7 @@ export class GitEvidenceProvider {
                     head: state.head,
                 },
             };
-        }); // end of .then()
+        });
     }
 }
 registerEvidenceProvider("git", () => new GitEvidenceProvider());

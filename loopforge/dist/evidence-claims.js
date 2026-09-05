@@ -14,7 +14,7 @@
  *  - downgraded to `contradicted` when error-level verification flags say
  *    the machine contradicted the claim.
  */
-import { committedRoundsFromEntries } from "./committed-round.js";
+import { committedRoundsFromEntries, machineEvidenceForRound } from "./committed-round.js";
 import { isRecord } from "./token-utils.js";
 /** Contradicting error flags that invalidate agent claims. */
 // NOTE: keep these as literals — importing the CHECK_* constants here would
@@ -84,11 +84,7 @@ export function resolveRoundFiles(vaultEntries, loopId, round) {
         .find((view) => view.loopId === loopId && view.round === round);
     if (!committed)
         return null;
-    const evidence = committed.afterEvidence.length > 0
-        ? committed.afterEvidence
-        : committed.roundEvidence.length > 0
-            ? committed.roundEvidence
-            : committed.beforeEvidence;
+    const evidence = machineEvidenceForRound(committed);
     const git = evidence.find((item) => isRecord(item) && item.provider === "git" && Array.isArray(item.files));
     if (!git)
         return null;
@@ -102,9 +98,7 @@ export function listVerifiedClaims(vaultEntries, loopId) {
     for (const round of committedRoundsFromEntries(vaultEntries)) {
         if (round.loopId !== loopId || !round.evaluation)
             continue;
-        const evidence = round.afterEvidence.length > 0
-            ? round.afterEvidence
-            : round.roundEvidence;
+        const evidence = machineEvidenceForRound(round);
         const view = rederiveClaimViewWithFlags(round.evaluation, evidence, round.verificationFlags);
         for (const claim of view.claims) {
             if (claim.status === "verified")

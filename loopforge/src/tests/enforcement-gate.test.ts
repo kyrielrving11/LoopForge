@@ -1,7 +1,12 @@
 /** Tests for enforcement-gate — Layer 2 round-boundary runtime enforcement. */
-import { describe, it } from "node:test";
+import { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { getPolicy, resetPolicy } from "../policy.js";
+import {
+  getPolicy,
+  resetPolicy,
+  setPolicyForTest,
+  type LoopPolicy,
+} from "../policy.js";
 import {
   makeEnforcementResult,
   makeExecutionEvidence,
@@ -10,6 +15,7 @@ import {
   makeVerificationResult,
   type EnforcementResult,
   type SelfEvaluation,
+  type VerificationFlag,
   type VerificationResult,
 } from "../protocol.js";
 import type { VaultEntry } from "../loop-store.js";
@@ -118,9 +124,9 @@ describe("enforcement-gate — happy path", () => {
       flags: [
         makeVerificationFlag({
           severity: "warn",
-          field: "progress_estimate",
-          check: "progress_regression",
-          detail: "Progress dropped from 0.5 to 0.3",
+          field: "blocker",
+          check: "blocked_without_blocker",
+          detail: "outcome=blocked without a blocker",
         }),
       ],
     });
@@ -183,23 +189,21 @@ describe("enforcement-gate — R2: recurring violation", () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// R3: empty success — no files changed, no tests, claims success
+// v3.7: success evidence row — the ex-R3 empty/missing-evidence posture is
+// now raised by the verification gate (checkSuccessWithoutVerifiedEvidence's
+// empty arm, check id success_without_verified_evidence) and enforced by the
+// single R8 ladder below. The enforcement row consumes gate flags; the empty-
+// arm flag production is covered in verification-gate.test.ts.
 // ═══════════════════════════════════════════════════════════════════════════
 
-describe("enforcement-gate — R3: empty success", () => {
-  it("rejects when agent claims success with no files and no tests", () => {
-    const curr = se({
-      success: true,
-      execution_evidence: makeExecutionEvidence({
-        files_changed: [],
-        test_results: null,
-        progress_estimate: 1.0,
-      }),
+describe("enforcement-gate — success evidence row (merged R8)", () => {
+  const evidenceFlag = (detail = "Agent claims success but provided no execution_evidence."): VerificationFlag =>
+    makeVerificationFlag({
+      severity: "error",
+      field: "success",
+      check: "success_without_verified_evidence",
+      detail,
     });
-    const result = enforceRound(curr, trusted(), 2, [], 0);
-    assert.equal(result.action, "reject");
-    assert.ok(result.reason.includes("no verifiable evidence"));
-  });
 
   it("accepts when success=true with files_changed (not empty)", () => {
     const curr = se({
@@ -214,21 +218,70 @@ describe("enforcement-gate — R3: empty success", () => {
     assert.equal(result.action, "accept");
   });
 
-  it("rejects when execution_evidence is undefined — evidence is now mandatory", () => {
-    // v1.17: execution_evidence is MANDATORY for structured self-evaluations.
-    // Missing evidence when success=true → reject (agent must provide evidence).
-    const curr = makeSelfEvaluation({
+  it("rejects on the empty-evidence error flag (required mode)", () => {
+    const curr = se({
       success: true,
-      output_summary: "Done.",
-      constraint_violations: [],
-      should_continue: true,
+      execution_evidence: makeExecutionEvidence({
+        files_changed: [],
+        test_results: null,
+        progress_estimate: 1.0,
+      }),
     });
-    // Explicitly remove execution_evidence (default factory sets it)
-    (curr as unknown as Record<string, unknown>).execution_evidence = undefined;
-    const result = enforceRound(curr, trusted(), 2, [], 0);
+    const result = enforceRound(
+      curr,
+      makeVerificationResult({ verdict: "contradicted", flags: [evidenceFlag()] }),
+      2, [], 0,
+    );
     assert.equal(result.action, "reject");
-    assert.ok(result.reason.includes("no execution_evidence"),
-      `expected reason to mention missing evidence, got: ${result.reason}`);
+    assert.equal(result.check, "success_without_verified_evidence");
+  });
+
+  it("rejects on the missing-execution_evidence error flag (mandatory evidence)", () => {
+    const result = enforceRound(
+      se({ success: true }),
+      makeVerificationResult({ verdict: "contradicted", flags: [evidenceFlag("no execution_evidence")] }),
+      2, [], 0,
+    );
+    assert.equal(result.action, "reject");
+    assert.equal(result.check, "success_without_verified_evidence");
+  });
+
+  it("terminates on the third consecutive empty-evidence strike", () => {
+    const curr = se({
+      success: true,
+      execution_evidence: makeExecutionEvidence({
+        files_changed: [],
+        test_results: null,
+        progress_estimate: 1.0,
+      }),
+    });
+    const result = enforceRound(
+      curr,
+      makeVerificationResult({ verdict: "contradicted", flags: [evidenceFlag()] }),
+      2, [], 2,
+    );
+    assert.equal(result.action, "terminate");
+    assert.equal(result.check, "success_without_verified_evidence");
+  });
+
+  it("rejects on the empty-evidence flag even under machine_backed_success=warn", () => {
+    const curr = se({
+      success: true,
+      execution_evidence: makeExecutionEvidence({
+        files_changed: [],
+        test_results: null,
+        progress_estimate: 1.0,
+      }),
+    });
+    const p = structuredClone(getPolicy());
+    p.evidence.machine_backed_success = "warn";
+    setPolicyForTest(p);
+    const result = enforceRound(
+      curr,
+      makeVerificationResult({ verdict: "contradicted", flags: [evidenceFlag()] }),
+      2, [], 0,
+    );
+    assert.equal(result.action, "reject");
   });
 });
 
@@ -236,7 +289,7 @@ describe("enforcement-gate — R3: empty success", () => {
 // R4: progress stall
 // ═══════════════════════════════════════════════════════════════════════════
 
-describe("enforcement-gate — R4: progress stall", () => {
+describe("enforcement-gate — progress stall evaluator (v3.7: R4/R5 merged)", () => {
   it("rejects when progress is flat for 3 rounds", () => {
     const curr = se({
       success: false,
@@ -1018,36 +1071,27 @@ describe("buildBacktrackPrompt", () => {
   // ── v3.5: stalled Round Contract revision channel ────────────────────────
 
   it("tells the agent to close a stalled Round Contract via blocked + revision", () => {
-    for (const trigger of ["progress_stall", "progress_flatline"]) {
-      const prompt = buildBacktrackPrompt(45, 42, trigger, []);
-      assert.ok(prompt.includes("Round Contract that caused the stall"),
-        `${trigger}: the stalled-contract bullet must appear`);
-      assert.ok(prompt.includes('outcome="blocked"'),
-        `${trigger}: the closed-with-blocked channel must be named`);
-      assert.ok(prompt.includes("REVISED contract"),
-        `${trigger}: declaring the revised contract in the same submission must be named`);
-      assert.ok(prompt.includes("silently restate the stalled contract"),
-        `${trigger}: the forbidden silent restate must be named`);
-    }
+    const prompt = buildBacktrackPrompt(45, 42, "progress_stall", []);
+    assert.ok(prompt.includes("Round Contract that caused the stall"),
+      "the stalled-contract bullet must appear");
+    assert.ok(prompt.includes('outcome="blocked"'),
+      "the closed-with-blocked channel must be named");
+    assert.ok(prompt.includes("REVISED contract"),
+      "declaring the revised contract in the same submission must be named");
+    assert.ok(prompt.includes("silently restate the stalled contract"),
+      "the forbidden silent restate must be named");
   });
 
   // ── Trigger-rule guidance ────────────────────────────────────────────────
+  // v3.7: stall and flatline share one trigger (progress_stall) and one
+  // prose section — the radical-change wording is folded in.
 
-  it("renders stall-specific guidance for progress_stall", () => {
+  it("renders unified stall guidance", () => {
     const prompt = buildBacktrackPrompt(45, 42, "progress_stall", []);
     verifyBacktrackPrompt(prompt, 45, 42, [
       "did not work",
-      "different",
-    ]);
-    assert.ok(!prompt.includes("radically different"),
-      "progress_stall should NOT include terminal-level language");
-  });
-
-  it("renders radical-change guidance for progress_flatline", () => {
-    const prompt = buildBacktrackPrompt(50, 45, "progress_flatline", []);
-    verifyBacktrackPrompt(prompt, 50, 45, [
       "radically different",
-      "zero forward motion",
+      "no verifiable forward motion",
     ]);
   });
 
@@ -1090,7 +1134,7 @@ describe("buildBacktrackPrompt", () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("enforcement-gate — v2.12 effective success", () => {
-  it("R3 accepts outcome=partial without execution evidence (declared non-success)", () => {
+  it("accepts outcome=partial without execution evidence (declared non-success)", () => {
     const selfEval = makeSelfEvaluation({
       success: true, // Core flag contradicts the optional outcome, which wins.
       outcome: "partial",
@@ -1100,17 +1144,6 @@ describe("enforcement-gate — v2.12 effective success", () => {
     });
     const result = enforceRound(selfEval, { verdict: "trusted", flags: [] }, 2, [], 0, 0);
     assert.equal(result.action, "accept");
-  });
-
-  it("R3 rejects success=true with no evidence when outcome is omitted", () => {
-    const selfEval = makeSelfEvaluation({
-      success: true,
-      output_summary: "done",
-      constraint_violations: [],
-      should_continue: false,
-    });
-    const result = enforceRound(selfEval, { verdict: "trusted", flags: [] }, 2, [], 0, 0);
-    assert.equal(result.action, "reject");
   });
 });
 
@@ -1184,7 +1217,7 @@ describe("enforcement-gate — v2.12 real anchor validation", () => {
 // round must not be repeated forever — the second escalation terminates.
 // ═══════════════════════════════════════════════════════════════════════════
 
-describe("enforcement-gate — R4: backtrack deadlock guard", () => {
+describe("enforcement-gate — progress stall: backtrack deadlock guard", () => {
   it("terminates instead of backtracking when a backtrack already committed for this round", () => {
     const curr = se({
       success: false,
@@ -1417,12 +1450,13 @@ describe("enforcement-gate — v3.3 R-EVID-VERIFY: entrypoint tampering", () => 
   });
 });
 
-// R5 continuity guard (v2.14): flatline requires the recent data points to
-// cover the most recent rounds — rounds without evidence are unknown motion.
+// v2.14/v3.7: progress continuity guard — stall (and its flatline tier)
+// requires the recent data points to cover the most recent rounds; rounds
+// without evidence are unknown motion, not zero motion.
 // ═══════════════════════════════════════════════════════════════════════════
 
-describe("enforcement-gate — R5: continuity guard", () => {
-  it("does not terminate on flatline when recent rounds have no progress data", () => {
+describe("enforcement-gate — progress stall: continuity guard (v3.7: R4/R5 merged)", () => {
+  it("does not fire on a discontinuous window when recent rounds have no progress data", () => {
     const curr = se({
       success: false,
       execution_evidence: makeExecutionEvidence({
@@ -1435,8 +1469,9 @@ describe("enforcement-gate — R5: continuity guard", () => {
       vaultRound(2, 0.30),
       vaultRound(3, 0.30),
       // Rounds 4-5 committed without execution_evidence — unknown motion,
-      // not zero motion. R4's window is discontinuous (returns null); R5
-      // previously looked at rounds 1-3 and terminated/backtracked anyway.
+      // not zero motion. The stall window is discontinuous (both tiers
+      // return null); the pre-v3.7 flatline slot looked at rounds 1-3 and
+      // terminated/backtracked anyway — the continuity guard must win.
       { task_id: "loop:test-loop:r4", loop_id: "test-loop", loop_lineage: { round: 4, success: true } },
       { task_id: "loop:test-loop:r5", loop_id: "test-loop", loop_lineage: { round: 5, success: true } },
     ];
@@ -1444,7 +1479,7 @@ describe("enforcement-gate — R5: continuity guard", () => {
     assert.equal(result.action, "accept");
   });
 
-  it("still triggers enforcement on a continuous flatline window (R4 preempts)", () => {
+  it("still fires on a continuous flatline window (stall predicate covers it)", () => {
     const curr = se({
       success: false,
       execution_evidence: makeExecutionEvidence({
@@ -1459,10 +1494,10 @@ describe("enforcement-gate — R5: continuity guard", () => {
       vaultRound(4, 0.30),
       vaultRound(5, 0.30),
     ];
-    // A continuous flatline satisfies R4's stall condition too, and R4 runs
-    // first — the first occurrence rejects (R5's flatline-specific branch
-    // is only reachable through R4's escalation). The continuity guard must
-    // not suppress enforcement on the legitimate flatline window.
+    // A continuous flatline satisfies the stall predicate (delta 0 < the
+    // positive threshold), so the evaluator fires on the stall tier; the
+    // flatline tier is only consulted when the stall predicate cannot hold.
+    // The continuity guard must not suppress the legitimate flatline window.
     const result = enforceRound(curr, trusted(), 6, vault, 0);
     assert.equal(result.action, "reject");
     assert.equal(result.check, "progress_stall");
@@ -1578,7 +1613,7 @@ describe("v3.2 — R4 machine progress fallback", () => {
 // v3.3 — R4/R5 exculpatory machine cross-check (evidence path)
 // ═══════════════════════════════════════════════════════════════════════════
 
-describe("v3.3 — R4/R5 exculpatory machine cross-check", () => {
+describe("v3.3 — progress stall exculpatory machine cross-check", () => {
   /** Committed feedback round carrying progress + git snapshot + met
    *  criteria — the full evidence-path shape R4/R5 and the machine
    *  signals (machineProgressSeries / hasNewCriteriaCompletion) read. */
@@ -1832,4 +1867,234 @@ describe("v3.5 — contract completion enforcement", () => {
       claiming(), withFlag("contract_premature", "warn"), 3, [], 0);
     assert.equal(result.action, "accept");
   });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v3.7 — behavior-equality compatibility matrix
+//
+// Transcribed from the v3.6 enforcement semantics BEFORE the convergence
+// merge (one rule per posture + uniform escalation). It locks the decision
+// level — accept / reject / backtrack / terminate — of every surviving rule
+// across strike counts and policy switches, so the v3.7 merge must produce
+// the same action for the same input. Reason text may differ; actions must
+// not. Rows pass gate-shaped flags: the flag set a real round would carry.
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("v3.7 — behavior-equality compatibility matrix", () => {
+  afterEach(() => resetPolicy());
+
+  const flag = (severity: "info" | "warn" | "error", check: string): VerificationFlag =>
+    makeVerificationFlag({
+      severity,
+      field: "success",
+      check,
+      detail: `detail for ${check}`,
+    });
+
+  const okEval = (progress = 0.5): SelfEvaluation => se({
+    execution_evidence: makeExecutionEvidence({
+      files_changed: ["src/foo.ts"],
+      test_results: { passed: 1, failed: 0, skipped: 0 },
+      progress_estimate: progress,
+    }),
+  });
+
+  /** Flat 3-round progress window (rounds 1-3), the current round is 4. */
+  const stallVault = (): VaultEntry[] => [
+    vaultRound(1, 0.30),
+    vaultRound(2, 0.31),
+    vaultRound(3, 0.32),
+  ];
+
+  /** Vault with a backtrack committed for the CURRENT round (deadlock). */
+  const deadlockVault = (round: number): VaultEntry[] => [
+    ...stallVault(),
+    {
+      task_id: `loop:test-loop:r${round}:feedback`,
+      loop_id: "test-loop",
+      loop_lineage: {
+        round,
+        round_transaction: {
+          schema_version: 1,
+          round_id: `test-loop:${round}`,
+          snapshot: {},
+          result: { action: "backtrack", verificationFlags: [] },
+        },
+      },
+    },
+  ];
+
+  const withPolicy = (
+    mutate: (p: LoopPolicy) => void,
+    run: () => "accept" | "reject" | "terminate" | "backtrack",
+  ): string => {
+    const p = structuredClone(getPolicy());
+    mutate(p);
+    setPolicyForTest(p);
+    return run();
+  };
+
+  type MatrixCase = {
+    name: string;
+    selfEval?: SelfEvaluation;
+    flags?: VerificationFlag[];
+    round?: number;
+    vault?: VaultEntry[];
+    strikes?: number;
+    streak?: number;
+    policy?: (p: LoopPolicy) => void;
+    expected: "accept" | "reject" | "terminate" | "backtrack";
+    check?: string;
+  };
+
+  const CASES: MatrixCase[] = [
+    // ── clean rounds ─────────────────────────────────────────────────────────
+    { name: "clean round accepts", expected: "accept" },
+
+    // ── success_with_remaining_criteria (uniform ladder) ────────────────────
+    { name: "R1 first strike rejects", flags: [flag("error", "success_with_remaining_criteria")], expected: "reject", check: "success_with_remaining_criteria" },
+    { name: "R1 second strike rejects", flags: [flag("error", "success_with_remaining_criteria")], strikes: 1, expected: "reject" },
+    { name: "R1 third strike terminates", flags: [flag("error", "success_with_remaining_criteria")], strikes: 2, expected: "terminate" },
+
+    // ── recurring_violation (uniform ladder) ─────────────────────────────────
+    { name: "R2 first strike rejects", flags: [flag("error", "recurring_violation")], expected: "reject" },
+    { name: "R2 third strike terminates", flags: [flag("error", "recurring_violation")], strikes: 2, expected: "terminate" },
+
+    // ── evidence contradiction family (uniform ladder) ──────────────────────
+    { name: "required command failed rejects", flags: [flag("error", "required_command_failed")], expected: "reject", check: "required_command_failed" },
+    { name: "command evidence mismatch rejects", flags: [flag("error", "command_evidence_mismatch")], expected: "reject", check: "command_evidence_mismatch" },
+    { name: "outcome success contradiction (error arm) rejects", flags: [flag("error", "outcome_success_contradiction")], expected: "reject", check: "outcome_success_contradiction" },
+    { name: "outcome contradiction warn arm is not enforced (accept)", flags: [flag("warn", "outcome_success_contradiction")], expected: "accept" },
+    { name: "evidence contradiction third strike terminates", flags: [flag("error", "required_command_failed")], strikes: 2, expected: "terminate" },
+
+    // ── verification_entrypoint_modified ─────────────────────────────────────
+    { name: "entrypoint tampered rejects", flags: [flag("error", "verification_entrypoint_modified")], expected: "reject", check: "verification_entrypoint_modified" },
+    { name: "entrypoint tampered outranks R8 (order lock)", flags: [flag("error", "verification_entrypoint_modified"), flag("error", "success_without_verified_evidence")], expected: "reject", check: "verification_entrypoint_modified" },
+    { name: "entrypoint tampered third strike terminates", flags: [flag("error", "verification_entrypoint_modified")], strikes: 2, expected: "terminate" },
+
+    // ── contract closure family (internal ladders) ───────────────────────────
+    { name: "contract completion unverified rejects", flags: [flag("error", "contract_completion_unverified")], expected: "reject", check: "contract_completion_unverified" },
+    { name: "completion outranks premature boundary (order lock)", flags: [flag("error", "contract_completion_unverified"), flag("error", "premature_boundary")], expected: "reject", check: "contract_completion_unverified" },
+    { name: "completion unverified third strike terminates", flags: [flag("error", "contract_completion_unverified")], strikes: 2, expected: "terminate" },
+    { name: "premature boundary rejects", flags: [flag("error", "premature_boundary")], expected: "reject", check: "premature_boundary" },
+    { name: "premature boundary outranks R8 (order lock)", flags: [flag("error", "premature_boundary"), flag("error", "success_without_verified_evidence")], expected: "reject", check: "premature_boundary" },
+    { name: "premature boundary third strike terminates", flags: [flag("error", "premature_boundary")], strikes: 2, expected: "terminate" },
+
+    // ── success evidence (merged R8/R3 semantics) ────────────────────────────
+    { name: "success without verified evidence rejects (required mode)", flags: [flag("error", "success_without_verified_evidence")], expected: "reject", check: "success_without_verified_evidence" },
+    { name: "R8 second strike rejects with escalation notice", flags: [flag("error", "success_without_verified_evidence")], strikes: 1, expected: "reject" },
+    { name: "R8 third strike terminates", flags: [flag("error", "success_without_verified_evidence")], strikes: 2, expected: "terminate" },
+    { name: "claims-arm warn flag accepts under machine_backed_success=warn",
+      flags: [flag("warn", "success_without_verified_evidence")],
+      policy: (p) => { p.evidence.machine_backed_success = "warn"; },
+      expected: "accept" },
+    { name: "empty-evidence posture still rejects under machine_backed_success=warn",
+      flags: [flag("error", "success_without_verified_evidence")],
+      policy: (p) => { p.evidence.machine_backed_success = "warn"; },
+      expected: "reject" },
+    { name: "no_change_reason claims-arm info flag accepts",
+      flags: [flag("info", "success_without_verified_evidence")],
+      expected: "accept" },
+
+    // ── round_scope_drift (clarification gate) ───────────────────────────────
+    { name: "scope drift without clarification rejects",
+      selfEval: okEval(), flags: [flag("warn", "round_scope_drift")], expected: "reject", check: "round_scope_drift" },
+    { name: "scope drift with substantive clarification accepts",
+      selfEval: se({ ...okEval(), drift_clarification: "extending contract scope: src/foo.ts is the intended change" }),
+      flags: [flag("warn", "round_scope_drift")], expected: "accept" },
+    { name: "scope drift weak clarification third strike terminates",
+      selfEval: se({ ...okEval(), drift_clarification: "x".repeat(40) }),
+      flags: [flag("warn", "round_scope_drift")], strikes: 2, expected: "terminate" },
+
+    // ── intent drift (own streak) ────────────────────────────────────────────
+    { name: "intent drift without clarification rejects (streak 0)",
+      selfEval: okEval(), flags: [flag("warn", "intent_drift")], expected: "reject", check: "intent_drift" },
+    { name: "intent drift substantive clarification accepts",
+      selfEval: se({ ...okEval(), drift_clarification: "pivot: the contract in src/foo.ts changed the approach" }),
+      flags: [flag("warn", "intent_drift")], expected: "accept" },
+    { name: "intent drift weak clarification at streak max-1 terminates",
+      selfEval: se({ ...okEval(), drift_clarification: "y".repeat(40) }),
+      flags: [flag("warn", "intent_drift")], streak: 2, expected: "terminate" },
+    { name: "intent drift with streak limit disabled accepts",
+      selfEval: se({ ...okEval(), drift_clarification: "z".repeat(40) }),
+      flags: [flag("warn", "intent_drift")], streak: 9,
+      policy: (p) => { p.engine.drift_clarification_max_streak = 0; },
+      expected: "accept" },
+
+    // ── progress stall (single evaluator after merge) ────────────────────────
+    { name: "flat window first strike rejects",
+      selfEval: se({ execution_evidence: makeExecutionEvidence({ files_changed: ["src/foo.ts"], progress_estimate: 0.33 }) }),
+      vault: stallVault(), round: 4, expected: "reject", check: "progress_stall" },
+    { name: "flat window second strike backtracks (escalation + backtrack)",
+      selfEval: se({ execution_evidence: makeExecutionEvidence({ files_changed: ["src/foo.ts"], progress_estimate: 0.33 }) }),
+      vault: stallVault(), round: 4, strikes: 1, expected: "backtrack", check: "progress_stall" },
+    { name: "flat window third strike terminates",
+      selfEval: se({ execution_evidence: makeExecutionEvidence({ files_changed: ["src/foo.ts"], progress_estimate: 0.33 }) }),
+      vault: stallVault(), round: 4, strikes: 2, expected: "terminate" },
+    { name: "stall deadlock guard terminates instead of re-backtracking",
+      selfEval: se({ execution_evidence: makeExecutionEvidence({ files_changed: ["src/foo.ts"], progress_estimate: 0.33 }) }),
+      vault: deadlockVault(4), round: 4, strikes: 1, expected: "terminate" },
+    { name: "flat window terminates on second strike when escalation disabled",
+      selfEval: se({ execution_evidence: makeExecutionEvidence({ files_changed: ["src/foo.ts"], progress_estimate: 0.33 }) }),
+      vault: stallVault(), round: 4, strikes: 1,
+      policy: (p) => { p.engine.enforcement_escalation_enabled = false; },
+      expected: "terminate" },
+    { name: "flat window rejects with notice on second strike when backtrack disabled",
+      selfEval: se({ execution_evidence: makeExecutionEvidence({ files_changed: ["src/foo.ts"], progress_estimate: 0.33 }) }),
+      vault: stallVault(), round: 4, strikes: 1,
+      policy: (p) => { p.engine.backtrack_enabled = false; },
+      expected: "reject" },
+
+    // ── backtrack_workspace_not_restored ─────────────────────────────────────
+    { name: "workspace not restored backtracks once",
+      flags: [flag("error", "backtrack_workspace_not_restored")], round: 4, expected: "backtrack", check: "backtrack_workspace_not_restored" },
+    { name: "workspace not restored after a committed backtrack terminates",
+      flags: [flag("error", "backtrack_workspace_not_restored")], vault: deadlockVault(4), round: 4, expected: "terminate" },
+    { name: "workspace-not-restored row is inactive when backtrack disabled",
+      flags: [flag("error", "backtrack_workspace_not_restored")], round: 4,
+      policy: (p) => { p.engine.backtrack_enabled = false; },
+      expected: "accept" },
+
+    // ── warn-only flags never enforce ────────────────────────────────────────
+    { name: "warn-only flag set accepts", flags: [flag("warn", "criteria_claims_unverified"), flag("warn", "contract_premature")], expected: "accept" },
+  ];
+
+  for (const c of CASES) {
+    it(c.name, () => {
+      const run = (): "accept" | "reject" | "terminate" | "backtrack" => {
+        const flags = c.flags ?? [];
+        const verdict = flags.some((f) => f.severity === "error")
+          ? "contradicted"
+          : flags.some((f) => f.severity === "warn") ? "suspect" : "trusted";
+        const verify = makeVerificationResult({ verdict, flags });
+        const result = enforceRound(
+          c.selfEval ?? okEval(),
+          verify,
+          c.round ?? 2,
+          c.vault ?? [],
+          c.strikes ?? 0,
+          c.streak ?? 0,
+        );
+        return result.action;
+      };
+      const action = c.policy ? withPolicy(c.policy, run) : run();
+      assert.equal(action, c.expected, c.name);
+      if (c.check) {
+        // Lock rows that carry a stable check id assert it; rows whose id may
+        // legitimately change across the merge assert actions only.
+        const result = enforceRound(
+          c.selfEval ?? okEval(),
+          makeVerificationResult({
+            verdict: "contradicted",
+            flags: c.flags ?? [],
+          }),
+          c.round ?? 2,
+          c.vault ?? [],
+          c.strikes ?? 0,
+          c.streak ?? 0,
+        );
+        assert.equal(result.check, c.check, `${c.name}: check id`);
+      }
+    });
+  }
 });

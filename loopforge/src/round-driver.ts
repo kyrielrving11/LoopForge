@@ -85,21 +85,6 @@ export class RoundDriver {
     return this.finishPrepare(response, loopId, round, evidenceBaseline);
   }
 
-  /** Synchronous fallback for legacy embedding APIs. Async evidence providers
-   * are deliberately skipped by EvidenceCollector.collect(). */
-  prepareSync(
-    request: LoopForgeRequest,
-    loopId: string,
-    round: number,
-  ): PreparedRound | null {
-    const response = this.compile(request, loopId, true);
-    if (!response) return null;
-    const evidenceBaseline = EvidenceCollector.fromProviderNames(
-      getPolicy().evidence.providers,
-    ).collect({ loopId });
-    return this.finishPrepare(response, loopId, round, evidenceBaseline);
-  }
-
   private compile(
     request: LoopForgeRequest,
     loopId: string,

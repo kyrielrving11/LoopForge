@@ -14,13 +14,13 @@
  */
 import { randomUUID } from "node:crypto";
 import { LoopForgeEngine } from "../engine.js";
-import { deriveGate } from "../cognitive-governance.js";
+import { canonicalizeGateAction, deriveGate, preflightStructuredGate, } from "../cognitive-governance.js";
 import { makeGateDecision, Mode } from "../protocol.js";
 import { buildLoopProjection } from "../loop-projection.js";
 import { deriveCognitiveFacts } from "../cognitive-facts.js";
 import { listVerifiedClaims } from "../evidence-claims.js";
 import { buildAudit } from "../audit.js";
-import { checkLoopHealth } from "../loop-compiler.js";
+import { checkLoopHealth, deriveSubGoalId, validateSubGoalUpdates } from "../loop-compiler.js";
 import { committedRoundsFromEntries } from "../committed-round.js";
 import { contractRoundEvaluations, deriveActiveRoundContract, } from "../round-contract.js";
 import { getPolicy, validateLoopId } from "../policy.js";
@@ -476,22 +476,65 @@ export class SessionManager {
         return result;
     }
     // ── v2.12: User/Agent gates ────────────────────────────────────────────
-    /** Classify a flat gate text. Read-only — no vault writes. */
-    checkGate(gateText) {
-        const { id, gate } = deriveGate(gateText);
+    /** Persist a gate_opened record for a structured preflight. Only
+     *  user_required actions are recorded — agent_allowed needs no human
+     *  authorization and opens no record. */
+    recordOpenedGate(loopId, round, verdict, canonicalAction) {
+        this.loopStore.appendEntry({
+            id: randomUUID(),
+            task_id: `loop:${loopId}:gate:${verdict.gateId}`,
+            task_type: "gate_opened",
+            loop_id: loopId,
+            timestamp: new Date().toISOString(),
+            gate_id: verdict.gateId,
+            gate_action: canonicalAction,
+            gate_kind: "user",
+            gate_structured: true,
+            loop_lineage: {
+                round,
+                gate_id: verdict.gateId,
+                action_hash: verdict.actionHash,
+            },
+        });
+    }
+    /** v3.7.1: structured gate preflight. The agent submits a
+     *  GateActionDescriptor; the runtime classifies it (conservative:
+     *  anything not provably safe is user_required with reason codes). A
+     *  user_required verdict persists a gate_opened record bound to
+     *  loop + round + actionHash; agent_allowed records nothing and returns
+     *  the evidence suggestion instead. No action is executed and no round
+     *  advances from this call. */
+    checkGate(sessionId, roundId, action) {
+        const session = this.sessions.get(sessionId);
+        if (!session) {
+            return { error: `session not found: ${sessionId}` };
+        }
+        const expectedRoundId = session.roundSnapshot?.roundId
+            ?? makeRoundId(session.loopId, session.currentRound);
+        if (expectedRoundId !== roundId) {
+            return { error: "roundId does not match the current round — re-run loopforge_gate_check with the roundId from the latest response" };
+        }
+        const verdict = preflightStructuredGate(action);
+        if (verdict.kind === "user") {
+            this.recordOpenedGate(session.loopId, session.currentRound, verdict, canonicalizeGateAction(action));
+        }
         return {
-            id,
-            kind: gate.kind,
-            ...(gate.kind === "user"
+            sessionId,
+            gateId: verdict.gateId,
+            risk: verdict.risk,
+            decision: verdict.decision,
+            reasonCodes: verdict.reasonCodes,
+            ...(verdict.kind === "user"
                 ? {
-                    question: gate.question,
-                    blockedScope: gate.blockedScope,
-                    allowedWork: gate.allowedWork,
+                    blockedScope: verdict.blockedScope,
+                    allowedBeforeApproval: verdict.allowedBeforeApproval,
+                    requiredEvidence: [],
+                    approvalQuestion: verdict.approvalQuestion,
                 }
                 : {
-                    problem: gate.problem,
-                    requiredEvidence: gate.requiredEvidence,
-                    suggestedResolution: gate.suggestedResolution,
+                    blockedScope: [],
+                    allowedBeforeApproval: [],
+                    requiredEvidence: verdict.requiredEvidence,
                 }),
         };
     }
@@ -542,18 +585,48 @@ export class SessionManager {
             const gateRound = typeof openedLineage.round === "number"
                 ? openedLineage.round
                 : currentRound;
-            const { id, gate, actionHash } = deriveGate(actionText);
-            if (id !== gateId) {
+            // v3.7.1: structured records re-derive their id through the structured
+            // classifier over the stored canonical action; flat records (blocked-
+            // round auto-records) keep the flat classifier. Either way the id
+            // embeds the action — a changed action no longer matches and the old
+            // approval expires.
+            let matchedId;
+            let userKind;
+            let userScope = [];
+            let actionHash = typeof openedLineage.action_hash === "string"
+                ? openedLineage.action_hash
+                : undefined;
+            if (opened.gate_structured === true) {
+                let descriptor;
+                try {
+                    descriptor = JSON.parse(actionText);
+                }
+                catch {
+                    return { error: `gate ${gateId} has a corrupted structured action — re-run loopforge_gate_check` };
+                }
+                const verdict = preflightStructuredGate(descriptor);
+                matchedId = verdict.gateId;
+                userKind = verdict.kind === "user";
+                userScope = verdict.blockedScope ?? [];
+                actionHash = actionHash ?? verdict.actionHash;
+            }
+            else {
+                const derived = deriveGate(actionText);
+                matchedId = derived.id;
+                userKind = derived.gate.kind === "user";
+                userScope = derived.gate.blockedScope ?? [];
+            }
+            if (matchedId !== gateId) {
                 return { error: "gateId does not match the recorded action — the action changed, old approvals expire" };
             }
-            if (gate.kind !== "user") {
+            if (!userKind) {
                 return { error: "agent gates are resolved by submitting the required evidence, not by user approval" };
             }
             const decision = makeGateDecision({
                 gateId,
                 kind: "user",
                 approved: approved === true,
-                scope: gate.blockedScope ?? [],
+                scope: userScope,
                 note: typeof note === "string" ? note : "",
                 decidedAt: new Date().toISOString(),
                 actionHash: actionHash ?? "",
@@ -583,6 +656,78 @@ export class SessionManager {
         }
     }
     // ── v2.12: Typed projection + audit ────────────────────────────────────
+    /** Compile the current round context exactly once per derivation path.
+     *  v3.0.1: prefer the round-boundary compile cached on the session (the
+     *  artifact's deterministic roundId guards against stale reuse); fall
+     *  back to a read-only compile (persistLineage: false) that never writes
+     *  the vault. Single derivation — shared by the projection view and the
+     *  subgoal_updates preflight so they can never disagree. */
+    compileContext(session) {
+        const cached = session.lastCompileResponse;
+        const expectedRoundId = session.roundSnapshot?.roundId
+            ?? makeRoundId(session.loopId, session.currentRound);
+        if (cached?.prompt_artifact && cached.prompt_artifact.roundId === expectedRoundId) {
+            return cached;
+        }
+        try {
+            const request = {
+                task: session.task,
+                mode: Mode.LOOP_COMPILE,
+                feedback: null,
+                skill_name: null,
+                task_id: null,
+                loop_id: session.loopId,
+                round: session.currentRound,
+                max_rounds: session.maxRounds,
+                verification_flags: [],
+            };
+            const compiled = session.engine.invokeLoopCompile(request, undefined, { persistLineage: false });
+            return compiled.response ?? null;
+        }
+        catch {
+            return null; // projection/preflight degrades gracefully
+        }
+    }
+    /** v3.7.1: pre-advance referential check for subgoal_updates. The
+     *  reference space is the SAME derivation the agent saw in its prompt
+     *  (the compiled sub_goals of the current round) plus this payload's own
+     *  emerged items (a sub-goal may be created and transitioned in one
+     *  round). Unknown IDs, terminal references, and illegal migrations
+     *  return evaluation_invalid before anything mutates. Compile failure
+     *  fails open (the shape checks above stay strict). */
+    preflightSubGoalUpdates(sessionId, roundId, updates, emerged) {
+        if (updates.length === 0)
+            return [];
+        const session = this.sessions.get(sessionId);
+        if (!session)
+            return [];
+        const expectedRoundId = session.roundSnapshot?.roundId
+            ?? makeRoundId(session.loopId, session.currentRound);
+        if (expectedRoundId !== roundId)
+            return []; // stale/foreign submission — advance handles it
+        const response = this.compileContext(session);
+        if (!response?.sub_goals)
+            return []; // fail open: cannot observe
+        const known = [...response.sub_goals];
+        for (const desc of emerged) {
+            const id = deriveSubGoalId(desc);
+            if (!known.some((sg) => sg.id === id)) {
+                known.push({
+                    id,
+                    description: desc.trim(),
+                    status: "pending",
+                    declared_at_round: session.currentRound,
+                    status_changed_at_round: session.currentRound,
+                    priority: known.length,
+                });
+            }
+        }
+        return validateSubGoalUpdates(known, updates).map((error) => ({
+            field: "subgoal_updates",
+            reason: error.reason,
+            detail: `${error.reason.replace(/_/g, " ")}: ${error.id}`,
+        }));
+    }
     /** Typed cognitive state projection for an active session. Derived on
      *  demand — zero persistence. Null when nothing meaningful exists yet. */
     getProjection(sessionId) {
@@ -594,38 +739,7 @@ export class SessionManager {
             ...queryLoopEntries(this.loopStore, session.loopId, { prefix }),
             ...queryLoopEntries(this.loopStore, session.loopId, { prefix, feedbackOnly: true }),
         ];
-        let compileResponse = null;
-        // v3.0.1: the round boundary already compiled this round — derive the
-        // projection from that response instead of recompiling the whole vault.
-        // The cache is invalidated by every compile path (it is rebuilt with the
-        // new round's response); the artifact's deterministic roundId guards
-        // against stale reuse.
-        const cached = session.lastCompileResponse;
-        const expectedRoundId = session.roundSnapshot?.roundId
-            ?? makeRoundId(session.loopId, session.currentRound);
-        if (cached?.prompt_artifact && cached.prompt_artifact.roundId === expectedRoundId) {
-            compileResponse = cached;
-        }
-        else {
-            try {
-                const request = {
-                    task: session.task,
-                    mode: Mode.LOOP_COMPILE,
-                    feedback: null,
-                    skill_name: null,
-                    task_id: null,
-                    loop_id: session.loopId,
-                    round: session.currentRound,
-                    max_rounds: session.maxRounds,
-                    verification_flags: [],
-                };
-                const compiled = session.engine.invokeLoopCompile(request, undefined, { persistLineage: false });
-                compileResponse = compiled.response ?? null;
-            }
-            catch {
-                compileResponse = null; // projection degrades gracefully
-            }
-        }
+        const compileResponse = this.compileContext(session);
         const openGates = this.lifecycle.listOpenGateDescriptions(session.loopId);
         const projection = buildLoopProjection(deriveCognitiveFacts({
             compileResponse,

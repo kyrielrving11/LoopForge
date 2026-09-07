@@ -1,6 +1,7 @@
 /** LoopForge — Cognitive State Runtime for AI coding agents.
  *
- * TypeScript reference implementation v3.7.0
+ * TypeScript reference implementation. Version is single-sourced from
+ * package.json (see src/version.ts).
  *
  * Usage:
  *   import { LoopForgeEngine, ReplayBackend, compileLoop } from "loopforge";

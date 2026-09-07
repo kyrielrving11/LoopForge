@@ -10,11 +10,11 @@
 
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { rmSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
-import { FileLoopStore } from "../loop-store.js";
+import { FileLoopStore, queryLoopEntries } from "../loop-store.js";
 import { SessionManager } from "../mcp/session.js";
 import type { McpSession } from "../mcp/session.js";
 import { verifyBacktrackPrompt } from "./_backtrack-asserts.js";
@@ -182,6 +182,16 @@ describe("E2E backtrack lifecycle", () => {
       "prompt must contain Workspace Restore section");
     assert.ok(result.prompt!.includes("Round"),
       "prompt must reference round numbers");
+    // v3.7.1: the backtrack directive carries the derived Recovery Brief —
+    // trigger, the redo round ID, and the failed (in-flight) approach.
+    assert.ok(result.prompt!.includes("### Recovery Brief"),
+      "prompt must contain the Recovery Brief header");
+    assert.ok(result.prompt!.includes("**Trigger**: progress_stall"),
+      "brief must name the trigger rule");
+    assert.ok(result.prompt!.includes("Recovery Round ID"),
+      "brief must carry the redo round's ID");
+    assert.ok(result.prompt!.includes(`Failed approach: Round 4: reviewed src/d.ts, no new progress.`),
+      "brief must record the failed approach");
   });
 
   // ── Step 7: Simulate crash and recover ─────────────────────────────────
@@ -324,5 +334,105 @@ describe("E2E backtrack redo is evaluated, not replayed", () => {
       `round 5 must advance, got ${result.enforcementAction ?? "accept"}`,
     );
     assert.equal(result.round, 6, "round 5 must advance to round 6");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v3.7.1: Recovery Brief window — derived from the committed rollback
+// decision (never from rejected payloads), rendered in the backtrack prompt
+// and the state file's Recent tier, and gone once the redo commits.
+// ═══════════════════════════════════════════════════════════════════════════
+describe("E2E Recovery Brief window (v3.7.1)", () => {
+  let storeDir: string;
+  let mgr: SessionManager;
+  let loopId = "";
+  let statePath = "";
+
+  before(() => {
+    storeDir = join(tmpdir(), `loopforge-recovery-brief-${randomUUID()}`);
+    mgr = createSessionManager(storeDir);
+  });
+
+  after(() => {
+    mgr.close();
+    try { rmSync(storeDir, { recursive: true }); } catch { /* best effort */ }
+    try { rmSync(statePath, { force: true }); } catch { /* best effort */ }
+  });
+
+  it("start + flat rounds + backtrack carries brief facts and the state-file window", async () => {
+    const created = await mgr.create({
+      task: "Write unit tests for all public functions. Run npm test after each change.",
+      maxRounds: 10,
+      constraints: ["Do not skip tests", "Run npm test before claiming success"],
+    });
+    const sessionId = created.sessionId;
+    const session = mgr.get(sessionId);
+    assert.ok(session, "session must exist");
+    loopId = session!.loopId;
+    statePath = join(process.cwd(), ".loopforge", "state", `${loopId}-state.md`);
+    rmSync(statePath, { force: true });
+
+    for (const [round, files] of [
+      [1, ["src/a.ts"]],
+      [2, ["src/b.ts"]],
+      [3, ["src/c.ts"]],
+    ] as Array<[number, string[]]>) {
+      const result = await mgr.advance(sessionId, `Round ${round} output`, stalledEval(round, 0.3, files));
+      assert.ok(!result.enforcementAction || result.enforcementAction === "accept");
+    }
+    const first = await mgr.advance(sessionId, "Round 4 output", stalledEval(4, 0.3, ["src/d.ts"]));
+    assert.equal(first.enforcementAction, "reject", "first stall must reject");
+    const second = await mgr.advance(sessionId, "Round 4 retry — same stalled approach", stalledEval(4, 0.3, ["src/d.ts"]));
+    assert.equal(second.enforcementAction, "backtrack", "second stall must backtrack");
+
+    // Prompt brief + redo round ID (loop:<loopId>:round:4 — restore 3 + 1).
+    assert.ok(second.prompt?.includes("### Recovery Brief"), "prompt carries the brief");
+    assert.ok(second.prompt?.includes(`\`loop:${loopId}:round:4\``), "prompt carries the redo round ID");
+
+    // The committed rollback decision retains the derived brief facts.
+    const reader = new FileLoopStore(join(storeDir, ".loopforge"));
+    const feedback = queryLoopEntries(reader, loopId, {
+      prefix: `loop:${loopId}:r4`,
+      feedbackOnly: true,
+    });
+    assert.equal(feedback.length, 1, "round 4 holds the rollback decision");
+    const lineage = (feedback[0]?.loop_lineage ?? {}) as Record<string, unknown>;
+    const tx = lineage.round_transaction as Record<string, unknown> | undefined;
+    const result = (tx?.result ?? {}) as Record<string, unknown>;
+    assert.equal(result.action, "backtrack");
+    assert.ok(Array.isArray(result.backtrackFailedRounds), "decision records failed rounds");
+    assert.ok(
+      (result.backtrackApproaches as string[] | undefined)?.some(
+        (a) => a.includes("Round 4: reviewed src/d.ts"),
+      ),
+      "decision records the failed approach (from the in-flight attempt — never a rejected payload)",
+    );
+
+    // State file (recovery window): Recent tier shows the brief.
+    assert.ok(existsSync(statePath), "backtrack compile writes the state file");
+    const during = readFileSync(statePath, "utf8");
+    const idxRecent = during.indexOf("## Recent");
+    const idxHistorical = during.indexOf("## Historical Summary");
+    assert.ok(idxRecent >= 0 && idxHistorical > idxRecent, "state file is tiered");
+    assert.ok(during.slice(idxRecent, idxHistorical).includes("### Recovery Brief"),
+      "brief renders in the Recent tier during the window");
+    assert.ok(during.includes(`**Source**: round 4`), "recovery compile marks its round");
+
+    // Redo with the same roundId is evaluated and accepted.
+    const restoredRoundId = mgr.get(sessionId)!.roundSnapshot?.roundId;
+    assert.ok(restoredRoundId, "session holds the restored roundId");
+    const redo = await mgr.advance(
+      sessionId, "Redo: root cause fixed, tests pass.",
+      fixedEval(4, ["src/fixed.ts"]), restoredRoundId,
+    );
+    assert.ok(!redo.enforcementAction || redo.enforcementAction === "accept",
+      `redo must be accepted, got ${redo.enforcementAction ?? "accept"}`);
+    assert.equal(redo.round, 5);
+
+    // After the redo commits the rollback record is replaced — the brief
+    // exits the projection by construction.
+    const afterRedo = readFileSync(statePath, "utf8");
+    assert.ok(!afterRedo.includes("Recovery Brief"),
+      "brief disappears once the redo round commits");
   });
 });

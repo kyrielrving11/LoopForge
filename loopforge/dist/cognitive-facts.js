@@ -76,11 +76,10 @@ export function deriveCognitiveFacts(input) {
             ? { current: lastBoundary.label, label: lastBoundary.label, boundaries }
             : null,
         delegation: {
-            pending: workerResults.filter((worker) => worker.outcome === "partial" || worker.outcome === "failed" ||
-                (worker.outcome === undefined && worker.success !== true)).length,
+            pending: workerResults.filter((worker) => worker.outcome === "partial" || worker.outcome === "failed").length,
             last_results: workerResults.slice(-5).map((worker) => ({
                 agentId: worker.agentId,
-                outcome: worker.outcome ?? (worker.success ? "success" : "failed"),
+                outcome: worker.outcome,
                 round: latestWorkerRound?.round ?? 0,
                 summary: worker.resultSummary.slice(0, 200),
             })),

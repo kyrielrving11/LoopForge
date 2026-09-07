@@ -126,6 +126,16 @@ values are ignored or defaulted and do not reject a submission. Missing or
 mistyped core fields return `evaluation_invalid` with details and may be retried
 with the same `roundId`.
 
+One documented exception keeps `evaluation_invalid` semantics: `subgoal_updates`
+is a strict STRUCTURAL boundary — it carries machine-processable sub-goal state
+transitions. Shape errors (bad ids/statuses, `sg-XXXXXXXX` literals in
+`emerged_subtasks`), unknown sub-goal references, terminal (done/canceled)
+references, and illegal migrations are rejected pre-advance against the SAME
+derived sub-goal set the agent saw in its prompt (single derivation, compiled
+read-only). It returns `evaluation_invalid` like core-field errors: no session
+state, no gates, no rejection counters, same-roundId retry. Worker results and
+`gate_ids` stay lenient (entry-level drops / citation checks only).
+
 An invalid evaluation is handled before `RoundLifecycle.advance()`. It must not
 save session state, write the Vault, run verification or enforcement gates,
 increment rejection state, or record metrics. Natural-language evaluation
@@ -147,7 +157,13 @@ runs verification and enforcement, and then applies one disposition:
   round. The retry uses the same round ID.
 - Backtrack commits a rollback decision, restores the round counter to the last
   clean committed round, preserves valid discoveries, and requires workspace
-  restoration before the next submission.
+  restoration before the next submission. The rollback decision carries a
+  derived Recovery Brief — trigger, restore point, the redo round id, failed
+  rounds with their approaches, and falsified assumptions. Its sources are
+  COMMITTED rounds above the restore point plus the in-flight attempt; rejected
+  payloads are not durable history and never become a source. The brief renders
+  in the backtrack prompt and the state file's Recent tier, and exits by
+  construction when the redo commit replaces the rollback record.
 - Terminate returns a terminal result without committing the rejected or
   terminating evaluation as a normal round.
 
@@ -228,9 +244,21 @@ loopforge_stop        intentionally stop a session
 loopforge_pause       pause a session
 loopforge_resume      reconstruct a durable session
 loopforge_replay      read the committed timeline
-loopforge_gate_check  inspect a recorded human/agent gate
-loopforge_gate_resolve record a human gate decision
+loopforge_gate_check  preflight a structured high-risk action (opt-in)
+loopforge_gate_resolve record a human gate decision (opt-in)
 ```
+
+`loopforge_gate_check` / `loopforge_gate_resolve` are opt-in: when
+`policy.gate.enabled` is false (the default) they are hidden from `tools/list`
+and direct calls return a stable `gate_disabled` error; existing gate records
+stay readable through replay and audit. When enabled, `gate_check` is a
+structured preflight over a `GateActionDescriptor` (conservative: anything not
+provably safe is `user_required` with reason codes), a `user_required` verdict
+persists a `gate_opened` record, and a round that cites an unapproved gate via
+`evaluation.gate_ids` is rejected (`user_gate_unresolved`). Trust model:
+`gate_resolve` is called by the Agent, so LoopForge can never machine-verify
+that a human is present — the gate layer is process governance plus an
+auditable decision record, not a human-presence proof.
 
 Do not add background execution or automatic integration discovery. The
 external agent remains the execution owner.

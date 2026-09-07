@@ -59,6 +59,15 @@ export interface RoundProcessResult {
     backtrackSkippedDiscoveries?: string[];
     /** v2.10: Which enforcement rule triggered the backtrack. */
     backtrackTriggerRule?: string;
+    /** v3.7.1: Rounds rolled back (exclusive range above the restore point).
+     *  Derived from committed facts + the in-flight attempt — rejected
+     *  payloads are not durable history and never become a source. */
+    backtrackFailedRounds?: number[];
+    /** v3.7.1: One approach per failed round (committed output_summary or the
+     *  in-flight attempt's), truncated — what must NOT be repeated. */
+    backtrackApproaches?: string[];
+    /** v3.7.1: Falsified assumptions from the failed rounds. */
+    backtrackWrongAssumptions?: string[];
     /** Verification flags from this round (for injection into next prompt). */
     verificationFlags: VerificationFlag[];
     /** Enforcement action for observability. */

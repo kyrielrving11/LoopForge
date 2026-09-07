@@ -622,7 +622,7 @@ describe("Engine — identity & round-view consistency (v3.3.1)", () => {
         subAgentType: "general-purpose",
         subTask: "scan the module",
         resultSummary: "found the seam",
-        success: true,
+        outcome: "success",
       }],
     }, loopId, 1, task);
     const result2 = engine.invokeLoopCompile(makeRequest({

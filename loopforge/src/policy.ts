@@ -146,6 +146,10 @@ export interface EvolutionPolicy {
   /** v2.5: Jaccard threshold for matching agent-declared status changes
    *  (completed/blocked/canceled) to existing sub-goals. Default: 0.5. */
   subgoal_match_threshold: number;
+  /** v3.7.1: Max ACTIVE sub-goals (pending/in_progress/blocked) shown in
+   *  prompts and the state file. done/canceled never render as items —
+   *  they survive in the vault, replay, and counts. */
+  max_active_subgoals: number;
   /** v2.5: Jaccard threshold for matching constraints during discovery
    *  and violation tracking. Default: 0.5. */
   constraint_match_threshold: number;
@@ -202,8 +206,12 @@ export interface McpPolicy {
   session_lease_renew_interval_ms: number;
 }
 
-/** v2.12: User/Agent gate governance. The gate is a record layer — it never
- *  blocks the verify→enforce→stop decision flow. */
+/** v2.12/v3.7.1: User/Agent gate governance. The gate is an OPT-IN
+ *  blocking layer. When disabled (the default): the two gate tools are
+ *  hidden from tools/list, direct calls return gate_disabled, and rounds
+ *  citing gate_ids are not checked. When enabled: loopforge_gate_check is
+ *  a structured preflight; high-risk actions persist a gate_opened record
+ *  and a round that cites an unapproved gate is rejected. */
 export interface GatePolicy {
   enabled: boolean;
 }
@@ -258,6 +266,7 @@ export const DEFAULT_POLICY: LoopPolicy = {
     criteria_dedup_threshold: 0.45,
     subgoal_dedup_threshold: 0.6,
     subgoal_match_threshold: 0.5,
+    max_active_subgoals: 12,
     constraint_match_threshold: 0.5,
     subgoal_drift_alignment_threshold: 0.3,
     constraint_id_enabled: true,
@@ -273,7 +282,7 @@ export const DEFAULT_POLICY: LoopPolicy = {
     session_lease_renew_interval_ms: 10_000,
   },
   gate: {
-    enabled: true,
+    enabled: false,
   },
 };
 

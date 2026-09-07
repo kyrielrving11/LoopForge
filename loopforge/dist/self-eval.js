@@ -80,15 +80,51 @@ export function parseCriterionRevisions(raw) {
         return { old: r.old.slice(0, 500), new: r.new.slice(0, 500) };
     });
 }
-/** Parse WorkerResult[] from a raw JSON array. */
-export function parseWorkerResults(raw) {
+/** Parse SubGoalUpdate[] from a raw JSON array.
+ *  v3.7.1: lenient per-entry filtering (id/status shape) with fixed caps
+ *  (20 entries, id ≤ 64, note ≤ 300). Referential validity — unknown IDs
+ *  and illegal migrations — is NOT checked here: that needs the committed
+ *  sub-goal set and runs as a pre-advance validation (evaluation_invalid). */
+export function parseSubGoalUpdates(raw) {
     if (!Array.isArray(raw))
         return [];
     return raw
         .filter((v) => typeof v === "object" && v !== null &&
-        typeof v.agentId === "string" &&
-        typeof v.subTask === "string" &&
-        typeof v.resultSummary === "string")
+        typeof v.id === "string" &&
+        (v.status === "in_progress" ||
+            v.status === "done" ||
+            v.status === "blocked" ||
+            v.status === "canceled"))
+        .slice(0, 20)
+        .map((u) => {
+        const update = {
+            id: u.id.trim().slice(0, 64),
+            status: u.status,
+        };
+        if (typeof u.note === "string" && u.note.trim().length > 0) {
+            update.note = u.note.trim().slice(0, 300);
+        }
+        return update;
+    });
+}
+/** Parse WorkerResult[] from a raw JSON array.
+ *  v3.7.1: `outcome` is the single fact. An entry without a valid outcome
+ *  is dropped (not derived, not defaulted) — the array stays informational:
+ *  absent/empty arrays are accepted unchanged, so a round without any
+ *  delegation can never be rejected over worker fields. */
+export function parseWorkerResults(raw) {
+    if (!Array.isArray(raw))
+        return [];
+    return raw
+        .filter((v) => {
+        if (typeof v !== "object" || v === null)
+            return false;
+        const w = v;
+        return typeof w.agentId === "string" &&
+            typeof w.subTask === "string" &&
+            typeof w.resultSummary === "string" &&
+            (w.outcome === "success" || w.outcome === "partial" || w.outcome === "failed");
+    })
         .slice(0, 20)
         .map((v) => {
         const w = v;
@@ -99,11 +135,7 @@ export function parseWorkerResults(raw) {
                 : "general-purpose",
             subTask: w.subTask.slice(0, 500),
             resultSummary: w.resultSummary.slice(0, 1000),
-            success: typeof w.success === "boolean" ? w.success : false,
-            // v2.12: Declared outcome wins; derived from success when absent.
-            outcome: w.outcome === "success" || w.outcome === "partial" || w.outcome === "failed"
-                ? w.outcome
-                : undefined,
+            outcome: w.outcome,
             discoveredConstraints: boundedStringArray(w.discoveredConstraints, 50, 500),
         };
     });
@@ -148,6 +180,87 @@ export function validateCoreSelfEvaluation(raw) {
     }
     return { missing, invalid };
 }
+/** v3.7.1: Strict structural checks for the sub-goal protocol fields
+ *  (subgoal_updates / emerged_subtasks). Runs in the same pre-advance
+ *  evaluation_invalid boundary as the four core fields: an error here is a
+ *  payload defect, never a work-quality rejection — no session state, no
+ *  gates, no rejection counters, retry with the same roundId.
+ *
+ *  Shape-only (no vault): entry shape, id pattern, status enum, caps, and
+ *  the sg-XXXXXXXX creation prohibition on emerged_subtasks. Referential
+ *  validity (unknown IDs / terminal references / illegal migrations) needs
+ *  the committed sub-goal set and is checked against the compiled
+ *  sub_goals right before advance (validateSubGoalUpdates in
+ *  loop-compiler.ts). */
+export function validateSubGoalUpdatesShape(raw) {
+    const errors = [];
+    const emerged = raw.emerged_subtasks;
+    if (Array.isArray(emerged)) {
+        for (const item of emerged) {
+            if (typeof item === "string" && /^sg-[a-f0-9]{8}$/.test(item.trim())) {
+                errors.push({
+                    field: "emerged_subtasks",
+                    reason: "id_in_creation",
+                    detail: `"${item.trim()}" matches the sg-XXXXXXXX ID pattern — the creation channel never accepts ID references`,
+                });
+            }
+        }
+    }
+    const updates = raw.subgoal_updates;
+    if (updates === undefined)
+        return errors;
+    if (!Array.isArray(updates)) {
+        errors.push({
+            field: "subgoal_updates",
+            reason: "not_array",
+            detail: "subgoal_updates must be an array of { id, status, note? } entries",
+        });
+        return errors;
+    }
+    if (updates.length > 20) {
+        errors.push({
+            field: "subgoal_updates",
+            reason: "too_many",
+            detail: "at most 20 subgoal_updates entries per round",
+        });
+    }
+    updates.forEach((entry, index) => {
+        if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+            errors.push({
+                field: "subgoal_updates",
+                reason: "invalid_entry",
+                detail: `entry ${index} is not an object`,
+            });
+            return;
+        }
+        const u = entry;
+        const id = u.id;
+        if (typeof id !== "string" || !/^sg-[a-f0-9]{8}$/.test(id.trim())) {
+            errors.push({
+                field: "subgoal_updates",
+                reason: "invalid_id",
+                detail: `entry ${index} must reference an sg-XXXXXXXX sub-goal ID`,
+            });
+        }
+        const status = u.status;
+        if (status !== "in_progress" && status !== "done" &&
+            status !== "blocked" && status !== "canceled") {
+            errors.push({
+                field: "subgoal_updates",
+                reason: "invalid_status",
+                detail: `entry ${index} status must be one of in_progress | done | blocked | canceled`,
+            });
+        }
+        if (u.note !== undefined && typeof u.note !== "string") {
+            errors.push({
+                field: "subgoal_updates",
+                reason: "invalid_note",
+                detail: `entry ${index} note must be a string`,
+            });
+        }
+    });
+    return errors;
+}
 /** Build a SelfEvaluation from a parsed JSON object.
  *  Lenient parsing: missing optional fields get sensible defaults. */
 export function buildSelfEvaluation(raw) {
@@ -174,9 +287,7 @@ export function buildSelfEvaluation(raw) {
         compression_checkpoint: typeof raw.compression_checkpoint === "boolean" ? raw.compression_checkpoint : false,
         checkpoint_label: boundedString(raw.checkpoint_label, 200) ?? "",
         next_action: boundedString(raw.next_action, 500),
-        completed_subtasks: boundedStringArray(raw.completed_subtasks, 50, 500),
-        blocked_subtasks: boundedStringArray(raw.blocked_subtasks, 50, 500),
-        canceled_subtasks: boundedStringArray(raw.canceled_subtasks, 50, 500),
+        subgoal_updates: parseSubGoalUpdates(raw.subgoal_updates),
         stop_reason: raw.stop_reason === "gave_up" || raw.stop_reason === "blocked" || raw.stop_reason === "needs_human_input"
             ? raw.stop_reason
             : undefined,
@@ -187,6 +298,7 @@ export function buildSelfEvaluation(raw) {
         blocker: typeof raw.blocker === "string" && raw.blocker.trim().length > 0
             ? raw.blocker.slice(0, 500)
             : undefined,
+        gate_ids: boundedStringArray(raw.gate_ids, 20, 64),
         retroactiveClaims: parseRetroactiveClaims(raw.retroactiveClaims),
         no_change_reason: typeof raw.no_change_reason === "string" && raw.no_change_reason.trim().length > 0
             ? raw.no_change_reason.slice(0, 200)

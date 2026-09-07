@@ -1,7 +1,7 @@
 {
   "name": "loopforge",
-  "version": "3.7.0",
-  "description": "External cognitive infrastructure for AI coding agents \u2014 breaks the summary cascade, provides independent verification, and enables model-directed prompt prioritization for 100+ round agent loops.",
+  "version": "3.7.1",
+  "description": "External cognitive infrastructure for AI coding agents — breaks the summary cascade, provides independent verification, and enables model-directed prompt prioritization for 100+ round agent loops.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -34,11 +34,11 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc && node dist/generate-schema.js",
-    "generate-schema": "tsc && node dist/generate-schema.js",
-    "test": "tsc && node dist/generate-schema.js && node --test --test-concurrency=1 dist/tests/*.test.js",
-    "test:watch": "tsc && node --test --watch dist/tests/*.test.js",
-    "check": "tsc --noEmit",
+    "build": "node scripts/sync-version.mjs && tsc && node scripts/trim-dist.mjs && node dist/generate-schema.js && node scripts/trim-dist.mjs",
+    "generate-schema": "node scripts/sync-version.mjs && tsc && node scripts/trim-dist.mjs && node dist/generate-schema.js && node scripts/trim-dist.mjs",
+    "test": "node scripts/sync-version.mjs && tsc && node scripts/trim-dist.mjs && node dist/generate-schema.js && node scripts/trim-dist.mjs && node --test --test-concurrency=1 dist/tests/*.test.js",
+    "test:watch": "node scripts/sync-version.mjs && tsc && node scripts/trim-dist.mjs && node --test --watch dist/tests/*.test.js",
+    "check": "node scripts/sync-version.mjs && tsc --noEmit",
     "verify:artifacts": "node scripts/verify-artifacts.mjs",
     "prepack": "npm run verify:artifacts && npm run build"
   },

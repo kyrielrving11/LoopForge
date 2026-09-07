@@ -8,17 +8,15 @@
 import type { LoopStore } from "./loop-store.js";
 import { type AgentLoopResult, type LoopForgeRequest, type SelfEvaluation, type SessionState } from "./protocol.js";
 export { parseExecutionEvidence, parseCriterionRevisions, parseWorkerResults, buildSelfEvaluation, } from "./self-eval.js";
-/** A single sub-agent delegation record (v1.9 — AgentTool mode). */
+/** A single sub-agent delegation record (v1.9 — AgentTool mode).
+ *  v3.7.1: outcome is the single fact; success is deleted. */
 export interface DelegationEntry {
     index: number;
     agentId: string;
     subAgentType: string;
     subTask: string;
     resultSummary: string;
-    success: boolean;
-    /** v2.12: Worker outcome (audit/projection data source). Derived from
-     *  success when absent. */
-    outcome?: "success" | "partial" | "failed";
+    outcome: "success" | "partial" | "failed";
     discoveredConstraints: string[];
 }
 export interface EngineMetrics {
@@ -67,6 +65,13 @@ export declare class LoopForgeEngine {
      *  Lineage-only entries of not-yet-committed rounds may trail the cache but
      *  never advance coveredRound (a later read replaces them post-commit). */
     private hydrationCache;
+    /** v3.7.1: Drop the hydration cache after a committed BACKTRACK decision.
+     *  The rollback commits as the CURRENT round (cache.coveredRound + 1), so
+     *  the normal incremental path never re-reads it before the restore
+     *  compile — which targets the SAME round and must see the rollback
+     *  immediately (recovery-boundary L2, Recovery Brief facts). One full
+     *  rehydrate on the rare rollback path is the correct trade. */
+    invalidateHydrationCache(loopId: string): void;
     /** v3.3.1: Drop the hydration cache when a feedback write targets a round
      *  the cache has already merged (coveredRound >= round). Cache entries are
      *  LINEAGE task_ids (loop:…:rN), so a task_id collision test could never

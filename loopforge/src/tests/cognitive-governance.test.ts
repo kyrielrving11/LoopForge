@@ -10,6 +10,7 @@ import {
   deriveGateId,
   deriveTodoId,
   auditOrder,
+  preflightStructuredGate,
 } from "../cognitive-governance.js";
 import type { GateActionDescriptor } from "../protocol.js";
 import type { VaultEntry } from "../loop-store.js";
@@ -117,5 +118,95 @@ describe("auditOrder", () => {
     ];
     const ordered = auditOrder(entries);
     assert.equal(ordered[ordered.length - 1].task_id, "loop:x:gate:g1:decision");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v3.7.1 — structured preflight (risk / decision / reason codes)
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("preflightStructuredGate (v3.7.1)", () => {
+  it("classifies a provably safe workspace action as agent_allowed / low", () => {
+    const verdict = preflightStructuredGate(descriptor({
+      description: "Refactor src/store.ts",
+      scope: ["src/store.ts"],
+      effects: ["workspace_write"],
+      reversibility: "reversible",
+      authorization: "agent_allowed",
+    }));
+    assert.equal(verdict.decision, "agent_allowed");
+    assert.equal(verdict.risk, "low");
+    assert.equal(verdict.kind, "agent");
+    assert.deepEqual(verdict.reasonCodes, []);
+    assert.ok(verdict.requiredEvidence?.includes("src/store.ts"));
+  });
+
+  it("classifies production / credentials / publish effects as user_required with reason codes", () => {
+    const verdict = preflightStructuredGate(descriptor({
+      description: "Ship the release",
+      scope: ["prod"],
+      effects: ["production", "publish"],
+      reversibility: "recoverable",
+      authorization: "unknown",
+    }));
+    assert.equal(verdict.decision, "user_required");
+    assert.equal(verdict.risk, "high");
+    assert.deepEqual(verdict.reasonCodes,
+      ["effects:production", "effects:publish", "authorization:unknown"]);
+    assert.ok(verdict.approvalQuestion?.includes("Ship the release"));
+    assert.ok(verdict.blockedScope?.includes("prod"));
+  });
+
+  it("is conservative: unknown authorization / empty effects are user_required with risk unknown", () => {
+    const unknownAuth = preflightStructuredGate(descriptor({
+      effects: ["workspace_write"],
+      reversibility: "reversible",
+      authorization: "unknown",
+    }));
+    assert.equal(unknownAuth.decision, "user_required");
+    assert.equal(unknownAuth.risk, "unknown");
+
+    const emptyEffects = preflightStructuredGate(descriptor({
+      effects: [],
+      reversibility: "reversible",
+      authorization: "agent_allowed",
+    }));
+    assert.equal(emptyEffects.decision, "user_required", "cannot prove safety without effects");
+    assert.ok(emptyEffects.reasonCodes.includes("effects_empty"));
+  });
+
+  it("flags irreversible and explicit user_required authorization", () => {
+    const irreversible = preflightStructuredGate(descriptor({
+      effects: ["workspace_write"],
+      reversibility: "irreversible",
+      authorization: "agent_allowed",
+    }));
+    assert.equal(irreversible.decision, "user_required");
+    assert.ok(irreversible.reasonCodes.includes("reversibility:irreversible"));
+
+    const explicit = preflightStructuredGate(descriptor({
+      effects: ["workspace_write"],
+      reversibility: "reversible",
+      authorization: "user_required",
+    }));
+    assert.equal(explicit.decision, "user_required");
+    assert.ok(explicit.reasonCodes.includes("authorization:user_required"));
+  });
+
+  it("binds the gate id to the canonical action — any change expires approval", () => {
+    const base = preflightStructuredGate(descriptor({
+      scope: ["db", "prod-api"],
+      authorization: "user_required",
+    }));
+    const reordered = preflightStructuredGate(descriptor({
+      scope: ["prod-api", "db"],
+      authorization: "user_required",
+    }));
+    assert.equal(base.gateId, reordered.gateId, "field order must not change the id");
+    const edited = preflightStructuredGate(descriptor({
+      scope: ["prod-api", "db", "cache"],
+      authorization: "user_required",
+    }));
+    assert.notEqual(base.gateId, edited.gateId, "a changed action expires old approvals");
   });
 });

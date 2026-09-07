@@ -75,7 +75,11 @@ export declare const CHECK_CONTRACT_COMPLETION_UNVERIFIED = "contract_completion
  *  the active one closes. Warn: the walker still ignores it; this only
  *  surfaces the otherwise-silent state. */
 export declare const CHECK_CONTRACT_PREMATURE = "contract_premature";
-export type VerificationDomain = 
+/** v3.7.1: A cited gate (evaluation.gate_ids) is not approved. Opt-in:
+ *  checked ONLY when policy.gate.enabled — citations are meaningless when
+ *  the gate layer is off. Error → enforcement rejects the round. */
+export declare const CHECK_USER_GATE_UNRESOLVED = "user_gate_unresolved";
+export type VerificationDomain =
 /** The declaration is self-consistent (and consistent with committed facts). */
 "evaluation_consistency"
 /** Machine evidence and the agent's claims about it. */
@@ -134,26 +138,17 @@ interface ParsedTestCounts {
  *  Recognized formats: Jest verbose/compact, Mocha, pytest/unittest, Go test,
  *  and PHPUnit OK summaries. */
 export declare function parseTestOutput(stdout: string): ParsedTestCounts | null;
-/** Verify a SelfEvaluation against the loop's cross-round lineage.
- *
- * @param selfEval             The agent's self-evaluation for the current round.
- * @param currentRound         The current round number (1-based).
- * @param vaultEntries         Vault entries for this loop (committed lineage
- *                             entries AND :feedback entries — the feedback
- *                             entries feed the ACTIVE-contract derivation).
- * @param prevSelfEval         The agent's self-evaluation from the previous round
- *                             (null for round 1).
- * @param evidenceSnapshots    v1.18: Evidence snapshots from configured providers.
- *                             Used by checkEvidenceIntegrity for multi-provider
- *                             cross-validation. Defaults to empty array. */
-export declare function verifySelfEvaluation(selfEval: SelfEvaluation, currentRound: number, vaultEntries: VaultEntry[], prevSelfEval?: SelfEvaluation | null, evidenceSnapshots?: ProviderSnapshot[], 
+export declare function verifySelfEvaluation(selfEval: SelfEvaluation, currentRound: number, vaultEntries: VaultEntry[], prevSelfEval?: SelfEvaluation | null, evidenceSnapshots?: ProviderSnapshot[],
 /** v2.13: Files from skipped backtrack rounds. If the agent's
  *  files_changed overlaps significantly with these, the workspace
  *  was not properly restored before working. */
-backtrackSkippedFiles?: string[], 
+backtrackSkippedFiles?: string[],
 /** v2.12: Git HEAD commit of the backtrack restore point. When set, the
  *  current git snapshot must sit at this commit — otherwise the workspace
  *  was not restored and the round cannot be accepted. */
-backtrackTargetGitHead?: string): VerificationResult;
+backtrackTargetGitHead?: string,
+/** v3.7.1: gate records (task_type gate_opened / gate_decision) live
+ *  outside the round prefix — the caller passes them in explicitly. */
+gateEntries?: VaultEntry[]): VerificationResult;
 export {};
 //# sourceMappingURL=verification-gate.d.ts.map

@@ -17,7 +17,7 @@
  *              with stopReason "enforcement_terminated".
  */
 import { makeEnforcementResult } from "./protocol.js";
-import { machineProgressSeries, CHECK_SUCCESS_WITH_REMAINING_CRITERIA, CHECK_RECURRING_VIOLATION, CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE, CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED, CHECK_REQUIRED_COMMAND_FAILED, CHECK_COMMAND_EVIDENCE_MISMATCH, CHECK_OUTCOME_SUCCESS_CONTRADICTION, CHECK_VERIFICATION_ENTRYPOINT_MODIFIED, CHECK_PREMATURE_BOUNDARY, CHECK_ROUND_SCOPE_DRIFT, CHECK_CONTRACT_COMPLETION_UNVERIFIED } from "./verification-gate.js";
+import { machineProgressSeries, CHECK_SUCCESS_WITH_REMAINING_CRITERIA, CHECK_RECURRING_VIOLATION, CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE, CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED, CHECK_REQUIRED_COMMAND_FAILED, CHECK_COMMAND_EVIDENCE_MISMATCH, CHECK_OUTCOME_SUCCESS_CONTRADICTION, CHECK_VERIFICATION_ENTRYPOINT_MODIFIED, CHECK_PREMATURE_BOUNDARY, CHECK_ROUND_SCOPE_DRIFT, CHECK_CONTRACT_COMPLETION_UNVERIFIED, CHECK_USER_GATE_UNRESOLVED } from "./verification-gate.js";
 import { deriveConstraintId, deriveCriterionId, deriveSubGoalId } from "./loop-compiler.js";
 import { getPolicy } from "./policy.js";
 import { STABLE_ID_RE, isRecord, entryRound, extractFilePathTokens } from "./token-utils.js";
@@ -138,22 +138,52 @@ export function findBacktrackTargetGitHead(restoreRound, vaultEntries) {
     }
     return null;
 }
-/** Build the backtrack prompt injected at the top of the restored round.
- *
- *  v2.13: Includes concrete workspace restore instructions with affected
- *  file lists from skipped rounds. The agent must restore the working tree
- *  to the clean round's state before proceeding. */
-export function buildBacktrackPrompt(fromRound, toRound, triggerRule, skippedDiscoveries, 
+export function buildBacktrackPrompt(fromRound, toRound, triggerRule, skippedDiscoveries,
 /** v2.13: Files changed in the skipped rounds (from evidence snapshots).
  *  Used to show the agent exactly what needs to be reverted. */
-skippedFiles = [], 
+skippedFiles = [],
 /** v2.12: Git HEAD commit hash at the backtrack point (current HEAD).
  *  The agent must discard work back to the clean round's state. */
-gitHead) {
+gitHead,
+/** v3.7.1: The redo submission's roundId (loop:<id>:round:<toRound+1>). */
+recoveryRoundId,
+/** v3.7.1: Derived Recovery Brief facts — committed facts + the
+ *  in-flight attempt only; never rejected payloads. */
+recovery) {
     const lines = [
         `## ⛔ Backtrack — Round ${fromRound} → Restored to Round ${toRound}`,
         "",
     ];
+    // ── Recovery Brief (v3.7.1) ──────────────────────────────────────────
+    // A compact structured summary at the top of the rollback directive. The
+    // detailed sections below (workspace restore, discoveries, instructions)
+    // keep their existing wording; the brief exists so the agent cannot miss
+    // why it was rolled back, what failed, and what the redo round is.
+    if (recovery) {
+        lines.push("### Recovery Brief", "");
+        lines.push(`- **Trigger**: ${triggerRule}`);
+        lines.push(`- **Restored to round**: ${toRound} (the redo is round ${toRound + 1})`);
+        if (recoveryRoundId) {
+            lines.push(`- **Recovery Round ID**: \`${recoveryRoundId}\``);
+        }
+        if (recovery.failedRounds.length > 0) {
+            lines.push(`- **Failed rounds**: ${recovery.failedRounds.join(", ")}`);
+            const shown = recovery.approaches.slice(0, 6);
+            for (const approach of shown) {
+                lines.push(`  - Failed approach: ${approach}`);
+            }
+            if (recovery.approaches.length > shown.length) {
+                lines.push(`  - … and ${recovery.approaches.length - shown.length} more failed approaches`);
+            }
+        }
+        if (recovery.wrongAssumptions.length > 0) {
+            lines.push("- **Falsified assumptions** (do not rebuild on these):");
+            for (const assumption of recovery.wrongAssumptions.slice(0, 5)) {
+                lines.push(`  - ${assumption}`);
+            }
+        }
+        lines.push("");
+    }
     // ── Why This Happened ────────────────────────────────────────────────
     // v3.7: stall and flatline are one evaluator emitting progress_stall; the
     // former flatline-specific wording ("zero forward motion → radically
@@ -197,7 +227,7 @@ gitHead) {
         "> with unrestored files will be **rejected**.", "");
     // ── What Must Change ──────────────────────────────────────────────────
     lines.push("### What Must Change", "", "- Do **NOT** repeat the approach used in the skipped rounds.", "- Try a **different** task decomposition or technique.", "- If the current sub-goal is stuck, consider canceling it " +
-        "(`canceled_subtasks`) and working on a different one.", 
+        "(`subgoal_updates` to canceled) and working on a different one.",
     // v3.5: the restored Current Task may be the very Round Contract that
     // stalled — the agent must be told the sanctioned way to revise it
     // (outcome=blocked closes the active contract; the revised proposal in
@@ -938,6 +968,8 @@ const RULE_TABLE = [
     { category: "progress_recovery", checks: ["max_rejections"], ladder: "counter" },
     { category: "plan_drift", checks: ["intent_drift"], ladder: "internal", clarificationAllowed: true },
     { category: "progress_recovery", checks: ["backtrack_workspace_not_restored"], ladder: "internal", backtrackAllowed: true },
+    // v3.7.1: cited gates without an approved human decision
+    { category: "contract_scope", checks: ["user_gate_unresolved"], ladder: "uniform", terminalAfter: 2, noticeOnRepeat: true },
 ];
 const RULE_TABLE_BY_ID = new Map();
 for (const row of RULE_TABLE) {
@@ -961,7 +993,27 @@ for (const row of RULE_TABLE) {
  * @param consecutiveRejections How many consecutive rounds have already been rejected.
  *                              Starts at 0; increments on each reject; resets on accept.
  */
-export function enforceRound(selfEval, verifyResult, currentRound, vaultEntries, consecutiveRejections = 0, 
+/** v3.7.1: user_gate_unresolved — the round cites gates without an
+ *  approved human decision. Reject; the uniform ladder escalates repeats
+ *  (the agent should pause and obtain approval — never resubmit a claim of
+ *  completed high-risk work). */
+function enforceUserGateUnresolved(flags) {
+    const flag = flags.find((f) => f.check === CHECK_USER_GATE_UNRESOLVED && f.severity === "error");
+    if (!flag)
+        return null;
+    return makeEnforcementResult({
+        action: "reject",
+        reason: flag.detail,
+        fix_instructions: "The round depends on a high-risk action with no approved human " +
+            "decision. Run loopforge_gate_check with the action, present the " +
+            "approval question, and call loopforge_gate_resolve only after the " +
+            "human decides. Then resubmit with the approved gate id in " +
+            "evaluation.gate_ids. Do NOT claim the action is done while it is " +
+            "unapproved — safe preparation work never needs a gate.",
+        check: CHECK_USER_GATE_UNRESOLVED,
+    });
+}
+export function enforceRound(selfEval, verifyResult, currentRound, vaultEntries, consecutiveRejections = 0,
 /** v2.12: Current clarification streak for R7 escalation. */
 driftClarificationStreak = 0) {
     const { flags } = verifyResult;
@@ -996,6 +1048,8 @@ driftClarificationStreak = 0) {
         () => enforceProgressStall(selfEval, flags, currentRound, vaultEntries, consecutiveRejections),
         // R6: rejection-counter catch-all (evaluated only when no row above
         // fired — a clean-looking round carrying a high persisted counter)
+        // v3.7.1: cited gate without an approved human decision
+        () => enforceUserGateUnresolved(flags),
         () => enforceMaxRejections(consecutiveRejections),
         // v2.12: R7 — intent drift; its weak-clarification streak is a separate
         // counter and never mixes with the global rejection count

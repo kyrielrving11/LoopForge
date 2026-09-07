@@ -279,12 +279,16 @@ describe("renderCanonicalStateMarkdown", () => {
     const state = createCanonicalLoopState(request(), response({
       sub_goals: [
         { id: "sg-1", description: "Task A", status: "done", declared_at_round: 1, status_changed_at_round: 3, completed_at_round: 3, priority: 0 },
+        { id: "sg-2", description: "Task B", status: "pending", declared_at_round: 2, status_changed_at_round: 2, priority: 1 },
       ],
     }), "test.md");
     const md = renderCanonicalStateMarkdown(state);
     assert.ok(md.includes("Sub-Goal Dashboard"));
-    // v2.8: Sub-goal IDs are rendered in the state file
-    assert.ok(md.includes("`sg-1`"), "should render sub-goal ID in state file");
+    // v2.8/v3.7.1: active sub-goal IDs render as rows; done/canceled only
+    // survive in the counts line.
+    assert.ok(md.includes("`sg-2`"), "should render active sub-goal ID in state file");
+    assert.ok(!md.includes("`sg-1`"), "done sub-goal rows no longer render in the state file");
+    assert.ok(md.includes("1 done"), "done count survives in the dashboard totals line");
   });
 
   it("renders verification flags", () => {
@@ -313,6 +317,92 @@ describe("renderCanonicalStateMarkdown", () => {
     const state = createCanonicalLoopState(request(), response(), "test.md");
     const md = renderCanonicalStateMarkdown(state);
     assert.ok(md.endsWith("\n"));
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v3.7.1 — state-file tiering (Current / Recent / Historical Summary)
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("state-file tiering (v3.7.1)", () => {
+  // A state with content in every tier: verification flags → Recent,
+  // milestones → Historical, objective/constraints → Current.
+  function richState() {
+    return createCanonicalLoopState(request({
+      verification_flags: [
+        { severity: "warn", field: "x", check: "c1", detail: "flag detail" },
+      ],
+    }), response({
+      rolling_summary: {
+        key_outcomes: [],
+        recurring_issues: [],
+        rounds_sampled: 1,
+        generated_at_round: 2,
+        milestones: [{
+          label: "m",
+          round_range: { start: 1, end: 2 },
+          outcome: "done",
+          carried_constraints: [],
+          resolved_constraints: [],
+          progress_at_boundary: 0.5,
+          kind: "auto",
+          generated_at_round: 2,
+        }],
+      },
+    }), "test.md");
+  }
+
+  it("renders the three tiers in order with derived metadata", () => {
+    const state = richState();
+    const md = renderCanonicalStateMarkdown(state, { attempt: 2 });
+    const idxCurrent = md.indexOf("## Current");
+    const idxRecent = md.indexOf("## Recent");
+    const idxHistorical = md.indexOf("## Historical Summary");
+    assert.ok(idxCurrent >= 0 && idxRecent > idxCurrent && idxHistorical > idxRecent,
+      "tiers must render in order: Current → Recent → Historical Summary");
+    assert.ok(md.includes("**Derived**: true"), "derived marker in the header");
+    assert.ok(md.includes("**Source**: round 2 (attempt 2)"), "attempt marker");
+    assert.match(md, /\*\*State hash\*\*: [a-f0-9]{12}/);
+    // Sections are demoted to H3 under their tier.
+    const current = md.slice(idxCurrent, idxRecent);
+    assert.ok(current.includes("### Loop Objective"), "Current holds the objective");
+    assert.ok(current.includes("### Active Constraints"), "Current holds active constraints");
+    const recent = md.slice(idxRecent, idxHistorical);
+    assert.ok(recent.includes("### Verification"), "Recent holds verification findings");
+    const historical = md.slice(idxHistorical);
+    assert.ok(historical.includes("### Phase History"), "Historical holds milestones");
+  });
+
+  it("marks the retry attempt — attempt 2 differs from attempt 1", () => {
+    const state = createCanonicalLoopState(request(), response(), "test.md");
+    const a1 = renderCanonicalStateMarkdown(state, { attempt: 1 });
+    const a2 = renderCanonicalStateMarkdown(state, { attempt: 2 });
+    assert.notEqual(a1, a2, "attempt must be visible in the derived view");
+    assert.ok(a1.includes("(attempt 1)"));
+    assert.ok(a2.includes("(attempt 2)"));
+  });
+
+  it("injects the Recovery Brief into Recent only when provided", () => {
+    const state = richState();
+    const plain = renderCanonicalStateMarkdown(state);
+    assert.ok(!plain.includes("Recovery Brief"), "no brief outside a recovery window");
+    const withBrief = renderCanonicalStateMarkdown(state, {
+      attempt: 1,
+      recoveryBrief: ["- rolled back to round 3", "- do not repeat approach A"],
+    });
+    const idxRecent = withBrief.indexOf("## Recent");
+    const idxHistorical = withBrief.indexOf("## Historical Summary");
+    assert.ok(idxRecent >= 0 && idxHistorical > idxRecent);
+    const recent = withBrief.slice(idxRecent, idxHistorical);
+    assert.ok(recent.includes("### Recovery Brief"), "brief renders inside Recent");
+    assert.ok(recent.includes("do not repeat approach A"));
+  });
+
+  it("produces byte-identical content for identical state and attempt", () => {
+    const state = richState();
+    const first = renderCanonicalStateMarkdown(state, { attempt: 1 });
+    const second = renderCanonicalStateMarkdown(state, { attempt: 1 });
+    assert.equal(first, second);
   });
 });
 

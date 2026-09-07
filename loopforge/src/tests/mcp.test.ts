@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import { MemoryLoopStore, installTestCommandProvider } from "./_helpers.js";
 import { queryLoopEntries } from "../loop-store.js";
 import type { LoopSessionDocument } from "../loop-store.js";
+import { deriveSubGoalId } from "../loop-compiler.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Helpers
@@ -57,7 +58,7 @@ function evalParam(opts: {
 import { SessionManager } from "../mcp/session.js";
 import { TOOL_HANDLERS, validateToolInput, validateToolOutput } from "../mcp/tools.js";
 import { SERVER_INSTRUCTIONS } from "../mcp/server.js";
-import { resetPolicy, getPolicy } from "../policy.js";
+import { resetPolicy, getPolicy, setPolicyForTest, DEFAULT_POLICY } from "../policy.js";
 import type { SelfEvaluation } from "../protocol.js";
 import { RoundTransactionCoordinator } from "../round-transaction.js";
 import { SessionLeaseConflictError } from "../storage.js";
@@ -95,6 +96,9 @@ describe("MCP — loopforge_start", async () => {
 describe("MCP — durable gate resolution", async () => {
   it("resolves a persisted gate after the owning process is recreated", async () => {
     resetPolicy();
+    // v3.7.1: gates are opt-in — the blocked-round auto-record path only
+    // runs when policy.gate.enabled.
+    setPolicyForTest({ ...DEFAULT_POLICY, gate: { enabled: true } });
     installTestCommandProvider();
     const store = new MemoryLoopStore();
     const first = new SessionManager(store);
@@ -137,6 +141,7 @@ describe("MCP — durable gate resolution", async () => {
     assert.equal(decision?.loop_id, loopId);
     assert.equal((decision?.loop_lineage as Record<string, unknown>)?.round, 1);
     restarted.close();
+    resetPolicy();
   });
 });
 
@@ -1568,25 +1573,31 @@ describe("MCP — drift streak & sub-goal persistence (v3.2.1)", async () => {
     );
   });
 
-  it("persists completed/blocked/canceled subtasks on the feedback entry", async () => {
+  it("persists subgoal_updates transitions on the feedback entry", async () => {
     const start = await TOOL_HANDLERS.loopforge_start(mgr, { task: "Audit ERC20", maxRounds: 20 });
     const sessionId = String(start.sessionId);
     const started = mgr.get(String(start.sessionId));
     assert.ok(started, "session must exist after start");
     const loopId = started!.loopId;
 
+    const doneId = deriveSubGoalId("first step");
+    const blockedId = deriveSubGoalId("blocked step");
+    const canceledId = deriveSubGoalId("dropped step");
+
     await TOOL_HANDLERS.loopforge_next(mgr, {
       sessionId,
       roundId: String(start.roundId),
       evaluation: {
         success: false,
-        output_summary: "Finished sg-a, hit a wall on sg-c, dropped sg-d.",
+        output_summary: "Finished the first step, hit a wall, dropped a step.",
         should_continue: true,
         constraint_violations: [],
-        emerged_subtasks: ["sg-b: next step"],
-        completed_subtasks: ["sg-a: first step"],
-        blocked_subtasks: ["sg-c: blocked step"],
-        canceled_subtasks: ["sg-d: dropped step"],
+        emerged_subtasks: ["first step", "blocked step", "dropped step", "next step"],
+        subgoal_updates: [
+          { id: doneId, status: "done" },
+          { id: blockedId, status: "blocked" },
+          { id: canceledId, status: "canceled" },
+        ],
         execution_evidence: {
           files_changed: ["src/a.ts"],
           test_results: { passed: 1, failed: 0, skipped: 0 },
@@ -1602,11 +1613,199 @@ describe("MCP — drift streak & sub-goal persistence (v3.2.1)", async () => {
       feedbackOnly: true,
     });
     assert.equal(feedback.length, 1, "round 1 must have one feedback entry");
-    assert.deepEqual(feedback[0].completed_subtasks, ["sg-a: first step"],
-      "completed_subtasks must persist on the feedback entry (subgoal_drift reads it)");
-    assert.deepEqual(feedback[0].blocked_subtasks, ["sg-c: blocked step"]);
-    assert.deepEqual(feedback[0].canceled_subtasks, ["sg-d: dropped step"]);
-    assert.deepEqual(feedback[0].emerged_subtasks, ["sg-b: next step"]);
+    assert.deepEqual(feedback[0].subgoal_updates, [
+      { id: doneId, status: "done" },
+      { id: blockedId, status: "blocked" },
+      { id: canceledId, status: "canceled" },
+    ], "subgoal_updates must persist on the feedback entry (compiler replays it)");
+    assert.deepEqual(feedback[0].emerged_subtasks, ["first step", "blocked step", "dropped step", "next step"]);
+  });
+
+  it("rejects an unknown sub-goal ID pre-advance without consuming the round", async () => {
+    const start = await TOOL_HANDLERS.loopforge_start(mgr, { task: "Audit ERC20", maxRounds: 20 });
+    const entriesBefore = store.listEntries().length;
+    const result = await TOOL_HANDLERS.loopforge_next(mgr, {
+      sessionId: start.sessionId,
+      roundId: start.roundId,
+      evaluation: {
+        success: false,
+        output_summary: "claimed a transition on a phantom goal",
+        should_continue: true,
+        constraint_violations: [],
+        subgoal_updates: [{ id: "sg-00000000", status: "done" }],
+        execution_evidence: {
+          files_changed: ["src/a.ts"],
+          test_results: { passed: 1, failed: 0, skipped: 0 },
+          success_criteria_met: [],
+          success_criteria_remaining: ["Complete the task"],
+          progress_estimate: 0.3,
+        },
+      },
+    });
+    assert.equal(result.error, "evaluation_invalid");
+    const details = result.details as { subgoal_errors: Array<{ reason: string; detail: string }> };
+    assert.equal(details.subgoal_errors[0]?.reason, "unknown_id");
+    // evaluation_invalid guarantee: nothing persisted, no rejection state,
+    // the same roundId stays open for a corrected retry.
+    assert.equal(store.listEntries().length, entriesBefore, "no vault/session writes");
+    const session = mgr.get(String(start.sessionId));
+    assert.equal(session?.currentRound, 1);
+    assert.equal(session?.consecutiveRejections, 0, "no rejection counters touched");
+    assert.equal(session?.roundSnapshot?.roundId, start.roundId, "round not consumed");
+    // A corrected submission on the same roundId is accepted.
+    const retry = await TOOL_HANDLERS.loopforge_next(mgr, {
+      sessionId: start.sessionId,
+      roundId: start.roundId,
+      evaluation: {
+        success: false,
+        output_summary: "fixed the payload",
+        should_continue: true,
+        constraint_violations: [],
+        execution_evidence: {
+          files_changed: ["src/a.ts"],
+          test_results: { passed: 1, failed: 0, skipped: 0 },
+          success_criteria_met: [],
+          success_criteria_remaining: ["Complete the task"],
+          progress_estimate: 0.3,
+        },
+      },
+    });
+    assert.equal(retry.error, undefined, "same-roundId retry must be accepted");
+  });
+
+  it("rejects sg-XXXXXXXX literals in emerged_subtasks (creation channel)", async () => {
+    const start = await TOOL_HANDLERS.loopforge_start(mgr, { task: "Audit ERC20", maxRounds: 20 });
+    const result = await TOOL_HANDLERS.loopforge_next(mgr, {
+      sessionId: start.sessionId,
+      roundId: start.roundId,
+      evaluation: {
+        success: false,
+        output_summary: "created by ID literal",
+        should_continue: true,
+        constraint_violations: [],
+        emerged_subtasks: ["sg-abcd1234"],
+      },
+    });
+    assert.equal(result.error, "evaluation_invalid");
+    const details = result.details as { subgoal_errors: Array<{ reason: string }> };
+    assert.equal(details.subgoal_errors[0]?.reason, "id_in_creation");
+  });
+
+  it("accepts a sub-goal that is created and transitioned within the same round", async () => {
+    const start = await TOOL_HANDLERS.loopforge_start(mgr, { task: "Audit ERC20", maxRounds: 20 });
+    const sgId = deriveSubGoalId("harden the withdraw path");
+    const result = await TOOL_HANDLERS.loopforge_next(mgr, {
+      sessionId: start.sessionId,
+      roundId: start.roundId,
+      evaluation: {
+        success: false,
+        output_summary: "emerged and started hardening the withdraw path",
+        should_continue: true,
+        constraint_violations: [],
+        emerged_subtasks: ["harden the withdraw path"],
+        subgoal_updates: [{ id: sgId, status: "in_progress" }],
+        execution_evidence: {
+          files_changed: ["src/withdraw.ts"],
+          test_results: { passed: 1, failed: 0, skipped: 0 },
+          success_criteria_met: [],
+          success_criteria_remaining: ["Complete the task"],
+          progress_estimate: 0.3,
+        },
+      },
+    });
+    assert.equal(result.error, undefined,
+      "same-round emergence + in_progress transition must be legal");
+  });
+
+  it("v3.7.1: an unapproved cited gate rejects the round; approval unblocks it", async () => {
+    setPolicyForTest({ ...DEFAULT_POLICY, gate: { enabled: true } });
+    try {
+      const start = await TOOL_HANDLERS.loopforge_start(mgr, { task: "Audit ERC20", maxRounds: 20 });
+      const sessionId = String(start.sessionId);
+      const roundId = String(start.roundId);
+
+      // Structured preflight: high-risk action → user_required + record.
+      const pre = await TOOL_HANDLERS.loopforge_gate_check(mgr, {
+        sessionId,
+        roundId,
+        action: {
+          description: "Deploy the release to production",
+          scope: ["prod-api"],
+          effects: ["production", "publish"],
+          reversibility: "unknown",
+          authorization: "user_required",
+        },
+      });
+      assert.equal(pre.error, undefined);
+      const preRec = pre as { decision: string; risk: string; reasonCodes: string[]; gateId: string };
+      assert.equal(preRec.decision, "user_required");
+      assert.equal(preRec.risk, "high");
+      assert.ok(preRec.reasonCodes.includes("effects:production"));
+      assert.ok(typeof preRec.gateId === "string" && preRec.gateId.length > 0);
+      const gateId = preRec.gateId;
+      assert.ok(typeof pre.gateId === "string" && pre.gateId.length > 0);
+      assert.ok(store.entries.some((e) => e.task_type === "gate_opened" && e.gate_id === gateId),
+        "user_required preflight persists a gate_opened record");
+
+      // Citing the unapproved gate → user_gate_unresolved reject.
+      const blocked = await TOOL_HANDLERS.loopforge_next(mgr, {
+        sessionId,
+        roundId,
+        evaluation: {
+          success: false,
+          output_summary: "Deployed but no human approved it yet.",
+          should_continue: true,
+          constraint_violations: [],
+          gate_ids: [gateId],
+          execution_evidence: {
+            files_changed: ["deploy.yml"],
+            test_results: { passed: 1, failed: 0, skipped: 0 },
+            success_criteria_met: [],
+            success_criteria_remaining: ["Complete the task"],
+            progress_estimate: 0.5,
+          },
+        },
+      });
+      assert.equal(blocked.enforcementAction, "reject", "unapproved citation must reject");
+      assert.ok(String(blocked.enforcementReason ?? "").includes("not_approved"),
+        "reason must report the unapproved citation");
+      assert.ok(String(blocked.enforcementReason ?? "").includes("approved human decision"),
+        "reason must describe the gate layer");
+      const sessionAfter = mgr.get(sessionId);
+      assert.equal(sessionAfter?.currentRound, 1, "reject must not advance the round");
+
+      // Human approval via gate_resolve, then the citation passes.
+      const resolved = await TOOL_HANDLERS.loopforge_gate_resolve(mgr, {
+        sessionId,
+        gateId,
+        approved: true,
+        note: "human reviewed and approved",
+      });
+      assert.equal(resolved.error, undefined);
+      const accepted = await TOOL_HANDLERS.loopforge_next(mgr, {
+        sessionId,
+        roundId,
+        evaluation: {
+          success: false,
+          output_summary: "Deployed with an approved gate.",
+          should_continue: true,
+          constraint_violations: [],
+          gate_ids: [gateId],
+          execution_evidence: {
+            files_changed: ["deploy.yml"],
+            test_results: { passed: 1, failed: 0, skipped: 0 },
+            success_criteria_met: [],
+            success_criteria_remaining: ["Complete the task"],
+            progress_estimate: 0.5,
+          },
+        },
+      });
+      assert.ok(!accepted.enforcementAction || accepted.enforcementAction === "accept",
+        `approved citation must pass, got ${accepted.enforcementAction ?? "accept"}`);
+      assert.equal(accepted.round, 2, "round advances after approval");
+    } finally {
+      resetPolicy();
+    }
   });
 
   it("three consecutive weak drift clarifications terminate the loop (v3.3.1 R7 streak)", async () => {

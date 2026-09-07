@@ -1,5 +1,70 @@
 # Changelog
 
+## 3.7.1 (2026-09-07)
+
+Protocol convergence and the opt-in gate layer. No compatibility is carried:
+the protocol field set is the version's field set. The single-source and
+derivation rules from 3.7.0 are untouched — Vault remains the only factual
+source, CanonicalLoopState the only cognitive source.
+
+**Sub-goal protocol convergence.** The three string-array declarations
+(`completed_subtasks` / `blocked_subtasks` / `canceled_subtasks`) and their
+natural-language/Jaccard fallback are gone. One explicit channel replaces
+them: `subgoal_updates` — `{ id, status }` references to ACTIVE sub-goals,
+governed by a single closed migration matrix (in_progress from pending or
+blocked — the dead state is revived through explicit declaration only;
+done/canceled are terminal; re-opening means a new `emerged_subtasks` item).
+`emerged_subtasks` never accepts `sg-XXXXXXXX` literals. Sub-goal status
+errors — shape, unknown ID, terminal reference, illegal migration — return
+`evaluation_invalid` pre-advance against the SAME compiled sub-goal set the
+agent saw (single derivation, zero session state, zero rejection counters,
+same-roundId retry); AGENTS.md's optional-field leniency documents this one
+structural exception. Derivation replays every committed round in order, so
+older transitions never regress on later compiles.
+
+**Bounded active projections.** Prompts, the state file, and projections
+render ACTIVE sub-goals only (pending/in_progress/blocked), ordered blocked →
+in_progress → pending (priority, then recency) and capped at the new
+`evolution.max_active_subgoals` (default 12). done/canceled items survive in
+the vault, replay, and the counts lines — never as rows.
+
+**Three-tier state file.** `.loopforge/state/<loopId>-state.md` is now grouped
+Current / Recent / Historical Summary with derived metadata (`Derived: true`,
+source round, attempt, state hash). Retry attempts are marked; deleting the
+file and recompiling rebuilds byte-identical content (new regression test).
+Recovery Briefs render in the Recent tier only inside a recovery window.
+
+**Recovery Brief.** Backtrack directives carry a structured brief — trigger,
+restore point, redo round ID, failed rounds with their approaches, and
+falsified assumptions. Sourced from committed rounds above the restore point
+plus the in-flight attempt; rejected payloads are not durable history and are
+never a source. The facts persist with the committed rollback decision
+(replay/audit readable) and the brief exits all projections by construction
+once the redo commit replaces the record.
+
+**WorkerResult convergence.** `success` is deleted; `outcome` is the single
+reported fact, `subAgentType` is optional (defaults to `general-purpose`).
+The array stays informational: absent/empty is always accepted, and a present
+entry without a valid outcome is dropped — never derived, never a rejection.
+
+**Gate layer becomes real — and opt-in.** `policy.gate.enabled` defaults to
+false. Disabled: the two gate tools are hidden from `tools/list` and direct
+calls return a stable `gate_disabled` error; history stays readable. Enabled:
+`loopforge_gate_check` is a structured preflight over a `GateActionDescriptor`
+(conservative classification with stable reason codes; any field change
+rebinds the gate id and expires old approvals); a `user_required` verdict
+persists a `gate_opened` record; a round citing an unapproved gate via
+`evaluation.gate_ids` is rejected (`user_gate_unresolved`, one uniform row).
+Trust model is documented: `gate_resolve` is Agent-mediated, so the layer is
+process governance plus an auditable decision record — never a machine proof
+that a human is present. Flat-text classification survives only for
+blocked-round auto-records (record layer, never blocking).
+
+**Version single-sourcing.** `src/version.ts` is generated from
+`package.json` (`scripts/sync-version.mjs` runs before build/test/check);
+CLI, MCP server info, and doctor reads it; tests and `verify:artifacts`
+probe the CLI against the package version. Hardcoded copies are deleted.
+
 ## 3.7.0 (2026-09-05)
 
 The convergence batch — verification domains, one enforcement strategy table,

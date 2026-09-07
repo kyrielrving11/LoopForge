@@ -12,6 +12,7 @@
  * advance pipeline. All round processing still goes through the
  * SessionManager → RoundDriver → RoundCoordinator path.
  */
+import type { GateActionDescriptor } from "../protocol.js";
 import type { ExternalContextProvider, LoopTerminalSink, SelfEvaluation } from "../protocol.js";
 import type { LoopStore } from "../loop-store.js";
 import type { PolicyMetricsSnapshot } from "../policy-metrics.js";
@@ -77,12 +78,41 @@ export declare class SessionManager implements SessionRegistry {
      *  Returns the number of sessions resumed. */
     autoResumeAll(): number;
     list(): McpSessionSummary[];
-    /** Classify a flat gate text. Read-only — no vault writes. */
-    checkGate(gateText: string): Record<string, unknown>;
+    /** Persist a gate_opened record for a structured preflight. Only
+     *  user_required actions are recorded — agent_allowed needs no human
+     *  authorization and opens no record. */
+    private recordOpenedGate;
+    /** v3.7.1: structured gate preflight. The agent submits a
+     *  GateActionDescriptor; the runtime classifies it (conservative:
+     *  anything not provably safe is user_required with reason codes). A
+     *  user_required verdict persists a gate_opened record bound to
+     *  loop + round + actionHash; agent_allowed records nothing and returns
+     *  the evidence suggestion instead. No action is executed and no round
+     *  advances from this call. */
+    checkGate(sessionId: string, roundId: string, action: GateActionDescriptor): Record<string, unknown>;
     /** Record a user decision for a recorded gate. The gateId embeds the
      *  canonicalized action hash — if the action changed, the match fails and
      *  the old approval expires automatically. */
     resolveGate(sessionId: string, gateId: string, approved: boolean, note?: string): Record<string, unknown>;
+    /** Compile the current round context exactly once per derivation path.
+     *  v3.0.1: prefer the round-boundary compile cached on the session (the
+     *  artifact's deterministic roundId guards against stale reuse); fall
+     *  back to a read-only compile (persistLineage: false) that never writes
+     *  the vault. Single derivation — shared by the projection view and the
+     *  subgoal_updates preflight so they can never disagree. */
+    private compileContext;
+    /** v3.7.1: pre-advance referential check for subgoal_updates. The
+     *  reference space is the SAME derivation the agent saw in its prompt
+     *  (the compiled sub_goals of the current round) plus this payload's own
+     *  emerged items (a sub-goal may be created and transitioned in one
+     *  round). Unknown IDs, terminal references, and illegal migrations
+     *  return evaluation_invalid before anything mutates. Compile failure
+     *  fails open (the shape checks above stay strict). */
+    preflightSubGoalUpdates(sessionId: string, roundId: string, updates: import("../protocol.js").SubGoalUpdate[], emerged: string[]): Array<{
+        field: string;
+        reason: string;
+        detail: string;
+    }>;
     /** Typed cognitive state projection for an active session. Derived on
      *  demand — zero persistence. Null when nothing meaningful exists yet. */
     getProjection(sessionId: string): Record<string, unknown> | null;

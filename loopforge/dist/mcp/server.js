@@ -8,7 +8,9 @@ import { appendFileSync } from "node:fs";
 import { SessionManager } from "./session.js";
 import { TOOL_HANDLERS, TOOL_SCHEMAS, ToolInputValidationError, validateToolDispatchInput, validateToolOutput, } from "./tools.js";
 import { isRecord } from "../token-utils.js";
-const SERVER_INFO = { name: "loopforge-mcp", version: "3.7.0" };
+import { getPolicy } from "../policy.js";
+import { VERSION } from "../version.js";
+const SERVER_INFO = { name: "loopforge-mcp", version: VERSION };
 const SUPPORTED_PROTOCOL_VERSIONS = new Set([
     "2024-11-05",
     "2025-03-26",
@@ -129,8 +131,15 @@ export class McpServer {
                 instructions: SERVER_INSTRUCTIONS,
             };
         }
-        if (req.method === "tools/list")
-            return { tools: TOOL_SCHEMAS };
+        // v3.7.1: the two gate tools are hidden when policy.gate.enabled=false
+        // (the default) — they are opt-in governance, not a stable surface.
+        if (req.method === "tools/list") {
+            const tools = getPolicy().gate.enabled
+                ? TOOL_SCHEMAS
+                : TOOL_SCHEMAS.filter((tool) => tool.name !== "loopforge_gate_check" &&
+                    tool.name !== "loopforge_gate_resolve");
+            return { tools };
+        }
         if (req.method !== "tools/call") {
             throw new JsonRpcError(-32601, `Unknown method: ${req.method}`);
         }

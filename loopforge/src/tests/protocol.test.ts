@@ -62,10 +62,11 @@ describe("Protocol — Factory functions", () => {
   });
 
   it("makeSelfEvaluation accepts worker_results override", () => {
-    const wr = [{ agentId: "abc", subAgentType: "explore", subTask: "search", resultSummary: "found 3 bugs", success: true }];
+    const wr: import("../protocol.js").WorkerResult[] =
+      [{ agentId: "abc", subAgentType: "explore", subTask: "search", resultSummary: "found 3 bugs", outcome: "success" }];
     const se = makeSelfEvaluation({ worker_results: wr });
     assert.equal(se.worker_results!.length, 1);
     assert.equal(se.worker_results![0].agentId, "abc");
-    assert.equal(se.worker_results![0].success, true);
+    assert.equal(se.worker_results![0].outcome, "success");
   });
 });

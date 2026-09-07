@@ -152,7 +152,7 @@ export declare function diffSnapshots(before: ProviderSnapshot[], after: Provide
  *  checks workspace cleanliness afterwards, and the backtrack prompt already
  *  instructs manual restore as the fallback. An empty workspace ("No local
  *  changes") is not a failure. */
-export declare function runBacktrackAutoRestore(gitHead: string | undefined, round: number, 
+export declare function runBacktrackAutoRestore(gitHead: string | undefined, round: number,
 /** v3.3.1: workspace root; injectable so tests can run against a temp
  *  repo. Defaults to the process cwd, matching the evidence providers. */
 cwd?: string): Promise<{

@@ -8,6 +8,9 @@ import { FileLoopStore } from "../loop-store.js";
 
 const cli = resolve("dist/cli.js");
 
+// Single version source: package.json. The CLI must agree with it.
+const pkgVersion = JSON.parse(readFileSync(resolve("package.json"), "utf8")).version as string;
+
 function temporaryDirectory(): string {
   return mkdtempSync(join(tmpdir(), "loopforge-cli-"));
 }
@@ -24,10 +27,10 @@ describe("loopforge CLI", () => {
   it("exposes one versioned command surface", () => {
     const help = run(["--help"]);
     assert.equal(help.status, 0, help.stderr);
-    assert.match(help.stdout, /LoopForge 3\.7\.0/);
+    assert.match(help.stdout, new RegExp(`LoopForge ${pkgVersion.replace(/\./g, "\\.")}`));
     assert.match(help.stdout, /loopforge mcp/);
     assert.match(help.stdout, /loopforge inspect/);
-    assert.equal(run(["--version"]).stdout.trim(), "3.7.0");
+    assert.equal(run(["--version"]).stdout.trim(), pkgVersion);
   });
 
   it("returns machine-readable doctor results", () => {

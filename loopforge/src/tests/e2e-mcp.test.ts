@@ -177,7 +177,9 @@ describe("E2E MCP lifecycle", () => {
     const list = await client.call("tools/list");
     const tools = list.tools as Array<{ name: string }>;
     assert.ok(Array.isArray(tools), "tools must be an array");
-    assert.ok(tools.length >= 9, `expected >=9 tools, got ${tools.length}`);
+    // v3.7.1: seven tools are always exposed; the two gate tools are
+    // opt-in (policy.gate.enabled) and hidden by default.
+    assert.ok(tools.length >= 7, `expected >=7 tools, got ${tools.length}`);
     const names = tools.map((t) => t.name);
     for (const expected of [
       "loopforge_start",
@@ -185,13 +187,13 @@ describe("E2E MCP lifecycle", () => {
       "loopforge_status",
       "loopforge_stop",
       "loopforge_pause",
-      "loopforge_gate_check",
       "loopforge_replay",
       "loopforge_resume",
-      "loopforge_gate_resolve",
     ]) {
       assert.ok(names.includes(expected), `tool ${expected} must be registered`);
     }
+    assert.ok(!names.includes("loopforge_gate_check"), "gate_check hidden by default");
+    assert.ok(!names.includes("loopforge_gate_resolve"), "gate_resolve hidden by default");
   });
 
   // ── Round 1: Start ──────────────────────────────────────────────────────────

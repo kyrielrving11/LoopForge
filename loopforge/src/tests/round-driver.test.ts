@@ -1,5 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { existsSync, readFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import { LoopForgeEngine } from "../engine.js";
 import { RoundDriver } from "../round-driver.js";
 import {
@@ -8,6 +10,7 @@ import {
   makeSelfEvaluation,
 } from "../protocol.js";
 import type { LoopForgeRequest } from "../protocol.js";
+import { deriveSubGoalId } from "../loop-compiler.js";
 import { MemoryLoopStore, installTestCommandProvider } from "./_helpers.js";
 import { queryLoopEntries } from "../loop-store.js";
 
@@ -107,7 +110,10 @@ describe("RoundDriver", () => {
       compression_checkpoint: true,
       checkpoint_label: "Phase 1 done",
       discovered_constraints: ["Never log secrets"],
-      completed_subtasks: ["Add error handling", "Wire config"],
+      subgoal_updates: [
+        { id: deriveSubGoalId("Add error handling"), status: "done" },
+        { id: deriveSubGoalId("Wire config"), status: "done" },
+      ],
       execution_evidence: makeExecutionEvidence({
         files_changed: ["src/a.ts"],
         test_results: { passed: 1, failed: 0, skipped: 0 },
@@ -141,7 +147,10 @@ describe("RoundDriver", () => {
     assert.equal(lin.checkpoint_label, "Phase 1 done");
     assert.deepEqual(lin.execution_evidence, eval1.execution_evidence);
     assert.deepEqual(entry.discovered_constraints, ["Never log secrets"]);
-    assert.deepEqual(entry.completed_subtasks, ["Add error handling", "Wire config"]);
+    assert.deepEqual(entry.subgoal_updates, [
+      { id: deriveSubGoalId("Add error handling"), status: "done" },
+      { id: deriveSubGoalId("Wire config"), status: "done" },
+    ]);
 
     // And the compiled round-2 response derives the agent_declared milestone
     const r2 = engine.invokeLoopCompile(
@@ -155,5 +164,71 @@ describe("RoundDriver", () => {
       `expected agent_declared milestone, got ${JSON.stringify(milestones)}`,
     );
     assert.equal(milestones[0].label, "Phase 1 done");
+  });
+
+  it("rebuilds an equivalent state file from the vault after deletion", async () => {
+    // v3.7.1: the state file is a derived view — deleting it must never lose
+    // state. A recompile of the same round (same attempt) writes back
+    // byte-identical content rebuilt from committed facts. The state
+    // directory is workspace-contained (policy enforcement), so the default
+    // `.loopforge/state` under the workspace is used and cleaned up.
+    const loopId = "driver-state-rebuild";
+    const store = new MemoryLoopStore();
+    const engine = new LoopForgeEngine(store);
+    const driver = new RoundDriver(engine, store);
+    const statePath = join(process.cwd(), ".loopforge", "state", `${loopId}-state.md`);
+    rmSync(statePath, { force: true });
+    try {
+      const p1 = await driver.prepare(request(loopId), loopId, 1);
+      assert.ok(p1, "round 1 must prepare");
+      const c1 = await driver.complete({
+        snapshot: p1!.snapshot,
+        loopId,
+        task: request(loopId).task,
+        maxRounds: 4,
+        selfEval: makeSelfEvaluation({
+          success: false,
+          output_summary: "Implemented the durable boundary.",
+          constraint_violations: [],
+          should_continue: true,
+          execution_evidence: makeExecutionEvidence({
+            files_changed: ["src/store.ts"],
+            test_results: { passed: 1, failed: 0, skipped: 0 },
+            success_criteria_met: [],
+            success_criteria_remaining: ["Finish the task"],
+            progress_estimate: 0.4,
+          }),
+        }),
+        consecutiveRejections: 0,
+        successTrajectory: [],
+      });
+      assert.equal(c1.outcome.result.action, "continue");
+      assert.ok(existsSync(statePath), "round-1 commit writes the state file");
+      const first = readFileSync(statePath, "utf8");
+      assert.ok(first.includes("**Derived**: true"), "derived metadata present");
+
+      // Round 2 compiles twice; deleting the file between compiles must not
+      // change the rebuilt content.
+      const p2 = await driver.prepare(
+        { ...request(loopId), round: 2 },
+        loopId,
+        2,
+      );
+      assert.ok(p2, "first round-2 prepare must succeed");
+      const second = readFileSync(statePath, "utf8");
+      assert.ok(second.includes("round 2"), "round metadata advances");
+
+      rmSync(statePath, { force: true });
+      const p2b = await driver.prepare(
+        { ...request(loopId), round: 2 },
+        loopId,
+        2,
+      );
+      assert.ok(p2b, "re-prepare after deletion must succeed");
+      const rebuilt = readFileSync(statePath, "utf8");
+      assert.equal(rebuilt, second, "deleted state file rebuilds byte-identically");
+    } finally {
+      rmSync(statePath, { force: true });
+    }
   });
 });

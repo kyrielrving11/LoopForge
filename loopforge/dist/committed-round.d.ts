@@ -6,7 +6,7 @@
  */
 import type { ProviderSnapshot } from "./evidence-provider.js";
 import type { VaultEntry } from "./loop-store.js";
-import type { ExecutionEvidence, PromptArtifact, RoundContract, RoundOutcome, SelfEvaluation, VerificationFlag } from "./protocol.js";
+import type { ExecutionEvidence, PromptArtifact, RoundContract, RoundOutcome, SelfEvaluation, SubGoalUpdate, VerificationFlag } from "./protocol.js";
 import type { RoundProcessResult } from "./round-coordinator.js";
 export type CommittedAction = "continue" | "stop" | "backtrack";
 export interface CommittedRoundView {
@@ -36,9 +36,7 @@ export interface CommittedRoundView {
     readonly activeConstraints?: string[];
     readonly retractedConstraints?: string[];
     readonly emergedSubtasks?: string[];
-    readonly completedSubtasks?: string[];
-    readonly blockedSubtasks?: string[];
-    readonly canceledSubtasks?: string[];
+    readonly subgoalUpdates?: SubGoalUpdate[];
 }
 /** Decode a durable :feedback entry. Reject/terminate/in-flight envelopes are
  * not committed history and therefore do not produce a view. */
@@ -76,6 +74,11 @@ export declare function entryRetractedConstraints(entry: unknown): string[];
 export declare function entryProgressEstimate(entry: unknown): number;
 /** Read emerged_subtasks from an entry (handles direct + lineage nesting). */
 export declare function entryEmergedSubtasks(entry: unknown): string[];
+/** Read subgoal_updates from an entry (handles direct + lineage nesting).
+ *  v3.7.1: committed status transitions are replayed in round order by the
+ *  compiler — every derivation replays ALL committed rounds, not just the
+ *  last one. */
+export declare function entrySubGoalUpdates(entry: unknown): SubGoalUpdate[];
 /** Read constraint_violations from an entry (entry-level, stored from the
  *  previous round's last_round_result at persist time — distinct from the
  *  evaluation-level violations on the committed view). Moved from

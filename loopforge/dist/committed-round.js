@@ -29,6 +29,33 @@ function strings(value) {
         ? value.filter((item) => typeof item === "string")
         : [];
 }
+/** Normalize a raw subgoal_updates value into typed entries. Decode stays
+ *  tolerant of any shape (parser caps apply at ingestion; this is the
+ *  read-model view of what was committed). */
+function subGoalUpdates(value) {
+    if (!Array.isArray(value))
+        return [];
+    const out = [];
+    for (const item of value) {
+        if (typeof item !== "object" || item === null)
+            continue;
+        const u = item;
+        if (typeof u.id !== "string")
+            continue;
+        const status = u.status;
+        if (status !== "in_progress" && status !== "done" &&
+            status !== "blocked" && status !== "canceled")
+            continue;
+        out.push({
+            id: u.id,
+            status,
+            note: typeof u.note === "string" ? u.note : undefined,
+        });
+        if (out.length >= 20)
+            break;
+    }
+    return out;
+}
 /** Decode a durable :feedback entry. Reject/terminate/in-flight envelopes are
  * not committed history and therefore do not produce a view. */
 export function decodeCommittedRound(entry) {
@@ -87,9 +114,7 @@ export function decodeCommittedRound(entry) {
         activeConstraints: strings(lineage?.constraints_active),
         retractedConstraints: strings(evaluation?.retracted_constraints),
         emergedSubtasks: strings(evaluation?.emerged_subtasks),
-        completedSubtasks: strings(evaluation?.completed_subtasks),
-        blockedSubtasks: strings(evaluation?.blocked_subtasks),
-        canceledSubtasks: strings(evaluation?.canceled_subtasks),
+        subgoalUpdates: subGoalUpdates(evaluation?.subgoal_updates),
     };
 }
 /** Decode an in-memory lineage entry after the engine merged its committed
@@ -120,8 +145,8 @@ export function decodeMergedRound(entry) {
         "discovered_constraints", "objective_refinement", "emerged_subtasks",
         "execution_evidence", "retracted_constraints", "revised_success_criteria",
         "wrong_assumptions", "worker_results", "compression_checkpoint",
-        "checkpoint_label", "next_action", "completed_subtasks", "blocked_subtasks",
-        "canceled_subtasks", "stop_reason", "outcome", "blocker",
+        "checkpoint_label", "next_action", "subgoal_updates", "stop_reason",
+        "outcome", "blocker", "gate_ids",
         "retroactiveClaims", "no_change_reason", "drift_clarification",
         "prompt_requests", "round_contract",
     ];
@@ -178,9 +203,7 @@ export function decodeMergedRound(entry) {
         activeConstraints: strings(raw.constraints_active ?? lineage.constraints_active),
         retractedConstraints: strings(evaluationRaw.retracted_constraints),
         emergedSubtasks: strings(evaluationRaw.emerged_subtasks),
-        completedSubtasks: strings(evaluationRaw.completed_subtasks),
-        blockedSubtasks: strings(evaluationRaw.blocked_subtasks),
-        canceledSubtasks: strings(evaluationRaw.canceled_subtasks),
+        subgoalUpdates: subGoalUpdates(evaluationRaw.subgoal_updates),
     };
 }
 /** Normalize committed history: rollback directives disappear, later records
@@ -283,6 +306,23 @@ export function entryEmergedSubtasks(entry) {
     const nested = entryLineage(entry).emerged_subtasks;
     if (Array.isArray(nested))
         return nested.filter((v) => typeof v === "string");
+    return [];
+}
+/** Read subgoal_updates from an entry (handles direct + lineage nesting).
+ *  v3.7.1: committed status transitions are replayed in round order by the
+ *  compiler — every derivation replays ALL committed rounds, not just the
+ *  last one. */
+export function entrySubGoalUpdates(entry) {
+    const view = decodeRound(entry);
+    if (view)
+        return view.subgoalUpdates ?? [];
+    const record = isRecord(entry) ? entry : {};
+    const direct = record.subgoal_updates;
+    if (Array.isArray(direct))
+        return subGoalUpdates(direct);
+    const nested = entryLineage(entry).subgoal_updates;
+    if (Array.isArray(nested))
+        return subGoalUpdates(nested);
     return [];
 }
 /** Read constraint_violations from an entry (entry-level, stored from the

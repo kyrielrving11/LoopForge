@@ -5,7 +5,7 @@
  * are never truncated; budgets are soft and overflow is recorded.
  */
 import { createHash } from "node:crypto";
-import { buildRoadmap, hashCanonicalState, milestoneHeading, trustBarLine } from "./canonical-state.js";
+import { activeSubGoalView, buildRoadmap, hashCanonicalState, milestoneHeading, trustBarLine, } from "./canonical-state.js";
 import { deriveItemId, STABLE_ID_RE, jaccardSimilarity } from "./token-utils.js";
 import { getPolicy } from "./policy.js";
 export const PROMPT_ARTIFACT_SCHEMA_VERSION = 1;
@@ -96,6 +96,8 @@ const VERIFICATION_ACTIONS = {
     // v3.5 — contract completion machine-backing + premature-replacement warn
     contract_completion_unverified: "Completion under the ACTIVE Round Contract requires its verification_plan commands to pass this round — fix the underlying failure so they pass and resubmit. Completion claims are not accepted without machine verification (no_change_reason does not apply).",
     contract_premature: "The ACTIVE contract is still open — restate it unchanged to continue it; a different contract is ignored until the active one is completed or blocked.",
+    // v3.7.1 — opt-in gate layer: cited gates need an approved human decision
+    user_gate_unresolved: "The round cites a high-risk action without an approved human decision. Run loopforge_gate_check, present the approval question, call loopforge_gate_resolve after the human decides, and resubmit with the approved gate id in evaluation.gate_ids.",
 };
 /** Fallback for unmapped check names (forward-compat with future checks). */
 const VERIFICATION_ACTION_FALLBACK = "Re-examine the flagged claim and correct your evaluation before resubmitting.";
@@ -202,7 +204,7 @@ export function milestoneBoundaryChanged(baseline, milestones) {
     const baselineRanges = new Set(baseline.milestoneRanges.map(([s, e]) => `${s}:${e}`));
     return milestones.some((m) => !baselineRanges.has(`${m.round_range.start}:${m.round_range.end}`));
 }
-function commonMandatorySections(state, 
+function commonMandatorySections(state,
 /** v2.11: L0 skips ID rendering to stay within tight budget. */
 level) {
     const sections = [
@@ -317,17 +319,18 @@ function l1Sections(state, baseline, emphasized) {
     }
     // v2.2: Sub-Goal Dashboard (compact — L1). v3.2: unchanged sub-goals
     // collapse to a count line; new/transitioned ones render in full.
-    const activeSubs = state.subGoals.filter((sg) => sg.status === "in_progress" || sg.status === "pending");
+    // v3.7.1: only ACTIVE items (pending/in_progress/blocked) enter the view;
+    // done/canceled never render as rows.
+    const view = activeSubGoalView(state.subGoals, Number.POSITIVE_INFINITY);
+    const activeSubs = view.active;
     if (activeSubs.length > 0) {
+        const iconOf = (sg) => sg.status === "in_progress" ? "🔄" : sg.status === "blocked" ? "🚫" : "⏳";
         const diff = diffSubGoals(baseline, activeSubs);
         const renderFull = !collapseEnabled || !baseline
             || diff.unchangedCount < COLLAPSE_MIN_UNCHANGED;
         if (renderFull) {
             const maxShow = 5;
-            const items = activeSubs.slice(0, maxShow).map((sg) => {
-                const icon = sg.status === "in_progress" ? "🔄" : "⏳";
-                return `${icon} [\`${sg.id}\`] ${sg.description}`;
-            });
+            const items = activeSubs.slice(0, maxShow).map((sg) => `${iconOf(sg)} [\`${sg.id}\`] ${sg.description}`);
             if (activeSubs.length > maxShow) {
                 items.push(`... and ${activeSubs.length - maxShow} more`);
             }
@@ -342,10 +345,7 @@ function l1Sections(state, baseline, emphasized) {
                 const prev = baseline.subGoals.find(([id]) => id === sg.id);
                 return prev !== undefined && prev[1] !== sg.status;
             }).length;
-            const items = diff.changed.slice(0, 5).map((sg) => {
-                const icon = sg.status === "in_progress" ? "🔄" : "⏳";
-                return `${icon} [\`${sg.id}\`] ${sg.description}`;
-            });
+            const items = diff.changed.slice(0, 5).map((sg) => `${iconOf(sg)} [\`${sg.id}\`] ${sg.description}`);
             items.push(`- … ${diff.unchangedCount} unchanged sub-goals, ${transitionCount + diff.removedCount} changed since R${baseline.round} (see state file)`);
             sections.push({
                 id: "sub_goals",
@@ -519,43 +519,27 @@ function l2Sections(state, fullStateMarkdown) {
         });
     }
     if (state.subGoals.length > 0) {
+        // v3.7.1: active-only rows ordered blocked → in_progress → pending
+        // (priority asc, recently changed first), capped by policy; done and
+        // canceled appear only in the stats line.
+        const cap = getPolicy().evolution.max_active_subgoals;
+        const view = activeSubGoalView(state.subGoals, cap);
         const lines = [];
-        // In progress
-        const inProgress = state.subGoals.filter((sg) => sg.status === "in_progress");
-        for (const sg of inProgress) {
-            lines.push(`🔄 [\`${sg.id}\`] ${sg.description} (since R${sg.status_changed_at_round})`);
+        for (const sg of view.active) {
+            if (sg.status === "in_progress") {
+                lines.push(`🔄 [\`${sg.id}\`] ${sg.description} (since R${sg.status_changed_at_round})`);
+            }
+            else if (sg.status === "blocked") {
+                lines.push(`🚫 [\`${sg.id}\`] ${sg.description} (blocked since R${sg.status_changed_at_round})`);
+            }
+            else {
+                const age = state.round - sg.declared_at_round;
+                const stale = age >= 10 ? " ⚠️ stale" : "";
+                lines.push(`⏳ [\`${sg.id}\`] ${sg.description} (pending ${age} rounds)${stale}`);
+            }
         }
-        // Pending (by age)
-        const pending = state.subGoals.filter((sg) => sg.status === "pending");
-        const shownPending = pending.slice(0, 10);
-        for (const sg of shownPending) {
-            const age = state.round - sg.declared_at_round;
-            const stale = age >= 10 ? " ⚠️ stale" : "";
-            lines.push(`⏳ [\`${sg.id}\`] ${sg.description} (pending ${age} rounds)${stale}`);
-        }
-        if (pending.length > 10) {
-            lines.push(`... and ${pending.length - 10} more pending`);
-        }
-        // Blocked
-        const blocked = state.subGoals.filter((sg) => sg.status === "blocked");
-        for (const sg of blocked) {
-            lines.push(`🚫 [\`${sg.id}\`] ${sg.description} (blocked since R${sg.status_changed_at_round})`);
-        }
-        // Recently done
-        const done = state.subGoals.filter((sg) => sg.status === "done");
-        const recentDone = done.slice(0, 5);
-        for (const sg of recentDone) {
-            lines.push(`✅ [\`${sg.id}\`] ${sg.description} (done R${sg.completed_at_round ?? sg.status_changed_at_round})`);
-        }
-        if (done.length > 5) {
-            lines.push(`... and ${done.length - 5} more completed`);
-        }
-        // Stats line
-        const total = state.subGoals.length;
-        const doneCount = done.length;
-        const canceledCount = state.subGoals.filter((sg) => sg.status === "canceled").length;
-        const activeCount = inProgress.length + pending.length + blocked.length;
-        lines.push(`─── ${total} total: ${activeCount} active, ${doneCount} done, ${canceledCount} canceled`);
+        // Stats line (full counts — rows may be capped)
+        lines.push(`─── ${view.total} total: ${view.activeTotal} active, ${view.done} done, ${view.canceled} canceled`);
         sections.push({
             id: "sub_goals_full",
             text: section("Sub-Goal Dashboard", lines.join("\n")),

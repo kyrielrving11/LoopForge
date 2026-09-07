@@ -35,28 +35,27 @@ export declare function findBacktrackTargetGitHead(restoreRound: number, vaultEn
  *  v2.13: Includes concrete workspace restore instructions with affected
  *  file lists from skipped rounds. The agent must restore the working tree
  *  to the clean round's state before proceeding. */
-export declare function buildBacktrackPrompt(fromRound: number, toRound: number, triggerRule: string, skippedDiscoveries: string[], 
+export interface BacktrackRecoveryFacts {
+    /** v3.7.1: Rolled-back rounds (restore point + 1 … trigger round). */
+    failedRounds: number[];
+    /** v3.7.1: One approach per failed round — what must NOT be repeated. */
+    approaches: string[];
+    /** v3.7.1: Falsified assumptions collected from the failed rounds. */
+    wrongAssumptions: string[];
+}
+export declare function buildBacktrackPrompt(fromRound: number, toRound: number, triggerRule: string, skippedDiscoveries: string[],
 /** v2.13: Files changed in the skipped rounds (from evidence snapshots).
  *  Used to show the agent exactly what needs to be reverted. */
-skippedFiles?: string[], 
+skippedFiles?: string[],
 /** v2.12: Git HEAD commit hash at the backtrack point (current HEAD).
  *  The agent must discard work back to the clean round's state. */
-gitHead?: string): string;
-/** Enforce round-boundary rules based on the verification gate's findings
- *  and the agent's self-evaluation integrity.
- *
- *  Rules run in priority order — the rules array below IS the priority
- *  order; numeric IDs (R1–R9, R-EVID) reflect insertion history, not
- *  priority. The first rule that fires wins.
- *
- * @param selfEval              The agent's self-evaluation for the current round.
- * @param verifyResult          The verification gate's output (from verifySelfEvaluation).
- * @param currentRound          Current round number (1-based, BEFORE increment).
- * @param vaultEntries          Vault entries for this loop (used for progress tracking).
- * @param consecutiveRejections How many consecutive rounds have already been rejected.
- *                              Starts at 0; increments on each reject; resets on accept.
- */
-export declare function enforceRound(selfEval: SelfEvaluation, verifyResult: VerificationResult, currentRound: number, vaultEntries: VaultEntry[], consecutiveRejections?: number, 
+gitHead?: string,
+/** v3.7.1: The redo submission's roundId (loop:<id>:round:<toRound+1>). */
+recoveryRoundId?: string,
+/** v3.7.1: Derived Recovery Brief facts — committed facts + the
+ *  in-flight attempt only; never rejected payloads. */
+recovery?: BacktrackRecoveryFacts): string;
+export declare function enforceRound(selfEval: SelfEvaluation, verifyResult: VerificationResult, currentRound: number, vaultEntries: VaultEntry[], consecutiveRejections?: number,
 /** v2.12: Current clarification streak for R7 escalation. */
 driftClarificationStreak?: number): EnforcementResult;
 /** Build a rejection prompt for the agent.

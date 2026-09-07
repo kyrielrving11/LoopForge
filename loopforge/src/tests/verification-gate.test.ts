@@ -22,6 +22,7 @@ import {
   CHECK_CONTRACT_COMPLETION_UNVERIFIED,
   CHECK_CONTRACT_PREMATURE,
   CHECK_DOMAIN,
+  CHECK_USER_GATE_UNRESOLVED,
   normalizeScopeEntry,
   isFileInScope,
   collectOutOfScopeFiles,
@@ -112,6 +113,7 @@ function verifySelfEvaluation(
   evidenceSnapshots: ProviderSnapshot[] = [cmdSnap("passed")],
   backtrackSkippedFiles: string[] = [],
   backtrackTargetGitHead?: string,
+  gateEntries: VaultEntry[] = [],
 ): ReturnType<typeof rawVerifySelfEvaluation> {
   return rawVerifySelfEvaluation(
     selfEval,
@@ -121,6 +123,7 @@ function verifySelfEvaluation(
     evidenceSnapshots,
     backtrackSkippedFiles,
     backtrackTargetGitHead,
+    gateEntries,
   );
 }
 
@@ -761,9 +764,9 @@ describe("verification-gate — intent-action drift", () => {
     assert.equal(result.verdict, "suspect", "intent_drift is a warn-level flag");
   });
 
-  // ── v2.14: structured-ID-first alignment signals ─────────────────────────
+  // ── v2.14/v3.7.1: structured-ID-first alignment signals ─────────────────
 
-  it("no flag when completed_subtasks carries the referenced sub-goal ID (even with 12% similarity)", () => {
+  it("no flag when the referenced sub-goal ID received a done transition", () => {
     const prev = se({
       next_action: "Complete sg-bfebcdd7 — segmentation, idempotency, and state machine tests",
     });
@@ -771,59 +774,42 @@ describe("verification-gate — intent-action drift", () => {
       output_summary:
         "Implemented three test suites covering chunk-boundary segmentation, " +
         "idempotent rerun assertions, and state machine transition tables",
-      completed_subtasks: ["sg-bfebcdd7"],
+      subgoal_updates: [{ id: "sg-bfebcdd7", status: "done" }],
     });
     const result = verifySelfEvaluation(curr, 3, [], prev);
     const flag = result.flags.find(f => f.check === "intent_drift");
-    assert.equal(flag, undefined, "sub-goal ID completion is intent alignment, not drift");
+    assert.equal(flag, undefined, "a declared done transition is intent alignment, not drift");
   });
 
-  it("no flag when a completed_subtask description derives the referenced sub-goal ID", () => {
-    const desc = "Add segmentation tests for chunk boundaries";
-    const sgId = "sg-" + computeGoalTextHash(desc).slice(0, 8);
-    const prev = se({
-      next_action: `Complete ${sgId} — segmentation, idempotency, and state machine tests`,
-    });
-    const curr = se({
-      output_summary: "Implemented chunk-boundary coverage across three suites",
-      completed_subtasks: [desc],
-    });
-    const result = verifySelfEvaluation(curr, 3, [], prev);
-    const flag = result.flags.find(f => f.check === "intent_drift");
-    assert.equal(flag, undefined, "description text matching the ID's hash is alignment");
-  });
-
-  it("no flag when a completed_subtask paraphrases the referenced sub-goal description", () => {
-    const desc = "Add idempotency guards for the payment flow";
-    const sgId = "sg-" + computeGoalTextHash(desc).slice(0, 8);
-    const prev = se({
-      next_action: `Work on ${sgId}`,
-      emerged_subtasks: [desc],
-    });
-    const curr = se({
-      output_summary: "Billed double charges on retry",
-      completed_subtasks: ["Adding idempotency guards for payment flow"],
-    });
-    const result = verifySelfEvaluation(curr, 3, [], prev);
-    const flag = result.flags.find(f => f.check === "intent_drift");
-    assert.equal(flag, undefined, "paraphrased completion above the match threshold is alignment");
-  });
-
-  it("still flags when the referenced sub-goal ID was not completed", () => {
+  it("still flags when the referenced sub-goal ID only received an in_progress transition", () => {
     const prev = se({
       next_action: "Complete sg-aaaa1111 — parser rewrite",
     });
     const curr = se({
       output_summary: "Rewrote the scheduler from scratch",
-      completed_subtasks: ["Rewrote the scheduler"],
+      subgoal_updates: [{ id: "sg-aaaa1111", status: "in_progress" }],
     });
     const result = verifySelfEvaluation(curr, 3, [], prev);
     const flag = result.flags.find(f => f.check === "intent_drift");
-    assert.ok(flag, "uncompleted referenced sub-goal is genuine drift");
+    assert.ok(flag, "an unfinished referenced sub-goal is genuine drift");
     assert.ok(
-      flag.detail.includes("did not match completed_subtasks"),
+      flag.detail.includes("did not match a declared done transition"),
       "detail should report the unmatched sub-goal ID",
     );
+  });
+
+  it("still flags when the referenced sub-goal ID was never updated", () => {
+    const prev = se({
+      next_action: "Complete sg-aaaa1111 — parser rewrite",
+    });
+    const curr = se({
+      output_summary: "Rewrote the scheduler from scratch",
+      subgoal_updates: [{ id: "sg-00000000", status: "canceled" }],
+    });
+    const result = verifySelfEvaluation(curr, 3, [], prev);
+    const flag = result.flags.find(f => f.check === "intent_drift");
+    assert.ok(flag, "an untouched referenced sub-goal is genuine drift");
+    assert.ok(flag.detail.includes("1 referenced sub-goal ID(s)"));
   });
 
   it("no flag when a file path named in next_action appears in files_changed", () => {
@@ -1906,7 +1892,7 @@ describe("verification-gate — v3.7 CHECK_DOMAIN membership", () => {
     const exports = verificationGate as unknown as Record<string, unknown>;
     const constants = Object.keys(exports)
       .filter((key) => key.startsWith("CHECK_") && typeof exports[key] === "string");
-    assert.equal(constants.length, 24, "the surviving check set is 24");
+    assert.equal(constants.length, 25, "the surviving check set is 25");
     const domains = new Set<string>();
     for (const key of constants) {
       const id = exports[key] as string;
@@ -1924,13 +1910,121 @@ describe("verification-gate — v3.7 CHECK_DOMAIN membership", () => {
   it("has no orphan domain entries and the expected domain sizes", () => {
     const counts: Record<string, number> = {};
     for (const domain of Object.values(CHECK_DOMAIN)) counts[domain] = (counts[domain] ?? 0) + 1;
-    assert.equal(Object.keys(CHECK_DOMAIN).length, 24, "CHECK_DOMAIN covers exactly the 24 checks");
+    assert.equal(Object.keys(CHECK_DOMAIN).length, 25, "CHECK_DOMAIN covers exactly the 25 checks");
     assert.deepEqual(counts, {
       evaluation_consistency: 8,
       evidence_integrity: 7,
-      plan_contract: 8,
+      plan_contract: 9,
       progress_recovery: 1,
     });
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v3.7.1 — opt-in gate blocking: user_gate_unresolved
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("verification-gate — v3.7.1 user_gate_unresolved", () => {
+  afterEach(() => resetPolicy());
+
+  function openedGate(gateId: string, actionText: string): VaultEntry {
+    return {
+      id: gateId,
+      task_id: `loop:g:gate:${gateId}`,
+      task_type: "gate_opened",
+      loop_id: "test-loop",
+      timestamp: "2026-09-01T00:00:00.000Z",
+      gate_id: gateId,
+      gate_action: actionText,
+      loop_lineage: { round: 1, gate_id: gateId },
+    };
+  }
+
+  function decision(gateId: string, approved: boolean): VaultEntry {
+    return {
+      id: `${gateId}:decision`,
+      task_id: `loop:g:gate:${gateId}:decision`,
+      task_type: "gate_decision",
+      loop_id: "test-loop",
+      timestamp: "2026-09-02T00:00:00.000Z",
+      gate_id: gateId,
+      approved,
+      loop_lineage: { round: 1, gate_id: gateId, action_hash: "x" },
+    };
+  }
+
+  const GATE_ID = "gate-111111111111";
+  const userActionJson = JSON.stringify({
+    description: "Deploy to production", scope: ["prod"],
+    effects: ["production"], reversibility: "unknown",
+    authorization: "user_required",
+  });
+  const agentActionJson = JSON.stringify({
+    description: "Refactor store", scope: ["src/store.ts"],
+    effects: ["workspace_write"], reversibility: "reversible",
+    authorization: "agent_allowed",
+  });
+
+  const flagFor = (result: ReturnType<typeof rawVerifySelfEvaluation>) =>
+    result.flags.find((f) => f.check === CHECK_USER_GATE_UNRESOLVED);
+
+  it("skips citations entirely when policy.gate.enabled=false (the default)", () => {
+    resetPolicy();
+    const result = verifySelfEvaluation(se({ gate_ids: [GATE_ID] }), 2);
+    assert.equal(flagFor(result), undefined, "no gate checks when the layer is off");
+  });
+
+  it("errors with not_found when the cited gate was never opened", () => {
+    setPolicyForTest({ ...DEFAULT_POLICY, gate: { enabled: true } });
+    const result = verifySelfEvaluation(se({ gate_ids: [GATE_ID] }), 2);
+    const flag = flagFor(result);
+    assert.ok(flag, "cited unknown gate must flag");
+    assert.equal(flag!.severity, "error");
+    assert.match(flag!.detail, /not_found/);
+  });
+
+  it("errors with not_user_gate for agent-classified gates", () => {
+    setPolicyForTest({ ...DEFAULT_POLICY, gate: { enabled: true } });
+    const result = verifySelfEvaluation(
+      se({ gate_ids: [GATE_ID] }), 2, [], null, [cmdSnap("passed")], [], undefined,
+      [openedGate(GATE_ID, agentActionJson)]);
+    const flag = flagFor(result);
+    assert.ok(flag, "an agent gate cannot satisfy a user citation");
+    assert.match(flag!.detail, /not_user_gate/);
+  });
+
+  it("errors with not_approved when no approved decision exists", () => {
+    setPolicyForTest({ ...DEFAULT_POLICY, gate: { enabled: true } });
+    const result = verifySelfEvaluation(
+      se({ gate_ids: [GATE_ID] }), 2, [], null, [cmdSnap("passed")], [], undefined, [
+        openedGate(GATE_ID, userActionJson),
+        decision(GATE_ID, false),
+      ]);
+    const flag = flagFor(result);
+    assert.ok(flag, "a declined gate cannot satisfy the citation");
+    assert.match(flag!.detail, /not_approved/);
+  });
+
+  it("stays silent when the cited user gate has an approved decision", () => {
+    setPolicyForTest({ ...DEFAULT_POLICY, gate: { enabled: true } });
+    const result = verifySelfEvaluation(
+      se({ gate_ids: [GATE_ID] }), 2, [], null, [cmdSnap("passed")], [], undefined, [
+        openedGate(GATE_ID, userActionJson),
+        decision(GATE_ID, true),
+      ]);
+    assert.equal(flagFor(result), undefined, "approved gate satisfies the citation");
+  });
+
+  it("supports legacy flat-text user gates (blocked-round auto-records)", () => {
+    setPolicyForTest({ ...DEFAULT_POLICY, gate: { enabled: true } });
+    const legacyId = "gate-222222222222";
+    const result = verifySelfEvaluation(
+      se({ gate_ids: [legacyId] }), 2, [], null, [cmdSnap("passed")], [], undefined, [
+        openedGate(legacyId, "publish the release to production"),
+        decision(legacyId, true),
+      ]);
+    assert.equal(flagFor(result), undefined,
+      "flat USER_RISK-classified records count as user gates");
   });
 });
 

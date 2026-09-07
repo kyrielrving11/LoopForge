@@ -11,7 +11,7 @@
         "loop_compile",
         "feedback"
       ],
-      "description": "LoopForge-loop_compile — TypeScript protocol definitions.\n\nAll types exchanged between the Main Agent and LoopForge flow through\nthese interfaces. This is the contract layer — no implementation logic.\n\nv3.3: 41 types — 2 enums + 35 interfaces + 4 type aliases."
+      "description": "LoopForge-loop_compile — TypeScript protocol definitions.\r\n\r\nAll types exchanged between the Main Agent and LoopForge flow through\r\nthese interfaces. This is the contract layer — no implementation logic.\r\n\r\nv3.3: 41 types — 2 enums + 35 interfaces + 4 type aliases."
     },
     "AgentStatus": {
       "type": "string",
@@ -84,7 +84,7 @@
         "success_criteria_remaining",
         "progress_estimate"
       ],
-      "description": "P4: Structured execution evidence reported by the agent after each round.\nGives LoopForge visibility into what actually happened — files changed,\ntest results, success criteria met, and a subjective progress estimate.\nEnables the compiler to cross-validate agent claims and compute real progress."
+      "description": "P4: Structured execution evidence reported by the agent after each round.\r\nGives LoopForge visibility into what actually happened — files changed,\r\ntest results, success criteria met, and a subjective progress estimate.\r\nEnables the compiler to cross-validate agent claims and compute real progress."
     },
     "CriterionRevision": {
       "type": "object",
@@ -100,7 +100,7 @@
         "old",
         "new"
       ],
-      "description": "P5: A revision to a success criterion — the old form and the new form.\nThe agent proposes this when it discovers the original criterion was\nwrong, unrealistic, or needs refinement."
+      "description": "P5: A revision to a success criterion — the old form and the new form.\r\nThe agent proposes this when it discovers the original criterion was\r\nwrong, unrealistic, or needs refinement."
     },
     "RoundContract": {
       "type": "object",
@@ -132,7 +132,7 @@
         "verification_plan",
         "scope"
       ],
-      "description": "v3.3: Round Contract. v3.4 semantics: the field on a submission is a\nPROPOSAL for the NEXT round — it becomes the ACTIVE contract (rendered\nas the Current Task and checked for execution conformance) only after\nthe declaring round commits, and stays active until a committed eval\nlists every done_when item in success_criteria_met (complete) or\nreports outcome=\"blocked\". While active it is restated unchanged each\nround; on completion or block, the next contract is declared instead.\nThe ACTIVE contract is machine-derived from committed rounds\n(round-contract.ts) — never read from last_round_result. Optional:\nabsent = no contract this round, all contract checks stay silent and\nrendering is identical to a contract-less round.\n\nEvery field is machine-checkable:\n- done_when items are claimed satisfied by listing them in\n  execution_evidence.success_criteria_met (verified per-round claim\n  model); leaving them out while success is claimed is premature_boundary\n  against the ACTIVE contract.\n- verification_plan names must reference configured, enabled\n  evidence.commands (round_unverifiable otherwise).\n- scope lists the files/directories the round may touch; actual git\n  changes outside it trigger round_scope_drift against the ACTIVE\n  contract."
+      "description": "v3.3: Round Contract. v3.4 semantics: the field on a submission is a\r\nPROPOSAL for the NEXT round — it becomes the ACTIVE contract (rendered\r\nas the Current Task and checked for execution conformance) only after\r\nthe declaring round commits, and stays active until a committed eval\r\nlists every done_when item in success_criteria_met (complete) or\r\nreports outcome=\"blocked\". While active it is restated unchanged each\r\nround; on completion or block, the next contract is declared instead.\r\nThe ACTIVE contract is machine-derived from committed rounds\r\n(round-contract.ts) — never read from last_round_result. Optional:\r\nabsent = no contract this round, all contract checks stay silent and\r\nrendering is identical to a contract-less round.\r\n\r\nEvery field is machine-checkable:\r\n- done_when items are claimed satisfied by listing them in\r\n  execution_evidence.success_criteria_met (verified per-round claim\r\n  model); leaving them out while success is claimed is premature_boundary\r\n  against the ACTIVE contract.\r\n- verification_plan names must reference configured, enabled\r\n  evidence.commands (round_unverifiable otherwise).\r\n- scope lists the files/directories the round may touch; actual git\r\n  changes outside it trigger round_scope_drift against the ACTIVE\r\n  contract."
     },
     "SelfEvaluation": {
       "type": "object",
@@ -165,6 +165,12 @@
           "type": "array",
           "items": {
             "type": "string"
+          }
+        },
+        "subgoal_updates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SubGoalUpdate"
           }
         },
         "execution_evidence": {
@@ -203,24 +209,6 @@
         "next_action": {
           "type": "string"
         },
-        "completed_subtasks": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "blocked_subtasks": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "canceled_subtasks": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
         "stop_reason": {
           "anyOf": [
             {
@@ -258,6 +246,12 @@
         "no_change_reason": {
           "type": "string"
         },
+        "gate_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "drift_clarification": {
           "type": "string"
         },
@@ -274,7 +268,7 @@
         "constraint_violations",
         "should_continue"
       ],
-      "description": "Structured self-evaluation submitted at the round boundary.\nThe agent outputs this after completing each round.\nEvery field is consumed by at least one downstream function.\n\nv1.4 (P0–P2): Three new optional fields enable cognitive evolution.\nv1.5 (P4–P5): Execution evidence, progress tracking, and self-correction."
+      "description": "Structured self-evaluation submitted at the round boundary.\r\nThe agent outputs this after completing each round.\r\nEvery field is consumed by at least one downstream function.\r\n\r\nv1.4 (P0–P2): Three new optional fields enable cognitive evolution.\r\nv1.5 (P4–P5): Execution evidence, progress tracking, and self-correction."
     },
     "RoundOutcome": {
       "type": "string",
@@ -318,7 +312,7 @@
         "delegation",
         "handoff"
       ],
-      "description": "v2.12: Typed cognitive state projection — runtime-derived facts shipped\nwith advance/status outputs. All fields are derived, zero persistence.\nConsumers: advance output (main agent), status (human/tooling), resume\nhandoff. The runtime provides facts; the agent decides actions."
+      "description": "v2.12: Typed cognitive state projection — runtime-derived facts shipped\r\nwith advance/status outputs. All fields are derived, zero persistence.\r\nConsumers: advance output (main agent), status (human/tooling), resume\r\nhandoff. The runtime provides facts; the agent decides actions."
     },
     "GateActionDescriptor": {
       "type": "object",
@@ -451,7 +445,7 @@
         "reversibility",
         "authorization"
       ],
-      "description": "v2.12: Structured high-risk action descriptor (internal — audit display\nand gate classification). The MCP surface uses a flat gate text instead."
+      "description": "v2.12: Structured high-risk action descriptor (internal — audit display\r\nand gate classification). The MCP surface uses a flat gate text instead."
     },
     "DerivedGate": {
       "type": "object",
@@ -503,7 +497,7 @@
       "required": [
         "kind"
       ],
-      "description": "v2.12: Classified gate — user gates need human authorization, agent\ngates are resolved by the agent submitting verifiable evidence."
+      "description": "v2.12: Classified gate — user gates need human authorization, agent\r\ngates are resolved by the agent submitting verifiable evidence."
     },
     "GateDecision": {
       "type": "object",
@@ -555,7 +549,7 @@
         "decidedAt",
         "actionHash"
       ],
-      "description": "v2.12: A persisted user decision for a gate. The actionHash binds the\napproval to the exact canonicalized action — an edited action changes\nthe hash, so stale approvals fail the gateId match automatically."
+      "description": "v2.12: A persisted user decision for a gate. The actionHash binds the\r\napproval to the exact canonicalized action — an edited action changes\r\nthe hash, so stale approvals fail the gateId match automatically."
     },
     "PromptRequests": {
       "type": "object",
@@ -573,7 +567,7 @@
           }
         }
       },
-      "description": "v2.9: Model-expressed information needs for the next round.\nSubmitted via SelfEvaluation.prompt_requests, consumed by the\nCompiler when assembling the next prompt. Transient — each round's\nrequests apply to that round only."
+      "description": "v2.9: Model-expressed information needs for the next round.\r\nSubmitted via SelfEvaluation.prompt_requests, consumed by the\r\nCompiler when assembling the next prompt. Transient — each round's\r\nrequests apply to that round only."
     },
     "MilestoneSummary": {
       "type": "object",
@@ -638,7 +632,7 @@
         "kind",
         "generated_at_round"
       ],
-      "description": "v2.1: Milestone summary — a phase-boundary snapshot that survives\nrolling-window eviction. Triggered by three signals in priority order:\n\n1. agent_declared    — compression_checkpoint === true (agent marks phase complete)\n2. criteria_milestone — new success_criteria_met detected (semantic dedup)\n3. auto              — safety net after N rounds without a milestone\n\nBuilt from raw round data in vault entries — no new persistent storage.\nRendered in L2 prompts and always written to the state file."
+      "description": "v2.1: Milestone summary — a phase-boundary snapshot that survives\r\nrolling-window eviction. Triggered by three signals in priority order:\r\n\r\n1. agent_declared    — compression_checkpoint === true (agent marks phase complete)\r\n2. criteria_milestone — new success_criteria_met detected (semantic dedup)\r\n3. auto              — safety net after N rounds without a milestone\r\n\r\nBuilt from raw round data in vault entries — no new persistent storage.\r\nRendered in L2 prompts and always written to the state file."
     },
     "WorkerResult": {
       "type": "object",
@@ -654,9 +648,6 @@
         },
         "resultSummary": {
           "type": "string"
-        },
-        "success": {
-          "type": "boolean"
         },
         "outcome": {
           "anyOf": [
@@ -689,12 +680,11 @@
       },
       "required": [
         "agentId",
-        "subAgentType",
         "subTask",
         "resultSummary",
-        "success"
+        "outcome"
       ],
-      "description": "A single sub-agent / Worker delegation result (v1.9 — multi-agent)."
+      "description": "A single sub-agent / Worker delegation result (v1.9 — multi-agent).\r\nv3.7.1: `outcome` is the single reported fact. `success` is deleted —\r\nentries without a valid outcome are dropped by the parser, never\r\nderived. The whole array is optional and informational: it buys no\r\nmachine verdict and an absent/empty array (no delegation this round)\r\nis always accepted."
     },
     "LoopForgeRequest": {
       "type": "object",
@@ -824,7 +814,7 @@
         "status",
         "related_subgoal_ids"
       ],
-      "description": "v3.2: Derived per-criterion status for the progress dashboard — the\n\"goal → criteria → evidence\" vertical view. Zero persistence: derived from\nvault entries each round (met/remaining reports + Jaccard sub-goal links)."
+      "description": "v3.2: Derived per-criterion status for the progress dashboard — the\r\n\"goal → criteria → evidence\" vertical view. Zero persistence: derived from\r\nvault entries each round (met/remaining reports + Jaccard sub-goal links)."
     },
     "Lesson": {
       "type": "object",
@@ -870,7 +860,7 @@
         "count",
         "rounds"
       ],
-      "description": "v3.2: A deterministic \"lesson learned\" — a constraint or verification\ncheck that failed repeatedly across rounds. Rendered in the prompt to\nimmunize the agent against repeating the same mistakes. Zero persistence:\nderived from vault entries each round; presentation only — never feeds\nthe enforcement gate's decisions."
+      "description": "v3.2: A deterministic \"lesson learned\" — a constraint or verification\r\ncheck that failed repeatedly across rounds. Rendered in the prompt to\r\nimmunize the agent against repeating the same mistakes. Zero persistence:\r\nderived from vault entries each round; presentation only — never feeds\r\nthe enforcement gate's decisions."
     },
     "LoopHealth": {
       "type": "object",
@@ -944,6 +934,50 @@
         "generated_at_round"
       ]
     },
+    "SubGoalUpdate": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "in_progress"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "done"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "blocked"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "canceled"
+              ]
+            }
+          ]
+        },
+        "note": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "status"
+      ],
+      "description": "v3.7.1: One explicit sub-goal status transition. The closed migration\r\nmatrix (loop-compiler.ts, single source) governs legality:\r\nin_progress from pending|blocked; done from pending|in_progress|blocked;\r\nblocked|canceled from pending|in_progress; blocked → canceled. done and\r\ncanceled are terminal — re-opening requires a NEW emerged_subtasks item."
+    },
     "SubGoal": {
       "type": "object",
       "properties": {
@@ -1008,7 +1042,7 @@
         "status_changed_at_round",
         "priority"
       ],
-      "description": "v2.2: A structured sub-goal tracked by the compiler across rounds.\nDeclared by the agent via emerged_subtasks (string[]), managed by\nthe compiler with derived status. Never creates sub-loops — the\nagent still owns execution; the compiler only tracks state."
+      "description": "v2.2: A structured sub-goal tracked by the compiler across rounds.\r\nDeclared by the agent via emerged_subtasks (creation) and\r\nsubgoal_updates (explicit transitions); statuses are compiler-derived\r\nfrom committed round facts. Never creates sub-loops — the agent still\r\nowns execution; the compiler only tracks state."
     },
     "ConstraintMeta": {
       "type": "object",
@@ -1057,7 +1091,7 @@
         "last_violated_at_round",
         "source"
       ],
-      "description": "v2.3: Per-constraint lifecycle metadata for the active constraint set.\nReconstructed each round from vault entries — no new persistence.\nv3.7: the time-aware decay arm (status inactive / discovered_at_round)\nwas removed — active constraints never auto-demote."
+      "description": "v2.3: Per-constraint lifecycle metadata for the active constraint set.\r\nReconstructed each round from vault entries — no new persistence.\r\nv3.7: the time-aware decay arm (status inactive / discovered_at_round)\r\nwas removed — active constraints never auto-demote."
     },
     "TaskAlignment": {
       "type": "object",
@@ -1118,6 +1152,12 @@
             "type": "string"
           }
         },
+        "subgoal_updates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SubGoalUpdate"
+          }
+        },
         "execution_evidence": {
           "$ref": "#/$defs/ExecutionEvidence"
         },
@@ -1153,24 +1193,6 @@
         },
         "next_action": {
           "type": "string"
-        },
-        "completed_subtasks": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "blocked_subtasks": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "canceled_subtasks": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
         },
         "drift_clarification": {
           "type": "string"
@@ -1558,7 +1580,7 @@
         "invalidated",
         "discovered"
       ],
-      "description": "Aggregated evidence snapshot for the state file Evidence section.\nFour categories give the agent a clear picture of what's been confirmed,\nwhat remains, what was wrong, and what's newly discovered — all derived\nfrom accumulated SelfEvaluation data across rounds."
+      "description": "Aggregated evidence snapshot for the state file Evidence section.\r\nFour categories give the agent a clear picture of what's been confirmed,\r\nwhat remains, what was wrong, and what's newly discovered — all derived\r\nfrom accumulated SelfEvaluation data across rounds."
     },
     "LoopForgeResponse": {
       "type": "object",
@@ -1735,7 +1757,7 @@
         "reason",
         "fix_instructions"
       ],
-      "description": "Result of round-boundary enforcement. Decides whether to accept the round,\nreject it (force the agent to redo the SAME round), or terminate the loop.\n\naccept:    round passes; proceed to next round as normal.\nreject:    agent's self-evaluation or output is invalid; the agent receives\n           a rejection prompt and must redo the same round. Round counter\n           does NOT increment.\nterminate: loop has reached an unrecoverable state; stop immediately with\n           stopReason \"enforcement_terminated\"."
+      "description": "Result of round-boundary enforcement. Decides whether to accept the round,\r\nreject it (force the agent to redo the SAME round), or terminate the loop.\r\n\r\naccept:    round passes; proceed to next round as normal.\r\nreject:    agent's self-evaluation or output is invalid; the agent receives\r\n           a rejection prompt and must redo the same round. Round counter\r\n           does NOT increment.\r\nterminate: loop has reached an unrecoverable state; stop immediately with\r\n           stopReason \"enforcement_terminated\"."
     },
     "ExternalContextRequest": {
       "type": "object",
@@ -1842,7 +1864,7 @@
         "check",
         "detail"
       ],
-      "description": "A single flag raised during self-evaluation verification.\nEach flag identifies a specific inconsistency between the agent's\nself-reported data and the loop's cross-round lineage."
+      "description": "A single flag raised during self-evaluation verification.\r\nEach flag identifies a specific inconsistency between the agent's\r\nself-reported data and the loop's cross-round lineage."
     },
     "VerificationResult": {
       "type": "object",
@@ -1880,7 +1902,7 @@
         "verdict",
         "flags"
       ],
-      "description": "Result of cross-round self-evaluation verification.\n\nVerdict semantics:\n- trusted:   all checks passed; flags are informational only.\n- suspect:   one or more warn-level flags; flags become warnings in the\n             next prompt so the agent can clarify.\n- contradicted: one or more error-level flags; the quality score for this\n                round is excluded from the quality trend (NOT modified).\n                Flags become hard constraints — the agent must respond."
+      "description": "Result of cross-round self-evaluation verification.\r\n\r\nVerdict semantics:\r\n- trusted:   all checks passed; flags are informational only.\r\n- suspect:   one or more warn-level flags; flags become warnings in the\r\n             next prompt so the agent can clarify.\r\n- contradicted: one or more error-level flags; the quality score for this\r\n                round is excluded from the quality trend (NOT modified).\r\n                Flags become hard constraints — the agent must respond."
     }
   }
 }

@@ -38,6 +38,7 @@ export const DEFAULT_POLICY = {
         criteria_dedup_threshold: 0.45,
         subgoal_dedup_threshold: 0.6,
         subgoal_match_threshold: 0.5,
+        max_active_subgoals: 12,
         constraint_match_threshold: 0.5,
         subgoal_drift_alignment_threshold: 0.3,
         constraint_id_enabled: true,
@@ -53,7 +54,7 @@ export const DEFAULT_POLICY = {
         session_lease_renew_interval_ms: 10_000,
     },
     gate: {
-        enabled: true,
+        enabled: false,
     },
 };
 /** Write a full default `loop_policy.json` to the target directory.

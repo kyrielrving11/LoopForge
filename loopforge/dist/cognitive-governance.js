@@ -1,10 +1,12 @@
-/** v2.12: User/Agent gate classification and governance helpers.
+/** v2.12/v3.7.1: User/Agent gate classification and governance helpers.
  *
- *  Ported from the 3.x line with the V2 flat-contract adaptation: the MCP
- *  surface works with a flat gate text (the agent's blocker description),
- *  while the structured GateActionDescriptor stays an internal type for
- *  audit display. Only decisions are persisted — gate state is always
- *  re-derivable via deriveGate, so the vault never holds a second truth.
+ *  v3.7.1: loopforge_gate_check is a STRUCTURED preflight over
+ *  GateActionDescriptor (preflightStructuredGate — the single classifier
+ *  behind both the tool and the round-blocking check). The flat-text
+ *  classifier (deriveGate / USER_RISK) survives only for blocked-round
+ *  auto-records, which stay a record-layer convenience that never blocks.
+ *  Only decisions are persisted; gate state is always re-derivable from
+ *  the canonical action, so the vault never holds a second truth.
  */
 import { createHash } from "node:crypto";
 import { computeGoalTextHash } from "./loop-compiler.js";
@@ -42,28 +44,82 @@ export function gateActionHash(action) {
 }
 /** Classify a structured action descriptor (internal use; audit display). */
 export function deriveStructuredGate(action) {
-    const actionHash = gateActionHash(action);
-    const highRisk = action.authorization === "user_required" ||
-        action.reversibility === "irreversible" ||
-        action.reversibility === "unknown" ||
-        action.effects.some((effect) => USER_EFFECTS.has(effect));
-    const userGate = highRisk || action.authorization === "unknown" || action.effects.length === 0;
+    const verdict = preflightStructuredGate(action);
     return {
-        id: `gate-${actionHash}`,
-        actionHash,
-        gate: userGate
+        id: verdict.gateId,
+        actionHash: verdict.actionHash,
+        gate: verdict.kind === "user"
             ? {
                 kind: "user",
-                question: `Authorize this action: ${action.description}`,
-                blockedScope: action.scope.length ? action.scope : [action.description],
-                allowedWork: ["Read-only investigation", "Local dry-run", "Prepare verification and rollback evidence"],
+                question: verdict.approvalQuestion,
+                blockedScope: verdict.blockedScope,
+                allowedWork: verdict.allowedBeforeApproval,
             }
             : {
                 kind: "agent",
                 problem: action.description,
-                requiredEvidence: action.scope,
-                suggestedResolution: "Resolve the technical blocker and submit concrete evidence in RoundReport.",
+                requiredEvidence: verdict.requiredEvidence,
+                suggestedResolution: verdict.suggestedResolution,
             },
+    };
+}
+/** v3.7.1: the structured gate preflight — the SINGLE classifier behind
+ *  loopforge_gate_check and the round-blocking check. Conservative by
+ *  default: anything that cannot be proven safe is user_required, with
+ *  stable reason codes instead of keyword guessing. `gateId` binds the
+ *  canonical action, so any field change produces a new id and expires old
+ *  approvals. */
+export function preflightStructuredGate(action) {
+    const actionHash = gateActionHash(action);
+    const gateId = `gate-${actionHash}`;
+    const reasonCodes = [];
+    const highRiskEffects = action.effects.filter((effect) => USER_EFFECTS.has(effect));
+    for (const effect of highRiskEffects)
+        reasonCodes.push(`effects:${effect}`);
+    if (action.reversibility === "irreversible")
+        reasonCodes.push("reversibility:irreversible");
+    if (action.reversibility === "unknown")
+        reasonCodes.push("reversibility:unknown");
+    if (action.authorization === "user_required")
+        reasonCodes.push("authorization:user_required");
+    if (action.authorization === "unknown")
+        reasonCodes.push("authorization:unknown");
+    if (action.effects.length === 0)
+        reasonCodes.push("effects_empty");
+    if (action.scope.length === 0)
+        reasonCodes.push("scope_empty");
+    const explicitHighRisk = action.authorization === "user_required" ||
+        action.reversibility === "irreversible" ||
+        action.reversibility === "unknown" ||
+        highRiskEffects.length > 0;
+    // Conservative default: unknown authorization or an empty effects list
+    // cannot be proven safe → user_required (risk unknown, not low).
+    const userRequired = explicitHighRisk || action.authorization === "unknown" ||
+        action.effects.length === 0;
+    const risk = userRequired
+        ? (explicitHighRisk ? "high" : "unknown")
+        : "low";
+    return {
+        gateId,
+        actionHash,
+        kind: userRequired ? "user" : "agent",
+        risk,
+        decision: userRequired ? "user_required" : "agent_allowed",
+        reasonCodes,
+        ...(userRequired
+            ? {
+                approvalQuestion: `Authorize this action: ${action.description}`,
+                blockedScope: action.scope.length ? action.scope : [action.description],
+                allowedBeforeApproval: [
+                    "Read-only investigation",
+                    "Local dry-run",
+                    "Prepare verification and rollback evidence",
+                ],
+            }
+            : {
+                requiredEvidence: action.scope,
+                suggestedResolution: "Resolve the technical blocker and submit concrete evidence in the round evaluation.",
+            }),
     };
 }
 /** Classify a flat gate text (MCP surface). The id embeds the canonicalized

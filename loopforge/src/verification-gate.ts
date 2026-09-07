@@ -22,11 +22,22 @@
 import type { VaultEntry } from "./loop-store.js";
 import type { ProviderSnapshot } from "./evidence-provider.js";
 import { getPolicy, isConfiguredCommand } from "./policy.js";
-import type { RoundContract, SelfEvaluation, VerificationFlag, VerificationResult } from "./protocol.js";
+import type {
+  GateActionDescriptor,
+  RoundContract,
+  SelfEvaluation,
+  VerificationFlag,
+  VerificationResult,
+} from "./protocol.js";
 import { makeVerificationFlag, makeVerificationResult } from "./protocol.js";
 import { jaccardSimilarity, tokenize, isRecord, entryRound, extractFilePathTokens } from "./token-utils.js";
 import { computeGoalTextHash, deriveSubGoalId } from "./loop-compiler.js";
-import { committedRoundsFromEntries, machineGitMotionSeries, entryViolations } from "./committed-round.js";
+import {
+  committedRoundsFromEntries,
+  entrySubGoalUpdates,
+  machineGitMotionSeries,
+  entryViolations,
+} from "./committed-round.js";
 import {
   contractRoundEvaluations,
   contractDoneWhenSatisfied,
@@ -36,6 +47,7 @@ import {
 import { stableStringify } from "./canonical-state.js";
 import { deriveClaimView, resolveRoundFiles, type ClaimView } from "./evidence-claims.js";
 import { effectiveSuccess, parseRoundContract } from "./self-eval.js";
+import { deriveGate, preflightStructuredGate } from "./cognitive-governance.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // v2.12: Check-name constants — single source of truth so the enforcement
@@ -123,6 +135,10 @@ export const CHECK_CONTRACT_COMPLETION_UNVERIFIED = "contract_completion_unverif
  *  the active one closes. Warn: the walker still ignores it; this only
  *  surfaces the otherwise-silent state. */
 export const CHECK_CONTRACT_PREMATURE = "contract_premature";
+/** v3.7.1: A cited gate (evaluation.gate_ids) is not approved. Opt-in:
+ *  checked ONLY when policy.gate.enabled — citations are meaningless when
+ *  the gate layer is off. Error → enforcement rejects the round. */
+export const CHECK_USER_GATE_UNRESOLVED = "user_gate_unresolved";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // v3.7: Four-domain membership map — the single source for docs, tests, and
@@ -170,6 +186,8 @@ export const CHECK_DOMAIN: Readonly<Record<string, VerificationDomain>> = {
   [CHECK_PREMATURE_BOUNDARY]: "plan_contract",
   [CHECK_CONTRACT_COMPLETION_UNVERIFIED]: "plan_contract",
   [CHECK_CONTRACT_PREMATURE]: "plan_contract",
+  // v3.7.1: cited-gate authorization conformance (opt-in blocking layer).
+  [CHECK_USER_GATE_UNRESOLVED]: "plan_contract",
   // ── progress_recovery ─────────────────────────────────────────────────────
   [CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED]: "progress_recovery",
 };
@@ -757,44 +775,17 @@ function isTestFile(path: string): boolean {
     /_test\.[a-z0-9]+$/i.test(path);
 }
 
-/** Map each referenced sub-goal ID to its known description(s), reconstructed
- *  from emerged_subtasks in the vault lineage and the previous self-eval. */
-function referencedSubGoalDescriptions(
-  ids: string[],
-  vaultEntries: VaultEntry[],
-  prevSelfEval: SelfEvaluation | null,
-): Map<string, string[]> {
-  const map = new Map<string, string[]>();
-  for (const id of ids) map.set(id, []);
-  const descriptions: string[] = [];
-  for (const entry of vaultEntries) {
-    const emerged = Array.isArray(entry.emerged_subtasks)
-      ? entry.emerged_subtasks.filter((v: unknown) => typeof v === "string")
-      : [];
-    descriptions.push(...emerged);
-  }
-  descriptions.push(...(prevSelfEval?.emerged_subtasks ?? []));
-  for (const desc of descriptions) {
-    const trimmed = desc.trim();
-    if (!trimmed) continue;
-    const id = deriveSubGoalId(trimmed);
-    if (map.has(id)) map.get(id)!.push(trimmed);
-  }
-  return map;
-}
-
 /** v2.1 (check 11): Compare the previous round's declared next_action with
  *  the current round's actual output_summary. Detect when the agent says it
  *  will do X but then does Y — silent drift without explanation.
  *
  *  Only fires when both next_action and output_summary are non-empty.
  *
- *  v2.14: Structured-ID-first detection. Alignment is decided by a waterfall
- *  of concrete signals before falling back to string similarity:
+ *  v2.14/v3.7.1: Structured-ID-first detection. Alignment is decided by a
+ *  waterfall of concrete signals before falling back to string similarity:
  *    1. Sub-goal IDs (sg-XXXXXXXX) in next_action matched against this
- *       round's completed_subtasks (exact ID, ID derived from the
- *       description text, or Jaccard against the referenced sub-goal's
- *       known description).
+ *       round's declared done transitions (subgoal_updates). Description
+ *       matching is gone — transitions are strict ID references now.
  *    2. File paths named in next_action appearing in files_changed.
  *    3. Test evidence — next_action mentions tests and test files were
  *       changed with tests actually run.
@@ -814,22 +805,15 @@ function checkIntentDrift(
   const policy = getPolicy();
   const filesChanged = selfEval.execution_evidence?.files_changed ?? [];
 
-  // ── Signal 1: sub-goal IDs referenced by next_action → completed this round
+  // ── Signal 1: sub-goal IDs referenced by next_action → a done transition
   const intentIds = extractSubGoalIds(intent);
   if (intentIds.length > 0) {
-    const completed = selfEval.completed_subtasks ?? [];
-    const referenced = referencedSubGoalDescriptions(intentIds, vaultEntries, prevSelfEval);
-    const idMatched = intentIds.some((id) =>
-      completed.some((entry) => {
-        const text = entry.trim();
-        if (!text) return false;
-        if (text.toLowerCase() === id) return true;
-        if (deriveSubGoalId(text) === id) return true;
-        const descriptions = referenced.get(id) ?? [];
-        return descriptions.some((desc) =>
-          jaccardSimilarity(text, desc) >= policy.evolution.subgoal_match_threshold);
-      }),
+    const doneIds = new Set(
+      (selfEval.subgoal_updates ?? [])
+        .filter((u) => u.status === "done")
+        .map((u) => u.id),
     );
+    const idMatched = intentIds.some((id) => doneIds.has(id));
     if (idMatched) return null;
   }
 
@@ -856,7 +840,7 @@ function checkIntentDrift(
   if (score >= threshold) return null;
 
   const idNote = intentIds.length > 0
-    ? `; ${intentIds.length} referenced sub-goal ID(s) did not match completed_subtasks`
+    ? `; ${intentIds.length} referenced sub-goal ID(s) did not match a declared done transition`
     : "";
   return makeVerificationFlag({
     severity: "warn",
@@ -1063,9 +1047,12 @@ function checkSubGoalDrift(
   const nextAction = selfEval.next_action?.trim();
   if (!nextAction) return null;
 
-  // Reconstruct pending sub-goal descriptions from vault entries
+  // Reconstruct the pending set from vault entries and the current eval.
+  // v3.7.1: emerged descriptions are the creation channel; done/canceled are
+  // terminal ids reached through subgoal_updates (monotone — a terminal
+  // transition can never be undone, so the terminal id set only grows).
   const pendingSubGoals = new Set<string>();
-  const completedOrCanceled = new Set<string>();
+  const terminalIds = new Set<string>();
   for (const entry of vaultEntries) {
     const emerged = Array.isArray(entry.emerged_subtasks)
       ? entry.emerged_subtasks.filter((v: unknown) => typeof v === "string")
@@ -1073,33 +1060,21 @@ function checkSubGoalDrift(
     for (const desc of emerged) {
       pendingSubGoals.add(desc.trim());
     }
-    const done = Array.isArray(entry.completed_subtasks)
-      ? entry.completed_subtasks.filter((v: unknown) => typeof v === "string")
-      : [];
-    for (const desc of done) {
-      completedOrCanceled.add(desc.trim());
-    }
-    const canceled = Array.isArray(entry.canceled_subtasks)
-      ? entry.canceled_subtasks.filter((v: unknown) => typeof v === "string")
-      : [];
-    for (const desc of canceled) {
-      completedOrCanceled.add(desc.trim());
+    for (const u of entrySubGoalUpdates(entry)) {
+      if (u.status === "done" || u.status === "canceled") terminalIds.add(u.id);
     }
   }
-  // Also process current selfEval
+  // Also process the current selfEval
   for (const desc of selfEval.emerged_subtasks ?? []) {
     pendingSubGoals.add(desc.trim());
   }
-  for (const desc of selfEval.completed_subtasks ?? []) {
-    completedOrCanceled.add(desc.trim());
-  }
-  for (const desc of selfEval.canceled_subtasks ?? []) {
-    completedOrCanceled.add(desc.trim());
+  for (const u of selfEval.subgoal_updates ?? []) {
+    if (u.status === "done" || u.status === "canceled") terminalIds.add(u.id);
   }
 
-  // Remove completed/canceled from pending
-  for (const desc of completedOrCanceled) {
-    pendingSubGoals.delete(desc);
+  // Remove descriptions whose derived id reached a terminal state
+  for (const desc of [...pendingSubGoals]) {
+    if (terminalIds.has(deriveSubGoalId(desc))) pendingSubGoals.delete(desc);
   }
 
   // Need at least 3 pending sub-goals for the check to be meaningful
@@ -1132,7 +1107,7 @@ function checkSubGoalDrift(
       detail:
         `Agent's next_action doesn't align with any of ${pendingSubGoals.size} pending sub-goals. ` +
         `Pending: ${sample}… Consider completing existing sub-goals before starting new work, ` +
-        `or cancel outdated sub-goals via canceled_subtasks.`,
+        `or cancel outdated sub-goals via subgoal_updates.`,
     });
   }
 
@@ -1441,6 +1416,65 @@ function checkContractPremature(
  * @param evidenceSnapshots    v1.18: Evidence snapshots from configured providers.
  *                             Used by checkEvidenceIntegrity for multi-provider
  *                             cross-validation. Defaults to empty array. */
+/** v3.7.1: Opt-in round blocking for the gate layer. For every gate id the
+ *  round cites (gate_ids), the gate_opened record must exist, must be a
+ *  USER gate, and must have an approved gate_decision. Error flags list
+ *  every failing id with a reason. Entirely skipped when the feature is
+ *  disabled — there is nothing to cite against. */
+function checkUserGateUnresolved(
+  selfEval: SelfEvaluation,
+  gateEntries: VaultEntry[],
+): VerificationFlag | null {
+  if (!getPolicy().gate.enabled) return null;
+  const cited = (selfEval.gate_ids ?? []).filter((id) => typeof id === "string");
+  if (cited.length === 0) return null;
+
+  const opened = new Set<string>();
+  const userKind = new Set<string>();
+  const approved = new Set<string>();
+  for (const entry of gateEntries) {
+    if (entry.task_type === "gate_opened" && typeof entry.gate_id === "string") {
+      opened.add(entry.gate_id);
+      // v3.7.1: structured records declare gate_kind; legacy flat records
+      // (blocked-round auto-records) classify their stored action text.
+      if (entry.gate_kind === "user") {
+        userKind.add(entry.gate_id);
+      } else if (typeof entry.gate_action === "string") {
+        let kind: "user" | "agent" | null = null;
+        try {
+          kind = preflightStructuredGate(
+            JSON.parse(entry.gate_action) as GateActionDescriptor,
+          ).kind;
+        } catch {
+          kind = deriveGate(entry.gate_action).gate.kind;
+        }
+        if (kind === "user") userKind.add(entry.gate_id);
+      }
+    }
+    if (entry.task_type === "gate_decision" && entry.approved === true &&
+        typeof entry.gate_id === "string") {
+      approved.add(entry.gate_id);
+    }
+  }
+
+  const failures: string[] = [];
+  for (const gateId of cited) {
+    if (!opened.has(gateId)) failures.push(`${gateId} (not_found)`);
+    else if (!userKind.has(gateId)) failures.push(`${gateId} (not_user_gate)`);
+    else if (!approved.has(gateId)) failures.push(`${gateId} (not_approved)`);
+  }
+  if (failures.length === 0) return null;
+  return makeVerificationFlag({
+    severity: "error",
+    field: "evaluation",
+    check: CHECK_USER_GATE_UNRESOLVED,
+    detail:
+      `The round cites gates without an approved human decision: ` +
+      `${failures.join("; ")}. Obtain approval via loopforge_gate_check / ` +
+      `loopforge_gate_resolve before claiming the action is done.`,
+  });
+}
+
 export function verifySelfEvaluation(
   selfEval: SelfEvaluation,
   currentRound: number,
@@ -1455,6 +1489,9 @@ export function verifySelfEvaluation(
    *  current git snapshot must sit at this commit — otherwise the workspace
    *  was not restored and the round cannot be accepted. */
   backtrackTargetGitHead?: string,
+  /** v3.7.1: gate records (task_type gate_opened / gate_decision) live
+   *  outside the round prefix — the caller passes them in explicitly. */
+  gateEntries: VaultEntry[] = [],
 ): VerificationResult {
   const flags: VerificationFlag[] = [];
 
@@ -1528,6 +1565,8 @@ export function verifySelfEvaluation(
     () => checkPrematureBoundary(activeContract, selfEval, claimView),
     () => checkContractCompletionUnverified(activeContract, selfEval, evidenceSnapshots),
     () => checkContractPremature(activeContract, selfEval),
+    // v3.7.1: opt-in gate-layer blocking (skipped when disabled)
+    () => checkUserGateUnresolved(selfEval, gateEntries),
   ];
 
   for (const run of checks) {

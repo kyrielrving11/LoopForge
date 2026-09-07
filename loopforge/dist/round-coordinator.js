@@ -21,6 +21,8 @@ import { queryLoopEntries } from "./loop-store.js";
 import { CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE, verifySelfEvaluation } from "./verification-gate.js";
 import { entryRound } from "./token-utils.js";
 import { effectiveSuccess } from "./self-eval.js";
+import { decodeCommittedRound } from "./committed-round.js";
+import { makeRoundId } from "./round-transaction.js";
 import { enforceRound, buildRejectionPrompt, findSafeRestorePoint, buildBacktrackPrompt, findBacktrackTargetGitHead, } from "./enforcement-gate.js";
 import { logEvent } from "./observability.js";
 import { getPolicy } from "./policy.js";
@@ -71,7 +73,12 @@ export class RoundCoordinator {
             ]
             : [];
         // ── 2. Verification gate ────────────────────────────────────────────
-        const verifyResult = verifySelfEvaluation(selfEval, currentRound, vaultEntries, lastSelfEval ?? null, evidenceSnapshots ?? [], input.backtrackSkippedFiles ?? [], input.backtrackTargetGitHead);
+        const verifyResult = verifySelfEvaluation(selfEval, currentRound, vaultEntries, lastSelfEval ?? null, evidenceSnapshots ?? [], input.backtrackSkippedFiles ?? [], input.backtrackTargetGitHead,
+        // v3.7.1: gate records live under the gate: prefix — outside the round
+        // entries above — and are passed separately to the gate check.
+        this.store
+            ? queryLoopEntries(this.store, loopId, { prefix: `loop:${loopId}:gate:` })
+            : []);
         const verificationFlags = verifyResult.flags;
         const gateContradicted = verifyResult.verdict === "contradicted";
         if (gateContradicted) {
@@ -176,11 +183,20 @@ export class RoundCoordinator {
             }
             // v2.13: Collect files changed in skipped rounds for the restore prompt
             const skippedFiles = [];
+            // v3.7.1: Recovery Brief facts — one approach and the falsified
+            // assumptions per rolled-back round, from COMMITTED rounds above the
+            // restore point (rejected attempts are not durable history and never
+            // become a source; the in-flight attempt below is the only exception).
+            const failedRounds = [];
+            const approaches = [];
+            const wrongAssumptions = [];
             for (let r = restorePoint.round + 1; r < currentRound; r++) {
                 // v3.2.1: match the feedback entry (execution_evidence lives there) —
                 // the compile-time lineage entry for the same round precedes it in
                 // the flat view and carries no evidence.
                 const entry = vaultEntries.find((e) => entryRound(e) === r && e.task_type !== "loop_lineage");
+                const view = entry ? decodeCommittedRound(entry) : null;
+                const evaluation = view?.evaluation ?? null;
                 if (entry?.execution_evidence) {
                     const ev = entry.execution_evidence;
                     const files = Array.isArray(ev.files_changed)
@@ -191,13 +207,38 @@ export class RoundCoordinator {
                             skippedFiles.push(f);
                     }
                 }
+                const summary = evaluation?.output_summary ?? "";
+                if (summary.trim().length > 0) {
+                    failedRounds.push(r);
+                    approaches.push(summary.trim().slice(0, 200));
+                }
+                const assumptions = (evaluation?.wrong_assumptions ?? [])
+                    .filter((v) => typeof v === "string")
+                    .map((s) => s.slice(0, 500));
+                for (const a of assumptions) {
+                    if (!wrongAssumptions.includes(a))
+                        wrongAssumptions.push(a);
+                }
+            }
+            // The in-flight attempt that triggered this rollback — its evaluation
+            // lives in this process, not in committed history.
+            const triggerSummary = selfEval.output_summary?.trim() ?? "";
+            if (triggerSummary.length > 0) {
+                if (!failedRounds.includes(currentRound))
+                    failedRounds.push(currentRound);
+                approaches.push(triggerSummary.slice(0, 200));
+                for (const a of (selfEval.wrong_assumptions ?? [])
+                    .filter((v) => typeof v === "string")) {
+                    if (!wrongAssumptions.includes(a))
+                        wrongAssumptions.push(a.slice(0, 500));
+                }
             }
             // v2.12: Capture the restore point's git HEAD so the next round's
             // verification can confirm the workspace returned to this commit.
             const targetGitHead = findBacktrackTargetGitHead(restorePoint.round, vaultEntries);
             const backtrackPrompt = buildBacktrackPrompt(currentRound, restorePoint.round, enforceResult.check ?? "progress_stall", getPolicy().engine.backtrack_preserve_discoveries
                 ? restorePoint.skippedDiscoveries
-                : [], skippedFiles, targetGitHead ?? undefined);
+                : [], skippedFiles, targetGitHead ?? undefined, makeRoundId(loopId, restorePoint.round + 1), { failedRounds, approaches, wrongAssumptions });
             logEvent("enforcement_backtrack", {
                 loopId,
                 round: currentRound,
@@ -216,6 +257,9 @@ export class RoundCoordinator {
                 backtrackSkippedFiles: skippedFiles,
                 backtrackTargetGitHead: targetGitHead ?? undefined,
                 backtrackTriggerRule: enforceResult.check,
+                backtrackFailedRounds: failedRounds,
+                backtrackApproaches: approaches,
+                backtrackWrongAssumptions: wrongAssumptions,
                 verificationFlags,
                 enforcementAction: "backtrack",
                 enforcementReason: enforceResult.reason,

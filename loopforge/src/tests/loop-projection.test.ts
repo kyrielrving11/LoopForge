@@ -96,7 +96,6 @@ describe("cognitive facts and projection", () => {
           subAgentType: "general-purpose",
           subTask: "inspect",
           resultSummary: "needs follow-up",
-          success: false,
           outcome: "partial",
           discoveredConstraints: [],
         }],

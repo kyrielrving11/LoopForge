@@ -214,6 +214,13 @@ export class RoundTransactionCoordinator {
             result,
         };
         this.engine.autoFeedback(input.selfEval, snapshot.loopId, snapshot.round, input.task, metadata);
+        // v3.7.1: a backtrack decision commits as the CURRENT round, which the
+        // incremental hydration cache never re-reads before the restore compile
+        // (it targets the same round). Drop the cache so the rollback — and its
+        // Recovery Brief facts — is visible to the very next compile.
+        if (result.action === "backtrack") {
+            this.engine.invalidateHydrationCache(snapshot.loopId);
+        }
         const persisted = this.readCommitted(committedSnapshot);
         if (!persisted) {
             throw new Error(`Round transaction commit failed: ${snapshot.roundId}`);

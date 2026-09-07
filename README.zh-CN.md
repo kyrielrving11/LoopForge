@@ -2,7 +2,7 @@
 
 **Agent 的上下文窗口不是记忆，记忆需要一个运行时。**
 
-**v3.7.0** — `npm install -g loopforge`。Node.js ≥ 18。零运行时依赖。
+**版本以 `LoopForge/package.json` 为准** — `npm install -g loopforge`。Node.js ≥ 18。零运行时依赖。
 > [English](./README.md)
 
 ---
@@ -150,7 +150,7 @@ Replay 通过已提交时间线和轮次 diff 回答“发生了什么”。Audi
 
 外部 Agent 负责规划和工具使用。它可以让 Compiler 强调已有状态或暴露困惑点，但不能移除必需 prompt 段落或绕过预算。LoopForge 不运行后台 Agent。
 
-九个 MCP 工具：`start`、`next`、`status`、`stop`、`pause`、`resume`、`replay`、`gate_check` 和 `gate_resolve`。`status` 提供 `session`、`loop`、`all` 和 `audit` 视图。运行时只使用 Node.js 标准库，阈值、预算和间隔由 `loop_policy.json` 控制。
+九个 MCP 工具：`start`、`next`、`status`、`stop`、`pause`、`resume`、`replay`、`gate_check` 和 `gate_resolve`。其中两个 gate 工具是 opt-in——`policy.gate.enabled` 为 true(默认 false)时才出现在 `tools/list`。`status` 提供 `session`、`loop`、`all` 和 `audit` 视图。运行时只使用 Node.js 标准库，阈值、预算和间隔由 `loop_policy.json` 控制。
 
 ---
 

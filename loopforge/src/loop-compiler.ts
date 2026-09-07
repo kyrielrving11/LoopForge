@@ -29,6 +29,7 @@ import {
   type RollingSummary,
   type RoundContract,
   type SubGoal,
+  type SubGoalUpdate,
   type TaskAlignment,
   type VerificationFlag,
 } from "./protocol.js";
@@ -47,6 +48,7 @@ import {
   entryRetractedConstraints,
   entryProgressEstimate,
   entryEmergedSubtasks,
+  entrySubGoalUpdates,
   type CommittedRoundView,
   machineGitMotionSeries,
   mergedRoundsFromEntries,
@@ -791,11 +793,10 @@ function isCriterionId(ref: string): boolean {
 }
 
 /**
- * Match a user-provided sub-task reference against existing SubGoals.
- *
- * Tries exact SubGoal ID match first (e.g. "sg-a3f2b1c0"), then falls
- * back to Jaccard token similarity on descriptions. Returns the index
- * of the best-matching SubGoal, or -1 when no match reaches threshold.
+ * Match a user-provided description against existing SubGoals for DEDUP
+ * (emerged_subtasks creation). Exact ID first, then Jaccard similarity on
+ * descriptions. v3.7.1: status transitions no longer use this — they are
+ * strict ID references validated before the round advances.
  */
 function matchSubGoal(
   target: string,
@@ -820,17 +821,84 @@ function matchSubGoal(
   return bestScore >= threshold ? bestIdx : -1;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Sub-goal transition matrix (v3.7.1 — single source)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** Closed migration matrix. done/canceled are terminal (no out-edges); the
+ *  matrix rejects re-opening. blocked → in_progress is the recovery path. */
+export const SUBGOAL_TRANSITIONS: Record<SubGoalUpdate["status"], readonly SubGoal["status"][]> = {
+  in_progress: ["pending", "blocked"],
+  done: ["pending", "in_progress", "blocked"],
+  blocked: ["pending", "in_progress"],
+  canceled: ["pending", "in_progress", "blocked"],
+};
+
+/** Whether a transition is legal. Same-status is a legal no-op (used by
+ *  replay idempotency). References to terminal sub-goals are rejected by
+ *  validateSubGoalUpdates before this is consulted. */
+export function canTransitionSubGoal(
+  from: SubGoal["status"],
+  to: SubGoalUpdate["status"],
+): boolean {
+  if (from === to) return true;
+  return SUBGOAL_TRANSITIONS[to].includes(from);
+}
+
+/** Referential validation of a payload's subgoal_updates against the
+ *  derived sub-goal set. Returns one error per invalid entry:
+ *  unknown_id | terminal_reference | illegal_transition. */
+export function validateSubGoalUpdates(
+  subGoals: SubGoal[],
+  updates: SubGoalUpdate[],
+): Array<{ id: string; reason: string }> {
+  const byId = new Map(subGoals.map((sg) => [sg.id, sg]));
+  const errors: Array<{ id: string; reason: string }> = [];
+  for (const update of updates) {
+    const target = byId.get(update.id);
+    if (!target) {
+      errors.push({ id: update.id, reason: "unknown_id" });
+      continue;
+    }
+    if (target.status === "done" || target.status === "canceled") {
+      errors.push({ id: update.id, reason: "terminal_reference" });
+      continue;
+    }
+    if (!canTransitionSubGoal(target.status, update.status)) {
+      errors.push({ id: update.id, reason: "illegal_transition" });
+    }
+  }
+  return errors;
+}
+
+/** Apply one transition to the accumulated list. Guards make replay of
+ *  committed history idempotent: terminal sub-goals never change and
+ *  same-status updates are no-ops. */
+function applySubGoalUpdate(
+  subGoals: SubGoal[],
+  update: SubGoalUpdate,
+  rnd: number,
+): void {
+  const target = subGoals.find((sg) => sg.id === update.id);
+  if (!target) return;
+  if (target.status === "done" || target.status === "canceled") return;
+  if (!canTransitionSubGoal(target.status, update.status)) return;
+  if (target.status === update.status) return;
+  target.status = update.status;
+  target.status_changed_at_round = rnd;
+  if (update.status === "done") target.completed_at_round = rnd;
+}
+
 /**
  * Manage the full sub-goal lifecycle across rounds.
  *
- * Accumulates sub-goals from all prior vault entries, processes the current
- * round's declarations, derives status changes, and returns the complete
- * structured SubGoal list.
- *
- * Status derivation priority (compiler-driven):
- *   1. Agent declared done/canceled/blocked → explicit status change
- *   2. next_action match → auto in_progress
- *   3. success_criteria_met match → auto done
+ * v3.7.1 derivation rule: EVERY committed round (round < currentRound) is
+ * replayed in round order — emerged_subtasks create pending items, then
+ * subgoal_updates apply explicit transitions. The round's own report
+ * (last_round_result, which the engine rebuilds from the same committed
+ * evaluation) contributes the same data on the fixture path, so applying
+ * it again is an idempotent no-op. Older transitions therefore never
+ * regress on later compiles, and no status is ever inferred.
  */
 function manageSubGoals(
   loopId: string,
@@ -840,37 +908,14 @@ function manageSubGoals(
 ): SubGoal[] {
   const policy = getPolicy().evolution;
   const allEntries = loopEntries(loopId, vaultContext);
-  const completedEntries = allEntries.filter(
-    (e) => entryRound(e) >= 1 && entryRound(e) < currentRound,
-  );
+  const completedEntries = allEntries
+    .filter((e) => entryRound(e) >= 1 && entryRound(e) < currentRound)
+    .sort((a, b) => entryRound(a) - entryRound(b));
   const subGoals: SubGoal[] = [];
 
-  // Phase 1 — Accumulate historical sub-goals from vault entries
-  for (const entry of completedEntries) {
-    const rnd = entryRound(entry);
-    const emerged = entryEmergedSubtasks(entry);
-    for (const desc of emerged) {
-      const id = deriveSubGoalId(desc);
+  const createEmerged = (descs: string[], rnd: number): void => {
+    for (const desc of descs) {
       // Dedup: skip if an existing sub-goal is too similar
-      if (matchSubGoal(desc, subGoals, policy.subgoal_dedup_threshold) >= 0) continue;
-      subGoals.push(makeSubGoal({
-        id,
-        description: desc.trim(),
-        status: "pending",
-        declared_at_round: rnd,
-        status_changed_at_round: rnd,
-        priority: subGoals.length,
-      }));
-    }
-  }
-
-  // Phase 2 — Process current round's sub-task declarations
-  if (lastRoundResult) {
-    const rnd = lastRoundResult.round || (currentRound - 1);
-
-    // New sub-goals from this round
-    const emerged = lastRoundResult.emerged_subtasks ?? [];
-    for (const desc of emerged) {
       if (matchSubGoal(desc, subGoals, policy.subgoal_dedup_threshold) >= 0) continue;
       subGoals.push(makeSubGoal({
         id: deriveSubGoalId(desc),
@@ -881,42 +926,26 @@ function manageSubGoals(
         priority: subGoals.length,
       }));
     }
+  };
 
-    // Completed sub-goals
-    const completed = lastRoundResult.completed_subtasks ?? [];
-    for (const desc of completed) {
-      const idx = matchSubGoal(desc, subGoals, policy.subgoal_match_threshold);
-      if (idx >= 0 && subGoals[idx].status !== "done" && subGoals[idx].status !== "canceled") {
-        subGoals[idx].status = "done";
-        subGoals[idx].status_changed_at_round = rnd;
-        subGoals[idx].completed_at_round = rnd;
-      }
+  // Phase 1 — Replay every committed round in order: create, then apply
+  // that round's declared transitions.
+  for (const entry of completedEntries) {
+    const rnd = entryRound(entry);
+    createEmerged(entryEmergedSubtasks(entry), rnd);
+    for (const update of entrySubGoalUpdates(entry)) {
+      applySubGoalUpdate(subGoals, update, rnd);
     }
+  }
 
-    // Blocked sub-goals
-    const blocked = lastRoundResult.blocked_subtasks ?? [];
-    for (const desc of blocked) {
-      const idx = matchSubGoal(desc, subGoals, policy.subgoal_match_threshold);
-      if (idx >= 0 && subGoals[idx].status !== "done" && subGoals[idx].status !== "canceled") {
-        subGoals[idx].status = "blocked";
-        subGoals[idx].status_changed_at_round = rnd;
-      }
+  // Phase 2 — The current round's own report (fixture/rebuild path; on the
+  // vault path this duplicates the last committed round and is idempotent).
+  if (lastRoundResult) {
+    const rnd = lastRoundResult.round || (currentRound - 1);
+    createEmerged(lastRoundResult.emerged_subtasks ?? [], rnd);
+    for (const update of lastRoundResult.subgoal_updates ?? []) {
+      applySubGoalUpdate(subGoals, update, rnd);
     }
-
-    // Canceled sub-goals
-    const canceled = lastRoundResult.canceled_subtasks ?? [];
-    for (const desc of canceled) {
-      const idx = matchSubGoal(desc, subGoals, policy.subgoal_match_threshold);
-      if (idx >= 0 && subGoals[idx].status !== "done" && subGoals[idx].status !== "canceled") {
-        subGoals[idx].status = "canceled";
-        subGoals[idx].status_changed_at_round = rnd;
-      }
-    }
-
-    // v3.7: no auto status inference. The v2.3 fuzzy heuristics
-    // (next_action Jaccard → in_progress, criteria Jaccard → done) were
-    // removed — they fabricated dashboard motion the machine never
-    // verified. Statuses change only via the agent declarations above.
   }
 
   // Sort for display: in_progress first, then pending by age desc, then blocked, then done, then canceled
@@ -1204,9 +1233,9 @@ export function buildSelfEvalBlock(
     },
     wrong_assumptions: [],
     next_action: "<next concrete action, or empty when complete>",
-    completed_subtasks: ["<sg-XXXXXXXX or text>"],
-    blocked_subtasks: ["<sg-XXXXXXXX or text>"],
-    canceled_subtasks: ["<sg-XXXXXXXX or text>"],
+    subgoal_updates: [
+      { id: "<sg-XXXXXXXX from the Sub-Goal Dashboard>", status: "done" },
+    ],
   };
 
   // v2.12: Declarative tri-state outcome (L1/L2 only — keeps L0 retry lean)
@@ -1268,7 +1297,8 @@ export function buildSelfEvalBlock(
   lines.push("IMPORTANT: Replace every <placeholder> with your actual data.");
   lines.push("Set success=true only when the full goal and ALL hard constraints are verified.");
   lines.push("Use IDs for exact matching: c-XXXXXXXX, cr-XXXXXXXX, sg-XXXXXXXX.");
-  lines.push("For subtasks, use sub-goal IDs from the Sub-Goal Dashboard above.");
+  lines.push("Sub-goal changes go through `subgoal_updates` (active sub-goal IDs only;");
+  lines.push("done/canceled are terminal — reopen via `emerged_subtasks`; bad IDs reject).");
   // v3.5: L2 contract-less nudge (prose only — never the JSON key name, so
   // contract-less rounds keep their template-lean assertions).
   if (proposalNudge) {
@@ -1299,6 +1329,48 @@ export function buildSelfEvalBlock(
 // v2.5: checkpoint() removed — agent_declared milestones from
 // compression_checkpoint supersede the separate CheckpointSummary.
 // See buildRollingSummary() signal 1.
+
+/** v3.7.1: Derived Recovery Brief for the state-file Recent tier. Present
+ *  ONLY while a committed backtrack decision is the current round's record
+ *  (the recovery window); the redo commit replaces that record, so the
+ *  brief exits the projection by construction. Sources are the committed
+ *  rollback decision's own fields — no new persistence, no rejected
+ *  payloads. */
+function committedBacktrackBrief(
+  loopId: string,
+  round: number,
+  context: Record<string, unknown> | null,
+): string[] | undefined {
+  const entry = loopEntries(loopId, context).find(
+    (e) => entryLineage(e).committed_action === "backtrack" && entryRound(e) === round,
+  );
+  if (!entry) return undefined;
+  // Read the facts the engine stamped onto the merged lineage entry from
+  // the committed rollback decision (engine.ts mergeCommittedRound).
+  const lineage = entryLineage(entry);
+  const asStrings = (value: unknown): string[] =>
+    Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
+  const asNumbers = (value: unknown): number[] =>
+    Array.isArray(value) ? value.filter((v): v is number => typeof v === "number") : [];
+  const failedRounds = asNumbers(lineage.backtrackFailedRounds);
+  const approaches = asStrings(lineage.backtrackApproaches).slice(0, 6);
+  const assumptions = asStrings(lineage.backtrackWrongAssumptions).slice(0, 5);
+  const target = typeof lineage.backtrackTarget === "number" ? lineage.backtrackTarget : 0;
+  const trigger = typeof lineage.backtrackTriggerRule === "string"
+    ? lineage.backtrackTriggerRule
+    : "unknown";
+  const lines = [
+    `- **Trigger**: ${trigger}`,
+    `- **Restored to round**: ${target} (redo round ${target + 1})`,
+  ];
+  if (failedRounds.length > 0) lines.push(`- **Failed rounds**: ${failedRounds.join(", ")}`);
+  for (const approach of approaches) lines.push(`  - Failed approach: ${approach}`);
+  if (assumptions.length > 0) {
+    lines.push("- **Falsified assumptions** (do not rebuild on these):");
+    for (const assumption of assumptions) lines.push(`  - ${assumption}`);
+  }
+  return lines;
+}
 
 export function compileLoop(
   request: LoopCompileRequest,
@@ -1405,7 +1477,14 @@ export function compileLoop(
     // v3.4: derived active contract — the Current Task's source of truth.
     roundContract: activeContract,
   });
-  const markdown = renderCanonicalStateMarkdown(state);
+  const markdown = renderCanonicalStateMarkdown(state, {
+    // v3.7.1: retry attempts are marked in the derived view (attempt is
+    // request context, not a committed fact). The Recovery Brief renders in
+    // the Recent tier only while a committed backtrack decision is this
+    // round's record; the redo commit removes it by construction.
+    attempt: request.attempt,
+    recoveryBrief: committedBacktrackBrief(request.loop_id, request.round, context),
+  });
 
   // v2.4–v2.5: Adaptive L2 budget — scales with loop complexity
   const adaptiveL2 = policy.prompt.l2_adaptive_enabled

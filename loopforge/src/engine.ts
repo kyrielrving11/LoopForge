@@ -35,6 +35,7 @@ import { policyMetrics } from "./policy-metrics.js";
 import {
   parseExecutionEvidence,
   parseCriterionRevisions,
+  parseSubGoalUpdates,
   parseWorkerResults,
   parsePromptRequests,
 } from "./self-eval.js";
@@ -52,17 +53,15 @@ export {
 // Engine Metrics
 // ═══════════════════════════════════════════════════════════════════════════
 
-/** A single sub-agent delegation record (v1.9 — AgentTool mode). */
+/** A single sub-agent delegation record (v1.9 — AgentTool mode).
+ *  v3.7.1: outcome is the single fact; success is deleted. */
 export interface DelegationEntry {
   index: number;
   agentId: string;
   subAgentType: string;
   subTask: string;
   resultSummary: string;
-  success: boolean;
-  /** v2.12: Worker outcome (audit/projection data source). Derived from
-   *  success when absent. */
-  outcome?: "success" | "partial" | "failed";
+  outcome: "success" | "partial" | "failed";
   discoveredConstraints: string[];
 }
 
@@ -186,11 +185,9 @@ export class LoopForgeEngine {
         execution_evidence: signal.execution_evidence ?? null,
         discovered_constraints: signal.discovered_constraints ?? [],
         emerged_subtasks: signal.emerged_subtasks ?? [],
-        // v3.2.1: persisted so the subgoal_drift check can read prior
-        // rounds' completed/canceled sub-goals from committed entries.
-        completed_subtasks: signal.completed_subtasks ?? [],
-        blocked_subtasks: signal.blocked_subtasks ?? [],
-        canceled_subtasks: signal.canceled_subtasks ?? [],
+        // v3.7.1: explicit transitions persist on committed entries so the
+        // compiler replays them in round order on every derivation.
+        subgoal_updates: signal.subgoal_updates ?? [],
         retracted_constraints: signal.retracted_constraints ?? [],
         worker_results: signal.worker_results ?? [],
       };
@@ -310,8 +307,7 @@ export class LoopForgeEngine {
           subAgentType: e.subAgentType,
           subTask: e.subTask,
           resultSummary: e.resultSummary,
-          success: e.success,
-          outcome: e.outcome ?? (e.success ? "success" : "failed"),
+          outcome: e.outcome,
           discoveredConstraints: e.discoveredConstraints,
         })),
       },
@@ -340,11 +336,9 @@ export class LoopForgeEngine {
     "checkpoint_label",
     "discovered_constraints",
     "emerged_subtasks",
+    "subgoal_updates",
     "retracted_constraints",
     "wrong_assumptions",
-    "completed_subtasks",
-    "blocked_subtasks",
-    "canceled_subtasks",
     "next_action",
     "objective_refinement",
     "outcome",
@@ -383,6 +377,28 @@ export class LoopForgeEngine {
       // post-backtrack recovery boundary (L2 rehydration) without a
       // second persistence format.
       lineage.committed_action = result.action;
+      // v3.7.1: Recovery Brief facts stamped onto the merged lineage entry
+      // (same derived-stamp pattern as attempt/round_evidence — in-memory
+      // only, never persisted; a fresh hydration re-derives them from the
+      // committed rollback decision). Compile-time views need them on the
+      // merged row because raw feedback documents are never exposed.
+      if (result.action === "backtrack") {
+        if (typeof result.backtrackTarget === "number") {
+          lineage.backtrackTarget = result.backtrackTarget;
+        }
+        if (typeof result.backtrackTriggerRule === "string") {
+          lineage.backtrackTriggerRule = result.backtrackTriggerRule;
+        }
+        if (Array.isArray(result.backtrackFailedRounds)) {
+          lineage.backtrackFailedRounds = result.backtrackFailedRounds;
+        }
+        if (Array.isArray(result.backtrackApproaches)) {
+          lineage.backtrackApproaches = result.backtrackApproaches;
+        }
+        if (Array.isArray(result.backtrackWrongAssumptions)) {
+          lineage.backtrackWrongAssumptions = result.backtrackWrongAssumptions;
+        }
+      }
     }
     if (committed) {
       // v3.5.1: compile-side display readers (Round Stats rejected attempts,
@@ -432,6 +448,16 @@ export class LoopForgeEngine {
     coveredRound: number;
     entries: VaultEntry[];
   } | null = null;
+
+  /** v3.7.1: Drop the hydration cache after a committed BACKTRACK decision.
+   *  The rollback commits as the CURRENT round (cache.coveredRound + 1), so
+   *  the normal incremental path never re-reads it before the restore
+   *  compile — which targets the SAME round and must see the rollback
+   *  immediately (recovery-boundary L2, Recovery Brief facts). One full
+   *  rehydrate on the rare rollback path is the correct trade. */
+  invalidateHydrationCache(loopId: string): void {
+    if (this.hydrationCache?.loopId === loopId) this.hydrationCache = null;
+  }
 
   /** v3.3.1: Drop the hydration cache when a feedback write targets a round
    *  the cache has already merged (coveredRound >= round). Cache entries are
@@ -750,13 +776,9 @@ export class LoopForgeEngine {
       discovered_constraints: mergedDiscovered,
       objective_refinement: selfEval.objective_refinement ?? "",
       emerged_subtasks: selfEval.emerged_subtasks ?? [],
-      // v3.2.1: persist the sub-goal lifecycle fields — the subgoal_drift
-      // check reads them from committed feedback entries; before this they
-      // were never written, so prior rounds' completed/canceled sub-goals
-      // were invisible and the pending set grew stale.
-      completed_subtasks: selfEval.completed_subtasks ?? [],
-      blocked_subtasks: selfEval.blocked_subtasks ?? [],
-      canceled_subtasks: selfEval.canceled_subtasks ?? [],
+      // v3.7.1: explicit transitions persist with the committed evaluation;
+      // the compiler replays them in round order on every derivation.
+      subgoal_updates: selfEval.subgoal_updates ?? [],
       // P4: Execution evidence
       execution_evidence: selfEval.execution_evidence ?? null,
       // P5: Self-correction
@@ -787,10 +809,9 @@ export class LoopForgeEngine {
       const entries = selfEval.worker_results.map((w, i) => ({
         index: i + 1,
         agentId: w.agentId,
-        subAgentType: w.subAgentType,
+        subAgentType: w.subAgentType ?? "general-purpose",
         subTask: w.subTask,
         resultSummary: w.resultSummary,
-        success: w.success,
         outcome: w.outcome,
         discoveredConstraints: w.discoveredConstraints ?? [],
       }));
@@ -908,16 +929,8 @@ export class LoopForgeEngine {
           typeof rr.compression_checkpoint === "boolean" ? rr.compression_checkpoint : false,
         checkpoint_label:
           typeof rr.checkpoint_label === "string" ? rr.checkpoint_label : "",
-        // v2.2: Sub-goal lifecycle
-        completed_subtasks: Array.isArray(rr.completed_subtasks)
-          ? (rr.completed_subtasks as string[]).filter((v: unknown) => typeof v === "string")
-          : [],
-        blocked_subtasks: Array.isArray(rr.blocked_subtasks)
-          ? (rr.blocked_subtasks as string[]).filter((v: unknown) => typeof v === "string")
-          : [],
-        canceled_subtasks: Array.isArray(rr.canceled_subtasks)
-          ? (rr.canceled_subtasks as string[]).filter((v: unknown) => typeof v === "string")
-          : [],
+        // v3.7.1: Sub-goal lifecycle — explicit transitions (shared parser)
+        subgoal_updates: parseSubGoalUpdates(rr.subgoal_updates),
         // v2.8: Drift clarification
         drift_clarification: typeof rr.drift_clarification === "string"
           ? rr.drift_clarification

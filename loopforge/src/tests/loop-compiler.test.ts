@@ -10,11 +10,14 @@ import {
   deriveCriterionStatuses,
   deriveGoalId,
   deriveLessons,
+  deriveSubGoalId,
+  validateSubGoalUpdates,
 } from "../loop-compiler.js";
 import {
   makeLoopCompileRequest,
   makeLoopObjective,
   makeLoopRoundResult,
+  type SubGoal,
 } from "../protocol.js";
 import { getPolicy, resetPolicy, setPolicyForTest, DEFAULT_POLICY } from "../policy.js";
 import { committedFeedbackRound, mergedLineageRound } from "./_helpers.js";
@@ -789,7 +792,7 @@ describe("cognitive-state compiler", () => {
 
   // ── v2.8: Sub-goal ID referencing ──────────────────────────────────────
 
-  it("matches sub-goal by exact ID in completed_subtasks", () => {
+  it("applies a done transition by exact sub-goal ID", () => {
     // Simulate a vault with a previously declared sub-goal
     const vault = {
       results: [{
@@ -807,9 +810,8 @@ describe("cognitive-state compiler", () => {
         output_summary: "Started auth fix",
       }],
     };
-    // Round 2: agent completes the sub-goal by referencing its ID
-    // deriveSubGoalId("Add error handling to login") produces a stable ID
-    const sgId = "sg-" + computeGoalTextHash("Add error handling to login").slice(0, 8);
+    // Round 2: agent completes the sub-goal by transitioning its ID
+    const sgId = deriveSubGoalId("Add error handling to login");
     const response = compileLoop(makeLoopCompileRequest({
       loop_id: "sg-id-match",
       round: 2,
@@ -819,22 +821,22 @@ describe("cognitive-state compiler", () => {
         round: 1,
         success: true,
         output_summary: "Completed auth fix",
-        completed_subtasks: [sgId], // ID reference
+        subgoal_updates: [{ id: sgId, status: "done" }],
       }),
     }), vault);
     const doneSubs = response.sub_goals?.filter(sg => sg.status === "done") ?? [];
-    assert.equal(doneSubs.length, 1, "should mark sub-goal as done when referenced by ID");
+    assert.equal(doneSubs.length, 1, "should mark sub-goal as done by ID reference");
     assert.equal(doneSubs[0].description, "Add error handling to login");
   });
 
-  it("falls back to Jaccard when sub-goal ID is not found", () => {
+  it("does not apply an update for an unknown sub-goal ID at compile time", () => {
     const vault = {
       results: [{
-        loop_id: "sg-jaccard",
+        loop_id: "sg-unknown",
         loop_lineage: {
-          loop_id: "sg-jaccard",
+          loop_id: "sg-unknown",
           round: 1,
-          goal_id: deriveGoalId("sg-jaccard", "Refactor database"),
+          goal_id: deriveGoalId("sg-unknown", "Refactor database"),
           task: "Refactor database",
           constraints_active: [],
           recompile_level: "l2",
@@ -844,9 +846,8 @@ describe("cognitive-state compiler", () => {
         output_summary: "Started refactor",
       }],
     };
-    // Reference by description, not ID — Jaccard fallback should match
     const response = compileLoop(makeLoopCompileRequest({
-      loop_id: "sg-jaccard",
+      loop_id: "sg-unknown",
       round: 2,
       task: "Refactor database",
       force_level: "l2",
@@ -854,11 +855,125 @@ describe("cognitive-state compiler", () => {
         round: 1,
         success: true,
         output_summary: "Tests written",
-        completed_subtasks: ["Write unit tests for queries"], // description
+        subgoal_updates: [{ id: "sg-00000000", status: "done" }],
       }),
     }), vault);
     const doneSubs = response.sub_goals?.filter(sg => sg.status === "done") ?? [];
-    assert.equal(doneSubs.length, 1, "should match by Jaccard fallback");
+    assert.equal(doneSubs.length, 0, "an unknown ID is a no-op for derivation (rejected pre-advance)");
+  });
+
+  it("reaches in_progress only through an explicit update", () => {
+    const vault = {
+      results: [{
+        loop_id: "sg-inprogress",
+        loop_lineage: {
+          loop_id: "sg-inprogress",
+          round: 1,
+          goal_id: deriveGoalId("sg-inprogress", "Fix auth bug"),
+          task: "Fix auth bug",
+          constraints_active: [],
+          recompile_level: "l2",
+        },
+        emerged_subtasks: ["Add rate limiting"],
+        success: true,
+        output_summary: "Started",
+      }],
+    };
+    const sgId = deriveSubGoalId("Add rate limiting");
+    const response = compileLoop(makeLoopCompileRequest({
+      loop_id: "sg-inprogress",
+      round: 2,
+      task: "Fix auth bug",
+      force_level: "l2",
+      last_round_result: makeLoopRoundResult({
+        round: 1,
+        success: true,
+        output_summary: "Started rate limiting",
+        subgoal_updates: [{ id: sgId, status: "in_progress" }],
+      }),
+    }), vault);
+    const active = response.sub_goals?.find(sg => sg.id === sgId);
+    assert.equal(active?.status, "in_progress",
+      "in_progress is produced only by an explicit agent declaration");
+  });
+
+  it("keeps older committed transitions when a later round declares nothing (no regression)", () => {
+    const sgId = deriveSubGoalId("Add error handling to login");
+    const vault = {
+      results: [
+        {
+          loop_id: "sg-persist",
+          loop_lineage: {
+            loop_id: "sg-persist", round: 1, goal_id: deriveGoalId("sg-persist", "Fix auth"),
+            task: "Fix auth", constraints_active: [], recompile_level: "l2",
+          },
+          emerged_subtasks: ["Add error handling to login"],
+          success: true,
+          output_summary: "Started",
+        },
+        {
+          loop_id: "sg-persist",
+          loop_lineage: {
+            loop_id: "sg-persist", round: 2, goal_id: deriveGoalId("sg-persist", "Fix auth"),
+            task: "Fix auth", constraints_active: [], recompile_level: "l2",
+          },
+          subgoal_updates: [{ id: sgId, status: "done" }],
+          success: true,
+          output_summary: "Done auth",
+        },
+      ],
+    };
+    const response = compileLoop(makeLoopCompileRequest({
+      loop_id: "sg-persist",
+      round: 3,
+      task: "Fix auth",
+      force_level: "l2",
+      last_round_result: makeLoopRoundResult({
+        round: 2,
+        success: true,
+        output_summary: "Done auth",
+      }),
+    }), vault);
+    const doneSubs = response.sub_goals?.filter(sg => sg.status === "done") ?? [];
+    assert.equal(doneSubs.length, 1,
+      "a done transition from round 2 must survive a round-3 compile with no new declarations");
+  });
+
+  it("v3.7.1: validateSubGoalUpdates enforces the closed matrix and terminality", () => {
+    const sg = (id: string, status: SubGoal["status"]): SubGoal => ({
+      id,
+      description: `goal ${id}`,
+      status,
+      declared_at_round: 1,
+      status_changed_at_round: 1,
+      priority: 0,
+    });
+    const pending = sg("sg-a1111111", "pending");
+    const done = sg("sg-b2222222", "done");
+
+    // Legal: pending → in_progress / done / blocked / canceled; same-status
+    // no-op is legal for replay idempotency.
+    const legal = validateSubGoalUpdates(
+      [pending, done],
+      [
+        { id: "sg-a1111111", status: "in_progress" },
+        { id: "sg-a1111111", status: "done" },
+        { id: "sg-a1111111", status: "blocked" },
+        { id: "sg-a1111111", status: "canceled" },
+      ],
+    );
+    assert.equal(legal.length, 0, "the active-state matrix is fully closed");
+
+    // Unknown ID and terminal references are errors.
+    const errors = validateSubGoalUpdates(
+      [pending, done],
+      [
+        { id: "sg-99999999", status: "done" },
+        { id: "sg-b2222222", status: "in_progress" },
+        { id: "sg-b2222222", status: "done" },
+      ],
+    );
+    assert.deepEqual(errors.map((e) => e.reason), ["unknown_id", "terminal_reference", "terminal_reference"]);
   });
 
   // ── v2.8: Self-eval block sub-goal ID hints ────────────────────────────

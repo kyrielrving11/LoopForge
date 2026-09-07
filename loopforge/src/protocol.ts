@@ -152,8 +152,18 @@ export interface SelfEvaluation {
   objective_refinement?: string;
   /** P2: Sub-problems that surfaced during execution and may need
    *  separate attention. Feed into the next-task suggestion.
-   *  Omit or leave empty if none emerged. */
+   *  Omit or leave empty if none emerged.
+   *  v3.7.1: this is the ONLY creation channel. A text matching the
+   *  sg-XXXXXXXX ID pattern is rejected — creation never accepts an
+   *  ID reference (that would fabricate a phantom hashed item). */
   emerged_subtasks?: string[];
+  /** v3.7.1: Explicit status transitions for EXISTING sub-goals. Each
+   *  entry must reference a committed sub-goal ID (sg-XXXXXXXX) and a
+   *  legal target status; unknown IDs, terminal (done/canceled)
+   *  references, and illegal migrations are evaluation_invalid before
+   *  the round advances. in_progress is only reachable through this
+   *  field — the runtime no longer infers it. */
+  subgoal_updates?: SubGoalUpdate[];
   /** P4: Structured evidence of what was executed this round.
    *  Files changed, test results, criteria met/remaining, progress estimate.
    *  Enables the compiler to validate claims and compute real progress. */
@@ -186,17 +196,6 @@ export interface SelfEvaluation {
    *  so the agent's self-planning persists across rounds. Optional —
    *  no next_action means the compiler generates the next task as before. */
   next_action?: string;
-  /** v2.2: Sub-tasks the agent completed this round. Each entry may be a
-   *  sub-goal ID (e.g. "sg-a3f2b1c0" from the Sub-Goal Dashboard) for
-   *  exact matching, or a natural-language description for Jaccard
-   *  similarity fallback. Omit if none. */
-  completed_subtasks?: string[];
-  /** v2.2: Sub-tasks that are now blocked (cannot proceed). Same ID-or-
-   *  description matching as completed_subtasks. Omit if none. */
-  blocked_subtasks?: string[];
-  /** v2.2: Sub-tasks the agent is canceling (no longer needed). Same ID-or-
-   *  description matching as completed_subtasks. Omit if none. */
-  canceled_subtasks?: string[];
   /** v2.5: Why the agent is stopping. Only meaningful when
    *  should_continue=false and success=false. Defaults to "gave_up"
    *  (current behavior) when absent. "blocked" means work cannot proceed
@@ -219,6 +218,14 @@ export interface SelfEvaluation {
    *  Downgrades the success_without_verified_evidence check from error to
    *  info. Flat string, ≤ 200 chars. */
   no_change_reason?: string;
+  /** v3.7.1: gate_opened ids this round's work depended on (returned by
+   *  loopforge_gate_check). Lenient format — non-string entries are
+   *  ignored, ≤ 20 entries. Enforced ONLY when policy.gate.enabled: a
+   *  cited gate that does not exist, is not a user gate, or has no
+   *  approved gate_decision produces the user_gate_unresolved error and
+   *  the round is rejected. Safe pre-work (investigation, dry-runs,
+   *  rollback evidence) never needs a gate. */
+  gate_ids?: string[];
   /** v2.8: When the previous round's verification flagged intent_drift or
    *  subgoal_drift, the agent explains why its actions diverged from its
    *  stated plan. Populated from the self-eval block when the prompt
@@ -410,16 +417,18 @@ export function makeMilestoneSummary(
   };
 }
 
-/** A single sub-agent / Worker delegation result (v1.9 — multi-agent). */
+/** A single sub-agent / Worker delegation result (v1.9 — multi-agent).
+ *  v3.7.1: `outcome` is the single reported fact. `success` is deleted —
+ *  entries without a valid outcome are dropped by the parser, never
+ *  derived. The whole array is optional and informational: it buys no
+ *  machine verdict and an absent/empty array (no delegation this round)
+ *  is always accepted. */
 export interface WorkerResult {
   agentId: string;
-  subAgentType: string;
+  subAgentType?: string;
   subTask: string;
   resultSummary: string;
-  success: boolean;
-  /** v2.12: Declared worker outcome. When absent, derived from success
-   *  (true → "success", false → "failed"). "partial" is explicit only. */
-  outcome?: "success" | "partial" | "failed";
+  outcome: "success" | "partial" | "failed";
   discoveredConstraints?: string[];
 }
 
@@ -434,6 +443,7 @@ export function makeSelfEvaluation(
     discovered_constraints: [],
     objective_refinement: "",
     emerged_subtasks: [],
+    subgoal_updates: [],
     execution_evidence: undefined,
     retracted_constraints: [],
     revised_success_criteria: [],
@@ -442,9 +452,6 @@ export function makeSelfEvaluation(
     compression_checkpoint: false,
     checkpoint_label: "",
     next_action: undefined,
-    completed_subtasks: [],
-    blocked_subtasks: [],
-    canceled_subtasks: [],
     stop_reason: undefined,
     outcome: undefined,
     blocker: undefined,
@@ -586,10 +593,30 @@ export function makeRollingSummary(
   };
 }
 
+/** v3.7.1: One explicit sub-goal status transition. The closed migration
+ *  matrix (loop-compiler.ts, single source) governs legality:
+ *  in_progress from pending|blocked; done from pending|in_progress|blocked;
+ *  blocked|canceled from pending|in_progress; blocked → canceled. done and
+ *  canceled are terminal — re-opening requires a NEW emerged_subtasks item. */
+export interface SubGoalUpdate {
+  /** The sub-goal to transition (sg-XXXXXXXX). Unknown IDs are invalid. */
+  id: string;
+  status: "in_progress" | "done" | "blocked" | "canceled";
+  /** Optional free-text note (≤ 300 chars). Lenient — never validated. */
+  note?: string;
+}
+
+export function makeSubGoalUpdate(
+  overrides: Partial<SubGoalUpdate> = {},
+): SubGoalUpdate {
+  return { id: "", status: "done", ...overrides };
+}
+
 /** v2.2: A structured sub-goal tracked by the compiler across rounds.
- *  Declared by the agent via emerged_subtasks (string[]), managed by
- *  the compiler with derived status. Never creates sub-loops — the
- *  agent still owns execution; the compiler only tracks state. */
+ *  Declared by the agent via emerged_subtasks (creation) and
+ *  subgoal_updates (explicit transitions); statuses are compiler-derived
+ *  from committed round facts. Never creates sub-loops — the agent still
+ *  owns execution; the compiler only tracks state. */
 export interface SubGoal {
   /** Stable identifier derived from description hash (sg-XXXXXXXX). */
   id: string;
@@ -682,6 +709,9 @@ export interface LoopRoundResult {
   objective_refinement?: string;
   /** P2: Sub-problems that emerged during this round. */
   emerged_subtasks?: string[];
+  /** v3.7.1: Explicit sub-goal transitions declared this round.
+   *  Set from SelfEvaluation.subgoal_updates during buildLoopRequest. */
+  subgoal_updates?: SubGoalUpdate[];
   /** P4: Execution evidence from this round. */
   execution_evidence?: ExecutionEvidence;
   /** P5: Constraints retracted this round. */
@@ -699,12 +729,6 @@ export interface LoopRoundResult {
   checkpoint_label?: string;
   /** v1.16: Agent's declared next action for the following round. */
   next_action?: string;
-  /** v2.2: Sub-tasks completed this round. */
-  completed_subtasks?: string[];
-  /** v2.2: Sub-tasks blocked this round. */
-  blocked_subtasks?: string[];
-  /** v2.2: Sub-tasks canceled this round. */
-  canceled_subtasks?: string[];
   /** v2.8: Agent's explanation for intent/subgoal drift detected in
    *  the previous round. Carried forward from SelfEvaluation. */
   drift_clarification?: string;
@@ -734,6 +758,7 @@ export function makeLoopRoundResult(
     discovered_constraints: [],
     objective_refinement: "",
     emerged_subtasks: [],
+    subgoal_updates: [],
     execution_evidence: undefined,
     retracted_constraints: [],
     revised_success_criteria: [],
@@ -742,9 +767,6 @@ export function makeLoopRoundResult(
     compression_checkpoint: false,
     checkpoint_label: "",
     next_action: undefined,
-    completed_subtasks: [],
-    blocked_subtasks: [],
-    canceled_subtasks: [],
     drift_clarification: undefined,
     prompt_requests: undefined,
     outcome: undefined,

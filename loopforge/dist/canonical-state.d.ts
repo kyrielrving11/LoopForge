@@ -5,6 +5,19 @@
  */
 import type { ConstraintMeta, CriterionStatus, Lesson, LoopCompileRequest, LoopCompileResponse, MilestoneSummary, RoundContract, SubGoal, VerificationFlag } from "./protocol.js";
 export declare const CANONICAL_STATE_SCHEMA_VERSION: 1;
+/** v3.7.1: Presentation view of sub-goals shared by prompts and the state
+ *  file (one derivation, no second copy). Only ACTIVE items render as rows
+ *  — pending/in_progress/blocked — ordered blocked → in_progress → pending
+ *  (priority ascending, then most recently changed first) and trimmed to
+ *  `cap`. done/canceled never render as items: they stay in the vault, in
+ *  replay, and in these counts. */
+export declare function activeSubGoalView(subGoals: SubGoal[], cap: number): {
+    active: SubGoal[];
+    activeTotal: number;
+    done: number;
+    canceled: number;
+    total: number;
+};
 /** v3.2: Durable snapshot of what an L1 prompt actually presented last round.
  *  Used as the diff baseline for L1 collapse. Persisted inside the lineage
  *  entry's loop_lineage (field extension — no new persistence format) and
@@ -135,8 +148,16 @@ export declare function trustBarLine(score: number): string;
  *  L2 Phase History and the detailed L1 renderer; the L1 copy previously
  *  rendered the range as "R3–R7", a format only this heading used. */
 export declare function milestoneHeading(milestone: MilestoneSummary): string;
-export declare function renderCanonicalStateMarkdown(state: CanonicalLoopState): string;
-export declare function createCanonicalLoopState(request: LoopCompileRequest, response: LoopCompileResponse, stateFilePath: string, 
+/** Options that vary per render: the retry attempt (single version of the
+ *  file across attempts is impossible — the attempt IS part of the derived
+ *  view) and the recovery-window Recovery Brief lines (W5, present only
+ *  while a committed backtrack decision is the current round's record). */
+export interface StateFileRenderOptions {
+    attempt?: number;
+    recoveryBrief?: string[];
+}
+export declare function renderCanonicalStateMarkdown(state: CanonicalLoopState, options?: StateFileRenderOptions): string;
+export declare function createCanonicalLoopState(request: LoopCompileRequest, response: LoopCompileResponse, stateFilePath: string,
 /** v3.3: Display-only derived data (round stats, machine git-motion).
  *  Optional 4th param — callers that predate v3.3 stay on 3-arg calls. */
 derived?: {

@@ -181,10 +181,42 @@ describe("assemblePromptArtifact — L2", () => {
     });
     const artifact = assemblePromptArtifact(input({ level: "l2", state }));
     assert.ok(artifact.renderedPrompt.includes("Sub-Goal Dashboard"));
-    assert.ok(artifact.renderedPrompt.includes("done"));
-    // v2.8: Sub-goal IDs are rendered for exact matching
-    assert.ok(artifact.renderedPrompt.includes("`sg-1`"), "should render sub-goal ID sg-1");
+    // v3.7.1: done rows no longer render — done survives in the stats line
+    assert.ok(artifact.renderedPrompt.includes("1 done"));
+    assert.ok(!artifact.renderedPrompt.includes("`sg-1`"), "done rows never render in prompts");
+    // v2.8/v3.7.1: active sub-goal IDs are rendered for exact matching
     assert.ok(artifact.renderedPrompt.includes("`sg-2`"), "should render sub-goal ID sg-2");
+  });
+
+  it("caps active sub-goal rows at max_active_subgoals (12) with full counts", () => {
+    const subGoals = [];
+    for (let i = 0; i < 15; i++) {
+      subGoals.push({
+        id: `sg-a${String(i).padStart(2, "0")}0000`,
+        description: `pending goal ${i}`,
+        status: "pending",
+        declared_at_round: 1,
+        status_changed_at_round: 1,
+        priority: i,
+      });
+    }
+    subGoals.push({
+      id: "sg-b1111111",
+      description: "blocked goal",
+      status: "blocked",
+      declared_at_round: 1,
+      status_changed_at_round: 2,
+      priority: 99,
+    });
+    const state = minimalState({ subGoals: subGoals as never });
+    const artifact = assemblePromptArtifact(input({ level: "l2", state }));
+    const dashboard = artifact.renderedPrompt.split("Sub-Goal Dashboard")[1]?.split("───")[0] ?? "";
+    const rows = dashboard.split("\n").filter((line) => /^[🔄🚫⏳]/.test(line.trim()));
+    assert.equal(rows.length, 12, "rows are capped at max_active_subgoals");
+    // Blocked items outrank pending regardless of priority.
+    assert.ok(rows[0]?.includes("sg-b1111111"), "blocked rows come first");
+    // Full counts survive the cap in the stats line.
+    assert.match(artifact.renderedPrompt, /─── 16 total: 16 active, 0 done, 0 canceled/);
   });
 
   it("includes failed patterns when present", () => {
@@ -590,8 +622,8 @@ describe("v3.2 — verification flag actions", () => {
       .map((key) => exports[key] as string);
     // v3.7 note: CHECK_DOMAIN (the domain map) is also a CHECK_-prefixed
     // export but is not a check id — filtered above by the string check.
-    assert.ok(checks.length === 24,
-      `expected the 24 surviving CHECK_* constants, got ${checks.length}`);
+    assert.ok(checks.length === 25,
+      `expected the 25 surviving CHECK_* constants, got ${checks.length}`);
     for (const check of checks) {
       const action = verificationActionFor(check);
       assert.ok(

@@ -202,10 +202,8 @@ export function buildLoopRequest(
       checkpoint_label: lastEval.checkpoint_label ?? "",
       // v1.16: Agent's declared next action
       next_action: lastEval.next_action,
-      // v2.2: Sub-goal lifecycle
-      completed_subtasks: lastEval.completed_subtasks ?? [],
-      blocked_subtasks: lastEval.blocked_subtasks ?? [],
-      canceled_subtasks: lastEval.canceled_subtasks ?? [],
+      // v3.7.1: Sub-goal lifecycle — explicit transitions
+      subgoal_updates: lastEval.subgoal_updates ?? [],
       // v2.8: Drift clarification
       drift_clarification: lastEval.drift_clarification,
       // v2.9: Model's information needs for the next prompt

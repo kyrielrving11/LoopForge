@@ -2,7 +2,7 @@
 
 **A context window is not memory. Memory needs a runtime.**
 
-**v3.7.0** — `npm install -g loopforge`. Node.js ≥ 18. Zero runtime dependencies.
+**Version per `LoopForge/package.json`** — `npm install -g loopforge`. Node.js ≥ 18. Zero runtime dependencies.
 > [中文文档](./README.zh-CN.md)
 
 ---
@@ -275,10 +275,11 @@ remove mandatory prompt sections or bypass the budget. LoopForge does not run
 a background agent.
 
 Nine MCP tools expose the runtime: `start`, `next`, `status`, `stop`, `pause`,
-`resume`, `replay`, `gate_check`, and `gate_resolve`. `status` provides
-`session`, `loop`, `all`, and `audit` views. The package uses only the Node.js
-standard library at runtime, and policy controls thresholds, budgets, and
-intervals.
+`resume`, `replay`, `gate_check`, and `gate_resolve`. The two gate tools are
+opt-in — hidden from `tools/list` unless `policy.gate.enabled` is true (the
+default is false). `status` provides `session`, `loop`, `all`, and `audit`
+views. The package uses only the Node.js standard library at runtime, and
+policy controls thresholds, budgets, and intervals.
 
 ---
 

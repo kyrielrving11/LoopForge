@@ -82,7 +82,7 @@ describe("Policy — v3.7 shipped sample", () => {
     };
     try {
       const policy = loadPolicy("loop_policy.json");
-      // v3.7: the stale keys (injection_mode, subgoal_auto_*, 
+      // v3.7: the stale keys (injection_mode, subgoal_auto_*,
       // constraint_inactive_rounds) were removed — no unknown-key warnings.
       assert.deepEqual(warnings, []);
       assert.equal(policy.version, "2");
@@ -90,7 +90,7 @@ describe("Policy — v3.7 shipped sample", () => {
       assert.equal(policy.engine.backtrack_enabled, true);
       assert.equal(policy.prompt.l2_pointer_enabled, true);
       assert.equal(policy.evolution.constraint_id_enabled, true);
-      assert.equal(policy.gate.enabled, true);
+      assert.equal(policy.gate.enabled, false);
     } finally {
       console.warn = originalWarn;
     }

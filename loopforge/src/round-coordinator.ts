@@ -31,6 +31,8 @@ import type {
 import { CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE, verifySelfEvaluation } from "./verification-gate.js";
 import { entryRound } from "./token-utils.js";
 import { effectiveSuccess } from "./self-eval.js";
+import { decodeCommittedRound } from "./committed-round.js";
+import { makeRoundId } from "./round-transaction.js";
 import {
   enforceRound,
   buildRejectionPrompt,
@@ -84,6 +86,15 @@ export interface RoundProcessResult {
   backtrackSkippedDiscoveries?: string[];
   /** v2.10: Which enforcement rule triggered the backtrack. */
   backtrackTriggerRule?: string;
+  /** v3.7.1: Rounds rolled back (exclusive range above the restore point).
+   *  Derived from committed facts + the in-flight attempt — rejected
+   *  payloads are not durable history and never become a source. */
+  backtrackFailedRounds?: number[];
+  /** v3.7.1: One approach per failed round (committed output_summary or the
+   *  in-flight attempt's), truncated — what must NOT be repeated. */
+  backtrackApproaches?: string[];
+  /** v3.7.1: Falsified assumptions from the failed rounds. */
+  backtrackWrongAssumptions?: string[];
   /** Verification flags from this round (for injection into next prompt). */
   verificationFlags: VerificationFlag[];
   /** Enforcement action for observability. */
@@ -197,6 +208,11 @@ export class RoundCoordinator {
       evidenceSnapshots ?? [],
       input.backtrackSkippedFiles ?? [],
       input.backtrackTargetGitHead,
+      // v3.7.1: gate records live under the gate: prefix — outside the round
+      // entries above — and are passed separately to the gate check.
+      this.store
+        ? queryLoopEntries(this.store, loopId, { prefix: `loop:${loopId}:gate:` })
+        : [],
     );
     const verificationFlags = verifyResult.flags;
     const gateContradicted = verifyResult.verdict === "contradicted";
@@ -319,6 +335,13 @@ export class RoundCoordinator {
 
       // v2.13: Collect files changed in skipped rounds for the restore prompt
       const skippedFiles: string[] = [];
+      // v3.7.1: Recovery Brief facts — one approach and the falsified
+      // assumptions per rolled-back round, from COMMITTED rounds above the
+      // restore point (rejected attempts are not durable history and never
+      // become a source; the in-flight attempt below is the only exception).
+      const failedRounds: number[] = [];
+      const approaches: string[] = [];
+      const wrongAssumptions: string[] = [];
       for (let r = restorePoint.round + 1; r < currentRound; r++) {
         // v3.2.1: match the feedback entry (execution_evidence lives there) —
         // the compile-time lineage entry for the same round precedes it in
@@ -326,6 +349,8 @@ export class RoundCoordinator {
         const entry = vaultEntries.find(
           (e) => entryRound(e) === r && e.task_type !== "loop_lineage",
         );
+        const view = entry ? decodeCommittedRound(entry) : null;
+        const evaluation = view?.evaluation ?? null;
         if (entry?.execution_evidence) {
           const ev = entry.execution_evidence as Record<string, unknown>;
           const files = Array.isArray(ev.files_changed)
@@ -334,6 +359,28 @@ export class RoundCoordinator {
           for (const f of files) {
             if (!skippedFiles.includes(f)) skippedFiles.push(f);
           }
+        }
+        const summary = evaluation?.output_summary ?? "";
+        if (summary.trim().length > 0) {
+          failedRounds.push(r);
+          approaches.push(summary.trim().slice(0, 200));
+        }
+        const assumptions = (evaluation?.wrong_assumptions ?? [])
+          .filter((v: unknown): v is string => typeof v === "string")
+          .map((s) => s.slice(0, 500));
+        for (const a of assumptions) {
+          if (!wrongAssumptions.includes(a)) wrongAssumptions.push(a);
+        }
+      }
+      // The in-flight attempt that triggered this rollback — its evaluation
+      // lives in this process, not in committed history.
+      const triggerSummary = selfEval.output_summary?.trim() ?? "";
+      if (triggerSummary.length > 0) {
+        if (!failedRounds.includes(currentRound)) failedRounds.push(currentRound);
+        approaches.push(triggerSummary.slice(0, 200));
+        for (const a of (selfEval.wrong_assumptions ?? [])
+          .filter((v: unknown): v is string => typeof v === "string")) {
+          if (!wrongAssumptions.includes(a)) wrongAssumptions.push(a.slice(0, 500));
         }
       }
 
@@ -350,6 +397,8 @@ export class RoundCoordinator {
           : [],
         skippedFiles,
         targetGitHead ?? undefined,
+        makeRoundId(loopId, restorePoint.round + 1),
+        { failedRounds, approaches, wrongAssumptions },
       );
 
       logEvent("enforcement_backtrack", {
@@ -371,6 +420,9 @@ export class RoundCoordinator {
         backtrackSkippedFiles: skippedFiles,
         backtrackTargetGitHead: targetGitHead ?? undefined,
         backtrackTriggerRule: enforceResult.check,
+        backtrackFailedRounds: failedRounds,
+        backtrackApproaches: approaches,
+        backtrackWrongAssumptions: wrongAssumptions,
         verificationFlags,
         enforcementAction: "backtrack",
         enforcementReason: enforceResult.reason,

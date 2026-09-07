@@ -108,9 +108,10 @@ describe("Long-Horizon Verification", () => {
   });
   after(() => { client.close(); try { rmSync(storeDir, { recursive: true }); } catch { /* ok */ } });
 
-  it("MCP init + 9 tools", async () => {
+  it("MCP init + stable tool surface (7 of 9; gates are opt-in)", async () => {
     assert.equal((await client.call("initialize", { protocolVersion: "2024-11-05" })).protocolVersion, "2024-11-05");
-    assert.ok(((await client.call("tools/list")).tools as Array<{ name: string }>).length >= 9);
+    // v3.7.1: gate tools are hidden unless policy.gate.enabled
+    assert.ok(((await client.call("tools/list")).tools as Array<{ name: string }>).length >= 7);
   });
 
   // ── R1 L2 (first_round) ──────────────────────────────────────────────────

@@ -1127,6 +1127,33 @@ describe("buildBacktrackPrompt", () => {
     assert.ok(!prompt.includes("Preserved Discoveries"),
       "should not render discovery section when empty");
   });
+
+  it("v3.7.1: renders the Recovery Brief with trigger, round ID, approaches and falsified assumptions", () => {
+    const prompt = buildBacktrackPrompt(
+      7, 4, "progress_stall", [], ["src/a.ts"], "abcdef12",
+      "loop:recovery-loop:round:5",
+      {
+        failedRounds: [5, 6, 7],
+        approaches: ["chased the wrong seam", "rewrote the scheduler again"],
+        wrongAssumptions: ["the DB was the bottleneck"],
+      },
+    );
+    assert.ok(prompt.includes("### Recovery Brief"));
+    assert.ok(prompt.includes("**Trigger**: progress_stall"));
+    assert.ok(prompt.includes("**Restored to round**: 4 (the redo is round 5)"));
+    assert.ok(prompt.includes("**Recovery Round ID**: `loop:recovery-loop:round:5`"));
+    assert.ok(prompt.includes("**Failed rounds**: 5, 6, 7"));
+    assert.ok(prompt.includes("Failed approach: chased the wrong seam"));
+    assert.ok(prompt.includes("Failed approach: rewrote the scheduler again"));
+    assert.ok(prompt.includes("**Falsified assumptions** (do not rebuild on these):"));
+    assert.ok(prompt.includes("- the DB was the bottleneck"));
+  });
+
+  it("v3.7.1: omits the Recovery Brief when no recovery facts were derived", () => {
+    const prompt = buildBacktrackPrompt(7, 4, "progress_stall", [], ["src/a.ts"]);
+    assert.ok(!prompt.includes("Recovery Brief"),
+      "no brief section without derived recovery facts");
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

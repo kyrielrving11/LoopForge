@@ -77,9 +77,7 @@ describe("buildSelfEvaluation", () => {
         success_criteria_remaining: [],
         progress_estimate: 0.3,
       },
-      completed_subtasks: ["setup tests"],
-      blocked_subtasks: [],
-      canceled_subtasks: [],
+      subgoal_updates: [{ id: "sg-aabbccdd", status: "done", note: "ship it" }],
       next_action: "audit upgrade proxy",
     };
     const result = buildSelfEvaluation(raw);
@@ -89,7 +87,7 @@ describe("buildSelfEvaluation", () => {
     assert.deepEqual(result.emerged_subtasks, ["audit timelock"]);
     assert.ok(result.execution_evidence);
     assert.equal(result.execution_evidence!.progress_estimate, 0.3);
-    assert.deepEqual(result.completed_subtasks, ["setup tests"]);
+    assert.deepEqual(result.subgoal_updates, [{ id: "sg-aabbccdd", status: "done", note: "ship it" }]);
     assert.equal(result.next_action, "audit upgrade proxy");
   });
 
@@ -362,5 +360,69 @@ describe("v3.3 — round_contract parsing", () => {
       should_continue: true,
     });
     assert.equal(without.round_contract, undefined);
+  });
+});
+
+describe("v3.7.1 — worker_results parsing (outcome is the single fact)", () => {
+  function build(worker_results: unknown) {
+    return buildSelfEvaluation({
+      success: false,
+      output_summary: "x",
+      constraint_violations: [],
+      should_continue: true,
+      worker_results,
+    });
+  }
+
+  it("accepts an absent worker_results array (the main agent did not delegate)", () => {
+    const absent = build(undefined);
+    assert.deepEqual(absent.worker_results, []);
+    const empty = build([]);
+    assert.deepEqual(empty.worker_results, []);
+  });
+
+  it("keeps entries with a valid declared outcome", () => {
+    const se = build([{
+      agentId: "w1",
+      subTask: "scan",
+      resultSummary: "found seams",
+      outcome: "partial",
+      discoveredConstraints: ["x"],
+    }]);
+    assert.equal(se.worker_results?.length, 1);
+    assert.equal(se.worker_results?.[0].outcome, "partial");
+  });
+
+  it("drops an entry without a valid outcome — never derives, never rejects the round", () => {
+    const se = build([
+      {
+        agentId: "w-legacy",
+        subTask: "scan",
+        resultSummary: "legacy shape",
+        // success: true was deleted in v3.7.1; an outcome-less entry is unclassifiable.
+      },
+      { agentId: "w2", subTask: "scan", resultSummary: "ok", outcome: "failed" },
+      { agentId: "w3", subTask: "scan", resultSummary: "bad enum", outcome: "blocked" },
+    ]);
+    assert.equal(se.worker_results?.length, 1);
+    assert.equal(se.worker_results?.[0].agentId, "w2");
+  });
+
+  it("defaults subAgentType to general-purpose and keeps existing caps", () => {
+    const se = build([{
+      agentId: "w1",
+      subTask: "scan",
+      resultSummary: "r".repeat(2000),
+      outcome: "success",
+    }]);
+    assert.equal(se.worker_results?.[0].subAgentType, "general-purpose");
+    assert.equal(se.worker_results?.[0].resultSummary.length, 1000);
+  });
+
+  it("caps the number of parsed worker entries at 20", () => {
+    const many = Array.from({ length: 30 }, (_, i) => ({
+      agentId: `w${i}`, subTask: "t", resultSummary: "s", outcome: "success" as const,
+    }));
+    assert.equal(build(many).worker_results?.length, 20);
   });
 });

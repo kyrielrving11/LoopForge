@@ -3,7 +3,7 @@
  * The compiler evolves structured state and renders one prompt artifact.
  * L0/L1/L2 control state density only; the external Agent owns reasoning.
  */
-import { type CriterionStatus, type Lesson, type LoopCompileRequest, type LoopCompileResponse, type LoopHealth, type LoopObjective, type LoopRoundResult, type RollingSummary, type SubGoal, type TaskAlignment, type VerificationFlag } from "./protocol.js";
+import { type CriterionStatus, type Lesson, type LoopCompileRequest, type LoopCompileResponse, type LoopHealth, type LoopObjective, type LoopRoundResult, type RollingSummary, type SubGoal, type SubGoalUpdate, type TaskAlignment, type VerificationFlag } from "./protocol.js";
 import type { PresentedStateSnapshot } from "./canonical-state.js";
 export interface PreviousRound {
     round: number;
@@ -50,20 +50,34 @@ export declare function deriveConstraintId(text: string): string;
 /** v2.11: Derive a stable criterion ID from its text hash (cr-XXXXXXXX).
  *  Same hash strategy as SubGoal — deterministic across rounds. */
 export declare function deriveCriterionId(text: string): string;
+/** Closed migration matrix. done/canceled are terminal (no out-edges); the
+ *  matrix rejects re-opening. blocked → in_progress is the recovery path. */
+export declare const SUBGOAL_TRANSITIONS: Record<SubGoalUpdate["status"], readonly SubGoal["status"][]>;
+/** Whether a transition is legal. Same-status is a legal no-op (used by
+ *  replay idempotency). References to terminal sub-goals are rejected by
+ *  validateSubGoalUpdates before this is consulted. */
+export declare function canTransitionSubGoal(from: SubGoal["status"], to: SubGoalUpdate["status"]): boolean;
+/** Referential validation of a payload's subgoal_updates against the
+ *  derived sub-goal set. Returns one error per invalid entry:
+ *  unknown_id | terminal_reference | illegal_transition. */
+export declare function validateSubGoalUpdates(subGoals: SubGoal[], updates: SubGoalUpdate[]): Array<{
+    id: string;
+    reason: string;
+}>;
 export declare function alignTask(proposedTask: string, request: LoopCompileRequest, context: Record<string, unknown> | null): TaskAlignment;
 export declare function checkLoopHealth(loopId: string, request: LoopCompileRequest, context: Record<string, unknown> | null): LoopHealth;
 export declare function decideLevel(request: LoopCompileRequest, context: Record<string, unknown> | null): "l0" | "l1" | "l2";
-export declare function buildSelfEvalBlock(round: number, prevDriftFlags?: VerificationFlag[], 
+export declare function buildSelfEvalBlock(round: number, prevDriftFlags?: VerificationFlag[],
 /** v2.12: L0 is the minimal retry template — the v2.12 declarative fields
  *  (outcome/blocker/retroactiveClaims) are L1/L2 additions so the retry
  *  prompt stays within its tight budget. */
-level?: "l0" | "l1" | "l2", 
+level?: "l0" | "l1" | "l2",
 /** v3.3/v3.4: Whether this round's Current Task IS the ACTIVE Round
  *  Contract (derived from committed rounds — compileLoop passes
  *  `activeContract != null`). Only then does the template ask the agent
  *  to restate/propose it — a generic empty contract template would invite
  *  placeholder submissions that trigger round_underspecified noise. */
-hasContract?: boolean, 
+hasContract?: boolean,
 /** v3.5: L2-only prose suggesting a Round Contract declaration when the
  *  Current Task is NOT one (contract_nudge_on_l2 policy, computed at the
  *  compileLoop call site). Mutually exclusive with hasContract. The prose

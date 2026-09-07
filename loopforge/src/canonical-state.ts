@@ -21,6 +21,40 @@ import { getPolicy } from "./policy.js";
 
 export const CANONICAL_STATE_SCHEMA_VERSION = 1 as const;
 
+/** v3.7.1: Presentation view of sub-goals shared by prompts and the state
+ *  file (one derivation, no second copy). Only ACTIVE items render as rows
+ *  — pending/in_progress/blocked — ordered blocked → in_progress → pending
+ *  (priority ascending, then most recently changed first) and trimmed to
+ *  `cap`. done/canceled never render as items: they stay in the vault, in
+ *  replay, and in these counts. */
+export function activeSubGoalView(
+  subGoals: SubGoal[],
+  cap: number,
+): {
+  active: SubGoal[];
+  activeTotal: number;
+  done: number;
+  canceled: number;
+  total: number;
+} {
+  const rank = (s: SubGoal): number =>
+    s.status === "blocked" ? 0 : s.status === "in_progress" ? 1 : 2;
+  const active = subGoals
+    .filter((s) => s.status !== "done" && s.status !== "canceled")
+    .sort((a, b) =>
+      rank(a) - rank(b) ||
+      a.priority - b.priority ||
+      b.status_changed_at_round - a.status_changed_at_round ||
+      (a.id < b.id ? -1 : 1));
+  return {
+    active: active.slice(0, cap),
+    activeTotal: active.length,
+    done: subGoals.filter((s) => s.status === "done").length,
+    canceled: subGoals.filter((s) => s.status === "canceled").length,
+    total: subGoals.length,
+  };
+}
+
 /** v3.2: Durable snapshot of what an L1 prompt actually presented last round.
  *  Used as the diff baseline for L1 collapse. Persisted inside the lineage
  *  entry's loop_lineage (field extension — no new persistence format) and
@@ -322,22 +356,106 @@ export function milestoneHeading(milestone: MilestoneSummary): string {
   return `**${kindIcon} ${milestone.label}** (Rounds ${milestone.round_range.start}–${milestone.round_range.end}, ${(milestone.progress_at_boundary * 100).toFixed(0)}%)`;
 }
 
-export function renderCanonicalStateMarkdown(state: CanonicalLoopState): string {
-  const lines = [
+// ═══════════════════════════════════════════════════════════════════════════
+// State-file tiering (v3.7.1)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** v3.7.1: every state-file section belongs to one of three conceptual
+ *  tiers. Deterministic static map — the renderer never reorders content,
+ *  it only groups and demotes the headings. Unknown titles default to
+ *  Recent so a future section can never silently disappear. */
+type StateTier = "Current" | "Recent" | "Historical Summary";
+
+const STATE_SECTION_TIER: Record<string, StateTier> = {
+  // Current — what the next round must hold in working memory.
+  "Loop Objective": "Current",
+  "Current Task": "Current",
+  "Success Criteria": "Current",
+  "Hard Constraints": "Current",
+  "Active Constraints": "Current",
+  Remaining: "Current",
+  Blockers: "Current",
+  "Sub-Goal Dashboard": "Current",
+  "External Context": "Current",
+  // Recent — this round's boundary facts (and, in a recovery window, the
+  // derived Recovery Brief injected at the top of this tier).
+  "Progress Dashboard": "Recent",
+  Verification: "Recent",
+  "Changes Since Last Round": "Recent",
+  Discoveries: "Recent",
+  "Next Action": "Recent",
+  "Agent Trust": "Recent",
+  // Historical Summary — the loop's memory skeleton, kept under existing
+  // milestone/lesson/window caps.
+  "Goal → Criteria": "Historical Summary",
+  "Cross-Round Outcomes": "Historical Summary",
+  "Recurring Issues": "Historical Summary",
+  "Failed Patterns": "Historical Summary",
+  "Lessons Learned": "Historical Summary",
+  "Retired Constraints": "Historical Summary",
+  Roadmap: "Historical Summary",
+  "Phase History": "Historical Summary",
+};
+
+const STATE_TIER_ORDER: StateTier[] = ["Current", "Recent", "Historical Summary"];
+
+/** Options that vary per render: the retry attempt (single version of the
+ *  file across attempts is impossible — the attempt IS part of the derived
+ *  view) and the recovery-window Recovery Brief lines (W5, present only
+ *  while a committed backtrack decision is the current round's record). */
+export interface StateFileRenderOptions {
+  attempt?: number;
+  recoveryBrief?: string[];
+}
+
+export function renderCanonicalStateMarkdown(
+  state: CanonicalLoopState,
+  options?: StateFileRenderOptions,
+): string {
+  const preamble = [
     `# LoopForge State — ${state.loopId}`,
     "",
     `**Schema**: ${state.schemaVersion}`,
     `**Round**: ${state.round}/${state.maxRounds}`,
     `**Goal ID**: ${state.goalId}`,
+    "**Derived**: true",
+    `**Source**: round ${state.round} (attempt ${options?.attempt ?? 1})`,
+    `**State hash**: ${hashCanonicalState(state).slice(0, 12)}`,
     "",
-    "## Loop Objective",
-    "",
-    state.objective,
-    "",
-    "## Current Task",
-    "",
-    state.currentTask,
   ];
+  const sections = flatStateSections(state);
+  if (options?.recoveryBrief && options.recoveryBrief.length > 0) {
+    sections.unshift({ title: "Recovery Brief", body: options.recoveryBrief });
+  }
+  const byTier = new Map<StateTier, Array<{ title: string; body: string[] }>>();
+  for (const tier of STATE_TIER_ORDER) byTier.set(tier, []);
+  for (const section of sections) {
+    const tier = STATE_SECTION_TIER[section.title] ?? "Recent";
+    byTier.get(tier)!.push(section);
+  }
+  const out: string[] = [...preamble];
+  for (const tier of STATE_TIER_ORDER) {
+    const tierSections = byTier.get(tier)!;
+    if (tierSections.length === 0) continue;
+    out.push(`## ${tier}`, "");
+    for (const section of tierSections) {
+      out.push(`### ${section.title}`, "");
+      for (const line of section.body) out.push(line);
+      out.push("");
+    }
+  }
+  return out.join("\n").trimEnd() + "\n";
+}
+
+/** Render the flat section list (title + body) that the tier wrapper
+ *  groups. Each builder keeps its original heading text; only the heading
+ *  level is demoted by the wrapper. */
+function flatStateSections(state: CanonicalLoopState): Array<{ title: string; body: string[] }> {
+  const lines: string[] = [];
+  lines.push(
+    "## Loop Objective", "", state.objective, "",
+    "## Current Task", "", state.currentTask,
+  );
   // v2.11: Success Criteria and Constraints render with stable IDs for exact agent matching
   addListWithIds(lines, "Success Criteria", state.successCriteria, "cr");
   addListWithIds(lines, "Hard Constraints", state.hardConstraints, "c");
@@ -469,27 +587,32 @@ export function renderCanonicalStateMarkdown(state: CanonicalLoopState): string 
     }
   }
   if (state.subGoals.length > 0) {
-    lines.push("## Sub-Goal Dashboard", "");
-    for (const sg of state.subGoals) {
-      const statusIcon =
-        sg.status === "in_progress" ? "🔄" :
-        sg.status === "done" ? "✅" :
-        sg.status === "blocked" ? "🚫" :
-        sg.status === "canceled" ? "❌" : "⏳";
-      const stale = sg.status === "pending" &&
-        state.round - sg.declared_at_round >= 10 ? " ⚠️ stale" : "";
-      const detail = sg.status === "done" && sg.completed_at_round
-        ? ` (done, R${sg.completed_at_round})`
-        : sg.status === "in_progress"
-        ? ` (since R${sg.status_changed_at_round})`
-        : sg.status === "pending"
-        ? ` (since R${sg.declared_at_round})`
-        : sg.status === "blocked"
-        ? ` (blocked R${sg.status_changed_at_round})`
-        : ` (canceled R${sg.status_changed_at_round})`;
-      lines.push(`- ${statusIcon} [\`${sg.id}\`] ${sg.description}${detail}${stale}`);
+    // v3.7.1: only ACTIVE items render as rows; done/canceled survive in
+    // the vault, replay, and the counts line below.
+    const cap = getPolicy().evolution.max_active_subgoals;
+    const view = activeSubGoalView(state.subGoals, cap);
+    if (view.active.length > 0) {
+      lines.push("## Sub-Goal Dashboard", "");
+      for (const sg of view.active) {
+        const statusIcon =
+          sg.status === "in_progress" ? "🔄" :
+          sg.status === "blocked" ? "🚫" : "⏳";
+        const stale = sg.status === "pending" &&
+          state.round - sg.declared_at_round >= 10 ? " ⚠️ stale" : "";
+        const detail = sg.status === "in_progress"
+          ? ` (since R${sg.status_changed_at_round})`
+          : sg.status === "pending"
+          ? ` (since R${sg.declared_at_round})`
+          : ` (blocked R${sg.status_changed_at_round})`;
+        lines.push(`- ${statusIcon} [\`${sg.id}\`] ${sg.description}${detail}${stale}`);
+      }
+      lines.push("");
     }
-    lines.push("");
+    lines.push(
+      `> ${view.total} total · ${view.activeTotal} active · ` +
+      `${view.done} done · ${view.canceled} canceled`,
+      "",
+    );
   }
   if (state.agentTrustScore !== undefined) {
     const barLen = 10;
@@ -509,7 +632,32 @@ export function renderCanonicalStateMarkdown(state: CanonicalLoopState): string 
   if (state.externalContext) {
     lines.push("## External Context", "", state.externalContext, "");
   }
-  return lines.join("\n").trimEnd() + "\n";
+  // Split the flat markdown into titled sections for tier grouping. Every
+  // builder above emits `## <Title>` headings over their content.
+  const sections: Array<{ title: string; body: string[] }> = [];
+  let current: { title: string; body: string[] } | null = null;
+  let inBody = false;
+  for (const line of lines) {
+    const heading = /^## (.+)$/.exec(line);
+    if (heading) {
+      current = { title: heading[1]!, body: [] };
+      sections.push(current);
+      inBody = false;
+      continue;
+    }
+    if (!current) continue;
+    if (!inBody) {
+      if (line.trim() === "") continue; // drop leading blanks after the heading
+      inBody = true;
+    }
+    current.body.push(line);
+  }
+  for (const section of sections) {
+    while (section.body.length > 0 && section.body[section.body.length - 1] === "") {
+      section.body.pop();
+    }
+  }
+  return sections;
 }
 
 export function createCanonicalLoopState(

@@ -80,6 +80,7 @@ export function makeSelfEvaluation(overrides = {}) {
         discovered_constraints: [],
         objective_refinement: "",
         emerged_subtasks: [],
+        subgoal_updates: [],
         execution_evidence: undefined,
         retracted_constraints: [],
         revised_success_criteria: [],
@@ -88,9 +89,6 @@ export function makeSelfEvaluation(overrides = {}) {
         compression_checkpoint: false,
         checkpoint_label: "",
         next_action: undefined,
-        completed_subtasks: [],
-        blocked_subtasks: [],
-        canceled_subtasks: [],
         stop_reason: undefined,
         outcome: undefined,
         blocker: undefined,
@@ -136,6 +134,9 @@ export function makeRollingSummary(overrides = {}) {
         ...overrides,
     };
 }
+export function makeSubGoalUpdate(overrides = {}) {
+    return { id: "", status: "done", ...overrides };
+}
 export function makeSubGoal(overrides = {}) {
     return {
         id: "",
@@ -175,6 +176,7 @@ export function makeLoopRoundResult(overrides = {}) {
         discovered_constraints: [],
         objective_refinement: "",
         emerged_subtasks: [],
+        subgoal_updates: [],
         execution_evidence: undefined,
         retracted_constraints: [],
         revised_success_criteria: [],
@@ -183,9 +185,6 @@ export function makeLoopRoundResult(overrides = {}) {
         compression_checkpoint: false,
         checkpoint_label: "",
         next_action: undefined,
-        completed_subtasks: [],
-        blocked_subtasks: [],
-        canceled_subtasks: [],
         drift_clarification: undefined,
         prompt_requests: undefined,
         outcome: undefined,

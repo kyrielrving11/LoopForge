@@ -108,6 +108,11 @@ try {
     "--outDir", tmpDist,
   ], "clean tsc build");
 
+  // 1b. Match the production trim step (diff-clean generated artifacts).
+  if (built) {
+    runNode([join(pkgRoot, "scripts", "trim-dist.mjs"), tmpDist], "dist trim");
+  }
+
   // 2. Generate the protocol schema into the temp dir.
   if (built) {
     built = runNode([
@@ -130,7 +135,22 @@ try {
     }
   }
 
-  // 4. Generated artifacts must match the last commit (HEAD).
+  // 4. The CLI must report exactly the package.json version (single source).
+  if (built && existsSync(join(distDir, "cli.js"))) {
+    try {
+      const cliVersion = execFileSync(process.execPath, [
+        join(distDir, "cli.js"), "--version",
+      ], { cwd: pkgRoot, encoding: "utf-8" }).trim();
+      const pkg = JSON.parse(readFileSync(join(pkgRoot, "package.json"), "utf-8"));
+      if (cliVersion !== pkg.version) {
+        fail(`CLI reports ${cliVersion} but package.json says ${pkg.version}`);
+      }
+    } catch (err) {
+      fail(`CLI version probe failed: ${String(err).slice(0, 400)}`);
+    }
+  }
+
+  // 5. Generated artifacts must match the last commit (HEAD).
   if (existsSync(join(repoRoot, ".git"))) {
     try {
       const dirty = execFileSync("git", [

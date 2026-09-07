@@ -193,9 +193,24 @@ describe("MCP stdio input boundary", () => {
 
       const listed = await rpc.request("tools/list");
       const tools = ((listed.result as Record<string, unknown>).tools as Array<Record<string, unknown>>);
+      // v3.7.1: the gate tools are opt-in — hidden by default.
       const gate = tools.find((tool) => tool.name === "loopforge_gate_check");
-      assert.ok(gate?.outputSchema);
-      assert.equal(gate?.execution, undefined);
+      assert.equal(gate, undefined, "gate tools are hidden when policy.gate.enabled=false");
+      const hidden = await rpc.request("tools/call", {
+        name: "loopforge_gate_check",
+        arguments: {
+          sessionId: "session",
+          roundId: "loop:test:round:1",
+          action: {
+            description: "Deploy", scope: [], effects: [], reversibility: "unknown",
+            authorization: "unknown",
+          },
+        },
+      });
+      const hiddenResult = hidden.result as Record<string, unknown>;
+      const hiddenContent = hiddenResult.content as Array<{ text: string }>;
+      const hiddenError = JSON.parse(hiddenContent[0].text as string) as Record<string, unknown>;
+      assert.equal(hiddenError.error, "gate_disabled");
 
       const direct = await rpc.request("tools/call", {
         name: "loopforge_status",

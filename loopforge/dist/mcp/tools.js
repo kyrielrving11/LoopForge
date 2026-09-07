@@ -6,9 +6,9 @@
  * Each handler receives SessionManager + parsed input, returns the output object.
  */
 import { buildSelfEvaluation } from "../engine.js";
-import { validateCoreSelfEvaluation } from "../self-eval.js";
+import { parseSubGoalUpdates, validateCoreSelfEvaluation, validateSubGoalUpdatesShape, } from "../self-eval.js";
 import { isRecord } from "../token-utils.js";
-import { validateLoopId } from "../policy.js";
+import { getPolicy, validateLoopId } from "../policy.js";
 // ═══════════════════════════════════════════════════════════════════════════
 // Tool schemas (MCP JSON Schema format)
 // ═══════════════════════════════════════════════════════════════════════════
@@ -101,7 +101,8 @@ const TOOL_BASE_SCHEMAS = [
                         emerged_subtasks: {
                             type: "array",
                             items: { type: "string" },
-                            description: "Optional. Sub-problems that surfaced during execution.",
+                            description: "Optional. Sub-problems that surfaced during execution. The only " +
+                                "sub-goal creation channel — sg-XXXXXXXX ID literals are rejected here.",
                         },
                         execution_evidence: {
                             type: "object",
@@ -162,7 +163,10 @@ const TOOL_BASE_SCHEMAS = [
                         },
                         worker_results: {
                             type: "array",
-                            description: "Optional. Results of sub-agent / Worker delegations this round.",
+                            description: "Optional. Results of sub-agent / Worker delegations this round. " +
+                                "Each entry must declare an outcome — the single reported fact. " +
+                                "Entries without a valid outcome are dropped by the runtime. " +
+                                "Omit or empty when nothing was delegated.",
                             items: {
                                 type: "object",
                                 properties: {
@@ -170,18 +174,16 @@ const TOOL_BASE_SCHEMAS = [
                                     subAgentType: { type: "string" },
                                     subTask: { type: "string" },
                                     resultSummary: { type: "string" },
-                                    success: { type: "boolean" },
                                     outcome: {
                                         type: "string",
                                         enum: ["success", "partial", "failed"],
-                                        description: "Optional. Worker outcome; derived from success when absent.",
                                     },
                                     discoveredConstraints: {
                                         type: "array",
                                         items: { type: "string" },
                                     },
                                 },
-                                required: ["agentId", "subAgentType", "subTask", "resultSummary", "success"],
+                                required: ["agentId", "subTask", "resultSummary", "outcome"],
                             },
                         },
                         compression_checkpoint: {
@@ -196,20 +198,33 @@ const TOOL_BASE_SCHEMAS = [
                             type: "string",
                             description: "Optional. What the agent plans to do in the next round. Helps LoopForge detect task drift early by comparing declared intent with actual work.",
                         },
-                        completed_subtasks: {
+                        subgoal_updates: {
                             type: "array",
-                            items: { type: "string" },
-                            description: "Optional. Sub-tasks completed this round. Matched to previously emerged sub-tasks by description similarity.",
-                        },
-                        blocked_subtasks: {
-                            type: "array",
-                            items: { type: "string" },
-                            description: "Optional. Sub-tasks that are now blocked. Describe what is blocking and why.",
-                        },
-                        canceled_subtasks: {
-                            type: "array",
-                            items: { type: "string" },
-                            description: "Optional. Sub-tasks no longer needed. Removes them from the active sub-goal list.",
+                            maxItems: 20,
+                            description: "Optional. Explicit status transitions for EXISTING sub-goals. " +
+                                "Each entry references an ACTIVE sub-goal ID (sg-XXXXXXXX) from " +
+                                "the dashboard with a target status. Unknown IDs, done/canceled " +
+                                "(terminal) references, and illegal migrations are rejected " +
+                                "before the round advances. done/canceled items must never be " +
+                                "referenced again — re-open via a NEW emerged_subtasks item.",
+                            items: {
+                                type: "object",
+                                properties: {
+                                    id: {
+                                        type: "string",
+                                        description: "Active sub-goal ID (sg-XXXXXXXX).",
+                                    },
+                                    status: {
+                                        type: "string",
+                                        enum: ["in_progress", "done", "blocked", "canceled"],
+                                    },
+                                    note: {
+                                        type: "string",
+                                        description: "Optional free-text note (≤ 300 chars).",
+                                    },
+                                },
+                                required: ["id", "status"],
+                            },
                         },
                         stop_reason: {
                             type: "string",
@@ -228,6 +243,14 @@ const TOOL_BASE_SCHEMAS = [
                         blocker: {
                             type: "string",
                             description: "Optional. Flat blocker description, required only when outcome=blocked. Also feeds the user/agent gate classification. Max 500 chars.",
+                        },
+                        gate_ids: {
+                            type: "array",
+                            maxItems: 20,
+                            description: "Optional. gate_opened ids this round's work depended on (from " +
+                                "loopforge_gate_check). Enforced only when policy.gate.enabled: " +
+                                "an unapproved cited gate rejects the round.",
+                            items: { type: "string" },
                         },
                         retroactiveClaims: {
                             type: "array",
@@ -385,21 +408,64 @@ const TOOL_BASE_SCHEMAS = [
     },
     {
         name: "loopforge_gate_check",
-        description: "v2.12: Classify a high-risk action or blocker text as a user gate (needs human authorization) or an agent gate (resolvable with evidence). Read-only — nothing is recorded. Use the returned gate id with loopforge_gate_resolve after a human decision.",
+        description: "v3.7.1: Structured preflight for a high-risk action. Classifies a " +
+            "GateActionDescriptor as user_required (needs human authorization — " +
+            "persists a gate_opened record you must cite via evaluation.gate_ids " +
+            "once approved) or agent_allowed (no record, no human needed). " +
+            "Never executes the action, never approves it, never advances a round. " +
+            "Hidden when policy.gate.enabled=false (direct calls return gate_disabled).",
         inputSchema: {
             type: "object",
             properties: {
-                gateText: {
-                    type: "string",
-                    description: "The action or blocker text to classify, e.g. 'Deploy to production'.",
+                sessionId: { type: "string", description: "Session ID." },
+                roundId: { type: "string", description: "RoundId from the latest response." },
+                action: {
+                    type: "object",
+                    description: "The action the agent plans to perform.",
+                    properties: {
+                        description: {
+                            type: "string",
+                            description: "What the action does, e.g. 'Deploy to production'.",
+                        },
+                        scope: {
+                            type: "array",
+                            items: { type: "string" },
+                            description: "Files / systems / services the action touches.",
+                        },
+                        effects: {
+                            type: "array",
+                            items: {
+                                type: "string",
+                                enum: [
+                                    "workspace_write", "production", "credentials", "data_migration",
+                                    "public_api", "publish", "payment", "external_communication",
+                                    "network",
+                                ],
+                            },
+                        },
+                        reversibility: {
+                            type: "string",
+                            enum: ["reversible", "recoverable", "irreversible", "unknown"],
+                        },
+                        authorization: {
+                            type: "string",
+                            enum: ["agent_allowed", "user_required", "unknown"],
+                        },
+                    },
+                    required: ["description", "scope", "effects", "reversibility", "authorization"],
                 },
             },
-            required: ["gateText"],
+            required: ["sessionId", "roundId", "action"],
         },
     },
     {
         name: "loopforge_gate_resolve",
-        description: "v2.12: Record a human decision for a previously opened user gate. The gate id embeds the action hash — if the action text changed, the approval expires automatically. Read-only for agent gates (they are resolved by submitting evidence).",
+        description: "v3.7.1: Record a human decision for a previously opened user gate. " +
+            "The caller is still the Agent — LoopForge cannot machine-verify that a " +
+            "human is present; the decision is recorded and audited, and the gate's " +
+            "approval binds to the canonical action (any change expires it). " +
+            "Agent gates are resolved by submitting evidence, never here. " +
+            "Hidden when policy.gate.enabled=false (direct calls return gate_disabled).",
         inputSchema: {
             type: "object",
             properties: {
@@ -409,7 +475,7 @@ const TOOL_BASE_SCHEMAS = [
                 },
                 gateId: {
                     type: "string",
-                    description: "Gate id returned by loopforge_gate_check or recorded from a blocked round.",
+                    description: "Gate id returned by loopforge_gate_check.",
                 },
                 approved: {
                     type: "boolean",
@@ -510,14 +576,15 @@ export const TOOL_OUTPUT_SCHEMAS = {
         type: "object",
         properties: {
             error: { type: "string" },
-            id: { type: "string" },
-            kind: { type: "string" },
-            question: { type: "string" },
+            sessionId: { type: "string" },
+            gateId: { type: "string" },
+            risk: { type: "string", enum: ["low", "high", "unknown"] },
+            decision: { type: "string", enum: ["agent_allowed", "user_required"] },
+            reasonCodes: { type: "array", items: { type: "string" } },
             blockedScope: { type: "array", items: { type: "string" } },
-            allowedWork: { type: "array", items: { type: "string" } },
-            problem: { type: "string" },
+            allowedBeforeApproval: { type: "array", items: { type: "string" } },
             requiredEvidence: { type: "array", items: { type: "string" } },
-            suggestedResolution: { type: "string" },
+            approvalQuestion: { type: "string" },
         },
         additionalProperties: true,
     },
@@ -779,6 +846,37 @@ export const TOOL_HANDLERS = {
                 roundId,
             };
         }
+        // v3.7.1: subgoal_updates is a strict structural boundary. Shape errors
+        // (bad entries, sg- literals in the creation channel) and referential
+        // errors (unknown / terminal / illegal transitions, checked against the
+        // compiled sub-goal set) return evaluation_invalid BEFORE advance — no
+        // state change, no gates, no rejection counters; retry same roundId.
+        const subgoalErrors = validateSubGoalUpdatesShape(rawEval);
+        if (subgoalErrors.length > 0) {
+            return {
+                error: "evaluation_invalid",
+                details: { missing: [], invalid: [], subgoal_errors: subgoalErrors },
+                sessionId,
+                roundId,
+            };
+        }
+        const updates = parseSubGoalUpdates(rawEval.subgoal_updates);
+        if (updates.length > 0) {
+            const emerged = Array.isArray(rawEval.emerged_subtasks)
+                ? rawEval.emerged_subtasks
+                    .filter((v) => typeof v === "string")
+                    .map((s) => s.slice(0, 500))
+                : [];
+            const referentialErrors = mgr.preflightSubGoalUpdates(sessionId, roundId, updates, emerged);
+            if (referentialErrors.length > 0) {
+                return {
+                    error: "evaluation_invalid",
+                    details: { missing: [], invalid: [], subgoal_errors: referentialErrors },
+                    sessionId,
+                    roundId,
+                };
+            }
+        }
         const preExtractedEval = buildSelfEvaluation(rawEval);
         const result = await mgr.advance(sessionId, output, preExtractedEval, roundId);
         // v2.12: Typed projection — runtime facts for the main agent, attached
@@ -916,12 +1014,45 @@ export const TOOL_HANDLERS = {
         return { ...result };
     },
     async loopforge_gate_check(mgr, input) {
-        const gateText = String(input.gateText ?? "");
-        if (!gateText.trim())
-            return { error: "gateText is required" };
-        return mgr.checkGate(gateText);
+        // v3.7.1: hidden when disabled — direct calls get a stable error.
+        if (!getPolicy().gate.enabled)
+            return { error: "gate_disabled" };
+        const sessionId = String(input.sessionId ?? "");
+        const roundId = String(input.roundId ?? "");
+        const action = input.action;
+        if (!sessionId)
+            return { error: "sessionId is required" };
+        if (!roundId)
+            return { error: "roundId is required — pass the roundId from the latest response" };
+        if (!action || !isRecord(action))
+            return { error: "action is required" };
+        const descriptor = {
+            description: String(action.description ?? ""),
+            scope: Array.isArray(action.scope)
+                ? action.scope.filter((v) => typeof v === "string")
+                : [],
+            effects: Array.isArray(action.effects)
+                ? action.effects.filter((v) => typeof v === "string")
+                    .filter((v) => true)
+                : [],
+            reversibility: (["reversible", "recoverable", "irreversible", "unknown"]
+                .includes(String(action.reversibility))
+                ? String(action.reversibility)
+                : "unknown"),
+            authorization: (["agent_allowed", "user_required", "unknown"]
+                .includes(String(action.authorization))
+                ? String(action.authorization)
+                : "unknown"),
+        };
+        if (!descriptor.description.trim()) {
+            return { error: "action.description is required" };
+        }
+        return mgr.checkGate(sessionId, roundId, descriptor);
     },
     async loopforge_gate_resolve(mgr, input) {
+        // v3.7.1: hidden when disabled — direct calls get a stable error.
+        if (!getPolicy().gate.enabled)
+            return { error: "gate_disabled" };
         return mgr.resolveGate(String(input.sessionId ?? ""), String(input.gateId ?? ""), input.approved === true, input.note === undefined ? undefined : String(input.note));
     },
 };

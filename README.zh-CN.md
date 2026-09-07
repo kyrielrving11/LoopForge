@@ -86,7 +86,7 @@ Round Contract 允许已提交轮次为下一轮提出有边界的工作。Activ
 
 它的数据来源是恢复点之上**已提交**的轮次，外加触发回滚的**进行中**尝试。被拒绝的载荷不是持久历史，永远不会成为数据源。简报渲染在回溯 prompt 顶部，并在恢复窗口期间出现在 state file 的 Recent 层；redo 提交后按构造退出。
 
-工作区恢复本身由 **Agent 执行**（回溯 prompt 会给出 git 命令）；LoopForge 不替它改写工作树——可选的 `backtrack_auto_restore` 策略（默认关闭）是唯一例外，且只运行显式配置的 stash/reset。验证门所谓"强制"，指的是**核查**：下一轮提交时用机器证据比对——git HEAD 必须已回到恢复点、失败轮次的文件不得再次出现在 `files_changed` 中（`backtrack_workspace_not_restored` 会持续拒绝 redo，直到工作区真正干净）。若回滚由停滞的 Round Contract 触发，被认可的出路是：用 `outcome: "blocked"` 关闭它，并在同一次提交中声明修订后的契约。
+工作区恢复本身由 **Agent 执行**（回溯 prompt 会给出 git 命令）；LoopForge 不替它改写工作树——可选的 `backtrack_auto_restore` 策略（默认关闭）是唯一例外，且只运行显式配置的 stash/reset。验证门是**核查**：下一轮提交时用机器证据比对——git HEAD 必须已回到恢复点、失败轮次的文件不得再次出现在 `files_changed` 中（`backtrack_workspace_not_restored` 会持续拒绝 redo，直到工作区真正干净）。停滞的 Round Contract **不是**第三条回滚触发路径——回滚只来自停滞评估器或工作区未恢复。但当被回滚的轮次当时正执行在一份 **active Round Contract** 之下，redo 要走"契约路径"而不是普通重做：用 `outcome: "blocked"`（附 blocker）关闭停滞契约，并在同一次提交里声明修订后的契约。契约仍 open 时静默重申它会被当作 premature 拒绝。
 
 持久 session、拥有者锁、可续租 lease 和幂等恢复支持进程中断后的继续执行，不跳过也不重复提交轮次。
 

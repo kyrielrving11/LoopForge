@@ -168,9 +168,13 @@ verification gate "enforces" is the CHECK: on the next submission it compares
 machine evidence — the git HEAD must have returned to the restore point and
 the failed rounds' files must not reappear in `files_changed`
 (`backtrack_workspace_not_restored` keeps rejecting the redo until the
-workspace is actually clean). When the rollback was triggered on a stalled Round
-Contract, the sanctioned path forward is to close it with `outcome: "blocked"`
-and declare the revised contract in the same submission.
+workspace is actually clean). A stalled Round Contract is not a separate
+backtrack trigger — rollbacks come only from the progress-stall evaluator or
+an unrestored workspace. But when the rolled-back rounds were executing under
+an ACTIVE Round Contract, the redo follows the contract path instead of a
+plain redo: close the stalled contract with `outcome: "blocked"` (+ blocker)
+and declare the revised contract in the same submission. Silently restating
+the stalled contract is rejected as premature while it is still open.
 
 Durable sessions, owned locks, renewable leases, and idempotent replay let the
 agent resume after process interruption without skipping or double-committing

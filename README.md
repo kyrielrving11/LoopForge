@@ -98,8 +98,11 @@ status projection consume the same facts. Deleting the state file loses no
 truth because LoopForge can regenerate it.
 
 Stable IDs (`c-`, `cr-`, and `sg-XXXXXXXX`) provide exact references where the
-agent supplies them. Natural-language references still use policy-controlled
-similarity matching as a fallback.
+agent supplies them. Constraint and criterion matching keeps a policy-controlled similarity
+fallback for plain-text references, and `subgoal_updates` — the only way to
+change a sub-goal's status — must cite ACTIVE `sg-` IDs exactly: unknown,
+terminal (done/canceled), or illegal transitions are rejected as
+`evaluation_invalid` before the round advances.
 
 ```text
 Traditional: prompt -> summary -> next prompt -> another summary
@@ -134,10 +137,35 @@ observed. Self-reported progress cannot create a machine verdict or cancel one.
 A rejected submission keeps the same logical `roundId`, increments its attempt,
 and commits no round. The agent receives a focused retry prompt.
 
-A stalled-progress evaluator can backtrack to the last clean committed round.
-LoopForge injects a diagnosis, identifies affected files, and verifies
-workspace restoration on the next submission. Valid discoveries from skipped
-rounds are preserved, while the rolled-back path stays out of final history.
+A stalled-progress evaluator can backtrack to the last clean committed round —
+the most recent committed round with no error-level verification flags. The
+backtrack commits a rollback directive that is excluded from final history:
+the round counter returns to `restorePoint + 1`, the redo submission reuses
+that round's `roundId`, and once the redo commits it physically replaces the
+rollback record — so the rolled-back path never appears in Replay, Audit, or
+progress windows.
+
+The rollback directive carries a derived **Recovery Brief**:
+
+- why it happened (the trigger rule) and the restore point;
+- the redo round's ID (`loop:<id>:round:<restorePoint + 1>`);
+- the failed rounds, each with the approach that must not be repeated;
+- falsified assumptions — do not rebuild on these;
+- preserved discoveries from the skipped rounds;
+- the files that must be reverted and the git commands to do it.
+
+Its sources are COMMITTED rounds above the restore point plus the in-flight
+attempt that triggered the rollback. Rejected payloads are not durable history
+and are never a source. The brief renders at the top of the backtrack prompt
+and in the state file's Recent tier for the duration of the recovery window;
+the redo commit removes it by construction.
+
+The verification gate then enforces the restore: the working tree must return
+to the restore point's git HEAD and files from the failed rounds must not
+reappear (`backtrack_workspace_not_restored` keeps rejecting the redo until
+the workspace is clean). When the rollback was triggered on a stalled Round
+Contract, the sanctioned path forward is to close it with `outcome: "blocked"`
+and declare the revised contract in the same submission.
 
 Durable sessions, owned locks, renewable leases, and idempotent replay let the
 agent resume after process interruption without skipping or double-committing
@@ -263,9 +291,12 @@ share the same committed-round decoder and filtering policy.
 ### Controlled recovery
 
 Retries preserve the logical round identity. Backtrack restores the last clean
-round, carries forward valid discoveries, and checks that the workspace matches
-the restore target. Session documents, monotonic round sequences, atomic
-writes, locks, and renewable leases protect restart and concurrency paths.
+round, carries forward valid discoveries, checks that the workspace matches
+the restore target, and hands the agent a structured Recovery Brief — trigger,
+restore point, redo round ID, failed approaches, and falsified assumptions —
+in the prompt and the state file's Recent tier until the redo commits. Session
+documents, monotonic round sequences, atomic writes, locks, and renewable
+leases protect restart and concurrency paths.
 
 ### Agent-owned execution
 

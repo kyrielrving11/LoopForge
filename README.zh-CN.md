@@ -54,7 +54,7 @@ Compiler 从已提交事实演化 Canonical State。目标、约束、证据、M
 
 `DerivedCognitiveFacts` 从 Canonical State 和已提交轮次派生 focus、todo、phase、delegation 和 handoff。prompt、可选 state file 与 status projection 使用同一份事实。删除 state file 不会丢失真相，因为它可以重新生成。
 
-稳定 ID（`c-`、`cr-`、`sg-XXXXXXXX`）在 Agent 提供时用于精确引用。自然语言引用仍保留由策略控制的相似度匹配作为回退。
+稳定 ID（`c-`、`cr-`、`sg-XXXXXXXX`）在 Agent 提供时用于精确引用；约束与成功条件的文本引用仍保留策略控制的相似度回退。子目标状态变更除外：`subgoal_updates` 必须精确引用**活动中的** `sg-` ID——未知、终态（done/canceled）或非法迁移会在轮次推进前以 `evaluation_invalid` 拒绝。
 
 ```
 传统做法：prompt -> 摘要 -> 下一轮 prompt -> 再次摘要
@@ -73,7 +73,20 @@ Round Contract 允许已提交轮次为下一轮提出有边界的工作。Activ
 
 被拒绝的提交保留逻辑 `roundId`，只增加 attempt，不提交轮次。Agent 会收到针对性的重试 prompt。
 
-停滞评估器可以回溯到最后一个干净的已提交轮次。LoopForge 注入诊断，列出受影响文件，并在下一次提交前验证工作区恢复。跳过轮次中的有效发现会被保留，而回溯路径不会进入最终历史。
+停滞评估器可以回溯到最后一个干净的已提交轮次——即最近一个没有 error 级验证标志的已提交轮次。回溯会提交一条**回滚指令**，并排除在最终历史之外：轮次计数器回到 `restorePoint + 1`，redo 提交复用该轮的 `roundId`；一旦 redo 提交，它会物理覆盖回滚记录——被回滚的路径永远不会出现在 Replay、Audit 或进度窗口里。
+
+回滚指令携带一条派生的 **Recovery Brief**（恢复简报）：
+
+- 触发原因（触发规则）与恢复点；
+- redo 轮的 ID（`loop:<id>:round:<restorePoint + 1>`）；
+- 失败的轮次及各自不可重复的失败方案；
+- 被证伪的假设——不要再建立在它们之上；
+- 跳过轮次中需要保留的有效发现；
+- 必须还原的文件与对应 git 命令。
+
+它的数据来源是恢复点之上**已提交**的轮次，外加触发回滚的**进行中**尝试。被拒绝的载荷不是持久历史，永远不会成为数据源。简报渲染在回溯 prompt 顶部，并在恢复窗口期间出现在 state file 的 Recent 层；redo 提交后按构造退出。
+
+验证门随后强制工作区恢复：工作树必须回到恢复点的 git HEAD，失败轮次涉及的文件不得再次出现在 `files_changed` 中（`backtrack_workspace_not_restored` 会持续拒绝 redo，直到工作区干净）。若回滚由停滞的 Round Contract 触发，被认可的出路是：用 `outcome: "blocked"` 关闭它，并在同一次提交中声明修订后的契约。
 
 持久 session、拥有者锁、可续租 lease 和幂等恢复支持进程中断后的继续执行，不跳过也不重复提交轮次。
 
@@ -144,7 +157,7 @@ Replay 通过已提交时间线和轮次 diff 回答“发生了什么”。Audi
 
 ### 受控恢复
 
-重试保留逻辑轮次身份。回溯恢复最后一个干净轮次，保留有效发现，并检查工作区是否回到恢复目标。Session 文档、单调序列、原子写入、锁和可续租 lease 保护重启与并发路径。
+重试保留逻辑轮次身份。回溯恢复最后一个干净轮次，保留有效发现，检查工作区是否回到恢复目标，并把结构化 Recovery Brief（触发规则、恢复点、redo 轮 ID、失败方案与被证伪假设）放入回溯 prompt 与 state file 的 Recent 层，直到 redo 提交。Session 文档、单调序列、原子写入、锁和可续租 lease 保护重启与并发路径。
 
 ### Agent 负责执行
 

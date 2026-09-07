@@ -2,7 +2,7 @@
 
 **A context window is not memory. Memory needs a runtime.**
 
-> **v3.7.0** — `npm install -g loopforge`. Node.js ≥ 18. Zero runtime dependencies.
+> **Version per `package.json`** — `npm install -g loopforge`. Node.js ≥ 18. Zero runtime dependencies.
 > [中文文档](../README.zh-CN.md)
 
 ---
@@ -127,15 +127,27 @@ External agent
 - One Canonical State for prompts, the optional state file, and current-status
   cognition.
 - Evidence-backed accept, reject, backtrack, and terminate decisions, including
-  Round Contract and workspace-restore checks.
-- L0, L1, and L2 prompt density, five-state sub-goals, constraint lifecycle,
-  milestones, and agent-requested emphasis or confusion points.
+  Round Contract and workspace-restore checks. A backtrack carries a derived
+  Recovery Brief — trigger rule, restore point, redo round ID, failed
+  approaches, and falsified assumptions — sourced from committed rounds plus
+  the in-flight attempt (never rejected payloads); the redo reuses the round
+  ID and its commit retires the brief.
+- L0, L1, and L2 prompt density, five-state sub-goals with explicit
+  `subgoal_updates` transitions (active `sg-` IDs only; done/canceled are
+  terminal), constraint lifecycle, milestones, and agent-requested emphasis or
+  confusion points. Prompts and the state file render active sub-goals only,
+  capped by policy; the state file is grouped into Current / Recent /
+  Historical Summary tiers with derived metadata (round, attempt, state hash)
+  and is byte-identical when regenerated from the Vault.
 - Separate Replay and Audit views. Replay answers what happened; Audit checks
   evidence and completeness.
 - Durable sessions with atomic round documents, sequence checks, owned locks,
   renewable leases, pause, resume, and idempotent recovery.
 - Nine MCP tools: `start`, `next`, `status`, `stop`, `pause`, `resume`, `replay`,
-  `gate_check`, and `gate_resolve`.
+  `gate_check`, and `gate_resolve`. The two gate tools are opt-in
+  (`policy.gate.enabled`, default false): hidden from `tools/list`, structured
+  preflight via `gate_check`, round-blocking on unapproved `gate_ids`
+  citations.
 - Zero runtime dependencies. Policy controls thresholds, budgets, and intervals.
 
 ---

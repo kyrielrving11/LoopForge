@@ -79,10 +79,13 @@ The four core evaluation fields are strict:
 
 All other evaluation fields are optional and normalized by LoopForge. Useful
 fields include `execution_evidence`, `discovered_constraints`,
-`emerged_subtasks`, `completed_subtasks`, `blocked_subtasks`,
-`canceled_subtasks`, `next_action`, `drift_clarification`, `prompt_requests`,
-`outcome`, `blocker`, `round_contract`, `retroactiveClaims`, and
-`worker_results`.
+`emerged_subtasks` (the only sub-goal creation channel — never an `sg-` ID),
+`subgoal_updates` (explicit status transitions: active `sg-` IDs with a target
+status; done/canceled are terminal and never reopen), `next_action`,
+`drift_clarification`, `prompt_requests`, `outcome`, `blocker`,
+`round_contract`, `retroactiveClaims`, `gate_ids` (only when the gate layer is
+enabled), and `worker_results` (each entry declares an `outcome`; entries
+without one are dropped).
 
 Optional malformed values are ignored or defaulted. They do not turn a valid
 submission into a transport error. Missing or mistyped core fields return
@@ -123,9 +126,13 @@ Prompts render stable IDs beside constraints, criteria, and sub-goals:
 - Criteria: `[cr-b5a6c7d8] Unit test coverage >= 90%`
 - Sub-goals: `[sg-f1e2d3c4] Add error handling to login`
 
-Prefer IDs for `constraint_violations`, criteria lists, subtask status changes,
-and drift clarifications. Natural-language matching remains a policy-controlled
-fallback when an ID is unavailable.
+Prefer IDs for `constraint_violations`, criteria lists, and drift
+clarifications (which may also anchor on real file paths). Sub-goal status
+changes REQUIRE exact ACTIVE `sg-` IDs via `subgoal_updates` — description
+matching is not a fallback there. Unknown, terminal (done/canceled), or
+illegal transitions return `evaluation_invalid` before the round advances:
+fix the payload and resubmit the same `roundId` (nothing is committed, no
+rejection counter moves).
 
 An optional `round_contract` is a proposal for the next round. It becomes
 active only after the declaring round commits. While active, its `done_when`,
@@ -136,19 +143,40 @@ observed passing in the closing round.
 ## Backtrack
 
 A progress stall (stalled or exactly-flat window over the lookback rounds)
-can trigger backtrack to the last clean committed round. The prompt includes a
-diagnosis and workspace-restore requirements.
+can trigger backtrack to the last clean committed round — the most recent
+committed round with no error-level verification flags. The backtrack commits
+a rollback directive that stays out of final history: your next submission is
+the REDO of round `restorePoint + 1` and must reuse the round ID the prompt
+carries; when it commits, the rollback record is replaced and disappears from
+history views.
+
+The backtrack prompt opens with a derived **Recovery Brief**:
+
+- the trigger rule and the restore point;
+- the redo round's ID (pass it back unchanged to `loopforge_next`);
+- the failed rounds and their approaches — what must NOT be repeated;
+- falsified assumptions — do not rebuild on these;
+- discoveries from the skipped rounds that remain valid;
+- the files to revert and the git commands to do it (the prompt may offer
+  `git stash` / `git checkout -- .` / `git reset --hard <restore-commit>`).
+
+The same brief renders in `.loopforge/state/<loopId>-state.md` under Recent
+while the recovery window is open; it is derived from committed rounds plus
+the in-flight attempt (rejected payloads are never a source) and disappears
+once the redo commits.
 
 When backtrack occurs:
 
-1. Restore the workspace exactly as requested before doing more work.
-2. Read the restored prompt and derived state.
-3. Do not repeat the failed approach without addressing the diagnosis.
+1. Restore the workspace exactly as requested before doing more work — the
+   next submission's git evidence is checked against the restore point's HEAD.
+2. Read the Recovery Brief, the restored prompt, and the derived state.
+3. Do not repeat a failed approach listed in the brief without addressing it.
 4. Keep valid discoveries from skipped rounds in later evaluations.
 
 If the workspace is not restored, the next submission is rejected with
 `backtrack_workspace_not_restored`. A stalled active contract should be closed
-with `outcome: "blocked"` and a blocker while proposing the revision.
+with `outcome: "blocked"` and a blocker while proposing the revised contract
+in the same submission.
 
 ## Drift
 
@@ -193,8 +221,18 @@ but do not treat it as an independent source of truth.
 
 Use `loopforge_pause` before an intentional interruption,
 `loopforge_resume` to reconstruct a durable session, and `loopforge_stop` only
-for an intentional terminal stop. Use `loopforge_gate_check` and
-`loopforge_gate_resolve` for recorded human or agent gates.
+for an intentional terminal stop.
+
+The two gate tools are opt-in (`policy.gate.enabled`, default false) and are
+hidden from `tools/list` when disabled. When enabled, preflight a high-risk
+action with `loopforge_gate_check` (a structured `GateActionDescriptor`): a
+`user_required` verdict returns a gate id and an approval question, and only
+an approved gate may be cited via `evaluation.gate_ids` in the round that
+performs the action. Present the approval question to the human and record
+their decision with `loopforge_gate_resolve`. Safe preparation work
+(investigation, dry-runs, rollback evidence) never needs a gate. Remember:
+approval is recorded through you, the Agent — LoopForge cannot machine-verify
+a human is present.
 
 Delegation does not create a separate LoopForge mode. Give each worker a
 self-contained subtask and relevant hard constraints, then place its result in

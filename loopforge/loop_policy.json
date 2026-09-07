@@ -13,7 +13,13 @@
   },
   "engine": {
     "stall_lookback_rounds": 3,
-    "max_rounds": 20
+    "max_rounds": 200,
+    "enforcement_escalation_enabled": true,
+    "backtrack_enabled": true,
+    "backtrack_max_depth": 3,
+    "backtrack_preserve_discoveries": true,
+    "drift_clarification_max_streak": 3,
+    "backtrack_auto_restore": false
   },
   "prompt": {
     "full_refresh_interval": 0,
@@ -25,7 +31,12 @@
     "l2_adaptive_milestone_factor": 1000,
     "l2_adaptive_max_chars": 40000,
     "l2_adaptive_subgoal_factor": 100,
+    "l2_pointer_enabled": true,
     "l1_collapse_enabled": true,
+    "contract_nudge_on_l2": true,
+    "max_emphasize_l2": 5,
+    "max_emphasize_l1": 3,
+    "max_confusion_points": 3,
     "confusion_section_threshold": 0.15
   },
   "backend": {
@@ -37,13 +48,15 @@
     "max_objective_versions": 10,
     "progress_stall_threshold": 0.05,
     "progress_mismatch_threshold": 0.3,
+    "task_continuity_threshold": 0.2,
+    "intent_drift_threshold": 0.15,
     "criteria_dedup_threshold": 0.45,
     "subgoal_dedup_threshold": 0.6,
     "subgoal_match_threshold": 0.5,
-    "intent_drift_threshold": 0.15,
+    "max_active_subgoals": 12,
     "constraint_match_threshold": 0.5,
     "subgoal_drift_alignment_threshold": 0.3,
-    "task_continuity_threshold": 0.2
+    "constraint_id_enabled": true
   },
   "checkpoint": {
     "outcome_max_chars": 200
@@ -63,5 +76,8 @@
   "mcp": {
     "session_lease_ms": 30000,
     "session_lease_renew_interval_ms": 10000
+  },
+  "gate": {
+    "enabled": false
   }
 }

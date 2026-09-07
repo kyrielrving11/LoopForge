@@ -1,4 +1,4 @@
-import { beforeEach, describe, it } from "node:test";
+import { afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   alignTask,
@@ -14,6 +14,7 @@ import {
   validateSubGoalUpdates,
 } from "../loop-compiler.js";
 import {
+  type LoopObjective,
   makeLoopCompileRequest,
   makeLoopObjective,
   makeLoopRoundResult,
@@ -2258,5 +2259,150 @@ describe("v3.5 — post-backtrack contract revision (compile side)", () => {
     } as never);
     assert.ok(res.prompt.includes("**Stalled slice**"),
       "until the redo commits, the restore point's active contract governs");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// M5 regression: objective_refinement folds exactly once per persisted state
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("M5 — objective refinement retry idempotency", () => {
+  it("retries do not re-append an already-folded refinement", () => {
+    const loopId = "m5-retry";
+    const refinement = "Include rollback verification";
+
+    // Round 3 attempt 1 already folded round 2's refinement into the
+    // objective base (its compile lineage is what a retry rehydrates).
+    const base = makeLoopObjective({
+      loop_id: loopId,
+      objective: "Ship the port",
+      success_criteria: ["All green"],
+      hard_constraints: ["No data loss"],
+    });
+    const attempt1Objective: LoopObjective = {
+      ...base,
+      objective: `${base.objective}\nRefinement: ${refinement}`,
+      version: (base.version ?? 1) + 1,
+      refinement_history: [refinement],
+    };
+    const context = {
+      results: [{
+        loop_id: loopId,
+        loop_lineage: { round: 3 },
+        loop_objective: attempt1Objective,
+      }],
+    };
+    const lastResult = makeLoopRoundResult({
+      round: 2,
+      success: false,
+      output_summary: "reworked the schema",
+      objective_refinement: refinement,
+    });
+
+    // Attempt 2 — and then attempt 3 against attempt 2's own compile output.
+    let lineage = context.results[0];
+    const attempt2 = compileLoop(makeLoopCompileRequest({
+      loop_id: loopId,
+      round: 3,
+      task: "Ship the port",
+      last_round_result: lastResult,
+    }), context);
+    const o2 = attempt2.loop_objective!;
+    assert.equal(o2.objective.match(/Refinement:/g)?.length, 1,
+      "attempt 2 must not duplicate the folded refinement");
+    assert.equal(o2.version, attempt1Objective.version,
+      "attempt 2 must not inflate the objective version");
+
+    lineage = { ...lineage, loop_objective: o2 };
+    const attempt3 = compileLoop(makeLoopCompileRequest({
+      loop_id: loopId,
+      round: 3,
+      task: "Ship the port",
+      last_round_result: lastResult,
+    }), { results: [lineage] });
+    const o3 = attempt3.loop_objective!;
+    assert.equal(o3.objective.match(/Refinement:/g)?.length, 1,
+      "attempt 3 must stay at a single fold");
+    assert.equal(o3.version, attempt1Objective.version,
+      "attempt 3 must not inflate the version further");
+    assert.deepEqual(o3.refinement_history, [refinement]);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// L7 regression: state_file.enabled=false must disable every knob that
+// depends on the file — L2 pointer mode and L1 collapse both point prompts
+// at the file for content, so with the file disabled they would silently
+// truncate what the agent sees.
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("L7 — state file disabled cross-knob guard", () => {
+  beforeEach(() => resetPolicy());
+
+  const disableStateFile = (): void => {
+    setPolicyForTest({
+      ...DEFAULT_POLICY,
+      state_file: { ...DEFAULT_POLICY.state_file, enabled: false },
+    });
+  };
+  const idsOf = (texts: string[]): string[] =>
+    texts.map((text) => `c-${deriveItemId(text)}`);
+  const baselineRound1 = (loopId: string): Record<string, unknown> => ({
+    loop_id: loopId,
+    output_summary: "Round 1 done",
+    success: true,
+    loop_lineage: {
+      loop_id: loopId,
+      round: 1,
+      constraints_active: ["Tests must pass", "Keep API stable", "Migrate data"],
+      presented_constraint_ids: idsOf(["Tests must pass", "Keep API stable", "Migrate data"]),
+      presented_subgoals: [],
+      presented_milestone_ranges: [[1, 1]],
+    },
+    constraint_violations: [],
+  });
+
+  it("L2 keeps the full state in the prompt instead of pointing at nothing", () => {
+    disableStateFile();
+    const response = compileLoop(makeLoopCompileRequest({
+      loop_id: "l7-l2",
+      round: 2,
+      task: "Continue the migration",
+      force_level: "l2",
+      last_round_result: makeLoopRoundResult({ round: 1, success: true }),
+    }), { results: [baselineRound1("l7-l2")] });
+    assert.equal(response.state_file_content, undefined,
+      "no state file content is produced when the file is disabled");
+    assert.ok(!response.prompt.includes("Full state:"),
+      "the L2 pointer line must not reference a file that is never written");
+    assert.ok(!response.prompt.includes("Read the full state file"),
+      "no read-the-file instruction may appear");
+    assert.ok(response.prompt.includes("Continue the migration"),
+      "the prompt stays self-contained when the file is disabled");
+  });
+
+  it("L1 renders full constraints instead of collapsing behind a missing file", () => {
+    disableStateFile();
+    const response = compileLoop(makeLoopCompileRequest({
+      loop_id: "l7-l1",
+      round: 2,
+      task: "Continue work",
+      force_level: "l1",
+      last_round_result: makeLoopRoundResult({
+        round: 1,
+        success: true,
+        discovered_constraints: ["No external deps"],
+      }),
+    }), { results: [baselineRound1("l7-l1")] });
+    const p = response.prompt;
+    // Collapse would have demoted the three unchanged constraints behind a
+    // "(see state file)" line — with no file, every constraint renders.
+    assert.ok(!p.includes("(see state file)"),
+      "no collapse line may point at a file that is never written");
+    assert.ok(!p.includes("unchanged constraints"),
+      "unchanged constraints must not be demoted");
+    for (const text of ["Tests must pass", "Keep API stable", "Migrate data"]) {
+      assert.ok(p.includes(text), `unchanged constraint must render in full: ${text}`);
+    }
   });
 });

@@ -164,7 +164,7 @@ describe("loopforge CLI", () => {
       assert.ok(existsSync(policyPath), "loop_policy.json should exist");
       const raw = JSON.parse(readFileSync(policyPath, "utf8"));
       assert.equal(raw.version, "2");
-      assert.equal(raw.engine.max_rounds, 20);
+      assert.equal(raw.engine.max_rounds, 200);
       assert.equal(raw.evidence.providers[0], "git");
     } finally {
       rmSync(root, { recursive: true, force: true });

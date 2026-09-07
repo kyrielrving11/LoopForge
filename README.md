@@ -118,10 +118,12 @@ configured commands. The enforcement gate turns those findings into accept,
 reject, backtrack, or terminate decisions through one ordered strategy table
 whose rows fall into four action classes: evidence contradiction, contract &
 scope, plan drift, and progress recovery. A single success-evidence policy
-covers unbacked success claims (a passed command or a declared
-`no_change_reason` is the only backing), a single stall evaluator covers both
-stalled and exactly-flat progress windows, and contract checks are framed as
-declaration / execution / closure stages.
+covers unbacked success claims — machine backing means a passed verification
+command; a declared `no_change_reason` is the honest escape only when NO
+verification command is configured (machine verification was structurally
+impossible). A single stall evaluator covers both stalled and exactly-flat
+progress windows, and contract checks are framed as declaration / execution /
+closure stages.
 
 Round Contracts let a committed round propose bounded work for the next round.
 The active contract is derived from committed history, remains active through
@@ -163,12 +165,17 @@ the redo commit removes it by construction.
 The workspace restore itself is executed by the AGENT (the backtrack prompt
 provides the git commands); LoopForge never rewrites the working tree for it
 — the optional `backtrack_auto_restore` policy, default off, is the only
-exception and then only runs the explicitly configured stash/reset. What the
-verification gate "enforces" is the CHECK: on the next submission it compares
-machine evidence — the git HEAD must have returned to the restore point and
-the failed rounds' files must not reappear in `files_changed`
-(`backtrack_workspace_not_restored` keeps rejecting the redo until the
-workspace is actually clean). A stalled Round Contract is not a separate
+exception and then only runs the explicitly configured stash/reset — and it
+aborts (never resets) when the stash fails, because uncommitted work is never
+destroyed. What the verification gate "enforces" is the CHECK: on the next
+submission it compares machine evidence — the git HEAD must have returned to
+the restore point, and any skipped file whose git fingerprint is still
+byte-identical to its failed-round state is machine proof that the workspace
+was never restored (`backtrack_workspace_not_restored` keeps rejecting the
+redo until it is actually clean). A redo touching the same files again is
+guidance only — self-reports never buy a verdict against the agent — so
+legitimate multi-file redos survive the check. A stalled Round Contract is
+not a separate
 backtrack trigger — rollbacks come only from the progress-stall evaluator or
 an unrestored workspace. But when the rolled-back rounds were executing under
 an ACTIVE Round Contract, the redo follows the contract path instead of a

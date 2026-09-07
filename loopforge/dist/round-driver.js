@@ -85,10 +85,12 @@ export class RoundDriver {
             selfEval: input.selfEval,
             lastSelfEval: input.lastSelfEval,
             consecutiveRejections: input.consecutiveRejections,
+            lastRejectionCheck: input.lastRejectionCheck,
             successTrajectory: input.successTrajectory,
             actualEvidence,
             driftClarificationStreak: input.driftClarificationStreak,
             backtrackSkippedFiles: input.backtrackSkippedFiles,
+            backtrackSkippedFingerprints: input.backtrackSkippedFingerprints,
             backtrackTargetGitHead: input.backtrackTargetGitHead,
         });
         return { outcome, actualEvidence };

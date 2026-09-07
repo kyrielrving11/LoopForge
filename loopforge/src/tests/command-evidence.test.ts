@@ -74,6 +74,19 @@ describe("CommandEvidenceProvider", () => {
     assert.equal(snapshot?.data.truncated, true);
   });
 
+  it("L8: honors a configured cap larger than the old 20k clamp", async () => {
+    // The old code silently clamped max_output_chars at 20_000 — a policy
+    // configured with 50_000 retained only 20k of a 30k stream.
+    const snapshot = await capture(new CommandEvidenceProvider(config({
+      args: ["-e", "process.stdout.write('x'.repeat(30_000))"],
+      max_output_chars: 50_000,
+    })));
+    assert.equal(snapshot?.data.truncated, false,
+      "30k of output under a 50k cap must not be truncated");
+    assert.equal((snapshot?.data.stdout as string).length, 30_000,
+      "the configured cap must be honored above 20k");
+  });
+
   it("records missing executables and unsafe cwd without throwing", async () => {
     const missing = await capture(new CommandEvidenceProvider(config({
       executable: `loopforge-missing-${Date.now()}`,

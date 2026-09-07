@@ -57,7 +57,13 @@ recoveryRoundId?: string,
 recovery?: BacktrackRecoveryFacts): string;
 export declare function enforceRound(selfEval: SelfEvaluation, verifyResult: VerificationResult, currentRound: number, vaultEntries: VaultEntry[], consecutiveRejections?: number,
 /** v2.12: Current clarification streak for R7 escalation. */
-driftClarificationStreak?: number): EnforcementResult;
+driftClarificationStreak?: number,
+/** L4 (v3.7.x): which check rejected the PREVIOUS round. The coordinator
+ *  resets consecutiveRejections to 1 whenever the check changes, so the
+ *  counter only ever measures one check's streak — this field names that
+ *  check and lets uniform rows escalate on THEIR OWN streak instead of
+ *  inheriting an unrelated history. */
+lastRejectionCheck?: string): EnforcementResult;
 /** Build a rejection prompt for the agent.
  *
  *  The prompt clearly states the round was rejected, why, what the agent

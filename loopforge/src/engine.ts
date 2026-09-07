@@ -522,6 +522,11 @@ export class LoopForgeEngine {
 
     for (const entry of fresh) {
       // v3.7: the legacy top-level `lineage` alias was removed.
+      // Only compile-lineage rows absorb the committed round's feedback.
+      // Delegation journals (`loop:<id>:r<N>:delegations`) share the same
+      // lineage.round and would otherwise decode as a SECOND round view —
+      // double-counting violations/lessons for one committed round.
+      if (entry.task_type !== "loop_lineage") continue;
       const lineage = (entry.loop_lineage ?? {}) as Record<string, unknown>;
       const rnd = lineage.round as number;
       const fb = rnd ? fbByRound.get(rnd) : undefined;

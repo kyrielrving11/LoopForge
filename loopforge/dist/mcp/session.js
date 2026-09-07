@@ -195,6 +195,7 @@ export class SessionManager {
             lastRejectionCheck: "",
             driftClarificationStreak: 0,
             backtrackSkippedFiles: [],
+            backtrackSkippedFingerprints: {},
             evidenceBaseline: [],
         });
         request.domain = input.domain ?? "";
@@ -236,6 +237,7 @@ export class SessionManager {
             lastRejectionCheck: "",
             driftClarificationStreak: 0,
             backtrackSkippedFiles: [],
+            backtrackSkippedFingerprints: {},
             evidenceBaseline,
             roundSnapshot: prepared?.snapshot ?? prepareRoundTransaction(loopId, 1, evidenceBaseline),
             currentPrompt: initialPrompt,

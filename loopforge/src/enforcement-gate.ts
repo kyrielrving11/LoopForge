@@ -677,13 +677,23 @@ function enforceScopeDrift(
   return makeEnforcementResult({
     action: "reject",
     reason: flag.detail,
+    // L3 (v3.7.x): option (b) previously told the agent to "extend the scope
+    // in your re-declared round_contract" — structurally unreachable: while a
+    // contract is ACTIVE, a replacement proposal is ignored as premature, so
+    // the guidance dead-ended into repeated rejects/termination. The only
+    // legal scope change is to CLOSE the active contract first: resubmit with
+    // outcome="blocked" (blocker naming the too-narrow scope) and the
+    // extended scope as the NEXT round's contract in the same submission.
     fix_instructions:
       "Files changed outside the contract's declared scope. You must either: " +
-      "(a) revert the out-of-scope changes, or (b) extend the scope in your " +
-      "re-declared round_contract AND explain the pivot in drift_clarification " +
-      "with concrete file paths (≥ 20 characters, real anchors). Weak or " +
-      "missing clarifications are rejected; repeated scope drift terminates " +
-      "the loop." + escalation,
+      "(a) revert the out-of-scope changes, or (b) legally extend the scope: " +
+      "a replacement contract is IGNORED while the current one is active, so " +
+      "resubmit this work with outcome: \"blocked\" (blocker naming the " +
+      "too-narrow scope) plus the extended scope as the next round's " +
+      "round_contract, and explain the pivot in drift_clarification with " +
+      "concrete file paths (≥ 20 characters, real anchors). Weak or missing " +
+      "clarifications are rejected; repeated scope drift terminates the loop." +
+      escalation,
     check: "round_scope_drift",
   });
 }
@@ -1346,6 +1356,12 @@ export function enforceRound(
   consecutiveRejections: number = 0,
   /** v2.12: Current clarification streak for R7 escalation. */
   driftClarificationStreak: number = 0,
+  /** L4 (v3.7.x): which check rejected the PREVIOUS round. The coordinator
+   *  resets consecutiveRejections to 1 whenever the check changes, so the
+   *  counter only ever measures one check's streak — this field names that
+   *  check and lets uniform rows escalate on THEIR OWN streak instead of
+   *  inheriting an unrelated history. */
+  lastRejectionCheck: string = "",
 ): EnforcementResult {
   const { flags } = verifyResult;
 
@@ -1406,17 +1422,27 @@ export function enforceRound(
       ? RULE_TABLE_BY_ID.get(result.check)
       : undefined;
     if (result.action === "reject" && row && row.ladder === "uniform") {
-      if (consecutiveRejections >= (row.terminalAfter ?? 2)) {
+      // L4: uniform rows escalate on their OWN consecutive streak only.
+      // consecutiveRejections is the streak of the PREVIOUS round's check
+      // (the coordinator resets it to 1 whenever the check changes) — a
+      // streak earned by a DIFFERENT check must not convert this first
+      // occurrence into termination. The user_gate row is the sharp case:
+      // its recovery is human approval, so a gate cited after unrelated
+      // rejections must reject with instructions, not kill the loop.
+      const ownStreak = lastRejectionCheck === result.check
+        ? consecutiveRejections
+        : 0;
+      if (ownStreak >= (row.terminalAfter ?? 2)) {
         return makeEnforcementResult({
           action: "terminate",
           reason:
-            `${consecutiveRejections + 1} consecutive rejections for the same ` +
+            `${ownStreak + 1} consecutive rejections for the same ` +
             `issue (${result.check}) without resolution — the agent cannot ` +
             `correct it even after escalation.`,
           check: result.check,
         });
       }
-      if (consecutiveRejections >= 1 && row.noticeOnRepeat &&
+      if (ownStreak >= 1 && row.noticeOnRepeat &&
           getPolicy().engine.enforcement_escalation_enabled) {
         result = makeEnforcementResult({
           ...result,

@@ -2,7 +2,12 @@
  *
  * L0/L1/L2 control state density only. Reasoning strategy belongs to the
  * external Agent. Mandatory task, hard-constraint, and verification sections
- * are never truncated; budgets are soft and overflow is recorded.
+ * are never truncated and always render. Budgets are soft CEILINGS applied
+ * to optional sections: optional sections are appended in priority order
+ * while the rendered length stays under the level's budget, and the rest are
+ * dropped from the prompt (the dropped content stays derivable from the
+ * vault). Prompt length can exceed the ceiling when the mandatory sections
+ * alone are over it — truncation of mandatory content never happens.
  */
 import { createHash } from "node:crypto";
 import { activeSubGoalView, buildRoadmap, hashCanonicalState, milestoneHeading, trustBarLine, } from "./canonical-state.js";
@@ -264,7 +269,11 @@ function l0Sections(state) {
 function l1Sections(state, baseline, emphasized) {
     const sections = commonMandatorySections(state, "l1");
     const active = activeNonHardConstraints(state);
-    const collapseEnabled = getPolicy().prompt.l1_collapse_enabled;
+    // L7: collapse needs the state file — its collapse line points at the file
+    // for the full content. With the file disabled (stateFilePath empty),
+    // collapsing would silently truncate the prompt's constraints view.
+    const collapseEnabled = getPolicy().prompt.l1_collapse_enabled &&
+        state.stateFilePath.length > 0;
     if (state.changesSinceLastRound.length > 0) {
         sections.push({
             id: "changes",

@@ -8,7 +8,7 @@ import {
   type VerificationFlag,
 } from "../protocol.js";
 import type { VaultEntry } from "../loop-store.js";
-import { committedFeedbackRound as committedRound } from "./_helpers.js";
+import { committedFeedbackRound as committedRound, testCommandProvider } from "./_helpers.js";
 import { verifySelfEvaluation as rawVerifySelfEvaluation, parseTestOutput, deriveEvidenceStatus, machineProgressSeries, CHECK_VERIFICATION_ENTRYPOINT_MODIFIED, CHECK_TEST_FILES_MODIFIED, CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE } from "../verification-gate.js";
 import type { ProviderSnapshot } from "../evidence-provider.js";
 import { computeGoalTextHash, deriveCriterionId } from "../loop-compiler.js";
@@ -112,6 +112,7 @@ function verifySelfEvaluation(
   prevSelfEval: SelfEvaluation | null = null,
   evidenceSnapshots: ProviderSnapshot[] = [cmdSnap("passed")],
   backtrackSkippedFiles: string[] = [],
+  backtrackSkippedFingerprints: Record<string, string> = {},
   backtrackTargetGitHead?: string,
   gateEntries: VaultEntry[] = [],
 ): ReturnType<typeof rawVerifySelfEvaluation> {
@@ -122,6 +123,7 @@ function verifySelfEvaluation(
     prevSelfEval,
     evidenceSnapshots,
     backtrackSkippedFiles,
+    backtrackSkippedFingerprints,
     backtrackTargetGitHead,
     gateEntries,
   );
@@ -935,7 +937,10 @@ describe("verification-gate — backtrack workspace restore", () => {
       "minor overlap (1-2 files) should be a warning");
   });
 
-  it("errors when files_changed has significant overlap (>= 3 files)", () => {
+  it("warns (not errors) on significant self-reported overlap (M3)", () => {
+    // A restored-then-redone file is indistinguishable from a never-restored
+    // one by self-report alone — a legitimate multi-file redo must never be
+    // terminated on this signal, so overlap stays guidance.
     const result = verifySelfEvaluation(
       se({ execution_evidence: makeExecutionEvidence({
         files_changed: ["src/a.ts", "src/b.ts", "src/c.ts"],
@@ -947,24 +952,62 @@ describe("verification-gate — backtrack workspace restore", () => {
       (f) => f.check === "backtrack_workspace_not_restored",
     );
     assert.ok(flag, "should flag significant overlap");
-    assert.equal(flag.severity, "error",
-      ">= 3 overlapping files should be an error");
+    assert.equal(flag.severity, "warn",
+      "self-reported overlap alone can no longer produce an error");
   });
 
-  it("errors when ALL files_changed overlap with skipped files", () => {
+  it("M3: errors only when a skipped file is byte-identical to its failed state", () => {
+    // Machine arm: the current git fingerprint still matches the fingerprint
+    // recorded at the failed round → the file was never touched since the
+    // rollback → the workspace was not restored.
+    const git = {
+      provider: "git",
+      timestamp: Date.now(),
+      files: ["src/a.ts"],
+      data: {
+        tracked: ["src/a.ts"], staged: [], untracked: [],
+        fingerprints: { "src/a.ts": "m:same", "lib/other.ts": "m:other" },
+      },
+    };
     const result = verifySelfEvaluation(
       se({ execution_evidence: makeExecutionEvidence({
-        files_changed: ["src/a.ts", "src/b.ts"],
+        files_changed: ["src/a.ts"],
       })}),
-      3, [], null, [],
-      ["src/a.ts", "src/b.ts"],
+      3, [], null, [git],
+      ["src/a.ts", "lib/other.ts"],
+      { "src/a.ts": "m:same", "lib/other.ts": "m:changed" },
     );
     const flag = result.flags.find(
       (f) => f.check === "backtrack_workspace_not_restored",
     );
-    assert.ok(flag, "should flag when all files overlap");
-    assert.equal(flag.severity, "error",
-      "100% overlap should be an error");
+    assert.ok(flag, "untouched failed-round files must error");
+    assert.equal(flag!.severity, "error");
+  });
+
+  it("M3: a restored-and-redone file does not error", () => {
+    // The agent restored the workspace, then legitimately re-modified the
+    // file during the redo — the fingerprint moved on, so no machine
+    // contradiction exists even though the claimed file overlaps.
+    const git = {
+      provider: "git",
+      timestamp: Date.now(),
+      files: ["src/a.ts"],
+      data: {
+        tracked: ["src/a.ts"], staged: [], untracked: [],
+        fingerprints: { "src/a.ts": "m:redone" },
+      },
+    };
+    const result = verifySelfEvaluation(
+      se({ execution_evidence: makeExecutionEvidence({
+        files_changed: ["src/a.ts"],
+      })}),
+      3, [], null, [git],
+      ["src/a.ts"],
+      { "src/a.ts": "m:failed-state" },
+    );
+    assert.ok(!result.flags.some((f) =>
+      f.check === "backtrack_workspace_not_restored" && f.severity === "error"),
+    "a legitimate redo must not raise the restore error");
   });
 
   it("no flag when execution_evidence is absent", () => {
@@ -1300,6 +1343,34 @@ describe("v3.3 — machine_backed_success switch", () => {
     assert.ok(flag, "R8 flag must fire even with no_change_reason");
     assert.equal(flag!.severity, "info");
     assert.equal(result.verdict, "suspect");
+  });
+
+  it("M2: an enabled verification command closes the no_change escape", () => {
+    // The escape's premise is "no machine-verifiable evidence". With an
+    // enabled command configured, machine verification WAS possible — a
+    // declared reason must not waive the required backing, even though git
+    // observed the round's file changes.
+    getPolicy().evidence.commands = [testCommandProvider()];
+    const result = verifySelfEvaluation(
+      se({ no_change_reason: "documentation-only round" }),
+      2, [], null, [gitSnap(["src/a.ts"])],
+    );
+    const flag = result.flags.find((f) => f.check === CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE);
+    assert.ok(flag, "R8 must still fire with a command configured");
+    assert.equal(flag!.severity, "error",
+      "no_change_reason must not downgrade when a verification command exists");
+    assert.equal(result.verdict, "contradicted");
+  });
+
+  it("M2: the escape survives only while verification is structurally impossible", () => {
+    // Default policy (commands: []) has nothing to run — the honest
+    // documentation-round escape stays open regardless of git motion.
+    const result = verifySelfEvaluation(
+      se({ no_change_reason: "documentation-only round" }),
+      2, [], null, [gitSnap(["src/a.ts"])],
+    );
+    const flag = result.flags.find((f) => f.check === CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE);
+    assert.equal(flag?.severity, "info");
   });
 
   it("v3.6: an entrypoint-tampered command is NOT machine evidence (merged lens)", () => {
@@ -1986,7 +2057,7 @@ describe("verification-gate — v3.7.1 user_gate_unresolved", () => {
   it("errors with not_user_gate for agent-classified gates", () => {
     setPolicyForTest({ ...DEFAULT_POLICY, gate: { enabled: true } });
     const result = verifySelfEvaluation(
-      se({ gate_ids: [GATE_ID] }), 2, [], null, [cmdSnap("passed")], [], undefined,
+      se({ gate_ids: [GATE_ID] }), 2, [], null, [cmdSnap("passed")], [], {}, undefined,
       [openedGate(GATE_ID, agentActionJson)]);
     const flag = flagFor(result);
     assert.ok(flag, "an agent gate cannot satisfy a user citation");
@@ -1996,7 +2067,7 @@ describe("verification-gate — v3.7.1 user_gate_unresolved", () => {
   it("errors with not_approved when no approved decision exists", () => {
     setPolicyForTest({ ...DEFAULT_POLICY, gate: { enabled: true } });
     const result = verifySelfEvaluation(
-      se({ gate_ids: [GATE_ID] }), 2, [], null, [cmdSnap("passed")], [], undefined, [
+      se({ gate_ids: [GATE_ID] }), 2, [], null, [cmdSnap("passed")], [], {}, undefined, [
         openedGate(GATE_ID, userActionJson),
         decision(GATE_ID, false),
       ]);
@@ -2008,7 +2079,7 @@ describe("verification-gate — v3.7.1 user_gate_unresolved", () => {
   it("stays silent when the cited user gate has an approved decision", () => {
     setPolicyForTest({ ...DEFAULT_POLICY, gate: { enabled: true } });
     const result = verifySelfEvaluation(
-      se({ gate_ids: [GATE_ID] }), 2, [], null, [cmdSnap("passed")], [], undefined, [
+      se({ gate_ids: [GATE_ID] }), 2, [], null, [cmdSnap("passed")], [], {}, undefined, [
         openedGate(GATE_ID, userActionJson),
         decision(GATE_ID, true),
       ]);
@@ -2019,7 +2090,7 @@ describe("verification-gate — v3.7.1 user_gate_unresolved", () => {
     setPolicyForTest({ ...DEFAULT_POLICY, gate: { enabled: true } });
     const legacyId = "gate-222222222222";
     const result = verifySelfEvaluation(
-      se({ gate_ids: [legacyId] }), 2, [], null, [cmdSnap("passed")], [], undefined, [
+      se({ gate_ids: [legacyId] }), 2, [], null, [cmdSnap("passed")], [], {}, undefined, [
         openedGate(legacyId, "publish the release to production"),
         decision(legacyId, true),
       ]);

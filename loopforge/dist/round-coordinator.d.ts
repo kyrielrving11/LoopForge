@@ -32,6 +32,9 @@ export interface RoundProcessInput {
     lastSelfEval?: SelfEvaluation;
     /** How many consecutive rounds have been rejected by enforcement. */
     consecutiveRejections: number;
+    /** L4 (v3.7.x): which check rejected the previous round — lets uniform
+     *  escalation rows act on their own streak, not an unrelated one. */
+    lastRejectionCheck?: string;
     /** v1.18: Evidence snapshots from configured providers. */
     evidenceSnapshots?: ProviderSnapshot[];
     /** Success values from already committed rounds. */
@@ -39,6 +42,10 @@ export interface RoundProcessInput {
     /** v2.13: Files from skipped backtrack rounds. Passed to verification
      *  gate for post-backtrack workspace restore check. */
     backtrackSkippedFiles?: string[];
+    /** M3 (v3.7.x): git fingerprint of each skipped file as recorded at its
+     *  failed round — machine proof of "untouched since the rollback" for
+     *  the restore check. */
+    backtrackSkippedFingerprints?: Record<string, string>;
     /** v2.12: Git HEAD of the backtrack restore point. The verification gate
      *  checks the workspace returns to this commit before accepting work. */
     backtrackTargetGitHead?: string;
@@ -68,6 +75,9 @@ export interface RoundProcessResult {
     backtrackApproaches?: string[];
     /** v3.7.1: Falsified assumptions from the failed rounds. */
     backtrackWrongAssumptions?: string[];
+    /** M3 (v3.7.x): per-file git fingerprint at the failed round — lets the
+     *  restore check prove a skipped file was never touched since the rollback. */
+    backtrackSkippedFingerprints?: Record<string, string>;
     /** Verification flags from this round (for injection into next prompt). */
     verificationFlags: VerificationFlag[];
     /** Enforcement action for observability. */

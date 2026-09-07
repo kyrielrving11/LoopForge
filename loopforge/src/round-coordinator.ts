@@ -29,7 +29,7 @@ import type {
   VerificationResult,
 } from "./protocol.js";
 import { CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE, verifySelfEvaluation } from "./verification-gate.js";
-import { entryRound } from "./token-utils.js";
+import { entryRound, isRecord } from "./token-utils.js";
 import { effectiveSuccess } from "./self-eval.js";
 import { decodeCommittedRound } from "./committed-round.js";
 import { makeRoundId } from "./round-transaction.js";
@@ -58,6 +58,9 @@ export interface RoundProcessInput {
   lastSelfEval?: SelfEvaluation;
   /** How many consecutive rounds have been rejected by enforcement. */
   consecutiveRejections: number;
+  /** L4 (v3.7.x): which check rejected the previous round — lets uniform
+   *  escalation rows act on their own streak, not an unrelated one. */
+  lastRejectionCheck?: string;
   /** v1.18: Evidence snapshots from configured providers. */
   evidenceSnapshots?: ProviderSnapshot[];
   /** Success values from already committed rounds. */
@@ -65,6 +68,10 @@ export interface RoundProcessInput {
   /** v2.13: Files from skipped backtrack rounds. Passed to verification
    *  gate for post-backtrack workspace restore check. */
   backtrackSkippedFiles?: string[];
+  /** M3 (v3.7.x): git fingerprint of each skipped file as recorded at its
+   *  failed round — machine proof of "untouched since the rollback" for
+   *  the restore check. */
+  backtrackSkippedFingerprints?: Record<string, string>;
   /** v2.12: Git HEAD of the backtrack restore point. The verification gate
    *  checks the workspace returns to this commit before accepting work. */
   backtrackTargetGitHead?: string;
@@ -95,6 +102,9 @@ export interface RoundProcessResult {
   backtrackApproaches?: string[];
   /** v3.7.1: Falsified assumptions from the failed rounds. */
   backtrackWrongAssumptions?: string[];
+  /** M3 (v3.7.x): per-file git fingerprint at the failed round — lets the
+   *  restore check prove a skipped file was never touched since the rollback. */
+  backtrackSkippedFingerprints?: Record<string, string>;
   /** Verification flags from this round (for injection into next prompt). */
   verificationFlags: VerificationFlag[];
   /** Enforcement action for observability. */
@@ -207,6 +217,7 @@ export class RoundCoordinator {
       lastSelfEval ?? null,
       evidenceSnapshots ?? [],
       input.backtrackSkippedFiles ?? [],
+      input.backtrackSkippedFingerprints ?? {},
       input.backtrackTargetGitHead,
       // v3.7.1: gate records live under the gate: prefix — outside the round
       // entries above — and are passed separately to the gate check.
@@ -238,6 +249,7 @@ export class RoundCoordinator {
       vaultEntries,
       consecutiveRejections,
       driftClarificationStreak,
+      input.lastRejectionCheck ?? "",
     );
 
     if (enforceResult.action === "reject") {
@@ -335,6 +347,11 @@ export class RoundCoordinator {
 
       // v2.13: Collect files changed in skipped rounds for the restore prompt
       const skippedFiles: string[] = [];
+      // M3 (v3.7.x): each skipped file's git fingerprint at its failed round.
+      // Recorded from the round's own after-evidence (machine data, not the
+      // agent's report); later rounds overwrite earlier ones so the map holds
+      // the LAST failed state of every file.
+      const skippedFingerprints: Record<string, string> = {};
       // v3.7.1: Recovery Brief facts — one approach and the falsified
       // assumptions per rolled-back round, from COMMITTED rounds above the
       // restore point (rejected attempts are not durable history and never
@@ -356,8 +373,17 @@ export class RoundCoordinator {
           const files = Array.isArray(ev.files_changed)
             ? ev.files_changed.filter((f: unknown) => typeof f === "string")
             : [];
+          const git = view?.afterEvidence.find(
+            (snapshot) => snapshot.provider === "git" &&
+              isRecord(snapshot.data) && isRecord(snapshot.data.fingerprints),
+          );
+          const gitFingerprints = git
+            ? (git.data.fingerprints as Record<string, unknown>)
+            : null;
           for (const f of files) {
             if (!skippedFiles.includes(f)) skippedFiles.push(f);
+            const fp = gitFingerprints?.[f];
+            if (typeof fp === "string") skippedFingerprints[f] = fp;
           }
         }
         const summary = evaluation?.output_summary ?? "";
@@ -418,6 +444,7 @@ export class RoundCoordinator {
           ? restorePoint.skippedDiscoveries
           : [],
         backtrackSkippedFiles: skippedFiles,
+        backtrackSkippedFingerprints: skippedFingerprints,
         backtrackTargetGitHead: targetGitHead ?? undefined,
         backtrackTriggerRule: enforceResult.check,
         backtrackFailedRounds: failedRounds,

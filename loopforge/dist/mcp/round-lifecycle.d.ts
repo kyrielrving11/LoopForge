@@ -40,6 +40,10 @@ export interface McpSession {
      *  continue working on stale files without restoring the workspace.
      *  Cleared after the first successful post-backtrack round. */
     backtrackSkippedFiles: string[];
+    /** M3 (v3.7.x): git fingerprint of each skipped file at its failed round
+     *  — machine proof for the workspace-restore check. Cleared with
+     *  backtrackSkippedFiles after the restore round. */
+    backtrackSkippedFingerprints: Record<string, string>;
     /** v2.12: Git HEAD of the last backtrack restore point. The verification
      *  gate checks the workspace returns to this commit before accepting.
      *  Cleared after the first successful post-backtrack round. */
@@ -203,6 +207,12 @@ export declare class RoundLifecycle {
      *  MUTATES: session.currentRound, session.currentPrompt, session.currentLevel,
      *           session.evidenceBaseline, session.roundSnapshot */
     private advanceToNextRound;
+    /** M4: mark a session stalled after its round committed but the next
+     *  prompt could not be prepared/persisted — mirrors the crash-recovery
+     *  siblings (reconcileCommittedRound / resume / reject paths). The
+     *  committed round stays held (roundSnapshot untouched) so a resubmission
+     *  with the same roundId replays it and recompiles the next round. */
+    private stalledAfterCommit;
     private advanceUnlocked;
     /** Core cycle entry used by SessionManager.advance after the queue + lease
      *  dance: validate → extract → execute transaction → route disposition

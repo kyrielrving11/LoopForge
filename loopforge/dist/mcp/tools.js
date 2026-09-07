@@ -30,7 +30,7 @@ const TOOL_BASE_SCHEMAS = [
                 maxRounds: {
                     type: "integer",
                     minimum: 1,
-                    description: "Maximum rounds before auto-stop. Default: 20 from policy.",
+                    description: "Maximum rounds before auto-stop. Default: 200 from policy.",
                 },
                 domain: {
                     type: "string",

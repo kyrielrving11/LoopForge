@@ -1903,6 +1903,39 @@
         "flags"
       ],
       "description": "Result of cross-round self-evaluation verification.\r\n\r\nVerdict semantics:\r\n- trusted:   all checks passed; flags are informational only.\r\n- suspect:   one or more warn-level flags; flags become warnings in the\r\n             next prompt so the agent can clarify.\r\n- contradicted: one or more error-level flags; the quality score for this\r\n                round is excluded from the quality trend (NOT modified).\r\n                Flags become hard constraints — the agent must respond."
+    },
+    "PresentedStateSnapshot": {
+      "type": "object",
+      "properties": {
+        "round": {
+          "type": "number"
+        },
+        "constraintIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "subGoals": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "milestoneRanges": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "round",
+        "constraintIds",
+        "subGoals",
+        "milestoneRanges"
+      ],
+      "description": "v3.2: Durable snapshot of what an L1 prompt actually presented last round.\r\nUsed as the diff baseline for L1 collapse. Persisted inside the lineage\r\nentry's loop_lineage (field extension — no new persistence format) and\r\ncarried on PromptArtifact for the compile-to-persist round-trip."
     }
   }
 }

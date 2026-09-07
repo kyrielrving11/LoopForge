@@ -184,6 +184,77 @@ function convertTypeNode(typeNode, checker) {
 // ═══════════════════════════════════════════════════════════════════════════
 // Helpers
 // ═══════════════════════════════════════════════════════════════════════════
+/** Collect every `#/$defs/<name>` reference in a schema subtree. */
+function collectRefNames(node, out) {
+    if (!node || typeof node !== "object")
+        return;
+    if (typeof node.$ref === "string") {
+        const match = /^#\/\$defs\/(.+)$/.exec(node.$ref);
+        if (match)
+            out.add(match[1]);
+    }
+    if (node.properties) {
+        for (const child of Object.values(node.properties))
+            collectRefNames(child, out);
+    }
+    if (node.items)
+        collectRefNames(node.items, out);
+    if (Array.isArray(node.anyOf)) {
+        for (const child of node.anyOf)
+            collectRefNames(child, out);
+    }
+}
+/** Convert one top-level statement into a $defs entry, when possible.
+ *  Returns true when a definition was added. Mirrors the main pass so the
+ *  cross-file sweep and the protocol.ts pass share one conversion path. */
+function addStatementDef(stmt, checker, defs) {
+    if (ts.isEnumDeclaration(stmt)) {
+        defs[stmt.name.text] = convertEnum(stmt);
+        return true;
+    }
+    if (ts.isInterfaceDeclaration(stmt)) {
+        defs[stmt.name.text] = convertInterface(stmt, checker);
+        return true;
+    }
+    if (!ts.isTypeAliasDeclaration(stmt))
+        return false;
+    const aliasType = stmt.type;
+    if (aliasType.kind === ts.SyntaxKind.FunctionType) {
+        return false; // Function signatures can't be represented in JSON Schema
+    }
+    if (ts.isUnionTypeNode(aliasType)) {
+        const allStrings = aliasType.types.every((t) => ts.isLiteralTypeNode(t) && ts.isStringLiteral(t.literal));
+        if (allStrings) {
+            defs[stmt.name.text] = {
+                type: "string",
+                enum: aliasType.types.map((t) => {
+                    const lit = t;
+                    if (ts.isStringLiteral(lit.literal))
+                        return lit.literal.text;
+                    return lit.literal.getText();
+                }),
+            };
+            return true;
+        }
+        if (aliasType.types.some((t) => t.kind === ts.SyntaxKind.FunctionType)) {
+            return false;
+        }
+    }
+    try {
+        const converted = convertTypeNode(stmt.type, checker);
+        if (converted.$ref) {
+            // A pure reference to another type — the target def (or a later sweep
+            // round) owns the definition.
+            return false;
+        }
+        defs[stmt.name.text] = converted;
+        return true;
+    }
+    catch {
+        // If conversion fails, skip — better a missing def than a broken schema.
+        return false;
+    }
+}
 /** Check if a type node includes null (T | null). */
 function typeIncludesNull(typeNode) {
     if (!typeNode)
@@ -264,53 +335,43 @@ function generateSchema() {
     const checker = program.getTypeChecker();
     const defs = {};
     for (const stmt of sourceFile.statements) {
-        if (ts.isEnumDeclaration(stmt)) {
-            defs[stmt.name.text] = convertEnum(stmt);
+        addStatementDef(stmt, checker, defs);
+    }
+    // L5 (v3.7.x): cross-file references. convertTypeNode emits `$ref` for any
+    // referenced interface/enum/alias, but the pass above only walks
+    // protocol.ts — a type imported from a sibling module (e.g.
+    // PresentedStateSnapshot from canonical-state.ts) was referenced but never
+    // defined, leaving a DANGLING $ref that breaks JSON Schema validators
+    // (`$defs/PresentedStateSnapshot` did not exist). Sweep the whole program
+    // to a fixpoint: for every referenced-but-missing def, locate its
+    // declaration in any non-declaration source file and convert it.
+    for (let guard = 0; guard < 20; guard++) {
+        const referenced = new Set();
+        for (const name of Object.keys(defs)) {
+            collectRefNames(defs[name], referenced);
         }
-        else if (ts.isInterfaceDeclaration(stmt)) {
-            defs[stmt.name.text] = convertInterface(stmt, checker);
-        }
-        else if (ts.isTypeAliasDeclaration(stmt)) {
-            // Process type alias: skip function types, convert string unions
-            const aliasType = stmt.type;
-            if (aliasType.kind === ts.SyntaxKind.FunctionType) {
-                continue; // Function signatures can't be represented in JSON Schema
-            }
-            if (ts.isUnionTypeNode(aliasType)) {
-                // Check if it's a union of string literals (like StopReason)
-                const allStrings = aliasType.types.every((t) => ts.isLiteralTypeNode(t) &&
-                    ts.isStringLiteral(t.literal));
-                if (allStrings) {
-                    const enumValues = aliasType.types.map((t) => {
-                        const lit = t;
-                        if (ts.isStringLiteral(lit.literal))
-                            return lit.literal.text;
-                        return lit.literal.getText();
-                    });
-                    defs[stmt.name.text] = {
-                        type: "string",
-                        enum: enumValues,
-                    };
-                    continue;
+        const missing = [...referenced].filter((name) => !(name in defs));
+        if (missing.length === 0)
+            break;
+        let added = false;
+        for (const sf of program.getSourceFiles()) {
+            if (sf.isDeclarationFile)
+                continue;
+            for (const stmt of sf.statements) {
+                const name = ts.isEnumDeclaration(stmt) || ts.isInterfaceDeclaration(stmt)
+                    || ts.isTypeAliasDeclaration(stmt)
+                    ? stmt.name?.text
+                    : undefined;
+                if (name && missing.includes(name)) {
+                    const before = Object.keys(defs).length;
+                    addStatementDef(stmt, checker, defs);
+                    if (Object.keys(defs).length > before)
+                        added = true;
                 }
-                // Union that includes function types → skip
-                if (aliasType.types.some((t) => t.kind === ts.SyntaxKind.FunctionType)) {
-                    continue;
-                }
-            }
-            // Other type aliases — try to convert
-            try {
-                const converted = convertTypeNode(stmt.type, checker);
-                if (converted.$ref) {
-                    // It's just a reference to another type, skip (duplicate)
-                    continue;
-                }
-                defs[stmt.name.text] = converted;
-            }
-            catch {
-                // If conversion fails, skip — better a missing def than a broken schema
             }
         }
+        if (!added)
+            break; // nothing more resolvable — stop
     }
     const schema = {
         $schema: "https://json-schema.org/draft/2020-12/schema",

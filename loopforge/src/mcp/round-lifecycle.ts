@@ -37,6 +37,7 @@ import {
 import type { RoundTransactionSnapshot } from "../round-transaction.js";
 import { RoundDriver } from "../round-driver.js";
 import type { RoundProcessResult } from "../round-coordinator.js";
+import type { PreparedRound } from "../round-driver.js";
 import { getPolicy } from "../policy.js";
 import { checkRoundSequence, queryLoopEntries } from "../loop-store.js";
 import type { LoopStore, VaultEntry } from "../loop-store.js";
@@ -45,6 +46,16 @@ import { policyMetrics } from "../policy-metrics.js";
 import type { SessionStateStore } from "../storage.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
+
+/** M3: parse a persisted skipped-file fingerprint map (string → string). */
+function parseFingerprintMap(value: unknown): Record<string, string> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const out: Record<string, string> = {};
+  for (const [file, fp] of Object.entries(value)) {
+    if (typeof fp === "string") out[file] = fp;
+  }
+  return out;
+}
 
 export interface McpSession {
   sessionId: string;
@@ -72,6 +83,10 @@ export interface McpSession {
    *  continue working on stale files without restoring the workspace.
    *  Cleared after the first successful post-backtrack round. */
   backtrackSkippedFiles: string[];
+  /** M3 (v3.7.x): git fingerprint of each skipped file at its failed round
+   *  — machine proof for the workspace-restore check. Cleared with
+   *  backtrackSkippedFiles after the restore round. */
+  backtrackSkippedFingerprints: Record<string, string>;
   /** v2.12: Git HEAD of the last backtrack restore point. The verification
    *  gate checks the workspace returns to this commit before accepting.
    *  Cleared after the first successful post-backtrack round. */
@@ -273,6 +288,9 @@ export class RoundLifecycle {
           drift_clarification_streak: session.driftClarificationStreak,
           // v2.13: Backtrack skipped files for workspace restore check
           backtrack_skipped_files: session.backtrackSkippedFiles,
+          // M3: skipped-file fingerprints at their failed rounds (restore
+          // check machine arm) — empty unless a backtrack is pending
+          backtrack_skipped_fingerprints: session.backtrackSkippedFingerprints,
           // v2.12: Backtrack restore-point git HEAD (crash recovery)
           backtrack_target_git_head: session.backtrackTargetGitHead ?? null,
           // v1.19: durable round transaction state
@@ -350,6 +368,9 @@ export class RoundLifecycle {
         (lineage.drift_clarification_streak as number) ?? 0,
       backtrackSkippedFiles:
         (lineage.backtrack_skipped_files as string[]) ?? [],
+      backtrackSkippedFingerprints: parseFingerprintMap(
+        lineage.backtrack_skipped_fingerprints,
+      ),
       backtrackTargetGitHead:
         typeof lineage.backtrack_target_git_head === "string" &&
         lineage.backtrack_target_git_head.length > 0
@@ -446,9 +467,15 @@ export class RoundLifecycle {
       if (pr.action !== "reject") session.lastRejectionCheck = "";
     }
     if (pr.newLastSelfEval) session.lastSelfEval = pr.newLastSelfEval;
+    // L1 (v3.7.x): trajectory push guard must use the SAME judgement as the
+    // counter guard below (recovered.snapshot.round). Comparing against
+    // session.currentRound conflates two windows: the crash window (persisted
+    // length N-1, currentRound N — push needed) and the pause race (pause()
+    // persisted the incremented counter AND the already-pushed round N —
+    // length N, currentRound N+1 — pushing again duplicates the entry).
     if (
       pr.shouldPushSuccessTrajectory &&
-      session.successTrajectory.length < session.currentRound
+      session.successTrajectory.length < recovered.snapshot.round
     ) {
       session.successTrajectory.push(pr.roundSuccess);
     }
@@ -754,9 +781,11 @@ export class RoundLifecycle {
       selfEval,
       lastSelfEval: session.lastSelfEval,
       consecutiveRejections: session.consecutiveRejections,
+      lastRejectionCheck: session.lastRejectionCheck,
       successTrajectory: session.successTrajectory,
       driftClarificationStreak: session.driftClarificationStreak,
       backtrackSkippedFiles: session.backtrackSkippedFiles,
+      backtrackSkippedFingerprints: session.backtrackSkippedFingerprints,
       backtrackTargetGitHead: session.backtrackTargetGitHead,
     });
     const outcome = completed.outcome;
@@ -780,7 +809,12 @@ export class RoundLifecycle {
       if (pr.action !== "reject") session.lastRejectionCheck = "";
     }
     if (pr.newLastSelfEval) session.lastSelfEval = pr.newLastSelfEval;
-    if (pr.shouldPushSuccessTrajectory) {
+    // L1 (v3.7.x): never push a REPLAYED outcome onto the trajectory. When a
+    // crash/exception window left the committed round undelivered, the replay
+    // re-executes the same round in memory — its success was already recorded
+    // by the original attempt (crash recovery re-pushes through
+    // reconcileCommittedRound instead, which uses the length-vs-round guard).
+    if (pr.shouldPushSuccessTrajectory && !completed.outcome.replayed) {
       session.successTrajectory.push(pr.roundSuccess);
     }
 
@@ -929,6 +963,9 @@ export class RoundLifecycle {
     session.lastRejectionCheck = "";
     session.driftClarificationStreak = 0;
     session.backtrackSkippedFiles = pr.backtrackSkippedFiles ?? [];
+    // M3: carry each skipped file's failed-round fingerprint for the
+    // machine-proven restore check on the redo submission.
+    session.backtrackSkippedFingerprints = pr.backtrackSkippedFingerprints ?? {};
     // v2.12: Remember the restore point's git HEAD — the next round's
     // verification gate confirms the workspace returned to this commit.
     session.backtrackTargetGitHead = pr.backtrackTargetGitHead;
@@ -1067,10 +1104,20 @@ export class RoundLifecycle {
     actualEvidence: ProviderSnapshot[],
   ): Promise<AdvanceResult> {
     const roundSuccess = pr.roundSuccess;
-    session.currentRound++;
+    // M4 (v3.7.x): replay guard. The counter may already point past the
+    // committed round when this continue is a REPLAY — after a crash or an
+    // in-process exception between the round's commit and this compile, the
+    // previous attempt already incremented currentRound but never compiled
+    // the next round. An unconditional ++ would silently skip that round's
+    // prompt and poison the vault sequence (see reconcileCommittedRound's
+    // v2.14 counter guard — the live path must use the same judgement).
+    if (!session.roundSnapshot || session.currentRound <= session.roundSnapshot.round) {
+      session.currentRound++;
+    }
     session.currentPrompt = null;
     // v2.13: Clear backtrack skipped files after advancing past the restore round
     session.backtrackSkippedFiles = [];
+    session.backtrackSkippedFingerprints = {};
     // v2.12: The restore-point git HEAD check only applies to the first
     // post-backtrack round — clear it once we advance past it.
     session.backtrackTargetGitHead = undefined;
@@ -1112,29 +1159,79 @@ export class RoundLifecycle {
     if (externalCtx) {
       request.external_context = externalCtx;
     }
-    const prepared = await new RoundDriver(
-      session.engine,
-      this.store,
-    ).prepare(
-      request,
-      session.loopId,
-      session.currentRound,
-    );
-    const nextPrompt = prepared?.prompt ?? null;
-    const nextLevel = prepared?.level ?? "l2";
-    const nextBaseline = prepared?.evidenceBaseline ?? actualEvidence;
+    let prepared: PreparedRound | null;
+    try {
+      prepared = await new RoundDriver(
+        session.engine,
+        this.store,
+      ).prepare(
+        request,
+        session.loopId,
+        session.currentRound,
+      );
+    } catch (error) {
+      // M4: a post-commit compile exception must not silently strand the
+      // session between rounds. The round above already committed — turn the
+      // session into the same stalled state the crash-recovery siblings use,
+      // so the agent gets a retryable result instead of a raw -32603 with a
+      // mutated, unsaved session (which let a replay skip the next round).
+      logEvent("compile_failed", {
+        loopId: session.loopId,
+        round: session.currentRound,
+        error: String(error),
+      });
+      return this.stalledAfterCommit(
+        sessionId,
+        session,
+        roundSuccess,
+        `RoundDriver.prepare threw after the round committed: ${String(error).slice(0, 300)}. ` +
+        `The session is stalled with the committed round still held — resume or ` +
+        `resubmit the same roundId to recompile the next prompt.`,
+      );
+    }
+    if (!prepared) {
+      // M4: align with the sibling paths (resume / unpause / reject /
+      // backtrack / crash recovery) that treat a null preparation as a
+      // stalled session — previously this silently returned prompt:null
+      // without a stopReason while the session kept running.
+      return this.stalledAfterCommit(
+        sessionId,
+        session,
+        roundSuccess,
+        "RoundDriver.prepare returned null after the round committed — the " +
+        "next prompt could not be compiled. Resume or resubmit the same " +
+        "roundId to retry.",
+      );
+    }
+    const nextPrompt = prepared.prompt;
+    const nextLevel = prepared.level;
+    const nextBaseline = prepared.evidenceBaseline ?? actualEvidence;
     session.evidenceBaseline = nextBaseline;
-    session.roundSnapshot = prepared?.snapshot ?? prepareRoundTransaction(
-      session.loopId,
-      session.currentRound,
-      nextBaseline,
-    );
+    session.roundSnapshot = prepared.snapshot;
     session.currentPrompt = nextPrompt;
     session.currentLevel = nextLevel;
-    session.currentWarnings = prepared?.warnings ?? [];
-    session.lastCompileResponse = prepared?.compileResponse ?? null;
+    session.currentWarnings = prepared.warnings ?? [];
+    session.lastCompileResponse = prepared.compileResponse ?? null;
     policyMetrics.recordStrategy(session.loopId, nextLevel);
-    this.save(session);
+    try {
+      this.save(session);
+    } catch (error) {
+      // The compiled prompt still lives in memory; surface it as a stalled
+      // result so a resume returns the held prompt rather than re-running
+      // the committed round.
+      logEvent("session_save_failed", {
+        loopId: session.loopId,
+        round: session.currentRound,
+        error: String(error),
+      });
+      return this.stalledAfterCommit(
+        sessionId,
+        session,
+        roundSuccess,
+        `The round committed but the session state could not be persisted: ${String(error).slice(0, 300)}. ` +
+        `Resume the loop to recover the held prompt.`,
+      );
+    }
 
     return {
       sessionId,
@@ -1143,7 +1240,40 @@ export class RoundLifecycle {
       prompt: nextPrompt,
       level: nextLevel,
       roundSuccess,
-      warnings: prepared?.warnings ?? [],
+      warnings: prepared.warnings ?? [],
+    };
+  }
+
+  /** M4: mark a session stalled after its round committed but the next
+   *  prompt could not be prepared/persisted — mirrors the crash-recovery
+   *  siblings (reconcileCommittedRound / resume / reject paths). The
+   *  committed round stays held (roundSnapshot untouched) so a resubmission
+   *  with the same roundId replays it and recompiles the next round. */
+  private stalledAfterCommit(
+    sessionId: string,
+    session: McpSession,
+    roundSuccess: boolean,
+    detail: string,
+  ): AdvanceResult {
+    session.status = "stalled";
+    session.currentPrompt = null;
+    try {
+      this.save(session);
+    } catch (error) {
+      logEvent("session_save_failed", {
+        loopId: session.loopId,
+        round: session.currentRound,
+        error: String(error),
+      });
+    }
+    return {
+      sessionId,
+      round: session.currentRound,
+      roundId: session.roundSnapshot?.roundId,
+      prompt: null,
+      stopReason: "stalled",
+      stopDetail: detail,
+      roundSuccess,
     };
   }
 

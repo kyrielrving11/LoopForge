@@ -48,11 +48,15 @@ export interface CompleteRoundInput {
   selfEval: SelfEvaluation;
   lastSelfEval?: SelfEvaluation;
   consecutiveRejections: number;
+  /** L4 (v3.7.x): previous round's rejection check (own-streak basis). */
+  lastRejectionCheck?: string;
   successTrajectory: boolean[];
   /** v2.12: Current clarification streak for R7 escalation. */
   driftClarificationStreak?: number;
   /** v2.13: Files from skipped backtrack rounds for restore check. */
   backtrackSkippedFiles?: string[];
+  /** M3 (v3.7.x): skipped-file git fingerprints at their failed rounds. */
+  backtrackSkippedFingerprints?: Record<string, string>;
   /** v2.12: Git HEAD of the backtrack restore point (workspace restore check). */
   backtrackTargetGitHead?: string;
 }
@@ -170,10 +174,12 @@ export class RoundDriver {
       selfEval: input.selfEval,
       lastSelfEval: input.lastSelfEval,
       consecutiveRejections: input.consecutiveRejections,
+      lastRejectionCheck: input.lastRejectionCheck,
       successTrajectory: input.successTrajectory,
       actualEvidence,
       driftClarificationStreak: input.driftClarificationStreak,
       backtrackSkippedFiles: input.backtrackSkippedFiles,
+      backtrackSkippedFingerprints: input.backtrackSkippedFingerprints,
       backtrackTargetGitHead: input.backtrackTargetGitHead,
     });
     return { outcome, actualEvidence };

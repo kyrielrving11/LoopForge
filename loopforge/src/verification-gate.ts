@@ -522,7 +522,10 @@ function checkRetroactiveClaims(
  *     success — "required" rejects (error), "warn" tolerates with a warn
  *     (round commits, success excluded from the trajectory, trust drops). A
  *     declared no_change_reason is the honest escape hatch: it downgrades to
- *     info. no_change_reason is honored HERE ONLY — contract checks refuse it. */
+ *     info — honored only while NO enabled verification command is
+ *     configured (machine verification was structurally impossible); a
+ *     configured command closes the escape. no_change_reason is honored HERE
+ *     ONLY — contract checks refuse it. */
 function checkSuccessWithoutVerifiedEvidence(
   selfEval: SelfEvaluation,
   status: EvidenceStatus,
@@ -547,7 +550,18 @@ function checkSuccessWithoutVerifiedEvidence(
 
   // Claims arm (v3.6).
   if (status.providerStatus === "verified") return null;
-  const noChange = typeof selfEval.no_change_reason === "string" &&
+  // M2 (v3.7.x): the no_change_reason escape is only honest when machine
+  // verification was STRUCTURALLY impossible. With an enabled verification
+  // command configured, the runtime had a machine-verifiable path for this
+  // round — a declared reason cannot waive it (that would let an agent
+  // dodge the configured verification by writing a sentence, even while git
+  // observed real file changes). Verification-less policies (the default:
+  // commands: []) keep the escape: there is genuinely nothing to run.
+  const verificationConfigured = getPolicy().evidence.commands.some(
+    (command) => command.enabled,
+  );
+  const noChange = !verificationConfigured &&
+    typeof selfEval.no_change_reason === "string" &&
     selfEval.no_change_reason.trim().length > 0;
   // v3.3: severity follows evidence.machine_backed_success — "required"
   // rejects (error), "warn" tolerates with a warn (round commits, success
@@ -1115,39 +1129,64 @@ function checkSubGoalDrift(
 }
 
 /** v2.13: After a backtrack, check that the agent restored the workspace
- *  before working. If the agent's files_changed overlaps with files from
- *  skipped (failed) rounds, the workspace was likely not clean. */
+ *  before working. Two arms:
+ *
+ *  1. Machine arm (M3, error): a skipped file whose CURRENT git fingerprint
+ *     still equals the fingerprint recorded at its failed round was never
+ *     touched since the rollback — the workspace was provably not restored.
+ *     Restored or re-modified files change fingerprint and can never be
+ *     misjudged by this arm.
+ *
+ *  2. Claims arm (warn only): the agent's files_changed overlaps the skipped
+ *     list. A self-report alone cannot distinguish a restored-then-redone
+ *     file from a never-restored one — a legitimate multi-file redo would
+ *     otherwise be falsely terminated — so overlap is guidance, not a
+ *     verdict. (The old error tier for >= 3 overlapping files was removed
+ *     for exactly this reason: it fired on honest redos.) */
 function checkBacktrackWorkspaceRestore(
   selfEval: SelfEvaluation,
   backtrackSkippedFiles: string[],
+  backtrackSkippedFingerprints: Record<string, string> = {},
+  evidenceSnapshots: ProviderSnapshot[] = [],
 ): VerificationFlag | null {
-  if (backtrackSkippedFiles.length === 0) return null;
+  // Machine arm — untouched-since-rollback proof, independent of claims.
+  const failedEntries = Object.entries(backtrackSkippedFingerprints);
+  if (failedEntries.length > 0) {
+    const git = evidenceSnapshots.find((snapshot) =>
+      snapshot.provider === "git" && isRecord(snapshot.data) &&
+      isRecord(snapshot.data.fingerprints));
+    const currentFingerprints = git
+      ? (git.data.fingerprints as Record<string, unknown>)
+      : null;
+    if (currentFingerprints) {
+      const untouched = failedEntries
+        .filter(([file, failedFp]) => currentFingerprints[file] === failedFp)
+        .map(([file]) => file)
+        .sort();
+      if (untouched.length > 0) {
+        return makeVerificationFlag({
+          severity: "error",
+          field: "workspace",
+          check: CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED,
+          detail:
+            `File(s) from the failed rounds are byte-identical to their ` +
+            `state at the rollback: ${untouched.slice(0, 5).join(", ")}. The ` +
+            `workspace was never restored — restore it to the restore point ` +
+            `(git checkout/reset) before redoing the work.`,
+        });
+      }
+    }
+  }
 
   const ev = selfEval.execution_evidence;
   if (!ev || ev.files_changed.length === 0) return null;
 
-  // Check overlap: files the agent changed vs. files from skipped rounds
+  // Claims arm — overlap as guidance only.
   const overlap = ev.files_changed.filter((f) =>
     backtrackSkippedFiles.some((sf) => sf === f || f.endsWith(sf) || sf.endsWith(f)),
   );
-
   if (overlap.length === 0) return null;
 
-  // Agent is modifying files that were part of failed rounds without
-  // having properly restored the workspace first.
-  if (overlap.length >= 3 || overlap.length === ev.files_changed.length) {
-    return makeVerificationFlag({
-      severity: "error",
-      field: "files_changed",
-      check: CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED,
-      detail:
-        `Agent modified ${overlap.length} file(s) that were part of ` +
-        `the skipped (failed) rounds: ${overlap.slice(0, 5).join(", ")}. ` +
-        `The workspace was likely not restored before working.`,
-    });
-  }
-
-  // Minor overlap — warn only
   return makeVerificationFlag({
     severity: "warn",
     field: "files_changed",
@@ -1485,6 +1524,9 @@ export function verifySelfEvaluation(
    *  files_changed overlaps significantly with these, the workspace
    *  was not properly restored before working. */
   backtrackSkippedFiles: string[] = [],
+  /** M3 (v3.7.x): skipped-file git fingerprints at their failed rounds —
+   *  machine proof of "untouched since the rollback" for the restore check. */
+  backtrackSkippedFingerprints: Record<string, string> = {},
   /** v2.12: Git HEAD commit of the backtrack restore point. When set, the
    *  current git snapshot must sit at this commit — otherwise the workspace
    *  was not restored and the round cannot be accepted. */
@@ -1551,7 +1593,9 @@ export function verifySelfEvaluation(
     // v2.2: Detect sub-goal drift — next_action doesn't align with pending sub-goals
     () => checkSubGoalDrift(selfEval, prevSelfEval, vaultEntries, currentRound),
     // v2.13: Post-backtrack workspace restore check
-    () => checkBacktrackWorkspaceRestore(selfEval, backtrackSkippedFiles),
+    () => checkBacktrackWorkspaceRestore(
+      selfEval, backtrackSkippedFiles, backtrackSkippedFingerprints, evidenceSnapshots,
+    ),
     // v2.12: Post-backtrack git HEAD restore check
     () => checkBacktrackGitHeadRestore(evidenceSnapshots, backtrackTargetGitHead),
     // v3.3: Round Contract checks. v3.4: split by target — structural

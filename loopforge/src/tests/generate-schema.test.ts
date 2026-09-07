@@ -47,10 +47,43 @@ describe("Generated JSON Schema — top-level", () => {
     const names = Object.keys(defs);
     // v3.3: RoundContract joined the $defs (37 → 38).
     // v3.7.1: SubGoalUpdate joined the $defs (38 → 39).
-    assert.equal(names.length, 39, `expected 39, got ${names.length}: ${names.join(", ")}`);
+    // L5: PresentedStateSnapshot joined the $defs (39 → 40) — a cross-file
+    // type that used to be referenced but never defined.
+    assert.equal(names.length, 40, `expected 40, got ${names.length}: ${names.join(", ")}`);
     assert.ok(names.includes("PromptArtifact"));
     assert.ok(names.includes("RoundOutcome"));
     assert.ok(names.includes("RoundContract"));
+  });
+
+  it("L5: every $ref resolves to a defined $defs entry", () => {
+    // Draft 2020-12 validators reject unresolved references at compile
+    // time — a dangling $ref (a type imported from outside protocol.ts,
+    // referenced but never collected) silently breaks the wire contract.
+    // PresentedStateSnapshot is the historical instance: PromptArtifact's
+    // presentedState referenced #/$defs/PresentedStateSnapshot while only 39
+    // defs existed.
+    const dangling: string[] = [];
+    const walk = (node: unknown): void => {
+      if (!node || typeof node !== "object") return;
+      const record = node as Record<string, unknown>;
+      if (typeof record.$ref === "string") {
+        const match = /^#\/\$defs\/(.+)$/.exec(record.$ref);
+        if (match && !(match[1] in defs)) dangling.push(record.$ref);
+      }
+      if (record.properties) {
+        for (const child of Object.values(record.properties)) walk(child);
+      }
+      if (record.items) walk(record.items);
+      if (Array.isArray(record.anyOf)) {
+        for (const child of record.anyOf) walk(child);
+      }
+    };
+    walk(schema);
+    assert.deepEqual(dangling, [],
+      `every $ref must resolve: ${dangling.join(", ")}`);
+    assert.ok(defs.PresentedStateSnapshot,
+      "the cross-file type must be emitted into $defs");
+    assert.equal(defs.PresentedStateSnapshot.type, "object");
   });
 });
 

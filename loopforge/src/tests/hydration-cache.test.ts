@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { LoopForgeEngine } from "../engine.js";
+import { deriveLessons } from "../loop-compiler.js";
 import { FileLoopStore } from "../loop-store.js";
 import type { VaultEntry } from "../loop-store.js";
 import { SessionManager } from "../mcp/session.js";
@@ -298,5 +299,55 @@ describe("v3.5.1 — hydration stamps attempt/roundEvidence for the compile view
     assert.equal(lin1.attempt, 2,
       "the committed attempt (rejection + redo) must be stamped for the compile view");
     assert.equal(typeof lin1.attempt, "number");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// M6 regression: delegation journals must never decode as a second round view
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("M6 — delegation journal merge boundary", () => {
+  beforeEach(() => resetPolicy());
+
+  it("a delegation journal does not duplicate its round in the lessons view", async () => {
+    const store = new FileLoopStore(join(tmpdir(), `loopforge-m6-${randomUUID()}`));
+    const mgr = new SessionManager(store);
+    const started = await mgr.create({ task: "Journal merge", loopId: "journal-merge" });
+    const sessionId = started.sessionId;
+
+    await mgr.advance(sessionId, "", continuingEvaluation()); // round 1 clean
+
+    // Round 2: ONE violation occurrence + worker_results — the engine
+    // auto-records a delegation_journal row for the same round.
+    const delegating = await mgr.advance(sessionId, "", {
+      ...continuingEvaluation(),
+      constraint_violations: ["Never touch prod data"],
+      worker_results: [
+        {
+          agentId: "worker-1",
+          subAgentType: "general-purpose",
+          subTask: "Inspect prod table",
+          resultSummary: "inspected",
+          outcome: "success" as const,
+        },
+      ],
+    });
+    assert.equal(delegating.round, 3); // round 2 committed; next round compiled
+
+    // The compile view at round 3 must contain exactly ONE committed
+    // round-2 view: the violation happened once, so no lesson may form.
+    const engine = new LoopForgeEngine(store);
+    const hydrated = engine.hydrateLoopContext("journal-merge", 3);
+    assert.ok(hydrated);
+    const lessons = deriveLessons(
+      "journal-merge",
+      { results: hydrated.results as unknown as Array<Record<string, unknown>> },
+      3,
+    );
+    const dup = lessons.find((l) => l.kind === "constraint_violation" &&
+      l.text === "Never touch prod data");
+    assert.equal(dup, undefined,
+      "a single violation round must not surface as a repeated lesson via a " +
+      "delegation journal clone (was: 2× (R2, R2))");
   });
 });

@@ -2,7 +2,12 @@
  *
  * L0/L1/L2 control state density only. Reasoning strategy belongs to the
  * external Agent. Mandatory task, hard-constraint, and verification sections
- * are never truncated; budgets are soft and overflow is recorded.
+ * are never truncated and always render. Budgets are soft CEILINGS applied
+ * to optional sections: optional sections are appended in priority order
+ * while the rendered length stays under the level's budget, and the rest are
+ * dropped from the prompt (the dropped content stays derivable from the
+ * vault). Prompt length can exceed the ceiling when the mandatory sections
+ * alone are over it — truncation of mandatory content never happens.
  */
 import type { CanonicalLoopState, PresentedStateSnapshot } from "./canonical-state.js";
 import type { PromptArtifact, PromptRequests } from "./protocol.js";

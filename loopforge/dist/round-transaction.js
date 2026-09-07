@@ -179,9 +179,11 @@ export class RoundTransactionCoordinator {
             selfEval: input.selfEval,
             lastSelfEval: input.lastSelfEval,
             consecutiveRejections: input.consecutiveRejections,
+            lastRejectionCheck: input.lastRejectionCheck,
             evidenceSnapshots: roundEvidence,
             successTrajectory: input.successTrajectory,
             backtrackSkippedFiles: input.backtrackSkippedFiles,
+            backtrackSkippedFingerprints: input.backtrackSkippedFingerprints,
             backtrackTargetGitHead: input.backtrackTargetGitHead,
         }, input.driftClarificationStreak ?? 0);
         const evaluated = {

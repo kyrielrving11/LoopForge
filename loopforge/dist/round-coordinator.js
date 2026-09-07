@@ -19,7 +19,7 @@
  */
 import { queryLoopEntries } from "./loop-store.js";
 import { CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE, verifySelfEvaluation } from "./verification-gate.js";
-import { entryRound } from "./token-utils.js";
+import { entryRound, isRecord } from "./token-utils.js";
 import { effectiveSuccess } from "./self-eval.js";
 import { decodeCommittedRound } from "./committed-round.js";
 import { makeRoundId } from "./round-transaction.js";
@@ -73,7 +73,7 @@ export class RoundCoordinator {
             ]
             : [];
         // ── 2. Verification gate ────────────────────────────────────────────
-        const verifyResult = verifySelfEvaluation(selfEval, currentRound, vaultEntries, lastSelfEval ?? null, evidenceSnapshots ?? [], input.backtrackSkippedFiles ?? [], input.backtrackTargetGitHead,
+        const verifyResult = verifySelfEvaluation(selfEval, currentRound, vaultEntries, lastSelfEval ?? null, evidenceSnapshots ?? [], input.backtrackSkippedFiles ?? [], input.backtrackSkippedFingerprints ?? {}, input.backtrackTargetGitHead,
         // v3.7.1: gate records live under the gate: prefix — outside the round
         // entries above — and are passed separately to the gate check.
         this.store
@@ -94,7 +94,7 @@ export class RoundCoordinator {
         // transaction reaches enforcement with a fully extracted self-evaluation.
         // The old v2.5 "heuristic partial enforcement" plumbing (extractionSucceeded
         // flag, enforcement skipEvidenceRules mode) was removed as unreachable.
-        const enforceResult = enforceRound(selfEval, verifyResult, currentRound, vaultEntries, consecutiveRejections, driftClarificationStreak);
+        const enforceResult = enforceRound(selfEval, verifyResult, currentRound, vaultEntries, consecutiveRejections, driftClarificationStreak, input.lastRejectionCheck ?? "");
         if (enforceResult.action === "reject") {
             const newRejections = consecutiveRejections + 1;
             const rejectionPrompt = buildRejectionPrompt(currentRound, task, enforceResult, verificationFlags);
@@ -183,6 +183,11 @@ export class RoundCoordinator {
             }
             // v2.13: Collect files changed in skipped rounds for the restore prompt
             const skippedFiles = [];
+            // M3 (v3.7.x): each skipped file's git fingerprint at its failed round.
+            // Recorded from the round's own after-evidence (machine data, not the
+            // agent's report); later rounds overwrite earlier ones so the map holds
+            // the LAST failed state of every file.
+            const skippedFingerprints = {};
             // v3.7.1: Recovery Brief facts — one approach and the falsified
             // assumptions per rolled-back round, from COMMITTED rounds above the
             // restore point (rejected attempts are not durable history and never
@@ -202,9 +207,17 @@ export class RoundCoordinator {
                     const files = Array.isArray(ev.files_changed)
                         ? ev.files_changed.filter((f) => typeof f === "string")
                         : [];
+                    const git = view?.afterEvidence.find((snapshot) => snapshot.provider === "git" &&
+                        isRecord(snapshot.data) && isRecord(snapshot.data.fingerprints));
+                    const gitFingerprints = git
+                        ? git.data.fingerprints
+                        : null;
                     for (const f of files) {
                         if (!skippedFiles.includes(f))
                             skippedFiles.push(f);
+                        const fp = gitFingerprints?.[f];
+                        if (typeof fp === "string")
+                            skippedFingerprints[f] = fp;
                     }
                 }
                 const summary = evaluation?.output_summary ?? "";
@@ -255,6 +268,7 @@ export class RoundCoordinator {
                     ? restorePoint.skippedDiscoveries
                     : [],
                 backtrackSkippedFiles: skippedFiles,
+                backtrackSkippedFingerprints: skippedFingerprints,
                 backtrackTargetGitHead: targetGitHead ?? undefined,
                 backtrackTriggerRule: enforceResult.check,
                 backtrackFailedRounds: failedRounds,

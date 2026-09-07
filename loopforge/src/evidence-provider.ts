@@ -16,6 +16,7 @@ import {
   execFileSync,
 } from "node:child_process";
 import { isAbsolute, relative, resolve, sep } from "node:path";
+import { isRecord } from "./token-utils.js";
 import { containInWorkspace } from "./workspace.js";
 import { getPolicy } from "./policy.js";
 import type { CommandEvidencePolicy } from "./policy.js";
@@ -47,6 +48,8 @@ export interface EvidenceCaptureContext {
   timeoutMs: number;
   loopId?: string;
   phase: "before" | "after";
+  /** Workspace root override (tests capture against temp repos). */
+  cwd?: string;
 }
 
 export type EvidenceCaptureResult =
@@ -87,6 +90,14 @@ export function unregisterEvidenceProvider(name: string): boolean {
 }
 
 // ── EvidenceCollector ──────────────────────────────────────────────────────
+
+/** L8: true when a command snapshot reports that the command hit its own
+ *  deadline (the CommandEvidenceProvider kills the child and records
+ *  status "timeout") rather than completing. */
+function isTimedOutSnapshot(snapshot: ProviderSnapshot): boolean {
+  if (!isRecord(snapshot.data)) return false;
+  return snapshot.data.kind === "command" && snapshot.data.status === "timeout";
+}
 
 /** Collects evidence from all configured providers (always async — the
  *  synchronous collect() was removed in v3.7).
@@ -158,7 +169,13 @@ export class EvidenceCollector {
           : await capture;
         const outcome = timedOut
           ? "timeout"
-          : snapshot ? "available" : "unavailable";
+          : snapshot
+            // L8: a command that hit its OWN deadline reports status
+            // "timeout" — count it as a timeout, not as available. Only the
+            // outer collector race previously produced "timeout", so the
+            // metric systematically undercounted command deadline hits.
+            ? isTimedOutSnapshot(snapshot) ? "timeout" : "available"
+            : "unavailable";
         policyMetrics.recordEvidence(
           provider.name,
           outcome,
@@ -295,7 +312,11 @@ export class CommandEvidenceProvider implements EvidenceProvider {
       return Promise.resolve(null);
     }
     const startedAt = Date.now();
-    const cap = Math.max(0, Math.min(20_000, this.config.max_output_chars));
+    // L8: honor the CONFIGURED output cap. The old Math.min(20_000, ...)
+    // silently clamped every larger configured value — a policy that says
+    // max_output_chars: 50000 quietly retained only 20k. (The constructor
+    // already defaults the cap to 20_000 when unset.)
+    const cap = Math.max(0, this.config.max_output_chars);
     const timeoutMs = Math.max(
       1,
       Math.min(this.config.timeout_ms, context?.timeoutMs || this.config.timeout_ms),
@@ -469,12 +490,20 @@ export interface GitFileState {
 export async function captureGitFileStateAsync(
   signal?: AbortSignal,
   timeoutMs?: number,
+  /** Workspace root; injectable so tests can capture against a temp repo.
+   *  Defaults to the process cwd, matching the evidence providers. */
+  cwd = process.cwd(),
 ): Promise<GitFileState | null> {
   const timeout = timeoutMs ?? 15000;
 
   const runGit = (args: readonly string[]): Promise<string> => {
     return new Promise((resolve, reject) => {
-      const child = execFile("git", [...args], {
+      // M1: core.quotePath=false — git otherwise octal-escapes every path
+      // with bytes >= 0x80 (Chinese and other non-ASCII filenames become
+      // "\346\226\207..."). Escaped names can't be stat/hash'd, so content
+      // changes to such files were invisible to the evidence fingerprints.
+      const child = execFile("git", ["-c", "core.quotePath=false", ...args], {
+        cwd,
         encoding: "utf-8" as const,
         timeout,
         signal,
@@ -526,7 +555,12 @@ export class GitEvidenceProvider implements EvidenceProvider {
   readonly name = "git";
 
   capture(context?: EvidenceCaptureContext): Promise<ProviderSnapshot | null> {
-    return captureGitFileStateAsync(context?.signal, context?.timeoutMs).then(
+    const workspace = context?.cwd ?? process.cwd();
+    return captureGitFileStateAsync(
+      context?.signal,
+      context?.timeoutMs,
+      workspace,
+    ).then(
       (state: GitFileState | null): ProviderSnapshot | null => {
         if (!state) return null;
         const files = [...new Set([
@@ -534,11 +568,15 @@ export class GitEvidenceProvider implements EvidenceProvider {
         ...state.staged,
         ...state.untracked,
       ])].sort();
+      // v3.7.1: paths from git are workspace-relative; the capture runs with
+      // the workspace as cwd, so relative stat/read resolve there naturally.
+      // An injectable cwd (tests) must resolve explicitly.
       const fingerprints: Record<string, string> = {};
       for (const file of files) {
         try {
-          const stat = statSync(file);
-          const hash = createHash("sha256").update(readFileSync(file)).digest("hex");
+          const target = isAbsolute(file) ? file : resolve(workspace, file);
+          const stat = statSync(target);
+          const hash = createHash("sha256").update(readFileSync(target)).digest("hex");
           fingerprints[file] = `${stat.mode}:${hash}`;
         } catch {
           // Deleted files are evidence too.  A stable sentinel lets the diff
@@ -691,6 +729,19 @@ export async function runBacktrackAutoRestore(
   steps.push(
     `stash: ${workspaceWasClean ? "clean (nothing to stash)" : stash.ok ? "ok" : `failed — ${stash.out.trim()}`}`,
   );
+  // L6 (v3.7.x): a failed stash must abort the restore. The contract above
+  // says every uncommitted change is preserved in a stash, NEVER destroyed —
+  // `reset --hard` after a stash failure would destroy exactly the changes
+  // the stash was meant to save (failed-round work AND any unrelated user
+  // edits). The verification gate then reports the workspace as unrestored
+  // and the backtrack prompt's manual-restore instructions take over.
+  if (!workspaceWasClean && !stash.ok) {
+    return {
+      ok: false,
+      detail: steps.join("; ") +
+        "; reset --hard SKIPPED — uncommitted changes would be destroyed",
+    };
+  }
   if (gitHead) {
     const reset = await run(["reset", "--hard", gitHead]);
     steps.push(

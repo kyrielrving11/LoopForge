@@ -143,6 +143,9 @@ export declare function verifySelfEvaluation(selfEval: SelfEvaluation, currentRo
  *  files_changed overlaps significantly with these, the workspace
  *  was not properly restored before working. */
 backtrackSkippedFiles?: string[],
+/** M3 (v3.7.x): skipped-file git fingerprints at their failed rounds —
+ *  machine proof of "untouched since the rollback" for the restore check. */
+backtrackSkippedFingerprints?: Record<string, string>,
 /** v2.12: Git HEAD commit of the backtrack restore point. When set, the
  *  current git snapshot must sit at this commit — otherwise the workspace
  *  was not restored and the round cannot be accepted. */

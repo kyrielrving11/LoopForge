@@ -416,8 +416,11 @@ function flatStateSections(state) {
         // the vault, replay, and the counts line below.
         const cap = getPolicy().evolution.max_active_subgoals;
         const view = activeSubGoalView(state.subGoals, cap);
+        // L8: the heading is emitted whenever sub-goals exist — with every
+        // sub-goal terminal (0 active rows) the counts line must still live
+        // under its own section instead of leaking into the previous one.
+        lines.push("## Sub-Goal Dashboard", "");
         if (view.active.length > 0) {
-            lines.push("## Sub-Goal Dashboard", "");
             for (const sg of view.active) {
                 const statusIcon = sg.status === "in_progress" ? "🔄" :
                     sg.status === "blocked" ? "🚫" : "⏳";
@@ -448,13 +451,21 @@ function flatStateSections(state) {
         lines.push("## External Context", "", state.externalContext, "");
     }
     // Split the flat markdown into titled sections for tier grouping. Every
-    // builder above emits `## <Title>` headings over their content.
+    // builder above emits `## <Title>` headings over their content — but only
+    // the KNOWN section titles are headings. Free-text bodies (objective,
+    // external context, milestone outcomes) may contain their own markdown
+    // lines starting with "## "; splitting on any such line would cut the
+    // body into a phantom section and re-tier everything that follows.
+    const knownSectionTitles = new Set([
+        ...Object.keys(STATE_SECTION_TIER),
+        "Recovery Brief",
+    ]);
     const sections = [];
     let current = null;
     let inBody = false;
     for (const line of lines) {
         const heading = /^## (.+)$/.exec(line);
-        if (heading) {
+        if (heading && knownSectionTitles.has(heading[1])) {
             current = { title: heading[1], body: [] };
             sections.push(current);
             inBody = false;
@@ -510,7 +521,7 @@ derived) {
         schemaVersion: CANONICAL_STATE_SCHEMA_VERSION,
         loopId: response.loop_id || request.loop_id,
         round: response.round || request.round,
-        maxRounds: request.max_rounds ?? 20,
+        maxRounds: request.max_rounds ?? getPolicy().engine.max_rounds,
         goalId: response.goal_id,
         objective: objective?.objective || request.task,
         objectiveVersion: objective?.version ?? 1,

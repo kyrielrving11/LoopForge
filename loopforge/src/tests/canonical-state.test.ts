@@ -172,9 +172,9 @@ describe("createCanonicalLoopState", () => {
     assert.equal(state.maxRounds, 50);
   });
 
-  it("defaults maxRounds to 20", () => {
+  it("defaults maxRounds to the policy default (200)", () => {
     const state = createCanonicalLoopState(request({ max_rounds: undefined }), response(), "test.md");
-    assert.equal(state.maxRounds, 20);
+    assert.equal(state.maxRounds, 200);
   });
 
   it("propagates verification flags", () => {

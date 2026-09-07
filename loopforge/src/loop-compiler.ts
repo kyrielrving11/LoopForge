@@ -236,9 +236,16 @@ function evolveObjective(
   let version = current.version ?? 1;
   if (last?.objective_refinement?.trim()) {
     const refinement = last.objective_refinement.trim();
-    history.push(refinement);
-    objective = `${objective}\nRefinement: ${refinement}`;
-    version++;
+    // M5: fold each refinement exactly once per persisted objective state.
+    // A retry recompiles the same round against the same committed
+    // last_round_result; without this guard every retry attempt re-appends
+    // the refinement and inflates the version — the objective text and the
+    // state file grew "Refinement: X" once per attempt.
+    if (!history.includes(refinement)) {
+      history.push(refinement);
+      objective = `${objective}\nRefinement: ${refinement}`;
+      version++;
+    }
   }
   const revisions = new Map(
     (last?.revised_success_criteria ?? []).map((item) => [item.old, item.new]),
@@ -1470,7 +1477,13 @@ export function compileLoop(
     warnings,
   });
   const policy = getPolicy();
-  const statePath = `${policy.state_file.directory}/${request.loop_id}-state.md`;
+  // L7 (v3.7.x): the state-file path is empty when the file is disabled —
+  // prompts must never point at (or collapse content behind) a file that
+  // writeStateFile will not create. An empty path propagates into the
+  // assembler's pointer lines and the L1 collapse gate below.
+  const statePath = policy.state_file.enabled
+    ? `${policy.state_file.directory}/${request.loop_id}-state.md`
+    : "";
   const state = createCanonicalLoopState(request, response, statePath, {
     roundStats,
     machineStatus,
@@ -1500,7 +1513,10 @@ export function compileLoop(
   // v2.8: L2 pointer mode — when enabled, skip the monolithic markdown blob.
   // Structured L2 sections (milestones, sub-goals, trust, progress) still
   // render. The state file on disk is the durable source of truth.
-  const l2Pointer = policy.prompt.l2_pointer_enabled && decision.level === "l2";
+  // L7: pointer mode REQUIRES the file — with state_file disabled it would
+  // silently drop the full state from L2 prompts and point at nothing.
+  const l2Pointer = policy.state_file.enabled &&
+    policy.prompt.l2_pointer_enabled && decision.level === "l2";
 
   const artifact = assemblePromptArtifact({
     state,

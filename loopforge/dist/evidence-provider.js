@@ -10,7 +10,8 @@
 import { createHash } from "node:crypto";
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { spawn, execFile, } from "node:child_process";
-import { relative, resolve, sep } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
+import { isRecord } from "./token-utils.js";
 import { containInWorkspace } from "./workspace.js";
 import { getPolicy } from "./policy.js";
 import { logEvent } from "./observability.js";
@@ -28,6 +29,14 @@ export function unregisterEvidenceProvider(name) {
     return providerFactories.delete(name);
 }
 // ── EvidenceCollector ──────────────────────────────────────────────────────
+/** L8: true when a command snapshot reports that the command hit its own
+ *  deadline (the CommandEvidenceProvider kills the child and records
+ *  status "timeout") rather than completing. */
+function isTimedOutSnapshot(snapshot) {
+    if (!isRecord(snapshot.data))
+        return false;
+    return snapshot.data.kind === "command" && snapshot.data.status === "timeout";
+}
 /** Collects evidence from all configured providers (always async — the
  *  synchronous collect() was removed in v3.7).
  *
@@ -99,7 +108,13 @@ export class EvidenceCollector {
                     : await capture;
                 const outcome = timedOut
                     ? "timeout"
-                    : snapshot ? "available" : "unavailable";
+                    : snapshot
+                        // L8: a command that hit its OWN deadline reports status
+                        // "timeout" — count it as a timeout, not as available. Only the
+                        // outer collector race previously produced "timeout", so the
+                        // metric systematically undercounted command deadline hits.
+                        ? isTimedOutSnapshot(snapshot) ? "timeout" : "available"
+                        : "unavailable";
                 policyMetrics.recordEvidence(provider.name, outcome, Date.now() - startedAt, options.loopId);
                 if (timedOut) {
                     logEvent("evidence_provider_timeout", { provider: provider.name, timeoutMs });
@@ -200,7 +215,11 @@ export class CommandEvidenceProvider {
             return Promise.resolve(null);
         }
         const startedAt = Date.now();
-        const cap = Math.max(0, Math.min(20_000, this.config.max_output_chars));
+        // L8: honor the CONFIGURED output cap. The old Math.min(20_000, ...)
+        // silently clamped every larger configured value — a policy that says
+        // max_output_chars: 50000 quietly retained only 20k. (The constructor
+        // already defaults the cap to 20_000 when unset.)
+        const cap = Math.max(0, this.config.max_output_chars);
         const timeoutMs = Math.max(1, Math.min(this.config.timeout_ms, context?.timeoutMs || this.config.timeout_ms));
         let cwd;
         if (!this.config.executable) {
@@ -309,11 +328,19 @@ export class CommandEvidenceProvider {
  * Performance: wall-clock time is max(single-command), not sum(3).
  * On a normal repo (~200ms/command): ~200ms vs ~600ms sequential.
  * On Windows with antivirus (~4s/command): ~4s vs ~12s sequential. */
-export async function captureGitFileStateAsync(signal, timeoutMs) {
+export async function captureGitFileStateAsync(signal, timeoutMs,
+/** Workspace root; injectable so tests can capture against a temp repo.
+ *  Defaults to the process cwd, matching the evidence providers. */
+cwd = process.cwd()) {
     const timeout = timeoutMs ?? 15000;
     const runGit = (args) => {
         return new Promise((resolve, reject) => {
-            const child = execFile("git", [...args], {
+            // M1: core.quotePath=false — git otherwise octal-escapes every path
+            // with bytes >= 0x80 (Chinese and other non-ASCII filenames become
+            // "\346\226\207..."). Escaped names can't be stat/hash'd, so content
+            // changes to such files were invisible to the evidence fingerprints.
+            const child = execFile("git", ["-c", "core.quotePath=false", ...args], {
+                cwd,
                 encoding: "utf-8",
                 timeout,
                 signal,
@@ -363,7 +390,8 @@ export async function captureGitFileStateAsync(signal, timeoutMs) {
 export class GitEvidenceProvider {
     name = "git";
     capture(context) {
-        return captureGitFileStateAsync(context?.signal, context?.timeoutMs).then((state) => {
+        const workspace = context?.cwd ?? process.cwd();
+        return captureGitFileStateAsync(context?.signal, context?.timeoutMs, workspace).then((state) => {
             if (!state)
                 return null;
             const files = [...new Set([
@@ -371,11 +399,15 @@ export class GitEvidenceProvider {
                     ...state.staged,
                     ...state.untracked,
                 ])].sort();
+            // v3.7.1: paths from git are workspace-relative; the capture runs with
+            // the workspace as cwd, so relative stat/read resolve there naturally.
+            // An injectable cwd (tests) must resolve explicitly.
             const fingerprints = {};
             for (const file of files) {
                 try {
-                    const stat = statSync(file);
-                    const hash = createHash("sha256").update(readFileSync(file)).digest("hex");
+                    const target = isAbsolute(file) ? file : resolve(workspace, file);
+                    const stat = statSync(target);
+                    const hash = createHash("sha256").update(readFileSync(target)).digest("hex");
                     fingerprints[file] = `${stat.mode}:${hash}`;
                 }
                 catch {
@@ -506,6 +538,19 @@ cwd = process.cwd()) {
     const stash = await run(["stash", "push", "-u", "-m", `loopforge-backtrack-round-${round}`]);
     const workspaceWasClean = stash.out.includes("No local changes");
     steps.push(`stash: ${workspaceWasClean ? "clean (nothing to stash)" : stash.ok ? "ok" : `failed — ${stash.out.trim()}`}`);
+    // L6 (v3.7.x): a failed stash must abort the restore. The contract above
+    // says every uncommitted change is preserved in a stash, NEVER destroyed —
+    // `reset --hard` after a stash failure would destroy exactly the changes
+    // the stash was meant to save (failed-round work AND any unrelated user
+    // edits). The verification gate then reports the workspace as unrestored
+    // and the backtrack prompt's manual-restore instructions take over.
+    if (!workspaceWasClean && !stash.ok) {
+        return {
+            ok: false,
+            detail: steps.join("; ") +
+                "; reset --hard SKIPPED — uncommitted changes would be destroyed",
+        };
+    }
     if (gitHead) {
         const reset = await run(["reset", "--hard", gitHead]);
         steps.push(`reset --hard ${gitHead.slice(0, 12)}: ${reset.ok ? "ok" : `failed — ${reset.out.trim()}`}`);

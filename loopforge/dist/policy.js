@@ -7,7 +7,7 @@ export const DEFAULT_POLICY = {
     version: "2",
     constraints: { retire_window: 3 },
     summary: { window: 5, health_check_interval: 1, milestone_interval: 20, max_milestones: 10, milestone_head_count: 3, milestone_tail_count: 3 },
-    engine: { stall_lookback_rounds: 3, max_rounds: 20, enforcement_escalation_enabled: true, backtrack_enabled: true, backtrack_max_depth: 3, backtrack_preserve_discoveries: true, drift_clarification_max_streak: 3, backtrack_auto_restore: false },
+    engine: { stall_lookback_rounds: 3, max_rounds: 200, enforcement_escalation_enabled: true, backtrack_enabled: true, backtrack_max_depth: 3, backtrack_preserve_discoveries: true, drift_clarification_max_streak: 3, backtrack_auto_restore: false },
     prompt: {
         full_refresh_interval: 0,
         l0_max_chars: 3000,

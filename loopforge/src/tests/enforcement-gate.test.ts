@@ -1807,6 +1807,21 @@ describe("v3.3 — Round Contract enforcement", () => {
     assert.match(result.fix_instructions, /drift_clarification/);
   });
 
+  it("R-C2: reject guidance names the legal scope-extension channel (L3)", () => {
+    // The old guidance said "extend the scope in your re-declared
+    // round_contract" — unreachable while a contract is ACTIVE (replacement
+    // proposals are ignored as premature), so agents dead-ended into repeat
+    // rejects. The only legal channel is closing the contract first:
+    // outcome="blocked" + the extended scope as the next round's proposal.
+    const result = enforceRound(se({ success: false }), withFlag("round_scope_drift", "warn"), 3, [], 0);
+    assert.equal(result.action, "reject");
+    assert.ok(!result.fix_instructions.includes("re-declared round_contract"),
+      "the unreachable instruction must be gone");
+    assert.match(result.fix_instructions, /outcome: "blocked"/,
+      "the legal close-then-extend channel must be named");
+    assert.match(result.fix_instructions, /next round's round_contract/);
+  });
+
   it("R-C2: weak clarification (no anchors) rejects; repeated → terminate", () => {
     const weak = se({
       success: false,
@@ -1969,6 +1984,10 @@ describe("v3.7 — behavior-equality compatibility matrix", () => {
     vault?: VaultEntry[];
     strikes?: number;
     streak?: number;
+    /** L4: check that was rejected in the previous round (own-streak basis).
+     *  Defaults to the case's own check when strikes are set — the realistic
+     *  same-issue streak shape the coordinator maintains. */
+    lastCheck?: string;
     policy?: (p: LoopPolicy) => void;
     expected: "accept" | "reject" | "terminate" | "backtrack";
     check?: string;
@@ -2082,12 +2101,32 @@ describe("v3.7 — behavior-equality compatibility matrix", () => {
       policy: (p) => { p.engine.backtrack_enabled = false; },
       expected: "accept" },
 
+    // ── user_gate_unresolved (uniform ladder, own-streak from L4) ───────────
+    { name: "user gate first strike rejects",
+      flags: [flag("error", "user_gate_unresolved")], expected: "reject", check: "user_gate_unresolved" },
+    { name: "user gate cited after unrelated rejections rejects, not terminates",
+      // Two fake-success rejections preceded this round — a streak the gate
+      // check never earned must not convert its first occurrence into
+      // termination: the agent must get the approval instructions.
+      flags: [flag("error", "user_gate_unresolved")], strikes: 2,
+      lastCheck: "success_with_remaining_criteria",
+      expected: "reject", check: "user_gate_unresolved" },
+    { name: "user gate third own strike terminates",
+      flags: [flag("error", "user_gate_unresolved")], strikes: 2,
+      lastCheck: "user_gate_unresolved",
+      expected: "terminate", check: "user_gate_unresolved" },
+
     // ── warn-only flags never enforce ────────────────────────────────────────
     { name: "warn-only flag set accepts", flags: [flag("warn", "criteria_claims_unverified"), flag("warn", "contract_premature")], expected: "accept" },
   ];
 
   for (const c of CASES) {
     it(c.name, () => {
+      // L4: same-issue streaks are the realistic shape — the coordinator
+      // resets the counter when the rejection check changes, and uniform
+      // rows now escalate on their OWN streak (lastRejectionCheck basis).
+      const lastCheck = c.lastCheck ??
+        (c.strikes ? c.check ?? c.flags?.[0]?.check ?? "" : "");
       const run = (): "accept" | "reject" | "terminate" | "backtrack" => {
         const flags = c.flags ?? [];
         const verdict = flags.some((f) => f.severity === "error")
@@ -2101,6 +2140,7 @@ describe("v3.7 — behavior-equality compatibility matrix", () => {
           c.vault ?? [],
           c.strikes ?? 0,
           c.streak ?? 0,
+          lastCheck,
         );
         return result.action;
       };
@@ -2119,6 +2159,7 @@ describe("v3.7 — behavior-equality compatibility matrix", () => {
           c.vault ?? [],
           c.strikes ?? 0,
           c.streak ?? 0,
+          lastCheck,
         );
         assert.equal(result.check, c.check, `${c.name}: check id`);
       }

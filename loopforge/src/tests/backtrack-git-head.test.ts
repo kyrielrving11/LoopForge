@@ -113,7 +113,7 @@ describe("findBacktrackTargetGitHead", () => {
 describe("verification gate — backtrack git head restore", () => {
   it("no flag when the workspace head matches the restore commit", () => {
     const result = verifySelfEvaluation(
-      se(), 4, [], null, [gitSnapshot(HEAD)], [], HEAD,
+      se(), 4, [], null, [gitSnapshot(HEAD)], [], {}, HEAD,
     );
     assert.equal(result.verdict, "trusted");
     assert.equal(result.flags.length, 0);
@@ -121,7 +121,7 @@ describe("verification gate — backtrack git head restore", () => {
 
   it("error flag when the workspace head differs from the restore commit", () => {
     const result = verifySelfEvaluation(
-      se(), 4, [], null, [gitSnapshot(OTHER_HEAD)], [], HEAD,
+      se(), 4, [], null, [gitSnapshot(OTHER_HEAD)], [], {}, HEAD,
     );
     assert.equal(result.verdict, "contradicted");
     const flag = result.flags.find(
@@ -136,14 +136,14 @@ describe("verification gate — backtrack git head restore", () => {
   });
 
   it("no flag when git is unavailable (fail-open)", () => {
-    const result = verifySelfEvaluation(se(), 4, [], null, [], [], HEAD);
+    const result = verifySelfEvaluation(se(), 4, [], null, [], [], {}, HEAD);
     assert.equal(result.verdict, "trusted");
   });
 
   it("compares only the first 12 characters (short hash)", () => {
     const sameShort = HEAD.slice(0, 12) + "ffffffffffffffffffffffffffffffff";
     const result = verifySelfEvaluation(
-      se(), 4, [], null, [gitSnapshot(sameShort)], [], HEAD,
+      se(), 4, [], null, [gitSnapshot(sameShort)], [], {}, HEAD,
     );
     assert.equal(result.verdict, "trusted");
   });

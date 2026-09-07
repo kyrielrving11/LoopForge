@@ -30,6 +30,8 @@ export interface EvidenceCaptureContext {
     timeoutMs: number;
     loopId?: string;
     phase: "before" | "after";
+    /** Workspace root override (tests capture against temp repos). */
+    cwd?: string;
 }
 export type EvidenceCaptureResult = ProviderSnapshot | null | Promise<ProviderSnapshot | null>;
 export interface EvidenceProvider {
@@ -119,7 +121,10 @@ export interface GitFileState {
  * Performance: wall-clock time is max(single-command), not sum(3).
  * On a normal repo (~200ms/command): ~200ms vs ~600ms sequential.
  * On Windows with antivirus (~4s/command): ~4s vs ~12s sequential. */
-export declare function captureGitFileStateAsync(signal?: AbortSignal, timeoutMs?: number): Promise<GitFileState | null>;
+export declare function captureGitFileStateAsync(signal?: AbortSignal, timeoutMs?: number,
+/** Workspace root; injectable so tests can capture against a temp repo.
+ *  Defaults to the process cwd, matching the evidence providers. */
+cwd?: string): Promise<GitFileState | null>;
 /** v3.7: async capture only — the synchronous captureGitFileState() fallback
  *  was removed together with the sync lifecycle (prepareSync). */
 export declare class GitEvidenceProvider implements EvidenceProvider {

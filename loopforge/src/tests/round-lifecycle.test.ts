@@ -202,6 +202,7 @@ describe("RoundLifecycle — reconstructSession", async () => {
       lastRejectionCheck: "",
       driftClarificationStreak: 0,
       backtrackSkippedFiles: [],
+      backtrackSkippedFingerprints: {},
       evidenceBaseline: [],
       roundSnapshot: prepareRoundTransaction("loop-rt", 4, []),
       currentPrompt: "persisted prompt",
@@ -282,6 +283,7 @@ describe("RoundLifecycle — reconstructSession", async () => {
       lastRejectionCheck: "",
       driftClarificationStreak: 0,
       backtrackSkippedFiles: [],
+      backtrackSkippedFingerprints: {},
       evidenceBaseline: [],
     };
 
@@ -326,6 +328,7 @@ describe("RoundLifecycle — resume / crash window", async () => {
       lastRejectionCheck: "",
       driftClarificationStreak: 0,
       backtrackSkippedFiles: [],
+      backtrackSkippedFingerprints: {},
       evidenceBaseline: [],
       roundSnapshot: prepareRoundTransaction("loop-held", 2, []),
       currentPrompt: "HELD-PROMPT",
@@ -353,6 +356,7 @@ describe("RoundLifecycle — resume / crash window", async () => {
       lastRejectionCheck: "",
       driftClarificationStreak: 0,
       backtrackSkippedFiles: [],
+      backtrackSkippedFingerprints: {},
       evidenceBaseline: [],
     };
 
@@ -481,5 +485,9 @@ describe("RoundLifecycle — advance", async () => {
     assert.ok(resumed);
     assert.equal(resumed.round, 2, "resume must compile the next round, not skip it");
     assert.ok(resumed.prompt);
+    // L1: pause() persisted the trajectory AFTER round 1's success was
+    // pushed — the crash-window reconcile must not push it a second time.
+    assert.deepEqual(mgr2.get(sid)?.successTrajectory, [true],
+      "unpause must not duplicate round 1 in the success trajectory");
   });
 });

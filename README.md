@@ -160,10 +160,15 @@ and are never a source. The brief renders at the top of the backtrack prompt
 and in the state file's Recent tier for the duration of the recovery window;
 the redo commit removes it by construction.
 
-The verification gate then enforces the restore: the working tree must return
-to the restore point's git HEAD and files from the failed rounds must not
-reappear (`backtrack_workspace_not_restored` keeps rejecting the redo until
-the workspace is clean). When the rollback was triggered on a stalled Round
+The workspace restore itself is executed by the AGENT (the backtrack prompt
+provides the git commands); LoopForge never rewrites the working tree for it
+— the optional `backtrack_auto_restore` policy, default off, is the only
+exception and then only runs the explicitly configured stash/reset. What the
+verification gate "enforces" is the CHECK: on the next submission it compares
+machine evidence — the git HEAD must have returned to the restore point and
+the failed rounds' files must not reappear in `files_changed`
+(`backtrack_workspace_not_restored` keeps rejecting the redo until the
+workspace is actually clean). When the rollback was triggered on a stalled Round
 Contract, the sanctioned path forward is to close it with `outcome: "blocked"`
 and declare the revised contract in the same submission.
 

@@ -780,7 +780,7 @@ describe("enforcement-gate — v2.12 effective success", () => {
       constraint_violations: [],
       should_continue: true,
     });
-    const result = enforceRound(selfEval, { verdict: "trusted", flags: [] }, 2, [], 0);
+    const result = enforceRound(selfEval, makeVerificationResult({ verdict: "trusted" }), 2, [], 0);
     assert.equal(result.action, "accept");
   });
 });
@@ -1199,6 +1199,29 @@ describe("v3.3 — progress stall exculpatory machine cross-check", () => {
     assert.equal(result!.action, "accept", "git motion exculpates the delta-based stall");
   });
 
+  it("v3.8.1: a machine-backed completion is not a stall, however flat the window", () => {
+    // The closing round of a loop often changes no files — it runs the
+    // verification and declares success. That is finishing, not churning, and
+    // the machine is the one saying so: `machineBackedSuccess` comes from the
+    // gate's own evidence status (a passed after-phase command the runtime
+    // observed). It replaces the old self-reported `>= 0.95` guard, which let
+    // the agent's own number decide whether the loop could end.
+    const entries = [
+      machineRound(1, 0.30, []),
+      machineRound(2, 0.30, []),
+      machineRound(3, 0.30, []),
+    ];
+    const backed = makeVerificationResult({ verdict: "trusted", machineBackedSuccess: true });
+    const accepted = enforceRound(se({ success: true }), backed, 4, entries, 0);
+    assert.equal(accepted.action, "accept",
+      "a machine-verified round must be able to close the loop");
+
+    // Without the machine fact the same window still stalls.
+    const stalled = enforceRound(se({ success: false }), trusted(), 4, entries, 0);
+    assert.equal(stalled.action, "reject");
+    assert.equal(stalled.check, "progress_stall");
+  });
+
   it("v3.6: a newly completed criterion does NOT exculpate the stall (git motion only)", () => {
     // Self-reported criteria completions never buy a machine verdict — only
     // observed git motion can veto the delta-based stall.
@@ -1212,7 +1235,7 @@ describe("v3.3 — progress stall exculpatory machine cross-check", () => {
     assert.equal(result!.check, "progress_stall");
   });
 
-  it("R4 reason annotates the missing machine signal when git is flat", () => {
+  it("R4 reason states the machine signal when git is flat", () => {
     const entries = [
       machineRound(1, 0.30, []),
       machineRound(2, 0.31, []),
@@ -1221,10 +1244,11 @@ describe("v3.3 — progress stall exculpatory machine cross-check", () => {
     const result = enforceRound(se({ success: false }), trusted(), 4, entries, 0);
     assert.equal(result!.action, "reject");
     assert.equal(result!.check, "progress_stall");
-    assert.match(
-      result!.reason,
-      /no machine-observed git motion in rounds 1–3/,
-    );
+    // v3.8.1: the machine series decides when it is observable, so the reason
+    // states the machine fact directly. The old wording appended it as an
+    // annotation to a self-report-derived verdict; here the verdict IS the
+    // machine observation (the rising self-report does not enter it).
+    assert.match(result!.reason, /no machine-observed changes in the last 3 rounds/);
   });
 
   it("v3.6: R5 flatline is NOT excluded by a criterion completion over the breaker window", () => {
@@ -1327,12 +1351,40 @@ describe("v3.8 — Round Contract item enforcement", () => {
   });
 
   it("repeated verification debt terminates as incomplete", () => {
+    // v3.8.1: the streak must belong to THIS check — the same rule every
+    // uniform row applies. An unrelated streak is covered below.
     const contract = itemContract();
     const result = enforceRound(se({ success: false }), debtFlag(), 4, [
       declaredRound(contract), priorDebt(contract, 2), priorDebt(contract, 3),
-    ], 2);
+    ], 2, "contract_items_unverified");
     assert.equal(result.action, "terminate");
     assert.equal(result.stopReason, "incomplete");
+  });
+
+  it("v3.8.1: an unrelated rejection streak cannot terminate verification debt", () => {
+    // `consecutiveRejections` is reset whenever the check changes, so it only
+    // measures one check's streak. Reading the bare counter let a streak
+    // earned by a DIFFERENT check turn this row's FIRST appearance into a
+    // termination as `incomplete`.
+    const contract = itemContract();
+    const result = enforceRound(se({ success: false }), debtFlag(), 4, [
+      declaredRound(contract), priorDebt(contract, 2), priorDebt(contract, 3),
+    ], 2, "required_command_failed");
+    assert.equal(result.action, "reject",
+      "the first appearance of this check must reject, not terminate");
+    assert.equal(result.check, "contract_items_unverified");
+  });
+
+  it("v3.8.1: the escalation notice is appended exactly once", () => {
+    // The handler owns this row's ladder; the uniform block used to apply the
+    // ladder again, so one fix_instructions carried the notice twice.
+    const contract = itemContract();
+    const result = enforceRound(se({ success: false }), debtFlag(), 4, [
+      declaredRound(contract), priorDebt(contract, 2), priorDebt(contract, 3),
+    ], 1, "contract_items_unverified");
+    assert.equal(result.action, "reject");
+    const appearances = result.fix_instructions.split("Seek Human Guidance").length - 1;
+    assert.equal(appearances, 1, "the escalation notice must not be duplicated");
   });
 
   it("scope drift rejects even without an explanation (v3.8: machine fact)", () => {

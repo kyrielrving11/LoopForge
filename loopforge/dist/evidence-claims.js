@@ -14,7 +14,7 @@
  *  - downgraded to `contradicted` when error-level verification flags say
  *    the machine contradicted the claim.
  */
-import { derivationRounds, machineEvidenceForRound } from "./committed-round.js";
+import { machineEvidenceForRound, readOnlyRounds } from "./committed-round.js";
 import { isPassedAfterObservation } from "./evidence-provider.js";
 import { claimedMetCriteria } from "./self-eval.js";
 /** Contradicting error flags that invalidate agent claims. */
@@ -82,7 +82,7 @@ export function rederiveClaimViewWithFlags(selfEval, evidenceSnapshots, flags) {
 /** Files actually changed in a committed round (git provider, after evidence
  *  preferred). Returns null when the round has no observable git snapshot. */
 export function resolveRoundFiles(vaultEntries, loopId, round) {
-    const committed = derivationRounds(vaultEntries)
+    const committed = readOnlyRounds(vaultEntries)
         .find((view) => view.loopId === loopId && view.round === round);
     if (!committed)
         return null;
@@ -97,7 +97,7 @@ export function resolveRoundFiles(vaultEntries, loopId, round) {
  *  know the objective; this returns the raw verified targets. */
 export function listVerifiedClaims(vaultEntries, loopId) {
     const verified = new Set();
-    for (const round of derivationRounds(vaultEntries)) {
+    for (const round of readOnlyRounds(vaultEntries)) {
         if (round.loopId !== loopId || !round.evaluation)
             continue;
         const evidence = machineEvidenceForRound(round);

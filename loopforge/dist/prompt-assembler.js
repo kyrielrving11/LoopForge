@@ -652,7 +652,7 @@ function renderConfusionAlerts(points, fullDensity) {
 }
 /** Render the "Critical Context" section — items the model emphasized.
  *  Pulled from active constraints, discoveries, and blocking issues. */
-function renderCriticalContext(emphasized, state) {
+function renderCriticalContext(emphasized) {
     if (emphasized.length === 0)
         return "";
     const lines = [
@@ -747,7 +747,6 @@ export function assemblePromptArtifact(input) {
     // ── v2.9: Prompt Requests — model-expressed information needs ──────────
     const pr = input.promptRequests;
     const levelIsL0 = input.level === "l0";
-    const levelIsL1 = input.level === "l1";
     const levelIsL2 = input.level === "l2";
     // Confusion alerts: L1/L2 only, rendered at the top (before mandatory sections)
     const confusionText = (!levelIsL0 && pr?.confusion_points?.length)
@@ -786,7 +785,7 @@ export function assemblePromptArtifact(input) {
         }
         : input.state;
     const sections = selectSections({ ...input, state: stateForSections });
-    const criticalContextText = renderCriticalContext(emphasized, input.state);
+    const criticalContextText = renderCriticalContext(emphasized);
     // v3.8.1: no presentation snapshot. The artifact records what THIS prompt
     // rendered (level, hashes, round identity, the sections it emitted) and
     // nothing about what a LATER prompt should do differently — a prompt's

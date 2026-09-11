@@ -30,6 +30,86 @@ function required(name: string): string[] {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// v3.8.1: fidelity invariants — the schema must not lose type information
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** Every property name a def declares, following `allOf` `$ref` branches —
+ *  how a concrete type states what it inherits. */
+function resolvedPropertyNames(name: string, seen = new Set<string>()): string[] {
+  if (seen.has(name)) return [];
+  seen.add(name);
+  const node = def(name);
+  const out = Object.keys((node.properties ?? {}) as Record<string, unknown>);
+  for (const branch of (node.allOf ?? []) as Array<Record<string, unknown>>) {
+    const ref = typeof branch.$ref === "string" ? branch.$ref : "";
+    if (ref.startsWith("#/$defs/")) {
+      out.push(...resolvedPropertyNames(ref.slice("#/$defs/".length), seen));
+    }
+    if (branch.properties) out.push(...Object.keys(branch.properties as Record<string, unknown>));
+  }
+  return out;
+}
+
+describe("v3.8.1 — schema fidelity", () => {
+  it("an extended interface publishes every inherited field", () => {
+    // `extends` used to be ignored entirely: GitObservation lost
+    // schemaVersion/providerId/phase/startedAt/finishedAt/status/files — the
+    // fields EVERY observation must carry — and MachineObservationBase was
+    // referenced by nothing.
+    const inherited = Object.keys(props("MachineObservationBase"));
+    assert.ok(inherited.length >= 7, `base declares the shared fields: ${inherited.join(", ")}`);
+    for (const concrete of ["GitObservation", "CommandObservation", "CustomObservation"]) {
+      const names = resolvedPropertyNames(concrete);
+      for (const field of inherited) {
+        assert.ok(names.includes(field),
+          `${concrete} must publish the inherited field "${field}"`);
+      }
+      const refs = ((def(concrete).allOf ?? []) as Array<Record<string, unknown>>)
+        .map((branch) => branch.$ref).filter(Boolean);
+      assert.ok(refs.includes("#/$defs/MachineObservationBase"),
+        `${concrete} must compose the base definition, not copy it`);
+    }
+  });
+
+  it("an inline object type publishes an object, not a string", () => {
+    // These used to fall through to the `{ type: "string" }` catch-all — the
+    // projection and the reported test counts were published as strings while
+    // the runtime sends objects.
+    const focus = props("LoopProjection").focus as Record<string, unknown>;
+    const focusObject = ((focus.anyOf ?? []) as Array<Record<string, unknown>>)
+      .find((branch) => branch.type === "object");
+    assert.ok(focusObject, "focus is an object (or null)");
+    assert.deepEqual(
+      Object.keys(focusObject!.properties as Record<string, unknown>).sort(),
+      ["since_round", "what"],
+    );
+
+    const todoItem = (props("LoopProjection").todo as Record<string, unknown>).items as Record<string, unknown>;
+    assert.equal(todoItem.type, "object", "todo items are objects");
+    assert.ok(Object.keys(todoItem.properties as Record<string, unknown>).includes("priority"));
+
+    const reported = props("ExecutionReport").tests_reported as Record<string, unknown>;
+    const reportedObject = ((reported.anyOf ?? []) as Array<Record<string, unknown>>)
+      .find((branch) => branch.type === "object");
+    assert.ok(reportedObject, "tests_reported is an object (or null)");
+    assert.deepEqual(
+      Object.keys(reportedObject!.properties as Record<string, unknown>).sort(),
+      ["failed", "passed", "skipped"],
+    );
+  });
+
+  it("a `typeof CONST` is published as the constant it is", () => {
+    // The envelope version is a HARD break at the runtime: a client generated
+    // from a schema that called it a string would serialize a String and have
+    // every round rejected. The source keeps ONE version source; the schema
+    // must read it rather than guess.
+    const version = props("PromptArtifact").schemaVersion;
+    assert.equal(version.type, "number", "the artifact schema version is a number");
+    assert.equal(version.const, 2);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Top-level structure
 // ═══════════════════════════════════════════════════════════════════════════
 

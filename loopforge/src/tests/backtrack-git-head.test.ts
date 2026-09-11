@@ -5,7 +5,8 @@
 import { describe, it } from "node:test";
 import { criterionClaims } from "./_helpers.js";
 import assert from "node:assert/strict";
-import { makeExecutionReport, makeSelfEvaluation } from "../protocol.js";
+import {
+  makeVerificationResult, makeExecutionReport, makeSelfEvaluation } from "../protocol.js";
 import type { SelfEvaluation, VerificationFlag } from "../protocol.js";
 import type { GitObservation, MachineObservation } from "../protocol.js";
 import type { VaultEntry } from "../loop-store.js";
@@ -193,7 +194,7 @@ describe("buildBacktrackPrompt — git head", () => {
 
 describe("enforcement R9 — backtrack workspace not restored", () => {
   function verifyResult(flags: VerificationFlag[]) {
-    return { verdict: "contradicted" as const, flags };
+    return makeVerificationResult({ verdict: "contradicted", flags });
   }
 
   it("returns backtrack when the flag is error-level and backtrack is enabled", () => {

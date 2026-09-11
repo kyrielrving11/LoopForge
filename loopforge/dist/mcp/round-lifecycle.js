@@ -85,9 +85,9 @@ export function buildLoopRequest(session, lastEval, verificationFlags) {
             // round's Current Task. v3.4: intentionally NOT forwarded — the
             // submission's round_contract is a PROPOSAL for the next round, and
             // the ACTIVE contract is derived from committed rounds at compile time
-            // (loop-compiler.deriveActiveContract), which also keeps it correct on
-            // retry / resume / unpause / backtrack compiles that have no
-            // last_round_result. Reading this field again would reintroduce the
+            // (`deriveRoundFacts` → `deriveActiveRoundContract`), which also keeps
+            // it correct on retry / resume / unpause / backtrack compiles that have
+            // no last_round_result. Reading this field again would reintroduce the
             // second source of truth the derivation replaced.
         });
     }

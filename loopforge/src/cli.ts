@@ -1,14 +1,15 @@
 #!/usr/bin/env node
 /** Unified LoopForge command line. */
 
-import { accessSync, constants, existsSync, realpathSync, statSync } from "node:fs";
+import { accessSync, constants, existsSync, statSync } from "node:fs";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { containInWorkspace } from "./workspace.js";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { initializeClient, type InitClient } from "./init.js";
 import { FileLoopStore, queryLoopEntries } from "./loop-store.js";
-import { getPolicy, validateLoopId, writeDefaultPolicy } from "./policy.js";
+import { getPolicy, validateLoopId, writeDefaultPolicy, DEFAULT_POLICY } from "./policy.js";
+import type { LoopPolicy } from "./policy.js";
 import { isProviderRegistered } from "./evidence-provider.js";
 import { buildExplain, renderExplain } from "./explain.js";
 import { McpServer } from "./mcp/server.js";
@@ -71,8 +72,26 @@ function ensureInsideWorkspace(configured: string): string {
 }
 
 function doctor(json: boolean): number {
-  const policy = getPolicy();
   const checks: Array<{ name: string; ok: boolean; required: boolean; detail: string }> = [];
+  // v3.8.1: loading the policy is itself a CHECK. It used to run first and
+  // throw, so `doctor --json` died on exactly the defect it exists to
+  // diagnose (a file that does not declare this schema version, or carries an
+  // unknown key) — README promised a policy-structure check and the one
+  // situation that needs it produced no report at all. The remaining checks
+  // run against the defaults so a broken policy file still yields a report.
+  let policy: LoopPolicy;
+  try {
+    policy = getPolicy();
+    checks.push({
+      name: "policy",
+      ok: true,
+      required: true,
+      detail: `schema version ${policy.version}, ${policy.evidence.commands.length} command(s)`,
+    });
+  } catch (error) {
+    checks.push({ name: "policy", ok: false, required: true, detail: String(error) });
+    policy = structuredClone(DEFAULT_POLICY);
+  }
   const nodeMajor = Number(process.versions.node.split(".")[0]);
   checks.push({
     name: "node",

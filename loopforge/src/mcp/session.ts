@@ -27,7 +27,6 @@ import type {
   ExternalContextProvider,
   LoopForgeResponse,
   LoopTerminalSink,
-  SelfEvaluation,
 } from "../protocol.js";
 import { buildLoopProjection } from "../loop-projection.js";
 import { deriveCognitiveFacts } from "../cognitive-facts.js";
@@ -36,11 +35,10 @@ import { listVerifiedClaims } from "../evidence-claims.js";
 import { buildAudit } from "../audit.js";
 import { buildExplain } from "../explain.js";
 import { CHECK_CONTRACT_ITEMS_UNVERIFIED } from "../verification-gate.js";
-import { derivationRounds } from "../committed-round.js";
+import { readOnlyRounds } from "../committed-round.js";
 import type { ActiveContractView } from "../round-contract.js";
 import { getPolicy, validateLoopId } from "../policy.js";
 import { isRecord } from "../token-utils.js";
-import { makeLoopCompileRequest } from "../protocol.js";
 import { ReplayBackend } from "../replay.js";
 import { FileLoopStore, queryLoopEntries } from "../loop-store.js";
 import type { LoopStore, VaultEntry } from "../loop-store.js";
@@ -837,7 +835,7 @@ export class SessionManager implements SessionRegistry {
     // from the same `deriveRoundFacts` the compile path calls, so the prompt
     // and the projection cannot tell different stories about what the machine
     // verified.
-    const rounds = derivationRounds(entries);
+    const rounds = readOnlyRounds(entries);
     const projection = buildLoopProjection(deriveCognitiveFacts({
       compileResponse,
       rounds,
@@ -882,7 +880,7 @@ export class SessionManager implements SessionRegistry {
     // Zero committed decisions → nothing to audit. Returning null lets the
     // tools layer report "no audit data" instead of the external auditor
     // solemnly passing a loop that never ran (or a mistyped loopId).
-    const hasCommittedDecision = derivationRounds(entries).length > 0;
+    const hasCommittedDecision = readOnlyRounds(entries).length > 0;
     if (!hasCommittedDecision) return null;
     const audit = buildAudit(loopId, entries, this.loopStore);
     return { ...audit };
@@ -937,7 +935,7 @@ export class SessionManager implements SessionRegistry {
     // still gets a view — with zeros — exactly as it did before.
     if (!context) return null;
     const entries = Array.isArray(context.results) ? context.results : [];
-    const views = derivationRounds(entries);
+    const views = readOnlyRounds(entries);
     const roundsWithUnverifiedItems = views.filter((view) =>
       view.verificationFlags.some(
         (flag) => flag.check === CHECK_CONTRACT_ITEMS_UNVERIFIED,

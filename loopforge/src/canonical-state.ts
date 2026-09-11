@@ -342,6 +342,13 @@ const STATE_SECTION_TIER: Record<string, StateTier> = {
   Blockers: "Current",
   "Sub-Goal Dashboard": "Current",
   "External Context": "Current",
+  // v3.8.1: the one-line phase position (the only fact the deleted Roadmap
+  // section carried that no other section renders). It is orientation for the
+  // NEXT round, so it belongs with the working-memory tier — and it must be
+  // listed here at all: an unlisted title is not a heading, so `## Phase` was
+  // absorbed into whatever section happened to precede it (its body even kept
+  // a raw `## ` line) and inherited that section's tier.
+  Phase: "Current",
   // Recent — this round's boundary facts (and, in a recovery window, the
   // derived Recovery Brief injected at the top of this tier).
   "Progress Dashboard": "Recent",

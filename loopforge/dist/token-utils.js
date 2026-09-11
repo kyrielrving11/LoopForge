@@ -48,6 +48,22 @@ export function deriveItemId(text) {
  *  references. v3.8 added the contract (rc-) and contract-item (rci-)
  *  namespaces. */
 export const STABLE_ID_RE = /^(c|cr|sg|rc|rci)-[a-f0-9]{8}$/;
+/** v2.11: Derive a stable criterion ID from its text hash (cr-XXXXXXXX).
+ *  Same hash strategy as SubGoal — deterministic across rounds.
+ *
+ *  v3.8.1: lives here (with the other id helpers) because the criterion fact
+ *  derivation and the compiler both need it; it used to sit in loop-compiler,
+ *  which would have made `round-facts.ts` ⇄ `loop-compiler.ts` an import
+ *  cycle. `loop-compiler.ts` re-exports it, so its public surface is
+ *  unchanged. */
+export function deriveCriterionId(text) {
+    return "cr-" + deriveItemId(text);
+}
+/** The cr-XXXXXXXX shape — the ONE predicate every criterion-reference reader
+ *  uses (round-contract.ts kept an inline copy before v3.8.1). */
+export function isCriterionId(ref) {
+    return /^cr-[a-f0-9]{8}$/.test(ref);
+}
 // ── v3.8: Contract identity (content-addressed, round-independent) ──────────
 /** Normalize one contract text field for identity purposes. */
 export function normalizeText(text) {

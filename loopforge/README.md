@@ -44,8 +44,8 @@ a round, entering either gate, or changing metrics.
 Valid submissions pass through evidence collection, a verification gate
 organized into four domains (evaluation consistency, evidence integrity, plan
 & contract, progress & recovery), and an enforcement gate driven by one
-ordered strategy table across four action classes (evidence contradiction,
-contract & scope, plan drift, progress recovery). Only an allowed round joins
+ordered strategy table — the row order is the priority, and each row names
+the check it reacts to plus its escalation ladder. Only an allowed round joins
 committed history. The shared internal `CommittedRoundView` gives Replay,
 Audit, Metrics, contracts, the compiler, and gate history one decoder and one
 filtering policy. It does not create another storage format.

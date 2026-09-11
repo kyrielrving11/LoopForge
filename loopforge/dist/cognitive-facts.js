@@ -5,7 +5,7 @@ const TODO_LIMIT = 10;
  *  item reducer, verified sub-goals, verification debt) lives with the bundle
  *  every consumer reads — one implementation, one history window. */
 export { deriveVerifiedSubGoals, deriveVerificationDebt } from "./round-facts.js";
-function deriveTodo(compileResponse, rounds, contractItemStatuses) {
+function deriveTodo(compileResponse, contractItemStatuses) {
     const candidates = [];
     const seen = new Set();
     const push = (item, reason, source, priority) => {
@@ -85,7 +85,7 @@ export function deriveCognitiveFacts(input) {
         focus: latestFocus
             ? { what: latestFocus.evaluation.output_summary.slice(0, 200), since_round: latestFocus.round }
             : null,
-        todo: deriveTodo(compileResponse, rounds, contractItemStatuses),
+        todo: deriveTodo(compileResponse, contractItemStatuses),
         phase: lastBoundary
             ? { current: lastBoundary.label, label: lastBoundary.label, boundaries }
             : null,

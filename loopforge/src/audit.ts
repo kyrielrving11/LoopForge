@@ -19,10 +19,9 @@ import { rederiveClaimViewWithFlags, listVerifiedClaims } from "./evidence-claim
 import type { VaultEntry } from "./loop-store.js";
 import { isRecord, entryRound } from "./token-utils.js";
 import {
-  derivationRounds,
-  decodeCommittedRound,
   legacyTransactionRounds,
   machineEvidenceForRound,
+  readOnlyRounds,
 } from "./committed-round.js";
 import { deriveRoundContractView } from "./round-contract.js";
 import type { ContractItemStatus } from "./protocol.js";
@@ -31,7 +30,7 @@ import { getPolicy } from "./policy.js";
 export interface AuditRound {
   round: number;
   outcome: string;
-  claims: Array<{ text: string; status: "verified" | "unverified" | "no_evidence" }>;
+  claims: Array<{ text: string; status: "verified" | "unverified" }>;
   checks: Array<{ check: string; severity: string; verdict: "failed" | "warn" | "info" }>;
   /** v3.8: the contract this round EXECUTED under and each item's status as of
    *  this round — the same derivation `explain` renders. */
@@ -106,10 +105,12 @@ export function buildAudit(
 ): AuditResult {
   const ordered = auditOrder(entries);
   // v3.8: the shared committed-round read model — ordering, dedup and rollback
-  // exclusion come from it, not from a private rule.
-  const views = derivationRounds(entries).filter((view) => view.loopId === loopId);
+  // exclusion come from it, not from a private rule. v3.8.1: the READ-ONLY
+  // window, which additionally applies the session frontier while a committed
+  // rollback directive is in effect, so a backtracked branch is not audited as
+  // this branch's history.
+  const views = readOnlyRounds(entries).filter((view) => view.loopId === loopId);
   const commands = getPolicy().evidence.commands ?? [];
-  const viewByRound = new Map(views.map((view) => [view.round, view] as const));
   // The executed contract per round, through the ONE derivation explain and
   // the live coordinator also call. Re-derived per round rather than walked
   // incrementally on purpose: a private incremental walker would be a second
@@ -127,23 +128,22 @@ export function buildAudit(
   }
 
   // ── Rounds: per-round claims + checks from committed snapshots ─────────
+  //
+  // v3.8.1: the list is built from the SAME window the contract axis below
+  // reads. Scanning the raw entries here applied a second, weaker history
+  // rule — no replacement of a round by a later record of the same logical
+  // round — so a superseded record was listed twice and could still flip the
+  // verdict to `contradicted`, while explain (which reads only the window)
+  // reported a different loop. Rollback exclusion comes from the window too.
   const rounds: AuditRound[] = [];
-  for (const entry of ordered) {
-    const taskId = String(entry.task_id ?? "");
-    if (!taskId.startsWith(`loop:${loopId}:r`) || !taskId.endsWith(":feedback")) continue;
-    const committed = decodeCommittedRound(entry);
-    if (!committed) continue;
-    // v2.14: rounds committed with action="backtrack" were rolled back —
-    // they are not part of the loop's final history. Counting them would
-    // inflate the round list and let their error flags flip the verdict.
-    if (committed.action === "backtrack") continue;
-    const round = entryRound(entry);
-    const outcome = committed.outcome ?? "unknown";
-    const claimView = committed.evaluation
+  for (const view of views) {
+    const round = view.round;
+    const outcome = view.outcome ?? "unknown";
+    const claimView = view.evaluation
       ? rederiveClaimViewWithFlags(
-          committed.evaluation,
-          machineEvidenceForRound(committed),
-          committed.verificationFlags,
+          view.evaluation,
+          machineEvidenceForRound(view),
+          view.verificationFlags,
         )
       : null;
     const executed = contractByRound.get(round);
@@ -156,7 +156,7 @@ export function buildAudit(
             status: claim.status === "verified" ? "verified" as const : "unverified" as const,
           }))
         : [],
-      checks: committed.verificationFlags.map((flag) => ({
+      checks: view.verificationFlags.map((flag) => ({
         check: flag.check,
         severity: flag.severity,
         verdict: flag.severity === "error" ? "failed" as const : flag.severity as "warn" | "info",

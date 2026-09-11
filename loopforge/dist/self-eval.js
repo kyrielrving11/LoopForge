@@ -14,6 +14,19 @@ function boundedStringArray(value, maxItems, maxChars) {
             .slice(0, maxItems)
         : [];
 }
+/** v3.8.1: the emerged-subtask intake bound — ONE constant, because the
+ *  sub-goal ids are derived by ORDINAL over this list. The strict submission
+ *  boundary builds the reference space the agent may transition from, and the
+ *  lenient normalizer builds the committed list every prompt compiles from;
+ *  bounding them differently let the boundary accept a transition to a
+ *  sub-goal the prompt could never carry, and the migration was then dropped
+ *  by the compile path without a word. */
+export const EMERGED_LIMITS = { items: 50, chars: 500 };
+/** THE emerged-list normalization. Both the boundary and the committed
+ *  evaluation call this, so the two sets cannot disagree. */
+export function boundedEmergedSubtasks(value) {
+    return boundedStringArray(value, EMERGED_LIMITS.items, EMERGED_LIMITS.chars);
+}
 function nonNegativeInteger(value) {
     return typeof value === "number" && Number.isFinite(value)
         ? Math.max(0, Math.trunc(value))
@@ -311,13 +324,11 @@ export function validateSubGoalUpdatesShape(raw) {
                 detail: `entry ${index} status must be one of in_progress | done | blocked | canceled`,
             });
         }
-        if (u.note !== undefined && typeof u.note !== "string") {
-            errors.push({
-                field: "subgoal_updates",
-                reason: "invalid_note",
-                detail: `entry ${index} note must be a string`,
-            });
-        }
+        // v3.8.1: `note` is deliberately NOT validated. protocol.ts documents it
+        // as "lenient — never validated" free text, and `parseSubGoalUpdates`
+        // drops a non-string note. Rejecting the WHOLE submission over a
+        // reporting annotation contradicted that boundary: it was the only
+        // lenient field that hard-rejected a round.
     });
     return errors;
 }
@@ -615,7 +626,7 @@ export function buildSelfEvaluation(raw) {
         should_continue: typeof raw.should_continue === "boolean" ? raw.should_continue : true,
         discovered_constraints: boundedStringArray(raw.discovered_constraints, 50, 500),
         objective_refinement: boundedString(raw.objective_refinement, 1000) ?? "",
-        emerged_subtasks: boundedStringArray(raw.emerged_subtasks, 50, 500),
+        emerged_subtasks: boundedEmergedSubtasks(raw.emerged_subtasks),
         execution_report: executionReport,
         retracted_constraints: retractedConstraints,
         revised_success_criteria: revisedCriteria,

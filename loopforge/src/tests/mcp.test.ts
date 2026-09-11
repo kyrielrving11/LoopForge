@@ -10,6 +10,10 @@ import { MemoryLoopStore, installTestCommandProvider, criterionClaims } from "./
 import { queryLoopEntries } from "../loop-store.js";
 import type { LoopSessionDocument } from "../loop-store.js";
 import { deriveSubGoalId } from "../subgoal-state.js";
+
+/** v3.8.1: the emerged intake cap (`EMERGED_LIMITS.items`). Spelled out here so
+ *  this regression test also compiles against the pre-fix source. */
+const EMERGED_CAP = 50;
 import { deriveContractItemIds } from "../token-utils.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1663,6 +1667,80 @@ describe("MCP — sub-goal persistence (v3.2.1)", async () => {
     });
     assert.equal(result.error, undefined,
       "same-round emergence + in_progress transition must be legal");
+  });
+
+  it("v3.8.1: a sub-goal past the emerged intake cap is unknown, not silently accepted", async () => {
+    // The boundary and the committed evaluation bound `emerged_subtasks` with
+    // ONE normalization, because the ids are derived by ORDINAL over the list.
+    // An unbound boundary accepted a transition to a sub-goal the compiled
+    // prompt never carried, and the compile path then dropped the migration
+    // without a word.
+    const start = await TOOL_HANDLERS.loopforge_start(mgr, { task: "Audit ERC20", maxRounds: 20 });
+    const started = mgr.get(String(start.sessionId));
+    assert.ok(started, "session must exist after start");
+    const descriptions = Array.from(
+      { length: EMERGED_CAP + 1 },
+      (_, index) => `emerged item ${index}`,
+    );
+    const beyondCap = descriptions[EMERGED_CAP]!;
+    const beyondId = deriveSubGoalId(
+      started!.loopId,
+      started!.currentRound,
+      EMERGED_CAP,
+      beyondCap,
+    );
+    const result = await TOOL_HANDLERS.loopforge_next(mgr, {
+      sessionId: start.sessionId,
+      roundId: start.roundId,
+      evaluation: {
+        success: false,
+        output_summary: "emerged more items than the intake carries",
+        should_continue: true,
+        constraint_violations: [],
+        emerged_subtasks: descriptions,
+        subgoal_updates: [{ id: beyondId, status: "in_progress" }],
+      },
+    });
+    assert.equal(result.error, "evaluation_invalid",
+      "a reference past the emerged cap must be rejected pre-advance");
+    const details = result.details as { subgoal_errors: Array<{ reason: string }> };
+    assert.equal(details.subgoal_errors[0]?.reason, "unknown_id");
+  });
+
+  it("v3.8.1: a non-string subgoal_updates note is lenient, not a rejected round", async () => {
+    // protocol.ts documents the note as "lenient — never validated" free text
+    // and parseSubGoalUpdates drops a non-string value. The shape validator
+    // used to reject the whole submission over it.
+    const start = await TOOL_HANDLERS.loopforge_start(mgr, { task: "Audit ERC20", maxRounds: 20 });
+    const started = mgr.get(String(start.sessionId));
+    assert.ok(started, "session must exist after start");
+    const loopId = started!.loopId;
+    const sgId = deriveSubGoalId(loopId, started!.currentRound, 0, "harden the withdraw path");
+    const result = await TOOL_HANDLERS.loopforge_next(mgr, {
+      sessionId: start.sessionId,
+      roundId: start.roundId,
+      evaluation: {
+        success: false,
+        output_summary: "reported a numeric note on a legal transition",
+        should_continue: true,
+        constraint_violations: [],
+        emerged_subtasks: ["harden the withdraw path"],
+        subgoal_updates: [{ id: sgId, status: "in_progress", note: 42 }],
+        execution_report: {
+          files_changed: ["src/withdraw.ts"],
+          tests_reported: { passed: 1, failed: 0, skipped: 0 },
+          criterion_claims: criterionClaims([], ["Complete the task"]),
+          progress_estimate: 0.3,
+        },
+      },
+    });
+    assert.equal(result.error, undefined, "a malformed note must not reject the round");
+    const feedback = queryLoopEntries(store, loopId, {
+      prefix: `loop:${loopId}:r1`,
+      feedbackOnly: true,
+    });
+    assert.deepEqual(feedback[0]?.subgoal_updates, [{ id: sgId, status: "in_progress" }],
+      "the unvalidated note is dropped, not persisted");
   });
 
   it("v3.7.1: an unapproved cited gate rejects the round; approval unblocks it", async () => {

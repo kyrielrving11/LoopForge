@@ -16,12 +16,11 @@
  */
 
 import type { VaultEntry } from "./loop-store.js";
-import { derivationRounds, machineEvidenceForRound } from "./committed-round.js";
+import { machineEvidenceForRound, readOnlyRounds } from "./committed-round.js";
 import type { MachineObservation } from "./protocol.js";
 import { isPassedAfterObservation } from "./evidence-provider.js";
 import { claimedMetCriteria } from "./self-eval.js";
 import type { SelfEvaluation, VerificationFlag } from "./protocol.js";
-import { isRecord } from "./token-utils.js";
 export interface DerivedClaim {
   /** Success criterion text as reported by the agent. */
   targetId: string;
@@ -122,7 +121,7 @@ export function resolveRoundFiles(
   loopId: string,
   round: number,
 ): string[] | null {
-  const committed = derivationRounds(vaultEntries)
+  const committed = readOnlyRounds(vaultEntries)
     .find((view) => view.loopId === loopId && view.round === round);
   if (!committed) return null;
   const evidence = machineEvidenceForRound(committed);
@@ -141,7 +140,7 @@ export function listVerifiedClaims(
   loopId: string,
 ): string[] {
   const verified = new Set<string>();
-  for (const round of derivationRounds(vaultEntries)) {
+  for (const round of readOnlyRounds(vaultEntries)) {
     if (round.loopId !== loopId || !round.evaluation) continue;
     const evidence = machineEvidenceForRound(round);
     const view = rederiveClaimViewWithFlags(

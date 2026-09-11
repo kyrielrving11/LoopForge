@@ -98,6 +98,12 @@ export declare class EvidenceCollector {
     /** Capture all providers concurrently with per-provider timeout isolation. */
     collectAsync(options?: EvidenceCollectOptions): Promise<MachineObservation[]>;
 }
+/** The workspace files a command's execution depends on, resolved
+ *  statically: the script it names on its own command line, plus package.json
+ *  when a package manager is what runs it. Exported for the pure-function
+ *  test — spawning a real package manager is not portable (a bare `npm`
+ *  cannot be spawned without a shell, and the runtime uses `shell: false`). */
+export declare function resolveEntrypointFiles(executable: string, args: string[], cwd: string): string[];
 /** Explicit, shell-free verification command. Disabled unless configured. */
 export declare class CommandEvidenceProvider implements EvidenceProvider {
     readonly name: string;

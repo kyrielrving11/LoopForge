@@ -20,6 +20,8 @@ import { resolve } from "node:path";
 interface SchemaNode {
   type?: string | string[];
   enum?: string[];
+  /** A pinned literal — how `typeof CONST` is published. */
+  const?: string | number | boolean;
   properties?: Record<string, SchemaNode>;
   required?: string[];
   items?: SchemaNode;
@@ -27,6 +29,9 @@ interface SchemaNode {
   $ref?: string;
   description?: string;
   anyOf?: SchemaNode[];
+  /** v3.8.1: how `extends` is expressed — the base definition plus the own
+   *  members, so an inherited field is never dropped from a concrete type. */
+  allOf?: SchemaNode[];
 }
 
 interface SchemaRoot extends SchemaNode {
@@ -114,14 +119,17 @@ function convertTypeNode(
     // Simple `T | null` or `T | undefined`
     if (nullIndex >= 0 && nonNull.length === 1) {
       const inner = convertTypeNode(nonNull[0], checker);
-      // If inner is a $ref, use anyOf; otherwise use type array
-      if (inner.$ref) {
-        return {
-          anyOf: [inner, { type: "null" }],
-        };
+      // `{ type: [T, "null"] }` can only carry `type`. A $ref cannot sit
+      // beside it, and an inline object would lose its properties — which is
+      // how `LoopProjection.focus` was published as "object or null" with no
+      // shape at all. Only the bare-type case collapses; anything richer
+      // states its two arms as anyOf.
+      const bareType = inner.$ref === undefined && inner.type !== undefined &&
+        Object.keys(inner).length === 1;
+      if (bareType) {
+        return { type: [inner.type as string, "null"] };
       }
-      const innerType = inner.type as string;
-      return { type: [innerType, "null"] };
+      return { anyOf: [inner, { type: "null" }] };
     }
 
     // Multi-type union without simple null — anyOf
@@ -154,7 +162,6 @@ function convertTypeNode(
 
       // Record<string, unknown> → object with additionalProperties
       if (name === "Record" && typeNode.typeArguments?.length === 2) {
-        const _keyType = typeNode.typeArguments[0];
         const valueType = typeNode.typeArguments[1];
         // unknown values → open object
         if (
@@ -213,6 +220,80 @@ function convertTypeNode(
     return { type: "string" }; // safest fallback
   }
 
+  // Inline object type: { a: string; b?: number }. These used to fall through
+  // to the `{ type: "string" }` catch-all, so every inline shape in the
+  // protocol (the projection's focus/phase/delegation/handoff, the todo list,
+  // the reported test counts, the capability rows) was published as a string.
+  if (ts.isTypeLiteralNode(typeNode)) {
+    const properties: Record<string, SchemaNode> = {};
+    const required: string[] = [];
+    for (const member of typeNode.members) {
+      if (!ts.isPropertySignature(member)) continue;
+      const name = member.name.getText();
+      if (!member.questionToken && !typeIncludesNull(member.type)) required.push(name);
+      properties[name] = member.type
+        ? convertTypeNode(member.type, checker)
+        : { type: "string" };
+    }
+    const out: SchemaNode = { type: "object", properties };
+    if (required.length > 0) out.required = required;
+    return out;
+  }
+
+  // `typeof CONST` — a pinned literal. The published schema used to call
+  // PROMPT_ARTIFACT_SCHEMA_VERSION a string, so a client generated from it
+  // serialized a String where the runtime requires the number and hard-breaks
+  // the whole round envelope. The source keeps ONE version source (the
+  // constant); the generator reads it.
+  if (ts.isTypeQueryNode(typeNode)) {
+    const sym = checker.getSymbolAtLocation(typeNode.exprName);
+    const decl = sym?.getDeclarations()?.[0];
+    if (decl && ts.isVariableDeclaration(decl) && decl.initializer) {
+      // `= 2 as const` (and a bare parenthesized/asserted literal): the
+      // assertion narrows the TYPE, but the VALUE is what the wire contract
+      // pins, so unwrap to the literal.
+      let init: ts.Expression = decl.initializer;
+      while (
+        ts.isAsExpression(init) || ts.isParenthesizedExpression(init) ||
+        ts.isTypeAssertionExpression(init) || ts.isSatisfiesExpression(init)
+      ) {
+        init = init.expression;
+      }
+      if (ts.isNumericLiteral(init)) return { type: "number", const: Number(init.text) };
+      if (ts.isStringLiteral(init)) return { type: "string", const: init.text };
+      if (init.kind === ts.SyntaxKind.TrueKeyword) return { type: "boolean", const: true };
+      if (init.kind === ts.SyntaxKind.FalseKeyword) return { type: "boolean", const: false };
+    }
+    return unrepresentable(`typeof ${typeNode.exprName.getText()}`);
+  }
+
+  // Intersection — JSON Schema's `allOf` says the same thing.
+  if (ts.isIntersectionTypeNode(typeNode)) {
+    return { allOf: typeNode.types.map((part) => convertTypeNode(part, checker)) };
+  }
+
+  // Tuple — a positional array.
+  if (ts.isTupleTypeNode(typeNode)) {
+    const elements = typeNode.elements.map((element) => convertTypeNode(element, checker));
+    return { type: "array", items: elements.length === 1 ? elements[0] : { anyOf: elements } };
+  }
+
+  // `readonly T[]` erases to the array; any other operator (`keyof`, `unique`)
+  // has no JSON shape.
+  if (ts.isTypeOperatorNode(typeNode)) {
+    if (typeNode.operator === ts.SyntaxKind.ReadonlyKeyword) {
+      return convertTypeNode(typeNode.type, checker);
+    }
+    return unrepresentable(`type operator ${ts.SyntaxKind[typeNode.operator]}`);
+  }
+
+  // `any` / `unknown` constrain nothing; `object` is any non-primitive.
+  if (typeNode.kind === ts.SyntaxKind.AnyKeyword ||
+      typeNode.kind === ts.SyntaxKind.UnknownKeyword) {
+    return {};
+  }
+  if (typeNode.kind === ts.SyntaxKind.ObjectKeyword) return { type: "object" };
+
   // Literal types: 'foo' | 'bar'
   if (ts.isLiteralTypeNode(typeNode)) {
     const literal = typeNode.literal;
@@ -229,8 +310,46 @@ function convertTypeNode(
     return convertTypeNode(typeNode.type, checker);
   }
 
-  // Fallback: unknown type → string
-  return { type: "string" };
+  // Anything left either cannot be a JSON value at all, or is a gap in this
+  // converter — and those two must not look alike. A silent `{ type: "string" }`
+  // is exactly how this generator dropped the inherited observation fields,
+  // the inline objects and the envelope version. A function or a symbol is
+  // RECORDED as an omission; anything else FAILS the build, so no future
+  // protocol change can degrade the published contract unnoticed.
+  return unrepresentable(ts.SyntaxKind[typeNode.kind]);
+}
+
+/** Node kinds with no JSON Schema counterpart. Recording the omission is the
+ *  honest answer ("this cannot appear on the wire"); guessing a shape is not.
+ *  Everything that reaches the catch-all and is NOT in this list is a
+ *  converter gap, and throws instead. */
+const NOT_REPRESENTABLE = new Set<string>([
+  "FunctionType",
+  "SymbolKeyword",
+  "UniqueKeyword",
+  "NeverKeyword",
+  "ConditionalType",
+  "MappedType",
+  "TemplateLiteralType",
+  "IndexedAccessType",
+  "TypePredicate",
+  "ThisType",
+  "ImportType",
+]);
+
+function unrepresentable(kind: string): SchemaNode {
+  if (!NOT_REPRESENTABLE.has(kind)) {
+    throw new Error(
+      `generate-schema: type node "${kind}" has no branch in convertTypeNode. ` +
+      "JSON Schema can express it, so the published protocol schema must too — " +
+      "add the branch (or, if it truly cannot appear on the wire, add it to " +
+      "NOT_REPRESENTABLE with the reason).",
+    );
+  }
+  process.stderr.write(
+    `generate-schema: ${kind} is not representable in JSON Schema — recorded as a description.\n`,
+  );
+  return { description: `Not representable in JSON Schema: ${kind}` };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -366,6 +485,32 @@ function convertInterface(
     } else {
       properties[propName] = { type: "string" }; // untyped → assume string
     }
+  }
+
+  // v3.8.1: `extends` is part of the wire contract. Emitting only the own
+  // members dropped every inherited field — a GitObservation lost
+  // schemaVersion/providerId/phase/startedAt/finishedAt/status/files, exactly
+  // the fields every observation must carry — and left the base definition
+  // referenced by nothing. `allOf` states inheritance the way the types do:
+  // the base is defined ONCE and composed, so a generated client reads
+  // `MachineObservationBase & { kind: "git"; data: GitObservationData }`.
+  const heritage = (node.heritageClauses ?? []).flatMap((clause) => clause.types);
+  if (heritage.length > 0) {
+    const branches: SchemaNode[] = heritage.map((type) => {
+      const expression = type.expression;
+      const name = ts.isIdentifier(expression) ? expression.text : expression.getText();
+      return { $ref: `#/$defs/${name}` };
+    });
+    if (Object.keys(properties).length > 0) {
+      const own: SchemaNode = { type: "object", properties };
+      if (required.length > 0) own.required = required;
+      branches.push(own);
+    }
+    const result: SchemaNode = { allOf: branches };
+    if (hasIndexSignature) result.additionalProperties = true;
+    const desc = getNodeDescription(node);
+    if (desc) result.description = desc;
+    return result;
   }
 
   const result: SchemaNode = {

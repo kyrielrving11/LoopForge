@@ -214,6 +214,34 @@ describe("loopforge CLI", () => {
     }
   });
 
+  it("v3.8.1: doctor REPORTS a policy defect instead of dying on it", () => {
+    // Loading the policy used to run first and throw, so `doctor --json` died
+    // on exactly the defect it exists to diagnose — the one situation where a
+    // report is needed produced a bare stderr line and no JSON at all.
+    const root = temporaryDirectory();
+    try {
+      writeFileSync(join(root, "loop_policy.json"), JSON.stringify({
+        version: POLICY_SCHEMA_VERSION,
+        engin: { max_rounds: 5 }, // typo for "engine"
+      }));
+      const result = run(["doctor", "--json"], root);
+      assert.equal(result.status, 1, "a failed required check must exit non-zero");
+      const report = JSON.parse(result.stdout) as {
+        ok: boolean;
+        checks: Array<{ name: string; ok: boolean; detail: string }>;
+      };
+      assert.equal(report.ok, false);
+      const policyCheck = report.checks.find((check) => check.name === "policy");
+      assert.ok(policyCheck, "the policy load is reported as a check");
+      assert.equal(policyCheck!.ok, false);
+      assert.match(policyCheck!.detail, /unknown policy key "engin"/);
+      assert.ok(report.checks.some((check) => check.name === "node"),
+        "the remaining checks still ran against the defaults");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("installs only the Perception skill for a generic client", () => {
     const root = temporaryDirectory();
     try {

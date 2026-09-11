@@ -1210,6 +1210,27 @@ describe("v3.3 — verification domain integrity", () => {
     const result = verifySelfEvaluation(se(), 2, [], null, [cmd]);
     assert.ok(!result.flags.some((f) => f.check === CHECK_VERIFICATION_ENTRYPOINT_MODIFIED));
   });
+
+  it("v3.8.1: a tampered entrypoint is found behind an earlier test-file-only command", () => {
+    // `testFilesModified` comes from the git file set alone, so it is true for
+    // EVERY command as soon as the round touched a test file. Returning that
+    // warn on the first command in array order hid a rewritten verification
+    // entrypoint in a later one: the error flag never existed, so the
+    // enforcement row that reacts to it never fired, and the round could be
+    // accepted on a "machine observation" the agent had just rewritten.
+    const git = gitSnap(["src/a.test.ts", "run-tests.sh"]);
+    const unitOnly = cmdSnap("passed", { commandId: "unit", entrypointFiles: ["other.sh"] });
+    const tampered = cmdSnap("passed", { commandId: "e2e", entrypointFiles: ["run-tests.sh"] });
+
+    const result = verifySelfEvaluation(se(), 2, [], null, [git, unitOnly, tampered]);
+    const flag = result.flags.find((f) => f.check === CHECK_VERIFICATION_ENTRYPOINT_MODIFIED);
+    assert.ok(flag, "the tampered entrypoint must be reported whatever the observation order");
+    assert.equal(flag!.severity, "error");
+
+    // The verdict cannot depend on which command the array happened to list first.
+    const reversed = verifySelfEvaluation(se(), 2, [], null, [git, tampered, unitOnly]);
+    assert.ok(reversed.flags.some((f) => f.check === CHECK_VERIFICATION_ENTRYPOINT_MODIFIED));
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

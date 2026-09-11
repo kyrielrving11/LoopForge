@@ -334,6 +334,17 @@ export class LoopForgeEngine {
             // never carry the stamp — a fresh hydration re-derives it identically
             // from the feedback entry's transaction snapshot).
             lineage.attempt = committed.attempt;
+            // v3.8.1: the ContractBinding is stamped with the same reasoning, and
+            // for a sharper reason: `decodeMergedRound` reads it from
+            // `lineage.contract_binding` and the compile path sees ONLY merged
+            // entries, so an unstamped binding made the compile-side "same
+            // configuration as at declaration" check silently skip — the prompt and
+            // state file called a contract closed while the coordinator, explain and
+            // audit (which decode the durable :feedback entry) reported it open and
+            // insufficient. One committed fact, two answers.
+            if (committed.contractBinding) {
+                lineage.contract_binding = committed.contractBinding;
+            }
             // v3.8: the factual observation collections are stamped (the round
             // delta is derived from them by the read model — transaction schema 2
             // persists no pre-computed delta).

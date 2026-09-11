@@ -441,7 +441,13 @@ describe("v3.3 — Roadmap and derived state", () => {
     // re-compositions of facts that already have their own sections; only the
     // phase position was unique, and it is one line now.
     assert.ok(!md.includes("## Roadmap"));
-    assert.ok(md.includes("## Phase"));
+    // v3.8.1: it must be a KNOWN title. The renderer only treats the titles in
+    // STATE_SECTION_TIER as headings, so an unlisted `## Phase` was absorbed
+    // into whichever section happened to precede it (leaving a raw level-2
+    // heading inside that section's body) and inherited that section's tier.
+    assert.ok(md.includes("### Phase"), "the phase line is its own section");
+    assert.ok(!/^## Phase$/m.test(md),
+      "a raw `## Phase` line means it was folded into the previous section");
     assert.ok(md.includes("round 7/20"));
     assert.ok(md.includes("3 rounds since the last boundary"));
   });
@@ -505,6 +511,7 @@ describe("Round Contract state (v3.3 rendering, v3.4 active source)", () => {
     },
     verifiedSubGoals: [],
     verificationDebt: [],
+    criterionFacts: [],
   });
 
   /** v3.4: The ACTIVE contract arrives in the derived bag (computed by the

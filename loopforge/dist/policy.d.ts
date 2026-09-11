@@ -56,7 +56,10 @@ export interface PromptPolicy {
     max_emphasize_l2: number;
     /** v2.9: Max emphasize items when level is L1. Default: 3. */
     max_emphasize_l1: number;
-    /** v2.9: Max confusion points rendered. Default: 3. */
+    /** v2.9: Max confusion points rendered at L2. Default: 3.
+     *  L1 renders the FIRST alert plus a pointer to the state file — that is a
+     *  density decision of the lean level (like the split max_emphasize_l1/l2
+     *  caps), not this knob. */
     max_confusion_points: number;
 }
 export interface BackendPolicy {

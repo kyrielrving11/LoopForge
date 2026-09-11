@@ -6,7 +6,7 @@
 
 import { queryLoopEntries } from "./loop-store.js";
 import type { LoopStore, VaultEntry } from "./loop-store.js";
-import { derivationRounds, decodeCommittedRound } from "./committed-round.js";
+import { decodeCommittedRound, readOnlyRounds } from "./committed-round.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ReplayBackend
@@ -100,7 +100,7 @@ export class ReplayBackend {
   private maxRound(loopId: string): number {
     const prefix = `loop:${loopId}:r`;
     const feedback = queryLoopEntries(this.store, loopId, { prefix, feedbackOnly: true });
-    const rounds = derivationRounds(feedback);
+    const rounds = readOnlyRounds(feedback);
     return rounds.length > 0 ? rounds[rounds.length - 1]!.round : 0;
   }
 }

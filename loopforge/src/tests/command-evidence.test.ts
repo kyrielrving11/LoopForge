@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import { criterionClaims } from "./_helpers.js";
 import assert from "node:assert/strict";
-import { CommandEvidenceProvider } from "../evidence-provider.js";
+import { CommandEvidenceProvider, resolveEntrypointFiles } from "../evidence-provider.js";
 import type { CommandEvidencePolicy } from "../policy.js";
 import { resetPolicy, getPolicy } from "../policy.js";
 import { makeSelfEvaluation } from "../protocol.js";
@@ -119,14 +119,40 @@ describe("CommandEvidenceProvider", () => {
     );
   });
 
-  it("v3.3: external commands only resolve package.json (or nothing)", async () => {
+  it("v3.8.1: a direct executable resolves no entrypoint it does not name", async () => {
+    // v3.3 added `package.json` to EVERY command's entrypoint set, so a round
+    // that touched it was reported as "the verification entrypoint changed"
+    // even when the command (here `node -e …`) has nothing to do with it.
     const snapshot = await capture(new CommandEvidenceProvider(config({
       args: ["-e", "process.exit(0)"],
     })));
     assert.equal(snapshot?.status, "passed");
     const entrypoints = (snapshot?.data.entrypointFiles ?? []) as string[];
-    assert.deepEqual(entrypoints, ["package.json"],
-      "no path-shaped arg means only the package.json indirection is observable",
+    assert.deepEqual(entrypoints, [],
+      "nothing on this command line is a workspace file, so nothing is an entrypoint",
+    );
+  });
+
+  it("v3.8.1: a package-manager invocation DOES resolve package.json", () => {
+    // `npm test` runs whatever `scripts.test` names, so package.json is the
+    // harness definition there and an edit to it must stay observable.
+    // Asserted through the pure derivation: a bare `npm` is not spawnable
+    // without a shell (the runtime runs commands with `shell: false`), and
+    // faking a manager per platform would test the fixture, not the rule.
+    assert.deepEqual(
+      resolveEntrypointFiles("npm", ["test"], "."),
+      ["package.json"],
+      "a package manager is defined by package.json",
+    );
+    assert.deepEqual(
+      resolveEntrypointFiles("npm.cmd", ["run", "verify"], "."),
+      ["package.json"],
+      "the Windows shim is the same invocation",
+    );
+    assert.deepEqual(
+      resolveEntrypointFiles(process.execPath, ["-e", "process.exit(0)"], "."),
+      [],
+      "a direct executable depends on nothing in the workspace",
     );
   });
 });

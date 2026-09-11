@@ -77,7 +77,10 @@ export interface PromptPolicy {
   max_emphasize_l2: number;
   /** v2.9: Max emphasize items when level is L1. Default: 3. */
   max_emphasize_l1: number;
-  /** v2.9: Max confusion points rendered. Default: 3. */
+  /** v2.9: Max confusion points rendered at L2. Default: 3.
+   *  L1 renders the FIRST alert plus a pointer to the state file — that is a
+   *  density decision of the lean level (like the split max_emphasize_l1/l2
+   *  caps), not this knob. */
   max_confusion_points: number;
 }
 
@@ -218,6 +221,19 @@ export function writeDefaultPolicy(
   return { path: target, created: true };
 }
 
+/** Element keys of the policy's array-of-object fields. An incoming array
+ *  REPLACES the default wholesale (the default list is empty), so element keys
+ *  are not otherwise checked: a typo inside a command ("enable" for "enabled")
+ *  was accepted, and the command then never registered — the loop ran on a
+ *  configuration the operator never chose, which is exactly the outcome the
+ *  version boundary of v3.8.1 exists to prevent. */
+const ARRAY_ELEMENT_KEYS: Record<string, ReadonlySet<string>> = {
+  commands: new Set([
+    "name", "enabled", "executable", "args", "cwd", "phase", "required",
+    "timeout_ms", "max_output_chars", "success_exit_codes",
+  ]),
+};
+
 /** Merge a declared policy file over the defaults.
  *
  *  v3.8.1: an unknown key is an ERROR, not a warning. A typo used to be
@@ -228,8 +244,13 @@ function deepMerge<T>(defaults: T, overrides: Record<string, unknown>): T {
   for (const key of Object.keys(overrides)) {
     const current = result[key];
     const incoming = overrides[key];
+    // `Object.hasOwn`, not `in`: the `in` operator also reports keys inherited
+    // from Object.prototype, so "constructor" / "__proto__" / "toString" were
+    // treated as known keys and merged (or, for "__proto__", replaced this
+    // object's prototype) instead of being rejected.
+    const known = Object.hasOwn(result, key);
     if (
-      key in result && current !== null && incoming !== null &&
+      known && current !== null && incoming !== null &&
       typeof current === "object" && !Array.isArray(current) &&
       typeof incoming === "object" && !Array.isArray(incoming)
     ) {
@@ -237,7 +258,28 @@ function deepMerge<T>(defaults: T, overrides: Record<string, unknown>): T {
         current as Record<string, unknown>,
         incoming as Record<string, unknown>,
       );
-    } else if (key in result) {
+    } else if (known) {
+      const elementKeys = Array.isArray(incoming) ? ARRAY_ELEMENT_KEYS[key] : undefined;
+      if (elementKeys) {
+        for (const item of incoming as unknown[]) {
+          if (typeof item !== "object" || item === null || Array.isArray(item)) {
+            throw new Error(
+              `policy "${key}" entries must be objects — one entry is ` +
+              `${Array.isArray(item) ? "an array" : typeof item}.`,
+            );
+          }
+          for (const itemKey of Object.keys(item)) {
+            if (!elementKeys.has(itemKey)) {
+              throw new Error(
+                `unknown policy key "${key}[].${itemKey}" — remove it, or fix ` +
+                "the typo. This release carries no compatibility layer: a " +
+                "config written for an older schema is not a valid config for " +
+                "this one.",
+              );
+            }
+          }
+        }
+      }
       result[key] = incoming;
     } else {
       throw new Error(

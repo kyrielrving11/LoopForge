@@ -31,7 +31,6 @@ import type {
 } from "./protocol.js";
 import { makeVerificationFlag, makeVerificationResult } from "./protocol.js";
 import { isRecord, entryRound, extractFilePathTokens } from "./token-utils.js";
-import { computeGoalTextHash } from "./loop-compiler.js";
 import {
   derivationRounds,
   machineGitMotionSeries,
@@ -46,9 +45,8 @@ import {
   deriveContractItemStatuses,
   type ContractItemStatusView,
 } from "./contract-items.js";
-import { stableStringify } from "./canonical-state.js";
 import { deriveClaimView, resolveRoundFiles, type ClaimView } from "./evidence-claims.js";
-import { claimedMetCriteria, claimedRemainingCriteria, effectiveSuccess, parseRoundContract } from "./self-eval.js";
+import { claimedMetCriteria, claimedRemainingCriteria, effectiveSuccess } from "./self-eval.js";
 import { deriveGate, preflightStructuredGate } from "./cognitive-governance.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -255,21 +253,6 @@ function passedAfterCommand(observations: MachineObservation[]): MachineObservat
   const git = observations.find((item) => item.providerId === "git") ?? null;
   const changed = git ? new Set(git.files) : null;
   return observations.find((item) => isPassedAfterObservation(item, changed)) ?? null;
-}
-
-/** v3.5: Names of commands observed passing in the after-phase this round.
- *  Tampered commands (entrypoint changed this round) are not machine
- *  evidence and are excluded — the same predicate passedAfterCommand uses. */
-function passedPlanCommandNames(observations: MachineObservation[]): Set<string> {
-  const git = observations.find((item) => item.providerId === "git") ?? null;
-  const changed = git ? new Set(git.files) : null;
-  const names = new Set<string>();
-  for (const observation of observations) {
-    if (!isPassedAfterObservation(observation, changed)) continue;
-    if (observation.kind !== "command") continue;
-    if (observation.data.commandId.length > 0) names.add(observation.data.commandId);
-  }
-  return names;
 }
 
 /** v3.2: Derive the machine-verification status of a round. The verification
@@ -893,30 +876,39 @@ function checkVerificationDomainIntegrity(
 ): VerificationFlag | null {
   const git = evidenceSnapshots.find((snapshot) => snapshot.providerId === "git") ?? null;
   if (!git) return null;
+  // v3.8.1: EVERY after-phase command is scanned for a tampered entrypoint
+  // before the test-file warn may answer for one of them. `testFilesModified`
+  // is derived from the git file set alone, so it is true for every command as
+  // soon as the round touched a test file; answering with that warn on the
+  // first command in array order meant a rewritten verification entrypoint
+  // produced no error flag at all, and the enforcement row that reacts to it
+  // never fired. The verdict depended on observation order.
   for (const snapshot of evidenceSnapshots) {
     if (!isRecord(snapshot.data) || snapshot.kind !== "command") continue;
     if (snapshot.phase !== "after") continue;
-    const { entrypointModified, testFilesModified } = commandTampered(snapshot, git);
-    if (!entrypointModified && !testFilesModified) continue;
-    const name = snapshot.data.commandId;
-    if (entrypointModified) {
-      return makeVerificationFlag({
-        severity: "error",
-        field: "execution_report",
-        check: CHECK_VERIFICATION_ENTRYPOINT_MODIFIED,
-        detail:
-          `Verification command "${name}" entrypoint changed this round — ` +
-          "its result cannot be trusted as machine evidence. Keep the " +
-          "verification command stable or resubmit the same round with the " +
-          "entrypoint unchanged.",
-      });
-    }
+    if (!commandTampered(snapshot, git).entrypointModified) continue;
+    return makeVerificationFlag({
+      severity: "error",
+      field: "execution_report",
+      check: CHECK_VERIFICATION_ENTRYPOINT_MODIFIED,
+      detail:
+        `Verification command "${snapshot.data.commandId}" entrypoint changed this round — ` +
+        "its result cannot be trusted as machine evidence. Keep the " +
+        "verification command stable or resubmit the same round with the " +
+        "entrypoint unchanged.",
+    });
+  }
+  // Only when NO entrypoint was tampered does the test-file warn stand in.
+  for (const snapshot of evidenceSnapshots) {
+    if (!isRecord(snapshot.data) || snapshot.kind !== "command") continue;
+    if (snapshot.phase !== "after") continue;
+    if (!commandTampered(snapshot, git).testFilesModified) continue;
     return makeVerificationFlag({
       severity: "warn",
       field: "execution_report",
       check: CHECK_TEST_FILES_MODIFIED,
       detail:
-        `Test files changed in the same round command "${name}" passed — ` +
+        `Test files changed in the same round command "${snapshot.data.commandId}" passed — ` +
         "confirm the tests still verify the task claims.",
     });
   }
@@ -1295,5 +1287,14 @@ export function verifySelfEvaluation(
     verdict = "trusted";
   }
 
-  return makeVerificationResult({ verdict, flags });
+  // v3.8.1: the machine-backed-success fact rides along with the result —
+  // ONE derivation (`deriveEvidenceStatus`), so the progress evaluator reads
+  // the same fact instead of inventing a second one. A round the machine
+  // verified is the loop FINISHING; a motion window says nothing about it,
+  // and the old self-reported `>= 0.95` guard said it with the agent's own
+  // number.
+  const machineBackedSuccess = effectiveSuccess(selfEval) &&
+    deriveEvidenceStatus(selfEval, evidenceSnapshots).providerStatus === "verified";
+
+  return makeVerificationResult({ verdict, flags, machineBackedSuccess });
 }

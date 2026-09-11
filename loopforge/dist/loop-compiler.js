@@ -8,14 +8,13 @@ import { getPolicy } from "./policy.js";
 import { AgentStatus, makeLoopCompileResponse, makeLoopObjective, makeConstraintMeta, makeMilestoneSummary, makeRollingSummary, } from "./protocol.js";
 import { createCanonicalLoopState, renderCanonicalStateMarkdown, } from "./canonical-state.js";
 import { decodeBacktrackRecord, decodeRound, entryLineage, entryCriteriaMet, entryCriteriaRemaining, entryActiveConstraints, entryRetractedConstraints, entryProgressEstimate, machineGitMotionSeries, derivationRounds, } from "./committed-round.js";
-import { deriveActiveRoundContract } from "./round-contract.js";
 import { NO_IN_FLIGHT_ROUND, deriveRoundFacts } from "./round-facts.js";
 import { recoveryBriefLines } from "./enforcement-gate.js";
 import { deriveSubGoals, duplicateEmergedDeclarations } from "./subgoal-state.js";
 import { claimedMetCriteria, claimedRemainingCriteria } from "./self-eval.js";
 import { assemblePromptArtifact } from "./prompt-assembler.js";
 import { decidePromptLevel, } from "./prompt-policy.js";
-import { deriveItemId, normalizeText, unique, entryRound } from "./token-utils.js";
+import { deriveCriterionId, deriveItemId, isCriterionId, normalizeText, unique, entryRound, } from "./token-utils.js";
 function contextEntries(context) {
     if (!context || !Array.isArray(context.results))
         return [];
@@ -250,32 +249,19 @@ function deriveMachineStatus(rounds, currentRound) {
     const motionRounds = series.filter(Boolean).length;
     return { windowRounds: 3, gitMotion: motionRounds > 0, motionRounds };
 }
-/** v3.4: ACTIVE Round Contract for the compile round — derived from the
- *  committed evals of earlier rounds only, never from request data. Reads
- *  the hydrated merged lineage entries (one per round; a committed decision
- *  is merged onto the round's lineage entry with `committed_action` set),
- *  skipping rounds whose committed action was "backtrack" (a roll-back
- *  directive, not an executed round). Because it runs identically on every
- *  compile path — including rejection retries and resume / unpause /
- *  backtrack compiles that carry no last_round_result — a contract round's
- *  re-compiles keep showing its contract as the Current Task. Null when no
- *  active contract: the Current Task falls back to the original task text. */
-function deriveActiveContract(loopId, context, currentRound) {
-    const entries = loopEntries(loopId, context);
-    const canonical = Array.from({ length: Math.max(0, currentRound - 1) }, (_, index) => roundCanonicalEntry(entries, index + 1)).filter((entry) => entry !== null);
-    return deriveActiveRoundContract(derivationRounds(canonical, currentRound));
-}
 /** v3.2: Derive per-criterion status — the "goal → criteria → evidence"
  *  vertical view. Each objective criterion gets: met/remaining/unknown
  *  (from per-round criterion_claims, ID-first or normalized-exact matching),
  *  the round it was first reported met, and the sub-goals a contract item
  *  referencing it also names (explicit `subgoal_refs`, never a text guess).
  *  Zero persistence — re-derived from the vault every compile. */
-export function deriveCriterionStatuses(loopId, context, objective, currentRound, subGoals, lastRoundResult,
-/** v3.8: the ACTIVE contract and its derived item statuses. A criterion is
- *  `verified` / `contradicted` / `insufficient` only through an item that
- *  references it — a claim alone can never reach `verified`. */
-verification) {
+export function deriveCriterionStatuses(loopId, context, objective, currentRound, lastRoundResult,
+/** v3.8.1: the criterion machine facts from the shared bundle. A criterion
+ *  is `verified` / `contradicted` / `insufficient` only through an item that
+ *  references it — a claim alone can never reach `verified` — and the fact
+ *  is derived over the WHOLE committed history, so it survives its contract
+ *  closing (see `deriveCriterionFacts`). */
+criterionFacts = []) {
     if (!objective || objective.success_criteria.length === 0)
         return [];
     const entries = loopEntries(loopId, context).filter((entry) => entryRound(entry) >= 1 && entryRound(entry) < currentRound);
@@ -286,45 +272,13 @@ verification) {
     const lastRemaining = claimedRemainingCriteria(lastEv);
     const lastEntry = entries[entries.length - 1] ?? null;
     const lastEntryRemaining = lastEntry ? entryCriteriaRemaining(lastEntry) : [];
-    const itemStatusByCriterion = new Map();
-    // v3.8.1: criterion → the sub-goals an item referencing it also names.
-    // EXPLICIT refs only (`ContractItemProposal.subgoal_refs`); the former
-    // Jaccard guess at "which sub-goal is this criterion about" is gone, so a
-    // criterion is never linked to a sub-goal it merely resembles.
-    const subGoalsByCriterion = new Map();
-    const activeContract = verification?.activeContract ?? null;
-    if (activeContract) {
-        for (const item of activeContract.items) {
-            if (item.subgoal_refs.length === 0)
-                continue;
-            for (const ref of item.criterion_refs) {
-                const criterionId = isCriterionId(ref) ? ref : deriveCriterionId(ref);
-                const linked = subGoalsByCriterion.get(criterionId) ?? [];
-                for (const subgoalId of item.subgoal_refs) {
-                    if (!linked.includes(subgoalId))
-                        linked.push(subgoalId);
-                }
-                subGoalsByCriterion.set(criterionId, linked);
-            }
-        }
-    }
-    if (activeContract) {
-        for (const item of activeContract.items) {
-            const status = verification?.itemStatuses.items
-                .find((entry) => entry.itemId === item.id)?.status;
-            // `pending` is "no claim yet" — it says nothing about the criterion, so
-            // the criterion keeps its own claim-derived status.
-            if (!status || status === "pending")
-                continue;
-            for (const ref of item.criterion_refs) {
-                const criterionId = isCriterionId(ref) ? ref : deriveCriterionId(ref);
-                const existing = itemStatusByCriterion.get(criterionId);
-                // Machine facts outrank each other by strength; a claim never
-                // weakens a machine verdict about the same criterion.
-                itemStatusByCriterion.set(criterionId, strongestStatus(existing, status));
-            }
-        }
-    }
+    // v3.8.1: criterion → machine status + explicit sub-goal links, from the
+    // shared `RoundFacts` bundle (whole committed history). It used to be
+    // re-derived here from the ACTIVE contract, which made both maps empty the
+    // moment the contract closed — the criterion's machine fact, and the
+    // sub-goal links carried on the same item, disappeared while the sub-goal
+    // side of the very same fact survived. One derivation, one window.
+    const factsByCriterion = new Map(criterionFacts.map((fact) => [fact.criterion_id, fact]));
     return objective.success_criteria.map((text) => {
         let metAtRound = null;
         for (const entry of entries) {
@@ -345,8 +299,8 @@ verification) {
                 lastEntryRemaining.some((remaining) => criteriaMatch(remaining, text))
                 ? "remaining"
                 : "unknown";
-        const machineStatus = itemStatusByCriterion.get(deriveCriterionId(text));
-        const status = machineStatus ?? claimedStatus;
+        const fact = factsByCriterion.get(deriveCriterionId(text));
+        const status = fact?.status ?? claimedStatus;
         return {
             id: deriveCriterionId(text),
             text,
@@ -354,22 +308,12 @@ verification) {
             ...(metAtRound !== null ? { met_at_round: metAtRound } : {}),
             // v3.8.1: explicit refs only — empty when no contract item links this
             // criterion to a sub-goal.
-            related_subgoal_ids: subGoalsByCriterion.get(deriveCriterionId(text)) ?? [],
+            related_subgoal_ids: fact?.related_subgoal_ids ?? [],
         };
     });
 }
 /** v3.8: Rank item statuses so the strongest machine fact wins when several
  *  items reference the same criterion. */
-function strongestStatus(left, right) {
-    const rank = {
-        contradicted: 3,
-        verified: 2,
-        insufficient: 1,
-    };
-    if (!left)
-        return right;
-    return rank[right] > rank[left] ? right : left;
-}
 /** Match two criterion references. If either is a criterion id
  *  (cr-XXXXXXXX), compares ids; otherwise requires the two texts to be
  *  EXACTLY equal after normalization (v3.8.1 — the similarity fallback is
@@ -442,7 +386,7 @@ function buildMilestoneFromEntries(phaseEntries, startRound, endRound, label, ki
  *  did nothing at L2 — so the state file’s phase history depended on the
  *  prompt level and had no bound of its own.) */
 const MILESTONE_HISTORY_CAP = 50;
-export function buildRollingSummary(loopId, currentRound, context, sinceRound = 0, level) {
+export function buildRollingSummary(loopId, currentRound, context, sinceRound = 0) {
     const policy = getPolicy().summary;
     const allEntries = loopEntries(loopId, context);
     // ── Phase 1: Recent Window (preserves existing behavior) ──
@@ -472,11 +416,6 @@ export function buildRollingSummary(loopId, currentRound, context, sinceRound = 
             : success === false ? "failed" : "accepted";
         if (summary)
             outcomes.push(`[R${round}] ${outcomeLabel}: ${summary}`);
-        const violations = view
-            ? view.constraintViolations ?? []
-            : Array.isArray(entry.constraint_violations)
-                ? entry.constraint_violations
-                : Array.isArray(data.constraint_violations) ? data.constraint_violations : [];
     }
     // ── Phase 2: Milestone Accumulation ──
     // Scan all completed entries in round order. For each entry, check three
@@ -558,18 +497,12 @@ export function buildRollingSummary(loopId, currentRound, context, sinceRound = 
 export function deriveConstraintId(text) {
     return "c-" + deriveItemId(text);
 }
-/** v2.11: Derive a stable criterion ID from its text hash (cr-XXXXXXXX).
- *  Same hash strategy as SubGoal — deterministic across rounds. */
-export function deriveCriterionId(text) {
-    return "cr-" + deriveItemId(text);
-}
-/** v2.11: Check whether a user-provided reference looks like a criterion ID.
- *  Matches the pattern cr-XXXXXXXX where X is a hex digit. Module-local:
- *  consumers with the same need (round-contract.ts) keep their own copy to
- *  avoid an import cycle. */
-function isCriterionId(ref) {
-    return /^cr-[a-f0-9]{8}$/.test(ref);
-}
+// v3.8.1: `deriveCriterionId` / `isCriterionId` moved to token-utils.ts, where
+// the other stable-id helpers live — the criterion fact derivation in
+// round-facts.ts needs them, and defining them here would make
+// round-facts ⇄ loop-compiler an import cycle. Re-exported so this module's
+// public surface ("./compiler") is unchanged.
+export { deriveCriterionId, isCriterionId } from "./token-utils.js";
 // ═══════════════════════════════════════════════════════════════════════════
 // Time-Aware Constraint Management (v2.3)
 // ═══════════════════════════════════════════════════════════════════════════
@@ -811,7 +744,7 @@ export function compileLoop(request, context) {
     const objective = evolveObjective(request, context);
     const constraints = evolveConstraints(request, objective, previous, context);
     const constraintLifecycle = manageConstraintLifecycle(constraints.active, objective, request.constraints_from_plan, context, request.round, request.last_round_result?.constraint_violations ?? []);
-    const rolling = buildRollingSummary(request.loop_id, request.round, context, 0, decision.level);
+    const rolling = buildRollingSummary(request.loop_id, request.round, context, 0);
     // v3.8: ONE committed-round derivation feeds every projection below
     // (sub-goals, the active contract, its item statuses, criteria).
     const windowRounds = derivationRounds(loopEntries(request.loop_id, context), request.round);
@@ -846,9 +779,9 @@ export function compileLoop(request, context) {
     });
     // `roundFacts.verifiedSubGoals` is not read here — it reaches the state file
     // and the projection through the bundle itself.
-    const { activeContract, itemStatuses: contractItemStatuses } = roundFacts;
+    const { activeContract } = roundFacts;
     // v3.2: Goal → criteria → evidence vertical view (derived, zero persistence).
-    const criterionStatuses = deriveCriterionStatuses(request.loop_id, context, objective, request.round, subGoals, request.last_round_result, { activeContract, itemStatuses: contractItemStatuses });
+    const criterionStatuses = deriveCriterionStatuses(request.loop_id, context, objective, request.round, request.last_round_result, roundFacts.criterionFacts);
     // v3.8.1: the ONE recurring-fact derivation, over the shared window. The
     // prompt renders its recent tail; the state file renders the recurring set.
     const recurringFlags = deriveRecurringFlags(windowRounds);

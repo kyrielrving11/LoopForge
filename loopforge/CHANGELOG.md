@@ -5,9 +5,10 @@
 **The convergence release.** 3.8.0 established the boundaries — one factual
 source, one cognitive source, a claim/observation/verification split. 3.8.1
 removes what grew on top of them: a single data flow that still had several
-parallel ways to say the same thing. Nothing is added. 1,799 lines in, 2,511
-lines out across `src/`. No compatibility is carried: the protocol field set,
-the policy schema and both versioned envelopes are this version's.
+parallel ways to say the same thing. Nothing is added. Across `src/` this is
+2,169 lines in and 2,931 out (1,365 in / 1,727 out excluding `src/tests`). No
+compatibility is carried: the protocol field set, the policy schema and both
+versioned envelopes are this version's.
 
 ### Text similarity is gone
 
@@ -230,7 +231,87 @@ and the budget rules — protected content survives a crushing ceiling,
 `protectedOverflow` is recorded, every rendered optional section outranks every
 dropped one, and identical input yields an identical prompt and artifact.
 
-886 tests.
+### Residual gaps closed before release
+
+A review of this branch found thirteen defects that the convergence story
+above does not cover. Each one is fixed with a regression test that was run
+against the previous code first (every test below fails without its fix):
+
+- **A contract item cannot close on stale evidence.** `verified` means "every
+  bound command observed passing in the CLOSING round"; the reducer read the
+  EARLIEST observation at or after the claim, so a round whose bound command
+  FAILED kept the item `verified`, closed the contract, and could reach
+  `completed`.
+- **The binding reaches the compile path.** `decodeMergedRound` read
+  `lineage.contract_binding`, which nothing wrote — so the compile-side "same
+  configuration as at declaration" check never ran, and the prompt and state
+  file could call a contract closed while the coordinator, explain and audit
+  called it open and insufficient.
+- **An entrypoint tamper is found behind a test-file warning.** The check
+  answered with the warn on the first after-phase command in array order, and
+  `testFilesModified` comes from the git file set alone — so a rewritten
+  verification entrypoint often produced no error at all and the enforcement
+  row that reacts to it never fired. The verdict depended on observation order.
+- **`audit` reads the shared window.** It scanned raw entries with its own,
+  weaker rule: a superseded record was listed twice and could flip the verdict
+  to `contradicted` for something that is not committed history.
+- **Read-only views honour the rollback frontier.** `audit`, `explain`, the
+  projection, `replay`, the metrics replay and the verified-claim view applied
+  no bound, so after a backtrack they reported the abandoned branch as this
+  branch's history and contradicted the prompt.
+- **The runtime's own state directory is not machine-observed work.** The
+  vault lives inside the workspace by default, so every round's bookkeeping
+  writes read as git motion — the signal the stall evaluator and the restore
+  checks consume.
+- **Progress enforcement is machine-first.** When the git series is observable
+  it decides alone; the agent's `progress_estimate` series is the fallback for
+  a loop with no machine history to read. A rising self-report can no longer
+  cancel a machine stall. A machine-verified round is exempt — it is the loop
+  finishing, not churning.
+- **Policy v4 rejects what it says it rejects.** `Object.hasOwn` instead of
+  `in` (a `__proto__` / `constructor` key was merged as if the schema declared
+  it), and array entries are key-checked — `"enable"` for `"enabled"` is now a
+  load error instead of a command that silently never registers.
+- **The lenient/structural split holds.** A non-string `subgoal_updates.note`
+  no longer rejects the whole submission (protocol.ts calls it lenient), and
+  the emerged list is bounded by ONE normalization, so the boundary can no
+  longer accept a sub-goal transition the compiled prompt never carried.
+- **Criterion machine facts survive their contract closing.** The state file's
+  Goal → Criteria row fell back to the agent's claim the moment the contract
+  fully verified; the fact now comes from the same history walk as the verified
+  sub-goals.
+- **Verification debt escalates on its own streak.** The row declared a
+  `uniform` ladder while its handler ran one too: the escalation notice was
+  appended twice, the uniform terminate branch was dead, and a streak earned by
+  a DIFFERENT check could terminate this row on its first appearance.
+- **`doctor` reports a policy defect instead of dying on it.** Loading the
+  policy ran first and threw, so `doctor --json` produced no report for exactly
+  the defect the README says it checks.
+- **The published JSON Schema is faithful to the protocol.** `extends` was
+  ignored (every concrete observation lost the seven fields the base declares,
+  and the base was referenced by nothing), inline object types were published
+  as strings (the projection payload, the reported test counts), and
+  `typeof CONST` was published as a string — a client generated from the schema
+  would serialize the envelope version as a String and have every round
+  hard-broken. The converter no longer guesses: a node JSON cannot express is
+  recorded as an omission, and any other unhandled node kind fails the build.
+- **`package.json` is an entrypoint only where it defines what runs.** It was
+  added unconditionally to every command's entrypoint set, so a round that
+  touched it — for any reason, with any command — was reported as "the
+  verification entrypoint changed" and rejected, however unrelated the file was
+  to what executed (`node -e …` never reads it). It is a candidate now only for
+  a package-manager invocation, which is exactly the case where editing it
+  changes the harness.
+
+Alongside: dead code deleted — `deriveActiveContract` (a second
+active-contract implementation with zero callers), `makeSubGoalUpdate`,
+`contractSubGoalIds`, the unread `PreparedRound.capability`, and 37 unused
+declarations across `src/` — and the prose corrected where it had drifted from
+the code (the enforcement table's action classes, the `emphasize` matching
+rule, `doctor`'s check list, `max_confusion_points`' level scope, the
+`ObservationStatus` provenance, and the artifact's measured budget region).
+
+908 tests.
 
 ## 3.8.0 (2026-09-10)
 

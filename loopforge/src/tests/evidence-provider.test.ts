@@ -52,6 +52,40 @@ describe("EvidenceProvider round diffs", () => {
     assert.deepEqual(await EvidenceCollector.fromProviderNames([]).collectAsync(), []);
   });
 
+  it("v3.8.1: the runtime's own state directory is not machine-observed work", async () => {
+    // The vault lives inside the workspace by default, so every round's
+    // bookkeeping writes would otherwise read as machine-observed motion —
+    // the very signal the stall evaluator and the backtrack restore checks
+    // consume. The exclusion lives in the provider, at the fact, rather than
+    // in a workspace .gitignore the runtime neither owns nor can rely on.
+    const dir = join(tmpdir(), `lf-state-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(dir, { recursive: true });
+    const git = (...args: string[]): string =>
+      execFileSync("git", args, { cwd: dir, encoding: "utf8" });
+    try {
+      git("init", "-q");
+      writeFileSync(join(dir, "src.ts"), "export const a = 1;\n");
+      mkdirSync(join(dir, ".loopforge", "loops", "x", "rounds"), { recursive: true });
+      writeFileSync(join(dir, ".loopforge", "loops", "x", "rounds", "1.json"), "{}\n");
+
+      const provider = new GitEvidenceProvider();
+      const snapshot = await provider.capture({
+        signal: new AbortController().signal,
+        timeoutMs: 10000,
+        phase: "after",
+        cwd: dir,
+      });
+      assert.ok(snapshot, "the git provider observes a real repository");
+      assert.ok(snapshot!.files.includes("src.ts"), "the agent's own file is observed");
+      assert.ok(!snapshot!.files.some((file) => file.startsWith(".loopforge/")),
+        "the runtime's state must not count as the agent's work");
+      assert.ok(!snapshot!.data.untracked.some((file) => file.startsWith(".loopforge/")),
+        "the raw lists exclude it too — one observation, one file set");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("M1: detects a content change to a non-ASCII (Chinese) filename", async () => {
     // Git octal-escapes paths with bytes >= 0x80 by default ("资料.md" →
     // "\350\265\204\346\226\231.md"); an escaped name can't be stat/hash'd,

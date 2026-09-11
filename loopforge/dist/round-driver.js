@@ -5,8 +5,8 @@
  * as heartbeats, executor deadlines, MCP leases, and response formatting stay
  * in their adapters.
  */
-import { deriveEvidenceCapability, EvidenceCollector } from "./evidence-provider.js";
-import { getPolicy, writeStateFile } from "./policy.js";
+import { EvidenceCollector } from "./evidence-provider.js";
+import { writeStateFile } from "./policy.js";
 import { prepareRejectedAttempt, prepareRoundTransaction, RoundTransactionCoordinator, } from "./round-transaction.js";
 export class RoundDriver {
     engine;
@@ -59,7 +59,6 @@ export class RoundDriver {
             stateFileContent: response.state_file_content,
             warnings: response.warnings,
             compileResponse: response,
-            capability: deriveEvidenceCapability(getPolicy(), rejected.beforeEvidence),
         };
     }
     finishPrepare(response, loopId, round, evidenceBaseline) {
@@ -74,7 +73,6 @@ export class RoundDriver {
             stateFileContent: response.state_file_content,
             warnings: response.warnings,
             compileResponse: response,
-            capability: deriveEvidenceCapability(getPolicy(), evidenceBaseline),
         };
     }
     async complete(input) {

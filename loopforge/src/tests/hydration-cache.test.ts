@@ -19,7 +19,7 @@ import { derivationRounds } from "../committed-round.js";
 import { FileLoopStore } from "../loop-store.js";
 import type { VaultEntry } from "../loop-store.js";
 import { SessionManager } from "../mcp/session.js";
-import { MemoryLoopStore, criterionClaims } from "./_helpers.js";
+import { MemoryLoopStore, criterionClaims, installTestCommandProvider } from "./_helpers.js";
 import { resetPolicy } from "../policy.js";
 import { Mode, type LoopForgeRequest, type SelfEvaluation } from "../protocol.js";
 
@@ -312,6 +312,50 @@ describe("v3.5.1 — hydration stamps attempt/roundEvidence for the compile view
     assert.equal(lin1.attempt, 2,
       "the committed attempt (rejection + redo) must be stamped for the compile view");
     assert.equal(typeof lin1.attempt, "number");
+  });
+
+  it("v3.8.1: merged lineage entries carry the committed ContractBinding", async () => {
+    // The compile path sees ONLY merged entries, and `decodeMergedRound`
+    // reads the binding from `lineage.contract_binding`. Unstamped, the
+    // compile-side "same configuration as at declaration" check silently
+    // skipped: the prompt and the state file called a contract closed while
+    // the coordinator, explain and audit — which decode the durable feedback
+    // entry — reported it open and insufficient.
+    installTestCommandProvider();
+    const store = new FileLoopStore(join(tmpdir(), `loopforge-bind-${randomUUID()}`));
+    const mgr = new SessionManager(store);
+    const started = await mgr.create({ task: "Binding stamp", loopId: "bind-stamp" });
+    await mgr.advance(started.sessionId, "", {
+      ...continuingEvaluation(),
+      round_contract: {
+        work_item: "Slice A",
+        scope: ["src/a"],
+        items: [{
+          description: "works",
+          criterion_refs: [],
+          subgoal_refs: [],
+          verify_with: ["verify"],
+        }],
+      },
+    });
+
+    const engine = new LoopForgeEngine(store);
+    const hydrated = engine.hydrateLoopContext("bind-stamp", 2);
+    const results = ((hydrated as { results?: unknown }).results ?? []) as Array<Record<string, unknown>>;
+    const r1 = results.find((entry) => {
+      const lin = (entry.loop_lineage ?? {}) as Record<string, unknown>;
+      return lin.round === 1;
+    });
+    assert.ok(r1, "round-1 merged entry must be in the hydrated view");
+    const decoded = derivationRounds([r1!])[0];
+    assert.ok(decoded, "the merged entry must decode as a committed round");
+    assert.ok(decoded!.contractBinding,
+      "the binding the commit stamped must reach the compile-side view");
+    assert.equal(
+      Object.keys(decoded!.contractBinding!.config_hash_by_command).length > 0,
+      true,
+      "the binding carries the per-command configuration hashes the check compares",
+    );
   });
 });
 

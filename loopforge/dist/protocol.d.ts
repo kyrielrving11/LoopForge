@@ -397,7 +397,6 @@ export interface SubGoalUpdate {
     /** Optional free-text note (≤ 300 chars). Lenient — never validated. */
     note?: string;
 }
-export declare function makeSubGoalUpdate(overrides?: Partial<SubGoalUpdate>): SubGoalUpdate;
 /** v2.2: A structured sub-goal tracked by the compiler across rounds.
  *  Declared by the agent via emerged_subtasks (creation) and
  *  subgoal_updates (explicit transitions); statuses are compiler-derived
@@ -548,12 +547,14 @@ export interface PromptArtifact {
     /** True when the PROTECTED sections alone exceeded the budget. Recorded so
      *  an over-budget prompt is visible rather than silently over-long. */
     protectedOverflow: boolean;
-    /** The ceiling this render was measured against. Measured over the SAME
-     *  region as `renderedChars`: the section area, excluding the fixed header,
-     *  the self-evaluation block and the footer, which are never budgeted. */
+    /** The ceiling this render was measured against: the level's configured
+     *  budget (`lN_max_chars`) minus the fixed footer, which is appended after
+     *  budgeting because it is never dropped. Measured over the SAME region as
+     *  `renderedChars`. */
     budget: number;
-    /** Characters the budgeted section area produced. NOT the prompt length —
-     *  `renderedPrompt` also carries the fixed header and footer. */
+    /** Characters the budgeted region produced: the fixed header, the confusion
+     *  alerts and the rendered sections — everything except the footer. NOT the
+     *  full prompt length; `renderedPrompt` adds the footer on top. */
     renderedChars: number;
 }
 export interface LoopCompileResponse {
@@ -731,6 +732,11 @@ export declare function makeVerificationFlag(overrides?: Partial<VerificationFla
 export interface VerificationResult {
     verdict: "trusted" | "suspect" | "contradicted";
     flags: VerificationFlag[];
+    /** v3.8.1: the round's success claim is MACHINE-backed — a passed
+     *  after-phase command observed by the runtime (`deriveEvidenceStatus`).
+     *  Carried as a fact so a consumer never re-derives it; the progress
+     *  evaluator reads it as "this round is finishing, not churning". */
+    machineBackedSuccess: boolean;
 }
 export declare function makeVerificationResult(overrides?: Partial<VerificationResult>): VerificationResult;
 /** v3.8: The agent's self-report for a round — renamed from ExecutionReport
@@ -815,7 +821,15 @@ export type ContractItemStatus = "pending" | "insufficient" | "contradicted" | "
  *  not contradicted; `contradicted` means machine facts deny a claim. */
 export type RoundVerificationStatus = "trusted" | "insufficient" | "contradicted";
 /** v3.8: Machine observation status. A configured provider always produces an
- *  observation — the failure modes are recorded, not filtered away. */
+ *  observation — the failure modes are recorded, not filtered away.
+ *
+ *  Who reports what: `timeout` and `unavailable` are the runtime's own words
+ *  for "the provider exceeded its deadline" and "the provider yielded
+ *  nothing" (the collector synthesizes both, so a provider cannot hide a
+ *  failure by returning nothing). `aborted` is what a PROVIDER reports when
+ *  its own capture was aborted — a command killed mid-flight, say. A
+ *  collector deadline aborts the capture AS a timeout, so the round records
+ *  the runtime's measured cause, not the provider's. */
 export type ObservationStatus = "observed" | "passed" | "failed" | "timeout" | "unavailable" | "error" | "aborted";
 /** v3.8: Common machine-observation fields. Observations are the factual
  *  record of what the machine saw; they are persisted with the round and are
@@ -917,9 +931,9 @@ export interface ObservedCapability {
  *  `stateHash`/`promptHash`; `ObservedCapability` carries live statuses and is
  *  rendered only. `provider.available` is provider-REGISTRY state (code, not
  *  policy) and therefore never enters the hash either — it is reported here and
- *  by `doctor`. Every surface that speaks about capability (prepare, MCP
- *  start/resume/next/status, warnings) derives from this one function so they
- *  cannot drift apart. */
+ *  by `doctor`. Every surface that speaks about capability (MCP start / next /
+ *  status, the warning list) calls this one function, so they cannot drift
+ *  apart — and none of them carries a second copy of the fact. */
 export interface EvidenceCapability {
     schemaVersion: 1;
     providers: Array<{

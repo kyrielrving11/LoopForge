@@ -8,9 +8,9 @@
 
 import type { LoopStore } from "./loop-store.js";
 import { LoopForgeEngine } from "./engine.js";
-import { deriveEvidenceCapability, EvidenceCollector } from "./evidence-provider.js";
-import type { EvidenceCapability, MachineObservation } from "./protocol.js";
-import { getPolicy, writeStateFile } from "./policy.js";
+import { EvidenceCollector } from "./evidence-provider.js";
+import type { MachineObservation } from "./protocol.js";
+import { writeStateFile } from "./policy.js";
 import type {
   LoopForgeRequest,
   LoopForgeResponse,
@@ -38,11 +38,6 @@ export interface PreparedRound {
   /** v3.0.1: The full compile response. Callers may cache it (e.g. for the
    *  typed projection) instead of recompiling for derived views. */
   compileResponse?: LoopForgeResponse;
-  /** v3.8: The derived capability this round was prepared under — policy,
-   *  provider registry, and the before-evidence baseline, through the single
-   *  `deriveEvidenceCapability` derivation. start/resume/next/status read the
-   *  same fact instead of re-deriving their own. */
-  capability: EvidenceCapability;
 }
 
 export interface CompleteRoundInput {
@@ -136,7 +131,6 @@ export class RoundDriver {
       stateFileContent: response.state_file_content,
       warnings: response.warnings,
       compileResponse: response,
-      capability: deriveEvidenceCapability(getPolicy(), rejected.beforeEvidence),
     };
   }
 
@@ -162,7 +156,6 @@ export class RoundDriver {
       stateFileContent: response.state_file_content,
       warnings: response.warnings,
       compileResponse: response,
-      capability: deriveEvidenceCapability(getPolicy(), evidenceBaseline),
     };
   }
 

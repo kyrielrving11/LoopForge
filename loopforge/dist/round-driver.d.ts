@@ -7,7 +7,7 @@
  */
 import type { LoopStore } from "./loop-store.js";
 import { LoopForgeEngine } from "./engine.js";
-import type { EvidenceCapability, MachineObservation } from "./protocol.js";
+import type { MachineObservation } from "./protocol.js";
 import type { LoopForgeRequest, LoopForgeResponse, PromptArtifact, SelfEvaluation } from "./protocol.js";
 import type { RoundTransactionOutcome, RoundTransactionSnapshot } from "./round-transaction.js";
 export interface PreparedRound {
@@ -21,11 +21,6 @@ export interface PreparedRound {
     /** v3.0.1: The full compile response. Callers may cache it (e.g. for the
      *  typed projection) instead of recompiling for derived views. */
     compileResponse?: LoopForgeResponse;
-    /** v3.8: The derived capability this round was prepared under — policy,
-     *  provider registry, and the before-evidence baseline, through the single
-     *  `deriveEvidenceCapability` derivation. start/resume/next/status read the
-     *  same fact instead of re-deriving their own. */
-    capability: EvidenceCapability;
 }
 export interface CompleteRoundInput {
     snapshot: RoundTransactionSnapshot;

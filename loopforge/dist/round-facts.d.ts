@@ -14,7 +14,7 @@
 import type { CommittedRoundView } from "./committed-round.js";
 import type { ContractItemStatusView } from "./contract-items.js";
 import type { CommandEvidencePolicy } from "./policy.js";
-import type { ExecutionReport, MachineObservation, SubGoal, VerifiedSubGoalFact } from "./protocol.js";
+import type { ContractItemStatus, ExecutionReport, MachineObservation, SubGoal, VerifiedSubGoalFact } from "./protocol.js";
 import type { ActiveContractView } from "./round-contract.js";
 export interface RoundFacts {
     /** The contract the NEXT round executes under — derived from committed
@@ -26,6 +26,20 @@ export interface RoundFacts {
     verifiedSubGoals: VerifiedSubGoalFact[];
     /** `done` sub-goals no verified item backs, plus `insufficient` items. */
     verificationDebt: string[];
+    /** v3.8.1: the machine fact about each criterion a contract item referenced,
+     *  over the WHOLE committed history — the criterion-side twin of
+     *  `verifiedSubGoals`, and read by the same callers. */
+    criterionFacts: CriterionMachineFact[];
+}
+/** v3.8.1: ONE criterion's machine fact. `status` is absent while every item
+ *  referencing the criterion is still `pending` — "no claim yet" says nothing
+ *  about the criterion, so the criterion keeps its claim-derived status. The
+ *  links are explicit `subgoal_refs` only, and they survive their item's
+ *  contract closing just like the status does. */
+export interface CriterionMachineFact {
+    criterion_id: string;
+    status?: Exclude<ContractItemStatus, "pending">;
+    related_subgoal_ids: string[];
 }
 /** The in-flight slice of a round that is being decided but is not yet
  *  committed. A pure committed-history replay passes null / [] — the reducer

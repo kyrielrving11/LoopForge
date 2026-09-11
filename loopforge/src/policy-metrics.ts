@@ -2,7 +2,7 @@
 
 import type { RoundProcessResult } from "./round-coordinator.js";
 import type { VaultEntry } from "./loop-store.js";
-import { derivationRounds } from "./committed-round.js";
+import { readOnlyRounds } from "./committed-round.js";
 
 export interface PolicyMetricsSnapshot {
   loopId?: string;
@@ -185,7 +185,7 @@ export function derivePolicyMetrics(
   entries: VaultEntry[],
 ): PolicyMetricsSnapshot {
   const metric = empty(loopId);
-  for (const round of derivationRounds(entries)) {
+  for (const round of readOnlyRounds(entries)) {
     if (round.loopId !== loopId) continue;
     const result = round.result;
     if (!result) continue;

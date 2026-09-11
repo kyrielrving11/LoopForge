@@ -46,8 +46,6 @@ export declare function sameContract(left: RoundContractProposal, right: RoundCo
 export declare function deriveActiveRoundContract(rounds: ReadonlyArray<CommittedRoundView>, commands?: ReadonlyArray<CommandEvidencePolicy>): ActiveContractView | null;
 /** v3.8: Every criterion id referenced by the contract's items. */
 export declare function contractCriterionIds(contract: ActiveContractView): string[];
-/** v3.8: Every sub-goal id referenced by any of the contract's items. */
-export declare function contractSubGoalIds(contract: ActiveContractView): string[];
 /** v3.8: The contract a round EXECUTED under, plus every item's status as of
  *  that round — the ONE derivation the live coordinator, explain and audit
  *  share, so the three can never disagree about what a round ran under.

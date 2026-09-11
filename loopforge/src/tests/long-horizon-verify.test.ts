@@ -20,7 +20,7 @@
 
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { ChildProcess, spawn } from "node:child_process";
+import { ChildProcess, spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { tmpdir } from "node:os";
@@ -40,9 +40,11 @@ interface JsonRpcResponse {
 class McpClient {
   private proc: ChildProcess; private rl: Interface;
   private pending = new Map<number, { resolve: (v: JsonRpcResponse) => void; reject: (e: Error) => void }>();
-  private nextId = 1; private stderr = "";
+  private nextId = 1; private stderr = ""; private workCounter = 0;
+  private readonly storeDir: string;
 
   constructor(storeDir: string) {
+    this.storeDir = storeDir;
     mkdirSync(storeDir, { recursive: true });
     this.proc = spawn(process.execPath, [CLI_PATH, "mcp"], { cwd: storeDir, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env } });
     this.proc.stderr?.on("data", (chunk: Buffer) => { this.stderr += chunk.toString("utf8"); });
@@ -60,7 +62,30 @@ class McpClient {
       this.proc.stdin!.write(JSON.stringify({ jsonrpc: "2.0", id, method, params: params ?? {} }) + "\n");
     });
   }
+  /** v3.8.1: THE fixture's agent actually does the work it reports.
+   *
+   *  The git provider observes this directory, and the stall evaluator lets
+   *  machine motion decide whenever it is observable — so a round that claims
+   *  `files_changed` without touching a file is exactly the unverifiable
+   *  self-report that evaluator exists to catch. Content changes on every
+   *  submission, so each round's before→after delta is non-empty. */
+  private materialize(evaluation: unknown): void {
+    const report = (evaluation as {
+      execution_report?: { files_changed?: unknown };
+    } | null)?.execution_report;
+    const files = Array.isArray(report?.files_changed) ? report.files_changed : [];
+    this.workCounter += 1;
+    for (const file of files) {
+      if (typeof file !== "string" || file.length === 0) continue;
+      const target = join(this.storeDir, file);
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, `// ${file} — written by fixture round ${this.workCounter}
+`);
+    }
+  }
+
   async tool(name: string, args: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
+    if (name === "loopforge_next") this.materialize(args.evaluation);
     const r = await this.call("tools/call", { name, arguments: args });
     if (r.structuredContent && typeof r.structuredContent === "object") return r.structuredContent as Record<string, unknown>;
     if (r.content && Array.isArray(r.content)) {
@@ -93,6 +118,13 @@ describe("Long-Horizon Verification", () => {
   before(() => {
     storeDir = join(tmpdir(), `loopforge-lh-${randomUUID()}`);
     mkdirSync(storeDir, { recursive: true });
+    // v3.8.1: the workspace is a real git repo, and the vault is ignored —
+    // the git provider observes THIS directory, so machine motion must mean
+    // the agent's own work. Without the repo the provider reports
+    // `unavailable` and every round looks motionless; without the ignore,
+    // LoopForge's own `.loopforge/` writes would look like progress.
+    spawnSync("git", ["init"], { cwd: storeDir, stdio: "ignore" });
+    writeFileSync(join(storeDir, ".gitignore"), ".loopforge/\n");
     // v3.3: a passing verification command keeps success claims machine-backed
     // (R8 requires it — self-reported test results alone are not evidence).
     // v3.8.1: the policy version is load-bearing, and full_refresh_interval is
@@ -134,9 +166,13 @@ describe("Long-Horizon Verification", () => {
   it("R2 L1 — isPalindrome + capitalize, discovers ESM constraint", async () => {
     const r = await client.tool("loopforge_next", { sessionId, roundId, evaluation: {
       success: false, should_continue: true, constraint_violations: [],
-      output_summary: "Implemented isPalindrome and capitalize. Discovered package.json needs type:module for ESM.",
-      discovered_constraints: ["package.json must include type:module for ESM resolution"],
-      execution_report: { files_changed: ["src/strkit.ts", "package.json"], tests_reported: { passed: 0, failed: 0, skipped: 0 }, criterion_claims: criterionClaims(["isPalindrome", "capitalize"], ["Write tests", "Implement truncate + toCamelCase"]), progress_estimate: 0.2 },
+      output_summary: "Implemented isPalindrome and capitalize. Discovered the package needs type:module for ESM.",
+      discovered_constraints: ["the package must declare type:module for ESM resolution"],
+      // The fixture's agent reports the files it actually wrote (the client
+      // materializes them), and it does not touch package.json: the ESM
+      // constraint is DISCOVERED here, and the verification command's own
+      // entrypoints stay put in the round that runs it.
+      execution_report: { files_changed: ["src/strkit.ts"], tests_reported: { passed: 0, failed: 0, skipped: 0 }, criterion_claims: criterionClaims(["isPalindrome", "capitalize"], ["Write tests", "Implement truncate + toCamelCase"]), progress_estimate: 0.2 },
     }});
     assert.ok(!r.error); assert.equal(String(r.level ?? "").toLowerCase(), "l1"); assert.equal(r.round, 2);
     roundId = String(r.roundId);

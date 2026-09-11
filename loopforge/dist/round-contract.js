@@ -87,15 +87,6 @@ export function contractCriterionIds(contract) {
     }
     return [...ids];
 }
-/** v3.8: Every sub-goal id referenced by any of the contract's items. */
-export function contractSubGoalIds(contract) {
-    const ids = new Set();
-    for (const item of contract.items) {
-        for (const ref of item.subgoal_refs)
-            ids.add(ref);
-    }
-    return [...ids];
-}
 /** v3.8: The contract a round EXECUTED under, plus every item's status as of
  *  that round — the ONE derivation the live coordinator, explain and audit
  *  share, so the three can never disagree about what a round ran under.

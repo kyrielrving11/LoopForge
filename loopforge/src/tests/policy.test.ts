@@ -77,11 +77,17 @@ describe("Policy — the schema version is a boundary", () => {
   beforeEach(() => resetPolicy());
 
   /** Write a policy file into a throwaway directory and run loadPolicy on it. */
-  const withPolicyFile = (body: Record<string, unknown>, run: (path: string) => void): void => {
+  const withPolicyFile = (
+    body: Record<string, unknown> | string,
+    run: (path: string) => void,
+  ): void => {
     const dir = mkdtempSync(join(tmpdir(), "lf-policy-"));
     try {
       const path = join(dir, "loop_policy.json");
-      writeFileSync(path, JSON.stringify(body));
+      // A raw string body is needed for keys an object literal cannot carry
+      // ("__proto__" in a literal sets the prototype; JSON.parse makes it an
+      // own property — and the file on disk is what the runtime reads).
+      writeFileSync(path, typeof body === "string" ? body : JSON.stringify(body));
       run(path);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -122,6 +128,51 @@ describe("Policy — the schema version is a boundary", () => {
       { version: POLICY_SCHEMA_VERSION, engin: { max_rounds: 5 } },
       (path) => {
         assert.throws(() => loadPolicy(path), /unknown policy key "engin"/);
+      },
+    );
+  });
+
+  it("v3.8.1: REJECTS an unknown key inside a command entry", () => {
+    // An array replaces the default wholesale (the default list is empty), so
+    // element keys were never checked: `"enable": true` — a typo for
+    // `enabled` — was accepted, and the command silently never registered.
+    withPolicyFile(
+      {
+        version: POLICY_SCHEMA_VERSION,
+        evidence: {
+          commands: [{
+            name: "verify",
+            enable: true,
+            executable: "node",
+            args: ["-e", "0"],
+            phase: "after",
+            required: true,
+            timeout_ms: 5000,
+            max_output_chars: 2000,
+            success_exit_codes: [0],
+          }],
+        },
+      },
+      (path) => {
+        assert.throws(() => loadPolicy(path), /unknown policy key "commands\[\]\.enable"/);
+      },
+    );
+  });
+
+  it("v3.8.1: REJECTS a key inherited from Object.prototype", () => {
+    // `key in result` is true for "constructor" / "__proto__" / "toString",
+    // so those were merged as if the schema declared them — and assigning
+    // "__proto__" replaced the policy object's own prototype.
+    withPolicyFile(
+      { version: POLICY_SCHEMA_VERSION, constructor: { x: 1 } },
+      (path) => {
+        assert.throws(() => loadPolicy(path), /unknown policy key "constructor"/);
+      },
+    );
+    withPolicyFile(
+      `{"version":"${POLICY_SCHEMA_VERSION}","__proto__":{"toString":1}}`,
+      (path) => {
+        assert.throws(() => loadPolicy(path), /unknown policy key "__proto__"/);
       },
     );
   });

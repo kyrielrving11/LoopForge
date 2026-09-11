@@ -22,7 +22,6 @@ import type { PromptArtifact, PromptRequests } from "./protocol.js";
 import { PROMPT_ARTIFACT_SCHEMA_VERSION } from "./protocol.js";
 import type {
   ConstraintMeta,
-  MilestoneSummary,
   RecurringFlag,
   SubGoal,
 } from "./protocol.js";
@@ -781,10 +780,7 @@ function renderConfusionAlerts(
 
 /** Render the "Critical Context" section — items the model emphasized.
  *  Pulled from active constraints, discoveries, and blocking issues. */
-function renderCriticalContext(
-  emphasized: string[],
-  state: CanonicalLoopState,
-): string {
+function renderCriticalContext(emphasized: string[]): string {
   if (emphasized.length === 0) return "";
   const lines: string[] = [
     "## 🔴 Critical Context",
@@ -884,7 +880,6 @@ export function assemblePromptArtifact(input: PromptAssemblyInput): PromptArtifa
   // ── v2.9: Prompt Requests — model-expressed information needs ──────────
   const pr = input.promptRequests;
   const levelIsL0 = input.level === "l0";
-  const levelIsL1 = input.level === "l1";
   const levelIsL2 = input.level === "l2";
 
   // Confusion alerts: L1/L2 only, rendered at the top (before mandatory sections)
@@ -930,7 +925,7 @@ export function assemblePromptArtifact(input: PromptAssemblyInput): PromptArtifa
       }
     : input.state;
   const sections = selectSections({ ...input, state: stateForSections });
-  const criticalContextText = renderCriticalContext(emphasized, input.state);
+  const criticalContextText = renderCriticalContext(emphasized);
 
   // v3.8.1: no presentation snapshot. The artifact records what THIS prompt
   // rendered (level, hashes, round identity, the sections it emitted) and

@@ -294,7 +294,7 @@ const TOOL_BASE_SCHEMAS = [
                 emphasize: {
                   type: "array" as const,
                   items: { type: "string" as const },
-                  description: "Constraints, discoveries, or decisions that need emphasis in the next prompt. Matched by meaning — not exact text. Matched items appear in a 'Critical Context' section. Max 5 entries. Pure reordering — no token overhead.",
+                  description: "Constraints, discoveries, or decisions that need emphasis in the next prompt. Each entry is matched against active state items by STABLE ID (c-/cr-/sg-XXXXXXXX) or by exact text after normalization — a paraphrase matches nothing and renders nothing. Matched items appear in a 'Critical Context' section. Max 5 entries. Pure reordering — no token overhead.",
                 },
                 confusion_points: {
                   type: "array" as const,
@@ -374,6 +374,10 @@ const TOOL_BASE_SCHEMAS = [
           type: "string" as const,
           enum: ["session", "loop", "all", "audit", "explain"],
           description: "Which view to return. Defaults to session. explain (v3.8) is the read-only per-round \"why\" view over committed facts.",
+        },
+        round: {
+          type: "number" as const,
+          description: "view=explain only: return that single round's \"why\" view. Omit for the whole timeline.",
         },
       },
       required: [],
@@ -1219,7 +1223,7 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
         : [],
       effects: Array.isArray(action.effects)
         ? action.effects.filter((v): v is string => typeof v === "string")
-            .filter((v): v is "workspace_write" | "production" | "credentials" |
+            .filter((_v): _v is "workspace_write" | "production" | "credentials" |
               "data_migration" | "public_api" | "publish" | "payment" |
               "external_communication" | "network" => true)
         : [],

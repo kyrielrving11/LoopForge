@@ -23,7 +23,7 @@ import { listVerifiedClaims } from "../evidence-claims.js";
 import { buildAudit } from "../audit.js";
 import { buildExplain } from "../explain.js";
 import { CHECK_CONTRACT_ITEMS_UNVERIFIED } from "../verification-gate.js";
-import { derivationRounds } from "../committed-round.js";
+import { readOnlyRounds } from "../committed-round.js";
 import { getPolicy, validateLoopId } from "../policy.js";
 import { isRecord } from "../token-utils.js";
 import { ReplayBackend } from "../replay.js";
@@ -724,7 +724,7 @@ export class SessionManager {
         // from the same `deriveRoundFacts` the compile path calls, so the prompt
         // and the projection cannot tell different stories about what the machine
         // verified.
-        const rounds = derivationRounds(entries);
+        const rounds = readOnlyRounds(entries);
         const projection = buildLoopProjection(deriveCognitiveFacts({
             compileResponse,
             rounds,
@@ -767,7 +767,7 @@ export class SessionManager {
         // Zero committed decisions → nothing to audit. Returning null lets the
         // tools layer report "no audit data" instead of the external auditor
         // solemnly passing a loop that never ran (or a mistyped loopId).
-        const hasCommittedDecision = derivationRounds(entries).length > 0;
+        const hasCommittedDecision = readOnlyRounds(entries).length > 0;
         if (!hasCommittedDecision)
             return null;
         const audit = buildAudit(loopId, entries, this.loopStore);
@@ -823,7 +823,7 @@ export class SessionManager {
         if (!context)
             return null;
         const entries = Array.isArray(context.results) ? context.results : [];
-        const views = derivationRounds(entries);
+        const views = readOnlyRounds(entries);
         const roundsWithUnverifiedItems = views.filter((view) => view.verificationFlags.some((flag) => flag.check === CHECK_CONTRACT_ITEMS_UNVERIFIED)).length;
         return {
             loopId,

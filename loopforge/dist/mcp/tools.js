@@ -284,7 +284,7 @@ const TOOL_BASE_SCHEMAS = [
                                 emphasize: {
                                     type: "array",
                                     items: { type: "string" },
-                                    description: "Constraints, discoveries, or decisions that need emphasis in the next prompt. Matched by meaning — not exact text. Matched items appear in a 'Critical Context' section. Max 5 entries. Pure reordering — no token overhead.",
+                                    description: "Constraints, discoveries, or decisions that need emphasis in the next prompt. Each entry is matched against active state items by STABLE ID (c-/cr-/sg-XXXXXXXX) or by exact text after normalization — a paraphrase matches nothing and renders nothing. Matched items appear in a 'Critical Context' section. Max 5 entries. Pure reordering — no token overhead.",
                                 },
                                 confusion_points: {
                                     type: "array",
@@ -363,6 +363,10 @@ const TOOL_BASE_SCHEMAS = [
                     type: "string",
                     enum: ["session", "loop", "all", "audit", "explain"],
                     description: "Which view to return. Defaults to session. explain (v3.8) is the read-only per-round \"why\" view over committed facts.",
+                },
+                round: {
+                    type: "number",
+                    description: "view=explain only: return that single round's \"why\" view. Omit for the whole timeline.",
                 },
             },
             required: [],
@@ -1145,7 +1149,7 @@ export const TOOL_HANDLERS = {
                 : [],
             effects: Array.isArray(action.effects)
                 ? action.effects.filter((v) => typeof v === "string")
-                    .filter((v) => true)
+                    .filter((_v) => true)
                 : [],
             reversibility: (["reversible", "recoverable", "irreversible", "unknown"]
                 .includes(String(action.reversibility))

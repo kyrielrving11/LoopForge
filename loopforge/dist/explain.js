@@ -5,12 +5,12 @@
  * the committed enforcement result. It never rebuilds history and never
  * writes. Every fact it prints is one the runtime already derived.
  */
-import { derivationRounds } from "./committed-round.js";
+import { readOnlyRounds } from "./committed-round.js";
 import { deriveActiveRoundContract, deriveRoundContractView } from "./round-contract.js";
 import { getPolicy } from "./policy.js";
 /** Build the explain view. Pure and read-only. */
 export function buildExplain(loopId, entries, round) {
-    const all = derivationRounds(entries);
+    const all = readOnlyRounds(entries);
     const commands = getPolicy().evidence.commands ?? [];
     const active = deriveActiveRoundContract(all, commands);
     const selected = round === undefined

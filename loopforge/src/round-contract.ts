@@ -25,7 +25,6 @@ import {
   canonicalContractText,
   deriveContractId,
   deriveContractItemIds,
-  deriveItemId,
 } from "./token-utils.js";
 import { deriveContractItemStatuses } from "./contract-items.js";
 import type { ContractItemStatusView } from "./contract-items.js";
@@ -133,15 +132,6 @@ export function contractCriterionIds(contract: ActiveContractView): string[] {
     for (const ref of item.criterion_refs) {
       if (/^cr-[a-f0-9]{8}$/.test(ref)) ids.add(ref);
     }
-  }
-  return [...ids];
-}
-
-/** v3.8: Every sub-goal id referenced by any of the contract's items. */
-export function contractSubGoalIds(contract: ActiveContractView): string[] {
-  const ids = new Set<string>();
-  for (const item of contract.items) {
-    for (const ref of item.subgoal_refs) ids.add(ref);
   }
   return [...ids];
 }

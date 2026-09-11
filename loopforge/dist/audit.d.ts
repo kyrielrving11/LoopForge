@@ -19,7 +19,7 @@ export interface AuditRound {
     outcome: string;
     claims: Array<{
         text: string;
-        status: "verified" | "unverified" | "no_evidence";
+        status: "verified" | "unverified";
     }>;
     checks: Array<{
         check: string;

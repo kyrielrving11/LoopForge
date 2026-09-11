@@ -506,17 +506,20 @@ describe("cognitive-state compiler", () => {
     assert.equal(ms[ms.length - 1].label, "Phase 60", "the newest always survive");
   });
 
-  it("bounds milestones identically at every prompt level", () => {
+  it("the milestone history depends on the committed rounds, never on a prompt level", () => {
     // The v3.0.1 sampler did nothing at L2, so the milestone set written to
-    // the state file depended on which level happened to compile. One input
-    // must now give one answer.
+    // the state file depended on which level happened to compile. v3.8.1
+    // deleted the level parameter outright, so "the level cannot change this"
+    // is now structural rather than behavioural; what stays worth pinning is
+    // that the derivation is a pure function of the committed rounds.
     const entries = Array.from({ length: 60 }, (_, i) => checkpointRound("cap_lvl", i + 1));
-    const atL1 = buildRollingSummary("cap_lvl", 61, { results: entries }, 0, "l1")?.milestones;
-    const atL2 = buildRollingSummary("cap_lvl", 61, { results: entries }, 0, "l2")?.milestones;
-    assert.deepEqual(atL1, atL2, "the level must not change the milestone history");
+    const first = buildRollingSummary("cap_lvl", 61, { results: entries })?.milestones;
+    const second = buildRollingSummary("cap_lvl", 61, { results: entries })?.milestones;
+    assert.deepEqual(first, second, "one input, one answer");
+    assert.ok((first?.length ?? 0) > 0, "the committed milestones are the only source");
   });
 
-  it("v3.0.1 L2 keeps every milestone — full rehydration is never sampled", () => {
+  it("keeps every milestone at or under the cap — nothing samples the set", () => {
     const entries: Record<string, unknown>[] = [];
     for (let i = 1; i <= 15; i++) {
       entries.push({
@@ -539,9 +542,9 @@ describe("cognitive-state compiler", () => {
         },
       });
     }
-    const rolling = buildRollingSummary("l2_ms", 16, { results: entries }, 0, "l2");
+    const rolling = buildRollingSummary("l2_ms", 16, { results: entries }, 0);
     const ms = rolling!.milestones ?? [];
-    assert.equal(ms.length, 15, `L2 must keep all 15 milestones, got ${ms.length}`);
+    assert.equal(ms.length, 15, `expected all 15 milestones, got ${ms.length}`);
     assert.equal(ms[0].label, "Phase 1");
     assert.equal(ms[ms.length - 1].label, "Phase 15");
   });
@@ -569,9 +572,9 @@ describe("cognitive-state compiler", () => {
         },
       });
     }
-    const rolling = buildRollingSummary("under_ms", 9, { results: entries }, 0, "l1");
+    const rolling = buildRollingSummary("under_ms", 9, { results: entries }, 0);
     const ms = rolling!.milestones ?? [];
-    assert.equal(ms.length, 8, `under-cap L1 must keep all 8 milestones, got ${ms.length}`);
+    assert.equal(ms.length, 8, `under-cap must keep all 8 milestones, got ${ms.length}`);
     assert.equal(ms[0].label, "Phase 1");
     assert.equal(ms[ms.length - 1].label, "Phase 8");
   });
@@ -1378,10 +1381,7 @@ describe("v3.2 — criterion status derivation", () => {
     }, makeLoopObjective({
       objective: "Build a parser",
       success_criteria: ["Parser complete", "Tests ≥90%", "No runtime deps"],
-    }), 3, [
-      { id: "sg-1", description: "Parser complete", status: "done", declared_at_round: 1, status_changed_at_round: 2, completed_at_round: 2, priority: 0 },
-      { id: "sg-2", description: "Test coverage", status: "in_progress", declared_at_round: 1, status_changed_at_round: 1, priority: 1 },
-    ]);
+    }), 3);
 
     assert.equal(statuses.length, 3);
     const parser = statuses.find((s) => s.text === "Parser complete")!;
@@ -1402,20 +1402,12 @@ describe("v3.2 — criterion status derivation", () => {
   });
 
   it("links a criterion to sub-goals only through an item's explicit refs", () => {
-    // v3.8.1: `related_subgoal_ids` reads `ContractItemProposal.subgoal_refs`
-    // on an item that references the criterion. Identical wording alone links
-    // nothing — the Jaccard guess at "which sub-goal is this criterion about"
-    // is gone.
+    // v3.8.1: `related_subgoal_ids` comes from the shared criterion facts,
+    // which read `ContractItemProposal.subgoal_refs` on an item that
+    // references the criterion (see round-facts.ts). Identical wording alone
+    // links nothing — the Jaccard guess at "which sub-goal is this criterion
+    // about" is gone.
     const parserCriterionId = deriveCriterionId("Parser complete");
-    const emptyStatuses = {
-      contractId: "rc-aaaaaaaa",
-      closure: "open" as const,
-      closed_at_round: null,
-      items: [],
-      verifiedCount: 0,
-      contradictedCount: 0,
-      insufficientCount: 0,
-    };
     const statuses = deriveCriterionStatuses("cs-refs", {
       results: [{
         loop_id: "cs-refs",
@@ -1428,29 +1420,13 @@ describe("v3.2 — criterion status derivation", () => {
     }, makeLoopObjective({
       objective: "Build a parser",
       success_criteria: ["Parser complete", "Tests ≥90%"],
-    }), 2, [], null, {
-      activeContract: {
-        id: "rc-aaaaaaaa",
-        declared_at_round: 1,
-        scope: [],
-        items: [{
-          id: "rci-11111111",
-          description: "parser works",
-          criterion_refs: [parserCriterionId],
-          subgoal_refs: ["sg-1"],
-          verify_with: ["verify"],
-        }, {
-          id: "rci-22222222",
-          description: "coverage",
-          criterion_refs: [deriveCriterionId("Tests ≥90%")],
-          // References the criterion but names NO sub-goal — so it links none.
-          subgoal_refs: [],
-          verify_with: ["verify"],
-        }],
-        config_hash_by_command: {},
-      },
-      itemStatuses: emptyStatuses,
-    });
+    }), 2, null, [
+      // The fact an item that references the criterion AND names the sub-goal
+      // produces.
+      { criterion_id: parserCriterionId, related_subgoal_ids: ["sg-1"] },
+      // An item with no subgoal_refs links nothing.
+      { criterion_id: deriveCriterionId("Tests ≥90%"), related_subgoal_ids: [] },
+    ]);
 
     const parser = statuses.find((s) => s.text === "Parser complete")!;
     assert.deepEqual(parser.related_subgoal_ids, ["sg-1"],

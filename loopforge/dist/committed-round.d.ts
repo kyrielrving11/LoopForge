@@ -134,6 +134,29 @@ export declare function historyRounds(views: Iterable<CommittedRoundView | null>
  * rounds occupied, so abandonment is temporal, not numeric, and cannot be
  * expressed as a bound here. */
 export declare function derivationRounds(entries: ReadonlyArray<unknown>, currentRound?: number): CommittedRoundView[];
+/** v3.8.1: the loop's durable round frontier — the session document's
+ *  `current_round`. Null when no session document is in the entry set, so
+ *  callers fail OPEN rather than inventing a bound. */
+export declare function persistedFrontier(entries: ReadonlyArray<unknown>): number | null;
+/** v3.8.1: THE window for a READ-ONLY view of a loop — audit, explain, replay,
+ *  the projection, the metrics replay. Same decoder and same rollback handling
+ *  as `derivationRounds`, plus the bound those callers cannot compute
+ *  themselves.
+ *
+ *  The live paths bound their window at the round being compiled, and that
+ *  bound is what keeps a backtracked branch out of this branch's history. A
+ *  read-only view has no compile round, so it reads the SAME frontier from the
+ *  durable session document and applies it only while a committed rollback
+ *  directive is still in effect — a directive stops being history the moment
+ *  the redo commit replaces its round's record, which is exactly when the
+ *  abandoned rounds have been re-committed and must count again.
+ *
+ *  With no directive in effect the window stays UNBOUNDED on purpose: after a
+ *  stop, terminate or max_rounds the session's `current_round` sits ON the
+ *  round it just committed, so bounding there would silently drop the loop's
+ *  final round. An unobservable frontier fails open the same way — a read-only
+ *  view never invents a fence, it only applies the one the runtime recorded. */
+export declare function readOnlyRounds(entries: ReadonlyArray<unknown>): CommittedRoundView[];
 /** The machine-evidence set that best represents a committed round: the
  *  after-phase observations (captured post-execution), else the derived round
  *  delta, else the pre-round baseline. Shared selector for the

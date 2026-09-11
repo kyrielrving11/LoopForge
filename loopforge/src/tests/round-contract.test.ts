@@ -39,10 +39,14 @@ function proposal(overrides: Partial<RoundContractProposal> = {}): RoundContract
 }
 
 function bindingFor(value: RoundContractProposal, loopId: string): ContractBinding {
+  const hashes: Record<string, string> = {};
+  for (const item of value.items) {
+    for (const commandId of item.verify_with) hashes[commandId] = "hash-1";
+  }
   return {
     rc_id: deriveContractId(loopId, value),
     item_ids: deriveContractItemIds(value.items),
-    config_hash_by_command: { "run-tests": "hash-1" },
+    config_hash_by_command: hashes,
   };
 }
 
@@ -50,10 +54,11 @@ function commandObservation(
   status: "passed" | "failed",
   configHash = "hash-1",
   files: string[] = [],
+  commandId = "run-tests",
 ): MachineObservation {
   return {
     schemaVersion: 1,
-    providerId: "command:run-tests",
+    providerId: `command:${commandId}`,
     kind: "command",
     phase: "after",
     startedAt: 0,
@@ -61,7 +66,7 @@ function commandObservation(
     status,
     files: [],
     data: {
-      commandId: "run-tests",
+      commandId,
       argv: ["node", "-e", "process.exit(0)"],
       cwd: ".",
       configHash,
@@ -207,5 +212,70 @@ describe("v3.8 — active contract walker", () => {
   it("exposes the criterion ids its items reference", () => {
     const active = activateContract(proposal(), 1, null, "cc");
     assert.deepEqual(contractCriterionIds(active), ["cr-11111111"]);
+  });
+
+  it("v3.8.1: a later failing observation overturns an earlier pass", () => {
+    // "every bound command observed passing in the CLOSING round" only holds
+    // if the latest observation decides. Scanning forward let the round-2 pass
+    // outlive the round-3 failure: the item stayed `verified`, the contract
+    // closed, and the machine's own denial of the claim was never read.
+    //
+    // Two items on two commands, so the contract is still OPEN when the later
+    // failure arrives — a single-item contract closes at round 2 and would
+    // never reach the round being tested.
+    const E2E: CommandEvidencePolicy = { ...COMMAND, name: "e2e" };
+    const twoItems = proposal({
+      items: [
+        { description: "login works", criterion_refs: [], subgoal_refs: [], verify_with: ["run-tests"] },
+        { description: "signup works", criterion_refs: [], subgoal_refs: [], verify_with: ["e2e"] },
+      ],
+    });
+    const [loginId, signupId] = deriveContractItemIds(twoItems.items);
+    const active = deriveActiveRoundContract([
+      round(1, { contract: twoItems }),
+      round(2, {
+        claims: [{ item_id: loginId!, outcome: "met" }],
+        observations: [commandObservation("passed")],
+      }),
+      round(3, {
+        contract: proposal({ work_item: "Next slice" }),
+        claims: [{ item_id: signupId!, outcome: "met" }],
+        observations: [
+          commandObservation("passed", "hash-1", [], "e2e"),
+          commandObservation("failed", "hash-1", [], "run-tests"),
+        ],
+      }),
+    ], [COMMAND, E2E]);
+    assert.equal(active?.work_item, "Implement auth",
+      "the bound command failed in the closing round — the item cannot stay verified");
+  });
+
+  it("v3.8.1: a malformed command observation cannot crash the shared derivation", () => {
+    // deriveRoundContractView is called by the compile path, the projection,
+    // the coordinator, explain and audit. A hand-written or externally written
+    // round document that the transaction parser accepts must not take all of
+    // them down with a TypeError.
+    const first = proposal();
+    const itemId = deriveContractItemIds(first.items)[0];
+    const malformed = commandObservation("passed");
+    delete (malformed.data as Record<string, unknown>).entrypointFiles;
+    const git: MachineObservation = {
+      schemaVersion: 1,
+      providerId: "git",
+      kind: "git",
+      phase: "after",
+      startedAt: 0,
+      finishedAt: 0,
+      status: "observed",
+      files: ["scripts/run-tests.sh"],
+      data: { tracked: [], staged: [], untracked: [], fingerprints: {} },
+    };
+    assert.doesNotThrow(() => deriveActiveRoundContract([
+      round(1, { contract: first }),
+      round(2, {
+        claims: [{ item_id: itemId, outcome: "met" }],
+        observations: [git, malformed],
+      }),
+    ], [COMMAND]));
   });
 });

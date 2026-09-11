@@ -7,6 +7,7 @@ import {
   deriveVerifiedSubGoals,
 } from "../cognitive-facts.js";
 import { deriveActiveRoundContract } from "../round-contract.js";
+import { NO_IN_FLIGHT_ROUND, deriveRoundFacts } from "../round-facts.js";
 import { deriveContractItemStatuses } from "../contract-items.js";
 import type { ContractItemStatusView } from "../contract-items.js";
 import type { CommandObservation, RoundContractProposal, SubGoal } from "../protocol.js";
@@ -152,6 +153,42 @@ describe("v3.8 — verified sub-goal facts", () => {
 
   it("ignores a sub-goal reference the loop never declared", () => {
     assert.deepEqual(facts([declaringRound(), verifyingRound()], []), []);
+  });
+});
+
+describe("v3.8.1 — criterion machine facts", () => {
+  const facts = (rounds: CommittedRoundView[]) => deriveRoundFacts({
+    rounds,
+    currentRound: 3,
+    inFlight: NO_IN_FLIGHT_ROUND,
+    subGoals: [],
+    commands: [COMMAND],
+  }).criterionFacts;
+
+  it("keeps the criterion's machine status and links after its contract closes", () => {
+    // The criterion side of the same fact the verified-sub-goal set keeps: it
+    // was re-derived from the ACTIVE contract, so a fully verified contract
+    // took the criterion's ✅ (and its `(related: sg-…)` links) with it — the
+    // state file fell back to the agent's claim while the machine had already
+    // decided.
+    const rounds = [declaringRound(), verifyingRound()];
+    assert.equal(deriveActiveRoundContract(rounds, [COMMAND]), null,
+      "precondition: closure makes the contract inactive");
+    const found = facts(rounds).find((fact) => fact.criterion_id === "cr-11111111");
+    assert.ok(found, "the criterion fact must survive its contract closing");
+    assert.equal(found!.status, "verified");
+    assert.deepEqual(found!.related_subgoal_ids, ["sg-11111111"],
+      "the explicit links travel with the status");
+  });
+
+  it("carries links but no status while the referencing item is pending", () => {
+    // A declared item is machine knowledge about WHICH sub-goal the criterion
+    // belongs to; `pending` is "no claim yet" and says nothing about the
+    // criterion's own state, so the criterion keeps its claim-derived status.
+    const found = facts([declaringRound()]).find((fact) => fact.criterion_id === "cr-11111111");
+    assert.ok(found, "the declaration alone makes the criterion known");
+    assert.equal(found!.status, undefined);
+    assert.deepEqual(found!.related_subgoal_ids, ["sg-11111111"]);
   });
 });
 

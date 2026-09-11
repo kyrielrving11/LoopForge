@@ -39,7 +39,12 @@ function evaluateCommand(commandId, declaredHash, slices, fromRound, configured)
             reason: `command "${commandId}" is no longer configured/enabled — cannot observe it`,
         };
     }
-    for (const slice of slices) {
+    // v3.8.1: the LATEST observation at or after the claim decides, so the
+    // closing round's evidence is the one consulted. Scanning forward let an
+    // early pass outlive a later failure: the item stayed `verified`, its
+    // contract closed, and a success stop could reach `completed` in a round
+    // whose bound command the machine had just observed FAILING.
+    for (const slice of [...slices].reverse()) {
         if (slice.round < fromRound)
             continue;
         const observation = slice.observations.find((item) => item.kind === "command" &&
@@ -58,7 +63,12 @@ function evaluateCommand(commandId, declaredHash, slices, fromRound, configured)
             .filter((item) => item.providerId === "git")
             .flatMap((item) => item.files));
         if (observation.status === "passed") {
-            if (changed.size > 0 && data.entrypointFiles.some((file) => changed.has(file))) {
+            // A malformed observation must not crash the derivation the compile
+            // path, the projection, the coordinator, explain and audit all share:
+            // no entrypoint list means the tamper check simply has nothing to
+            // compare, the same posture as a command with no entrypoint files.
+            const entrypoints = Array.isArray(data.entrypointFiles) ? data.entrypointFiles : [];
+            if (changed.size > 0 && entrypoints.some((file) => changed.has(file))) {
                 return {
                     verdict: "contradicted",
                     reason: `command "${commandId}" passed but its entrypoint changed in round ${slice.round}`,

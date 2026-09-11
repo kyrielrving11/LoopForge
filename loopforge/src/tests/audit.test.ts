@@ -348,4 +348,26 @@ describe("buildAudit", () => {
     assert.equal(audit.rounds[0].round, 2);
     assert.equal(audit.verdict, "passed");
   });
+
+  it("v3.8.1: a round replaced by a later record of the same round is listed once", () => {
+    // The shared committed-history window replaces an earlier record with a
+    // later one for the SAME logical round. Scanning the raw entries here
+    // applied a second, weaker rule: the round was listed twice, and an error
+    // flag on the superseded record could still flip the verdict — an audit
+    // verdict of `contradicted` for a record that is not committed history,
+    // while explain (which reads only the window) reported the opposite.
+    const clean = { success: false, output_summary: "clean", constraint_violations: [], should_continue: true };
+    const entries = [
+      committedFeedback(1, clean, [
+        { severity: "error", check: "required_command_failed", field: "execution_report", detail: "superseded" },
+      ]),
+      committedFeedback(1, clean),
+    ];
+    const audit = buildAudit("audit-loop", entries);
+    assert.equal(audit.rounds.length, 1, "the window keeps one record per logical round");
+    assert.equal(audit.rounds.filter((round) => round.round === 1).length, 1);
+    assert.equal(audit.rounds[0].checks.length, 0,
+      "the superseded record's flags are not history");
+    assert.equal(audit.verdict, "passed");
+  });
 });

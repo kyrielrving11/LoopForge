@@ -6,8 +6,7 @@
  * writes. Every fact it prints is one the runtime already derived.
  */
 
-import type { CommittedRoundView } from "./committed-round.js";
-import { derivationRounds } from "./committed-round.js";
+import { readOnlyRounds } from "./committed-round.js";
 import { deriveActiveRoundContract, deriveRoundContractView } from "./round-contract.js";
 import { getPolicy } from "./policy.js";
 import type { VaultEntry } from "./loop-store.js";
@@ -62,7 +61,7 @@ export function buildExplain(
   entries: VaultEntry[],
   round?: number,
 ): ExplainResult {
-  const all = derivationRounds(entries);
+  const all = readOnlyRounds(entries);
   const commands = getPolicy().evidence.commands ?? [];
   const active = deriveActiveRoundContract(all, commands);
   const selected = round === undefined

@@ -3,10 +3,9 @@
  * The compiler evolves structured state and renders one prompt artifact.
  * L0/L1/L2 control state density only; the external Agent owns reasoning.
  */
-import { type CriterionStatus, type RecurringFlag, type LoopCompileRequest, type LoopCompileResponse, type LoopObjective, type LoopRoundResult, type RollingSummary, type SubGoal } from "./protocol.js";
+import { type CriterionStatus, type RecurringFlag, type LoopCompileRequest, type LoopCompileResponse, type LoopObjective, type LoopRoundResult, type RollingSummary } from "./protocol.js";
 import { type CommittedRoundView } from "./committed-round.js";
-import { type ActiveContractView } from "./round-contract.js";
-import type { ContractItemStatusView } from "./contract-items.js";
+import type { CriterionMachineFact } from "./round-facts.js";
 export interface PreviousRound {
     round: number;
     goal_id: string;
@@ -41,26 +40,25 @@ export declare function deriveRecurringFlags(committedRounds: ReadonlyArray<Comm
  *  the round it was first reported met, and the sub-goals a contract item
  *  referencing it also names (explicit `subgoal_refs`, never a text guess).
  *  Zero persistence — re-derived from the vault every compile. */
-export declare function deriveCriterionStatuses(loopId: string, context: Record<string, unknown> | null, objective: LoopObjective | null, currentRound: number, subGoals: SubGoal[], lastRoundResult?: LoopRoundResult | null,
-/** v3.8: the ACTIVE contract and its derived item statuses. A criterion is
- *  `verified` / `contradicted` / `insufficient` only through an item that
- *  references it — a claim alone can never reach `verified`. */
-verification?: {
-    activeContract: ActiveContractView | null;
-    itemStatuses: ContractItemStatusView;
-}): CriterionStatus[];
+export declare function deriveCriterionStatuses(loopId: string, context: Record<string, unknown> | null, objective: LoopObjective | null, currentRound: number, lastRoundResult?: LoopRoundResult | null,
+/** v3.8.1: the criterion machine facts from the shared bundle. A criterion
+ *  is `verified` / `contradicted` / `insufficient` only through an item that
+ *  references it — a claim alone can never reach `verified` — and the fact
+ *  is derived over the WHOLE committed history, so it survives its contract
+ *  closing (see `deriveCriterionFacts`). */
+criterionFacts?: ReadonlyArray<CriterionMachineFact>): CriterionStatus[];
+/** v3.8: Rank item statuses so the strongest machine fact wins when several
+ *  items reference the same criterion. */
 /** Match two criterion references. If either is a criterion id
  *  (cr-XXXXXXXX), compares ids; otherwise requires the two texts to be
  *  EXACTLY equal after normalization (v3.8.1 — the similarity fallback is
  *  gone, so a paraphrase is a different criterion). */
 export declare function criteriaMatch(a: string, b: string): boolean;
-export declare function buildRollingSummary(loopId: string, currentRound: number, context: Record<string, unknown> | null, sinceRound?: number, level?: string): RollingSummary | null;
+export declare function buildRollingSummary(loopId: string, currentRound: number, context: Record<string, unknown> | null, sinceRound?: number): RollingSummary | null;
 /** v2.11: Derive a stable constraint ID from its text hash (c-XXXXXXXX).
  *  Same hash strategy as SubGoal — deterministic across rounds. */
 export declare function deriveConstraintId(text: string): string;
-/** v2.11: Derive a stable criterion ID from its text hash (cr-XXXXXXXX).
- *  Same hash strategy as SubGoal — deterministic across rounds. */
-export declare function deriveCriterionId(text: string): string;
+export { deriveCriterionId, isCriterionId } from "./token-utils.js";
 export declare function decideLevel(request: LoopCompileRequest, context: Record<string, unknown> | null): "l0" | "l1" | "l2";
 export declare function buildSelfEvalBlock(round: number,
 /** v2.12: L0 is the minimal retry template — the v2.12 declarative fields

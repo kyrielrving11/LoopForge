@@ -2,6 +2,20 @@
  * The MCP boundary validates required fields before these helpers run.
  */
 import { type CriterionRevision, type ExecutionReport, type PromptRequests, type RoundContractProposal, type RoundOutcome, type SelfEvaluation, type SubGoalUpdate } from "./protocol.js";
+/** v3.8.1: the emerged-subtask intake bound — ONE constant, because the
+ *  sub-goal ids are derived by ORDINAL over this list. The strict submission
+ *  boundary builds the reference space the agent may transition from, and the
+ *  lenient normalizer builds the committed list every prompt compiles from;
+ *  bounding them differently let the boundary accept a transition to a
+ *  sub-goal the prompt could never carry, and the migration was then dropped
+ *  by the compile path without a word. */
+export declare const EMERGED_LIMITS: {
+    readonly items: 50;
+    readonly chars: 500;
+};
+/** THE emerged-list normalization. Both the boundary and the committed
+ *  evaluation call this, so the two sets cannot disagree. */
+export declare function boundedEmergedSubtasks(value: unknown): string[];
 /** Parse ExecutionReport from a raw JSON object. */
 export declare function parseExecutionReport(raw: Record<string, unknown> | undefined | null): ExecutionReport | undefined;
 /** v3.8: The criterion ids the agent claims met this round. */

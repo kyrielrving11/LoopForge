@@ -33,6 +33,7 @@ import type { ActiveContractView } from "../round-contract.js";
 import { deriveActiveRoundContract } from "../round-contract.js";
 import { derivationRounds } from "../committed-round.js";
 import {
+  boundedEmergedSubtasks,
   buildSelfEvaluation,
   parseSubGoalUpdates,
   validateContractShape,
@@ -189,12 +190,11 @@ export function validateSubmission(
       submissionError: { code: "evaluation_invalid", details: { ...core } },
     };
   }
-  // The emerged set is part of BOTH referential spaces below.
-  const emerged = Array.isArray(submission.emerged_subtasks)
-    ? (submission.emerged_subtasks as unknown[])
-        .filter((value): value is string => typeof value === "string")
-        .map((value) => value.slice(0, 500))
-    : [];
+  // The emerged set is part of BOTH referential spaces below. It goes through
+  // the SAME normalization the committed evaluation uses: the sub-goal ids are
+  // derived by ORDINAL over this list, so bounding it differently here let the
+  // boundary accept a transition to a sub-goal the prompt never carried.
+  const emerged = boundedEmergedSubtasks(submission.emerged_subtasks);
   const subgoalShapeErrors = validateSubGoalUpdatesShape(submission);
   if (subgoalShapeErrors.length > 0) {
     return {

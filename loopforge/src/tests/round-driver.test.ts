@@ -51,31 +51,32 @@ describe("RoundDriver", () => {
     assert.equal(left.snapshot.phase, "prompted");
   });
 
-  it("v3.8: prepare() returns the derived EvidenceCapability", async () => {
+  it("v3.8.1: the capability of a prepared round is the ONE derivation, read where it is used", async () => {
+    // The prepared round used to CARRY this fact in a field no production
+    // consumer read: the surfaces that speak about capability (MCP
+    // start/next/status, the warning list) call the derivation themselves,
+    // with the same policy and the same baseline. v3.8.1 deleted the field —
+    // a second copy of a fact is a second thing that can go stale.
     const prepared = await new RoundDriver(
       new LoopForgeEngine(new MemoryLoopStore()),
     ).prepare(request("driver-capability"), "driver-capability", 1);
-
     assert.ok(prepared);
+
+    const capability = deriveEvidenceCapability(getPolicy(), prepared.evidenceBaseline);
     // installTestCommandProvider configures "verify" (enabled, after-phase).
-    assert.equal(prepared.capability.schemaVersion, 1);
+    assert.equal(capability.schemaVersion, 1);
     assert.deepEqual(
-      prepared.capability.commands.map((command) => [command.commandId, command.ready]),
+      capability.commands.map((command) => [command.commandId, command.ready]),
       [["verify", true]],
     );
-    assert.equal(prepared.capability.contractVerificationAvailable, true);
+    assert.equal(capability.contractVerificationAvailable, true);
     assert.deepEqual(
-      prepared.capability.providers.map((provider) => provider.providerId),
+      capability.providers.map((provider) => provider.providerId),
       ["git"],
       "the default policy configures the git provider",
     );
-    assert.deepEqual(prepared.capability.warnings, [],
+    assert.deepEqual(capability.warnings, [],
       "a configured provider and an enabled command need no warning");
-    // The prepared capability is the SAME fact the CLI-side surfaces derive.
-    assert.deepEqual(
-      prepared.capability,
-      deriveEvidenceCapability(getPolicy(), prepared.evidenceBaseline),
-    );
   });
 
   it("compiles a new L0 artifact for a rejected attempt without a lineage commit", async () => {

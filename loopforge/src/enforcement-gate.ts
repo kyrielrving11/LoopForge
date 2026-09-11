@@ -26,7 +26,6 @@ import type {
 } from "./protocol.js";
 import { makeEnforcementResult } from "./protocol.js";
 import { machineProgressSeries, CHECK_SUCCESS_WITH_REMAINING_CRITERIA, CHECK_RECURRING_VIOLATION, CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE, CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED, CHECK_REQUIRED_COMMAND_FAILED, CHECK_COMMAND_EVIDENCE_MISMATCH, CHECK_OUTCOME_SUCCESS_CONTRADICTION, CHECK_VERIFICATION_ENTRYPOINT_MODIFIED, CHECK_ROUND_SCOPE_DRIFT, CHECK_CONTRACT_ITEMS_UNVERIFIED, CHECK_USER_GATE_UNRESOLVED } from "./verification-gate.js";
-import { effectiveSuccess } from "./self-eval.js";
 import { getPolicy } from "./policy.js";
 import { isRecord, entryRound } from "./token-utils.js";
 import type { RoundProcessResult } from "./round-coordinator.js";
@@ -573,8 +572,15 @@ function enforceSuccessWithoutVerifiedEvidence(
 /** v3.8: Verification debt — contract items claimed met without machine
  *  verification. The round COMMITS (insufficient is recorded, not rejected);
  *  this row only fires once the debt has persisted for
- *  `engine.unverified_claim_streak_limit` consecutive rounds, then runs the
- *  standard uniform ladder (reject → terminate as `incomplete`).
+ *  `engine.unverified_claim_streak_limit` consecutive rounds, then runs its
+ *  OWN ladder: reject → terminate as `incomplete`.
+ *
+ *  v3.8.1: the ladder lives here (RULE_TABLE marks the row "internal").
+ *  Declaring it "uniform" as well ran the escalation twice — the notice was
+ *  appended twice to one fix_instructions — and made the uniform terminate
+ *  branch unreachable, while its bare `consecutiveRejections` read let a
+ *  streak earned by a DIFFERENT check terminate this row on its FIRST
+ *  occurrence, which is exactly what the L4 rule forbids.
  *
  *  The streak is derived from COMMITTED round flags, so it survives restart
  *  and cannot be moved by an agent self-report. Git motion does not excuse
@@ -584,6 +590,7 @@ function enforceContractItemsUnverified(
   currentRound: number,
   vaultEntries: VaultEntry[],
   consecutiveRejections: number,
+  lastRejectionCheck: string,
 ): EnforcementResult | null {
   const limit = getPolicy().engine.unverified_claim_streak_limit;
   if (!Number.isFinite(limit) || limit <= 0) return null;
@@ -603,7 +610,14 @@ function enforceContractItemsUnverified(
   }
   if (streak < limit) return null;
 
-  if (consecutiveRejections >= 2) {
+  // The counter measures the PREVIOUS round's check (the coordinator resets it
+  // whenever the check changes), so it only speaks for this row when it names
+  // this row — same rule the uniform rows apply.
+  const ownRejections = lastRejectionCheck === "contract_items_unverified"
+    ? consecutiveRejections
+    : 0;
+
+  if (ownRejections >= 2) {
     return makeEnforcementResult({
       action: "terminate",
       reason:
@@ -614,7 +628,7 @@ function enforceContractItemsUnverified(
     });
   }
   const escalation = getPolicy().engine.enforcement_escalation_enabled &&
-    consecutiveRejections >= 1
+    ownRejections >= 1
     ? buildEscalationNotice()
     : "";
   return makeEnforcementResult({
@@ -638,9 +652,7 @@ function enforceContractItemsUnverified(
  *  and declare an extended scope. Repeated drift terminates. */
 function enforceScopeDrift(
   flags: VerificationFlag[],
-  selfEval: SelfEvaluation,
   consecutiveRejections: number,
-  vaultEntries: VaultEntry[] = [],
 ): EnforcementResult | null {
   const flag = flags.find((f) => f.check === CHECK_ROUND_SCOPE_DRIFT);
   if (!flag) return null;
@@ -740,17 +752,44 @@ function evaluateStallWindow(
   selfEval: SelfEvaluation,
   currentRound: number,
   vaultEntries: VaultEntry[],
+  /** v3.8.1: the round's success is machine-verified (`deriveEvidenceStatus`).
+   *  A verified round is finishing work; a motion window cannot outvote it. */
+  machineBackedSuccess: boolean,
 ): StallWindowVerdict | null {
+  // A round the machine verified is not churn, whatever the window says. This
+  // is the machine-backed replacement for the old self-reported `>= 0.95`
+  // near-completion guard: it lets a loop FINISH (a closing round that only
+  // runs the verification and declares success changes no files).
+  if (machineBackedSuccess) return null;
   const window = tier === "progress_stall"
     ? 3
     : Math.max(1, getPolicy().engine.stall_lookback_rounds);
   if (currentRound < window) return null;
   const progressByRound = progressWindow(vaultEntries, currentRound, selfEval);
+  const threshold = getPolicy().evolution.progress_stall_threshold;
   let stalled = false;
   let detail = "";
-  const threshold = getPolicy().evolution.progress_stall_threshold;
 
-  if (progressByRound.size >= window) {
+  // v3.8.1: when the MACHINE series is observable it decides the verdict, and
+  // the agent's own estimates are not consulted at all. Reading the estimates
+  // first (the pre-3.8.1 order) let an agent cancel a stall by writing a
+  // rising `progress_estimate` every round — a verdict about machine motion
+  // that the agent's own report could move, which is the one thing an external
+  // verifier must not allow. Machine motion still only ever EXCUSES: it can
+  // veto a stall it did not create; it can never create one.
+  //
+  // The self-reported window is the FALLBACK for a loop with no machine
+  // history to read (no git provider, or fewer rounds than the window). There
+  // the evaluator can only catch a stall the agent's own reports state, and
+  // the near-completion guard keeps it from rejecting a loop that reports
+  // itself nearly done.
+  const machine = machineProgressSeries(vaultEntries, currentRound, window);
+  if (machine !== null) {
+    stalled = machine.every((value) => !value);
+    detail = tier === "progress_stall"
+      ? `no machine-observed changes in the last ${window} rounds`
+      : `no machine-observed changes for ${window} consecutive rounds`;
+  } else if (progressByRound.size >= window) {
     const recent = [...progressByRound.keys()].sort((a, b) => a - b).slice(-window);
     if (recent[0] < currentRound - window) return null;
     const values = recent.map((round) => progressByRound.get(round)!);
@@ -759,27 +798,17 @@ function evaluateStallWindow(
       stalled = values.slice(1).every((value, index) =>
         value - values[index]! < threshold,
       );
-      detail = values.map((value) => `${(value * 100).toFixed(0)}%`).join(" → ");
+      detail = `${values.map((value) => `${(value * 100).toFixed(0)}%`).join(" → ")}` +
+        " (agent-reported, no machine history to read)";
     } else {
       const first = values[0]!;
       stalled = values.every((value) => Math.abs(value - first) < 1e-10);
       detail = `completely flat at ${(first * 100).toFixed(0)}%`;
     }
   } else {
-    const machine = machineProgressSeries(vaultEntries, currentRound, window);
-    if (machine === null) return null;
-    stalled = machine.every((value) => !value);
-    detail = tier === "progress_stall"
-      ? `no machine-observed changes in the last ${window} rounds`
-      : `no machine-observed changes for ${window} consecutive rounds`;
+    return null;
   }
   if (!stalled) return null;
-
-  const machine = machineProgressSeries(vaultEntries, currentRound, window);
-  if (machine?.some(Boolean)) return null;
-  if (machine !== null) {
-    detail += ` — no machine-observed git motion in rounds ${currentRound - window}–${currentRound - 1}`;
-  }
   return { tier, detail, window, threshold };
 }
 
@@ -872,9 +901,11 @@ function enforceProgressStall(
   currentRound: number,
   vaultEntries: VaultEntry[],
   consecutiveRejections: number,
+  machineBackedSuccess: boolean,
 ): EnforcementResult | null {
-  const verdict = evaluateStallWindow("progress_stall", selfEval, currentRound, vaultEntries)
-    ?? evaluateStallWindow("progress_flatline", selfEval, currentRound, vaultEntries);
+  const verdict =
+    evaluateStallWindow("progress_stall", selfEval, currentRound, vaultEntries, machineBackedSuccess)
+    ?? evaluateStallWindow("progress_flatline", selfEval, currentRound, vaultEntries, machineBackedSuccess);
   return verdict
     ? resolveStallDisposition(verdict, currentRound, vaultEntries, consecutiveRejections)
     : null;
@@ -1025,7 +1056,10 @@ const RULE_TABLE: readonly RuleRow[] = [
   { checks: ["verification_entrypoint_modified"], ladder: "uniform", terminalAfter: 2, noticeOnRepeat: true },
   { checks: ["success_without_verified_evidence"], ladder: "internal" },
   { checks: ["round_scope_drift"], ladder: "internal" },
-  { checks: ["contract_items_unverified"], ladder: "uniform", terminalAfter: 2, noticeOnRepeat: true },
+  // v3.8.1: "internal" — the handler owns this row's ladder (it must terminate
+  // as `incomplete`, with its own reason). Declaring it uniform as well ran the
+  // escalation notice twice and left the uniform terminate branch dead.
+  { checks: ["contract_items_unverified"], ladder: "internal" },
   { checks: ["progress_stall"], ladder: "internal" },
   { checks: ["max_rejections"], ladder: "counter" },
   { checks: ["backtrack_workspace_not_restored"], ladder: "internal" },
@@ -1119,13 +1153,16 @@ export function enforceRound(
     // arm merged from the former R3 empty_success posture + claims arm)
     () => enforceSuccessWithoutVerifiedEvidence(flags, consecutiveRejections),
     // v3.3: R-C2 — files changed outside the contract's declared scope
-    () => enforceScopeDrift(flags, selfEval, consecutiveRejections, vaultEntries),
+    () => enforceScopeDrift(flags, consecutiveRejections),
     // v3.8: verification debt — contract items claimed met without machine
     // verification (fires only after the configured streak)
-    () => enforceContractItemsUnverified(flags, currentRound, vaultEntries, consecutiveRejections),
+    () => enforceContractItemsUnverified(
+      flags, currentRound, vaultEntries, consecutiveRejections, lastRejectionCheck),
     // v3.7: single progress evaluator (former R4/R5 slots merged) —
     // reject → backtrack → terminate with the deadlock guard
-    () => enforceProgressStall(selfEval, flags, currentRound, vaultEntries, consecutiveRejections),
+    () => enforceProgressStall(
+      selfEval, flags, currentRound, vaultEntries, consecutiveRejections,
+      verifyResult.machineBackedSuccess),
     // R6: rejection-counter catch-all (evaluated only when no row above
     // fired — a clean-looking round carrying a high persisted counter)
     // v3.7.1: cited gate without an approved human decision

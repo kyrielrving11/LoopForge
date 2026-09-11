@@ -14,7 +14,7 @@ import { readFileSync, realpathSync, statSync } from "node:fs";
 import { spawn, execFile, } from "node:child_process";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { containInWorkspace } from "./workspace.js";
-import { commandConfigHash, deriveConfiguredCapability, getPolicy } from "./policy.js";
+import { commandConfigHash, deriveConfiguredCapability, getPolicy, resolveStateDirectory } from "./policy.js";
 import { logEvent } from "./observability.js";
 import { policyMetrics } from "./policy-metrics.js";
 const providerFactories = new Map();
@@ -282,14 +282,40 @@ function commandCwd(configured) {
  *  paths are skipped. Returns forward-slash paths (git convention) so the
  *  gate can intersect them with the round's git diff. Empty result = the
  *  command's entrypoint cannot be observed (external command) — fail open. */
-function resolveEntrypointFiles(executable, args, cwd) {
+/** Package-manager executables, whose own configuration IS the command's
+ *  harness: `npm test` runs whatever `scripts.test` names, so an edit there
+ *  changes what the machine will execute. Any other command's harness is what
+ *  its own command line names. */
+const PACKAGE_MANAGER_EXECUTABLES = new Set([
+    "npm", "npm.cmd", "npm.exe",
+    "npx", "npx.cmd", "npx.exe",
+    "pnpm", "pnpm.cmd", "yarn", "yarn.cmd", "yarnpkg",
+    "bun", "bunx",
+]);
+function isPackageManagerCommand(executable) {
+    const base = executable.split(/[\\/]/).pop() ?? executable;
+    return PACKAGE_MANAGER_EXECUTABLES.has(base.trim().toLowerCase());
+}
+/** The workspace files a command's execution depends on, resolved
+ *  statically: the script it names on its own command line, plus package.json
+ *  when a package manager is what runs it. Exported for the pure-function
+ *  test — spawning a real package manager is not portable (a bare `npm`
+ *  cannot be spawned without a shell, and the runtime uses `shell: false`). */
+export function resolveEntrypointFiles(executable, args, cwd) {
     // v3.3.1: entrypoint containment uses the shared workspace check.
     const workspace = process.cwd();
     const candidates = [...args];
     if (executable.includes("/") || executable.includes("\\")) {
         candidates.unshift(executable);
     }
-    candidates.push("package.json");
+    // v3.8.1: `package.json` is a candidate only for a package-manager
+    // invocation, which is the only case where it defines what runs. Adding it
+    // unconditionally made EVERY command's entrypoint set include it, so a round
+    // that touched package.json — for any reason at all, with any command — was
+    // reported as "the verification entrypoint changed" and rejected, however
+    // unrelated the file was to what actually executed.
+    if (isPackageManagerCommand(executable))
+        candidates.push("package.json");
     const found = [];
     for (const candidate of candidates) {
         try {
@@ -534,12 +560,37 @@ cwd = process.cwd()) {
     }
 }
 // ── Built-in: GitEvidenceProvider ──────────────────────────────────────────
+/** The runtime's resolved state directory, or null when it cannot be observed
+ *  (configured outside the workspace, or an unresolvable path). */
+function stateDirectory(workspace) {
+    try {
+        return resolveStateDirectory(workspace, getPolicy().backend.root_dir);
+    }
+    catch {
+        return null;
+    }
+}
+/** True when a workspace-relative or absolute file path is the state directory
+ *  or lives inside it. */
+function isInsideDirectory(file, workspace, dir) {
+    const absolute = isAbsolute(file) ? file : resolve(workspace, file);
+    const prefix = dir.endsWith(sep) ? dir : `${dir}${sep}`;
+    return absolute === dir || absolute.startsWith(prefix);
+}
 export class GitEvidenceProvider {
     name = "git";
     kind = "git";
     capture(context) {
         const workspace = context?.cwd ?? process.cwd();
         const startedAt = Date.now();
+        // v3.8.1: the runtime's OWN state directory is not the agent's work. The
+        // vault lives inside the workspace by default, so every round's
+        // bookkeeping writes would otherwise read as machine-observed motion —
+        // the very signal the stall evaluator and the restore checks consume. The
+        // exclusion lives here, at the fact, and not in the workspace's
+        // .gitignore (which the runtime does not own and a user may not have).
+        const stateDir = stateDirectory(workspace);
+        const isRuntimeState = (file) => stateDir !== null && isInsideDirectory(file, workspace, stateDir);
         return captureGitFileStateAsync(context?.signal, context?.timeoutMs, workspace).then((state) => {
             if (!state)
                 return null;
@@ -547,7 +598,7 @@ export class GitEvidenceProvider {
                     ...state.tracked,
                     ...state.staged,
                     ...state.untracked,
-                ])].sort();
+                ])].filter((file) => !isRuntimeState(file)).sort();
             // v3.7.1: paths from git are workspace-relative; the capture runs with
             // the workspace as cwd, so relative stat/read resolve there naturally.
             // An injectable cwd (tests) must resolve explicitly.
@@ -575,9 +626,9 @@ export class GitEvidenceProvider {
                 status: "observed",
                 files,
                 data: {
-                    tracked: state.tracked,
-                    staged: state.staged,
-                    untracked: state.untracked,
+                    tracked: state.tracked.filter((file) => !isRuntimeState(file)),
+                    staged: state.staged.filter((file) => !isRuntimeState(file)),
+                    untracked: state.untracked.filter((file) => !isRuntimeState(file)),
                     fingerprints,
                     head: state.head,
                 },

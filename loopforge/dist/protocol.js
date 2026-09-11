@@ -113,9 +113,6 @@ export function makeRollingSummary(overrides = {}) {
         ...overrides,
     };
 }
-export function makeSubGoalUpdate(overrides = {}) {
-    return { id: "", status: "done", ...overrides };
-}
 export function makeSubGoal(overrides = {}) {
     return {
         id: "",
@@ -248,6 +245,7 @@ export function makeVerificationResult(overrides = {}) {
     return {
         verdict: "trusted",
         flags: [],
+        machineBackedSuccess: false,
         ...overrides,
     };
 }
@@ -260,26 +258,6 @@ export function makeExecutionReport(overrides = {}) {
         progress_estimate: 0.0,
         ...overrides,
     };
-}
-// ── Serialisation helpers ───────────────────────────────────────────────────
-function toDict(obj) {
-    const result = {};
-    for (const [key, value] of Object.entries(obj)) {
-        if (value === null || value === undefined)
-            continue;
-        if (typeof value === "object" && !Array.isArray(value)) {
-            result[key] = toDict(value);
-        }
-        else if (Array.isArray(value)) {
-            result[key] = value.map((v) => typeof v === "object" && v !== null && !Array.isArray(v)
-                ? toDict(v)
-                : v);
-        }
-        else {
-            result[key] = value;
-        }
-    }
-    return result;
 }
 // ── Factory helpers ─────────────────────────────────────────────────────────
 export function makeTaskId(taskDescription) {

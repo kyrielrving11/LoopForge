@@ -274,19 +274,32 @@ output, and explicitly configured command evidence. Its checks are organized
 into four verification domains: evaluation consistency, evidence integrity,
 plan & contract conformance, and progress & recovery. The enforcement gate
 turns verification results into accept, reject, backtrack, or terminate
-decisions through one ordered in-process strategy table; its rows fall into
-action classes (evidence contradiction, contract & scope, progress recovery).
-Rule numbers are historical — v3.8 documents semantics, not numbered rules.
+decisions through one ordered in-process strategy table. The row order IS the
+priority, and a row carries exactly two things: the check it reacts to and its
+ladder (`uniform` rows share one escalate-then-terminate path, `internal` rows
+own theirs). The former `category` field is gone — v3.8 deleted it, so no
+document should describe the rows as belonging to a category. Rule numbers are
+historical at the same time: v3.8 documents semantics, not numbered rules.
 The verification check set is 20 (evaluation_consistency 8, evidence_integrity
 7, plan_contract 4, progress_recovery 1). Success evidence is a single policy: a success claim with
 no machine-verified observation, or with empty/missing evidence, is handled
 by the success-evidence check; `no_change_reason` is that check's escape hatch
 for the claims arm only — it does not excuse contract completion, scope drift,
 silently dropped contract claims, or a success claim that recorded no
-execution evidence at all. Progress enforcement is a single stall evaluator:
-a window without machine git motion and without self-reported progress motion
-rejects, then backtracks or terminates; git motion can excuse a stall verdict,
-agent-reported progress alone cannot create or cancel one.
+execution evidence at all. Progress enforcement is a single stall evaluator,
+and it reads MACHINE facts first: when the git series is observable over the
+window it alone decides — a window without machine motion rejects, then
+backtracks or terminates — and machine motion only ever EXCUSES (it can veto a
+stall it did not create; it can never create one). The agent's own
+`progress_estimate` series is the FALLBACK for a loop with no machine history
+to read (no git provider, or fewer rounds than the window); there the verdict
+can only state a stall the agent's own reports show, and a near-completion
+guard keeps it from rejecting a loop that reports itself nearly done. An
+agent's rising self-report therefore cannot cancel a machine-derived stall.
+One machine fact is exempt by construction: a round whose success is
+machine-backed (`deriveEvidenceStatus` → a passed after-phase command the
+runtime observed) is the loop FINISHING, not churning — the closing round of
+a loop often changes no files at all.
 
 Round Contracts are proposals for the next round, expressed as ITEMS. A
 proposal becomes active only after its declaring round commits, and the active

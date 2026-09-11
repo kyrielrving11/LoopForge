@@ -7,7 +7,7 @@
  */
 import type { LoopStore } from "./loop-store.js";
 import { type AgentLoopResult, type LoopForgeRequest, type SelfEvaluation, type SessionState } from "./protocol.js";
-export { parseExecutionEvidence, parseCriterionRevisions, parseWorkerResults, buildSelfEvaluation, } from "./self-eval.js";
+export { parseExecutionReport, parseCriterionRevisions, parseWorkerResults, buildSelfEvaluation, } from "./self-eval.js";
 /** A single sub-agent delegation record (v1.9 — AgentTool mode).
  *  v3.7.1: outcome is the single fact; success is deleted. */
 export interface DelegationEntry {

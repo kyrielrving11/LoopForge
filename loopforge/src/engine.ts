@@ -33,7 +33,7 @@ import { isRecord } from "./token-utils.js";
 import { decodeCommittedRound } from "./committed-round.js";
 import { policyMetrics } from "./policy-metrics.js";
 import {
-  parseExecutionEvidence,
+  parseExecutionReport,
   parseCriterionRevisions,
   parseSubGoalUpdates,
   parseWorkerResults,
@@ -43,7 +43,7 @@ import { parseLoopExtras } from "./loop-extras-parser.js";
 
 // ── Re-export self-evaluation utilities (moved to self-eval.ts) ──────────
 export {
-  parseExecutionEvidence,
+  parseExecutionReport,
   parseCriterionRevisions,
   parseWorkerResults,
   buildSelfEvaluation,
@@ -180,9 +180,9 @@ export class LoopForgeEngine {
         skill_used: (signal.skill_used as string) ?? "",
         loop_id: signal.loop_id as string | undefined,
         loop_lineage: (signal.loop_lineage as Record<string, unknown>) ?? {},
-        // Persist execution_evidence so the enforcement gate (R4/R5) can
+        // Persist execution_report so the enforcement gate (R4/R5) can
         // read progress_estimate from vault entries across rounds.
-        execution_evidence: signal.execution_evidence ?? null,
+        execution_report: signal.execution_report ?? null,
         discovered_constraints: signal.discovered_constraints ?? [],
         emerged_subtasks: signal.emerged_subtasks ?? [],
         // v3.7.1: explicit transitions persist on committed entries so the
@@ -331,7 +331,7 @@ export class LoopForgeEngine {
    *  round; compile-time lineage fields (constraints_active, goal_text_hash,
    *  recompile_level, …) are left untouched. */
   private static readonly EVAL_MERGED_LINEAGE_FIELDS = [
-    "execution_evidence",
+    "execution_report",
     "compression_checkpoint",
     "checkpoint_label",
     "discovered_constraints",
@@ -339,11 +339,9 @@ export class LoopForgeEngine {
     "subgoal_updates",
     "retracted_constraints",
     "wrong_assumptions",
-    "next_action",
     "objective_refinement",
     "outcome",
     "blocker",
-    "drift_clarification",
     "revised_success_criteria",
     "worker_results",
     "prompt_requests",
@@ -408,8 +406,14 @@ export class LoopForgeEngine {
       // never carry the stamp — a fresh hydration re-derives it identically
       // from the feedback entry's transaction snapshot).
       lineage.attempt = committed.attempt;
-      if (committed.roundEvidence.length > 0) {
-        lineage.round_evidence = committed.roundEvidence;
+      // v3.8: the factual observation collections are stamped (the round
+      // delta is derived from them by the read model — transaction schema 2
+      // persists no pre-computed delta).
+      if (committed.beforeEvidence.length > 0) {
+        lineage.before_evidence = committed.beforeEvidence;
+      }
+      if (committed.afterEvidence.length > 0) {
+        lineage.after_evidence = committed.afterEvidence;
       }
     }
     if (!evaluation) return;
@@ -785,7 +789,7 @@ export class LoopForgeEngine {
       // the compiler replays them in round order on every derivation.
       subgoal_updates: selfEval.subgoal_updates ?? [],
       // P4: Execution evidence
-      execution_evidence: selfEval.execution_evidence ?? null,
+      execution_report: selfEval.execution_report ?? null,
       // P5: Self-correction
       retracted_constraints: selfEval.retracted_constraints ?? [],
       revised_success_criteria: selfEval.revised_success_criteria ?? [],
@@ -897,8 +901,8 @@ export class LoopForgeEngine {
     if (parsed.last_round_result) {
       const rr = parsed.last_round_result;
       // Parse P4 execution evidence (shared helper)
-      const executionEvidence = parseExecutionEvidence(
-        rr.execution_evidence as Record<string, unknown> | undefined,
+      const executionReport = parseExecutionReport(
+        rr.execution_report as Record<string, unknown> | undefined,
       );
       // Parse P5 revised_success_criteria (shared parser)
       const revisedCriteria = parseCriterionRevisions(rr.revised_success_criteria);
@@ -920,7 +924,7 @@ export class LoopForgeEngine {
           ? (rr.emerged_subtasks as string[]).filter((v: unknown) => typeof v === "string")
           : [],
         // P4: Execution evidence
-        execution_evidence: executionEvidence,
+        execution_report: executionReport,
         // P5: Self-correction
         retracted_constraints: Array.isArray(rr.retracted_constraints)
           ? (rr.retracted_constraints as string[]).filter((v: unknown) => typeof v === "string")
@@ -936,10 +940,6 @@ export class LoopForgeEngine {
           typeof rr.checkpoint_label === "string" ? rr.checkpoint_label : "",
         // v3.7.1: Sub-goal lifecycle — explicit transitions (shared parser)
         subgoal_updates: parseSubGoalUpdates(rr.subgoal_updates),
-        // v2.8: Drift clarification
-        drift_clarification: typeof rr.drift_clarification === "string"
-          ? rr.drift_clarification
-          : undefined,
         // Multi-agent: Worker delegation results (shared parser)
         worker_results: parseWorkerResults(rr.worker_results),
         // v2.12: Tri-state outcome + blocker + retroactive claims
@@ -958,16 +958,14 @@ export class LoopForgeEngine {
             .map((item) => ({ round: item.round as number, claim: (item.claim as string).slice(0, 500) }))
             .slice(0, 20)
           : [],
-        // v3.3.1: next_action + prompt_requests — this whitelist rebuild
-        // previously dropped them, and since EVERY compile path (MCP
-        // advance/retry/backtrack + Runtime) funnels through
-        // invokeLoopCompile, the compiler never saw them on the production
-        // path: "Next Action" never rendered, suggested_next_task stayed
-        // empty, sub-goal Phase-3 auto in_progress never fired, and
-        // prompt_requests (emphasize/confusion_points) were never
-        // consumed. Unit tests fed compileLoop directly, so 783 greens
-        // missed the gap. Shared lenient parsers mirror the other fields.
-        next_action: typeof rr.next_action === "string" ? rr.next_action : undefined,
+        // v3.3.1: prompt_requests — this whitelist rebuild previously
+        // dropped it, and since EVERY compile path (MCP advance/retry/
+        // backtrack + Runtime) funnels through invokeLoopCompile, the
+        // compiler never saw it on the production path: prompt_requests
+        // (emphasize/confusion_points) were never consumed. Unit tests fed
+        // compileLoop directly, so the gap stayed invisible. Shared lenient
+        // parsers mirror the other fields. (v3.8 removed next_action from
+        // this list along with the field itself.)
         prompt_requests: parsePromptRequests(rr.prompt_requests),
       });
     }

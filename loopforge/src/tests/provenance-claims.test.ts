@@ -3,10 +3,11 @@
  */
 
 import { describe, it } from "node:test";
+import { criterionClaims } from "./_helpers.js";
 import assert from "node:assert/strict";
-import { makeExecutionEvidence, makeSelfEvaluation } from "../protocol.js";
+import { makeExecutionReport, makeSelfEvaluation } from "../protocol.js";
 import type { SelfEvaluation, VerificationFlag } from "../protocol.js";
-import type { ProviderSnapshot } from "../evidence-provider.js";
+import type { CommandObservation, ObservationStatus } from "../protocol.js";
 import {
   deriveClaimView,
   rederiveClaimViewWithFlags,
@@ -23,11 +24,10 @@ function evalWithCriteria(
     output_summary: "done",
     constraint_violations: [],
     should_continue: false,
-    execution_evidence: makeExecutionEvidence({
+    execution_report: makeExecutionReport({
       files_changed: ["src/a.ts"],
-      test_results: { passed: 1, failed: 0, skipped: 0 },
-      success_criteria_met: ["tests pass"],
-      success_criteria_remaining: [],
+      tests_reported: { passed: 1, failed: 0, skipped: 0 },
+      criterion_claims: criterionClaims(["tests pass"], []),
       progress_estimate: 1,
     }),
     ...overrides,
@@ -37,19 +37,31 @@ function evalWithCriteria(
 function commandSnapshot(
   status: "passed" | "failed",
   required = false,
-): ProviderSnapshot {
+): CommandObservation {
   return {
-    provider: "command:npm-test",
-    timestamp: Date.now(),
+    schemaVersion: 1,
+    providerId: "command:npm-test",
+    kind: "command",
+    phase: "after",
+    startedAt: 0,
+    finishedAt: 0,
+    status,
     files: [],
     data: {
-      kind: "command",
-      commandName: "npm-test",
+      commandId: "npm-test",
+      argv: ["npm", "test"],
+      cwd: ".",
+      configHash: "0".repeat(64),
       required,
-      phase: "after",
-      status,
       exitCode: status === "passed" ? 0 : 1,
-      stdout: status === "passed" ? "all tests passed" : "FAIL 1",
+      signal: null,
+      durationMs: 1,
+      stdoutSha256: "0".repeat(64),
+      stderrSha256: "0".repeat(64),
+      stdoutExcerpt: status === "passed" ? "all tests passed" : "FAIL 1",
+      stderrExcerpt: "",
+      truncated: false,
+      entrypointFiles: [],
     },
   };
 }
@@ -57,11 +69,10 @@ function commandSnapshot(
 describe("deriveClaimView", () => {
   it("marks all reported criteria as claimed by default (no machine evidence)", () => {
     const selfEval = evalWithCriteria({
-      execution_evidence: makeExecutionEvidence({
+      execution_report: makeExecutionReport({
         files_changed: ["src/a.ts"],
-        test_results: null,
-        success_criteria_met: ["tests pass"],
-        success_criteria_remaining: [],
+        tests_reported: null,
+        criterion_claims: criterionClaims(["tests pass"], []),
         progress_estimate: 0.5,
       }),
     });
@@ -89,7 +100,7 @@ describe("deriveClaimView", () => {
   });
 
   it("v3.3: self-reported passing tests without a passed command are NOT machine evidence", () => {
-    // The attack the tightening closes: fabricated test_results alone used
+    // The attack the tightening closes: fabricated tests_reported alone used
     // to satisfy hasMachineEvidence (which gates R8 and the criteria check).
     const selfEval = evalWithCriteria();
     const view = deriveClaimView(selfEval, []);
@@ -102,11 +113,10 @@ describe("deriveClaimView", () => {
 
   it("stays claimed when command passed but test results are null", () => {
     const selfEval = evalWithCriteria({
-      execution_evidence: makeExecutionEvidence({
+      execution_report: makeExecutionReport({
         files_changed: ["src/a.ts"],
-        test_results: null,
-        success_criteria_met: ["tests pass"],
-        success_criteria_remaining: [],
+        tests_reported: null,
+        criterion_claims: criterionClaims(["tests pass"], []),
         progress_estimate: 0.5,
       }),
     });
@@ -116,11 +126,10 @@ describe("deriveClaimView", () => {
 
   it("stays claimed when test results have failures", () => {
     const selfEval = evalWithCriteria({
-      execution_evidence: makeExecutionEvidence({
+      execution_report: makeExecutionReport({
         files_changed: ["src/a.ts"],
-        test_results: { passed: 3, failed: 1, skipped: 0 },
-        success_criteria_met: ["tests pass"],
-        success_criteria_remaining: [],
+        tests_reported: { passed: 3, failed: 1, skipped: 0 },
+        criterion_claims: criterionClaims(["tests pass"], []),
         progress_estimate: 0.5,
       }),
     });
@@ -168,10 +177,10 @@ describe("resolveRoundFiles", () => {
     loop_lineage: {
       round: 1,
       round_transaction: {
-        schema_version: 1,
+        schema_version: 2,
         round_id: "loop:provenance-loop:round:1",
         snapshot: {
-          schemaVersion: 1,
+          schemaVersion: 2,
           roundId: "loop:provenance-loop:round:1",
           loopId: "provenance-loop",
           round: 1,
@@ -179,10 +188,15 @@ describe("resolveRoundFiles", () => {
           phase: "committed",
           beforeEvidence: [],
           afterEvidence: [{
-            provider: "git",
-            timestamp: Date.now(),
+            schemaVersion: 1,
+            providerId: "git",
+            kind: "git",
+            phase: "after",
+            startedAt: 0,
+            finishedAt: 0,
+            status: "observed",
             files: ["src/a.ts", "src/b.ts"],
-            data: { head: "abc123" },
+            data: { head: "abc123", fingerprints: {} },
           }],
           createdAt: Date.now(),
           updatedAt: Date.now(),
@@ -207,10 +221,10 @@ describe("resolveRoundFiles", () => {
       loop_lineage: {
         round: 1,
         round_transaction: {
-          schema_version: 1,
+          schema_version: 2,
           round_id: "loop:provenance-loop:round:1",
           snapshot: {
-            schemaVersion: 1,
+            schemaVersion: 2,
             roundId: "loop:provenance-loop:round:1",
             loopId: "provenance-loop",
             round: 1,
@@ -239,7 +253,7 @@ describe("listVerifiedClaims", () => {
     round: number,
     evaluation: SelfEvaluation,
     flags: VerificationFlag[],
-    snapshots: ProviderSnapshot[],
+    snapshots: CommandObservation[],
   ): VaultEntry {
     return {
       id: `loop:provenance-loop:r${round}:feedback`,
@@ -250,10 +264,10 @@ describe("listVerifiedClaims", () => {
       loop_lineage: {
         round,
         round_transaction: {
-          schema_version: 1,
+          schema_version: 2,
           round_id: `loop:provenance-loop:round:${round}`,
           snapshot: {
-            schemaVersion: 1,
+            schemaVersion: 2,
             roundId: `loop:provenance-loop:round:${round}`,
             loopId: "provenance-loop",
             round,
@@ -278,11 +292,10 @@ describe("listVerifiedClaims", () => {
       committedFeedback(
         2,
         evalWithCriteria({
-          execution_evidence: makeExecutionEvidence({
+          execution_report: makeExecutionReport({
             files_changed: ["src/b.ts"],
-            test_results: null,
-            success_criteria_met: ["docs updated"],
-            success_criteria_remaining: [],
+            tests_reported: null,
+            criterion_claims: criterionClaims(["docs updated"], []),
             progress_estimate: 0.6,
           }),
         }),

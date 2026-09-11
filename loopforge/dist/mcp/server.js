@@ -11,6 +11,38 @@ import { isRecord } from "../token-utils.js";
 import { getPolicy } from "../policy.js";
 import { VERSION } from "../version.js";
 const SERVER_INFO = { name: "loopforge-mcp", version: VERSION };
+/** v3.8: Error codes whose fix is a corrected payload the agent may resend.
+ *  Everything else is a state/transport condition. */
+const RETRYABLE_ERROR_CODES = new Set([
+    "evaluation_invalid",
+    "contract_invalid",
+    "policy_invalid",
+    "round_id_required",
+    "round_id_mismatch",
+    "invalid_argument",
+]);
+/** v3.8: The uniform tool result envelope. A handler returns the stable code in
+ *  `error` and the human sentence in `errorMessage` (absent → the code is also
+ *  the message, for the errors whose code IS self-explanatory); every other
+ *  result is `ok: true` with its payload unchanged. */
+function applyToolEnvelope(output) {
+    const code = typeof output.error === "string" ? output.error : null;
+    if (code === null)
+        return { ok: true, ...output };
+    const { error: _error, errorMessage, details, sessionId, roundId, ...rest } = output;
+    return {
+        ok: false,
+        error: {
+            code,
+            message: typeof errorMessage === "string" && errorMessage.length > 0 ? errorMessage : code,
+            retryable: RETRYABLE_ERROR_CODES.has(code),
+            ...(typeof sessionId === "string" ? { sessionId } : {}),
+            ...(typeof roundId === "string" ? { roundId } : {}),
+            ...(details !== undefined ? { details } : {}),
+        },
+        ...rest,
+    };
+}
 const SUPPORTED_PROTOCOL_VERSIONS = new Set([
     "2024-11-05",
     "2025-03-26",
@@ -169,11 +201,16 @@ export class McpServer {
             throw error;
         }
         const output = await handler(this.mgr, args);
+        // v3.8: the uniform tool result envelope — every tool answers with
+        // { ok: true, ...payload } or { ok: false, error: ToolError }. Handlers
+        // keep returning their in-band error string; this boundary is the single
+        // place that turns it into the wire contract.
+        const wrapped = applyToolEnvelope(output);
         // v2.14: enforce the declared output contracts — a handler output that
         // violates its outputSchema is a contract bug, surfaced as a clean
         // JSON-RPC error instead of silently shipping a schema-violating result.
         try {
-            validateToolOutput(name, output);
+            validateToolOutput(name, wrapped);
         }
         catch (error) {
             if (error instanceof ToolInputValidationError) {
@@ -181,7 +218,7 @@ export class McpServer {
             }
             throw error;
         }
-        const isError = typeof output.error === "string";
+        const isError = wrapped.ok === false;
         // Extract the compiled prompt (present in start/next/resume responses).
         // MCP content annotations signal priority to the host so it can
         // preserve critical assistant-facing content during compaction.
@@ -199,7 +236,7 @@ export class McpServer {
             });
             // Secondary: structured metadata (sessionId, round, level, warnings,
             // enforcementAction, etc.) without the prompt.
-            const { prompt: _prompt, ...meta } = output;
+            const { prompt: _prompt, ...meta } = wrapped;
             content.push({
                 type: "text",
                 text: JSON.stringify(meta),
@@ -209,7 +246,7 @@ export class McpServer {
         else if (isError) {
             content.push({
                 type: "text",
-                text: JSON.stringify(output),
+                text: JSON.stringify(wrapped),
                 annotations: { priority: 1.0, audience: ["user", "assistant"] },
             });
         }
@@ -217,7 +254,7 @@ export class McpServer {
             // Non-prompt tools (status, list, replay, health, pause)
             content.push({
                 type: "text",
-                text: JSON.stringify(output),
+                text: JSON.stringify(wrapped),
                 annotations: { priority: 0.5, audience: ["assistant"] },
             });
         }

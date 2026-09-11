@@ -1,4 +1,5 @@
 /** Tests for canonical-state — state creation and Markdown rendering. */
+import { criterionClaims } from "./_helpers.js";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -234,11 +235,10 @@ describe("renderCanonicalStateMarkdown", () => {
         output_summary: "done",
         constraint_violations: [],
         manual_fixes_needed: "",
-        execution_evidence: {
+        execution_report: {
           files_changed: ["a.ts"],
-          test_results: { passed: 8, failed: 1, skipped: 0 },
-          success_criteria_met: ["c1"],
-          success_criteria_remaining: ["c2"],
+          tests_reported: { passed: 8, failed: 1, skipped: 0 },
+          criterion_claims: criterionClaims(["c1"], ["c2"]),
           progress_estimate: 0.5,
         },
       },
@@ -433,7 +433,7 @@ describe("v3.3 — Roadmap and derived state", () => {
       generated_at_round: 4,
     },
     criterion_statuses: [
-      { id: "cr-11111111", text: "all tests pass", status: "met" as const, met_at_round: 3, related_subgoal_ids: [] },
+      { id: "cr-11111111", text: "all tests pass", status: "verified" as const, met_at_round: 3, related_subgoal_ids: [] },
       { id: "cr-22222222", text: "no regressions", status: "remaining" as const, related_subgoal_ids: [] },
       { id: "cr-33333333", text: "clean lint", status: "unknown" as const, related_subgoal_ids: [] },
     ],
@@ -492,11 +492,17 @@ describe("v3.3 — Roadmap and derived state", () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("Round Contract state (v3.3 rendering, v3.4 active source)", () => {
+  // v3.8: the ACTIVE contract is the derived item view.
   const contract = {
+    id: "rc-aaaaaaaa",
+    declared_at_round: 2,
     work_item: "Implement auth",
-    done_when: ["cr-auth-login", "cr-auth-logout"],
-    verification_plan: ["run-tests"],
     scope: ["src/auth"],
+    items: [
+      { id: "rci-11111111", description: "login works", criterion_refs: ["cr-auth-login"], subgoal_refs: [], verify_with: ["run-tests"] },
+      { id: "rci-22222222", description: "logout works", criterion_refs: ["cr-auth-logout"], subgoal_refs: [], verify_with: ["run-tests"] },
+    ],
+    config_hash_by_command: {},
   };
 
   /** v3.4: The ACTIVE contract arrives in the derived bag (computed by
@@ -510,9 +516,10 @@ describe("Round Contract state (v3.3 rendering, v3.4 active source)", () => {
   it("active contract replaces Current Task and lands in state.roundContract", () => {
     const state = withActiveContract();
     assert.equal(state.roundContract?.work_item, "Implement auth");
-    assert.ok(state.currentTask.includes("**Implement auth**"));
-    assert.ok(state.currentTask.includes("- Done when: cr-auth-login"));
+    assert.ok(state.currentTask.includes("**Implement auth** (rc-aaaaaaaa)"));
+    assert.ok(state.currentTask.includes("- [`rci-11111111`] login works"));
     assert.ok(state.currentTask.includes("- Verify via: run-tests"));
+    assert.ok(state.currentTask.includes("- Criteria: cr-auth-login"));
     assert.ok(state.currentTask.includes("- Scope: src/auth"));
     assert.ok(!state.currentTask.includes("Fix bugs in auth module"),
       "the original task is NOT the Current Task on a contract round");
@@ -534,18 +541,25 @@ describe("Round Contract state (v3.3 rendering, v3.4 active source)", () => {
 
   it("formatRoundContract renders compactly and omits empty arrays", () => {
     const text = formatRoundContract({
+      id: "rc-bbbbbbbb",
+      declared_at_round: 1,
       work_item: "Tidy",
-      done_when: ["lint clean"],
-      verification_plan: [],
       scope: [],
+      items: [{ id: "rci-33333333", description: "lint clean", criterion_refs: [], subgoal_refs: [], verify_with: [] }],
+      config_hash_by_command: {},
     });
-    assert.equal(text, "**Tidy**\n- Done when: lint clean");
+    assert.equal(text, "**Tidy** (rc-bbbbbbbb)\n- [`rci-33333333`] lint clean");
     const noWorkItem = formatRoundContract({
-      done_when: [],
-      verification_plan: ["run-tests"],
+      id: "rc-cccccccc",
+      declared_at_round: 1,
       scope: [],
+      items: [{ id: "rci-44444444", description: "tests pass", criterion_refs: [], subgoal_refs: [], verify_with: ["run-tests"] }],
+      config_hash_by_command: {},
     });
-    assert.equal(noWorkItem, "**Round Contract**\n- Verify via: run-tests");
+    assert.equal(
+      noWorkItem,
+      "**Round Contract** (rc-cccccccc)\n- [`rci-44444444`] tests pass\n  - Verify via: run-tests",
+    );
   });
 });
 

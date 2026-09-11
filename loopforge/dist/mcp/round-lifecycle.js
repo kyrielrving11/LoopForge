@@ -13,7 +13,7 @@ import { randomUUID } from "node:crypto";
 import { LoopForgeEngine } from "../engine.js";
 import { deriveGate } from "../cognitive-governance.js";
 import { Mode, makeLoopCompileRequest, makeLoopRoundResult, } from "../protocol.js";
-import { EvidenceCollector, runBacktrackAutoRestore } from "../evidence-provider.js";
+import { EvidenceCollector } from "../evidence-provider.js";
 import { makeRoundId, parseRoundTransactionSnapshot, prepareRoundTransaction, } from "../round-transaction.js";
 import { RoundDriver } from "../round-driver.js";
 import { getPolicy } from "../policy.js";
@@ -63,7 +63,7 @@ export function buildLoopRequest(session, lastEval, verificationFlags) {
             objective_refinement: lastEval.objective_refinement ?? "",
             emerged_subtasks: lastEval.emerged_subtasks ?? [],
             // P4: Execution evidence
-            execution_evidence: lastEval.execution_evidence ?? undefined,
+            execution_report: lastEval.execution_report ?? undefined,
             // P5: Self-correction
             retracted_constraints: lastEval.retracted_constraints ?? [],
             revised_success_criteria: lastEval.revised_success_criteria ?? [],
@@ -73,12 +73,8 @@ export function buildLoopRequest(session, lastEval, verificationFlags) {
             // v1.10: Checkpoint boundary
             compression_checkpoint: lastEval.compression_checkpoint ?? false,
             checkpoint_label: lastEval.checkpoint_label ?? "",
-            // v1.16: Agent's declared next action
-            next_action: lastEval.next_action,
             // v3.7.1: Sub-goal lifecycle — explicit transitions
             subgoal_updates: lastEval.subgoal_updates ?? [],
-            // v2.8: Drift clarification
-            drift_clarification: lastEval.drift_clarification,
             // v2.9: Model's information needs for the next prompt
             prompt_requests: lastEval.prompt_requests,
             // v2.12: Tri-state outcome + blocker + retroactive claims
@@ -138,8 +134,6 @@ export class RoundLifecycle {
                 // v1.13: Enforcement gate state
                 consecutive_rejections: session.consecutiveRejections,
                 last_rejection_check: session.lastRejectionCheck,
-                // v2.12: Clarification streak
-                drift_clarification_streak: session.driftClarificationStreak,
                 // v2.13: Backtrack skipped files for workspace restore check
                 backtrack_skipped_files: session.backtrackSkippedFiles,
                 // M3: skipped-file fingerprints at their failed rounds (restore
@@ -210,7 +204,6 @@ export class RoundLifecycle {
             lastRejectionCheck: typeof lineage.last_rejection_check === "string"
                 ? lineage.last_rejection_check
                 : "",
-            driftClarificationStreak: lineage.drift_clarification_streak ?? 0,
             backtrackSkippedFiles: lineage.backtrack_skipped_files ?? [],
             backtrackSkippedFingerprints: parseFingerprintMap(lineage.backtrack_skipped_fingerprints),
             backtrackTargetGitHead: typeof lineage.backtrack_target_git_head === "string" &&
@@ -247,6 +240,9 @@ export class RoundLifecycle {
             prompt: prepared.prompt,
             level: prepared.level,
             roundSuccess,
+            // v3.8: the posture of the round that just committed — read from the
+            // transaction's committed result, not recomputed here.
+            verificationStatus: session.roundSnapshot?.result?.verificationStatus,
             warnings: warningsOverride ?? session.currentWarnings ?? [],
         };
     }
@@ -332,7 +328,6 @@ export class RoundLifecycle {
             session.currentRound = restoreTarget + 1;
             session.consecutiveRejections = 0;
             session.lastRejectionCheck = "";
-            session.driftClarificationStreak = 0;
             session.lastSelfEval = undefined;
             session.currentPrompt = null;
             this.save(session);
@@ -529,7 +524,7 @@ export class RoundLifecycle {
     /** Execute the round transaction and apply per-rule rejection tracking.
      *  MUTATES: session.roundSnapshot, session.consecutiveRejections,
      *           session.lastRejectionCheck, session.lastSelfEval,
-     *           session.successTrajectory, session.driftClarificationStreak */
+     *           session.successTrajectory */
     async executeRoundTransaction(session, selfEval) {
         const snapshot = session.roundSnapshot ?? prepareRoundTransaction(session.loopId, session.currentRound, session.evidenceBaseline ?? []);
         const completed = await new RoundDriver(session.engine, this.store).complete({
@@ -542,7 +537,6 @@ export class RoundLifecycle {
             consecutiveRejections: session.consecutiveRejections,
             lastRejectionCheck: session.lastRejectionCheck,
             successTrajectory: session.successTrajectory,
-            driftClarificationStreak: session.driftClarificationStreak,
             backtrackSkippedFiles: session.backtrackSkippedFiles,
             backtrackSkippedFingerprints: session.backtrackSkippedFingerprints,
             backtrackTargetGitHead: session.backtrackTargetGitHead,
@@ -551,9 +545,6 @@ export class RoundLifecycle {
         const actualEvidence = completed.actualEvidence;
         session.roundSnapshot = outcome.snapshot;
         const pr = outcome.result;
-        // v2.12: Clarification streak tracking — independent of rejection tracking.
-        // Reset on rounds without intent_drift; track substantive vs weak clarifications.
-        this.updateClarificationStreak(session, pr);
         // Per-rule rejection tracking: same-check rejections accumulate;
         // a different rejection reason resets the counter.
         if (pr.action === "reject" && pr.rejectionCheck) {
@@ -579,39 +570,6 @@ export class RoundLifecycle {
             session.successTrajectory.push(pr.roundSuccess);
         }
         return { pr, verificationFlags: pr.verificationFlags, actualEvidence };
-    }
-    /** v2.12: Update the clarification streak based on the round result.
-     *  - Substantive clarification (anchors present): keep streak — genuine pivot.
-     *  - No intent_drift this round: reset streak to 0.
-     *  - Weak clarification rejected by R7: streak was already consumed by
-     *    enforceIntentDrift to decide reject vs terminate; staleness is handled
-     *    on the enforcement side. We sync the persisted counter for crash recovery.
-     *  v3.2.1: when a HIGHER-PRIORITY rule (R1–R6/R8/R9/R-EVID) rejected the
-     *  round, R7 never participated — clarificationAccepted is undefined (it
-     *  is only set on the continue path). Touching the streak there would
-     *  pollute it with rejections unrelated to drift and terminate the loop
-     *  one weak clarification early.
-     *  MUTATES: session.driftClarificationStreak */
-    updateClarificationStreak(session, pr) {
-        const hasIntentDrift = pr.verificationFlags.some((f) => f.check === "intent_drift");
-        if (!hasIntentDrift) {
-            // No drift this round — reset streak
-            session.driftClarificationStreak = 0;
-            return;
-        }
-        // R7 did not participate in this round's decision (a higher-priority
-        // rule rejected/accepted first) — leave the streak untouched.
-        if (pr.clarificationAccepted === undefined)
-            return;
-        // v2.12: Clarification accepted with anchors → substantive pivot.
-        // Keep streak as-is (don't increment for genuine explanations).
-        if (pr.clarificationAccepted) {
-            return;
-        }
-        // R7 rejected (weak or no clarification). The enforcement gate
-        // already used the streak to decide reject vs terminate.
-        // Increment the persisted counter so crash recovery sees it.
-        session.driftClarificationStreak += 1;
     }
     /** Build a rejection result: compile a retry prompt, persist, return.
      *  MUTATES: session.roundSnapshot, session.currentPrompt, session.currentLevel */
@@ -644,6 +602,7 @@ export class RoundLifecycle {
             prompt: preparedRetry.prompt,
             level: preparedRetry.level,
             enforcementAction: "reject",
+            verificationStatus: pr.verificationStatus,
             enforcementReason: pr.enforcementReason,
         };
     }
@@ -655,24 +614,11 @@ export class RoundLifecycle {
      *           session.currentPrompt, session.currentLevel,
      *           session.consecutiveRejections, session.lastSelfEval */
     async buildBacktrackResult(sessionId, session, pr) {
-        // v3.3.1: wire up engine.backtrack_auto_restore — the v2.13 policy
-        // switch promised automatic workspace recovery and never had an
-        // implementation (the flag had zero consumers, so setting it changed
-        // nothing). When enabled: stash every uncommitted change (tracked +
-        // untracked — nothing destroyed) and hard-reset to the restore point
-        // commit so the failed rounds' state is gone before the agent redoes
-        // the round. DANGEROUS by design and off by default; when off, the
-        // prompt instructs manual restore and the verification gate enforces it.
-        if (getPolicy().engine.backtrack_auto_restore) {
-            const outcome = await runBacktrackAutoRestore(pr.backtrackTargetGitHead, session.currentRound);
-            logEvent("backtrack_auto_restore", {
-                sessionId,
-                loopId: session.loopId,
-                fromRound: session.currentRound,
-                ok: outcome.ok,
-                detail: outcome.detail,
-            });
-        }
+        // v3.8: LoopForge never mutates the working tree. The backtrack prompt
+        // carries the restore facts (files, fingerprints, target HEAD) and the
+        // verification gate enforces the check on the redo submission; the agent
+        // executes the restore itself. The former `backtrack_auto_restore` policy
+        // and its git stash/reset implementation were deleted.
         const restoreTarget = pr.backtrackTarget ?? (session.currentRound - 1);
         const newRound = restoreTarget + 1;
         logEvent("session_backtrack", {
@@ -687,7 +633,6 @@ export class RoundLifecycle {
         session.currentRound = newRound;
         session.consecutiveRejections = 0;
         session.lastRejectionCheck = "";
-        session.driftClarificationStreak = 0;
         session.backtrackSkippedFiles = pr.backtrackSkippedFiles ?? [];
         // M3: carry each skipped file's failed-round fingerprint for the
         // machine-proven restore check on the redo submission.
@@ -725,6 +670,7 @@ export class RoundLifecycle {
                 stopReason: "stalled",
                 stopDetail: "Backtrack failed: RoundDriver.prepare returned null — could not compile from restore point.",
                 enforcementAction: "backtrack",
+                verificationStatus: pr.verificationStatus,
                 enforcementReason: pr.enforcementReason,
             };
         }
@@ -747,6 +693,7 @@ export class RoundLifecycle {
             prompt: fullPrompt,
             level: prepared.level,
             enforcementAction: "backtrack",
+            verificationStatus: pr.verificationStatus,
             enforcementReason: pr.enforcementReason,
             warnings: prepared?.warnings ?? [],
         };
@@ -770,6 +717,7 @@ export class RoundLifecycle {
             stopReason: "enforcement_terminated",
             stopDetail: pr.enforcementReason ?? "The enforcement gate terminated the loop.",
             enforcementAction: "terminate",
+            verificationStatus: pr.verificationStatus,
             enforcementReason: pr.enforcementReason,
         };
     }

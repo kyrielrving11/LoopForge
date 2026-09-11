@@ -1,9 +1,23 @@
 /** Structured self-evaluation parsing and normalization — pure functions.
  * The MCP boundary validates required fields before these helpers run.
  */
-import { type CriterionRevision, type ExecutionEvidence, type PromptRequests, type RoundContract, type RoundOutcome, type SelfEvaluation, type SubGoalUpdate } from "./protocol.js";
-/** Parse ExecutionEvidence from a raw JSON object. */
-export declare function parseExecutionEvidence(raw: Record<string, unknown> | undefined | null): ExecutionEvidence | undefined;
+import { type CriterionRevision, type ExecutionReport, type PromptRequests, type RoundContractProposal, type RoundOutcome, type SelfEvaluation, type SubGoalUpdate } from "./protocol.js";
+/** Parse ExecutionReport from a raw JSON object. */
+export declare function parseExecutionReport(raw: Record<string, unknown> | undefined | null): ExecutionReport | undefined;
+/** v3.8: The criterion ids the agent claims met this round. */
+export declare function claimedMetCriteria(report: {
+    criterion_claims?: Array<{
+        criterion_id: string;
+        outcome: string;
+    }>;
+} | undefined | null): string[];
+/** v3.8: The criterion ids the agent declares still outstanding. */
+export declare function claimedRemainingCriteria(report: {
+    criterion_claims?: Array<{
+        criterion_id: string;
+        outcome: string;
+    }>;
+} | undefined | null): string[];
 /** Parse CriterionRevision[] from a raw JSON array. */
 export declare function parseCriterionRevisions(raw: unknown): CriterionRevision[];
 /** Parse SubGoalUpdate[] from a raw JSON array.
@@ -65,15 +79,65 @@ export declare function validateSubGoalUpdatesShape(raw: Record<string, unknown>
     reason: string;
     detail: string;
 }>;
+export interface ContractValidationError {
+    field: string;
+    reason: string;
+    detail: string;
+}
+/** v3.8: Everything the strict contract boundary needs to judge a declaration
+ *  against the SAME derived state the agent saw in its prompt. Injected rather
+ *  than imported so the validator stays a pure, unit-testable function. */
+export interface ContractValidationContext {
+    /** rci- ids of the ACTIVE contract; null when it cannot be observed (fail
+     *  open — shape checks stay strict either way). */
+    activeItemIds: ReadonlySet<string> | null;
+    /** sg- ids the agent may legitimately reference: the compiled set plus the
+     *  submission's own same-round `emerged_subtasks`; null when it cannot be
+     *  observed (fail open). */
+    knownSubGoalIds: ReadonlySet<string> | null;
+    /** Configured AND enabled AND after-capable evidence command. */
+    isConfiguredCommand: (name: string) => boolean;
+    /** Returns a detail string when a declared scope entry leaves the
+     *  workspace, or null when it is contained. */
+    checkScopeEntry: (entry: string) => string | null;
+}
+/** v3.8: Strict STRUCTURAL boundary for the Round Contract declaration and
+ *  the contract item claims — the same pre-advance contract as
+ *  subgoal_updates: an error here is a payload defect, never a work-quality
+ *  rejection (no session state, no gates, no rejection counters, retry with
+ *  the same roundId as `contract_invalid`).
+ *
+ *  Declaration strictness: items must exist and stay within CONTRACT_LIMITS;
+ *  every item must bind at least one configured, enabled, after-capable
+ *  command; scope entries must stay inside the workspace; criterion and
+ *  sub-goal references must be well-formed, and sub-goal references must name
+ *  a sub-goal that actually exists. The limits are enforced HERE rather than
+ *  by silently truncating in the lenient parser — a declaration is a
+ *  boundary, not a suggestion.
+ *
+ *  Claim strictness: item ids must be well formed, unique, and — when the
+ *  active contract is known — reference an item of the ACTIVE contract. */
+export declare function validateContractShape(raw: Record<string, unknown>, context: ContractValidationContext): ContractValidationError[];
 /** Build a SelfEvaluation from a parsed JSON object.
  *  Lenient parsing: missing optional fields get sensible defaults. */
 export declare function buildSelfEvaluation(raw: Record<string, unknown>): SelfEvaluation;
-/** Parse a RoundContract object from raw JSON input. Lenient: non-string
- *  entries are dropped, strings are trimmed and capped. An object that IS
- *  present is returned even with empty arrays — an empty contract is a
- *  real declaration the round_underspecified check must see. Returns
- *  undefined only when the raw value is absent or not an object. */
-export declare function parseRoundContract(raw: unknown): RoundContract | undefined;
+/** v3.8: The ONE set of contract-declaration limits. `validateContractShape`
+ *  (the strict boundary) rejects a declaration over these; `parseRoundContract`
+ *  (the lenient path, reached only after the strict boundary passed) truncates
+ *  to the same numbers. One source, so the two can never drift. */
+export declare const CONTRACT_LIMITS: {
+    readonly items: 20;
+    readonly scope: 50;
+    readonly criterionRefs: 20;
+    readonly subgoalRefs: 20;
+    readonly verifyWith: 20;
+};
+/** Parse a Round Contract PROPOSAL from raw JSON input. Lenient on shapes
+ *  the strict declaration boundary already rejected: strings are trimmed and
+ *  capped, non-string array entries are dropped. Item ORDER and COUNT are
+ *  preserved — the derived rci- ids depend on them. Returns undefined only
+ *  when the raw value is absent or not an object. */
+export declare function parseRoundContract(raw: unknown): RoundContractProposal | undefined;
 /** Parse a PromptRequests object from raw JSON input.
  *  Lenient: missing or invalid fields get sensible defaults.
  *  Returns undefined if the raw value is absent or not an object,

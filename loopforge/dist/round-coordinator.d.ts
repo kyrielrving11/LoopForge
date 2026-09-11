@@ -18,8 +18,8 @@
  * side-effect free and accepted decisions can be replayed idempotently.
  */
 import type { LoopStore } from "./loop-store.js";
-import type { ProviderSnapshot } from "./evidence-provider.js";
-import type { SelfEvaluation, StopReason, VerificationFlag } from "./protocol.js";
+import type { MachineObservation } from "./protocol.js";
+import type { SelfEvaluation, RoundVerificationStatus, StopReason, VerificationFlag } from "./protocol.js";
 /** Input to a single round processing step. */
 export interface RoundProcessInput {
     loopId: string;
@@ -36,7 +36,7 @@ export interface RoundProcessInput {
      *  escalation rows act on their own streak, not an unrelated one. */
     lastRejectionCheck?: string;
     /** v1.18: Evidence snapshots from configured providers. */
-    evidenceSnapshots?: ProviderSnapshot[];
+    evidenceSnapshots?: MachineObservation[];
     /** Success values from already committed rounds. */
     successTrajectory?: boolean[];
     /** v2.13: Files from skipped backtrack rounds. Passed to verification
@@ -88,6 +88,11 @@ export interface RoundProcessResult {
     roundSuccess: boolean;
     /** Whether the verification gate returned "contradicted". */
     gateContradicted: boolean;
+    /** v3.8: The round-level verification posture, derived from the ACTIVE
+     *  contract's item statuses and this round's claims: `trusted` (everything
+     *  claimed is machine-backed), `insufficient` (claims unbacked, nothing
+     *  contradicted), `contradicted` (a machine fact denies a claim). */
+    verificationStatus: RoundVerificationStatus;
     /** Updated consecutiveRejections count — caller must persist. */
     newConsecutiveRejections: number;
     /** Which enforcement check fired (set when action is "reject" or "terminate").
@@ -99,13 +104,6 @@ export interface RoundProcessResult {
     /** Whether the caller should push roundSuccess onto the success trajectory.
      *  false when gateContradicted or when action is "reject". */
     shouldPushSuccessTrajectory: boolean;
-    /** v2.12: True when this round's intent_drift was waived via substantive
-     *  drift_clarification. The caller uses this to track clarification streaks.
-     *  v3.3.1: false when R7 itself rejected/terminated on a weak or missing
-     *  clarification (the caller increments the streak); undefined when R7 did
-     *  not participate in the decision — a higher-priority rule's rejection
-     *  must never touch the streak. */
-    clarificationAccepted?: boolean;
     /** v2.13: Git HEAD commit hash of the backtrack target round.
      *  Set when action is "backtrack". The verification gate uses this
      *  to check that the agent restored the workspace before working. */
@@ -127,10 +125,7 @@ export declare class RoundCoordinator {
      *  - Managing heartbeat / signal handlers (runtime only)
      *  - Memory injection (both paths, before calling processRound)
      *  - Transactional feedback commit (accepted rounds only)
-     *  - State file I/O (both paths, after compiling)
-     *
-     * @param driftClarificationStreak v2.12: Current clarification streak
-     *  from session state. Passed through to enforceRound for R7 escalation. */
-    processRound(input: RoundProcessInput, driftClarificationStreak?: number): RoundProcessResult;
+     *  - State file I/O (both paths, after compiling) */
+    processRound(input: RoundProcessInput): RoundProcessResult;
 }
 //# sourceMappingURL=round-coordinator.d.ts.map

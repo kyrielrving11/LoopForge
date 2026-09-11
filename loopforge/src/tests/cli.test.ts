@@ -30,6 +30,7 @@ describe("loopforge CLI", () => {
     assert.match(help.stdout, new RegExp(`LoopForge ${pkgVersion.replace(/\./g, "\\.")}`));
     assert.match(help.stdout, /loopforge mcp/);
     assert.match(help.stdout, /loopforge inspect/);
+    assert.match(help.stdout, /loopforge explain/);
     assert.equal(run(["--version"]).stdout.trim(), pkgVersion);
   });
 
@@ -98,10 +99,10 @@ describe("loopforge CLI", () => {
         loop_lineage: {
           round: 1,
           round_transaction: {
-            schema_version: 1,
+            schema_version: 2,
             round_id: "loop:inspect-me:round:1",
             snapshot: {
-              schemaVersion: 1,
+              schemaVersion: 2,
               roundId: "loop:inspect-me:round:1",
               loopId: "inspect-me",
               round: 1,
@@ -140,6 +141,71 @@ describe("loopforge CLI", () => {
     }
   });
 
+  it("explains a loop from committed facts without creating history", () => {
+    const root = temporaryDirectory();
+    try {
+      const store = new FileLoopStore(join(root, ".loopforge"));
+      store.appendEntry({
+        task_id: "loop:explain-me:r1:feedback",
+        task_type: "feedback",
+        loop_id: "explain-me",
+        loop_lineage: {
+          round: 1,
+          round_transaction: {
+            schema_version: 2,
+            round_id: "loop:explain-me:round:1",
+            snapshot: {
+              schemaVersion: 2,
+              roundId: "loop:explain-me:round:1",
+              loopId: "explain-me",
+              round: 1,
+              attempt: 1,
+              phase: "committed",
+              beforeEvidence: [],
+              afterEvidence: [],
+              evaluation: {
+                success: false,
+                output_summary: "Scaffolded the module.",
+                constraint_violations: [],
+                should_continue: true,
+              },
+              createdAt: 0,
+              updatedAt: 0,
+            },
+            result: { action: "continue", verificationFlags: [], roundSuccess: false },
+          },
+        },
+      });
+      const before = store.listEntries("explain-me").length;
+      const result = run(["explain", "explain-me", "--json"], root);
+      assert.equal(result.status, 0, result.stderr);
+      const explained = JSON.parse(result.stdout) as { loopId: string; rounds: unknown[] };
+      assert.equal(explained.loopId, "explain-me");
+      assert.equal(explained.rounds.length, 1);
+      // Read-only: explaining never appends a round.
+      assert.equal(store.listEntries("explain-me").length, before);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reports static-only doctor checks including provider registration", () => {
+    const root = temporaryDirectory();
+    try {
+      const result = run(["doctor", "--json"], root);
+      assert.equal(result.status, 0, result.stderr);
+      const report = JSON.parse(result.stdout) as {
+        checks: Array<{ name: string; ok: boolean }>;
+      };
+      assert.ok(report.checks.some((check) => check.name === "provider:git"),
+        "registered providers are reported");
+      assert.ok(report.checks.every((check) => check.name !== "command:missing"),
+        "no verification command is executed or invented by doctor");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("installs only the Perception skill for a generic client", () => {
     const root = temporaryDirectory();
     try {
@@ -163,7 +229,7 @@ describe("loopforge CLI", () => {
       const policyPath = join(root, "loop_policy.json");
       assert.ok(existsSync(policyPath), "loop_policy.json should exist");
       const raw = JSON.parse(readFileSync(policyPath, "utf8"));
-      assert.equal(raw.version, "2");
+      assert.equal(raw.version, "3");
       assert.equal(raw.engine.max_rounds, 200);
       assert.equal(raw.evidence.providers[0], "git");
     } finally {

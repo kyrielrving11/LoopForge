@@ -145,9 +145,12 @@ describe("MCP stdio input boundary", () => {
       assert.equal(wrongTypeResult.isError, true);
       const wrongTypeContent = wrongTypeResult.content as Array<{ text: string }>;
       const evaluationError = JSON.parse(wrongTypeContent[0]!.text) as Record<string, unknown>;
-      assert.equal(evaluationError.error, "evaluation_invalid");
+      assert.equal(evaluationError.ok, false);
+      const toolError = evaluationError.error as Record<string, unknown>;
+      assert.equal(toolError.code, "evaluation_invalid");
+      assert.equal(toolError.retryable, true, "a payload defect is retryable with the same roundId");
       assert.deepEqual(
-        ((evaluationError.details as Record<string, unknown>).invalid as Array<Record<string, unknown>>)
+        ((toolError.details as Record<string, unknown>).invalid as Array<Record<string, unknown>>)
           .map((item) => item.field),
         ["success"],
       );
@@ -183,6 +186,50 @@ describe("MCP stdio input boundary", () => {
     }
   });
 
+  it("answers every in-band error with a stable code and a separate human message", async () => {
+    const rpc = spawnRpcServer();
+    try {
+      await rpc.request("initialize");
+      const call = async (name: string, args: Record<string, unknown>) => {
+        const response = await rpc.request("tools/call", { name, arguments: args });
+        const result = response.result as Record<string, unknown>;
+        const content = result.content as Array<{ text: string }>;
+        const parsed = JSON.parse(content[0]!.text) as Record<string, unknown>;
+        assert.equal(parsed.ok, false);
+        return parsed.error as Record<string, unknown>;
+      };
+
+      // A malformed request is retryable — the fix is a corrected payload, and
+      // the human sentence must not double as the code.
+      const missingLoopId = await call("loopforge_status", { view: "audit" });
+      assert.equal(missingLoopId.code, "invalid_argument");
+      assert.equal(missingLoopId.retryable, true);
+      assert.equal(missingLoopId.message, "loopId is required for view=audit",
+        "the human sentence rides in message, never as the code");
+
+      // A state condition is not retryable.
+      const unknownSession = await call("loopforge_stop", { sessionId: "nope" });
+      assert.equal(unknownSession.code, "session_not_found");
+      assert.equal(unknownSession.retryable, false);
+      assert.equal(unknownSession.sessionId, "nope");
+      assert.match(String(unknownSession.message), /session not found: nope/);
+
+      const unknownLoop = await call("loopforge_status", { view: "loop", loopId: "ghost-loop" });
+      assert.equal(unknownLoop.code, "state_unavailable");
+      assert.equal(unknownLoop.retryable, false);
+
+      const unresumable = await call("loopforge_resume", { loopId: "ghost-loop" });
+      assert.equal(unresumable.code, "state_unavailable");
+      assert.match(String(unresumable.message), /no saved session found/);
+
+      const missingReplay = await call("loopforge_replay", { loopId: "ghost-loop" });
+      assert.equal(missingReplay.code, "state_unavailable");
+      assert.match(String(missingReplay.message), /no committed rounds found/);
+    } finally {
+      await rpc.close();
+    }
+  });
+
   it("returns protocol-compatible tool output and rejects MCP task execution", async () => {
     const rpc = spawnRpcServer();
     try {
@@ -210,7 +257,8 @@ describe("MCP stdio input boundary", () => {
       const hiddenResult = hidden.result as Record<string, unknown>;
       const hiddenContent = hiddenResult.content as Array<{ text: string }>;
       const hiddenError = JSON.parse(hiddenContent[0].text as string) as Record<string, unknown>;
-      assert.equal(hiddenError.error, "gate_disabled");
+      assert.equal(hiddenError.ok, false);
+      assert.equal((hiddenError.error as Record<string, unknown>).code, "gate_disabled");
 
       const direct = await rpc.request("tools/call", {
         name: "loopforge_status",
@@ -221,6 +269,7 @@ describe("MCP stdio input boundary", () => {
       assert.equal(directResult.structuredContent, undefined);
       const content = directResult.content as Array<{ text: string }>;
       const structured = JSON.parse(content[0].text) as Record<string, unknown>;
+      assert.equal(structured.ok, true, "every successful result carries ok:true");
       assert.ok(Array.isArray(structured.sessions));
 
       const rejectedTask = await rpc.request("tools/call", {

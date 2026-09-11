@@ -25,9 +25,8 @@ import type {
   VerificationResult,
 } from "./protocol.js";
 import { makeEnforcementResult } from "./protocol.js";
-import { machineProgressSeries, CHECK_SUCCESS_WITH_REMAINING_CRITERIA, CHECK_RECURRING_VIOLATION, CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE, CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED, CHECK_REQUIRED_COMMAND_FAILED, CHECK_COMMAND_EVIDENCE_MISMATCH, CHECK_OUTCOME_SUCCESS_CONTRADICTION, CHECK_VERIFICATION_ENTRYPOINT_MODIFIED, CHECK_PREMATURE_BOUNDARY, CHECK_ROUND_SCOPE_DRIFT, CHECK_CONTRACT_COMPLETION_UNVERIFIED, CHECK_USER_GATE_UNRESOLVED } from "./verification-gate.js";
+import { machineProgressSeries, CHECK_SUCCESS_WITH_REMAINING_CRITERIA, CHECK_RECURRING_VIOLATION, CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE, CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED, CHECK_REQUIRED_COMMAND_FAILED, CHECK_COMMAND_EVIDENCE_MISMATCH, CHECK_OUTCOME_SUCCESS_CONTRADICTION, CHECK_VERIFICATION_ENTRYPOINT_MODIFIED, CHECK_ROUND_SCOPE_DRIFT, CHECK_CONTRACT_ITEMS_UNVERIFIED, CHECK_USER_GATE_UNRESOLVED } from "./verification-gate.js";
 import { effectiveSuccess } from "./self-eval.js";
-import { deriveConstraintId, deriveCriterionId, deriveSubGoalId } from "./loop-compiler.js";
 import { getPolicy } from "./policy.js";
 import { STABLE_ID_RE, isRecord, entryRound, extractFilePathTokens } from "./token-utils.js";
 import type { RoundProcessResult } from "./round-coordinator.js";
@@ -50,7 +49,7 @@ function collectProgressByRound(
 ): Map<number, number> {
   const progressByRound = new Map<number, number>();
   for (const round of committedRoundsFromEntries(vaultEntries, currentRound)) {
-    const progress = round.executionEvidence?.progress_estimate;
+    const progress = round.executionReport?.progress_estimate;
     if (typeof progress === "number") progressByRound.set(round.round, progress);
   }
   return progressByRound;
@@ -70,7 +69,7 @@ function progressWindow(
 ): Map<number, number> {
   const progressByRound = collectProgressByRound(vaultEntries, currentRound);
   if (hasCommittedBacktrack(vaultEntries, currentRound)) {
-    const pe = selfEval.execution_evidence?.progress_estimate;
+    const pe = selfEval.execution_report?.progress_estimate;
     if (typeof pe === "number") progressByRound.set(currentRound, pe);
   }
   return progressByRound;
@@ -169,7 +168,7 @@ export function findBacktrackTargetGitHead(
   if (!committed) return null;
   const evidence = machineEvidenceForRound(committed);
   for (const item of evidence) {
-    if (!isRecord(item) || item.provider !== "git" || !isRecord(item.data)) continue;
+    if (!isRecord(item) || item.providerId !== "git" || !isRecord(item.data)) continue;
     const head = item.data.head;
     if (typeof head === "string" && head.length > 0) return head;
   }
@@ -289,44 +288,41 @@ export function buildBacktrackPrompt(
     lines.push("");
   }
 
-  lines.push(
-    "**To restore a clean workspace, run:**",
-    "",
-    "```bash",
-    "# Option A: Keep everything as a safety net (recommended) — reversible",
-    `git stash push -u -m "backtrack-safety-net-round-${fromRound}"`,
-    "",
-    "# Option B: Discard ALL uncommitted AND untracked changes (permanent)",
-    "git checkout -- .",
-    "git clean -fd",
-    "```",
-    "",
-    "> Option A is a safety net — do NOT `git stash pop` before submitting " +
-    "the next round: the skipped work would look unrestored and be rejected. " +
-    "Restore only files you own after the next round commits, via " +
-    "`git checkout stash@{0} -- <path>`.",
-    "",
-  );
-  // v2.12: Restore to the exact commit observed at the clean round.
+  // v3.8: FACTS, not commands. LoopForge never mutates the working tree, and it
+  // does not prescribe how the agent restores it either — the restore is the
+  // AGENT's action, so the prompt states what must be true (the target HEAD and
+  // the files that must be reverted) and leaves the means entirely to the
+  // agent. No `git stash` / `git reset` / `git checkout` / `git clean` line
+  // belongs here.
   if (gitHead) {
     lines.push(
-      `**Restore to commit \`${gitHead.slice(0, 12)}\`** — the verification ` +
-      "gate checks that your working tree returns to this commit before " +
-      "accepting your next submission.",
+      "**The workspace must be returned to the restore point before you " +
+      "continue:**",
       "",
-      "```bash",
-      "# Option C: If the failed rounds created commits, reset HEAD to the restore point",
-      `git reset --hard ${gitHead.slice(0, 12)}`,
-      "```",
+      `- HEAD must be at \`${gitHead.slice(0, 12)}\``,
+      `- Every file listed above must be back in its state at Round ${toRound}`,
+      `- No leftover change from rounds ${toRound + 1}–${fromRound} may remain`,
       "",
-      "> Option C discards the failed rounds' commits — use it only when those",
-      "> commits belong to the failed work.",
+      "Your next submission's git observation is compared against that HEAD, " +
+      "and a file whose fingerprint still matches the failed round proves the " +
+      "restore did not happen.",
+      "",
+    );
+  } else {
+    lines.push(
+      `**The workspace must be returned to its state at Round ${toRound}** — ` +
+      "every file listed above reverted, with nothing left over from the " +
+      "failed rounds.",
       "",
     );
   }
   lines.push(
-    `**If git is unavailable**, manually revert the files listed above ` +
-    `to their state at Round ${toRound}. Re-read the state file below — ` +
+    "Restoring the workspace is **your** responsibility. LoopForge never " +
+    "modifies the working tree; it only records the restore requirement and " +
+    "checks the result.",
+    "",
+    `**If git is unavailable**, revert the files listed above by hand to ` +
+    `their state at Round ${toRound}. Re-read the state file below — ` +
     `it reflects the correct state at Round ${toRound}.`,
     "",
     "> 🛡️ **Verification:** The next round's evidence check will verify that " +
@@ -394,7 +390,7 @@ export function buildBacktrackPrompt(
 // Rules are ordered by priority. The first non-null result wins.
 // ═══════════════════════════════════════════════════════════════════════════
 
-/** R1: Agent claims success but success_criteria_remaining has items.
+/** R1: Agent claims success but declared criteria remain outstanding.
  *  This is a lie — the agent must either finish the criteria or
  *  set success=false honestly. Triggered by the verification gate's
  *  "success_with_remaining_criteria" error flag. */
@@ -532,33 +528,54 @@ function enforceSuccessWithoutVerifiedEvidence(
       "by machine-verifiable evidence.",
     fix_instructions:
       "Provide verifiable evidence for your success claim: (a) run tests and " +
-      "report results in execution_evidence.test_results, or (b) configure a " +
+      "report results in execution_report.tests_reported, or (b) configure a " +
       "required verification command and run it, or (c) if no change was " +
       "genuinely needed, declare no_change_reason explaining why." + escalation,
     check: "success_without_verified_evidence",
   });
 }
 
-/** R-C1 (v3.3): Round Contract boundary claimed prematurely. The gate
- *  produced premature_boundary (error): success claimed while done_when
- *  items were claimed met without machine-verified evidence or silently
- *  dropped. First occurrence → reject with contract-specific fix
- *  instructions; second consecutive → terminate (R8 ladder). */
-function enforcePrematureBoundary(
+/** v3.8: Verification debt — contract items claimed met without machine
+ *  verification. The round COMMITS (insufficient is recorded, not rejected);
+ *  this row only fires once the debt has persisted for
+ *  `engine.unverified_claim_streak_limit` consecutive rounds, then runs the
+ *  standard uniform ladder (reject → terminate as `incomplete`).
+ *
+ *  The streak is derived from COMMITTED round flags, so it survives restart
+ *  and cannot be moved by an agent self-report. Git motion does not excuse
+ *  it: churning code without verifying is exactly what this row catches. */
+function enforceContractItemsUnverified(
   flags: VerificationFlag[],
+  currentRound: number,
+  vaultEntries: VaultEntry[],
   consecutiveRejections: number,
 ): EnforcementResult | null {
-  const flag = flags.find((f) =>
-    f.check === CHECK_PREMATURE_BOUNDARY && f.severity === "error");
-  if (!flag) return null;
+  const limit = getPolicy().engine.unverified_claim_streak_limit;
+  if (!Number.isFinite(limit) || limit <= 0) return null;
+  const current = flags.find((flag) => flag.check === CHECK_CONTRACT_ITEMS_UNVERIFIED);
+  if (!current) return null;
+
+  let streak = 1;
+  for (let round = currentRound - 1; round >= 1; round--) {
+    const entry = vaultEntries.find((item) =>
+      entryRound(item) === round && String(item.task_id ?? "").endsWith(":feedback"));
+    const committed = entry ? decodeCommittedRound(entry) : null;
+    const carried = committed?.verificationFlags.some(
+      (flag) => flag.check === CHECK_CONTRACT_ITEMS_UNVERIFIED,
+    );
+    if (!carried) break;
+    streak++;
+  }
+  if (streak < limit) return null;
 
   if (consecutiveRejections >= 2) {
     return makeEnforcementResult({
       action: "terminate",
       reason:
-        "Repeated premature Round Contract boundary claims — done_when items " +
-        "claimed without machine evidence or dropped while success is claimed.",
-      check: "premature_boundary",
+        `Verification debt persisted for ${streak} rounds — contract items ` +
+        `claimed met while no bound command was observed passing.`,
+      check: "contract_items_unverified",
+      stopReason: "incomplete",
     });
   }
   const escalation = getPolicy().engine.enforcement_escalation_enabled &&
@@ -567,72 +584,23 @@ function enforcePrematureBoundary(
     : "";
   return makeEnforcementResult({
     action: "reject",
-    reason: flag.detail,
+    reason: current.detail,
     fix_instructions:
-      "You claimed success under a Round Contract but done_when items are " +
-      "unfinished or unverified. You must: (a) run the contract's " +
-      "verification_plan commands (configured in loop_policy.json " +
-      "evidence.commands) and report their actual output, listing satisfied " +
-      "done_when items in success_criteria_met; or (b) set success=false and " +
-      "list what remains in success_criteria_remaining. " +
-      "Do NOT claim contract completion without machine evidence " +
-      "(no_change_reason does not apply to contract claims)." + escalation,
-    check: "premature_boundary",
-  });
-}
-
-/** v3.5: Round Contract completion claimed without its verification_plan
- *  commands passing this round. The gate produced
- *  contract_completion_unverified (error): the eval's met claims satisfy
- *  every done_when of the ACTIVE contract, but the machine never observed
- *  the plan's commands pass. Closing a contract is a success-class claim —
- *  first occurrence → reject with fix instructions; second consecutive →
- *  terminate (R-C1's ladder). Registered BEFORE R-C1: the completion-truth
- *  question outranks boundary nuance. */
-function enforceContractCompletionUnverified(
-  flags: VerificationFlag[],
-  consecutiveRejections: number,
-): EnforcementResult | null {
-  const flag = flags.find((f) =>
-    f.check === CHECK_CONTRACT_COMPLETION_UNVERIFIED && f.severity === "error");
-  if (!flag) return null;
-
-  if (consecutiveRejections >= 2) {
-    return makeEnforcementResult({
-      action: "terminate",
-      reason:
-        "Repeated unverified Round Contract completion claims — done_when items " +
-        "claimed complete while the verification_plan commands never passed.",
-      check: "contract_completion_unverified",
-    });
-  }
-  const escalation = getPolicy().engine.enforcement_escalation_enabled &&
-    consecutiveRejections >= 1
-    ? buildEscalationNotice()
-    : "";
-  return makeEnforcementResult({
-    action: "reject",
-    reason: flag.detail,
-    fix_instructions:
-      "You claimed completion under the ACTIVE Round Contract, but its " +
-      "verification_plan commands did not pass this round. You must: (a) fix " +
-      "the underlying failure, re-run the contract's verification_plan " +
-      "commands (configured in loop_policy.json evidence.commands), and list " +
-      "satisfied done_when items in success_criteria_met; or (b) set " +
-      "success=false and list what remains in success_criteria_remaining. " +
-      "Completion claims are never accepted without machine verification — " +
-      "do NOT use no_change_reason for completion claims." + escalation,
-    check: "contract_completion_unverified",
+      `Contract items have been claimed met for ${streak} consecutive rounds ` +
+      "without machine verification. You must either: (a) run the item's bound " +
+      "command(s) so they are observed passing, or (b) report the item as " +
+      "remaining / declare outcome: \"blocked\" with a blocker. " +
+      "An unverified claim is never accepted as completion." + escalation,
+    check: "contract_items_unverified",
   });
 }
 
 /** R-C2 (v3.3): Round Contract scope drift. The gate produced
  *  round_scope_drift (warn): files changed outside the contract's declared
- *  scope. A substantive drift_clarification (≥ 20 chars with real anchors —
- *  the out-of-scope file paths count) accepts the legitimately expanded
- *  scope; no/weak clarification rejects; repeated unclarified drift
- *  terminates. Mirrors R8's ladder, not R7's streak counter — no new
- *  session state. */
+ *  scope. v3.8: scope drift is a MACHINE fact and is no longer waivable by an
+ *  agent explanation (the drift_clarification channel was deleted) — the
+ *  agent must revert the out-of-scope changes or close the active contract
+ *  and declare an extended scope. Repeated drift terminates. */
 function enforceScopeDrift(
   flags: VerificationFlag[],
   selfEval: SelfEvaluation,
@@ -642,31 +610,12 @@ function enforceScopeDrift(
   const flag = flags.find((f) => f.check === CHECK_ROUND_SCOPE_DRIFT);
   if (!flag) return null;
 
-  const clarification = selfEval.drift_clarification?.trim();
-  const hasAnchor = clarification
-    ? clarificationIsSubstantive(clarification, selfEval, vaultEntries)
-    : false;
-  const isSubstantive = clarification !== undefined
-    && clarification.length >= 20
-    && hasAnchor;
-
-  if (isSubstantive) {
-    // Genuine scope expansion with concrete file references → accept.
-    return makeEnforcementResult({
-      action: "accept",
-      reason: "",
-      fix_instructions: "",
-      check: "round_scope_drift",
-      clarification_accepted: true,
-    });
-  }
-
   if (consecutiveRejections >= 2) {
     return makeEnforcementResult({
       action: "terminate",
       reason:
-        `Repeated scope drift without substantive drift_clarification — ` +
-        `the agent keeps changing files outside its declared contract scope.`,
+        `Repeated scope drift — the agent keeps changing files outside its ` +
+        `declared contract scope.`,
       check: "round_scope_drift",
     });
   }
@@ -690,9 +639,8 @@ function enforceScopeDrift(
       "a replacement contract is IGNORED while the current one is active, so " +
       "resubmit this work with outcome: \"blocked\" (blocker naming the " +
       "too-narrow scope) plus the extended scope as the next round's " +
-      "round_contract, and explain the pivot in drift_clarification with " +
-      "concrete file paths (≥ 20 characters, real anchors). Weak or missing " +
-      "clarifications are rejected; repeated scope drift terminates the loop." +
+      "round_contract. Scope drift is a machine fact — no explanation waives " +
+      "it. Repeated scope drift terminates the loop." +
       escalation,
     check: "round_scope_drift",
   });
@@ -728,11 +676,12 @@ function enforceBacktrackNotRestored(
     action: "backtrack",
     reason:
       "The workspace was not restored after backtrack: " + flag.detail,
+    // v3.8: the requirement, not the recipe — LoopForge never mutates the
+    // working tree and does not prescribe how the agent restores it.
     fix_instructions:
-      "Restore the working directory to the clean round's state " +
-      "(git checkout -- . && git clean -fd, or git stash; if the failed " +
-      "rounds created commits, git reset --hard <restore-commit>) before " +
-      "submitting the next round.",
+      "Return the working directory to the clean round's state before " +
+      "submitting the next round: the skipped-round files must be reverted " +
+      "and HEAD must be back at the restore point the backtrack prompt named.",
     check: "backtrack_workspace_not_restored",
   });
 }
@@ -950,244 +899,6 @@ function enforceMaxRejections(
   });
 }
 
-/** v2.12: Check if a drift_clarification contains at least one semantic
- *  anchor — a constraint/criterion/sub-goal ID (v2.11) or a file-path-like
- *  reference. This distinguishes genuine explanations from filler text that
- *  just happens to be ≥ 20 characters. */
-/** Extract anchor candidates from a clarification: c-/cr-/sg- IDs and
- *  file-path-like tokens. */
-function extractAnchors(clarification: string): string[] {
-  const anchors = new Set<string>();
-  for (const match of clarification.matchAll(/[c]r?-[a-f0-9]{8}|sg-[a-f0-9]{8}/gi)) {
-    anchors.add(match[0].toLowerCase());
-  }
-  for (const path of extractFilePathTokens(clarification)) {
-    anchors.add(path);
-  }
-  return [...anchors];
-}
-
-/** v2.12: A drift clarification is substantive only when at least one anchor
- *  is REAL — a stable ID that derives from a known constraint/criterion/
- *  sub-goal text in the vault, or a file path present in reported/observed
- *  files. Regex patterns alone (e.g. a fabricated `c-00000000`) no longer
- *  count, closing the v2.12 filler-text loophole. */
-function clarificationIsSubstantive(
-  clarification: string,
-  selfEval: SelfEvaluation,
-  vaultEntries: VaultEntry[],
-): boolean {
-  const anchors = extractAnchors(clarification);
-  if (anchors.length === 0) return false;
-
-  const knownFiles = new Set<string>();
-  const knownTexts = new Set<string>();
-  const collect = (values: unknown): void => {
-    if (!Array.isArray(values)) return;
-    for (const value of values) {
-      if (typeof value === "string" && value.length > 0) knownTexts.add(value);
-    }
-  };
-  // The agent's own round report is a known set: its constraints, criteria,
-  // and files are legitimate anchor targets.
-  for (const file of selfEval.execution_evidence?.files_changed ?? []) knownFiles.add(file);
-  collect(selfEval.discovered_constraints);
-  collect(selfEval.constraint_violations);
-  const selfEvidence = selfEval.execution_evidence;
-  if (selfEvidence) {
-    collect(selfEvidence.success_criteria_met);
-    collect(selfEvidence.success_criteria_remaining);
-  }
-  for (const entry of vaultEntries) {
-    collect(entry.constraint_violations);
-    collect(entry.discovered_constraints);
-    const ev = entry.execution_evidence as Record<string, unknown> | undefined;
-    if (ev) {
-      collect(ev.files_changed);
-      collect(ev.success_criteria_met);
-      collect(ev.success_criteria_remaining);
-    }
-  }
-
-  for (const anchor of anchors) {
-    if (STABLE_ID_RE.test(anchor)) {
-      const matches = anchor.startsWith("c-") && !anchor.startsWith("cr-")
-        ? [...knownTexts].some((text) => deriveConstraintId(text) === anchor)
-        : anchor.startsWith("cr-")
-          ? [...knownTexts].some((text) => deriveCriterionId(text) === anchor)
-          : [...knownTexts].some((text) => deriveSubGoalId(text) === anchor);
-      if (matches) return true;
-      continue;
-    }
-    // File path: exact or suffix match against known files.
-    if ([...knownFiles].some((file) =>
-      file === anchor || file.endsWith(`/${anchor}`) || file.endsWith(`\\${anchor}`))) {
-      return true;
-    }
-  }
-  return false;
-}
-
-/** Build a stronger rejection notice as the clarification streak grows. */
-function buildClarificationRejectionNotice(streak: number): string {
-  const base =
-    "Your declared next_action from the previous round does not match " +
-    "what you actually did this round. You must either: " +
-    "(a) explain why you pivoted in the drift_clarification field, " +
-    "mentioning specific constraint/criterion/sub-goal IDs or file paths " +
-    "that prompted the change, or " +
-    "(b) redo this round and do what you said you would do.";
-
-  if (streak >= 2) {
-    return (
-      base +
-      "\n\n### ⚠️ Repeated Weak Clarification\n\n" +
-      `You have submitted drift_clarification without concrete references ` +
-      `for ${streak} consecutive rounds. Your explanation MUST include at ` +
-      `least one of: a constraint ID (c-XXXXXXXX), criterion ID (cr-XXXXXXXX), ` +
-      `sub-goal ID (sg-XXXXXXXX), or a file path you changed.\n\n` +
-      `🚨 If the next clarification also lacks concrete anchors, the loop ` +
-      `will be terminated.`
-    );
-  }
-
-  return base;
-}
-
-/** R7: Agent declared a next_action but did something unrelated.
- *
- *  v2.8: When the agent provides a substantive drift_clarification (≥ 20
- *  characters), the rejection is waived — the agent has acknowledged and
- *  explained the pivot. An empty or absent clarification still triggers
- *  the normal reject/terminate path.
- *
- *  v2.12: Clarification now requires a semantic anchor (constraint/criterion/
- *  sub-goal ID or file path) in addition to the ≥ 20 char minimum. Weak
- *  clarifications (no anchors) increment a streak counter; 3 consecutive
- *  weak clarifications terminate the loop.
- *
- *  First occurrence → reject (agent must explain the gap or realign).
- *  Second consecutive → terminate (agent cannot/will not follow its own plan). */
-function enforceIntentDrift(
-  flags: VerificationFlag[],
-  selfEval: SelfEvaluation,
-  consecutiveRejections: number,
-  driftClarificationStreak: number = 0,
-  vaultEntries: VaultEntry[] = [],
-): EnforcementResult | null {
-  const flag = flags.find((f) => f.check === "intent_drift");
-  if (!flag) return null;
-
-  const clarification = selfEval.drift_clarification?.trim();
-
-  // v2.12: Substantive anchors — the referenced ID/path must actually exist
-  // in the vault or in reported files; a fabricated ID no longer counts.
-  const hasAnchor = clarification
-    ? clarificationIsSubstantive(clarification, selfEval, vaultEntries)
-    : false;
-
-  // v2.12: Substantive clarification = length check + semantic anchor
-  const isSubstantive = clarification
-    && clarification.length >= 20
-    && hasAnchor;
-
-  if (isSubstantive) {
-    // Genuine explanation with concrete references → accept the pivot
-    return makeEnforcementResult({
-      action: "accept",
-      reason: "",
-      fix_instructions: "",
-      check: "intent_drift",
-      clarification_accepted: true,
-    });
-  }
-
-  // v2.12: Clarification present but weak (no semantic anchors)
-  if (clarification && clarification.length >= 20 && !hasAnchor) {
-    const maxStreak = getPolicy().engine.drift_clarification_max_streak;
-
-    // When maxStreak is 0, disable the check (pre-v2.12 behavior)
-    if (maxStreak <= 0) {
-      return makeEnforcementResult({
-        action: "accept",
-        reason: "",
-        fix_instructions: "",
-        check: "intent_drift",
-        clarification_accepted: true,
-      });
-    }
-
-    const newStreak = driftClarificationStreak + 1;
-    if (newStreak >= maxStreak) {
-      return makeEnforcementResult({
-        action: "terminate",
-        reason:
-          `Agent has submitted weak drift_clarification (no concrete IDs or ` +
-          `file references) for ${newStreak} consecutive rounds. The agent ` +
-          `systematically avoids following its own plan without substantive ` +
-          `explanation.`,
-        check: "intent_drift",
-      });
-    }
-
-    return makeEnforcementResult({
-      action: "reject",
-      reason: flag.detail,
-      fix_instructions: buildClarificationRejectionNotice(newStreak),
-      check: "intent_drift",
-    });
-  }
-
-  // No clarification or too short — the worst form of drift. v2.14: counts
-  // toward the SAME streak as weak clarifications (maxStreak consecutive
-  // un-explained drifts terminate, per the README's "three consecutive weak
-  // clarifications"). Previously this branch used the GLOBAL
-  // consecutiveRejections counter, so an unrelated earlier rejection
-  // (e.g. R1) terminated the loop on the very first drift.
-  const maxStreak = getPolicy().engine.drift_clarification_max_streak;
-
-  // When maxStreak is 0, disable the check (pre-v2.12 behavior)
-  if (maxStreak <= 0) {
-    return makeEnforcementResult({
-      action: "accept",
-      reason: "",
-      fix_instructions: "",
-      check: "intent_drift",
-      clarification_accepted: true,
-    });
-  }
-
-  const newStreak = driftClarificationStreak + 1;
-  if (newStreak >= maxStreak) {
-    return makeEnforcementResult({
-      action: "terminate",
-      reason:
-        `Agent has drifted from its declared next_action for ${newStreak} ` +
-        `consecutive rounds without any drift_clarification. The agent ` +
-        `cannot or will not follow its own plan — terminating loop.`,
-      check: "intent_drift",
-    });
-  }
-
-  return makeEnforcementResult({
-    action: "reject",
-    reason: flag.detail,
-    fix_instructions:
-      "Your declared next_action from the previous round does not match " +
-      "what you actually did this round. You must either: " +
-      "(a) explain why you pivoted and what you learned in the " +
-      "drift_clarification field, or " +
-      "(b) redo this round and do what you said you would do. " +
-      "If you intentionally changed direction, update your objective_refinement " +
-      "and set a new next_action that reflects the new plan.",
-    check: "intent_drift",
-  });
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Escalation notice builder (v2.7)
-// ═══════════════════════════════════════════════════════════════════════════
-
 /** Build an escalation notice urging the agent to seek human guidance.
  *
  *  Appended to fix_instructions when a rule would otherwise terminate.
@@ -1247,22 +958,15 @@ function buildDiagnosticGap(flags: VerificationFlag[]): string {
 // ═══════════════════════════════════════════════════════════════════════════
 // v3.7 — Enforcement strategy table
 //
-// The single in-process description of every enforcement row: its semantic
-// action class (the four documented categories), its ladder kind, and its
-// escalation knobs. Lives only in memory — never persisted, never a second
-// state source. Priority is the ordered walk in enforceRound (the R-labels
-// in rule comments are historical); this table supplies per-row semantics.
+// The single in-process description of every enforcement row: its ladder kind
+// and escalation knobs. Lives only in memory — never persisted, never a
+// second state source. Priority is the ordered walk in enforceRound (the
+// R-labels in rule comments are historical); this table supplies per-row
+// semantics. v3.8: the never-read `category` / `clarificationAllowed` /
+// `backtrackAllowed` fields were deleted with the drift machinery.
 // ═══════════════════════════════════════════════════════════════════════════
 
-type RuleCategory =
-  | "evidence_contradiction"
-  | "contract_scope"
-  | "plan_drift"
-  | "progress_recovery";
-
 interface RuleRow {
-  /** Semantic action class (documented as the four-class model). */
-  category: RuleCategory;
   /** Enforcement check ids the row owns; in-row first match wins. */
   checks: readonly string[];
   /** uniform — no internal ladder; escalates on the session's consecutive
@@ -1277,29 +981,21 @@ interface RuleRow {
   /** uniform rows only: repeat rejections carry the escalation notice when
    *  enforcement_escalation_enabled. (Internal rows append their own.) */
   noticeOnRepeat?: boolean;
-  backtrackAllowed?: boolean;
-  clarificationAllowed?: boolean;
 }
 
 const RULE_TABLE: readonly RuleRow[] = [
-  // R1/R2 join the contradiction umbrella per the documented four-class model
-  // (AGENTS/README/CHANGELOG): a row's category is its enforcement action
-  // class, NOT the trigger check's gate domain — claim-vs-self-reported-facts
-  // rows (outcome_success_contradiction included) belong to this class too.
-  { category: "evidence_contradiction", checks: ["success_with_remaining_criteria"], ladder: "uniform", terminalAfter: 2, noticeOnRepeat: true },
-  { category: "evidence_contradiction", checks: ["recurring_violation"], ladder: "uniform", terminalAfter: 2, noticeOnRepeat: true },
-  { category: "evidence_contradiction", checks: ["required_command_failed", "command_evidence_mismatch", "outcome_success_contradiction"], ladder: "uniform", terminalAfter: 2, noticeOnRepeat: true },
-  { category: "evidence_contradiction", checks: ["verification_entrypoint_modified"], ladder: "uniform", terminalAfter: 2, noticeOnRepeat: true },
-  { category: "contract_scope", checks: ["contract_completion_unverified"], ladder: "internal" },
-  { category: "contract_scope", checks: ["premature_boundary"], ladder: "internal" },
-  { category: "evidence_contradiction", checks: ["success_without_verified_evidence"], ladder: "internal" },
-  { category: "contract_scope", checks: ["round_scope_drift"], ladder: "internal", clarificationAllowed: true },
-  { category: "progress_recovery", checks: ["progress_stall"], ladder: "internal", backtrackAllowed: true },
-  { category: "progress_recovery", checks: ["max_rejections"], ladder: "counter" },
-  { category: "plan_drift", checks: ["intent_drift"], ladder: "internal", clarificationAllowed: true },
-  { category: "progress_recovery", checks: ["backtrack_workspace_not_restored"], ladder: "internal", backtrackAllowed: true },
+  { checks: ["success_with_remaining_criteria"], ladder: "uniform", terminalAfter: 2, noticeOnRepeat: true },
+  { checks: ["recurring_violation"], ladder: "uniform", terminalAfter: 2, noticeOnRepeat: true },
+  { checks: ["required_command_failed", "command_evidence_mismatch", "outcome_success_contradiction"], ladder: "uniform", terminalAfter: 2, noticeOnRepeat: true },
+  { checks: ["verification_entrypoint_modified"], ladder: "uniform", terminalAfter: 2, noticeOnRepeat: true },
+  { checks: ["success_without_verified_evidence"], ladder: "internal" },
+  { checks: ["round_scope_drift"], ladder: "internal" },
+  { checks: ["contract_items_unverified"], ladder: "uniform", terminalAfter: 2, noticeOnRepeat: true },
+  { checks: ["progress_stall"], ladder: "internal" },
+  { checks: ["max_rejections"], ladder: "counter" },
+  { checks: ["backtrack_workspace_not_restored"], ladder: "internal" },
   // v3.7.1: cited gates without an approved human decision
-  { category: "contract_scope", checks: ["user_gate_unresolved"], ladder: "uniform", terminalAfter: 2, noticeOnRepeat: true },
+  { checks: ["user_gate_unresolved"], ladder: "uniform", terminalAfter: 2, noticeOnRepeat: true },
 ];
 
 const RULE_TABLE_BY_ID = new Map<string, RuleRow>();
@@ -1354,8 +1050,6 @@ export function enforceRound(
   currentRound: number,
   vaultEntries: VaultEntry[],
   consecutiveRejections: number = 0,
-  /** v2.12: Current clarification streak for R7 escalation. */
-  driftClarificationStreak: number = 0,
   /** L4 (v3.7.x): which check rejected the PREVIOUS round. The coordinator
    *  resets consecutiveRejections to 1 whenever the check changes, so the
    *  counter only ever measures one check's streak — this field names that
@@ -1381,16 +1075,19 @@ export function enforceRound(
     // v3.5: contract completion claimed without its verification_plan
     // commands passing — runs before R-C1: the completion-truth question
     // outranks boundary nuance.
-    () => enforceContractCompletionUnverified(flags, consecutiveRejections),
+
     // v3.3: R-C1 — contract boundary claimed prematurely (contract-specific
     // wording and check counting; runs before R8 so contract rounds get the
     // contract's own reason.)
-    () => enforcePrematureBoundary(flags, consecutiveRejections),
+
     // v2.12/v3.7: R8 — the single success-evidence row (empty/missing-evidence
     // arm merged from the former R3 empty_success posture + claims arm)
     () => enforceSuccessWithoutVerifiedEvidence(flags, consecutiveRejections),
     // v3.3: R-C2 — files changed outside the contract's declared scope
     () => enforceScopeDrift(flags, selfEval, consecutiveRejections, vaultEntries),
+    // v3.8: verification debt — contract items claimed met without machine
+    // verification (fires only after the configured streak)
+    () => enforceContractItemsUnverified(flags, currentRound, vaultEntries, consecutiveRejections),
     // v3.7: single progress evaluator (former R4/R5 slots merged) —
     // reject → backtrack → terminate with the deadlock guard
     () => enforceProgressStall(selfEval, flags, currentRound, vaultEntries, consecutiveRejections),
@@ -1399,9 +1096,6 @@ export function enforceRound(
     // v3.7.1: cited gate without an approved human decision
     () => enforceUserGateUnresolved(flags),
     () => enforceMaxRejections(consecutiveRejections),
-    // v2.12: R7 — intent drift; its weak-clarification streak is a separate
-    // counter and never mixes with the global rejection count
-    () => enforceIntentDrift(flags, selfEval, consecutiveRejections, driftClarificationStreak, vaultEntries),
     // v2.12: R9 — post-backtrack workspace not restored
     () => enforceBacktrackNotRestored(flags, vaultEntries, currentRound),
   ];

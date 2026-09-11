@@ -3,7 +3,10 @@
  * The canonical state is data, not Markdown. Prompt and state-file renderers
  * consume the same value so they cannot silently drift apart.
  */
-import type { ConstraintMeta, CriterionStatus, Lesson, LoopCompileRequest, LoopCompileResponse, MilestoneSummary, RoundContract, SubGoal, VerificationFlag } from "./protocol.js";
+import type { ConstraintMeta, CriterionStatus, Lesson, LoopCompileRequest, LoopCompileResponse, MilestoneSummary, SubGoal, VerificationFlag } from "./protocol.js";
+import type { ActiveContractView } from "./round-contract.js";
+import type { ContractItemStatusView } from "./contract-items.js";
+import type { ConfiguredCapability, VerifiedSubGoalFact } from "./protocol.js";
 export declare const CANONICAL_STATE_SCHEMA_VERSION: 1;
 /** v3.7.1: Presentation view of sub-goals shared by prompts and the state
  *  file (one derivation, no second copy). Only ACTIVE items render as rows
@@ -73,7 +76,6 @@ export interface CanonicalLoopState {
     blockers: string[];
     verificationFlags: VerificationFlag[];
     discoveries: string[];
-    nextAction: string;
     rollingOutcomes: string[];
     recurringIssues: string[];
     failedPatterns: string[];
@@ -114,7 +116,18 @@ export interface CanonicalLoopState {
      *  round_contract, which is a proposal for the NEXT round). Conditional
      *  presence: absent without an active contract — keeps state hashes
      *  byte-identical for contract-less rounds. */
-    roundContract?: RoundContract;
+    roundContract?: ActiveContractView;
+    /** v3.8: The derived item statuses of the ACTIVE contract — the runtime's
+     *  statement about what the agent claimed under it. Conditional presence:
+     *  absent without an active contract. */
+    contractItemStatuses?: ContractItemStatusView;
+    /** v3.8: Sub-goals a verified contract item backs. DERIVED, never
+     *  persisted — the machine's separate statement about a `done` sub-goal. */
+    verifiedSubGoals?: VerifiedSubGoalFact[];
+    /** v3.8: The static verification capability (policy-derived). Unconditional:
+     *  it is part of the round's verification context, so every state hash
+     *  changes once, deliberately. */
+    capability: ConfiguredCapability;
 }
 /** Deterministic JSON serialization used by state and prompt hashes. */
 export declare function stableStringify(value: unknown): string;
@@ -138,7 +151,10 @@ export declare function buildRoadmap(state: CanonicalLoopState): string[];
  *  body — the single formatting source shared by prompts and the state
  *  file (module contract above). The original objective is NOT here: it
  *  lives in the Objective section. Empty arrays render no line. */
-export declare function formatRoundContract(contract: RoundContract): string;
+export declare function formatRoundContract(contract: ActiveContractView,
+/** v3.8: the derived item statuses. When given, each item renders with its
+ *  machine status — the agent sees the verification debt in its own task. */
+statuses?: ContractItemStatusView | null): string;
 /** The trust bar line ("██████░░░░ 60%"). The L2 Agent Trust section and the
  *  detailed L1 renderer used to carry private copies of this formula — shared
  *  here so a formatting change is made once (module contract: renderers must
@@ -167,6 +183,10 @@ derived?: {
      *  committed evals of earlier rounds — see loop-compiler). Drives the
      *  Current Task. Never the submission's own round_contract field, which
      *  is a proposal for the NEXT round. */
-    roundContract?: RoundContract | null;
+    roundContract?: ActiveContractView | null;
+    /** v3.8: derived item statuses for the ACTIVE contract. */
+    contractItemStatuses?: ContractItemStatusView | null;
+    /** v3.8: derived machine-verified sub-goal facts. */
+    verifiedSubGoals?: VerifiedSubGoalFact[] | null;
 }): CanonicalLoopState;
 //# sourceMappingURL=canonical-state.d.ts.map

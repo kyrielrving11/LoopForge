@@ -11,10 +11,26 @@ import { buildSelfEvaluation } from "../engine.js";
 import {
   parseSubGoalUpdates,
   validateCoreSelfEvaluation,
+  validateContractShape,
   validateSubGoalUpdatesShape,
 } from "../self-eval.js";
 import { isRecord } from "../token-utils.js";
-import { getPolicy, validateLoopId } from "../policy.js";
+import { getPolicy, isConfiguredCommand, validateLoopId } from "../policy.js";
+import { deriveEvidenceCapability } from "../evidence-provider.js";
+import { containInWorkspace } from "../workspace.js";
+
+/** v3.8: A contract's `scope` is the round's declared file boundary, so it
+ *  passes through the same workspace containment check as every other
+ *  workspace path. Returns the reason when the entry escapes, null when it is
+ *  contained. */
+function scopeEntryDetail(entry: string): string | null {
+  try {
+    containInWorkspace(process.cwd(), entry);
+    return null;
+  } catch (error) {
+    return error instanceof Error ? error.message : "leaves the workspace";
+  }
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Tool schemas (MCP JSON Schema format)
@@ -115,7 +131,7 @@ const TOOL_BASE_SCHEMAS = [
                 "Optional. Sub-problems that surfaced during execution. The only " +
                 "sub-goal creation channel — sg-XXXXXXXX ID literals are rejected here.",
             },
-            execution_evidence: {
+            execution_report: {
               type: "object" as const,
               description: "Optional. Structured record of what actually happened this round.",
               properties: {
@@ -124,7 +140,7 @@ const TOOL_BASE_SCHEMAS = [
                   items: { type: "string" as const },
                   description: "Files modified this round.",
                 },
-                test_results: {
+                tests_reported: {
                   type: "object" as const,
                   description: "Test results from this round.",
                   properties: {
@@ -133,15 +149,31 @@ const TOOL_BASE_SCHEMAS = [
                     skipped: { type: "integer" as const, minimum: 0, description: "Number of skipped tests." },
                   },
                 },
-                success_criteria_met: {
+                criterion_claims: {
                   type: "array" as const,
-                  items: { type: "string" as const },
-                  description: "Success criteria satisfied this round.",
+                  description: "v3.8: advisory claims about objective criteria. LENIENT — unknown or malformed ids are dropped with a warning, never a rejection.",
+                  items: {
+                    type: "object" as const,
+                    properties: {
+                      criterion_id: { type: "string" as const, description: "cr-XXXXXXXX criterion id (free text allowed)." },
+                      outcome: { type: "string" as const, enum: ["met", "remaining"] },
+                    },
+                    required: ["criterion_id", "outcome"],
+                    additionalProperties: false,
+                  },
                 },
-                success_criteria_remaining: {
+                contract_item_claims: {
                   type: "array" as const,
-                  items: { type: "string" as const },
-                  description: "Success criteria still outstanding.",
+                  description: "Claims about items of the ACTIVE contract, cited by the rci-XXXXXXXX id the prompt rendered. LENIENT at declaration: an unknown/malformed id is reported as contract_invalid so you can correct the payload and resubmit the same roundId. A claim never verifies anything by itself — the runtime only marks an item verified when its bound commands are observed passing.",
+                  items: {
+                    type: "object" as const,
+                    properties: {
+                      item_id: { type: "string" as const, description: "rci-XXXXXXXX id of an item of the ACTIVE contract." },
+                      outcome: { type: "string" as const, enum: ["met", "remaining"], description: "Your claim for that item this round." },
+                    },
+                    required: ["item_id", "outcome"],
+                    additionalProperties: false,
+                  },
                 },
                 progress_estimate: {
                   type: "number" as const,
@@ -205,10 +237,6 @@ const TOOL_BASE_SCHEMAS = [
             checkpoint_label: {
               type: "string" as const,
               description: "Optional. Human-readable label for this checkpoint (e.g. 'core-functions-complete'). Only meaningful when compression_checkpoint is true.",
-            },
-            next_action: {
-              type: "string" as const,
-              description: "Optional. What the agent plans to do in the next round. Helps LoopForge detect task drift early by comparing declared intent with actual work.",
             },
             subgoal_updates: {
               type: "array" as const,
@@ -279,10 +307,6 @@ const TOOL_BASE_SCHEMAS = [
               },
               description: "Optional. Claims that a PRIOR round satisfied a criterion. The runtime verifies them against the prior round's git evidence. Max 20 entries.",
             },
-            drift_clarification: {
-              type: "string" as const,
-              description: "Optional. Explain why this round's actions diverged from your previous round's next_action. Only required when the previous round was flagged for intent_drift or subgoal_drift. Mention concrete anchors: sub-goal IDs (sg-XXXXXXXX), constraint IDs (c-XXXXXXXX), criterion IDs (cr-XXXXXXXX), or file paths.",
-            },
             prompt_requests: {
               type: "object" as const,
               description: "Optional. Information needs for the next round's prompt. Use when you know what context you'll need to succeed in the next round.",
@@ -301,29 +325,49 @@ const TOOL_BASE_SCHEMAS = [
             },
             round_contract: {
               type: "object" as const,
-              description: "Optional. Proposal for the NEXT round's contract (v3.4). Declared here, it becomes the ACTIVE contract (rendered as the Current Task) only after this round commits, and stays active until a later round lists every done_when item in success_criteria_met or reports outcome=blocked. While it is active, restate it unchanged here; on completion or block, declare the next contract instead (or omit the field — the Current Task reverts to the original task). Checks: round_underspecified / round_unverifiable target this proposal; round_scope_drift and premature_boundary target the ACTIVE contract.",
+              description: "Optional. Proposal for the NEXT round's contract (v3.8 item model). Declared here, it becomes the ACTIVE contract (rendered as the Current Task) only after this round commits. It closes when EVERY item is machine-verified (its bound commands observed passing, untampered, with the declared config), or when a round reports outcome=blocked. While it is open, restate it unchanged here — a different proposal is ignored. DECLARATION IS STRICT: an item with no bound command, one naming an unknown/disabled/non-after-capable command, a scope entry leaving the workspace, a malformed reference, or a count over the declared limits returns contract_invalid and the round may be retried with the same roundId.",
               properties: {
                 work_item: {
                   type: "string" as const,
                   description: "Optional. Round focus, one line. Rendered as the active contract's Current Task first line. Max 200 chars.",
                 },
-                done_when: {
+                items: {
                   type: "array" as const,
-                  items: { type: "string" as const },
-                  description: "Completion conditions: cr-XXXXXXXX criterion IDs or free text. Satisfied = list in success_criteria_met; still open = list in success_criteria_remaining. Max 20 items.",
-                },
-                verification_plan: {
-                  type: "array" as const,
-                  items: { type: "string" as const },
-                  description: "Names of configured, enabled evidence.commands (see loop_policy.json evidence.commands) that verify the done_when claims. Max 20 items.",
+                  description: "Required, at least one (max 20). Each item is a verification unit bound to evidence commands. The runtime derives a stable rci-XXXXXXXX id per item and renders it in the prompt — cite that id in execution_report.contract_item_claims.",
+                  items: {
+                    type: "object" as const,
+                    properties: {
+                      description: {
+                        type: "string" as const,
+                        description: "What must be true for this item. Max 200 chars.",
+                      },
+                      criterion_refs: {
+                        type: "array" as const,
+                        items: { type: "string" as const },
+                        description: "Optional. cr-XXXXXXXX criterion ids this item is evidence for (free text allowed). Max 20.",
+                      },
+                      subgoal_refs: {
+                        type: "array" as const,
+                        items: { type: "string" as const },
+                        description: "Optional. sg-XXXXXXXX sub-goals THIS ITEM is evidence for. Must name sub-goals that exist (or that this same submission creates via emerged_subtasks). Max 20 ids. A machine-verified item produces the derived verified-subgoal fact for exactly the ids it names here.",
+                      },
+                      verify_with: {
+                        type: "array" as const,
+                        items: { type: "string" as const },
+                        description: "Required, at least one. Names of configured, enabled, after-capable evidence.commands (loop_policy.json) that verify this item. Unknown or disabled names are rejected.",
+                      },
+                    },
+                    required: ["description", "verify_with"],
+                    additionalProperties: false,
+                  },
                 },
                 scope: {
                   type: "array" as const,
                   items: { type: "string" as const },
-                  description: "Files/directories this round may touch (workspace-relative; './' and trailing slashes accepted). Out-of-scope git changes trigger round_scope_drift. Max 50 items.",
+                  description: "Files/directories this round may touch (workspace-relative; './' and trailing slashes accepted; must stay inside the workspace). Out-of-scope git changes trigger round_scope_drift, which is a machine fact and is not waivable by explanation. Max 50 items.",
                 },
               },
-              required: ["done_when", "verification_plan", "scope"],
+              required: ["items", "scope"],
             },
           },
         },
@@ -348,8 +392,8 @@ const TOOL_BASE_SCHEMAS = [
         },
         view: {
           type: "string" as const,
-          enum: ["session", "loop", "all", "audit"],
-          description: "Which view to return. Defaults to session.",
+          enum: ["session", "loop", "all", "audit", "explain"],
+          description: "Which view to return. Defaults to session. explain (v3.8) is the read-only per-round \"why\" view over committed facts.",
         },
       },
       required: [],
@@ -517,7 +561,8 @@ type JsonSchema = Record<string, unknown>;
 const ADVANCE_OUTPUT_SCHEMA: JsonSchema = {
   type: "object",
   properties: {
-    error: { type: "string" },
+    ok: { type: "boolean", description: "v3.8: uniform result envelope — false means the error object describes a rejected call." },
+    error: { type: "object", additionalProperties: true, description: "v3.8 ToolError: { code, message, retryable, sessionId?, roundId?, details? }" },
     details: { type: "object", additionalProperties: true },
     sessionId: { type: "string" },
     round: { type: "number" },
@@ -550,7 +595,8 @@ export const TOOL_OUTPUT_SCHEMAS: Record<string, JsonSchema> = {
   loopforge_status: {
     type: "object",
     properties: {
-      error: { type: "string" },
+      ok: { type: "boolean", description: "v3.8: uniform result envelope — false means the error object describes a rejected call." },
+      error: { type: "object", additionalProperties: true, description: "v3.8 ToolError: { code, message, retryable, sessionId?, roundId?, details? }" },
       sessionId: { type: "string" },
       loopId: { type: "string" },
       round: { type: "number" },
@@ -570,7 +616,8 @@ export const TOOL_OUTPUT_SCHEMAS: Record<string, JsonSchema> = {
   loopforge_stop: {
     type: "object",
     properties: {
-      error: { type: "string" },
+      ok: { type: "boolean", description: "v3.8: uniform result envelope — false means the error object describes a rejected call." },
+      error: { type: "object", additionalProperties: true, description: "v3.8 ToolError: { code, message, retryable, sessionId?, roundId?, details? }" },
       success: { type: "boolean" },
       roundsCompleted: { type: "number" },
       successTrajectory: { type: "array", items: { type: "boolean" } },
@@ -580,7 +627,8 @@ export const TOOL_OUTPUT_SCHEMAS: Record<string, JsonSchema> = {
   loopforge_pause: {
     type: "object",
     properties: {
-      error: { type: "string" },
+      ok: { type: "boolean", description: "v3.8: uniform result envelope — false means the error object describes a rejected call." },
+      error: { type: "object", additionalProperties: true, description: "v3.8 ToolError: { code, message, retryable, sessionId?, roundId?, details? }" },
       sessionId: { type: "string" },
       round: { type: "number" },
       status: { type: "string" },
@@ -590,7 +638,8 @@ export const TOOL_OUTPUT_SCHEMAS: Record<string, JsonSchema> = {
   loopforge_replay: {
     type: "object",
     properties: {
-      error: { type: "string" },
+      ok: { type: "boolean", description: "v3.8: uniform result envelope — false means the error object describes a rejected call." },
+      error: { type: "object", additionalProperties: true, description: "v3.8 ToolError: { code, message, retryable, sessionId?, roundId?, details? }" },
       sessionId: { type: "string" },
       loopId: { type: "string" },
       timeline: { type: "array", items: { type: "object", additionalProperties: true } },
@@ -600,7 +649,8 @@ export const TOOL_OUTPUT_SCHEMAS: Record<string, JsonSchema> = {
   loopforge_gate_check: {
     type: "object",
     properties: {
-      error: { type: "string" },
+      ok: { type: "boolean", description: "v3.8: uniform result envelope — false means the error object describes a rejected call." },
+      error: { type: "object", additionalProperties: true, description: "v3.8 ToolError: { code, message, retryable, sessionId?, roundId?, details? }" },
       sessionId: { type: "string" },
       gateId: { type: "string" },
       risk: { type: "string", enum: ["low", "high", "unknown"] },
@@ -616,7 +666,8 @@ export const TOOL_OUTPUT_SCHEMAS: Record<string, JsonSchema> = {
   loopforge_gate_resolve: {
     type: "object",
     properties: {
-      error: { type: "string" },
+      ok: { type: "boolean", description: "v3.8: uniform result envelope — false means the error object describes a rejected call." },
+      error: { type: "object", additionalProperties: true, description: "v3.8 ToolError: { code, message, retryable, sessionId?, roundId?, details? }" },
       sessionId: { type: "string" },
       loopId: { type: "string" },
       gateId: { type: "string" },
@@ -824,6 +875,17 @@ export function validateToolOutput(
 
 export type ToolHandler = (mgr: SessionManager, input: Record<string, unknown>) => Promise<Record<string, unknown>>;
 
+/** v3.8: capability warnings for the current policy, merged with the compile's
+ *  own warnings. Derived through the SAME function `RoundDriver.prepare()`
+ *  uses, so the start/resume banner and the prepared round cannot tell two
+ *  different stories about what the runtime can observe. Never persisted. */
+function capabilityWarningList(existing?: string[]): string[] {
+  return [...new Set([
+    ...(existing ?? []),
+    ...deriveEvidenceCapability(getPolicy()).warnings,
+  ])];
+}
+
 export const TOOL_HANDLERS: Record<string, ToolHandler> = {
   async loopforge_start(mgr, input): Promise<Record<string, unknown>> {
     const startInput: StartInput = {
@@ -838,7 +900,10 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
     };
 
     if (!startInput.task.trim()) {
-      return { error: "task is required and must be non-empty" };
+      return {
+        error: "invalid_argument",
+        errorMessage: "task is required and must be non-empty",
+      };
     }
 
     // v2.14: entry-point validation — a bad maxRounds previously passed
@@ -847,24 +912,49 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
     // argument error.
     if (startInput.maxRounds !== undefined &&
         (!Number.isInteger(startInput.maxRounds) || startInput.maxRounds < 1)) {
-      return { error: "maxRounds must be a positive integer" };
+      return {
+        error: "invalid_argument",
+        errorMessage: "maxRounds must be a positive integer",
+      };
     }
     if (startInput.loopId !== undefined) {
       try {
         validateLoopId(startInput.loopId);
       } catch (error) {
-        return { error: `invalid loopId: ${(error as Error).message}` };
+        return {
+          error: "invalid_argument",
+          errorMessage: `invalid loopId: ${(error as Error).message}`,
+        };
       }
     }
 
-    const result = await mgr.create(startInput);
+    // A malformed loop_policy.json is a configuration defect, not a bad
+    // argument — it must not escape as an opaque JSON-RPC internal error.
+    let result: Awaited<ReturnType<SessionManager["create"]>>;
+    try {
+      result = await mgr.create(startInput);
+    } catch (error) {
+      return {
+        error: "policy_invalid",
+        errorMessage: `the runtime policy could not be loaded: ${(error as Error).message}`,
+      };
+    }
     // v2.14: a same-process duplicate loopId surfaces as a clean argument
     // error instead of a prompt-less "success" the client cannot act on.
     if (typeof result.stopReason === "string" &&
         result.stopReason.startsWith("loop_already_running:")) {
-      return { error: result.stopDetail ?? "loop already running" };
+      return {
+        error: "loop_already_running",
+        errorMessage: result.stopDetail ?? "loop already running",
+      };
     }
-    return { ...result };
+    // v3.8: the static capability warning — a loop with no provider or no
+    // enabled command can still run; its success claims are recorded as
+    // insufficient instead of verified, and the agent is told so up front.
+    const capabilityWarnings = capabilityWarningList(result.warnings);
+    return capabilityWarnings.length > 0
+      ? { ...result, warnings: capabilityWarnings }
+      : { ...result };
   },
 
   async loopforge_next(mgr, input): Promise<Record<string, unknown>> {
@@ -873,13 +963,19 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
     const rawEval = input.evaluation as Record<string, unknown> | undefined;
     const roundId = input.roundId === undefined ? undefined : String(input.roundId);
 
-    if (!sessionId) return { error: "sessionId is required" };
+    if (!sessionId) {
+      return { error: "invalid_argument", errorMessage: "sessionId is required" };
+    }
     // v3.0.1: every submission is anchored to the round it reports on. A
     // missing roundId would silently re-process a stale submission against a
     // later round — reject it here so the contract is enforced even when the
     // handler is invoked directly (bypassing schema validation).
     if (!roundId || !roundId.trim()) {
-      return { error: "roundId is required — pass the roundId from the most recent loopforge_start / loopforge_next / loopforge_resume / loopforge_status response" };
+      return {
+        error: "round_id_required",
+        errorMessage: "roundId is required — pass the roundId from the most recent " +
+          "loopforge_start / loopforge_next / loopforge_resume / loopforge_status response",
+      };
     }
 
     if (!rawEval || typeof rawEval !== "object" || Array.isArray(rawEval)) {
@@ -916,13 +1012,15 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
         roundId,
       };
     }
+    // The emerged set is part of BOTH referential boundaries: a sub-goal may
+    // be created and referenced/transitioned in one round.
+    const emerged = Array.isArray(rawEval.emerged_subtasks)
+      ? (rawEval.emerged_subtasks as unknown[])
+          .filter((v): v is string => typeof v === "string")
+          .map((s) => s.slice(0, 500))
+      : [];
     const updates = parseSubGoalUpdates(rawEval.subgoal_updates);
     if (updates.length > 0) {
-      const emerged = Array.isArray(rawEval.emerged_subtasks)
-        ? (rawEval.emerged_subtasks as unknown[])
-            .filter((v): v is string => typeof v === "string")
-            .map((s) => s.slice(0, 500))
-        : [];
       const referentialErrors = mgr.preflightSubGoalUpdates(
         sessionId, roundId, updates, emerged,
       );
@@ -934,6 +1032,25 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
           roundId,
         };
       }
+    }
+    // v3.8: the contract declaration and item claims are the same kind of
+    // strict structural boundary as subgoal_updates — a defect returns
+    // contract_invalid BEFORE advance, with zero state change and a
+    // same-roundId retry. The scope check is injected because containment is a
+    // filesystem fact, not a property of the payload.
+    const contractErrors = validateContractShape(rawEval, {
+      activeItemIds: mgr.preflightContractItems(sessionId),
+      knownSubGoalIds: mgr.preflightKnownSubGoalIds(sessionId, emerged),
+      isConfiguredCommand,
+      checkScopeEntry: scopeEntryDetail,
+    });
+    if (contractErrors.length > 0) {
+      return {
+        error: "contract_invalid",
+        details: { missing: [], invalid: [], contract_errors: contractErrors },
+        sessionId,
+        roundId,
+      };
     }
     const preExtractedEval = buildSelfEvaluation(rawEval);
 
@@ -951,7 +1068,8 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
   },
 
   async loopforge_status(mgr, input): Promise<Record<string, unknown>> {
-    const view = input.view === "loop" || input.view === "all" || input.view === "audit"
+    const view = input.view === "loop" || input.view === "all" ||
+        input.view === "audit" || input.view === "explain"
       ? input.view
       : "session";
     const sessionId = String(input.sessionId ?? "");
@@ -964,23 +1082,59 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
 
     // v2.12: view=audit — read-only verification audit.
     if (view === "audit") {
-      if (!loopId) return { error: "loopId is required for view=audit" };
+      if (!loopId) {
+        return { error: "invalid_argument", errorMessage: "loopId is required for view=audit" };
+      }
       const audit = mgr.getAudit(loopId);
-      if (!audit) return { error: `no audit data found for loop "${loopId}"` };
+      if (!audit) {
+        return {
+          error: "state_unavailable",
+          errorMessage: `no audit data found for loop "${loopId}"`,
+          sessionId,
+        };
+      }
       return audit;
+    }
+
+    // v3.8: view=explain — the read-only per-round "why" view.
+    if (view === "explain") {
+      if (!loopId) {
+        return { error: "invalid_argument", errorMessage: "loopId is required for view=explain" };
+      }
+      const roundValue = input.round;
+      const round = typeof roundValue === "number" && Number.isInteger(roundValue) && roundValue >= 1
+        ? roundValue
+        : undefined;
+      return mgr.getExplain(loopId, round);
     }
 
     // v2.12: view=loop — loop health (formerly loopforge_health).
     if (view === "loop") {
-      if (!loopId) return { error: "loopId is required for view=loop" };
+      if (!loopId) {
+        return { error: "invalid_argument", errorMessage: "loopId is required for view=loop" };
+      }
       const health = mgr.getHealth(loopId);
-      return health ?? { error: `no health data for loop "${loopId}"` };
+      return health ?? {
+        error: "state_unavailable",
+        errorMessage: `no health data for loop "${loopId}"`,
+      };
     }
 
-    if (!sessionId) return { error: "sessionId is required for view=session" };
+    if (!sessionId) {
+      return {
+        error: "invalid_argument",
+        errorMessage: "sessionId is required for view=session",
+      };
+    }
 
     const session = mgr.get(sessionId);
-    if (!session) return { error: `session not found: ${sessionId}` };
+    if (!session) {
+      return {
+        error: "session_not_found",
+        errorMessage: `session not found: ${sessionId} (process restarted?) — pass loopId for view=audit/loop, or loopforge_resume`,
+        sessionId,
+      };
+    }
 
     const metrics = session.engine.getMetrics();
     return {
@@ -996,6 +1150,11 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
       // verification gates derive the same value from the same committed
       // evals via the shared round-contract walker).
       activeContract: mgr.getActiveContract(sessionId),
+      // v3.8: the ONE capability fact — the static half the compile hashes
+      // (what verification is possible) plus the live half rendered from the
+      // last baseline. `available` is provider-registry state: reported here
+      // and by `doctor`, never hashed.
+      capability: deriveEvidenceCapability(getPolicy(), session.evidenceBaseline ?? []),
       projection: mgr.getProjection(sessionId),
       metrics: {
         vaultWriteErrors: metrics.vaultWriteErrors,
@@ -1011,10 +1170,18 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
 
   async loopforge_stop(mgr, input): Promise<Record<string, unknown>> {
     const sessionId = String(input.sessionId ?? "");
-    if (!sessionId) return { error: "sessionId is required" };
+    if (!sessionId) {
+      return { error: "invalid_argument", errorMessage: "sessionId is required" };
+    }
 
     const session = mgr.get(sessionId);
-    if (!session) return { error: `session not found: ${sessionId}` };
+    if (!session) {
+      return {
+        error: "session_not_found",
+        errorMessage: `session not found: ${sessionId}`,
+        sessionId,
+      };
+    }
 
     const roundsCompleted = session.currentRound;
     const successTrajectory = [...session.successTrajectory];
@@ -1025,7 +1192,9 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
 
   async loopforge_pause(mgr, input): Promise<Record<string, unknown>> {
     const sessionId = String(input.sessionId ?? "");
-    if (!sessionId) return { error: "sessionId is required" };
+    if (!sessionId) {
+      return { error: "invalid_argument", errorMessage: "sessionId is required" };
+    }
     const result = mgr.pause(sessionId);
     return { ...result };
   },
@@ -1034,7 +1203,11 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
     const sessionId = String(input.sessionId ?? "");
     const loopId = String(input.loopId ?? "");
     if (!sessionId && !loopId) {
-      return { error: "sessionId or loopId is required — pass loopId to replay a loop after a restart (no live session)" };
+      return {
+        error: "invalid_argument",
+        errorMessage: "sessionId or loopId is required — pass loopId to replay a loop " +
+          "after a restart (no live session)",
+      };
     }
 
     // Live session first: it disambiguates re-used loopIds and the session
@@ -1048,7 +1221,12 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
       // v3.3.1: session not in memory (restart). Fall through to the vault
       // path when a loopId was also provided; otherwise say so plainly.
       if (!loopId) {
-        return { error: `session not found: ${sessionId} (process restarted?) — pass loopId to replay from the vault` };
+        return {
+          error: "session_not_found",
+          errorMessage: `session not found: ${sessionId} (process restarted?) — ` +
+            "pass loopId to replay from the vault",
+          sessionId,
+        };
       }
     }
 
@@ -1056,7 +1234,10 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
     // documents, not in the session registry.
     const timeline = mgr.replayByLoop(loopId);
     if (!timeline) {
-      return { error: `no committed rounds found for loop "${loopId}"` };
+      return {
+        error: "state_unavailable",
+        errorMessage: `no committed rounds found for loop "${loopId}"`,
+      };
     }
     // sessionId omitted on the vault path (its output schema is string-only).
     return { ...(sessionId ? { sessionId } : {}), loopId, timeline };
@@ -1064,11 +1245,16 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
 
   async loopforge_resume(mgr, input): Promise<Record<string, unknown>> {
     const loopId = String(input.loopId ?? "");
-    if (!loopId) return { error: "loopId is required" };
+    if (!loopId) {
+      return { error: "invalid_argument", errorMessage: "loopId is required" };
+    }
     try {
       validateLoopId(loopId);
     } catch (error) {
-      return { error: `invalid loopId: ${(error as Error).message}` };
+      return {
+        error: "invalid_argument",
+        errorMessage: `invalid loopId: ${(error as Error).message}`,
+      };
     }
 
     // Paused recovery must run first so the persisted status is atomically
@@ -1077,7 +1263,12 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
     if (!result) {
       result = await mgr.resume(loopId);
     }
-    if (!result) return { error: `no saved session found for loop "${loopId}"` };
+    if (!result) {
+      return {
+        error: "state_unavailable",
+        errorMessage: `no saved session found for loop "${loopId}"`,
+      };
+    }
 
     return { ...result };
   },
@@ -1088,9 +1279,19 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
     const sessionId = String(input.sessionId ?? "");
     const roundId = String(input.roundId ?? "");
     const action = input.action as Record<string, unknown> | undefined;
-    if (!sessionId) return { error: "sessionId is required" };
-    if (!roundId) return { error: "roundId is required — pass the roundId from the latest response" };
-    if (!action || !isRecord(action)) return { error: "action is required" };
+    if (!sessionId) {
+      return { error: "invalid_argument", errorMessage: "sessionId is required" };
+    }
+    if (!roundId) {
+      return {
+        error: "round_id_required",
+        errorMessage: "roundId is required — pass the roundId from the latest response",
+        sessionId,
+      };
+    }
+    if (!action || !isRecord(action)) {
+      return { error: "invalid_argument", errorMessage: "action is required", sessionId, roundId };
+    }
     const descriptor: import("../protocol.js").GateActionDescriptor = {
       description: String(action.description ?? ""),
       scope: Array.isArray(action.scope)
@@ -1112,7 +1313,12 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
         : "unknown") as import("../protocol.js").GateActionDescriptor["authorization"],
     };
     if (!descriptor.description.trim()) {
-      return { error: "action.description is required" };
+      return {
+        error: "invalid_argument",
+        errorMessage: "action.description is required",
+        sessionId,
+        roundId,
+      };
     }
     return mgr.checkGate(sessionId, roundId, descriptor);
   },

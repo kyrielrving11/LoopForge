@@ -47,45 +47,6 @@
         "manual_fixes_needed"
       ]
     },
-    "ExecutionEvidence": {
-      "type": "object",
-      "properties": {
-        "files_changed": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "test_results": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "success_criteria_met": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "success_criteria_remaining": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "progress_estimate": {
-          "type": "number"
-        }
-      },
-      "required": [
-        "files_changed",
-        "success_criteria_met",
-        "success_criteria_remaining",
-        "progress_estimate"
-      ],
-      "description": "P4: Structured execution evidence reported by the agent after each round.\r\nGives LoopForge visibility into what actually happened — files changed,\r\ntest results, success criteria met, and a subjective progress estimate.\r\nEnables the compiler to cross-validate agent claims and compute real progress."
-    },
     "CriterionRevision": {
       "type": "object",
       "properties": {
@@ -101,38 +62,6 @@
         "new"
       ],
       "description": "P5: A revision to a success criterion — the old form and the new form.\r\nThe agent proposes this when it discovers the original criterion was\r\nwrong, unrealistic, or needs refinement."
-    },
-    "RoundContract": {
-      "type": "object",
-      "properties": {
-        "work_item": {
-          "type": "string"
-        },
-        "done_when": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "verification_plan": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "scope": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        }
-      },
-      "required": [
-        "done_when",
-        "verification_plan",
-        "scope"
-      ],
-      "description": "v3.3: Round Contract. v3.4 semantics: the field on a submission is a\r\nPROPOSAL for the NEXT round — it becomes the ACTIVE contract (rendered\r\nas the Current Task and checked for execution conformance) only after\r\nthe declaring round commits, and stays active until a committed eval\r\nlists every done_when item in success_criteria_met (complete) or\r\nreports outcome=\"blocked\". While active it is restated unchanged each\r\nround; on completion or block, the next contract is declared instead.\r\nThe ACTIVE contract is machine-derived from committed rounds\r\n(round-contract.ts) — never read from last_round_result. Optional:\r\nabsent = no contract this round, all contract checks stay silent and\r\nrendering is identical to a contract-less round.\r\n\r\nEvery field is machine-checkable:\r\n- done_when items are claimed satisfied by listing them in\r\n  execution_evidence.success_criteria_met (verified per-round claim\r\n  model); leaving them out while success is claimed is premature_boundary\r\n  against the ACTIVE contract.\r\n- verification_plan names must reference configured, enabled\r\n  evidence.commands (round_unverifiable otherwise).\r\n- scope lists the files/directories the round may touch; actual git\r\n  changes outside it trigger round_scope_drift against the ACTIVE\r\n  contract."
     },
     "SelfEvaluation": {
       "type": "object",
@@ -173,8 +102,8 @@
             "$ref": "#/$defs/SubGoalUpdate"
           }
         },
-        "execution_evidence": {
-          "$ref": "#/$defs/ExecutionEvidence"
+        "execution_report": {
+          "$ref": "#/$defs/ExecutionReport"
         },
         "retracted_constraints": {
           "type": "array",
@@ -205,9 +134,6 @@
           "items": {
             "$ref": "#/$defs/WorkerResult"
           }
-        },
-        "next_action": {
-          "type": "string"
         },
         "stop_reason": {
           "anyOf": [
@@ -252,14 +178,11 @@
             "type": "string"
           }
         },
-        "drift_clarification": {
-          "type": "string"
-        },
         "prompt_requests": {
           "$ref": "#/$defs/PromptRequests"
         },
         "round_contract": {
-          "$ref": "#/$defs/RoundContract"
+          "$ref": "#/$defs/RoundContractProposal"
         }
       },
       "required": [
@@ -305,12 +228,19 @@
         },
         "handoff": {
           "type": "string"
+        },
+        "verified_subgoals": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/VerifiedSubGoalFact"
+          }
         }
       },
       "required": [
         "todo",
         "delegation",
-        "handoff"
+        "handoff",
+        "verified_subgoals"
       ],
       "description": "v2.12: Typed cognitive state projection — runtime-derived facts shipped\r\nwith advance/status outputs. All fields are derived, zero persistence.\r\nConsumers: advance output (main agent), status (human/tooling), resume\r\nhandoff. The runtime provides facts; the agent decides actions."
     },
@@ -632,7 +562,7 @@
         "kind",
         "generated_at_round"
       ],
-      "description": "v2.1: Milestone summary — a phase-boundary snapshot that survives\r\nrolling-window eviction. Triggered by three signals in priority order:\r\n\r\n1. agent_declared    — compression_checkpoint === true (agent marks phase complete)\r\n2. criteria_milestone — new success_criteria_met detected (semantic dedup)\r\n3. auto              — safety net after N rounds without a milestone\r\n\r\nBuilt from raw round data in vault entries — no new persistent storage.\r\nRendered in L2 prompts and always written to the state file."
+      "description": "v2.1: Milestone summary — a phase-boundary snapshot that survives\r\nrolling-window eviction. Triggered by three signals in priority order:\r\n\r\n1. agent_declared    — compression_checkpoint === true (agent marks phase complete)\r\n2. criteria_milestone — a new met criterion_claim detected (semantic dedup)\r\n3. auto              — safety net after N rounds without a milestone\r\n\r\nBuilt from raw round data in vault entries — no new persistent storage.\r\nRendered in L2 prompts and always written to the state file."
     },
     "WorkerResult": {
       "type": "object",
@@ -781,7 +711,13 @@
             {
               "type": "string",
               "enum": [
-                "met"
+                "unknown"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "claimed"
               ]
             },
             {
@@ -793,7 +729,19 @@
             {
               "type": "string",
               "enum": [
-                "unknown"
+                "insufficient"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "contradicted"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "verified"
               ]
             }
           ]
@@ -814,7 +762,7 @@
         "status",
         "related_subgoal_ids"
       ],
-      "description": "v3.2: Derived per-criterion status for the progress dashboard — the\r\n\"goal → criteria → evidence\" vertical view. Zero persistence: derived from\r\nvault entries each round (met/remaining reports + Jaccard sub-goal links)."
+      "description": "v3.2: Derived per-criterion status for the progress dashboard — the\r\n\"goal → criteria → evidence\" vertical view. Zero persistence: derived\r\nfrom committed rounds each round.\r\n\r\nv3.8 states: `claimed` (the agent claims it met), `remaining` (declared\r\noutstanding), `verified` (a verified contract item references it),\r\n`contradicted` / `insufficient` (machine evidence denies / cannot back\r\nthe claim), `unknown` (never mentioned)."
     },
     "Lesson": {
       "type": "object",
@@ -1032,6 +980,9 @@
         },
         "priority": {
           "type": "number"
+        },
+        "status_note": {
+          "type": "string"
         }
       },
       "required": [
@@ -1158,8 +1109,8 @@
             "$ref": "#/$defs/SubGoalUpdate"
           }
         },
-        "execution_evidence": {
-          "$ref": "#/$defs/ExecutionEvidence"
+        "execution_report": {
+          "$ref": "#/$defs/ExecutionReport"
         },
         "retracted_constraints": {
           "type": "array",
@@ -1189,12 +1140,6 @@
           "type": "boolean"
         },
         "checkpoint_label": {
-          "type": "string"
-        },
-        "next_action": {
-          "type": "string"
-        },
-        "drift_clarification": {
           "type": "string"
         },
         "prompt_requests": {
@@ -1705,7 +1650,8 @@
         "max_rounds",
         "stalled",
         "enforcement_terminated",
-        "paused"
+        "paused",
+        "incomplete"
       ]
     },
     "EnforcementResult": {
@@ -1748,8 +1694,8 @@
         "check": {
           "type": "string"
         },
-        "clarification_accepted": {
-          "type": "boolean"
+        "stopReason": {
+          "$ref": "#/$defs/StopReason"
         }
       },
       "required": [
@@ -1903,6 +1849,670 @@
         "flags"
       ],
       "description": "Result of cross-round self-evaluation verification.\r\n\r\nVerdict semantics:\r\n- trusted:   all checks passed; flags are informational only.\r\n- suspect:   one or more warn-level flags; flags become warnings in the\r\n             next prompt so the agent can clarify.\r\n- contradicted: one or more error-level flags; the quality score for this\r\n                round is excluded from the quality trend (NOT modified).\r\n                Flags become hard constraints — the agent must respond."
+    },
+    "ExecutionReport": {
+      "type": "object",
+      "properties": {
+        "files_changed": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "tests_reported": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "criterion_claims": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CriterionClaim"
+          }
+        },
+        "contract_item_claims": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContractItemClaim"
+          }
+        },
+        "progress_estimate": {
+          "type": "number"
+        }
+      },
+      "description": "v3.8: The agent's self-report for a round — renamed from ExecutionReport\r\nbecause these fields are claims, not evidence. The whole object is\r\noptional; a mistyped optional field is dropped with a warning and never\r\nrejects the round."
+    },
+    "CriterionClaim": {
+      "type": "object",
+      "properties": {
+        "criterion_id": {
+          "type": "string"
+        },
+        "outcome": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "met"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "remaining"
+              ]
+            }
+          ]
+        }
+      },
+      "required": [
+        "criterion_id",
+        "outcome"
+      ],
+      "description": "v3.8: An advisory claim about an objective criterion. Lenient by design —\r\nthe criterion layer is advisory; the contract item layer is the machine\r\nverification skeleton."
+    },
+    "ContractItemClaim": {
+      "type": "object",
+      "properties": {
+        "item_id": {
+          "type": "string"
+        },
+        "outcome": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "met"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "remaining"
+              ]
+            }
+          ]
+        }
+      },
+      "required": [
+        "item_id",
+        "outcome"
+      ],
+      "description": "v3.8: A claim about an ACTIVE contract item, cited by the derived\r\nrci-XXXXXXXX id the prompt rendered."
+    },
+    "ContractItemProposal": {
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "criterion_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "subgoal_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "verify_with": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "description",
+        "criterion_refs",
+        "subgoal_refs",
+        "verify_with"
+      ],
+      "description": "v3.8: One declared contract item. `verify_with` must name configured,\r\nenabled, after-capable evidence commands — the declaration is strict.\r\n\r\n`subgoal_refs` lives HERE, not on the contract: a machine-verified item\r\nbacks exactly the sub-goals it names, so \"item A verifies SubGoal 1, item B\r\nverifies SubGoal 2\" is expressible and `VerifiedSubGoalFact` attribution is\r\nper-item instead of \"every verified item backs every sub-goal\"."
+    },
+    "RoundContractProposal": {
+      "type": "object",
+      "properties": {
+        "work_item": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContractItemProposal"
+          }
+        }
+      },
+      "required": [
+        "scope",
+        "items"
+      ],
+      "description": "v3.8: A Round Contract proposal for the NEXT round. It becomes ACTIVE only\r\nafter the declaring round commits. Identity (rc-/rci-) is derived from\r\nCONTENT ONLY — restating an unchanged contract keeps the same identity,\r\nunlike a SubGoal whose id includes its declaration round."
+    },
+    "ContractBinding": {
+      "type": "object",
+      "properties": {
+        "rc_id": {
+          "type": "string"
+        },
+        "item_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "config_hash_by_command": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "rc_id",
+        "item_ids",
+        "config_hash_by_command"
+      ],
+      "description": "v3.8: The machine's record of what a contract bound at its declaration\r\nround. Stamped by the runtime when the declaring round COMMITS (policy is\r\nnot part of the Vault, so the command configuration in force at\r\ndeclaration could not otherwise be recovered). It is machine-recomputed,\r\nnever agent-supplied, and adds no second truth."
+    },
+    "ContractItemStatus": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "insufficient",
+        "contradicted",
+        "verified"
+      ]
+    },
+    "ActiveContractItem": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "description": "v3.8: A contract item carrying its runtime-derived rci-XXXXXXXX identity."
+    },
+    "ActiveRoundContract": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "declared_at_round": {
+          "type": "number"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ActiveContractItem"
+          }
+        },
+        "config_hash_by_command": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "declared_at_round",
+        "items",
+        "config_hash_by_command"
+      ],
+      "description": "v3.8: The ACTIVE contract derived from committed rounds.\r\n\r\n`config_hash_by_command` is stamped at commit time: the declaration round\r\nrecords the command configuration it was declared against, so the closing\r\nround can prove the config did not change under the agent (policy itself\r\nis not part of the Vault). The stamp is machine-recomputed, never\r\nagent-supplied, and adds no second truth."
+    },
+    "RoundVerificationStatus": {
+      "type": "string",
+      "enum": [
+        "trusted",
+        "insufficient",
+        "contradicted"
+      ]
+    },
+    "ObservationStatus": {
+      "type": "string",
+      "enum": [
+        "observed",
+        "passed",
+        "failed",
+        "timeout",
+        "unavailable",
+        "error",
+        "aborted"
+      ]
+    },
+    "MachineObservationBase": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "type": "number"
+        },
+        "providerId": {
+          "type": "string"
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "git"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "command"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "custom"
+              ]
+            }
+          ]
+        },
+        "phase": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "before"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "after"
+              ]
+            }
+          ]
+        },
+        "startedAt": {
+          "type": "number"
+        },
+        "finishedAt": {
+          "type": "number"
+        },
+        "status": {
+          "$ref": "#/$defs/ObservationStatus"
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "providerId",
+        "kind",
+        "phase",
+        "startedAt",
+        "finishedAt",
+        "status",
+        "files"
+      ],
+      "description": "v3.8: Common machine-observation fields. Observations are the factual\r\nrecord of what the machine saw; they are persisted with the round and are\r\nthe only input that can create a `verified` fact."
+    },
+    "GitObservationData": {
+      "type": "object",
+      "properties": {
+        "tracked": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "staged": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "untracked": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "fingerprints": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "head": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "tracked",
+        "staged",
+        "untracked",
+        "fingerprints"
+      ]
+    },
+    "GitObservation": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "git"
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/GitObservationData"
+        }
+      },
+      "required": [
+        "kind",
+        "data"
+      ]
+    },
+    "CommandObservationData": {
+      "type": "object",
+      "properties": {
+        "commandId": {
+          "type": "string"
+        },
+        "argv": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "configHash": {
+          "type": "string"
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "exitCode": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "signal": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "durationMs": {
+          "type": "number"
+        },
+        "failureDetail": {
+          "type": "string"
+        },
+        "stdoutSha256": {
+          "type": "string"
+        },
+        "stderrSha256": {
+          "type": "string"
+        },
+        "stdoutExcerpt": {
+          "type": "string"
+        },
+        "stderrExcerpt": {
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "entrypointFiles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "commandId",
+        "argv",
+        "cwd",
+        "configHash",
+        "required",
+        "durationMs",
+        "stdoutSha256",
+        "stderrSha256",
+        "stdoutExcerpt",
+        "stderrExcerpt",
+        "truncated",
+        "entrypointFiles"
+      ]
+    },
+    "CommandObservation": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "command"
+          ]
+        },
+        "data": {
+          "$ref": "#/$defs/CommandObservationData"
+        }
+      },
+      "required": [
+        "kind",
+        "data"
+      ]
+    },
+    "CustomObservation": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "custom"
+          ]
+        },
+        "data": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "required": [
+        "kind",
+        "data"
+      ]
+    },
+    "MachineObservation": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GitObservation"
+        },
+        {
+          "$ref": "#/$defs/CommandObservation"
+        },
+        {
+          "$ref": "#/$defs/CustomObservation"
+        }
+      ]
+    },
+    "ConfiguredCapability": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "type": "number"
+        },
+        "providers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "commands": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "observationConfigured": {
+          "type": "boolean"
+        },
+        "contractVerificationAvailable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "providers",
+        "commands",
+        "observationConfigured",
+        "contractVerificationAvailable"
+      ],
+      "description": "v3.8: Static, policy-derived verification capability. A pure function of\r\npolicy — no probing, no filesystem, no provider registry — so it can be\r\nhashed into stateHash and reproduced by replay/audit from committed facts.\r\nProvider REGISTRATION is code state and is deliberately excluded; it is\r\nreported as an unhashed readiness diagnostic instead."
+    },
+    "ObservedCapability": {
+      "type": "object",
+      "properties": {
+        "providers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "commands": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "providers",
+        "commands"
+      ],
+      "description": "v3.8: Live observation capability. Rendered only — never hashed, never\r\npersisted independently of the observations it is derived from."
+    },
+    "EvidenceCapability": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "type": "number"
+        },
+        "providers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "commands": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "contractVerificationAvailable": {
+          "type": "boolean"
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "providers",
+        "commands",
+        "contractVerificationAvailable",
+        "warnings"
+      ],
+      "description": "v3.8: The single capability fact a prepared round returns — the union of\r\nthe two halves, split so that only the POLICY half is hashable.\r\n\r\n`ConfiguredCapability` is a pure function of policy and feeds\r\n`stateHash`/`promptHash`; `ObservedCapability` carries live statuses and is\r\nrendered only. `provider.available` is provider-REGISTRY state (code, not\r\npolicy) and therefore never enters the hash either — it is reported here and\r\nby `doctor`. Every surface that speaks about capability (prepare, MCP\r\nstart/resume/next/status, warnings) derives from this one function so they\r\ncannot drift apart."
+    },
+    "VerifiedSubGoalFact": {
+      "type": "object",
+      "properties": {
+        "subgoal_id": {
+          "type": "string"
+        },
+        "contract_item_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "verified_at_round": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "subgoal_id",
+        "contract_item_ids",
+        "verified_at_round"
+      ],
+      "description": "v3.8: A machine-verified sub-goal fact. DERIVED in cognitive-facts.ts,\r\nnever persisted: it exists only while a committed contract item references\r\nthe sub-goal AND that item is verified. It never writes SubGoal.status —\r\n`done` stays the agent's declaration."
+    },
+    "ToolErrorCode": {
+      "type": "string",
+      "enum": [
+        "evaluation_invalid",
+        "contract_invalid",
+        "policy_invalid",
+        "session_not_found",
+        "round_id_required",
+        "round_id_mismatch",
+        "state_unavailable",
+        "invalid_argument",
+        "gate_disabled",
+        "loop_already_running"
+      ]
+    },
+    "ToolError": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/ToolErrorCode"
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "roundId": {
+          "type": "string"
+        },
+        "details": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "retryable"
+      ],
+      "description": "v3.8: The structured error inside the uniform `{ok: false}` envelope."
     },
     "PresentedStateSnapshot": {
       "type": "object",

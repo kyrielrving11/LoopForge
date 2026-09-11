@@ -15,12 +15,14 @@ export function buildLoopProjection(facts) {
             verified: [...facts.handoff.verified],
             open_risks: [...facts.handoff.open_risks],
         },
+        verified_subgoals: [...facts.verified_subgoals],
     });
     const empty = projection.focus === null && projection.todo.length === 0 &&
         projection.phase === null && projection.delegation.last_results.length === 0 &&
         projection.handoff.summary.length === 0 &&
         projection.handoff.verified.length === 0 &&
-        projection.handoff.open_risks.length === 0;
+        projection.handoff.open_risks.length === 0 &&
+        projection.verified_subgoals.length === 0;
     return empty ? null : projection;
 }
 //# sourceMappingURL=loop-projection.js.map

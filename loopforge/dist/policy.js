@@ -1,13 +1,13 @@
 /** Externalized LoopForge runtime policy. */
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync, } from "node:fs";
 import { resolve } from "node:path";
 import { containInWorkspace } from "./workspace.js";
 export const DEFAULT_POLICY = {
-    version: "2",
+    version: "3",
     constraints: { retire_window: 3 },
     summary: { window: 5, health_check_interval: 1, milestone_interval: 20, max_milestones: 10, milestone_head_count: 3, milestone_tail_count: 3 },
-    engine: { stall_lookback_rounds: 3, max_rounds: 200, enforcement_escalation_enabled: true, backtrack_enabled: true, backtrack_max_depth: 3, backtrack_preserve_discoveries: true, drift_clarification_max_streak: 3, backtrack_auto_restore: false },
+    engine: { stall_lookback_rounds: 3, max_rounds: 200, enforcement_escalation_enabled: true, backtrack_enabled: true, backtrack_max_depth: 3, backtrack_preserve_discoveries: true, unverified_claim_streak_limit: 3 },
     prompt: {
         full_refresh_interval: 0,
         l0_max_chars: 3000,
@@ -34,13 +34,11 @@ export const DEFAULT_POLICY = {
         progress_stall_threshold: 0.05,
         progress_mismatch_threshold: 0.3,
         task_continuity_threshold: 0.2,
-        intent_drift_threshold: 0.15,
         criteria_dedup_threshold: 0.45,
         subgoal_dedup_threshold: 0.6,
         subgoal_match_threshold: 0.5,
         max_active_subgoals: 12,
         constraint_match_threshold: 0.5,
-        subgoal_drift_alignment_threshold: 0.3,
         constraint_id_enabled: true,
     },
     checkpoint: { outcome_max_chars: 200 },
@@ -48,7 +46,7 @@ export const DEFAULT_POLICY = {
         enabled: true,
         directory: ".loopforge/state",
     },
-    evidence: { providers: ["git"], timeout_ms: 120_000, commands: [], machine_backed_success: "required" },
+    evidence: { providers: ["git"], timeout_ms: 120_000, commands: [] },
     mcp: {
         session_lease_ms: 30_000,
         session_lease_renew_interval_ms: 10_000,
@@ -126,12 +124,78 @@ export function resetPolicy() {
 export function setPolicyForTest(next) {
     policy = next;
 }
-/** v3.3: Whether a command name is configured AND enabled in the current
- *  policy's evidence.commands. The machine-checkable predicate behind the
- *  round_contract verification_plan (round_unverifiable otherwise). */
+/** v3.8: Deterministic hash of a command's verification configuration. Used
+ *  to prove that a contract's bound command did not change under the agent
+ *  between declaration and closure. `args` order is preserved (semantically
+ *  meaningful); `success_exit_codes` is sorted (an equivalent set must hash
+ *  equal). Pure — no I/O, no probing. */
+export function commandConfigHash(config) {
+    const normalized = {
+        name: config.name,
+        executable: config.executable,
+        args: [...config.args],
+        cwd: config.cwd ?? ".",
+        phase: config.phase,
+        required: config.required === true,
+        timeout_ms: config.timeout_ms,
+        max_output_chars: config.max_output_chars,
+        success_exit_codes: [...config.success_exit_codes].sort((a, b) => a - b),
+    };
+    return createHash("sha256").update(stableStringifyPolicy(normalized)).digest("hex");
+}
+/** Stable JSON: object keys sorted recursively, so a key-order change never
+ *  changes the hash. Arrays keep their order. */
+function stableStringifyPolicy(value) {
+    if (value === null || typeof value !== "object")
+        return JSON.stringify(value) ?? "null";
+    if (Array.isArray(value)) {
+        return `[${value.map((item) => stableStringifyPolicy(item)).join(",")}]`;
+    }
+    const entries = Object.entries(value)
+        .filter(([, item]) => item !== undefined)
+        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${stableStringifyPolicy(item)}`).join(",")}}`;
+}
+/** v3.8: Static verification capability — a pure function of policy, so it is
+ *  byte-identical across retries of the same round and reproducible by
+ *  replay/audit from committed facts. It contains NO probing, no filesystem
+ *  access, and no provider-registry state; readiness of the runtime
+ *  environment is a `doctor` concern, not a hashed fact. */
+export function deriveConfiguredCapability(policy) {
+    const providers = (Array.isArray(policy.evidence?.providers) ? policy.evidence.providers : [])
+        .filter((name) => typeof name === "string" && name.trim().length > 0)
+        .map((providerId) => ({ providerId }));
+    const commands = (Array.isArray(policy.evidence?.commands) ? policy.evidence.commands : [])
+        .map((command) => ({
+        commandId: command.name,
+        enabled: command.enabled === true,
+        phase: command.phase === "both" ? "both" : "after",
+        required: command.required === true,
+        configHash: commandConfigHash(command),
+    }));
+    return {
+        schemaVersion: 1,
+        providers,
+        commands,
+        observationConfigured: providers.length > 0,
+        // Every configured command runs in the after phase ("after" or "both"),
+        // so an enabled command is exactly what makes contract verification
+        // possible.
+        contractVerificationAvailable: commands.some((command) => command.enabled),
+    };
+}
+/** v3.3/v3.8: Whether a command name may back a Round Contract item. A
+ *  contract item is verified by an AFTER-phase observation, so the predicate
+ *  requires configured AND enabled AND after-capable — `verify_with` may only
+ *  reference a command the runtime can actually observe at closure time.
+ *
+ *  `CommandEvidencePolicy.phase` is `"after" | "both"` today, so the phase arm
+ *  is currently self-satisfying; it is stated explicitly because it is the
+ *  boundary the contract declaration is judged against, not an accident of
+ *  the current phase enum. */
 export function isConfiguredCommand(name) {
     const commands = getPolicy().evidence?.commands ?? [];
-    return commands.some((c) => c.enabled && c.name === name);
+    return commands.some((c) => c.enabled && c.name === name && (c.phase === "after" || c.phase === "both"));
 }
 const LOOP_ID_RE = /^[a-zA-Z0-9][-a-zA-Z0-9_:.]{0,127}$/;
 export function validateLoopId(loopId) {

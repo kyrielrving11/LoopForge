@@ -23,14 +23,14 @@ export { FileLoopStore, queryLoopEntries, LOOP_STORE_SCHEMA_VERSION, } from "./l
 export type { LoopStore, LoopSessionDocument, LoopRoundDocument, VaultEntry, } from "./loop-store.js";
 export { compileLoop, decideLevel, alignTask, checkLoopHealth, computeGoalTextHash, deriveGoalId, getPreviousRound, buildSelfEvalBlock, buildRollingSummary, } from "./loop-compiler.js";
 export { ReplayBackend } from "./replay.js";
-export { LoopForgeEngine, createEngine, buildSelfEvaluation, parseExecutionEvidence, parseCriterionRevisions, parseWorkerResults, } from "./engine.js";
+export { LoopForgeEngine, createEngine, buildSelfEvaluation, parseExecutionReport, parseCriterionRevisions, parseWorkerResults, } from "./engine.js";
 export type { EngineMetrics, DelegationEntry } from "./engine.js";
 export type { StopReason } from "./protocol.js";
 export { McpServer } from "./mcp/server.js";
 export { SessionManager } from "./mcp/session.js";
 export type { McpSession, McpSessionSummary } from "./mcp/session.js";
-export { EvidenceCollector, GitEvidenceProvider, CommandEvidenceProvider, registerEvidenceProvider, unregisterEvidenceProvider, extractFilesFromSnapshots, diffSnapshots, diffSnapshotCollections, } from "./evidence-provider.js";
-export type { ProviderSnapshot, EvidenceProvider, EvidenceCaptureContext, EvidenceCaptureResult, EvidenceCollectOptions, EvidenceProviderFactory, CommandEvidenceData, } from "./evidence-provider.js";
+export { EvidenceCollector, GitEvidenceProvider, CommandEvidenceProvider, registerEvidenceProvider, unregisterEvidenceProvider, isProviderRegistered, isPassedAfterObservation, gitChangedFiles, extractFilesFromSnapshots, diffSnapshots, diffSnapshotCollections, } from "./evidence-provider.js";
+export type { EvidenceProvider, EvidenceCaptureContext, EvidenceCaptureResult, EvidenceCollectOptions, EvidenceProviderFactory, } from "./evidence-provider.js";
 export { logEvent, } from "./observability.js";
 export type { LogEventData, } from "./observability.js";
 export { PolicyMetricsCollector, policyMetrics, getPolicyMetrics, resetPolicyMetrics, } from "./policy-metrics.js";

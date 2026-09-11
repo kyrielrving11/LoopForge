@@ -1,4 +1,5 @@
 import { describe, it } from "node:test";
+import { criterionClaims } from "./_helpers.js";
 import assert from "node:assert/strict";
 import { CommandEvidenceProvider } from "../evidence-provider.js";
 import type { CommandEvidencePolicy } from "../policy.js";
@@ -41,8 +42,8 @@ describe("CommandEvidenceProvider", () => {
     const snapshot = await capture(new CommandEvidenceProvider(config({
       args: ["-e", "process.stdout.write(process.argv[1])", argument],
     })));
-    assert.equal(snapshot?.data.status, "passed");
-    assert.equal(snapshot?.data.stdout, argument);
+    assert.equal(snapshot?.status, "passed");
+    assert.equal(snapshot?.data.stdoutExcerpt, argument);
     assert.equal(snapshot?.data.exitCode, 0);
   });
 
@@ -50,9 +51,9 @@ describe("CommandEvidenceProvider", () => {
     const snapshot = await capture(new CommandEvidenceProvider(config({
       args: ["-e", "process.stderr.write('bad'); process.exit(7)"],
     })));
-    assert.equal(snapshot?.data.status, "failed");
+    assert.equal(snapshot?.status, "failed");
     assert.equal(snapshot?.data.exitCode, 7);
-    assert.equal(snapshot?.data.stderr, "bad");
+    assert.equal(snapshot?.data.stderrExcerpt, "bad");
   });
 
   it("terminates a command at its own deadline", async () => {
@@ -61,7 +62,7 @@ describe("CommandEvidenceProvider", () => {
       args: ["-e", "setTimeout(() => {}, 10000)"],
       timeout_ms: 40,
     })));
-    assert.equal(snapshot?.data.status, "timeout");
+    assert.equal(snapshot?.status, "timeout");
     assert.ok(Date.now() - started < 1000);
   });
 
@@ -70,7 +71,7 @@ describe("CommandEvidenceProvider", () => {
       args: ["-e", "process.stdout.write('x'.repeat(100))"],
       max_output_chars: 10,
     })));
-    assert.equal(snapshot?.data.stdout, "xxxxxxxxxx");
+    assert.equal(snapshot?.data.stdoutExcerpt, "xxxxxxxxxx");
     assert.equal(snapshot?.data.truncated, true);
   });
 
@@ -83,18 +84,23 @@ describe("CommandEvidenceProvider", () => {
     })));
     assert.equal(snapshot?.data.truncated, false,
       "30k of output under a 50k cap must not be truncated");
-    assert.equal((snapshot?.data.stdout as string).length, 30_000,
+    assert.equal((snapshot?.data.stdoutExcerpt as string).length, 30_000,
       "the configured cap must be honored above 20k");
   });
 
   it("records missing executables and unsafe cwd without throwing", async () => {
+    // v3.8: a missing executable is `unavailable` (the machine could not
+    // observe anything); an unsafe cwd is `error` (the configuration is
+    // wrong). Both are recorded, never thrown.
     const missing = await capture(new CommandEvidenceProvider(config({
       executable: `loopforge-missing-${Date.now()}`,
     })));
-    assert.equal(missing?.data.status, "missing");
+    assert.equal(missing?.status, "unavailable");
+    assert.equal(missing?.data.failureDetail, "ENOENT");
 
     const invalid = await capture(new CommandEvidenceProvider(config({ cwd: ".." })));
-    assert.equal(invalid?.data.status, "invalid_cwd");
+    assert.equal(invalid?.status, "error");
+    assert.match(String(invalid?.data.failureDetail), /workspace/);
   });
 
   it("does not run after-only commands in the before phase", async () => {
@@ -106,7 +112,7 @@ describe("CommandEvidenceProvider", () => {
     const snapshot = await capture(new CommandEvidenceProvider(config({
       args: ["-e", "process.exit(0)", "src/evidence-provider.ts"],
     })));
-    assert.equal(snapshot?.data.status, "passed");
+    assert.equal(snapshot?.status, "passed");
     assert.ok(
       (snapshot?.data.entrypointFiles as string[]).includes("src/evidence-provider.ts"),
       "args resolving to workspace files must be listed as entrypoints",
@@ -117,7 +123,7 @@ describe("CommandEvidenceProvider", () => {
     const snapshot = await capture(new CommandEvidenceProvider(config({
       args: ["-e", "process.exit(0)"],
     })));
-    assert.equal(snapshot?.data.status, "passed");
+    assert.equal(snapshot?.status, "passed");
     const entrypoints = (snapshot?.data.entrypointFiles ?? []) as string[];
     assert.deepEqual(entrypoints, ["package.json"],
       "no path-shaped arg means only the package.json indirection is observable",
@@ -129,16 +135,29 @@ describe("required command verification", () => {
   it("contradicts a success claim when a required command failed", () => {
     const evaluation = makeSelfEvaluation({ success: true });
     const result = verifySelfEvaluation(evaluation, 1, [], null, [{
-      provider: "command:test",
-      timestamp: Date.now(),
+      schemaVersion: 1,
+      providerId: "command:test",
+      kind: "command",
+      phase: "after",
+      startedAt: 0,
+      finishedAt: 0,
+      status: "failed",
       files: [],
       data: {
-        kind: "command",
-        commandName: "tests",
+        commandId: "tests",
+        argv: ["npm", "test"],
+        cwd: ".",
+        configHash: "0".repeat(64),
         required: true,
-        phase: "after",
-        status: "failed",
         exitCode: 1,
+        signal: null,
+        durationMs: 1,
+        stdoutSha256: "0".repeat(64),
+        stderrSha256: "0".repeat(64),
+        stdoutExcerpt: "",
+        stderrExcerpt: "",
+        truncated: false,
+        entrypointFiles: [],
       },
     }]);
     assert.equal(result.verdict, "contradicted");
@@ -147,33 +166,43 @@ describe("required command verification", () => {
 
   it("does not contradict optional command failures", () => {
     resetPolicy();
-    // v3.3: R8 is required by default — self-reported test results alone are
-    // no longer machine evidence, so a success claim would be rejected by
-    // R8 before the optional-command behavior can be observed. Relax to
-    // warn so this test isolates the optional-command semantics.
-    getPolicy().evidence.machine_backed_success = "warn";
+    // v3.8: an optional (required=false) bound command failing does not
+    // reject the round — the required_command_failed check only fires for
+    // required commands.
     try {
       const evaluation = makeSelfEvaluation({
         success: true,
-        execution_evidence: {
+        execution_report: {
           files_changed: ["src/a.ts"],
-          test_results: { passed: 1, failed: 0, skipped: 0 },
-          success_criteria_met: [],
-          success_criteria_remaining: [],
+          tests_reported: { passed: 1, failed: 0, skipped: 0 },
+          criterion_claims: criterionClaims([], []),
           progress_estimate: 0.5,
         },
       });
       const result = verifySelfEvaluation(evaluation, 1, [], null, [{
-        provider: "command:optional",
-        timestamp: Date.now(),
+        schemaVersion: 1,
+        providerId: "command:optional",
+        kind: "command",
+        phase: "after",
+        startedAt: 0,
+        finishedAt: 0,
+        status: "failed",
         files: [],
         data: {
-          kind: "command",
-          commandName: "lint",
+          commandId: "lint",
+          argv: ["npm", "run", "lint"],
+          cwd: ".",
+          configHash: "0".repeat(64),
           required: false,
-          phase: "after",
-          status: "failed",
           exitCode: 1,
+          signal: null,
+          durationMs: 1,
+          stdoutSha256: "0".repeat(64),
+          stderrSha256: "0".repeat(64),
+          stdoutExcerpt: "",
+          stderrExcerpt: "",
+          truncated: false,
+          entrypointFiles: [],
         },
       }]);
       // v3.2: optional failure + claimed success = unverified success — the

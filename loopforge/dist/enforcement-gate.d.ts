@@ -56,8 +56,6 @@ recoveryRoundId?: string,
  *  in-flight attempt only; never rejected payloads. */
 recovery?: BacktrackRecoveryFacts): string;
 export declare function enforceRound(selfEval: SelfEvaluation, verifyResult: VerificationResult, currentRound: number, vaultEntries: VaultEntry[], consecutiveRejections?: number,
-/** v2.12: Current clarification streak for R7 escalation. */
-driftClarificationStreak?: number,
 /** L4 (v3.7.x): which check rejected the PREVIOUS round. The coordinator
  *  resets consecutiveRejections to 1 whenever the check changes, so the
  *  counter only ever measures one check's streak — this field names that

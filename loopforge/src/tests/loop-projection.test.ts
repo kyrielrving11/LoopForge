@@ -4,8 +4,14 @@ import { deriveCognitiveFacts } from "../cognitive-facts.js";
 import { buildLoopProjection } from "../loop-projection.js";
 import type { CommittedRoundView } from "../committed-round.js";
 import { makeLoopCompileResponse, makeSelfEvaluation } from "../protocol.js";
+import { installTestCommandProvider } from "./_helpers.js";
+import { deriveContractItemIds } from "../token-utils.js";
 
-function round(number: number, overrides: Record<string, unknown> = {}): CommittedRoundView {
+function round(
+  number: number,
+  overrides: Record<string, unknown> = {},
+  view: Partial<CommittedRoundView> = {},
+): CommittedRoundView {
   const evaluation = makeSelfEvaluation({
     success: false,
     output_summary: `round ${number}`,
@@ -22,18 +28,85 @@ function round(number: number, overrides: Record<string, unknown> = {}): Committ
     attempt: 1,
     promptArtifact: null,
     evaluation,
-    executionEvidence: evaluation.execution_evidence ?? null,
+    executionReport: evaluation.execution_report ?? null,
     verificationFlags: [],
     result: null,
     action: "continue",
     success: evaluation.success,
     outcome: evaluation.outcome ?? (evaluation.success ? "success" : "failed"),
     contractProposal: null,
+    contractBinding: null,
     beforeEvidence: [],
     afterEvidence: [],
-    roundEvidence: [],
+    observationDelta: [],
+    evidenceIncomplete: true,
+    ...view,
   };
 }
+
+/** "verify" is the command installTestCommandProvider configures. */
+const CONTRACT = {
+  work_item: "Slice A",
+  scope: ["src/a"],
+  items: [{
+    description: "works",
+    criterion_refs: [],
+    subgoal_refs: ["sg-11111111"],
+    verify_with: ["verify"],
+  }],
+};
+
+const commandObservation = () => ({
+  schemaVersion: 1 as const,
+  providerId: "command:verify",
+  kind: "command" as const,
+  phase: "after" as const,
+  startedAt: 0,
+  finishedAt: 0,
+  status: "passed" as const,
+  files: [],
+  data: {
+    commandId: "verify",
+    argv: ["node", "-e", "verify"],
+    cwd: ".",
+    configHash: "0".repeat(64),
+    required: false,
+    exitCode: 0,
+    signal: null,
+    durationMs: 1,
+    stdoutSha256: "0".repeat(64),
+    stderrSha256: "0".repeat(64),
+    stdoutExcerpt: "",
+    stderrExcerpt: "",
+    truncated: false,
+    entrypointFiles: [],
+  },
+});
+
+/** The committed rounds that declare the contract and then machine-verify it. */
+function verifiedHistory(): CommittedRoundView[] {
+  return [
+    round(1, {}, { contractProposal: { ...CONTRACT } }),
+    round(2, {}, {
+      executionReport: {
+        contract_item_claims: [{ item_id: deriveContractItemIds(CONTRACT.items)[0], outcome: "met" }],
+      },
+      observationDelta: [commandObservation()],
+      outcome: "success",
+    }),
+  ];
+}
+
+const subGoalResponse = () => makeLoopCompileResponse({
+  sub_goals: [{
+    id: "sg-11111111",
+    description: "login works",
+    status: "done",
+    declared_at_round: 1,
+    status_changed_at_round: 2,
+    priority: 0,
+  }] as never,
+});
 
 describe("cognitive facts and projection", () => {
   it("returns null for an empty fact set", () => {
@@ -41,15 +114,16 @@ describe("cognitive facts and projection", () => {
     assert.equal(buildLoopProjection(facts), null);
   });
 
-  it("derives focus and agent intent from committed rounds", () => {
+  it("derives focus from committed rounds", () => {
     const facts = deriveCognitiveFacts({
       compileResponse: null,
-      rounds: [round(1, { outcome: "partial", output_summary: "implemented parser", next_action: "run tests" })],
+      rounds: [round(1, { outcome: "partial", output_summary: "implemented parser" })],
     });
     const projection = buildLoopProjection(facts)!;
     assert.equal(projection.focus?.what, "implemented parser");
     assert.equal(projection.focus?.since_round, 1);
-    assert.ok(projection.todo.some((item) => item.item === "run tests"));
+    // v3.8: the agent's own next_action is no longer a projection input.
+    assert.deepEqual(projection.todo, []);
   });
 
   it("deduplicates and prioritizes todo facts", () => {
@@ -61,7 +135,7 @@ describe("cognitive facts and projection", () => {
     });
     const facts = deriveCognitiveFacts({
       compileResponse: response,
-      rounds: [round(1, { next_action: "fix parser" })],
+      rounds: [round(1)],
     });
     assert.equal(facts.todo.filter((item) => item.item === "fix parser").length, 1);
     assert.equal(facts.todo[0]?.item, "repair build");
@@ -111,6 +185,37 @@ describe("cognitive facts and projection", () => {
     assert.match(projection.handoff.summary, /Remaining criteria: parser passes/);
     assert.deepEqual(projection.handoff.verified, ["cr-12345678"]);
     assert.ok(projection.handoff.open_risks.some((risk) => risk.includes("publish package")));
+  });
+
+  it("v3.8: exposes verified_subgoals on the projection", () => {
+    installTestCommandProvider();
+    const projection = buildLoopProjection(deriveCognitiveFacts({
+      compileResponse: subGoalResponse(),
+      rounds: verifiedHistory(),
+    }))!;
+    assert.equal(projection.verified_subgoals.length, 1);
+    assert.equal(projection.verified_subgoals[0].subgoal_id, "sg-11111111");
+    assert.deepEqual(
+      projection.verified_subgoals[0].contract_item_ids,
+      deriveContractItemIds(CONTRACT.items),
+    );
+    assert.equal(projection.verified_subgoals[0].verified_at_round, 2);
+    // The machine fact and the debt view are consistent: a verified sub-goal
+    // is never reported as unverified.
+    assert.ok(
+      !projection.handoff.open_risks.some((risk) => risk.includes("sg-11111111")),
+      "a machine-verified sub-goal carries no verification debt",
+    );
+  });
+
+  it("v3.8: reports no verified_subgoals while the item is unverified", () => {
+    installTestCommandProvider();
+    const projection = buildLoopProjection(deriveCognitiveFacts({
+      compileResponse: subGoalResponse(),
+      rounds: [round(1, {}, { contractProposal: { ...CONTRACT } })],
+    }))!;
+    assert.deepEqual(projection.verified_subgoals, []);
+    assert.ok(projection.handoff.open_risks.some((risk) => risk.includes("sg-11111111")));
   });
 
   it("does not collapse a verified-only or risk-only handoff", () => {

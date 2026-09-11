@@ -13,7 +13,7 @@ import {
   type LoopForgeRequest,
 } from "../protocol.js";
 import { resetPolicy } from "../policy.js";
-import { installTestCommandProvider } from "./_helpers.js";
+import { installTestCommandProvider, criterionClaims } from "./_helpers.js";
 import { deriveItemId } from "../token-utils.js";
 
 function makeRequest(overrides: Record<string, unknown> = {}): import("../protocol.js").LoopForgeRequest {
@@ -275,7 +275,7 @@ describe("Engine — P0-P5 Cognitive Evolution (v1.7 E2E)", () => {
       "P2: emerged subtasks not forwarded");
   });
 
-  it("P4: execution_evidence survives engine boundary and generates progress dashboard", () => {
+  it("P4: execution_report survives engine boundary and generates progress dashboard", () => {
     const engine = createEngine();
     // Round 1
     engine.invokeLoopCompile(makeRequest({
@@ -315,11 +315,10 @@ describe("Engine — P0-P5 Cognitive Evolution (v1.7 E2E)", () => {
         output_summary: "Fixed reentrancy in withdraw()",
         constraint_violations: [],
         manual_fixes_needed: "",
-        execution_evidence: {
+        execution_report: {
           files_changed: ["contracts/Token.sol", "test/Token.test.ts"],
-          test_results: { passed: 24, failed: 0, skipped: 0 },
-          success_criteria_met: ["No reentrancy"],
-          success_criteria_remaining: ["Access control OK", "Overflow checks"],
+          tests_reported: { passed: 24, failed: 0, skipped: 0 },
+          criterion_claims: criterionClaims(["No reentrancy"], ["Access control OK", "Overflow checks"]),
           progress_estimate: 0.33,
         },
       },
@@ -512,14 +511,12 @@ describe("Engine — last_round_result boundary (v3.3.1)", () => {
     installTestCommandProvider();
   });
 
-  it("preserves next_action and prompt_requests across the invokeLoopCompile boundary", () => {
+  it("preserves prompt_requests across the invokeLoopCompile boundary", () => {
     // Regression: the field-by-field last_round_result rebuild in
-    // invokeLoopCompile silently dropped next_action and prompt_requests.
-    // Every compile path funnels through this boundary, so on the real MCP
-    // flow the "Next Action" section, suggested_next_task, sub-goal auto
-    // in_progress, and prompt_requests (emphasize /
-    // confusion_points) never reached the compiler — unit tests fed
-    // compileLoop directly and missed the gap.
+    // invokeLoopCompile silently dropped prompt_requests. Every compile path
+    // funnels through this boundary, so on the real MCP flow
+    // prompt_requests (emphasize / confusion_points) never reached the
+    // compiler — unit tests fed compileLoop directly and missed the gap.
     const engine = createEngine();
     const result = engine.invokeLoopCompile(makeRequest({
       loop_id: "engine-boundary-next",
@@ -531,7 +528,6 @@ describe("Engine — last_round_result boundary (v3.3.1)", () => {
         output_summary: "Started the auth module",
         constraint_violations: [],
         manual_fixes_needed: "",
-        next_action: "Finish the auth module",
         discovered_constraints: ["auth module"],
         prompt_requests: {
           emphasize: ["auth module"],
@@ -541,13 +537,6 @@ describe("Engine — last_round_result boundary (v3.3.1)", () => {
     }));
     assert.equal(result.status, AgentStatus.OK);
     const prompt = result.response?.prompt ?? "";
-    // next_action must survive the boundary.
-    assert.ok(prompt.includes("### Next Action"),
-      "L2 must render the Next Action section");
-    assert.ok(prompt.includes("Finish the auth module"),
-      "the next_action text must reach the rendered prompt");
-    assert.equal(result.response?.suggested_next_task, "Finish the auth module",
-      "suggested_next_task must derive from the preserved next_action");
     // prompt_requests must survive the boundary.
     assert.ok(prompt.includes("🔴 Critical Context"),
       "emphasize must reach the Critical Context section");

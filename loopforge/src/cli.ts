@@ -2,13 +2,15 @@
 /** Unified LoopForge command line. */
 
 import { accessSync, constants, existsSync, realpathSync, statSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { containInWorkspace } from "./workspace.js";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { initializeClient, type InitClient } from "./init.js";
-import { FileLoopStore } from "./loop-store.js";
+import { FileLoopStore, queryLoopEntries } from "./loop-store.js";
 import { getPolicy, validateLoopId, writeDefaultPolicy } from "./policy.js";
+import { isProviderRegistered } from "./evidence-provider.js";
+import { buildExplain, renderExplain } from "./explain.js";
 import { McpServer } from "./mcp/server.js";
 import { VERSION } from "./version.js";
 
@@ -19,6 +21,7 @@ Usage:
   loopforge init --client claude|codex|generic [--target DIR] [--force]
   loopforge doctor [--json]
   loopforge inspect LOOP_ID [--round N] [--prompt] [--json]
+  loopforge explain LOOP_ID [--round N] [--json]
 `;
 
 function option(args: string[], name: string): string | undefined {
@@ -97,6 +100,34 @@ function doctor(json: boolean): number {
     required: false,
     detail: git.status === 0 ? git.stdout.trim() : "unavailable (git evidence will be skipped)",
   });
+  // v3.8: provider names must be registered (registration is code state, so
+  // it is a doctor concern, never a hashed capability fact).
+  for (const provider of policy.evidence.providers ?? []) {
+    checks.push({
+      name: `provider:${provider}`,
+      ok: isProviderRegistered(provider),
+      required: true,
+      detail: isProviderRegistered(provider)
+        ? "registered"
+        : "no provider factory is registered for this name",
+    });
+  }
+  // v3.8: command ids must be unique — a duplicate name makes item
+  // verification ambiguous.
+  const seenCommandIds = new Map<string, number>();
+  for (const command of policy.evidence.commands) {
+    seenCommandIds.set(command.name, (seenCommandIds.get(command.name) ?? 0) + 1);
+  }
+  for (const [name, count] of seenCommandIds) {
+    if (count > 1) {
+      checks.push({
+        name: `command-id:${name}`,
+        ok: false,
+        required: true,
+        detail: `duplicate command id declared ${count} times — item verification would be ambiguous`,
+      });
+    }
+  }
   for (const command of policy.evidence.commands) {
     if (!command.enabled) continue;
     let ok = true;
@@ -104,6 +135,24 @@ function doctor(json: boolean): number {
     try {
       if (!command.name || !command.executable) throw new Error("name and executable are required");
       if (!Array.isArray(command.args)) throw new Error("args must be an array");
+      if (!(Number.isFinite(command.timeout_ms) && command.timeout_ms > 0)) {
+        throw new Error("timeout_ms must be a positive number");
+      }
+      if (!(Number.isFinite(command.max_output_chars) && command.max_output_chars > 0)) {
+        throw new Error("max_output_chars must be a positive number");
+      }
+      // Static executable resolution: consult PATH/PATHEXT without executing
+      // anything. A bare name that resolves nowhere is a configuration bug the
+      // agent would otherwise discover only when the command runs.
+      if (!command.executable.includes("/") && !command.executable.includes("\\")) {
+        const pathEntries = (process.env.PATH ?? "").split(delimiter);
+        const extensions = process.platform === "win32"
+          ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT").split(";")
+          : [""];
+        const resolved = pathEntries.some((dir) =>
+          extensions.some((ext) => existsSync(join(dir, `${command.executable}${ext}`))));
+        if (!resolved) throw new Error(`executable "${command.executable}" is not on PATH`);
+      }
       if (command.cwd) {
         const cwd = ensureInsideWorkspace(command.cwd);
         if (existsSync(cwd) && !statSync(cwd).isDirectory()) throw new Error("cwd is not a directory");
@@ -133,6 +182,33 @@ function doctor(json: boolean): number {
     }
   }
   return report.ok ? 0 : 1;
+}
+
+/** v3.8: `loopforge explain` — the read-only "why" view over committed rounds. */
+function explain(args: string[]): number {
+  const loopId = args.find((arg) => !arg.startsWith("-"));
+  if (!loopId) {
+    process.stderr.write("loopforge explain: LOOP_ID is required\n");
+    return 1;
+  }
+  try {
+    validateLoopId(loopId);
+  } catch (error) {
+    process.stderr.write(`loopforge explain: ${String(error)}\n`);
+    return 1;
+  }
+  const roundValue = option(args, "--round");
+  const round = roundValue === undefined ? undefined : Number(roundValue);
+  if (round !== undefined && (!Number.isInteger(round) || round < 1)) {
+    process.stderr.write("loopforge explain: --round must be a positive integer\n");
+    return 1;
+  }
+  const store = new FileLoopStore(getPolicy().backend.root_dir);
+  const entries = queryLoopEntries(store, loopId, { prefix: `loop:${loopId}:` })
+    .concat(queryLoopEntries(store, loopId, { prefix: `loop:${loopId}:`, feedbackOnly: true }));
+  const result = buildExplain(loopId, entries, round);
+  print(has(args, "--json") ? result : renderExplain(result), has(args, "--json"));
+  return 0;
 }
 
 function inspect(args: string[]): void {
@@ -207,6 +283,10 @@ export function main(argv = process.argv.slice(2)): void {
     return;
   }
   if (command === "init") return init(args);
+  if (command === "explain") {
+    process.exitCode = explain(args);
+    return;
+  }
   if (command === "doctor") {
     process.exitCode = doctor(has(args, "--json"));
     return;

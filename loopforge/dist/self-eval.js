@@ -1,7 +1,7 @@
 /** Structured self-evaluation parsing and normalization — pure functions.
  * The MCP boundary validates required fields before these helpers run.
  */
-import { makeExecutionEvidence, makeSelfEvaluation, } from "./protocol.js";
+import { makeExecutionReport, makeSelfEvaluation, } from "./protocol.js";
 // ── Raw parsing helpers ───────────────────────────────────────────────────
 function boundedString(value, maxChars) {
     return typeof value === "string" ? value.slice(0, maxChars) : undefined;
@@ -40,17 +40,17 @@ function parseRetroactiveClaims(raw) {
     }
     return claims;
 }
-/** Parse ExecutionEvidence from a raw JSON object. */
-export function parseExecutionEvidence(raw) {
+/** Parse ExecutionReport from a raw JSON object. */
+export function parseExecutionReport(raw) {
     if (!raw || typeof raw !== "object" || Array.isArray(raw))
         return undefined;
-    const testResults = raw.test_results && typeof raw.test_results === "object" &&
-        !Array.isArray(raw.test_results)
-        ? raw.test_results
+    const testResults = raw.tests_reported && typeof raw.tests_reported === "object" &&
+        !Array.isArray(raw.tests_reported)
+        ? raw.tests_reported
         : undefined;
-    return makeExecutionEvidence({
+    return makeExecutionReport({
         files_changed: boundedStringArray(raw.files_changed, 200, 500),
-        test_results: testResults && typeof testResults.passed === "number" &&
+        tests_reported: testResults && typeof testResults.passed === "number" &&
             Number.isFinite(testResults.passed)
             ? {
                 passed: nonNegativeInteger(testResults.passed),
@@ -58,13 +58,73 @@ export function parseExecutionEvidence(raw) {
                 skipped: nonNegativeInteger(testResults.skipped),
             }
             : null,
-        success_criteria_met: boundedStringArray(raw.success_criteria_met, 100, 500),
-        success_criteria_remaining: boundedStringArray(raw.success_criteria_remaining, 100, 500),
+        criterion_claims: parseCriterionClaims(raw.criterion_claims),
+        contract_item_claims: parseContractItemClaims(raw.contract_item_claims),
         progress_estimate: typeof raw.progress_estimate === "number" &&
             Number.isFinite(raw.progress_estimate)
             ? Math.max(0, Math.min(1, raw.progress_estimate))
             : 0.0,
     });
+}
+/** v3.8: The criterion ids the agent claims met this round. */
+export function claimedMetCriteria(report) {
+    return (report?.criterion_claims ?? [])
+        .filter((claim) => claim.outcome === "met")
+        .map((claim) => claim.criterion_id);
+}
+/** v3.8: The criterion ids the agent declares still outstanding. */
+export function claimedRemainingCriteria(report) {
+    return (report?.criterion_claims ?? [])
+        .filter((claim) => claim.outcome === "remaining")
+        .map((claim) => claim.criterion_id);
+}
+/** v3.8: LENIENT parse of advisory criterion claims — unknown or malformed
+ *  entries are dropped, never a rejection (the contract item layer is the
+ *  strict one). */
+function parseCriterionClaims(raw) {
+    if (!Array.isArray(raw))
+        return [];
+    const claims = [];
+    for (const item of raw) {
+        if (claims.length >= 100)
+            break;
+        if (typeof item !== "object" || item === null || Array.isArray(item))
+            continue;
+        const entry = item;
+        if (typeof entry.criterion_id !== "string" || entry.criterion_id.trim().length === 0)
+            continue;
+        if (entry.outcome !== "met" && entry.outcome !== "remaining")
+            continue;
+        claims.push({
+            criterion_id: entry.criterion_id.trim().slice(0, 500),
+            outcome: entry.outcome,
+        });
+    }
+    return claims;
+}
+/** v3.8: LENIENT parse of contract item claims. Referential validity is the
+ *  strict pre-advance boundary in validateContractShape — this parser only
+ *  normalizes what reaches the read model. */
+function parseContractItemClaims(raw) {
+    if (!Array.isArray(raw))
+        return [];
+    const claims = [];
+    for (const item of raw) {
+        if (claims.length >= 20)
+            break;
+        if (typeof item !== "object" || item === null || Array.isArray(item))
+            continue;
+        const entry = item;
+        if (typeof entry.item_id !== "string")
+            continue;
+        if (entry.outcome !== "met" && entry.outcome !== "remaining")
+            continue;
+        claims.push({
+            item_id: entry.item_id.trim().slice(0, 64),
+            outcome: entry.outcome,
+        });
+    }
+    return claims;
 }
 /** Parse CriterionRevision[] from a raw JSON array. */
 export function parseCriterionRevisions(raw) {
@@ -261,10 +321,287 @@ export function validateSubGoalUpdatesShape(raw) {
     });
     return errors;
 }
+const SUBGOAL_ID_RE = /^sg-[a-f0-9]{8}$/;
+/** v3.8: `scope` is the round's declared file boundary, so containment is a
+ *  trust boundary like every other workspace path — a declaration that names
+ *  `/etc` or `../outside` is rejected, not silently normalized into a string
+ *  the drift check can never match. */
+function validateContractScope(scope, checkScopeEntry, errors) {
+    if (scope === undefined)
+        return;
+    if (!Array.isArray(scope)) {
+        errors.push({
+            field: "round_contract",
+            reason: "invalid_scope",
+            detail: "scope must be an array of workspace-relative paths",
+        });
+        return;
+    }
+    if (scope.length > CONTRACT_LIMITS.scope) {
+        errors.push({
+            field: "round_contract",
+            reason: "too_many_scope_entries",
+            detail: `scope may list at most ${CONTRACT_LIMITS.scope} entries (got ${scope.length})`,
+        });
+    }
+    scope.forEach((entry, index) => {
+        if (typeof entry !== "string" || entry.trim().length === 0) {
+            errors.push({
+                field: "round_contract",
+                reason: "invalid_scope_entry",
+                detail: `scope entry ${index} must be a non-empty string`,
+            });
+            return;
+        }
+        const detail = checkScopeEntry(entry.trim());
+        if (detail) {
+            errors.push({
+                field: "round_contract",
+                reason: "scope_outside_workspace",
+                detail: `scope entry ${index} "${entry.trim()}" ${detail}`,
+            });
+        }
+    });
+}
+function validateContractItem(item, index, context, errors) {
+    if (typeof item !== "object" || item === null || Array.isArray(item)) {
+        errors.push({
+            field: "round_contract",
+            reason: "invalid_item",
+            detail: `item ${index} is not an object`,
+        });
+        return;
+    }
+    const entry = item;
+    if (typeof entry.description !== "string" || entry.description.trim().length === 0) {
+        errors.push({
+            field: "round_contract",
+            reason: "empty_item_description",
+            detail: `item ${index} needs a non-empty description`,
+        });
+    }
+    const verifyWith = entry.verify_with;
+    if (!Array.isArray(verifyWith) || verifyWith.length === 0) {
+        errors.push({
+            field: "round_contract",
+            reason: "no_verify_with",
+            detail: `item ${index} must bind at least one evidence command in verify_with`,
+        });
+    }
+    else {
+        if (verifyWith.length > CONTRACT_LIMITS.verifyWith) {
+            errors.push({
+                field: "round_contract",
+                reason: "too_many_verify_with",
+                detail: `item ${index} verify_with may name at most ${CONTRACT_LIMITS.verifyWith} commands ` +
+                    `(got ${verifyWith.length})`,
+            });
+        }
+        for (const name of verifyWith) {
+            if (typeof name !== "string" || !context.isConfiguredCommand(name)) {
+                errors.push({
+                    field: "round_contract",
+                    reason: "unknown_command",
+                    detail: `item ${index} verify_with names "${String(name)}", which is not a ` +
+                        "configured, enabled, after-capable evidence command",
+                });
+            }
+        }
+    }
+    const criterionRefs = entry.criterion_refs;
+    if (criterionRefs !== undefined) {
+        if (!Array.isArray(criterionRefs)) {
+            errors.push({
+                field: "round_contract",
+                reason: "invalid_criterion_refs",
+                detail: `item ${index} criterion_refs must be an array of strings`,
+            });
+        }
+        else {
+            if (criterionRefs.length > CONTRACT_LIMITS.criterionRefs) {
+                errors.push({
+                    field: "round_contract",
+                    reason: "too_many_criterion_refs",
+                    detail: `item ${index} criterion_refs may list at most ` +
+                        `${CONTRACT_LIMITS.criterionRefs} ids (got ${criterionRefs.length})`,
+                });
+            }
+            criterionRefs.forEach((ref, refIndex) => {
+                if (typeof ref !== "string" || ref.trim().length === 0) {
+                    errors.push({
+                        field: "round_contract",
+                        reason: "invalid_criterion_ref",
+                        detail: `item ${index} criterion_refs entry ${refIndex} must be a non-empty string`,
+                    });
+                }
+            });
+        }
+    }
+    const subgoalRefs = entry.subgoal_refs;
+    if (subgoalRefs !== undefined) {
+        if (!Array.isArray(subgoalRefs)) {
+            errors.push({
+                field: "round_contract",
+                reason: "invalid_subgoal_refs",
+                detail: `item ${index} subgoal_refs must be an array of sg-XXXXXXXX ids`,
+            });
+        }
+        else {
+            if (subgoalRefs.length > CONTRACT_LIMITS.subgoalRefs) {
+                errors.push({
+                    field: "round_contract",
+                    reason: "too_many_subgoal_refs",
+                    detail: `item ${index} subgoal_refs may list at most ` +
+                        `${CONTRACT_LIMITS.subgoalRefs} ids (got ${subgoalRefs.length})`,
+                });
+            }
+            const seen = new Set();
+            for (const ref of subgoalRefs) {
+                if (typeof ref !== "string" || !SUBGOAL_ID_RE.test(ref.trim())) {
+                    errors.push({
+                        field: "round_contract",
+                        reason: "invalid_subgoal_ref",
+                        detail: `item ${index} subgoal_refs entry "${String(ref)}" must be an sg-XXXXXXXX id`,
+                    });
+                    continue;
+                }
+                const id = ref.trim();
+                if (seen.has(id)) {
+                    errors.push({
+                        field: "round_contract",
+                        reason: "duplicate_subgoal_ref",
+                        detail: `item ${index} subgoal_refs repeats ${id}`,
+                    });
+                }
+                seen.add(id);
+                if (context.knownSubGoalIds && !context.knownSubGoalIds.has(id)) {
+                    errors.push({
+                        field: "round_contract",
+                        reason: "unknown_subgoal_ref",
+                        detail: `item ${index} references ${id}, which is not a sub-goal of this loop`,
+                    });
+                }
+            }
+        }
+    }
+}
+/** v3.8: Strict STRUCTURAL boundary for the Round Contract declaration and
+ *  the contract item claims — the same pre-advance contract as
+ *  subgoal_updates: an error here is a payload defect, never a work-quality
+ *  rejection (no session state, no gates, no rejection counters, retry with
+ *  the same roundId as `contract_invalid`).
+ *
+ *  Declaration strictness: items must exist and stay within CONTRACT_LIMITS;
+ *  every item must bind at least one configured, enabled, after-capable
+ *  command; scope entries must stay inside the workspace; criterion and
+ *  sub-goal references must be well-formed, and sub-goal references must name
+ *  a sub-goal that actually exists. The limits are enforced HERE rather than
+ *  by silently truncating in the lenient parser — a declaration is a
+ *  boundary, not a suggestion.
+ *
+ *  Claim strictness: item ids must be well formed, unique, and — when the
+ *  active contract is known — reference an item of the ACTIVE contract. */
+export function validateContractShape(raw, context) {
+    const errors = [];
+    const contract = raw.round_contract;
+    if (contract !== undefined) {
+        if (typeof contract !== "object" || contract === null || Array.isArray(contract)) {
+            errors.push({
+                field: "round_contract",
+                reason: "not_object",
+                detail: "round_contract must be an object with an items array",
+            });
+        }
+        else {
+            const obj = contract;
+            validateContractScope(obj.scope, context.checkScopeEntry, errors);
+            const items = obj.items;
+            if (!Array.isArray(items) || items.length === 0) {
+                errors.push({
+                    field: "round_contract",
+                    reason: "no_items",
+                    detail: "a contract must declare at least one item (description + verify_with)",
+                });
+            }
+            else if (items.length > CONTRACT_LIMITS.items) {
+                errors.push({
+                    field: "round_contract",
+                    reason: "too_many_items",
+                    detail: `a contract may declare at most ${CONTRACT_LIMITS.items} items (got ${items.length})`,
+                });
+            }
+            else {
+                items.forEach((item, index) => {
+                    validateContractItem(item, index, context, errors);
+                });
+            }
+        }
+    }
+    const report = raw.execution_report;
+    if (typeof report === "object" && report !== null && !Array.isArray(report)) {
+        const claims = report.contract_item_claims;
+        if (claims !== undefined) {
+            if (!Array.isArray(claims)) {
+                errors.push({
+                    field: "execution_report.contract_item_claims",
+                    reason: "not_array",
+                    detail: "contract_item_claims must be an array of { item_id, outcome } entries",
+                });
+            }
+            else {
+                const seen = new Set();
+                claims.forEach((claim, index) => {
+                    if (typeof claim !== "object" || claim === null || Array.isArray(claim)) {
+                        errors.push({
+                            field: "execution_report.contract_item_claims",
+                            reason: "invalid_entry",
+                            detail: `entry ${index} is not an object`,
+                        });
+                        return;
+                    }
+                    const entry = claim;
+                    const id = typeof entry.item_id === "string" ? entry.item_id.trim() : "";
+                    if (!/^rci-[a-f0-9]{8}$/.test(id)) {
+                        errors.push({
+                            field: "execution_report.contract_item_claims",
+                            reason: "invalid_item_id",
+                            detail: `entry ${index} must reference an rci-XXXXXXXX contract item id`,
+                        });
+                    }
+                    else {
+                        if (seen.has(id)) {
+                            errors.push({
+                                field: "execution_report.contract_item_claims",
+                                reason: "duplicate_item_id",
+                                detail: `entry ${index} repeats item id ${id}`,
+                            });
+                        }
+                        seen.add(id);
+                        if (context.activeItemIds && !context.activeItemIds.has(id)) {
+                            errors.push({
+                                field: "execution_report.contract_item_claims",
+                                reason: "unknown_item_id",
+                                detail: `entry ${index} references ${id}, which is not an item of the ACTIVE contract`,
+                            });
+                        }
+                    }
+                    if (entry.outcome !== "met" && entry.outcome !== "remaining") {
+                        errors.push({
+                            field: "execution_report.contract_item_claims",
+                            reason: "invalid_outcome",
+                            detail: `entry ${index} outcome must be "met" or "remaining"`,
+                        });
+                    }
+                });
+            }
+        }
+    }
+    return errors;
+}
 /** Build a SelfEvaluation from a parsed JSON object.
  *  Lenient parsing: missing optional fields get sensible defaults. */
 export function buildSelfEvaluation(raw) {
-    const executionEvidence = parseExecutionEvidence(raw.execution_evidence);
+    const executionReport = parseExecutionReport(raw.execution_report);
     const retractedConstraints = boundedStringArray(raw.retracted_constraints, 50, 500);
     const revisedCriteria = parseCriterionRevisions(raw.revised_success_criteria);
     const wrongAssumptions = boundedStringArray(raw.wrong_assumptions, 50, 500);
@@ -279,14 +616,13 @@ export function buildSelfEvaluation(raw) {
         discovered_constraints: boundedStringArray(raw.discovered_constraints, 50, 500),
         objective_refinement: boundedString(raw.objective_refinement, 1000) ?? "",
         emerged_subtasks: boundedStringArray(raw.emerged_subtasks, 50, 500),
-        execution_evidence: executionEvidence,
+        execution_report: executionReport,
         retracted_constraints: retractedConstraints,
         revised_success_criteria: revisedCriteria,
         wrong_assumptions: wrongAssumptions,
         worker_results: workerResults,
         compression_checkpoint: typeof raw.compression_checkpoint === "boolean" ? raw.compression_checkpoint : false,
         checkpoint_label: boundedString(raw.checkpoint_label, 200) ?? "",
-        next_action: boundedString(raw.next_action, 500),
         subgoal_updates: parseSubGoalUpdates(raw.subgoal_updates),
         stop_reason: raw.stop_reason === "gave_up" || raw.stop_reason === "blocked" || raw.stop_reason === "needs_human_input"
             ? raw.stop_reason
@@ -303,16 +639,26 @@ export function buildSelfEvaluation(raw) {
         no_change_reason: typeof raw.no_change_reason === "string" && raw.no_change_reason.trim().length > 0
             ? raw.no_change_reason.slice(0, 200)
             : undefined,
-        drift_clarification: boundedString(raw.drift_clarification, 1000),
         prompt_requests: parsePromptRequests(raw.prompt_requests),
         round_contract: parseRoundContract(raw.round_contract),
     });
 }
-/** Parse a RoundContract object from raw JSON input. Lenient: non-string
- *  entries are dropped, strings are trimmed and capped. An object that IS
- *  present is returned even with empty arrays — an empty contract is a
- *  real declaration the round_underspecified check must see. Returns
- *  undefined only when the raw value is absent or not an object. */
+/** v3.8: The ONE set of contract-declaration limits. `validateContractShape`
+ *  (the strict boundary) rejects a declaration over these; `parseRoundContract`
+ *  (the lenient path, reached only after the strict boundary passed) truncates
+ *  to the same numbers. One source, so the two can never drift. */
+export const CONTRACT_LIMITS = {
+    items: 20,
+    scope: 50,
+    criterionRefs: 20,
+    subgoalRefs: 20,
+    verifyWith: 20,
+};
+/** Parse a Round Contract PROPOSAL from raw JSON input. Lenient on shapes
+ *  the strict declaration boundary already rejected: strings are trimmed and
+ *  capped, non-string array entries are dropped. Item ORDER and COUNT are
+ *  preserved — the derived rci- ids depend on them. Returns undefined only
+ *  when the raw value is absent or not an object. */
 export function parseRoundContract(raw) {
     if (!raw || typeof raw !== "object" || Array.isArray(raw))
         return undefined;
@@ -324,13 +670,25 @@ export function parseRoundContract(raw) {
             .filter(Boolean)
             .slice(0, cap)
         : [];
+    const items = Array.isArray(obj.items)
+        ? obj.items
+            .slice(0, CONTRACT_LIMITS.items)
+            .filter((item) => typeof item === "object" && item !== null && !Array.isArray(item))
+            .map((item) => ({
+            description: typeof item.description === "string"
+                ? item.description.trim().slice(0, 200)
+                : "",
+            criterion_refs: capStrings(item.criterion_refs, 200, CONTRACT_LIMITS.criterionRefs),
+            subgoal_refs: capStrings(item.subgoal_refs, 64, CONTRACT_LIMITS.subgoalRefs),
+            verify_with: capStrings(item.verify_with, 200, CONTRACT_LIMITS.verifyWith),
+        }))
+        : [];
     return {
         work_item: typeof obj.work_item === "string" && obj.work_item.trim().length > 0
             ? obj.work_item.trim().slice(0, 200)
             : undefined,
-        done_when: capStrings(obj.done_when, 200, 20),
-        verification_plan: capStrings(obj.verification_plan, 200, 20),
-        scope: capStrings(obj.scope, 500, 50),
+        scope: capStrings(obj.scope, 500, CONTRACT_LIMITS.scope),
+        items,
     };
 }
 /** Parse a PromptRequests object from raw JSON input.

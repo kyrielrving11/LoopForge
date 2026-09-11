@@ -7,7 +7,7 @@
  *  audit and handoff purposes.
  *
  *  Rules (honesty first — machine evidence is the only upgrade path):
- *  - every `success_criteria_met` entry is a claim, `claimed` by default;
+ *  - every met `criterion_claims` entry is a claim, `claimed` by default;
  *  - upgraded to `verified` only when a machine-verifiable test pass is
  *    observed (test results with 0 failures AND a passed after-phase
  *    command snapshot);
@@ -15,7 +15,7 @@
  *    the machine contradicted the claim.
  */
 import type { VaultEntry } from "./loop-store.js";
-import type { ProviderSnapshot } from "./evidence-provider.js";
+import type { MachineObservation } from "./protocol.js";
 import type { SelfEvaluation, VerificationFlag } from "./protocol.js";
 export interface DerivedClaim {
     /** Success criterion text as reported by the agent. */
@@ -35,11 +35,11 @@ export interface ClaimView {
 }
 /** Derive the runtime claim view for a round. No file-level or text-level
  *  guessing: git observations only serve the evidence_integrity warn. */
-export declare function deriveClaimView(selfEval: SelfEvaluation, evidenceSnapshots: ProviderSnapshot[]): ClaimView;
+export declare function deriveClaimView(selfEval: SelfEvaluation, evidenceSnapshots: MachineObservation[]): ClaimView;
 /** Re-derive a claim view including the contradiction downgrade driven by
  *  verification flags. Used by audit and listVerifiedClaims on persisted
  *  snapshots; the live round path uses deriveClaimView only. */
-export declare function rederiveClaimViewWithFlags(selfEval: SelfEvaluation, evidenceSnapshots: ProviderSnapshot[], flags: VerificationFlag[]): ClaimView;
+export declare function rederiveClaimViewWithFlags(selfEval: SelfEvaluation, evidenceSnapshots: MachineObservation[], flags: VerificationFlag[]): ClaimView;
 /** Files actually changed in a committed round (git provider, after evidence
  *  preferred). Returns null when the round has no observable git snapshot. */
 export declare function resolveRoundFiles(vaultEntries: VaultEntry[], loopId: string, round: number): string[] | null;

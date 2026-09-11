@@ -62,12 +62,12 @@ describe("MCP schema ↔ protocol schema sync", () => {
     );
   });
 
-  it("exposes drift_clarification (v2.8 regression guard)", () => {
+  it("exposes subgoal_updates (v3.7.1 regression guard)", () => {
     const evalProps = evaluationProps();
     assert.ok(
-      "drift_clarification" in evalProps,
-      "drift_clarification must be accepted by the closed MCP evaluation " +
-      "schema — the enforcement gate R7 depends on it",
+      "subgoal_updates" in evalProps,
+      "subgoal_updates must be accepted by the closed MCP evaluation " +
+      "schema — the sub-goal lifecycle depends on it",
     );
   });
 });

@@ -18,7 +18,7 @@ import { FileLoopStore, queryLoopEntries } from "../loop-store.js";
 import { SessionManager } from "../mcp/session.js";
 import type { McpSession } from "../mcp/session.js";
 import { verifyBacktrackPrompt } from "./_backtrack-asserts.js";
-import { installTestCommandProvider } from "./_helpers.js";
+import { installTestCommandProvider, criterionClaims } from "./_helpers.js";
 
 // v3.3: success claims need machine-backed evidence — the SessionManager
 // collects via the real collector, so a passing command provider keeps
@@ -35,11 +35,10 @@ function stalledEval(round: number, progress: number, files: string[]) {
     output_summary: `Round ${round}: reviewed ${files.join(", ")}, no new progress.`,
     should_continue: true as const,
     constraint_violations: [] as string[],
-    execution_evidence: {
+    execution_report: {
       files_changed: files,
-      test_results: { passed: 0, failed: 0, skipped: 0 },
-      success_criteria_met: [] as string[],
-      success_criteria_remaining: ["Complete the task"],
+      tests_reported: { passed: 0, failed: 0, skipped: 0 },
+      criterion_claims: criterionClaims([] as string[], ["Complete the task"]),
       progress_estimate: progress,
     },
   };
@@ -60,11 +59,10 @@ function fixedEval(round: number, files: string[]) {
     output_summary: `Round ${round}: fixed the root cause, tests now pass.`,
     should_continue: true as const,
     constraint_violations: [] as string[],
-    execution_evidence: {
+    execution_report: {
       files_changed: files,
-      test_results: { passed: 5, failed: 0, skipped: 0 },
-      success_criteria_met: ["Complete the task"],
-      success_criteria_remaining: [] as string[],
+      tests_reported: { passed: 5, failed: 0, skipped: 0 },
+      criterion_claims: criterionClaims(["Complete the task"], [] as string[]),
       progress_estimate: 1,
     },
   };

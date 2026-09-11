@@ -7,7 +7,7 @@
  *  audit and handoff purposes.
  *
  *  Rules (honesty first — machine evidence is the only upgrade path):
- *  - every `success_criteria_met` entry is a claim, `claimed` by default;
+ *  - every met `criterion_claims` entry is a claim, `claimed` by default;
  *  - upgraded to `verified` only when a machine-verifiable test pass is
  *    observed (test results with 0 failures AND a passed after-phase
  *    command snapshot);
@@ -17,7 +17,9 @@
 
 import type { VaultEntry } from "./loop-store.js";
 import { committedRoundsFromEntries, machineEvidenceForRound } from "./committed-round.js";
-import type { ProviderSnapshot } from "./evidence-provider.js";
+import type { MachineObservation } from "./protocol.js";
+import { isPassedAfterObservation } from "./evidence-provider.js";
+import { claimedMetCriteria } from "./self-eval.js";
 import type { SelfEvaluation, VerificationFlag } from "./protocol.js";
 import { isRecord } from "./token-utils.js";
 export interface DerivedClaim {
@@ -48,28 +50,28 @@ const CONTRADICTING_CHECKS = new Set([
 ]);
 
 function hasPassingTestEvidence(selfEval: SelfEvaluation): boolean {
-  const results = selfEval.execution_evidence?.test_results;
+  const results = selfEval.execution_report?.tests_reported;
   return results !== null &&
     results !== undefined &&
     results.failed === 0 &&
     results.passed > 0;
 }
 
-function hasPassedAfterCommand(snapshots: ProviderSnapshot[]): boolean {
-  return snapshots.some((snapshot) =>
-    isRecord(snapshot.data) &&
-    snapshot.data.kind === "command" &&
-    snapshot.data.phase === "after" &&
-    snapshot.data.status === "passed");
+function hasPassedAfterCommand(observations: MachineObservation[]): boolean {
+  // v3.8: ONE predicate — the gate's entrypoint-tamper exclusion and this
+  // module's check were two divergent definitions of "machine-backed".
+  const git = observations.find((item) => item.providerId === "git") ?? null;
+  const changed = git ? new Set(git.files) : null;
+  return observations.some((item) => isPassedAfterObservation(item, changed));
 }
 
 /** Derive the runtime claim view for a round. No file-level or text-level
  *  guessing: git observations only serve the evidence_integrity warn. */
 export function deriveClaimView(
   selfEval: SelfEvaluation,
-  evidenceSnapshots: ProviderSnapshot[],
+  evidenceSnapshots: MachineObservation[],
 ): ClaimView {
-  const met = selfEval.execution_evidence?.success_criteria_met ?? [];
+  const met = claimedMetCriteria(selfEval.execution_report);
   const machineVerified = hasPassingTestEvidence(selfEval) &&
     hasPassedAfterCommand(evidenceSnapshots);
   const claims: DerivedClaim[] = met.map((targetId) => ({
@@ -82,7 +84,7 @@ export function deriveClaimView(
     verifiedCount: claims.filter((claim) => claim.status === "verified").length,
     contradictedCount: 0,
     // v3.3: machine evidence requires a passed after-phase command observed
-    // by the runtime itself — the agent's self-reported test_results are a
+    // by the runtime itself — the agent's self-reported tests_reported are a
     // claim, not evidence. Without a passed command, R8 and the
     // criteria-claims check can no longer be satisfied by fabrication.
     hasMachineEvidence: hasPassingTestEvidence(selfEval) &&
@@ -95,7 +97,7 @@ export function deriveClaimView(
  *  snapshots; the live round path uses deriveClaimView only. */
 export function rederiveClaimViewWithFlags(
   selfEval: SelfEvaluation,
-  evidenceSnapshots: ProviderSnapshot[],
+  evidenceSnapshots: MachineObservation[],
   flags: VerificationFlag[],
 ): ClaimView {
   const view = deriveClaimView(selfEval, evidenceSnapshots);
@@ -125,7 +127,7 @@ export function resolveRoundFiles(
   if (!committed) return null;
   const evidence = machineEvidenceForRound(committed);
   const git = evidence.find((item) =>
-    isRecord(item) && item.provider === "git" && Array.isArray(item.files)) as
+    item.providerId === "git" && Array.isArray(item.files)) as
     Record<string, unknown> | undefined;
   if (!git) return null;
   return (git.files as unknown[]).filter((file): file is string => typeof file === "string");

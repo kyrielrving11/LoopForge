@@ -1,5 +1,216 @@
 # Changelog
 
+## 3.8.0 (2026-09-10)
+
+The verification-boundary version. The two sources are untouched — the Vault's
+committed round documents remain the only factual source, `CanonicalLoopState`
+the only cognitive source — but the boundary now separates four states
+explicitly: **the agent claims it / the machine observed nothing / the machine
+verified it / the machine contradicted it.** No compatibility is carried: the
+protocol field set is this version's field set, and a schema-1 transaction is
+not history (see below).
+
+**The agent's report stopped being called evidence.** `ExecutionEvidence` →
+`ExecutionReport` (field `execution_evidence` → `execution_report`). Its fields
+are now claims: `criterion_claims: [{criterion_id, outcome}]` and
+`contract_item_claims: [{item_id, outcome: "met" | "remaining"}]`. The old
+`success_criteria_met` / `success_criteria_remaining` string arrays are
+deleted. No claim can create a verified fact.
+
+**Round Contract is an item model.** A proposal declares
+`items: [{description, criterion_refs, verify_with}]`; every item must bind at
+least one configured, enabled evidence command. The runtime derives a stable
+`rci-XXXXXXXX` per item and an `rc-XXXXXXXX` per contract **from content only**
+(loopId + canonicalized proposal — never the declaring round), so restating a
+contract unchanged keeps its identity and the item ids the agent already cited.
+A SubGoal is the deliberate opposite: its `sg-` id includes the declaration
+round, because re-declaring a sub-goal is a new declaration event.
+
+**Closure is machine-derived.** Item statuses `pending | insufficient |
+contradicted | verified` are computed by the runtime. `verified` requires the
+agent to have claimed `met` *and* every bound command to have been observed
+passing in the closing round — after-phase, entrypoint untampered, and with the
+command configuration recorded at declaration time (the commit stamps a
+`ContractBinding`, because policy is not part of the Vault). Claimed-but-unbacked
+is `insufficient` and **the round still commits**: the debt is surfaced instead
+of rejected. The contract closes when every item is `verified`, or when a round
+reports `outcome: "blocked"`. Because closure is derived, a premature closure is
+structurally impossible — `premature_boundary` and
+`contract_completion_unverified` are deleted along with their enforcement rows.
+
+**Strict vs lenient, stated once.** STRICT — `contract_invalid`, same-roundId
+retry, zero state change: a contract with no items, an item with no
+`verify_with`, an unknown or disabled command id, malformed `subgoal_refs`,
+malformed/duplicate/unknown `contract_item_claims`. LENIENT — dropped with a
+warning, never a rejection: `criterion_claims` with unknown or malformed ids.
+The criterion layer is advisory; the contract item layer is the verification
+skeleton.
+
+**Machine observations replaced provider snapshots.** Providers emit
+`MachineObservation` with `status: observed | passed | failed | timeout |
+unavailable | error | aborted`. A configured provider now ALWAYS produces an
+observation — unavailability, timeouts, errors and aborts are recorded in the
+round's factual record instead of being silently filtered out. Command
+observations carry argv, cwd, configHash, exit code, signal, duration,
+full-stream `stdoutSha256` / `stderrSha256` (the hash covers the whole stream,
+never the truncated excerpt), capped excerpts, and `entrypointFiles`. The two
+divergent "machine-backed" predicates (the gate excluded entrypoint-tampered
+commands, `evidence-claims` did not) converged into one
+`isPassedAfterObservation`.
+
+**Transaction schema 2 — derived data is no longer persisted.** The snapshot
+stores only the before/after observation collections; the round delta is
+`deriveRoundObservationDelta(before, after)`, consumed by every reader
+(gates, git-motion series, metrics, replay, audit). A schema-1 envelope is a
+HARD break — the round is not history — and the loss is explicit:
+`legacyTransactionRounds()` lists those rounds in the audit rather than letting
+the loop look complete while rounds are missing. Committed rounds expose
+`evidenceIncomplete` when they carry no after-phase observations; the before
+baseline is never substituted for them.
+
+**EvidenceCapability, split so it can be hashed.** `ConfiguredCapability` is a
+pure function of policy (providers, enabled commands, per-command config hashes)
+and feeds `stateHash`/`promptHash`, so it is byte-identical across retries of a
+round and reproducible by replay. `ObservedCapability` carries live statuses and
+is rendered only — never hashed. Provider registration is code state and is
+deliberately excluded from the hashed half; runtime readiness is a `doctor`
+concern. Adding capability to the canonical state changes every `stateHash`
+once — a one-time, intentional change.
+
+**Verification debt is bounded.** `insufficient` items do not reject a round,
+but they cannot accumulate forever: once the debt persists for
+`engine.unverified_claim_streak_limit` consecutive committed rounds (default 3)
+the enforcement gate rejects with instructions, and terminates as `incomplete`
+on the next same-check strike. The streak is derived from committed round flags,
+so an agent self-report cannot move it and git motion does not excuse it —
+churning code without verifying is exactly what this row catches. A stop with
+the active contract still unverified now reports `incomplete`, never
+`completed`, and an unverified success stays out of the success trajectory.
+
+**Sub-goals replay from the shared read model.** The lifecycle moved to
+`subgoal-state.ts` and consumes committed round views only — the drift check
+that rebuilt a pending set from raw vault entries (a second history
+interpretation) is gone, along with `intent_drift`, `subgoal_drift`,
+`drift_clarification`, `next_action` and R7. Jaccard similarity survives as a
+diagnostic (`possible_duplicate_subgoal` warning) but never merges, blocks, or
+changes a status. Machine verification still never writes `SubGoal.status`; a
+verified contract item that references a sub-goal produces a derived
+`VerifiedSubGoalFact`.
+
+**Scope drift is a machine fact with no waiver.** The `drift_clarification`
+channel is deleted, so an out-of-scope change can no longer be argued away: the
+round is rejected and repeated drift terminates. `machine_backed_success` is
+deleted with it — the item model replaced its two-setting tolerance switch.
+`backtrack_auto_restore` and its git stash/reset implementation are deleted too:
+LoopForge never mutates the working tree, and the backtrack prompt's restore
+facts plus the gate's restore check are the whole mechanism — facts, not
+commands, so the prompt does not prescribe a git invocation either (see the
+convergence batch below).
+
+**Uniform MCP result envelope, and an explain view.** Every tool answers with
+`{ok: true, ...payload}` or `{ok: false, error: {code, message, retryable,
+sessionId?, roundId?, details?}}`. `loopforge_status` gained `view="explain"`
+and the CLI gained `loopforge explain LOOP_ID [--round N] [--json]` — a
+read-only per-round "why" view over committed facts, the contract item reducer,
+the observations, the verification flags and the committed enforcement result.
+It never rebuilds history and never writes. `doctor` is now documented as
+static-only: policy structure, command-id uniqueness, cwd containment, provider
+registration, PATH/PATHEXT resolution, timeout and output caps, store, git
+readiness. It never executes a verification command and has no `--fix`.
+
+**Verification check set: 24 → 20.** `round_underspecified`,
+`round_unverifiable`, `premature_boundary` and `contract_completion_unverified`
+are replaced by `contract_items_unverified`; `intent_drift` and `subgoal_drift`
+are deleted. Domains: evaluation_consistency 8, evidence_integrity 7,
+plan_contract 4, progress_recovery 1.
+
+**Convergence batch — the remaining gaps between this design and the runtime.**
+Still version 3.8.0, still no compatibility carried; the protocol field set is
+this version's field set.
+
+- **An unregistered provider now yields an `unavailable` observation.** A name
+  in `policy.evidence.providers` with no registered factory used to be dropped
+  silently, so "the provider is configured but nothing was recorded" left no
+  trace in the Vault. It now produces an `unavailable` observation like every
+  other provider failure mode, in configuration order.
+- **An explicit blocked declaration outranks the success claim.** The stop
+  decision checked `completed` first, so `success: true` next to
+  `stop_reason: "blocked"` (or `"needs_human_input"`) reported completion.
+  Blocked is now decided first, and `completed` requires a `verified` closure
+  specifically — a `blocked` closure no longer satisfies it. A contradicted
+  item can never produce `completed` (closure is `verified` only when EVERY
+  item is); that posture's reject/terminate path stays the enforcement gate's.
+- **`explain` reports the contract the round EXECUTED under.** Deriving the
+  walker from rounds `<= view.round` handed a closing round its successor's
+  contract (or none), because the round's own proposal had already closed the
+  active one. `deriveRoundContractView` is now the single derivation — executed
+  contract from the rounds BEFORE this one, this round's report and
+  observations folded in as the in-flight slice — and the coordinator,
+  `explain`, and `audit` all call it. The reducer gained `currentOutcome`, so a
+  round's own `blocked` outcome closes its contract in the live path too (the
+  arm was previously unreachable there).
+- **Stable MCP error codes.** `applyToolEnvelope` used to set `message` equal to
+  `code`, so a free-text sentence WAS the code and a client could not branch on
+  the error type. Handlers now return a `ToolErrorCode` plus a separate
+  `errorMessage`; the new `ToolError` type joins the public protocol. Codes:
+  `evaluation_invalid`, `contract_invalid`, `policy_invalid`,
+  `session_not_found`, `round_id_required`, `round_id_mismatch`,
+  `state_unavailable`, `invalid_argument`, `gate_disabled`,
+  `loop_already_running`. `round_id_mismatch` is for the gate preflight, which
+  has no held prompt to return; `loopforge_next` keeps its v3.0.1 held-prompt
+  recovery (`ok: true` plus a warning).
+- **The Round Contract declaration boundary is complete.** `contract_invalid`
+  now also rejects: items, scope entries, or per-item refs over the shared
+  `CONTRACT_LIMITS` (previously the parser silently truncated them); a `scope`
+  that is not a string array, or an entry that leaves the workspace (checked
+  with the same `containInWorkspace` boundary as every other workspace path);
+  non-string `criterion_refs` entries; a `verify_with` command that is not
+  after-capable (the predicate now states the phase requirement the contract
+  boundary depends on); and a `subgoal_refs` id naming a sub-goal the loop does
+  not have. `validateContractShape` takes a `ContractValidationContext` so each
+  reference space is injected and an unobservable one fails open without
+  weakening the shape checks.
+- **`subgoal_refs` moved from the contract to the item.** A machine-verified
+  item backs exactly the sub-goals IT names, so "item A verifies SubGoal 1,
+  item B verifies SubGoal 2" is expressible and `VerifiedSubGoalFact`
+  attribution is per-item instead of "every verified item backs every
+  sub-goal". This changes the content-addressed `rc-`/`rci-` identity (the
+  canonical text changed); a restate still keeps its ids.
+- **Verified sub-goal facts survive their contract closing.** They were derived
+  from the currently-ACTIVE contract, which disappears the moment its last item
+  verifies — so the fact vanished exactly when it became fully true, and the
+  verification-debt view accused the machine-verified sub-goal of having no
+  machine backing. `deriveVerifiedSubGoals` now reads the whole committed
+  history through `deriveRoundContractView`.
+- **`LoopProjection` exposes `verified_subgoals`**, forwarded from the same
+  `deriveCognitiveFacts` the canonical state consumes. It was computed
+  internally and then dropped before reaching any projection consumer. The
+  projection also reads the WHOLE committed history now: its old
+  `beforeRound: session.currentRound` bound is only correct while the loop is
+  running, so a stop / terminate / `max_rounds` silently dropped the loop's
+  final committed round and the projection contradicted audit and explain about
+  the verification it exists to report.
+- **`EvidenceCapability` is a `prepare()` return fact.**
+  `deriveEvidenceCapability(policy, observations)` is the one derivation;
+  `RoundDriver.prepare()` returns it, MCP start/resume/next/status and the
+  capability warnings read it. The split is preserved: `ConfiguredCapability`
+  stays a pure function of policy in `stateHash`/`promptHash`, while provider
+  registry readiness (`available`) and live statuses are rendered only and
+  never hashed.
+- **The backtrack prompt states restore FACTS, never commands.** All
+  `git stash` / `git reset` / `git checkout` / `git clean` lines are gone from
+  the prompt and from R9's `fix_instructions`: the prompt names the target HEAD
+  and the files that must be reverted, says the restore is the agent's
+  responsibility, and leaves the means to the agent. The regression helper now
+  asserts those commands are ABSENT rather than present.
+- **Audit runs on the contract item axis.** `AuditResult.contracts` reports each
+  contract's active rounds, item statuses and closure; the verdict is
+  `contradicted` on a contradicted item and `incomplete` on an open contract.
+  The criterion axis stays, advisory, and its long-standing unit mismatch is
+  fixed — `declared` was a per-round sum against a deduplicated `evidenced`
+  count, so `missing` was fiction. Both are distinct-id counts now.
+  `AuditRound` carries the round's executed contract, matching `explain`.
+
 ## 3.7.1 (2026-09-07)
 
 Protocol convergence and the opt-in gate layer. No compatibility is carried:

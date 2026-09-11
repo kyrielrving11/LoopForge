@@ -10,9 +10,8 @@ import {
   deriveCriterionStatuses,
   deriveGoalId,
   deriveLessons,
-  deriveSubGoalId,
-  validateSubGoalUpdates,
 } from "../loop-compiler.js";
+import { deriveSubGoalId, validateSubGoalUpdates } from "../subgoal-state.js";
 import {
   type LoopObjective,
   makeLoopCompileRequest,
@@ -21,8 +20,39 @@ import {
   type SubGoal,
 } from "../protocol.js";
 import { getPolicy, resetPolicy, setPolicyForTest, DEFAULT_POLICY } from "../policy.js";
-import { committedFeedbackRound, mergedLineageRound } from "./_helpers.js";
-import { deriveItemId } from "../token-utils.js";
+import { committedFeedbackRound, mergedLineageRound, criterionClaims } from "./_helpers.js";
+import type { MachineObservation } from "../protocol.js";
+
+/** v3.8: a passed after-phase command observation for contract verification. */
+function commandObservation(status: "passed" | "failed"): MachineObservation {
+  return {
+    schemaVersion: 1,
+    providerId: "command:verify",
+    kind: "command",
+    phase: "after",
+    startedAt: 0,
+    finishedAt: 0,
+    status,
+    files: [],
+    data: {
+      commandId: "verify",
+      argv: ["node", "-e", "verify"],
+      cwd: ".",
+      configHash: "",
+      required: true,
+      exitCode: status === "passed" ? 0 : 1,
+      signal: null,
+      durationMs: 1,
+      stdoutSha256: "0".repeat(64),
+      stderrSha256: "0".repeat(64),
+      stdoutExcerpt: "",
+      stderrExcerpt: "",
+      truncated: false,
+      entrypointFiles: [],
+    },
+  };
+}
+import { deriveContractItemIds, deriveItemId } from "../token-utils.js";
 
 describe("cognitive-state compiler", () => {
   beforeEach(() => resetPolicy());
@@ -120,12 +150,10 @@ describe("cognitive-state compiler", () => {
         retracted_constraints: ["Temporary freeze"],
         wrong_assumptions: ["Migration was reversible"],
         emerged_subtasks: ["Verify rollback"],
-        next_action: "Run rollback test",
-        execution_evidence: {
+        execution_report: {
           files_changed: ["src/store.ts"],
-          test_results: { passed: 10, failed: 1, skipped: 0 },
-          success_criteria_met: [],
-          success_criteria_remaining: ["All tests pass"],
+          tests_reported: { passed: 10, failed: 1, skipped: 0 },
+          criterion_claims: criterionClaims([], ["All tests pass"]),
           progress_estimate: 0.7,
         },
       }),
@@ -259,11 +287,10 @@ describe("cognitive-state compiler", () => {
             checkpoint_label: "数据层完成",
           },
           constraint_violations: [],
-          execution_evidence: {
+          execution_report: {
             files_changed: ["db/migrate.ts"],
-            test_results: { passed: 10, failed: 0, skipped: 0 },
-            success_criteria_met: ["Migration verified"],
-            success_criteria_remaining: [],
+            tests_reported: { passed: 10, failed: 0, skipped: 0 },
+            criterion_claims: criterionClaims(["Migration verified"], []),
             progress_estimate: 0.35,
           },
           retracted_constraints: [],
@@ -278,11 +305,10 @@ describe("cognitive-state compiler", () => {
             constraints_active: ["No data loss", "Keep rollback path"],
           },
           constraint_violations: [],
-          execution_evidence: {
+          execution_report: {
             files_changed: ["api/routes.ts"],
-            test_results: null,
-            success_criteria_met: ["Migration verified"],
-            success_criteria_remaining: ["API coverage ≥ 90%"],
+            tests_reported: null,
+            criterion_claims: criterionClaims(["Migration verified"], ["API coverage ≥ 90%"]),
             progress_estimate: 0.40,
           },
         },
@@ -310,11 +336,10 @@ describe("cognitive-state compiler", () => {
           success: true,
           loop_lineage: { loop_id: "crit_ms", round: 1, constraints_active: [] },
           constraint_violations: [],
-          execution_evidence: {
+          execution_report: {
             files_changed: ["test/unit.ts"],
-            test_results: { passed: 20, failed: 0, skipped: 0 },
-            success_criteria_met: ["Unit tests ≥ 90%"],
-            success_criteria_remaining: ["Integration tests pass", "E2E coverage"],
+            tests_reported: { passed: 20, failed: 0, skipped: 0 },
+            criterion_claims: criterionClaims(["Unit tests ≥ 90%"], ["Integration tests pass", "E2E coverage"]),
             progress_estimate: 0.30,
           },
           retracted_constraints: [],
@@ -325,11 +350,10 @@ describe("cognitive-state compiler", () => {
           success: true,
           loop_lineage: { loop_id: "crit_ms", round: 2, constraints_active: [] },
           constraint_violations: [],
-          execution_evidence: {
+          execution_report: {
             files_changed: ["test/integration.ts"],
-            test_results: { passed: 15, failed: 0, skipped: 0 },
-            success_criteria_met: ["Unit tests ≥ 90%", "Integration tests pass"],
-            success_criteria_remaining: ["E2E coverage"],
+            tests_reported: { passed: 15, failed: 0, skipped: 0 },
+            criterion_claims: criterionClaims(["Unit tests ≥ 90%", "Integration tests pass"], ["E2E coverage"]),
             progress_estimate: 0.65,
           },
           retracted_constraints: [],
@@ -340,11 +364,10 @@ describe("cognitive-state compiler", () => {
           success: true,
           loop_lineage: { loop_id: "crit_ms", round: 3, constraints_active: [] },
           constraint_violations: [],
-          execution_evidence: {
+          execution_report: {
             files_changed: ["test/e2e.ts"],
-            test_results: null,
-            success_criteria_met: ["Unit tests ≥ 90%", "Integration tests pass"],
-            success_criteria_remaining: ["E2E coverage"],
+            tests_reported: null,
+            criterion_claims: criterionClaims(["Unit tests ≥ 90%", "Integration tests pass"], ["E2E coverage"]),
             progress_estimate: 0.70,
           },
         },
@@ -371,11 +394,10 @@ describe("cognitive-state compiler", () => {
           success: true,
           loop_lineage: { loop_id: "dedup_ms", round: 1, constraints_active: [] },
           constraint_violations: [],
-          execution_evidence: {
+          execution_report: {
             files_changed: ["test/a.ts"],
-            test_results: { passed: 5, failed: 0, skipped: 0 },
-            success_criteria_met: ["Unit test coverage at 90%"],
-            success_criteria_remaining: [],
+            tests_reported: { passed: 5, failed: 0, skipped: 0 },
+            criterion_claims: criterionClaims(["Unit test coverage at 90%"], []),
             progress_estimate: 0.30,
           },
         },
@@ -385,12 +407,11 @@ describe("cognitive-state compiler", () => {
           success: true,
           loop_lineage: { loop_id: "dedup_ms", round: 2, constraints_active: [] },
           constraint_violations: [],
-          execution_evidence: {
+          execution_report: {
             files_changed: ["test/b.ts"],
-            test_results: { passed: 10, failed: 0, skipped: 0 },
+            tests_reported: { passed: 10, failed: 0, skipped: 0 },
             // "unit test coverage reached 90 percent" is semantically the same
-            success_criteria_met: ["unit test coverage reached 90 percent"],
-            success_criteria_remaining: [],
+            criterion_claims: criterionClaims(["unit test coverage reached 90 percent"], []),
             progress_estimate: 0.50,
           },
         },
@@ -400,11 +421,10 @@ describe("cognitive-state compiler", () => {
           success: true,
           loop_lineage: { loop_id: "dedup_ms", round: 3, constraints_active: [] },
           constraint_violations: [],
-          execution_evidence: {
+          execution_report: {
             files_changed: ["test/c.ts"],
-            test_results: { passed: 12, failed: 0, skipped: 0 },
-            success_criteria_met: ["unit test coverage reached 90 percent"],
-            success_criteria_remaining: [],
+            tests_reported: { passed: 12, failed: 0, skipped: 0 },
+            criterion_claims: criterionClaims(["unit test coverage reached 90 percent"], []),
             progress_estimate: 0.60,
           },
         },
@@ -430,11 +450,10 @@ describe("cognitive-state compiler", () => {
           success: true,
           loop_lineage: { loop_id: "diff_ms", round: 1, constraints_active: [] },
           constraint_violations: [],
-          execution_evidence: {
+          execution_report: {
             files_changed: ["test/unit.ts"],
-            test_results: { passed: 20, failed: 0, skipped: 0 },
-            success_criteria_met: ["Unit tests done"],
-            success_criteria_remaining: ["Integration done"],
+            tests_reported: { passed: 20, failed: 0, skipped: 0 },
+            criterion_claims: criterionClaims(["Unit tests done"], ["Integration done"]),
             progress_estimate: 0.30,
           },
         },
@@ -444,12 +463,11 @@ describe("cognitive-state compiler", () => {
           success: true,
           loop_lineage: { loop_id: "diff_ms", round: 2, constraints_active: [] },
           constraint_violations: [],
-          execution_evidence: {
+          execution_report: {
             files_changed: ["test/int.ts"],
-            test_results: { passed: 15, failed: 0, skipped: 0 },
+            tests_reported: { passed: 15, failed: 0, skipped: 0 },
             // "Integration done" is genuinely different from "Unit tests done"
-            success_criteria_met: ["Unit tests done", "Integration done"],
-            success_criteria_remaining: [],
+            criterion_claims: criterionClaims(["Unit tests done", "Integration done"], []),
             progress_estimate: 0.70,
           },
         },
@@ -477,11 +495,10 @@ describe("cognitive-state compiler", () => {
           checkpoint_label: `Phase ${i}`,
         },
         constraint_violations: [],
-        execution_evidence: {
+        execution_report: {
           files_changed: [],
-          test_results: null,
-          success_criteria_met: [],
-          success_criteria_remaining: [],
+          tests_reported: null,
+          criterion_claims: criterionClaims([], []),
           progress_estimate: i / 15,
         },
       });
@@ -512,11 +529,10 @@ describe("cognitive-state compiler", () => {
           checkpoint_label: `Phase ${i}`,
         },
         constraint_violations: [],
-        execution_evidence: {
+        execution_report: {
           files_changed: [],
-          test_results: null,
-          success_criteria_met: [],
-          success_criteria_remaining: [],
+          tests_reported: null,
+          criterion_claims: criterionClaims([], []),
           progress_estimate: i / 15,
         },
       });
@@ -550,11 +566,10 @@ describe("cognitive-state compiler", () => {
           checkpoint_label: `Phase ${i}`,
         },
         constraint_violations: [],
-        execution_evidence: {
+        execution_report: {
           files_changed: [],
-          test_results: null,
-          success_criteria_met: [],
-          success_criteria_remaining: [],
+          tests_reported: null,
+          criterion_claims: criterionClaims([], []),
           progress_estimate: i / 15,
         },
       });
@@ -581,11 +596,10 @@ describe("cognitive-state compiler", () => {
           checkpoint_label: `Phase ${i}`,
         },
         constraint_violations: [],
-        execution_evidence: {
+        execution_report: {
           files_changed: [],
-          test_results: null,
-          success_criteria_met: [],
-          success_criteria_remaining: [],
+          tests_reported: null,
+          criterion_claims: criterionClaims([], []),
           progress_estimate: i / 8,
         },
       });
@@ -647,11 +661,10 @@ describe("cognitive-state compiler", () => {
             checkpoint_label: "Data Layer",
           },
           constraint_violations: [],
-          execution_evidence: {
+          execution_report: {
             files_changed: ["data/store.ts"],
-            test_results: { passed: 5, failed: 0, skipped: 0 },
-            success_criteria_met: [],
-            success_criteria_remaining: [],
+            tests_reported: { passed: 5, failed: 0, skipped: 0 },
+            criterion_claims: criterionClaims([], []),
             progress_estimate: 0.30,
           },
         },
@@ -665,11 +678,10 @@ describe("cognitive-state compiler", () => {
             constraints_active: ["No regression"],
           },
           constraint_violations: [],
-          execution_evidence: {
+          execution_report: {
             files_changed: ["api/routes.ts"],
-            test_results: null,
-            success_criteria_met: [],
-            success_criteria_remaining: [],
+            tests_reported: null,
+            criterion_claims: criterionClaims([], []),
             progress_estimate: 0.45,
           },
         },
@@ -683,11 +695,10 @@ describe("cognitive-state compiler", () => {
             constraints_active: ["No regression"],
           },
           constraint_violations: [],
-          execution_evidence: {
+          execution_report: {
             files_changed: ["api/middleware.ts"],
-            test_results: { passed: 8, failed: 0, skipped: 0 },
-            success_criteria_met: [],
-            success_criteria_remaining: [],
+            tests_reported: { passed: 8, failed: 0, skipped: 0 },
+            criterion_claims: criterionClaims([], []),
             progress_estimate: 0.60,
           },
         },
@@ -720,11 +731,10 @@ describe("cognitive-state compiler", () => {
             checkpoint_label: "Core Module",
           },
           constraint_violations: [],
-          execution_evidence: {
+          execution_report: {
             files_changed: ["core.ts"],
-            test_results: null,
-            success_criteria_met: [],
-            success_criteria_remaining: [],
+            tests_reported: null,
+            criterion_claims: criterionClaims([], []),
             progress_estimate: 0.30,
           },
         },
@@ -805,6 +815,7 @@ describe("cognitive-state compiler", () => {
           task: "Fix auth bug",
           constraints_active: [],
           recompile_level: "l2",
+          committed_action: "continue",
         },
         emerged_subtasks: ["Add error handling to login"],
         success: true,
@@ -812,7 +823,7 @@ describe("cognitive-state compiler", () => {
       }],
     };
     // Round 2: agent completes the sub-goal by transitioning its ID
-    const sgId = deriveSubGoalId("Add error handling to login");
+    const sgId = deriveSubGoalId("sg-id-match", 1, 0, "Add error handling to login");
     const response = compileLoop(makeLoopCompileRequest({
       loop_id: "sg-id-match",
       round: 2,
@@ -874,13 +885,14 @@ describe("cognitive-state compiler", () => {
           task: "Fix auth bug",
           constraints_active: [],
           recompile_level: "l2",
+          committed_action: "continue",
         },
         emerged_subtasks: ["Add rate limiting"],
         success: true,
         output_summary: "Started",
       }],
     };
-    const sgId = deriveSubGoalId("Add rate limiting");
+    const sgId = deriveSubGoalId("sg-inprogress", 1, 0, "Add rate limiting");
     const response = compileLoop(makeLoopCompileRequest({
       loop_id: "sg-inprogress",
       round: 2,
@@ -899,7 +911,7 @@ describe("cognitive-state compiler", () => {
   });
 
   it("keeps older committed transitions when a later round declares nothing (no regression)", () => {
-    const sgId = deriveSubGoalId("Add error handling to login");
+    const sgId = deriveSubGoalId("sg-persist", 1, 0, "Add error handling to login");
     const vault = {
       results: [
         {
@@ -907,6 +919,7 @@ describe("cognitive-state compiler", () => {
           loop_lineage: {
             loop_id: "sg-persist", round: 1, goal_id: deriveGoalId("sg-persist", "Fix auth"),
             task: "Fix auth", constraints_active: [], recompile_level: "l2",
+            committed_action: "continue",
           },
           emerged_subtasks: ["Add error handling to login"],
           success: true,
@@ -917,6 +930,7 @@ describe("cognitive-state compiler", () => {
           loop_lineage: {
             loop_id: "sg-persist", round: 2, goal_id: deriveGoalId("sg-persist", "Fix auth"),
             task: "Fix auth", constraints_active: [], recompile_level: "l2",
+            committed_action: "continue",
           },
           subgoal_updates: [{ id: sgId, status: "done" }],
           success: true,
@@ -986,31 +1000,6 @@ describe("cognitive-state compiler", () => {
     assert.ok(block.includes("Sub-Goal Dashboard"), "should reference the dashboard");
   });
 
-  // ── v2.8: Drift clarification injection ────────────────────────────────
-
-  it("buildSelfEvalBlock does NOT inject drift_clarification when no drift flags", () => {
-    const block = buildSelfEvalBlock(3, []);
-    assert.ok(!block.includes("drift_clarification"), "should not include drift field");
-    assert.ok(!block.includes("Drift Detected"), "should not show drift warning");
-  });
-
-  it("buildSelfEvalBlock injects drift_clarification when intent_drift flag present", () => {
-    const block = buildSelfEvalBlock(3, [
-      { severity: "warn", field: "output_summary", check: "intent_drift", detail: "drift detected" },
-    ]);
-    assert.ok(block.includes("drift_clarification"), "should include drift field");
-    assert.ok(block.includes("intent_drift"), "should mention the flag type");
-    assert.ok(block.includes("Drift Detected"), "should show drift warning to agent");
-  });
-
-  it("buildSelfEvalBlock injects drift_clarification when subgoal_drift flag present", () => {
-    const block = buildSelfEvalBlock(5, [
-      { severity: "warn", field: "next_action", check: "subgoal_drift", detail: "pending sub-goals not aligned" },
-    ]);
-    assert.ok(block.includes("drift_clarification"), "should include drift field");
-    assert.ok(block.includes("subgoal_drift"), "should mention the flag type");
-  });
-
   // ── v2.8: L2 pointer mode ─────────────────────────────────────────────
 
   it("skips fullStateMarkdown at L2 when l2_pointer_enabled is true", () => {
@@ -1028,11 +1017,10 @@ describe("cognitive-state compiler", () => {
         round: 1,
         success: false,
         output_summary: "Started refactor",
-        execution_evidence: {
+        execution_report: {
           files_changed: ["src/db.ts"],
-          test_results: { passed: 8, failed: 2, skipped: 0 },
-          success_criteria_met: [],
-          success_criteria_remaining: ["All tests pass"],
+          tests_reported: { passed: 8, failed: 2, skipped: 0 },
+          criterion_claims: criterionClaims([], ["All tests pass"]),
           progress_estimate: 0.3,
         },
       }),
@@ -1216,9 +1204,9 @@ describe("cognitive-state compiler", () => {
     // constraint_violations placeholder should mention c-XXXXXXXX
     assert.ok(block.includes("c-XXXXXXXX"),
       "constraint_violations placeholder should use c-XXXXXXXX");
-    // success_criteria_met placeholder should mention cr-XXXXXXXX
+    // the criterion-claim placeholder should mention cr-XXXXXXXX
     assert.ok(block.includes("cr-XXXXXXXX"),
-      "success_criteria_met placeholder should use cr-XXXXXXXX");
+      "criterion_claims placeholder should use cr-XXXXXXXX");
   });
 
   it("older vault entries without IDs still match via Jaccard fallback", () => {
@@ -1311,12 +1299,11 @@ describe("cognitive-state compiler", () => {
         round: 2,
         success: true,
         output_summary: "API work done",
-        execution_evidence: {
+        execution_report: {
           files_changed: ["api.ts"],
-          test_results: null,
+          tests_reported: null,
           // Both criteria met — use IDs for precise matching
-          success_criteria_met: ["cr-" + computeGoalTextHash("API returns valid JSON").slice(0, 8)],
-          success_criteria_remaining: [],
+          criterion_claims: criterionClaims(["cr-" + computeGoalTextHash("API returns valid JSON").slice(0, 8)], []),
           progress_estimate: 0.8,
         },
       }),
@@ -1515,25 +1502,23 @@ describe("v3.2 — L1 collapse diff baseline", () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("v3.2 — criterion status derivation", () => {
-  it("derives met / remaining / unknown with met rounds and linked sub-goals", () => {
+  it("derives claimed / remaining / unknown with claimed rounds and linked sub-goals", () => {
     const statuses = deriveCriterionStatuses("cs-test", {
       results: [
         {
           loop_id: "cs-test",
           success: true,
           loop_lineage: { loop_id: "cs-test", round: 1, constraints_active: [] },
-          execution_evidence: {
-            success_criteria_met: [],
-            success_criteria_remaining: ["Parser complete", "Tests ≥90%"],
+          execution_report: {
+            criterion_claims: criterionClaims([], ["Parser complete", "Tests ≥90%"]),
           },
         },
         {
           loop_id: "cs-test",
           success: true,
           loop_lineage: { loop_id: "cs-test", round: 2, constraints_active: [] },
-          execution_evidence: {
-            success_criteria_met: ["Parser complete"],
-            success_criteria_remaining: ["Tests ≥90%"],
+          execution_report: {
+            criterion_claims: criterionClaims(["Parser complete"], ["Tests ≥90%"]),
           },
         },
       ],
@@ -1547,7 +1532,7 @@ describe("v3.2 — criterion status derivation", () => {
 
     assert.equal(statuses.length, 3);
     const parser = statuses.find((s) => s.text === "Parser complete")!;
-    assert.equal(parser.status, "met");
+    assert.equal(parser.status, "claimed");
     assert.equal(parser.met_at_round, 2, "first met report wins");
     assert.deepEqual(parser.related_subgoal_ids, ["sg-1"], "identical text links the sub-goal");
 
@@ -1573,11 +1558,10 @@ describe("v3.2 — criterion status derivation", () => {
       last_round_result: makeLoopRoundResult({
         round: 1,
         success: true,
-        execution_evidence: {
+        execution_report: {
           files_changed: ["src/parser.ts"],
-          test_results: { passed: 10, failed: 0, skipped: 0 },
-          success_criteria_met: ["Parser complete"],
-          success_criteria_remaining: ["Tests ≥90%"],
+          tests_reported: { passed: 10, failed: 0, skipped: 0 },
+          criterion_claims: criterionClaims(["Parser complete"], ["Tests ≥90%"]),
           progress_estimate: 0.6,
         },
       }),
@@ -1831,7 +1815,7 @@ describe("v3.3 — round stats and machine status threading", () => {
     attempt,
     files,
     progress,
-    roundEvidence: [{ provider: "git", timestamp: Date.now(), files, data: {} }],
+    roundEvidence: [{ schemaVersion: 1, providerId: "git", kind: "git", phase: "after", startedAt: 0, finishedAt: 0, status: "observed", files, data: { fingerprints: {} } }],
   });
 
   it("derives round stats and machine git-motion from committed context entries", () => {
@@ -1894,10 +1878,15 @@ describe("v3.3 — round stats and machine status threading", () => {
         files: [`src/r${round}.ts`],
         progress: 0.2 + round * 0.1,
         roundEvidence: [{
-          provider: "git",
-          timestamp: Date.now(),
+          schemaVersion: 1,
+          providerId: "git",
+          kind: "git",
+          phase: "after",
+          startedAt: 0,
+          finishedAt: 0,
+          status: "observed",
           files: gitMotion ? [`src/r${round}.ts`] : [],
-          data: {},
+          data: { fingerprints: {} },
         }],
       });
     const response = compileLoop(makeLoopCompileRequest({
@@ -1927,15 +1916,15 @@ describe("v3.3 — round stats and machine status threading", () => {
 
 describe("v3.3 — Round Contract eval template", () => {
   it("restates the contract in L1/L2 templates when hasContract is set", () => {
-    const block = buildSelfEvalBlock(4, [], "l2", true);
+    const block = buildSelfEvalBlock(4, "l2", true);
     assert.ok(block.includes("round_contract"), "template must carry the contract key");
     assert.ok(block.includes("restate the Current Task's contract UNCHANGED"));
   });
 
   it("non-contract rounds and L0 retries never see the contract template", () => {
-    const plain = buildSelfEvalBlock(4, [], "l2", false);
+    const plain = buildSelfEvalBlock(4, "l2", false);
     assert.ok(!plain.includes("round_contract"), "no contract → no template key");
-    const retry = buildSelfEvalBlock(4, [], "l0", true);
+    const retry = buildSelfEvalBlock(4, "l0", true);
     assert.ok(!retry.includes("round_contract"), "L0 retry stays lean even with a contract");
   });
 });
@@ -1948,17 +1937,19 @@ describe("v3.4 — ACTIVE Round Contract derivation (compileLoop)", () => {
   /** Merged production-shape lineage entry (shared fixture, derive-cc loop). */
   const mergedRound = (r: number, o: Parameters<typeof mergedLineageRound>[1] = {}) =>
     mergedLineageRound(r, { loopId: "derive-cc", ...o });
+  // v3.8: contracts declare ITEMS; each binds evidence commands.
   const A = {
     work_item: "Slice A",
-    done_when: ["cr-a-1", "cr-a-2"],
-    verification_plan: ["verify"],
     scope: ["src/a"],
+    items: [
+      { description: "a one", criterion_refs: ["cr-a-1"], subgoal_refs: [], verify_with: ["verify"] },
+      { description: "a two", criterion_refs: ["cr-a-2"], subgoal_refs: [], verify_with: ["verify"] },
+    ],
   };
   const B = {
     work_item: "Slice B",
-    done_when: ["cr-b-1"],
-    verification_plan: ["verify"],
     scope: ["src/b"],
+    items: [{ description: "b one", criterion_refs: ["cr-b-1"], subgoal_refs: [], verify_with: ["verify"] }],
   };
   const TASK = "Build the whole thing";
   const compileAt = (
@@ -1981,7 +1972,7 @@ describe("v3.4 — ACTIVE Round Contract derivation (compileLoop)", () => {
       mergedRound(2, { met: [] }),
     ]);
     assert.ok(res.prompt.includes("**Slice A**"), "active contract must be the Current Task");
-    assert.ok(res.prompt.includes("- Done when: cr-a-1"));
+    assert.ok(res.prompt.includes("a one"), "item descriptions render");
     assert.ok(res.state_file_content?.includes("**Slice A**"));
     // L1/L2 eval template asks for the restatement (hasContract via derived
     // active — no last_round_result needed).
@@ -1999,10 +1990,27 @@ describe("v3.4 — ACTIVE Round Contract derivation (compileLoop)", () => {
       "L0 retry stays lean — no restatement template");
   });
 
-  it("a satisfied contract reverts the Current Task to the original task", () => {
+  it("a fully verified contract reverts the Current Task to the original task", () => {
+    // v3.8: closure requires every item to be machine-verified — a claim
+    // alone never closes a contract.
+    setPolicyForTest({
+      ...DEFAULT_POLICY,
+      evidence: {
+        ...DEFAULT_POLICY.evidence,
+        commands: [{
+          name: "verify", enabled: true, executable: "node", args: ["-e", "verify"],
+          phase: "after", required: true, timeout_ms: 1000,
+          max_output_chars: 2000, success_exit_codes: [0],
+        }],
+      },
+    });
+    const itemIds = deriveContractItemIds(A.items);
     const res = compileAt(3, "l2", [
       mergedRound(1, { contract: A }),
-      mergedRound(2, { met: A.done_when }), // all done_when claimed met
+      mergedRound(2, {
+        contractItemClaims: itemIds.map((item_id) => ({ item_id, outcome: "met" as const })),
+        roundEvidence: [commandObservation("passed")],
+      }),
     ]);
     assert.ok(!res.prompt.includes("**Slice A**"), "satisfied contract must stop rendering");
     assert.ok(!res.prompt.includes("round_contract"),
@@ -2103,7 +2111,7 @@ describe("v3.5 — L2 contract declaration nudge", () => {
   const NUDGE = "consider declaring a";
 
   it("appends nudge prose on an L2 contract-less block — without the JSON key name", () => {
-    const block = buildSelfEvalBlock(4, [], "l2", false, true);
+    const block = buildSelfEvalBlock(4, "l2", false, true);
     assert.ok(block.includes(NUDGE), "nudge must be present");
     assert.ok(block.includes("Round Contract"));
     assert.ok(!block.includes("round_contract"),
@@ -2111,7 +2119,7 @@ describe("v3.5 — L2 contract declaration nudge", () => {
   });
 
   it("is off by default (no proposalNudge flag)", () => {
-    assert.ok(!buildSelfEvalBlock(4, [], "l2", false).includes(NUDGE));
+    assert.ok(!buildSelfEvalBlock(4, "l2", false).includes(NUDGE));
   });
 
   it("never appears on L0/L1 compiles (the L2 gating lives at the call site)", () => {
@@ -2124,14 +2132,14 @@ describe("v3.5 — L2 contract declaration nudge", () => {
           task_id: "nudge-loop:r1",
           task_type: "loop_lineage",
           loop_lineage: { loop_id: "nudge-loop", round: 1, committed_action: "continue" },
-          execution_evidence: { files_changed: [], success_criteria_met: [] },
+          execution_report: { files_changed: [], criterion_claims: criterionClaims([]) },
         },
         {
           loop_id: "nudge-loop",
           task_id: "nudge-loop:r2",
           task_type: "loop_lineage",
           loop_lineage: { loop_id: "nudge-loop", round: 2, committed_action: "continue" },
-          execution_evidence: { files_changed: [], success_criteria_met: [] },
+          execution_report: { files_changed: [], criterion_claims: criterionClaims([]) },
         },
       ],
       global_entries: [],
@@ -2175,11 +2183,10 @@ describe("v3.5 — L2 contract declaration nudge", () => {
         },
         round_contract: {
           work_item: "Slice A",
-          done_when: ["cr-a-1"],
-          verification_plan: ["verify"],
           scope: ["src/a"],
+          items: [{ description: "a one", criterion_refs: ["cr-a-1"], subgoal_refs: [], verify_with: ["verify"] }],
         },
-        execution_evidence: { files_changed: [], success_criteria_met: [] },
+        execution_report: { files_changed: [], criterion_claims: criterionClaims([]) },
       }],
       global_entries: [],
     } as never);
@@ -2208,15 +2215,13 @@ describe("v3.5 — post-backtrack contract revision (compile side)", () => {
     mergedLineageRound(r, { loopId: "redo-cc", ...o });
   const A = {
     work_item: "Stalled slice",
-    done_when: ["cr-a-1"],
-    verification_plan: ["verify"],
     scope: ["src/a"],
+    items: [{ description: "a one", criterion_refs: ["cr-a-1"], subgoal_refs: [], verify_with: ["verify"] }],
   };
   const B = {
     work_item: "Revised slice",
-    done_when: ["cr-b-1"],
-    verification_plan: ["verify"],
     scope: ["src/b"],
+    items: [{ description: "b one", criterion_refs: ["cr-b-1"], subgoal_refs: [], verify_with: ["verify"] }],
   };
 
   it("a blocked redo eval after backtrack rounds activates the revised contract", () => {

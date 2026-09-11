@@ -10,17 +10,21 @@ import {
   captureGitFileStateAsync,
   diffSnapshotCollections,
   diffSnapshots,
-  runBacktrackAutoRestore,
 } from "../evidence-provider.js";
-import type { ProviderSnapshot } from "../evidence-provider.js";
+import type { GitObservation } from "../protocol.js";
 
 function gitSnapshot(
   files: string[],
   fingerprints: Record<string, string>,
-): ProviderSnapshot {
+): GitObservation {
   return {
-    provider: "git",
-    timestamp: Date.now(),
+    schemaVersion: 1,
+    providerId: "git",
+    kind: "git",
+    phase: "after",
+    startedAt: 0,
+    finishedAt: 0,
+    status: "observed",
     files,
     data: { tracked: files, staged: [], untracked: [], fingerprints },
   };
@@ -69,7 +73,7 @@ describe("EvidenceProvider round diffs", () => {
       // file is listed in BOTH captures, so only the fingerprint can see
       // the content change.
       const provider = new GitEvidenceProvider();
-      const capture = (): Promise<ProviderSnapshot | null> => provider.capture({
+      const capture = (): Promise<GitObservation | null> => provider.capture({
         signal: new AbortController().signal,
         timeoutMs: 10000,
         phase: "after",
@@ -94,98 +98,6 @@ describe("EvidenceProvider round diffs", () => {
       );
       assert.deepEqual(diffSnapshots([snapBefore], [snapAfter]), [fileName],
         "a pure content change to a Chinese-named file must surface in the diff");
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-});
-
-describe("runBacktrackAutoRestore (v3.3.1)", () => {
-  const gitEnv = { ...process.env, GIT_AUTHOR_NAME: "lf-test", GIT_AUTHOR_EMAIL: "lf@test", GIT_COMMITTER_NAME: "lf-test", GIT_COMMITTER_EMAIL: "lf@test" };
-  function git(dir: string, ...args: string[]): string {
-    return execFileSync("git", args, { cwd: dir, encoding: "utf8", env: gitEnv });
-  }
-
-  function freshRepo(): string {
-    const dir = join(tmpdir(), `lf-autorestore-${Math.random().toString(36).slice(2)}`);
-    mkdirSync(dir, { recursive: true });
-    git(dir, "init", "-q");
-    return dir;
-  }
-
-  it("stashes failed-round changes and resets to the restore-point commit", async () => {
-    const dir = freshRepo();
-    try {
-      writeFileSync(join(dir, "work.ts"), "baseline\n");
-      git(dir, "add", "work.ts");
-      git(dir, "commit", "-q", "-m", "baseline");
-      const head = git(dir, "rev-parse", "HEAD").trim();
-
-      // Failed round: modify a tracked file, create an untracked file, commit.
-      writeFileSync(join(dir, "work.ts"), "failed-round change\n");
-      writeFileSync(join(dir, "scratch-untracked.ts"), "leftover\n");
-      git(dir, "add", "work.ts");
-      git(dir, "commit", "-q", "-m", "failed round commit");
-
-      const outcome = await runBacktrackAutoRestore(head, 7, dir);
-      assert.equal(outcome.ok, true, outcome.detail);
-      // Tracked file back at baseline; untracked scratch removed (stashed);
-      // the failed commit is gone (HEAD back at the restore point).
-      assert.equal(readFileSync(join(dir, "work.ts"), "utf8").trim(), "baseline",
-        "tracked changes must be reverted to the restore point");
-      assert.equal(existsSync(join(dir, "scratch-untracked.ts")), false,
-        "untracked failed-round files must be stashed away, not left behind");
-      assert.equal(git(dir, "rev-parse", "HEAD").trim(), head,
-        "commits made by failed rounds must be discarded");
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("treats an already-clean workspace as success", async () => {
-    const dir = freshRepo();
-    try {
-      writeFileSync(join(dir, "work.ts"), "baseline\n");
-      git(dir, "add", "work.ts");
-      git(dir, "commit", "-q", "-m", "baseline");
-      const head = git(dir, "rev-parse", "HEAD").trim();
-      const outcome = await runBacktrackAutoRestore(head, 1, dir);
-      assert.equal(outcome.ok, true, outcome.detail);
-      assert.ok(outcome.detail.includes("clean"), outcome.detail);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("L6: skips reset --hard when the stash fails — uncommitted work survives", async () => {
-    // A stash failure must abort the restore: `reset --hard` after it would
-    // destroy exactly the changes the stash was meant to preserve. A merge
-    // conflict is the deterministic way to make `git stash push -u` fail
-    // while `git reset --hard` would otherwise succeed.
-    const dir = freshRepo();
-    try {
-      writeFileSync(join(dir, "work.ts"), "base\n");
-      git(dir, "add", "work.ts");
-      git(dir, "commit", "-q", "-m", "base");
-      git(dir, "checkout", "-q", "-b", "side");
-      writeFileSync(join(dir, "work.ts"), "side\n");
-      git(dir, "commit", "-qam", "side");
-      git(dir, "checkout", "-q", "master");
-      writeFileSync(join(dir, "work.ts"), "master\n");
-      git(dir, "commit", "-qam", "master");
-      const head = git(dir, "rev-parse", "HEAD").trim();
-      // Merge conflict: unmerged index entries — stash push now fails.
-      try { git(dir, "merge", "side"); } catch { /* expected conflict */ }
-      assert.ok(readFileSync(join(dir, "work.ts"), "utf8").includes("<<<<<<<"),
-        "fixture must be in a conflicted state");
-
-      const outcome = await runBacktrackAutoRestore(head, 5, dir);
-      assert.equal(outcome.ok, false, "a failed stash must report failure");
-      assert.ok(outcome.detail.includes("SKIPPED"), outcome.detail);
-      assert.ok(readFileSync(join(dir, "work.ts"), "utf8").includes("<<<<<<<"),
-        "reset must NOT have run — the conflicted (uncommitted) state survives");
-      assert.equal(git(dir, "rev-parse", "HEAD").trim(), head,
-        "HEAD must be untouched when the restore aborted");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

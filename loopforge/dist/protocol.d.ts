@@ -22,70 +22,12 @@ export interface ExecutionFeedback {
     manual_fixes_needed: string;
 }
 export declare function makeExecutionFeedback(overrides?: Partial<ExecutionFeedback>): ExecutionFeedback;
-/** P4: Structured execution evidence reported by the agent after each round.
- *  Gives LoopForge visibility into what actually happened — files changed,
- *  test results, success criteria met, and a subjective progress estimate.
- *  Enables the compiler to cross-validate agent claims and compute real progress. */
-export interface ExecutionEvidence {
-    /** Files changed in this round. Empty if no files were modified. */
-    files_changed: string[];
-    /** Test results. null if no tests were run. */
-    test_results: {
-        passed: number;
-        failed: number;
-        skipped: number;
-    } | null;
-    /** Success criteria from the Loop Objective that were MET this round. */
-    success_criteria_met: string[];
-    /** Success criteria from the Loop Objective that REMAIN unmet. */
-    success_criteria_remaining: string[];
-    /** Agent's own estimate of overall progress (0.0 to 1.0). */
-    progress_estimate: number;
-}
-export declare function makeExecutionEvidence(overrides?: Partial<ExecutionEvidence>): ExecutionEvidence;
 /** P5: A revision to a success criterion — the old form and the new form.
  *  The agent proposes this when it discovers the original criterion was
  *  wrong, unrealistic, or needs refinement. */
 export interface CriterionRevision {
     old: string;
     new: string;
-}
-/** v3.3: Round Contract. v3.4 semantics: the field on a submission is a
- *  PROPOSAL for the NEXT round — it becomes the ACTIVE contract (rendered
- *  as the Current Task and checked for execution conformance) only after
- *  the declaring round commits, and stays active until a committed eval
- *  lists every done_when item in success_criteria_met (complete) or
- *  reports outcome="blocked". While active it is restated unchanged each
- *  round; on completion or block, the next contract is declared instead.
- *  The ACTIVE contract is machine-derived from committed rounds
- *  (round-contract.ts) — never read from last_round_result. Optional:
- *  absent = no contract this round, all contract checks stay silent and
- *  rendering is identical to a contract-less round.
- *
- *  Every field is machine-checkable:
- *  - done_when items are claimed satisfied by listing them in
- *    execution_evidence.success_criteria_met (verified per-round claim
- *    model); leaving them out while success is claimed is premature_boundary
- *    against the ACTIVE contract.
- *  - verification_plan names must reference configured, enabled
- *    evidence.commands (round_unverifiable otherwise).
- *  - scope lists the files/directories the round may touch; actual git
- *    changes outside it trigger round_scope_drift against the ACTIVE
- *    contract. */
-export interface RoundContract {
-    /** Round focus, one line. Rendered as the Current Task's first line. */
-    work_item?: string;
-    /** Completion conditions: cr-XXXXXXXX criterion IDs or free text.
-     *  Claimed met = listed in success_criteria_met; still open = listed in
-     *  success_criteria_remaining. ≤ 20 items. */
-    done_when: string[];
-    /** Verification plan: names of configured, enabled evidence commands
-     *  (policy.evidence.commands[].name). ≤ 20 items. */
-    verification_plan: string[];
-    /** Files/directories this round may touch (workspace-relative paths,
-     *  forward or back slashes, "./" prefix and trailing slashes accepted).
-     *  Out-of-scope git changes = round_scope_drift. ≤ 50 items. */
-    scope: string[];
 }
 /** Structured self-evaluation submitted at the round boundary.
  *  The agent outputs this after completing each round.
@@ -132,7 +74,7 @@ export interface SelfEvaluation {
     /** P4: Structured evidence of what was executed this round.
      *  Files changed, test results, criteria met/remaining, progress estimate.
      *  Enables the compiler to validate claims and compute real progress. */
-    execution_evidence?: ExecutionEvidence;
+    execution_report?: ExecutionReport;
     /** P5: Constraints that the agent now believes are wrong or irrelevant.
      *  Removed from the active constraint set by the compiler.
      *  Omit or leave empty if none. */
@@ -156,11 +98,6 @@ export interface SelfEvaluation {
      *  The engine automatically writes these to the delegation journal.
      *  Omit or leave empty if no delegations occurred. */
     worker_results?: WorkerResult[];
-    /** v1.16: Agent's declared next action — what it plans to do in the
-     *  following round. Stored as loop state and rendered in the next prompt
-     *  so the agent's self-planning persists across rounds. Optional —
-     *  no next_action means the compiler generates the next task as before. */
-    next_action?: string;
     /** v2.5: Why the agent is stopping. Only meaningful when
      *  should_continue=false and success=false. Defaults to "gave_up"
      *  (current behavior) when absent. "blocked" means work cannot proceed
@@ -194,13 +131,6 @@ export interface SelfEvaluation {
      *  the round is rejected. Safe pre-work (investigation, dry-runs,
      *  rollback evidence) never needs a gate. */
     gate_ids?: string[];
-    /** v2.8: When the previous round's verification flagged intent_drift or
-     *  subgoal_drift, the agent explains why its actions diverged from its
-     *  stated plan. Populated from the self-eval block when the prompt
-     *  injected the field. Empty or absent when no drift was flagged.
-     *  Used by the enforcement gate R7 to distinguish intentional pivots
-     *  from unacknowledged drift. */
-    drift_clarification?: string;
     /** Model's information needs for the next round's prompt.
      *  Consumed by the Compiler — not durable across rounds. */
     prompt_requests?: PromptRequests;
@@ -209,7 +139,7 @@ export interface SelfEvaluation {
      *  it completes or blocks). Becomes the ACTIVE contract only once this
      *  round commits; it is then derived at compile time from committed
      *  rounds — see round-contract.ts. Optional. */
-    round_contract?: RoundContract;
+    round_contract?: RoundContractProposal;
 }
 /** v2.12: Tri-state round outcome. Declared via SelfEvaluation.outcome;
  *  derived from `success` when absent. Shared by the dual gates, the stop
@@ -225,13 +155,15 @@ export interface LoopProjection {
         what: string;
         since_round: number;
     } | null;
-    /** Suggested next steps: agent-declared intent vs compiler-derived
-     *  pending/blocked sub-goals. Non-authoritative. */
+    /** Suggested next steps, derived from the active contract, sub-goals, and
+     *  open gates/recovery requirements. Non-authoritative. v3.8: the
+     *  `agent_intent` source was deleted with `next_action` — the agent's own
+     *  plan is no longer a projection input. */
     todo: Array<{
         id: string;
         item: string;
         reason: string;
-        source: "derived" | "agent_intent";
+        source: "derived";
         priority: number;
     }>;
     /** Phase boundaries from milestone history. */
@@ -261,6 +193,12 @@ export interface LoopProjection {
         verified: string[];
         open_risks: string[];
     };
+    /** v3.8: Sub-goals a machine-verified contract item backs. The machine's
+     *  separate statement about a `done` sub-goal — it never rewrites
+     *  `SubGoal.status`. Derived in cognitive-facts.ts, exposed here so the
+     *  projection carries the same verification view the prompt and state file
+     *  do. */
+    verified_subgoals: VerifiedSubGoalFact[];
 }
 export declare function makeLoopProjection(overrides?: Partial<LoopProjection>): LoopProjection;
 /** v2.12: Structured high-risk action descriptor (internal — audit display
@@ -317,7 +255,7 @@ export interface PromptRequests {
  *  rolling-window eviction. Triggered by three signals in priority order:
  *
  *  1. agent_declared    — compression_checkpoint === true (agent marks phase complete)
- *  2. criteria_milestone — new success_criteria_met detected (semantic dedup)
+ *  2. criteria_milestone — a new met criterion_claim detected (semantic dedup)
  *  3. auto              — safety net after N rounds without a milestone
  *
  *  Built from raw round data in vault entries — no new persistent storage.
@@ -385,14 +323,19 @@ export interface LoopObjective {
     refinement_history?: string[];
 }
 /** v3.2: Derived per-criterion status for the progress dashboard — the
- *  "goal → criteria → evidence" vertical view. Zero persistence: derived from
- *  vault entries each round (met/remaining reports + Jaccard sub-goal links). */
+ *  "goal → criteria → evidence" vertical view. Zero persistence: derived
+ *  from committed rounds each round.
+ *
+ *  v3.8 states: `claimed` (the agent claims it met), `remaining` (declared
+ *  outstanding), `verified` (a verified contract item references it),
+ *  `contradicted` / `insufficient` (machine evidence denies / cannot back
+ *  the claim), `unknown` (never mentioned). */
 export interface CriterionStatus {
     /** Stable ID derived from the criterion text (cr-XXXXXXXX). */
     id: string;
     /** The criterion text as declared in the objective. */
     text: string;
-    status: "met" | "remaining" | "unknown";
+    status: "unknown" | "claimed" | "remaining" | "insufficient" | "contradicted" | "verified";
     /** Round when the criterion was first reported met (machine-backed). */
     met_at_round?: number;
     /** Sub-goals whose description matches this criterion (Jaccard). */
@@ -473,6 +416,9 @@ export interface SubGoal {
     completed_at_round?: number;
     /** Priority hint: 0 = highest. Derived from declaration order. */
     priority: number;
+    /** v3.8: The agent's note from the transition that set the current status.
+     *  Lenient — it never affects validation, only what the agent reads back. */
+    status_note?: string;
 }
 export declare function makeSubGoal(overrides?: Partial<SubGoal>): SubGoal;
 /** v2.3: Per-constraint lifecycle metadata for the active constraint set.
@@ -516,7 +462,7 @@ export interface LoopRoundResult {
      *  Set from SelfEvaluation.subgoal_updates during buildLoopRequest. */
     subgoal_updates?: SubGoalUpdate[];
     /** P4: Execution evidence from this round. */
-    execution_evidence?: ExecutionEvidence;
+    execution_report?: ExecutionReport;
     /** P5: Constraints retracted this round. */
     retracted_constraints?: string[];
     /** P5: Success criteria revised this round. */
@@ -530,11 +476,6 @@ export interface LoopRoundResult {
     compression_checkpoint?: boolean;
     /** v1.10: Human-readable label for the checkpoint. */
     checkpoint_label?: string;
-    /** v1.16: Agent's declared next action for the following round. */
-    next_action?: string;
-    /** v2.8: Agent's explanation for intent/subgoal drift detected in
-     *  the previous round. Carried forward from SelfEvaluation. */
-    drift_clarification?: string;
     /** Model's information needs for the next round's prompt.
      *  Carried forward from SelfEvaluation. Consumed by the Compiler. */
     prompt_requests?: PromptRequests;
@@ -695,7 +636,11 @@ export interface AgentLoopResult {
  *  `cancelled` is manual stop via loopforge_stop. */
 export type StopReason = "completed" | "failed" | "blocked" | "cancelled" | "max_rounds" | "stalled" | "enforcement_terminated"
 /** Loop was paused by user or signal. */
- | "paused";
+ | "paused"
+/** v3.8: The agent stopped, but machine verification did not close the
+ *  active contract (or the observations are insufficient to prove the task
+ *  complete). Never reported as `completed`. */
+ | "incomplete";
 /** Result of round-boundary enforcement. Decides whether to accept the round,
  *  reject it (force the agent to redo the SAME round), or terminate the loop.
  *
@@ -716,10 +661,10 @@ export interface EnforcementResult {
      *  Used by callers to track consecutive rejections per-rule
      *  so unrelated rejections don't accumulate toward the max. */
     check?: string;
-    /** v2.12: True when the enforcement gate accepted the round via
-     *  drift_clarification waiver (R7). The caller uses this to track
-     *  clarification streaks independently of rejection streaks. */
-    clarification_accepted?: boolean;
+    /** v3.8: The stop reason a `terminate` decision must map to. Absent means
+     *  the historical `enforcement_terminated`; `incomplete` is set by the
+     *  verification-debt row. */
+    stopReason?: StopReason;
 }
 export declare function makeEnforcementResult(overrides?: Partial<EnforcementResult>): EnforcementResult;
 /** Context supplied to an embedding-owned provider before compilation. */
@@ -770,5 +715,271 @@ export interface VerificationResult {
     flags: VerificationFlag[];
 }
 export declare function makeVerificationResult(overrides?: Partial<VerificationResult>): VerificationResult;
+/** v3.8: The agent's self-report for a round — renamed from ExecutionReport
+ *  because these fields are claims, not evidence. The whole object is
+ *  optional; a mistyped optional field is dropped with a warning and never
+ *  rejects the round. */
+export interface ExecutionReport {
+    /** Files the agent says it changed. Informational — compared against the
+     *  git observation, never trusted as the observation. */
+    files_changed?: string[];
+    /** Test counts the agent reports. Informational. */
+    tests_reported?: {
+        passed: number;
+        failed: number;
+        skipped: number;
+    } | null;
+    /** Advisory claims about objective criteria. LENIENT: unknown/duplicate
+     *  criterion ids and malformed outcomes are dropped with a warning. */
+    criterion_claims?: CriterionClaim[];
+    /** Claims about ACTIVE contract items. STRICT: an unknown/duplicate item id
+     *  or an illegal outcome is a structural defect (contract_invalid). */
+    contract_item_claims?: ContractItemClaim[];
+    /** The agent's own progress estimate (0.0–1.0). Informational. */
+    progress_estimate?: number;
+}
+export declare function makeExecutionReport(overrides?: Partial<ExecutionReport>): ExecutionReport;
+/** v3.8: An advisory claim about an objective criterion. Lenient by design —
+ *  the criterion layer is advisory; the contract item layer is the machine
+ *  verification skeleton. */
+export interface CriterionClaim {
+    /** cr-XXXXXXXX (or the criterion text for plain-text matching). */
+    criterion_id: string;
+    outcome: "met" | "remaining";
+}
+/** v3.8: A claim about an ACTIVE contract item, cited by the derived
+ *  rci-XXXXXXXX id the prompt rendered. */
+export interface ContractItemClaim {
+    item_id: string;
+    outcome: "met" | "remaining";
+}
+/** v3.8: One declared contract item. `verify_with` must name configured,
+ *  enabled, after-capable evidence commands — the declaration is strict.
+ *
+ *  `subgoal_refs` lives HERE, not on the contract: a machine-verified item
+ *  backs exactly the sub-goals it names, so "item A verifies SubGoal 1, item B
+ *  verifies SubGoal 2" is expressible and `VerifiedSubGoalFact` attribution is
+ *  per-item instead of "every verified item backs every sub-goal". */
+export interface ContractItemProposal {
+    description: string;
+    /** cr-XXXXXXXX criterion ids this item is evidence for (or free text). */
+    criterion_refs: string[];
+    /** sg-XXXXXXXX sub-goals this item is evidence for. */
+    subgoal_refs: string[];
+    /** Evidence command ids (policy.evidence.commands[].name). */
+    verify_with: string[];
+}
+/** v3.8: A Round Contract proposal for the NEXT round. It becomes ACTIVE only
+ *  after the declaring round commits. Identity (rc-/rci-) is derived from
+ *  CONTENT ONLY — restating an unchanged contract keeps the same identity,
+ *  unlike a SubGoal whose id includes its declaration round. */
+export interface RoundContractProposal {
+    work_item?: string;
+    /** Files/directories the round may touch. Empty = no scope constraint. */
+    scope: string[];
+    items: ContractItemProposal[];
+}
+/** v3.8: The machine's record of what a contract bound at its declaration
+ *  round. Stamped by the runtime when the declaring round COMMITS (policy is
+ *  not part of the Vault, so the command configuration in force at
+ *  declaration could not otherwise be recovered). It is machine-recomputed,
+ *  never agent-supplied, and adds no second truth. */
+export interface ContractBinding {
+    rc_id: string;
+    item_ids: string[];
+    config_hash_by_command: Record<string, string>;
+}
+/** v3.8: Runtime-derived contract item status. The agent may only claim
+ *  `met` / `remaining`; the other three are machine-derived. */
+export type ContractItemStatus = "pending" | "insufficient" | "contradicted" | "verified";
+/** v3.8: A contract item carrying its runtime-derived rci-XXXXXXXX identity. */
+export interface ActiveContractItem extends ContractItemProposal {
+    id: string;
+}
+/** v3.8: The ACTIVE contract derived from committed rounds.
+ *
+ *  `config_hash_by_command` is stamped at commit time: the declaration round
+ *  records the command configuration it was declared against, so the closing
+ *  round can prove the config did not change under the agent (policy itself
+ *  is not part of the Vault). The stamp is machine-recomputed, never
+ *  agent-supplied, and adds no second truth. */
+export interface ActiveRoundContract extends RoundContractProposal {
+    /** rc-XXXXXXXX — derived from loopId + canonicalized content. */
+    id: string;
+    /** The round that declared the proposal that became active. A fact, not
+     *  part of the identity hash. */
+    declared_at_round: number;
+    items: ActiveContractItem[];
+    config_hash_by_command: Record<string, string>;
+}
+/** v3.8: The round-level verification posture. `trusted` means every claim in
+ *  the round is machine-backed; `insufficient` means claims are unbacked but
+ *  not contradicted; `contradicted` means machine facts deny a claim. */
+export type RoundVerificationStatus = "trusted" | "insufficient" | "contradicted";
+/** v3.8: Machine observation status. A configured provider always produces an
+ *  observation — the failure modes are recorded, not filtered away. */
+export type ObservationStatus = "observed" | "passed" | "failed" | "timeout" | "unavailable" | "error" | "aborted";
+/** v3.8: Common machine-observation fields. Observations are the factual
+ *  record of what the machine saw; they are persisted with the round and are
+ *  the only input that can create a `verified` fact. */
+export interface MachineObservationBase {
+    schemaVersion: 1;
+    providerId: string;
+    kind: "git" | "command" | "custom";
+    phase: "before" | "after";
+    startedAt: number;
+    finishedAt: number;
+    status: ObservationStatus;
+    /** Files this observation reports (git: changed paths; command: resolved
+     *  entrypoint files). */
+    files: string[];
+}
+export interface GitObservationData {
+    tracked: string[];
+    staged: string[];
+    untracked: string[];
+    /** path -> "<mode>:<sha256>" (or the literal "missing"). */
+    fingerprints: Record<string, string>;
+    head?: string;
+}
+export interface GitObservation extends MachineObservationBase {
+    kind: "git";
+    data: GitObservationData;
+}
+export interface CommandObservationData {
+    commandId: string;
+    argv: string[];
+    cwd: string;
+    /** sha256 of the normalized command configuration at capture time. */
+    configHash: string;
+    required: boolean;
+    exitCode: number | null;
+    signal: string | null;
+    durationMs: number;
+    /** Why a non-passed observation did not pass (e.g. "ENOENT", "cwd leaves
+     *  the workspace"). Free text for the audit trail — never a verdict. */
+    failureDetail?: string;
+    /** sha256 over the FULL stdout stream — never the truncated excerpt. */
+    stdoutSha256: string;
+    /** sha256 over the FULL stderr stream. */
+    stderrSha256: string;
+    stdoutExcerpt: string;
+    stderrExcerpt: string;
+    truncated: boolean;
+    entrypointFiles: string[];
+}
+export interface CommandObservation extends MachineObservationBase {
+    kind: "command";
+    data: CommandObservationData;
+}
+export interface CustomObservation extends MachineObservationBase {
+    kind: "custom";
+    data: Record<string, unknown>;
+}
+export type MachineObservation = GitObservation | CommandObservation | CustomObservation;
+/** v3.8: Static, policy-derived verification capability. A pure function of
+ *  policy — no probing, no filesystem, no provider registry — so it can be
+ *  hashed into stateHash and reproduced by replay/audit from committed facts.
+ *  Provider REGISTRATION is code state and is deliberately excluded; it is
+ *  reported as an unhashed readiness diagnostic instead. */
+export interface ConfiguredCapability {
+    schemaVersion: 1;
+    providers: Array<{
+        providerId: string;
+    }>;
+    commands: Array<{
+        commandId: string;
+        enabled: boolean;
+        phase: "after" | "both";
+        required: boolean;
+        configHash: string;
+    }>;
+    /** policy.evidence.providers is non-empty. */
+    observationConfigured: boolean;
+    /** At least one enabled, after-capable command. */
+    contractVerificationAvailable: boolean;
+}
+/** v3.8: Live observation capability. Rendered only — never hashed, never
+ *  persisted independently of the observations it is derived from. */
+export interface ObservedCapability {
+    providers: Array<{
+        providerId: string;
+        status: ObservationStatus;
+    }>;
+    commands: Array<{
+        commandId: string;
+        status: ObservationStatus;
+        configHash: string;
+    }>;
+}
+/** v3.8: The single capability fact a prepared round returns — the union of
+ *  the two halves, split so that only the POLICY half is hashable.
+ *
+ *  `ConfiguredCapability` is a pure function of policy and feeds
+ *  `stateHash`/`promptHash`; `ObservedCapability` carries live statuses and is
+ *  rendered only. `provider.available` is provider-REGISTRY state (code, not
+ *  policy) and therefore never enters the hash either — it is reported here and
+ *  by `doctor`. Every surface that speaks about capability (prepare, MCP
+ *  start/resume/next/status, warnings) derives from this one function so they
+ *  cannot drift apart. */
+export interface EvidenceCapability {
+    schemaVersion: 1;
+    providers: Array<{
+        providerId: string;
+        /** A factory for this name is registered in this runtime. */
+        available: boolean;
+        status: ObservationStatus;
+    }>;
+    commands: Array<{
+        commandId: string;
+        enabled: boolean;
+        phase: "after" | "both";
+        configHash: string;
+        /** Enabled and after-capable — i.e. usable as a contract item's evidence. */
+        ready: boolean;
+    }>;
+    contractVerificationAvailable: boolean;
+    /** Human-readable capability gaps (the same text start/resume/status show). */
+    warnings: string[];
+}
+/** v3.8: A machine-verified sub-goal fact. DERIVED in cognitive-facts.ts,
+ *  never persisted: it exists only while a committed contract item references
+ *  the sub-goal AND that item is verified. It never writes SubGoal.status —
+ *  `done` stays the agent's declaration. */
+export interface VerifiedSubGoalFact {
+    subgoal_id: string;
+    contract_item_ids: string[];
+    verified_at_round: number;
+}
+/** v3.8: The STABLE error codes every tool answers with. A client can branch
+ *  on these; the human sentence rides in `ToolError.message` and never doubles
+ *  as the code.
+ *
+ *  - `evaluation_invalid` / `contract_invalid` / `policy_invalid` — a payload
+ *    or configuration defect; the same roundId may be retried.
+ *  - `round_id_required` / `round_id_mismatch` — the anchor is missing or no
+ *    longer names the current round.
+ *  - `session_not_found` / `state_unavailable` — the named session or read
+ *    model is not there.
+ *  - `invalid_argument` — the request itself is malformed at the tool boundary.
+ *  - `gate_disabled` / `loop_already_running` — a state condition, not a defect.
+ *
+ *  Note: a `loopforge_next` submission whose roundId no longer matches is NOT
+ *  `round_id_mismatch` — it returns the held prompt with a warning and
+ *  `ok: true` so the agent can recover the response it missed. That recovery
+ *  contract (v3.0.1) is deliberate; `round_id_mismatch` is for the places with
+ *  no held prompt to return (the gate preflight). */
+export type ToolErrorCode = "evaluation_invalid" | "contract_invalid" | "policy_invalid" | "session_not_found" | "round_id_required" | "round_id_mismatch" | "state_unavailable" | "invalid_argument" | "gate_disabled" | "loop_already_running";
+/** v3.8: The structured error inside the uniform `{ok: false}` envelope. */
+export interface ToolError {
+    code: ToolErrorCode;
+    /** Human-readable cause. Never the code. */
+    message: string;
+    /** Whether the fix is a corrected payload the agent may resend. */
+    retryable: boolean;
+    sessionId?: string;
+    roundId?: string;
+    details?: Record<string, unknown>;
+}
 export declare function makeTaskId(taskDescription: string): string;
 //# sourceMappingURL=protocol.d.ts.map

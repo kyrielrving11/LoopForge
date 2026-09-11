@@ -26,17 +26,17 @@ import { FileLoopStore } from "../loop-store.js";
 import { SessionManager } from "../mcp/session.js";
 import { resetPolicy, setPolicyForTest, DEFAULT_POLICY } from "../policy.js";
 import type { SelfEvaluation } from "../protocol.js";
+import { criterionClaims } from "./_helpers.js";
 
 const continuingEvaluation = (): SelfEvaluation => ({
   success: false,
   output_summary: "made progress",
   constraint_violations: [],
   should_continue: true,
-  execution_evidence: {
+  execution_report: {
     files_changed: ["src/a.ts"],
-    test_results: { passed: 1, failed: 0, skipped: 0 },
-    success_criteria_met: [],
-    success_criteria_remaining: ["more"],
+    tests_reported: { passed: 1, failed: 0, skipped: 0 },
+    criterion_claims: criterionClaims([], ["more"]),
     progress_estimate: 0.5,
   },
 });

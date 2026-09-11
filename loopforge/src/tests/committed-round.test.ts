@@ -6,6 +6,7 @@ import {
   historyRounds,
 } from "../committed-round.js";
 import { committedFeedbackRound, mergedLineageRound } from "./_helpers.js";
+import { claimedMetCriteria } from "../self-eval.js";
 
 describe("CommittedRoundView", () => {
   it("normalizes durable and hydrated representations to the same facts", () => {
@@ -27,8 +28,8 @@ describe("CommittedRoundView", () => {
     const durable = decodeCommittedRound(raw)!;
     const hydrated = decodeMergedRound(merged)!;
     assert.deepEqual(
-      [durable.round, durable.attempt, durable.outcome, durable.executionEvidence?.success_criteria_met],
-      [hydrated.round, hydrated.attempt, hydrated.outcome, hydrated.executionEvidence?.success_criteria_met],
+      [durable.round, durable.attempt, durable.outcome, claimedMetCriteria(durable.executionReport)],
+      [hydrated.round, hydrated.attempt, hydrated.outcome, claimedMetCriteria(hydrated.executionReport)],
     );
     assert.equal(durable.sequence, 2);
   });
@@ -54,13 +55,13 @@ describe("CommittedRoundView", () => {
     assert.equal(history[0]?.outcome, "blocked");
   });
 
-  it("accepts the current direct-feedback envelope without inventing persisted state", () => {
+  it("rejects an envelope without a parseable snapshot (v3.8 hard break)", () => {
+    // v3.8: the transaction schema is a hard version break — an envelope that
+    // does not parse is not committed history. legacyTransactionRounds()
+    // reports the loss explicitly instead of decoding a partial view.
     const entry = committedFeedbackRound(1, { loopId: "view" });
     const transaction = entry.loop_lineage!.round_transaction as Record<string, unknown>;
     delete transaction.snapshot;
-    const decoded = decodeCommittedRound(entry);
-    assert.equal(decoded?.round, 1);
-    assert.equal(decoded?.action, "continue");
-    assert.equal(decoded?.evaluation, null);
+    assert.equal(decodeCommittedRound(entry), null);
   });
 });

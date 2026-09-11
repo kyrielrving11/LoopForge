@@ -27,7 +27,7 @@ import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { createInterface, Interface } from "node:readline";
 import { fileURLToPath } from "node:url";
-import { testCommandProvider } from "./_helpers.js";
+import { testCommandProvider, criterionClaims } from "./_helpers.js";
 
 const CLI_PATH = resolve(dirname(fileURLToPath(import.meta.url)), "..", "cli.js");
 
@@ -135,7 +135,7 @@ describe("Long-Horizon Verification", () => {
       success: false, should_continue: true, constraint_violations: [],
       output_summary: "Implemented isPalindrome and capitalize. Discovered package.json needs type:module for ESM.",
       discovered_constraints: ["package.json must include type:module for ESM resolution"],
-      execution_evidence: { files_changed: ["src/strkit.ts", "package.json"], test_results: { passed: 0, failed: 0, skipped: 0 }, success_criteria_met: ["isPalindrome", "capitalize"], success_criteria_remaining: ["Write tests", "Implement truncate + toCamelCase"], progress_estimate: 0.2 },
+      execution_report: { files_changed: ["src/strkit.ts", "package.json"], tests_reported: { passed: 0, failed: 0, skipped: 0 }, criterion_claims: criterionClaims(["isPalindrome", "capitalize"], ["Write tests", "Implement truncate + toCamelCase"]), progress_estimate: 0.2 },
     }});
     assert.ok(!r.error); assert.equal(String(r.level ?? "").toLowerCase(), "l1"); assert.equal(r.round, 2);
     roundId = String(r.roundId);
@@ -152,7 +152,7 @@ describe("Long-Horizon Verification", () => {
       output_summary: "Wrote tests for isPalindrome and capitalize. isPalindrome passes (3/3), capitalize fails on empty string. Declaring checkpoint.",
       discovered_constraints: ["All functions must handle empty string input gracefully"],
       compression_checkpoint: true, checkpoint_label: "core-functions-complete",
-      execution_evidence: { files_changed: ["src/strkit.test.ts"], test_results: { passed: 3, failed: 1, skipped: 0 }, success_criteria_met: [], success_criteria_remaining: ["Fix capitalize bug", "Implement truncate + toCamelCase"], progress_estimate: 0.3 },
+      execution_report: { files_changed: ["src/strkit.test.ts"], tests_reported: { passed: 3, failed: 1, skipped: 0 }, criterion_claims: criterionClaims([], ["Fix capitalize bug", "Implement truncate + toCamelCase"]), progress_estimate: 0.3 },
     }});
     assert.ok(!r.error);
     // R2's eval declared compression_checkpoint → R3 prompt is L2.
@@ -174,7 +174,7 @@ describe("Long-Horizon Verification", () => {
       success: false, should_continue: true, constraint_violations: [],
       output_summary: "Fixed capitalize empty-string. All tests pass (6/6). Return types must be consistent.",
       discovered_constraints: ["Function return types must be consistent — always return string"],
-      execution_evidence: { files_changed: ["src/strkit.ts", "src/strkit.test.ts"], test_results: { passed: 6, failed: 0, skipped: 0 }, success_criteria_met: ["isPalindrome + capitalize tested"], success_criteria_remaining: ["Implement truncate + toCamelCase"], progress_estimate: 0.4 },
+      execution_report: { files_changed: ["src/strkit.ts", "src/strkit.test.ts"], tests_reported: { passed: 6, failed: 0, skipped: 0 }, criterion_claims: criterionClaims(["isPalindrome + capitalize tested"], ["Implement truncate + toCamelCase"]), progress_estimate: 0.4 },
     }});
     assert.ok(!r.error);
     assert.equal(String(r.level ?? "").toLowerCase(), "l1");
@@ -190,7 +190,7 @@ describe("Long-Horizon Verification", () => {
       success: false, should_continue: true, constraint_violations: [],
       output_summary: "Implemented truncate with tests (9/9 pass). Unicode edge cases handled.",
       discovered_constraints: ["truncate must handle unicode multi-byte characters"],
-      execution_evidence: { files_changed: ["src/strkit.ts", "src/strkit.test.ts"], test_results: { passed: 9, failed: 0, skipped: 0 }, success_criteria_met: ["truncate done"], success_criteria_remaining: ["Implement toCamelCase", "Write toCamelCase tests"], progress_estimate: 0.55 },
+      execution_report: { files_changed: ["src/strkit.ts", "src/strkit.test.ts"], tests_reported: { passed: 9, failed: 0, skipped: 0 }, criterion_claims: criterionClaims(["truncate done"], ["Implement toCamelCase", "Write toCamelCase tests"]), progress_estimate: 0.55 },
     }});
     assert.ok(!r.error); assert.equal(String(r.level ?? "").toLowerCase(), "l1"); assert.equal(r.round, 5);
     roundId = String(r.roundId);
@@ -205,7 +205,7 @@ describe("Long-Horizon Verification", () => {
       output_summary: "Implemented toCamelCase (13/13 pass). R3 empty-string constraint was wrong — each function handles edges naturally.",
       retracted_constraints: ["All functions must handle empty string input gracefully"],
       wrong_assumptions: ["Assumed empty strings needed per-function special-case handling"],
-      execution_evidence: { files_changed: ["src/strkit.ts", "src/strkit.test.ts"], test_results: { passed: 13, failed: 0, skipped: 0 }, success_criteria_met: ["All four functions done"], success_criteria_remaining: ["Integration tests", "Verify no runtime deps"], progress_estimate: 0.7 },
+      execution_report: { files_changed: ["src/strkit.ts", "src/strkit.test.ts"], tests_reported: { passed: 13, failed: 0, skipped: 0 }, criterion_claims: criterionClaims(["All four functions done"], ["Integration tests", "Verify no runtime deps"]), progress_estimate: 0.7 },
     }});
     assert.ok(!r.error); assert.equal(String(r.level ?? "").toLowerCase(), "l1"); assert.equal(r.round, 6);
     roundId = String(r.roundId);
@@ -220,7 +220,7 @@ describe("Long-Horizon Verification", () => {
       output_summary: "Integration tests pass (13/13). Refined objective: add validateAndTransform pipeline.",
       objective_refinement: "The library should provide validateAndTransform(input, fns[]) pipeline utility",
       emerged_subtasks: ["Implement validateAndTransform pipeline", "Add pipeline integration tests"],
-      execution_evidence: { files_changed: ["src/strkit.ts"], test_results: { passed: 13, failed: 0, skipped: 0 }, success_criteria_met: ["Core functions done"], success_criteria_remaining: ["Implement pipeline", "Verify no runtime deps", "Final polish"], progress_estimate: 0.75 },
+      execution_report: { files_changed: ["src/strkit.ts"], tests_reported: { passed: 13, failed: 0, skipped: 0 }, criterion_claims: criterionClaims(["Core functions done"], ["Implement pipeline", "Verify no runtime deps", "Final polish"]), progress_estimate: 0.75 },
     }});
     assert.ok(!r.error); assert.equal(r.round, 7); roundId = String(r.roundId); LL.push(`R7:${String(r.level ?? "").toUpperCase() || '?'}`);
   });
@@ -231,7 +231,7 @@ describe("Long-Horizon Verification", () => {
     const r = await client.tool("loopforge_next", { sessionId, roundId, evaluation: {
       success: true, should_continue: true, constraint_violations: [],
       output_summary: "Implemented validateAndTransform. Everything works!",
-      execution_evidence: { files_changed: ["src/pipeline.ts"], test_results: { passed: 15, failed: 0, skipped: 0 }, success_criteria_met: ["pipeline done"], success_criteria_remaining: ["Verify no runtime deps", "Final lint"], progress_estimate: 0.82 },
+      execution_report: { files_changed: ["src/pipeline.ts"], tests_reported: { passed: 15, failed: 0, skipped: 0 }, criterion_claims: criterionClaims(["pipeline done"], ["Verify no runtime deps", "Final lint"]), progress_estimate: 0.82 },
     }});
     assert.ok(!r.error);
     assert.equal(r.enforcementAction, "reject");
@@ -251,7 +251,7 @@ describe("Long-Horizon Verification", () => {
       success: false, should_continue: true, constraint_violations: [],
       output_summary: "Reverted false claim. Implemented pipeline with full tests. Verified no runtime deps. 17/17 pass.",
       discovered_constraints: ["validateAndTransform pipeline pattern confirmed correct"],
-      execution_evidence: { files_changed: ["src/strkit.ts", "src/pipeline.ts", "src/pipeline.test.ts"], test_results: { passed: 17, failed: 0, skipped: 0 }, success_criteria_met: ["pipeline done", "no runtime deps"], success_criteria_remaining: ["Final polish"], progress_estimate: 0.9 },
+      execution_report: { files_changed: ["src/strkit.ts", "src/pipeline.ts", "src/pipeline.test.ts"], tests_reported: { passed: 17, failed: 0, skipped: 0 }, criterion_claims: criterionClaims(["pipeline done", "no runtime deps"], ["Final polish"]), progress_estimate: 0.9 },
     }});
     assert.ok(!r.error);
     // Retry accepted → session advances to round 8.
@@ -273,7 +273,7 @@ describe("Long-Horizon Verification", () => {
     const r = await client.tool("loopforge_next", { sessionId, roundId, evaluation: {
       success: false, should_continue: true, constraint_violations: [],
       output_summary: "Ran linter, added JSDoc, updated README. All 17 tests pass. Ready to ship.",
-      execution_evidence: { files_changed: ["src/strkit.ts", "src/pipeline.ts", "README.md"], test_results: { passed: 17, failed: 0, skipped: 0 }, success_criteria_met: ["Final polish"], success_criteria_remaining: [], progress_estimate: 0.98 },
+      execution_report: { files_changed: ["src/strkit.ts", "src/pipeline.ts", "README.md"], tests_reported: { passed: 17, failed: 0, skipped: 0 }, criterion_claims: criterionClaims(["Final polish"], []), progress_estimate: 0.98 },
     }});
     assert.ok(!r.error);
     // previousFailedWithoutNewInfo fires (priority before periodic_refresh)
@@ -289,7 +289,7 @@ describe("Long-Horizon Verification", () => {
     const r = await client.tool("loopforge_next", { sessionId, roundId, evaluation: {
       success: true, should_continue: false, constraint_violations: [],
       output_summary: "All functions implemented, tested (17/17), documented. No runtime deps. ESM confirmed. Task complete.",
-      execution_evidence: { files_changed: [], test_results: { passed: 17, failed: 0, skipped: 0 }, success_criteria_met: ["All functions", "Pipeline", "No runtime deps", "Final polish"], success_criteria_remaining: [], progress_estimate: 1.0 },
+      execution_report: { files_changed: [], tests_reported: { passed: 17, failed: 0, skipped: 0 }, criterion_claims: criterionClaims(["All functions", "Pipeline", "No runtime deps", "Final polish"]), progress_estimate: 1.0 },
     }});
     assert.ok(!r.error);
     assert.equal(String(r.stopReason ?? ""), "completed");
@@ -367,148 +367,3 @@ describe("Long-Horizon Verification", () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// v3.5 — Round Contract arc through the real CLI (own loop, own store)
-//
-// declare → active → machine-backed completion → proposal transition →
-// premature success rejected (retry keeps the ACTIVE contract) → terminal
-// completion. machine_backed_success "required" + the passing "verify"
-// command make completion claims machine-backed on every round.
-// ═══════════════════════════════════════════════════════════════════════════
-
-describe("Long-Horizon — Round Contract arc (v3.5)", () => {
-  let client: McpClient;
-  let storeDir: string;
-  let sessionId: string;
-  let roundId: string;
-
-  const CONTRACT = (workItem: string, doneWhen: string): Record<string, unknown> => ({
-    work_item: workItem,
-    done_when: [doneWhen],
-    verification_plan: ["verify"],
-    scope: ["src"],
-  });
-  const A = CONTRACT("Implement arg parsing", "cr-parse-args");
-  const B = CONTRACT("Implement output formatting", "cr-format-out");
-
-  before(() => {
-    storeDir = join(tmpdir(), `loopforge-contract-${randomUUID()}`);
-    mkdirSync(storeDir, { recursive: true });
-    writeFileSync(join(storeDir, "loop_policy.json"), JSON.stringify({
-      evidence: {
-        providers: ["git"],
-        timeout_ms: 120000,
-        commands: [testCommandProvider()],
-        machine_backed_success: "required",
-      },
-    }));
-    client = new McpClient(storeDir);
-  });
-  after(() => { client.close(); try { rmSync(storeDir, { recursive: true }); } catch { /* ok */ } });
-
-  const evalRound = (overrides: Record<string, unknown>): Record<string, unknown> => ({
-    success: false,
-    should_continue: true,
-    constraint_violations: [],
-    output_summary: "Worked the round.",
-    execution_evidence: {
-      files_changed: ["src/cli.ts"],
-      test_results: { passed: 1, failed: 0, skipped: 0 },
-      success_criteria_met: [],
-      success_criteria_remaining: ["cr-parse-args"],
-      progress_estimate: 0.3,
-    },
-    ...overrides,
-  });
-
-  it("drives the full contract arc end-to-end", async () => {
-    // R1 — declare A.
-    const r1 = await client.tool("loopforge_start", {
-      task: "Build the strkit CLI module",
-      maxRounds: 8,
-      domain: "typescript",
-    });
-    assert.ok(!r1.error);
-    sessionId = String(r1.sessionId);
-    roundId = String(r1.roundId);
-    const r2p = await client.tool("loopforge_next", { sessionId, roundId, evaluation: evalRound({
-      output_summary: "Scaffolded; declared the parsing contract.",
-      round_contract: A,
-    }) });
-    assert.ok(!r2p.error);
-    assert.equal(String(r2p.round), "2");
-    assert.ok(String(r2p.prompt ?? "").includes("**Implement arg parsing**"),
-      "round 2 must execute under the ACTIVE contract A");
-    roundId = String(r2p.roundId);
-
-    // R2 — partial restate under A.
-    const r3p = await client.tool("loopforge_next", { sessionId, roundId, evaluation: evalRound({
-      round_contract: A,
-      execution_evidence: {
-        files_changed: ["src/cli.ts"],
-        test_results: { passed: 1, failed: 0, skipped: 0 },
-        success_criteria_met: [],
-        success_criteria_remaining: ["cr-parse-args"],
-        progress_estimate: 0.4,
-      },
-    }) });
-    assert.ok(!r3p.error);
-    roundId = String(r3p.roundId);
-
-    // R3 — complete A (machine-backed by the auto-run verify command) and
-    // propose B.
-    const r4p = await client.tool("loopforge_next", { sessionId, roundId, evaluation: evalRound({
-      round_contract: B,
-      execution_evidence: {
-        files_changed: ["src/cli.ts"],
-        test_results: { passed: 1, failed: 0, skipped: 0 },
-        success_criteria_met: ["cr-parse-args"],
-        success_criteria_remaining: [],
-        progress_estimate: 0.6,
-      },
-    }) });
-    assert.ok(!r4p.error);
-    assert.ok(!String(r4p.prompt ?? "").includes("contract_completion_unverified"),
-      "machine-backed completion must not be flagged");
-    assert.ok(String(r4p.prompt ?? "").includes("**Implement output formatting**"),
-      "B must become the ACTIVE contract");
-    assert.ok(!String(r4p.prompt ?? "").includes("**Implement arg parsing**"),
-      "A must be closed, not re-rendered");
-    roundId = String(r4p.roundId);
-
-    // R4 — premature success under B → rejected; the L0 retry keeps B.
-    const rejected = await client.tool("loopforge_next", { sessionId, roundId, evaluation: evalRound({
-      success: true,
-      should_continue: true,
-      execution_evidence: {
-        files_changed: ["src/cli.ts"],
-        test_results: { passed: 1, failed: 0, skipped: 0 },
-        success_criteria_met: [],
-        success_criteria_remaining: ["cr-format-out"],
-        progress_estimate: 0.7,
-      },
-    }) });
-    assert.ok(!rejected.error);
-    assert.equal(String(rejected.enforcementAction ?? ""), "reject");
-    assert.equal(String(rejected.level ?? "").toLowerCase(), "l0");
-    assert.ok(String(rejected.prompt ?? "").includes("**Implement output formatting**"),
-      "the retry must keep the ACTIVE contract as Current Task");
-    assert.ok(!String(rejected.prompt ?? "").includes("round_contract"),
-      "L0 retry stays template-lean");
-    roundId = String(rejected.roundId);
-
-    // R5 — complete B and end the loop.
-    const done = await client.tool("loopforge_next", { sessionId, roundId, evaluation: evalRound({
-      success: true,
-      should_continue: false,
-      execution_evidence: {
-        files_changed: ["src/cli.ts"],
-        test_results: { passed: 1, failed: 0, skipped: 0 },
-        success_criteria_met: ["cr-format-out"],
-        success_criteria_remaining: [],
-        progress_estimate: 1.0,
-      },
-    }) });
-    assert.ok(!done.error);
-    assert.equal(String(done.stopReason ?? ""), "completed");
-  });
-});

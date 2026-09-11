@@ -55,7 +55,13 @@ temporary clean mirror when a HEAD comparison is required.
 loopforge/src/
   protocol.ts           Public protocol types and constructors
   self-eval.ts          Structured evaluation validation and lenient optional
-                        field normalization
+                        field normalization; the strict contract declaration
+                        and item-claim boundary (contract_invalid)
+  subgoal-state.ts      Sub-goal lifecycle — round-scoped ids, the closed
+                        transition matrix, committed-view replay, and the
+                        similarity diagnostic
+  contract-items.ts     Contract item status reducer (pending / insufficient /
+                        contradicted / verified) and closure
   committed-round.ts    Single read model for committed feedback and hydrated
                         lineage; decoding, ordering, deduplication, rollback
                         exclusion, and transaction extraction
@@ -67,16 +73,17 @@ loopforge/src/
   engine.ts             Engine state, feedback, and lineage hydration
   round-driver.ts       Shared round preparation and completion
   round-transaction.ts  Stable round identity, attempts, evidence, and recovery
-  round-contract.ts     Active Round Contract derivation and item matching
+  round-contract.ts     Active Round Contract derivation; content-addressed
+                        rc-/rci- identity and the closure walker
   round-coordinator.ts  Verification, enforcement, recovery, and stop decisions
   verification-gate.ts  Independent evidence and cross-round consistency checks
-                        (four verification domains: evaluation consistency /
-                        evidence integrity / plan & contract / progress &
-                        recovery)
-  enforcement-gate.ts   Disposition rules over an in-process strategy table
-                        (four action classes: evidence contradiction / contract
-                        & scope / plan drift / progress recovery)
+                        (20 checks in four verification domains: evaluation
+                        consistency / evidence integrity / plan & contract /
+                        progress & recovery)
+  enforcement-gate.ts   Disposition rules over an in-process strategy table,
+                        including the bounded verification-debt escalation
   evidence-claims.ts    Derived claim provenance and verified-claim views
+  explain.ts            Read-only per-round "why" view over committed facts
   cognitive-governance.ts User and agent gate classification
   loop-projection.ts    Typed adapter over DerivedCognitiveFacts
   audit.ts              Read-only completeness and evidence audit
@@ -126,8 +133,8 @@ values are ignored or defaulted and do not reject a submission. Missing or
 mistyped core fields return `evaluation_invalid` with details and may be retried
 with the same `roundId`.
 
-One documented exception keeps `evaluation_invalid` semantics: `subgoal_updates`
-is a strict STRUCTURAL boundary — it carries machine-processable sub-goal state
+Two documented exceptions keep strict pre-advance semantics. `subgoal_updates`
+is a STRUCTURAL boundary — it carries machine-processable sub-goal state
 transitions. Shape errors (bad ids/statuses, `sg-XXXXXXXX` literals in
 `emerged_subtasks`), unknown sub-goal references, terminal (done/canceled)
 references, and illegal migrations are rejected pre-advance against the SAME
@@ -135,6 +142,25 @@ derived sub-goal set the agent saw in its prompt (single derivation, compiled
 read-only). It returns `evaluation_invalid` like core-field errors: no session
 state, no gates, no rejection counters, same-roundId retry. Worker results and
 `gate_ids` stay lenient (entry-level drops / citation checks only).
+
+`round_contract` and `execution_report.contract_item_claims` are the second
+strict boundary, returning `contract_invalid` with the same guarantees. The
+validator receives its reference space as a context object
+(`ContractValidationContext`): the ACTIVE contract's item ids, the known
+sub-goal ids (the compiled set plus this submission's own `emerged_subtasks`,
+so a sub-goal may be created and referenced in one round), the command
+predicate, and an injected workspace-containment check. Each is null when it
+cannot be observed, in which case that arm fails open while the shape checks
+stay strict. Malformed, duplicated or unknown item ids are rejected
+pre-advance against the SAME derived ACTIVE contract the agent saw.
+`criterion_claims` stays lenient: unknown or malformed entries are dropped with
+a warning, because the criterion layer is advisory while the contract item
+layer is the verification skeleton.
+
+v3.8 also renamed the agent's report: `ExecutionEvidence` → `ExecutionReport`
+(field `execution_report`), with `criterion_claims` and `contract_item_claims`
+replacing the old `success_criteria_met` / `success_criteria_remaining` string
+arrays. No field of that report can create a `verified` fact.
 
 An invalid evaluation is handled before `RoundLifecycle.advance()`. It must not
 save session state, write the Vault, run verification or enforcement gates,
@@ -163,9 +189,23 @@ runs verification and enforcement, and then applies one disposition:
   COMMITTED rounds above the restore point plus the in-flight attempt; rejected
   payloads are not durable history and never become a source. The brief renders
   in the backtrack prompt and the state file's Recent tier, and exits by
-  construction when the redo commit replaces the rollback record.
+  construction when the redo commit replaces the rollback record. The prompt
+  states restore FACTS only — the target HEAD and the files that must be
+  reverted — and never prescribes a git command: LoopForge neither mutates the
+  working tree nor dictates the means. The agent owns the restore; the gate
+  owns the check.
 - Terminate returns a terminal result without committing the rejected or
   terminating evaluation as a normal round.
+
+Stop reasons are decided in one order: an explicit blocked declaration
+(`outcome: "blocked"`, or `stop_reason: "blocked"` / `"needs_human_input"`)
+outranks the success claim, so a contradictory payload can never buy
+`completed`. `completed` then requires `effectiveSuccess` AND a contract that
+is closed as `verified` (or no active contract at all); a `blocked` closure
+does not satisfy it. An unverified success stop is `incomplete`. A contradicted
+item never reaches `completed` — closure is `verified` only when every item is
+— and turning that posture into a reject/terminate is the enforcement gate's
+job, evaluated before the stop decision.
 
 Round IDs prevent lost responses and duplicate submissions from skipping or
 double-committing a round. Transaction recovery is idempotent after a process
@@ -179,9 +219,10 @@ into four verification domains: evaluation consistency, evidence integrity,
 plan & contract conformance, and progress & recovery. The enforcement gate
 turns verification results into accept, reject, backtrack, or terminate
 decisions through one ordered in-process strategy table; its rows fall into
-four action classes (evidence contradiction, contract & scope, plan drift,
-progress recovery). Rule numbers are historical — v3.7 documents semantics,
-not numbered rules. Success evidence is a single policy: a success claim with
+action classes (evidence contradiction, contract & scope, progress recovery).
+Rule numbers are historical — v3.8 documents semantics, not numbered rules.
+The verification check set is 20 (evaluation_consistency 8, evidence_integrity
+7, plan_contract 4, progress_recovery 1). Success evidence is a single policy: a success claim with
 no machine-verified observation, or with empty/missing evidence, is handled
 by the success-evidence check; `no_change_reason` is that check's escape hatch
 for the claims arm only — it does not excuse contract completion, scope drift,
@@ -191,17 +232,52 @@ a window without machine git motion and without self-reported progress motion
 rejects, then backtracks or terminates; git motion can excuse a stall verdict,
 agent-reported progress alone cannot create or cancel one.
 
-Round Contracts are proposals for the next round. A proposal becomes active
-only after its declaring round commits. The active contract is derived from
-committed rounds on every compile path, including retry, resume, and backtrack.
-Contract checks are framed in three stages — Declaration (proposal
-verifiability: done_when and verification_plan), Execution (scope conformance,
-done_when not dropped), Closure (every done_when met and the verification plan
-observed passing) — a documentation framing only; no phase field exists. It
-closes when a committed evaluation completes its `done_when` items or reports
-`outcome: "blocked"`. A verification plan must be observed passing in the
-closing round. A different proposal while the active contract is open is
-ignored and surfaced as a warning.
+Round Contracts are proposals for the next round, expressed as ITEMS. A
+proposal becomes active only after its declaring round commits, and the active
+contract is derived from committed rounds on every compile path (retry, resume,
+backtrack). Every item binds at least one configured, enabled, after-capable
+evidence command; the runtime derives a content-addressed `rc-`/`rci-`
+identity, so restating a contract unchanged keeps the ids the agent already
+cited. Item statuses — `pending`, `insufficient`, `contradicted`, `verified` —
+are machine-derived by `contract-items.ts`: `verified` requires a `met` claim
+AND every bound command observed passing in the closing round (after-phase,
+entrypoint untampered, same configuration as at declaration — the commit stamps
+a `ContractBinding` for exactly this comparison). The contract closes when
+every item is `verified`, or when a round reports `outcome: "blocked"`.
+Claimed-but-unbacked is `insufficient` and the round still commits; the debt is
+surfaced and the enforcement gate's bounded escalation
+(`engine.unverified_claim_streak_limit`) handles a persistent pattern by
+rejecting, then terminating as `incomplete`. Because closure is derived, a
+premature closure is structurally impossible. A different proposal while the
+active contract is open is ignored and surfaced as a warning. Scope drift is a
+machine fact with no clarification waiver.
+
+The declaration boundary is strict and complete: `contract_invalid` rejects a
+contract with no items, over `CONTRACT_LIMITS` (items / scope / per-item refs),
+an item with no `verify_with`, an unknown / disabled / non-after-capable
+command id, a `scope` entry that is not a string or leaves the workspace
+(checked with the same `containInWorkspace` boundary as every other workspace
+path), a malformed or over-long `criterion_refs` / `subgoal_refs` entry, and a
+`subgoal_refs` id naming a sub-goal the loop does not have. The limits live in
+one exported constant used by both the strict validator and the lenient parser,
+so a declaration is rejected rather than silently truncated.
+
+`subgoal_refs` sits on the ITEM, not on the contract: a machine-verified item
+backs exactly the sub-goals it names. `deriveVerifiedSubGoals` reads the WHOLE
+committed history through the shared `deriveRoundContractView` — a verified
+item is machine history that survives its contract closing, and reading only
+the currently-active contract made the fact vanish at the moment it became
+fully true (and turned the debt view into a false accusation). A Round Contract
+is the only place sub-goals meet verification; `SubGoal.status` stays the
+agent's declaration and is never written by the machine.
+
+`deriveRoundContractView` is the single "what contract did this round execute
+under, and where did its items stand" derivation — the live coordinator,
+`explain`, and `audit` all call it, so a read-only view cannot disagree with
+the live posture. It derives from the rounds BEFORE the one being reported (a
+proposal declared in round R is active from R+1, and a contract round R closes
+must still be reported as round R's), and folds the round's own report and
+observations in as the in-flight slice.
 
 ## Prompt levels and projections
 
@@ -209,6 +285,12 @@ L0, L1, and L2 control state density only. They do not choose a reasoning
 technique. L0 is a lean same-round retry, L1 is normal continuation, and L2 is
 full rehydration. Mandatory prompt sections remain present and the token budget
 is enforced.
+
+`LoopProjection` carries `verified_subgoals` — the derived machine facts about
+sub-goals a verified contract item backs. It is forwarded from the same
+`deriveCognitiveFacts` the canonical state consumes, not re-derived, so the
+projection, the prompt and the state file cannot tell different stories about
+what the machine verified.
 
 The optional `.loopforge/state/<loopId>-state.md` file is a derived view. It can
 be regenerated from the Vault and must never become an independent source of
@@ -232,14 +314,37 @@ imported legacy loops are no longer supported. Writes are atomic and protected
 by owned locks. MCP mutations are serialized per session and fenced by
 renewable cross-process leases. Command evidence is disabled by default, uses
 an executable plus arguments with `shell: false`, and is restricted to the
-workspace. Evidence collection is always asynchronous.
+workspace. Evidence collection is always asynchronous. Providers emit
+`MachineObservation`s and every configured provider always yields one —
+unavailable, timeout, error and abort are recorded statuses, never filtered
+away. A configured name with no registered factory is not dropped either: it
+yields an `unavailable` observation, because "the provider is configured but
+nothing was recorded" is itself a fact the round has to carry. Capability has
+one derivation (`deriveEvidenceCapability`), consumed by `RoundDriver.prepare`
+(prepared rounds return it), MCP start/resume/next/status, and the warning
+list. It is split so it can be hashed: `ConfiguredCapability` is a pure
+function of policy and participates in `stateHash`/`promptHash`, while
+provider-REGISTRY readiness (`available`) and live observation statuses are
+rendered only and never enter a hash. `doctor` reports readiness; the hash
+never encodes it.
+
+MCP errors carry a stable `ToolErrorCode` and a separate human `message`.
+`round_id_mismatch` is for places with no held prompt to return (the gate
+preflight); `loopforge_next` keeps the v3.0.1 held-prompt recovery instead, so a
+mismatched submission there is `ok: true` with a warning.
+
+The round transaction is schema 2 and persists only the before/after
+observation collections; the round delta is derived
+(`deriveRoundObservationDelta`). A schema-1 envelope is a hard break: the round
+is not history, and `legacyTransactionRounds()` reports it in the audit instead
+of letting it vanish silently.
 
 The primary integration is the synchronous MCP server:
 
 ```text
 loopforge_start       create a session and compile round 1
 loopforge_next        submit structured evaluation and advance
-loopforge_status      inspect session, loop, all, or audit views
+loopforge_status      inspect session, loop, all, audit, or explain views
 loopforge_stop        intentionally stop a session
 loopforge_pause       pause a session
 loopforge_resume      reconstruct a durable session
@@ -276,6 +381,14 @@ external agent remains the execution owner.
 - Evidence changes require timeout, abort, unavailable provider, output cap,
   workspace boundary, and contradiction coverage.
 - MCP changes require primitive JSON, strict core arguments, structured output,
-  and process-level stdio coverage.
+  the uniform `{ok}` result envelope, stable `ToolErrorCode`s with a message
+  that never doubles as the code, and process-level stdio coverage.
+- Contract changes require identity stability (a restate keeps its rc-/rci- ids),
+  per-item status derivation, derived-fact survival across closure, closure
+  reported identically by the coordinator / explain / audit, and
+  `contract_invalid` retry coverage.
+- Stop-reason changes require the contradictory-payload cases (explicit
+  `blocked` next to `success: true`, a contradicted item next to a success
+  stop) to be covered — `completed` must stay machine-true.
 - Update `loopforge-protocol.json` and `dist/` through the build. Do not edit
   generated artifacts by hand.

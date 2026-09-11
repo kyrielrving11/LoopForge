@@ -8,8 +8,8 @@
 
 import type { LoopStore } from "./loop-store.js";
 import { LoopForgeEngine } from "./engine.js";
-import { EvidenceCollector } from "./evidence-provider.js";
-import type { ProviderSnapshot } from "./evidence-provider.js";
+import { deriveEvidenceCapability, EvidenceCollector } from "./evidence-provider.js";
+import type { EvidenceCapability, MachineObservation } from "./protocol.js";
 import { getPolicy, writeStateFile } from "./policy.js";
 import type {
   LoopForgeRequest,
@@ -31,13 +31,18 @@ export interface PreparedRound {
   prompt: string;
   artifact?: PromptArtifact;
   level: "l0" | "l1" | "l2";
-  evidenceBaseline: ProviderSnapshot[];
+  evidenceBaseline: MachineObservation[];
   snapshot: RoundTransactionSnapshot;
   stateFileContent?: string;
   warnings?: string[];
   /** v3.0.1: The full compile response. Callers may cache it (e.g. for the
    *  typed projection) instead of recompiling for derived views. */
   compileResponse?: LoopForgeResponse;
+  /** v3.8: The derived capability this round was prepared under — policy,
+   *  provider registry, and the before-evidence baseline, through the single
+   *  `deriveEvidenceCapability` derivation. start/resume/next/status read the
+   *  same fact instead of re-deriving their own. */
+  capability: EvidenceCapability;
 }
 
 export interface CompleteRoundInput {
@@ -51,8 +56,6 @@ export interface CompleteRoundInput {
   /** L4 (v3.7.x): previous round's rejection check (own-streak basis). */
   lastRejectionCheck?: string;
   successTrajectory: boolean[];
-  /** v2.12: Current clarification streak for R7 escalation. */
-  driftClarificationStreak?: number;
   /** v2.13: Files from skipped backtrack rounds for restore check. */
   backtrackSkippedFiles?: string[];
   /** M3 (v3.7.x): skipped-file git fingerprints at their failed rounds. */
@@ -63,7 +66,7 @@ export interface CompleteRoundInput {
 
 export interface CompletedRound {
   outcome: RoundTransactionOutcome;
-  actualEvidence: ProviderSnapshot[];
+  actualEvidence: MachineObservation[];
 }
 
 export class RoundDriver {
@@ -133,6 +136,7 @@ export class RoundDriver {
       stateFileContent: response.state_file_content,
       warnings: response.warnings,
       compileResponse: response,
+      capability: deriveEvidenceCapability(getPolicy(), rejected.beforeEvidence),
     };
   }
 
@@ -140,7 +144,7 @@ export class RoundDriver {
     response: LoopForgeResponse,
     loopId: string,
     round: number,
-    evidenceBaseline: ProviderSnapshot[],
+    evidenceBaseline: MachineObservation[],
   ): PreparedRound {
     const artifact = response.prompt_artifact;
     const snapshot = prepareRoundTransaction(
@@ -158,6 +162,7 @@ export class RoundDriver {
       stateFileContent: response.state_file_content,
       warnings: response.warnings,
       compileResponse: response,
+      capability: deriveEvidenceCapability(getPolicy(), evidenceBaseline),
     };
   }
 
@@ -177,7 +182,6 @@ export class RoundDriver {
       lastRejectionCheck: input.lastRejectionCheck,
       successTrajectory: input.successTrajectory,
       actualEvidence,
-      driftClarificationStreak: input.driftClarificationStreak,
       backtrackSkippedFiles: input.backtrackSkippedFiles,
       backtrackSkippedFingerprints: input.backtrackSkippedFingerprints,
       backtrackTargetGitHead: input.backtrackTargetGitHead,
@@ -195,7 +199,7 @@ export class RoundDriver {
   private collectEvidence(
     loopId: string,
     phase: "before" | "after",
-  ): Promise<ProviderSnapshot[]> {
+  ): Promise<MachineObservation[]> {
     return EvidenceCollector.fromPolicy().collectAsync({ loopId, phase });
   }
 }

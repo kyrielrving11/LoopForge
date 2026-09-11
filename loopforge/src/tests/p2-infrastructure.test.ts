@@ -8,8 +8,8 @@ import {
 import type {
   EvidenceCaptureContext,
   EvidenceProvider,
-  ProviderSnapshot,
 } from "../evidence-provider.js";
+import type { MachineObservation } from "../protocol.js";
 import {
   getPolicyMetrics,
   PolicyMetricsCollector,
@@ -30,10 +30,15 @@ import { LOOP_STORE_SCHEMA_VERSION } from "../loop-store.js";
 import { SessionManager } from "../mcp/session.js";
 import { MemoryLoopStore } from "./_helpers.js";
 
-function snapshot(provider: string): ProviderSnapshot {
+function snapshot(provider: string): MachineObservation {
   return {
-    provider,
-    timestamp: Date.now(),
+    schemaVersion: 1,
+    providerId: provider,
+    kind: "custom",
+    phase: "after",
+    startedAt: 0,
+    finishedAt: 0,
+    status: "observed",
     files: [`${provider}.txt`],
     data: { ok: true },
   };
@@ -47,22 +52,26 @@ afterEach(() => {
 describe("P2 async evidence", () => {
   it("collects async providers and isolates failures", async () => {
     const providers: EvidenceProvider[] = [
-      { name: "sync", capture: () => snapshot("sync") },
+      { name: "sync", kind: "custom", capture: () => snapshot("sync") },
       {
         name: "async",
+        kind: "custom",
         capture: async () => {
           await Promise.resolve();
           return snapshot("async");
         },
       },
-      { name: "broken", capture: async () => { throw new Error("boom"); } },
+      { name: "broken", kind: "custom", capture: async () => { throw new Error("boom"); } },
     ];
     const result = await new EvidenceCollector(providers).collectAsync({
       timeoutMs: 100,
       loopId: "evidence-isolation",
     });
 
-    assert.deepEqual(result.map((item) => item.provider), ["sync", "async"]);
+    // v3.8: a throwing provider now yields an explicit `error` observation —
+    // the gap is recorded, never filtered away.
+    assert.deepEqual(result.map((item) => item.providerId), ["sync", "async", "broken"]);
+    assert.equal(result[2].status, "error");
     const metrics = getPolicyMetrics("evidence-isolation");
     assert.equal(metrics.evidenceAvailable, 2);
     assert.equal(metrics.evidenceFailures, 1);
@@ -72,18 +81,21 @@ describe("P2 async evidence", () => {
     let signal: AbortSignal | undefined;
     const hanging: EvidenceProvider = {
       name: "hanging",
+      kind: "custom",
       capture: (context?: EvidenceCaptureContext) => {
         signal = context?.signal;
-        return new Promise<ProviderSnapshot | null>(() => undefined);
+        return new Promise<MachineObservation | null>(() => undefined);
       },
     };
     const started = Date.now();
     const result = await new EvidenceCollector([
       hanging,
-      { name: "ready", capture: () => snapshot("ready") },
+      { name: "ready", kind: "custom", capture: () => snapshot("ready") },
     ]).collectAsync({ timeoutMs: 20, loopId: "evidence-timeout" });
 
-    assert.deepEqual(result.map((item) => item.provider), ["ready"]);
+    // v3.8: the timed-out provider yields an explicit `timeout` observation.
+    assert.deepEqual(result.map((item) => item.providerId), ["hanging", "ready"]);
+    assert.equal(result[0].status, "timeout");
     assert.equal(signal?.aborted, true);
     assert.ok(Date.now() - started < 500);
     assert.equal(getPolicyMetrics("evidence-timeout").evidenceTimeouts, 1);
@@ -92,13 +104,20 @@ describe("P2 async evidence", () => {
   it("resolves custom providers named by policy", async () => {
     registerEvidenceProvider("async-test", () => ({
       name: "async-test",
+      kind: "custom",
       capture: async () => snapshot("async-test"),
     }));
     const result = await EvidenceCollector.fromProviderNames([
       "unknown",
       "async-test",
     ]).collectAsync({ timeoutMs: 100 });
-    assert.equal(result[0]?.provider, "async-test");
+    // v3.8: an unregistered name is NOT dropped. Configuring a provider claims
+    // it observes something, so the gap itself must be a recorded fact —
+    // otherwise "provider is configured but nothing was recorded" is silent.
+    assert.deepEqual(result.map((item) => item.providerId), ["unknown", "async-test"]);
+    assert.equal(result[0].status, "unavailable");
+    assert.match(String((result[0].data as { detail?: string }).detail ?? ""), /not registered/);
+    assert.equal(result[1].status, "observed");
   });
 });
 

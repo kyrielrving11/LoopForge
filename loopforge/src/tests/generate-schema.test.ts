@@ -49,10 +49,22 @@ describe("Generated JSON Schema — top-level", () => {
     // v3.7.1: SubGoalUpdate joined the $defs (38 → 39).
     // L5: PresentedStateSnapshot joined the $defs (39 → 40) — a cross-file
     // type that used to be referenced but never defined.
-    assert.equal(names.length, 40, `expected 40, got ${names.length}: ${names.join(", ")}`);
+    // v3.8: the agent-report / contract-item / machine-observation /
+    // capability surface replaced the legacy contract and evidence
+    // definitions (40 → 59).
+    // v3.8.0 fix batch: EvidenceCapability (the prepared round's capability
+    // fact) and the ToolError/ToolErrorCode pair joined (59 → 62).
+    assert.equal(names.length, 62, `expected 62, got ${names.length}: ${names.join(", ")}`);
     assert.ok(names.includes("PromptArtifact"));
     assert.ok(names.includes("RoundOutcome"));
-    assert.ok(names.includes("RoundContract"));
+    assert.ok(names.includes("RoundContractProposal"));
+    assert.ok(names.includes("ActiveRoundContract"));
+    assert.ok(names.includes("ExecutionReport"));
+    assert.ok(names.includes("MachineObservationBase"));
+    assert.ok(names.includes("ConfiguredCapability"));
+    assert.ok(names.includes("EvidenceCapability"));
+    assert.ok(names.includes("ToolError"));
+    assert.ok(names.includes("ToolErrorCode"));
   });
 
   it("L5: every $ref resolves to a defined $defs entry", () => {

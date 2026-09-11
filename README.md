@@ -69,16 +69,22 @@ quietly becoming a second history.
 
 `loopforge_next` accepts a structured `evaluation`. Four core fields are
 strict: `success`, `output_summary`, `constraint_violations`, and
-`should_continue`. Optional fields are normalized by the runtime. Missing or
-mistyped core fields return `evaluation_invalid`; the agent can correct the
-payload and resubmit it with the same `roundId`. This path does not save the
-session, write a round, run either gate, or change rejection and metrics state.
+`should_continue`. Optional fields are normalized by the runtime, with two
+exceptions — the Round Contract declaration and `contract_item_claims` are
+strict structural boundaries that return `contract_invalid` before the round
+advances. Missing or mistyped core fields return `evaluation_invalid`; the
+agent can correct the payload and resubmit it with the same `roundId`. This
+path does not save the session, write a round, run either gate, or change
+rejection and metrics state.
 
-After validation, LoopForge collects Git and command evidence, runs the
-verification and enforcement gates, and commits only an allowed round. The
-committed round documents are the durable record. Rejected and in-flight
-attempts do not join that record, and rolled-back backtrack decisions are
-excluded from final history views.
+After validation, LoopForge collects machine observations (Git and configured
+commands), runs the verification and enforcement gates, and commits only an
+allowed round. The agent's own report is a claim, never evidence: it carries
+`files_changed`, `tests_reported`, `criterion_claims`, `contract_item_claims`,
+and `progress_estimate`, and none of it can create a verified fact — only the
+observations can. The committed round documents are the durable record.
+Rejected and in-flight attempts do not join that record, and rolled-back
+backtrack decisions are excluded from final history views.
 
 All historical readers use the same internal `CommittedRoundView`. It decodes,
 orders, deduplicates, and filters round documents once for Replay, Audit,
@@ -97,12 +103,15 @@ Canonical State and committed rounds. The prompt, optional state file, and
 status projection consume the same facts. Deleting the state file loses no
 truth because LoopForge can regenerate it.
 
-Stable IDs (`c-`, `cr-`, and `sg-XXXXXXXX`) provide exact references where the
-agent supplies them. Constraint and criterion matching keeps a policy-controlled similarity
-fallback for plain-text references, and `subgoal_updates` — the only way to
-change a sub-goal's status — must cite ACTIVE `sg-` IDs exactly: unknown,
-terminal (done/canceled), or illegal transitions are rejected as
-`evaluation_invalid` before the round advances.
+Stable IDs (`c-`, `cr-`, `sg-`, `rc-`, and `rci-XXXXXXXX`) provide exact
+references where the agent supplies them. Constraint and criterion matching
+keeps a policy-controlled similarity fallback for plain-text references.
+Sub-goal creation does not: a `sg-` ID is scoped to its declaration event, so
+re-declaring the same text in a later round is a new sub-goal, and similarity is
+only a `possible_duplicate_subgoal` diagnostic that never merges or blocks.
+`subgoal_updates` — the only way to change a sub-goal's status — must cite ACTIVE
+`sg-` IDs exactly: unknown, terminal (done/canceled), or illegal transitions are
+rejected as `evaluation_invalid` before the round advances.
 
 ```text
 Traditional: prompt -> summary -> next prompt -> another summary
@@ -111,28 +120,52 @@ LoopForge:    committed rounds -> Canonical State -> next prompt
 
 ### 3. External verification and enforcement
 
-The verification gate organizes its checks into four verification domains —
-evaluation consistency, evidence integrity, plan & contract conformance, and
-progress & recovery — against Git snapshots, test output, and explicitly
+The verification gate organizes its 20 checks into four verification domains —
+evaluation consistency, evidence integrity, plan & contract, and progress &
+recovery — against Git snapshots, command observations, and explicitly
 configured commands. The enforcement gate turns those findings into accept,
-reject, backtrack, or terminate decisions through one ordered strategy table
-whose rows fall into four action classes: evidence contradiction, contract &
-scope, plan drift, and progress recovery. A single success-evidence policy
-covers unbacked success claims — machine backing means a passed verification
-command; a declared `no_change_reason` is the honest escape only when NO
-verification command is configured (machine verification was structurally
-impossible). A single stall evaluator covers both stalled and exactly-flat
-progress windows, and contract checks are framed as declaration / execution /
-closure stages.
+reject, backtrack, or terminate decisions through one ordered strategy table;
+each row carries its own escalation ladder, so repeated rejections of the same
+check escalate and eventually terminate instead of looping. A single
+success-evidence policy covers unbacked success claims — machine backing means
+an untampered, passed after-phase verification command; a declared
+`no_change_reason` is the honest escape only when NO verification command is
+configured (machine verification was structurally impossible). A single stall
+evaluator covers both stalled and exactly-flat progress windows. Machine
+evidence can excuse a progress-stall verdict when Git motion is observed;
+self-reported progress cannot create a machine verdict or cancel one.
 
-Round Contracts let a committed round propose bounded work for the next round.
-The active contract is derived from committed history, remains active through
-retry and resume, and closes only when its criteria are claimed complete or the
-agent reports it blocked. Contract completion with a verification plan must be
-backed by passing observations from that round.
+Providers emit typed machine observations with statuses `observed | passed |
+failed | timeout | unavailable | error | aborted`. A configured provider always
+produces one — unavailability, timeouts, errors, and aborts are recorded in the
+round's factual record rather than filtered away. The committed transaction
+persists only the before/after observation collections; the round delta is
+derived from them, never stored. A legacy transaction envelope is a hard break:
+those rounds are not history, and the audit lists them explicitly.
 
-Machine evidence can excuse a progress-stall verdict when Git motion is
-observed. Self-reported progress cannot create a machine verdict or cancel one.
+Round Contracts are item-based. A proposal declares `items`, each bound to at
+least one configured, enabled evidence command, and becomes the active contract
+once the declaring round commits. The runtime derives one stable `rci-` item ID
+per item and one `rc-` contract ID, both from content only — restating a
+contract unchanged keeps the identity the agent already cited.
+Item status (`pending`, `insufficient`, `contradicted`, `verified`) is
+machine-derived: `verified` requires the agent to have claimed `met` AND every
+bound command to have been observed passing in the closing round (after phase,
+entrypoint untampered, same command configuration as at declaration). The active
+contract is derived from committed history, remains active through retry and
+resume, and closes when every item is `verified` or a round reports
+`outcome: "blocked"`. While it is open, a different proposal is ignored
+(`contract_premature`) — a fresh contract is only legal after the old one
+closes.
+
+Verification debt is bounded. A claimed-but-unbacked item is `insufficient`:
+recorded, never a rejection, and the round still commits. But once the debt
+persists for `engine.unverified_claim_streak_limit` consecutive committed rounds
+(default 3) the enforcement gate rejects with instructions, and the next
+same-check strike terminates the loop. The streak is derived from committed
+round flags, so an agent self-report cannot move it and Git motion does not
+excuse it. Scope drift is likewise a machine fact with no clarification waiver:
+out-of-scope Git changes reject the round, and repeated drift terminates it.
 
 ### 4. Recovery without rewriting history
 
@@ -154,7 +187,7 @@ The rollback directive carries a derived **Recovery Brief**:
 - the failed rounds, each with the approach that must not be repeated;
 - falsified assumptions — do not rebuild on these;
 - preserved discoveries from the skipped rounds;
-- the files that must be reverted and the git commands to do it.
+- the files that must be reverted and the HEAD the workspace must return to.
 
 Its sources are COMMITTED rounds above the restore point plus the in-flight
 attempt that triggered the rollback. Rejected payloads are not durable history
@@ -162,26 +195,25 @@ and are never a source. The brief renders at the top of the backtrack prompt
 and in the state file's Recent tier for the duration of the recovery window;
 the redo commit removes it by construction.
 
-The workspace restore itself is executed by the AGENT (the backtrack prompt
-provides the git commands); LoopForge never rewrites the working tree for it
-— the optional `backtrack_auto_restore` policy, default off, is the only
-exception and then only runs the explicitly configured stash/reset — and it
-aborts (never resets) when the stash fails, because uncommitted work is never
-destroyed. What the verification gate "enforces" is the CHECK: on the next
+The workspace restore itself is executed by the AGENT. The backtrack prompt
+states the restore FACTS — the target HEAD, the files that must be reverted —
+and never prescribes a command; the prompt plus the gate's restore check are
+the whole mechanism. What the verification gate "enforces" is the CHECK: on the next
 submission it compares machine evidence — the git HEAD must have returned to
 the restore point, and any skipped file whose git fingerprint is still
 byte-identical to its failed-round state is machine proof that the workspace
 was never restored (`backtrack_workspace_not_restored` keeps rejecting the
 redo until it is actually clean). A redo touching the same files again is
 guidance only — self-reports never buy a verdict against the agent — so
-legitimate multi-file redos survive the check. A stalled Round Contract is
-not a separate
-backtrack trigger — rollbacks come only from the progress-stall evaluator or
-an unrestored workspace. But when the rolled-back rounds were executing under
+legitimate multi-file redos survive the check. A stalled Round Contract is not
+a separate backtrack trigger — rollbacks come only from the progress-stall
+evaluator or an unrestored workspace. But when the rolled-back rounds were
+executing under
 an ACTIVE Round Contract, the redo follows the contract path instead of a
 plain redo: close the stalled contract with `outcome: "blocked"` (+ blocker)
-and declare the revised contract in the same submission. Silently restating
-the stalled contract is rejected as premature while it is still open.
+and declare the revised contract in the same submission — the blocked outcome
+closes the old contract, so the new proposal becomes active next round.
+Restating the stalled contract unchanged only continues it.
 
 Durable sessions, owned locks, renewable leases, and idempotent replay let the
 agent resume after process interruption without skipping or double-committing
@@ -198,6 +230,9 @@ a round.
   of compressing the prior prompt.
 - **Not a constraint tracker.** Constraints are one input to external
   verification and enforcement, not the product boundary.
+- **Not a self-report ledger.** Everything the agent writes about its own work
+  is a claim. Only committed machine observations can mark a contract item
+  `verified`, and no claim ever becomes a fact.
 - **Not an agent or unattended executor.** The external agent reads code,
   edits files, runs tools, and chooses its reasoning. LoopForge governs round
   transitions.
@@ -226,16 +261,18 @@ available as a library for custom integrations — see the
 
 ```text
 External agent
-  executes work and submits structured evaluation
+  executes work and submits a structured evaluation (claims)
                          |
                          v
 Evaluation boundary
-  strict core fields, lenient optional normalization
+  strict core fields + strict contract / sub-goal structure
+  lenient optional normalization
   invalid -> retry same roundId, no state mutation
                          |
                          v
 Round boundary
-  collect evidence -> verification gate -> enforcement gate
+  machine observations (before/after) -> verification gate
+  -> enforcement gate
                          |
              +-----------+-----------+
              |                       |
@@ -245,6 +282,7 @@ Round boundary
                                        v
 Committed round documents
   single durable factual source
+  transaction schema 2: observations persisted, delta derived
                                        |
                                        v
 CommittedRoundView
@@ -252,8 +290,8 @@ CommittedRoundView
                          |
               +----------+----------+
               |          |          |
-       Canonical State  Replay   Audit / Metrics
-       cognitive source timeline evidence / diagnostics
+       Canonical State  Replay   Audit / Metrics / Explain
+       cognitive source timeline evidence, diagnostics, why
               |
               v
 DerivedCognitiveFacts
@@ -267,8 +305,8 @@ External agent, next round
 ```
 
 The current-round gates also inspect the submitted evaluation and fresh
-evidence before commit. Their historical inputs still come through the shared
-committed-round view.
+observations before commit. Their historical inputs still come through the
+shared committed-round view.
 
 ---
 
@@ -278,13 +316,15 @@ committed-round view.
 
 The MCP boundary validates primitive JSON arguments and structured tool
 outputs. The four required evaluation fields are strict, while optional
-evaluation detail is normalized and bounded. Format errors are retryable and
-cannot contaminate round state.
+evaluation detail is normalized and bounded. Two optional structures are strict
+as well — the Round Contract declaration and `contract_item_claims` — and
+return `contract_invalid` for a same-`roundId` retry with zero state change.
+Format errors are retryable and cannot contaminate round state.
 
 ### Deterministic state reconstruction
 
 The compiler reconstructs state from committed rounds. It tracks five-state
-sub-goals, time-aware discovered constraints, phase milestones, evidence,
+sub-goals, discovered constraints, phase milestones, machine observations,
 trust, and the active Round Contract without adding another persistence model.
 L0, L1, and L2 select prompt density only. They do not prescribe a reasoning
 technique.
@@ -292,17 +332,21 @@ technique.
 ### Evidence-backed decisions
 
 Verification derives claim provenance and machine status from collected
-snapshots. Enforcement turns those findings into accept, reject, backtrack, or
-terminate decisions. Metrics remain diagnostic and never decide correctness,
-gate outcomes, stop conditions, or contracts.
+observations. Enforcement turns those findings into accept, reject, backtrack,
+or terminate decisions, and bounds verification debt by terminating a loop that
+keeps claiming unverified contract items. Metrics remain diagnostic and never
+decide correctness, gate outcomes, stop conditions, or contracts.
 
 ### Separate observation views
 
 Replay answers what happened by exposing the committed timeline and round
 diffs. Audit answers whether the final facts are complete and whether claims
-have supporting evidence. Status projects the current cognitive state. These
-interfaces stay separate because they answer different questions, but they
-share the same committed-round decoder and filtering policy.
+have supporting evidence — including any rounds dropped by a legacy
+transaction schema. Explain answers why a round was decided the way it was:
+its contract and item statuses, its observations, and its flags. Status
+projects the current cognitive state. These interfaces stay separate because
+they answer different questions, but they share the same committed-round
+decoder and filtering policy.
 
 ### Controlled recovery
 
@@ -324,9 +368,26 @@ a background agent.
 Nine MCP tools expose the runtime: `start`, `next`, `status`, `stop`, `pause`,
 `resume`, `replay`, `gate_check`, and `gate_resolve`. The two gate tools are
 opt-in — hidden from `tools/list` unless `policy.gate.enabled` is true (the
-default is false). `status` provides `session`, `loop`, `all`, and `audit`
-views. The package uses only the Node.js standard library at runtime, and
-policy controls thresholds, budgets, and intervals.
+default is false). Every tool answers with a uniform envelope: `{ok: true,
+...payload}` or `{ok: false, error: {code, message, retryable, sessionId?,
+roundId?, details?}}`. `code` is a stable identifier and `message` carries the
+human sentence, so a client can branch on the type without parsing prose:
+`evaluation_invalid`, `contract_invalid`, `policy_invalid`, `session_not_found`,
+`round_id_required`, `round_id_mismatch`, `state_unavailable`,
+`invalid_argument`, `gate_disabled`, `loop_already_running`. Payload defects
+(`evaluation_invalid`, `contract_invalid`, `policy_invalid`, `round_id_*`,
+`invalid_argument`) are `retryable`, meaning the fix is a corrected submission;
+state conditions are not. A `loopforge_next` whose `roundId` no longer matches
+is deliberately NOT an error — it returns the held prompt with `ok: true` so
+the agent can recover the response it missed. `status` provides `session`,
+`loop`, `all`, `audit`, and
+`explain` views; `loopforge explain LOOP_ID [--round N] [--json]` exposes the
+same per-round "why" view from the CLI. `loopforge doctor` is static-only — it
+checks policy structure, command-ID uniqueness, cwd containment, provider
+registration, PATH resolution, caps, store, and git readiness, and never
+executes a verification command or rewrites policy. The package uses only the
+Node.js standard library at runtime, and policy controls thresholds, budgets,
+and intervals.
 
 ---
 

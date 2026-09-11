@@ -12,12 +12,16 @@ import type {
   LoopCompileRequest,
   LoopCompileResponse,
   MilestoneSummary,
-  RoundContract,
   SubGoal,
   VerificationFlag,
 } from "./protocol.js";
 import { deriveItemId, STABLE_ID_RE, unique } from "./token-utils.js";
+import { claimedMetCriteria, claimedRemainingCriteria } from "./self-eval.js";
 import { getPolicy } from "./policy.js";
+import type { ActiveContractView } from "./round-contract.js";
+import type { ContractItemStatusView } from "./contract-items.js";
+import { deriveConfiguredCapability } from "./policy.js";
+import type { ConfiguredCapability, VerifiedSubGoalFact } from "./protocol.js";
 
 export const CANONICAL_STATE_SCHEMA_VERSION = 1 as const;
 
@@ -113,7 +117,6 @@ export interface CanonicalLoopState {
   blockers: string[];
   verificationFlags: VerificationFlag[];
   discoveries: string[];
-  nextAction: string;
   rollingOutcomes: string[];
   recurringIssues: string[];
   failedPatterns: string[];
@@ -150,7 +153,18 @@ export interface CanonicalLoopState {
    *  round_contract, which is a proposal for the NEXT round). Conditional
    *  presence: absent without an active contract — keeps state hashes
    *  byte-identical for contract-less rounds. */
-  roundContract?: RoundContract;
+  roundContract?: ActiveContractView;
+  /** v3.8: The derived item statuses of the ACTIVE contract — the runtime's
+   *  statement about what the agent claimed under it. Conditional presence:
+   *  absent without an active contract. */
+  contractItemStatuses?: ContractItemStatusView;
+  /** v3.8: Sub-goals a verified contract item backs. DERIVED, never
+   *  persisted — the machine's separate statement about a `done` sub-goal. */
+  verifiedSubGoals?: VerifiedSubGoalFact[];
+  /** v3.8: The static verification capability (policy-derived). Unconditional:
+   *  it is part of the round's verification context, so every state hash
+   *  changes once, deliberately. */
+  capability: ConfiguredCapability;
 }
 
 // unique() imported from token-utils.ts
@@ -266,7 +280,7 @@ export function buildRoadmap(state: CanonicalLoopState): string[] {
     lastMilestone.round_range.end <= state.round
     ? state.round - lastMilestone.round_range.end
     : null;
-  const met = state.criterionStatuses.filter((cs) => cs.status === "met").length;
+  const met = state.criterionStatuses.filter((cs) => cs.status === "verified" || cs.status === "claimed").length;
   const total = state.criterionStatuses.length;
   const remaining = state.criterionStatuses.filter(
     (cs) => cs.status === "remaining" || cs.status === "unknown",
@@ -315,18 +329,38 @@ export function buildRoadmap(state: CanonicalLoopState): string[] {
  *  body — the single formatting source shared by prompts and the state
  *  file (module contract above). The original objective is NOT here: it
  *  lives in the Objective section. Empty arrays render no line. */
-export function formatRoundContract(contract: RoundContract): string {
+export function formatRoundContract(
+  contract: ActiveContractView,
+  /** v3.8: the derived item statuses. When given, each item renders with its
+   *  machine status — the agent sees the verification debt in its own task. */
+  statuses?: ContractItemStatusView | null,
+): string {
   const lines: string[] = [];
   const heading = contract.work_item?.trim();
-  lines.push(`**${heading || "Round Contract"}**`);
-  for (const item of contract.done_when) {
-    lines.push(`- Done when: ${item}`);
+  lines.push(`**${heading || "Round Contract"}** (${contract.id})`);
+  const statusById = new Map(
+    (statuses?.items ?? []).map((item) => [item.itemId, item]),
+  );
+  for (const item of contract.items) {
+    const machine = statusById.get(item.id);
+    const mark = machine?.status === "verified" ? "✅"
+      : machine?.status === "insufficient" ? "🟠"
+      : machine?.status === "contradicted" ? "⛔"
+      : machine?.status === "pending" ? "⬜"
+      : "";
+    lines.push(`- ${mark ? `${mark} ` : ""}[\`${item.id}\`] ${item.description}${machine ? ` — ${machine.status}` : ""}`);
+    if (item.verify_with.length > 0) {
+      lines.push(`  - Verify via: ${item.verify_with.join(", ")}`);
+    }
+    if (item.criterion_refs.length > 0) {
+      lines.push(`  - Criteria: ${item.criterion_refs.join(", ")}`);
+    }
+    if (machine?.reasons.length) {
+      lines.push(`  - Unverified because: ${machine.reasons[0]}`);
+    }
   }
-  for (const item of contract.verification_plan) {
-    lines.push(`- Verify via: ${item}`);
-  }
-  for (const item of contract.scope) {
-    lines.push(`- Scope: ${item}`);
+  for (const entry of contract.scope) {
+    lines.push(`- Scope: ${entry}`);
   }
   return lines.join("\n");
 }
@@ -489,7 +523,7 @@ function flatStateSections(state: CanonicalLoopState): Array<{ title: string; bo
       lines.push(`**Machine (git)**: ${motion}`);
     }
     if (state.criterionStatuses.length > 0) {
-      const metCount = state.criterionStatuses.filter((cs) => cs.status === "met").length;
+      const metCount = state.criterionStatuses.filter((cs) => cs.status === "verified" || cs.status === "claimed").length;
       lines.push(`**Machine (criteria)**: ${metCount}/${state.criterionStatuses.length} met across committed rounds`);
     }
     if (state.progress.tests) {
@@ -510,7 +544,11 @@ function flatStateSections(state: CanonicalLoopState): Array<{ title: string; bo
     const idEnabled = getPolicy().evolution.constraint_id_enabled;
     lines.push("## Goal → Criteria", "");
     for (const cs of state.criterionStatuses) {
-      const icon = cs.status === "met" ? "✅" : cs.status === "remaining" ? "⬜" : "❔";
+      const icon = cs.status === "verified" ? "✅"
+        : cs.status === "claimed" ? "🟡"
+        : cs.status === "insufficient" ? "🟠"
+        : cs.status === "contradicted" ? "⛔"
+        : cs.status === "remaining" ? "⬜" : "❔";
       const idTag = idEnabled ? ` [\`${cs.id}\`]` : "";
       const met = cs.met_at_round !== undefined ? ` (met R${cs.met_at_round})` : "";
       const related = cs.related_subgoal_ids.length > 0
@@ -543,9 +581,6 @@ function flatStateSections(state: CanonicalLoopState): Array<{ title: string; bo
     lines.push("");
   }
   addList(lines, "Retired Constraints", state.retiredConstraints);
-  if (state.nextAction) {
-    lines.push("## Next Action", "", state.nextAction, "");
-  }
   // v3.3: Forward-looking roadmap — same buildRoadmap the prompts render.
   const roadmap = buildRoadmap(state);
   if (roadmap.length > 0) {
@@ -684,14 +719,18 @@ export function createCanonicalLoopState(
      *  committed evals of earlier rounds — see loop-compiler). Drives the
      *  Current Task. Never the submission's own round_contract field, which
      *  is a proposal for the NEXT round. */
-    roundContract?: RoundContract | null;
+    roundContract?: ActiveContractView | null;
+    /** v3.8: derived item statuses for the ACTIVE contract. */
+    contractItemStatuses?: ContractItemStatusView | null;
+    /** v3.8: derived machine-verified sub-goal facts. */
+    verifiedSubGoals?: VerifiedSubGoalFact[] | null;
   },
 ): CanonicalLoopState {
   const last = request.last_round_result;
   const objective = response.loop_objective;
   const verificationFlags = request.verification_flags ?? [];
   const rolling = response.rolling_summary;
-  const executionEvidence = last?.execution_evidence;
+  const executionReport = last?.execution_report;
 
   const changes = unique([
     request.new_since_last_round,
@@ -728,7 +767,9 @@ export function createCanonicalLoopState(
     goalId: response.goal_id,
     objective: objective?.objective || request.task,
     objectiveVersion: objective?.version ?? 1,
-    currentTask: roundContract ? formatRoundContract(roundContract) : request.task,
+    currentTask: roundContract
+      ? formatRoundContract(roundContract, derived?.contractItemStatuses ?? null)
+      : request.task,
     successCriteria: unique(objective?.success_criteria ?? []),
     hardConstraints: unique(objective?.hard_constraints ?? []),
     activeConstraints: unique(response.constraints_active),
@@ -736,12 +777,11 @@ export function createCanonicalLoopState(
     constraintMetadata: response.constraint_metadata ?? [],
     changesSinceLastRound: changes,
     remainingCriteria: unique(
-      last?.execution_evidence?.success_criteria_remaining ?? [],
+      claimedRemainingCriteria(last?.execution_report),
     ),
     blockers,
     verificationFlags,
     discoveries,
-    nextAction: last?.next_action?.trim() || response.suggested_next_task,
     rollingOutcomes: unique(rolling?.key_outcomes ?? []),
     recurringIssues: unique(rolling?.recurring_issues ?? []),
     failedPatterns: unique(rolling?.failed_patterns ?? []),
@@ -755,13 +795,13 @@ export function createCanonicalLoopState(
     externalContext: request.external_context?.trim() ?? "",
     stateFilePath,
     progress: {
-      estimate: executionEvidence?.progress_estimate ?? null,
-      criteriaMet: unique(executionEvidence?.success_criteria_met ?? []),
+      estimate: executionReport?.progress_estimate ?? null,
+      criteriaMet: unique(claimedMetCriteria(executionReport)),
       criteriaRemaining: unique(
-        executionEvidence?.success_criteria_remaining ?? [],
+        claimedRemainingCriteria(executionReport),
       ),
-      filesChanged: unique(executionEvidence?.files_changed ?? []),
-      tests: executionEvidence?.test_results ?? null,
+      filesChanged: unique(executionReport?.files_changed ?? []),
+      tests: executionReport?.tests_reported ?? null,
     },
     // v3.3: Conditional presence — empty/absent derived data must not add
     // keys, or every state hash would change for rounds without it.
@@ -771,5 +811,12 @@ export function createCanonicalLoopState(
     ...(derived?.machineStatus ? { machineStatus: derived.machineStatus } : {}),
     // v3.3: Conditional presence — no contract, no key (hash stability).
     ...(roundContract ? { roundContract } : {}),
+    ...(derived?.contractItemStatuses
+      ? { contractItemStatuses: derived.contractItemStatuses }
+      : {}),
+    ...(derived?.verifiedSubGoals && derived.verifiedSubGoals.length > 0
+      ? { verifiedSubGoals: [...derived.verifiedSubGoals] }
+      : {}),
+    capability: deriveConfiguredCapability(getPolicy()),
   };
 }

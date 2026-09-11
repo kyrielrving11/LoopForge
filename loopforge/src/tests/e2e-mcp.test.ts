@@ -18,7 +18,7 @@ import { join, resolve, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { createInterface, Interface } from "node:readline";
-import { writeMachineBackedPolicy } from "./_helpers.js";
+import { writeMachineBackedPolicy, criterionClaims } from "./_helpers.js";
 import { fileURLToPath } from "node:url";
 
 // ── MCP stdio client ─────────────────────────────────────────────────────────
@@ -246,10 +246,10 @@ describe("E2E MCP lifecycle", () => {
         discovered_constraints: [
           "CommandEvidenceProvider stdout may be truncated at 20k chars",
         ],
-        execution_evidence: {
+        execution_report: {
           files_changed: ["src/verification-gate.ts"],
-          test_results: { passed: 243, failed: 0, skipped: 0 },
-          success_criteria_met: ["Audited verification-gate.ts"],
+          tests_reported: { passed: 243, failed: 0, skipped: 0 },
+          criterion_claims: criterionClaims(["Audited verification-gate.ts"]),
           success_criteria_remaining: [
             "Fix any confirmed correctness bugs",
             "Preserve the public API",
@@ -287,14 +287,13 @@ describe("E2E MCP lifecycle", () => {
         output_summary: "Changed internal function signature.",
         should_continue: true,
         constraint_violations: ["Do not change the public API"],
-        execution_evidence: {
+        execution_report: {
           files_changed: [],
-          test_results: { passed: 0, failed: 5, skipped: 0 },
-          success_criteria_met: [],
-          success_criteria_remaining: [
+          tests_reported: { passed: 0, failed: 5, skipped: 0 },
+          criterion_claims: criterionClaims([], [
             "Fix any confirmed correctness bugs",
             "Preserve the public API",
-          ],
+          ]),
           progress_estimate: 0.25,
         },
       },
@@ -323,10 +322,10 @@ describe("E2E MCP lifecycle", () => {
         should_continue: true,
         constraint_violations: [],
         discovered_constraints: [],
-        execution_evidence: {
+        execution_report: {
           files_changed: ["src/verification-gate.ts"],
-          test_results: { passed: 243, failed: 0, skipped: 0 },
-          success_criteria_met: ["Preserve the public API — verified restored"],
+          tests_reported: { passed: 243, failed: 0, skipped: 0 },
+          criterion_claims: criterionClaims(["Preserve the public API — verified restored"]),
           success_criteria_remaining: [
             "Fix any confirmed correctness bugs",
           ],
@@ -377,15 +376,15 @@ describe("E2E MCP lifecycle", () => {
           "correctness bugs found. All constraints preserved. All tests pass.",
         should_continue: false,
         constraint_violations: [],
-        execution_evidence: {
+        execution_report: {
           files_changed: ["src/verification-gate.ts"],
-          test_results: { passed: 243, failed: 0, skipped: 0 },
+          tests_reported: { passed: 243, failed: 0, skipped: 0 },
           success_criteria_met: [
             "Audited verification-gate.ts",
             "Fix any confirmed correctness bugs — none found",
             "Preserve the public API",
           ],
-          success_criteria_remaining: [],
+          criterion_claims: criterionClaims([], []),
           progress_estimate: 1.0,
         },
       },

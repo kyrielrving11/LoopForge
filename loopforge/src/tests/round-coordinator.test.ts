@@ -1,11 +1,13 @@
 /** Tests for RoundCoordinator — verify → enforce → stop pipeline. */
+import { committedFeedbackRound, criterionClaims, MemoryLoopStore } from "./_helpers.js";
+import { deriveContractItemIds } from "../token-utils.js";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { RoundCoordinator } from "../round-coordinator.js";
 import type { RoundProcessInput } from "../round-coordinator.js";
-import { makeSelfEvaluation, makeExecutionEvidence } from "../protocol.js";
+import { makeSelfEvaluation, makeExecutionReport } from "../protocol.js";
 import type { SelfEvaluation } from "../protocol.js";
-import type { ProviderSnapshot } from "../evidence-provider.js";
+import type { CommandObservation } from "../protocol.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Helpers
@@ -17,11 +19,10 @@ function se(overrides: Partial<SelfEvaluation> = {}): SelfEvaluation {
     output_summary: "Fixed 3 bugs in auth module.",
     constraint_violations: [],
     should_continue: true,
-    execution_evidence: makeExecutionEvidence({
+    execution_report: makeExecutionReport({
       files_changed: ["auth.ts"],
-      test_results: { passed: 10, failed: 0, skipped: 0 },
-      success_criteria_met: [],
-      success_criteria_remaining: ["add unit tests"],
+      tests_reported: { passed: 10, failed: 0, skipped: 0 },
+      criterion_claims: criterionClaims([], ["add unit tests"]),
       progress_estimate: 0.4,
     }),
     ...overrides,
@@ -31,22 +32,29 @@ function se(overrides: Partial<SelfEvaluation> = {}): SelfEvaluation {
 /** v3.3: A passed after-phase command whose stdout matches the se() fixture
  *  counts (Tests: 10 passed) — success claims need machine-backed evidence,
  *  so rounds without a command snapshot get rejected by R8. */
-function commandSnap(): ProviderSnapshot {
+function commandSnap(): CommandObservation {
   return {
-    provider: "command:verify",
-    timestamp: Date.now(),
+    schemaVersion: 1,
+    providerId: "command:verify",
+    kind: "command",
+    phase: "after",
+    startedAt: 0,
+    finishedAt: 0,
+    status: "passed",
     files: [],
     data: {
-      kind: "command",
-      commandName: "verify",
+      commandId: "verify",
+      argv: ["npm", "run", "verify"],
+      cwd: ".",
+      configHash: "0".repeat(64),
       required: false,
-      phase: "after",
-      status: "passed",
       exitCode: 0,
       signal: null,
       durationMs: 10,
-      stdout: "Tests: 10 passed, 10 total",
-      stderr: "",
+      stdoutSha256: "0".repeat(64),
+      stderrSha256: "0".repeat(64),
+      stdoutExcerpt: "Tests: 10 passed, 10 total",
+      stderrExcerpt: "",
       truncated: false,
       entrypointFiles: [],
     },
@@ -99,16 +107,50 @@ describe("RoundCoordinator — stop conditions", () => {
         success: true,
         should_continue: false,
         // Clean completion: no remaining criteria, evidence present
-        execution_evidence: makeExecutionEvidence({
+        execution_report: makeExecutionReport({
           files_changed: ["auth.ts"],
-          test_results: { passed: 10, failed: 0, skipped: 0 },
-          success_criteria_remaining: [],
+          tests_reported: { passed: 10, failed: 0, skipped: 0 },
+          criterion_claims: criterionClaims([], []),
           progress_estimate: 1.0,
         }),
       }),
     }));
     assert.equal(result.action, "stop");
     assert.equal(result.stopReason, "completed");
+  });
+
+  it("v3.8: a stop under an open contract is incomplete, not completed", () => {
+    // The agent claims the active contract's item met, but no bound command
+    // was observed passing — the round commits (insufficient is recorded),
+    // and the STOP must not claim completion.
+    const contract = {
+      work_item: "Slice A",
+      scope: ["src/auth"],
+      items: [{ description: "login works", criterion_refs: [], subgoal_refs: [], verify_with: ["verify"] }],
+    };
+    const itemId = deriveContractItemIds(contract.items)[0];
+    const store = new MemoryLoopStore();
+    store.appendEntry(committedFeedbackRound(1, { loopId: "stop-open-contract", contract }));
+    const withVault = new RoundCoordinator(store);
+    const result = withVault.processRound(minimalInput({
+      loopId: "stop-open-contract",
+      currentRound: 2,
+      selfEval: se({
+        success: true,
+        should_continue: false,
+        execution_report: makeExecutionReport({
+          files_changed: ["src/auth/a.ts"],
+          tests_reported: { passed: 1, failed: 0, skipped: 0 },
+          contract_item_claims: [{ item_id: itemId, outcome: "met" }],
+          progress_estimate: 1.0,
+        }),
+      }),
+    }));
+    assert.equal(result.action, "stop");
+    assert.equal(result.stopReason, "incomplete",
+      "machine verification did not close the contract — the loop never reports completed");
+    assert.equal(result.shouldPushSuccessTrajectory, false,
+      "an unverified stop never enters the success trajectory");
   });
 
   it("stops when should_continue=false and success=false (failed)", () => {
@@ -143,6 +185,66 @@ describe("RoundCoordinator — stop conditions", () => {
     assert.equal(result.stopReason, "blocked");
   });
 
+  it("v3.8: an explicit blocked declaration outranks a success claim", () => {
+    // `success: true` together with a declared blocked stop is a
+    // contradiction. The declared field is the honest reading — reporting
+    // `completed` would let two contradictory fields silently buy a
+    // completion verdict. The report is otherwise a clean completion, so the
+    // only thing standing between this round and `completed` is the
+    // declaration.
+    const result = coordinator.processRound(minimalInput({
+      selfEval: se({
+        success: true,
+        should_continue: false,
+        stop_reason: "blocked",
+        execution_report: makeExecutionReport({
+          files_changed: ["auth.ts"],
+          tests_reported: { passed: 10, failed: 0, skipped: 0 },
+          criterion_claims: criterionClaims([], []),
+          progress_estimate: 1.0,
+        }),
+      }),
+    }));
+    assert.equal(result.action, "stop");
+    assert.equal(result.stopReason, "blocked");
+  });
+
+  it("v3.8: an explicit blocked declaration outranks a closed contract", () => {
+    // Same contradiction, now with a contract that IS machine-verified: the
+    // old ordering hit `completed` here because contract closure was checked
+    // before the declared blocked stop.
+    const contract = {
+      work_item: "Slice A",
+      scope: ["src/auth"],
+      items: [{ description: "login works", criterion_refs: [], verify_with: ["verify"], subgoal_refs: [] }],
+    };
+    const itemId = deriveContractItemIds(contract.items)[0];
+    const store = new MemoryLoopStore();
+    store.appendEntry(committedFeedbackRound(1, { loopId: "blocked-closed-contract", contract }));
+    store.appendEntry(committedFeedbackRound(2, {
+      loopId: "blocked-closed-contract",
+      contractItemClaims: [{ item_id: itemId, outcome: "met" }],
+    }));
+    const withVault = new RoundCoordinator(store);
+    const result = withVault.processRound(minimalInput({
+      loopId: "blocked-closed-contract",
+      currentRound: 3,
+      selfEval: se({
+        success: true,
+        should_continue: false,
+        stop_reason: "needs_human_input",
+        execution_report: makeExecutionReport({
+          files_changed: [],
+          tests_reported: { passed: 0, failed: 0, skipped: 0 },
+          contract_item_claims: [{ item_id: itemId, outcome: "met" }],
+          progress_estimate: 1.0,
+        }),
+      }),
+    }));
+    assert.equal(result.action, "stop");
+    assert.equal(result.stopReason, "blocked");
+  });
+
   it("stops at maxRounds", () => {
     const result = coordinator.processRound(minimalInput({
       currentRound: 20,
@@ -165,8 +267,8 @@ describe("RoundCoordinator — rejection", () => {
     const result = coordinator.processRound(minimalInput({
       selfEval: se({
         success: true,
-        execution_evidence: makeExecutionEvidence({
-          success_criteria_remaining: ["unfinished criteria"],
+        execution_report: makeExecutionReport({
+          criterion_claims: criterionClaims([], ["unfinished criteria"]),
           progress_estimate: 0.5,
         }),
       }),
@@ -182,8 +284,8 @@ describe("RoundCoordinator — rejection", () => {
     const result = coordinator.processRound(minimalInput({
       selfEval: se({
         success: true,
-        execution_evidence: makeExecutionEvidence({
-          success_criteria_remaining: ["unfinished criteria"],
+        execution_report: makeExecutionReport({
+          criterion_claims: criterionClaims([], ["unfinished criteria"]),
           progress_estimate: 0.5,
         }),
       }),
@@ -236,8 +338,8 @@ describe("RoundCoordinator — verification flags", () => {
     const result = coordinator.processRound(minimalInput({
       selfEval: se({
         success: true,
-        execution_evidence: makeExecutionEvidence({
-          success_criteria_remaining: ["unmet criteria", "more unmet"],
+        execution_report: makeExecutionReport({
+          criterion_claims: criterionClaims([], ["unmet criteria", "more unmet"]),
           progress_estimate: 0.5,
         }),
       }),
@@ -277,11 +379,10 @@ describe("round-coordinator — v2.12 outcome stop mapping", () => {
       output_summary: "round done",
       constraint_violations: [],
       should_continue: false,
-      execution_evidence: {
+      execution_report: {
         files_changed: ["src/a.ts"],
-        test_results: { passed: 1, failed: 0, skipped: 0 },
-        success_criteria_met: [],
-        success_criteria_remaining: [],
+        tests_reported: { passed: 1, failed: 0, skipped: 0 },
+        criterion_claims: criterionClaims([], []),
         progress_estimate: 1,
       },
     });

@@ -24,10 +24,10 @@ function committedFeedback(
     loop_lineage: {
       round,
       round_transaction: {
-        schema_version: 1,
+        schema_version: 2,
         round_id: `loop:metrics-loop:round:${round}`,
         snapshot: {
-          schemaVersion: 1,
+          schemaVersion: 2,
           roundId: `loop:metrics-loop:round:${round}`,
           loopId: "metrics-loop",
           round,

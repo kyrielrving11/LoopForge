@@ -1,64 +1,82 @@
-/** v3.4: Round Contract lifecycle — proposal vs active semantics.
+/** Round Contract derivation — the ACTIVE contract a round executes under.
  *
- * A submission's `round_contract` is a PROPOSAL for the NEXT round. It
- * becomes the ACTIVE contract (rendered as the Current Task and the target
- * of the round_scope_drift / premature_boundary checks) only after the
- * declaring round commits, and stays active until a committed eval closes
- * it:
- *   (i)  complete — every active done_when item is listed in that eval's
- *        execution_evidence.success_criteria_met (claims-based matching;
- *        per-item machine backing is future work), or
- *   (ii) blocked — the eval's declared outcome is "blocked".
- * On close the closing eval's own proposal (if any) becomes active; with
- * none, the Current Task reverts to the original task text. A different
- * proposal declared while the active contract is NOT closed is ignored —
- * the durable work item wins. The declaration round's own met claims never
- * satisfy its own proposal (it only becomes active the round AFTER the
- * declaration commits).
+ *  A submission's `round_contract` is a PROPOSAL for the next round. It
+ *  becomes ACTIVE only after the declaring round commits; the active contract
+ *  is then derived from committed rounds on every compile path (retry,
+ *  resume, backtrack). It closes when every item is machine-verified, or when
+ *  the agent reports `outcome: "blocked"`; while it is open a different
+ *  proposal is ignored.
  *
- * Pure derivation over committed evals only — never reads in-flight or
- * rejected submissions. No persistence lives here; committed round
- * documents remain the single source of truth and both sides (compile-time
- * merged lineage view, verification-time raw :feedback view) translate
- * their entry shape into CommittedRoundEvaluation before calling
- * deriveActiveRoundContract.
+ *  v3.8 identity: `rc-` / `rci-` are derived from CONTENT ONLY (loop id +
+ *  canonical proposal), so restating an unchanged contract keeps the same
+ *  identity and the item ids the agent already cited. This is deliberately
+ *  the opposite of a SubGoal, whose id includes its declaration round.
  */
+import type { ContractItemProposal, ExecutionReport, MachineObservation, RoundContractProposal } from "./protocol.js";
 import type { CommittedRoundView } from "./committed-round.js";
-import type { RoundContract, RoundOutcome } from "./protocol.js";
-/** One committed round's evaluation, in the shape both adapters produce. */
-export interface CommittedRoundEvaluation {
-    round: number;
-    /** The contract the eval PROPOSED for the next round (null = none). */
-    proposal: RoundContract | null;
-    /** Committed eval outcome; null when the committed eval had none. */
-    outcome: RoundOutcome | null;
-    /** success_criteria_met claims of the committed eval. */
-    met: string[];
+import type { CommandEvidencePolicy } from "./policy.js";
+import type { ContractItemStatusView } from "./contract-items.js";
+export interface ActiveContractItem extends ContractItemProposal {
+    /** rci-XXXXXXXX — derived from the item's own content. */
+    id: string;
 }
-/** Match two done_when / met-claim references for completion testing.
- *  cr-ID-aware + Jaccard fallback, identical to criteriaMatch. */
-export declare function contractItemMatches(a: string, b: string): boolean;
-/** Whether every done_when item of `contract` matches a claim in `met`.
- *  Vacuous when done_when is empty (such contracts were already warned
- *  round_underspecified at declaration; they close at the first eval
- *  committed while active). */
-export declare function contractDoneWhenSatisfied(contract: RoundContract, met: string[]): boolean;
-/** Walk committed evals (ASCENDING by round; the caller already restricts
- *  them to rounds earlier than the compile/verify round) and return the
- *  ACTIVE contract for the round after the last committed one — null means
- *  the Current Task falls back to the original task text.
+export interface ActiveContractView {
+    /** rc-XXXXXXXX — derived from loopId + canonical proposal content. */
+    id: string;
+    /** The round that declared the proposal that became active (a fact, not
+     *  part of the identity hash). */
+    declared_at_round: number;
+    work_item?: string;
+    scope: string[];
+    items: ActiveContractItem[];
+    /** The command configuration in force at declaration (machine-stamped at
+     *  commit — see ContractBinding). */
+    config_hash_by_command: Record<string, string>;
+}
+/** v3.8: Build the derived active contract from a committed proposal plus the
+ *  binding the runtime stamped when that round committed. */
+export declare function activateContract(proposal: RoundContractProposal, declaredAtRound: number, binding: {
+    config_hash_by_command: Record<string, string>;
+} | null, loopId: string): ActiveContractView;
+/** v3.8: Content equality — restating a contract unchanged is the same
+ *  contract. Never compare by id (8 hex = 32 bits; a collision must not merge
+ *  two different contracts). */
+export declare function sameContract(left: RoundContractProposal, right: RoundContractProposal): boolean;
+/** v3.8: The active contract after replaying committed rounds in order. */
+export declare function deriveActiveRoundContract(rounds: ReadonlyArray<CommittedRoundView>, commands?: ReadonlyArray<CommandEvidencePolicy>): ActiveContractView | null;
+/** v2.11: Match a user-provided reference against a criterion (cr-XXXXXXXX
+ *  equality first, then Jaccard similarity). Kept for criterion claims — the
+ *  contract layer no longer matches free text. */
+export declare function contractItemMatches(left: string, right: string): boolean;
+/** v3.8: Every criterion id referenced by the contract's items. */
+export declare function contractCriterionIds(contract: ActiveContractView): string[];
+/** v3.8: Every sub-goal id referenced by any of the contract's items. */
+export declare function contractSubGoalIds(contract: ActiveContractView): string[];
+/** v3.8: The contract a round EXECUTED under, plus every item's status as of
+ *  that round — the ONE derivation the live coordinator, explain and audit
+ *  share, so the three can never disagree about what a round ran under.
  *
- *  State machine per committed eval r, with `active` the contract carried
- *  into r (null = whole-task round):
- *    - active && r.outcome === "blocked"          → active = r.proposal
- *    - active && all done_when in r.met           → active = r.proposal
- *    - active && neither                          → active unchanged (r's
- *      different proposal is a premature replacement and is ignored)
- *    - !active                                    → active = r.proposal
- *  (a proposal never activates on its own declaration round — it becomes
- *  active only for the rounds that follow the commit). */
-export declare function deriveActiveRoundContract(committed: ReadonlyArray<CommittedRoundEvaluation>): RoundContract | null;
-/** Narrow the shared committed-round view to the contract state machine's
- * inputs. Contract code never interprets persistence envelopes itself. */
-export declare function contractRoundEvaluations(rounds: ReadonlyArray<CommittedRoundView>): CommittedRoundEvaluation[];
+ *  Two things make this different from "derive from every round up to and
+ *  including this one":
+ *
+ *  - The executed contract comes from the rounds BEFORE this one. A proposal
+ *    declared in round R becomes active in R+1, and a contract round R CLOSES
+ *    must still be reported as round R's contract — folding R's own proposal
+ *    into the walker would hand the round the successor (or nothing).
+ *  - The round's own report and observations enter as the in-flight slice, so
+ *    its claims and its bound commands are judged with the same reducer the
+ *    coordinator uses before the round commits. */
+export declare function deriveRoundContractView(input: {
+    /** Committed rounds (rollback-excluded), ascending. */
+    rounds: ReadonlyArray<CommittedRoundView>;
+    round: number;
+    report: ExecutionReport | null;
+    observations: ReadonlyArray<MachineObservation>;
+    /** The round's committed/effective outcome — `blocked` closes its contract. */
+    outcome: string | null;
+    commands: ReadonlyArray<CommandEvidencePolicy>;
+}): {
+    contract: ActiveContractView | null;
+    statuses: ContractItemStatusView;
+};
 //# sourceMappingURL=round-contract.d.ts.map

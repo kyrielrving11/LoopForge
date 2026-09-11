@@ -3,10 +3,11 @@
  */
 
 import { describe, it } from "node:test";
+import { criterionClaims } from "./_helpers.js";
 import assert from "node:assert/strict";
-import { makeExecutionEvidence, makeSelfEvaluation } from "../protocol.js";
+import { makeExecutionReport, makeSelfEvaluation } from "../protocol.js";
 import type { SelfEvaluation, VerificationFlag } from "../protocol.js";
-import type { ProviderSnapshot } from "../evidence-provider.js";
+import type { GitObservation, MachineObservation } from "../protocol.js";
 import type { VaultEntry } from "../loop-store.js";
 import {
   findBacktrackTargetGitHead,
@@ -18,22 +19,27 @@ import { verifySelfEvaluation } from "../verification-gate.js";
 const HEAD = "abcdef1234567890abcdef1234567890abcdef12";
 const OTHER_HEAD = "123456abcdef7890abcdef1234567890abcdef12";
 
-function gitSnapshot(head: string | undefined): ProviderSnapshot {
+function gitSnapshot(head: string | undefined): GitObservation {
   return {
-    provider: "git",
-    timestamp: Date.now(),
+    schemaVersion: 1,
+    providerId: "git",
+    kind: "git",
+    phase: "after",
+    startedAt: 0,
+    finishedAt: 0,
+    status: "observed",
     files: ["src/a.ts"],
-    data: { tracked: [], staged: [], untracked: [], head },
+    data: { tracked: [], staged: [], untracked: [], fingerprints: {}, head },
   };
 }
 
 function committedFeedback(
   round: number,
-  snapshots: ProviderSnapshot[],
+  snapshots: MachineObservation[],
   preferAfter = true,
 ): VaultEntry {
   const snapshot = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     roundId: `loop:git-loop:round:${round}`,
     loopId: "git-loop",
     round,
@@ -53,7 +59,7 @@ function committedFeedback(
     loop_lineage: {
       round,
       round_transaction: {
-        schema_version: 1,
+        schema_version: 2,
         round_id: `loop:git-loop:round:${round}`,
         snapshot,
         result: { action: "continue", verificationFlags: [] },
@@ -68,11 +74,10 @@ function se(overrides: Partial<SelfEvaluation> = {}): SelfEvaluation {
     output_summary: "working",
     constraint_violations: [],
     should_continue: true,
-    execution_evidence: makeExecutionEvidence({
+    execution_report: makeExecutionReport({
       files_changed: ["src/a.ts"],
-      test_results: null,
-      success_criteria_met: [],
-      success_criteria_remaining: [],
+      tests_reported: null,
+      criterion_claims: criterionClaims([], []),
       progress_estimate: 0.3,
     }),
     ...overrides,
@@ -96,10 +101,30 @@ describe("findBacktrackTargetGitHead", () => {
 
   it("returns null when the snapshot has no git provider", () => {
     const entries = [committedFeedback(3, [{
-      provider: "command:npm-test",
-      timestamp: Date.now(),
+      schemaVersion: 1,
+      providerId: "command:npm-test",
+      kind: "command",
+      phase: "after",
+      startedAt: 0,
+      finishedAt: 0,
+      status: "passed",
       files: [],
-      data: { kind: "command", phase: "after", status: "passed" },
+      data: {
+        commandId: "npm-test",
+        argv: ["npm", "test"],
+        cwd: ".",
+        configHash: "0".repeat(64),
+        required: false,
+        exitCode: 0,
+        signal: null,
+        durationMs: 1,
+        stdoutSha256: "0".repeat(64),
+        stderrSha256: "0".repeat(64),
+        stdoutExcerpt: "",
+        stderrExcerpt: "",
+        truncated: false,
+        entrypointFiles: [],
+      },
     }])];
     assert.equal(findBacktrackTargetGitHead(3, entries), null);
   });
@@ -150,14 +175,19 @@ describe("verification gate — backtrack git head restore", () => {
 });
 
 describe("buildBacktrackPrompt — git head", () => {
-  it("renders the restore commit line when gitHead is provided", () => {
+  it("states the required HEAD as a restore fact when gitHead is provided", () => {
     const prompt = buildBacktrackPrompt(4, 3, "progress_stall", [], [], HEAD);
-    assert.ok(prompt.includes(`Restore to commit \`${HEAD.slice(0, 12)}\``));
+    assert.ok(prompt.includes(`HEAD must be at \`${HEAD.slice(0, 12)}\``));
+    // v3.8: a FACT, never a command — the restore is the agent's action.
+    for (const command of ["git stash", "git reset", "git checkout", "git clean"]) {
+      assert.ok(!prompt.includes(command), `must not prescribe "${command}"`);
+    }
   });
 
-  it("omits the commit line when gitHead is absent", () => {
+  it("omits the HEAD fact when gitHead is absent", () => {
     const prompt = buildBacktrackPrompt(4, 3, "progress_stall", [], []);
-    assert.ok(!prompt.includes("Restore to commit"));
+    assert.ok(!prompt.includes("HEAD must be at"));
+    assert.ok(prompt.includes("Restoring the workspace is **your** responsibility"));
   });
 });
 
@@ -173,7 +203,7 @@ describe("enforcement R9 — backtrack workspace not restored", () => {
       check: "backtrack_workspace_not_restored",
       detail: "HEAD mismatch",
     }];
-    const result = enforceRound(se(), verifyResult(flags), 4, [], 0, 0);
+    const result = enforceRound(se(), verifyResult(flags), 4, [], 0);
     assert.equal(result.action, "backtrack");
     assert.equal(result.check, "backtrack_workspace_not_restored");
   });
@@ -185,7 +215,7 @@ describe("enforcement R9 — backtrack workspace not restored", () => {
       check: "backtrack_workspace_not_restored",
       detail: "minor overlap",
     }];
-    const result = enforceRound(se(), verifyResult(flags), 4, [], 0, 0);
+    const result = enforceRound(se(), verifyResult(flags), 4, [], 0);
     assert.equal(result.action, "accept");
   });
 });

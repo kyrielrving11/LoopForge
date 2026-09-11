@@ -8,7 +8,7 @@
 
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { MemoryLoopStore, installTestCommandProvider } from "./_helpers.js";
+import { MemoryLoopStore, installTestCommandProvider, criterionClaims } from "./_helpers.js";
 import { resetPolicy } from "../policy.js";
 import { LoopForgeEngine } from "../engine.js";
 import { SessionManager } from "../mcp/session.js";
@@ -115,12 +115,11 @@ function evalFor(opts: { success?: boolean; shouldContinue?: boolean }): SelfEva
     output_summary: "Completed the task successfully.",
     constraint_violations: [],
     should_continue: opts.shouldContinue ?? true,
-    execution_evidence: success
+    execution_report: success
       ? {
           files_changed: ["src/test.ts"],
-          test_results: { passed: 1, failed: 0, skipped: 0 },
-          success_criteria_met: [],
-          success_criteria_remaining: [],
+          tests_reported: { passed: 1, failed: 0, skipped: 0 },
+          criterion_claims: criterionClaims([], []),
         }
       : undefined,
   } as SelfEvaluation;
@@ -165,7 +164,6 @@ describe("RoundLifecycle — reconstructSession", async () => {
     assert.equal(session.status, "running");
     assert.equal(session.consecutiveRejections, 1);
     assert.equal(session.lastRejectionCheck, "R4");
-    assert.equal(session.driftClarificationStreak, 2);
     assert.deepEqual(session.backtrackSkippedFiles, ["a.ts"]);
     assert.equal(session.backtrackTargetGitHead, "abc123");
     assert.equal(session.currentPrompt, "held prompt");
@@ -200,7 +198,6 @@ describe("RoundLifecycle — reconstructSession", async () => {
       createdAt: Date.now(),
       consecutiveRejections: 0,
       lastRejectionCheck: "",
-      driftClarificationStreak: 0,
       backtrackSkippedFiles: [],
       backtrackSkippedFingerprints: {},
       evidenceBaseline: [],
@@ -281,7 +278,6 @@ describe("RoundLifecycle — reconstructSession", async () => {
       createdAt: Date.now(),
       consecutiveRejections: 0,
       lastRejectionCheck: "",
-      driftClarificationStreak: 0,
       backtrackSkippedFiles: [],
       backtrackSkippedFingerprints: {},
       evidenceBaseline: [],
@@ -326,7 +322,6 @@ describe("RoundLifecycle — resume / crash window", async () => {
       createdAt: Date.now(),
       consecutiveRejections: 0,
       lastRejectionCheck: "",
-      driftClarificationStreak: 0,
       backtrackSkippedFiles: [],
       backtrackSkippedFingerprints: {},
       evidenceBaseline: [],
@@ -354,7 +349,6 @@ describe("RoundLifecycle — resume / crash window", async () => {
       createdAt: Date.now(),
       consecutiveRejections: 0,
       lastRejectionCheck: "",
-      driftClarificationStreak: 0,
       backtrackSkippedFiles: [],
       backtrackSkippedFingerprints: {},
       evidenceBaseline: [],

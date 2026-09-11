@@ -6,10 +6,11 @@
 
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { MemoryLoopStore, installTestCommandProvider } from "./_helpers.js";
+import { MemoryLoopStore, installTestCommandProvider, criterionClaims } from "./_helpers.js";
 import { queryLoopEntries } from "../loop-store.js";
 import type { LoopSessionDocument } from "../loop-store.js";
-import { deriveSubGoalId } from "../loop-compiler.js";
+import { deriveSubGoalId } from "../subgoal-state.js";
+import { deriveContractItemIds } from "../token-utils.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Helpers
@@ -45,11 +46,10 @@ function evalParam(opts: {
     should_continue: opts.shouldContinue ?? true,
     // Include minimal execution evidence so enforcement gate R3
     // (empty success) doesn't reject valid test rounds.
-    execution_evidence: hasSuccess ? {
+    execution_report: hasSuccess ? {
       files_changed: ["src/test.ts"],
-      test_results: { passed: 1, failed: 0, skipped: 0 },
-      success_criteria_met: [],
-      success_criteria_remaining: [],
+      tests_reported: { passed: 1, failed: 0, skipped: 0 },
+      criterion_claims: criterionClaims([], []),
       progress_estimate: 0.5,
     } : undefined,
   };
@@ -389,18 +389,17 @@ describe("MCP — multi-round lifecycle", async () => {
         constraint_violations: [],
         should_continue: true,
         discovered_constraints: ["All external calls must use SafeERC20"],
-        execution_evidence: {
+        execution_report: {
           files_changed: ["Token.sol"],
-          test_results: { passed: 20, failed: 2, skipped: 0 },
-          success_criteria_met: ["Reentrancy guard added to withdraw()"],
-          success_criteria_remaining: ["Reentrancy guard for deposit()", "Access control audit"],
+          tests_reported: { passed: 20, failed: 2, skipped: 0 },
+          criterion_claims: criterionClaims(["Reentrancy guard added to withdraw()"], ["Reentrancy guard for deposit()", "Access control audit"]),
           progress_estimate: 0.4,
         },
       },
     });
     assert.equal(r1.stopReason, undefined);
 
-    // Round 2 → stop (v1.17: must include execution_evidence for success=true)
+    // Round 2 → stop (v1.17: must include execution_report for success=true)
     const r2 = await TOOL_HANDLERS.loopforge_next(mgr, {
       sessionId,
       roundId: String(r1.roundId),
@@ -409,11 +408,10 @@ describe("MCP — multi-round lifecycle", async () => {
         output_summary: "All reentrancy bugs fixed. 24/24 tests pass.",
         constraint_violations: [],
         should_continue: false,
-        execution_evidence: {
+        execution_report: {
           files_changed: ["Token.sol"],
-          test_results: { passed: 24, failed: 0, skipped: 0 },
-          success_criteria_met: ["Reentrancy guard for deposit()", "Access control audit"],
-          success_criteria_remaining: [],
+          tests_reported: { passed: 24, failed: 0, skipped: 0 },
+          criterion_claims: criterionClaims(["Reentrancy guard for deposit()", "Access control audit"], []),
           progress_estimate: 1.0,
         },
       },
@@ -460,11 +458,10 @@ describe("MCP — multi-round lifecycle", async () => {
       output_summary: summary,
       should_continue: true,
       constraint_violations: ["Violate X"],
-      execution_evidence: {
+      execution_report: {
         files_changed: [`src/r${round}.ts`],
-        test_results: { passed: 1, failed: 0, skipped: 0 },
-        success_criteria_met: [],
-        success_criteria_remaining: ["Complete the task"],
+        tests_reported: { passed: 1, failed: 0, skipped: 0 },
+        criterion_claims: criterionClaims([], ["Complete the task"]),
         progress_estimate: 0.2 + round * 0.1,
       },
     });
@@ -690,11 +687,10 @@ describe("MCP — session persistence (save / resume)", async () => {
       output_summary: "All done",
       constraint_violations: [],
       should_continue: false,  // triggers completed → status="stopped"
-      execution_evidence: {
+      execution_report: {
         files_changed: ["src/test.ts"],
-        test_results: { passed: 1, failed: 0, skipped: 0 },
-        success_criteria_met: [],
-        success_criteria_remaining: [],
+        tests_reported: { passed: 1, failed: 0, skipped: 0 },
+        criterion_claims: criterionClaims([], []),
         progress_estimate: 1.0,
       },
     } as SelfEvaluation);
@@ -893,11 +889,10 @@ describe("MCP P0 lifecycle regressions", () => {
     output_summary: "partial",
     constraint_violations: [],
     should_continue: true,
-    execution_evidence: {
+    execution_report: {
       files_changed: [],
-      test_results: null,
-      success_criteria_met: [],
-      success_criteria_remaining: ["remaining"],
+      tests_reported: null,
+      criterion_claims: criterionClaims([], ["remaining"]),
       progress_estimate: 0.4,
     },
   });
@@ -935,11 +930,10 @@ describe("MCP P0 lifecycle regressions", () => {
   });
 
   it("commits the terminal trajectory and keeps completed replay available", async () => {
-    // v3.3: this test deliberately exercises the UNVERIFIED path — R8 is
-    // relaxed to warn and the command provider (installed by beforeEach) is
-    // removed so the success claim stays unverified and out of the trajectory.
+    // v3.8: this test deliberately exercises the UNVERIFIED path — the
+    // command provider installed by beforeEach is removed, so the success
+    // claim stays unbacked and out of the success trajectory.
     resetPolicy();
-    getPolicy().evidence.machine_backed_success = "warn";
     const started = await TOOL_HANDLERS.loopforge_start(mgr, {
       task: "Terminal replay regression",
       loopId: "terminal-replay-regression",
@@ -992,11 +986,10 @@ describe("MCP P0 lifecycle regressions", () => {
       output_summary: "partial",
       constraint_violations: [],
       should_continue: true,
-      execution_evidence: {
+      execution_report: {
         files_changed: [],
-        test_results: null,
-        success_criteria_met: [],
-        success_criteria_remaining: ["remaining"],
+        tests_reported: null,
+        criterion_claims: criterionClaims([], ["remaining"]),
         progress_estimate: 0.4,
       },
     } as SelfEvaluation;
@@ -1142,11 +1135,10 @@ describe("MCP P0 lifecycle regressions", () => {
       output_summary: "premature success",
       constraint_violations: [],
       should_continue: true,
-      execution_evidence: {
+      execution_report: {
         files_changed: ["src/change.ts"],
-        test_results: { passed: 1, failed: 0, skipped: 0 },
-        success_criteria_met: [],
-        success_criteria_remaining: ["still open"],
+        tests_reported: { passed: 1, failed: 0, skipped: 0 },
+        criterion_claims: criterionClaims([], ["still open"]),
         progress_estimate: 0.5,
       },
     };
@@ -1216,7 +1208,7 @@ describe("MCP P0 lifecycle regressions", () => {
 
     const persisted = counting.readSession("atomic-session-save")
       ?.entry?.loop_lineage?.round_snapshot as Record<string, unknown> | undefined;
-    assert.equal(persisted?.schemaVersion, 1);
+    assert.equal(persisted?.schemaVersion, 2);
     assert.equal(persisted?.roundId, started.roundId);
   });
 });
@@ -1243,7 +1235,9 @@ describe("MCP — input and output contract enforcement", () => {
         maxRounds: bad,
       });
       assert.ok("error" in result, `maxRounds=${bad} must be rejected`);
-      assert.ok((result.error as string).includes("maxRounds"));
+      assert.equal(result.error, "invalid_argument", "the CODE is stable");
+      assert.ok((result.errorMessage as string).includes("maxRounds"),
+        "the human sentence rides in errorMessage, never in the code");
     }
   });
 
@@ -1253,7 +1247,8 @@ describe("MCP — input and output contract enforcement", () => {
       loopId: "../escape",
     });
     assert.ok("error" in result);
-    assert.ok((result.error as string).includes("loopId"));
+    assert.equal(result.error, "invalid_argument");
+    assert.ok((result.errorMessage as string).includes("loopId"));
 
     const resume = await TOOL_HANDLERS.loopforge_resume(mgr, {
       loopId: "../escape",
@@ -1293,7 +1288,8 @@ describe("MCP — input and output contract enforcement", () => {
       loopId: "dup-guard",
     });
     assert.ok("error" in second, "second create must be rejected");
-    assert.ok((second.error as string).includes("already exists"));
+    assert.equal(second.error, "loop_already_running");
+    assert.ok((second.errorMessage as string).includes("already exists"));
 
     // The first session remains intact and advanceable
     const advanced = await TOOL_HANDLERS.loopforge_next(mgr, {
@@ -1313,7 +1309,8 @@ describe("MCP — input and output contract enforcement", () => {
       evaluation: evalParam({ success: true }),
     });
     assert.ok("error" in result, "missing roundId must be rejected");
-    assert.ok((result.error as string).includes("roundId"));
+    assert.equal(result.error, "round_id_required");
+    assert.ok((result.errorMessage as string).includes("roundId"));
   });
 
   it("returns the held prompt with a warning when a stale roundId is submitted", async () => {
@@ -1398,12 +1395,10 @@ describe("MCP — v3.2 unverified success trajectory", () => {
 
   beforeEach(() => {
     resetPolicy();
-    // v3.3: this suite deliberately exercises the UNVERIFIED path — no
-    // command provider, and machine_backed_success=warn so R8 tolerates
-    // the claim (warn instead of reject) while the success still never
-    // enters the trajectory.
+    // v3.8: this suite deliberately exercises the UNVERIFIED path — no
+    // command provider is configured, so success claims stay unbacked and
+    // never enter the success trajectory.
     getPolicy().evidence.commands = [];
-    getPolicy().evidence.machine_backed_success = "warn";
     store = new MemoryLoopStore();
     mgr = new SessionManager(store);
   });
@@ -1493,7 +1488,7 @@ describe("MCP — tool contract (v3.2.1)", async () => {
           constraint_violations: [],
           should_continue: true,
           outcome: 42,
-          execution_evidence: "malformed optional value",
+          execution_report: "malformed optional value",
         },
       });
     }, "optional evaluation fields must reach runtime normalization");
@@ -1506,10 +1501,10 @@ describe("MCP — tool contract (v3.2.1)", async () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// v3.2.1: drift streak must not be polluted by non-R7 rejections, and the
-// sub-goal lifecycle fields must persist on committed feedback entries.
+// v3.2.1: the sub-goal lifecycle fields must persist on committed feedback
+// entries (the drift-streak arm was deleted in v3.8 with R7).
 // ═══════════════════════════════════════════════════════════════════════════
-describe("MCP — drift streak & sub-goal persistence (v3.2.1)", async () => {
+describe("MCP — sub-goal persistence (v3.2.1)", async () => {
   let store: MemoryLoopStore;
   let mgr: SessionManager;
 
@@ -1521,58 +1516,6 @@ describe("MCP — drift streak & sub-goal persistence (v3.2.1)", async () => {
     mgr = new SessionManager(store);
   });
 
-  it("a non-R7 rejection (recurring violation) does not pollute the drift streak", async () => {
-    const start = await TOOL_HANDLERS.loopforge_start(mgr, { task: "Audit ERC20", maxRounds: 20 });
-    const sessionId = String(start.sessionId);
-
-    const evalFor = (round: number, summary: string): Record<string, unknown> => ({
-      success: false,
-      output_summary: summary,
-      should_continue: true,
-      next_action: "Refactor the auth module",
-      constraint_violations: ["Violate X"],
-      execution_evidence: {
-        files_changed: [`src/r${round}.ts`],
-        test_results: { passed: 0, failed: 0, skipped: 0 },
-        success_criteria_met: [],
-        success_criteria_remaining: ["Complete the task"],
-        progress_estimate: 0.3,
-      },
-    });
-
-    // Rounds 1–2: same violation, intent matches output.
-    let last = start;
-    for (const [round, summary] of [
-      [1, "Refactored the auth module"],
-      [2, "Refactored the auth module"],
-    ] as Array<[number, string]>) {
-      last = await TOOL_HANDLERS.loopforge_next(mgr, {
-        sessionId,
-        roundId: String(last.roundId),
-        evaluation: evalFor(round, summary),
-      });
-      assert.ok(!last.enforcementAction || last.enforcementAction === "accept",
-        `round ${round} must advance, got ${last.enforcementAction ?? "accept"}`);
-    }
-
-    // Round 3: SAME violation (3rd → recurring_violation flag, R2 fires)
-    // AND drifted output ("Fixed the CSS…" vs next_action "Refactor the
-    // auth module" → intent_drift flag). R2 has higher priority than R7,
-    // so R7 never participates — the streak must stay untouched.
-    const r3 = await TOOL_HANDLERS.loopforge_next(mgr, {
-      sessionId,
-      roundId: String(last.roundId),
-      evaluation: evalFor(3, "Fixed the CSS padding and layout issues"),
-    });
-    assert.equal(r3.enforcementAction, "reject", "R2 recurring violation must reject");
-    const session = mgr.get(String(start.sessionId));
-    assert.ok(session, "session must exist");
-    assert.equal(
-      session!.driftClarificationStreak, 0,
-      "a rejection by a higher-priority rule must not increment the R7 streak",
-    );
-  });
-
   it("persists subgoal_updates transitions on the feedback entry", async () => {
     const start = await TOOL_HANDLERS.loopforge_start(mgr, { task: "Audit ERC20", maxRounds: 20 });
     const sessionId = String(start.sessionId);
@@ -1580,9 +1523,11 @@ describe("MCP — drift streak & sub-goal persistence (v3.2.1)", async () => {
     assert.ok(started, "session must exist after start");
     const loopId = started!.loopId;
 
-    const doneId = deriveSubGoalId("first step");
-    const blockedId = deriveSubGoalId("blocked step");
-    const canceledId = deriveSubGoalId("dropped step");
+    // v3.8: ids are scoped to the declaration event (loop, round, ordinal).
+    const round1 = Number(started!.currentRound);
+    const doneId = deriveSubGoalId(loopId, round1, 0, "first step");
+    const blockedId = deriveSubGoalId(loopId, round1, 1, "blocked step");
+    const canceledId = deriveSubGoalId(loopId, round1, 2, "dropped step");
 
     await TOOL_HANDLERS.loopforge_next(mgr, {
       sessionId,
@@ -1598,11 +1543,10 @@ describe("MCP — drift streak & sub-goal persistence (v3.2.1)", async () => {
           { id: blockedId, status: "blocked" },
           { id: canceledId, status: "canceled" },
         ],
-        execution_evidence: {
+        execution_report: {
           files_changed: ["src/a.ts"],
-          test_results: { passed: 1, failed: 0, skipped: 0 },
-          success_criteria_met: [],
-          success_criteria_remaining: ["Complete the task"],
+          tests_reported: { passed: 1, failed: 0, skipped: 0 },
+          criterion_claims: criterionClaims([], ["Complete the task"]),
           progress_estimate: 0.3,
         },
       },
@@ -1633,11 +1577,10 @@ describe("MCP — drift streak & sub-goal persistence (v3.2.1)", async () => {
         should_continue: true,
         constraint_violations: [],
         subgoal_updates: [{ id: "sg-00000000", status: "done" }],
-        execution_evidence: {
+        execution_report: {
           files_changed: ["src/a.ts"],
-          test_results: { passed: 1, failed: 0, skipped: 0 },
-          success_criteria_met: [],
-          success_criteria_remaining: ["Complete the task"],
+          tests_reported: { passed: 1, failed: 0, skipped: 0 },
+          criterion_claims: criterionClaims([], ["Complete the task"]),
           progress_estimate: 0.3,
         },
       },
@@ -1661,11 +1604,10 @@ describe("MCP — drift streak & sub-goal persistence (v3.2.1)", async () => {
         output_summary: "fixed the payload",
         should_continue: true,
         constraint_violations: [],
-        execution_evidence: {
+        execution_report: {
           files_changed: ["src/a.ts"],
-          test_results: { passed: 1, failed: 0, skipped: 0 },
-          success_criteria_met: [],
-          success_criteria_remaining: ["Complete the task"],
+          tests_reported: { passed: 1, failed: 0, skipped: 0 },
+          criterion_claims: criterionClaims([], ["Complete the task"]),
           progress_estimate: 0.3,
         },
       },
@@ -1693,7 +1635,9 @@ describe("MCP — drift streak & sub-goal persistence (v3.2.1)", async () => {
 
   it("accepts a sub-goal that is created and transitioned within the same round", async () => {
     const start = await TOOL_HANDLERS.loopforge_start(mgr, { task: "Audit ERC20", maxRounds: 20 });
-    const sgId = deriveSubGoalId("harden the withdraw path");
+    const started = mgr.get(String(start.sessionId));
+    assert.ok(started, "session must exist after start");
+    const sgId = deriveSubGoalId(started!.loopId, started!.currentRound, 0, "harden the withdraw path");
     const result = await TOOL_HANDLERS.loopforge_next(mgr, {
       sessionId: start.sessionId,
       roundId: start.roundId,
@@ -1704,11 +1648,10 @@ describe("MCP — drift streak & sub-goal persistence (v3.2.1)", async () => {
         constraint_violations: [],
         emerged_subtasks: ["harden the withdraw path"],
         subgoal_updates: [{ id: sgId, status: "in_progress" }],
-        execution_evidence: {
+        execution_report: {
           files_changed: ["src/withdraw.ts"],
-          test_results: { passed: 1, failed: 0, skipped: 0 },
-          success_criteria_met: [],
-          success_criteria_remaining: ["Complete the task"],
+          tests_reported: { passed: 1, failed: 0, skipped: 0 },
+          criterion_claims: criterionClaims([], ["Complete the task"]),
           progress_estimate: 0.3,
         },
       },
@@ -1757,11 +1700,10 @@ describe("MCP — drift streak & sub-goal persistence (v3.2.1)", async () => {
           should_continue: true,
           constraint_violations: [],
           gate_ids: [gateId],
-          execution_evidence: {
+          execution_report: {
             files_changed: ["deploy.yml"],
-            test_results: { passed: 1, failed: 0, skipped: 0 },
-            success_criteria_met: [],
-            success_criteria_remaining: ["Complete the task"],
+            tests_reported: { passed: 1, failed: 0, skipped: 0 },
+            criterion_claims: criterionClaims([], ["Complete the task"]),
             progress_estimate: 0.5,
           },
         },
@@ -1791,11 +1733,10 @@ describe("MCP — drift streak & sub-goal persistence (v3.2.1)", async () => {
           should_continue: true,
           constraint_violations: [],
           gate_ids: [gateId],
-          execution_evidence: {
+          execution_report: {
             files_changed: ["deploy.yml"],
-            test_results: { passed: 1, failed: 0, skipped: 0 },
-            success_criteria_met: [],
-            success_criteria_remaining: ["Complete the task"],
+            tests_reported: { passed: 1, failed: 0, skipped: 0 },
+            criterion_claims: criterionClaims([], ["Complete the task"]),
             progress_estimate: 0.5,
           },
         },
@@ -1806,107 +1747,6 @@ describe("MCP — drift streak & sub-goal persistence (v3.2.1)", async () => {
     } finally {
       resetPolicy();
     }
-  });
-
-  it("three consecutive weak drift clarifications terminate the loop (v3.3.1 R7 streak)", async () => {
-    const start = await TOOL_HANDLERS.loopforge_start(mgr, { task: "Audit ERC20", maxRounds: 20 });
-    const sessionId = String(start.sessionId);
-
-    // Round 1 aligns with its own next_action → clean continue. Its
-    // next_action becomes the intent baseline for the drift checks.
-    const r1 = await TOOL_HANDLERS.loopforge_next(mgr, {
-      sessionId,
-      roundId: String(start.roundId),
-      evaluation: {
-        success: false,
-        output_summary: "Refactored the auth module",
-        should_continue: true,
-        next_action: "Refactor the auth module",
-        constraint_violations: [],
-        execution_evidence: {
-          files_changed: ["src/auth.ts"],
-          test_results: { passed: 1, failed: 0, skipped: 0 },
-          success_criteria_met: [],
-          success_criteria_remaining: ["Complete the task"],
-          progress_estimate: 0.3,
-        },
-      },
-    });
-    assert.ok(!r1.enforcementAction || r1.enforcementAction === "accept",
-      "round 1 must advance cleanly, got " + String(r1.enforcementAction));
-
-    // Every later submission drifts from the declared intent and carries NO
-    // drift_clarification (weak by definition). Progress rises so R4/R5 stay
-    // silent — this must exercise the R7 streak, not the stall rules.
-    const driftEval = (attempt: number): Record<string, unknown> => ({
-      success: false,
-      output_summary: "Reworked the CSS grid and layout instead",
-      should_continue: true,
-      constraint_violations: [],
-      execution_evidence: {
-        files_changed: [`src/layout-${attempt}.ts`],
-        test_results: { passed: 0, failed: 0, skipped: 0 },
-        success_criteria_met: [],
-        success_criteria_remaining: ["Complete the task"],
-        progress_estimate: 0.3 + attempt * 0.1,
-      },
-    });
-    const session = () => {
-      const s = mgr.get(String(start.sessionId));
-      assert.ok(s, "session must exist");
-      return s;
-    };
-
-    // Drift #1 → R7 rejects (no clarification); the streak must increment.
-    let last = await TOOL_HANDLERS.loopforge_next(mgr, {
-      sessionId,
-      roundId: String(r1.roundId),
-      evaluation: driftEval(1),
-    });
-    assert.equal(last.enforcementAction, "reject", "drift #1 must reject");
-    assert.ok(String(last.enforcementReason ?? "").includes("Declared intent was"),
-      `drift #1 must be R7's intent_drift rejection (got: ${last.enforcementReason})`);
-    assert.equal(session().driftClarificationStreak, 1,
-      "an R7 weak-clarification rejection must increment the streak");
-
-    // Drift #2 → R7 rejects again; streak reaches 2.
-    last = await TOOL_HANDLERS.loopforge_next(mgr, {
-      sessionId,
-      roundId: String(r1.roundId),
-      evaluation: driftEval(2),
-    });
-    assert.equal(last.enforcementAction, "reject", "drift #2 must reject");
-    assert.ok(String(last.enforcementReason ?? "").includes("Declared intent was"),
-      `drift #2 must be R7's intent_drift rejection (got: ${last.enforcementReason})`);
-    assert.equal(session().driftClarificationStreak, 2,
-      "the second R7 weak-clarification rejection must increment the streak to 2");
-
-    // Drift #3 → R6 (escalation at 2 consecutive rejections) fires before R7
-    // and rejects with max_rejections. The streak is untouched (R6 is not
-    // R7) and the per-check rejection counter resets.
-    last = await TOOL_HANDLERS.loopforge_next(mgr, {
-      sessionId,
-      roundId: String(r1.roundId),
-      evaluation: driftEval(3),
-    });
-    assert.equal(last.enforcementAction, "reject", "drift #3 must reject");
-    assert.ok(String(last.enforcementReason ?? "").includes("consecutive enforcement rejections"),
-      `R6's escalation ladder must interleave on the third rejection (got: ${last.enforcementReason})`);
-    assert.equal(session().driftClarificationStreak, 2,
-      "a non-R7 rejection must not touch the streak");
-
-    // Drift #4 → R7 sees streak 2 → newStreak 3 ≥ drift_clarification_max_streak
-    // → terminate. This is the ladder the v3.3.1 fix restores: without the
-    // reject-path clarificationAccepted echo, the streak never grew and the
-    // loop rejected forever instead of terminating.
-    last = await TOOL_HANDLERS.loopforge_next(mgr, {
-      sessionId,
-      roundId: String(r1.roundId),
-      evaluation: driftEval(4),
-    });
-    assert.equal(last.enforcementAction, "terminate",
-      "the third weak clarification must terminate the loop");
-    assert.equal(last.stopReason, "enforcement_terminated");
   });
 });
 
@@ -1932,9 +1772,8 @@ describe("MCP — Round Contract flow", async () => {
     });
     input.round_contract = {
       work_item: "Implement auth",
-      done_when: ["cr-auth-login"],
-      verification_plan: ["run-tests"],
       scope: ["src/auth"],
+      items: [{ description: "login works", criterion_refs: ["cr-auth-login"], subgoal_refs: [], verify_with: ["run-tests"] }],
     };
     assert.doesNotThrow(() => {
       validateToolInput("loopforge_next", {
@@ -1954,18 +1793,16 @@ describe("MCP — Round Contract flow", async () => {
       output_summary: "Scaffolded auth; declared the round contract.",
       constraint_violations: [],
       should_continue: true,
-      execution_evidence: {
+      execution_report: {
         files_changed: ["src/auth.ts"],
-        test_results: { passed: 0, failed: 0, skipped: 0 },
-        success_criteria_met: [],
-        success_criteria_remaining: ["cr-login-works"],
+        tests_reported: { passed: 0, failed: 0, skipped: 0 },
+        criterion_claims: criterionClaims([], ["cr-login-works"]),
         progress_estimate: 0.2,
       },
       round_contract: {
         work_item: "Implement login flow",
-        done_when: ["cr-login-works"],
-        verification_plan: ["run-tests"],
         scope: ["src/auth"],
+        items: [{ description: "login works", criterion_refs: ["cr-login-works"], subgoal_refs: [], verify_with: ["run-tests"] }],
       },
     };
     const r2 = await mgr.advance(sessionId, "Scaffolded the auth module.", evalBlock);
@@ -1973,7 +1810,7 @@ describe("MCP — Round Contract flow", async () => {
     assert.equal(r2.round, 2);
     assert.ok(r2.prompt.includes("**Implement login flow**"),
       "round 2 prompt must carry the contract as Current Task");
-    assert.ok(r2.prompt.includes("- Done when: cr-login-works"));
+    assert.ok(r2.prompt.includes("login works"), "item descriptions render");
     assert.ok(r2.prompt.includes("- Verify via: run-tests"));
   });
 
@@ -1994,9 +1831,9 @@ describe("MCP — Round Contract flow", async () => {
 
   const CONTRACT = (workItem: string): SelfEvaluation["round_contract"] => ({
     work_item: workItem,
-    done_when: ["cr-login-works"],
-    verification_plan: ["verify"], // the name installTestCommandProvider configures
     scope: ["src/auth"],
+    // "verify" is the command installTestCommandProvider configures.
+    items: [{ description: "login works", criterion_refs: ["cr-login-works"], subgoal_refs: [], verify_with: ["verify"] }],
   });
 
   /** Partial honest eval: success=false + a declared proposal (or none). */
@@ -2009,14 +1846,70 @@ describe("MCP — Round Contract flow", async () => {
     output_summary: "Worked the round.",
     constraint_violations: [],
     should_continue: true,
-    execution_evidence: {
+    execution_report: {
       files_changed: ["src/auth.ts"],
-      test_results: { passed: 1, failed: 0, skipped: 0 },
-      success_criteria_met: met,
-      success_criteria_remaining: remaining,
+      tests_reported: { passed: 1, failed: 0, skipped: 0 },
+      criterion_claims: criterionClaims(met, remaining),
       progress_estimate: 0.4,
     },
     ...(contract ? { round_contract: contract } : {}),
+  });
+
+  it("v3.8: the projection carries verified_subgoals after the loop stops", async () => {
+    // The projection used to read only the committed rounds BELOW
+    // session.currentRound — a bound that is only correct while the loop is
+    // running. A stop leaves currentRound on the round it just committed, so
+    // the final round was dropped and the projection contradicted audit and
+    // explain about the very verification it exists to report.
+    installTestCommandProvider();
+    const started = await mgr.create({ task: "Ship the widget", loopId: "projection-stop", maxRounds: 4 });
+    const subGoalId = deriveSubGoalId("projection-stop", 1, 0, "wire the widget");
+    const contract: SelfEvaluation["round_contract"] = {
+      work_item: "Slice A",
+      scope: ["src/auth"],
+      items: [{
+        description: "widget works",
+        criterion_refs: [],
+        subgoal_refs: [subGoalId],
+        verify_with: ["verify"],
+      }],
+    };
+    const itemId = deriveContractItemIds(contract.items)[0];
+
+    await mgr.advance(started.sessionId, "", {
+      success: false,
+      output_summary: "Declared the contract.",
+      constraint_violations: [],
+      should_continue: true,
+      emerged_subtasks: ["wire the widget"],
+      round_contract: contract,
+    });
+
+    const stopped = await mgr.advance(started.sessionId, "", {
+      success: true,
+      output_summary: "Verified the slice.",
+      constraint_violations: [],
+      should_continue: false,
+      execution_report: {
+        files_changed: [],
+        tests_reported: { passed: 1, failed: 0, skipped: 0 },
+        contract_item_claims: [{ item_id: itemId, outcome: "met" }],
+        criterion_claims: [],
+      },
+    });
+    assert.equal(stopped.stopReason, "completed");
+
+    const projection = await mgr.getProjection(started.sessionId) as Record<string, unknown>;
+    assert.deepEqual(
+      projection.verified_subgoals,
+      [{ subgoal_id: subGoalId, contract_item_ids: [itemId], verified_at_round: 2 }],
+      "the final committed round is machine history — the projection must include it",
+    );
+    // The audit reads the same history and must agree.
+    const audit = await mgr.getAudit("projection-stop") as {
+      contracts: { verifiedItems: number };
+    } | null;
+    assert.equal(audit?.contracts.verifiedItems, 1);
   });
 
   it("v3.4: rejection mid-contract keeps the ACTIVE contract as the retry's Current Task", async () => {
@@ -2042,11 +1935,10 @@ describe("MCP — Round Contract flow", async () => {
       output_summary: "premature success",
       constraint_violations: [],
       should_continue: true,
-      execution_evidence: {
+      execution_report: {
         files_changed: ["src/auth.ts"],
-        test_results: { passed: 1, failed: 0, skipped: 0 },
-        success_criteria_met: [],
-        success_criteria_remaining: ["cr-login-works"],
+        tests_reported: { passed: 1, failed: 0, skipped: 0 },
+        criterion_claims: criterionClaims([], ["cr-login-works"]),
         progress_estimate: 0.5,
       },
     });
@@ -2060,33 +1952,37 @@ describe("MCP — Round Contract flow", async () => {
       "L0 retry stays lean — no restatement template");
   });
 
-  it("v3.4: a satisfied contract reverts the next prompt to the original task", async () => {
+  it("v3.8: a verified contract closes and the Current Task reverts", async () => {
     const started = await mgr.create({
       task: "Build the auth module",
       loopId: "contract-satisfied-revert",
       maxRounds: 4,
     });
-    const a = CONTRACT("Implement login flow");
-    const r2 = await mgr.advance(started.sessionId, "", honest([], ["cr-login-works"], a));
+    const contract = CONTRACT("Implement login flow");
+    const itemId = deriveContractItemIds(contract!.items)[0];
+    const r2 = await mgr.advance(started.sessionId, "", honest([], ["cr-login-works"], contract));
     assert.ok(String(r2.prompt ?? "").includes("**Implement login flow**"));
-    // Round 2 completes A (all done_when met) and proposes nothing new.
-    const r3 = await mgr.advance(
-      started.sessionId,
-      "",
-      honest(["cr-login-works"], [], undefined),
-    );
+
+    // v3.8: the item closes only when its bound command was observed passing
+    // (the "verify" provider is installed for this suite and passes), so the
+    // contract closes and the Current Task reverts to the original task.
+    const r3 = await mgr.advance(started.sessionId, "", {
+      success: false,
+      output_summary: "Ran the bound verification command.",
+      constraint_violations: [],
+      should_continue: true,
+      execution_report: {
+        files_changed: ["src/auth.ts"],
+        tests_reported: { passed: 1, failed: 0, skipped: 0 },
+        progress_estimate: 0.6,
+        contract_item_claims: [{ item_id: itemId, outcome: "met" }],
+      },
+    });
     assert.equal(r3.round, 3);
-    // v3.5: the completing round is machine-backed end-to-end — the "verify"
-    // command auto-ran and passed, so neither the completion flag nor
-    // premature_boundary may appear in round 3's prompt flag lines.
-    assert.ok(!String(r3.prompt ?? "").includes("contract_completion_unverified"),
-      "machine-backed completion must stay silent");
-    assert.ok(!String(r3.prompt ?? "").includes("premature_boundary"),
-      "machine-backed completion must not trip the boundary check");
     assert.ok(String(r3.prompt ?? "").includes("Build the auth module"),
-      "round 3 must fall back to the original task as Current Task");
+      "a closed contract reverts the Current Task to the original task");
     assert.ok(!String(r3.prompt ?? "").includes("**Implement login flow**"),
-      "a satisfied contract must stop rendering");
+      "the closed contract must stop rendering");
   });
 
   it("v3.4: a premature replacement is ignored — the open contract continues", async () => {
@@ -2170,11 +2066,10 @@ describe("MCP — audit & vault replay (v3.3.1)", async () => {
           output_summary: `Round ${i} progress`,
           constraint_violations: [],
           should_continue: true,
-          execution_evidence: {
+          execution_report: {
             files_changed: [`src/r${i}.ts`],
-            test_results: { passed: 1, failed: 0, skipped: 0 },
-            success_criteria_met: [],
-            success_criteria_remaining: ["Complete the task"],
+            tests_reported: { passed: 1, failed: 0, skipped: 0 },
+            criterion_claims: criterionClaims([], ["Complete the task"]),
             progress_estimate: 0.2 + i * 0.1,
           },
         },
@@ -2210,14 +2105,16 @@ describe("MCP — audit & vault replay (v3.3.1)", async () => {
     const start = await TOOL_HANDLERS.loopforge_start(mgr, { task: "Never commits" });
     const loopId = mgr.get(String(start.sessionId))!.loopId;
     const audit = await TOOL_HANDLERS.loopforge_status(mgr, { view: "audit", loopId });
-    assert.ok(String(audit.error ?? "").includes("no audit data"),
+    assert.equal(audit.error, "state_unavailable",
       "a loop without committed decisions must not be solemnly passed: " + JSON.stringify(audit));
+    assert.ok(String(audit.errorMessage ?? "").includes("no audit data"));
     const missing = await TOOL_HANDLERS.loopforge_status(mgr, {
       view: "audit",
       loopId: "no-such-loop",
     });
-    assert.ok(String(missing.error ?? "").includes("no audit data"),
+    assert.equal(missing.error, "state_unavailable",
       "a nonexistent loop must not audit as passed");
+    assert.ok(String(missing.errorMessage ?? "").includes("no audit data"));
   });
 
   it("replays a loop straight from the vault after restart (v3.3.1)", async () => {
@@ -2231,6 +2128,7 @@ describe("MCP — audit & vault replay (v3.3.1)", async () => {
     assert.ok(Array.isArray(timeline) && timeline.length >= 2,
       `vault replay must return the committed timeline (got ${String(timeline?.length)})`);
     const missing = await TOOL_HANDLERS.loopforge_replay(restarted, { loopId: "no-such-loop" });
-    assert.ok(String(missing.error ?? "").includes("no committed rounds"));
+    assert.equal(missing.error, "state_unavailable");
+    assert.ok(String(missing.errorMessage ?? "").includes("no committed rounds"));
   });
 });

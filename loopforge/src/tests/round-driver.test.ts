@@ -6,13 +6,15 @@ import { LoopForgeEngine } from "../engine.js";
 import { RoundDriver } from "../round-driver.js";
 import {
   Mode,
-  makeExecutionEvidence,
+  makeExecutionReport,
   makeSelfEvaluation,
 } from "../protocol.js";
 import type { LoopForgeRequest } from "../protocol.js";
-import { deriveSubGoalId } from "../loop-compiler.js";
-import { MemoryLoopStore, installTestCommandProvider } from "./_helpers.js";
+import { deriveSubGoalId } from "../subgoal-state.js";
+import { MemoryLoopStore, installTestCommandProvider, criterionClaims } from "./_helpers.js";
 import { queryLoopEntries } from "../loop-store.js";
+import { deriveEvidenceCapability } from "../evidence-provider.js";
+import { getPolicy } from "../policy.js";
 
 // v3.3: success claims need machine-backed evidence — the RoundDriver
 // collects evidence via the real collector, so a passing command provider
@@ -47,6 +49,33 @@ describe("RoundDriver", () => {
     assert.equal(left.artifact.promptHash, right.artifact.promptHash);
     assert.equal(left.artifact.stateHash, right.artifact.stateHash);
     assert.equal(left.snapshot.phase, "prompted");
+  });
+
+  it("v3.8: prepare() returns the derived EvidenceCapability", async () => {
+    const prepared = await new RoundDriver(
+      new LoopForgeEngine(new MemoryLoopStore()),
+    ).prepare(request("driver-capability"), "driver-capability", 1);
+
+    assert.ok(prepared);
+    // installTestCommandProvider configures "verify" (enabled, after-phase).
+    assert.equal(prepared.capability.schemaVersion, 1);
+    assert.deepEqual(
+      prepared.capability.commands.map((command) => [command.commandId, command.ready]),
+      [["verify", true]],
+    );
+    assert.equal(prepared.capability.contractVerificationAvailable, true);
+    assert.deepEqual(
+      prepared.capability.providers.map((provider) => provider.providerId),
+      ["git"],
+      "the default policy configures the git provider",
+    );
+    assert.deepEqual(prepared.capability.warnings, [],
+      "a configured provider and an enabled command need no warning");
+    // The prepared capability is the SAME fact the CLI-side surfaces derive.
+    assert.deepEqual(
+      prepared.capability,
+      deriveEvidenceCapability(getPolicy(), prepared.evidenceBaseline),
+    );
   });
 
   it("compiles a new L0 artifact for a rejected attempt without a lineage commit", async () => {
@@ -111,14 +140,13 @@ describe("RoundDriver", () => {
       checkpoint_label: "Phase 1 done",
       discovered_constraints: ["Never log secrets"],
       subgoal_updates: [
-        { id: deriveSubGoalId("Add error handling"), status: "done" },
-        { id: deriveSubGoalId("Wire config"), status: "done" },
+        { id: deriveSubGoalId("driver-cross-round", 1, 0, "Add error handling"), status: "done" },
+        { id: deriveSubGoalId("driver-cross-round", 1, 1, "Wire config"), status: "done" },
       ],
-      execution_evidence: makeExecutionEvidence({
+      execution_report: makeExecutionReport({
         files_changed: ["src/a.ts"],
-        test_results: { passed: 1, failed: 0, skipped: 0 },
-        success_criteria_met: ["cr-11111111", "Parser handles edge cases"],
-        success_criteria_remaining: [],
+        tests_reported: { passed: 1, failed: 0, skipped: 0 },
+        criterion_claims: criterionClaims(["cr-11111111", "Parser handles edge cases"], []),
         progress_estimate: 0.5,
       }),
     });
@@ -145,11 +173,11 @@ describe("RoundDriver", () => {
     assert.equal(entry.output_summary, "Implemented the parser.");
     assert.equal(lin.compression_checkpoint, true);
     assert.equal(lin.checkpoint_label, "Phase 1 done");
-    assert.deepEqual(lin.execution_evidence, eval1.execution_evidence);
+    assert.deepEqual(lin.execution_report, eval1.execution_report);
     assert.deepEqual(entry.discovered_constraints, ["Never log secrets"]);
     assert.deepEqual(entry.subgoal_updates, [
-      { id: deriveSubGoalId("Add error handling"), status: "done" },
-      { id: deriveSubGoalId("Wire config"), status: "done" },
+      { id: deriveSubGoalId("driver-cross-round", 1, 0, "Add error handling"), status: "done" },
+      { id: deriveSubGoalId("driver-cross-round", 1, 1, "Wire config"), status: "done" },
     ]);
 
     // And the compiled round-2 response derives the agent_declared milestone
@@ -191,11 +219,10 @@ describe("RoundDriver", () => {
           output_summary: "Implemented the durable boundary.",
           constraint_violations: [],
           should_continue: true,
-          execution_evidence: makeExecutionEvidence({
+          execution_report: makeExecutionReport({
             files_changed: ["src/store.ts"],
-            test_results: { passed: 1, failed: 0, skipped: 0 },
-            success_criteria_met: [],
-            success_criteria_remaining: ["Finish the task"],
+            tests_reported: { passed: 1, failed: 0, skipped: 0 },
+            criterion_claims: criterionClaims([], ["Finish the task"]),
             progress_estimate: 0.4,
           }),
         }),

@@ -26,12 +26,12 @@ export { compileLoop, decideLevel, alignTask, checkLoopHealth, computeGoalTextHa
 // Replay
 export { ReplayBackend } from "./replay.js";
 // Engine
-export { LoopForgeEngine, createEngine, buildSelfEvaluation, parseExecutionEvidence, parseCriterionRevisions, parseWorkerResults, } from "./engine.js";
+export { LoopForgeEngine, createEngine, buildSelfEvaluation, parseExecutionReport, parseCriterionRevisions, parseWorkerResults, } from "./engine.js";
 // MCP (v1.3)
 export { McpServer } from "./mcp/server.js";
 export { SessionManager } from "./mcp/session.js";
-// EvidenceProvider (v1.18)
-export { EvidenceCollector, GitEvidenceProvider, CommandEvidenceProvider, registerEvidenceProvider, unregisterEvidenceProvider, extractFilesFromSnapshots, diffSnapshots, diffSnapshotCollections, } from "./evidence-provider.js";
+// EvidenceProvider (v1.18 / v3.8: machine observations)
+export { EvidenceCollector, GitEvidenceProvider, CommandEvidenceProvider, registerEvidenceProvider, unregisterEvidenceProvider, isProviderRegistered, isPassedAfterObservation, gitChangedFiles, extractFilesFromSnapshots, diffSnapshots, diffSnapshotCollections, } from "./evidence-provider.js";
 // Structured tracing and policy effectiveness metrics (v1.20)
 export { logEvent, } from "./observability.js";
 export { PolicyMetricsCollector, policyMetrics, getPolicyMetrics, resetPolicyMetrics, } from "./policy-metrics.js";

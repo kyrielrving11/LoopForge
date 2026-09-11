@@ -103,8 +103,94 @@ export function deriveItemId(text: string): string {
     .slice(0, 8);
 }
 
-/** Stable-ID shape shared by constraint/criterion/sub-goal references. */
-export const STABLE_ID_RE = /^(c|cr|sg)-[a-f0-9]{8}$/;
+/** Stable-ID shape shared by constraint/criterion/sub-goal/contract
+ *  references. v3.8 added the contract (rc-) and contract-item (rci-)
+ *  namespaces. */
+export const STABLE_ID_RE = /^(c|cr|sg|rc|rci)-[a-f0-9]{8}$/;
+
+// ── v3.8: Contract identity (content-addressed, round-independent) ──────────
+
+/** Normalize one contract text field for identity purposes. */
+export function normalizeContractText(text: string): string {
+  return text.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+/** The contract-item fields that participate in rci-/rc- identity. Structural
+ *  (not imported from protocol.ts) so this module keeps its zero-dependency
+ *  position alongside the other pure token helpers. */
+export interface ContractIdentityItem {
+  description: string;
+  criterion_refs: string[];
+  subgoal_refs: string[];
+  verify_with: string[];
+}
+
+/** v3.8: Canonical form of a contract proposal. Identity is CONTENT only —
+ *  restating an unchanged contract keeps the same rc-/rci- ids, unlike a
+ *  SubGoal whose id includes its declaration round. Array order is part of
+ *  the identity. */
+export function canonicalContractText(contract: {
+  work_item?: string;
+  scope: string[];
+  items: ContractIdentityItem[];
+}): string {
+  const canonical = {
+    work_item: normalizeContractText(contract.work_item ?? ""),
+    scope: contract.scope.map(normalizeContractText),
+    items: contract.items.map((item) => ({
+      description: normalizeContractText(item.description),
+      criterion_refs: item.criterion_refs.map(normalizeContractText),
+      subgoal_refs: item.subgoal_refs.map(normalizeContractText),
+      verify_with: item.verify_with.map(normalizeContractText),
+    })),
+  };
+  return JSON.stringify(canonical);
+}
+
+/** v3.8: rc-XXXXXXXX — loopId + canonical content. */
+export function deriveContractId(
+  loopId: string,
+  contract: Parameters<typeof canonicalContractText>[0],
+): string {
+  return `rc-${deriveItemId(`${loopId} ${canonicalContractText(contract)}`)}`;
+}
+
+/** v3.8: rci-XXXXXXXX — the item's own content plus a duplicate ordinal.
+ *  Deliberately independent of the contract id: editing `work_item` or
+ *  `scope` must not invalidate every item id the agent already cited. */
+export function deriveContractItemId(
+  item: ContractIdentityItem,
+  duplicateOrdinal: number,
+): string {
+  const canonical = JSON.stringify({
+    description: normalizeContractText(item.description),
+    criterion_refs: item.criterion_refs.map(normalizeContractText),
+    subgoal_refs: item.subgoal_refs.map(normalizeContractText),
+    verify_with: item.verify_with.map(normalizeContractText),
+    duplicate_ordinal: duplicateOrdinal,
+  });
+  return `rci-${deriveItemId(canonical)}`;
+}
+
+/** v3.8: Assign ids to a proposal's items in declaration order. Items with
+ *  identical normalized content get distinct ids through their duplicate
+ *  ordinal. */
+export function deriveContractItemIds(
+  items: ReadonlyArray<ContractIdentityItem>,
+): string[] {
+  const seen = new Map<string, number>();
+  return items.map((item) => {
+    const key = JSON.stringify({
+      description: normalizeContractText(item.description),
+      criterion_refs: item.criterion_refs.map(normalizeContractText),
+      subgoal_refs: item.subgoal_refs.map(normalizeContractText),
+      verify_with: item.verify_with.map(normalizeContractText),
+    });
+    const ordinal = seen.get(key) ?? 0;
+    seen.set(key, ordinal + 1);
+    return deriveContractItemId(item, ordinal);
+  });
+}
 
 // ── File-path token extraction ──────────────────────────────────────────────
 

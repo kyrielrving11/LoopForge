@@ -33,8 +33,40 @@ export declare function entryRound(entry: unknown): number;
  *  loop-compiler; consolidation must not change the hash strategy
  *  (deterministic across rounds). */
 export declare function deriveItemId(text: string): string;
-/** Stable-ID shape shared by constraint/criterion/sub-goal references. */
+/** Stable-ID shape shared by constraint/criterion/sub-goal/contract
+ *  references. v3.8 added the contract (rc-) and contract-item (rci-)
+ *  namespaces. */
 export declare const STABLE_ID_RE: RegExp;
+/** Normalize one contract text field for identity purposes. */
+export declare function normalizeContractText(text: string): string;
+/** The contract-item fields that participate in rci-/rc- identity. Structural
+ *  (not imported from protocol.ts) so this module keeps its zero-dependency
+ *  position alongside the other pure token helpers. */
+export interface ContractIdentityItem {
+    description: string;
+    criterion_refs: string[];
+    subgoal_refs: string[];
+    verify_with: string[];
+}
+/** v3.8: Canonical form of a contract proposal. Identity is CONTENT only —
+ *  restating an unchanged contract keeps the same rc-/rci- ids, unlike a
+ *  SubGoal whose id includes its declaration round. Array order is part of
+ *  the identity. */
+export declare function canonicalContractText(contract: {
+    work_item?: string;
+    scope: string[];
+    items: ContractIdentityItem[];
+}): string;
+/** v3.8: rc-XXXXXXXX — loopId + canonical content. */
+export declare function deriveContractId(loopId: string, contract: Parameters<typeof canonicalContractText>[0]): string;
+/** v3.8: rci-XXXXXXXX — the item's own content plus a duplicate ordinal.
+ *  Deliberately independent of the contract id: editing `work_item` or
+ *  `scope` must not invalidate every item id the agent already cited. */
+export declare function deriveContractItemId(item: ContractIdentityItem, duplicateOrdinal: number): string;
+/** v3.8: Assign ids to a proposal's items in declaration order. Items with
+ *  identical normalized content get distinct ids through their duplicate
+ *  ordinal. */
+export declare function deriveContractItemIds(items: ReadonlyArray<ContractIdentityItem>): string[];
 /** Extract the distinct file-path-like tokens from text. The module-local
  *  /g regex is safe to share across callers: matchAll always consumes the
  *  string to exhaustion, which resets lastIndex before any later use. */

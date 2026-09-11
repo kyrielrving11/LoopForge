@@ -5,20 +5,26 @@
  * lineage representation. Consumers receive one stable, read-only view.
  */
 
-import type { ProviderSnapshot } from "./evidence-provider.js";
+import type { MachineObservation } from "./protocol.js";
 import type { VaultEntry } from "./loop-store.js";
 import type {
-  ExecutionEvidence,
+  ContractBinding,
+  ExecutionReport,
   PromptArtifact,
-  RoundContract,
+  RoundContractProposal,
   RoundOutcome,
   SelfEvaluation,
   SubGoalUpdate,
   VerificationFlag,
 } from "./protocol.js";
 import type { RoundProcessResult } from "./round-coordinator.js";
-import { parseRoundTransactionSnapshot } from "./round-transaction.js";
-import { effectiveOutcome, parseRoundContract } from "./self-eval.js";
+import {
+  ROUND_TRANSACTION_SCHEMA_VERSION,
+  deriveRoundObservationDelta,
+  parseRoundTransactionSnapshot,
+  transactionSchemaVersionOf,
+} from "./round-transaction.js";
+import { claimedMetCriteria, claimedRemainingCriteria, effectiveOutcome, parseRoundContract } from "./self-eval.js";
 import { entryRound, isRecord } from "./token-utils.js";
 
 export type CommittedAction = "continue" | "stop" | "backtrack";
@@ -33,16 +39,24 @@ export interface CommittedRoundView {
   readonly attempt: number;
   readonly promptArtifact: PromptArtifact | null;
   readonly evaluation: SelfEvaluation | null;
-  readonly executionEvidence: ExecutionEvidence | null;
+  readonly executionReport: ExecutionReport | null;
   readonly verificationFlags: VerificationFlag[];
   readonly result: RoundProcessResult | null;
   readonly action: CommittedAction;
   readonly success: boolean;
   readonly outcome: RoundOutcome | null;
-  readonly contractProposal: RoundContract | null;
-  readonly beforeEvidence: ProviderSnapshot[];
-  readonly afterEvidence: ProviderSnapshot[];
-  readonly roundEvidence: ProviderSnapshot[];
+  readonly contractProposal: RoundContractProposal | null;
+  /** v3.8: the machine binding stamped when the declaring round committed. */
+  readonly contractBinding: ContractBinding | null;
+  readonly beforeEvidence: MachineObservation[];
+  readonly afterEvidence: MachineObservation[];
+  /** v3.8: derived before→after delta — never persisted (transaction
+   *  schema 2 stores only the two factual collections). */
+  readonly observationDelta: MachineObservation[];
+  /** v3.8: true when the round committed without after-phase observations —
+   *  its machine evidence is incomplete and must never be substituted with
+   *  the before baseline. */
+  readonly evidenceIncomplete: boolean;
   /** Normalized round-level declarations used by compiler projections. */
   readonly outputSummary?: string;
   readonly constraintViolations?: string[];
@@ -59,8 +73,8 @@ function committedAction(value: unknown): CommittedAction | null {
     : null;
 }
 
-function snapshots(value: unknown): ProviderSnapshot[] {
-  return Array.isArray(value) ? value as ProviderSnapshot[] : [];
+function snapshots(value: unknown): MachineObservation[] {
+  return Array.isArray(value) ? value as MachineObservation[] : [];
 }
 
 function flags(value: unknown): VerificationFlag[] {
@@ -112,11 +126,16 @@ export function decodeCommittedRound(entry: VaultEntry): CommittedRoundView | nu
     ? lineage.round_transaction
     : null;
   if (!transaction) return null;
+  // v3.8: the transaction schema is a HARD break — an envelope that does not
+  // parse (legacy version, malformed observations) is not committed history.
+  // legacyTransactionRounds() reports the loss explicitly; it is never
+  // silently decoded into a partial view.
   const snapshot = parseRoundTransactionSnapshot(transaction.snapshot);
-  if (snapshot && snapshot.phase !== "committed") return null;
+  if (!snapshot) return null;
+  if (snapshot.phase !== "committed") return null;
   const resultValue = isRecord(transaction.result)
     ? transaction.result
-    : snapshot?.result;
+    : snapshot.result;
   if (!isRecord(resultValue)) return null;
   const action = committedAction(resultValue.action);
   if (!action) return null;
@@ -137,7 +156,7 @@ export function decodeCommittedRound(entry: VaultEntry): CommittedRoundView | nu
     attempt: snapshot?.attempt ?? 1,
     promptArtifact: snapshot?.promptArtifact ?? null,
     evaluation,
-    executionEvidence: evaluation?.execution_evidence ?? null,
+    executionReport: evaluation?.execution_report ?? null,
     verificationFlags: flags(result.verificationFlags),
     result,
     action,
@@ -146,9 +165,14 @@ export function decodeCommittedRound(entry: VaultEntry): CommittedRoundView | nu
     contractProposal: evaluation?.round_contract
       ? parseRoundContract(evaluation.round_contract) ?? null
       : null,
+    contractBinding: snapshot?.contractBinding ?? null,
     beforeEvidence: snapshots(snapshot?.beforeEvidence),
     afterEvidence: snapshots(snapshot?.afterEvidence),
-    roundEvidence: snapshots(snapshot?.roundEvidence),
+    observationDelta: deriveRoundObservationDelta(
+      snapshots(snapshot?.beforeEvidence),
+      snapshots(snapshot?.afterEvidence),
+    ),
+    evidenceIncomplete: (snapshot?.afterEvidence?.length ?? 0) === 0,
     outputSummary: evaluation?.output_summary,
     constraintViolations: strings(evaluation?.constraint_violations),
     discoveredConstraints: strings(evaluation?.discovered_constraints),
@@ -182,11 +206,11 @@ export function decodeMergedRound(entry: unknown): CommittedRoundView | null {
   const evaluationKeys = [
     "success", "output_summary", "constraint_violations", "should_continue",
     "discovered_constraints", "objective_refinement", "emerged_subtasks",
-    "execution_evidence", "retracted_constraints", "revised_success_criteria",
+    "execution_report", "retracted_constraints", "revised_success_criteria",
     "wrong_assumptions", "worker_results", "compression_checkpoint",
-    "checkpoint_label", "next_action", "subgoal_updates", "stop_reason",
+    "checkpoint_label", "subgoal_updates", "stop_reason",
     "outcome", "blocker", "gate_ids",
-    "retroactiveClaims", "no_change_reason", "drift_clarification",
+    "retroactiveClaims", "no_change_reason",
     "prompt_requests", "round_contract",
   ];
   let hasEvaluation = false;
@@ -207,8 +231,8 @@ export function decodeMergedRound(entry: unknown): CommittedRoundView | null {
       ? evaluationRaw.success ? "success" : "failed"
       : null);
   const proposal = parseRoundContract(evaluationRaw.round_contract) ?? null;
-  const executionEvidence = isRecord(evaluationRaw.execution_evidence)
-    ? evaluationRaw.execution_evidence as unknown as ExecutionEvidence
+  const executionReport = isRecord(evaluationRaw.execution_report)
+    ? evaluationRaw.execution_report as unknown as ExecutionReport
     : null;
   return {
     source: "merged",
@@ -222,7 +246,7 @@ export function decodeMergedRound(entry: unknown): CommittedRoundView | null {
       ? lineage.prompt_artifact as unknown as PromptArtifact
       : null,
     evaluation,
-    executionEvidence,
+    executionReport,
     verificationFlags: flags(raw.verification_flags ?? lineage.verification_flags),
     result,
     action,
@@ -231,9 +255,16 @@ export function decodeMergedRound(entry: unknown): CommittedRoundView | null {
       : typeof lineage.success === "boolean" ? lineage.success : false,
     outcome,
     contractProposal: proposal,
+    contractBinding: isRecord(lineage.contract_binding)
+      ? lineage.contract_binding as unknown as ContractBinding
+      : null,
     beforeEvidence: snapshots(lineage.before_evidence),
     afterEvidence: snapshots(lineage.after_evidence),
-    roundEvidence: snapshots(lineage.round_evidence),
+    observationDelta: deriveRoundObservationDelta(
+      snapshots(lineage.before_evidence),
+      snapshots(lineage.after_evidence),
+    ),
+    evidenceIncomplete: snapshots(lineage.after_evidence).length === 0,
     outputSummary: typeof evaluationRaw.output_summary === "string"
       ? evaluationRaw.output_summary
       : undefined,
@@ -264,40 +295,50 @@ export function entryLineage(entry: unknown): Record<string, unknown> {
   return isRecord(value) ? value : {};
 }
 
-/** Extract execution_evidence from an entry, handling both direct-field and
+/** Extract execution_report from an entry, handling both direct-field and
  *  lineage-nested shapes. The decoded committed view wins when the entry is
  *  a committed round. Returns null when absent. Moved from loop-compiler so
  *  field-shape interpretation lives in this module only. */
-export function entryExecutionEvidence(entry: unknown): Record<string, unknown> | null {
+export function entryExecutionReport(entry: unknown): Record<string, unknown> | null {
   const view = decodeRound(entry);
-  if (view) return view.executionEvidence as Record<string, unknown> | null;
+  if (view) return view.executionReport as Record<string, unknown> | null;
   const record = isRecord(entry) ? entry : {};
-  const direct = record.execution_evidence;
+  const direct = record.execution_report;
   if (isRecord(direct)) return direct;
-  const nested = entryLineage(entry).execution_evidence;
+  const nested = entryLineage(entry).execution_report;
   return isRecord(nested) ? nested : null;
 }
 
-/** Read success_criteria_met from an entry's execution_evidence. */
+/** Read the criteria the agent claimed met from an entry's execution_report. */
 export function entryCriteriaMet(entry: unknown): string[] {
   const view = decodeRound(entry);
-  if (view) return view.executionEvidence?.success_criteria_met
-    ?.filter((value): value is string => typeof value === "string") ?? [];
-  const ev = entryExecutionEvidence(entry);
+  if (view) return claimedMetCriteria(view.executionReport);
+  const ev = entryExecutionReport(entry);
   if (!ev) return [];
-  const arr = ev.success_criteria_met;
-  return Array.isArray(arr) ? arr.filter((v): v is string => typeof v === "string") : [];
+  return rawCriterionClaims(ev, "met");
 }
 
-/** Read success_criteria_remaining from an entry's execution_evidence. */
+/** Read the criteria the agent declared outstanding from an entry. */
 export function entryCriteriaRemaining(entry: unknown): string[] {
   const view = decodeRound(entry);
-  if (view) return view.executionEvidence?.success_criteria_remaining
-    ?.filter((value): value is string => typeof value === "string") ?? [];
-  const ev = entryExecutionEvidence(entry);
+  if (view) return claimedRemainingCriteria(view.executionReport);
+  const ev = entryExecutionReport(entry);
   if (!ev) return [];
-  const arr = ev.success_criteria_remaining;
-  return Array.isArray(arr) ? arr.filter((v): v is string => typeof v === "string") : [];
+  return rawCriterionClaims(ev, "remaining");
+}
+
+/** Shape-tolerant reader for a raw entry's criterion claims (the durable
+ *  shape, before the typed parse). */
+function rawCriterionClaims(
+  report: Record<string, unknown>,
+  outcome: "met" | "remaining",
+): string[] {
+  const claims = report.criterion_claims;
+  if (!Array.isArray(claims)) return [];
+  return claims
+    .filter(isRecord)
+    .filter((claim) => claim.outcome === outcome && typeof claim.criterion_id === "string")
+    .map((claim) => claim.criterion_id as string);
 }
 
 /** Read constraints_active from an entry's lineage. */
@@ -321,10 +362,10 @@ export function entryRetractedConstraints(entry: unknown): string[] {
   return [];
 }
 
-/** Read progress_estimate from an entry's execution_evidence (0 when
+/** Read progress_estimate from an entry's execution_report (0 when
  *  absent). */
 export function entryProgressEstimate(entry: unknown): number {
-  const ev = entryExecutionEvidence(entry);
+  const ev = entryExecutionReport(entry);
   if (!ev) return 0;
   const pe = ev.progress_estimate;
   return typeof pe === "number" ? pe : 0;
@@ -388,18 +429,17 @@ export function committedRoundsFromEntries(
 }
 
 /** The machine-evidence set that best represents a committed round: the
- *  after-phase evidence (captured post-execution), else the round's committed
- *  diff evidence, else the pre-round baseline. Shared selector for the
+ *  after-phase observations (captured post-execution), else the derived round
+ *  delta, else the pre-round baseline. Shared selector for the
  *  evidence-fallback chains that audit, claims, and backtrack-restore each
- *  used to inline with subtly different tiers — the enforcement-gate variant
- *  previously skipped roundEvidence entirely. Distinct from
- *  machineGitMotionSeries, which deliberately reads roundEvidence alone for
- *  the diffed motion signal. */
+ *  used to inline with subtly different tiers. Distinct from
+ *  machineGitMotionSeries, which deliberately reads the delta alone for the
+ *  motion signal. */
 export function machineEvidenceForRound(
   view: CommittedRoundView,
-): ProviderSnapshot[] {
+): MachineObservation[] {
   if (view.afterEvidence.length > 0) return view.afterEvidence;
-  if (view.roundEvidence.length > 0) return view.roundEvidence;
+  if (view.observationDelta.length > 0) return view.observationDelta;
   return view.beforeEvidence;
 }
 
@@ -408,6 +448,29 @@ export function mergedRoundsFromEntries(
   beforeRound = Number.POSITIVE_INFINITY,
 ): CommittedRoundView[] {
   return historyRounds(entries.map(decodeMergedRound), beforeRound);
+}
+
+/** v3.8: Rounds whose persisted transaction carries a LEGACY schema version.
+ *  A hard version break must be visible, not silent: these rounds drop out of
+ *  history views, so audit/status surface them here instead of letting the
+ *  loop look complete while rounds are missing. */
+export function legacyTransactionRounds(
+  entries: unknown[],
+): Array<{ round: number; schemaVersion: number }> {
+  const out: Array<{ round: number; schemaVersion: number }> = [];
+  for (const entry of entries) {
+    if (!isRecord(entry)) continue;
+    const lineage = entryLineage(entry);
+    const envelope = isRecord(lineage.round_transaction)
+      ? lineage.round_transaction
+      : isRecord(entry.round_transaction) ? entry.round_transaction : null;
+    if (!envelope || !isRecord(envelope.snapshot)) continue;
+    const version = transactionSchemaVersionOf(envelope.snapshot);
+    if (version === null || version === ROUND_TRANSACTION_SCHEMA_VERSION) continue;
+    const round = entryRound(entry);
+    if (round >= 1) out.push({ round, schemaVersion: version });
+  }
+  return out.sort((a, b) => a.round - b.round);
 }
 
 /** Machine-observed git motion for the most recent contiguous window.
@@ -421,7 +484,7 @@ export function machineGitMotionSeries(
   const byRound = new Map<number, boolean>();
   for (const round of rounds) {
     if (round.round < 1 || round.round >= currentRound) continue;
-    const git = round.roundEvidence.find((snapshot) => snapshot.provider === "git");
+    const git = round.observationDelta.find((snapshot) => snapshot.providerId === "git");
     if (!git) continue;
     byRound.set(round.round, Array.isArray(git.files) && git.files.length > 0);
   }

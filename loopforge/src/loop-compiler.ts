@@ -27,7 +27,7 @@ import {
   type LoopRoundResult,
   type MilestoneSummary,
   type RollingSummary,
-  type RoundContract,
+  type ContractItemStatus,
   type SubGoal,
   type SubGoalUpdate,
   type TaskAlignment,
@@ -41,7 +41,7 @@ import type { MachineStatus, PresentedStateSnapshot, RoundStat } from "./canonic
 import {
   decodeRound,
   entryLineage,
-  entryExecutionEvidence,
+  entryExecutionReport,
   entryCriteriaMet,
   entryCriteriaRemaining,
   entryActiveConstraints,
@@ -53,10 +53,14 @@ import {
   machineGitMotionSeries,
   mergedRoundsFromEntries,
 } from "./committed-round.js";
+import { deriveActiveRoundContract, type ActiveContractView } from "./round-contract.js";
+import { deriveSubGoals, possibleDuplicateSubGoals } from "./subgoal-state.js";
+import { deriveVerifiedSubGoals } from "./cognitive-facts.js";
 import {
-  contractRoundEvaluations,
-  deriveActiveRoundContract,
-} from "./round-contract.js";
+  deriveContractItemStatuses,
+  type ContractItemStatusView,
+} from "./contract-items.js";
+import { claimedMetCriteria, claimedRemainingCriteria } from "./self-eval.js";
 import { assemblePromptArtifact } from "./prompt-assembler.js";
 import {
   decidePromptLevel,
@@ -387,7 +391,7 @@ function deriveRoundStats(
   const stats: RoundStat[] = [];
   let prevProgress: number | null = null;
   for (const round of rounds.slice(-window)) {
-    const ev = round.executionEvidence;
+    const ev = round.executionReport;
     const files = ev?.files_changed;
     const rawProgress = ev?.progress_estimate;
     const progress = typeof rawProgress === "number" ? rawProgress : null;
@@ -432,19 +436,19 @@ function deriveActiveContract(
   loopId: string,
   context: Record<string, unknown> | null,
   currentRound: number,
-): RoundContract | null {
+): ActiveContractView | null {
   const entries = loopEntries(loopId, context);
   const canonical = Array.from({ length: Math.max(0, currentRound - 1) }, (_, index) =>
     roundCanonicalEntry(entries, index + 1),
   ).filter((entry): entry is Entry => entry !== null);
-  return deriveActiveRoundContract(contractRoundEvaluations(
+  return deriveActiveRoundContract(
     mergedRoundsFromEntries(canonical, currentRound),
-  ));
+  );
 }
 
 /** v3.2: Derive per-criterion status — the "goal → criteria → evidence"
  *  vertical view. Each objective criterion gets: met/remaining/unknown
- *  (from per-round success_criteria_met/remaining reports, ID-first
+ *  (from per-round criterion_claims, ID-first
  *  matching), the round it was first reported met, and any sub-goals whose
  *  description matches it (Jaccard). Zero persistence — re-derived from the
  *  vault every compile. */
@@ -455,6 +459,13 @@ export function deriveCriterionStatuses(
   currentRound: number,
   subGoals: SubGoal[],
   lastRoundResult?: LoopRoundResult | null,
+  /** v3.8: the ACTIVE contract and its derived item statuses. A criterion is
+   *  `verified` / `contradicted` / `insufficient` only through an item that
+   *  references it — a claim alone can never reach `verified`. */
+  verification?: {
+    activeContract: ActiveContractView | null;
+    itemStatuses: ContractItemStatusView;
+  },
 ): CriterionStatus[] {
   if (!objective || objective.success_criteria.length === 0) return [];
   const entries = loopEntries(loopId, context).filter(
@@ -462,12 +473,32 @@ export function deriveCriterionStatuses(
   );
   // The current round's report lives in last_round_result (the vault only
   // gains it on commit); treat it as the report for round currentRound - 1.
-  const lastEv = lastRoundResult?.execution_evidence;
-  const lastMet = lastEv?.success_criteria_met ?? [];
-  const lastRemaining = lastEv?.success_criteria_remaining ?? [];
+  const lastEv = lastRoundResult?.execution_report;
+  const lastMet = claimedMetCriteria(lastEv);
+  const lastRemaining = claimedRemainingCriteria(lastEv);
   const lastEntry = entries[entries.length - 1] ?? null;
   const lastEntryRemaining = lastEntry ? entryCriteriaRemaining(lastEntry) : [];
   const matchThreshold = getPolicy().evolution.subgoal_match_threshold;
+  // v3.8: criterion → item status, derived from the contract's item refs.
+  type MachineCriterionStatus = Exclude<ContractItemStatus, "pending">;
+  const itemStatusByCriterion = new Map<string, MachineCriterionStatus>();
+  const activeContract = verification?.activeContract ?? null;
+  if (activeContract) {
+    for (const item of activeContract.items) {
+      const status = verification?.itemStatuses.items
+        .find((entry) => entry.itemId === item.id)?.status;
+      // `pending` is "no claim yet" — it says nothing about the criterion, so
+      // the criterion keeps its own claim-derived status.
+      if (!status || status === "pending") continue;
+      for (const ref of item.criterion_refs) {
+        const criterionId = isCriterionId(ref) ? ref : deriveCriterionId(ref);
+        const existing = itemStatusByCriterion.get(criterionId);
+        // Machine facts outrank each other by strength; a claim never
+        // weakens a machine verdict about the same criterion.
+        itemStatusByCriterion.set(criterionId, strongestStatus(existing, status));
+      }
+    }
+  }
 
   return objective.success_criteria.map((text) => {
     let metAtRound: number | null = null;
@@ -481,12 +512,16 @@ export function deriveCriterionStatuses(
     if (metAtRound === null && lastMet.some((met) => criteriaMatch(met, text))) {
       metAtRound = currentRound - 1;
     }
-    const status: CriterionStatus["status"] = metAtRound !== null
-      ? "met"
+    // v3.8: a claim reaches `claimed` at most. Only a machine fact about a
+    // contract item that references this criterion can go further.
+    const claimedStatus: CriterionStatus["status"] = metAtRound !== null
+      ? "claimed"
       : lastRemaining.some((remaining) => criteriaMatch(remaining, text)) ||
         lastEntryRemaining.some((remaining) => criteriaMatch(remaining, text))
         ? "remaining"
         : "unknown";
+    const machineStatus = itemStatusByCriterion.get(deriveCriterionId(text));
+    const status: CriterionStatus["status"] = machineStatus ?? claimedStatus;
     return {
       id: deriveCriterionId(text),
       text,
@@ -497,6 +532,21 @@ export function deriveCriterionStatuses(
         .map((sg) => sg.id),
     };
   });
+}
+
+/** v3.8: Rank item statuses so the strongest machine fact wins when several
+ *  items reference the same criterion. */
+function strongestStatus(
+  left: Exclude<ContractItemStatus, "pending"> | undefined,
+  right: Exclude<ContractItemStatus, "pending">,
+): Exclude<ContractItemStatus, "pending"> {
+  const rank: Record<Exclude<ContractItemStatus, "pending">, number> = {
+    contradicted: 3,
+    verified: 2,
+    insufficient: 1,
+  };
+  if (!left) return right;
+  return rank[right] > rank[left] ? right : left;
 }
 
 /** v2.11: Match two criterion references for deduplication.
@@ -517,7 +567,7 @@ export function criteriaMatch(a: string, b: string): boolean {
 }
 
 /** Detect newly met criteria by comparing the current entry's
- *  success_criteria_met against the previous entry's.
+ *  met criterion_claims against the previous entry's.
  *  v2.11: ID-first matching (cr-XXXXXXXX) with Jaccard similarity
  *  fallback for natural-language references.
  *  Returns empty array when there is no previous entry — the first
@@ -773,12 +823,6 @@ export function buildRollingSummary(
 // Sub-Goal Structured Tracking (v2.2)
 // ═══════════════════════════════════════════════════════════════════════════
 
-/** Derive a stable sub-goal ID from its description hash.
- *  Exported as the single source of truth (verification-gate imports it). */
-export function deriveSubGoalId(description: string): string {
-  return "sg-" + deriveItemId(description);
-}
-
 /** v2.11: Derive a stable constraint ID from its text hash (c-XXXXXXXX).
  *  Same hash strategy as SubGoal — deterministic across rounds. */
 export function deriveConstraintId(text: string): string {
@@ -799,185 +843,6 @@ function isCriterionId(ref: string): boolean {
   return /^cr-[a-f0-9]{8}$/.test(ref);
 }
 
-/**
- * Match a user-provided description against existing SubGoals for DEDUP
- * (emerged_subtasks creation). Exact ID first, then Jaccard similarity on
- * descriptions. v3.7.1: status transitions no longer use this — they are
- * strict ID references validated before the round advances.
- */
-function matchSubGoal(
-  target: string,
-  subGoals: SubGoal[],
-  threshold: number,
-): number {
-  const trimmed = target.trim();
-  // Phase 1: Exact ID match
-  for (let i = 0; i < subGoals.length; i++) {
-    if (subGoals[i].id === trimmed) return i;
-  }
-  // Phase 2: Jaccard fallback on description text
-  let bestIdx = -1;
-  let bestScore = 0;
-  for (let i = 0; i < subGoals.length; i++) {
-    const score = jaccardSimilarity(trimmed, subGoals[i].description);
-    if (score > bestScore) {
-      bestScore = score;
-      bestIdx = i;
-    }
-  }
-  return bestScore >= threshold ? bestIdx : -1;
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Sub-goal transition matrix (v3.7.1 — single source)
-// ═══════════════════════════════════════════════════════════════════════════
-
-/** Closed migration matrix. done/canceled are terminal (no out-edges); the
- *  matrix rejects re-opening. blocked → in_progress is the recovery path. */
-export const SUBGOAL_TRANSITIONS: Record<SubGoalUpdate["status"], readonly SubGoal["status"][]> = {
-  in_progress: ["pending", "blocked"],
-  done: ["pending", "in_progress", "blocked"],
-  blocked: ["pending", "in_progress"],
-  canceled: ["pending", "in_progress", "blocked"],
-};
-
-/** Whether a transition is legal. Same-status is a legal no-op (used by
- *  replay idempotency). References to terminal sub-goals are rejected by
- *  validateSubGoalUpdates before this is consulted. */
-export function canTransitionSubGoal(
-  from: SubGoal["status"],
-  to: SubGoalUpdate["status"],
-): boolean {
-  if (from === to) return true;
-  return SUBGOAL_TRANSITIONS[to].includes(from);
-}
-
-/** Referential validation of a payload's subgoal_updates against the
- *  derived sub-goal set. Returns one error per invalid entry:
- *  unknown_id | terminal_reference | illegal_transition. */
-export function validateSubGoalUpdates(
-  subGoals: SubGoal[],
-  updates: SubGoalUpdate[],
-): Array<{ id: string; reason: string }> {
-  const byId = new Map(subGoals.map((sg) => [sg.id, sg]));
-  const errors: Array<{ id: string; reason: string }> = [];
-  for (const update of updates) {
-    const target = byId.get(update.id);
-    if (!target) {
-      errors.push({ id: update.id, reason: "unknown_id" });
-      continue;
-    }
-    if (target.status === "done" || target.status === "canceled") {
-      errors.push({ id: update.id, reason: "terminal_reference" });
-      continue;
-    }
-    if (!canTransitionSubGoal(target.status, update.status)) {
-      errors.push({ id: update.id, reason: "illegal_transition" });
-    }
-  }
-  return errors;
-}
-
-/** Apply one transition to the accumulated list. Guards make replay of
- *  committed history idempotent: terminal sub-goals never change and
- *  same-status updates are no-ops. */
-function applySubGoalUpdate(
-  subGoals: SubGoal[],
-  update: SubGoalUpdate,
-  rnd: number,
-): void {
-  const target = subGoals.find((sg) => sg.id === update.id);
-  if (!target) return;
-  if (target.status === "done" || target.status === "canceled") return;
-  if (!canTransitionSubGoal(target.status, update.status)) return;
-  if (target.status === update.status) return;
-  target.status = update.status;
-  target.status_changed_at_round = rnd;
-  if (update.status === "done") target.completed_at_round = rnd;
-}
-
-/**
- * Manage the full sub-goal lifecycle across rounds.
- *
- * v3.7.1 derivation rule: EVERY committed round (round < currentRound) is
- * replayed in round order — emerged_subtasks create pending items, then
- * subgoal_updates apply explicit transitions. The round's own report
- * (last_round_result, which the engine rebuilds from the same committed
- * evaluation) contributes the same data on the fixture path, so applying
- * it again is an idempotent no-op. Older transitions therefore never
- * regress on later compiles, and no status is ever inferred.
- */
-function manageSubGoals(
-  loopId: string,
-  currentRound: number,
-  lastRoundResult: LoopRoundResult | null,
-  vaultContext: Record<string, unknown> | null,
-): SubGoal[] {
-  const policy = getPolicy().evolution;
-  const allEntries = loopEntries(loopId, vaultContext);
-  const completedEntries = allEntries
-    .filter((e) => entryRound(e) >= 1 && entryRound(e) < currentRound)
-    .sort((a, b) => entryRound(a) - entryRound(b));
-  const subGoals: SubGoal[] = [];
-
-  const createEmerged = (descs: string[], rnd: number): void => {
-    for (const desc of descs) {
-      // Dedup: skip if an existing sub-goal is too similar
-      if (matchSubGoal(desc, subGoals, policy.subgoal_dedup_threshold) >= 0) continue;
-      subGoals.push(makeSubGoal({
-        id: deriveSubGoalId(desc),
-        description: desc.trim(),
-        status: "pending",
-        declared_at_round: rnd,
-        status_changed_at_round: rnd,
-        priority: subGoals.length,
-      }));
-    }
-  };
-
-  // Phase 1 — Replay every committed round in order: create, then apply
-  // that round's declared transitions.
-  for (const entry of completedEntries) {
-    const rnd = entryRound(entry);
-    createEmerged(entryEmergedSubtasks(entry), rnd);
-    for (const update of entrySubGoalUpdates(entry)) {
-      applySubGoalUpdate(subGoals, update, rnd);
-    }
-  }
-
-  // Phase 2 — The current round's own report (fixture/rebuild path; on the
-  // vault path this duplicates the last committed round and is idempotent).
-  if (lastRoundResult) {
-    const rnd = lastRoundResult.round || (currentRound - 1);
-    createEmerged(lastRoundResult.emerged_subtasks ?? [], rnd);
-    for (const update of lastRoundResult.subgoal_updates ?? []) {
-      applySubGoalUpdate(subGoals, update, rnd);
-    }
-  }
-
-  // Sort for display: in_progress first, then pending by age desc, then blocked, then done, then canceled
-  subGoals.sort((a, b) => {
-    const rank = (s: SubGoal) => {
-      switch (s.status) {
-        case "in_progress": return 0;
-        case "pending": return 1;
-        case "blocked": return 2;
-        case "done": return 3;
-        case "canceled": return 4;
-      }
-    };
-    const ra = rank(a), rb = rank(b);
-    if (ra !== rb) return ra - rb;
-    // Within same status: pending by oldest first, done by most recent first
-    // (v2.14: the previous expression simplified to b.declared - a.declared,
-    // which sorted NEWEST first despite the comment)
-    if (a.status === "pending") return a.declared_at_round - b.declared_at_round;
-    if (a.status === "done") return (b.completed_at_round ?? 0) - (a.completed_at_round ?? 0);
-    return a.declared_at_round - b.declared_at_round;
-  });
-
-  return subGoals;
-}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Time-Aware Constraint Management (v2.3)
@@ -1080,7 +945,7 @@ function manageConstraintLifecycle(
     // (its own Success Criteria section and the verification gate's
     // criteriaMatch are ID-first on cr-). Rendering it under c-XXXXXXXX in
     // the active list meant the same text carried two IDs in one prompt,
-    // and an agent echoing the active-list ID into success_criteria_met
+    // and an agent echoing the active-list ID into its criterion claims
     // could never match.
     metadata.push(makeConstraintMeta({
       id: source === "criteria" ? deriveCriterionId(text) : deriveConstraintId(text),
@@ -1200,7 +1065,6 @@ export function decideLevel(
 
 export function buildSelfEvalBlock(
   round: number,
-  prevDriftFlags?: VerificationFlag[],
   /** v2.12: L0 is the minimal retry template — the v2.12 declarative fields
    *  (outcome/blocker/retroactiveClaims) are L1/L2 additions so the retry
    *  prompt stays within its tight budget. */
@@ -1218,9 +1082,6 @@ export function buildSelfEvalBlock(
    *  L2 tests assert its lowercase absence. */
   proposalNudge = false,
 ): string {
-  const hasIntentDrift = prevDriftFlags?.some(f => f.check === "intent_drift") ?? false;
-  const hasSubGoalDrift = prevDriftFlags?.some(f => f.check === "subgoal_drift") ?? false;
-  const needsClarification = hasIntentDrift || hasSubGoalDrift;
   const declareOutcome = level !== "l0";
   const restateContract = hasContract && declareOutcome;
 
@@ -1231,15 +1092,18 @@ export function buildSelfEvalBlock(
     should_continue: true,
     discovered_constraints: ["<new constraint>"],
     emerged_subtasks: [],
-    execution_evidence: {
+    execution_report: {
       files_changed: [],
-      test_results: { passed: 0, failed: 0, skipped: 0 },
-      success_criteria_met: ["<cr-XXXXXXXX or text>"],
-      success_criteria_remaining: ["<cr-XXXXXXXX or text>"],
+      tests_reported: { passed: 0, failed: 0, skipped: 0 },
+      // The contract claim is functional (it is what advances an item), so it
+      // stays at every level. The advisory criterion claim is an L1/L2
+      // addition — the L0 retry template is a lean delta kept under budget.
+      contract_item_claims: [
+        { item_id: "<rci-XXXXXXXX from the Current Task>", outcome: "met" },
+      ],
       progress_estimate: 0,
     },
     wrong_assumptions: [],
-    next_action: "<next concrete action, or empty when complete>",
     subgoal_updates: [
       { id: "<sg-XXXXXXXX from the Sub-Goal Dashboard>", status: "done" },
     ],
@@ -1250,6 +1114,10 @@ export function buildSelfEvalBlock(
     evalObj.outcome = "<success|partial|failed|blocked>";
     evalObj.blocker = "<required only when outcome=blocked>";
     evalObj.retroactiveClaims = [];
+    // v3.8: the advisory criterion claim rides with the other L1/L2 additions.
+    (evalObj.execution_report as Record<string, unknown>).criterion_claims = [
+      { criterion_id: "<cr-XXXXXXXX or text>", outcome: "met" },
+    ];
   }
 
   // v3.3/v3.4: Round Contract proposal template (L1/L2, active-contract
@@ -1267,35 +1135,12 @@ export function buildSelfEvalBlock(
     };
   }
 
-  // v2.8: Inject drift clarification field when previous round had drift flags
-  if (needsClarification) {
-    const flagTypes = [
-      hasIntentDrift ? "intent_drift" : "",
-      hasSubGoalDrift ? "subgoal_drift" : "",
-    ].filter(Boolean).join(" / ");
-    evalObj.drift_clarification =
-      `<explain why your Round ${round} actions diverged from your stated plan ` +
-      `(${flagTypes} detected in previous round). ` +
-      `Leave empty if no divergence occurred>`;
-  }
-
   const lines = [
     "### LoopForge Evaluation (Required)",
     "",
     `After completing Round ${round}, replace the placeholder values below`,
     "with your actual results and pass this object as `loopforge_next.evaluation`.",
   ];
-
-  if (needsClarification) {
-    lines.push(
-      "",
-      "> ⚠️ **Drift Detected:** The verification gate detected that your previous",
-      "> round's declared intent (next_action) did not match your actual output.",
-      "> Please explain the pivot in the `drift_clarification` field below.",
-      "> An honest explanation helps the enforcement gate distinguish intentional",
-      "> course corrections from unacknowledged drift.",
-    );
-  }
 
   lines.push("```json");
   lines.push(JSON.stringify(evalObj, null, 2));
@@ -1320,13 +1165,15 @@ export function buildSelfEvalBlock(
   if (restateContract) {
     lines.push(
       "Round Contract: restate the Current Task's contract UNCHANGED in",
-      "`round_contract` (work_item/done_when/verification_plan/scope) and run",
-      "its Verify commands; list satisfied done_when items in",
-      "`success_criteria_met`. When the current contract's done_when items are",
-      "all satisfied, or the round is blocked (outcome=blocked + blocker),",
-      "declare the NEXT round's contract instead (or omit `round_contract`",
-      "when the whole task is done — the Current Task reverts to the",
-      "original task).",
+      "`round_contract` (work_item/items/scope) and run each item's Verify",
+      "commands; claim the items you completed in",
+      "`execution_report.contract_item_claims` using the `rci-XXXXXXXX` ids",
+      "the Current Task renders. An item only becomes verified when its bound",
+      "command is observed passing — a claim alone leaves it insufficient.",
+      "When every item is verified, or the round is blocked (outcome=blocked",
+      "+ blocker), declare the NEXT round's contract instead (or omit",
+      "`round_contract` when the whole task is done — the Current Task",
+      "reverts to the original task).",
     );
   }
 
@@ -1396,12 +1243,47 @@ export function compileLoop(
     request.last_round_result?.constraint_violations ?? [],
   );
   const rolling = buildRollingSummary(request.loop_id, request.round, context, 0, decision.level);
-  const subGoals = manageSubGoals(
-    request.loop_id,
+  // v3.8: ONE committed-round derivation feeds every projection below
+  // (sub-goals, the active contract, its item statuses, criteria).
+  const derivationRounds = mergedRoundsFromEntries(
+    loopEntries(request.loop_id, context),
     request.round,
-    request.last_round_result,
-    context,
   );
+  // v3.8: sub-goal lifecycle lives in subgoal-state.ts and consumes the
+  // shared committed-round view — one history interpretation.
+  const subGoals = deriveSubGoals({
+    loopId: request.loop_id,
+    currentRound: request.round,
+    rounds: derivationRounds,
+    currentReport: request.last_round_result
+      ? {
+          round: request.last_round_result.round || (request.round - 1),
+          emergedSubtasks: request.last_round_result.emerged_subtasks ?? [],
+          subgoalUpdates: request.last_round_result.subgoal_updates ?? [],
+        }
+      : null,
+  });
+  // v3.4/v3.8: the ACTIVE Round Contract and its derived item statuses for
+  // this compile. Derived from committed rounds, so rejection retries, resume,
+  // unpause and backtrack compiles (which carry no last_round_result) keep
+  // showing the same contract, and a verified or blocked contract stops being
+  // shown. The compile path has no in-flight observations of its own.
+  const activeContract = deriveActiveRoundContract(derivationRounds);
+  const contractItemStatuses = deriveContractItemStatuses({
+    contract: activeContract,
+    rounds: derivationRounds,
+    currentRound: request.round,
+    currentReport: null,
+    currentObservations: [],
+    commands: getPolicy().evidence.commands ?? [],
+  });
+  // v3.8: derived from the committed history, not from `activeContract` — a
+  // verified item stays proven after its contract closes.
+  const verifiedSubGoals = deriveVerifiedSubGoals({
+    subGoals,
+    rounds: derivationRounds,
+    commands: getPolicy().evidence.commands ?? [],
+  });
   // v3.2: Goal → criteria → evidence vertical view (derived, zero persistence).
   const criterionStatuses = deriveCriterionStatuses(
     request.loop_id,
@@ -1410,16 +1292,29 @@ export function compileLoop(
     request.round,
     subGoals,
     request.last_round_result,
+    { activeContract, itemStatuses: contractItemStatuses },
   );
   // v3.2: Lessons learned — repeated violations / verification failures.
   const lessons = deriveLessons(request.loop_id, context, request.round);
   const alignment = alignTask(request.task, request, context);
   const health = checkLoopHealth(request.loop_id, { ...request, loop_objective: objective }, context);
+  // v3.8: Jaccard similarity is DIAGNOSTIC ONLY for sub-goals — it never
+  // merges or blocks a declaration, and it never creates a second history
+  // interpretation (the set below is the same derived set everything else
+  // consumes).
+  const duplicateSubGoals = possibleDuplicateSubGoals(
+    subGoals,
+    getPolicy().evolution.subgoal_dedup_threshold,
+  );
   const warnings = unique([
     alignment.warning,
     health.escalation_recommended !== "none"
       ? `Loop health recommends ${health.escalation_recommended}.`
       : "",
+    ...duplicateSubGoals.map(
+      (pair) => `possible_duplicate_subgoal: ${pair.left} ~ ${pair.right} ` +
+        `(${(pair.score * 100).toFixed(0)}% similar) — consider consolidating them.`,
+    ),
   ]);
 
   // ── v2.5: Agent trust score ──────────────────────────────────────────
@@ -1444,11 +1339,6 @@ export function compileLoop(
   // v3.3: Round stats + machine git-motion status (display-only, derived).
   const roundStats = deriveRoundStats(committedRounds);
   const machineStatus = deriveMachineStatus(committedRounds, request.round);
-  // v3.4: ACTIVE Round Contract for this compile — derived from committed
-  // rounds, so rejection retries / resume / unpause / backtrack compiles
-  // (no last_round_result) keep showing the contract as Current Task, and a
-  // satisfied or blocked contract stops being shown.
-  const activeContract = deriveActiveContract(request.loop_id, context, request.round);
 
   const response = makeLoopCompileResponse({
     status: AgentStatus.OK,
@@ -1471,8 +1361,7 @@ export function compileLoop(
     lessons,
     agent_trust_score: request.round > 1 ? Number(trustScore.toFixed(2)) : undefined,
     agent_trust_trend: request.round > 1 ? trend : [],
-    suggested_next_task: request.last_round_result?.next_action?.trim() ||
-      request.last_round_result?.emerged_subtasks?.[0] || "",
+    suggested_next_task: request.last_round_result?.emerged_subtasks?.[0] || "",
     plan_source: request.plan_source,
     warnings,
   });
@@ -1489,6 +1378,10 @@ export function compileLoop(
     machineStatus,
     // v3.4: derived active contract — the Current Task's source of truth.
     roundContract: activeContract,
+    // v3.8: the verification view of that contract, its derived sub-goal
+    // facts, and the static capability — all derived, all in the hash.
+    contractItemStatuses,
+    verifiedSubGoals,
   });
   const markdown = renderCanonicalStateMarkdown(state, {
     // v3.7.1: retry attempts are marked in the derived view (attempt is
@@ -1530,7 +1423,6 @@ export function compileLoop(
     attempt: request.attempt,
     selfEvaluationBlock: buildSelfEvalBlock(
       request.round,
-      request.verification_flags,
       decision.level,
       // v3.4: restate the contract only when this prompt's Current Task IS
       // the ACTIVE contract (derived — not the previous submission's field,

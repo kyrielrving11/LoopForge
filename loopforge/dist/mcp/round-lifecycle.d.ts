@@ -10,8 +10,8 @@
  * session ownership, queues, and leases remain in SessionManager.
  */
 import { LoopForgeEngine } from "../engine.js";
-import type { LoopForgeRequest, LoopForgeResponse, SelfEvaluation, VerificationFlag, ExternalContextProvider, LoopTerminalSink } from "../protocol.js";
-import type { ProviderSnapshot } from "../evidence-provider.js";
+import type { LoopForgeRequest, LoopForgeResponse, SelfEvaluation, VerificationFlag, ExternalContextProvider, LoopTerminalSink, RoundVerificationStatus } from "../protocol.js";
+import type { MachineObservation } from "../protocol.js";
 import type { RoundTransactionSnapshot } from "../round-transaction.js";
 import type { LoopStore, VaultEntry } from "../loop-store.js";
 import type { SessionStateStore } from "../storage.js";
@@ -31,10 +31,6 @@ export interface McpSession {
     /** Which enforcement check triggered the last rejection.
      *  Only same-check rejections accumulate toward the max. */
     lastRejectionCheck: string;
-    /** v2.12: Consecutive rounds where the agent used drift_clarification
-     *  to waive R7 rejection. Reset to 0 when a round has no intent_drift.
-     *  Terminates the loop when exceeding policy.drift_clarification_max_streak. */
-    driftClarificationStreak: number;
     /** v2.13: Files changed in skipped rounds during the last backtrack.
      *  The next round's verification gate checks that the agent did not
      *  continue working on stale files without restoring the workspace.
@@ -49,7 +45,7 @@ export interface McpSession {
      *  Cleared after the first successful post-backtrack round. */
     backtrackTargetGitHead?: string;
     /** Evidence baseline captured immediately before the agent receives a prompt. */
-    evidenceBaseline?: ProviderSnapshot[];
+    evidenceBaseline?: MachineObservation[];
     /** Schema-versioned transaction for the prompt currently held by the agent. */
     roundSnapshot?: RoundTransactionSnapshot;
     /** Persisted prompt prevents resume from compiling the same round twice. */
@@ -95,6 +91,11 @@ export interface AdvanceResult {
      *  When "reject", the prompt contains a rejection notice and the agent
      *  must redo the same round. Round counter does NOT increment. */
     enforcementAction?: "accept" | "reject" | "terminate" | "backtrack";
+    /** v3.8: The round-level verification posture — `trusted` when everything
+     *  claimed this round is machine-backed, `insufficient` when claims are
+     *  unbacked but nothing is denied, `contradicted` when a machine fact
+     *  denies a claim. Never a verdict about the agent's work quality. */
+    verificationStatus?: RoundVerificationStatus;
     /** v1.13: When enforcementAction is "reject" or "terminate", the reason
      *  why the round was rejected or the loop was terminated. */
     enforcementReason?: string;
@@ -170,21 +171,8 @@ export declare class RoundLifecycle {
     /** Execute the round transaction and apply per-rule rejection tracking.
      *  MUTATES: session.roundSnapshot, session.consecutiveRejections,
      *           session.lastRejectionCheck, session.lastSelfEval,
-     *           session.successTrajectory, session.driftClarificationStreak */
+     *           session.successTrajectory */
     private executeRoundTransaction;
-    /** v2.12: Update the clarification streak based on the round result.
-     *  - Substantive clarification (anchors present): keep streak — genuine pivot.
-     *  - No intent_drift this round: reset streak to 0.
-     *  - Weak clarification rejected by R7: streak was already consumed by
-     *    enforceIntentDrift to decide reject vs terminate; staleness is handled
-     *    on the enforcement side. We sync the persisted counter for crash recovery.
-     *  v3.2.1: when a HIGHER-PRIORITY rule (R1–R6/R8/R9/R-EVID) rejected the
-     *  round, R7 never participated — clarificationAccepted is undefined (it
-     *  is only set on the continue path). Touching the streak there would
-     *  pollute it with rejections unrelated to drift and terminate the loop
-     *  one weak clarification early.
-     *  MUTATES: session.driftClarificationStreak */
-    private updateClarificationStreak;
     /** Build a rejection result: compile a retry prompt, persist, return.
      *  MUTATES: session.roundSnapshot, session.currentPrompt, session.currentLevel */
     private buildRejectionResult;

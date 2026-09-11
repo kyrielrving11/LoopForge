@@ -10,7 +10,7 @@ import {
 import type { RoundTransactionSnapshot } from "../round-transaction.js";
 import type { SelfEvaluation } from "../protocol.js";
 import { queryLoopEntries } from "../loop-store.js";
-import { MemoryLoopStore } from "./_helpers.js";
+import { MemoryLoopStore, criterionClaims } from "./_helpers.js";
 import { getPolicyMetrics, resetPolicyMetrics } from "../policy-metrics.js";
 
 function continuingEvaluation(): SelfEvaluation {
@@ -19,11 +19,10 @@ function continuingEvaluation(): SelfEvaluation {
     output_summary: "partial progress",
     constraint_violations: [],
     should_continue: true,
-    execution_evidence: {
+    execution_report: {
       files_changed: [],
-      test_results: null,
-      success_criteria_met: [],
-      success_criteria_remaining: ["remaining"],
+      tests_reported: null,
+      criterion_claims: criterionClaims([], ["remaining"]),
       progress_estimate: 0.4,
     },
   };
@@ -35,11 +34,10 @@ function rejectedEvaluation(): SelfEvaluation {
     output_summary: "claimed completion",
     constraint_violations: [],
     should_continue: true,
-    execution_evidence: {
+    execution_report: {
       files_changed: ["src/change.ts"],
-      test_results: { passed: 1, failed: 0, skipped: 0 },
-      success_criteria_met: [],
-      success_criteria_remaining: ["still open"],
+      tests_reported: { passed: 1, failed: 0, skipped: 0 },
+      criterion_claims: criterionClaims([], ["still open"]),
       progress_estimate: 0.5,
     },
   };
@@ -125,7 +123,6 @@ describe("backtrack commit replay", () => {
       ...base,
       phase: "committed",
       afterEvidence: [],
-      roundEvidence: [],
       evaluation: {
         success: false,
         output_summary: "stalled",
@@ -134,6 +131,7 @@ describe("backtrack commit replay", () => {
       },
       result: {
         action: "backtrack",
+        verificationStatus: "trusted",
         roundSuccess: false,
         gateContradicted: false,
         newConsecutiveRejections: 0,
@@ -163,10 +161,10 @@ describe("backtrack commit replay", () => {
       phase: "committed",
       attempt: 1,
       afterEvidence: [],
-      roundEvidence: [],
       evaluation: continuingEvaluation(),
       result: {
         action: "backtrack",
+        verificationStatus: "trusted",
         backtrackTarget: 2,
         backtrackPrompt: "## Backtrack — Round 5 → Restored to Round 2",
         backtrackTriggerRule: "progress_stall",
@@ -188,7 +186,7 @@ describe("backtrack commit replay", () => {
       5,
       "test task",
       {
-        schema_version: 1,
+        schema_version: 2,
         round_id: committed.roundId,
         snapshot: committed,
         result: committed.result!,

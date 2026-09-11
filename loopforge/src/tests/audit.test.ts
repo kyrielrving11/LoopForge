@@ -1,4 +1,5 @@
 /** v2.12: Read-only end-of-loop audit — claims, gates, verdict, sequence. */
+import { criterionClaims, installTestCommandProvider } from "./_helpers.js";
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -9,12 +10,55 @@ import { tmpdir } from "node:os";
 import { buildAudit } from "../audit.js";
 import { FileLoopStore } from "../loop-store.js";
 import type { VaultEntry } from "../loop-store.js";
+import { deriveContractItemIds } from "../token-utils.js";
+
+/** "verify" is the command installTestCommandProvider configures. */
+const CONTRACT = {
+  work_item: "Slice A",
+  scope: ["src/a"],
+  items: [{
+    description: "works",
+    criterion_refs: [],
+    subgoal_refs: [],
+    verify_with: ["verify"],
+  }],
+};
+
+function commandObservation(status: "passed" | "failed"): Record<string, unknown> {
+  return {
+    schemaVersion: 1,
+    providerId: "command:verify",
+    kind: "command",
+    phase: "after",
+    startedAt: 0,
+    finishedAt: 0,
+    status,
+    files: [],
+    data: {
+      commandId: "verify",
+      argv: ["node", "-e", "verify"],
+      cwd: ".",
+      configHash: "0".repeat(64),
+      required: false,
+      exitCode: status === "passed" ? 0 : 1,
+      signal: null,
+      durationMs: 1,
+      stdoutSha256: "0".repeat(64),
+      stderrSha256: "0".repeat(64),
+      stdoutExcerpt: "",
+      stderrExcerpt: "",
+      truncated: false,
+      entrypointFiles: [],
+    },
+  };
+}
 
 function committedFeedback(
   round: number,
   evaluation: Record<string, unknown>,
   flags: Array<Record<string, unknown>> = [],
   action = "continue",
+  afterEvidence: unknown[] = [],
 ): VaultEntry {
   return {
     id: `loop:audit-loop:r${round}:feedback`,
@@ -25,17 +69,17 @@ function committedFeedback(
     loop_lineage: {
       round,
       round_transaction: {
-        schema_version: 1,
+        schema_version: 2,
         round_id: `loop:audit-loop:round:${round}`,
         snapshot: {
-          schemaVersion: 1,
+          schemaVersion: 2,
           roundId: `loop:audit-loop:round:${round}`,
           loopId: "audit-loop",
           round,
           attempt: 1,
           phase: "committed",
           beforeEvidence: [],
-          afterEvidence: [],
+          afterEvidence,
           evaluation,
           result: { action, verificationFlags: flags },
           createdAt: Date.now(),
@@ -112,11 +156,10 @@ describe("buildAudit", () => {
         output_summary: "r1",
         constraint_violations: [],
         should_continue: false,
-        execution_evidence: {
+        execution_report: {
           files_changed: ["src/a.ts"],
-          test_results: { passed: 2, failed: 0, skipped: 0 },
-          success_criteria_met: ["tests pass"],
-          success_criteria_remaining: [],
+          tests_reported: { passed: 2, failed: 0, skipped: 0 },
+          criterion_claims: criterionClaims(["tests pass"], []),
           progress_estimate: 1,
         },
       }),
@@ -126,6 +169,111 @@ describe("buildAudit", () => {
     // No command snapshot observed → claims stay claimed → not evidenced.
     assert.equal(audit.criteria.evidenced, 0);
     assert.equal(audit.verdict, "incomplete");
+  });
+
+  it("v3.8: reports each round's executed contract and the contract's closure", () => {
+    installTestCommandProvider();
+    const itemId = deriveContractItemIds(CONTRACT.items)[0];
+    const entries = [
+      committedFeedback(1, {
+        success: false, output_summary: "declared", constraint_violations: [], should_continue: true,
+        round_contract: CONTRACT,
+      }),
+      committedFeedback(2, {
+        success: true, output_summary: "verified", constraint_violations: [], should_continue: true,
+        execution_report: {
+          files_changed: [],
+          criterion_claims: [],
+          contract_item_claims: [{ item_id: itemId, outcome: "met" }],
+        },
+      }, [], "continue", [commandObservation("passed")]),
+    ];
+    const audit = buildAudit("audit-loop", entries);
+
+    assert.equal(audit.rounds[0].contract, null,
+      "the declaring round's proposal is for the NEXT round — it executed under nothing");
+    assert.equal(audit.rounds[1].contract?.closure, "verified");
+    assert.equal(audit.rounds[1].contract?.declared_at_round, 1);
+    assert.deepEqual(audit.rounds[1].contract?.items.map((item) => item.status), ["verified"]);
+
+    assert.equal(audit.contracts.contracts.length, 1);
+    const contract = audit.contracts.contracts[0];
+    assert.equal(contract.declared_at_round, 1);
+    assert.equal(contract.first_active_round, 2);
+    assert.equal(contract.last_active_round, 2);
+    assert.equal(contract.closure, "verified");
+    assert.equal(contract.closed_at_round, 2);
+    assert.equal(audit.contracts.open, 0);
+    assert.equal(audit.contracts.verifiedItems, 1);
+    assert.equal(audit.verdict, "passed");
+  });
+
+  it("v3.8: an unbacked claim leaves the contract open and the audit incomplete", () => {
+    installTestCommandProvider();
+    const itemId = deriveContractItemIds(CONTRACT.items)[0];
+    const audit = buildAudit("audit-loop", [
+      committedFeedback(1, {
+        success: false, output_summary: "declared", constraint_violations: [], should_continue: true,
+        round_contract: CONTRACT,
+      }),
+      committedFeedback(2, {
+        success: true, output_summary: "claimed", constraint_violations: [], should_continue: true,
+        execution_report: {
+          files_changed: [],
+          criterion_claims: [],
+          contract_item_claims: [{ item_id: itemId, outcome: "met" }],
+        },
+      }),
+    ]);
+    assert.equal(audit.rounds[1].contract?.items[0].status, "insufficient");
+    assert.equal(audit.contracts.contracts[0].closure, "open");
+    assert.equal(audit.contracts.open, 1);
+    assert.equal(audit.contracts.insufficientItems, 1);
+    assert.equal(audit.verdict, "incomplete",
+      "an open contract is unfinished verification, whatever the claims say");
+  });
+
+  it("v3.8: a contradicted item flips the verdict even without an error flag", () => {
+    installTestCommandProvider();
+    const itemId = deriveContractItemIds(CONTRACT.items)[0];
+    const audit = buildAudit("audit-loop", [
+      committedFeedback(1, {
+        success: false, output_summary: "declared", constraint_violations: [], should_continue: true,
+        round_contract: CONTRACT,
+      }),
+      committedFeedback(2, {
+        success: true, output_summary: "claimed", constraint_violations: [], should_continue: false,
+        execution_report: {
+          files_changed: [],
+          criterion_claims: [],
+          contract_item_claims: [{ item_id: itemId, outcome: "met" }],
+        },
+      }, [], "continue", [commandObservation("failed")]),
+    ]);
+    assert.equal(audit.contracts.contradictedItems, 1);
+    assert.equal(audit.verdict, "contradicted",
+      "the machine denied the claim — that is a contradiction, not a gap");
+  });
+
+  it("v3.8: declared and evidenced are comparable distinct-id counts", () => {
+    const claim = (text: string) => ({
+      success: false,
+      output_summary: `r ${text}`,
+      constraint_violations: [],
+      should_continue: true,
+      execution_report: {
+        files_changed: ["src/a.ts"],
+        criterion_claims: criterionClaims([text]),
+      },
+    });
+    const audit = buildAudit("audit-loop", [
+      committedFeedback(1, claim("tests pass")),
+      committedFeedback(2, claim("tests pass")),
+    ]);
+    assert.equal(audit.criteria.declared, 1,
+      "the same criterion claimed twice is ONE declared criterion");
+    assert.equal(audit.criteria.evidenced, 0);
+    assert.equal(audit.criteria.missing, 1);
   });
 
   it("keeps the latest gate decision and lists unresolved user gates", () => {

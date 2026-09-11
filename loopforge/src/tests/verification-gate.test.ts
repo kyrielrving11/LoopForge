@@ -2,24 +2,28 @@
 import { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import {
-  makeExecutionEvidence,
+  makeExecutionReport,
   makeSelfEvaluation,
   type SelfEvaluation,
   type VerificationFlag,
 } from "../protocol.js";
 import type { VaultEntry } from "../loop-store.js";
-import { committedFeedbackRound as committedRound, testCommandProvider } from "./_helpers.js";
+import { committedFeedbackRound as committedRound, testCommandProvider, criterionClaims } from "./_helpers.js";
 import { verifySelfEvaluation as rawVerifySelfEvaluation, parseTestOutput, deriveEvidenceStatus, machineProgressSeries, CHECK_VERIFICATION_ENTRYPOINT_MODIFIED, CHECK_TEST_FILES_MODIFIED, CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE } from "../verification-gate.js";
-import type { ProviderSnapshot } from "../evidence-provider.js";
+import type {
+  CommandObservation,
+  CommandObservationData,
+  GitObservation,
+  MachineObservation,
+  ObservationStatus,
+} from "../protocol.js";
 import { computeGoalTextHash, deriveCriterionId } from "../loop-compiler.js";
-import { resetPolicy, getPolicy, setPolicyForTest, DEFAULT_POLICY } from "../policy.js";
-import type { RoundContract } from "../protocol.js";
+import { commandConfigHash, resetPolicy, getPolicy, setPolicyForTest, DEFAULT_POLICY } from "../policy.js";
+import type { ContractBinding, RoundContractProposal } from "../protocol.js";
+import { deriveContractId, deriveContractItemIds } from "../token-utils.js";
 import {
-  CHECK_ROUND_UNDERSPECIFIED,
-  CHECK_ROUND_UNVERIFIABLE,
   CHECK_ROUND_SCOPE_DRIFT,
-  CHECK_PREMATURE_BOUNDARY,
-  CHECK_CONTRACT_COMPLETION_UNVERIFIED,
+  CHECK_CONTRACT_ITEMS_UNVERIFIED,
   CHECK_CONTRACT_PREMATURE,
   CHECK_DOMAIN,
   CHECK_USER_GATE_UNRESOLVED,
@@ -38,10 +42,15 @@ import * as verificationGate from "../verification-gate.js";
  *  evidence check stays silent unless a test explicitly removes it. */
 /** v3.2: A verified git snapshot (machine observation present) — keeps the
  *  success_unverified check silent in tests that assert "no flag" outcomes. */
-function gitSnap(files: string[] = ["src/a.ts"]): ProviderSnapshot {
+function gitSnap(files: string[] = ["src/a.ts"]): GitObservation {
   return {
-    provider: "git",
-    timestamp: Date.now(),
+    schemaVersion: 1,
+    providerId: "git",
+    kind: "git",
+    phase: "after",
+    startedAt: 0,
+    finishedAt: 0,
+    status: "observed",
     files,
     data: { tracked: files, staged: [], untracked: [], fingerprints: {} },
   };
@@ -53,11 +62,10 @@ function se(overrides: Partial<SelfEvaluation> = {}): SelfEvaluation {
     output_summary: "Task completed.",
     constraint_violations: [],
     should_continue: true,
-    execution_evidence: makeExecutionEvidence({
+    execution_report: makeExecutionReport({
       files_changed: ["src/a.ts"],
-      test_results: { passed: 1, failed: 0, skipped: 0 },
-      success_criteria_met: ["criterion A"],
-      success_criteria_remaining: [],
+      tests_reported: { passed: 1, failed: 0, skipped: 0 },
+      criterion_claims: criterionClaims(["criterion A"], []),
       progress_estimate: 0.5,
     }),
     ...overrides,
@@ -66,26 +74,33 @@ function se(overrides: Partial<SelfEvaluation> = {}): SelfEvaluation {
 
 /** v3.2: A passed/failed after-phase command snapshot. The default stdout
  *  parses to {passed: 1, failed: 0} — matches the se() fixture's
- *  test_results so count-comparison checks stay silent. */
+ *  tests_reported so count-comparison checks stay silent. */
 function cmdSnap(
-  status: "passed" | "failed",
-  overrides: Partial<ProviderSnapshot["data"]> = {},
-): ProviderSnapshot {
+  status: ObservationStatus,
+  overrides: Partial<CommandObservationData> = {},
+): CommandObservation {
   return {
-    provider: "command:test",
-    timestamp: Date.now(),
+    schemaVersion: 1,
+    providerId: "command:test",
+    kind: "command",
+    phase: "after",
+    startedAt: 0,
+    finishedAt: 0,
+    status,
     files: [],
     data: {
-      kind: "command",
-      commandName: "test",
+      commandId: "test",
+      argv: ["node", "-e", "test"],
+      cwd: ".",
+      configHash: "0".repeat(64),
       required: false,
-      phase: "after",
-      status,
       exitCode: status === "passed" ? 0 : 1,
       signal: null,
       durationMs: 100,
-      stdout: status === "passed" ? "Tests: 1 passed, 1 total" : "Tests: 0 passed, 1 failed",
-      stderr: "",
+      stdoutSha256: "0".repeat(64),
+      stderrSha256: "0".repeat(64),
+      stdoutExcerpt: status === "passed" ? "Tests: 1 passed, 1 total" : "Tests: 0 passed, 1 failed",
+      stderrExcerpt: "",
       truncated: false,
       entrypointFiles: [],
       ...overrides,
@@ -94,10 +109,10 @@ function cmdSnap(
 }
 
 /** v3.3: A verified evidence pair — git observation plus a passed command.
- *  Success claims with self-reported test_results alone are no longer
+ *  Success claims with self-reported tests_reported alone are no longer
  *  machine evidence (R8 required by default), so tests that assert unrelated
  *  checks must pass a passed command snapshot. */
-function verifiedEvidence(files: string[] = ["src/a.ts"]): ProviderSnapshot[] {
+function verifiedEvidence(files: string[] = ["src/a.ts"]): MachineObservation[] {
   return [gitSnap(files), cmdSnap("passed")];
 }
 
@@ -110,7 +125,7 @@ function verifySelfEvaluation(
   currentRound: number,
   vaultEntries: VaultEntry[] = [],
   prevSelfEval: SelfEvaluation | null = null,
-  evidenceSnapshots: ProviderSnapshot[] = [cmdSnap("passed")],
+  evidenceSnapshots: MachineObservation[] = [cmdSnap("passed")],
   backtrackSkippedFiles: string[] = [],
   backtrackSkippedFingerprints: Record<string, string> = {},
   backtrackTargetGitHead?: string,
@@ -150,11 +165,10 @@ describe("verification-gate — happy path", () => {
   it("trusted verdict when all checks pass with consistent data", () => {
     const curr = se({
       success: false,
-      execution_evidence: makeExecutionEvidence({
+      execution_report: makeExecutionReport({
         files_changed: ["src/foo.ts"],
-        test_results: { passed: 3, failed: 0, skipped: 0 },
-        success_criteria_met: ["impl"],
-        success_criteria_remaining: ["tests"],
+        tests_reported: { passed: 3, failed: 0, skipped: 0 },
+        criterion_claims: criterionClaims(["impl"], ["tests"]),
         progress_estimate: 0.7,
       }),
       constraint_violations: ["deadline"],
@@ -163,11 +177,10 @@ describe("verification-gate — happy path", () => {
 
     const prev = se({
       success: false,
-      execution_evidence: makeExecutionEvidence({
+      execution_report: makeExecutionReport({
         files_changed: ["src/bar.ts"],
-        test_results: { passed: 1, failed: 0, skipped: 0 },
-        success_criteria_met: [],
-        success_criteria_remaining: ["impl", "tests"],
+        tests_reported: { passed: 1, failed: 0, skipped: 0 },
+        criterion_claims: criterionClaims([], ["impl", "tests"]),
         progress_estimate: 0.3,
       }),
       constraint_violations: ["missing docs"],
@@ -178,18 +191,18 @@ describe("verification-gate — happy path", () => {
 
     // A passed command with matching counts keeps criteria_claims_unverified,
     // command_evidence_mismatch, R8 and success_unverified all silent
-    // (v3.3: self-reported test_results alone are no longer machine evidence).
+    // (v3.3: self-reported tests_reported alone are no longer machine evidence).
     const result = verifySelfEvaluation(curr, 2, vault, prev,
-      [cmdSnap("passed", { stdout: "Tests: 3 passed, 3 total" })]);
+      [cmdSnap("passed", { stdoutExcerpt: "Tests: 3 passed, 3 total" })]);
     assert.equal(result.verdict, "trusted");
     assert.equal(result.flags.length, 0);
   });
 
   it("trusted verdict for first round (no previous data)", () => {
     const curr = se({
-      execution_evidence: makeExecutionEvidence({
+      execution_report: makeExecutionReport({
         progress_estimate: 0.0,
-        test_results: { passed: 1, failed: 0, skipped: 0 },
+        tests_reported: { passed: 1, failed: 0, skipped: 0 },
         files_changed: ["src/a.ts"],
       }),
     });
@@ -208,9 +221,8 @@ describe("verification-gate — success with remaining criteria", () => {
   it("flags when success=true but criteria remain unmet", () => {
     const curr = se({
       success: true,
-      execution_evidence: makeExecutionEvidence({
-        success_criteria_met: ["builds"],
-        success_criteria_remaining: ["tests pass", "docs updated"],
+      execution_report: makeExecutionReport({
+        criterion_claims: criterionClaims(["builds"], ["tests pass", "docs updated"]),
       }),
     });
 
@@ -225,10 +237,9 @@ describe("verification-gate — success with remaining criteria", () => {
   it("does not flag when success=true and criteria list is empty", () => {
     const curr = se({
       success: true,
-      execution_evidence: makeExecutionEvidence({
-        success_criteria_met: ["builds", "tests pass"],
-        success_criteria_remaining: [],
-        test_results: { passed: 1, failed: 0, skipped: 0 },
+      execution_report: makeExecutionReport({
+        criterion_claims: criterionClaims(["builds", "tests pass"], []),
+        tests_reported: { passed: 1, failed: 0, skipped: 0 },
         files_changed: ["src/a.ts"],
       }),
     });
@@ -240,8 +251,8 @@ describe("verification-gate — success with remaining criteria", () => {
   it("does not flag when success is false even with remaining criteria", () => {
     const curr = se({
       success: false,
-      execution_evidence: makeExecutionEvidence({
-        success_criteria_remaining: ["tests pass"],
+      execution_report: makeExecutionReport({
+        criterion_claims: criterionClaims([], ["tests pass"]),
       }),
     });
 
@@ -416,9 +427,9 @@ describe("verification-gate — verdict aggregation", () => {
   it("single error flag → contradicted", () => {
     const curr = se({
       success: true,
-      execution_evidence: makeExecutionEvidence({
-        success_criteria_remaining: ["tests pass"],
-        test_results: { passed: 1, failed: 0, skipped: 0 },
+      execution_report: makeExecutionReport({
+        criterion_claims: criterionClaims([], ["tests pass"]),
+        tests_reported: { passed: 1, failed: 0, skipped: 0 },
         files_changed: ["src/a.ts"],
       }),
     });
@@ -431,10 +442,10 @@ describe("verification-gate — verdict aggregation", () => {
   it("multiple warn + one error → contradicted (error wins)", () => {
     const curr = se({
       success: true,
-      execution_evidence: makeExecutionEvidence({
+      execution_report: makeExecutionReport({
         files_changed: [],
-        test_results: { passed: 3, failed: 0, skipped: 0 },
-        success_criteria_remaining: ["tests pass"],
+        tests_reported: { passed: 3, failed: 0, skipped: 0 },
+        criterion_claims: criterionClaims([], ["tests pass"]),
       }),
       discovered_constraints: ["must handle null"],
     });
@@ -451,10 +462,10 @@ describe("verification-gate — verdict aggregation", () => {
   it("all checks pass → trusted", () => {
     const curr = se({
       success: false,
-      execution_evidence: makeExecutionEvidence({
+      execution_report: makeExecutionReport({
         files_changed: ["src/foo.ts"],
-        test_results: { passed: 3, failed: 1, skipped: 0 },
-        success_criteria_remaining: ["tests"],
+        tests_reported: { passed: 3, failed: 1, skipped: 0 },
+        criterion_claims: criterionClaims([], ["tests"]),
         progress_estimate: 0.5,
       }),
       constraint_violations: ["minor"],
@@ -462,7 +473,7 @@ describe("verification-gate — verdict aggregation", () => {
     });
     const prev = se({
       success: false,
-      execution_evidence: makeExecutionEvidence({
+      execution_report: makeExecutionReport({
         progress_estimate: 0.3,
       }),
       constraint_violations: ["other"],
@@ -470,7 +481,7 @@ describe("verification-gate — verdict aggregation", () => {
     });
 
     const result = verifySelfEvaluation(curr, 2, [], prev,
-      [gitSnap(["src/foo.ts"]), cmdSnap("passed", { stdout: "Tests: 3 passed, 1 failed" })]);
+      [gitSnap(["src/foo.ts"]), cmdSnap("passed", { stdoutExcerpt: "Tests: 3 passed, 1 failed" })]);
     assert.equal(result.verdict, "trusted");
     assert.equal(result.flags.length, 0);
   });
@@ -551,23 +562,35 @@ describe("parseTestOutput", () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /** Build a minimal command evidence snapshot for testing. */
-function cmdSnapshot(overrides: Record<string, unknown> = {}): ProviderSnapshot {
+function cmdSnapshot(
+  overrides: Partial<CommandObservationData> = {},
+  observation: Partial<Omit<CommandObservation, "data">> = {},
+): CommandObservation {
   return {
-    provider: "command:test",
-    timestamp: Date.now(),
+    schemaVersion: 1,
+    providerId: "command:test",
+    kind: "command",
+    phase: "after",
+    startedAt: 0,
+    finishedAt: 0,
+    status: "passed",
     files: [],
+    ...observation,
     data: {
-      kind: "command",
-      commandName: "test",
+      commandId: "test",
+      argv: ["node", "-e", "test"],
+      cwd: ".",
+      configHash: "0".repeat(64),
       required: false,
-      phase: "after",
-      status: "passed",
       exitCode: 0,
       signal: null,
       durationMs: 100,
-      stdout: "",
-      stderr: "",
+      stdoutSha256: "0".repeat(64),
+      stderrSha256: "0".repeat(64),
+      stdoutExcerpt: "",
+      stderrExcerpt: "",
       truncated: false,
+      entrypointFiles: [],
       ...overrides,
     },
   };
@@ -576,12 +599,12 @@ function cmdSnapshot(overrides: Record<string, unknown> = {}): ProviderSnapshot 
 describe("verification-gate — command evidence integrity", () => {
   it("no flag when test counts match exactly", () => {
     const curr = se({
-      execution_evidence: makeExecutionEvidence({
+      execution_report: makeExecutionReport({
         files_changed: [],
-        test_results: { passed: 8, failed: 1, skipped: 0 },
+        tests_reported: { passed: 8, failed: 1, skipped: 0 },
       }),
     });
-    const snap = cmdSnapshot({ stdout: "Tests: 1 failed, 8 passed, 9 total" });
+    const snap = cmdSnapshot({ stdoutExcerpt: "Tests: 1 failed, 8 passed, 9 total" });
     const result = verifySelfEvaluation(curr, 2, [], null, [snap]);
     const flag = result.flags.find(f => f.check === "command_evidence_mismatch");
     assert.equal(flag, undefined, "should not flag when counts match");
@@ -589,12 +612,12 @@ describe("verification-gate — command evidence integrity", () => {
 
   it("warn when passed counts differ", () => {
     const curr = se({
-      execution_evidence: makeExecutionEvidence({
+      execution_report: makeExecutionReport({
         files_changed: [],
-        test_results: { passed: 10, failed: 1, skipped: 0 },
+        tests_reported: { passed: 10, failed: 1, skipped: 0 },
       }),
     });
-    const snap = cmdSnapshot({ stdout: "Tests: 1 failed, 8 passed, 9 total" });
+    const snap = cmdSnapshot({ stdoutExcerpt: "Tests: 1 failed, 8 passed, 9 total" });
     const result = verifySelfEvaluation(curr, 2, [], null, [snap]);
     const flag = result.flags.find(f => f.check === "command_evidence_mismatch");
     assert.ok(flag, "should flag mismatch");
@@ -606,39 +629,39 @@ describe("verification-gate — command evidence integrity", () => {
   it("error when agent reports 0 failed but command shows failures", () => {
     const curr = se({
       success: true,
-      execution_evidence: makeExecutionEvidence({
+      execution_report: makeExecutionReport({
         files_changed: [],
-        test_results: { passed: 8, failed: 0, skipped: 0 },
+        tests_reported: { passed: 8, failed: 0, skipped: 0 },
       }),
     });
-    const snap = cmdSnapshot({ stdout: "Tests: 2 failed, 8 passed, 10 total" });
+    const snap = cmdSnapshot({ stdoutExcerpt: "Tests: 2 failed, 8 passed, 10 total" });
     const result = verifySelfEvaluation(curr, 2, [], null, [snap]);
     const flag = result.flags.find(f => f.check === "command_evidence_mismatch");
     assert.ok(flag, "should flag hidden failures");
     assert.equal(flag!.severity, "error");
   });
 
-  it("no flag when agent has no test_results", () => {
+  it("no flag when agent has no tests_reported", () => {
     const curr = se({
-      execution_evidence: makeExecutionEvidence({
+      execution_report: makeExecutionReport({
         files_changed: ["src/foo.ts"],
-        test_results: null,
+        tests_reported: null,
       }),
     });
-    const snap = cmdSnapshot({ stdout: "Tests: 1 failed, 8 passed, 9 total" });
+    const snap = cmdSnapshot({ stdoutExcerpt: "Tests: 1 failed, 8 passed, 9 total" });
     const result = verifySelfEvaluation(curr, 2, [], null, [snap]);
     const flag = result.flags.find(f => f.check === "command_evidence_mismatch");
-    assert.equal(flag, undefined, "should skip when no test_results reported");
+    assert.equal(flag, undefined, "should skip when no tests_reported reported");
   });
 
   it("no flag when command output is truncated", () => {
     const curr = se({
-      execution_evidence: makeExecutionEvidence({
-        test_results: { passed: 8, failed: 1, skipped: 0 },
+      execution_report: makeExecutionReport({
+        tests_reported: { passed: 8, failed: 1, skipped: 0 },
       }),
     });
     const snap = cmdSnapshot({
-      stdout: "Tests: 1 failed, 8 passed, 9 total",
+      stdoutExcerpt: "Tests: 1 failed, 8 passed, 9 total",
       truncated: true,
     });
     const result = verifySelfEvaluation(curr, 2, [], null, [snap]);
@@ -648,15 +671,14 @@ describe("verification-gate — command evidence integrity", () => {
 
   it("no flag when command status is not passed", () => {
     const curr = se({
-      execution_evidence: makeExecutionEvidence({
-        test_results: { passed: 8, failed: 1, skipped: 0 },
+      execution_report: makeExecutionReport({
+        tests_reported: { passed: 8, failed: 1, skipped: 0 },
       }),
     });
-    const snap = cmdSnapshot({
-      stdout: "Tests: 1 failed, 8 passed, 9 total",
-      status: "failed",
-      exitCode: 1,
-    });
+    const snap = cmdSnapshot(
+      { stdoutExcerpt: "Tests: 1 failed, 8 passed, 9 total", exitCode: 1 },
+      { status: "failed" },
+    );
     const result = verifySelfEvaluation(curr, 2, [], null, [snap]);
     const flag = result.flags.find(f => f.check === "command_evidence_mismatch");
     assert.equal(flag, undefined, "should skip non-passed commands");
@@ -664,14 +686,19 @@ describe("verification-gate — command evidence integrity", () => {
 
   it("no flag for non-command evidence providers", () => {
     const curr = se({
-      execution_evidence: makeExecutionEvidence({
-        test_results: { passed: 8, failed: 1, skipped: 0 },
+      execution_report: makeExecutionReport({
+        tests_reported: { passed: 8, failed: 1, skipped: 0 },
       }),
     });
     // A non-command provider (e.g. a hypothetical coverage provider)
-    const snap: ProviderSnapshot = {
-      provider: "coverage",
-      timestamp: Date.now(),
+    const snap: MachineObservation = {
+      schemaVersion: 1,
+      providerId: "coverage",
+      kind: "custom",
+      phase: "after",
+      startedAt: 0,
+      finishedAt: 0,
+      status: "observed",
       files: [],
       data: { kind: "coverage", coverage: 0.8 },
     };
@@ -682,11 +709,11 @@ describe("verification-gate — command evidence integrity", () => {
 
   it("no flag when command output is unparseable", () => {
     const curr = se({
-      execution_evidence: makeExecutionEvidence({
-        test_results: { passed: 8, failed: 1, skipped: 0 },
+      execution_report: makeExecutionReport({
+        tests_reported: { passed: 8, failed: 1, skipped: 0 },
       }),
     });
-    const snap = cmdSnapshot({ stdout: "All checks passed! ✨" });
+    const snap = cmdSnapshot({ stdoutExcerpt: "All checks passed! ✨" });
     const result = verifySelfEvaluation(curr, 2, [], null, [snap]);
     const flag = result.flags.find(f => f.check === "command_evidence_mismatch");
     assert.equal(flag, undefined, "should skip unparseable output");
@@ -694,183 +721,13 @@ describe("verification-gate — command evidence integrity", () => {
 
   it("no flag with empty evidence snapshots", () => {
     const curr = se({
-      execution_evidence: makeExecutionEvidence({
-        test_results: { passed: 8, failed: 1, skipped: 0 },
+      execution_report: makeExecutionReport({
+        tests_reported: { passed: 8, failed: 1, skipped: 0 },
       }),
     });
     const result = verifySelfEvaluation(curr, 2, [], null, []);
     const flag = result.flags.find(f => f.check === "command_evidence_mismatch");
     assert.equal(flag, undefined, "should skip when no snapshots");
-  });
-});
-
-// ═══════════════════════════════════════════════════════════════════════════
-// v2.1: Intent-action drift detection
-// ═══════════════════════════════════════════════════════════════════════════
-
-describe("verification-gate — intent-action drift", () => {
-  it("no flag when next_action and output_summary are semantically similar", () => {
-    const prev = se({ next_action: "Refactor the authentication module" });
-    const curr = se({ output_summary: "Refactored the authentication module — extracted middleware, updated tests" });
-    const result = verifySelfEvaluation(curr, 3, [], prev);
-    const flag = result.flags.find(f => f.check === "intent_drift");
-    assert.equal(flag, undefined, "should not flag when intent matches action");
-  });
-
-  it("warn flag when next_action is completely unrelated to output_summary", () => {
-    const prev = se({ next_action: "Refactor the authentication module" });
-    const curr = se({ output_summary: "Fixed CSS padding on login button and adjusted margins" });
-    const result = verifySelfEvaluation(curr, 3, [], prev);
-    const flag = result.flags.find(f => f.check === "intent_drift");
-    assert.ok(flag, "should flag intent-action drift");
-    assert.equal(flag.severity, "warn");
-    assert.ok(flag.detail.includes("intent"), "detail should mention declared intent");
-    assert.ok(flag.detail.includes("similarity"), "detail should include similarity score");
-  });
-
-  it("no flag when prevSelfEval is null (round 1 has no prior intent)", () => {
-    const curr = se({ output_summary: "Fixed CSS padding" });
-    const result = verifySelfEvaluation(curr, 1, [], null);
-    const flag = result.flags.find(f => f.check === "intent_drift");
-    assert.equal(flag, undefined, "should not flag without previous self-eval");
-  });
-
-  it("no flag when next_action is empty string", () => {
-    const prev = se({ next_action: "" });
-    const curr = se({ output_summary: "Fixed CSS padding" });
-    const result = verifySelfEvaluation(curr, 3, [], prev);
-    const flag = result.flags.find(f => f.check === "intent_drift");
-    assert.equal(flag, undefined, "should not flag when intent is empty");
-  });
-
-  it("no flag when output_summary is empty", () => {
-    const prev = se({ next_action: "Refactor auth module" });
-    const curr = se({ output_summary: "" });
-    const result = verifySelfEvaluation(curr, 3, [], prev);
-    const flag = result.flags.find(f => f.check === "intent_drift");
-    assert.equal(flag, undefined, "should not flag when summary is empty");
-  });
-
-  it("no flag when next_action is undefined", () => {
-    const prev = se({ next_action: undefined });
-    const curr = se({ output_summary: "Fixed CSS padding" });
-    const result = verifySelfEvaluation(curr, 3, [], prev);
-    const flag = result.flags.find(f => f.check === "intent_drift");
-    assert.equal(flag, undefined, "should not flag when intent is undefined");
-  });
-
-  it("verdict is suspect when intent drift is the only flag", () => {
-    const prev = se({ next_action: "Refactor auth" });
-    const curr = se({ output_summary: "Fixed CSS padding" });
-    const result = verifySelfEvaluation(curr, 3, [], prev);
-    assert.equal(result.verdict, "suspect", "intent_drift is a warn-level flag");
-  });
-
-  // ── v2.14/v3.7.1: structured-ID-first alignment signals ─────────────────
-
-  it("no flag when the referenced sub-goal ID received a done transition", () => {
-    const prev = se({
-      next_action: "Complete sg-bfebcdd7 — segmentation, idempotency, and state machine tests",
-    });
-    const curr = se({
-      output_summary:
-        "Implemented three test suites covering chunk-boundary segmentation, " +
-        "idempotent rerun assertions, and state machine transition tables",
-      subgoal_updates: [{ id: "sg-bfebcdd7", status: "done" }],
-    });
-    const result = verifySelfEvaluation(curr, 3, [], prev);
-    const flag = result.flags.find(f => f.check === "intent_drift");
-    assert.equal(flag, undefined, "a declared done transition is intent alignment, not drift");
-  });
-
-  it("still flags when the referenced sub-goal ID only received an in_progress transition", () => {
-    const prev = se({
-      next_action: "Complete sg-aaaa1111 — parser rewrite",
-    });
-    const curr = se({
-      output_summary: "Rewrote the scheduler from scratch",
-      subgoal_updates: [{ id: "sg-aaaa1111", status: "in_progress" }],
-    });
-    const result = verifySelfEvaluation(curr, 3, [], prev);
-    const flag = result.flags.find(f => f.check === "intent_drift");
-    assert.ok(flag, "an unfinished referenced sub-goal is genuine drift");
-    assert.ok(
-      flag.detail.includes("did not match a declared done transition"),
-      "detail should report the unmatched sub-goal ID",
-    );
-  });
-
-  it("still flags when the referenced sub-goal ID was never updated", () => {
-    const prev = se({
-      next_action: "Complete sg-aaaa1111 — parser rewrite",
-    });
-    const curr = se({
-      output_summary: "Rewrote the scheduler from scratch",
-      subgoal_updates: [{ id: "sg-00000000", status: "canceled" }],
-    });
-    const result = verifySelfEvaluation(curr, 3, [], prev);
-    const flag = result.flags.find(f => f.check === "intent_drift");
-    assert.ok(flag, "an untouched referenced sub-goal is genuine drift");
-    assert.ok(flag.detail.includes("1 referenced sub-goal ID(s)"));
-  });
-
-  it("no flag when a file path named in next_action appears in files_changed", () => {
-    const prev = se({ next_action: "Refactor src/auth/login.ts" });
-    const curr = se({
-      output_summary: "Adjusted the login flow",
-      execution_evidence: makeExecutionEvidence({
-        files_changed: ["src/auth/login.ts"],
-      }),
-    });
-    const result = verifySelfEvaluation(curr, 3, [], prev);
-    const flag = result.flags.find(f => f.check === "intent_drift");
-    assert.equal(flag, undefined, "file-path evidence is alignment");
-  });
-
-  it("no flag when intent mentions tests and test files changed with tests run", () => {
-    const prev = se({ next_action: "Write unit tests for the auth module" });
-    const curr = se({
-      output_summary: "Covered authentication logic",
-      execution_evidence: makeExecutionEvidence({
-        files_changed: ["src/auth/login.test.ts"],
-        test_results: { passed: 12, failed: 0, skipped: 0 },
-      }),
-    });
-    const result = verifySelfEvaluation(curr, 3, [], prev);
-    const flag = result.flags.find(f => f.check === "intent_drift");
-    assert.equal(flag, undefined, "test-file evidence with passing counts is alignment");
-  });
-});
-
-// ═══════════════════════════════════════════════════════════════════════════
-// v2.2 / v2.14: Sub-goal drift — stable ID alignment first
-// ═══════════════════════════════════════════════════════════════════════════
-
-describe("verification-gate — sub-goal drift ID alignment", () => {
-  const sgA = "Add error handling to login";
-  const sgB = "Write API integration tests";
-  const sgC = "Refactor database layer";
-  const idA = "sg-" + computeGoalTextHash(sgA).slice(0, 8);
-
-  function vaultWithSubGoals(): VaultEntry[] {
-    return [
-      { ...vaultRound(2), emerged_subtasks: [sgA, sgB, sgC] },
-    ];
-  }
-
-  it("no flag when next_action references a pending sub-goal by ID", () => {
-    const curr = se({ next_action: `Finish ${idA} with regression coverage` });
-    const result = verifySelfEvaluation(curr, 3, vaultWithSubGoals(), null);
-    const flag = result.flags.find(f => f.check === "subgoal_drift");
-    assert.equal(flag, undefined, "ID reference to a pending sub-goal is aligned by definition");
-  });
-
-  it("still flags when next_action aligns with no pending sub-goal", () => {
-    const curr = se({ next_action: "Investigate CI flakiness" });
-    const result = verifySelfEvaluation(curr, 3, vaultWithSubGoals(), null);
-    const flag = result.flags.find(f => f.check === "subgoal_drift");
-    assert.ok(flag, "unrelated next_action should still flag sub-goal drift");
-    assert.equal(flag.severity, "warn");
   });
 });
 
@@ -884,7 +741,7 @@ describe("verification-gate — backtrack workspace restore", () => {
       success: false,
       output_summary: "Worked on feature",
       should_continue: true,
-      execution_evidence: makeExecutionEvidence({
+      execution_report: makeExecutionReport({
         files_changed: ["src/new-feature.ts"],
         progress_estimate: 0.5,
       }),
@@ -894,7 +751,7 @@ describe("verification-gate — backtrack workspace restore", () => {
 
   it("no flag when backtrackSkippedFiles is empty", () => {
     const result = verifySelfEvaluation(
-      se({ execution_evidence: makeExecutionEvidence({
+      se({ execution_report: makeExecutionReport({
         files_changed: ["src/auth.ts"],
       })}),
       3, [], null, [], [],
@@ -908,7 +765,7 @@ describe("verification-gate — backtrack workspace restore", () => {
 
   it("no flag when files_changed has no overlap with skipped files", () => {
     const result = verifySelfEvaluation(
-      se({ execution_evidence: makeExecutionEvidence({
+      se({ execution_report: makeExecutionReport({
         files_changed: ["src/auth.ts"],
       })}),
       3, [], null, [],
@@ -923,7 +780,7 @@ describe("verification-gate — backtrack workspace restore", () => {
 
   it("warns when files_changed has minor overlap with skipped files", () => {
     const result = verifySelfEvaluation(
-      se({ execution_evidence: makeExecutionEvidence({
+      se({ execution_report: makeExecutionReport({
         files_changed: ["src/auth.ts", "src/new.ts"],
       })}),
       3, [], null, [],
@@ -942,7 +799,7 @@ describe("verification-gate — backtrack workspace restore", () => {
     // one by self-report alone — a legitimate multi-file redo must never be
     // terminated on this signal, so overlap stays guidance.
     const result = verifySelfEvaluation(
-      se({ execution_evidence: makeExecutionEvidence({
+      se({ execution_report: makeExecutionReport({
         files_changed: ["src/a.ts", "src/b.ts", "src/c.ts"],
       })}),
       3, [], null, [],
@@ -960,9 +817,14 @@ describe("verification-gate — backtrack workspace restore", () => {
     // Machine arm: the current git fingerprint still matches the fingerprint
     // recorded at the failed round → the file was never touched since the
     // rollback → the workspace was not restored.
-    const git = {
-      provider: "git",
-      timestamp: Date.now(),
+    const git: GitObservation = {
+      schemaVersion: 1,
+      providerId: "git",
+      kind: "git",
+      phase: "after",
+      startedAt: 0,
+      finishedAt: 0,
+      status: "observed",
       files: ["src/a.ts"],
       data: {
         tracked: ["src/a.ts"], staged: [], untracked: [],
@@ -970,7 +832,7 @@ describe("verification-gate — backtrack workspace restore", () => {
       },
     };
     const result = verifySelfEvaluation(
-      se({ execution_evidence: makeExecutionEvidence({
+      se({ execution_report: makeExecutionReport({
         files_changed: ["src/a.ts"],
       })}),
       3, [], null, [git],
@@ -988,9 +850,14 @@ describe("verification-gate — backtrack workspace restore", () => {
     // The agent restored the workspace, then legitimately re-modified the
     // file during the redo — the fingerprint moved on, so no machine
     // contradiction exists even though the claimed file overlaps.
-    const git = {
-      provider: "git",
-      timestamp: Date.now(),
+    const git: GitObservation = {
+      schemaVersion: 1,
+      providerId: "git",
+      kind: "git",
+      phase: "after",
+      startedAt: 0,
+      finishedAt: 0,
+      status: "observed",
       files: ["src/a.ts"],
       data: {
         tracked: ["src/a.ts"], staged: [], untracked: [],
@@ -998,7 +865,7 @@ describe("verification-gate — backtrack workspace restore", () => {
       },
     };
     const result = verifySelfEvaluation(
-      se({ execution_evidence: makeExecutionEvidence({
+      se({ execution_report: makeExecutionReport({
         files_changed: ["src/a.ts"],
       })}),
       3, [], null, [git],
@@ -1010,9 +877,9 @@ describe("verification-gate — backtrack workspace restore", () => {
     "a legitimate redo must not raise the restore error");
   });
 
-  it("no flag when execution_evidence is absent", () => {
+  it("no flag when execution_report is absent", () => {
     const result = verifySelfEvaluation(
-      se({ execution_evidence: undefined }),
+      se({ execution_report: undefined }),
       3, [], null, [],
       ["src/auth.ts"],
     );
@@ -1035,11 +902,10 @@ describe("verification-gate — v2.12 outcome consistency", () => {
     const curr = se({
       success: true,
       outcome: "partial",
-      execution_evidence: makeExecutionEvidence({
+      execution_report: makeExecutionReport({
         files_changed: ["src/a.ts"],
-        test_results: { passed: 1, failed: 0, skipped: 0 },
-        success_criteria_met: [],
-        success_criteria_remaining: ["tests pass"],
+        tests_reported: { passed: 1, failed: 0, skipped: 0 },
+        criterion_claims: criterionClaims([], ["tests pass"]),
         progress_estimate: 0.5,
       }),
     });
@@ -1121,10 +987,10 @@ describe("verification-gate — v2.12 outcome consistency", () => {
       loop_lineage: {
         round: 1,
         round_transaction: {
-          schema_version: 1,
+          schema_version: 2,
           round_id: "loop:test-loop:round:1",
           snapshot: {
-            schemaVersion: 1,
+            schemaVersion: 2,
             roundId: "loop:test-loop:round:1",
             loopId: "test-loop",
             round: 1,
@@ -1132,10 +998,15 @@ describe("verification-gate — v2.12 outcome consistency", () => {
             phase: "committed" as const,
             beforeEvidence: [],
             afterEvidence: [{
-              provider: "git",
-              timestamp: Date.now(),
+              schemaVersion: 1,
+              providerId: "git",
+              kind: "git",
+              phase: "after",
+              startedAt: 0,
+              finishedAt: 0,
+              status: "observed",
               files: ["src/fixed.ts"],
-              data: { head: "abc" },
+              data: { head: "abc", fingerprints: {} },
             }],
             createdAt: Date.now(),
             updatedAt: Date.now(),
@@ -1160,11 +1031,10 @@ describe("verification-gate — v2.12 unverified criteria claims", () => {
   it("warns when criteria are met but none machine-verified", () => {
     const curr = se({
       success: false,
-      execution_evidence: makeExecutionEvidence({
+      execution_report: makeExecutionReport({
         files_changed: ["src/a.ts"],
-        test_results: null,
-        success_criteria_met: ["tests pass", "docs updated"],
-        success_criteria_remaining: [],
+        tests_reported: null,
+        criterion_claims: criterionClaims(["tests pass", "docs updated"], []),
         progress_estimate: 0.5,
       }),
     });
@@ -1176,11 +1046,10 @@ describe("verification-gate — v2.12 unverified criteria claims", () => {
 
   it("stays silent when test evidence backs the claims", () => {
     const curr = se({
-      execution_evidence: makeExecutionEvidence({
+      execution_report: makeExecutionReport({
         files_changed: ["src/a.ts"],
-        test_results: { passed: 4, failed: 0, skipped: 0 },
-        success_criteria_met: ["tests pass"],
-        success_criteria_remaining: [],
+        tests_reported: { passed: 4, failed: 0, skipped: 0 },
+        criterion_claims: criterionClaims(["tests pass"], []),
         progress_estimate: 0.8,
       }),
     });
@@ -1190,11 +1059,10 @@ describe("verification-gate — v2.12 unverified criteria claims", () => {
 
   it("stays silent when no criteria are reported met", () => {
     const curr = se({
-      execution_evidence: makeExecutionEvidence({
+      execution_report: makeExecutionReport({
         files_changed: ["src/a.ts"],
-        test_results: null,
-        success_criteria_met: [],
-        success_criteria_remaining: ["tests pass"],
+        tests_reported: null,
+        criterion_claims: criterionClaims([], ["tests pass"]),
         progress_estimate: 0.3,
       }),
     });
@@ -1229,9 +1097,9 @@ describe("v3.2 — deriveEvidenceStatus", () => {
 
   it("passed after-command → verified, testsMachineBacked when counts agree", () => {
     const selfEval = se({
-      execution_evidence: makeExecutionEvidence({
+      execution_report: makeExecutionReport({
         files_changed: [],
-        test_results: { passed: 1, failed: 0, skipped: 0 },
+        tests_reported: { passed: 1, failed: 0, skipped: 0 },
       }),
     });
     const status = deriveEvidenceStatus(selfEval, [cmdSnap("passed")]);
@@ -1257,7 +1125,7 @@ describe("v3.2 — machineProgressSeries", () => {
   const feedbackRound = (round: number, gitFiles: string[]): VaultEntry =>
     committedRound(round, {
       loopId: "mp",
-      roundEvidence: [{ provider: "git", timestamp: Date.now(), files: gitFiles, data: {} }],
+      roundEvidence: [{ schemaVersion: 1, providerId: "git", kind: "git", phase: "after", startedAt: 0, finishedAt: 0, status: "observed", files: gitFiles, data: { fingerprints: {} } }],
     });
 
   it("reports per-round git observations for the lookback window", () => {
@@ -1291,114 +1159,6 @@ describe("v3.2 — machineProgressSeries", () => {
 
 // ═══════════════════════════════════════════════════════════════════════════
 // v3.3 — machine_backed_success policy switch (R8 severity)
-// ═══════════════════════════════════════════════════════════════════════════
-
-describe("v3.3 — machine_backed_success switch", () => {
-  afterEach(() => resetPolicy());
-
-  // Fabricated success: files changed + self-reported passing tests, no
-  // command snapshot — the v3.3 attack the tightening closes.
-  const fabricated = (): SelfEvaluation => se({
-    execution_evidence: makeExecutionEvidence({
-      files_changed: ["src/a.ts"],
-      test_results: { passed: 5, failed: 0, skipped: 0 },
-      success_criteria_met: ["tests pass"],
-      success_criteria_remaining: [],
-      progress_estimate: 0.9,
-    }),
-  });
-
-  it("required (default): fabricated success is an R8 error", () => {
-    const result = verifySelfEvaluation(fabricated(), 2, [], null, [gitSnap(["src/a.ts"])]);
-    const flag = result.flags.find((f) => f.check === CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE);
-    assert.ok(flag, "R8 flag must fire");
-    assert.equal(flag!.severity, "error");
-    assert.equal(result.verdict, "contradicted");
-  });
-
-  it("warn: fabricated success downgrades to a warn and keeps the verdict suspect", () => {
-    resetPolicy();
-    getPolicy().evidence.machine_backed_success = "warn";
-    const result = verifySelfEvaluation(fabricated(), 2, [], null, [gitSnap(["src/a.ts"])]);
-    const flag = result.flags.find((f) => f.check === CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE);
-    assert.ok(flag, "R8 flag must fire");
-    assert.equal(flag!.severity, "warn");
-    assert.equal(result.verdict, "suspect");
-  });
-
-  it("a passed command still satisfies the claim in both modes", () => {
-    const result = verifySelfEvaluation(fabricated(), 2, [], null,
-      [cmdSnap("passed", { stdout: "Tests: 5 passed, 5 total" })]);
-    assert.ok(!result.flags.some((f) =>
-      f.check === CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE && f.severity === "error"));
-  });
-
-  it("v3.6: a declared no_change_reason is the R8-family escape → info", () => {
-    // The single honored downgrade site (contract checks refuse it).
-    const result = verifySelfEvaluation(
-      se({ no_change_reason: "documentation-only round" }),
-      2, [], null, [gitSnap(["src/a.ts"])],
-    );
-    const flag = result.flags.find((f) => f.check === CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE);
-    assert.ok(flag, "R8 flag must fire even with no_change_reason");
-    assert.equal(flag!.severity, "info");
-    assert.equal(result.verdict, "suspect");
-  });
-
-  it("M2: an enabled verification command closes the no_change escape", () => {
-    // The escape's premise is "no machine-verifiable evidence". With an
-    // enabled command configured, machine verification WAS possible — a
-    // declared reason must not waive the required backing, even though git
-    // observed the round's file changes.
-    getPolicy().evidence.commands = [testCommandProvider()];
-    const result = verifySelfEvaluation(
-      se({ no_change_reason: "documentation-only round" }),
-      2, [], null, [gitSnap(["src/a.ts"])],
-    );
-    const flag = result.flags.find((f) => f.check === CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE);
-    assert.ok(flag, "R8 must still fire with a command configured");
-    assert.equal(flag!.severity, "error",
-      "no_change_reason must not downgrade when a verification command exists");
-    assert.equal(result.verdict, "contradicted");
-  });
-
-  it("M2: the escape survives only while verification is structurally impossible", () => {
-    // Default policy (commands: []) has nothing to run — the honest
-    // documentation-round escape stays open regardless of git motion.
-    const result = verifySelfEvaluation(
-      se({ no_change_reason: "documentation-only round" }),
-      2, [], null, [gitSnap(["src/a.ts"])],
-    );
-    const flag = result.flags.find((f) => f.check === CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE);
-    assert.equal(flag?.severity, "info");
-  });
-
-  it("v3.6: an entrypoint-tampered command is NOT machine evidence (merged lens)", () => {
-    // v3.6: this coverage moved from success_unverified into R8 — a passed
-    // command whose entrypoint the agent rewrote this round degrades
-    // providerStatus to unavailable, so R8 fires.
-    const git = gitSnap(["run-tests.sh"]);
-    const cmd = cmdSnap("passed", { entrypointFiles: ["run-tests.sh"] });
-    const result = verifySelfEvaluation(se(), 2, [], null, [git, cmd]);
-    const flag = result.flags.find((f) => f.check === CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE);
-    assert.ok(flag, "tampered command must not count as machine evidence");
-    assert.equal(flag!.severity, "error");
-    assert.ok(result.flags.some((f) => f.check === CHECK_VERIFICATION_ENTRYPOINT_MODIFIED),
-      "the entrypoint-tampering error also fires");
-  });
-
-  it("success=false never fires R8", () => {
-    const result = verifySelfEvaluation(
-      se({ success: false }),
-      2, [], null, [gitSnap(["src/a.ts"])],
-    );
-    assert.ok(!result.flags.some((f) => f.check === CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE));
-  });
-});
-
-
-// ═══════════════════════════════════════════════════════════════════════════
-// v3.3 — verification domain integrity (entrypoint / test-file pollution)
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("v3.3 — verification domain integrity", () => {
@@ -1459,511 +1219,166 @@ describe("v3.3 — verification domain integrity", () => {
 // v3.3 — Round Contract checks
 // ═══════════════════════════════════════════════════════════════════════════
 
-/** Default policy has empty evidence.commands → "run-tests" is NOT
- *  configured, which is what the round_unverifiable tests rely on.
- *  v3.5 caveat: any test that calls withRunTestsConfigured() NEAR a
- *  completing eval must pass a passing snapshot whose commandName matches
- *  the plan — otherwise contract_completion_unverified fires (that is the
- *  check working, not a fixture accident). */
-const contract = (overrides: Partial<RoundContract> = {}): RoundContract => ({
-  work_item: "Implement auth",
-  done_when: ["criterion A"],
-  verification_plan: ["run-tests"],
-  scope: ["src/auth"],
-  ...overrides,
+/** The "run-tests" command policy the item-model tests configure. */
+const policyRunTestsCommand = () => ({
+  name: "run-tests", enabled: true, executable: "node", args: ["test"],
+  phase: "after" as const, required: false, timeout_ms: 1000,
+  max_output_chars: 2000, success_exit_codes: [0],
 });
 
+/** Configure a "run-tests" command so the item model can observe it. */
 const withRunTestsConfigured = (): void => {
   setPolicyForTest({
     ...DEFAULT_POLICY,
-    evidence: {
-      ...DEFAULT_POLICY.evidence,
-      commands: [{
-        name: "run-tests", enabled: true, executable: "node", args: ["test"],
-        phase: "after", required: false, timeout_ms: 1000,
-        max_output_chars: 1000, success_exit_codes: [0],
-      }],
-    },
+    evidence: { ...DEFAULT_POLICY.evidence, commands: [policyRunTestsCommand()] },
   });
 };
 
-describe("Round Contract checks (v3.3 proposal declaration + v3.4 active split)", () => {
+describe("Round Contract checks (v3.8 item model)", () => {
   afterEach(() => resetPolicy());
 
-  it("round_underspecified: contract with empty done_when → warn", () => {
-    const result = verifySelfEvaluation(
-      se({ round_contract: contract({ done_when: [] }) }), 2);
-    const flag = result.flags.find((f) => f.check === CHECK_ROUND_UNDERSPECIFIED);
-    assert.ok(flag, "empty done_when must be flagged");
-    assert.equal(flag!.severity, "warn");
+  /** A contract with one item bound to the test command. */
+  const itemContract = (overrides: Partial<RoundContractProposal> = {}): RoundContractProposal => ({
+    work_item: "Slice A",
+    scope: ["src/auth"],
+    items: [{ description: "login works", criterion_refs: [], subgoal_refs: [], verify_with: ["run-tests"] }],
+    ...overrides,
   });
 
-  it("round_unverifiable: empty verification_plan → warn", () => {
-    const result = verifySelfEvaluation(
-      se({ round_contract: contract({ verification_plan: [] }) }), 2);
-    assert.ok(result.flags.some((f) =>
-      f.check === CHECK_ROUND_UNVERIFIABLE && f.severity === "warn"));
+  /** The binding the runtime stamps when the declaring round commits. */
+  /** The config hash the runtime stamps when the declaring round commits. */
+  const declaredHash = (): string => commandConfigHash(policyRunTestsCommand());
+  const bindingFor = (value: RoundContractProposal): ContractBinding => ({
+    rc_id: deriveContractId("test-loop", value),
+    item_ids: deriveContractItemIds(value.items),
+    config_hash_by_command: { "run-tests": declaredHash() },
   });
 
-  it("round_unverifiable: command not configured → warn naming it", () => {
-    const result = verifySelfEvaluation(
-      se({ round_contract: contract({ verification_plan: ["run-tests"] }) }), 2);
-    const flag = result.flags.find((f) => f.check === CHECK_ROUND_UNVERIFIABLE);
-    assert.ok(flag);
-    assert.match(flag!.detail, /run-tests/);
-  });
+  const itemIds = (value: RoundContractProposal): string[] => deriveContractItemIds(value.items);
 
-  it("round_unverifiable: configured and enabled command passes", () => {
+  const activeRound = (value: RoundContractProposal) =>
+    committedRound(1, { contract: value, contractBinding: bindingFor(value) });
+
+  const claimsMet = (value: RoundContractProposal) =>
+    itemIds(value).map((item_id) => ({ item_id, outcome: "met" as const }));
+
+  it("contract_items_unverified: claimed met without a passing command → warn", () => {
     withRunTestsConfigured();
+    const contract = itemContract();
     const result = verifySelfEvaluation(
-      se({ round_contract: contract({ verification_plan: ["run-tests"] }) }), 2);
-    assert.ok(!result.flags.some((f) => f.check === CHECK_ROUND_UNVERIFIABLE));
-  });
-
-  it("no contract → all four contract checks stay silent", () => {
-    const result = verifySelfEvaluation(se(), 2);
-    const checks = [
-      CHECK_ROUND_UNDERSPECIFIED,
-      CHECK_ROUND_UNVERIFIABLE,
-      CHECK_ROUND_SCOPE_DRIFT,
-      CHECK_PREMATURE_BOUNDARY,
-    ];
-    for (const check of checks) {
-      assert.ok(!result.flags.some((f) => f.check === check), `${check} must stay silent`);
-    }
-  });
-
-  // ── v3.4: Execution conformance targets the ACTIVE contract (committed
-  // ── rounds), never the submission's own proposal. The eval under test is
-  // ── round 2 executing under a contract proposed at round 1. ─────────────
-
-  it("premature_boundary: MIXED claims (one met without evidence, one dropped) → error", () => {
-    // Round 2 executes under ACTIVE [criterion A, criterion B]; success=true,
-    // "criterion A" IS in success_criteria_met (no machine evidence), and
-    // "criterion B" is neither met nor remaining. NOT a full-met posture —
-    // v3.5.1: full-met is owned by contract_completion_unverified.
-    const active = [committedRound(1, {
-      contract: contract({ done_when: ["criterion A", "criterion B"] }),
-    })];
-    const result = verifySelfEvaluation(
-      se({ round_contract: contract({ done_when: ["criterion A", "criterion B"] }) }),
-      2, active, null, []);
-    const flag = result.flags.find((f) => f.check === CHECK_PREMATURE_BOUNDARY);
-    assert.ok(flag, "mixed boundary claim must be flagged");
-    assert.equal(flag!.severity, "error");
-    assert.match(flag!.detail, /criterion A|criteria/);
-    assert.ok(!result.flags.some((f) => f.check === CHECK_CONTRACT_COMPLETION_UNVERIFIED),
-      "not all done_when met → completion check stays silent");
-  });
-
-  it("premature_boundary: same eval with NO active contract stays silent", () => {
-    // Round 1 of the loop: the eval's round_contract is a PROPOSAL for the
-    // NEXT round — nothing was executed under it, so claiming success while
-    // proposing a contract must not fire premature_boundary (the v3.3
-    // off-by-one noise this split removes). Success-class gates (R1,
-    // success_unverified) police the claim instead.
-    const result = verifySelfEvaluation(se({ round_contract: contract() }), 2, [], null, []);
-    assert.ok(!result.flags.some((f) => f.check === CHECK_PREMATURE_BOUNDARY));
-    assert.ok(!result.flags.some((f) => f.check === CHECK_ROUND_SCOPE_DRIFT));
-  });
-
-  it("premature_boundary: machine-verified met claims pass", () => {
-    // Wrapper default injects a passed command snapshot → verifiedCount > 0.
-    const active = [committedRound(1, { contract: contract() })];
-    const result = verifySelfEvaluation(
-      se({ round_contract: contract() }), 2, active);
-    assert.ok(!result.flags.some((f) => f.check === CHECK_PREMATURE_BOUNDARY));
-  });
-
-  it("premature_boundary: active done_when silently dropped (neither met nor remaining) → error", () => {
-    // "criterion B" (in the ACTIVE contract from round 1) is neither met
-    // nor remaining in round 2's eval.
-    const active = [committedRound(1, { contract: contract({ done_when: ["criterion A", "criterion B"] }) })];
-    const result = verifySelfEvaluation(se({
-      round_contract: contract({ done_when: ["criterion A", "criterion B"] }),
-    }), 2, active);
-    const flag = result.flags.find((f) => f.check === CHECK_PREMATURE_BOUNDARY);
-    assert.ok(flag);
-    assert.match(flag!.detail, /criterion B/);
-  });
-
-  it("premature_boundary: honest remaining listing does not double-flag (R1's domain)", () => {
-    const active = [committedRound(1, { contract: contract({ done_when: ["criterion A", "criterion B"] }) })];
-    const result = verifySelfEvaluation(se({
-      execution_evidence: makeExecutionEvidence({
-        files_changed: ["src/a.ts"],
-        test_results: { passed: 1, failed: 0, skipped: 0 },
-        success_criteria_met: ["criterion A"],
-        success_criteria_remaining: ["criterion B"],
-        progress_estimate: 0.5,
+      se({
+        execution_report: makeExecutionReport({ contract_item_claims: claimsMet(contract) }),
       }),
-      round_contract: contract({ done_when: ["criterion A", "criterion B"] }),
-    }), 2, active);
-    assert.ok(!result.flags.some((f) => f.check === CHECK_PREMATURE_BOUNDARY),
-      "items listed in remaining are R1's domain, not premature_boundary");
+      2,
+      [activeRound(contract)],
+      null,
+      [gitSnap(["src/auth/a.ts"])],
+    );
+    const flag = result.flags.find((f) => f.check === CHECK_CONTRACT_ITEMS_UNVERIFIED);
+    assert.ok(flag, "an unverified claim must be surfaced");
+    assert.equal(flag!.severity, "warn");
   });
 
-  it("premature_boundary: no_change_reason does NOT downgrade (v3.6)", () => {
-    // v3.6: the escape hatch belongs to the R8 success-claim family alone —
-    // a declared "no change" contradicts silently dropping contract
-    // done_when items, so the boundary claim errors even with it.
-    const active = [committedRound(1, {
-      contract: contract({ done_when: ["criterion A", "criterion B"] }),
-    })];
-    const result = verifySelfEvaluation(se({
-      no_change_reason: "documentation-only round",
-      round_contract: contract({ done_when: ["criterion A", "criterion B"] }),
-    }), 2, active);
-    const flag = result.flags.find((f) => f.check === CHECK_PREMATURE_BOUNDARY);
-    assert.ok(flag);
-    assert.equal(flag!.severity, "error");
-  });
-
-  it("round_scope_drift: git changes fully inside the ACTIVE scope → silent", () => {
-    const active = [committedRound(1, { contract: contract() })];
+  it("contract_items_unverified: silent when the bound command passed", () => {
+    withRunTestsConfigured();
+    const contract = itemContract();
     const result = verifySelfEvaluation(
-      se({ round_contract: contract() }), 2, active, null, [gitSnap(["src/auth/login.ts"])]);
+      se({
+        execution_report: makeExecutionReport({ contract_item_claims: claimsMet(contract) }),
+      }),
+      2,
+      [activeRound(contract)],
+      null,
+      [gitSnap(["src/auth/a.ts"]), cmdSnap("passed", { commandId: "run-tests", configHash: declaredHash() })],
+    );
+    assert.ok(!result.flags.some((f) => f.check === CHECK_CONTRACT_ITEMS_UNVERIFIED));
+  });
+
+  it("round_scope_drift: files outside the active contract's scope → warn", () => {
+    const contract = itemContract();
+    const result = verifySelfEvaluation(
+      se({ success: false, execution_report: makeExecutionReport({ files_changed: ["src/other.ts"] }) }),
+      2,
+      [activeRound(contract)],
+      null,
+      [gitSnap(["src/other.ts"])],
+    );
+    assert.ok(result.flags.some((f) =>
+      f.check === CHECK_ROUND_SCOPE_DRIFT && f.severity === "warn"));
+  });
+
+  it("round_scope_drift: silent when the active contract declares no scope", () => {
+    const contract = itemContract({ scope: [] });
+    const result = verifySelfEvaluation(
+      se({ success: false, execution_report: makeExecutionReport({ files_changed: ["src/other.ts"] }) }),
+      2,
+      [activeRound(contract)],
+      null,
+      [gitSnap(["src/other.ts"])],
+    );
     assert.ok(!result.flags.some((f) => f.check === CHECK_ROUND_SCOPE_DRIFT));
   });
 
-  it("round_scope_drift: out-of-scope git change → warn naming the file", () => {
-    const active = [committedRound(1, { contract: contract() })];
+  it("contract_premature: a different proposal while open → warn", () => {
+    const contract = itemContract();
     const result = verifySelfEvaluation(
-      se({ round_contract: contract() }), 2, active, null, [gitSnap(["src/other.ts"])]);
-    const flag = result.flags.find((f) => f.check === CHECK_ROUND_SCOPE_DRIFT);
-    assert.ok(flag);
-    assert.equal(flag!.severity, "warn");
-    assert.match(flag!.detail, /src\/other\.ts/);
-  });
-
-  it("round_scope_drift: no git snapshot or empty scope → fail open", () => {
-    const active = [committedRound(1, { contract: contract() })];
-    const noGit = verifySelfEvaluation(se({ round_contract: contract() }), 2, active);
-    assert.ok(!noGit.flags.some((f) => f.check === CHECK_ROUND_SCOPE_DRIFT));
-    const emptyActive = [committedRound(1, { contract: contract({ scope: [] }) })];
-    const emptyScope = verifySelfEvaluation(
-      se({ round_contract: contract({ scope: [] }) }), 2, emptyActive, null, [gitSnap(["src/other.ts"])]);
-    assert.ok(!emptyScope.flags.some((f) => f.check === CHECK_ROUND_SCOPE_DRIFT));
-  });
-
-  it("scope and premature read the ACTIVE contract, not the submission's proposal", () => {
-    // Round 2 executes under ACTIVE A (done_when "criterion A", scope
-    // src/auth). Its eval proposes B (scope src/other, done_when "criterion
-    // B") while honestly reporting A done. B's scope would be violated by
-    // the round's git changes — but B was NOT executed this round, so no
-    // drift fires; A's done_when met with machine evidence (verifiedEvidence),
-    // so no premature boundary fires. The old selfEval-based checks would
-    // have flagged both.
-    const active = [committedRound(1, { contract: contract() })];
-    const result = verifySelfEvaluation(se({
-      round_contract: contract({ work_item: "Next slice", done_when: ["criterion B"], scope: ["src/other"] }),
-    }), 2, active, null, verifiedEvidence(["src/auth/login.ts"]));
-    assert.ok(!result.flags.some((f) => f.check === CHECK_ROUND_SCOPE_DRIFT));
-    assert.ok(!result.flags.some((f) => f.check === CHECK_PREMATURE_BOUNDARY));
-  });
-
-  it("scope helpers: normalization, directory prefix and single-file matching", () => {
-    assert.equal(normalizeScopeEntry("./src/auth/"), "src/auth");
-    assert.equal(normalizeScopeEntry("src\\auth\\"), "src/auth");
-    assert.equal(normalizeScopeEntry("./"), "");
-    assert.equal(normalizeScopeEntry("."), "");
-    assert.ok(isFileInScope("src/auth/login.ts", ["src/auth"]));
-    assert.ok(isFileInScope("src/auth/login.ts", ["./src/auth/"]));
-    assert.ok(isFileInScope("src/auth.ts", ["src/auth.ts"]), "exact single-file scope");
-    assert.ok(isFileInScope("anything.txt", ["./"]), "repo root scope matches all");
-    assert.ok(!isFileInScope("src/other.ts", ["src/auth"]));
-    assert.deepEqual(collectOutOfScopeFiles(
-      ["src/auth/login.ts", "src/other.ts"], ["src/auth"]), ["src/other.ts"]);
-  });
-});
-
-// ═══════════════════════════════════════════════════════════════════════════
-// v3.5 — contract_completion_unverified: closing a contract is a success-
-// class claim and must be machine-backed (verification side)
-// ═══════════════════════════════════════════════════════════════════════════
-
-describe("v3.5 — contract_completion_unverified", () => {
-  afterEach(() => resetPolicy());
-
-  /** Contract under test with a single plan command. */
-  const done = ["criterion A"];
-  const plan = ["run-tests"];
-  const withRunTests = (): void => {
-    setPolicyForTest({
-      ...DEFAULT_POLICY,
-      evidence: {
-        ...DEFAULT_POLICY.evidence,
-        commands: [{
-          name: "run-tests", enabled: true, executable: "node", args: ["test"],
-          phase: "after", required: false, timeout_ms: 1000,
-          max_output_chars: 1000, success_exit_codes: [0],
-        }],
-      },
-    });
-  };
-  /** The ACTIVE contract, declared at committed round 1. */
-  const active = [committedRound(1, {
-    contract: contract({ done_when: done, verification_plan: plan }),
-  })];
-
-  it("completion with the plan command passing is silent", () => {
-    withRunTests();
-    const result = verifySelfEvaluation(
-      se({ execution_evidence: makeExecutionEvidence({
-        files_changed: ["src/auth.ts"],
-        test_results: { passed: 1, failed: 0, skipped: 0 },
-        success_criteria_met: done,
-        success_criteria_remaining: [],
-        progress_estimate: 0.5,
-      }) }),
-      2, active, null, [cmdSnap("passed", { commandName: "run-tests" })],
+      se({
+        success: false,
+        execution_report: makeExecutionReport({}),
+        round_contract: itemContract({ work_item: "Slice B" }),
+      }),
+      2,
+      [activeRound(contract)],
+      null,
+      [gitSnap(["src/auth/a.ts"])],
     );
-    assert.ok(!result.flags.some((f) => f.check === CHECK_CONTRACT_COMPLETION_UNVERIFIED));
-    assert.ok(!result.flags.some((f) => f.check === CHECK_PREMATURE_BOUNDARY));
+    assert.ok(result.flags.some((f) =>
+      f.check === CHECK_CONTRACT_PREMATURE && f.severity === "warn"));
   });
 
-  it("completion with the plan command failed → error naming it", () => {
-    withRunTests();
+  it("contract_premature: a restate is not flagged", () => {
+    const contract = itemContract();
     const result = verifySelfEvaluation(
-      se({ execution_evidence: makeExecutionEvidence({
-        files_changed: ["src/auth.ts"],
-        test_results: { passed: 0, failed: 1, skipped: 0 },
-        success_criteria_met: done,
-        success_criteria_remaining: [],
-        progress_estimate: 0.5,
-      }) }),
-      2, active, null, [cmdSnap("failed", { commandName: "run-tests" })],
-    );
-    const flag = result.flags.find((f) => f.check === CHECK_CONTRACT_COMPLETION_UNVERIFIED);
-    assert.ok(flag, "completion without a passing plan command must be flagged");
-    assert.equal(flag!.severity, "error");
-    assert.match(flag!.detail, /run-tests/);
-  });
-
-  it("completion with no snapshot for the plan name → error", () => {
-    withRunTests();
-    const result = verifySelfEvaluation(
-      se({ execution_evidence: makeExecutionEvidence({
-        files_changed: ["src/auth.ts"],
-        test_results: { passed: 1, failed: 0, skipped: 0 },
-        success_criteria_met: done,
-        success_criteria_remaining: [],
-        progress_estimate: 0.5,
-      }) }),
-      // Wrapper default snapshot passes but is named "test" — not the plan.
-      2, active, null, [cmdSnap("passed")],
-    );
-    const flag = result.flags.find((f) => f.check === CHECK_CONTRACT_COMPLETION_UNVERIFIED);
-    assert.ok(flag);
-    assert.equal(flag!.severity, "error");
-    assert.match(flag!.detail, /run-tests/);
-  });
-
-  it("fires regardless of success — the closure itself is the claim", () => {
-    withRunTests();
-    const partial = verifySelfEvaluation(
-      se({ success: false, execution_evidence: makeExecutionEvidence({
-        files_changed: ["src/auth.ts"],
-        test_results: { passed: 1, failed: 0, skipped: 0 },
-        success_criteria_met: done,
-        success_criteria_remaining: [],
-        progress_estimate: 0.5,
-      }) }),
-      2, active, null, [cmdSnap("passed")], // not the plan name
-    );
-    const flag = partial.flags.find((f) => f.check === CHECK_CONTRACT_COMPLETION_UNVERIFIED);
-    assert.ok(flag, "success=false must not shield an unverified closure");
-  });
-
-  it("machine_backed_success \"warn\" downgrades to warn", () => {
-    withRunTests();
-    setPolicyForTest({
-      ...getPolicy(),
-      evidence: { ...getPolicy().evidence, machine_backed_success: "warn" },
-    });
-    const result = verifySelfEvaluation(
-      se({ execution_evidence: makeExecutionEvidence({
-        files_changed: ["src/auth.ts"],
-        test_results: { passed: 1, failed: 0, skipped: 0 },
-        success_criteria_met: done,
-        success_criteria_remaining: [],
-        progress_estimate: 0.5,
-      }) }),
-      2, active, null, [cmdSnap("passed")],
-    );
-    const flag = result.flags.find((f) => f.check === CHECK_CONTRACT_COMPLETION_UNVERIFIED);
-    assert.ok(flag);
-    assert.equal(flag!.severity, "warn");
-  });
-
-  it("partial met (not all done_when) is silent", () => {
-    withRunTests();
-    const result = verifySelfEvaluation(
-      se({ execution_evidence: makeExecutionEvidence({
-        files_changed: ["src/auth.ts"],
-        test_results: { passed: 1, failed: 0, skipped: 0 },
-        success_criteria_met: [],
-        success_criteria_remaining: done,
-        progress_estimate: 0.3,
-      }) }),
-      2, active, null, [cmdSnap("passed")],
-    );
-    assert.ok(!result.flags.some((f) => f.check === CHECK_CONTRACT_COMPLETION_UNVERIFIED));
-  });
-
-  it("empty verification_plan is silent (declaration already warned)", () => {
-    withRunTests();
-    const noPlan = [committedRound(1, {
-      contract: contract({ done_when: done, verification_plan: [] }),
-    })];
-    const result = verifySelfEvaluation(
-      se({ execution_evidence: makeExecutionEvidence({
-        files_changed: ["src/auth.ts"],
-        test_results: { passed: 1, failed: 0, skipped: 0 },
-        success_criteria_met: done,
-        success_criteria_remaining: [],
-        progress_estimate: 0.5,
-      }) }),
-      2, noPlan, null, [cmdSnap("passed")],
-    );
-    assert.ok(!result.flags.some((f) => f.check === CHECK_CONTRACT_COMPLETION_UNVERIFIED));
-  });
-
-  it("fail open: plan name no longer configured+enabled is not required", () => {
-    // Default policy has NO commands → run-tests is unconfigured → silent.
-    const result = verifySelfEvaluation(
-      se({ execution_evidence: makeExecutionEvidence({
-        files_changed: ["src/auth.ts"],
-        test_results: { passed: 1, failed: 0, skipped: 0 },
-        success_criteria_met: done,
-        success_criteria_remaining: [],
-        progress_estimate: 0.5,
-      }) }),
-      2, active, null, [cmdSnap("passed")],
-    );
-    assert.ok(!result.flags.some((f) => f.check === CHECK_CONTRACT_COMPLETION_UNVERIFIED),
-      "cannot observe → not required");
-  });
-
-  it("success=true full-met with zero evidence fires completion; R-C1 stays silent", () => {
-    // v3.5.1: the full-met posture is owned by contract_completion_unverified
-    // — premature_boundary no longer double-fires on it (it stays for mixed /
-    // silently-dropped claims). One posture, one flag, one enforcement voice.
-    withRunTests();
-    const result = verifySelfEvaluation(
-      se({ execution_evidence: makeExecutionEvidence({
-        files_changed: ["src/auth.ts"],
-        test_results: { passed: 1, failed: 0, skipped: 0 },
-        success_criteria_met: done,
-        success_criteria_remaining: [],
-        progress_estimate: 0.9,
-      }) }),
-      2, active, null, [],
-    );
-    const completion = result.flags.find((f) => f.check === CHECK_CONTRACT_COMPLETION_UNVERIFIED);
-    const boundary = result.flags.find((f) => f.check === CHECK_PREMATURE_BOUNDARY);
-    assert.ok(completion, "completion flag must fire");
-    assert.equal(completion!.severity, "error");
-    assert.equal(boundary, undefined,
-      "premature_boundary must not fire on a fully-met posture");
-  });
-});
-
-// ═══════════════════════════════════════════════════════════════════════════
-// v3.5 — contract_premature: a different proposal while the ACTIVE contract
-// is open is surfaced (warn) — never silent, never rejecting
-// ═══════════════════════════════════════════════════════════════════════════
-
-describe("v3.5 — contract_premature warn", () => {
-  afterEach(() => resetPolicy());
-
-  const done = ["criterion A"];
-  const other = contract({ work_item: "Next slice", done_when: ["criterion B"], scope: ["src/other"] });
-  /** The ACTIVE contract, declared at committed round 1. */
-  const active = [committedRound(1, { contract: contract({ done_when: done }) })];
-
-  /** Eval that keeps the active contract open (nothing met, success=false). */
-  const openEval = (proposal?: RoundContract): SelfEvaluation => se({
-    success: false,
-    execution_evidence: makeExecutionEvidence({
-      files_changed: ["src/auth.ts"],
-      test_results: { passed: 1, failed: 0, skipped: 0 },
-      success_criteria_met: [],
-      success_criteria_remaining: done,
-      progress_estimate: 0.3,
-    }),
-    ...(proposal ? { round_contract: proposal } : {}),
-  });
-
-  it("different proposal while open → warn", () => {
-    const result = verifySelfEvaluation(openEval(other), 2, active);
-    const flag = result.flags.find((f) => f.check === CHECK_CONTRACT_PREMATURE);
-    assert.ok(flag, "premature replacement must be surfaced");
-    assert.equal(flag!.severity, "warn");
-    assert.match(flag!.detail, /ignored until the active contract is completed or blocked/);
-  });
-
-  it("identical restate is silent", () => {
-    const result = verifySelfEvaluation(
-      openEval(contract({ done_when: done, verification_plan: ["run-tests"], scope: ["src/auth"] })),
-      2, active,
+      se({
+        success: false,
+        execution_report: makeExecutionReport({}),
+        round_contract: itemContract(),
+      }),
+      2,
+      [activeRound(contract)],
+      null,
+      [gitSnap(["src/auth/a.ts"])],
     );
     assert.ok(!result.flags.some((f) => f.check === CHECK_CONTRACT_PREMATURE));
   });
 
-  it("completion round proposing a different contract is silent (closure first)", () => {
-    const result = verifySelfEvaluation(se({
-      execution_evidence: makeExecutionEvidence({
-        files_changed: ["src/auth.ts"],
-        test_results: { passed: 1, failed: 0, skipped: 0 },
-        success_criteria_met: done,
-        success_criteria_remaining: [],
-        progress_estimate: 0.6,
+  it("contract_premature: silent when the round declares outcome=blocked", () => {
+    const contract = itemContract();
+    const result = verifySelfEvaluation(
+      se({
+        success: false,
+        outcome: "blocked",
+        blocker: "scope too narrow",
+        execution_report: makeExecutionReport({}),
+        round_contract: itemContract({ work_item: "Slice B" }),
       }),
-      round_contract: other,
-    }), 2, active);
-    assert.ok(!result.flags.some((f) => f.check === CHECK_CONTRACT_PREMATURE),
-      "completing the active contract first makes the new proposal legitimate");
-  });
-
-  it("outcome=blocked with a different proposal is silent", () => {
-    const result = verifySelfEvaluation(se({
-      success: false,
-      outcome: "blocked",
-      blocker: "third-party dependency broken",
-      execution_evidence: makeExecutionEvidence({
-        files_changed: [],
-        test_results: { passed: 0, failed: 0, skipped: 0 },
-        success_criteria_met: [],
-        success_criteria_remaining: done,
-        progress_estimate: 0.3,
-      }),
-      round_contract: other,
-    }), 2, active);
-    assert.ok(!result.flags.some((f) => f.check === CHECK_CONTRACT_PREMATURE),
-      "blocking the active contract legitimizes the revision");
-  });
-
-  it("no proposal and no active contract are silent", () => {
-    const noProposal = verifySelfEvaluation(openEval(), 2, active);
-    assert.ok(!noProposal.flags.some((f) => f.check === CHECK_CONTRACT_PREMATURE));
-    const noActive = verifySelfEvaluation(openEval(other), 2, []);
-    assert.ok(!noActive.flags.some((f) => f.check === CHECK_CONTRACT_PREMATURE),
-      "round 1 declaring a proposal is a declaration, not a replacement");
+      2,
+      [activeRound(contract)],
+      null,
+      [gitSnap(["src/auth/a.ts"])],
+    );
+    assert.ok(!result.flags.some((f) => f.check === CHECK_CONTRACT_PREMATURE));
   });
 });
-
-// ═══════════════════════════════════════════════════════════════════════════
-// v3.7 — CHECK_DOMAIN coverage: every surviving check belongs to exactly one
-// of the four verification domains.
-// ═══════════════════════════════════════════════════════════════════════════
 
 describe("verification-gate — v3.7 CHECK_DOMAIN membership", () => {
   it("maps every surviving CHECK_* constant into one of the four domains", () => {
     const exports = verificationGate as unknown as Record<string, unknown>;
     const constants = Object.keys(exports)
       .filter((key) => key.startsWith("CHECK_") && typeof exports[key] === "string");
-    assert.equal(constants.length, 25, "the surviving check set is 25");
+    // v3.8: the drift checks were deleted and the four contract checks were
+    // replaced by the item-model checks (25 → 20).
+    assert.equal(constants.length, 20, "the surviving check set is 20");
     const domains = new Set<string>();
     for (const key of constants) {
       const id = exports[key] as string;
@@ -1981,11 +1396,13 @@ describe("verification-gate — v3.7 CHECK_DOMAIN membership", () => {
   it("has no orphan domain entries and the expected domain sizes", () => {
     const counts: Record<string, number> = {};
     for (const domain of Object.values(CHECK_DOMAIN)) counts[domain] = (counts[domain] ?? 0) + 1;
-    assert.equal(Object.keys(CHECK_DOMAIN).length, 25, "CHECK_DOMAIN covers exactly the 25 checks");
+    // v3.8: 20 checks after the drift and legacy contract checks were
+    // replaced by the item-model checks.
+    assert.equal(Object.keys(CHECK_DOMAIN).length, 20, "CHECK_DOMAIN covers exactly the 20 checks");
     assert.deepEqual(counts, {
       evaluation_consistency: 8,
       evidence_integrity: 7,
-      plan_contract: 9,
+      plan_contract: 4,
       progress_recovery: 1,
     });
   });
@@ -2113,9 +1530,9 @@ describe("verification-gate — v3.7 success-evidence merge (empty arm)", () => 
   const successNoEvidence = (overrides: Partial<SelfEvaluation> = {}): SelfEvaluation =>
     se({
       success: true,
-      execution_evidence: makeExecutionEvidence({
+      execution_report: makeExecutionReport({
         files_changed: [],
-        test_results: null,
+        tests_reported: null,
         progress_estimate: 0.5,
       }),
       ...overrides,
@@ -2131,24 +1548,15 @@ describe("verification-gate — v3.7 success-evidence merge (empty arm)", () => 
     assert.ok(emptyArmFlag(result), "empty arm must fire");
   });
 
-  it("errors when success=true carries no execution_evidence at all (mandatory)", () => {
+  it("errors when success=true carries no execution_report at all (mandatory)", () => {
     const bare = se({ success: true });
-    (bare as unknown as Record<string, unknown>).execution_evidence = undefined;
+    (bare as unknown as Record<string, unknown>).execution_report = undefined;
     const result = verifySelfEvaluation(bare, 2);
     assert.equal(result.verdict, "contradicted");
     const flag = emptyArmFlag(result);
     assert.ok(flag);
-    assert.ok(flag.detail.includes("no execution_evidence"),
+    assert.ok(flag.detail.includes("no execution_report"),
       `detail should say evidence is missing, got: ${flag.detail}`);
-  });
-
-  it("still errors under machine_backed_success=warn (empty arm is unconditional)", () => {
-    const p = structuredClone(getPolicy());
-    p.evidence.machine_backed_success = "warn";
-    setPolicyForTest(p);
-    const result = verifySelfEvaluation(successNoEvidence(), 2);
-    assert.equal(result.verdict, "contradicted");
-    assert.ok(emptyArmFlag(result), "empty arm is not the policy-tolerated claims arm");
   });
 
   it("still errors when no_change_reason is declared (no change with zero evidence is unbacked)", () => {
@@ -2173,13 +1581,13 @@ describe("verification-gate — v3.7 success-evidence merge (empty arm)", () => 
     assert.ok(!emptyArmFlag(result), "effectiveSuccess=false suppresses the whole check");
   });
 
-  it("stays silent when execution_evidence is non-empty (claims arm owns the posture)", () => {
+  it("stays silent when execution_report is non-empty (claims arm owns the posture)", () => {
     const result = verifySelfEvaluation(
       se({
         success: true,
-        execution_evidence: makeExecutionEvidence({
+        execution_report: makeExecutionReport({
           files_changed: ["src/foo.ts"],
-          test_results: { passed: 1, failed: 0, skipped: 0 },
+          tests_reported: { passed: 1, failed: 0, skipped: 0 },
         }),
       }),
       2,

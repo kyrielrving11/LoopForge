@@ -9,7 +9,7 @@ import {
 } from "../policy.js";
 import {
   makeEnforcementResult,
-  makeExecutionEvidence,
+  makeExecutionReport,
   makeSelfEvaluation,
   makeVerificationFlag,
   makeVerificationResult,
@@ -25,9 +25,15 @@ import {
   findSafeRestorePoint,
   buildBacktrackPrompt,
 } from "../enforcement-gate.js";
-import { deriveConstraintId, deriveCriterionId, deriveSubGoalId } from "../loop-compiler.js";
+
 import { verifyBacktrackPrompt } from "./_backtrack-asserts.js";
-import { committedFeedbackRound } from "./_helpers.js";
+import { committedBacktrackRound, committedFeedbackRound, testCommandProvider, criterionClaims } from "./_helpers.js";
+import { deriveContractItemIds } from "../token-utils.js";
+import { commandConfigHash } from "../policy.js";
+import { CHECK_CONTRACT_ITEMS_UNVERIFIED } from "../verification-gate.js";
+
+/** The command policy the item-model enforcement tests bind to. */
+const testCommandProviderPolicy = () => testCommandProvider();
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Helpers
@@ -99,9 +105,9 @@ describe("enforcement-gate — happy path", () => {
   it("accepts a round with trusted verdict and clean self-eval", () => {
     const curr = se({
       success: false,
-      execution_evidence: makeExecutionEvidence({
+      execution_report: makeExecutionReport({
         files_changed: ["src/foo.ts"],
-        test_results: { passed: 3, failed: 1, skipped: 0 },
+        tests_reported: { passed: 3, failed: 1, skipped: 0 },
         progress_estimate: 0.5,
       }),
     });
@@ -113,9 +119,9 @@ describe("enforcement-gate — happy path", () => {
   it("accepts a round with suspect verdict (warn only, not error)", () => {
     const curr = se({
       success: false,
-      execution_evidence: makeExecutionEvidence({
+      execution_report: makeExecutionReport({
         files_changed: ["src/bar.ts"],
-        test_results: { passed: 5, failed: 0, skipped: 0 },
+        tests_reported: { passed: 5, failed: 0, skipped: 0 },
         progress_estimate: 0.3,
       }),
     });
@@ -149,10 +155,9 @@ describe("enforcement-gate — R1: fake success", () => {
   it("rejects when agent claims success but criteria remain unmet", () => {
     const curr = se({
       success: true,
-      execution_evidence: makeExecutionEvidence({
+      execution_report: makeExecutionReport({
         files_changed: ["src/foo.ts"],
-        success_criteria_met: ["criteria-1"],
-        success_criteria_remaining: ["criteria-2", "criteria-3"],
+        criterion_claims: criterionClaims(["criteria-1"], ["criteria-2", "criteria-3"]),
         progress_estimate: 0.5,
       }),
     });
@@ -197,7 +202,7 @@ describe("enforcement-gate — R2: recurring violation", () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("enforcement-gate — success evidence row (merged R8)", () => {
-  const evidenceFlag = (detail = "Agent claims success but provided no execution_evidence."): VerificationFlag =>
+  const evidenceFlag = (detail = "Agent claims success but provided no execution_report."): VerificationFlag =>
     makeVerificationFlag({
       severity: "error",
       field: "success",
@@ -208,9 +213,9 @@ describe("enforcement-gate — success evidence row (merged R8)", () => {
   it("accepts when success=true with files_changed (not empty)", () => {
     const curr = se({
       success: true,
-      execution_evidence: makeExecutionEvidence({
+      execution_report: makeExecutionReport({
         files_changed: ["src/fixed.ts"],
-        test_results: { passed: 10, failed: 0, skipped: 0 },
+        tests_reported: { passed: 10, failed: 0, skipped: 0 },
         progress_estimate: 1.0,
       }),
     });
@@ -221,9 +226,9 @@ describe("enforcement-gate — success evidence row (merged R8)", () => {
   it("rejects on the empty-evidence error flag (required mode)", () => {
     const curr = se({
       success: true,
-      execution_evidence: makeExecutionEvidence({
+      execution_report: makeExecutionReport({
         files_changed: [],
-        test_results: null,
+        tests_reported: null,
         progress_estimate: 1.0,
       }),
     });
@@ -236,10 +241,10 @@ describe("enforcement-gate — success evidence row (merged R8)", () => {
     assert.equal(result.check, "success_without_verified_evidence");
   });
 
-  it("rejects on the missing-execution_evidence error flag (mandatory evidence)", () => {
+  it("rejects on the missing-execution_report error flag (mandatory evidence)", () => {
     const result = enforceRound(
       se({ success: true }),
-      makeVerificationResult({ verdict: "contradicted", flags: [evidenceFlag("no execution_evidence")] }),
+      makeVerificationResult({ verdict: "contradicted", flags: [evidenceFlag("no execution_report")] }),
       2, [], 0,
     );
     assert.equal(result.action, "reject");
@@ -249,9 +254,9 @@ describe("enforcement-gate — success evidence row (merged R8)", () => {
   it("terminates on the third consecutive empty-evidence strike", () => {
     const curr = se({
       success: true,
-      execution_evidence: makeExecutionEvidence({
+      execution_report: makeExecutionReport({
         files_changed: [],
-        test_results: null,
+        tests_reported: null,
         progress_estimate: 1.0,
       }),
     });
@@ -264,17 +269,16 @@ describe("enforcement-gate — success evidence row (merged R8)", () => {
     assert.equal(result.check, "success_without_verified_evidence");
   });
 
-  it("rejects on the empty-evidence flag even under machine_backed_success=warn", () => {
+  it("rejects on the empty-evidence flag", () => {
     const curr = se({
       success: true,
-      execution_evidence: makeExecutionEvidence({
+      execution_report: makeExecutionReport({
         files_changed: [],
-        test_results: null,
+        tests_reported: null,
         progress_estimate: 1.0,
       }),
     });
     const p = structuredClone(getPolicy());
-    p.evidence.machine_backed_success = "warn";
     setPolicyForTest(p);
     const result = enforceRound(
       curr,
@@ -293,7 +297,7 @@ describe("enforcement-gate — progress stall evaluator (v3.7: R4/R5 merged)", (
   it("rejects when progress is flat for 3 rounds", () => {
     const curr = se({
       success: false,
-      execution_evidence: makeExecutionEvidence({
+      execution_report: makeExecutionReport({
         files_changed: ["src/foo.ts"],
         progress_estimate: 0.33,
       }),
@@ -311,7 +315,7 @@ describe("enforcement-gate — progress stall evaluator (v3.7: R4/R5 merged)", (
   it("accepts when progress is increasing", () => {
     const curr = se({
       success: false,
-      execution_evidence: makeExecutionEvidence({
+      execution_report: makeExecutionReport({
         files_changed: ["src/foo.ts"],
         progress_estimate: 0.80,
       }),
@@ -328,7 +332,7 @@ describe("enforcement-gate — progress stall evaluator (v3.7: R4/R5 merged)", (
   it("backtracks on second consecutive stall rejection instead of terminating", () => {
     const curr = se({
       success: false,
-      execution_evidence: makeExecutionEvidence({
+      execution_report: makeExecutionReport({
         files_changed: ["src/foo.ts"],
         progress_estimate: 0.33,
       }),
@@ -349,7 +353,7 @@ describe("enforcement-gate — progress stall evaluator (v3.7: R4/R5 merged)", (
   it("terminates on third consecutive stall rejection after escalation", () => {
     const curr = se({
       success: false,
-      execution_evidence: makeExecutionEvidence({
+      execution_report: makeExecutionReport({
         files_changed: ["src/foo.ts"],
         progress_estimate: 0.33,
       }),
@@ -368,7 +372,7 @@ describe("enforcement-gate — progress stall evaluator (v3.7: R4/R5 merged)", (
   it("does not fire with less than 3 rounds of vault data", () => {
     const curr = se({
       success: false,
-      execution_evidence: makeExecutionEvidence({
+      execution_report: makeExecutionReport({
         progress_estimate: 0.32,
       }),
     });
@@ -416,11 +420,10 @@ describe("enforcement-gate — rule priority", () => {
   it("R1 (fake success) fires before R3 (empty success)", () => {
     const curr = se({
       success: true,
-      execution_evidence: makeExecutionEvidence({
+      execution_report: makeExecutionReport({
         files_changed: [],       // triggers R3
-        test_results: null,       // triggers R3
-        success_criteria_met: ["x"],
-        success_criteria_remaining: ["y", "z"],  // triggers R1
+        tests_reported: null,       // triggers R3
+        criterion_claims: criterionClaims(["x"], ["y", "z"]),  // triggers R1
         progress_estimate: 1.0,
       }),
     });
@@ -470,398 +473,6 @@ describe("buildRejectionPrompt", () => {
 // ═══════════════════════════════════════════════════════════════════════════
 // v2.8: R7 — Intent drift with drift_clarification
 // ═══════════════════════════════════════════════════════════════════════════
-
-describe("enforceRound — R7 intent drift with clarification", () => {
-  it("rejects when intent_drift flag present without clarification", () => {
-    const selfEval = makeSelfEvaluation({
-      success: false,
-      output_summary: "Fixed CSS padding",
-      should_continue: true,
-    });
-    const verifyResult = makeVerificationResult({
-      verdict: "suspect",
-      flags: [
-        makeVerificationFlag({
-          severity: "warn",
-          field: "output_summary",
-          check: "intent_drift",
-          detail: "Declared intent was refactor auth but actual output fixed css — similarity 8%",
-        }),
-      ],
-    });
-    const result = enforceRound(selfEval, verifyResult, 3, [], 0);
-    assert.equal(result.action, "reject", "should reject without clarification");
-    assert.equal(result.check, "intent_drift");
-  });
-
-  it("accepts (skips reject) when agent provides substantive drift_clarification", () => {
-    const selfEval = makeSelfEvaluation({
-      success: false,
-      output_summary: "Fixed CSS padding",
-      should_continue: true,
-      execution_evidence: makeExecutionEvidence({
-        files_changed: ["src/components/Login.css"],
-        test_results: null,
-        success_criteria_met: [],
-        success_criteria_remaining: [],
-        progress_estimate: 0.6,
-      }),
-      drift_clarification:
-        "Pivoted from auth refactor because data showed CSS layout was the actual user complaint. " +
-        "The auth module refactor was preempted by this higher-priority fix. " +
-        "Changed src/components/Login.css to fix the visual regression.",
-    });
-    const verifyResult = makeVerificationResult({
-      verdict: "suspect",
-      flags: [
-        makeVerificationFlag({
-          severity: "warn",
-          field: "output_summary",
-          check: "intent_drift",
-          detail: "Declared intent was refactor auth but actual output fixed css — similarity 8%",
-        }),
-      ],
-    });
-    const result = enforceRound(selfEval, verifyResult, 3, [], 0);
-    assert.notEqual(result.action, "reject",
-      "should not reject when clarification is provided");
-    // v2.12: Should signal clarification was accepted
-    assert.equal(result.clarification_accepted, true,
-      "should mark clarification as accepted");
-  });
-
-  it("rejects when drift_clarification is too short (under 20 chars)", () => {
-    const selfEval = makeSelfEvaluation({
-      success: false,
-      output_summary: "Fixed CSS padding",
-      should_continue: true,
-      drift_clarification: "Changed plan.",
-    });
-    const verifyResult = makeVerificationResult({
-      verdict: "suspect",
-      flags: [
-        makeVerificationFlag({
-          severity: "warn",
-          field: "output_summary",
-          check: "intent_drift",
-          detail: "Declared intent was refactor auth but actual output fixed css — similarity 8%",
-        }),
-      ],
-    });
-    const result = enforceRound(selfEval, verifyResult, 3, [], 0);
-    assert.equal(result.action, "reject",
-      "should reject when clarification is too short");
-  });
-
-  it("terminates on the third consecutive intent_drift without clarification", () => {
-    const selfEval = makeSelfEvaluation({
-      success: false,
-      output_summary: "Fixed CSS padding again",
-      should_continue: true,
-    });
-    const verifyResult = makeVerificationResult({
-      verdict: "suspect",
-      flags: [
-        makeVerificationFlag({
-          severity: "warn",
-          field: "output_summary",
-          check: "intent_drift",
-          detail: "Declared intent was audit contracts but actual output fixed css — similarity 5%",
-        }),
-      ],
-    });
-    // v2.14: the no-clarification branch counts toward the SAME streak as
-    // weak clarifications (README: "three consecutive weak clarifications
-    // terminate"). streak=2 → this is the 3rd consecutive un-explained drift.
-    const result = enforceRound(selfEval, verifyResult, 5, [], 0, 2);
-    assert.equal(result.action, "terminate",
-      "should terminate on third consecutive drift without clarification");
-  });
-
-  it("does not terminate on the first drift after an unrelated rejection", () => {
-    const selfEval = makeSelfEvaluation({
-      success: false,
-      output_summary: "Fixed CSS padding",
-      should_continue: true,
-    });
-    const verifyResult = makeVerificationResult({
-      verdict: "suspect",
-      flags: [
-        makeVerificationFlag({
-          severity: "warn",
-          field: "output_summary",
-          check: "intent_drift",
-          detail: "Declared intent was audit contracts but actual output fixed css — similarity 5%",
-        }),
-      ],
-    });
-    // consecutiveRejections=1 comes from an UNRELATED rejection (e.g. R1).
-    // The old branch read the global counter and terminated on the very
-    // first drift; the v2.14 streak semantics give the agent its full
-    // three-round runway regardless of other rejections.
-    const result = enforceRound(selfEval, verifyResult, 5, [], 1);
-    assert.equal(result.action, "reject");
-    assert.equal(result.check, "intent_drift");
-  });
-
-  // ── v2.12: Semantic anchor detection ─────────────────────────────────
-
-  it("accepts clarification with a real constraint ID anchor", () => {
-    const constraintId = deriveConstraintId("rate limiting");
-    const selfEval = makeSelfEvaluation({
-      success: false,
-      output_summary: "Fixed CSS padding",
-      should_continue: true,
-      discovered_constraints: ["rate limiting"],
-      drift_clarification:
-        `Pivoted because constraint ${constraintId} (rate limiting) was already satisfied. ` +
-        "The CSS fix was higher priority.",
-    });
-    const result = enforceRound(selfEval, makeVerificationResult({
-      verdict: "suspect",
-      flags: [makeVerificationFlag({
-        severity: "warn", field: "output_summary",
-        check: "intent_drift",
-        detail: "Drift detected",
-      })],
-    }), 3, [], 0, 0);
-    assert.notEqual(result.action, "reject",
-      "should accept when clarification has constraint ID");
-    assert.equal(result.clarification_accepted, true,
-      "should signal clarification was accepted");
-  });
-
-  it("accepts clarification with a real sub-goal ID anchor", () => {
-    const subGoalId = deriveSubGoalId("util structure");
-    const selfEval = makeSelfEvaluation({
-      success: false,
-      output_summary: "Refactored utils",
-      should_continue: true,
-      discovered_constraints: ["util structure"],
-      drift_clarification:
-        `Discovered that sub-goal ${subGoalId} was blocked by the util structure. ` +
-        "Refactored it first so the sub-goal can proceed next round.",
-    });
-    const result = enforceRound(selfEval, makeVerificationResult({
-      verdict: "suspect",
-      flags: [makeVerificationFlag({
-        severity: "warn", field: "output_summary",
-        check: "intent_drift",
-        detail: "Drift detected",
-      })],
-    }), 3, [], 0, 0);
-    assert.notEqual(result.action, "reject",
-      "should accept when clarification has sub-goal ID");
-    assert.equal(result.clarification_accepted, true);
-  });
-
-  it("accepts clarification with a real criterion ID anchor", () => {
-    const criterionId = deriveCriterionId("integration coverage");
-    const selfEval = makeSelfEvaluation({
-      success: false,
-      output_summary: "Wrote integration tests",
-      should_continue: true,
-      execution_evidence: makeExecutionEvidence({
-        files_changed: [],
-        test_results: null,
-        success_criteria_met: ["integration coverage"],
-        success_criteria_remaining: [],
-        progress_estimate: 0.5,
-      }),
-      drift_clarification:
-        `Pivoted to write tests because criterion ${criterionId} requires ` +
-        "integration coverage before the feature is considered done.",
-    });
-    const result = enforceRound(selfEval, makeVerificationResult({
-      verdict: "suspect",
-      flags: [makeVerificationFlag({
-        severity: "warn", field: "output_summary",
-        check: "intent_drift",
-        detail: "Drift detected",
-      })],
-    }), 3, [], 0, 0);
-    assert.notEqual(result.action, "reject",
-      "should accept when clarification has criterion ID");
-    assert.equal(result.clarification_accepted, true);
-  });
-
-  it("accepts clarification with a real file path anchor", () => {
-    const selfEval = makeSelfEvaluation({
-      success: false,
-      output_summary: "Fixed CSS padding",
-      should_continue: true,
-      execution_evidence: makeExecutionEvidence({
-        files_changed: ["src/components/Login.tsx"],
-        test_results: null,
-        success_criteria_met: [],
-        success_criteria_remaining: [],
-        progress_estimate: 0.6,
-      }),
-      drift_clarification:
-        "Pivoted because I found a bug in src/components/Login.tsx that " +
-        "was causing the layout issue. Fixed that before continuing auth work.",
-    });
-    const result = enforceRound(selfEval, makeVerificationResult({
-      verdict: "suspect",
-      flags: [makeVerificationFlag({
-        severity: "warn", field: "output_summary",
-        check: "intent_drift",
-        detail: "Drift detected",
-      })],
-    }), 3, [], 0, 0);
-    assert.notEqual(result.action, "reject",
-      "should accept when clarification has file path");
-    assert.equal(result.clarification_accepted, true);
-  });
-
-  it("rejects weak clarification (>= 20 chars but no anchors) on first occurrence", () => {
-    const selfEval = makeSelfEvaluation({
-      success: false,
-      output_summary: "Fixed CSS padding",
-      should_continue: true,
-      drift_clarification:
-        "Because I think this is necessary for the current step implementation. " +
-        "The direction change was needed for better results.",
-    });
-    const result = enforceRound(selfEval, makeVerificationResult({
-      verdict: "suspect",
-      flags: [makeVerificationFlag({
-        severity: "warn", field: "output_summary",
-        check: "intent_drift",
-        detail: "Drift detected",
-      })],
-    }), 3, [], 0, 0);
-    assert.equal(result.action, "reject",
-      "should reject weak clarification without anchors");
-    assert.equal(result.check, "intent_drift");
-    // fix_instructions should mention the need for concrete references
-    assert.ok(
-      (result.fix_instructions ?? "").includes("drift_clarification"),
-      "fix_instructions should mention drift_clarification",
-    );
-  });
-
-  it("terminates on third consecutive weak clarification (streak >= 3)", () => {
-    const makeDriftEval = () => makeSelfEvaluation({
-      success: false,
-      output_summary: "Did something else",
-      should_continue: true,
-      drift_clarification:
-        "I changed direction because I felt this approach was more optimal " +
-        "for the current implementation requirements. It was the right call.",
-    });
-    const verifyResult = makeVerificationResult({
-      verdict: "suspect",
-      flags: [makeVerificationFlag({
-        severity: "warn", field: "output_summary",
-        check: "intent_drift",
-        detail: "Drift detected",
-      })],
-    });
-
-    // Streak = 0 → first weak clarification → reject only
-    const r0 = enforceRound(makeDriftEval(), verifyResult, 3, [], 0, 0);
-    assert.equal(r0.action, "reject",
-      "streak 0 should reject (first weak clarification)");
-
-    // Streak = 1 → second weak clarification → still reject, but with warning
-    const r1 = enforceRound(makeDriftEval(), verifyResult, 4, [], 0, 1);
-    assert.equal(r1.action, "reject",
-      "streak 1 should still reject (second weak clarification)");
-    assert.ok(
-      (r1.fix_instructions ?? "").includes("Repeated Weak Clarification"),
-      "fix_instructions should warn about repeated weak clarification on streak >= 2",
-    );
-
-    // Streak = 2 → third weak clarification (2 + 1 = 3 >= max_streak=3) → terminate
-    const r2 = enforceRound(makeDriftEval(), verifyResult, 5, [], 0, 2);
-    assert.equal(r2.action, "terminate",
-      "streak 2 + 1 = 3 should terminate (reaches max_streak=3)");
-  });
-
-  it("keeps streak unchanged for substantive clarification", () => {
-    // Even with an existing streak, a strong clarification should be accepted
-    // without resetting the streak (the enforcement gate doesn't track state;
-    // the SessionManager does). But the result should NOT be reject/terminate.
-    const selfEval = makeSelfEvaluation({
-      success: false,
-      output_summary: "Fixed CSS",
-      should_continue: true,
-      execution_evidence: makeExecutionEvidence({
-        files_changed: ["src/styles/main.css"],
-        test_results: null,
-        success_criteria_met: [],
-        success_criteria_remaining: [],
-        progress_estimate: 0.6,
-      }),
-      drift_clarification:
-        "Pivoted because src/styles/main.css had a layout-breaking regression. " +
-        "The auth work was blocked by this visual bug.",
-    });
-    const result = enforceRound(selfEval, makeVerificationResult({
-      verdict: "suspect",
-      flags: [makeVerificationFlag({
-        severity: "warn", field: "output_summary",
-        check: "intent_drift",
-        detail: "Drift detected",
-      })],
-    }), 3, [], 0, 2); // streak = 2
-    assert.notEqual(result.action, "reject",
-      "should accept substantive clarification even with existing streak");
-    assert.equal(result.clarification_accepted, true);
-  });
-
-  it("still rejects when drift_clarification is absent entirely (original behavior)", () => {
-    const selfEval = makeSelfEvaluation({
-      success: false,
-      output_summary: "Fixed CSS padding",
-      should_continue: true,
-      // No drift_clarification at all
-    });
-    const result = enforceRound(selfEval, makeVerificationResult({
-      verdict: "suspect",
-      flags: [makeVerificationFlag({
-        severity: "warn", field: "output_summary",
-        check: "intent_drift",
-        detail: "Drift detected",
-      })],
-    }), 3, [], 0, 0);
-    assert.equal(result.action, "reject",
-      "should reject when no clarification provided");
-  });
-
-  it("weak clarification streak escalation disabled when max_streak is 0", () => {
-    // Temporarily override the policy to disable the streak limit
-    resetPolicy();
-    const p = getPolicy();
-    const orig = p.engine.drift_clarification_max_streak;
-    p.engine.drift_clarification_max_streak = 0;
-
-    try {
-      const selfEval = makeSelfEvaluation({
-        success: false,
-        output_summary: "Did something else",
-        should_continue: true,
-        drift_clarification:
-          "I changed direction because I felt this approach was better. " +
-          "No concrete details but the length check still passes.",
-      });
-      const result = enforceRound(selfEval, makeVerificationResult({
-        verdict: "suspect",
-        flags: [makeVerificationFlag({
-          severity: "warn", field: "output_summary",
-          check: "intent_drift",
-          detail: "Drift detected",
-        })],
-      }), 3, [], 0, 0);
-      assert.notEqual(result.action, "reject",
-        "should accept when max_streak is 0 (pre-v2.12 behavior)");
-      assert.equal(result.clarification_accepted, true);
-    } finally {
-      p.engine.drift_clarification_max_streak = orig;
-    }
-  });
-});
 
 // ═══════════════════════════════════════════════════════════════════════════
 // v2.10: Backtrack — safe restore point
@@ -1169,7 +780,7 @@ describe("enforcement-gate — v2.12 effective success", () => {
       constraint_violations: [],
       should_continue: true,
     });
-    const result = enforceRound(selfEval, { verdict: "trusted", flags: [] }, 2, [], 0, 0);
+    const result = enforceRound(selfEval, { verdict: "trusted", flags: [] }, 2, [], 0);
     assert.equal(result.action, "accept");
   });
 });
@@ -1177,68 +788,6 @@ describe("enforcement-gate — v2.12 effective success", () => {
 // ═══════════════════════════════════════════════════════════════════════════
 // v2.12: R7 real-anchor validation — fabricated IDs no longer count
 // ═══════════════════════════════════════════════════════════════════════════
-
-describe("enforcement-gate — v2.12 real anchor validation", () => {
-  function driftVerify(): VerificationResult {
-    return makeVerificationResult({
-      verdict: "suspect",
-      flags: [makeVerificationFlag({
-        severity: "warn", field: "output_summary",
-        check: "intent_drift",
-        detail: "Drift detected",
-      })],
-    });
-  }
-
-  it("rejects a fabricated constraint ID that does not derive from any known text", () => {
-    const selfEval = makeSelfEvaluation({
-      success: false,
-      output_summary: "Fixed CSS",
-      should_continue: true,
-      drift_clarification:
-        "Pivoted because constraint c-00000000 was already satisfied. The CSS fix was higher priority.",
-    });
-    const result = enforceRound(selfEval, driftVerify(), 3, [], 0, 0);
-    assert.equal(result.action, "reject",
-      "fabricated IDs must not count as substantive anchors");
-    assert.notEqual(result.clarification_accepted, true);
-  });
-
-  it("rejects a file path that was never reported or observed", () => {
-    const selfEval = makeSelfEvaluation({
-      success: false,
-      output_summary: "Fixed CSS",
-      should_continue: true,
-      drift_clarification:
-        "Pivoted because src/fake/path.ts was the actual problem.",
-    });
-    const result = enforceRound(selfEval, driftVerify(), 3, [], 0, 0);
-    assert.equal(result.action, "reject");
-  });
-
-  it("accepts a real anchor found in vault entries (not just the current report)", () => {
-    const constraintId = deriveConstraintId("rate limiting");
-    const vault: VaultEntry[] = [{
-      id: "loop:anchor-loop:r2",
-      task_id: "loop:anchor-loop:r2",
-      task_type: "loop_lineage",
-      loop_id: "anchor-loop",
-      timestamp: new Date().toISOString(),
-      loop_lineage: { round: 2 },
-      discovered_constraints: ["rate limiting"],
-    }];
-    const selfEval = makeSelfEvaluation({
-      success: false,
-      output_summary: "Fixed CSS",
-      should_continue: true,
-      drift_clarification:
-        `Pivoted because constraint ${constraintId} was satisfied in an earlier round.`,
-    });
-    const result = enforceRound(selfEval, driftVerify(), 3, vault, 0, 0);
-    assert.equal(result.action, "accept");
-    assert.equal(result.clarification_accepted, true);
-  });
-});
 
 // R4 deadlock guard (v2.14): a backtrack that already committed for this
 // round must not be repeated forever — the second escalation terminates.
@@ -1248,7 +797,7 @@ describe("enforcement-gate — progress stall: backtrack deadlock guard", () => 
   it("terminates instead of backtracking when a backtrack already committed for this round", () => {
     const curr = se({
       success: false,
-      execution_evidence: makeExecutionEvidence({
+      execution_report: makeExecutionReport({
         files_changed: ["src/foo.ts"],
         progress_estimate: 0.33,
       }),
@@ -1259,19 +808,7 @@ describe("enforcement-gate — progress stall: backtrack deadlock guard", () => 
       vaultRound(3, 0.32),
       // The previous stall cycle already committed a backtrack for round 4 —
       // the loop is re-walking rolled-back territory with the same stall.
-      {
-        task_id: "loop:test-loop:r4:feedback",
-        loop_id: "test-loop",
-        loop_lineage: {
-          round: 4,
-          round_transaction: {
-            schema_version: 1,
-            round_id: "test-loop:4",
-            snapshot: {},
-            result: { action: "backtrack", verificationFlags: [] },
-          },
-        },
-      },
+      committedBacktrackRound(4),
     ];
     const result = enforceRound(curr, trusted(), 4, vault, 1);
     assert.equal(result.action, "terminate");
@@ -1281,7 +818,7 @@ describe("enforcement-gate — progress stall: backtrack deadlock guard", () => 
   it("still backtracks on a fresh stall window with no committed backtrack", () => {
     const curr = se({
       success: false,
-      execution_evidence: makeExecutionEvidence({
+      execution_report: makeExecutionReport({
         files_changed: ["src/foo.ts"],
         progress_estimate: 0.43,
       }),
@@ -1291,19 +828,7 @@ describe("enforcement-gate — progress stall: backtrack deadlock guard", () => 
     const vault = [
       vaultRound(1, 0.30),
       vaultRound(2, 0.31),
-      {
-        task_id: "loop:test-loop:r2:feedback",
-        loop_id: "test-loop",
-        loop_lineage: {
-          round: 2,
-          round_transaction: {
-            schema_version: 1,
-            round_id: "test-loop:2",
-            snapshot: {},
-            result: { action: "backtrack", verificationFlags: [] },
-          },
-        },
-      },
+      committedBacktrackRound(2),
       vaultRound(3, 0.40),
       vaultRound(4, 0.41),
       vaultRound(5, 0.42),
@@ -1321,9 +846,9 @@ describe("enforcement-gate — progress stall: backtrack deadlock guard", () => 
 describe("enforcement-gate — R-EVID: evidence contradictions", () => {
   it("rejects when a required command failed", () => {
     const curr = se({
-      execution_evidence: makeExecutionEvidence({
+      execution_report: makeExecutionReport({
         files_changed: ["src/foo.ts"],
-        test_results: { passed: 1, failed: 0, skipped: 0 },
+        tests_reported: { passed: 1, failed: 0, skipped: 0 },
       }),
     });
     const verify = makeVerificationResult({
@@ -1344,9 +869,9 @@ describe("enforcement-gate — R-EVID: evidence contradictions", () => {
 
   it("rejects when reported test results hide failures", () => {
     const curr = se({
-      execution_evidence: makeExecutionEvidence({
+      execution_report: makeExecutionReport({
         files_changed: ["src/foo.ts"],
-        test_results: { passed: 1, failed: 0, skipped: 0 },
+        tests_reported: { passed: 1, failed: 0, skipped: 0 },
       }),
     });
     const verify = makeVerificationResult({
@@ -1354,9 +879,9 @@ describe("enforcement-gate — R-EVID: evidence contradictions", () => {
       flags: [
         makeVerificationFlag({
           severity: "error",
-          field: "test_results",
+          field: "tests_reported",
           check: "command_evidence_mismatch",
-          detail: 'Agent test_results don\'t match "npm test" output: failed: reported 0, command shows 5',
+          detail: 'Agent tests_reported don\'t match "npm test" output: failed: reported 0, command shows 5',
         }),
       ],
     });
@@ -1367,9 +892,9 @@ describe("enforcement-gate — R-EVID: evidence contradictions", () => {
 
   it("rejects on a self-contradictory outcome claim", () => {
     const curr = se({
-      execution_evidence: makeExecutionEvidence({
+      execution_report: makeExecutionReport({
         files_changed: ["src/foo.ts"],
-        test_results: { passed: 1, failed: 0, skipped: 0 },
+        tests_reported: { passed: 1, failed: 0, skipped: 0 },
       }),
     });
     const verify = makeVerificationResult({
@@ -1390,9 +915,9 @@ describe("enforcement-gate — R-EVID: evidence contradictions", () => {
 
   it("accepts when the contradiction flags are absent", () => {
     const curr = se({
-      execution_evidence: makeExecutionEvidence({
+      execution_report: makeExecutionReport({
         files_changed: ["src/foo.ts"],
-        test_results: { passed: 1, failed: 0, skipped: 0 },
+        tests_reported: { passed: 1, failed: 0, skipped: 0 },
       }),
     });
     const result = enforceRound(curr, trusted(), 4, [], 0);
@@ -1406,7 +931,7 @@ describe("enforcement-gate — v3.3 R-EVID-VERIFY: entrypoint tampering", () => 
     flags: [
       makeVerificationFlag({
         severity: "error",
-        field: "execution_evidence",
+        field: "execution_report",
         check: "verification_entrypoint_modified",
         detail: 'Verification command "run-tests" entrypoint changed this round',
       }),
@@ -1415,9 +940,9 @@ describe("enforcement-gate — v3.3 R-EVID-VERIFY: entrypoint tampering", () => 
 
   it("rejects when the verification command entrypoint changed this round", () => {
     const curr = se({
-      execution_evidence: makeExecutionEvidence({
+      execution_report: makeExecutionReport({
         files_changed: ["run-tests.sh"],
-        test_results: { passed: 1, failed: 0, skipped: 0 },
+        tests_reported: { passed: 1, failed: 0, skipped: 0 },
       }),
     });
     const result = enforceRound(curr, entrypointTainted(), 4, [], 0);
@@ -1427,9 +952,9 @@ describe("enforcement-gate — v3.3 R-EVID-VERIFY: entrypoint tampering", () => 
 
   it("takes precedence over R8 when both fire (entrypoint reason is specific)", () => {
     const curr = se({
-      execution_evidence: makeExecutionEvidence({
+      execution_report: makeExecutionReport({
         files_changed: ["src/foo.ts"],
-        test_results: { passed: 1, failed: 0, skipped: 0 },
+        tests_reported: { passed: 1, failed: 0, skipped: 0 },
       }),
     });
     const verify = makeVerificationResult({
@@ -1437,7 +962,7 @@ describe("enforcement-gate — v3.3 R-EVID-VERIFY: entrypoint tampering", () => 
       flags: [
         makeVerificationFlag({
           severity: "error",
-          field: "execution_evidence",
+          field: "execution_report",
           check: "verification_entrypoint_modified",
           detail: 'Verification command "run-tests" entrypoint changed this round',
         }),
@@ -1456,9 +981,9 @@ describe("enforcement-gate — v3.3 R-EVID-VERIFY: entrypoint tampering", () => 
 
   it("does not fire when the entrypoint flag is warn-level or absent", () => {
     const curr = se({
-      execution_evidence: makeExecutionEvidence({
+      execution_report: makeExecutionReport({
         files_changed: ["src/foo.ts"],
-        test_results: { passed: 1, failed: 0, skipped: 0 },
+        tests_reported: { passed: 1, failed: 0, skipped: 0 },
       }),
     });
     const verify = makeVerificationResult({
@@ -1466,7 +991,7 @@ describe("enforcement-gate — v3.3 R-EVID-VERIFY: entrypoint tampering", () => 
       flags: [
         makeVerificationFlag({
           severity: "warn",
-          field: "execution_evidence",
+          field: "execution_report",
           check: "test_files_modified",
           detail: "Test files changed in the same round the command passed",
         }),
@@ -1486,7 +1011,7 @@ describe("enforcement-gate — progress stall: continuity guard (v3.7: R4/R5 mer
   it("does not fire on a discontinuous window when recent rounds have no progress data", () => {
     const curr = se({
       success: false,
-      execution_evidence: makeExecutionEvidence({
+      execution_report: makeExecutionReport({
         files_changed: ["src/foo.ts"],
         progress_estimate: 0.40,
       }),
@@ -1495,7 +1020,7 @@ describe("enforcement-gate — progress stall: continuity guard (v3.7: R4/R5 mer
       vaultRound(1, 0.30),
       vaultRound(2, 0.30),
       vaultRound(3, 0.30),
-      // Rounds 4-5 committed without execution_evidence — unknown motion,
+      // Rounds 4-5 committed without execution_report — unknown motion,
       // not zero motion. The stall window is discontinuous (both tiers
       // return null); the pre-v3.7 flatline slot looked at rounds 1-3 and
       // terminated/backtracked anyway — the continuity guard must win.
@@ -1509,7 +1034,7 @@ describe("enforcement-gate — progress stall: continuity guard (v3.7: R4/R5 mer
   it("still fires on a continuous flatline window (stall predicate covers it)", () => {
     const curr = se({
       success: false,
-      execution_evidence: makeExecutionEvidence({
+      execution_report: makeExecutionReport({
         files_changed: ["src/foo.ts"],
         progress_estimate: 0.30,
       }),
@@ -1550,27 +1075,14 @@ describe("enforcement-gate — R9: workspace restore guard", () => {
     });
   }
 
-  function committedBacktrackEntry(round: number): VaultEntry {
-    return {
-      task_id: `loop:test-loop:r${round}:feedback`,
-      loop_id: "test-loop",
-      loop_lineage: {
-        round,
-        round_transaction: {
-          schema_version: 1,
-          round_id: `loop:test-loop:${round}`,
-          snapshot: {},
-          result: { action: "backtrack", verificationFlags: [] },
-        },
-      },
-    };
-  }
+  const committedBacktrackEntry = (round: number): VaultEntry =>
+    committedBacktrackRound(round);
 
   it("backtracks when no prior backtrack committed for this round", () => {
     const curr = se({
-      execution_evidence: makeExecutionEvidence({
+      execution_report: makeExecutionReport({
         files_changed: ["src/foo.ts"],
-        test_results: { passed: 1, failed: 0, skipped: 0 },
+        tests_reported: { passed: 1, failed: 0, skipped: 0 },
       }),
     });
     const result = enforceRound(curr, unrestoredVerify(), 3, [], 0);
@@ -1580,9 +1092,9 @@ describe("enforcement-gate — R9: workspace restore guard", () => {
 
   it("terminates when the workspace was never restored after a prior backtrack", () => {
     const curr = se({
-      execution_evidence: makeExecutionEvidence({
+      execution_report: makeExecutionReport({
         files_changed: ["src/foo.ts"],
-        test_results: { passed: 1, failed: 0, skipped: 0 },
+        tests_reported: { passed: 1, failed: 0, skipped: 0 },
       }),
     });
     const vault = [committedBacktrackEntry(3)];
@@ -1591,10 +1103,30 @@ describe("enforcement-gate — R9: workspace restore guard", () => {
     assert.equal(result.check, "backtrack_workspace_not_restored");
   });
 
-  it("buildBacktrackPrompt includes a git reset command when a restore commit exists", () => {
+  it("buildBacktrackPrompt states the restore requirement without prescribing a command", () => {
     const prompt = buildBacktrackPrompt(5, 3, "progress_stall", [], [], "abc123def4567890");
-    assert.ok(prompt.includes("git reset --hard abc123def4"),
-      "prompt must show how to move HEAD to the restore commit");
+    assert.ok(prompt.includes("HEAD must be at `abc123def456`"),
+      "prompt must state where HEAD has to end up");
+    assert.ok(prompt.includes("Restoring the workspace is **your** responsibility"));
+    for (const command of ["git stash", "git reset", "git checkout", "git clean"]) {
+      assert.ok(!prompt.includes(command),
+        "LoopForge does not prescribe how the agent restores the workspace");
+    }
+  });
+
+  it("R9 fix_instructions state the requirement, not a recipe", () => {
+    const result = enforceRound(
+      se({ execution_report: makeExecutionReport({ files_changed: ["src/a.ts"] }) }),
+      unrestoredVerify(),
+      3,
+      [],
+      0,
+    );
+    assert.equal(result.action, "backtrack");
+    for (const command of ["git stash", "git reset", "git checkout", "git clean"]) {
+      assert.ok(!(result.fix_instructions ?? "").includes(command));
+    }
+    assert.match(result.fix_instructions ?? "", /must be reverted/);
   });
 });
 
@@ -1607,7 +1139,7 @@ describe("v3.2 — R4 machine progress fallback", () => {
   const feedbackRound = (round: number, gitFiles: string[]): VaultEntry =>
     committedFeedbackRound(round, {
       loopId: "test-loop",
-      roundEvidence: [{ provider: "git", timestamp: Date.now(), files: gitFiles, data: {} }],
+      roundEvidence: [{ schemaVersion: 1, providerId: "git", kind: "git", phase: "after", startedAt: 0, finishedAt: 0, status: "observed", files: gitFiles, data: { fingerprints: {} } }],
     });
 
   it("detects stall from three rounds without git changes on the heuristic path", () => {
@@ -1626,9 +1158,9 @@ describe("v3.2 — R4 machine progress fallback", () => {
 
   it("skips when no git snapshots exist", () => {
     const entries = [
-      committedFeedbackRound(1, { loopId: "test-loop", roundEvidence: [], noExecutionEvidence: true }),
-      committedFeedbackRound(2, { loopId: "test-loop", roundEvidence: [], noExecutionEvidence: true }),
-      committedFeedbackRound(3, { loopId: "test-loop", roundEvidence: [], noExecutionEvidence: true }),
+      committedFeedbackRound(1, { loopId: "test-loop", roundEvidence: [], noExecutionReport: true }),
+      committedFeedbackRound(2, { loopId: "test-loop", roundEvidence: [], noExecutionReport: true }),
+      committedFeedbackRound(3, { loopId: "test-loop", roundEvidence: [], noExecutionReport: true }),
     ];
     const result = enforceRound(se({ success: false }), trusted(), 4, entries, 0);
     assert.equal(result!.action, "accept", "no git signal → the rule keeps skipping");
@@ -1654,7 +1186,7 @@ describe("v3.3 — progress stall exculpatory machine cross-check", () => {
     files: gitFiles,
     progress,
     met,
-    roundEvidence: [{ provider: "git", timestamp: Date.now(), files: gitFiles, data: {} }],
+    roundEvidence: [{ schemaVersion: 1, providerId: "git", kind: "git", phase: "after", startedAt: 0, finishedAt: 0, status: "observed", files: gitFiles, data: { fingerprints: {} } }],
   });
 
   it("does not fire R4 when git motion was observed in the window (evidence path)", () => {
@@ -1721,193 +1253,98 @@ describe("v3.3 — progress stall exculpatory machine cross-check", () => {
 
 
 // ═══════════════════════════════════════════════════════════════════════════
-// v3.3 — Round Contract enforcement (R-C1 premature_boundary / R-C2 scope)
+// v3.8 — Round Contract enforcement: scope drift (machine fact, no waiver)
 // ═══════════════════════════════════════════════════════════════════════════
 
-describe("v3.3 — Round Contract enforcement", () => {
-  /** VerificationResult carrying a single flag of the given check. */
-  const withFlag = (check: string, severity: "warn" | "error" | "info" = "error"): VerificationResult =>
+describe("v3.8 — Round Contract item enforcement", () => {
+  /** A contract with one item bound to the configured test command. */
+  const itemContract = (overrides: Record<string, unknown> = {}) => ({
+    work_item: "Slice A",
+    scope: ["src/auth"],
+    items: [{ description: "login works", criterion_refs: [], subgoal_refs: [], verify_with: ["verify"] }],
+    ...overrides,
+  });
+
+  const bindingFor = (value: ReturnType<typeof itemContract>) => ({
+    rc_id: "rc-aaaaaaaa",
+    item_ids: deriveContractItemIds(value.items),
+    config_hash_by_command: { verify: commandConfigHash(testCommandProviderPolicy()) },
+  });
+
+  const declaredRound = (value: ReturnType<typeof itemContract>): VaultEntry =>
+    committedFeedbackRound(1, {
+      loopId: "test-loop",
+      contract: value,
+      contractBinding: bindingFor(value),
+    });
+
+  const priorDebt = (contract: ReturnType<typeof itemContract>, round: number): VaultEntry =>
+    committedFeedbackRound(round, {
+      loopId: "test-loop",
+      contract,
+      contractBinding: bindingFor(contract),
+      verificationFlags: [{
+        severity: "warn", field: "round_contract",
+        check: CHECK_CONTRACT_ITEMS_UNVERIFIED, detail: "debt",
+      }],
+    });
+
+  const debtFlag = (): VerificationResult =>
     makeVerificationResult({
-      verdict: severity === "error" ? "contradicted" : "suspect",
+      verdict: "suspect",
       flags: [makeVerificationFlag({
-        severity,
+        severity: "warn",
         field: "round_contract",
-        check,
-        detail: `contract issue: ${check}`,
+        check: CHECK_CONTRACT_ITEMS_UNVERIFIED,
+        detail: "1 contract item(s) claimed met but not machine-verified: rci-1",
       })],
     });
 
-  /** Evidence-carrying success claim — keeps R3 (empty_success) and other
-   *  pre-contract rules out of the way so R-C1 is what the round trips. */
-  const claimingSuccess = (): SelfEvaluation => se({
-    success: true,
-    execution_evidence: makeExecutionEvidence({
-      files_changed: ["src/auth.ts"],
-      test_results: { passed: 1, failed: 0, skipped: 0 },
-      success_criteria_met: ["criterion A"],
-      success_criteria_remaining: [],
-      progress_estimate: 0.9,
-    }),
-  });
-
-  it("R-C1: premature_boundary error flag → reject with contract wording", () => {
-    const result = enforceRound(claimingSuccess(), withFlag("premature_boundary"), 3, [], 0);
-    assert.equal(result.action, "reject");
-    assert.equal(result.check, "premature_boundary");
-    assert.match(result.fix_instructions, /verification_plan/);
-    assert.match(result.fix_instructions, /success_criteria_remaining/);
-  });
-
-  it("R-C1: repeated premature_boundary → terminate", () => {
-    const result = enforceRound(claimingSuccess(), withFlag("premature_boundary"), 3, [], 2);
-    assert.equal(result.action, "terminate");
-    assert.equal(result.check, "premature_boundary");
-  });
-
-  it("R-C1 outranks R8 on contract rounds (rule order regression)", () => {
-    // Both premature_boundary AND success_without_verified_evidence fire on
-    // an unverified contract success claim; the contract gets its own
-    // reason and its own rejection counter.
-    const result = enforceRound(claimingSuccess(), makeVerificationResult({
-      verdict: "contradicted",
-      flags: [
-        makeVerificationFlag({ severity: "error", field: "success",
-          check: "success_without_verified_evidence", detail: "no evidence" }),
-        makeVerificationFlag({ severity: "error", field: "round_contract",
-          check: "premature_boundary", detail: "done_when unverified" }),
-      ],
-    }), 3, [], 0);
-    assert.equal(result.check, "premature_boundary");
-  });
-
-  it("R-C2: scope drift with substantive clarification → accept", () => {
-    // The clarification names the out-of-scope file, which sits in the
-    // selfEval's own files_changed → real anchor, ≥ 20 chars.
-    const selfEval = se({
-      success: false,
-      execution_evidence: makeExecutionEvidence({
-        files_changed: ["src/other.ts"],
-        test_results: { passed: 1, failed: 0, skipped: 0 },
-        success_criteria_met: [],
-        success_criteria_remaining: [],
-        progress_estimate: 0.5,
-      }),
-      drift_clarification:
-        "Extended scope to src/other.ts because the API types moved there",
+  const scopeDriftFlag = (): VerificationResult =>
+    makeVerificationResult({
+      verdict: "suspect",
+      flags: [makeVerificationFlag({
+        severity: "warn", field: "round_contract",
+        check: "round_scope_drift", detail: "files changed outside scope",
+      })],
     });
-    const result = enforceRound(selfEval, withFlag("round_scope_drift", "warn"), 3, [], 0);
+
+  it("verification debt does not reject below the configured streak", () => {
+    const result = enforceRound(se({ success: false }), debtFlag(), 2, [
+      declaredRound(itemContract()),
+    ], 0);
     assert.equal(result.action, "accept");
-    assert.equal(result.clarification_accepted, true);
   });
 
-  it("R-C2: scope drift without clarification → reject", () => {
-    const result = enforceRound(se({ success: false }), withFlag("round_scope_drift", "warn"), 3, [], 0);
+  it("verification debt rejects once the streak reaches the limit", () => {
+    const contract = itemContract();
+    const result = enforceRound(se({ success: false }), debtFlag(), 4, [
+      declaredRound(contract), priorDebt(contract, 2), priorDebt(contract, 3),
+    ], 0);
+    assert.equal(result.action, "reject");
+    assert.equal(result.check, "contract_items_unverified");
+    assert.match(result.fix_instructions, /bound command/);
+  });
+
+  it("repeated verification debt terminates as incomplete", () => {
+    const contract = itemContract();
+    const result = enforceRound(se({ success: false }), debtFlag(), 4, [
+      declaredRound(contract), priorDebt(contract, 2), priorDebt(contract, 3),
+    ], 2);
+    assert.equal(result.action, "terminate");
+    assert.equal(result.stopReason, "incomplete");
+  });
+
+  it("scope drift rejects even without an explanation (v3.8: machine fact)", () => {
+    const result = enforceRound(se({ success: false }), scopeDriftFlag(), 3, [], 0);
     assert.equal(result.action, "reject");
     assert.equal(result.check, "round_scope_drift");
-    assert.match(result.fix_instructions, /drift_clarification/);
   });
 
-  it("R-C2: reject guidance names the legal scope-extension channel (L3)", () => {
-    // The old guidance said "extend the scope in your re-declared
-    // round_contract" — unreachable while a contract is ACTIVE (replacement
-    // proposals are ignored as premature), so agents dead-ended into repeat
-    // rejects. The only legal channel is closing the contract first:
-    // outcome="blocked" + the extended scope as the next round's proposal.
-    const result = enforceRound(se({ success: false }), withFlag("round_scope_drift", "warn"), 3, [], 0);
-    assert.equal(result.action, "reject");
-    assert.ok(!result.fix_instructions.includes("re-declared round_contract"),
-      "the unreachable instruction must be gone");
-    assert.match(result.fix_instructions, /outcome: "blocked"/,
-      "the legal close-then-extend channel must be named");
-    assert.match(result.fix_instructions, /next round's round_contract/);
-  });
-
-  it("R-C2: weak clarification (no anchors) rejects; repeated → terminate", () => {
-    const weak = se({
-      success: false,
-      drift_clarification: "I changed direction because it was better overall",
-    });
-    const first = enforceRound(weak, withFlag("round_scope_drift", "warn"), 3, [], 0);
-    assert.equal(first.action, "reject", "anchor-less clarification must not accept");
-    const repeated = enforceRound(weak, withFlag("round_scope_drift", "warn"), 3, [], 2);
-    assert.equal(repeated.action, "terminate");
-    assert.equal(repeated.check, "round_scope_drift");
-  });
-});
-
-// ═══════════════════════════════════════════════════════════════════════════
-// v3.5 — contract_completion_unverified enforcement rule
-// ═══════════════════════════════════════════════════════════════════════════
-
-describe("v3.5 — contract completion enforcement", () => {
-  /** VerificationResult carrying one flag of the given check/severity. */
-  const withFlag = (check: string, severity: "warn" | "error" | "info" = "error"): VerificationResult =>
-    makeVerificationResult({
-      verdict: severity === "error" ? "contradicted" : "suspect",
-      flags: [makeVerificationFlag({
-        severity,
-        field: "round_contract",
-        check,
-        detail: `contract issue: ${check}`,
-      })],
-    });
-
-  /** Evidence-carrying eval — keeps R3 (empty_success) and R8 out of the
-   *  way so the injected flag is what the round trips. */
-  const claiming = (): SelfEvaluation => se({
-    execution_evidence: makeExecutionEvidence({
-      files_changed: ["src/auth.ts"],
-      test_results: { passed: 1, failed: 0, skipped: 0 },
-      success_criteria_met: ["criterion A"],
-      success_criteria_remaining: [],
-      progress_estimate: 0.9,
-    }),
-  });
-
-  it("completion-unverified error → reject with the contract's own wording", () => {
-    const result = enforceRound(
-      claiming(), withFlag("contract_completion_unverified"), 3, [], 0);
-    assert.equal(result.action, "reject");
-    assert.equal(result.check, "contract_completion_unverified");
-    assert.match(result.fix_instructions, /verification_plan/);
-    assert.match(result.fix_instructions, /no_change_reason/);
-  });
-
-  it("second consecutive completion-unverified → terminate", () => {
-    const first = enforceRound(
-      claiming(), withFlag("contract_completion_unverified"), 3, [], 0);
-    assert.equal(first.action, "reject");
-    const repeated = enforceRound(
-      claiming(), withFlag("contract_completion_unverified"), 3, [], 2);
-    assert.equal(repeated.action, "terminate");
-    assert.equal(repeated.check, "contract_completion_unverified");
-  });
-
-  it("completion-unverified outranks premature_boundary (registration order)", () => {
-    // A completing eval that also trips the boundary gets the completion
-    // reason first — the completion-truth question precedes boundary nuance.
-    const both = makeVerificationResult({
-      verdict: "contradicted",
-      flags: [
-        makeVerificationFlag({
-          severity: "error", field: "round_contract",
-          check: "premature_boundary", detail: "boundary",
-        }),
-        makeVerificationFlag({
-          severity: "error", field: "round_contract",
-          check: "contract_completion_unverified", detail: "completion",
-        }),
-      ],
-    });
-    const result = enforceRound(claiming(), both, 3, [], 0);
-    assert.equal(result.action, "reject");
-    assert.equal(result.check, "contract_completion_unverified");
-  });
-
-  it("contract_premature warn alone → accept (warn never rejects)", () => {
-    const result = enforceRound(
-      claiming(), withFlag("contract_premature", "warn"), 3, [], 0);
-    assert.equal(result.action, "accept");
+  it("repeated scope drift terminates", () => {
+    const result = enforceRound(se({ success: false }), scopeDriftFlag(), 3, [], 2);
+    assert.equal(result.action, "terminate");
+    assert.equal(result.check, "round_scope_drift");
   });
 });
 
@@ -1934,9 +1371,9 @@ describe("v3.7 — behavior-equality compatibility matrix", () => {
     });
 
   const okEval = (progress = 0.5): SelfEvaluation => se({
-    execution_evidence: makeExecutionEvidence({
+    execution_report: makeExecutionReport({
       files_changed: ["src/foo.ts"],
-      test_results: { passed: 1, failed: 0, skipped: 0 },
+      tests_reported: { passed: 1, failed: 0, skipped: 0 },
       progress_estimate: progress,
     }),
   });
@@ -1951,19 +1388,7 @@ describe("v3.7 — behavior-equality compatibility matrix", () => {
   /** Vault with a backtrack committed for the CURRENT round (deadlock). */
   const deadlockVault = (round: number): VaultEntry[] => [
     ...stallVault(),
-    {
-      task_id: `loop:test-loop:r${round}:feedback`,
-      loop_id: "test-loop",
-      loop_lineage: {
-        round,
-        round_transaction: {
-          schema_version: 1,
-          round_id: `test-loop:${round}`,
-          snapshot: {},
-          result: { action: "backtrack", verificationFlags: [] },
-        },
-      },
-    },
+    committedBacktrackRound(round),
   ];
 
   const withPolicy = (
@@ -2019,74 +1444,42 @@ describe("v3.7 — behavior-equality compatibility matrix", () => {
     { name: "entrypoint tampered third strike terminates", flags: [flag("error", "verification_entrypoint_modified")], strikes: 2, expected: "terminate" },
 
     // ── contract closure family (internal ladders) ───────────────────────────
-    { name: "contract completion unverified rejects", flags: [flag("error", "contract_completion_unverified")], expected: "reject", check: "contract_completion_unverified" },
-    { name: "completion outranks premature boundary (order lock)", flags: [flag("error", "contract_completion_unverified"), flag("error", "premature_boundary")], expected: "reject", check: "contract_completion_unverified" },
-    { name: "completion unverified third strike terminates", flags: [flag("error", "contract_completion_unverified")], strikes: 2, expected: "terminate" },
-    { name: "premature boundary rejects", flags: [flag("error", "premature_boundary")], expected: "reject", check: "premature_boundary" },
-    { name: "premature boundary outranks R8 (order lock)", flags: [flag("error", "premature_boundary"), flag("error", "success_without_verified_evidence")], expected: "reject", check: "premature_boundary" },
-    { name: "premature boundary third strike terminates", flags: [flag("error", "premature_boundary")], strikes: 2, expected: "terminate" },
 
     // ── success evidence (merged R8/R3 semantics) ────────────────────────────
     { name: "success without verified evidence rejects (required mode)", flags: [flag("error", "success_without_verified_evidence")], expected: "reject", check: "success_without_verified_evidence" },
     { name: "R8 second strike rejects with escalation notice", flags: [flag("error", "success_without_verified_evidence")], strikes: 1, expected: "reject" },
     { name: "R8 third strike terminates", flags: [flag("error", "success_without_verified_evidence")], strikes: 2, expected: "terminate" },
-    { name: "claims-arm warn flag accepts under machine_backed_success=warn",
-      flags: [flag("warn", "success_without_verified_evidence")],
-      policy: (p) => { p.evidence.machine_backed_success = "warn"; },
-      expected: "accept" },
-    { name: "empty-evidence posture still rejects under machine_backed_success=warn",
-      flags: [flag("error", "success_without_verified_evidence")],
-      policy: (p) => { p.evidence.machine_backed_success = "warn"; },
-      expected: "reject" },
     { name: "no_change_reason claims-arm info flag accepts",
       flags: [flag("info", "success_without_verified_evidence")],
       expected: "accept" },
 
-    // ── round_scope_drift (clarification gate) ───────────────────────────────
-    { name: "scope drift without clarification rejects",
+    // ── round_scope_drift (v3.8: machine fact, no clarification waiver) ─────
+    { name: "scope drift rejects",
       selfEval: okEval(), flags: [flag("warn", "round_scope_drift")], expected: "reject", check: "round_scope_drift" },
-    { name: "scope drift with substantive clarification accepts",
-      selfEval: se({ ...okEval(), drift_clarification: "extending contract scope: src/foo.ts is the intended change" }),
-      flags: [flag("warn", "round_scope_drift")], expected: "accept" },
-    { name: "scope drift weak clarification third strike terminates",
-      selfEval: se({ ...okEval(), drift_clarification: "x".repeat(40) }),
+    { name: "scope drift third strike terminates",
+      selfEval: okEval(),
       flags: [flag("warn", "round_scope_drift")], strikes: 2, expected: "terminate" },
-
-    // ── intent drift (own streak) ────────────────────────────────────────────
-    { name: "intent drift without clarification rejects (streak 0)",
-      selfEval: okEval(), flags: [flag("warn", "intent_drift")], expected: "reject", check: "intent_drift" },
-    { name: "intent drift substantive clarification accepts",
-      selfEval: se({ ...okEval(), drift_clarification: "pivot: the contract in src/foo.ts changed the approach" }),
-      flags: [flag("warn", "intent_drift")], expected: "accept" },
-    { name: "intent drift weak clarification at streak max-1 terminates",
-      selfEval: se({ ...okEval(), drift_clarification: "y".repeat(40) }),
-      flags: [flag("warn", "intent_drift")], streak: 2, expected: "terminate" },
-    { name: "intent drift with streak limit disabled accepts",
-      selfEval: se({ ...okEval(), drift_clarification: "z".repeat(40) }),
-      flags: [flag("warn", "intent_drift")], streak: 9,
-      policy: (p) => { p.engine.drift_clarification_max_streak = 0; },
-      expected: "accept" },
 
     // ── progress stall (single evaluator after merge) ────────────────────────
     { name: "flat window first strike rejects",
-      selfEval: se({ execution_evidence: makeExecutionEvidence({ files_changed: ["src/foo.ts"], progress_estimate: 0.33 }) }),
+      selfEval: se({ execution_report: makeExecutionReport({ files_changed: ["src/foo.ts"], progress_estimate: 0.33 }) }),
       vault: stallVault(), round: 4, expected: "reject", check: "progress_stall" },
     { name: "flat window second strike backtracks (escalation + backtrack)",
-      selfEval: se({ execution_evidence: makeExecutionEvidence({ files_changed: ["src/foo.ts"], progress_estimate: 0.33 }) }),
+      selfEval: se({ execution_report: makeExecutionReport({ files_changed: ["src/foo.ts"], progress_estimate: 0.33 }) }),
       vault: stallVault(), round: 4, strikes: 1, expected: "backtrack", check: "progress_stall" },
     { name: "flat window third strike terminates",
-      selfEval: se({ execution_evidence: makeExecutionEvidence({ files_changed: ["src/foo.ts"], progress_estimate: 0.33 }) }),
+      selfEval: se({ execution_report: makeExecutionReport({ files_changed: ["src/foo.ts"], progress_estimate: 0.33 }) }),
       vault: stallVault(), round: 4, strikes: 2, expected: "terminate" },
     { name: "stall deadlock guard terminates instead of re-backtracking",
-      selfEval: se({ execution_evidence: makeExecutionEvidence({ files_changed: ["src/foo.ts"], progress_estimate: 0.33 }) }),
+      selfEval: se({ execution_report: makeExecutionReport({ files_changed: ["src/foo.ts"], progress_estimate: 0.33 }) }),
       vault: deadlockVault(4), round: 4, strikes: 1, expected: "terminate" },
     { name: "flat window terminates on second strike when escalation disabled",
-      selfEval: se({ execution_evidence: makeExecutionEvidence({ files_changed: ["src/foo.ts"], progress_estimate: 0.33 }) }),
+      selfEval: se({ execution_report: makeExecutionReport({ files_changed: ["src/foo.ts"], progress_estimate: 0.33 }) }),
       vault: stallVault(), round: 4, strikes: 1,
       policy: (p) => { p.engine.enforcement_escalation_enabled = false; },
       expected: "terminate" },
     { name: "flat window rejects with notice on second strike when backtrack disabled",
-      selfEval: se({ execution_evidence: makeExecutionEvidence({ files_changed: ["src/foo.ts"], progress_estimate: 0.33 }) }),
+      selfEval: se({ execution_report: makeExecutionReport({ files_changed: ["src/foo.ts"], progress_estimate: 0.33 }) }),
       vault: stallVault(), round: 4, strikes: 1,
       policy: (p) => { p.engine.backtrack_enabled = false; },
       expected: "reject" },
@@ -2139,7 +1532,6 @@ describe("v3.7 — behavior-equality compatibility matrix", () => {
           c.round ?? 2,
           c.vault ?? [],
           c.strikes ?? 0,
-          c.streak ?? 0,
           lastCheck,
         );
         return result.action;
@@ -2158,7 +1550,6 @@ describe("v3.7 — behavior-equality compatibility matrix", () => {
           c.round ?? 2,
           c.vault ?? [],
           c.strikes ?? 0,
-          c.streak ?? 0,
           lastCheck,
         );
         assert.equal(result.check, c.check, `${c.name}: check id`);

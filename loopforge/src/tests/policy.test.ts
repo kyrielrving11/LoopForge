@@ -29,13 +29,13 @@ describe("Policy — Defaults", () => {
     assert.equal(DEFAULT_POLICY.backend.root_dir, ".loopforge");
   });
 
-  it("v3.3: machine_backed_success defaults to required", () => {
-    assert.equal(DEFAULT_POLICY.evidence.machine_backed_success, "required");
-    // Old loop_policy.json files (missing the key) fall back to the default
-    // via deepMerge — no migration needed.
+  it("v3.8: evidence policy carries providers, timeout, and commands only", () => {
+    assert.deepEqual(Object.keys(DEFAULT_POLICY.evidence).sort(), ["commands", "providers", "timeout_ms"]);
+    // Old loop_policy.json files (missing keys) fall back to the defaults via
+    // deepMerge — no migration needed (the v3.8 deletions simply inherit).
     resetPolicy();
     const policy = getPolicy("nonexistent_policy.json");
-    assert.equal(policy.evidence.machine_backed_success, "required");
+    assert.deepEqual(policy.evidence.commands, []);
   });
 });
 
@@ -66,7 +66,7 @@ describe("Policy — Loading", () => {
   it("loadPolicy returns defaults when given invalid path", () => {
     const policy = loadPolicy("/nonexistent/path.json");
     assert.equal(policy.constraints.retire_window, 3);
-    assert.equal(policy.version, "2");
+    assert.equal(policy.version, "3");
   });
 });
 
@@ -85,7 +85,7 @@ describe("Policy — v3.7 shipped sample", () => {
       // v3.7: the stale keys (injection_mode, subgoal_auto_*,
       // constraint_inactive_rounds) were removed — no unknown-key warnings.
       assert.deepEqual(warnings, []);
-      assert.equal(policy.version, "2");
+      assert.equal(policy.version, "3");
       // Keys absent from the sample file inherit from DEFAULT_POLICY.
       assert.equal(policy.engine.backtrack_enabled, true);
       assert.equal(policy.prompt.l2_pointer_enabled, true);

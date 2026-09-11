@@ -18,7 +18,7 @@ import { deriveLessons } from "../loop-compiler.js";
 import { FileLoopStore } from "../loop-store.js";
 import type { VaultEntry } from "../loop-store.js";
 import { SessionManager } from "../mcp/session.js";
-import { MemoryLoopStore } from "./_helpers.js";
+import { MemoryLoopStore, criterionClaims } from "./_helpers.js";
 import { resetPolicy } from "../policy.js";
 import { Mode, type LoopForgeRequest, type SelfEvaluation } from "../protocol.js";
 
@@ -27,11 +27,10 @@ const continuingEvaluation = (): SelfEvaluation => ({
   output_summary: "made progress",
   constraint_violations: [],
   should_continue: true,
-  execution_evidence: {
+  execution_report: {
     files_changed: ["src/a.ts"],
-    test_results: { passed: 1, failed: 0, skipped: 0 },
-    success_criteria_met: [],
-    success_criteria_remaining: ["more"],
+    tests_reported: { passed: 1, failed: 0, skipped: 0 },
+    criterion_claims: criterionClaims([], ["more"]),
     progress_estimate: 0.5,
   },
 });
@@ -206,10 +205,24 @@ describe("Hydration cache — backtrack redo replace (v3.3.1)", () => {
       loop_id: loopId,
       round,
     });
-    // Minimal round-transaction shape the engine merges: round_id for the
-    // idempotency scan, result for the committed decision.
-    const transaction = (roundId: string, action: "backtrack" | "continue") => ({
-      round_id: roundId,
+    // v3.8: a realistic committed envelope — the engine's merge decodes it
+    // through the shared read model, which requires the schema-2 snapshot.
+    const transaction = (action: "backtrack" | "continue", round = 1) => ({
+      schema_version: 2,
+      round_id: `loop:${loopId}:round:${round}`,
+      snapshot: {
+        schemaVersion: 2,
+        roundId: `loop:${loopId}:round:${round}`,
+        loopId,
+        round,
+        attempt: 1,
+        phase: "committed",
+        beforeEvidence: [],
+        afterEvidence: [],
+        evaluation: continuingEvaluation(),
+        createdAt: 0,
+        updatedAt: 0,
+      },
       result: { action, verificationFlags: [], roundSuccess: false },
     });
     const round2Entry = (hydration: Record<string, unknown> | null) =>
@@ -222,10 +235,10 @@ describe("Hydration cache — backtrack redo replace (v3.3.1)", () => {
 
     // Round 1 compiles and commits normally.
     engine.invokeLoopCompile(compileRequest(1));
-    engine.autoFeedback(continuingEvaluation(), loopId, 1, task, transaction("rid-1", "continue"));
+    engine.autoFeedback(continuingEvaluation(), loopId, 1, task, transaction("continue", 1));
     // Round 2 compiles, then the runtime commits a BACKTRACK decision for it.
     engine.invokeLoopCompile(compileRequest(2));
-    engine.autoFeedback(continuingEvaluation(), loopId, 2, task, transaction("rid-2", "backtrack"));
+    engine.autoFeedback(continuingEvaluation(), loopId, 2, task, transaction("backtrack", 2));
     // Warm hydration merges the backtrack into the cache (coveredRound = 2).
     engine.hydrateLoopContext(loopId, 3);
     const warm = engine.hydrateLoopContext(loopId, 3);
@@ -238,7 +251,7 @@ describe("Hydration cache — backtrack redo replace (v3.3.1)", () => {
 
     // The agent redoes round 2 (same roundId) — the redo REPLACES the
     // backtrack feedback (v3.2.1 semantics).
-    engine.autoFeedback(continuingEvaluation(), loopId, 2, task, transaction("rid-2", "continue"));
+    engine.autoFeedback(continuingEvaluation(), loopId, 2, task, transaction("continue", 2));
 
     // v3.3.1: the next hydration must show the REDO decision. Before the
     // fix, the fast path (coveredRound >= round - 1) served the stale
@@ -273,11 +286,10 @@ describe("v3.5.1 — hydration stamps attempt/roundEvidence for the compile view
       output_summary: "premature success",
       constraint_violations: [],
       should_continue: true,
-      execution_evidence: {
+      execution_report: {
         files_changed: [],
-        test_results: { passed: 0, failed: 0, skipped: 0 },
-        success_criteria_met: [],
-        success_criteria_remaining: ["more"],
+        tests_reported: { passed: 0, failed: 0, skipped: 0 },
+        criterion_claims: criterionClaims([], ["more"]),
         progress_estimate: 0.1,
       },
     });

@@ -14,9 +14,17 @@ import type {
   VaultEntry,
 } from "../loop-store.js";
 import { LOOP_STORE_SCHEMA_VERSION } from "../loop-store.js";
-import { makeExecutionEvidence, makeSelfEvaluation } from "../protocol.js";
-import type { RoundContract, RoundOutcome, VerificationFlag } from "../protocol.js";
+import { makeExecutionReport, makeSelfEvaluation } from "../protocol.js";
+import type { CriterionClaim, RoundContractProposal, RoundOutcome, VerificationFlag } from "../protocol.js";
 import { getPolicy } from "../policy.js";
+
+/** v3.8: Build the criterion claims an evaluation submits. */
+export function criterionClaims(met: string[] = [], remaining: string[] = []): CriterionClaim[] {
+  return [
+    ...met.map((criterion_id) => ({ criterion_id, outcome: "met" as const })),
+    ...remaining.map((criterion_id) => ({ criterion_id, outcome: "remaining" as const })),
+  ];
+}
 
 // ── v3.5.1: shared committed-round fixtures ─────────────────────────────────
 // One builder each for the two vault entry shapes every contract/dashboard
@@ -34,7 +42,7 @@ import { getPolicy } from "../policy.js";
 export function committedFeedbackRound(
   round: number,
   opts: {
-    contract?: RoundContract;
+    contract?: RoundContractProposal;
     outcome?: RoundOutcome;
     met?: string[];
     action?: string;
@@ -42,10 +50,14 @@ export function committedFeedbackRound(
     roundEvidence?: unknown[];
     files?: string[];
     progress?: number;
-    noExecutionEvidence?: boolean;
+    noExecutionReport?: boolean;
     discoveredConstraints?: string[];
     verificationFlags?: VerificationFlag[];
     loopId?: string;
+    /** v3.8: machine binding stamped on the committed contract. */
+    contractBinding?: unknown;
+    /** v3.8: committed item claims (replaces the legacy `met` list). */
+    contractItemClaims?: Array<{ item_id: string; outcome: "met" | "remaining" }>;
   } = {},
 ): VaultEntry {
   const loopId = opts.loopId ?? "cc";
@@ -55,17 +67,18 @@ export function committedFeedbackRound(
     loop_lineage: {
       round,
       round_transaction: {
-        schema_version: 1,
+        schema_version: 2,
         round_id: `loop:${loopId}:round:${round}`,
         snapshot: {
-          schemaVersion: 1,
+          schemaVersion: 2,
           roundId: `loop:${loopId}:round:${round}`,
           loopId,
           round,
           attempt: opts.attempt ?? 1,
           phase: "committed",
           beforeEvidence: [],
-          roundEvidence: opts.roundEvidence,
+          afterEvidence: opts.roundEvidence,
+          ...(opts.contractBinding !== undefined ? { contractBinding: opts.contractBinding } : {}),
           createdAt: 0,
           updatedAt: 0,
           evaluation: makeSelfEvaluation({
@@ -76,14 +89,16 @@ export function committedFeedbackRound(
             outcome: opts.outcome,
             round_contract: opts.contract,
             discovered_constraints: opts.discoveredConstraints ?? [],
-            execution_evidence: opts.noExecutionEvidence
+            execution_report: opts.noExecutionReport
               ? undefined
-              : makeExecutionEvidence({
+              : makeExecutionReport({
                   files_changed: opts.files ?? [],
-                  test_results: { passed: 0, failed: 0, skipped: 0 },
-                  success_criteria_met: opts.met ?? [],
-                  success_criteria_remaining: [],
+                  tests_reported: { passed: 0, failed: 0, skipped: 0 },
+                  criterion_claims: criterionClaims(opts.met ?? []),
                   progress_estimate: opts.progress ?? 0.2,
+                  ...(opts.contractItemClaims
+                    ? { contract_item_claims: opts.contractItemClaims }
+                    : {}),
                 }),
           }),
         },
@@ -91,6 +106,46 @@ export function committedFeedbackRound(
           action: opts.action ?? "continue",
           verificationFlags: opts.verificationFlags ?? [],
         },
+      },
+    },
+  };
+}
+
+/** v3.8: A committed backtrack directive — the rollback record written when
+ *  the enforcement gate rolls a stalled round back. Its transaction carries a
+ *  full committed snapshot like every other committed round; `historyRounds`
+ *  excludes it from final history. */
+export function committedBacktrackRound(
+  round: number,
+  loopId = "test-loop",
+): VaultEntry {
+  return {
+    task_id: `loop:${loopId}:r${round}:feedback`,
+    loop_id: loopId,
+    loop_lineage: {
+      round,
+      round_transaction: {
+        schema_version: 2,
+        round_id: `loop:${loopId}:round:${round}`,
+        snapshot: {
+          schemaVersion: 2,
+          roundId: `loop:${loopId}:round:${round}`,
+          loopId,
+          round,
+          attempt: 1,
+          phase: "committed",
+          beforeEvidence: [],
+          afterEvidence: [],
+          evaluation: makeSelfEvaluation({
+            success: false,
+            output_summary: `Rolled back round ${round}.`,
+            constraint_violations: [],
+            should_continue: true,
+          }),
+          createdAt: 0,
+          updatedAt: 0,
+        },
+        result: { action: "backtrack", verificationFlags: [], roundSuccess: false },
       },
     },
   };
@@ -105,7 +160,7 @@ export function committedFeedbackRound(
 export function mergedLineageRound(
   round: number,
   opts: {
-    contract?: RoundContract;
+    contract?: RoundContractProposal;
     outcome?: RoundOutcome;
     met?: string[];
     action?: string;
@@ -116,6 +171,10 @@ export function mergedLineageRound(
     files?: string[];
     progress?: number;
     loopId?: string;
+    /** v3.8: machine binding stamped on the committed contract. */
+    contractBinding?: unknown;
+    /** v3.8: the round's committed item claims. */
+    contractItemClaims?: Array<{ item_id: string; outcome: "met" | "remaining" }>;
   } = {},
 ): Record<string, unknown> {
   const loopId = opts.loopId ?? "me";
@@ -126,33 +185,42 @@ export function mergedLineageRound(
     ...(opts.committed === false
       ? {}
       : { committed_action: opts.action ?? "continue" }),
-    execution_evidence: {
+    execution_report: {
       files_changed: opts.files ?? [],
-      test_results: { passed: 0, failed: 0, skipped: 0 },
-      success_criteria_met: opts.met ?? [],
-      success_criteria_remaining: [],
+      tests_reported: { passed: 0, failed: 0, skipped: 0 },
+      criterion_claims: criterionClaims(opts.met ?? []),
       progress_estimate: opts.progress ?? 0.2,
     },
   };
   if (opts.contract) lin.round_contract = opts.contract;
   if (opts.outcome !== undefined) lin.outcome = opts.outcome;
   if (opts.attempt !== undefined) lin.attempt = opts.attempt;
-  if (opts.roundEvidence !== undefined) lin.round_evidence = opts.roundEvidence;
+  if (opts.roundEvidence !== undefined) lin.after_evidence = opts.roundEvidence;
+  if (opts.contractBinding !== undefined) lin.contract_binding = opts.contractBinding;
   const body: Record<string, unknown> = {
     loop_id: loopId,
     task_id: `${loopId}:r${round}`,
     task_type: "loop_lineage",
     success: false,
-    execution_evidence: {
+    execution_report: {
       files_changed: opts.files ?? [],
-      test_results: { passed: 0, failed: 0, skipped: 0 },
-      success_criteria_met: opts.met ?? [],
-      success_criteria_remaining: [],
+      tests_reported: { passed: 0, failed: 0, skipped: 0 },
+      criterion_claims: criterionClaims(opts.met ?? []),
       progress_estimate: opts.progress ?? 0.2,
     },
   };
   if (opts.contract) body.round_contract = opts.contract;
   if (opts.outcome !== undefined) body.outcome = opts.outcome;
+  // decodeMergedRound reads `raw[key] ?? lineage[key]` — the body wins, so the
+  // item claims must be stamped on BOTH shapes.
+  if (opts.contractItemClaims) {
+    const withClaims = (report: Record<string, unknown>): Record<string, unknown> => ({
+      ...report,
+      contract_item_claims: opts.contractItemClaims,
+    });
+    lin.execution_report = withClaims(lin.execution_report as Record<string, unknown>);
+    body.execution_report = withClaims(body.execution_report as Record<string, unknown>);
+  }
   body.loop_lineage = lin;
   return body;
 }
@@ -199,7 +267,6 @@ export function writeMachineBackedPolicy(dir: string): void {
       providers: ["git"],
       timeout_ms: 120000,
       commands: [testCommandProvider()],
-      machine_backed_success: "required",
     },
   }, null, 2));
 }

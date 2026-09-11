@@ -9,7 +9,7 @@
 import type { LoopStore, VaultEntry } from "./loop-store.js";
 import { LoopForgeEngine } from "./engine.js";
 import { diffSnapshotCollections } from "./evidence-provider.js";
-import type { ProviderSnapshot } from "./evidence-provider.js";
+import type { ContractBinding, MachineObservation, RoundContractProposal } from "./protocol.js";
 import type { SelfEvaluation } from "./protocol.js";
 import type { PromptArtifact } from "./protocol.js";
 import {
@@ -17,12 +17,18 @@ import {
   type RoundProcessResult,
 } from "./round-coordinator.js";
 import { logEvent } from "./observability.js";
-import { isRecord } from "./token-utils.js";
+import { deriveContractId, deriveContractItemIds, isRecord } from "./token-utils.js";
+import { commandConfigHash, getPolicy } from "./policy.js";
 import { policyMetrics } from "./policy-metrics.js";
 import { VaultRoundCommitStore } from "./storage.js";
 import type { RoundCommitStore } from "./storage.js";
 
-export const ROUND_TRANSACTION_SCHEMA_VERSION = 1 as const;
+export const ROUND_TRANSACTION_SCHEMA_VERSION = 2 as const;
+
+/** v3.8: the closed set of machine-observation statuses. */
+const OBSERVATION_STATUSES = [
+  "observed", "passed", "failed", "timeout", "unavailable", "error", "aborted",
+] as const;
 
 export type RoundTransactionPhase =
   | "prepared"
@@ -39,11 +45,13 @@ export interface RoundTransactionSnapshot {
   round: number;
   attempt: number;
   phase: RoundTransactionPhase;
-  beforeEvidence: ProviderSnapshot[];
-  afterEvidence?: ProviderSnapshot[];
-  roundEvidence?: ProviderSnapshot[];
+  beforeEvidence: MachineObservation[];
+  afterEvidence?: MachineObservation[];
   evaluation?: SelfEvaluation;
   result?: RoundProcessResult;
+  /** v3.8: the contract binding resolved at commit time (see ContractBinding).
+   *  Absent when the committing round declared no contract. */
+  contractBinding?: ContractBinding;
   createdAt: number;
   updatedAt: number;
   /** Exact prompt delivered for the current attempt. */
@@ -60,8 +68,6 @@ export interface RoundTransactionInput {
   /** L4 (v3.7.x): previous round's rejection check (own-streak basis). */
   lastRejectionCheck?: string;
   successTrajectory: boolean[];
-  /** v2.12: Current clarification streak for R7 escalation. */
-  driftClarificationStreak?: number;
   /** v2.13: Files from skipped backtrack rounds for restore check. */
   backtrackSkippedFiles?: string[];
   /** M3 (v3.7.x): skipped-file git fingerprints at their failed rounds. */
@@ -69,7 +75,7 @@ export interface RoundTransactionInput {
   /** v2.12: Git HEAD of the backtrack restore point. The verification gate
    *  checks the workspace returns to this commit before accepting work. */
   backtrackTargetGitHead?: string;
-  actualEvidence: ProviderSnapshot[];
+  actualEvidence: MachineObservation[];
 }
 
 export interface RoundTransactionOutcome {
@@ -77,6 +83,50 @@ export interface RoundTransactionOutcome {
   result: RoundProcessResult;
   /** true when a prior committed decision was replayed from the vault. */
   replayed: boolean;
+}
+
+/** v3.8: The round's observation delta (before → after) — files that
+ *  appeared, disappeared, or changed content. DERIVED, never persisted: the
+ *  transaction stores only the two factual observation collections, and every
+ *  reader (gates, metrics, git-motion series, replay, audit) consumes this one
+ *  derivation. */
+export function deriveRoundObservationDelta(
+  before: MachineObservation[],
+  after: MachineObservation[],
+): MachineObservation[] {
+  return diffSnapshotCollections(before, after);
+}
+
+/** v3.8: The schema version stamped on a persisted transaction envelope, or
+ *  null when the value is not a transaction envelope at all. Used to surface
+ *  legacy documents explicitly instead of letting them vanish from history. */
+export function transactionSchemaVersionOf(value: unknown): number | null {
+  if (!isRecord(value)) return null;
+  return typeof value.schemaVersion === "number" ? value.schemaVersion : null;
+}
+
+/** v3.8: Resolve the machine binding a contract proposal carries at commit. */
+function resolveContractBinding(
+  proposal: RoundContractProposal | undefined,
+  loopId: string,
+): ContractBinding | undefined {
+  if (!proposal || !Array.isArray(proposal.items) || proposal.items.length === 0) {
+    return undefined;
+  }
+  const commands = getPolicy().evidence.commands ?? [];
+  const byName = new Map(commands.map((command) => [command.name, command]));
+  const configHashByCommand: Record<string, string> = {};
+  for (const item of proposal.items) {
+    for (const commandId of item.verify_with ?? []) {
+      const command = byName.get(commandId);
+      if (command) configHashByCommand[commandId] = commandConfigHash(command);
+    }
+  }
+  return {
+    rc_id: deriveContractId(loopId, proposal),
+    item_ids: deriveContractItemIds(proposal.items),
+    config_hash_by_command: configHashByCommand,
+  };
 }
 
 export function makeRoundId(loopId: string, round: number): string {
@@ -89,7 +139,7 @@ export function makeRoundId(loopId: string, round: number): string {
 export function prepareRoundTransaction(
   loopId: string,
   round: number,
-  beforeEvidence: ProviderSnapshot[],
+  beforeEvidence: MachineObservation[],
   promptArtifact?: PromptArtifact,
 ): RoundTransactionSnapshot {
   const now = Date.now();
@@ -132,7 +182,6 @@ export function prepareRejectedAttempt(
     attempt: promptArtifact.attempt,
     phase: "prompted",
     afterEvidence: undefined,
-    roundEvidence: undefined,
     evaluation: undefined,
     result: undefined,
     promptArtifact,
@@ -141,6 +190,14 @@ export function prepareRejectedAttempt(
 }
 
 
+/** v3.8: Shape check for a persisted contract binding. */
+function isContractBinding(value: unknown): value is ContractBinding {
+  if (!isRecord(value)) return false;
+  if (typeof value.rc_id !== "string" || !Array.isArray(value.item_ids)) return false;
+  if (!value.item_ids.every((id) => typeof id === "string")) return false;
+  return isRecord(value.config_hash_by_command);
+}
+
 export function isProcessResult(value: unknown): value is RoundProcessResult {
   if (!isRecord(value)) return false;
   return ["continue", "stop", "reject", "terminate", "backtrack"].includes(
@@ -148,21 +205,26 @@ export function isProcessResult(value: unknown): value is RoundProcessResult {
   ) && Array.isArray(value.verificationFlags);
 }
 
-function parseProviderSnapshots(value: unknown): ProviderSnapshot[] | null {
+function parseMachineObservations(value: unknown): MachineObservation[] | null {
   if (!Array.isArray(value)) return null;
-  const snapshots: ProviderSnapshot[] = [];
+  const observations: MachineObservation[] = [];
   for (const item of value) {
     if (!isRecord(item)) return null;
     if (
-      typeof item.provider !== "string" ||
-      typeof item.timestamp !== "number" ||
+      item.schemaVersion !== 1 ||
+      typeof item.providerId !== "string" ||
+      (item.kind !== "git" && item.kind !== "command" && item.kind !== "custom") ||
+      (item.phase !== "before" && item.phase !== "after") ||
+      typeof item.startedAt !== "number" ||
+      typeof item.finishedAt !== "number" ||
+      !(OBSERVATION_STATUSES as readonly string[]).includes(String(item.status)) ||
       !Array.isArray(item.files) ||
       !item.files.every((file) => typeof file === "string") ||
       !isRecord(item.data)
     ) return null;
-    snapshots.push(item as unknown as ProviderSnapshot);
+    observations.push(item as unknown as MachineObservation);
   }
-  return snapshots;
+  return observations;
 }
 
 /** Parse a persisted snapshot without trusting arbitrary vault data. */
@@ -180,17 +242,14 @@ export function parseRoundTransactionSnapshot(
     !["prepared", "prompted", "evaluated", "rejected", "committed", "terminated"]
       .includes(String(value.phase))
   ) return null;
-  const beforeEvidence = parseProviderSnapshots(value.beforeEvidence);
+  const beforeEvidence = parseMachineObservations(value.beforeEvidence);
   if (!beforeEvidence) return null;
   const afterEvidence = value.afterEvidence === undefined
     ? undefined
-    : parseProviderSnapshots(value.afterEvidence);
+    : parseMachineObservations(value.afterEvidence);
   if (value.afterEvidence !== undefined && !afterEvidence) return null;
-  const roundEvidence = value.roundEvidence === undefined
-    ? undefined
-    : parseProviderSnapshots(value.roundEvidence);
-  if (value.roundEvidence !== undefined && !roundEvidence) return null;
   if (value.result !== undefined && !isProcessResult(value.result)) return null;
+  if (value.contractBinding !== undefined && !isContractBinding(value.contractBinding)) return null;
   if (value.promptArtifact !== undefined) {
     if (!isRecord(value.promptArtifact)) return null;
     const artifact = value.promptArtifact;
@@ -208,7 +267,6 @@ export function parseRoundTransactionSnapshot(
     ...value,
     beforeEvidence,
     afterEvidence,
-    roundEvidence,
   } as unknown as RoundTransactionSnapshot;
   if (snapshot.roundId !== makeRoundId(snapshot.loopId, snapshot.round)) {
     return null;
@@ -263,7 +321,10 @@ export class RoundTransactionCoordinator {
     const attempt = snapshot.phase === "rejected"
       ? snapshot.attempt + 1
       : snapshot.attempt;
-    const roundEvidence = diffSnapshotCollections(
+    // v3.8: the round delta is DERIVED, never persisted — the transaction
+    // stores the two factual observation collections and this pure function
+    // is the single derivation every reader shares.
+    const roundDelta = deriveRoundObservationDelta(
       snapshot.beforeEvidence,
       input.actualEvidence,
     );
@@ -277,19 +338,18 @@ export class RoundTransactionCoordinator {
       lastSelfEval: input.lastSelfEval,
       consecutiveRejections: input.consecutiveRejections,
       lastRejectionCheck: input.lastRejectionCheck,
-      evidenceSnapshots: roundEvidence,
+      evidenceSnapshots: roundDelta,
       successTrajectory: input.successTrajectory,
       backtrackSkippedFiles: input.backtrackSkippedFiles,
       backtrackSkippedFingerprints: input.backtrackSkippedFingerprints,
       backtrackTargetGitHead: input.backtrackTargetGitHead,
-    }, input.driftClarificationStreak ?? 0);
+    });
 
     const evaluated: RoundTransactionSnapshot = {
       ...snapshot,
       attempt,
       phase: "evaluated",
       afterEvidence: input.actualEvidence,
-      roundEvidence,
       evaluation: input.selfEval,
       result,
       updatedAt: Date.now(),
@@ -308,6 +368,16 @@ export class RoundTransactionCoordinator {
     const committedSnapshot: RoundTransactionSnapshot = {
       ...evaluated,
       phase: "committed",
+      // v3.8: the contract binding is resolved HERE, at commit time, because
+      // the command configuration in force at declaration is not recoverable
+      // from the Vault afterwards. Machine-recomputed — never agent-supplied.
+      ...(() => {
+        const binding = resolveContractBinding(
+          input.selfEval.round_contract,
+          snapshot.loopId,
+        );
+        return binding ? { contractBinding: binding } : {};
+      })(),
       updatedAt: Date.now(),
     };
     const metadata: Record<string, unknown> = {

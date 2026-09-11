@@ -26,16 +26,6 @@ export function makeExecutionFeedback(overrides = {}) {
         ...overrides,
     };
 }
-export function makeExecutionEvidence(overrides = {}) {
-    return {
-        files_changed: [],
-        test_results: null,
-        success_criteria_met: [],
-        success_criteria_remaining: [],
-        progress_estimate: 0.0,
-        ...overrides,
-    };
-}
 export function makeLoopProjection(overrides = {}) {
     return {
         focus: null,
@@ -43,6 +33,7 @@ export function makeLoopProjection(overrides = {}) {
         phase: null,
         delegation: { pending: 0, last_results: [] },
         handoff: { summary: "", verified: [], open_risks: [] },
+        verified_subgoals: [],
         ...overrides,
     };
 }
@@ -81,20 +72,18 @@ export function makeSelfEvaluation(overrides = {}) {
         objective_refinement: "",
         emerged_subtasks: [],
         subgoal_updates: [],
-        execution_evidence: undefined,
+        execution_report: undefined,
         retracted_constraints: [],
         revised_success_criteria: [],
         wrong_assumptions: [],
         worker_results: [],
         compression_checkpoint: false,
         checkpoint_label: "",
-        next_action: undefined,
         stop_reason: undefined,
         outcome: undefined,
         blocker: undefined,
         retroactiveClaims: [],
         no_change_reason: undefined,
-        drift_clarification: undefined,
         prompt_requests: undefined,
         round_contract: undefined,
         ...overrides,
@@ -177,15 +166,13 @@ export function makeLoopRoundResult(overrides = {}) {
         objective_refinement: "",
         emerged_subtasks: [],
         subgoal_updates: [],
-        execution_evidence: undefined,
+        execution_report: undefined,
         retracted_constraints: [],
         revised_success_criteria: [],
         wrong_assumptions: [],
         worker_results: [],
         compression_checkpoint: false,
         checkpoint_label: "",
-        next_action: undefined,
-        drift_clarification: undefined,
         prompt_requests: undefined,
         outcome: undefined,
         blocker: undefined,
@@ -264,7 +251,7 @@ export function makeEnforcementResult(overrides = {}) {
         reason: "",
         fix_instructions: "",
         check: "",
-        clarification_accepted: false,
+        stopReason: undefined,
         ...overrides,
     };
 }
@@ -281,6 +268,16 @@ export function makeVerificationResult(overrides = {}) {
     return {
         verdict: "trusted",
         flags: [],
+        ...overrides,
+    };
+}
+export function makeExecutionReport(overrides = {}) {
+    return {
+        files_changed: [],
+        tests_reported: null,
+        criterion_claims: [],
+        contract_item_claims: [],
+        progress_estimate: 0.0,
         ...overrides,
     };
 }

@@ -34,12 +34,11 @@ import { buildLoopProjection } from "../loop-projection.js";
 import { deriveCognitiveFacts } from "../cognitive-facts.js";
 import { listVerifiedClaims } from "../evidence-claims.js";
 import { buildAudit } from "../audit.js";
-import { checkLoopHealth, deriveSubGoalId, validateSubGoalUpdates } from "../loop-compiler.js";
+import { buildExplain } from "../explain.js";
+import { checkLoopHealth } from "../loop-compiler.js";
+import { deriveEmergedItems, validateSubGoalUpdates } from "../subgoal-state.js";
 import { committedRoundsFromEntries } from "../committed-round.js";
-import {
-  contractRoundEvaluations,
-  deriveActiveRoundContract,
-} from "../round-contract.js";
+import { deriveActiveRoundContract, type ActiveContractView } from "../round-contract.js";
 import { getPolicy, validateLoopId } from "../policy.js";
 import { isRecord } from "../token-utils.js";
 import {
@@ -275,7 +274,6 @@ export class SessionManager implements SessionRegistry {
       maxRounds, successTrajectory: [], status: "running", createdAt: Date.now(),
       consecutiveRejections: 0,
       lastRejectionCheck: "",
-      driftClarificationStreak: 0,
       backtrackSkippedFiles: [],
       backtrackSkippedFingerprints: {},
       evidenceBaseline: [],
@@ -322,7 +320,6 @@ export class SessionManager implements SessionRegistry {
       // v1.13: Enforcement gate state
       consecutiveRejections: 0,
       lastRejectionCheck: "",
-      driftClarificationStreak: 0,
       backtrackSkippedFiles: [],
       backtrackSkippedFingerprints: {},
       evidenceBaseline,
@@ -616,12 +613,22 @@ export class SessionManager implements SessionRegistry {
   ): Record<string, unknown> {
     const session = this.sessions.get(sessionId);
     if (!session) {
-      return { error: `session not found: ${sessionId}` };
+      return {
+        error: "session_not_found",
+        errorMessage: `session not found: ${sessionId}`,
+        sessionId,
+      };
     }
     const expectedRoundId = session.roundSnapshot?.roundId
       ?? makeRoundId(session.loopId, session.currentRound);
     if (expectedRoundId !== roundId) {
-      return { error: "roundId does not match the current round — re-run loopforge_gate_check with the roundId from the latest response" };
+      return {
+        error: "round_id_mismatch",
+        errorMessage: "roundId does not match the current round — re-run loopforge_gate_check " +
+          "with the roundId from the latest response",
+        sessionId,
+        roundId,
+      };
     }
     const verdict = preflightStructuredGate(action);
     if (verdict.kind === "user") {
@@ -675,7 +682,13 @@ export class SessionManager implements SessionRegistry {
         return lineage.session_id === sessionId;
       });
       loopId = persistedEntry?.loop_id;
-      if (!loopId) return { error: `session not found: ${sessionId}` };
+      if (!loopId) {
+        return {
+          error: "session_not_found",
+          errorMessage: `session not found: ${sessionId}`,
+          sessionId,
+        };
+      }
       const claimed = this.claimSessionEntry(loopId);
       if (!claimed) {
         return { ...this.leaseConflictResult(loopId, persistedEntry) };
@@ -687,13 +700,23 @@ export class SessionManager implements SessionRegistry {
         : 0;
     }
 
-    if (!loopId) return { error: `session not found: ${sessionId}` };
+    if (!loopId) {
+      return {
+        error: "session_not_found",
+        errorMessage: `session not found: ${sessionId}`,
+        sessionId,
+      };
+    }
     try {
       const prefix = `loop:${loopId}:gate:`;
       const opened = queryLoopEntries(this.loopStore, loopId, { prefix })
         .find((entry) => entry.task_type === "gate_opened" && entry.gate_id === gateId);
       if (!opened) {
-        return { error: `no gate_opened record for gate ${gateId} — the gate may have expired or was never recorded` };
+        return {
+          error: "state_unavailable",
+          errorMessage: `no gate_opened record for gate ${gateId} — the gate may have ` +
+            "expired or was never recorded",
+        };
       }
       const actionText = typeof opened.gate_action === "string" ? opened.gate_action : "";
       const openedLineage = isRecord(opened.loop_lineage) ? opened.loop_lineage : {};
@@ -716,7 +739,11 @@ export class SessionManager implements SessionRegistry {
         try {
           descriptor = JSON.parse(actionText) as GateActionDescriptor;
         } catch {
-          return { error: `gate ${gateId} has a corrupted structured action — re-run loopforge_gate_check` };
+          return {
+            error: "state_unavailable",
+            errorMessage: `gate ${gateId} has a corrupted structured action — ` +
+              "re-run loopforge_gate_check",
+          };
         }
         const verdict = preflightStructuredGate(descriptor);
         matchedId = verdict.gateId;
@@ -730,10 +757,18 @@ export class SessionManager implements SessionRegistry {
         userScope = derived.gate.blockedScope ?? [];
       }
       if (matchedId !== gateId) {
-        return { error: "gateId does not match the recorded action — the action changed, old approvals expire" };
+        return {
+          error: "invalid_argument",
+          errorMessage: "gateId does not match the recorded action — the action changed, " +
+            "old approvals expire",
+        };
       }
       if (!userKind) {
-        return { error: "agent gates are resolved by submitting the required evidence, not by user approval" };
+        return {
+          error: "invalid_argument",
+          errorMessage: "agent gates are resolved by submitting the required evidence, " +
+            "not by user approval",
+        };
       }
       const decision = makeGateDecision({
         gateId,
@@ -828,15 +863,33 @@ export class SessionManager implements SessionRegistry {
     const expectedRoundId = session.roundSnapshot?.roundId
       ?? makeRoundId(session.loopId, session.currentRound);
     if (expectedRoundId !== roundId) return []; // stale/foreign submission — advance handles it
+    const known = this.knownSubGoals(session, emerged);
+    if (!known) return []; // fail open: cannot observe
+    return validateSubGoalUpdates(known, updates).map((error) => ({
+      field: "subgoal_updates",
+      reason: error.reason,
+      detail: `${error.reason.replace(/_/g, " ")}: ${error.id}`,
+    }));
+  }
+
+  /** v3.8: The reference space for sub-goal ids, shared by `subgoal_updates`
+   *  referential validation and contract-item `subgoal_refs` validation: the
+   *  compiled sub_goals of the current round (exactly the set the prompt
+   *  rendered) plus this payload's own emerged items, so a sub-goal may be
+   *  created and referenced in one round. Null when the compile cannot be
+   *  observed — callers fail open and keep their shape checks strict. */
+  private knownSubGoals(
+    session: McpSession,
+    emerged: string[],
+  ): import("../protocol.js").SubGoal[] | null {
     const response = this.compileContext(session);
-    if (!response?.sub_goals) return []; // fail open: cannot observe
+    if (!response?.sub_goals) return null;
     const known = [...response.sub_goals];
-    for (const desc of emerged) {
-      const id = deriveSubGoalId(desc);
-      if (!known.some((sg) => sg.id === id)) {
+    for (const item of deriveEmergedItems(session.loopId, session.currentRound, emerged)) {
+      if (!known.some((sg) => sg.id === item.id)) {
         known.push({
-          id,
-          description: desc.trim(),
+          id: item.id,
+          description: item.description,
           status: "pending",
           declared_at_round: session.currentRound,
           status_changed_at_round: session.currentRound,
@@ -844,11 +897,34 @@ export class SessionManager implements SessionRegistry {
         });
       }
     }
-    return validateSubGoalUpdates(known, updates).map((error) => ({
-      field: "subgoal_updates",
-      reason: error.reason,
-      detail: `${error.reason.replace(/_/g, " ")}: ${error.id}`,
-    }));
+    return known;
+  }
+
+  /** v3.8: pre-advance referential check for contract `subgoal_refs`. The
+   *  reference space is the SAME derived sub-goal set the agent saw in its
+   *  prompt plus its own same-round `emerged_subtasks` — a declaration may not
+   *  forge an `sg-` id that corresponds to nothing. Returns null when the
+   *  compile cannot be observed (fail open — the shape checks stay strict). */
+  preflightKnownSubGoalIds(
+    sessionId: string,
+    emerged: string[],
+  ): ReadonlySet<string> | null {
+    const session = this.sessions.get(sessionId);
+    if (!session) return null;
+    const known = this.knownSubGoals(session, emerged);
+    return known ? new Set(known.map((subGoal) => subGoal.id)) : null;
+  }
+
+  /** v3.8: pre-advance referential check for contract_item_claims. The
+   *  reference space is the SAME derived ACTIVE contract the agent saw in its
+   *  prompt. Returns the active contract's item ids, or null when the
+   *  contract cannot be observed (fail open — the shape checks stay strict). */
+  preflightContractItems(sessionId: string): ReadonlySet<string> | null {
+    const session = this.sessions.get(sessionId);
+    if (!session) return null;
+    const active = this.getActiveContract(sessionId);
+    if (!active) return new Set();
+    return new Set(active.items.map((item) => item.id));
   }
 
   /** Typed cognitive state projection for an active session. Derived on
@@ -863,13 +939,31 @@ export class SessionManager implements SessionRegistry {
     ];
     const compileResponse = this.compileContext(session);
     const openGates = this.lifecycle.listOpenGateDescriptions(session.loopId);
+    // v3.8: the projection reads the WHOLE committed history. The old
+    // `beforeRound: session.currentRound` bound is only correct while the loop
+    // is running, where currentRound is always one past the last committed
+    // round; a stop / terminate / max_rounds leaves currentRound ON the round
+    // it just committed, so the bound silently dropped the loop's final round
+    // and the projection disagreed with audit and explain about it.
     const projection = buildLoopProjection(deriveCognitiveFacts({
       compileResponse,
-      rounds: committedRoundsFromEntries(entries, session.currentRound),
+      rounds: committedRoundsFromEntries(entries),
       verifiedClaims: listVerifiedClaims(entries, session.loopId),
       openGates,
     }));
     return projection ? { ...projection } : null;
+  }
+
+  /** v3.8: Read-only per-round "why" view over committed facts. Never
+   *  rebuilds history and never writes. */
+  getExplain(loopId: string, round?: number): Record<string, unknown> {
+    validateLoopId(loopId);
+    const prefix = `loop:${loopId}:`;
+    const entries = [
+      ...queryLoopEntries(this.loopStore, loopId, { prefix }),
+      ...queryLoopEntries(this.loopStore, loopId, { prefix, feedbackOnly: true }),
+    ];
+    return buildExplain(loopId, entries, round) as unknown as Record<string, unknown>;
   }
 
   /** Read-only end-of-loop audit (verification view). Never writes. */
@@ -898,7 +992,7 @@ export class SessionManager implements SessionRegistry {
    *  derived from the committed :feedback evals (the SAME adapter + walker
    *  the verification gate uses; display-only, zero persistence). Null when
    *  nothing is active (whole-task round). */
-  getActiveContract(sessionId: string): import("../protocol.js").RoundContract | null {
+  getActiveContract(sessionId: string): ActiveContractView | null {
     const session = this.sessions.get(sessionId);
     if (!session) return null;
     const prefix = `loop:${session.loopId}:`;
@@ -907,7 +1001,7 @@ export class SessionManager implements SessionRegistry {
       ...queryLoopEntries(this.loopStore, session.loopId, { prefix, feedbackOnly: true }),
     ];
     return deriveActiveRoundContract(
-      contractRoundEvaluations(committedRoundsFromEntries(entries, session.currentRound)),
+      committedRoundsFromEntries(entries, session.currentRound),
     );
   }
 

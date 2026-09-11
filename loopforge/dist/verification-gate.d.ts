@@ -19,7 +19,7 @@
  * framed as declaration / execution / closure stages in their doc comments.
  */
 import type { VaultEntry } from "./loop-store.js";
-import type { ProviderSnapshot } from "./evidence-provider.js";
+import type { MachineObservation } from "./protocol.js";
 import type { SelfEvaluation, VerificationResult } from "./protocol.js";
 export declare const CHECK_SUCCESS_WITH_REMAINING_CRITERIA = "success_with_remaining_criteria";
 export declare const CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE = "success_without_verified_evidence";
@@ -42,34 +42,16 @@ export declare const CHECK_VERIFICATION_ENTRYPOINT_MODIFIED = "verification_entr
 /** v3.3: Test files changed in the same round a verification command passed.
  *  Warn-only — the command result stays usable. */
 export declare const CHECK_TEST_FILES_MODIFIED = "test_files_modified";
-export declare const CHECK_INTENT_DRIFT = "intent_drift";
-export declare const CHECK_SUBGOAL_DRIFT = "subgoal_drift";
 export declare const CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED = "backtrack_workspace_not_restored";
 export declare const CHECK_CRITERIA_CLAIMS_UNVERIFIED = "criteria_claims_unverified";
-/** Contract proposed with an empty done_when — nothing is promised, so
- *  nothing can be verified at the boundary. Warn: the contract can be fixed
- *  by re-declaring next round. */
-export declare const CHECK_ROUND_UNDERSPECIFIED = "round_underspecified";
-/** done_when items exist but verification_plan is empty or names commands
- *  that are not configured AND enabled in policy.evidence.commands — the
- *  completion claims could never be machine-checked. Warn. */
-export declare const CHECK_ROUND_UNVERIFIABLE = "round_unverifiable";
+/** v3.8: Contract items claimed met but not machine-verified this round.
+ *  The round commits; the debt is surfaced and the enforcement gate's
+ *  verification-debt row handles a persistent pattern. */
+export declare const CHECK_CONTRACT_ITEMS_UNVERIFIED = "contract_items_unverified";
 /** The round's actual git changes include files outside the ACTIVE
- *  contract's declared scope. Warn + drift_clarification exemption
- *  (R7-style). */
+ *  contract's declared scope. Warn; v3.8: not waivable by explanation — the
+ *  enforcement gate rejects, and repeated drift terminates. */
 export declare const CHECK_ROUND_SCOPE_DRIFT = "round_scope_drift";
-/** success claimed under the ACTIVE contract whose done_when items are
- *  either claimed met without machine-verified evidence or silently dropped
- *  (not in success_criteria_met NOR success_criteria_remaining). Error. */
-export declare const CHECK_PREMATURE_BOUNDARY = "premature_boundary";
-/** v3.5: Closing a Round Contract is a success-class claim and must be
- *  machine-backed. The eval's met claims satisfy every done_when of the
- *  ACTIVE contract but its verification_plan commands did not pass this
- *  round. Error; warn under evidence.machine_backed_success "warn"; never
- *  downgraded by no_change_reason (all done_when met contradicts "no
- *  change"). Fail-open: plan names no longer configured+enabled are not
- *  required (cannot observe). */
-export declare const CHECK_CONTRACT_COMPLETION_UNVERIFIED = "contract_completion_unverified";
 /** v3.5: The ACTIVE contract is still open (not completed, not blocked)
  *  while a different contract was proposed — the proposal is ignored until
  *  the active one closes. Warn: the walker still ignores it; this only
@@ -110,7 +92,7 @@ export interface EvidenceStatus {
     gitObserved: boolean;
     /** A passed after-phase command snapshot exists. */
     commandVerified: boolean;
-    /** Agent-reported test_results agree with a passed command's parsed stdout. */
+    /** Agent-reported tests_reported agree with a passed command's parsed stdout. */
     testsMachineBacked: boolean;
     /** Agent-reported files_changed equals the git diff set exactly. */
     reportedFilesMatch: boolean;
@@ -119,7 +101,7 @@ export interface EvidenceStatus {
  *  capability is modeled explicitly (verified / unavailable / absent) instead
  *  of letting evidence-dependent checks silently disappear when snapshots are
  *  missing — the fix for the "weakest when it matters most" gap. */
-export declare function deriveEvidenceStatus(selfEval: SelfEvaluation, evidenceSnapshots: ProviderSnapshot[]): EvidenceStatus;
+export declare function deriveEvidenceStatus(selfEval: SelfEvaluation, evidenceSnapshots: MachineObservation[]): EvidenceStatus;
 /** Per-round machine progress over decoded committed history. */
 export declare function machineProgressSeries(vaultEntries: VaultEntry[], currentRound: number, lookback: number): boolean[] | null;
 interface ParsedTestCounts {
@@ -138,7 +120,7 @@ interface ParsedTestCounts {
  *  Recognized formats: Jest verbose/compact, Mocha, pytest/unittest, Go test,
  *  and PHPUnit OK summaries. */
 export declare function parseTestOutput(stdout: string): ParsedTestCounts | null;
-export declare function verifySelfEvaluation(selfEval: SelfEvaluation, currentRound: number, vaultEntries: VaultEntry[], prevSelfEval?: SelfEvaluation | null, evidenceSnapshots?: ProviderSnapshot[],
+export declare function verifySelfEvaluation(selfEval: SelfEvaluation, currentRound: number, vaultEntries: VaultEntry[], prevSelfEval?: SelfEvaluation | null, evidenceSnapshots?: MachineObservation[],
 /** v2.13: Files from skipped backtrack rounds. If the agent's
  *  files_changed overlaps significantly with these, the workspace
  *  was not properly restored before working. */

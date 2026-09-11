@@ -122,7 +122,7 @@ export {
   LoopForgeEngine,
   createEngine,
   buildSelfEvaluation,
-  parseExecutionEvidence,
+  parseExecutionReport,
   parseCriterionRevisions,
   parseWorkerResults,
 } from "./engine.js";
@@ -135,25 +135,26 @@ export type { StopReason } from "./protocol.js";
 export { McpServer } from "./mcp/server.js";
 export { SessionManager } from "./mcp/session.js";
 export type { McpSession, McpSessionSummary } from "./mcp/session.js";
-// EvidenceProvider (v1.18)
+// EvidenceProvider (v1.18 / v3.8: machine observations)
 export {
   EvidenceCollector,
   GitEvidenceProvider,
   CommandEvidenceProvider,
   registerEvidenceProvider,
   unregisterEvidenceProvider,
+  isProviderRegistered,
+  isPassedAfterObservation,
+  gitChangedFiles,
   extractFilesFromSnapshots,
   diffSnapshots,
   diffSnapshotCollections,
 } from "./evidence-provider.js";
 export type {
-  ProviderSnapshot,
   EvidenceProvider,
   EvidenceCaptureContext,
   EvidenceCaptureResult,
   EvidenceCollectOptions,
   EvidenceProviderFactory,
-  CommandEvidenceData,
 } from "./evidence-provider.js";
 
 // Structured tracing and policy effectiveness metrics (v1.20)

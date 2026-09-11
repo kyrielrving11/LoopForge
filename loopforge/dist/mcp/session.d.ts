@@ -14,6 +14,7 @@
  */
 import type { GateActionDescriptor } from "../protocol.js";
 import type { ExternalContextProvider, LoopTerminalSink, SelfEvaluation } from "../protocol.js";
+import { type ActiveContractView } from "../round-contract.js";
 import type { LoopStore } from "../loop-store.js";
 import type { PolicyMetricsSnapshot } from "../policy-metrics.js";
 import type { SessionStateStore } from "../storage.js";
@@ -113,16 +114,37 @@ export declare class SessionManager implements SessionRegistry {
         reason: string;
         detail: string;
     }>;
+    /** v3.8: The reference space for sub-goal ids, shared by `subgoal_updates`
+     *  referential validation and contract-item `subgoal_refs` validation: the
+     *  compiled sub_goals of the current round (exactly the set the prompt
+     *  rendered) plus this payload's own emerged items, so a sub-goal may be
+     *  created and referenced in one round. Null when the compile cannot be
+     *  observed — callers fail open and keep their shape checks strict. */
+    private knownSubGoals;
+    /** v3.8: pre-advance referential check for contract `subgoal_refs`. The
+     *  reference space is the SAME derived sub-goal set the agent saw in its
+     *  prompt plus its own same-round `emerged_subtasks` — a declaration may not
+     *  forge an `sg-` id that corresponds to nothing. Returns null when the
+     *  compile cannot be observed (fail open — the shape checks stay strict). */
+    preflightKnownSubGoalIds(sessionId: string, emerged: string[]): ReadonlySet<string> | null;
+    /** v3.8: pre-advance referential check for contract_item_claims. The
+     *  reference space is the SAME derived ACTIVE contract the agent saw in its
+     *  prompt. Returns the active contract's item ids, or null when the
+     *  contract cannot be observed (fail open — the shape checks stay strict). */
+    preflightContractItems(sessionId: string): ReadonlySet<string> | null;
     /** Typed cognitive state projection for an active session. Derived on
      *  demand — zero persistence. Null when nothing meaningful exists yet. */
     getProjection(sessionId: string): Record<string, unknown> | null;
+    /** v3.8: Read-only per-round "why" view over committed facts. Never
+     *  rebuilds history and never writes. */
+    getExplain(loopId: string, round?: number): Record<string, unknown>;
     /** Read-only end-of-loop audit (verification view). Never writes. */
     getAudit(loopId: string): Record<string, unknown> | null;
     /** v3.5: The ACTIVE Round Contract governing the session's next round —
      *  derived from the committed :feedback evals (the SAME adapter + walker
      *  the verification gate uses; display-only, zero persistence). Null when
      *  nothing is active (whole-task round). */
-    getActiveContract(sessionId: string): import("../protocol.js").RoundContract | null;
+    getActiveContract(sessionId: string): ActiveContractView | null;
     /** v2.12: Policy metrics that survive restarts — vault-derived round
      *  statistics (A4 port) folded with this process's live observations.
      *  Non-durable fields (evidence, vault errors) come from live only. */

@@ -7,12 +7,12 @@
  */
 import type { LoopStore } from "./loop-store.js";
 import { LoopForgeEngine } from "./engine.js";
-import type { ProviderSnapshot } from "./evidence-provider.js";
+import type { ContractBinding, MachineObservation } from "./protocol.js";
 import type { SelfEvaluation } from "./protocol.js";
 import type { PromptArtifact } from "./protocol.js";
 import { type RoundProcessResult } from "./round-coordinator.js";
 import type { RoundCommitStore } from "./storage.js";
-export declare const ROUND_TRANSACTION_SCHEMA_VERSION: 1;
+export declare const ROUND_TRANSACTION_SCHEMA_VERSION: 2;
 export type RoundTransactionPhase = "prepared" | "prompted" | "evaluated" | "rejected" | "committed" | "terminated";
 export interface RoundTransactionSnapshot {
     schemaVersion: typeof ROUND_TRANSACTION_SCHEMA_VERSION;
@@ -21,11 +21,13 @@ export interface RoundTransactionSnapshot {
     round: number;
     attempt: number;
     phase: RoundTransactionPhase;
-    beforeEvidence: ProviderSnapshot[];
-    afterEvidence?: ProviderSnapshot[];
-    roundEvidence?: ProviderSnapshot[];
+    beforeEvidence: MachineObservation[];
+    afterEvidence?: MachineObservation[];
     evaluation?: SelfEvaluation;
     result?: RoundProcessResult;
+    /** v3.8: the contract binding resolved at commit time (see ContractBinding).
+     *  Absent when the committing round declared no contract. */
+    contractBinding?: ContractBinding;
     createdAt: number;
     updatedAt: number;
     /** Exact prompt delivered for the current attempt. */
@@ -41,8 +43,6 @@ export interface RoundTransactionInput {
     /** L4 (v3.7.x): previous round's rejection check (own-streak basis). */
     lastRejectionCheck?: string;
     successTrajectory: boolean[];
-    /** v2.12: Current clarification streak for R7 escalation. */
-    driftClarificationStreak?: number;
     /** v2.13: Files from skipped backtrack rounds for restore check. */
     backtrackSkippedFiles?: string[];
     /** M3 (v3.7.x): skipped-file git fingerprints at their failed rounds. */
@@ -50,7 +50,7 @@ export interface RoundTransactionInput {
     /** v2.12: Git HEAD of the backtrack restore point. The verification gate
      *  checks the workspace returns to this commit before accepting work. */
     backtrackTargetGitHead?: string;
-    actualEvidence: ProviderSnapshot[];
+    actualEvidence: MachineObservation[];
 }
 export interface RoundTransactionOutcome {
     snapshot: RoundTransactionSnapshot;
@@ -58,8 +58,18 @@ export interface RoundTransactionOutcome {
     /** true when a prior committed decision was replayed from the vault. */
     replayed: boolean;
 }
+/** v3.8: The round's observation delta (before → after) — files that
+ *  appeared, disappeared, or changed content. DERIVED, never persisted: the
+ *  transaction stores only the two factual observation collections, and every
+ *  reader (gates, metrics, git-motion series, replay, audit) consumes this one
+ *  derivation. */
+export declare function deriveRoundObservationDelta(before: MachineObservation[], after: MachineObservation[]): MachineObservation[];
+/** v3.8: The schema version stamped on a persisted transaction envelope, or
+ *  null when the value is not a transaction envelope at all. Used to surface
+ *  legacy documents explicitly instead of letting them vanish from history. */
+export declare function transactionSchemaVersionOf(value: unknown): number | null;
 export declare function makeRoundId(loopId: string, round: number): string;
-export declare function prepareRoundTransaction(loopId: string, round: number, beforeEvidence: ProviderSnapshot[], promptArtifact?: PromptArtifact): RoundTransactionSnapshot;
+export declare function prepareRoundTransaction(loopId: string, round: number, beforeEvidence: MachineObservation[], promptArtifact?: PromptArtifact): RoundTransactionSnapshot;
 /** Attach the next prompt attempt to a rejected logical round without changing
  * its identity or evidence baseline. Evaluation fields belong to the previous
  * attempt and are cleared before the Agent receives the retry prompt. */

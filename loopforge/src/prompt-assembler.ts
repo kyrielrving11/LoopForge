@@ -126,7 +126,7 @@ const VERIFICATION_ACTIONS: Readonly<Record<string, string>> = {
   success_with_remaining_criteria:
     "Complete the remaining criteria before claiming success, or set success=false and report what remains.",
   success_without_verified_evidence:
-    "Back the success claim with machine-verifiable evidence: run tests or a required verification command and report the actual output. If you genuinely performed no work, provide execution_evidence and declare no_change_reason.",
+    "Back the success claim with machine-verifiable evidence: run tests or a required verification command and report the actual output. If you genuinely performed no work, provide execution_report and declare no_change_reason.",
   outcome_success_contradiction:
     "Reconcile the declared outcome with the success flag and resubmit an honest evaluation.",
   blocked_without_blocker:
@@ -147,10 +147,6 @@ const VERIFICATION_ACTIONS: Readonly<Record<string, string>> = {
     "Re-run the required verification command and report its actual output before claiming success.",
   command_evidence_mismatch:
     "Report the true command output and reconcile the mismatch.",
-  intent_drift:
-    "Explain the pivot in drift_clarification with concrete references, or redo the round as promised.",
-  subgoal_drift:
-    "Reconcile the sub-goal list with your reported work before resubmitting.",
   backtrack_workspace_not_restored:
     "Restore the skipped-round files and the expected git HEAD, then resubmit.",
   criteria_claims_unverified:
@@ -161,19 +157,13 @@ const VERIFICATION_ACTIONS: Readonly<Record<string, string>> = {
     "Re-run the verification command on the changed entrypoint, or revert the entrypoint change and re-run.",
   test_files_modified:
     "Re-run the verification command after the test-file changes and report the fresh output.",
-  round_underspecified:
-    "Declare this round's contract with a non-empty done_when list — what must be true when the round is done?",
-  round_unverifiable:
-    "Name only configured, enabled evidence.commands in verification_plan, or drop done_when items that cannot be machine-verified.",
   round_scope_drift:
-    "Revert the out-of-scope file changes, or extend the contract scope to cover them and explain why in drift_clarification.",
-  premature_boundary:
-    "Run the contract's verification_plan commands and report real output before claiming done_when met; or set success=false and list the items in success_criteria_remaining (no_change_reason does not apply to contract claims).",
-  // v3.5 — contract completion machine-backing + premature-replacement warn
-  contract_completion_unverified:
-    "Completion under the ACTIVE Round Contract requires its verification_plan commands to pass this round — fix the underlying failure so they pass and resubmit. Completion claims are not accepted without machine verification (no_change_reason does not apply).",
+    "Revert the out-of-scope file changes, or close the active contract and declare the extended scope in a new proposal. Scope drift is a machine fact and is not waivable by explanation.",
+  // v3.8 — item model: claimed-but-unverified debt
+  contract_items_unverified:
+    "Run the bound command(s) for each claimed item so they are observed passing, or report the item as remaining (or declare outcome=\"blocked\").",
   contract_premature:
-    "The ACTIVE contract is still open — restate it unchanged to continue it; a different contract is ignored until the active one is completed or blocked.",
+    "The ACTIVE contract is still open — restate it unchanged to continue it; a different contract is ignored until every item is verified or the round reports blocked.",
   // v3.7.1 — opt-in gate layer: cited gates need an approved human decision
   user_gate_unresolved:
     "The round cites a high-risk action without an approved human decision. Run loopforge_gate_check, present the approval question, call loopforge_gate_resolve after the human decides, and resubmit with the approved gate id in evaluation.gate_ids.",
@@ -564,13 +554,6 @@ function l1Sections(
       mandatory: false,
     });
   }
-  if (state.nextAction) {
-    sections.push({
-      id: "next_action",
-      text: section("Next Action", state.nextAction),
-      mandatory: false,
-    });
-  }
   return sections;
 }
 
@@ -692,13 +675,6 @@ function l2Sections(
       mandatory: false,
     });
   }
-  if (state.nextAction) {
-    sections.push({
-      id: "next_action",
-      text: section("Next Action", state.nextAction),
-      mandatory: false,
-    });
-  }
   if (state.externalContext) {
     sections.push({
       id: "external_context",
@@ -739,8 +715,13 @@ function l2Sections(
       lines.push(`**Machine (git)**: ${motion}`);
     }
     if (state.criterionStatuses.length > 0) {
-      const metCount = state.criterionStatuses.filter((cs) => cs.status === "met").length;
-      lines.push(`**Machine (criteria)**: ${metCount}/${state.criterionStatuses.length} met across committed rounds`);
+      const verifiedCount = state.criterionStatuses.filter((cs) => cs.status === "verified").length;
+      const claimedCount = state.criterionStatuses.filter((cs) => cs.status === "claimed").length;
+      lines.push(
+        `**Machine (criteria)**: ${verifiedCount}/${state.criterionStatuses.length} verified` +
+        (claimedCount > 0 ? `, ${claimedCount} claimed-but-unverified` : "") +
+        " across committed rounds",
+      );
     }
     if (state.progress.tests) {
       lines.push(
@@ -762,7 +743,11 @@ function l2Sections(
       const idEnabled = getPolicy().evolution.constraint_id_enabled;
       lines.push("", "**Goal → Criteria**:");
       for (const cs of state.criterionStatuses) {
-        const icon = cs.status === "met" ? "✅" : cs.status === "remaining" ? "⬜" : "❔";
+        const icon = cs.status === "verified" ? "✅"
+          : cs.status === "claimed" ? "🟡"
+          : cs.status === "insufficient" ? "🟠"
+          : cs.status === "contradicted" ? "⛔"
+          : cs.status === "remaining" ? "⬜" : "❔";
         const idTag = idEnabled ? ` [\`${cs.id}\`]` : "";
         const met = cs.met_at_round !== undefined ? `(met R${cs.met_at_round})` : "";
         const related = cs.related_subgoal_ids.length > 0
@@ -1052,8 +1037,8 @@ export function assemblePromptArtifact(input: PromptAssemblyInput): PromptArtifa
     "- `should_continue`: Set to **`false` ONLY** when the ENTIRE loop task is done.",
     "  Partial progress or completed subtasks → `true`.",
     "- `constraint_violations`: Be honest. List every constraint you actually violated.",
-    "- `execution_evidence.files_changed`: List files you modified — used for verification.",
-    "- `execution_evidence.test_results`: Report actual test runner output.",
+    "- `execution_report.files_changed`: List files you modified — used for verification.",
+    "- `execution_report.tests_reported`: Report actual test runner output.",
     "- `progress_estimate`: A number 0.0–1.0 reflecting overall task completion.",
     "",
     "### If the Prompt Says \"REJECTED\"",

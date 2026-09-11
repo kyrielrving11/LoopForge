@@ -18,15 +18,15 @@
  * changes run order or verdict aggregation. Round Contract checks are further
  * framed as declaration / execution / closure stages in their doc comments.
  */
-import { getPolicy, isConfiguredCommand } from "./policy.js";
+import { isPassedAfterObservation } from "./evidence-provider.js";
+import { getPolicy } from "./policy.js";
 import { makeVerificationFlag, makeVerificationResult } from "./protocol.js";
-import { jaccardSimilarity, tokenize, isRecord, entryRound, extractFilePathTokens } from "./token-utils.js";
-import { deriveSubGoalId } from "./loop-compiler.js";
-import { committedRoundsFromEntries, entrySubGoalUpdates, machineGitMotionSeries, entryViolations, } from "./committed-round.js";
-import { contractRoundEvaluations, contractDoneWhenSatisfied, contractItemMatches, deriveActiveRoundContract, } from "./round-contract.js";
-import { stableStringify } from "./canonical-state.js";
+import { isRecord, entryRound, extractFilePathTokens } from "./token-utils.js";
+import { committedRoundsFromEntries, machineGitMotionSeries, entryViolations, } from "./committed-round.js";
+import { deriveActiveRoundContract, sameContract, } from "./round-contract.js";
+import { deriveContractItemStatuses, } from "./contract-items.js";
 import { deriveClaimView, resolveRoundFiles } from "./evidence-claims.js";
-import { effectiveSuccess, parseRoundContract } from "./self-eval.js";
+import { claimedMetCriteria, claimedRemainingCriteria, effectiveSuccess } from "./self-eval.js";
 import { deriveGate, preflightStructuredGate } from "./cognitive-governance.js";
 // ═══════════════════════════════════════════════════════════════════════════
 // v2.12: Check-name constants — single source of truth so the enforcement
@@ -64,8 +64,6 @@ export const CHECK_VERIFICATION_ENTRYPOINT_MODIFIED = "verification_entrypoint_m
 /** v3.3: Test files changed in the same round a verification command passed.
  *  Warn-only — the command result stays usable. */
 export const CHECK_TEST_FILES_MODIFIED = "test_files_modified";
-export const CHECK_INTENT_DRIFT = "intent_drift";
-export const CHECK_SUBGOAL_DRIFT = "subgoal_drift";
 export const CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED = "backtrack_workspace_not_restored";
 export const CHECK_CRITERIA_CLAIMS_UNVERIFIED = "criteria_claims_unverified";
 // v3.3 — Round Contract checks. v3.4: split by target. The submission's own
@@ -84,30 +82,14 @@ export const CHECK_CRITERIA_CLAIMS_UNVERIFIED = "criteria_claims_unverified";
 // (completion truth: contract_completion_unverified; premature_boundary's
 // claimed-met-unverified arm). The framing is documentation only — no phase
 // field exists on the contract.
-/** Contract proposed with an empty done_when — nothing is promised, so
- *  nothing can be verified at the boundary. Warn: the contract can be fixed
- *  by re-declaring next round. */
-export const CHECK_ROUND_UNDERSPECIFIED = "round_underspecified";
-/** done_when items exist but verification_plan is empty or names commands
- *  that are not configured AND enabled in policy.evidence.commands — the
- *  completion claims could never be machine-checked. Warn. */
-export const CHECK_ROUND_UNVERIFIABLE = "round_unverifiable";
+/** v3.8: Contract items claimed met but not machine-verified this round.
+ *  The round commits; the debt is surfaced and the enforcement gate's
+ *  verification-debt row handles a persistent pattern. */
+export const CHECK_CONTRACT_ITEMS_UNVERIFIED = "contract_items_unverified";
 /** The round's actual git changes include files outside the ACTIVE
- *  contract's declared scope. Warn + drift_clarification exemption
- *  (R7-style). */
+ *  contract's declared scope. Warn; v3.8: not waivable by explanation — the
+ *  enforcement gate rejects, and repeated drift terminates. */
 export const CHECK_ROUND_SCOPE_DRIFT = "round_scope_drift";
-/** success claimed under the ACTIVE contract whose done_when items are
- *  either claimed met without machine-verified evidence or silently dropped
- *  (not in success_criteria_met NOR success_criteria_remaining). Error. */
-export const CHECK_PREMATURE_BOUNDARY = "premature_boundary";
-/** v3.5: Closing a Round Contract is a success-class claim and must be
- *  machine-backed. The eval's met claims satisfy every done_when of the
- *  ACTIVE contract but its verification_plan commands did not pass this
- *  round. Error; warn under evidence.machine_backed_success "warn"; never
- *  downgraded by no_change_reason (all done_when met contradicts "no
- *  change"). Fail-open: plan names no longer configured+enabled are not
- *  required (cannot observe). */
-export const CHECK_CONTRACT_COMPLETION_UNVERIFIED = "contract_completion_unverified";
 /** v3.5: The ACTIVE contract is still open (not completed, not blocked)
  *  while a different contract was proposed — the proposal is ignored until
  *  the active one closes. Warn: the walker still ignores it; this only
@@ -136,13 +118,8 @@ export const CHECK_DOMAIN = {
     [CHECK_VERIFICATION_ENTRYPOINT_MODIFIED]: "evidence_integrity",
     [CHECK_TEST_FILES_MODIFIED]: "evidence_integrity",
     // ── plan_contract ─────────────────────────────────────────────────────────
-    [CHECK_INTENT_DRIFT]: "plan_contract",
-    [CHECK_SUBGOAL_DRIFT]: "plan_contract",
-    [CHECK_ROUND_UNDERSPECIFIED]: "plan_contract",
-    [CHECK_ROUND_UNVERIFIABLE]: "plan_contract",
+    [CHECK_CONTRACT_ITEMS_UNVERIFIED]: "plan_contract",
     [CHECK_ROUND_SCOPE_DRIFT]: "plan_contract",
-    [CHECK_PREMATURE_BOUNDARY]: "plan_contract",
-    [CHECK_CONTRACT_COMPLETION_UNVERIFIED]: "plan_contract",
     [CHECK_CONTRACT_PREMATURE]: "plan_contract",
     // v3.7.1: cited-gate authorization conformance (opt-in blocking layer).
     [CHECK_USER_GATE_UNRESOLVED]: "plan_contract",
@@ -185,53 +162,44 @@ export function isFileInScope(file, scope) {
 export function collectOutOfScopeFiles(files, scope) {
     return files.filter((file) => !isFileInScope(file, scope));
 }
-/** v3.3: Detect verification-domain tampering for a command snapshot.
- *  entrypointModified — a workspace file the command depends on
- *  (snapshot.data.entrypointFiles) changed this round: the runtime executed
- *  a script the agent just rewrote, so the "machine observation" has no
- *  stable baseline. testFilesModified — the round changed test files
- *  (isTestFile): normal in TDD, so warn-only; the command result stays
- *  usable. Pure snapshot derivation — no fs access (this module is pure). */
-function commandTampered(snapshot, gitSnapshot) {
-    if (!gitSnapshot)
+/** v3.3: Detect verification-domain tampering for a command observation.
+ *  entrypointModified — a workspace file the command depends on changed this
+ *  round: the runtime executed a script the agent just rewrote, so the
+ *  "machine observation" has no stable baseline. testFilesModified — the
+ *  round changed test files (isTestFile): normal in TDD, so warn-only; the
+ *  command result stays usable. Pure derivation — no fs access. */
+function commandTampered(observation, gitObservation) {
+    if (!gitObservation)
         return { entrypointModified: false, testFilesModified: false };
-    const gitFiles = new Set(gitSnapshot.files);
-    const entrypoints = isRecord(snapshot.data) &&
-        Array.isArray(snapshot.data.entrypointFiles)
-        ? snapshot.data.entrypointFiles.filter((f) => typeof f === "string")
+    const gitFiles = new Set(gitObservation.files);
+    const entrypoints = observation.kind === "command"
+        ? observation.data.entrypointFiles ?? []
         : [];
     const entrypointModified = entrypoints.some((file) => gitFiles.has(file));
     const testFilesModified = [...gitFiles].some((file) => isTestFile(file));
     return { entrypointModified, testFilesModified };
 }
-function passedAfterCommand(snapshots) {
-    const git = snapshots.find((snapshot) => snapshot.provider === "git") ?? null;
-    return snapshots.find((snapshot) => isRecord(snapshot.data) &&
-        snapshot.data.kind === "command" &&
-        snapshot.data.phase === "after" &&
-        snapshot.data.status === "passed" &&
-        // v3.3: a command whose entrypoint changed this round is not machine
-        // evidence — exclude it so providerStatus degrades to unavailable.
-        !commandTampered(snapshot, git).entrypointModified) ?? null;
+/** v3.8: The single machine-backed predicate lives in evidence-provider.ts.
+ *  This wrapper resolves the round's git observation once for a collection. */
+function passedAfterCommand(observations) {
+    const git = observations.find((item) => item.providerId === "git") ?? null;
+    const changed = git ? new Set(git.files) : null;
+    return observations.find((item) => isPassedAfterObservation(item, changed)) ?? null;
 }
 /** v3.5: Names of commands observed passing in the after-phase this round.
  *  Tampered commands (entrypoint changed this round) are not machine
- *  evidence and are excluded — the same rule passedAfterCommand applies. */
-function passedPlanCommandNames(snapshots) {
-    const git = snapshots.find((snapshot) => snapshot.provider === "git") ?? null;
+ *  evidence and are excluded — the same predicate passedAfterCommand uses. */
+function passedPlanCommandNames(observations) {
+    const git = observations.find((item) => item.providerId === "git") ?? null;
+    const changed = git ? new Set(git.files) : null;
     const names = new Set();
-    for (const snapshot of snapshots) {
-        if (!isRecord(snapshot.data))
+    for (const observation of observations) {
+        if (!isPassedAfterObservation(observation, changed))
             continue;
-        if (snapshot.data.kind !== "command")
+        if (observation.kind !== "command")
             continue;
-        if (snapshot.data.phase !== "after" || snapshot.data.status !== "passed")
-            continue;
-        if (commandTampered(snapshot, git).entrypointModified)
-            continue;
-        const name = snapshot.data.commandName;
-        if (typeof name === "string" && name.length > 0)
-            names.add(name);
+        if (observation.data.commandId.length > 0)
+            names.add(observation.data.commandId);
     }
     return names;
 }
@@ -240,17 +208,17 @@ function passedPlanCommandNames(snapshots) {
  *  of letting evidence-dependent checks silently disappear when snapshots are
  *  missing — the fix for the "weakest when it matters most" gap. */
 export function deriveEvidenceStatus(selfEval, evidenceSnapshots) {
-    const gitSnap = evidenceSnapshots.find((snapshot) => snapshot.provider === "git") ?? null;
+    const gitSnap = evidenceSnapshots.find((item) => item.providerId === "git") ?? null;
     const gitObserved = gitSnap !== null && gitSnap.files.length > 0;
     const command = passedAfterCommand(evidenceSnapshots);
     const commandVerified = command !== null;
-    // testsMachineBacked: agent-reported test_results agree with a passed
+    // testsMachineBacked: agent-reported tests_reported agree with a passed
     // command's parsed stdout (the same comparison checkCommandEvidenceIntegrity
     // performs — parseTestOutput lives in this module).
     let testsMachineBacked = false;
-    const reported = selfEval.execution_evidence?.test_results;
-    if (command && reported) {
-        const parsed = parseTestOutput(String(command.data.stdout ?? ""));
+    const reported = selfEval.execution_report?.tests_reported;
+    if (command && command.kind === "command" && reported) {
+        const parsed = parseTestOutput(command.data.stdoutExcerpt ?? "");
         testsMachineBacked = parsed !== null &&
             parsed.passed === reported.passed &&
             parsed.failed === reported.failed &&
@@ -258,8 +226,8 @@ export function deriveEvidenceStatus(selfEval, evidenceSnapshots) {
     }
     // reportedFilesMatch: agent-reported files_changed equals the git diff set.
     let reportedFilesMatch = false;
-    if (gitSnap && selfEval.execution_evidence) {
-        const reportedSet = [...selfEval.execution_evidence.files_changed].sort();
+    if (gitSnap && selfEval.execution_report) {
+        const reportedSet = [...(selfEval.execution_report.files_changed ?? [])].sort();
         const actualSet = [...gitSnap.files].sort();
         reportedFilesMatch = reportedSet.length === actualSet.length &&
             reportedSet.every((file, index) => file === actualSet[index]);
@@ -293,8 +261,8 @@ export function machineProgressSeries(vaultEntries, currentRound, lookback) {
 function checkSuccessWithRemainingCriteria(selfEval) {
     if (!effectiveSuccess(selfEval))
         return null;
-    const remaining = selfEval.execution_evidence?.success_criteria_remaining;
-    if (!remaining || remaining.length === 0)
+    const remaining = claimedRemainingCriteria(selfEval.execution_report);
+    if (remaining.length === 0)
         return null;
     return makeVerificationFlag({
         severity: "error",
@@ -310,14 +278,14 @@ function checkSuccessWithRemainingCriteria(selfEval) {
  *  next prompt tells the agent its claims are unverified. This is the
  *  mild form of the 3.x criterion-specific completion rule. */
 function checkUnverifiedCriteriaClaims(selfEval, claimView) {
-    const met = selfEval.execution_evidence?.success_criteria_met;
-    if (!met || met.length === 0)
+    const met = claimedMetCriteria(selfEval.execution_report);
+    if (met.length === 0)
         return null;
     if (claimView.verifiedCount > 0 || claimView.hasMachineEvidence)
         return null;
     return makeVerificationFlag({
         severity: "warn",
-        field: "execution_evidence",
+        field: "execution_report",
         check: CHECK_CRITERIA_CLAIMS_UNVERIFIED,
         detail: `${met.length} criteria reported met but none machine-verified ` +
             "(no passing test evidence or command snapshot)",
@@ -410,13 +378,12 @@ function checkRetroactiveClaims(selfEval, vaultEntries, currentRound) {
 /** v2.12/v3.6/v3.7: success without machine backing — the single
  *  "success evidence" semantic. Two arms, evaluated in order:
  *  1. Empty/missing-evidence arm (v3.7: absorbed the enforcement-only
- *     empty_success rule): success=true with NO execution_evidence at all, or
- *     with files_changed empty AND test_results null, is an error
+ *     empty_success rule): success=true with NO execution_report at all, or
+ *     with files_changed empty AND tests_reported null, is an error
  *     unconditionally — BEFORE the providerStatus early-exit, so a passed
- *     command never rescues it (execution_evidence stays mandatory), and
- *     neither evidence.machine_backed_success "warn" nor a declared
- *     no_change_reason downgrades it ("no change" with literally no evidence
- *     recorded is still an unbacked claim).
+ *     command never rescues it (execution_report stays mandatory), and
+ *     no declared no_change_reason downgrades it ("no change" with literally
+ *     no evidence recorded is still an unbacked claim).
  *  2. Claims arm (v3.6): success=true but the runtime observed no machine
  *     evidence for it. The trigger is the runtime-derived providerStatus
  *     (verified / unavailable / absent) — "verified" requires an UNTAMPERED
@@ -433,18 +400,18 @@ function checkSuccessWithoutVerifiedEvidence(selfEval, status) {
     if (!effectiveSuccess(selfEval))
         return null;
     // v3.7: empty/missing-evidence arm (ex-R3 empty_success posture).
-    const ev = selfEval.execution_evidence;
-    if (!ev || (ev.files_changed.length === 0 && ev.test_results === null)) {
+    const ev = selfEval.execution_report;
+    if (!ev || ((ev.files_changed ?? []).length === 0 && ev.tests_reported === null)) {
         return makeVerificationFlag({
             severity: "error",
             field: "success",
             check: CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE,
             detail: ev
-                ? "Agent claims success but execution_evidence shows no files changed " +
+                ? "Agent claims success but execution_report shows no files changed " +
                     "and no tests were run. There is no verifiable evidence of work."
-                : "Agent claims success but provided no execution_evidence. " +
-                    "Every successful round MUST include execution_evidence with " +
-                    "files_changed, test_results, and progress_estimate.",
+                : "Agent claims success but provided no execution_report. " +
+                    "Every successful round MUST include execution_report with " +
+                    "files_changed, tests_reported, and progress_estimate.",
         });
     }
     // Claims arm (v3.6).
@@ -461,14 +428,15 @@ function checkSuccessWithoutVerifiedEvidence(selfEval, status) {
     const noChange = !verificationConfigured &&
         typeof selfEval.no_change_reason === "string" &&
         selfEval.no_change_reason.trim().length > 0;
-    // v3.3: severity follows evidence.machine_backed_success — "required"
-    // rejects (error), "warn" tolerates with a warn (round commits, success
-    // excluded from the trajectory, trust drops). no_change_reason stays info.
-    const severity = noChange
-        ? "info"
-        : getPolicy().evidence.machine_backed_success === "warn"
-            ? "warn"
-            : "error";
+    // v3.8: an unbacked success claim is "机器观察不足", not a contradiction —
+    // the round COMMITS with the claim recorded as insufficient, and the
+    // success stays out of the success trajectory (shouldPushSuccess keys on
+    // this warn). The bounded verification-debt row is what eventually acts on
+    // a persistent pattern. `no_change_reason` stays info, and only works when
+    // machine verification was structurally impossible (no enabled command).
+    // A success claim with NO execution_report at all is the other arm and
+    // remains an unconditional error.
+    const severity = noChange ? "info" : "warn";
     return makeVerificationFlag({
         severity,
         field: "success",
@@ -572,16 +540,16 @@ function checkRetractFreshConstraint(selfEval, prevSelfEval, currentRound) {
     return null;
 }
 /** v1.18: Cross-validate agent-reported files_changed against git evidence
- *  from the configured evidence providers (ProviderSnapshot array). */
+ *  from the configured evidence providers (MachineObservation array). */
 function checkEvidenceIntegrity(selfEval, evidenceSnapshots) {
-    if (!selfEval.execution_evidence)
+    if (!selfEval.execution_report)
         return null;
     if (evidenceSnapshots.length === 0)
         return null;
-    const gitSnap = evidenceSnapshots.find((s) => s.provider === "git");
+    const gitSnap = evidenceSnapshots.find((s) => s.providerId === "git");
     if (!gitSnap)
         return null;
-    const reported = [...selfEval.execution_evidence.files_changed].sort();
+    const reported = [...(selfEval.execution_report.files_changed ?? [])].sort();
     const actual = [...gitSnap.files].sort();
     if (reported.length === 0 && actual.length === 0)
         return null;
@@ -616,22 +584,20 @@ function checkRequiredCommandEvidence(selfEval, evidenceSnapshots) {
     if (!effectiveSuccess(selfEval))
         return null;
     for (const snapshot of evidenceSnapshots) {
-        if (snapshot.data.kind !== "command")
+        if (snapshot.kind !== "command")
             continue;
-        if (snapshot.data.phase !== "after" || snapshot.data.required !== true)
+        if (snapshot.phase !== "after" || snapshot.data.required !== true)
             continue;
-        const status = snapshot.data.status;
+        const status = snapshot.status;
         if (status === "passed")
             continue;
-        const name = typeof snapshot.data.commandName === "string"
-            ? snapshot.data.commandName
-            : snapshot.provider;
+        const name = snapshot.data.commandId;
         const exitCode = typeof snapshot.data.exitCode === "number"
             ? ` (exit ${snapshot.data.exitCode})`
             : "";
         return makeVerificationFlag({
             severity: "error",
-            field: "execution_evidence",
+            field: "execution_report",
             check: CHECK_REQUIRED_COMMAND_FAILED,
             detail: `Agent claims success but required command "${name}" ${String(status)}${exitCode}`,
         });
@@ -639,87 +605,11 @@ function checkRequiredCommandEvidence(selfEval, evidenceSnapshots) {
     return null;
 }
 // ── Test output parsing ────────────────────────────────────────────────────
-// jaccardSimilarity() imported from token-utils.ts (v2.1 — intent-action drift detection)
-/** Extract stable sub-goal IDs (sg-XXXXXXXX) mentioned in text.
- *  Matches the ID format rendered in prompts (loop-compiler deriveSubGoalId). */
-function extractSubGoalIds(text) {
-    return [...new Set(text.toLowerCase().match(/sg-[a-f0-9]{8}/g) ?? [])];
-}
 /** Whether a changed path looks like a test file. */
 function isTestFile(path) {
     return /\.(test|spec)\.[a-z0-9]+$/i.test(path) ||
         /(^|[\\/])tests?[\\/]/i.test(path) ||
         /_test\.[a-z0-9]+$/i.test(path);
-}
-/** v2.1 (check 11): Compare the previous round's declared next_action with
- *  the current round's actual output_summary. Detect when the agent says it
- *  will do X but then does Y — silent drift without explanation.
- *
- *  Only fires when both next_action and output_summary are non-empty.
- *
- *  v2.14/v3.7.1: Structured-ID-first detection. Alignment is decided by a
- *  waterfall of concrete signals before falling back to string similarity:
- *    1. Sub-goal IDs (sg-XXXXXXXX) in next_action matched against this
- *       round's declared done transitions (subgoal_updates). Description
- *       matching is gone — transitions are strict ID references now.
- *    2. File paths named in next_action appearing in files_changed.
- *    3. Test evidence — next_action mentions tests and test files were
- *       changed with tests actually run.
- *    4. Jaccard token similarity against the policy threshold (weak signal).
- *  Any signal aligning is sufficient — text similarity is never the sole
- *  authority when structured evidence exists. */
-function checkIntentDrift(selfEval, prevSelfEval, vaultEntries) {
-    if (!prevSelfEval?.next_action?.trim())
-        return null;
-    if (!selfEval.output_summary.trim())
-        return null;
-    const intent = prevSelfEval.next_action.trim();
-    const actual = selfEval.output_summary.trim();
-    const policy = getPolicy();
-    const filesChanged = selfEval.execution_evidence?.files_changed ?? [];
-    // ── Signal 1: sub-goal IDs referenced by next_action → a done transition
-    const intentIds = extractSubGoalIds(intent);
-    if (intentIds.length > 0) {
-        const doneIds = new Set((selfEval.subgoal_updates ?? [])
-            .filter((u) => u.status === "done")
-            .map((u) => u.id));
-        const idMatched = intentIds.some((id) => doneIds.has(id));
-        if (idMatched)
-            return null;
-    }
-    // ── Signal 2: file paths named in next_action appear in files_changed
-    const intentPaths = extractFilePathTokens(intent);
-    if (intentPaths.length > 0 && filesChanged.length > 0) {
-        const pathMatched = intentPaths.some((p) => filesChanged.some((f) => f === p || f.endsWith(p) || p.endsWith(f)));
-        if (pathMatched)
-            return null;
-    }
-    // ── Signal 3: test evidence — intent mentions tests, test files changed,
-    //    and tests actually ran this round
-    const intentTokens = tokenize(intent);
-    const mentionsTests = intentTokens.has("test") || intentTokens.has("tests");
-    const testResults = selfEval.execution_evidence?.test_results;
-    const testsRan = !!testResults && testResults.passed + testResults.failed > 0;
-    const testFilesChanged = filesChanged.some((f) => isTestFile(f));
-    if (mentionsTests && testsRan && testFilesChanged)
-        return null;
-    // ── Signal 4 (weak): Jaccard token similarity
-    const score = jaccardSimilarity(intent, actual);
-    const threshold = policy.evolution.intent_drift_threshold;
-    if (score >= threshold)
-        return null;
-    const idNote = intentIds.length > 0
-        ? `; ${intentIds.length} referenced sub-goal ID(s) did not match a declared done transition`
-        : "";
-    return makeVerificationFlag({
-        severity: "warn",
-        field: "output_summary",
-        check: CHECK_INTENT_DRIFT,
-        detail: `Declared intent was "${intent.slice(0, 120)}" ` +
-            `but actual output "${actual.slice(0, 120)}" — ` +
-            `similarity ${(score * 100).toFixed(0)}% below threshold ${(threshold * 100).toFixed(0)}%` +
-            idNote,
-    });
 }
 /** Best-effort parse of test counts from common test-runner output formats.
  *
@@ -785,7 +675,7 @@ export function parseTestOutput(stdout) {
     }
     return null;
 }
-/** Cross-validate agent-reported test_results against command evidence output.
+/** Cross-validate agent-reported tests_reported against command evidence output.
  *
  *  For each command provider whose status is "passed" and output is not
  *  truncated, attempts to parse test counts from stdout. Mismatched counts
@@ -795,17 +685,17 @@ export function parseTestOutput(stdout) {
  *  Non-command evidence providers are skipped (no structural cross-check is
  *  defined for them yet). */
 function checkCommandEvidenceIntegrity(selfEval, evidenceSnapshots) {
-    const reported = selfEval.execution_evidence?.test_results;
+    const reported = selfEval.execution_report?.tests_reported;
     if (!reported)
         return null;
     for (const snapshot of evidenceSnapshots) {
-        if (snapshot.data.kind !== "command")
+        if (snapshot.kind !== "command")
             continue;
-        if (snapshot.data.status !== "passed")
+        if (snapshot.status !== "passed")
             continue;
         if (snapshot.data.truncated === true)
             continue;
-        const stdout = typeof snapshot.data.stdout === "string" ? snapshot.data.stdout : "";
+        const stdout = typeof snapshot.data.stdoutExcerpt === "string" ? snapshot.data.stdoutExcerpt : "";
         const parsed = parseTestOutput(stdout);
         if (!parsed)
             continue;
@@ -820,16 +710,14 @@ function checkCommandEvidenceIntegrity(selfEval, evidenceSnapshots) {
             // Counts match exactly — evidence supports the agent's claim.
             continue;
         }
-        const name = typeof snapshot.data.commandName === "string"
-            ? snapshot.data.commandName
-            : snapshot.provider;
+        const name = snapshot.data.commandId;
         // Agent hides failures → error. Other mismatch → warn.
         const severity = parsed.failed > 0 && reported.failed === 0 ? "error" : "warn";
         return makeVerificationFlag({
             severity,
-            field: "test_results",
+            field: "tests_reported",
             check: CHECK_COMMAND_EVIDENCE_MISMATCH,
-            detail: `Agent test_results don't match "${name}" output: ${mismatches.join("; ")}`,
+            detail: `Agent tests_reported don't match "${name}" output: ${mismatches.join("; ")}`,
         });
     }
     return null;
@@ -841,24 +729,22 @@ function checkCommandEvidenceIntegrity(selfEval, evidenceSnapshots) {
  *  confirm the tests still verify the task claims). Fail-open when the git
  *  snapshot is missing or the command has no resolvable entrypoint. */
 function checkVerificationDomainIntegrity(evidenceSnapshots) {
-    const git = evidenceSnapshots.find((snapshot) => snapshot.provider === "git") ?? null;
+    const git = evidenceSnapshots.find((snapshot) => snapshot.providerId === "git") ?? null;
     if (!git)
         return null;
     for (const snapshot of evidenceSnapshots) {
-        if (!isRecord(snapshot.data) || snapshot.data.kind !== "command")
+        if (!isRecord(snapshot.data) || snapshot.kind !== "command")
             continue;
-        if (snapshot.data.phase !== "after")
+        if (snapshot.phase !== "after")
             continue;
         const { entrypointModified, testFilesModified } = commandTampered(snapshot, git);
         if (!entrypointModified && !testFilesModified)
             continue;
-        const name = typeof snapshot.data.commandName === "string"
-            ? snapshot.data.commandName
-            : snapshot.provider;
+        const name = snapshot.data.commandId;
         if (entrypointModified) {
             return makeVerificationFlag({
                 severity: "error",
-                field: "execution_evidence",
+                field: "execution_report",
                 check: CHECK_VERIFICATION_ENTRYPOINT_MODIFIED,
                 detail: `Verification command "${name}" entrypoint changed this round — ` +
                     "its result cannot be trusted as machine evidence. Keep the " +
@@ -868,86 +754,10 @@ function checkVerificationDomainIntegrity(evidenceSnapshots) {
         }
         return makeVerificationFlag({
             severity: "warn",
-            field: "execution_evidence",
+            field: "execution_report",
             check: CHECK_TEST_FILES_MODIFIED,
             detail: `Test files changed in the same round command "${name}" passed — ` +
                 "confirm the tests still verify the task claims.",
-        });
-    }
-    return null;
-}
-/** v2.2: Check if the agent's declared next_action aligns with any pending
- *  or in_progress sub-goal. When 3+ pending sub-goals exist but the agent
- *  plans work unrelated to any of them, it may indicate task drift.
- *  This is a warn-level advisory — the agent always owns prioritization.
- *
- *  v2.14: Exact sub-goal ID alignment first — next_action naming a pending
- *  sub-goal by its stable ID (sg-XXXXXXXX) is aligned by definition.
- *  Jaccard description similarity remains as the fallback. */
-function checkSubGoalDrift(selfEval, prevSelfEval, vaultEntries, currentRound) {
-    const nextAction = selfEval.next_action?.trim();
-    if (!nextAction)
-        return null;
-    // Reconstruct the pending set from vault entries and the current eval.
-    // v3.7.1: emerged descriptions are the creation channel; done/canceled are
-    // terminal ids reached through subgoal_updates (monotone — a terminal
-    // transition can never be undone, so the terminal id set only grows).
-    const pendingSubGoals = new Set();
-    const terminalIds = new Set();
-    for (const entry of vaultEntries) {
-        const emerged = Array.isArray(entry.emerged_subtasks)
-            ? entry.emerged_subtasks.filter((v) => typeof v === "string")
-            : [];
-        for (const desc of emerged) {
-            pendingSubGoals.add(desc.trim());
-        }
-        for (const u of entrySubGoalUpdates(entry)) {
-            if (u.status === "done" || u.status === "canceled")
-                terminalIds.add(u.id);
-        }
-    }
-    // Also process the current selfEval
-    for (const desc of selfEval.emerged_subtasks ?? []) {
-        pendingSubGoals.add(desc.trim());
-    }
-    for (const u of selfEval.subgoal_updates ?? []) {
-        if (u.status === "done" || u.status === "canceled")
-            terminalIds.add(u.id);
-    }
-    // Remove descriptions whose derived id reached a terminal state
-    for (const desc of [...pendingSubGoals]) {
-        if (terminalIds.has(deriveSubGoalId(desc)))
-            pendingSubGoals.delete(desc);
-    }
-    // Need at least 3 pending sub-goals for the check to be meaningful
-    if (pendingSubGoals.size < 3)
-        return null;
-    // v2.14: Stable ID match first — next_action naming a pending sub-goal
-    // by ID is aligned by definition, regardless of description wording.
-    const nextActionIds = extractSubGoalIds(nextAction);
-    if (nextActionIds.length > 0) {
-        const pendingIds = new Set([...pendingSubGoals].map((d) => deriveSubGoalId(d)));
-        if (nextActionIds.some((id) => pendingIds.has(id)))
-            return null;
-    }
-    // Check if next_action aligns with any pending sub-goal
-    let aligns = false;
-    for (const sg of pendingSubGoals) {
-        const score = jaccardSimilarity(nextAction, sg);
-        if (score >= getPolicy().evolution.subgoal_drift_alignment_threshold) {
-            aligns = true;
-            break;
-        }
-    }
-    if (!aligns) {
-        const sample = [...pendingSubGoals].slice(0, 3).join(", ");
-        return makeVerificationFlag({
-            severity: "warn",
-            field: "next_action",
-            check: CHECK_SUBGOAL_DRIFT,
-            detail: `Agent's next_action doesn't align with any of ${pendingSubGoals.size} pending sub-goals. ` +
-                `Pending: ${sample}… Consider completing existing sub-goals before starting new work, ` +
-                `or cancel outdated sub-goals via subgoal_updates.`,
         });
     }
     return null;
@@ -971,9 +781,8 @@ function checkBacktrackWorkspaceRestore(selfEval, backtrackSkippedFiles, backtra
     // Machine arm — untouched-since-rollback proof, independent of claims.
     const failedEntries = Object.entries(backtrackSkippedFingerprints);
     if (failedEntries.length > 0) {
-        const git = evidenceSnapshots.find((snapshot) => snapshot.provider === "git" && isRecord(snapshot.data) &&
-            isRecord(snapshot.data.fingerprints));
-        const currentFingerprints = git
+        const git = evidenceSnapshots.find((snapshot) => snapshot.kind === "git" && isRecord(snapshot.data.fingerprints));
+        const currentFingerprints = git && git.kind === "git"
             ? git.data.fingerprints
             : null;
         if (currentFingerprints) {
@@ -994,11 +803,11 @@ function checkBacktrackWorkspaceRestore(selfEval, backtrackSkippedFiles, backtra
             }
         }
     }
-    const ev = selfEval.execution_evidence;
-    if (!ev || ev.files_changed.length === 0)
+    const ev = selfEval.execution_report;
+    if (!ev || (ev.files_changed ?? []).length === 0)
         return null;
     // Claims arm — overlap as guidance only.
-    const overlap = ev.files_changed.filter((f) => backtrackSkippedFiles.some((sf) => sf === f || f.endsWith(sf) || sf.endsWith(f)));
+    const overlap = (ev.files_changed ?? []).filter((f) => backtrackSkippedFiles.some((sf) => sf === f || f.endsWith(sf) || sf.endsWith(f)));
     if (overlap.length === 0)
         return null;
     return makeVerificationFlag({
@@ -1015,7 +824,7 @@ function checkBacktrackWorkspaceRestore(selfEval, backtrackSkippedFiles, backtra
 function checkBacktrackGitHeadRestore(evidenceSnapshots, backtrackTargetGitHead) {
     if (!backtrackTargetGitHead)
         return null;
-    const git = evidenceSnapshots.find((snapshot) => snapshot.provider === "git" && isRecord(snapshot.data) &&
+    const git = evidenceSnapshots.find((snapshot) => snapshot.providerId === "git" && isRecord(snapshot.data) &&
         typeof snapshot.data.head === "string");
     if (!git)
         return null; // git unavailable → cannot verify → skip (fail-open)
@@ -1034,67 +843,23 @@ function checkBacktrackGitHeadRestore(evidenceSnapshots, backtrackTargetGitHead)
     });
 }
 // ═══════════════════════════════════════════════════════════════════════════
-// v3.3 — Round Contract checks (all silent when no contract is declared)
+// v3.8 — Round Contract checks (all silent when no contract is declared)
+//
+// The item model moved closure to the runtime: an item is verified only when
+// its bound commands were observed passing (untampered, same config) in the
+// claiming round. A claimed-but-unbacked item is therefore `insufficient`
+// (recorded, never a rejection), and a premature closure is structurally
+// impossible. The checks below only surface state the agent must see.
 // ═══════════════════════════════════════════════════════════════════════════
-/** A PROPOSAL that promises nothing is a wasted round's worth of trust:
- *  done_when empty means the boundary can never be machine-checked.
- *  v3.4: declaration-quality check on the submission's own proposal — never
- *  on the (derived) active contract. */
-function checkRoundUnderspecified(selfEval) {
-    const contract = selfEval.round_contract;
-    if (!contract)
-        return null;
-    if (contract.done_when.length > 0)
-        return null;
-    return makeVerificationFlag({
-        severity: "warn",
-        field: "round_contract",
-        check: CHECK_ROUND_UNDERSPECIFIED,
-        detail: "Round Contract declared with an empty done_when — nothing is " +
-            "promised, so completion cannot be verified. Declare what must be " +
-            "true when the round is done.",
-    });
-}
-/** done_when items whose verification_plan cannot run (empty plan, or names
- *  outside the configured, enabled evidence.commands) can never be
- *  machine-checked at the boundary. v3.4: declaration-quality check on the
- *  submission's own proposal. */
-function checkRoundUnverifiable(selfEval) {
-    const contract = selfEval.round_contract;
-    if (!contract)
-        return null;
-    if (contract.done_when.length === 0)
-        return null;
-    if (contract.verification_plan.length > 0 &&
-        contract.verification_plan.every((name) => isConfiguredCommand(name))) {
-        return null;
-    }
-    const unknown = contract.verification_plan.filter((name) => !isConfiguredCommand(name));
-    const detail = contract.verification_plan.length === 0
-        ? "done_when items declared but verification_plan is empty — no command " +
-            "can back the completion claims"
-        : `verification_plan names commands that are not configured and enabled ` +
-            `in evidence.commands: ${unknown.slice(0, 3).join(", ")}`;
-    return makeVerificationFlag({
-        severity: "warn",
-        field: "round_contract",
-        check: CHECK_ROUND_UNVERIFIABLE,
-        detail: detail + ". Name only configured, enabled evidence.commands, or drop " +
-            "done_when items that cannot be machine-verified.",
-    });
-}
 /** The round changed files outside the ACTIVE contract's declared scope.
  *  Git diff files are the machine-authoritative "what actually changed" set.
- *  v3.4: targets the contract the round actually executed under — derived
- *  from committed evals, never the submission's own proposal. Silent when
- *  no active contract exists (round 1 and whole-task rounds: the agent
- *  executed the original task, not a contract boundary). */
+ *  Silent when no active contract exists or it declares no scope. */
 function checkRoundScopeDrift(activeContract, evidenceSnapshots) {
     if (!activeContract)
         return null;
     if (activeContract.scope.length === 0)
         return null;
-    const git = evidenceSnapshots.find((snapshot) => snapshot.provider === "git");
+    const git = evidenceSnapshots.find((snapshot) => snapshot.providerId === "git");
     if (!git)
         return null; // git unavailable → cannot observe → fail open
     const outOfScope = collectOutOfScopeFiles(git.files, activeContract.scope);
@@ -1108,142 +873,53 @@ function checkRoundScopeDrift(activeContract, evidenceSnapshots) {
             (outOfScope.length > 5
                 ? ` (${outOfScope.length} total, showing 5): ${outOfScope.slice(0, 5).join(", ")}`
                 : `: ${outOfScope.join(", ")}`) +
-            `. Revert them or extend the contract scope and explain in drift_clarification.`,
+            `. Revert them, or close the active contract and declare the extended scope in a new proposal.`,
     });
 }
-/** success claimed under the ACTIVE contract whose done_when items were not
- *  honestly and verifiably completed: claimed met with no machine-verified
- *  evidence this round, or silently dropped (present in neither
- *  success_criteria_met nor success_criteria_remaining).
- *  v3.4: targets the derived ACTIVE contract (the round's real boundary) —
- *  a proposal declared on a round without an active contract is never
- *  checked for conformance against work the round did not do under it.
- *  v3.5.1: a fully-met posture (every done_when claimed satisfied) is owned
- *  by contract_completion_unverified — this check stays for mixed and
- *  silently-dropped success claims only.
- *  v3.6: no_change_reason never downgrades this check — the escape hatch
- *  belongs to the R8 success-claim family alone; a declared "no change"
- *  contradicts silently dropping contract done_when items. */
-function checkPrematureBoundary(activeContract, selfEval, claimView) {
-    if (!activeContract || activeContract.done_when.length === 0)
+/** v3.8: Claimed-but-unverified contract items. The round COMMITS — the debt
+ *  is surfaced (prompt, state file, handoff) and the enforcement gate's
+ *  verification-debt row handles a persistent pattern. */
+function checkContractItemsUnverified(statuses) {
+    if (statuses.insufficientCount === 0)
         return null;
-    if (!effectiveSuccess(selfEval))
-        return null;
-    const ev = selfEval.execution_evidence;
-    const met = ev?.success_criteria_met ?? [];
-    // v3.5.1: full-met → the completion check owns the posture (it also fires
-    // on success=false, so nothing is lost — and under machine_backed_success
-    // "warn" the same tolerance applies on both sides).
-    if (contractDoneWhenSatisfied(activeContract, met))
-        return null;
-    const remaining = ev?.success_criteria_remaining ?? [];
-    const problems = [];
-    for (const item of activeContract.done_when) {
-        // Shared matcher with the lifecycle walker (round-contract.ts) — the
-        // compile-side closure decision and this conformance check can never
-        // disagree on what counts as a satisfied item.
-        const isMet = met.some((m) => contractItemMatches(item, m));
-        const isRemaining = remaining.some((r) => contractItemMatches(item, r));
-        if (isMet) {
-            // Claimed met — needs round-level machine verification. The v3.3
-            // claim model is round-uniform: any verified claim backs the round,
-            // so zero verified claims = none of them are backed.
-            if (claimView.verifiedCount === 0) {
-                problems.push(`"${item.slice(0, 80)}" claimed met without machine-verified evidence`);
-            }
-        }
-        else if (!isRemaining) {
-            // Neither met nor remaining — silently dropped while success is
-            // claimed. Honest reporting would list it in remaining (R1's domain).
-            problems.push(`"${item.slice(0, 80)}" neither met nor listed as remaining`);
-        }
-    }
-    if (problems.length === 0)
-        return null;
+    const unverified = statuses.items
+        .filter((item) => item.status === "insufficient")
+        .slice(0, 3)
+        .map((item) => item.itemId);
     return makeVerificationFlag({
-        severity: "error",
+        severity: "warn",
         field: "round_contract",
-        check: CHECK_PREMATURE_BOUNDARY,
-        detail: `Round Contract boundary claimed prematurely: ${problems.slice(0, 3).join("; ")}. ` +
-            `Run the contract's verification_plan commands and report real output, ` +
-            `or set success=false and list the items in success_criteria_remaining.`,
+        check: CHECK_CONTRACT_ITEMS_UNVERIFIED,
+        detail: `${statuses.insufficientCount} contract item(s) claimed met but not machine-verified: ` +
+            `${unverified.join(", ")}. Run the bound command(s) or report the item as remaining.`,
     });
 }
-/** v3.5: Closing a Round Contract is a success-class claim and must be
- *  machine-backed. When the eval's met claims satisfy EVERY done_when of
- *  the ACTIVE contract (the walker's close condition), each verification_plan
- *  command must have been observed passing (after-phase command snapshot,
- *  untampered) in the same round. Fires regardless of the success flag —
- *  a claim-based closure that the machine cannot back must not advance the
- *  contract state machine. Severity follows evidence.machine_backed_success
- *  (the R8 tolerance switch). Deliberately no no_change_reason downgrade:
- *  all done_when met contradicts "no change". Fail-open: a plan name that
- *  is no longer a configured, enabled command cannot be observed and is
- *  not required. The check observes that the commands ran, not what they
- *  verified — R-C1's claim model remains the content bound. */
-function checkContractCompletionUnverified(activeContract, selfEval, evidenceSnapshots) {
-    if (!activeContract || activeContract.verification_plan.length === 0)
-        return null;
-    const met = selfEval.execution_evidence?.success_criteria_met ?? [];
-    if (!contractDoneWhenSatisfied(activeContract, met))
-        return null; // walker does not close
-    const required = activeContract.verification_plan
-        .filter((name) => isConfiguredCommand(name));
-    if (required.length === 0)
-        return null; // fail open — cannot observe
-    const passed = passedPlanCommandNames(evidenceSnapshots);
-    const missing = required.filter((name) => !passed.has(name));
-    if (missing.length === 0)
-        return null;
-    const severity = getPolicy().evidence.machine_backed_success === "warn"
-        ? "warn"
-        : "error";
-    return makeVerificationFlag({
-        severity,
-        field: "round_contract",
-        check: CHECK_CONTRACT_COMPLETION_UNVERIFIED,
-        detail: `Round Contract completion claimed (every done_when met), but verification_plan ` +
-            `command${missing.length > 1 ? "s" : ""} did not pass this round: ` +
-            `${missing.slice(0, 3).join(", ")}. Closing a contract is a success-class claim — ` +
-            `fix the underlying failure so the command${missing.length > 1 ? "s" : ""} pass and ` +
-            `resubmit; no_change_reason does not apply to completion claims.`,
-    });
-}
-/** v3.5: A different contract proposed while the ACTIVE contract is still
- *  open. The walker ignores the premature proposal — this warn only makes
- *  the ignored state visible to the agent. Silent when the eval closes the
- *  active contract (all done_when met, or outcome=blocked — checked FIRST,
- *  mirroring the walker), when no proposal is submitted, or when the
- *  proposal equals the active contract (a restate). Equality is
- *  key-order-insensitive and normalized through parseRoundContract on both
- *  sides so committed-raw vs parsed-submission key-set drift cannot cause
- *  spurious warns. */
-function checkContractPremature(activeContract, selfEval) {
+/** A different contract proposed while the ACTIVE contract is still open. The
+ *  walker ignores the premature proposal — this warn only makes the ignored
+ *  state visible. Silent when the active contract is closed (all items
+ *  verified, or outcome=blocked), when no proposal is submitted, or when the
+ *  proposal is a restate (content equality, never id equality). */
+function checkContractPremature(activeContract, statuses, selfEval) {
     if (!activeContract)
         return null;
-    const met = selfEval.execution_evidence?.success_criteria_met ?? [];
-    if (contractDoneWhenSatisfied(activeContract, met))
+    if (statuses.closure !== "open")
         return null; // closed
     if (selfEval.outcome === "blocked")
         return null; // closed
     const proposal = selfEval.round_contract;
     if (!proposal)
         return null;
-    const same = stableStringify(parseRoundContract(activeContract)) ===
-        stableStringify(parseRoundContract(proposal));
-    if (same)
+    if (sameContract(proposal, activeContract))
         return null; // restate → continue
     return makeVerificationFlag({
         severity: "warn",
         field: "round_contract",
         check: CHECK_CONTRACT_PREMATURE,
-        detail: "The ACTIVE Round Contract is still open (not all done_when met, not blocked) " +
+        detail: "The ACTIVE Round Contract is still open (not every item verified, not blocked) " +
             "while a different contract was proposed — it is ignored until the active " +
-            "contract is completed or blocked. Restate the active contract unchanged to " +
-            "continue it.",
+            "contract closes. Restate the active contract unchanged to continue it.",
     });
 }
-// ═══════════════════════════════════════════════════════════════════════════
 // Main entry point
 // ═══════════════════════════════════════════════════════════════════════════
 /** Verify a SelfEvaluation against the loop's cross-round lineage.
@@ -1345,7 +1021,18 @@ gateEntries = []) {
     // round_contract is a PROPOSAL for the next round and never participates
     // (the eval under verification is not yet committed, so it structurally
     // cannot influence the derivation).
-    const activeContract = deriveActiveRoundContract(contractRoundEvaluations(committedRoundsFromEntries(vaultEntries, currentRound)));
+    const committedRounds = committedRoundsFromEntries(vaultEntries, currentRound);
+    const activeContract = deriveActiveRoundContract(committedRounds);
+    // v3.8: The item-level status of the ACTIVE contract for THIS round — the
+    // same reducer the compile path, audit, and explain consume.
+    const contractStatuses = deriveContractItemStatuses({
+        contract: activeContract,
+        rounds: committedRounds,
+        currentRound,
+        currentReport: selfEval.execution_report ?? null,
+        currentObservations: evidenceSnapshots,
+        commands: getPolicy().evidence.commands ?? [],
+    });
     // v2.12: Derived claim provenance — which reported criteria completions
     // are backed by machine evidence (pure derivation, not persisted).
     const claimView = deriveClaimView(selfEval, evidenceSnapshots);
@@ -1375,30 +1062,22 @@ gateEntries = []) {
         // v1.18: Cross-validate agent-reported files_changed against git evidence
         () => checkEvidenceIntegrity(selfEval, evidenceSnapshots),
         () => checkRequiredCommandEvidence(selfEval, evidenceSnapshots),
-        // v2.0: Cross-validate agent-reported test_results against command output
+        // v2.0: Cross-validate agent-reported tests_reported against command output
         () => checkCommandEvidenceIntegrity(selfEval, evidenceSnapshots),
         // v3.3: Verification domain integrity — command entrypoint / test files
         // changed in the same round the command ran
         () => checkVerificationDomainIntegrity(evidenceSnapshots),
-        // v2.1: Detect intent-action drift — agent said X but did Y
-        () => checkIntentDrift(selfEval, prevSelfEval, vaultEntries),
-        // v2.2: Detect sub-goal drift — next_action doesn't align with pending sub-goals
-        () => checkSubGoalDrift(selfEval, prevSelfEval, vaultEntries, currentRound),
         // v2.13: Post-backtrack workspace restore check
         () => checkBacktrackWorkspaceRestore(selfEval, backtrackSkippedFiles, backtrackSkippedFingerprints, evidenceSnapshots),
         // v2.12: Post-backtrack git HEAD restore check
         () => checkBacktrackGitHeadRestore(evidenceSnapshots, backtrackTargetGitHead),
-        // v3.3: Round Contract checks. v3.4: split by target — structural
-        // (warn) at proposal declaration, conformance against the derived
-        // ACTIVE contract (scope_drift warn / premature_boundary error).
-        // v3.5: + completion machine-backing (error) and premature-replacement
-        // visibility (warn).
-        () => checkRoundUnderspecified(selfEval),
-        () => checkRoundUnverifiable(selfEval),
+        // v3.8: Round Contract checks over the derived item model. Declaration
+        // quality is enforced structurally (contract_invalid) before the round
+        // advances, so the gate only reports execution state: scope drift,
+        // claimed-but-unverified items, and an ignored replacement proposal.
         () => checkRoundScopeDrift(activeContract, evidenceSnapshots),
-        () => checkPrematureBoundary(activeContract, selfEval, claimView),
-        () => checkContractCompletionUnverified(activeContract, selfEval, evidenceSnapshots),
-        () => checkContractPremature(activeContract, selfEval),
+        () => checkContractItemsUnverified(contractStatuses),
+        () => checkContractPremature(activeContract, contractStatuses, selfEval),
         // v3.7.1: opt-in gate-layer blocking (skipped when disabled)
         () => checkUserGateUnresolved(selfEval, gateEntries),
     ];

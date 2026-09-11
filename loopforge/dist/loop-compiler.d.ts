@@ -3,8 +3,10 @@
  * The compiler evolves structured state and renders one prompt artifact.
  * L0/L1/L2 control state density only; the external Agent owns reasoning.
  */
-import { type CriterionStatus, type Lesson, type LoopCompileRequest, type LoopCompileResponse, type LoopHealth, type LoopObjective, type LoopRoundResult, type RollingSummary, type SubGoal, type SubGoalUpdate, type TaskAlignment, type VerificationFlag } from "./protocol.js";
+import { type CriterionStatus, type Lesson, type LoopCompileRequest, type LoopCompileResponse, type LoopHealth, type LoopObjective, type LoopRoundResult, type RollingSummary, type SubGoal, type TaskAlignment } from "./protocol.js";
 import type { PresentedStateSnapshot } from "./canonical-state.js";
+import { type ActiveContractView } from "./round-contract.js";
+import { type ContractItemStatusView } from "./contract-items.js";
 export interface PreviousRound {
     round: number;
     goal_id: string;
@@ -29,11 +31,18 @@ export declare function getPreviousRound(loopId: string, round: number, context:
 export declare function deriveLessons(loopId: string, context: Record<string, unknown> | null, currentRound: number): Lesson[];
 /** v3.2: Derive per-criterion status — the "goal → criteria → evidence"
  *  vertical view. Each objective criterion gets: met/remaining/unknown
- *  (from per-round success_criteria_met/remaining reports, ID-first
+ *  (from per-round criterion_claims, ID-first
  *  matching), the round it was first reported met, and any sub-goals whose
  *  description matches it (Jaccard). Zero persistence — re-derived from the
  *  vault every compile. */
-export declare function deriveCriterionStatuses(loopId: string, context: Record<string, unknown> | null, objective: LoopObjective | null, currentRound: number, subGoals: SubGoal[], lastRoundResult?: LoopRoundResult | null): CriterionStatus[];
+export declare function deriveCriterionStatuses(loopId: string, context: Record<string, unknown> | null, objective: LoopObjective | null, currentRound: number, subGoals: SubGoal[], lastRoundResult?: LoopRoundResult | null,
+/** v3.8: the ACTIVE contract and its derived item statuses. A criterion is
+ *  `verified` / `contradicted` / `insufficient` only through an item that
+ *  references it — a claim alone can never reach `verified`. */
+verification?: {
+    activeContract: ActiveContractView | null;
+    itemStatuses: ContractItemStatusView;
+}): CriterionStatus[];
 /** v2.11: Match two criterion references for deduplication.
  *  If either is a criterion ID (cr-XXXXXXXX), uses exact ID comparison.
  *  Otherwise falls back to Jaccard similarity.
@@ -41,33 +50,16 @@ export declare function deriveCriterionStatuses(loopId: string, context: Record<
  *  scan (R4/R5 exculpatory cross-check). */
 export declare function criteriaMatch(a: string, b: string): boolean;
 export declare function buildRollingSummary(loopId: string, currentRound: number, context: Record<string, unknown> | null, sinceRound?: number, level?: string): RollingSummary | null;
-/** Derive a stable sub-goal ID from its description hash.
- *  Exported as the single source of truth (verification-gate imports it). */
-export declare function deriveSubGoalId(description: string): string;
 /** v2.11: Derive a stable constraint ID from its text hash (c-XXXXXXXX).
  *  Same hash strategy as SubGoal — deterministic across rounds. */
 export declare function deriveConstraintId(text: string): string;
 /** v2.11: Derive a stable criterion ID from its text hash (cr-XXXXXXXX).
  *  Same hash strategy as SubGoal — deterministic across rounds. */
 export declare function deriveCriterionId(text: string): string;
-/** Closed migration matrix. done/canceled are terminal (no out-edges); the
- *  matrix rejects re-opening. blocked → in_progress is the recovery path. */
-export declare const SUBGOAL_TRANSITIONS: Record<SubGoalUpdate["status"], readonly SubGoal["status"][]>;
-/** Whether a transition is legal. Same-status is a legal no-op (used by
- *  replay idempotency). References to terminal sub-goals are rejected by
- *  validateSubGoalUpdates before this is consulted. */
-export declare function canTransitionSubGoal(from: SubGoal["status"], to: SubGoalUpdate["status"]): boolean;
-/** Referential validation of a payload's subgoal_updates against the
- *  derived sub-goal set. Returns one error per invalid entry:
- *  unknown_id | terminal_reference | illegal_transition. */
-export declare function validateSubGoalUpdates(subGoals: SubGoal[], updates: SubGoalUpdate[]): Array<{
-    id: string;
-    reason: string;
-}>;
 export declare function alignTask(proposedTask: string, request: LoopCompileRequest, context: Record<string, unknown> | null): TaskAlignment;
 export declare function checkLoopHealth(loopId: string, request: LoopCompileRequest, context: Record<string, unknown> | null): LoopHealth;
 export declare function decideLevel(request: LoopCompileRequest, context: Record<string, unknown> | null): "l0" | "l1" | "l2";
-export declare function buildSelfEvalBlock(round: number, prevDriftFlags?: VerificationFlag[],
+export declare function buildSelfEvalBlock(round: number,
 /** v2.12: L0 is the minimal retry template — the v2.12 declarative fields
  *  (outcome/blocker/retroactiveClaims) are L1/L2 additions so the retry
  *  prompt stays within its tight budget. */

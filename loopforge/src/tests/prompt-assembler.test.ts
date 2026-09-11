@@ -6,7 +6,7 @@ import type { PromptAssemblyInput } from "../prompt-assembler.js";
 import type { CanonicalLoopState, PresentedStateSnapshot } from "../canonical-state.js";
 import type { ConstraintMeta } from "../protocol.js";
 import { deriveItemId } from "../token-utils.js";
-import { getPolicy, resetPolicy, setPolicyForTest } from "../policy.js";
+import { deriveConfiguredCapability, getPolicy, resetPolicy, setPolicyForTest, DEFAULT_POLICY } from "../policy.js";
 // Namespace import of the verification-gate CHECK_* constants: the coverage
 // test below iterates them so a new constant can never silently lack an
 // action entry. (Tests may import verification-gate freely — only the src
@@ -37,7 +37,6 @@ function minimalState(overrides: Partial<CanonicalLoopState> = {}): CanonicalLoo
     blockers: [],
     verificationFlags: [],
     discoveries: [],
-    nextAction: "",
     rollingOutcomes: [],
     recurringIssues: [],
     failedPatterns: [],
@@ -50,6 +49,7 @@ function minimalState(overrides: Partial<CanonicalLoopState> = {}): CanonicalLoo
     agentTrustScore: undefined,
     agentTrustTrend: [],
     stateFilePath: ".loopforge/state/test.md",
+    capability: deriveConfiguredCapability(DEFAULT_POLICY),
     progress: {
       estimate: null,
       criteriaMet: [],
@@ -555,10 +555,10 @@ describe("v3.2 — verification flag actions", () => {
     const artifact = assemblePromptArtifact(input({
       level: "l2",
       state: minimalState({
-        verificationFlags: [flag("warn", "subgoal_drift")],
+        verificationFlags: [flag("warn", "criteria_claims_unverified")],
       }),
     }));
-    assert.match(artifact.renderedPrompt, /→ Action: Reconcile the sub-goal list/);
+    assert.match(artifact.renderedPrompt, /→ Action: Provide evidence for each claimed success criterion/);
   });
 
   it("does not append a continuation to info flags", () => {
@@ -622,8 +622,10 @@ describe("v3.2 — verification flag actions", () => {
       .map((key) => exports[key] as string);
     // v3.7 note: CHECK_DOMAIN (the domain map) is also a CHECK_-prefixed
     // export but is not a check id — filtered above by the string check.
-    assert.ok(checks.length === 25,
-      `expected the 25 surviving CHECK_* constants, got ${checks.length}`);
+    // v3.8: 20 — the drift checks and the legacy contract checks were
+    // replaced by the item-model checks.
+    assert.ok(checks.length === 20,
+      `expected the 20 surviving CHECK_* constants, got ${checks.length}`);
     for (const check of checks) {
       const action = verificationActionFor(check);
       assert.ok(
@@ -908,7 +910,7 @@ describe("v3.3 — Roadmap section", () => {
       kind: "auto" as const, generated_at_round: 4,
     }],
     criterionStatuses: [
-      { id: "cr-11111111", text: "all tests pass", status: "met" as const, met_at_round: 3, related_subgoal_ids: [] },
+      { id: "cr-11111111", text: "all tests pass", status: "verified" as const, met_at_round: 3, related_subgoal_ids: [] },
       { id: "cr-22222222", text: "no regressions", status: "remaining" as const, related_subgoal_ids: [] },
     ],
     subGoals: [
@@ -963,7 +965,7 @@ describe("v3.3 — machine dashboard rows and round stats", () => {
       },
       machineStatus: { windowRounds: 3, gitMotion: true, motionRounds: 2 },
       criterionStatuses: [
-        { id: "cr-11111111", text: "all tests pass", status: "met" as const, met_at_round: 3, related_subgoal_ids: [] },
+        { id: "cr-11111111", text: "all tests pass", status: "verified" as const, met_at_round: 3, related_subgoal_ids: [] },
         { id: "cr-22222222", text: "no regressions", status: "remaining" as const, related_subgoal_ids: [] },
       ],
     });
@@ -974,7 +976,7 @@ describe("v3.3 — machine dashboard rows and round stats", () => {
     assert.ok(prompt.includes("Machine (git)"));
     assert.ok(prompt.includes("changes in 2/3 recent committed rounds"));
     assert.ok(prompt.includes("Machine (criteria)"));
-    assert.ok(prompt.includes("1/2 met across committed rounds"));
+    assert.ok(prompt.includes("1/2 verified across committed rounds"));
     assert.ok(prompt.includes("self-reported estimate (unverified until machine-backed)"));
   });
 

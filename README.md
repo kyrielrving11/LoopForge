@@ -374,26 +374,7 @@ background agent.
 Nine MCP tools expose the runtime: `start`, `next`, `status`, `stop`, `pause`,
 `resume`, `replay`, `gate_check`, and `gate_resolve`. The two gate tools are
 opt-in — hidden from `tools/list` unless `policy.gate.enabled` is true (the
-default is false). Every tool answers with a uniform envelope: `{ok: true,
-...payload}` or `{ok: false, error: {code, message, retryable, sessionId?,
-roundId?, details?}}`. `code` is a stable identifier and `message` carries the
-human sentence, so a client can branch on the type without parsing prose:
-`evaluation_invalid`, `contract_invalid`, `policy_invalid`, `session_not_found`,
-`round_id_required`, `round_id_mismatch`, `state_unavailable`,
-`invalid_argument`, `gate_disabled`, `loop_already_running`. Payload defects
-(`evaluation_invalid`, `contract_invalid`, `policy_invalid`, `round_id_*`,
-`invalid_argument`) are `retryable`, meaning the fix is a corrected submission;
-state conditions are not. A `loopforge_next` whose `roundId` no longer matches
-is deliberately NOT an error — it returns the held prompt with `ok: true` so
-the agent can recover the response it missed. `status` provides `session`,
-`loop`, `all`, `audit`, and
-`explain` views; `loopforge explain LOOP_ID [--round N] [--json]` exposes the
-same per-round "why" view from the CLI. `loopforge doctor` is static-only — it
-checks policy structure, command-ID uniqueness, cwd containment, provider
-registration, PATH resolution, caps, store, and git readiness, and never
-executes a verification command or rewrites policy. The package uses only the
-Node.js standard library at runtime, and policy controls thresholds, budgets,
-and intervals.
+default is false). 
 
 ---
 

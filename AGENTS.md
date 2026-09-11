@@ -315,8 +315,12 @@ a `ContractBinding` for exactly this comparison). The contract closes when
 every item is `verified`, or when a round reports `outcome: "blocked"`.
 Claimed-but-unbacked is `insufficient` and the round still commits; the debt is
 surfaced and the enforcement gate's bounded escalation
-(`engine.unverified_claim_streak_limit`) handles a persistent pattern by
-rejecting, then terminating as `incomplete`. Because closure is derived, a
+(`engine.unverified_claim_streak_limit`, default 3) handles a persistent
+pattern with the row's OWN ladder: the round at the limit is rejected, a second
+consecutive rejection OF THE SAME CHECK rejects again with the escalation
+notice, and the third terminates the loop as `incomplete`. The counter is that
+check's own streak — `consecutiveRejections` is reset whenever the check
+changes, so a streak earned by a different check never escalates this row. Because closure is derived, a
 premature closure is structurally impossible. A different proposal while the
 active contract is open is ignored and surfaced as a warning. Scope drift is a
 machine fact with no clarification waiver.

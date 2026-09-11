@@ -172,7 +172,7 @@ Replay 通过已提交时间线和轮次 diff 回答“发生了什么”。Audi
 
 外部 Agent 负责规划和工具使用。它可以让 Compiler 强调已有状态（按稳定 ID 或完全相等文本）或暴露困惑点，但不能移除**受保护**的 prompt 段落或绕过预算：当受保护内容自身超出上限时，prompt 会记下 `protectedOverflow` 而不是把它们丢掉。LoopForge 不运行后台 Agent。
 
-九个 MCP 工具：`start`、`next`、`status`、`stop`、`pause`、`resume`、`replay`、`gate_check` 和 `gate_resolve`。其中两个 gate 工具是 opt-in——`policy.gate.enabled` 为 true(默认 false)时才出现在 `tools/list`。每个工具都使用统一信封应答：`{ok: true, ...payload}` 或 `{ok: false, error: {code, message, retryable, sessionId?, roundId?, details?}}`。`code` 是稳定标识符，人类可读的句子放在 `message` 里，客户端无需解析自然语言即可分支：`evaluation_invalid`、`contract_invalid`、`policy_invalid`、`session_not_found`、`round_id_required`、`round_id_mismatch`、`state_unavailable`、`invalid_argument`、`gate_disabled`、`loop_already_running`。载荷缺陷（`evaluation_invalid`、`contract_invalid`、`policy_invalid`、`round_id_*`、`invalid_argument`）标记为 `retryable`——修正载荷即可重试；状态类条件不可重试。`loopforge_next` 的 `roundId` 不再匹配时**故意不报错**：它返回 held prompt 并带 `ok: true`，让 Agent 找回错过的响应。`status` 提供 `session`、`loop`、`all`、`audit` 和 `explain` 视图；CLI 的 `loopforge explain LOOP_ID [--round N] [--json]` 暴露同一份逐轮“为什么”视图。`loopforge doctor` 只做静态检查——policy 结构、command ID 唯一性、cwd 包含关系、provider 注册、PATH 解析、超时与输出上限、store 与 git 可用性——从不执行验证命令，也不会改写 policy。运行时只使用 Node.js 标准库，阈值、预算和间隔由 `loop_policy.json` 控制。
+九个 MCP 工具：`start`、`next`、`status`、`stop`、`pause`、`resume`、`replay`、`gate_check` 和 `gate_resolve`。其中两个 gate 工具是 opt-in——`policy.gate.enabled` 为 true(默认 false)时才出现在 `tools/list`。
 
 ---
 

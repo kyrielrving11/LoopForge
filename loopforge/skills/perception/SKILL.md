@@ -248,16 +248,17 @@ under.
 ## Backtrack
 
 A progress stall can trigger backtrack to the last clean committed round — the
-most recent committed round with no error-level verification flags. The window
-is `engine.stall_lookback_rounds` rounds (default 3), and the verdict is
-MACHINE-first: when git observations exist for the window, machine motion alone
-decides it, and your `progress_estimate` does not enter — a rising estimate
-cannot cancel a stall, and git motion can only excuse one (it never creates
-one). Your reported estimates are consulted only when the loop has no machine
-history to read (no git provider, or fewer rounds than the window). One
-machine fact is exempt by construction: a round whose success the machine
-verified is finishing, not churning — the closing round of a loop often changes
-no files at all. So the way out of a stall is real, observable work.
+most recent committed round with no error-level verification flags. The stall
+window is 3 committed rounds (the breaker tier that follows it uses
+`engine.stall_lookback_rounds`, default 3), and the verdict is MACHINE-first:
+when git observations exist for the window, machine motion alone decides it,
+and your `progress_estimate` does not enter — a rising estimate cannot cancel a
+stall, and git motion can only excuse one (it never creates one). Your reported
+estimates are consulted only when the loop has no machine history to read (no
+git provider, or fewer rounds than the window). One machine fact is exempt by
+construction: a round whose success the machine verified is finishing, not
+churning — the closing round of a loop often changes no files at all. So the way
+out of a stall is real, observable work.
 
 The backtrack commits a rollback directive that stays out of final history:
 your next submission is the REDO of round `restorePoint + 1` and must reuse the

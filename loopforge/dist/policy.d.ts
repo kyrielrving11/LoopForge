@@ -11,7 +11,9 @@ export interface SummaryPolicy {
     milestone_interval: number;
 }
 export interface EnginePolicy {
-    /** Number of committed rounds inspected for progress stalls. */
+    /** v3.8.1: the window of the progress BREAKER tier — the second tier of the
+     *  single progress evaluator, which fires when the stall tier (a fixed 3
+     *  committed rounds) saw no stall. Default: 3. */
     stall_lookback_rounds: number;
     max_rounds: number;
     /** v2.7: When true, enforcement rules that would terminate (R4 2nd strike,

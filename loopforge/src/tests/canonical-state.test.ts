@@ -9,9 +9,10 @@ import {
   stableStringify,
   formatRoundContract,
   milestoneHeading,
-  trustBarLine,
   CANONICAL_STATE_SCHEMA_VERSION,
 } from "../canonical-state.js";
+import type { ActiveContractView } from "../round-contract.js";
+import type { RoundFacts } from "../round-facts.js";
 import {
   makeLoopCompileRequest,
   makeLoopCompileResponse,
@@ -148,14 +149,12 @@ describe("createCanonicalLoopState", () => {
     const state = createCanonicalLoopState(request(), response({
       rolling_summary: {
         key_outcomes: ["[R1] accepted: fixed bug"],
-        recurring_issues: ["flakey test"],
         rounds_sampled: 1,
         generated_at_round: 2,
         milestones: [],
       },
     }), "test.md");
     assert.ok(state.rollingOutcomes.length > 0);
-    assert.ok(state.recurringIssues.length > 0);
   });
 
   it("propagates sub-goals", () => {
@@ -255,7 +254,6 @@ describe("renderCanonicalStateMarkdown", () => {
     const state = createCanonicalLoopState(request(), response({
       rolling_summary: {
         key_outcomes: [],
-        recurring_issues: [],
         rounds_sampled: 1,
         generated_at_round: 2,
         milestones: [{
@@ -302,16 +300,6 @@ describe("renderCanonicalStateMarkdown", () => {
     assert.ok(md.includes("detail text"));
   });
 
-  it("renders agent trust when score is available", () => {
-    const state = createCanonicalLoopState(request(), response({
-      agent_trust_score: 0.85,
-      agent_trust_trend: [0.9, 0.85, 0.8],
-    }), "test.md");
-    const md = renderCanonicalStateMarkdown(state);
-    assert.ok(md.includes("Agent Trust"));
-    assert.ok(md.includes("85%"));
-    assert.ok(md.includes("0.9 → 0.85 → 0.8"));
-  });
 
   it("always ends with a newline", () => {
     const state = createCanonicalLoopState(request(), response(), "test.md");
@@ -335,7 +323,6 @@ describe("state-file tiering (v3.7.1)", () => {
     }), response({
       rolling_summary: {
         key_outcomes: [],
-        recurring_issues: [],
         rounds_sampled: 1,
         generated_at_round: 2,
         milestones: [{
@@ -427,7 +414,6 @@ describe("v3.3 — Roadmap and derived state", () => {
         generated_at_round: 4,
       }],
       key_outcomes: [],
-      recurring_issues: [],
       failed_patterns: [],
       rounds_sampled: 4,
       generated_at_round: 4,
@@ -447,15 +433,17 @@ describe("v3.3 — Roadmap and derived state", () => {
     }],
   });
 
-  it("renders Roadmap with position, criteria counts, remaining IDs and sub-goal activity", () => {
+  it("renders the one-line Phase section", () => {
     const state = createCanonicalLoopState(request({ round: 7 }), fullResponse(), "test.md");
     const md = renderCanonicalStateMarkdown(state);
-    assert.ok(md.includes("## Roadmap"));
-    assert.ok(md.includes("Position: round 7/20"));
-    assert.ok(md.includes("3 rounds since the last milestone boundary"));
-    assert.ok(md.includes("1/3 met · 2 remaining"));
-    assert.ok(md.includes("cr-22222222"), "remaining criterion IDs render");
-    assert.ok(md.includes("1 in progress · 0 pending"));
+    // v3.8.1: the Roadmap section is gone. Three of its four lines
+    // (criteria counts, remaining criterion IDs, sub-goal activity) were
+    // re-compositions of facts that already have their own sections; only the
+    // phase position was unique, and it is one line now.
+    assert.ok(!md.includes("## Roadmap"));
+    assert.ok(md.includes("## Phase"));
+    assert.ok(md.includes("round 7/20"));
+    assert.ok(md.includes("3 rounds since the last boundary"));
   });
 
   it("omits Roadmap when milestones and criteria are empty", () => {
@@ -464,22 +452,18 @@ describe("v3.3 — Roadmap and derived state", () => {
     assert.ok(!md.includes("## Roadmap"));
   });
 
-  it("propagates derived roundStats/machineStatus conditionally and deterministically", () => {
+  it("propagates derived machineStatus conditionally and deterministically", () => {
     const req = request();
     const res = response();
     const plain1 = createCanonicalLoopState(req, res, "test.md");
     const plain2 = createCanonicalLoopState(req, res, "test.md");
-    assert.equal("roundStats" in plain1, false, "no derived data → key absent (hash stability)");
-    assert.equal("machineStatus" in plain1, false);
+    assert.equal("machineStatus" in plain1, false, "no derived data → key absent (hash stability)");
     assert.equal(hashCanonicalState(plain1), hashCanonicalState(plain2));
 
     const derived = () => createCanonicalLoopState(req, res, "test.md", {
-      roundStats: [{ round: 1, filesChangedCount: 3, rejectedAttempts: 1, progressDelta: null }],
       machineStatus: { windowRounds: 3, gitMotion: true, motionRounds: 2 },
     });
     const state = derived();
-    assert.equal(state.roundStats?.length, 1);
-    assert.equal(state.roundStats![0].rejectedAttempts, 1);
     assert.equal(state.machineStatus?.gitMotion, true);
     assert.notEqual(hashCanonicalState(plain1), hashCanonicalState(state));
     assert.equal(hashCanonicalState(state), hashCanonicalState(derived()),
@@ -505,12 +489,30 @@ describe("Round Contract state (v3.3 rendering, v3.4 active source)", () => {
     config_hash_by_command: {},
   };
 
-  /** v3.4: The ACTIVE contract arrives in the derived bag (computed by
-   *  loop-compiler.deriveActiveContract from committed rounds) — never via
+  /** v3.8.1: the contract facts arrive as ONE bundle (round-facts
+   *  `deriveRoundFacts`), so a state can never mix values derived over
+   *  different history windows. */
+  const contractFacts = (activeContract: ActiveContractView | null): RoundFacts => ({
+    activeContract,
+    itemStatuses: {
+      contractId: "rc-aaaaaaaa",
+      closure: "open",
+      closed_at_round: null,
+      items: [],
+      verifiedCount: 0,
+      contradictedCount: 0,
+      insufficientCount: 0,
+    },
+    verifiedSubGoals: [],
+    verificationDebt: [],
+  });
+
+  /** v3.4: The ACTIVE contract arrives in the derived bag (computed by the
+   *  contract walker from committed rounds) — never via
    *  request.last_round_result, which no longer carries it. */
   const withActiveContract = () =>
     createCanonicalLoopState(request({ round: 3 }), response({ round: 3 }), "test.md", {
-      roundContract: contract,
+      roundFacts: contractFacts(contract),
     });
 
   it("active contract replaces Current Task and lands in state.roundContract", () => {
@@ -564,13 +566,6 @@ describe("Round Contract state (v3.3 rendering, v3.4 active source)", () => {
 });
 
 describe("Shared presentation atoms (v3.3.1)", () => {
-  it("trustBarLine renders the fixed-width bar and percentage", () => {
-    assert.equal(trustBarLine(0.6), "██████░░░░ 60%");
-    assert.equal(trustBarLine(0), "░░░░░░░░░░ 0%");
-    assert.equal(trustBarLine(1), "██████████ 100%");
-    // Math.round(2.5) rounds half up → 3 filled cells at 25%.
-    assert.equal(trustBarLine(0.25), "███░░░░░░░ 25%");
-  });
 
   it("milestoneHeading renders icon, label, round range and progress", () => {
     const base = {

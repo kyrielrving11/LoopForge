@@ -32,7 +32,7 @@ import type {
 import { CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE, verifySelfEvaluation } from "./verification-gate.js";
 import { entryRound, isRecord } from "./token-utils.js";
 import { effectiveOutcome, effectiveSuccess } from "./self-eval.js";
-import { committedRoundsFromEntries, decodeCommittedRound } from "./committed-round.js";
+import { derivationRounds, decodeCommittedRound } from "./committed-round.js";
 import { makeRoundId } from "./round-transaction.js";
 import {
   enforceRound,
@@ -172,6 +172,100 @@ function shouldPushSuccess(
 
 // ── RoundCoordinator ───────────────────────────────────────────────────────
 
+/** v3.8.1: The rolled-back branch's facts — the ONE derivation of which rounds
+ *  failed, which approaches must not be repeated, which assumptions were
+ *  falsified, and which files (with their failed-round git fingerprints) the
+ *  agent must restore.
+ *
+ *  Sources are COMMITTED rounds above the restore point; rejected attempts are
+ *  not durable history and never become a source. The in-flight attempt that
+ *  triggered the rollback is the one exception — its evaluation lives in this
+ *  process, not in committed history.
+ *
+ *  Extracted from the coordinator's inline walk so it is unit-testable without
+ *  driving a whole rollback, and so the prompt, the state file and the
+ *  committed decision all describe one event. */
+export function deriveBacktrackRecoveryFacts(input: {
+  currentRound: number;
+  restoreRound: number;
+  vaultEntries: VaultEntry[];
+  selfEval: SelfEvaluation;
+}): {
+  skippedFiles: string[];
+  skippedFingerprints: Record<string, string>;
+  failedRounds: number[];
+  approaches: string[];
+  wrongAssumptions: string[];
+} {
+  const { currentRound, restoreRound, vaultEntries, selfEval } = input;
+  // v2.13: files changed in skipped rounds, for the restore prompt.
+  const skippedFiles: string[] = [];
+  // M3 (v3.7.x): each skipped file's git fingerprint at its failed round.
+  // Recorded from the round's own after-evidence (machine data, not the
+  // agent's report); later rounds overwrite earlier ones so the map holds the
+  // LAST failed state of every file.
+  const skippedFingerprints: Record<string, string> = {};
+  const failedRounds: number[] = [];
+  const approaches: string[] = [];
+  const wrongAssumptions: string[] = [];
+  for (let r = restoreRound + 1; r < currentRound; r++) {
+    // v3.2.1: match the feedback entry (execution_report lives there) — the
+    // compile-time lineage entry for the same round precedes it in the flat
+    // view and carries no evidence.
+    const entry = vaultEntries.find(
+      (e) => entryRound(e) === r && e.task_type !== "loop_lineage",
+    );
+    const view = entry ? decodeCommittedRound(entry) : null;
+    const evaluation = view?.evaluation ?? null;
+    if (entry?.execution_report) {
+      const ev = entry.execution_report as Record<string, unknown>;
+      const files = Array.isArray(ev.files_changed)
+        ? ev.files_changed.filter((f: unknown) => typeof f === "string")
+        : [];
+      const git = view?.afterEvidence.find(
+        (snapshot) => snapshot.kind === "git" &&
+          isRecord(snapshot.data.fingerprints),
+      );
+      const gitFingerprints = git && git.kind === "git"
+        ? (git.data.fingerprints as Record<string, unknown>)
+        : null;
+      for (const f of files) {
+        if (!skippedFiles.includes(f)) skippedFiles.push(f);
+        const fp = gitFingerprints?.[f];
+        if (typeof fp === "string") skippedFingerprints[f] = fp;
+      }
+    }
+    const summary = evaluation?.output_summary ?? "";
+    if (summary.trim().length > 0) {
+      failedRounds.push(r);
+      approaches.push(summary.trim().slice(0, 200));
+    }
+    const assumptions = (evaluation?.wrong_assumptions ?? [])
+      .filter((v: unknown): v is string => typeof v === "string")
+      .map((s) => s.slice(0, 500));
+    for (const a of assumptions) {
+      if (!wrongAssumptions.includes(a)) wrongAssumptions.push(a);
+    }
+  }
+  // The in-flight attempt that triggered this rollback.
+  const triggerSummary = selfEval.output_summary?.trim() ?? "";
+  if (triggerSummary.length > 0) {
+    if (!failedRounds.includes(currentRound)) failedRounds.push(currentRound);
+    approaches.push(triggerSummary.slice(0, 200));
+    for (const a of (selfEval.wrong_assumptions ?? [])
+      .filter((v: unknown): v is string => typeof v === "string")) {
+      if (!wrongAssumptions.includes(a)) wrongAssumptions.push(a.slice(0, 500));
+    }
+  }
+  return {
+    skippedFiles,
+    skippedFingerprints,
+    failedRounds,
+    approaches,
+    wrongAssumptions,
+  };
+}
+
 export class RoundCoordinator {
   private store: LoopStore | undefined;
 
@@ -236,7 +330,7 @@ export class RoundCoordinator {
     // v3.8: the ACTIVE contract's derived item statuses for this round — the
     // same reducer the gate, compile path, audit and explain consume. Drives
     // the stop mapping (completed vs incomplete) and the success trajectory.
-    const committedRounds = committedRoundsFromEntries(vaultEntries, currentRound);
+    const committedRounds = derivationRounds(vaultEntries, currentRound);
     // v3.8: the shared executed-contract derivation — the same one explain and
     // audit call, so the live posture and the read-only views cannot diverge.
     const { statuses: activeContractStatuses } = deriveRoundContractView({
@@ -356,70 +450,22 @@ export class RoundCoordinator {
         };
       }
 
-      // v2.13: Collect files changed in skipped rounds for the restore prompt
-      const skippedFiles: string[] = [];
-      // M3 (v3.7.x): each skipped file's git fingerprint at its failed round.
-      // Recorded from the round's own after-evidence (machine data, not the
-      // agent's report); later rounds overwrite earlier ones so the map holds
-      // the LAST failed state of every file.
-      const skippedFingerprints: Record<string, string> = {};
-      // v3.7.1: Recovery Brief facts — one approach and the falsified
-      // assumptions per rolled-back round, from COMMITTED rounds above the
-      // restore point (rejected attempts are not durable history and never
-      // become a source; the in-flight attempt below is the only exception).
-      const failedRounds: number[] = [];
-      const approaches: string[] = [];
-      const wrongAssumptions: string[] = [];
-      for (let r = restorePoint.round + 1; r < currentRound; r++) {
-        // v3.2.1: match the feedback entry (execution_report lives there) —
-        // the compile-time lineage entry for the same round precedes it in
-        // the flat view and carries no evidence.
-        const entry = vaultEntries.find(
-          (e) => entryRound(e) === r && e.task_type !== "loop_lineage",
-        );
-        const view = entry ? decodeCommittedRound(entry) : null;
-        const evaluation = view?.evaluation ?? null;
-        if (entry?.execution_report) {
-          const ev = entry.execution_report as Record<string, unknown>;
-          const files = Array.isArray(ev.files_changed)
-            ? ev.files_changed.filter((f: unknown) => typeof f === "string")
-            : [];
-          const git = view?.afterEvidence.find(
-            (snapshot) => snapshot.kind === "git" &&
-              isRecord(snapshot.data.fingerprints),
-          );
-          const gitFingerprints = git && git.kind === "git"
-            ? (git.data.fingerprints as Record<string, unknown>)
-            : null;
-          for (const f of files) {
-            if (!skippedFiles.includes(f)) skippedFiles.push(f);
-            const fp = gitFingerprints?.[f];
-            if (typeof fp === "string") skippedFingerprints[f] = fp;
-          }
-        }
-        const summary = evaluation?.output_summary ?? "";
-        if (summary.trim().length > 0) {
-          failedRounds.push(r);
-          approaches.push(summary.trim().slice(0, 200));
-        }
-        const assumptions = (evaluation?.wrong_assumptions ?? [])
-          .filter((v: unknown): v is string => typeof v === "string")
-          .map((s) => s.slice(0, 500));
-        for (const a of assumptions) {
-          if (!wrongAssumptions.includes(a)) wrongAssumptions.push(a);
-        }
-      }
-      // The in-flight attempt that triggered this rollback — its evaluation
-      // lives in this process, not in committed history.
-      const triggerSummary = selfEval.output_summary?.trim() ?? "";
-      if (triggerSummary.length > 0) {
-        if (!failedRounds.includes(currentRound)) failedRounds.push(currentRound);
-        approaches.push(triggerSummary.slice(0, 200));
-        for (const a of (selfEval.wrong_assumptions ?? [])
-          .filter((v: unknown): v is string => typeof v === "string")) {
-          if (!wrongAssumptions.includes(a)) wrongAssumptions.push(a.slice(0, 500));
-        }
-      }
+      // v2.13/v3.8.1: the rolled-back branch's facts — one named derivation,
+      // so the walk is testable without driving a whole rollback, and the
+      // prompt, the state file and the committed decision all describe one
+      // event.
+      const {
+        skippedFiles,
+        skippedFingerprints,
+        failedRounds,
+        approaches,
+        wrongAssumptions,
+      } = deriveBacktrackRecoveryFacts({
+        currentRound,
+        restoreRound: restorePoint.round,
+        vaultEntries,
+        selfEval,
+      });
 
       // v2.12: Capture the restore point's git HEAD so the next round's
       // verification can confirm the workspace returned to this commit.

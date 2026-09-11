@@ -223,16 +223,10 @@ export class LoopForgeEngine {
       success: true,
     };
 
-    // v3.2: Persist what this round's prompt actually presented (L1 only —
-    // L0/L2 compiles leave the artifact field undefined). The next L1 compile
-    // reads these as its collapse diff baseline. Field extension of the
-    // existing lineage entry — no new persistence format.
-    const presented = response.prompt_artifact?.presentedState;
-    if (presented) {
-      structuredLineage.presented_constraint_ids = presented.constraintIds;
-      structuredLineage.presented_subgoals = presented.subGoals;
-      structuredLineage.presented_milestone_ranges = presented.milestoneRanges;
-    }
+    // v3.8.1: the `presented_*` lineage stamps are gone with L1 collapse.
+    // They were persisted derived state whose only purpose was to change what
+    // the NEXT prompt rendered — a prompt's content must follow from
+    // committed facts, not from what the previous prompt happened to show.
 
     let lastOutputSummary = "";
     let lastViolations: string[] = [];
@@ -395,6 +389,20 @@ export class LoopForgeEngine {
         }
         if (Array.isArray(result.backtrackWrongAssumptions)) {
           lineage.backtrackWrongAssumptions = result.backtrackWrongAssumptions;
+        }
+        // v3.8.1: the restore facts the agent-facing brief is made of. They
+        // were persisted on the committed decision but never stamped here, so
+        // the compile-side Recovery Brief could not read them off the merged
+        // row and re-derived the rollback from a second walk instead.
+        if (Array.isArray(result.backtrackSkippedFiles)) {
+          lineage.backtrackSkippedFiles = result.backtrackSkippedFiles;
+        }
+        if (result.backtrackSkippedFingerprints &&
+            typeof result.backtrackSkippedFingerprints === "object") {
+          lineage.backtrackSkippedFingerprints = result.backtrackSkippedFingerprints;
+        }
+        if (typeof result.backtrackTargetGitHead === "string") {
+          lineage.backtrackTargetGitHead = result.backtrackTargetGitHead;
         }
       }
     }
@@ -888,7 +896,6 @@ export class LoopForgeEngine {
       constraints_from_plan: parsed.constraints_from_plan,
       new_since_last_round: parsed.new_since_last_round,
       force_level: parsed.force_level,
-      health_check_interval: parsed.health_check_interval,
       external_context: parsed.external_context,
       max_rounds: parsed.max_rounds,
       verification_flags: parsed.verification_flags,
@@ -1026,7 +1033,6 @@ export class LoopForgeEngine {
         rolling_summary: response.rolling_summary,
         sub_goals: response.sub_goals,
         criterion_statuses: response.criterion_statuses,
-        suggested_next_task: response.suggested_next_task,
       },
     };
   }

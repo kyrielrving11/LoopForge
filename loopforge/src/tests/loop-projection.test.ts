@@ -6,6 +6,8 @@ import type { CommittedRoundView } from "../committed-round.js";
 import { makeLoopCompileResponse, makeSelfEvaluation } from "../protocol.js";
 import { installTestCommandProvider } from "./_helpers.js";
 import { deriveContractItemIds } from "../token-utils.js";
+import { NO_IN_FLIGHT_ROUND, deriveRoundFacts } from "../round-facts.js";
+import { getPolicy } from "../policy.js";
 
 function round(
   number: number,
@@ -41,6 +43,9 @@ function round(
     observationDelta: [],
     evidenceIncomplete: true,
     ...view,
+    // A Partial spread can carry `backtrack: undefined`; the view contract is
+    // record-or-null.
+    backtrack: view.backtrack ?? null,
   };
 }
 
@@ -108,14 +113,33 @@ const subGoalResponse = () => makeLoopCompileResponse({
   }] as never,
 });
 
+/** v3.8.1: `deriveCognitiveFacts` now takes the contract facts instead of
+ *  re-deriving them internally (one fact, one derivation). This wrapper builds
+ *  them from exactly the inputs the old internal derivation used, so every test
+ *  below still asserts the same facts — only the derivation moved outward. */
+function cognitiveFacts(
+  input: Omit<Parameters<typeof deriveCognitiveFacts>[0], "facts">,
+): ReturnType<typeof deriveCognitiveFacts> {
+  return deriveCognitiveFacts({
+    ...input,
+    facts: deriveRoundFacts({
+      rounds: input.rounds,
+      currentRound: (input.rounds[input.rounds.length - 1]?.round ?? 0) + 1,
+      inFlight: NO_IN_FLIGHT_ROUND,
+      subGoals: input.compileResponse?.sub_goals ?? [],
+      commands: getPolicy().evidence.commands ?? [],
+    }),
+  });
+}
+
 describe("cognitive facts and projection", () => {
   it("returns null for an empty fact set", () => {
-    const facts = deriveCognitiveFacts({ compileResponse: null, rounds: [] });
+    const facts = cognitiveFacts({ compileResponse: null, rounds: [] });
     assert.equal(buildLoopProjection(facts), null);
   });
 
   it("derives focus from committed rounds", () => {
-    const facts = deriveCognitiveFacts({
+    const facts = cognitiveFacts({
       compileResponse: null,
       rounds: [round(1, { outcome: "partial", output_summary: "implemented parser" })],
     });
@@ -133,7 +157,7 @@ describe("cognitive facts and projection", () => {
         { id: "sg-b", description: "repair build", status: "blocked", priority: 1 },
       ] as never,
     });
-    const facts = deriveCognitiveFacts({
+    const facts = cognitiveFacts({
       compileResponse: response,
       rounds: [round(1)],
     });
@@ -162,7 +186,7 @@ describe("cognitive facts and projection", () => {
         milestones: [{ label: "foundation", round_range: { start: 1, end: 2 } }],
       } as never,
     });
-    const facts = deriveCognitiveFacts({
+    const facts = cognitiveFacts({
       compileResponse: response,
       rounds: [round(2, {
         worker_results: [{
@@ -189,7 +213,7 @@ describe("cognitive facts and projection", () => {
 
   it("v3.8: exposes verified_subgoals on the projection", () => {
     installTestCommandProvider();
-    const projection = buildLoopProjection(deriveCognitiveFacts({
+    const projection = buildLoopProjection(cognitiveFacts({
       compileResponse: subGoalResponse(),
       rounds: verifiedHistory(),
     }))!;
@@ -210,7 +234,7 @@ describe("cognitive facts and projection", () => {
 
   it("v3.8: reports no verified_subgoals while the item is unverified", () => {
     installTestCommandProvider();
-    const projection = buildLoopProjection(deriveCognitiveFacts({
+    const projection = buildLoopProjection(cognitiveFacts({
       compileResponse: subGoalResponse(),
       rounds: [round(1, {}, { contractProposal: { ...CONTRACT } })],
     }))!;
@@ -219,13 +243,13 @@ describe("cognitive facts and projection", () => {
   });
 
   it("does not collapse a verified-only or risk-only handoff", () => {
-    const verified = deriveCognitiveFacts({
+    const verified = cognitiveFacts({
       compileResponse: null,
       rounds: [],
       verifiedClaims: ["cr-12345678"],
     });
     assert.ok(buildLoopProjection(verified));
-    const risks = deriveCognitiveFacts({
+    const risks = cognitiveFacts({
       compileResponse: null,
       rounds: [],
       openGates: ["needs approval"],

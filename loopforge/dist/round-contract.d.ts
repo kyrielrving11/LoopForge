@@ -44,10 +44,6 @@ export declare function activateContract(proposal: RoundContractProposal, declar
 export declare function sameContract(left: RoundContractProposal, right: RoundContractProposal): boolean;
 /** v3.8: The active contract after replaying committed rounds in order. */
 export declare function deriveActiveRoundContract(rounds: ReadonlyArray<CommittedRoundView>, commands?: ReadonlyArray<CommandEvidencePolicy>): ActiveContractView | null;
-/** v2.11: Match a user-provided reference against a criterion (cr-XXXXXXXX
- *  equality first, then Jaccard similarity). Kept for criterion claims — the
- *  contract layer no longer matches free text. */
-export declare function contractItemMatches(left: string, right: string): boolean;
 /** v3.8: Every criterion id referenced by the contract's items. */
 export declare function contractCriterionIds(contract: ActiveContractView): string[];
 /** v3.8: Every sub-goal id referenced by any of the contract's items. */

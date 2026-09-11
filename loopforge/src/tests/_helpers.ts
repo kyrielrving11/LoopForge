@@ -17,6 +17,7 @@ import { LOOP_STORE_SCHEMA_VERSION } from "../loop-store.js";
 import { makeExecutionReport, makeSelfEvaluation } from "../protocol.js";
 import type { CriterionClaim, RoundContractProposal, RoundOutcome, VerificationFlag } from "../protocol.js";
 import { getPolicy } from "../policy.js";
+import { POLICY_SCHEMA_VERSION } from "../policy.js";
 
 /** v3.8: Build the criterion claims an evaluation submits. */
 export function criterionClaims(met: string[] = [], remaining: string[] = []): CriterionClaim[] {
@@ -262,7 +263,10 @@ export function testCommandProvider(): {
 export function writeMachineBackedPolicy(dir: string): void {
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "loop_policy.json"), JSON.stringify({
-    version: "2",
+    // v3.8.1: the policy version is load-bearing — a file that does not
+    // declare the current schema is REJECTED, so this fixture must track it
+    // rather than hardcode a number that rots.
+    version: POLICY_SCHEMA_VERSION,
     evidence: {
       providers: ["git"],
       timeout_ms: 120000,

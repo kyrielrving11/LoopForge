@@ -6,6 +6,7 @@
  */
 
 import type { MachineObservation } from "./protocol.js";
+import { PROMPT_ARTIFACT_SCHEMA_VERSION } from "./protocol.js";
 import type { VaultEntry } from "./loop-store.js";
 import type {
   ContractBinding,
@@ -28,6 +29,26 @@ import { claimedMetCriteria, claimedRemainingCriteria, effectiveOutcome, parseRo
 import { entryRound, isRecord } from "./token-utils.js";
 
 export type CommittedAction = "continue" | "stop" | "backtrack";
+
+/** v3.8.1: the rolled-back branch's facts, decoded from a committed rollback
+ *  directive. One shape for the compile-side Recovery Brief, the state file's
+ *  Recent tier and the rollback prompt — these were three renderers over two
+ *  independent derivations (the committed record and an in-memory walk).
+ *
+ *  Note the target is a RESTORE POINT, not an upper bound: the redo re-commits
+ *  the same round numbers the abandoned rounds occupied (round-lifecycle.ts
+ *  sets `currentRound = backtrackTarget + 1`), so this is never a window
+ *  fence. Abandonment is temporal, not numeric. */
+export interface BacktrackRecoveryRecord {
+  readonly target: number;
+  readonly triggerRule: string;
+  readonly failedRounds: number[];
+  readonly approaches: string[];
+  readonly wrongAssumptions: string[];
+  readonly skippedFiles: string[];
+  readonly skippedFingerprints: Record<string, string>;
+  readonly targetGitHead?: string;
+}
 
 export interface CommittedRoundView {
   readonly source: "feedback" | "merged";
@@ -65,6 +86,10 @@ export interface CommittedRoundView {
   readonly retractedConstraints?: string[];
   readonly emergedSubtasks?: string[];
   readonly subgoalUpdates?: SubGoalUpdate[];
+  /** v3.8.1: present only on a committed rollback directive, null elsewhere.
+   *  Decoded from `result.*` on the durable feedback entry and from the
+   *  `lineage.backtrack*` stamps on a hydrated merged entry. */
+  readonly backtrack: BacktrackRecoveryRecord | null;
 }
 
 function committedAction(value: unknown): CommittedAction | null {
@@ -92,6 +117,45 @@ function strings(value: unknown): string[] {
   return Array.isArray(value)
     ? value.filter((item): item is string => typeof item === "string")
     : [];
+}
+
+function numbers(value: unknown): number[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is number => typeof item === "number")
+    : [];
+}
+
+function stringMap(value: unknown): Record<string, string> {
+  if (!isRecord(value)) return {};
+  const out: Record<string, string> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (typeof entry === "string") out[key] = entry;
+  }
+  return out;
+}
+
+/** v3.8.1: decode a rollback directive's facts from either carrier —
+ *  `result.*` on a durable :feedback entry, `lineage.*` on a hydrated merged
+ *  entry. Returns null when no restore point is recorded, which is also the
+ *  signal that the record cannot serve as recovery guidance. */
+export function decodeBacktrackRecord(source: unknown): BacktrackRecoveryRecord | null {
+  const value = isRecord(source) ? source : {};
+  const target = typeof value.backtrackTarget === "number" ? value.backtrackTarget : null;
+  if (target === null) return null;
+  return {
+    target,
+    triggerRule: typeof value.backtrackTriggerRule === "string"
+      ? value.backtrackTriggerRule
+      : "",
+    failedRounds: numbers(value.backtrackFailedRounds),
+    approaches: strings(value.backtrackApproaches),
+    wrongAssumptions: strings(value.backtrackWrongAssumptions),
+    skippedFiles: strings(value.backtrackSkippedFiles),
+    skippedFingerprints: stringMap(value.backtrackSkippedFingerprints),
+    targetGitHead: typeof value.backtrackTargetGitHead === "string"
+      ? value.backtrackTargetGitHead
+      : undefined,
+  };
 }
 
 /** Normalize a raw subgoal_updates value into typed entries. Decode stays
@@ -180,6 +244,7 @@ export function decodeCommittedRound(entry: VaultEntry): CommittedRoundView | nu
     retractedConstraints: strings(evaluation?.retracted_constraints),
     emergedSubtasks: strings(evaluation?.emerged_subtasks),
     subgoalUpdates: subGoalUpdates(evaluation?.subgoal_updates),
+    backtrack: action === "backtrack" ? decodeBacktrackRecord(resultValue) : null,
   };
 }
 
@@ -274,6 +339,7 @@ export function decodeMergedRound(entry: unknown): CommittedRoundView | null {
     retractedConstraints: strings(evaluationRaw.retracted_constraints),
     emergedSubtasks: strings(evaluationRaw.emerged_subtasks),
     subgoalUpdates: subGoalUpdates(evaluationRaw.subgoal_updates),
+    backtrack: action === "backtrack" ? decodeBacktrackRecord(lineage) : null,
   };
 }
 
@@ -421,11 +487,23 @@ export function historyRounds(
   return [...byRound.values()].sort((a, b) => a.round - b.round);
 }
 
-export function committedRoundsFromEntries(
-  entries: VaultEntry[],
-  beforeRound = Number.POSITIVE_INFINITY,
+/** v3.8.1: the ONE committed-history window every derivation reads.
+ *
+ * `decodeRound` (hydrated merged lineage first, then the durable feedback
+ * entry) plus the rollback handling in `historyRounds` — so the compile path,
+ * the projection, the live coordinator, audit and explain can no longer
+ * disagree about which rounds are this branch's history, nor about how their
+ * envelope was interpreted.
+ *
+ * `currentRound` bounds the window exactly as before (default: unbounded). It
+ * is NOT a rollback fence: the redo re-commits the round numbers the abandoned
+ * rounds occupied, so abandonment is temporal, not numeric, and cannot be
+ * expressed as a bound here. */
+export function derivationRounds(
+  entries: ReadonlyArray<unknown>,
+  currentRound: number = Number.POSITIVE_INFINITY,
 ): CommittedRoundView[] {
-  return historyRounds(entries.map(decodeCommittedRound), beforeRound);
+  return historyRounds(entries.map(decodeRound), currentRound);
 }
 
 /** The machine-evidence set that best represents a committed round: the
@@ -443,21 +521,21 @@ export function machineEvidenceForRound(
   return view.beforeEvidence;
 }
 
-export function mergedRoundsFromEntries(
-  entries: unknown[],
-  beforeRound = Number.POSITIVE_INFINITY,
-): CommittedRoundView[] {
-  return historyRounds(entries.map(decodeMergedRound), beforeRound);
-}
-
 /** v3.8: Rounds whose persisted transaction carries a LEGACY schema version.
  *  A hard version break must be visible, not silent: these rounds drop out of
  *  history views, so audit/status surface them here instead of letting the
  *  loop look complete while rounds are missing. */
-export function legacyTransactionRounds(
-  entries: unknown[],
-): Array<{ round: number; schemaVersion: number }> {
-  const out: Array<{ round: number; schemaVersion: number }> = [];
+export interface LegacyRound {
+  round: number;
+  schemaVersion: number;
+  /** v3.8.1: which versioned envelope rejected the round. Both are hard
+   *  breaks — a round that fails either check is not committed history — so
+   *  both must be REPORTED, not just the transaction one. */
+  envelope: "transaction" | "prompt_artifact";
+}
+
+export function legacyTransactionRounds(entries: unknown[]): LegacyRound[] {
+  const out: LegacyRound[] = [];
   for (const entry of entries) {
     if (!isRecord(entry)) continue;
     const lineage = entryLineage(entry);
@@ -465,10 +543,26 @@ export function legacyTransactionRounds(
       ? lineage.round_transaction
       : isRecord(entry.round_transaction) ? entry.round_transaction : null;
     if (!envelope || !isRecord(envelope.snapshot)) continue;
-    const version = transactionSchemaVersionOf(envelope.snapshot);
-    if (version === null || version === ROUND_TRANSACTION_SCHEMA_VERSION) continue;
     const round = entryRound(entry);
-    if (round >= 1) out.push({ round, schemaVersion: version });
+    if (round < 1) continue;
+    const version = transactionSchemaVersionOf(envelope.snapshot);
+    if (version !== null && version !== ROUND_TRANSACTION_SCHEMA_VERSION) {
+      out.push({ round, schemaVersion: version, envelope: "transaction" });
+      continue;
+    }
+    // v3.8.1: the PromptArtifact schema is versioned separately, and the
+    // transaction parser rejects a snapshot whose artifact version it does
+    // not know — dropping the whole round. Reporting only the transaction
+    // version would let an artifact-version break delete committed history
+    // silently, which is the one thing this function exists to prevent.
+    const snapshot = envelope.snapshot as Record<string, unknown>;
+    if (isRecord(snapshot.promptArtifact)) {
+      const artifactVersion = snapshot.promptArtifact.schemaVersion;
+      if (typeof artifactVersion === "number" &&
+          artifactVersion !== PROMPT_ARTIFACT_SCHEMA_VERSION) {
+        out.push({ round, schemaVersion: artifactVersion, envelope: "prompt_artifact" });
+      }
+    }
   }
   return out.sort((a, b) => a.round - b.round);
 }

@@ -141,6 +141,18 @@ export declare class RoundLifecycle {
     /** Apply a prepared round to the session, persist, and build the result.
      *  Shared by reconcileCommittedRound, resume, and unpause — the three
      *  compile-then-persist tails were previously copy-pasted. */
+    /** Apply a processed round's counters to the session.
+     *
+     *  v3.8.1: per-rule rejection tracking — same-check rejections accumulate,
+     *  and a DIFFERENT rejection reason resets the counter to 1, so an agent
+     *  that fixes what it was told to fix is not punished by an unrelated
+     *  earlier rejection. This rule ran as two byte-identical copies (the live
+     *  advance path and the crash replay); one rule, one implementation, so the
+     *  two paths cannot drift.
+     *
+     *  `newConsecutiveRejections` comes from the enforcement gate and already
+     *  counts the round; it is only honoured when the check is unchanged. */
+    private applyRoundCounters;
     private persistPrepared;
     private restoredPromptResult;
     /** Reconcile the crash window where feedback committed but session_state

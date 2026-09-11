@@ -7,7 +7,7 @@ import {
   deriveEmergedItems,
   deriveSubGoalId,
   deriveSubGoals,
-  possibleDuplicateSubGoals,
+  duplicateEmergedDeclarations,
   validateSubGoalUpdates,
 } from "../subgoal-state.js";
 import type { SubGoal } from "../protocol.js";
@@ -148,33 +148,26 @@ describe("v3.8 — transition matrix and terminality", () => {
   });
 });
 
-describe("v3.8 — similarity is diagnostic only", () => {
-  const sg = (id: string, description: string, status: SubGoal["status"] = "pending"): SubGoal => ({
-    id,
-    description,
-    status,
-    declared_at_round: 1,
-    status_changed_at_round: 1,
-    priority: 0,
+describe("v3.8.1 — exact declaration duplicates are stated as fact", () => {
+  it("reports the exact repeats dropped from one round's emerged list", () => {
+    // Normalized-exact only: whitespace and case are folded, wording is not.
+    const duplicates = duplicateEmergedDeclarations([
+      "Fix the parser bug",
+      "fix   the parser bug",
+      "fix the parser bugs",
+    ]);
+    assert.deepEqual(duplicates, ["fix the parser bug"]);
   });
 
-  it("reports near-duplicate active sub-goals without merging them", () => {
-    const goals = [
-      sg("sg-aaaaaaaa", "fix the parser bug"),
-      sg("sg-bbbbbbbb", "fix the parser bugs"),
-    ];
-    const pairs = possibleDuplicateSubGoals(goals, 0.6);
-    assert.equal(pairs.length, 1);
-    assert.equal(pairs[0].left, "sg-aaaaaaaa");
-    // The declaration is untouched — both survive.
-    assert.equal(goals.length, 2);
+  it("reports each repeated declaration once, regardless of how often it recurs", () => {
+    assert.deepEqual(
+      duplicateEmergedDeclarations(["a b", "a b", "a b", "c d"]),
+      ["a b"],
+    );
   });
 
-  it("ignores terminal sub-goals in the diagnostic", () => {
-    const goals = [
-      sg("sg-aaaaaaaa", "fix the parser bug", "done"),
-      sg("sg-bbbbbbbb", "fix the parser bugs"),
-    ];
-    assert.deepEqual(possibleDuplicateSubGoals(goals, 0.6), []);
+  it("is silent when every declaration is distinct, and ignores blanks", () => {
+    assert.deepEqual(duplicateEmergedDeclarations(["one", "two", "three"]), []);
+    assert.deepEqual(duplicateEmergedDeclarations(["", "  ", "one"]), []);
   });
 });

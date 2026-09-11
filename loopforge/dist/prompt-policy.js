@@ -10,8 +10,6 @@ export function decidePromptLevel(input) {
     if (input.recoveryBoundary) {
         return { level: "l2", reasons: ["recovery_boundary"] };
     }
-    if (input.stateDrift)
-        return { level: "l2", reasons: ["state_drift"] };
     if ((input.attempt ?? 1) > 1) {
         return { level: "l0", reasons: ["retry_delta"] };
     }
@@ -41,11 +39,12 @@ export function decidePromptLevel(input) {
     if (input.previousFailedWithoutNewInformation) {
         return { level: "l0", reasons: ["retry_delta"] };
     }
-    const lastFullRound = input.lastFullRound ?? 1;
-    if (input.fullRefreshInterval > 0 &&
-        input.round - lastFullRound >= input.fullRefreshInterval) {
-        return { level: "l2", reasons: ["periodic_refresh"] };
-    }
+    // v3.8.1: no periodic_refresh branch. It was gated on
+    // `full_refresh_interval`, whose default is 0 — a switch that disables its
+    // own branch out of the box. L2 is reachable by six reasons that are FACTS
+    // about the round (first round, plan boundary, recovery, machine
+    // contradiction, checkpoint, repeated rejection); a round-count timer was
+    // the one that was not.
     return { level: "l1", reasons: ["state_capsule"] };
 }
 //# sourceMappingURL=prompt-policy.js.map

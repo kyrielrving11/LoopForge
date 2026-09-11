@@ -1,17 +1,18 @@
 import { afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
-  alignTask,
   buildSelfEvalBlock,
   buildRollingSummary,
   compileLoop,
   computeGoalTextHash,
   decideLevel,
+  deriveCriterionId,
   deriveCriterionStatuses,
   deriveGoalId,
-  deriveLessons,
+  deriveRecurringFlags,
 } from "../loop-compiler.js";
 import { deriveSubGoalId, validateSubGoalUpdates } from "../subgoal-state.js";
+import type { CommittedRoundView } from "../committed-round.js";
 import {
   type LoopObjective,
   makeLoopCompileRequest,
@@ -21,7 +22,7 @@ import {
 } from "../protocol.js";
 import { getPolicy, resetPolicy, setPolicyForTest, DEFAULT_POLICY } from "../policy.js";
 import { committedFeedbackRound, mergedLineageRound, criterionClaims } from "./_helpers.js";
-import type { MachineObservation } from "../protocol.js";
+import type { MachineObservation, VerificationFlag } from "../protocol.js";
 
 /** v3.8: a passed after-phase command observation for contract verification. */
 function commandObservation(status: "passed" | "failed"): MachineObservation {
@@ -52,7 +53,7 @@ function commandObservation(status: "passed" | "failed"): MachineObservation {
     },
   };
 }
-import { deriveContractItemIds, deriveItemId } from "../token-utils.js";
+import { deriveContractItemIds } from "../token-utils.js";
 
 describe("cognitive-state compiler", () => {
   beforeEach(() => resetPolicy());
@@ -184,17 +185,7 @@ describe("cognitive-state compiler", () => {
     assert.match(response.prompt, /npm test exited with code 1/);
   });
 
-  it("computes objective alignment and rolling outcomes without technique metadata", () => {
-    const request = makeLoopCompileRequest({
-      loop_id: "health",
-      round: 2,
-      task: "Fix storage transaction",
-      loop_objective: makeLoopObjective({
-        objective: "Fix storage transaction",
-        success_criteria: ["Recovery works"],
-      }),
-    });
-    assert.ok(alignTask(request.task, request, null).alignment_score > 0.3);
+  it("computes rolling outcomes without technique metadata", () => {
     const rolling = buildRollingSummary("health", 3, {
       results: [{
         loop_id: "health",
@@ -384,61 +375,56 @@ describe("cognitive-state compiler", () => {
     assert.equal(critMs[0].progress_at_boundary, 0.65);
   });
 
-  it("does not create a duplicate criteria milestone for semantic equivalents", () => {
-    // Same criteria phrased differently — should be detected as semantic dup
+  /** One committed round claiming the given criteria, for the two tests
+   *  below that pin the exact-vs-similar boundary of criterion identity. */
+  const criteriaRound = (round: number, met: string[]) => ({
+    loop_id: "dedup_ms",
+    output_summary: `round ${round}`,
+    success: true,
+    loop_lineage: { loop_id: "dedup_ms", round, constraints_active: [] },
+    constraint_violations: [],
+    execution_report: {
+      files_changed: [`test/${round}.ts`],
+      tests_reported: { passed: round * 5, failed: 0, skipped: 0 },
+      criterion_claims: criterionClaims(met, []),
+      progress_estimate: 0.3 * round,
+    },
+  });
+
+  const criteriaMilestones = (rolling: ReturnType<typeof buildRollingSummary>) =>
+    (rolling?.milestones ?? []).filter((m) => m.kind === "criteria_milestone");
+
+  it("treats differently-worded criteria as DISTINCT — wording is not identity", () => {
+    // v3.8.1: the former Jaccard criterion dedup is gone. Two criteria that
+    // merely read alike are two criteria, so claiming the second one is new
+    // information and earns a milestone. Guessing they were "semantically the
+    // same" is exactly the kind of text-similarity-as-fact this release
+    // removes.
     const rolling = buildRollingSummary("dedup_ms", 4, {
       results: [
-        {
-          loop_id: "dedup_ms",
-          output_summary: "Wrote tests",
-          success: true,
-          loop_lineage: { loop_id: "dedup_ms", round: 1, constraints_active: [] },
-          constraint_violations: [],
-          execution_report: {
-            files_changed: ["test/a.ts"],
-            tests_reported: { passed: 5, failed: 0, skipped: 0 },
-            criterion_claims: criterionClaims(["Unit test coverage at 90%"], []),
-            progress_estimate: 0.30,
-          },
-        },
-        {
-          loop_id: "dedup_ms",
-          output_summary: "More tests",
-          success: true,
-          loop_lineage: { loop_id: "dedup_ms", round: 2, constraints_active: [] },
-          constraint_violations: [],
-          execution_report: {
-            files_changed: ["test/b.ts"],
-            tests_reported: { passed: 10, failed: 0, skipped: 0 },
-            // "unit test coverage reached 90 percent" is semantically the same
-            criterion_claims: criterionClaims(["unit test coverage reached 90 percent"], []),
-            progress_estimate: 0.50,
-          },
-        },
-        {
-          loop_id: "dedup_ms",
-          output_summary: "Still testing",
-          success: true,
-          loop_lineage: { loop_id: "dedup_ms", round: 3, constraints_active: [] },
-          constraint_violations: [],
-          execution_report: {
-            files_changed: ["test/c.ts"],
-            tests_reported: { passed: 12, failed: 0, skipped: 0 },
-            criterion_claims: criterionClaims(["unit test coverage reached 90 percent"], []),
-            progress_estimate: 0.60,
-          },
-        },
+        criteriaRound(1, ["Unit test coverage at 90%"]),
+        criteriaRound(2, ["unit test coverage reached 90 percent"]),
+        criteriaRound(3, ["unit test coverage reached 90 percent"]),
       ],
     });
-    assert.ok(rolling, "should produce a rolling summary");
-    // The dedup should NOT trigger a criteria_milestone at round 2
-    // because the criteria are semantically the same (similarity >= 0.7)
-    const allMs = rolling!.milestones ?? [];
-    const critMs = allMs.filter((m) => m.kind === "criteria_milestone");
-    assert.equal(critMs.length, 0,
-      `expected 0 criteria milestones (semantic dedup), got ${critMs.length}: ${
-        critMs.map((m) => m.label).join(", ")
-      }`);
+    const critMs = criteriaMilestones(rolling);
+    assert.equal(critMs.length, 1,
+      `expected 1 criteria milestone, got ${critMs.length}: ${critMs.map((m) => m.label).join(", ")}`);
+    assert.ok(critMs[0].label.includes("unit test coverage reached 90 percent"));
+  });
+
+  it("treats a restated criterion as the same one — normalized-exact is identity", () => {
+    // Same criterion, re-claimed with different spacing and case. Whitespace
+    // and case fold; the criterion is not new, so no second milestone.
+    const rolling = buildRollingSummary("dedup_ms", 4, {
+      results: [
+        criteriaRound(1, ["Unit test coverage at 90%"]),
+        criteriaRound(2, ["unit   test coverage at 90%"]),
+        criteriaRound(3, ["unit test coverage at 90%"]),
+      ],
+    });
+    assert.equal(criteriaMilestones(rolling).length, 0,
+      "a restated criterion is not new progress");
   });
 
   it("detects genuinely different criteria between rounds", () => {
@@ -479,76 +465,55 @@ describe("cognitive-state compiler", () => {
     assert.match(critMs[0].label, /Integration done/);
   });
 
-  it("caps milestones at max_milestones (10 by default)", () => {
-    // Create 15 entries each with compression_checkpoint to force 15 milestones
-    const entries: Record<string, unknown>[] = [];
-    for (let i = 1; i <= 15; i++) {
-      entries.push({
-        loop_id: "cap_ms",
-        output_summary: `Round ${i} done`,
-        success: true,
-        loop_lineage: {
-          loop_id: "cap_ms",
-          round: i,
-          constraints_active: [],
-          compression_checkpoint: true,
-          checkpoint_label: `Phase ${i}`,
-        },
-        constraint_violations: [],
-        execution_report: {
-          files_changed: [],
-          tests_reported: null,
-          criterion_claims: criterionClaims([], []),
-          progress_estimate: i / 15,
-        },
-      });
-    }
+  /** One committed round whose checkpoint forces a distinct milestone. */
+  const checkpointRound = (loopId: string, round: number) => ({
+    loop_id: loopId,
+    output_summary: `Round ${round} done`,
+    success: true,
+    loop_lineage: {
+      loop_id: loopId,
+      round,
+      constraints_active: [],
+      compression_checkpoint: true,
+      checkpoint_label: `Phase ${round}`,
+    },
+    constraint_violations: [],
+    execution_report: {
+      files_changed: [],
+      tests_reported: null,
+      criterion_claims: criterionClaims([], []),
+      progress_estimate: round / 100,
+    },
+  });
+
+  it("keeps every milestone while the history is under the cap", () => {
+    const entries = Array.from({ length: 15 }, (_, i) => checkpointRound("cap_ms", i + 1));
     const rolling = buildRollingSummary("cap_ms", 16, { results: entries });
-    assert.ok(rolling, "should produce a rolling summary");
-    const ms = rolling!.milestones ?? [];
-    assert.ok(ms.length <= 10, `expected ≤ 10 milestones, got ${ms.length}`);
-    // v3.0.1: L1 samples head anchors + newest tail instead of keeping the
-    // most recent 10 — the oldest milestones survive as history anchors.
+    const ms = rolling?.milestones ?? [];
+    // v3.8.1: the fixed cap is 50. The v3.0.1 sampler truncated to 10 and
+    // moved the oldest milestones around to keep "history anchors"; the
+    // history is now simply bounded, newest kept.
+    assert.equal(ms.length, 15, `expected all 15 under the cap, got ${ms.length}`);
     assert.equal(ms[0].label, "Phase 1");
     assert.equal(ms[ms.length - 1].label, "Phase 15");
   });
 
-  it("v3.0.1 L1 samples milestones as head + middle + tail when over the cap", () => {
-    // 15 agent_declared milestones → L1 keeps 3 head + 4 middle + 3 tail.
-    const entries: Record<string, unknown>[] = [];
-    for (let i = 1; i <= 15; i++) {
-      entries.push({
-        loop_id: "sample_ms",
-        output_summary: `Round ${i} done`,
-        success: true,
-        loop_lineage: {
-          loop_id: "sample_ms",
-          round: i,
-          constraints_active: [],
-          compression_checkpoint: true,
-          checkpoint_label: `Phase ${i}`,
-        },
-        constraint_violations: [],
-        execution_report: {
-          files_changed: [],
-          tests_reported: null,
-          criterion_claims: criterionClaims([], []),
-          progress_estimate: i / 15,
-        },
-      });
-    }
-    const rolling = buildRollingSummary("sample_ms", 16, { results: entries }, 0, "l1");
-    const ms = rolling!.milestones ?? [];
-    assert.equal(ms.length, 10, `expected 10 sampled milestones, got ${ms.length}`);
-    // Head anchors: the 3 oldest milestones survive.
-    assert.deepEqual(ms.slice(0, 3).map((m) => m.label), ["Phase 1", "Phase 2", "Phase 3"]);
-    // Newest tail: the 3 most recent milestones survive.
-    assert.deepEqual(ms.slice(-3).map((m) => m.label), ["Phase 13", "Phase 14", "Phase 15"]);
-    // Middle: 4 representatives, in chronological order, no duplicates.
-    const middle = ms.slice(3, 7).map((m) => m.label);
-    assert.equal(middle.length, 4);
-    assert.equal(new Set(middle).size, 4, `middle sample must not repeat: ${middle}`);
-    assert.deepEqual([...middle].sort(), [...middle], "middle sample must stay chronological");
+  it("caps milestone history at MILESTONE_HISTORY_CAP, keeping the newest", () => {
+    const entries = Array.from({ length: 60 }, (_, i) => checkpointRound("cap_over", i + 1));
+    const ms = buildRollingSummary("cap_over", 61, { results: entries })?.milestones ?? [];
+    assert.equal(ms.length, 50, `expected the cap, got ${ms.length}`);
+    assert.equal(ms[0].label, "Phase 11", "the oldest are the ones dropped");
+    assert.equal(ms[ms.length - 1].label, "Phase 60", "the newest always survive");
+  });
+
+  it("bounds milestones identically at every prompt level", () => {
+    // The v3.0.1 sampler did nothing at L2, so the milestone set written to
+    // the state file depended on which level happened to compile. One input
+    // must now give one answer.
+    const entries = Array.from({ length: 60 }, (_, i) => checkpointRound("cap_lvl", i + 1));
+    const atL1 = buildRollingSummary("cap_lvl", 61, { results: entries }, 0, "l1")?.milestones;
+    const atL2 = buildRollingSummary("cap_lvl", 61, { results: entries }, 0, "l2")?.milestones;
+    assert.deepEqual(atL1, atL2, "the level must not change the milestone history");
   });
 
   it("v3.0.1 L2 keeps every milestone — full rehydration is never sampled", () => {
@@ -754,11 +719,18 @@ describe("cognitive-state compiler", () => {
         },
       ],
     });
-    // L1 should show recent rounds but NOT Phase History
+    // L1 shows recent rounds and ONE phase line — never L2's Phase History.
     assert.match(response.prompt, /Recent Rounds/);
     assert.doesNotMatch(response.prompt, /Phase History/);
-    // L1 should not mention the old checkpoint label from round 1
-    assert.doesNotMatch(response.prompt, /Core Module/);
+    // v3.8.1: the phase line NAMES the current phase. The old rule that L1
+    // must never echo a milestone label existed because labels were collapsed
+    // content in the L1 diff (see the deleted collapse invariant); with the
+    // diff gone, naming the phase the agent itself declared is the point of
+    // the line.
+    assert.match(response.prompt, /Phase/);
+    assert.match(response.prompt, /Core Module/);
+    // It must still not re-render the milestone as a Phase History entry.
+    assert.doesNotMatch(response.prompt, /round_range|Phase 1\b/);
   });
 
   it("L0 retry prompt contains no summary sections", () => {
@@ -1028,9 +1000,11 @@ describe("cognitive-state compiler", () => {
     // L2 pointer mode: should NOT contain the monolithic blob
     assert.ok(!(response.prompt ?? "").includes("Full Rehydrated State"),
       "L2 prompt should not contain full state blob when l2_pointer_enabled is true");
-    // But structured sections should be present
-    assert.ok((response.prompt ?? "").includes("Progress Dashboard"),
-      "L2 prompt should include Progress Dashboard");
+    // v3.8.1: the Progress Dashboard / Round Stats sections are gone from the
+    // prompt entirely (they re-composed facts the prompt already states, plus
+    // the agent’s own numbers). The prompt keeps what THIS round needs.
+    assert.ok(!(response.prompt ?? "").includes("Progress Dashboard"),
+      "the L2 prompt carries no re-composed dashboard");
     // State file should still be written
     assert.ok(response.state_file_content,
       "state_file_content should still be present");
@@ -1159,32 +1133,6 @@ describe("cognitive-state compiler", () => {
       "State file should render constraint IDs with c- prefix");
     assert.ok(stateFile.includes("`cr-") || stateFile.includes("[`cr-"),
       "State file should render criterion IDs with cr- prefix");
-  });
-
-  it("hides constraint IDs in state file when constraint_id_enabled is false", () => {
-    resetPolicy();
-    const p = getPolicy();
-    p.evolution.constraint_id_enabled = false;
-
-    const response = compileLoop(makeLoopCompileRequest({
-      loop_id: "id-off",
-      round: 2,
-      task: "Implement feature",
-      loop_objective: makeLoopObjective({
-        objective: "Build feature",
-        success_criteria: ["Feature works"],
-        hard_constraints: ["No data loss"],
-        loop_id: "id-off",
-      }),
-      constraints_from_plan: ["Use HTTPS"],
-    }), null);
-
-    const stateFile = response.state_file_content ?? "";
-    // When disabled, IDs should NOT appear with `[c-` or `[cr-` prefix in state file
-    assert.ok(!stateFile.includes("[`c-"),
-      "State file should NOT show c- ID prefix when constraint_id_enabled=false");
-    assert.ok(!stateFile.includes("[`cr-"),
-      "State file should NOT show cr- ID prefix when constraint_id_enabled=false");
   });
 
   it("self-eval template includes ID usage guidance", () => {
@@ -1402,101 +1350,6 @@ describe("cognitive-state compiler", () => {
 // v3.2 — L1 collapse diff baseline
 // ═══════════════════════════════════════════════════════════════════════════
 
-describe("v3.2 — L1 collapse diff baseline", () => {
-  const idsOf = (texts: string[]): string[] =>
-    texts.map((text) => `c-${deriveItemId(text)}`);
-  const r1Entry = (
-    loopId: string,
-    presented: Record<string, unknown> | null,
-  ): Record<string, unknown> => ({
-    loop_id: loopId,
-    output_summary: "Round 1 done",
-    success: true,
-    loop_lineage: {
-      loop_id: loopId,
-      round: 1,
-      constraints_active: ["Tests must pass", "Keep API stable", "Migrate data"],
-      ...(presented ?? {}),
-    },
-    constraint_violations: [],
-  });
-  const snapshot = (loopId: string): Record<string, unknown> => ({
-    presented_constraint_ids: idsOf(["Tests must pass", "Keep API stable", "Migrate data"]),
-    presented_subgoals: [["sg-11111111", "pending"], ["sg-22222222", "pending"], ["sg-33333333", "pending"]],
-    presented_milestone_ranges: [[1, 1]],
-  });
-
-  it("collapses unchanged constraints against a persisted round-1 snapshot", () => {
-    const response = compileLoop(makeLoopCompileRequest({
-      loop_id: "collapse-lc",
-      round: 2,
-      task: "Continue work",
-      force_level: "l1",
-      last_round_result: makeLoopRoundResult({
-        round: 1,
-        success: true,
-        discovered_constraints: ["No external deps"],
-      }),
-    }), {
-      results: [
-        r1Entry("collapse-lc", snapshot("collapse-lc")),
-        {
-          loop_id: "collapse-lc",
-          output_summary: "Round 2 progress",
-          success: true,
-          loop_lineage: { loop_id: "collapse-lc", round: 2, constraints_active: [] },
-          constraint_violations: [],
-        },
-      ],
-    });
-    const p = response.prompt;
-    // One new constraint this round → full line; three unchanged → collapse.
-    assert.match(p, /No external deps \(new this round\)/);
-    assert.match(p, /… 3 unchanged constraints, 0 demoted since R1 \(see state file\)/);
-    // L1 pointer carries the state-file update round.
-    assert.match(p, /📄 Full state: .* \(updated round 2\)/);
-  });
-
-  it("is byte-identical across repeated compiles with a collapse baseline", () => {
-    const request = makeLoopCompileRequest({
-      loop_id: "collapse-lc2",
-      round: 2,
-      task: "Continue work",
-      force_level: "l1",
-    });
-    const context = {
-      results: [
-        r1Entry("collapse-lc2", snapshot("collapse-lc2")),
-        {
-          loop_id: "collapse-lc2",
-          output_summary: "Round 2 progress",
-          success: true,
-          loop_lineage: { loop_id: "collapse-lc2", round: 2, constraints_active: [] },
-          constraint_violations: [],
-        },
-      ],
-    };
-    const first = compileLoop(request, context);
-    const second = compileLoop(request, context);
-    assert.equal(second.prompt, first.prompt, "collapse must be deterministic");
-    assert.equal(second.prompt_artifact!.promptHash, first.prompt_artifact!.promptHash);
-  });
-
-  it("renders in full when the prior round has no L1 presented fields", () => {
-    const response = compileLoop(makeLoopCompileRequest({
-      loop_id: "collapse-old",
-      round: 2,
-      task: "Continue work",
-      force_level: "l1",
-    }), {
-      results: [r1Entry("collapse-old", null)],
-    });
-    const p = response.prompt;
-    assert.ok(p.includes("Tests must pass"), "missing L1 baseline → full render");
-    assert.ok(!p.includes("unchanged constraints"), "no collapse line without presented fields");
-  });
-});
-
 // ═══════════════════════════════════════════════════════════════════════════
 // v3.2 — criterion status derivation (goal → criteria → evidence)
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1534,7 +1387,10 @@ describe("v3.2 — criterion status derivation", () => {
     const parser = statuses.find((s) => s.text === "Parser complete")!;
     assert.equal(parser.status, "claimed");
     assert.equal(parser.met_at_round, 2, "first met report wins");
-    assert.deepEqual(parser.related_subgoal_ids, ["sg-1"], "identical text links the sub-goal");
+    // v3.8.1: no contract here, so nothing links — and identical wording alone
+    // never links. See the explicit-refs test below.
+    assert.deepEqual(parser.related_subgoal_ids, [],
+      "text alone does not link a criterion to a sub-goal");
 
     const tests = statuses.find((s) => s.text === "Tests ≥90%")!;
     assert.equal(tests.status, "remaining");
@@ -1543,6 +1399,65 @@ describe("v3.2 — criterion status derivation", () => {
     const deps = statuses.find((s) => s.text === "No runtime deps")!;
     assert.equal(deps.status, "unknown", "never mentioned → unknown");
     assert.match(deps.id, /^cr-/);
+  });
+
+  it("links a criterion to sub-goals only through an item's explicit refs", () => {
+    // v3.8.1: `related_subgoal_ids` reads `ContractItemProposal.subgoal_refs`
+    // on an item that references the criterion. Identical wording alone links
+    // nothing — the Jaccard guess at "which sub-goal is this criterion about"
+    // is gone.
+    const parserCriterionId = deriveCriterionId("Parser complete");
+    const emptyStatuses = {
+      contractId: "rc-aaaaaaaa",
+      closure: "open" as const,
+      closed_at_round: null,
+      items: [],
+      verifiedCount: 0,
+      contradictedCount: 0,
+      insufficientCount: 0,
+    };
+    const statuses = deriveCriterionStatuses("cs-refs", {
+      results: [{
+        loop_id: "cs-refs",
+        success: true,
+        loop_lineage: { loop_id: "cs-refs", round: 1, constraints_active: [] },
+        execution_report: {
+          criterion_claims: criterionClaims([], ["Parser complete"]),
+        },
+      }],
+    }, makeLoopObjective({
+      objective: "Build a parser",
+      success_criteria: ["Parser complete", "Tests ≥90%"],
+    }), 2, [], null, {
+      activeContract: {
+        id: "rc-aaaaaaaa",
+        declared_at_round: 1,
+        scope: [],
+        items: [{
+          id: "rci-11111111",
+          description: "parser works",
+          criterion_refs: [parserCriterionId],
+          subgoal_refs: ["sg-1"],
+          verify_with: ["verify"],
+        }, {
+          id: "rci-22222222",
+          description: "coverage",
+          criterion_refs: [deriveCriterionId("Tests ≥90%")],
+          // References the criterion but names NO sub-goal — so it links none.
+          subgoal_refs: [],
+          verify_with: ["verify"],
+        }],
+        config_hash_by_command: {},
+      },
+      itemStatuses: emptyStatuses,
+    });
+
+    const parser = statuses.find((s) => s.text === "Parser complete")!;
+    assert.deepEqual(parser.related_subgoal_ids, ["sg-1"],
+      "an item that references the criterion AND names the sub-goal links them");
+    const tests = statuses.find((s) => s.text === "Tests ≥90%")!;
+    assert.deepEqual(tests.related_subgoal_ids, [],
+      "an item with no subgoal_refs links nothing");
   });
 
   it("renders the Goal → Criteria view in the L2 prompt and the state file", () => {
@@ -1566,144 +1481,191 @@ describe("v3.2 — criterion status derivation", () => {
         },
       }),
     }), null);
-    assert.match(response.prompt, /Goal → Criteria/);
-    assert.match(response.prompt, /Parser complete.*met R1/);
-    assert.match(response.prompt, /Tests ≥90%/);
+    // v3.8.1: the Goal → Criteria dashboard is gone from the prompt. The
+    // criterion list survives in the state file, where a human or external
+    // tool reads it — the prompt no longer duplicates it.
+    assert.doesNotMatch(response.prompt, /Goal → Criteria/);
     assert.match(response.state_file_content ?? "", /## Goal → Criteria/);
+    assert.match(response.state_file_content ?? "", /Parser complete/);
+    assert.match(response.state_file_content ?? "", /Tests ≥90%/);
   });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// v3.2 — lessons learned derivation and rendering
+// v3.8.1 — recurring flags: ONE derivation, two render windows
 // ═══════════════════════════════════════════════════════════════════════════
 
-describe("v3.2 — lessons learned", () => {
-  it("derives repeated violations and verification failures across all rounds", () => {
-    const lessons = deriveLessons("lessons-test", {
-      results: [
-        {
-          loop_id: "lessons-test",
-          loop_lineage: { loop_id: "lessons-test", round: 1 },
-          constraint_violations: ["No external deps"],
-          verification_flags: [{ severity: "error", field: "x", check: "evidence_integrity", detail: "d" }],
-        },
-        {
-          loop_id: "lessons-test",
-          loop_lineage: { loop_id: "lessons-test", round: 2 },
-          constraint_violations: ["No external deps"],
-          verification_flags: [{ severity: "error", field: "x", check: "evidence_integrity", detail: "d" }],
-        },
-        {
-          loop_id: "lessons-test",
-          loop_lineage: { loop_id: "lessons-test", round: 3 },
-          constraint_violations: ["No external deps"],
-          verification_flags: [{ severity: "warn", field: "x", check: "intent_drift", detail: "d" }],
-        },
-        {
-          loop_id: "lessons-test",
-          loop_lineage: { loop_id: "lessons-test", round: 4 },
-          constraint_violations: [],
-          verification_flags: [{ severity: "warn", field: "x", check: "intent_drift", detail: "d" }],
-        },
-      ],
-    }, 5);
+describe("v3.8.1 — recurring flags", () => {
+  /** A committed round view. The derivation takes VIEWS, not raw vault
+   *  entries, so a caller cannot hand it an uninterpreted envelope. */
+  const round = (
+    number: number,
+    opts: { violations?: string[]; flags?: VerificationFlag[] } = {},
+  ): CommittedRoundView => ({
+    source: "merged",
+    sourceEntry: {},
+    loopId: "recurring",
+    round: number,
+    roundId: `loop:recurring:round:${number}`,
+    attempt: 1,
+    promptArtifact: null,
+    evaluation: null,
+    executionReport: null,
+    verificationFlags: opts.flags ?? [],
+    result: null,
+    action: "continue",
+    success: false,
+    outcome: null,
+    contractProposal: null,
+    contractBinding: null,
+    beforeEvidence: [],
+    afterEvidence: [],
+    observationDelta: [],
+    evidenceIncomplete: true,
+    constraintViolations: opts.violations ?? [],
+    backtrack: null,
+  });
 
-    const violation = lessons.find((l) => l.kind === "constraint_violation")!;
-    assert.equal(violation.text, "No external deps");
+  const flag = (
+    severity: "error" | "warn",
+    check: string,
+    ref?: string,
+  ): VerificationFlag => ({
+    severity, field: "x", check, detail: "d", ...(ref ? { ref } : {}),
+  });
+
+  it("counts facts across the committed history, keyed by subject and ref", () => {
+    const flags = deriveRecurringFlags([
+      round(1, { violations: ["No external deps"], flags: [flag("error", "evidence_integrity", "verify")] }),
+      round(2, { violations: ["No external deps"], flags: [flag("error", "evidence_integrity", "verify")] }),
+      round(3, { violations: ["No external deps"], flags: [flag("warn", "recurring_violation")] }),
+    ]);
+
+    const violation = flags.find((f) => f.kind === "constraint_violation")!;
+    assert.equal(violation.subject, "No external deps");
     assert.equal(violation.count, 3);
     assert.deepEqual(violation.rounds, [1, 2, 3]);
 
-    const error = lessons.find((l) => l.kind === "verification_error")!;
-    assert.equal(error.text, "evidence_integrity");
+    const error = flags.find((f) => f.kind === "verification_error")!;
+    assert.equal(error.subject, "evidence_integrity");
+    assert.equal(error.ref, "verify", "the id the flag was about rides along");
     assert.equal(error.count, 2);
     assert.deepEqual(error.rounds, [1, 2]);
 
-    // warn repeated twice → also a lesson
-    const warn = lessons.find((l) => l.kind === "verification_warning")!;
-    assert.equal(warn.text, "intent_drift");
-    assert.equal(warn.count, 2);
-
     // Sorted by count descending.
-    assert.equal(lessons[0].kind, "constraint_violation");
+    assert.equal(flags[0].kind, "constraint_violation");
   });
 
-  it("renders violation lessons in the L1 Recurring Issues section with rounds", () => {
-    const response = compileLoop(makeLoopCompileRequest({
-      loop_id: "lessons-l1",
-      round: 3,
-      task: "Continue work",
-      force_level: "l1",
-    }), {
-      results: [
-        {
-          loop_id: "lessons-l1",
-          loop_lineage: { loop_id: "lessons-l1", round: 1 },
-          constraint_violations: ["No external deps"],
-          verification_flags: [{ severity: "error", field: "x", check: "evidence_integrity", detail: "d" }],
-        },
-        {
-          loop_id: "lessons-l1",
-          loop_lineage: { loop_id: "lessons-l1", round: 2 },
-          constraint_violations: ["No external deps"],
-          verification_flags: [{ severity: "error", field: "x", check: "evidence_integrity", detail: "d" }],
-        },
-      ],
-    });
-    const p = response.prompt;
-    assert.match(p, /Recurring Issues/);
-    assert.match(p, /No external deps \(violated 2×: R1, R2\)/);
+  it("reports a single occurrence — the threshold belongs to the renderer", () => {
+    // The old split was a raw no-threshold violation list for the prompt AND
+    // a whole-history count >= 2 "lessons" list for the state file. The
+    // derivation is now neutral; each renderer applies its own window.
+    const flags = deriveRecurringFlags([
+      round(1, {}),
+      round(2, { flags: [flag("warn", "test_files_modified")] }),
+      round(3, {}),
+    ]);
+    assert.equal(flags.length, 1);
+    assert.equal(flags[0].count, 1);
+    assert.deepEqual(flags[0].rounds, [2]);
   });
 
-  it("renders the L2 Lessons Learned section and the state file section", () => {
+  it("separates facts that share a check id but differ in ref", () => {
+    const flags = deriveRecurringFlags([
+      round(1, { flags: [flag("error", "required_command_failed", "verify")] }),
+      round(2, { flags: [flag("error", "required_command_failed", "lint")] }),
+      round(3, { flags: [flag("error", "required_command_failed", "verify")] }),
+    ]);
+    assert.equal(flags.length, 2, "two subjects failed, not one recurring check");
+    const verify = flags.find((f) => f.ref === "verify")!;
+    assert.equal(verify.count, 2);
+    assert.deepEqual(verify.rounds, [1, 3]);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v3.8.1 — the two render windows over ONE recurring-fact list
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("v3.8.1 — Active Warnings (prompt) vs Recurring Flags (state file)", () => {
+  /** A committed merged round carrying flags and violations. */
+  const committed = (
+    loopId: string,
+    round: number,
+    violations: string[],
+    flags: VerificationFlag[],
+  ): Record<string, unknown> => {
+    const entry = mergedLineageRound(round, { loopId });
+    entry.verification_flags = flags;
+    entry.constraint_violations = violations;
+    return entry;
+  };
+  const warn = (check: string): VerificationFlag =>
+    ({ severity: "warn", field: "x", check, detail: "d" });
+
+  it("the prompt shows the RECENT window, the state file the RECURRING set", () => {
+    // Round 1 violated a constraint and it never recurred; rounds 2 and 3
+    // repeatedly tripped one check. With a 3-round window at round 4, the
+    // prompt should surface BOTH (the violation is 3 rounds old and still in
+    // the window); the state file should surface only the recurring check.
     const response = compileLoop(makeLoopCompileRequest({
-      loop_id: "lessons-l2",
-      round: 3,
+      loop_id: "windows",
+      round: 4,
       task: "Continue work",
       force_level: "l2",
     }), {
       results: [
-        {
-          loop_id: "lessons-l2",
-          loop_lineage: { loop_id: "lessons-l2", round: 1 },
-          constraint_violations: ["No external deps"],
-          verification_flags: [{ severity: "error", field: "x", check: "evidence_integrity", detail: "d" }],
-        },
-        {
-          loop_id: "lessons-l2",
-          loop_lineage: { loop_id: "lessons-l2", round: 2 },
-          constraint_violations: ["No external deps"],
-          verification_flags: [{ severity: "error", field: "x", check: "evidence_integrity", detail: "d" }],
-        },
+        committed("windows", 1, ["Never touch prod data"], []),
+        committed("windows", 2, [], [warn("test_files_modified")]),
+        committed("windows", 3, [], [warn("test_files_modified")]),
       ],
     });
-    assert.match(response.prompt, /Lessons Learned/);
-    assert.match(response.prompt, /No external deps — 2× \(R1, R2\)/);
-    assert.match(response.state_file_content ?? "", /## Lessons Learned/);
+
+    const prompt = response.prompt;
+    assert.match(prompt, /Active Warnings/);
+    assert.match(prompt, /test_files_modified — 2×, latest R3/);
+    assert.match(prompt, /Never touch prod data — 1×, latest R1/);
+
+    const stateFile = response.state_file_content ?? "";
+    assert.match(stateFile, /## Recurring Flags/);
+    assert.match(stateFile, /test_files_modified — 2× \(R2, R3\)/);
+    assert.doesNotMatch(stateFile, /Never touch prod data/,
+      "a one-off is not a recurring flag");
   });
 
-  it("keeps L0 free of lessons sections", () => {
+  it("states differ from the prompt: the window is committed rounds, not the whole loop", () => {
+    // The warning fired at round 1 only. At round 9 it is outside the
+    // 3-round window, so the prompt must not carry it — while the state
+    // file still shows nothing either (it never recurred).
     const response = compileLoop(makeLoopCompileRequest({
-      loop_id: "lessons-l0",
+      loop_id: "stale",
+      round: 9,
+      task: "Continue work",
+      force_level: "l1",
+    }), {
+      results: [
+        committed("stale", 1, [], [warn("test_files_modified")]),
+      ],
+    });
+    assert.doesNotMatch(response.prompt, /Active Warnings/,
+      "nothing is firing inside the recent window");
+  });
+
+  it("L0 carries neither window", () => {
+    const response = compileLoop(makeLoopCompileRequest({
+      loop_id: "l0-clean",
       round: 3,
       attempt: 2,
       task: "Continue work",
       rejection_notice: "Required command failed",
     }), {
       results: [
-        {
-          loop_id: "lessons-l0",
-          loop_lineage: { loop_id: "lessons-l0", round: 1 },
-          constraint_violations: ["No external deps"],
-        },
-        {
-          loop_id: "lessons-l0",
-          loop_lineage: { loop_id: "lessons-l0", round: 2 },
-          constraint_violations: ["No external deps"],
-        },
+        committed("l0-clean", 1, ["Never touch prod data"], [warn("test_files_modified")]),
+        committed("l0-clean", 2, ["Never touch prod data"], [warn("test_files_modified")]),
       ],
     });
-    assert.doesNotMatch(response.prompt, /Lessons Learned/);
-    assert.doesNotMatch(response.prompt, /Recurring Issues/);
+    assert.doesNotMatch(response.prompt, /Active Warnings/);
+    assert.doesNotMatch(response.prompt, /Recurring Flags/);
   });
 });
 
@@ -1832,17 +1794,14 @@ describe("v3.3 — round stats and machine status threading", () => {
       ],
       global_entries: [],
     } as never);
-    // Round Stats (L2 structured): files per round, rejected attempts from
-    // snapshot.attempt - 1, self-reported progress deltas.
-    assert.match(response.prompt, /Round Stats/);
-    assert.match(response.prompt, /- R1: 2 files, 1 rejected attempt/);
-    assert.match(response.prompt, /- R2: 1 file, Δ\+0\.10/);
-    assert.match(response.prompt, /- R3: 2 files, Δ\+0\.10/);
-    // Machine git-motion row: git observed changes in all 3 committed rounds.
-    assert.match(response.prompt, /Machine \(git\)/);
-    assert.match(response.prompt, /changes in 3\/3 recent committed rounds/);
-    // state.md renderer gets the same machine rows (same-source contract).
+    // v3.8.1: Round Stats is deleted — its only renderer was the L2 prompt
+    // section removed in this release, so it was computed, stored in the
+    // canonical state (and therefore in stateHash) and read by nothing.
+    assert.doesNotMatch(response.prompt, /Round Stats/);
+    // The machine git-motion row survives, in the state file — the surface a
+    // human or external tool reads.
     assert.match(response.state_file_content ?? "", /Machine \(git\)/);
+    assert.match(response.state_file_content ?? "", /changes observed in 3\/3 recent committed rounds/);
   });
 
   it("keeps prompt and state hashes deterministic with derived data present", () => {
@@ -1902,11 +1861,12 @@ describe("v3.3 — round stats and machine status threading", () => {
       ],
       global_entries: [],
     } as never);
-    assert.match(response.prompt, /- R1: 1 file, 1 rejected attempt/);
-    assert.match(response.prompt, /Machine \(git\)/);
-    assert.match(response.prompt, /changes in 2\/3 recent committed rounds/,
-      "R1+R2 moved; R3 recorded no motion");
+    // v3.8.1: the per-round stats table is gone from the prompt; the machine
+    // git-motion row is a state-file row.
+    assert.doesNotMatch(response.prompt, /Round Stats/);
     assert.match(response.state_file_content ?? "", /Machine \(git\)/);
+    assert.match(response.state_file_content ?? "", /changes observed in 2\/3 recent committed rounds/,
+      "R1+R2 moved; R3 recorded no motion");
   });
 });
 
@@ -2101,113 +2061,6 @@ describe("Auto safety-net milestone — milestone-less loops (v3.3.1)", () => {
   });
 });
 
-// ═══════════════════════════════════════════════════════════════════════════
-// v3.5 — L2 contract declaration nudge + post-backtrack revision fixtures
-// ═══════════════════════════════════════════════════════════════════════════
-
-describe("v3.5 — L2 contract declaration nudge", () => {
-  beforeEach(() => resetPolicy());
-
-  const NUDGE = "consider declaring a";
-
-  it("appends nudge prose on an L2 contract-less block — without the JSON key name", () => {
-    const block = buildSelfEvalBlock(4, "l2", false, true);
-    assert.ok(block.includes(NUDGE), "nudge must be present");
-    assert.ok(block.includes("Round Contract"));
-    assert.ok(!block.includes("round_contract"),
-      "the prose must never contain the JSON key name (contract-less L2 tests rely on it)");
-  });
-
-  it("is off by default (no proposalNudge flag)", () => {
-    assert.ok(!buildSelfEvalBlock(4, "l2", false).includes(NUDGE));
-  });
-
-  it("never appears on L0/L1 compiles (the L2 gating lives at the call site)", () => {
-    // Round 3 with two contract-less committed rounds — force_level applies
-    // outside the round-1 first_round decision (which is always L2).
-    const ctx = {
-      results: [
-        {
-          loop_id: "nudge-loop",
-          task_id: "nudge-loop:r1",
-          task_type: "loop_lineage",
-          loop_lineage: { loop_id: "nudge-loop", round: 1, committed_action: "continue" },
-          execution_report: { files_changed: [], criterion_claims: criterionClaims([]) },
-        },
-        {
-          loop_id: "nudge-loop",
-          task_id: "nudge-loop:r2",
-          task_type: "loop_lineage",
-          loop_lineage: { loop_id: "nudge-loop", round: 2, committed_action: "continue" },
-          execution_report: { files_changed: [], criterion_claims: criterionClaims([]) },
-        },
-      ],
-      global_entries: [],
-    };
-    const mk = (level: "l0" | "l1" | "l2") => compileLoop(makeLoopCompileRequest({
-      loop_id: "nudge-loop",
-      round: 3,
-      task: "Plain one-round task",
-      force_level: level,
-    }), ctx as never);
-    assert.ok(!mk("l0").prompt.includes(NUDGE), "L0 stays lean");
-    assert.ok(!mk("l1").prompt.includes(NUDGE), "nudge is L2-only");
-    assert.ok(mk("l2").prompt.includes(NUDGE));
-  });
-
-  it("compileLoop nudges L2 contract-less compiles (policy default on)", () => {
-    const res = compileLoop(makeLoopCompileRequest({
-      loop_id: "nudge-loop",
-      round: 1,
-      task: "Plain one-round task",
-      force_level: "l2",
-    }), null);
-    assert.ok(res.prompt.includes(NUDGE));
-  });
-
-  it("does not nudge when an ACTIVE contract is the Current Task", () => {
-    const res = compileLoop(makeLoopCompileRequest({
-      loop_id: "nudge-loop",
-      round: 2,
-      task: "Plain one-round task",
-      force_level: "l2",
-    }), {
-      results: [{
-        loop_id: "nudge-loop",
-        task_id: "nudge-loop:r1",
-        task_type: "loop_lineage",
-        loop_lineage: {
-          loop_id: "nudge-loop",
-          round: 1,
-          committed_action: "continue",
-        },
-        round_contract: {
-          work_item: "Slice A",
-          scope: ["src/a"],
-          items: [{ description: "a one", criterion_refs: ["cr-a-1"], subgoal_refs: [], verify_with: ["verify"] }],
-        },
-        execution_report: { files_changed: [], criterion_claims: criterionClaims([]) },
-      }],
-      global_entries: [],
-    } as never);
-    assert.ok(res.prompt.includes("**Slice A**"), "active contract renders");
-    assert.ok(!res.prompt.includes(NUDGE), "no nudge when a contract is active");
-  });
-
-  it("kill switch: contract_nudge_on_l2=false restores pre-v3.5 L2 rendering", () => {
-    setPolicyForTest({
-      ...DEFAULT_POLICY,
-      prompt: { ...DEFAULT_POLICY.prompt, contract_nudge_on_l2: false },
-    });
-    const res = compileLoop(makeLoopCompileRequest({
-      loop_id: "nudge-loop",
-      round: 1,
-      task: "Plain one-round task",
-      force_level: "l2",
-    }), null);
-    assert.ok(!res.prompt.includes(NUDGE));
-  });
-});
 
 describe("v3.5 — post-backtrack contract revision (compile side)", () => {
   /** Merged production-shape lineage entry (shared fixture, redo-cc loop). */
@@ -2350,8 +2203,6 @@ describe("L7 — state file disabled cross-knob guard", () => {
       state_file: { ...DEFAULT_POLICY.state_file, enabled: false },
     });
   };
-  const idsOf = (texts: string[]): string[] =>
-    texts.map((text) => `c-${deriveItemId(text)}`);
   const baselineRound1 = (loopId: string): Record<string, unknown> => ({
     loop_id: loopId,
     output_summary: "Round 1 done",
@@ -2360,9 +2211,6 @@ describe("L7 — state file disabled cross-knob guard", () => {
       loop_id: loopId,
       round: 1,
       constraints_active: ["Tests must pass", "Keep API stable", "Migrate data"],
-      presented_constraint_ids: idsOf(["Tests must pass", "Keep API stable", "Migrate data"]),
-      presented_subgoals: [],
-      presented_milestone_ranges: [[1, 1]],
     },
     constraint_violations: [],
   });

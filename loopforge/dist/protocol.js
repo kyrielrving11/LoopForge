@@ -11,6 +11,8 @@ export var Mode;
     Mode["LOOP_COMPILE"] = "loop_compile";
     Mode["FEEDBACK"] = "feedback";
 })(Mode || (Mode = {}));
+// Type-only import — erased at runtime, no dependency cycle with
+// canonical-state.ts (which imports protocol.ts for its types).
 export var AgentStatus;
 (function (AgentStatus) {
     AgentStatus["OK"] = "ok";
@@ -101,21 +103,9 @@ export function makeLoopObjective(overrides = {}) {
         ...overrides,
     };
 }
-export function makeLoopHealth(overrides = {}) {
-    return {
-        goal_alignment: 1.0,
-        constraint_integrity: 1.0,
-        drift_detected: false,
-        strategy_stability: true,
-        task_continuity: 1.0,
-        escalation_recommended: "none",
-        ...overrides,
-    };
-}
 export function makeRollingSummary(overrides = {}) {
     return {
         key_outcomes: [],
-        recurring_issues: [],
         rounds_sampled: 0,
         generated_at_round: 0,
         failed_patterns: [],
@@ -143,15 +133,6 @@ export function makeConstraintMeta(overrides = {}) {
         text: "",
         last_violated_at_round: 0,
         source: "discovered",
-        ...overrides,
-    };
-}
-export function makeTaskAlignment(overrides = {}) {
-    return {
-        is_aligned: true,
-        alignment_score: 1.0,
-        warning: "",
-        escalation: "none",
         ...overrides,
     };
 }
@@ -196,7 +177,6 @@ export function makeLoopCompileRequest(overrides = {}) {
         new_since_last_round: "",
         last_round_result: null,
         force_level: "auto",
-        health_check_interval: 1,
         external_context: "",
         verification_flags: [],
         attempt: 1,
@@ -205,6 +185,11 @@ export function makeLoopCompileRequest(overrides = {}) {
         ...overrides,
     };
 }
+/** Immutable record of the exact prompt delivered for one round attempt. */
+/** v3.8.1: the artifact schema version, next to the type it versions. The
+ *  transaction envelope parser reads it, so the constant lives here rather
+ *  than in the renderer. */
+export const PROMPT_ARTIFACT_SCHEMA_VERSION = 2;
 export function makeLoopCompileResponse(overrides = {}) {
     return {
         status: AgentStatus.OK,
@@ -219,14 +204,9 @@ export function makeLoopCompileResponse(overrides = {}) {
         goal_id: "",
         goal_text_hash: "",
         loop_objective: null,
-        loop_health: null,
-        task_alignment: null,
         rolling_summary: null,
         sub_goals: [],
         constraint_metadata: [],
-        agent_trust_score: undefined,
-        agent_trust_trend: [],
-        suggested_next_task: "",
         plan_source: null,
         warnings: [],
         error: "",

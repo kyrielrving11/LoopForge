@@ -43,6 +43,26 @@ export interface BacktrackRecoveryFacts {
     /** v3.7.1: Falsified assumptions collected from the failed rounds. */
     wrongAssumptions: string[];
 }
+/** v3.8.1: the ONE Recovery Brief renderer.
+ *
+ *  The rollback prompt and the state file's Recent tier used to carry two
+ *  hand-written copies of these lines — differing in punctuation
+ *  ("the redo is round N" vs "redo round N") and in whether an approach
+ *  overflow count was shown at all. Two renderers over one rollback meant the
+ *  two surfaces could describe the same event differently while both claiming
+ *  to be derived facts. The facts are supplied by the caller: the coordinator
+ *  from its live walk, the compile path from `decodeBacktrackRecord` on the
+ *  committed decision. */
+export declare function recoveryBriefLines(input: {
+    target: number;
+    triggerRule: string;
+    failedRounds: string[] | number[];
+    approaches: string[];
+    wrongAssumptions: string[];
+    recoveryRoundId?: string;
+    maxApproaches?: number;
+    maxAssumptions?: number;
+}): string[];
 export declare function buildBacktrackPrompt(fromRound: number, toRound: number, triggerRule: string, skippedDiscoveries: string[],
 /** v2.13: Files changed in the skipped rounds (from evidence snapshots).
  *  Used to show the agent exactly what needs to be reverted. */

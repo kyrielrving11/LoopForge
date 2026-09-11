@@ -149,8 +149,16 @@ export declare class SessionManager implements SessionRegistry {
      *  statistics (A4 port) folded with this process's live observations.
      *  Non-durable fields (evidence, vault errors) come from live only. */
     getPolicyMetrics(loopId: string): PolicyMetricsSnapshot;
-    /** Get loop health for a loop (in-memory or vault).
-     *  Computes goal alignment, constraint integrity, drift, strategy stability. */
+    /** Get machine facts about a loop (in-memory or vault).
+     *
+     *  v3.8.1: this view used to report `goal_alignment`, `drift_detected`,
+     *  `strategy_stability` and `task_continuity`. Every one was a
+     *  text-similarity verdict rather than a fact, and two were degenerate in
+     *  THIS method specifically: `task_continuity` was pinned to 1.0 because the
+     *  request was built with `round: 1`, so `getPreviousRound(loopId, 0)`
+     *  returned null and the code took its hardcoded `?? 1` branch; and
+     *  `strategy_stability` was a literal `true`. What remains is counted
+     *  directly from committed round flags. */
     getHealth(loopId: string): Record<string, unknown> | null;
     /** Core cycle: extract self-eval → record feedback → check stop → compile next.
      *  The lease + per-session queue wrap the RoundLifecycle state machine.

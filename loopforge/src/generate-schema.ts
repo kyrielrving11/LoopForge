@@ -411,12 +411,12 @@ function generateSchema(): void {
 
   // L5 (v3.7.x): cross-file references. convertTypeNode emits `$ref` for any
   // referenced interface/enum/alias, but the pass above only walks
-  // protocol.ts — a type imported from a sibling module (e.g.
-  // PresentedStateSnapshot from canonical-state.ts) was referenced but never
-  // defined, leaving a DANGLING $ref that breaks JSON Schema validators
-  // (`$defs/PresentedStateSnapshot` did not exist). Sweep the whole program
-  // to a fixpoint: for every referenced-but-missing def, locate its
-  // declaration in any non-declaration source file and convert it.
+  // protocol.ts — a type imported from a sibling module (historically
+  // PresentedStateSnapshot from canonical-state.ts, deleted in v3.8.1) was
+  // referenced but never defined, leaving a DANGLING $ref that breaks JSON
+  // Schema validators. Sweep the whole program to a fixpoint: for every
+  // referenced-but-missing def, locate its declaration in any
+  // non-declaration source file and convert it.
   for (let guard = 0; guard < 20; guard++) {
     const referenced = new Set<string>();
     for (const name of Object.keys(defs)) {

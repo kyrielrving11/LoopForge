@@ -844,7 +844,7 @@ describe("MCP — resume / list-vault / health", async () => {
     assert.ok(found !== undefined, "vault-persisted session should appear in list");
   });
 
-  it("loopforge_health returns health data for a started loop", async () => {
+  it("loopforge_status view=loop returns machine counts for a started loop", async () => {
     await TOOL_HANDLERS.loopforge_start(mgr, {
       task: "Health test task",
       loopId: "health-test",
@@ -854,11 +854,16 @@ describe("MCP — resume / list-vault / health", async () => {
     const result = await TOOL_HANDLERS.loopforge_status(mgr, { view: "loop",
       loopId: "health-test",
     });
-    assert.ok("goal_alignment" in result, `expected goal_alignment, got: ${JSON.stringify(result)}`);
-    assert.ok("constraint_integrity" in result);
-    assert.ok("drift_detected" in result);
-    assert.ok("strategy_stability" in result);
-    assert.ok("task_continuity" in result);
+    // v3.8.1: goal_alignment / drift_detected / strategy_stability /
+    // task_continuity are gone — every one was a text-similarity verdict, and
+    // two were degenerate in this view (task_continuity pinned to 1.0,
+    // strategy_stability a literal true). What remains is counted from
+    // committed round flags.
+    assert.ok("committed_rounds" in result,
+      `expected committed_rounds, got: ${JSON.stringify(result)}`);
+    assert.ok("rounds_with_unverified_items" in result);
+    assert.ok("unverified_streak_limit" in result);
+    assert.ok("policy_metrics" in result);
   });
 
   it("loopforge_health returns error for unknown loop", async () => {

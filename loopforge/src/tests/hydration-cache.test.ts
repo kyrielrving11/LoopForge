@@ -14,7 +14,8 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { LoopForgeEngine } from "../engine.js";
-import { deriveLessons } from "../loop-compiler.js";
+import { deriveRecurringFlags } from "../loop-compiler.js";
+import { derivationRounds } from "../committed-round.js";
 import { FileLoopStore } from "../loop-store.js";
 import type { VaultEntry } from "../loop-store.js";
 import { SessionManager } from "../mcp/session.js";
@@ -347,19 +348,24 @@ describe("M6 — delegation journal merge boundary", () => {
     assert.equal(delegating.round, 3); // round 2 committed; next round compiled
 
     // The compile view at round 3 must contain exactly ONE committed
-    // round-2 view: the violation happened once, so no lesson may form.
+    // round-2 view: the violation happened once, so it must count once.
     const engine = new LoopForgeEngine(store);
     const hydrated = engine.hydrateLoopContext("journal-merge", 3);
     assert.ok(hydrated);
-    const lessons = deriveLessons(
-      "journal-merge",
-      { results: hydrated.results as unknown as Array<Record<string, unknown>> },
-      3,
+    // v3.8.1: the check runs through the shared window. `derivationRounds`
+    // decodes only committed round views, so a delegation journal row cannot
+    // contribute a second view of the same round — the old failure ("2×
+    // (R2, R2)") is now structurally impossible, and this pins it.
+    const views = derivationRounds(
+      (hydrated.results ?? []) as unknown as Array<Record<string, unknown>>,
     );
-    const dup = lessons.find((l) => l.kind === "constraint_violation" &&
-      l.text === "Never touch prod data");
-    assert.equal(dup, undefined,
-      "a single violation round must not surface as a repeated lesson via a " +
-      "delegation journal clone (was: 2× (R2, R2))");
+    assert.equal(views.filter((v) => v.round === 2).length, 1,
+      "exactly one committed view per round, journals excluded");
+    const flags = deriveRecurringFlags(views);
+    const violation = flags.find((f) => f.kind === "constraint_violation" &&
+      f.subject === "Never touch prod data");
+    assert.equal(violation?.count, 1,
+      "a single violation round counts once, never twice via a journal clone");
+    assert.deepEqual(violation?.rounds, [2]);
   });
 });

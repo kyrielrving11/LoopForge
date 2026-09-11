@@ -424,15 +424,15 @@ describe("E2E MCP lifecycle", () => {
     assert.ok(timeline.length >= 1, `expected >=1 entries in timeline, got ${timeline.length}`);
   });
 
-  it("health returns alignment and integrity data", async () => {
+  it("health returns machine counts for the loop", async () => {
     const result = await client.tool("loopforge_status", { loopId, view: "loop" });
 
     assert.ok(!result.error, `unexpected error: ${String(result.error)}`);
-    // Health returns structured diagnostic fields.
+    // v3.8.1: counted facts only — the alignment/continuity/drift scores are
+    // gone with the rest of the text-similarity verdicts.
     assert.ok(typeof result.loopId === "string");
-    assert.equal(typeof result.drift_detected, "boolean");
-    // goal_alignment may be an object or a status string depending on vault state.
-    assert.ok(result.goal_alignment !== undefined, "goal_alignment must be present");
+    assert.equal(typeof result.committed_rounds, "number");
+    assert.equal(typeof result.rounds_with_unverified_items, "number");
   });
 
   it("loopforge_list includes the completed session", async () => {

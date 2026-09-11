@@ -8,7 +8,7 @@ import { createHash } from "node:crypto";
 import type {
   ConstraintMeta,
   CriterionStatus,
-  Lesson,
+  RecurringFlag,
   LoopCompileRequest,
   LoopCompileResponse,
   MilestoneSummary,
@@ -22,6 +22,7 @@ import type { ActiveContractView } from "./round-contract.js";
 import type { ContractItemStatusView } from "./contract-items.js";
 import { deriveConfiguredCapability } from "./policy.js";
 import type { ConfiguredCapability, VerifiedSubGoalFact } from "./protocol.js";
+import type { RoundFacts } from "./round-facts.js";
 
 export const CANONICAL_STATE_SCHEMA_VERSION = 1 as const;
 
@@ -59,33 +60,6 @@ export function activeSubGoalView(
   };
 }
 
-/** v3.2: Durable snapshot of what an L1 prompt actually presented last round.
- *  Used as the diff baseline for L1 collapse. Persisted inside the lineage
- *  entry's loop_lineage (field extension — no new persistence format) and
- *  carried on PromptArtifact for the compile-to-persist round-trip. */
-export interface PresentedStateSnapshot {
-  /** Round whose presentation this snapshot describes (the baseline round). */
-  round: number;
-  /** Stable IDs (c-XXXXXXXX) of constraints rendered in the L1 Active
-   *  Constraints section (post-emphasize, non-hard). */
-  constraintIds: string[];
-  /** [sub-goal id, status] pairs rendered in the L1 Active Sub-Goals section
-   *  (in_progress + pending only). Statuses enable transition detection. */
-  subGoals: Array<[string, string]>;
-  /** [start, end] round ranges of all milestones at presentation time. */
-  milestoneRanges: Array<[number, number]>;
-}
-
-/** v3.3: Per-round statistics for the display (files changed, rejected
- *  attempts, self-reported progress delta). Compiler-derived from committed
- *  entries — zero persistence. Optional: absent when no committed rounds. */
-export interface RoundStat {
-  round: number;
-  filesChangedCount: number | null;
-  rejectedAttempts: number | null;
-  progressDelta: number | null;
-}
-
 /** v3.3: Machine git-motion cross-check over the last committed rounds.
  *  Display-only companion to the R4/R5 exculpatory signal. Optional:
  *  absent when no committed rounds carry git snapshots — the object, when
@@ -118,7 +92,6 @@ export interface CanonicalLoopState {
   verificationFlags: VerificationFlag[];
   discoveries: string[];
   rollingOutcomes: string[];
-  recurringIssues: string[];
   failedPatterns: string[];
   /** v2.1: Phase-boundary milestone summaries that survive window eviction. */
   milestones: MilestoneSummary[];
@@ -126,13 +99,10 @@ export interface CanonicalLoopState {
   subGoals: SubGoal[];
   /** v3.2: Derived per-criterion status (goal → criteria → evidence view). */
   criterionStatuses: CriterionStatus[];
-  /** v3.2: Deterministic lessons learned (repeated violations / failures). */
-  lessons: Lesson[];
-  /** v2.5: Agent trust score [0, 1] from verification flags. */
-  agentTrustScore: number | undefined;
-  /** v2.5: Trust trend over last 10 rounds. */
-  agentTrustTrend: number[];
-  suggestedNextTask: string;
+  /** v3.8.1: THE repeated-fact list (see RecurringFlag). One derivation
+   *  replaces the former Lessons list and the rolling summary's
+   *  "recurring_issues" window; renderers filter it. */
+  recurringFlags: RecurringFlag[];
   externalContext: string;
   stateFilePath: string;
   progress: {
@@ -142,9 +112,6 @@ export interface CanonicalLoopState {
     filesChanged: string[];
     tests: { passed: number; failed: number; skipped: number } | null;
   };
-  /** v3.3: Display-only round stats over the last committed rounds.
-   *  Conditional presence: absent when there are no committed rounds. */
-  roundStats?: RoundStat[];
   /** v3.3: Machine git-motion cross-check for the progress dashboard.
    *  Conditional presence: absent when no committed git snapshots exist. */
   machineStatus?: MachineStatus;
@@ -188,6 +155,18 @@ export function hashCanonicalState(state: CanonicalLoopState): string {
   return createHash("sha256").update(stableStringify(state)).digest("hex");
 }
 
+/** v3.8.1: how many recurring flags the state file lists before folding the
+ *  rest into a count. The prompt keeps its own, smaller cap (Active Warnings)
+ *  over a different slice of the same list. */
+const RECURRING_RENDER_CAP = 8;
+
+/** v3.8.1: the state file's recurring slice — only facts that actually
+ *  RECURRED (present in >= 2 rounds). The prompt shows the recent tail
+ *  instead; both read the same `RecurringFlag` list. */
+function recurringOnly(flags: RecurringFlag[]): RecurringFlag[] {
+  return flags.filter((flag) => flag.rounds.length >= 2);
+}
+
 function addList(lines: string[], title: string, values: string[]): void {
   if (values.length === 0) return;
   lines.push(`## ${title}`, "");
@@ -198,9 +177,13 @@ function addList(lines: string[], title: string, values: string[]): void {
 /** v2.11: Derive a stable 8-char hex ID from text using SHA-256.
  *  Same hash strategy as computeGoalTextHash in loop-compiler.ts. */
 
-/** v2.11: Render a list with ID prefixes when constraint_id_enabled is true.
- *  Each item gets a [prefix-XXXXXXXX] tag derived from its text hash.
- *  Items that already look like IDs (e.g. "cr-a3f2b1c0") are rendered as-is. */
+/** v2.11: Render a list with ID prefixes. Each item gets a
+ *  [prefix-XXXXXXXX] tag derived from its text hash. Items that already look
+ *  like IDs (e.g. "cr-a3f2b1c0") are rendered as-is.
+ *  v3.8.1: IDs are always rendered — the `constraint_id_enabled` escape hatch
+ *  was deleted (it never switched the MATCHING strategy, only the rendering,
+ *  so it could only ever produce a prompt whose items the agent could not
+ *  name). */
 function addListWithIds(
   lines: string[],
   title: string,
@@ -208,7 +191,6 @@ function addListWithIds(
   prefix: string,
 ): void {
   if (values.length === 0) return;
-  const idEnabled = getPolicy().evolution.constraint_id_enabled;
   lines.push(`## ${title}`, "");
   for (const value of values) {
     const trimmed = value.trim();
@@ -216,11 +198,8 @@ function addListWithIds(
     // If the value is already an ID, render it as-is
     if (STABLE_ID_RE.test(trimmed)) {
       lines.push(`- [\`${trimmed}\`] ${trimmed}`);
-    } else if (idEnabled) {
-      const id = prefix + "-" + deriveItemId(trimmed);
-      lines.push(`- [\`${id}\`] ${trimmed}`);
     } else {
-      lines.push(`- ${trimmed}`);
+      lines.push(`- [\`${prefix}-${deriveItemId(trimmed)}\`] ${trimmed}`);
     }
   }
   lines.push("");
@@ -240,7 +219,6 @@ function addListWithIdentities(
   metadata: ConstraintMeta[],
 ): void {
   if (values.length === 0) return;
-  const idEnabled = getPolicy().evolution.constraint_id_enabled;
   const idByText = new Map(metadata.map((meta) => [meta.text, meta.id]));
   lines.push(`## ${title}`, "");
   for (const value of values) {
@@ -248,81 +226,45 @@ function addListWithIdentities(
     if (!trimmed) continue;
     if (STABLE_ID_RE.test(trimmed)) {
       lines.push(`- [\`${trimmed}\`] ${trimmed}`);
-    } else if (idEnabled) {
+    } else {
       const id = idByText.get(trimmed) ?? `c-${deriveItemId(trimmed)}`;
       lines.push(`- [\`${id}\`] ${trimmed}`);
-    } else {
-      lines.push(`- ${trimmed}`);
     }
   }
   lines.push("");
 }
 
-/** Human/Agent-readable materialized view. It is always reproducible from the
- * canonical state and is never consulted as transaction truth. */
-/** v3.3: Forward-looking "roadmap" view derived from existing state — loop
- *  position, met/remaining criteria (with IDs), and sub-goal activity.
+/** v3.8.1: the one-line phase position — which phase the loop is in, and how
+ *  far the next boundary is.
  *
- *  Deliberately label-free: milestone labels/ranges are collapsed content in
- *  L1 (the diff-collapse invariant) and are rendered in full by Phase
- *  History everywhere else — the roadmap only reports "N rounds since the
- *  last milestone boundary", never the boundary's identity. Next action is
- *  likewise excluded: every level renders its own Next Action section.
- *  Shared by the state-file and prompt renderers so they cannot silently
- *  drift apart (module contract above). Returns [] — renders nothing —
- *  when the state carries none of these. Presentation only; never feeds
- *  enforcement. */
-export function buildRoadmap(state: CanonicalLoopState): string[] {
+ *  This is all that survives of v3.3's "roadmap": of its four lines, three
+ *  (met/remaining criteria with ids, sub-goal activity) were already rendered
+ *  in full by the sections that own them. Returns "" when no milestone exists,
+ *  so the caller renders no section at all — bare position is already in the
+ *  prompt header.
+ *
+ *  Shared by the state-file and prompt renderers so they cannot drift apart
+ *  (module contract above). Presentation only; never feeds enforcement. */
+export function buildPhaseLine(state: CanonicalLoopState): string {
   const lastMilestone = state.milestones.length > 0
     ? state.milestones[state.milestones.length - 1]
     : null;
-  const roundsSinceMilestone = lastMilestone !== null &&
-    lastMilestone.round_range.end <= state.round
+  // No phase boundary yet → no phase to report. Position alone ("round 3/200")
+  // is already in the prompt header, so rendering it again would be noise.
+  if (!lastMilestone) return "";
+  const roundsSince = lastMilestone.round_range.end <= state.round
     ? state.round - lastMilestone.round_range.end
     : null;
-  const met = state.criterionStatuses.filter((cs) => cs.status === "verified" || cs.status === "claimed").length;
-  const total = state.criterionStatuses.length;
-  const remaining = state.criterionStatuses.filter(
-    (cs) => cs.status === "remaining" || cs.status === "unknown",
-  );
-  const inProgress = state.subGoals.filter((sg) => sg.status === "in_progress").length;
-  const pending = state.subGoals.filter((sg) => sg.status === "pending").length;
-  // Bare position alone is not forward information — no milestone distance,
-  // criteria, remaining criteria, or sub-goal activity means nothing to
-  // look ahead to. Returns [] so empty states render no section at all.
-  if (roundsSinceMilestone === null && total === 0 &&
-      state.remainingCriteria.length === 0 && inProgress === 0 && pending === 0) {
-    return [];
+  const parts = [
+    `phase "${lastMilestone.label}"`,
+    `round ${state.round}/${state.maxRounds}`,
+  ];
+  if (roundsSince !== null) {
+    parts.push(
+      `${roundsSince} round${roundsSince === 1 ? "" : "s"} since the last boundary`,
+    );
   }
-
-  const lines: string[] = [];
-  let position = `Position: round ${state.round}/${state.maxRounds}`;
-  if (roundsSinceMilestone !== null) {
-    position += ` · ${roundsSinceMilestone} round${roundsSinceMilestone === 1 ? "" : "s"} since the last milestone boundary`;
-  }
-  lines.push(`- ${position}`);
-
-  if (total > 0) {
-    lines.push(`- Criteria: ${met}/${total} met · ${remaining.length} remaining`);
-  } else if (state.remainingCriteria.length > 0) {
-    lines.push(`- Criteria: ${state.remainingCriteria.length} remaining`);
-  }
-  if (remaining.length > 0) {
-    const idEnabled = getPolicy().evolution.constraint_id_enabled;
-    for (const cs of remaining.slice(0, 8)) {
-      const idTag = idEnabled ? ` [\`${cs.id}\`]` : "";
-      const icon = cs.status === "remaining" ? "⬜" : "❔";
-      lines.push(`  - ${icon}${idTag} ${cs.text}`);
-    }
-    if (remaining.length > 8) {
-      lines.push(`  - ... and ${remaining.length - 8} more`);
-    }
-  }
-
-  if (inProgress > 0 || pending > 0) {
-    lines.push(`- Sub-goals: ${inProgress} in progress · ${pending} pending`);
-  }
-  return lines;
+  return parts.join(" · ");
 }
 
 /** v3.3/v3.4: Render the ACTIVE Round Contract as the Current Task section
@@ -369,17 +311,6 @@ export function formatRoundContract(
 // v3.3.1: Shared presentation atoms
 // ═══════════════════════════════════════════════════════════════════════════
 
-/** The trust bar line ("██████░░░░ 60%"). The L2 Agent Trust section and the
- *  detailed L1 renderer used to carry private copies of this formula — shared
- *  here so a formatting change is made once (module contract: renderers must
- *  not silently drift apart). */
-export function trustBarLine(score: number): string {
-  const barLen = 10;
-  const filled = Math.round(score * barLen);
-  const bar = "█".repeat(filled) + "░".repeat(barLen - filled);
-  return `${bar} ${(score * 100).toFixed(0)}%`;
-}
-
 /** Milestone heading line ("**🏁 Round 7** (Rounds 3–7, 60%)"). Shared by the
  *  L2 Phase History and the detailed L1 renderer; the L1 copy previously
  *  rendered the range as "R3–R7", a format only this heading used. */
@@ -417,17 +348,13 @@ const STATE_SECTION_TIER: Record<string, StateTier> = {
   Verification: "Recent",
   "Changes Since Last Round": "Recent",
   Discoveries: "Recent",
-  "Next Action": "Recent",
-  "Agent Trust": "Recent",
   // Historical Summary — the loop's memory skeleton, kept under existing
-  // milestone/lesson/window caps.
+  // milestone/window caps.
   "Goal → Criteria": "Historical Summary",
   "Cross-Round Outcomes": "Historical Summary",
-  "Recurring Issues": "Historical Summary",
+  "Recurring Flags": "Historical Summary",
   "Failed Patterns": "Historical Summary",
-  "Lessons Learned": "Historical Summary",
   "Retired Constraints": "Historical Summary",
-  Roadmap: "Historical Summary",
   "Phase History": "Historical Summary",
 };
 
@@ -442,6 +369,12 @@ export interface StateFileRenderOptions {
   recoveryBrief?: string[];
 }
 
+/** Human/Agent-readable materialized view. It is always reproducible from the
+ *  canonical state and is never consulted as transaction truth.
+ *
+ *  v3.8.1: this is where the diagnostics live — the progress dashboard, the
+ *  criterion list, round stats, the FULL recurring-flag history and the phase
+ *  history. The prompt carries only what the next round needs. */
 export function renderCanonicalStateMarkdown(
   state: CanonicalLoopState,
   options?: StateFileRenderOptions,
@@ -538,10 +471,8 @@ function flatStateSections(state: CanonicalLoopState): Array<{ title: string; bo
     }
     lines.push("");
   }
-  // v3.2: Goal → criteria → evidence vertical view. IDs follow
-  // constraint_id_enabled like every other ID-rendering path.
+  // v3.2: Goal → criteria → evidence vertical view. IDs are always rendered.
   if (state.criterionStatuses.length > 0) {
-    const idEnabled = getPolicy().evolution.constraint_id_enabled;
     lines.push("## Goal → Criteria", "");
     for (const cs of state.criterionStatuses) {
       const icon = cs.status === "verified" ? "✅"
@@ -549,7 +480,7 @@ function flatStateSections(state: CanonicalLoopState): Array<{ title: string; bo
         : cs.status === "insufficient" ? "🟠"
         : cs.status === "contradicted" ? "⛔"
         : cs.status === "remaining" ? "⬜" : "❔";
-      const idTag = idEnabled ? ` [\`${cs.id}\`]` : "";
+      const idTag = ` [\`${cs.id}\`]`;
       const met = cs.met_at_round !== undefined ? ` (met R${cs.met_at_round})` : "";
       const related = cs.related_subgoal_ids.length > 0
         ? ` (related: ${cs.related_subgoal_ids.join(", ")})`
@@ -560,32 +491,37 @@ function flatStateSections(state: CanonicalLoopState): Array<{ title: string; bo
   }
   addListWithIds(lines, "Remaining", state.remainingCriteria, "cr");
   addList(lines, "Blockers", state.blockers);
+  const recurring = recurringOnly(state.recurringFlags);
   addList(lines, "Discoveries", state.discoveries);
   addList(lines, "Cross-Round Outcomes", state.rollingOutcomes);
-  addList(lines, "Recurring Issues", state.recurringIssues);
   addList(lines, "Failed Patterns", state.failedPatterns);
-  // v3.2: Lessons learned — repeated violations / verification failures.
-  if (state.lessons.length > 0) {
-    lines.push("## Lessons Learned", "");
-    for (const lesson of state.lessons.slice(0, 8)) {
-      const icon = lesson.kind === "constraint_violation"
+  // v3.8.1: ONE recurring-facts section. "Recurring Issues" (the last 5
+  // rounds' raw violations, no threshold) and "Lessons Learned" (the whole
+  // history, count >= 2) were two windows over one fact set rendered as two
+  // headings. The state file keeps the genuinely recurring set; the prompt
+  // shows the recent tail of the same derivation.
+  if (recurring.length > 0) {
+    lines.push("## Recurring Flags", "");
+    for (const flag of recurring.slice(0, RECURRING_RENDER_CAP)) {
+      const icon = flag.kind === "constraint_violation"
         ? "🚫"
-        : lesson.kind === "verification_error" ? "⚠️" : "ℹ️";
+        : flag.kind === "verification_error" ? "⚠️" : "ℹ️";
+      const subject = flag.ref ? `${flag.subject} [${flag.ref}]` : flag.subject;
       lines.push(
-        `- ${icon} ${lesson.text} — ${lesson.count}× (R${lesson.rounds.join(", R")})`,
+        `- ${icon} ${subject} — ${flag.count}× (R${flag.rounds.join(", R")})`,
       );
     }
-    if (state.lessons.length > 8) {
-      lines.push(`- ... and ${state.lessons.length - 8} more`);
+    if (recurring.length > RECURRING_RENDER_CAP) {
+      lines.push(`- ... and ${recurring.length - RECURRING_RENDER_CAP} more`);
     }
     lines.push("");
   }
   addList(lines, "Retired Constraints", state.retiredConstraints);
-  // v3.3: Forward-looking roadmap — same buildRoadmap the prompts render.
-  const roadmap = buildRoadmap(state);
-  if (roadmap.length > 0) {
-    lines.push("## Roadmap", "");
-    for (const line of roadmap) lines.push(line);
+  // v3.8.1: the Roadmap section is gone. Only its non-duplicated fact — the
+  // phase position — survives, as the one-line phase line the prompts render.
+  const phaseLine = buildPhaseLine(state);
+  if (phaseLine) {
+    lines.push("## Phase", "", `- ${phaseLine}`);
     lines.push("");
   }
   if (state.verificationFlags.length > 0) {
@@ -652,21 +588,6 @@ function flatStateSections(state: CanonicalLoopState): Array<{ title: string; bo
       "",
     );
   }
-  if (state.agentTrustScore !== undefined) {
-    const barLen = 10;
-    const filled = Math.round(state.agentTrustScore * barLen);
-    const bar = "█".repeat(filled) + "░".repeat(barLen - filled);
-    const avg = state.agentTrustTrend.length > 0
-      ? (state.agentTrustTrend.reduce((a, b) => a + b, 0) / state.agentTrustTrend.length).toFixed(2)
-      : "—";
-    lines.push(
-      "## Agent Trust", "",
-      `${bar} ${(state.agentTrustScore * 100).toFixed(0)}%`,
-      `Trend (last ${state.agentTrustTrend.length}): ${state.agentTrustTrend.join(" → ")}`,
-      `Average: ${avg}`,
-      "",
-    );
-  }
   if (state.externalContext) {
     lines.push("## External Context", "", state.externalContext, "");
   }
@@ -710,20 +631,18 @@ export function createCanonicalLoopState(
   request: LoopCompileRequest,
   response: LoopCompileResponse,
   stateFilePath: string,
-  /** v3.3: Display-only derived data (round stats, machine git-motion).
-   *  Optional 4th param — callers that predate v3.3 stay on 3-arg calls. */
+  /** v3.3: Display-only derived data. Optional 4th param — callers that
+   *  predate v3.3 stay on 3-arg calls. */
   derived?: {
-    roundStats?: RoundStat[];
     machineStatus?: MachineStatus;
-    /** v3.4: ACTIVE Round Contract for this round (compile-derived from the
-     *  committed evals of earlier rounds — see loop-compiler). Drives the
-     *  Current Task. Never the submission's own round_contract field, which
-     *  is a proposal for the NEXT round. */
-    roundContract?: ActiveContractView | null;
-    /** v3.8: derived item statuses for the ACTIVE contract. */
-    contractItemStatuses?: ContractItemStatusView | null;
-    /** v3.8: derived machine-verified sub-goal facts. */
-    verifiedSubGoals?: VerifiedSubGoalFact[] | null;
+    /** v3.8.1: the contract-fact bundle — the ACTIVE Round Contract (drives
+     *  the Current Task; never the submission's own `round_contract` field,
+     *  which is a proposal for the NEXT round), its derived item statuses, and
+     *  the machine-verified sub-goal facts, all from ONE `deriveRoundFacts`
+     *  call. Taking them as a bundle makes it structurally impossible to
+     *  assemble a state out of values derived over different history windows —
+     *  v3.4/v3.8 passed them as three independent options. */
+    roundFacts?: RoundFacts;
   },
 ): CanonicalLoopState {
   const last = request.last_round_result;
@@ -757,7 +676,7 @@ export function createCanonicalLoopState(
   // to do this round"; the original objective stays in the Objective
   // section above. No active contract → the original task text is used,
   // byte-identical to pre-v3.3 behavior.
-  const roundContract = derived?.roundContract ?? null;
+  const roundContract = derived?.roundFacts?.activeContract ?? null;
 
   return {
     schemaVersion: CANONICAL_STATE_SCHEMA_VERSION,
@@ -768,7 +687,7 @@ export function createCanonicalLoopState(
     objective: objective?.objective || request.task,
     objectiveVersion: objective?.version ?? 1,
     currentTask: roundContract
-      ? formatRoundContract(roundContract, derived?.contractItemStatuses ?? null)
+      ? formatRoundContract(roundContract, derived?.roundFacts?.itemStatuses ?? null)
       : request.task,
     successCriteria: unique(objective?.success_criteria ?? []),
     hardConstraints: unique(objective?.hard_constraints ?? []),
@@ -783,15 +702,11 @@ export function createCanonicalLoopState(
     verificationFlags,
     discoveries,
     rollingOutcomes: unique(rolling?.key_outcomes ?? []),
-    recurringIssues: unique(rolling?.recurring_issues ?? []),
     failedPatterns: unique(rolling?.failed_patterns ?? []),
     milestones: rolling?.milestones ?? [],
     subGoals: response.sub_goals ?? [],
     criterionStatuses: response.criterion_statuses ?? [],
-    lessons: response.lessons ?? [],
-    agentTrustScore: response.agent_trust_score,
-    agentTrustTrend: response.agent_trust_trend ?? [],
-    suggestedNextTask: response.suggested_next_task,
+    recurringFlags: response.recurring_flags ?? [],
     externalContext: request.external_context?.trim() ?? "",
     stateFilePath,
     progress: {
@@ -805,17 +720,15 @@ export function createCanonicalLoopState(
     },
     // v3.3: Conditional presence — empty/absent derived data must not add
     // keys, or every state hash would change for rounds without it.
-    ...(derived?.roundStats && derived.roundStats.length > 0
-      ? { roundStats: derived.roundStats }
-      : {}),
     ...(derived?.machineStatus ? { machineStatus: derived.machineStatus } : {}),
     // v3.3: Conditional presence — no contract, no key (hash stability).
     ...(roundContract ? { roundContract } : {}),
-    ...(derived?.contractItemStatuses
-      ? { contractItemStatuses: derived.contractItemStatuses }
+    ...(derived?.roundFacts?.itemStatuses
+      ? { contractItemStatuses: derived.roundFacts.itemStatuses }
       : {}),
-    ...(derived?.verifiedSubGoals && derived.verifiedSubGoals.length > 0
-      ? { verifiedSubGoals: [...derived.verifiedSubGoals] }
+    ...(derived?.roundFacts?.verifiedSubGoals &&
+      derived.roundFacts.verifiedSubGoals.length > 0
+      ? { verifiedSubGoals: [...derived.roundFacts.verifiedSubGoals] }
       : {}),
     capability: deriveConfiguredCapability(getPolicy()),
   };

@@ -20,21 +20,14 @@ export interface ConstraintsPolicy {
 
 export interface SummaryPolicy {
   window: number;
-  health_check_interval: number;
   /** v2.1: Rounds between automatic safety-net milestones.
    *  Default 20. Only fires when no agent_declared or criteria_milestone
    *  has been created for this many rounds. */
   milestone_interval: number;
-  /** v2.1: Maximum number of milestone summaries to accumulate.
-   *  Oldest milestones are evicted when the cap is exceeded. */
-  max_milestones: number;
-  /** v3.0.1: L1 milestone sampling — when milestones exceed max_milestones,
-   *  keep this many of the OLDEST milestones as history anchors. The same
-   *  count of the NEWEST is always kept; the middle is sampled evenly. */
-  milestone_head_count: number;
-  /** v3.0.1: L1 milestone sampling — this many of the NEWEST milestones are
-   *  always kept when the cap is exceeded. */
-  milestone_tail_count: number;
+  /** v3.8.1: the milestone-history bound lives in loop-compiler.ts as
+   *  MILESTONE_HISTORY_CAP, not here. It is a fixed property of the derived
+   *  view, and making it configurable is what let the state file's phase
+   *  history depend on the prompt level that compiled. */
 }
 
 export interface EnginePolicy {
@@ -71,46 +64,21 @@ export interface EnginePolicy {
 
 /** Levels control state density only; reasoning strategy belongs to the Agent. */
 export interface PromptPolicy {
-  full_refresh_interval: number;
   l0_max_chars: number;
   l1_max_chars: number;
   l2_max_chars: number;
-  /** v2.4: Enable adaptive L2 budget scaling with loop complexity.
-   *  Grows with round count + milestone count up to l2_adaptive_max_chars. */
-  l2_adaptive_enabled: boolean;
-  /** v2.4: Additional L2 chars per completed round. Default: 200. */
-  l2_adaptive_round_factor: number;
-  /** v2.4: Additional L2 chars per milestone. Default: 1000. */
-  l2_adaptive_milestone_factor: number;
-  /** v2.4: Absolute ceiling for adaptive L2 budget. Default: 40000. */
-  l2_adaptive_max_chars: number;
-  /** v2.5: Additional L2 chars per tracked sub-goal. Default: 100. */
-  l2_adaptive_subgoal_factor: number;
   /** v2.8: When true, L2 prompts skip inline fullStateMarkdown and
    *  instruct the agent to read the state file instead. Structured
    *  sections (milestones, sub-goals, trust, progress) are still
    *  rendered. Default: true. Set to false to restore pre-v2.8 L2
    *  behavior. */
   l2_pointer_enabled: boolean;
-  /** v3.2: Collapse unchanged L1 content (vs the previous round's persisted
-   *  presentation) into one-line state-file pointers. Default: true.
-   *  Set to false to restore pre-v3.2 full L1 rendering. */
-  l1_collapse_enabled: boolean;
-  /** v3.5: When true, L2 prompts whose Current Task is NOT a Round Contract
-   *  append a short suggestion to declare one when the remaining work spans
-   *  several rounds. L2-only prose in the eval template tail — never the
-   *  JSON key name; L0/L1 prompts are unaffected (byte-identical to v3.4).
-   *  Default: true. Set to false to restore pre-v3.5 L2 rendering. */
-  contract_nudge_on_l2: boolean;
   /** v2.9: Max emphasize items when level is L2. Default: 5. */
   max_emphasize_l2: number;
   /** v2.9: Max emphasize items when level is L1. Default: 3. */
   max_emphasize_l1: number;
   /** v2.9: Max confusion points rendered. Default: 3. */
   max_confusion_points: number;
-  /** v2.14: Jaccard threshold for pointing a confusion point at its
-   *  best-matching state section. Default: 0.15 (15%). */
-  confusion_section_threshold: number;
 }
 
 export interface BackendPolicy {
@@ -122,32 +90,12 @@ export interface EvolutionPolicy {
   max_discovered_constraints_per_round: number;
   max_active_constraints: number;
   max_objective_versions: number;
+  /** Numeric progress tolerance for the stall evaluator — not a text score. */
   progress_stall_threshold: number;
-  progress_mismatch_threshold: number;
-  /** v2.14: Jaccard threshold for task continuity in checkLoopHealth —
-   *  below this, the loop is considered drifting. Default: 0.2. */
-  task_continuity_threshold: number;
-  /** v2.5: Jaccard threshold for detecting genuinely new success criteria
-   *  between rounds. Used by detectNewCriteria(). Default: 0.45. */
-  criteria_dedup_threshold: number;
-  /** v2.5: Jaccard threshold for deduplicating new sub-goals against
-   *  existing ones. Used when accumulating emerged_subtasks. Default: 0.6. */
-  subgoal_dedup_threshold: number;
-  /** v2.5: Jaccard threshold for matching agent-declared status changes
-   *  (completed/blocked/canceled) to existing sub-goals. Default: 0.5. */
-  subgoal_match_threshold: number;
   /** v3.7.1: Max ACTIVE sub-goals (pending/in_progress/blocked) shown in
    *  prompts and the state file. done/canceled never render as items —
    *  they survive in the vault, replay, and counts. */
   max_active_subgoals: number;
-  /** v2.5: Jaccard threshold for matching constraints during discovery
-   *  and violation tracking. Default: 0.5. */
-  constraint_match_threshold: number;
-  /** v2.11: When true, constraints and criteria are assigned stable IDs
-   *  (c-XXXXXXXX, cr-XXXXXXXX) rendered in prompts. The agent is encouraged
-   *  to reference IDs for exact matching; natural-language references use
-   *  Jaccard similarity. Default: true. */
-  constraint_id_enabled: boolean;
 }
 
 export interface CheckpointPolicy {
@@ -194,6 +142,10 @@ export interface GatePolicy {
   enabled: boolean;
 }
 
+/** v3.8.1: the policy schema version. A policy file that does not declare
+ *  exactly this version is REJECTED — see loadPolicy. */
+export const POLICY_SCHEMA_VERSION = "4";
+
 export interface LoopPolicy {
   version: string;
   constraints: ConstraintsPolicy;
@@ -210,27 +162,18 @@ export interface LoopPolicy {
 }
 
 export const DEFAULT_POLICY: LoopPolicy = {
-  version: "3",
+  version: POLICY_SCHEMA_VERSION,
   constraints: { retire_window: 3 },
-  summary: { window: 5, health_check_interval: 1, milestone_interval: 20, max_milestones: 10, milestone_head_count: 3, milestone_tail_count: 3 },
+  summary: { window: 5, milestone_interval: 20 },
   engine: { stall_lookback_rounds: 3, max_rounds: 200, enforcement_escalation_enabled: true, backtrack_enabled: true, backtrack_max_depth: 3, backtrack_preserve_discoveries: true, unverified_claim_streak_limit: 3 },
   prompt: {
-    full_refresh_interval: 0,
     l0_max_chars: 3000,
     l1_max_chars: 7000,
     l2_max_chars: 18000,
-    l2_adaptive_enabled: true,
-    l2_adaptive_round_factor: 200,
-    l2_adaptive_milestone_factor: 1000,
-    l2_adaptive_max_chars: 40000,
-    l2_adaptive_subgoal_factor: 100,
     l2_pointer_enabled: true,
-    l1_collapse_enabled: true,
-    contract_nudge_on_l2: true,
     max_emphasize_l2: 5,
     max_emphasize_l1: 3,
     max_confusion_points: 3,
-    confusion_section_threshold: 0.15,
   },
   backend: { root_dir: ".loopforge" },
   evolution: {
@@ -238,14 +181,7 @@ export const DEFAULT_POLICY: LoopPolicy = {
     max_active_constraints: 15,
     max_objective_versions: 10,
     progress_stall_threshold: 0.05,
-    progress_mismatch_threshold: 0.3,
-    task_continuity_threshold: 0.2,
-    criteria_dedup_threshold: 0.45,
-    subgoal_dedup_threshold: 0.6,
-    subgoal_match_threshold: 0.5,
     max_active_subgoals: 12,
-    constraint_match_threshold: 0.5,
-    constraint_id_enabled: true,
   },
   checkpoint: { outcome_max_chars: 200 },
   state_file: {
@@ -282,6 +218,11 @@ export function writeDefaultPolicy(
   return { path: target, created: true };
 }
 
+/** Merge a declared policy file over the defaults.
+ *
+ *  v3.8.1: an unknown key is an ERROR, not a warning. A typo used to be
+ *  announced and then ignored, so the loop ran on a value the operator never
+ *  set — the one outcome a configuration defect must never produce. */
 function deepMerge<T>(defaults: T, overrides: Record<string, unknown>): T {
   const result = { ...defaults } as Record<string, unknown>;
   for (const key of Object.keys(overrides)) {
@@ -299,25 +240,49 @@ function deepMerge<T>(defaults: T, overrides: Record<string, unknown>): T {
     } else if (key in result) {
       result[key] = incoming;
     } else {
-      // Warn on unknown keys — a typo like "max_round" instead of
-      // "max_rounds" would otherwise be silently ignored.
-      console.warn(`loopforge: ignoring unknown policy key "${key}". Check loop_policy.json for typos.`);
+      throw new Error(
+        `unknown policy key "${key}" — remove it, or fix the typo. ` +
+        "This release carries no compatibility layer: a config written for an " +
+        "older schema is not a valid config for this one.",
+      );
     }
   }
   return result as T;
 }
 
+/** Load the runtime policy, or fall back to the defaults when no file
+ *  declares one.
+ *
+ *  v3.8.1: the `version` field is load-bearing. Previously it was a
+ *  declarative string that NOTHING read, so a policy written for an older
+ *  schema was silently merged over the current defaults — options that no
+ *  longer exist evaporated and options that changed meaning were applied
+ *  under their old name. Now a file either declares the current schema
+ *  version or the load fails, and the failure surfaces as `policy_invalid`
+ *  rather than the loop running on a configuration nobody chose.
+ *
+ *  A MISSING or unparseable file still falls through to the defaults (running
+ *  with no policy file is normal). A file that exists and parses is a
+ *  declaration, so its defects propagate instead of being swallowed. */
 export function loadPolicy(path?: string): LoopPolicy {
   const candidates = [path, "loop_policy.json"].filter(Boolean) as string[];
   for (const candidate of candidates) {
+    let raw: unknown;
     try {
-      const raw = JSON.parse(readFileSync(resolve(candidate), "utf8"));
-      if (raw && typeof raw === "object" && !Array.isArray(raw)) {
-        return deepMerge(DEFAULT_POLICY, raw as Record<string, unknown>);
-      }
+      raw = JSON.parse(readFileSync(resolve(candidate), "utf8"));
     } catch {
-      // Try the next candidate.
+      continue; // absent or unreadable — try the next candidate
     }
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const version = (raw as Record<string, unknown>).version;
+    if (version !== POLICY_SCHEMA_VERSION) {
+      throw new Error(
+        `policy version ${JSON.stringify(version)} does not match the current ` +
+        `schema version "${POLICY_SCHEMA_VERSION}". Update the file; there is ` +
+        "no migration path.",
+      );
+    }
+    return deepMerge(DEFAULT_POLICY, raw as Record<string, unknown>);
   }
   return structuredClone(DEFAULT_POLICY);
 }
@@ -337,7 +302,7 @@ export function resetPolicy(): void {
 }
 
 /** v3.2: Test-only injection — mirrors resetPolicy so tests can exercise a
- *  specific policy configuration (e.g. l1_collapse_enabled=false). */
+ *  specific policy configuration (e.g. state_file.enabled=false). */
 export function setPolicyForTest(next: LoopPolicy): void {
   policy = next;
 }

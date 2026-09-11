@@ -59,17 +59,25 @@ loopforge/src/
                         and item-claim boundary (contract_invalid)
   subgoal-state.ts      Sub-goal lifecycle — round-scoped ids, the closed
                         transition matrix, committed-view replay, and the
-                        similarity diagnostic
+                        exact-duplicate declaration diagnostic
   contract-items.ts     Contract item status reducer (pending / insufficient /
                         contradicted / verified) and closure
+  round-facts.ts        THE contract-fact derivation — the contract walker,
+                        item reducer, verified sub-goals and verification debt
+                        as ONE pass over ONE history window
   committed-round.ts    Single read model for committed feedback and hydrated
                         lineage; decoding, ordering, deduplication, rollback
-                        exclusion, and transaction extraction
-  cognitive-facts.ts    Derived focus, todo, phase, delegation, and handoff
+                        exclusion, and transaction extraction. Also the ONE
+                        window function every derivation reads
+                        (`derivationRounds`)
+  cognitive-facts.ts    Derived focus, todo, phase, delegation, and handoff.
+                        Consumes the caller's RoundFacts — it derives nothing
+                        about contracts
   canonical-state.ts    CanonicalLoopState and deterministic state hashing
   loop-compiler.ts      State evolution and PromptArtifact compilation
   prompt-policy.ts      L0/L1/L2 prompt-density selection
-  prompt-assembler.ts   Single-pass PromptArtifact rendering
+  prompt-assembler.ts   Single-pass PromptArtifact rendering; the fixed
+                        section priority and the protected set
   engine.ts             Engine state, feedback, and lineage hydration
   round-driver.ts       Shared round preparation and completion
   round-transaction.ts  Stable round identity, attempts, evidence, and recovery
@@ -107,13 +115,29 @@ LoopForge has one factual source and one cognitive source.
 
 - The factual source is the committed typed round documents in the Vault.
   `CommittedRoundView` is the shared internal read model over those documents,
-  not a second persistence format.
+  not a second persistence format. `derivationRounds(entries, N)` in
+  `committed-round.ts` is the ONE window every derivation reads — the compile
+  path, the projection, the live coordinator, audit and explain all go through
+  it, so they cannot disagree about which rounds are this branch's history or
+  about how their envelope was interpreted.
 - The cognitive source is `CanonicalLoopState`, compiled from committed facts.
   `DerivedCognitiveFacts` supplies focus, todo, phase, delegation, and handoff
-  to prompt, state-file, and status projections.
+  to prompt, state-file, and status projections. It takes the contract facts
+  as an INPUT (`RoundFacts`, from `round-facts.ts`) and derives nothing about
+  contracts itself — one algorithm, one window, no second answer.
 - Replay answers what happened. Audit checks whether facts are complete and
   claims have supporting evidence. Metrics are diagnostic only. These views
   share the committed-round decoder and do not own separate history rules.
+
+### Relationship identity
+
+Everything that affects a fact, a state, a verdict, or a replayed history is
+established by: a stable id, an explicit `criterion_refs` / `subgoal_refs` /
+`contract_item_id`, normalized-exact text, or a content hash. **Never by a
+similarity score.** v3.8.1 deleted the Jaccard implementation, its tokenizer
+and its seven thresholds outright; `criteriaMatch`, `matchesConstraintText`
+and `matchEmphasize` compare ids or normalized-exact text, and a paraphrase is
+a different thing.
 
 Rejected and in-flight attempts are not committed history. A backtrack decision
 is a rollback directive and is excluded from final history after the redo.
@@ -283,8 +307,39 @@ observations in as the in-flight slice.
 
 L0, L1, and L2 control state density only. They do not choose a reasoning
 technique. L0 is a lean same-round retry, L1 is normal continuation, and L2 is
-full rehydration. Mandatory prompt sections remain present and the token budget
-is enforced.
+full rehydration. L2 is entered only for reasons that are FACTS about the
+round — first round, plan boundary, committed recovery, a machine
+contradiction, a checkpoint boundary, or repeated rejection. There is no
+round-count timer.
+
+### Budget: fixed priority, protected set, deterministic truncation
+
+`prompt-assembler.ts` owns the order in ONE table (`SECTION_PRIORITY`). A
+Section's `mandatory` flag means PROTECTED: never dropped, never truncated,
+rendered first regardless of budget. Everything else is optional and is cut
+**strictly lowest-priority-first** — greedy first-fit is NOT the rule, because
+it can render a small low-priority section into room a larger high-priority one
+could not use, so "Blockers" could be missing while "Phase" is present. At most
+ONE optional section may be rendered partially, cut at a line boundary.
+
+When the protected set alone exceeds the budget the prompt is rendered anyway
+and `PromptArtifact.protectedOverflow` is set: an over-budget prompt is
+RECORDED, never silently produced.
+
+The budget is fixed per level (`l0/l1/l2_max_chars`). It does not scale with
+round count, milestone count or sub-goal count — a prompt's allowed content
+must not depend on how long the loop has been running.
+
+`PromptArtifact` (schema 2) records what THIS prompt did: `level`,
+`stateHash`, `promptHash`, round identity, `sections`, `droppedSections`,
+`protectedOverflow`, `budget`, `renderedChars`. It records nothing about what
+a LATER prompt should do. There is no presentation snapshot: a prompt's content
+follows from committed facts, not from what the previous prompt happened to
+show. An artifact that does not parse (an older schema version included) is a
+HARD break, and `legacyTransactionRounds()` reports the loss rather than
+letting the loop look complete while rounds are missing.
+
+### Projections
 
 `LoopProjection` carries `verified_subgoals` — the derived machine facts about
 sub-goals a verified contract item backs. It is forwarded from the same
@@ -292,9 +347,15 @@ sub-goals a verified contract item backs. It is forwarded from the same
 projection, the prompt and the state file cannot tell different stories about
 what the machine verified.
 
-The optional `.loopforge/state/<loopId>-state.md` file is a derived view. It can
-be regenerated from the Vault and must never become an independent source of
-truth.
+The optional `.loopforge/state/<loopId>-state.md` file is a derived view for
+humans, the CLI and external tools. It can be regenerated from the Vault, its
+content depends only on committed facts (not on which prompt level compiled),
+and it must never become an independent source of truth. Diagnostics live here
+— trust, roadmap, the progress dashboard, per-round stats and the full
+recurring-flag history are state-file concerns, not prompt concerns. The prompt
+carries a bounded recent tail of the recurring facts (`Active Warnings`) and a
+one-line phase; a backtrack's Recovery Brief renders in the prompt and in the
+state file's Recent tier from ONE set of facts.
 
 ## Storage and integration
 
@@ -337,7 +398,15 @@ The round transaction is schema 2 and persists only the before/after
 observation collections; the round delta is derived
 (`deriveRoundObservationDelta`). A schema-1 envelope is a hard break: the round
 is not history, and `legacyTransactionRounds()` reports it in the audit instead
-of letting it vanish silently.
+of letting it vanish silently. The same applies to the PromptArtifact schema
+(now 2): both versioned envelopes are HARD breaks, and both are REPORTED —
+`legacyTransactionRounds()` tags each loss with which envelope rejected it.
+A version break that deletes committed history without saying so is the one
+outcome this reporting exists to prevent.
+
+The same applies to the policy schema (version 4): `loadPolicy` rejects a file
+that declares a different version, or an unknown key, instead of merging it
+over the current defaults. The version field used to be read by nothing.
 
 The primary integration is the synchronous MCP server:
 
@@ -371,7 +440,13 @@ external agent remains the execution owner.
 ## Before changing a hotspot
 
 - Prompt changes require PromptArtifact budget, hashing, density-level, and
-  same-round retry coverage.
+  same-round retry coverage — plus proof that the PROTECTED set survives a
+  budget below its own size (`protectedOverflow` recorded, not silently
+  resolved), that every rendered optional section outranks every dropped one,
+  and that identical input yields an identical prompt and artifact.
+- Policy changes require the version boundary to hold: a file declaring a
+  different schema version, or carrying an unknown key, must be REJECTED
+  (`policy_invalid`), never merged over the defaults.
 - Protocol or evaluation changes require schema, handler, lifecycle, malformed
   input, same-round retry, and state-unchanged tests.
 - Transaction changes require reject, backtrack, replay, concurrent next,

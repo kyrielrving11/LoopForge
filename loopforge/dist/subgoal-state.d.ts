@@ -12,8 +12,8 @@
  * re-declaring the same text in a later round creates a NEW sub-goal — the
  * previous one may be terminal, and the old text-only hash silently dropped
  * the re-declaration. Within one round, exactly-equal text keeps only the
- * first entry. Jaccard similarity no longer merges anything: it only feeds
- * the `possible_duplicate_subgoal` diagnostic.
+ * first entry, and `duplicateEmergedDeclarations` reports what was dropped.
+ * v3.8.1: no similarity anywhere — a near-duplicate is not a fact.
  *
  * Input is committed round views plus the in-flight report — never raw vault
  * envelopes, so there is exactly one history interpretation.
@@ -21,6 +21,17 @@
 import type { SubGoal, SubGoalUpdate } from "./protocol.js";
 /** v3.8: Stable sub-goal id scoped to its declaration event. */
 export declare function deriveSubGoalId(loopId: string, declaredAtRound: number, ordinal: number, description: string): string;
+/** v3.8.1: The exact duplicates `deriveEmergedItems` discarded — entries whose
+ *  normalized text repeated an earlier entry in the SAME declaration round, so
+ *  no second sub-goal was created for them.
+ *
+ *  This replaces the former cross-round Jaccard near-duplicate diagnostic. A
+ *  near-duplicate is not a fact: two differently-worded sub-goals may be two
+ *  real pieces of work, and the message told the agent to "consider
+ *  consolidating" on the strength of a similarity score. An exact repeat
+ *  inside one round genuinely WAS dropped, so saying so is honest and
+ *  actionable. */
+export declare function duplicateEmergedDeclarations(descriptions: ReadonlyArray<string>): string[];
 /** v3.8: The items a round's emerged list will create, in order. Exact
  *  duplicates within the round keep only their first entry, and ordinals
  *  count the surviving entries — the pre-advance preflight and the compile
@@ -63,12 +74,4 @@ export declare function deriveSubGoals(input: {
      *  committed round on the vault path). */
     currentReport?: SubGoalDeclarationRound | null;
 }): SubGoal[];
-/** v3.8: Similarity is DIAGNOSTIC ONLY — it never merges or blocks a
- *  declaration. Pairs above the threshold are reported so the prompt can
- *  suggest consolidating them. */
-export declare function possibleDuplicateSubGoals(subGoals: ReadonlyArray<SubGoal>, threshold: number): Array<{
-    left: string;
-    right: string;
-    score: number;
-}>;
 //# sourceMappingURL=subgoal-state.d.ts.map

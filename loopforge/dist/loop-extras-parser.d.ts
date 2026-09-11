@@ -62,7 +62,6 @@ export interface ParsedLoopExtras {
     constraints_from_plan: string[];
     new_since_last_round: string;
     force_level: string;
-    health_check_interval: number;
     external_context: string;
     max_rounds: number | undefined;
     verification_flags: VerificationFlag[];

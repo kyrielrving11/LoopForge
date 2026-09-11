@@ -1,23 +1,12 @@
-/** Shared token utilities — Jaccard similarity, dedup, vault entry helpers.
+/** Shared token helpers — content-addressed ids, contract canonicalization,
+ *  normalization, and vault entry accessors.
  *
- * Single source of truth for tokenization and similarity functions used
- * by the compiler, verification gate, and canonical state renderer.
- *
- * Latin alphanumerics tokenize as whole words; consecutive CJK characters
- * tokenize as overlapping 2-grams (a lone CJK character is its own token)
- * so CJK similarity takes intermediate values instead of collapsing to
- * 0/1. The ranges cover Unified Ideographs, Compatibility Ideographs and
- * Extensions B–F (surrogate-pair code points the legacy regex missed).
+ *  v3.8.1: `tokenize`, `isCjkCodePoint` and `jaccardSimilarity` are gone.
+ *  They existed to grade how alike two strings were, and every caller used
+ *  that grade as a relationship (same criterion, same constraint, same
+ *  sub-goal, task drift). Relationships now come from stable ids, explicit
+ *  refs, normalized-exact text, or content hashes — never from a score.
  */
-/** Tokenize text into a set of lowercase ASCII words and CJK bigrams.
- *  Scripts are tokenized independently, so mixed text yields per-script
- *  tokens (e.g. "修复bug重入" → {修复, bug, 重入}). */
-export declare function tokenize(text: string): Set<string>;
-/** Jaccard similarity in [0, 1]. Returns 0 when either side is empty —
- *  an empty description carries no information and must not match
- *  everything (a score of 1 would make `[""]` a wildcard that falsely
- *  marks sub-goals done or suppresses criteria milestones). */
-export declare function jaccardSimilarity(left: string, right: string): number;
 /** Filter null/undefined/empty strings, trim, and deduplicate via Set. */
 export declare function unique(values: Array<string | null | undefined>): string[];
 /** Narrow `unknown` to a non-array object. Used across storage, MCP, and
@@ -38,7 +27,7 @@ export declare function deriveItemId(text: string): string;
  *  namespaces. */
 export declare const STABLE_ID_RE: RegExp;
 /** Normalize one contract text field for identity purposes. */
-export declare function normalizeContractText(text: string): string;
+export declare function normalizeText(text: string): string;
 /** The contract-item fields that participate in rci-/rc- identity. Structural
  *  (not imported from protocol.ts) so this module keeps its zero-dependency
  *  position alongside the other pure token helpers. */

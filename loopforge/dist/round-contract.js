@@ -12,7 +12,7 @@
  *  identity and the item ids the agent already cited. This is deliberately
  *  the opposite of a SubGoal, whose id includes its declaration round.
  */
-import { canonicalContractText, deriveContractId, deriveContractItemIds, deriveItemId, jaccardSimilarity, } from "./token-utils.js";
+import { canonicalContractText, deriveContractId, deriveContractItemIds, } from "./token-utils.js";
 import { deriveContractItemStatuses } from "./contract-items.js";
 import { getPolicy } from "./policy.js";
 /** v3.8: Build the derived active contract from a committed proposal plus the
@@ -75,22 +75,6 @@ export function deriveActiveRoundContract(rounds, commands = getPolicy().evidenc
         // Otherwise the active contract stays; a different proposal is ignored.
     }
     return active;
-}
-/** v2.11: Match a user-provided reference against a criterion (cr-XXXXXXXX
- *  equality first, then Jaccard similarity). Kept for criterion claims — the
- *  contract layer no longer matches free text. */
-export function contractItemMatches(left, right) {
-    const isId = (value) => /^cr-[a-f0-9]{8}$/.test(value);
-    const leftIsId = isId(left);
-    const rightIsId = isId(right);
-    if (leftIsId && rightIsId)
-        return left === right;
-    if (leftIsId !== rightIsId) {
-        const text = leftIsId ? right : left;
-        const id = leftIsId ? left : right;
-        return `cr-${deriveItemId(text)}` === id;
-    }
-    return jaccardSimilarity(left, right) >= getPolicy().evolution.criteria_dedup_threshold;
 }
 /** v3.8: Every criterion id referenced by the contract's items. */
 export function contractCriterionIds(contract) {

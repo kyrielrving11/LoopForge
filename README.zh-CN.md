@@ -54,7 +54,7 @@ Compiler 从已提交事实演化 Canonical State。目标、约束、证据、M
 
 `DerivedCognitiveFacts` 从 Canonical State 和已提交轮次派生 focus、todo、phase、delegation 和 handoff。prompt、可选 state file 与 status projection 使用同一份事实。删除 state file 不会丢失真相，因为它可以重新生成。
 
-稳定 ID（`c-`、`cr-`、`sg-`、`rc-` 和 `rci-XXXXXXXX`）在 Agent 提供时用于精确引用；约束与成功条件的文本引用仍保留策略控制的相似度回退。子目标创建没有回退：`sg-` ID 绑定到声明事件，后续轮次重新声明同一文本会创建**新的**子目标，相似度只是 `possible_duplicate_subgoal` 诊断，永不合并、永不阻塞。子目标状态变更除外：`subgoal_updates` 必须精确引用**活动中的** `sg-` ID——未知、终态（done/canceled）或非法迁移会在轮次推进前以 `evaluation_invalid` 拒绝。
+稳定 ID（`c-`、`cr-`、`sg-`、`rc-` 和 `rci-XXXXXXXX`）在 Agent 提供时用于精确引用；其余关系一律靠**规范化后完全相等**的文本比对——没有相似度回退：换个说法的条件、约束或强调目标就是**另一个**东西，不是模糊匹配。子目标是刻意相反的设计：`sg-` ID 绑定到声明事件，后续轮次重新声明同一文本会创建**新的**子目标。同一个声明轮次内，完全重复的条目只保留第一条，并以 `duplicate_declaration` 上报。子目标状态变更除外：`subgoal_updates` 必须精确引用**活动中的** `sg-` ID——未知、终态（done/canceled）或非法迁移会在轮次推进前以 `evaluation_invalid` 拒绝。
 
 ```
 传统做法：prompt -> 摘要 -> 下一轮 prompt -> 再次摘要
@@ -154,7 +154,7 @@ MCP 边界校验基础 JSON 参数和结构化工具输出。四个必填 evalua
 
 ### 确定性的状态重建
 
-Compiler 从已提交轮次重建状态，跟踪五态子目标、发现约束、阶段 Milestone、机器观察、信任度和 Active Round Contract，不增加另一种持久化模型。L0、L1、L2 只选择 prompt 密度，不规定推理策略。
+Compiler 从已提交轮次重建状态，跟踪五态子目标、发现约束、阶段 Milestone、机器观察和 Active Round Contract，不增加另一种持久化模型。诊断信息——进度面板、逐轮统计、重复事实的完整历史——住在 state file 与只读状态视图里，不进 prompt。L0、L1、L2 只选择 prompt 密度，不规定推理策略。
 
 ### 证据支持的决定
 
@@ -170,7 +170,7 @@ Replay 通过已提交时间线和轮次 diff 回答“发生了什么”。Audi
 
 ### Agent 负责执行
 
-外部 Agent 负责规划和工具使用。它可以让 Compiler 强调已有状态或暴露困惑点，但不能移除必需 prompt 段落或绕过预算。LoopForge 不运行后台 Agent。
+外部 Agent 负责规划和工具使用。它可以让 Compiler 强调已有状态（按稳定 ID 或完全相等文本）或暴露困惑点，但不能移除**受保护**的 prompt 段落或绕过预算：当受保护内容自身超出上限时，prompt 会记下 `protectedOverflow` 而不是把它们丢掉。LoopForge 不运行后台 Agent。
 
 九个 MCP 工具：`start`、`next`、`status`、`stop`、`pause`、`resume`、`replay`、`gate_check` 和 `gate_resolve`。其中两个 gate 工具是 opt-in——`policy.gate.enabled` 为 true(默认 false)时才出现在 `tools/list`。每个工具都使用统一信封应答：`{ok: true, ...payload}` 或 `{ok: false, error: {code, message, retryable, sessionId?, roundId?, details?}}`。`code` 是稳定标识符，人类可读的句子放在 `message` 里，客户端无需解析自然语言即可分支：`evaluation_invalid`、`contract_invalid`、`policy_invalid`、`session_not_found`、`round_id_required`、`round_id_mismatch`、`state_unavailable`、`invalid_argument`、`gate_disabled`、`loop_already_running`。载荷缺陷（`evaluation_invalid`、`contract_invalid`、`policy_invalid`、`round_id_*`、`invalid_argument`）标记为 `retryable`——修正载荷即可重试；状态类条件不可重试。`loopforge_next` 的 `roundId` 不再匹配时**故意不报错**：它返回 held prompt 并带 `ok: true`，让 Agent 找回错过的响应。`status` 提供 `session`、`loop`、`all`、`audit` 和 `explain` 视图；CLI 的 `loopforge explain LOOP_ID [--round N] [--json]` 暴露同一份逐轮“为什么”视图。`loopforge doctor` 只做静态检查——policy 结构、command ID 唯一性、cwd 包含关系、provider 注册、PATH 解析、超时与输出上限、store 与 git 可用性——从不执行验证命令，也不会改写 policy。运行时只使用 Node.js 标准库，阈值、预算和间隔由 `loop_policy.json` 控制。
 

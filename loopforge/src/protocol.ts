@@ -15,7 +15,6 @@ export enum Mode {
 
 // Type-only import — erased at runtime, no dependency cycle with
 // canonical-state.ts (which imports protocol.ts for its types).
-import type { PresentedStateSnapshot } from "./canonical-state.js";
 
 export enum AgentStatus {
   OK = "ok",
@@ -68,8 +67,8 @@ export interface SelfEvaluation {
    *  computeConstraintRetirement (activity detection), vault lineage. */
   output_summary: string;
   /** Constraints the agent actually violated this round.
-   *  Feeds: checkLoopHealth (constraint_integrity),
-   *  buildRollingSummary (recurring_issues), computeConstraintRetirement. */
+   *  Feeds: deriveRecurringFlags (the constraint_violation kind) and
+   *  computeConstraintRetirement. */
   constraint_violations: string[];
   /** false ONLY when the entire task is complete. Tells the autonomous
    *  runner to stop the loop. Not consumed by the compiler. */
@@ -286,11 +285,11 @@ export function makeGateDecision(
  *  Compiler when assembling the next prompt. Transient — each round's
  *  requests apply to that round only. */
 export interface PromptRequests {
-  /** Items to emphasize. Matched against active state via Jaccard
-   *  similarity. Matching items are pulled into a "Critical Context"
-   *  section rendered before optional sections. No content is added —
-   *  only reordered. Max entries: policy-driven (L2: 5, L1: 3).
-   *  L0: ignored. */
+  /** Items to emphasize. Matched against active state by stable id or
+   *  normalized-exact text (v3.8.1 — the Jaccard arm is gone). Matching items
+   *  are pulled into a "Critical Context" section rendered before optional
+   *  sections. No content is added — only reordered. An unmatched entry is
+   *  dropped. Max entries: policy-driven (L2: 5, L1: 3). L0: ignored. */
   emphasize?: string[];
   /** Things the model is confused about. Rendered at the prompt top
    *  as "Confusion Alerts" before the Objective section. Compiler
@@ -401,7 +400,6 @@ export interface LoopForgeRequest {
   // Extended fields accepted by invokeLoopCompile() to populate LoopCompileRequest:
   //   loop_id, round, goal_id, domain, next_task_proposal, plan_source,
   //   constraints_from_plan, new_since_last_round, force_level,
-  //   health_check_interval, external_context, last_round_result,
   //   verification_flags
   [key: string]: unknown;
 }
@@ -444,7 +442,8 @@ export interface CriterionStatus {
     | "verified";
   /** Round when the criterion was first reported met (machine-backed). */
   met_at_round?: number;
-  /** Sub-goals whose description matches this criterion (Jaccard). */
+  /** Sub-goals an item referencing this criterion also names, via explicit
+   *  `subgoal_refs` (v3.8.1 — never a text-similarity guess). */
   related_subgoal_ids: string[];
 }
 
@@ -453,13 +452,25 @@ export interface CriterionStatus {
  *  immunize the agent against repeating the same mistakes. Zero persistence:
  *  derived from vault entries each round; presentation only — never feeds
  *  the enforcement gate's decisions. */
-export interface Lesson {
-  /** Constraint text or verification check name. */
-  text: string;
+/** v3.8.1: a repeated machine fact, keyed by what it is ABOUT.
+ *
+ *  One derivation over the whole committed history replaces the three
+ *  separate views of "what keeps going wrong" this release removed:
+ *  `Lesson` (whole history, count >= 2), `rolling_summary.recurring_issues`
+ *  (the last 5 rounds' raw violation texts, no threshold at all despite the
+ *  name), and the L1/L2 prompt sections built on top of each. Callers FILTER
+ *  this list — the state file renders the genuinely recurring set, the prompt
+ *  renders the recent tail. */
+export interface RecurringFlag {
+  /** Constraint text (for a violation) or the verification check id. */
+  subject: string;
   kind: "constraint_violation" | "verification_error" | "verification_warning";
-  /** How many rounds this lesson occurred in. */
+  /** `VerificationFlag.ref` — the command id, `rci-`/`sg-`/`cr-` id or path
+   *  the flag was about. Empty when the check recorded no subject. */
+  ref: string;
+  /** Occurrences across the whole committed history. */
   count: number;
-  /** The rounds it occurred in, ascending. */
+  /** The distinct rounds it occurred in, ascending. */
   rounds: number[];
 }
 
@@ -478,32 +489,10 @@ export function makeLoopObjective(
   };
 }
 
-export interface LoopHealth {
-  goal_alignment: number;
-  constraint_integrity: number;
-  drift_detected: boolean;
-  strategy_stability: boolean;
-  task_continuity: number;
-  escalation_recommended: string;
-}
-
-export function makeLoopHealth(overrides: Partial<LoopHealth> = {}): LoopHealth {
-  return {
-    goal_alignment: 1.0,
-    constraint_integrity: 1.0,
-    drift_detected: false,
-    strategy_stability: true,
-    task_continuity: 1.0,
-    escalation_recommended: "none",
-    ...overrides,
-  };
-}
-
 export interface RollingSummary {
   /** v1.12: Unified key outcomes — merged from what_worked + key_lessons.
    *  Format: "[R{round}] ✓/✗ ({technique}): {summary}" */
   key_outcomes: string[];
-  recurring_issues: string[];
   rounds_sampled: number;
   generated_at_round: number;
   /** v1.7: Detected failure patterns — repeated failed rounds with
@@ -522,7 +511,6 @@ export function makeRollingSummary(
 ): RollingSummary {
   return {
     key_outcomes: [],
-    recurring_issues: [],
     rounds_sampled: 0,
     generated_at_round: 0,
     failed_patterns: [],
@@ -558,7 +546,8 @@ export function makeSubGoalUpdate(
 export interface SubGoal {
   /** Stable identifier derived from description hash (sg-XXXXXXXX). */
   id: string;
-  /** Agent-declared description, deduplicated by similarity. */
+  /** Agent-declared description. Exact repeats within one declaration round
+   *  keep only the first entry (v3.8.1 — no similarity dedup). */
   description: string;
   /** Compiler-derived status. */
   status: "pending" | "in_progress" | "done" | "blocked" | "canceled";
@@ -595,8 +584,9 @@ export function makeSubGoal(
  *  was removed — active constraints never auto-demote. */
 export interface ConstraintMeta {
   /** v2.11: Stable identifier derived from text hash (c-XXXXXXXX).
-   *  Enables exact ID-first matching by the agent and compiler.
-   *  Eliminates Jaccard false positives/negatives. */
+   *  The only name an agent can use to refer to this constraint — v3.8.1
+   *  deleted every similarity fallback, so stable ids and normalized-exact
+   *  text are the whole matching surface. */
   id: string;
   /** Normalized constraint text (the key). */
   text: string;
@@ -615,25 +605,6 @@ export function makeConstraintMeta(
     text: "",
     last_violated_at_round: 0,
     source: "discovered",
-    ...overrides,
-  };
-}
-
-export interface TaskAlignment {
-  is_aligned: boolean;
-  alignment_score: number;
-  warning: string;
-  escalation: string;
-}
-
-export function makeTaskAlignment(
-  overrides: Partial<TaskAlignment> = {},
-): TaskAlignment {
-  return {
-    is_aligned: true,
-    alignment_score: 1.0,
-    warning: "",
-    escalation: "none",
     ...overrides,
   };
 }
@@ -725,7 +696,6 @@ export interface LoopCompileRequest {
   new_since_last_round: string;
   last_round_result: LoopRoundResult | null;
   force_level: string;
-  health_check_interval: number;
   /** Optional context supplied explicitly by the embedding Agent. */
   external_context?: string;
   /** Maximum rounds for this loop. Used by the state file header to show
@@ -761,7 +731,6 @@ export function makeLoopCompileRequest(
     new_since_last_round: "",
     last_round_result: null,
     force_level: "auto",
-    health_check_interval: 1,
     external_context: "",
     verification_flags: [],
     attempt: 1,
@@ -772,18 +741,39 @@ export function makeLoopCompileRequest(
 }
 
 /** Immutable record of the exact prompt delivered for one round attempt. */
+/** v3.8.1: the artifact schema version, next to the type it versions. The
+ *  transaction envelope parser reads it, so the constant lives here rather
+ *  than in the renderer. */
+export const PROMPT_ARTIFACT_SCHEMA_VERSION = 2 as const;
+
 export interface PromptArtifact {
-  schemaVersion: 1;
+  /** v3.8.1: schema 2. Version 1 is a HARD break — a round whose artifact
+   *  does not parse is not committed history, and `legacyTransactionRounds`
+   *  reports the loss rather than letting it vanish. */
+  schemaVersion: typeof PROMPT_ARTIFACT_SCHEMA_VERSION;
+  /** Round identity: `loop:<loopId>:round:<n>`. */
   roundId: string;
+  /** The round number on its own, so a reader does not re-parse roundId. */
+  round: number;
   attempt: number;
   level: "l0" | "l1" | "l2";
   renderedPrompt: string;
   promptHash: string;
   stateHash: string;
-  /** v3.2: What the rendered prompt actually presented (L1 only). Persisted
-   *  on the lineage entry as the diff baseline for L1 collapse. Absent for
-   *  L0/L2 compiles. */
-  presentedState?: PresentedStateSnapshot;
+  /** Section ids actually rendered, in render order. */
+  sections: string[];
+  /** Section ids the deterministic budget rule dropped. */
+  droppedSections: string[];
+  /** True when the PROTECTED sections alone exceeded the budget. Recorded so
+   *  an over-budget prompt is visible rather than silently over-long. */
+  protectedOverflow: boolean;
+  /** The ceiling this render was measured against. Measured over the SAME
+   *  region as `renderedChars`: the section area, excluding the fixed header,
+   *  the self-evaluation block and the footer, which are never budgeted. */
+  budget: number;
+  /** Characters the budgeted section area produced. NOT the prompt length —
+   *  `renderedPrompt` also carries the fixed header and footer. */
+  renderedChars: number;
 }
 
 export interface LoopCompileResponse {
@@ -799,8 +789,6 @@ export interface LoopCompileResponse {
   goal_id: string;
   goal_text_hash: string;
   loop_objective: LoopObjective | null;
-  loop_health: LoopHealth | null;
-  task_alignment: TaskAlignment | null;
   rolling_summary: RollingSummary | null;
   /** v2.2: Structured sub-goals tracked across rounds. Compiler-managed
    *  lifecycle with derived status. Rendered as Sub-Goal Dashboard. */
@@ -809,17 +797,16 @@ export interface LoopCompileResponse {
   constraint_metadata?: ConstraintMeta[];
   /** v2.5: Current round's agent trust score [0, 1]. Derived from verification
    *  flags: -0.15 per error, -0.03 per warn. Always 1.0 for round 1. */
-  agent_trust_score?: number;
   /** v2.5: Trust scores from the last 10 rounds, newest last. Empty for
    *  round 1. Reconstructed from vault entries — zero new persistence. */
-  agent_trust_trend?: number[];
   /** v3.2: Derived per-criterion status (goal → criteria → evidence view).
    *  Zero persistence — re-derived from vault entries each round. */
   criterion_statuses?: CriterionStatus[];
-  /** v3.2: Deterministic lessons learned (repeated violations / repeated
-   *  verification failures). Presentation only — never feeds enforcement. */
-  lessons?: Lesson[];
-  suggested_next_task: string;
+  /** v3.8.1: repeated machine facts over the whole committed history, keyed
+   *  by check id / constraint text and the id they were about. Presentation
+   *  only — never feeds enforcement. Replaces the former Lessons list; callers
+   *  filter it (state file: count >= 2, prompt: recent tail). */
+  recurring_flags?: RecurringFlag[];
   plan_source: string | null;
   warnings: string[];
   error: string;
@@ -849,14 +836,9 @@ export function makeLoopCompileResponse(
     goal_id: "",
     goal_text_hash: "",
     loop_objective: null,
-    loop_health: null,
-    task_alignment: null,
     rolling_summary: null,
     sub_goals: [],
     constraint_metadata: [],
-    agent_trust_score: undefined,
-    agent_trust_trend: [],
-    suggested_next_task: "",
     plan_source: null,
     warnings: [],
     error: "",
@@ -907,7 +889,6 @@ export interface LoopForgeResponse {
   rolling_summary?: RollingSummary | null;
   sub_goals?: SubGoal[];
   criterion_statuses?: CriterionStatus[];
-  suggested_next_task?: string;
 }
 
 // ── Session state (Engine internal) ─────────────────────────────────────────
@@ -1033,6 +1014,12 @@ export interface VerificationFlag {
   check: string;
   /** Human-readable description of the inconsistency found. */
   detail: string;
+  /** v3.8.1: the id this flag is ABOUT — a configured command id, an
+   *  `rci-` / `sg-` / `cr-` id, or a workspace path. Optional: only checks with
+   *  a concrete subject set it. Recurring-warning grouping keys on
+   *  `(check, ref)` so it reports WHICH item keeps failing rather than
+   *  re-parsing `detail` prose. */
+  ref?: string;
 }
 
 export function makeVerificationFlag(
@@ -1175,28 +1162,6 @@ export type ContractItemStatus =
   | "insufficient"
   | "contradicted"
   | "verified";
-
-/** v3.8: A contract item carrying its runtime-derived rci-XXXXXXXX identity. */
-export interface ActiveContractItem extends ContractItemProposal {
-  id: string;
-}
-
-/** v3.8: The ACTIVE contract derived from committed rounds.
- *
- *  `config_hash_by_command` is stamped at commit time: the declaration round
- *  records the command configuration it was declared against, so the closing
- *  round can prove the config did not change under the agent (policy itself
- *  is not part of the Vault). The stamp is machine-recomputed, never
- *  agent-supplied, and adds no second truth. */
-export interface ActiveRoundContract extends RoundContractProposal {
-  /** rc-XXXXXXXX — derived from loopId + canonicalized content. */
-  id: string;
-  /** The round that declared the proposal that became active. A fact, not
-   *  part of the identity hash. */
-  declared_at_round: number;
-  items: ActiveContractItem[];
-  config_hash_by_command: Record<string, string>;
-}
 
 /** v3.8: The round-level verification posture. `trusted` means every claim in
  *  the round is machine-backed; `insufficient` means claims are unbacked but

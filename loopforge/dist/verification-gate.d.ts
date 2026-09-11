@@ -66,9 +66,10 @@ export type VerificationDomain =
 "evaluation_consistency"
 /** Machine evidence and the agent's claims about it. */
  | "evidence_integrity"
-/** Plan conformance: intent/sub-goal drift (two detection bases under the
- *  "plan drift" label) and the Round Contract declaration/execution/closure
- *  checks. */
+/** Plan conformance: the Round Contract declaration/execution/closure
+ *  checks, scope containment, and cited-gate authorization. (The
+ *  intent/sub-goal "plan drift" checks this once named were deleted in
+ *  v3.8 — drift is not a machine fact.) */
  | "plan_contract"
 /** Workspace restore after backtrack. Machine-side progress enforcement
  *  (the stall evaluator) lives in the enforcement gate, not here. */

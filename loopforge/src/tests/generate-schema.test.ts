@@ -54,11 +54,15 @@ describe("Generated JSON Schema — top-level", () => {
     // definitions (40 → 59).
     // v3.8.0 fix batch: EvidenceCapability (the prepared round's capability
     // fact) and the ToolError/ToolErrorCode pair joined (59 → 62).
-    assert.equal(names.length, 62, `expected 62, got ${names.length}: ${names.join(", ")}`);
+    // v3.8.1: LoopHealth and TaskAlignment were deleted — both were
+    // text-similarity verdicts exposed as protocol types (62 → 60).
+    // Then ActiveRoundContract/ActiveContractItem, duplicate declarations of
+    // the runtime’s ActiveContractView that only the schema ever saw, were
+    // deleted too (60 → 58... 57 with the second boundary deletion).
+    assert.equal(names.length, 57, `expected 57, got ${names.length}: ${names.join(", ")}`);
     assert.ok(names.includes("PromptArtifact"));
     assert.ok(names.includes("RoundOutcome"));
     assert.ok(names.includes("RoundContractProposal"));
-    assert.ok(names.includes("ActiveRoundContract"));
     assert.ok(names.includes("ExecutionReport"));
     assert.ok(names.includes("MachineObservationBase"));
     assert.ok(names.includes("ConfiguredCapability"));
@@ -71,9 +75,9 @@ describe("Generated JSON Schema — top-level", () => {
     // Draft 2020-12 validators reject unresolved references at compile
     // time — a dangling $ref (a type imported from outside protocol.ts,
     // referenced but never collected) silently breaks the wire contract.
-    // PresentedStateSnapshot is the historical instance: PromptArtifact's
-    // presentedState referenced #/$defs/PresentedStateSnapshot while only 39
-    // defs existed.
+    // v3.8.1: PresentedStateSnapshot was the historical instance (referenced
+    // but never collected) and is now deleted outright, so the sweep must
+    // simply keep finding nothing.
     const dangling: string[] = [];
     const walk = (node: unknown): void => {
       if (!node || typeof node !== "object") return;
@@ -93,9 +97,6 @@ describe("Generated JSON Schema — top-level", () => {
     walk(schema);
     assert.deepEqual(dangling, [],
       `every $ref must resolve: ${dangling.join(", ")}`);
-    assert.ok(defs.PresentedStateSnapshot,
-      "the cross-file type must be emitted into $defs");
-    assert.equal(defs.PresentedStateSnapshot.type, "object");
   });
 });
 
@@ -123,25 +124,9 @@ describe("Enums", () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("Interface type correctness", () => {
-  it("LoopHealth — numbers are number, booleans are boolean", () => {
-    const p = props("LoopHealth");
-    assert.equal(p.goal_alignment.type, "number");
-    assert.equal(p.constraint_integrity.type, "number");
-    assert.equal(p.task_continuity.type, "number");
-    assert.equal(p.drift_detected.type, "boolean");
-    assert.equal(p.strategy_stability.type, "boolean");
-  });
-
   it("LoopCompileRequest — numbers are number", () => {
     const p = props("LoopCompileRequest");
     assert.equal(p.round.type, "number");
-    assert.equal(p.health_check_interval.type, "number");
-  });
-
-  it("TaskAlignment — is_aligned is boolean, alignment_score is number", () => {
-    const p = props("TaskAlignment");
-    assert.equal(p.is_aligned.type, "boolean");
-    assert.equal(p.alignment_score.type, "number");
   });
 
   it("LoopRoundResult — round is number and success is boolean", () => {

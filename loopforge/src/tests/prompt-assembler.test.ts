@@ -2,8 +2,9 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { assemblePromptArtifact, DEFAULT_PROMPT_BUDGETS, verificationActionFor } from "../prompt-assembler.js";
+import { PROMPT_ARTIFACT_SCHEMA_VERSION } from "../protocol.js";
 import type { PromptAssemblyInput } from "../prompt-assembler.js";
-import type { CanonicalLoopState, PresentedStateSnapshot } from "../canonical-state.js";
+import type { CanonicalLoopState } from "../canonical-state.js";
 import type { ConstraintMeta } from "../protocol.js";
 import { deriveItemId } from "../token-utils.js";
 import { deriveConfiguredCapability, getPolicy, resetPolicy, setPolicyForTest, DEFAULT_POLICY } from "../policy.js";
@@ -38,16 +39,12 @@ function minimalState(overrides: Partial<CanonicalLoopState> = {}): CanonicalLoo
     verificationFlags: [],
     discoveries: [],
     rollingOutcomes: [],
-    recurringIssues: [],
     failedPatterns: [],
     milestones: [],
     subGoals: [],
     criterionStatuses: [],
-    lessons: [],
-    suggestedNextTask: "",
+    recurringFlags: [],
     externalContext: "",
-    agentTrustScore: undefined,
-    agentTrustTrend: [],
     stateFilePath: ".loopforge/state/test.md",
     capability: deriveConfiguredCapability(DEFAULT_POLICY),
     progress: {
@@ -246,8 +243,6 @@ describe("assemblePromptArtifact — L2", () => {
           declared_at_round: 1, status_changed_at_round: 3,
           completed_at_round: 3, priority: 0 },
       ],
-      agentTrustScore: 0.85,
-      agentTrustTrend: [0.9, 0.85],
       progress: {
         estimate: 0.6, criteriaMet: ["auth"], criteriaRemaining: ["api"],
         filesChanged: ["src/auth.ts"],
@@ -264,11 +259,14 @@ describe("assemblePromptArtifact — L2", () => {
     assert.ok(artifact.renderedPrompt.includes("Phase History"));
     assert.ok(artifact.renderedPrompt.includes("Sub-Goal Dashboard"));
     // v2.8 gap fills
-    assert.ok(artifact.renderedPrompt.includes("Progress Dashboard"));
-    assert.ok(artifact.renderedPrompt.includes("60%"));
-    assert.ok(artifact.renderedPrompt.includes("Agent Trust"));
-    assert.ok(artifact.renderedPrompt.includes("85%"));
+    // v3.8.1: Progress Dashboard is gone from the prompt entirely — see the
+    // dedicated invariant test below.
+    assert.ok(!artifact.renderedPrompt.includes("Progress Dashboard"));
     assert.ok(artifact.renderedPrompt.includes("Retired Constraints"));
+    // v3.8.1: the Agent Trust section is gone — the score was an arbitrary
+    // weighting of flag counts and its "trend" was computed from a different
+    // source, so neither was a fact about the loop.
+    assert.ok(!artifact.renderedPrompt.includes("Agent Trust"));
     // Must NOT contain the monolithic blob header
     assert.ok(!artifact.renderedPrompt.includes("Full Rehydrated State"));
   });
@@ -285,7 +283,7 @@ describe("assemblePromptArtifact — L2", () => {
   it("includes read instruction for L2 pointer mode reasons", () => {
     const artifact = assemblePromptArtifact(input({
       level: "l2",
-      reasons: ["periodic_refresh"],
+      reasons: ["recovery_boundary"],
       fullStateMarkdown: undefined,
     }));
     assert.ok(artifact.renderedPrompt.includes("Read the full state file before acting"));
@@ -297,9 +295,21 @@ describe("assemblePromptArtifact — L2", () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("assemblePromptArtifact — metadata", () => {
-  it("includes schema version", () => {
+  it("stamps the artifact schema version and the budget accounting", () => {
     const artifact = assemblePromptArtifact(input());
-    assert.equal(artifact.schemaVersion, 1);
+    assert.equal(artifact.schemaVersion, PROMPT_ARTIFACT_SCHEMA_VERSION);
+    // v3.8.1: the artifact records what THIS prompt did.
+    assert.equal(artifact.round, 1);
+    assert.ok(Array.isArray(artifact.sections));
+    assert.ok(Array.isArray(artifact.droppedSections));
+    assert.equal(typeof artifact.protectedOverflow, "boolean");
+    assert.equal(typeof artifact.budget, "number");
+    // `renderedChars` measures the BUDGETED section area; `renderedPrompt`
+    // also carries the fixed header, the self-evaluation block and the footer.
+    assert.ok(artifact.renderedChars > 0);
+    assert.ok(artifact.renderedChars <= artifact.renderedPrompt.length);
+    assert.ok(artifact.budget > 0);
+    assert.ok(artifact.sections.includes("objective"));
   });
 
   it("generates a prompt hash", () => {
@@ -372,11 +382,28 @@ describe("assemblePromptArtifact — prompt_requests L2", () => {
         discoveries: ["timelock has minimum delay of 2 days"],
       }),
       promptRequests: {
-        emphasize: ["use SafeERC20 for external calls"],
+        emphasize: ["use SafeERC20 for all external calls"],
       },
     }));
     assert.ok(artifact.renderedPrompt.includes("🔴 Critical Context"));
     assert.ok(artifact.renderedPrompt.includes("SafeERC20"));
+  });
+
+  it("v3.8.1: a merely SIMILAR emphasis target matches nothing", () => {
+    // The Jaccard fallback is gone. "use SafeERC20 for external calls" is
+    // close enough to have matched "…for all external calls" before; now an
+    // emphasis either names the item (exactly, or by stable id) or is dropped.
+    const artifact = assemblePromptArtifact(input({
+      level: "l2",
+      state: minimalState({
+        activeConstraints: ["use SafeERC20 for all external calls"],
+      }),
+      promptRequests: {
+        emphasize: ["use SafeERC20 for external calls"],
+      },
+    }));
+    assert.ok(!artifact.renderedPrompt.includes("🔴 Critical Context"),
+      "a near-miss emphasis must not pull the item into Critical Context");
   });
 
   it("does not duplicate an emphasized hard constraint or success criterion", () => {
@@ -414,7 +441,7 @@ describe("assemblePromptArtifact — prompt_requests L2", () => {
       }),
       promptRequests: {
         confusion_points: ["confused about X"],
-        emphasize: ["SafeERC20 required for external calls"],
+        emphasize: ["SafeERC20 required for all external contract calls"],
       },
     }));
     assert.ok(artifact.renderedPrompt.includes("Confusion Alerts"));
@@ -495,7 +522,7 @@ describe("assemblePromptArtifact — optional prompt_requests", () => {
       level: "l2",
       state: minimalState({ activeConstraints: [constraint] }),
       promptRequests: {
-        emphasize: ["use SafeERC20 for external calls"],
+        emphasize: [constraint],
       },
     }));
     assert.ok(artifact.renderedPrompt.includes("🔴 Critical Context"));
@@ -642,232 +669,6 @@ describe("v3.2 — verification flag actions", () => {
 // v3.2 — L1 diff-collapse
 // ═══════════════════════════════════════════════════════════════════════════
 
-describe("v3.2 — L1 diff-collapse", () => {
-  const baselineOf = (overrides: Partial<PresentedStateSnapshot> = {}): PresentedStateSnapshot => ({
-    round: 2,
-    constraintIds: ["c-11111111", "c-22222222", "c-33333333", "c-44444444"],
-    subGoals: [["sg-11111111", "pending"], ["sg-22222222", "pending"], ["sg-33333333", "pending"]],
-    milestoneRanges: [[1, 2]],
-    ...overrides,
-  });
-  const constraints = [
-    "No external dependencies",
-    "Tests must pass",
-    "Keep API stable",
-    "Migrate data",
-  ];
-  const constraintMeta = (): ConstraintMeta[] => constraints.map((text) => ({
-    id: `c-${deriveItemId(text)}`,
-    text,
-    discovered_at_round: 1,
-    last_violated_at_round: 0,
-    source: "discovered" as const,
-    status: "active" as const,
-  }));
-
-  it("renders changed constraints in full with markers and a collapse line", () => {
-    const meta = constraintMeta();
-    const baseline = baselineOf({ constraintIds: meta.map((m) => m.id) });
-    const state = minimalState({
-      round: 3,
-      activeConstraints: [
-        "No external dependencies",
-        "Tests must pass",
-        "Keep API stable",
-        "Migrate data",
-        "New constraint added",
-      ],
-      constraintMetadata: [
-        ...meta,
-        { id: `c-${deriveItemId("New constraint added")}`, text: "New constraint added",
-          last_violated_at_round: 0, source: "discovered" as const },
-      ],
-      hardConstraints: [],
-    });
-    // "Keep API stable" violated this round.
-    state.constraintMetadata = state.constraintMetadata.map((m) =>
-      m.text === "Keep API stable" ? { ...m, last_violated_at_round: 3 } : m);
-
-    const artifact = assemblePromptArtifact(input({
-      level: "l1",
-      state,
-      presentedBaseline: baseline,
-    }));
-    const p = artifact.renderedPrompt;
-    assert.match(p, /New constraint added \(new this round\)/);
-    assert.match(p, /Keep API stable \(violated this round\)/);
-    assert.match(p, /… 3 unchanged constraints, 0 demoted since R2 \(see state file\)/);
-    assert.match(p, /📄 Full state: `\.loopforge\/state\/test\.md` \(updated round 3\)/);
-    assert.ok(!p.includes("No external dependencies] No external dependencies") &&
-      !p.includes("Tests must pass] Tests must pass"),
-      "unchanged constraints must be collapsed");
-  });
-
-  it("renders sub-goal status transitions in full and collapses the rest", () => {
-    const baseline = baselineOf({ subGoals: [
-      ["sg-11111111", "pending"], ["sg-22222222", "pending"], ["sg-33333333", "pending"], ["sg-44444444", "pending"],
-    ] });
-    const state = minimalState({
-      round: 3,
-      subGoals: [
-        { id: "sg-11111111", description: "Task A", status: "pending", declared_at_round: 1, status_changed_at_round: 1, priority: 0 },
-        { id: "sg-22222222", description: "Task B", status: "in_progress", declared_at_round: 1, status_changed_at_round: 3, priority: 1 },
-        { id: "sg-33333333", description: "Task C", status: "pending", declared_at_round: 1, status_changed_at_round: 1, priority: 2 },
-        { id: "sg-44444444", description: "Task D", status: "pending", declared_at_round: 1, status_changed_at_round: 1, priority: 3 },
-      ],
-    });
-    const artifact = assemblePromptArtifact(input({
-      level: "l1",
-      state,
-      presentedBaseline: baseline,
-    }));
-    const p = artifact.renderedPrompt;
-    assert.match(p, /🔄 \[`sg-22222222`\] Task B/);
-    assert.match(p, /… 3 unchanged sub-goals, 1 changed since R2 \(see state file\)/);
-  });
-
-  it("collapses earlier Recent Rounds but keeps the newest three", () => {
-    const state = minimalState({
-      round: 5,
-      rollingOutcomes: [
-        "[R1] accepted: one",
-        "[R2] accepted: two",
-        "[R3] accepted: three",
-        "[R4] accepted: four",
-      ],
-      milestones: [{ label: "M", round_range: { start: 1, end: 2 }, outcome: "o",
-        carried_constraints: [], resolved_constraints: [], progress_at_boundary: 0.5,
-        kind: "agent_declared", generated_at_round: 2 }],
-    });
-    const artifact = assemblePromptArtifact(input({
-      level: "l1",
-      state,
-      presentedBaseline: baselineOf(),
-    }));
-    const p = artifact.renderedPrompt;
-    assert.ok(p.includes("[R4] accepted: four"));
-    assert.ok(p.includes("[R3] accepted: three"));
-    assert.ok(p.includes("[R2] accepted: two"));
-    assert.match(p, /… 1 earlier round \(see state file\)/);
-  });
-
-  it("renders all Recent Rounds when a milestone boundary was crossed", () => {
-    const state = minimalState({
-      round: 5,
-      rollingOutcomes: ["[R1] a", "[R2] b", "[R3] c", "[R4] d"],
-      milestones: [{ label: "M2", round_range: { start: 3, end: 4 }, outcome: "o",
-        carried_constraints: [], resolved_constraints: [], progress_at_boundary: 0.8,
-        kind: "criteria_milestone", generated_at_round: 4 }],
-    });
-    const artifact = assemblePromptArtifact(input({
-      level: "l1",
-      state,
-      presentedBaseline: baselineOf(),
-    }));
-    const p = artifact.renderedPrompt;
-    assert.ok(p.includes("[R1] a"), "milestone boundary must force full render");
-    assert.ok(!p.includes("earlier round"), "no collapse line when boundary crossed");
-  });
-
-  it("leaves L2 unaffected by a baseline — no collapse lines, plain pointer", () => {
-    const meta = constraintMeta();
-    const baseline = baselineOf({ constraintIds: meta.map((m) => m.id) });
-    const state = minimalState({
-      round: 3,
-      activeConstraints: ["No external dependencies", "Tests must pass", "Keep API stable", "Migrate data"],
-      constraintMetadata: meta,
-      milestones: [{ label: "M", round_range: { start: 1, end: 2 }, outcome: "o",
-        carried_constraints: [], resolved_constraints: [], progress_at_boundary: 0.5,
-        kind: "auto", generated_at_round: 2 }],
-    });
-    const artifact = assemblePromptArtifact(input({
-      level: "l2",
-      state,
-      presentedBaseline: baseline,
-    }));
-    const p = artifact.renderedPrompt;
-    assert.ok(!p.includes("unchanged constraints"), "L2 must not collapse");
-    assert.ok(!p.includes("(updated round"), "L2 pointer must stay plain");
-  });
-
-  it("renders in full when there is no baseline (first round / old-format vault)", () => {
-    const meta = constraintMeta();
-    const state = minimalState({
-      round: 3,
-      activeConstraints: ["No external dependencies", "Tests must pass", "Keep API stable"],
-      constraintMetadata: meta,
-    });
-    const artifact = assemblePromptArtifact(input({
-      level: "l1",
-      state,
-      presentedBaseline: null,
-    }));
-    const p = artifact.renderedPrompt;
-    assert.ok(p.includes("No external dependencies"), "no baseline → full render");
-    assert.ok(!p.includes("unchanged constraints"), "no collapse line without baseline");
-  });
-
-  it("renders in full when l1_collapse_enabled is false", () => {
-    const policy = { ...getPolicy(), prompt: { ...getPolicy().prompt, l1_collapse_enabled: false } };
-    setPolicyForTest(policy);
-    try {
-      const meta = constraintMeta();
-      const baseline = baselineOf({ constraintIds: meta.map((m) => m.id) });
-      const state = minimalState({
-        round: 3,
-        activeConstraints: ["No external dependencies", "Tests must pass", "Keep API stable", "Migrate data"],
-        constraintMetadata: meta,
-      });
-      const artifact = assemblePromptArtifact(input({
-        level: "l1",
-        state,
-        presentedBaseline: baseline,
-      }));
-      const p = artifact.renderedPrompt;
-      assert.ok(p.includes("No external dependencies"), "kill switch → full render");
-      assert.ok(!p.includes("unchanged constraints"));
-    } finally {
-      resetPolicy();
-    }
-  });
-
-  it("emphasized constraints are excluded from the demoted count and render in Critical Context", () => {
-    const meta = constraintMeta();
-    const baseline = baselineOf({ constraintIds: meta.map((m) => m.id) });
-    // "Tests must pass" is in the baseline but absent from active this round
-    // (demoted), and the agent emphasized it — it must NOT count as demoted.
-    const state = minimalState({
-      round: 3,
-      activeConstraints: [
-        "No external dependencies",
-        "Tests must pass",
-        "Keep API stable",
-        "Migrate data",
-        "Another active one",
-      ],
-      constraintMetadata: [
-        ...meta,
-        { id: `c-${deriveItemId("Another active one")}`, text: "Another active one",
-          last_violated_at_round: 0, source: "discovered" as const },
-      ],
-      hardConstraints: [],
-    });
-    const artifact = assemblePromptArtifact(input({
-      level: "l1",
-      state,
-      presentedBaseline: baseline,
-      promptRequests: { emphasize: ["Tests must pass"] },
-    }));
-    const p = artifact.renderedPrompt;
-    assert.ok(p.includes("🔴 Critical Context"), "emphasized item must render in Critical Context");
-    // unchanged = No external deps + Keep API stable + Migrate data = 3 (Another active one is new);
-    // removed = Tests must pass (emphasized, excluded) = 0.
-    assert.match(p, /… 3 unchanged constraints, 0 demoted since R2/,
-      "emphasized baseline item must not count as demoted");
-  });
-});
-
-
 // ═══════════════════════════════════════════════════════════════════════════
 // v3.2 — external context in L1
 // ═══════════════════════════════════════════════════════════════════════════
@@ -919,23 +720,24 @@ describe("v3.3 — Roadmap section", () => {
     ],
   });
 
-  it("includes the Roadmap section in structured L2 when data present", () => {
+  it("includes the one-line Phase section in structured L2 when data present", () => {
     const artifact = assemblePromptArtifact(input({
       level: "l2", fullStateMarkdown: undefined, state: roadmapState(),
     }));
-    assert.ok(artifact.renderedPrompt.includes("### Roadmap"));
-    assert.ok(artifact.renderedPrompt.includes("Position: round 7/20"));
-    assert.ok(artifact.renderedPrompt.includes("3 rounds since the last milestone boundary"));
-    assert.ok(artifact.renderedPrompt.includes("1/2 met · 1 remaining"));
-    assert.ok(artifact.renderedPrompt.includes("1 in progress · 0 pending"));
+    assert.ok(artifact.renderedPrompt.includes("### Phase"));
+    assert.ok(artifact.renderedPrompt.includes("round 7/20"));
+    assert.ok(artifact.renderedPrompt.includes("3 rounds since the last boundary"));
+    assert.ok(!artifact.renderedPrompt.includes("### Roadmap"));
   });
 
-  it("renders Roadmap in L1 when data present and omits it when absent", () => {
+  it("renders the Phase line in L1 when a phase exists and omits it when none does", () => {
     const artifact = assemblePromptArtifact(input({ level: "l1", state: roadmapState() }));
-    assert.ok(artifact.renderedPrompt.includes("### Roadmap"));
+    assert.ok(artifact.renderedPrompt.includes("### Phase"));
 
+    // No milestone → no phase to name, and the line stays out entirely
+    // (position alone is already in the prompt header).
     const empty = assemblePromptArtifact(input({ level: "l1", state: minimalState() }));
-    assert.ok(!empty.renderedPrompt.includes("Roadmap"));
+    assert.ok(!empty.renderedPrompt.includes("### Phase"));
   });
 
   it("empty roadmap renders nothing (L2)", () => {
@@ -945,57 +747,144 @@ describe("v3.3 — Roadmap section", () => {
     assert.ok(!artifact.renderedPrompt.includes("Roadmap"));
   });
 
-  it("L1 collapse invariant: roadmap never echoes milestone labels", () => {
-    // Milestone labels are collapsed content in L1 (diff-collapse invariant);
-    // the roadmap reports distance only, never the boundary's identity.
+  it("L1 names the current phase but never renders Phase History", () => {
+    // v3.8.1: the old rule ("L1 must never echo a milestone label") was a
+    // consequence of L1 diff-collapse — labels were collapsed content, and the
+    // roadmap reported distance only to keep the diff stable. The collapse is
+    // gone, so the phase line may name the phase the agent declared. What must
+    // NOT appear is L2's Phase History, which is the full-rehydration view.
     const artifact = assemblePromptArtifact(input({ level: "l1", state: roadmapState() }));
-    assert.ok(!artifact.renderedPrompt.includes("Core Module"));
+    assert.ok(artifact.renderedPrompt.includes("Core Module"),
+      "the phase line names the current phase");
+    assert.ok(!artifact.renderedPrompt.includes("Phase History"));
   });
 });
 
 describe("v3.3 — machine dashboard rows and round stats", () => {
-  it("Progress Dashboard shows machine rows when machineStatus is present", () => {
+  it("v3.8.1: the L2 prompt carries neither the Progress Dashboard nor Round Stats", () => {
+    // Both sections were re-compositions of facts the prompt already states
+    // elsewhere, mixed with the agent’s OWN numbers (completion estimate,
+    // test counts, per-round progress deltas). The criterion list and the
+    // machine git/criteria rows still render in the STATE FILE, where a human
+    // or external tool reads them — see canonical-state.test.ts.
     const state = minimalState({
       progress: {
         estimate: 0.6,
         criteriaMet: [],
         criteriaRemaining: [],
         filesChanged: ["src/a.ts"],
-        tests: null,
+        tests: { passed: 8, failed: 1, skipped: 0 },
       },
       machineStatus: { windowRounds: 3, gitMotion: true, motionRounds: 2 },
       criterionStatuses: [
         { id: "cr-11111111", text: "all tests pass", status: "verified" as const, met_at_round: 3, related_subgoal_ids: [] },
-        { id: "cr-22222222", text: "no regressions", status: "remaining" as const, related_subgoal_ids: [] },
       ],
     });
     const artifact = assemblePromptArtifact(input({
       level: "l2", fullStateMarkdown: undefined, state,
     }));
     const prompt = artifact.renderedPrompt;
-    assert.ok(prompt.includes("Machine (git)"));
-    assert.ok(prompt.includes("changes in 2/3 recent committed rounds"));
-    assert.ok(prompt.includes("Machine (criteria)"));
-    assert.ok(prompt.includes("1/2 verified across committed rounds"));
-    assert.ok(prompt.includes("self-reported estimate (unverified until machine-backed)"));
+    assert.ok(!prompt.includes("Progress Dashboard"));
+    assert.ok(!prompt.includes("Round Stats"));
+    assert.ok(!prompt.includes("Machine (git)"));
+    assert.ok(!prompt.includes("Goal → Criteria"));
+    assert.ok(!prompt.includes("self-reported estimate"));
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v3.8.1 — fixed priority, protected set, deterministic truncation
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("assemblePromptArtifact — budget determinism", () => {
+  /** A state with plenty of optional content at every priority. */
+  const loadedState = () => minimalState({
+    subGoals: [
+      { id: "sg-1", description: "Task A", status: "in_progress", declared_at_round: 1, status_changed_at_round: 2, priority: 0 },
+    ],
+    remainingCriteria: ["criterion one", "criterion two"],
+    blockers: ["a blocker"],
+    discoveries: ["a discovery"],
+    rollingOutcomes: ["[R1] accepted: something"],
+    externalContext: "external notes",
+    retiredConstraints: ["an old rule"],
+    recurringFlags: [
+      { subject: "test_files_modified", kind: "verification_warning", ref: "", count: 3, rounds: [1, 2, 3] },
+    ],
+    milestones: [{
+      label: "Core Module", round_range: { start: 1, end: 2 }, outcome: "done",
+      carried_constraints: [], resolved_constraints: [], progress_at_boundary: 0.5,
+      kind: "auto" as const, generated_at_round: 2,
+    }],
   });
 
-  it("renders Round Stats from state.roundStats and omits the section without it", () => {
-    const withStats = minimalState({
-      roundStats: [
-        { round: 12, filesChangedCount: 3, rejectedAttempts: 1, progressDelta: 0.1 },
-        { round: 13, filesChangedCount: 0, rejectedAttempts: 0, progressDelta: -0.05 },
-      ],
-    });
+  it("renders the protected set even when the budget cannot hold it", () => {
+    // 200 chars is far below the protected content of a loaded L2 prompt.
     const artifact = assemblePromptArtifact(input({
-      level: "l2", fullStateMarkdown: undefined, state: withStats,
+      level: "l2", fullStateMarkdown: undefined, state: loadedState(),
+      budgets: { l2: 200 },
     }));
-    assert.ok(artifact.renderedPrompt.includes("R12: 3 files, 1 rejected attempt, Δ+0.10"));
-    assert.ok(artifact.renderedPrompt.includes("R13: 0 files, Δ-0.05"));
+    const prompt = artifact.renderedPrompt;
+    for (const heading of ["Objective", "Current Task", "Active Hard Constraints"]) {
+      assert.ok(prompt.includes(heading), `${heading} is protected and must render`);
+    }
+    assert.ok(artifact.protectedOverflow,
+      "protected content over the ceiling is RECORDED, never silently exceeded");
+    // The optional tail is what gets cut.
+    assert.ok(artifact.droppedSections.length > 0, "optional sections are dropped");
+    assert.ok(!artifact.droppedSections.includes("objective"));
+  });
 
-    const without = assemblePromptArtifact(input({
-      level: "l2", fullStateMarkdown: undefined, state: minimalState(),
+  it("drops optional sections lowest-priority-first", () => {
+    const artifact = assemblePromptArtifact(input({
+      level: "l2", fullStateMarkdown: undefined, state: loadedState(),
+      budgets: { l2: 2000 },
     }));
-    assert.ok(!without.renderedPrompt.includes("Round Stats"));
+    // The invariant is about the CUT POINT, not about any single section:
+    // every optional section that rendered must outrank every one that was
+    // dropped. (Greedy first-fit does not give this — it can render a small
+    // low-priority section into room a larger high-priority one could not
+    // use.)
+    const order = [
+      "active_constraints", "remaining", "sub_goals", "blockers",
+      "discoveries", "rolling_outcomes", "phase", "active_warnings",
+      "external_context", "retired_constraints", "milestones",
+    ];
+    const rendered = order.filter((id) => artifact.sections.includes(id));
+    const dropped = order.filter((id) => artifact.droppedSections.includes(id));
+    assert.ok(dropped.length > 0, "a tight budget must cut something");
+    assert.ok(rendered.length > 0, "...but not everything");
+    const lastRendered = order.indexOf(rendered[rendered.length - 1]);
+    const firstDropped = order.indexOf(dropped[0]);
+    assert.ok(
+      lastRendered < firstDropped,
+      `rendered [${rendered.join(", ")}] must all outrank dropped [${dropped.join(", ")}]`,
+    );
+  });
+
+  it("is deterministic: identical input gives an identical prompt and artifact", () => {
+    const make = () => assemblePromptArtifact(input({
+      level: "l2", fullStateMarkdown: undefined, state: loadedState(),
+      budgets: { l2: 2000 },
+    }));
+    const a = make();
+    const b = make();
+    assert.equal(a.renderedPrompt, b.renderedPrompt);
+    assert.equal(a.promptHash, b.promptHash);
+    assert.deepEqual(a.sections, b.sections);
+    assert.deepEqual(a.droppedSections, b.droppedSections);
+    assert.equal(a.protectedOverflow, b.protectedOverflow);
+  });
+
+  it("never truncates mid-line", () => {
+    const artifact = assemblePromptArtifact(input({
+      level: "l2", fullStateMarkdown: undefined, state: loadedState(),
+      budgets: { l2: 1400 },
+    }));
+    // A truncated section is cut at a newline, so the budgeted area ends a
+    // line cleanly rather than in the middle of a bullet.
+    const area = artifact.renderedPrompt.slice(0, artifact.renderedChars);
+    assert.ok(area.length > 0);
+    assert.ok(!/\n\s*$/.test(area.slice(0, -1)) || area.endsWith("\n"));
   });
 });

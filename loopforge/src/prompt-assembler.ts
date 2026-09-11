@@ -11,24 +11,28 @@
  */
 
 import { createHash } from "node:crypto";
-import type { CanonicalLoopState, PresentedStateSnapshot } from "./canonical-state.js";
+import type { CanonicalLoopState } from "./canonical-state.js";
 import {
   activeSubGoalView,
-  buildRoadmap,
+  buildPhaseLine,
   hashCanonicalState,
   milestoneHeading,
-  trustBarLine,
 } from "./canonical-state.js";
 import type { PromptArtifact, PromptRequests } from "./protocol.js";
-import type { ConstraintMeta, MilestoneSummary, SubGoal } from "./protocol.js";
+import { PROMPT_ARTIFACT_SCHEMA_VERSION } from "./protocol.js";
+import type {
+  ConstraintMeta,
+  MilestoneSummary,
+  RecurringFlag,
+  SubGoal,
+} from "./protocol.js";
 import type {
   PromptLevel,
   PromptLevelReason,
 } from "./prompt-policy.js";
-import { deriveItemId, STABLE_ID_RE, jaccardSimilarity } from "./token-utils.js";
+import { deriveItemId, STABLE_ID_RE, normalizeText } from "./token-utils.js";
 import { getPolicy } from "./policy.js";
 
-export const PROMPT_ARTIFACT_SCHEMA_VERSION = 1 as const;
 
 export interface PromptBudgets {
   l0: number;
@@ -52,9 +56,6 @@ export interface PromptAssemblyInput {
   fullStateMarkdown?: string;
   /** v2.9: Model's information needs for this prompt. L0: ignored. */
   promptRequests?: PromptRequests;
-  /** v3.2: Previous round's L1 presentation (persisted diff baseline).
-   *  When present, L1 collapses unchanged content against it. */
-  presentedBaseline?: PresentedStateSnapshot | null;
 }
 
 interface Section {
@@ -75,10 +76,9 @@ function bullets(values: string[], prefix = "- "): string {
  *  Same hash strategy as computeGoalTextHash in loop-compiler.ts. */
 /** v2.11: Render a bullet list with ID prefixes for constraints/criteria.
  *  Each item gets a [prefix-XXXXXXXX] tag. Items that already look like IDs
- *  are rendered as-is. When constraint_id_enabled is false, renders plain bullets. */
+ *  are rendered as-is. v3.8.1: IDs are always rendered — the
+ *  `constraint_id_enabled` escape hatch is gone. */
 function bulletsWithIds(values: string[], prefix: string): string {
-  const idEnabled = getPolicy().evolution.constraint_id_enabled;
-  if (!idEnabled) return bullets(values);
   return values.map((v) => {
     const trimmed = v.trim();
     if (STABLE_ID_RE.test(trimmed)) {
@@ -101,8 +101,6 @@ function bulletsWithIdentities(
   values: string[],
   metadata: ConstraintMeta[],
 ): string {
-  const idEnabled = getPolicy().evolution.constraint_id_enabled;
-  if (!idEnabled) return bullets(values);
   const idByText = new Map(metadata.map((meta) => [meta.text, meta.id]));
   return values.map((v) => {
     const trimmed = v.trim();
@@ -212,12 +210,6 @@ function activeNonHardConstraints(state: CanonicalLoopState): string[] {
 // v3.2: L1 diff-collapse helpers
 // ═══════════════════════════════════════════════════════════════════════════
 
-/** v3.2: Collapse only when at least this many items are unchanged — a tiny
- *  unchanged set renders in full (nothing worth saving). */
-export const COLLAPSE_MIN_UNCHANGED = 3;
-/** v3.2: Recent-rounds items kept in full when older ones collapse. */
-export const KEEP_RECENT_ROUNDS = 3;
-
 /** v3.2: Stable ID of a constraint text as rendered by bulletsWithIds —
  *  metadata's own id when present, else the derived hash. */
 function constraintIdOf(text: string, metadata: ConstraintMeta[]): string {
@@ -225,92 +217,6 @@ function constraintIdOf(text: string, metadata: ConstraintMeta[]): string {
   return meta?.id ?? `c-${deriveItemId(text)}`;
 }
 
-export interface ConstraintDiff {
-  /** Constraint texts to render in full (new or violated this round). */
-  changed: string[];
-  /** Same-ID items unchanged since the baseline. */
-  unchangedCount: number;
-  /** Baseline items absent now, excluding emphasized items (they were moved
-   *  to Critical Context, not demoted). */
-  removedCount: number;
-}
-
-export function diffConstraints(
-  baseline: PresentedStateSnapshot | null,
-  activeTexts: string[],
-  metadata: ConstraintMeta[],
-  round: number,
-  emphasized: Set<string>,
-): ConstraintDiff {
-  if (!baseline) return { changed: activeTexts, unchangedCount: 0, removedCount: 0 };
-  const baselineIds = new Set(baseline.constraintIds);
-  const currentIds = new Set(activeTexts.map((text) => constraintIdOf(text, metadata)));
-  const changed: string[] = [];
-  let unchangedCount = 0;
-  for (const text of activeTexts) {
-    const id = constraintIdOf(text, metadata);
-    const violatedThisRound = metadata.find((m) => m.text === text)
-      ?.last_violated_at_round === round;
-    if (!baselineIds.has(id) || violatedThisRound) changed.push(text);
-    else unchangedCount++;
-  }
-  let removedCount = 0;
-  if (emphasized.size > 0) {
-    const emphasizedIds = new Set([...emphasized].map((text) => constraintIdOf(text, metadata)));
-    for (const id of baselineIds) {
-      if (!currentIds.has(id) && !emphasizedIds.has(id)) removedCount++;
-    }
-  } else {
-    for (const id of baselineIds) {
-      if (!currentIds.has(id)) removedCount++;
-    }
-  }
-  return { changed, unchangedCount, removedCount };
-}
-
-export interface SubGoalDiff {
-  /** Sub-goals to render in full (new or status transition). */
-  changed: SubGoal[];
-  unchangedCount: number;
-  /** Baseline sub-goals no longer in the active set (done/canceled/blocked). */
-  removedCount: number;
-}
-
-export function diffSubGoals(
-  baseline: PresentedStateSnapshot | null,
-  activeSubs: SubGoal[],
-): SubGoalDiff {
-  if (!baseline) return { changed: activeSubs, unchangedCount: 0, removedCount: 0 };
-  const baselineById = new Map(baseline.subGoals);
-  const currentIds = new Set(activeSubs.map((sg) => sg.id));
-  const changed: SubGoal[] = [];
-  let unchangedCount = 0;
-  for (const sg of activeSubs) {
-    const prevStatus = baselineById.get(sg.id);
-    if (prevStatus === undefined || prevStatus !== sg.status) changed.push(sg);
-    else unchangedCount++;
-  }
-  let removedCount = 0;
-  for (const [id] of baseline.subGoals) {
-    if (!currentIds.has(id)) removedCount++;
-  }
-  return { changed, unchangedCount, removedCount };
-}
-
-/** v3.2: True when a milestone boundary was crossed since the baseline —
- *  the Recent Rounds section then renders in full (a phase ended). */
-export function milestoneBoundaryChanged(
-  baseline: PresentedStateSnapshot | null,
-  milestones: MilestoneSummary[],
-): boolean {
-  if (!baseline) return false;
-  const baselineRanges = new Set(
-    baseline.milestoneRanges.map(([s, e]) => `${s}:${e}`),
-  );
-  return milestones.some(
-    (m) => !baselineRanges.has(`${m.round_range.start}:${m.round_range.end}`),
-  );
-}
 
 function commonMandatorySections(
   state: CanonicalLoopState,
@@ -373,18 +279,42 @@ function l0Sections(state: CanonicalLoopState): Section[] {
   return sections;
 }
 
+/** v3.8.1: the committed-round window Active Warnings reports on. */
+const ACTIVE_WARNINGS_WINDOW = 3;
+/** v3.8.1: hard cap on Active Warnings lines. */
+const ACTIVE_WARNINGS_CAP = 5;
+
+/** v3.8.1: the prompt's slice of the recurring-fact list — the facts still
+ *  firing inside the last ACTIVE_WARNINGS_WINDOW committed rounds.
+ *
+ *  One list, two windows: this shows what is going wrong NOW (any count), the
+ *  state file shows what keeps recurring (>= 2 rounds). Before this release
+ *  the prompt carried a raw, unthresholded violation list AND a whole-history
+ *  count >= 2 list, under two different headings.
+ *
+ *  Returns "" when nothing is firing, so the caller renders no section. */
+function activeWarnings(flags: RecurringFlag[], currentRound: number): string {
+  const cutoff = currentRound - ACTIVE_WARNINGS_WINDOW;
+  const shown = flags
+    .filter((flag) => flag.rounds.some((round) => round >= cutoff))
+    .sort((a, b) =>
+      Math.max(...b.rounds) - Math.max(...a.rounds) || b.count - a.count)
+    .slice(0, ACTIVE_WARNINGS_CAP);
+  if (shown.length === 0) return "";
+  return shown.map((flag) => {
+    const icon = flag.kind === "constraint_violation"
+      ? "🚫"
+      : flag.kind === "verification_error" ? "⚠️" : "ℹ️";
+    const subject = flag.ref ? `${flag.subject} [${flag.ref}]` : flag.subject;
+    return `- ${icon} ${subject} — ${flag.count}×, latest R${Math.max(...flag.rounds)}`;
+  }).join("\n");
+}
+
 function l1Sections(
   state: CanonicalLoopState,
-  baseline: PresentedStateSnapshot | null,
-  emphasized: Set<string>,
 ): Section[] {
   const sections = commonMandatorySections(state, "l1");
   const active = activeNonHardConstraints(state);
-  // L7: collapse needs the state file — its collapse line points at the file
-  // for the full content. With the file disabled (stateFilePath empty),
-  // collapsing would silently truncate the prompt's constraints view.
-  const collapseEnabled = getPolicy().prompt.l1_collapse_enabled &&
-    state.stateFilePath.length > 0;
   if (state.changesSinceLastRound.length > 0) {
     sections.push({
       id: "changes",
@@ -392,42 +322,27 @@ function l1Sections(
       mandatory: false,
     });
   }
-  // v3.2: Active Constraints — collapse unchanged items against the previous
-  // round's presentation; new and violated-this-round constraints render in
-  // full. The collapse line points at the state file (regenerated every
-  // round), so no information is lost — only presentation is compacted.
+  // v3.8.1: Active Constraints render IN FULL. v3.2 folded unchanged items
+  // into "… N unchanged constraints (see state file)" pointer lines, which
+  // made the prompt's content depend on what the PREVIOUS prompt happened to
+  // show rather than on committed facts — and those pointer lines fed the
+  // prompt hash. The fold needed the previous round's persisted presentation
+  // snapshot, which is deleted.
   if (active.length > 0) {
-    const diff = diffConstraints(
-      baseline, active, state.constraintMetadata, state.round, emphasized,
-    );
-    const renderFull = !collapseEnabled || !baseline
-      || diff.unchangedCount < COLLAPSE_MIN_UNCHANGED;
-    if (renderFull) {
-      sections.push({
-        id: "active_constraints",
-        text: section(
-          "Active Constraints / Success Criteria",
-          bulletsWithIdentities(active, state.constraintMetadata),
-        ),
-        mandatory: false,
-      });
-    } else {
-      const lines = diff.changed.map((text) => {
-        const id = constraintIdOf(text, state.constraintMetadata);
-        const violated = state.constraintMetadata.find((m) => m.text === text)
-          ?.last_violated_at_round === state.round;
-        const suffix = violated ? " (violated this round)" : " (new this round)";
-        return `- [\`${id}\`] ${text}${suffix}`;
-      });
-      lines.push(
-        `- … ${diff.unchangedCount} unchanged constraints, ${diff.removedCount} demoted since R${baseline.round} (see state file)`,
-      );
-      sections.push({
-        id: "active_constraints",
-        text: section("Active Constraints / Success Criteria", lines.join("\n")),
-        mandatory: false,
-      });
-    }
+    // The one thing the folded branch carried that a plain bullet list does
+    // not: the machine fact that this round broke the constraint. Kept so the
+    // annotation is not lost along with the fold.
+    const lines = active.map((text) => {
+      const violated = state.constraintMetadata.find((m) => m.text === text)
+        ?.last_violated_at_round === state.round;
+      return `- [\`${constraintIdOf(text, state.constraintMetadata)}\`] ${text}` +
+        (violated ? " (violated this round)" : "");
+    });
+    sections.push({
+      id: "active_constraints",
+      text: section("Active Constraints / Success Criteria", lines.join("\n")),
+      mandatory: false,
+    });
   }
   if (state.remainingCriteria.length > 0) {
     sections.push({
@@ -443,46 +358,25 @@ function l1Sections(
       mandatory: false,
     });
   }
-  // v2.2: Sub-Goal Dashboard (compact — L1). v3.2: unchanged sub-goals
-  // collapse to a count line; new/transitioned ones render in full.
-  // v3.7.1: only ACTIVE items (pending/in_progress/blocked) enter the view;
-  // done/canceled never render as rows.
+  // v2.2: Sub-Goal Dashboard (compact — L1). v3.7.1: only ACTIVE items
+  // (pending/in_progress/blocked) enter the view; done/canceled never render
+  // as rows. v3.8.1: rendered in full — the unchanged-count fold is gone.
   const view = activeSubGoalView(state.subGoals, Number.POSITIVE_INFINITY);
   const activeSubs = view.active;
   if (activeSubs.length > 0) {
     const iconOf = (sg: SubGoal): string =>
       sg.status === "in_progress" ? "🔄" : sg.status === "blocked" ? "🚫" : "⏳";
-    const diff = diffSubGoals(baseline, activeSubs);
-    const renderFull = !collapseEnabled || !baseline
-      || diff.unchangedCount < COLLAPSE_MIN_UNCHANGED;
-    if (renderFull) {
-      const maxShow = 5;
-      const items = activeSubs.slice(0, maxShow).map((sg) =>
-        `${iconOf(sg)} [\`${sg.id}\`] ${sg.description}`);
-      if (activeSubs.length > maxShow) {
-        items.push(`... and ${activeSubs.length - maxShow} more`);
-      }
-      sections.push({
-        id: "sub_goals",
-        text: section("Active Sub-Goals", items.join("\n")),
-        mandatory: false,
-      });
-    } else {
-      const transitionCount = diff.changed.filter((sg) => {
-        const prev = baseline.subGoals.find(([id]) => id === sg.id);
-        return prev !== undefined && prev[1] !== sg.status;
-      }).length;
-      const items = diff.changed.slice(0, 5).map((sg) =>
-        `${iconOf(sg)} [\`${sg.id}\`] ${sg.description}`);
-      items.push(
-        `- … ${diff.unchangedCount} unchanged sub-goals, ${transitionCount + diff.removedCount} changed since R${baseline.round} (see state file)`,
-      );
-      sections.push({
-        id: "sub_goals",
-        text: section("Active Sub-Goals", items.join("\n")),
-        mandatory: false,
-      });
+    const maxShow = 5;
+    const items = activeSubs.slice(0, maxShow).map((sg) =>
+      `${iconOf(sg)} [\`${sg.id}\`] ${sg.description}`);
+    if (activeSubs.length > maxShow) {
+      items.push(`... and ${activeSubs.length - maxShow} more`);
     }
+    sections.push({
+      id: "sub_goals",
+      text: section("Active Sub-Goals", items.join("\n")),
+      mandatory: false,
+    });
   }
   if (state.discoveries.length > 0) {
     sections.push({
@@ -491,31 +385,14 @@ function l1Sections(
       mandatory: false,
     });
   }
-  // v3.2: Recent Rounds — keep the newest KEEP_RECENT_ROUNDS in full, fold
-  // older ones into one pointer line (unless a milestone boundary crossed).
+  // v3.2: Recent Rounds. v3.8.1: rendered in full — the keep-newest-N fold and
+  // its milestone-boundary exception are gone.
   if (state.rollingOutcomes.length > 0) {
-    const boundaryChanged = milestoneBoundaryChanged(baseline, state.milestones);
-    const collapseable = collapseEnabled && baseline !== null
-      && state.rollingOutcomes.length > KEEP_RECENT_ROUNDS && !boundaryChanged;
-    if (collapseable) {
-      const kept = state.rollingOutcomes.slice(-KEEP_RECENT_ROUNDS);
-      const earlier = state.rollingOutcomes.length - kept.length;
-      const lines = [
-        ...kept,
-        `- … ${earlier} earlier round${earlier === 1 ? "" : "s"} (see state file)`,
-      ];
-      sections.push({
-        id: "rolling_outcomes",
-        text: section("Recent Rounds", lines.join("\n")),
-        mandatory: false,
-      });
-    } else {
-      sections.push({
-        id: "rolling_outcomes",
-        text: section("Recent Rounds", bullets(state.rollingOutcomes)),
-        mandatory: false,
-      });
-    }
+    sections.push({
+      id: "rolling_outcomes",
+      text: section("Recent Rounds", bullets(state.rollingOutcomes)),
+      mandatory: false,
+    });
   }
   // v3.2: L1 also renders the explicit external context (previously L2-only).
   // Placed after the changes delta, within the soft budget.
@@ -526,31 +403,26 @@ function l1Sections(
       mandatory: false,
     });
   }
-  // v3.3: Forward-looking roadmap (same buildRoadmap as state.md and L2).
-  const roadmapLines = buildRoadmap(state);
-  if (roadmapLines.length > 0) {
+  // v3.8.1: one compact phase line, not the Roadmap prose.
+  const l1Phase = buildPhaseLine(state);
+  if (l1Phase) {
     sections.push({
-      id: "roadmap",
-      text: section("Roadmap", roadmapLines.join("\n")),
+      id: "phase",
+      text: section("Phase", l1Phase),
       mandatory: false,
     });
   }
-  // v3.2: Recurring Issues carries the deterministic violation lessons (with
-  // counts and rounds) when available; falls back to the rolling window text.
-  if (state.recurringIssues.length > 0 || state.lessons.length > 0) {
-    const violationLessons = state.lessons
-      .filter((lesson) => lesson.kind === "constraint_violation")
-      .slice(0, 3);
-    const body = violationLessons.length > 0
-      ? violationLessons
-          .map((lesson) =>
-            `- ${lesson.text} (violated ${lesson.count}×: R${lesson.rounds.join(", R")})`,
-          )
-          .join("\n")
-      : bullets(state.recurringIssues);
+  // v3.8.1: Active Warnings — the recent tail of the ONE recurring-fact
+  // derivation. It replaces two prompt sections ("Recurring Issues", fed by
+  // the last 5 rounds' raw violations with no threshold, and "Lessons
+  // Learned", fed by the whole-history count >= 2 view) that were two windows
+  // over one fact set. What the agent needs in the prompt is the recent tail;
+  // the full recurring set lives in the state file.
+  const warnings = activeWarnings(state.recurringFlags, state.round);
+  if (warnings) {
     sections.push({
-      id: "recurring_issues",
-      text: section("Recurring Issues", body),
+      id: "active_warnings",
+      text: section("Active Warnings", warnings),
       mandatory: false,
     });
   }
@@ -581,7 +453,6 @@ function l2Sections(
     ["blockers", "Blockers", state.blockers, null],
     ["discoveries", "Discoveries", state.discoveries, null],
     ["rolling_outcomes", "Cross-Round Outcomes", state.rollingOutcomes, null],
-    ["recurring_issues", "Recurring Issues", state.recurringIssues, null],
     ["failed_patterns", "Failed Patterns", state.failedPatterns, null],
   ];
   for (const [id, title, values, idPrefix] of groups) {
@@ -598,32 +469,26 @@ function l2Sections(
         : bullets(values);
     sections.push({ id, text: section(title, body), mandatory: false });
   }
-  // v3.2: Lessons learned — repeated violations / verification failures
-  // across the whole loop (not just the rolling window).
-  if (state.lessons.length > 0) {
-    const lessonLines = state.lessons.slice(0, 8).map((lesson) => {
-      const icon = lesson.kind === "constraint_violation"
-        ? "🚫"
-        : lesson.kind === "verification_error" ? "⚠️" : "ℹ️";
-      return `- ${icon} ${lesson.text} — ${lesson.count}× (R${lesson.rounds.join(", R")})`;
-    });
-    if (state.lessons.length > 8) {
-      lessonLines.push(`- ... and ${state.lessons.length - 8} more`);
-    }
+  // v3.8.1: Active Warnings — the recent tail of the ONE recurring-fact
+  // derivation (see l1Sections). The whole-history recurring set is the state
+  // file's job; L2 shows the same recent slice as L1 so the two levels cannot
+  // tell different stories about what is going wrong right now.
+  const warnings = activeWarnings(state.recurringFlags, state.round);
+  if (warnings) {
     sections.push({
-      id: "lessons",
-      text: section("Lessons Learned", lessonLines.join("\n")),
+      id: "active_warnings",
+      text: section("Active Warnings", warnings),
       mandatory: false,
     });
   }
-  // v3.3: Forward-looking roadmap — rendered right before the (backward-
-  // looking) Phase History so the agent sees where it is before where it's
-  // been. Same buildRoadmap as state.md and L1.
-  const roadmapLines = buildRoadmap(state);
-  if (roadmapLines.length > 0) {
+  // v3.8.1: one compact phase line, not the Roadmap prose — rendered right
+  // before the (backward-looking) Phase History so the agent sees where it is
+  // before where it has been.
+  const l2Phase = buildPhaseLine(state);
+  if (l2Phase) {
     sections.push({
-      id: "roadmap",
-      text: section("Roadmap", roadmapLines.join("\n")),
+      id: "phase",
+      text: section("Phase", l2Phase),
       mandatory: false,
     });
   }
@@ -685,112 +550,13 @@ function l2Sections(
 
   // ── v2.8: Path B gap fills (previously only in full state markdown) ──
 
-  // Progress Dashboard
-  if (
-    state.progress.estimate !== null ||
-    state.progress.criteriaMet.length > 0 ||
-    state.progress.criteriaRemaining.length > 0 ||
-    state.progress.filesChanged.length > 0 ||
-    state.progress.tests !== null ||
-    state.machineStatus !== undefined
-  ) {
-    const lines: string[] = [];
-    const total = state.progress.criteriaMet.length + state.progress.criteriaRemaining.length;
-    if (total > 0) {
-      lines.push(`**Criteria**: ${state.progress.criteriaMet.length}/${total} met`);
-    }
-    if (state.progress.estimate !== null) {
-      lines.push(`**Estimated Completion**: ${(state.progress.estimate * 100).toFixed(0)}%`);
-      // v3.3: honest labeling — the estimate is the agent's own number.
-      lines.push("**Signal source**: self-reported estimate (unverified until machine-backed)");
-    }
-    // v3.3: machine side of the comparison — git motion over committed
-    // rounds (v3.6: the object always carries definite values — no
-    // "unavailable" arm).
-    if (state.machineStatus) {
-      const ms = state.machineStatus;
-      const motion = ms.gitMotion
-        ? `changes in ${ms.motionRounds}/${ms.windowRounds} recent committed rounds`
-        : `no git changes in the last ${ms.windowRounds} committed rounds`;
-      lines.push(`**Machine (git)**: ${motion}`);
-    }
-    if (state.criterionStatuses.length > 0) {
-      const verifiedCount = state.criterionStatuses.filter((cs) => cs.status === "verified").length;
-      const claimedCount = state.criterionStatuses.filter((cs) => cs.status === "claimed").length;
-      lines.push(
-        `**Machine (criteria)**: ${verifiedCount}/${state.criterionStatuses.length} verified` +
-        (claimedCount > 0 ? `, ${claimedCount} claimed-but-unverified` : "") +
-        " across committed rounds",
-      );
-    }
-    if (state.progress.tests) {
-      lines.push(
-        `**Tests**: ${state.progress.tests.passed} passed, ` +
-        `${state.progress.tests.failed} failed, ${state.progress.tests.skipped} skipped`,
-      );
-    }
-    if (state.progress.filesChanged.length > 0) {
-      lines.push("**Files Changed**:");
-      for (const f of state.progress.filesChanged.slice(0, 10)) lines.push(`- ${f}`);
-      if (state.progress.filesChanged.length > 10) {
-        lines.push(`- ... and ${state.progress.filesChanged.length - 10} more`);
-      }
-    }
-    // v3.2: Goal → criteria → evidence vertical view — per-criterion status
-    // with the round it was met and linked sub-goals. IDs follow
-    // constraint_id_enabled like every other ID-rendering path.
-    if (state.criterionStatuses.length > 0) {
-      const idEnabled = getPolicy().evolution.constraint_id_enabled;
-      lines.push("", "**Goal → Criteria**:");
-      for (const cs of state.criterionStatuses) {
-        const icon = cs.status === "verified" ? "✅"
-          : cs.status === "claimed" ? "🟡"
-          : cs.status === "insufficient" ? "🟠"
-          : cs.status === "contradicted" ? "⛔"
-          : cs.status === "remaining" ? "⬜" : "❔";
-        const idTag = idEnabled ? ` [\`${cs.id}\`]` : "";
-        const met = cs.met_at_round !== undefined ? `(met R${cs.met_at_round})` : "";
-        const related = cs.related_subgoal_ids.length > 0
-          ? ` [↔ ${cs.related_subgoal_ids.join(", ")}]`
-          : "";
-        lines.push(`- ${icon}${idTag} ${cs.text} ${met}${related}`);
-      }
-    }
-    sections.push({
-      id: "progress",
-      text: section("Progress Dashboard", lines.join("\n")),
-      mandatory: false,
-    });
-  }
-
-  // v3.3: Per-round statistics — lets the agent calibrate round granularity
-  // (files per round, rejected attempts, self-reported progress deltas).
-  // v3.6: source-labeled — files/Δ are agent-reported; only rejected
-  // attempts (and the Machine (git) row above) are machine-recorded.
-  if (state.roundStats && state.roundStats.length > 0) {
-    const statLines = state.roundStats.map((stat) => {
-      const parts: string[] = [];
-      if (stat.filesChangedCount !== null) {
-        parts.push(`${stat.filesChangedCount} file${stat.filesChangedCount === 1 ? "" : "s"}`);
-      }
-      if (stat.rejectedAttempts !== null && stat.rejectedAttempts > 0) {
-        parts.push(`${stat.rejectedAttempts} rejected attempt${stat.rejectedAttempts === 1 ? "" : "s"}`);
-      }
-      if (stat.progressDelta !== null) {
-        parts.push(`Δ${stat.progressDelta >= 0 ? "+" : ""}${stat.progressDelta.toFixed(2)}`);
-      }
-      return `- R${stat.round}: ${parts.length > 0 ? parts.join(", ") : "no data"}`;
-    });
-    statLines.push(
-      "> files & Δ are agent-reported; rejected attempts are machine-recorded " +
-      "(the Machine (git) row above is machine-observed)",
-    );
-    sections.push({
-      id: "round_stats",
-      text: section("Round Stats", statLines.join("\n")),
-      mandatory: false,
-    });
-  }
+  // v3.8.1: the L2 Progress Dashboard and Round Stats sections are gone.
+  // The dashboard was `criterionStatuses` re-composed into a table and mixed
+  // with the agent’s OWN completion estimate and test counts; Round Stats
+  // re-listed per-round files and progress deltas, both self-reported. The
+  // criterion list and the machine git/criteria rows still render in the
+  // state file, where a human or external tool reads them — the prompt keeps
+  // only the current round’s own facts.
 
   // Retired Constraints
   if (state.retiredConstraints.length > 0) {
@@ -802,102 +568,187 @@ function l2Sections(
     });
   }
 
-  // Agent Trust Score + Trend
-  if (state.agentTrustScore !== undefined) {
-    const lines = [
-      trustBarLine(state.agentTrustScore),
-    ];
-    if (state.agentTrustTrend.length > 0) {
-      const avg = (state.agentTrustTrend.reduce((a, b) => a + b, 0)
-        / state.agentTrustTrend.length).toFixed(2);
-      lines.push(
-        `Trend (last ${state.agentTrustTrend.length}): ${state.agentTrustTrend.join(" → ")}`,
-      );
-      lines.push(`Average: ${avg}`);
-    }
-    sections.push({
-      id: "agent_trust",
-      text: section("Agent Trust", lines.join("\n")),
-      mandatory: false,
-    });
-  }
-
   return sections;
 }
 
-function selectSections(
-  input: PromptAssemblyInput,
-  emphasized: Set<string>,
-): Section[] {
+function selectSections(input: PromptAssemblyInput): Section[] {
   if (input.level === "l0") return l0Sections(input.state);
-  if (input.level === "l1") {
-    return l1Sections(input.state, input.presentedBaseline ?? null, emphasized);
-  }
+  if (input.level === "l1") return l1Sections(input.state);
   return l2Sections(input.state, input.fullStateMarkdown);
+}
+
+/** v3.8.1: render order, in ONE place.
+ *
+ *  - A section absent from this table falls to DEFAULT_SECTION_PRIORITY.
+ *  - A Section's `mandatory` flag means PROTECTED: never dropped, never
+ *    truncated, rendered first regardless of budget.
+ *  - Everything else is optional and is cut lowest-priority-first.
+ *
+ *  Priority belongs to the SECTION, not to policy: a budget knob must not be
+ *  able to change which facts count as more important. (v3.2–v3.8 had no
+ *  order at all — optional sections were appended in declaration order, so a
+ *  single large early section silently pushed out every later one.)
+ */
+const SECTION_PRIORITY: Readonly<Record<string, number>> = {
+  // ── protected ───────────────────────────────────────────────────────────
+  objective: 0,
+  current_task: 1,
+  hard_constraints: 2,
+  verification: 3,
+  retry_requirements: 4,
+  // Zero-token pure reorder, but it is the ONLY place emphasized items render
+  // (they are MOVED out of their source sections), so dropping it would delete
+  // them rather than just deprioritize them.
+  critical_context: 5,
+  // ── optional, most to least important ───────────────────────────────────
+  success_criteria: 10,
+  active_constraints: 11,
+  remaining: 12,
+  sub_goals: 13,
+  blockers: 14,
+  changes: 15,
+  discoveries: 16,
+  rolling_outcomes: 17,
+  phase: 18,
+  active_warnings: 19,
+  external_context: 20,
+  failed_patterns: 21,
+  retired_constraints: 22,
+  milestones: 23,
+  sub_goals_full: 24,
+  full_state: 25,
+};
+
+const DEFAULT_SECTION_PRIORITY = 50;
+
+/** v3.8.1: the smallest remaining room worth spending on a truncated
+ *  section. Below this a partial render is noise, so the section is dropped
+ *  whole instead. */
+const TRUNCATION_MIN_CHARS = 256;
+
+/** Cut at a line boundary so a truncated section cannot end mid-sentence. */
+function truncateAtLine(text: string, room: number): string {
+  const clipped = text.slice(0, room);
+  const lastBreak = clipped.lastIndexOf("\n");
+  return `${lastBreak > 0 ? clipped.slice(0, lastBreak) : clipped}\n`;
 }
 
 function renderWithinBudget(
   sections: Section[],
   fixedText: string,
   budget: number,
-): { rendered: string; included: string[] } {
-  const mandatory = sections.filter((item) => item.mandatory);
-  const optional = sections.filter((item) => !item.mandatory);
-  let rendered = fixedText + mandatory.map((item) => item.text).join("");
-  const included = mandatory.filter((item) => item.text).map((item) => item.id);
+): {
+  rendered: string;
+  included: string[];
+  dropped: string[];
+  protectedOverflow: boolean;
+} {
+  // Total order: priority, then declaration order. Deterministic by
+  // construction — no dependence on map iteration or insertion accidents.
+  const ranked = sections
+    .map((item, index) => ({ item, index }))
+    .sort((a, b) =>
+      (SECTION_PRIORITY[a.item.id] ?? DEFAULT_SECTION_PRIORITY) -
+        (SECTION_PRIORITY[b.item.id] ?? DEFAULT_SECTION_PRIORITY) ||
+      a.index - b.index);
 
-  for (const item of optional) {
-    if (!item.text) continue;
-    if (rendered.length + item.text.length <= budget) {
-      rendered += item.text;
-      included.push(item.id);
+  let rendered = fixedText;
+  const included: string[] = [];
+  const dropped: string[] = [];
+  for (const { item } of ranked) {
+    if (!item.text || !item.mandatory) continue;
+    rendered += item.text;
+    included.push(item.id);
+  }
+  // Protected content alone can exceed the ceiling. That is RECORDED, never
+  // "fixed" by truncating a protected section.
+  const protectedOverflow = rendered.length > budget;
+
+  // Optional sections, STRICT priority: find the longest optional PREFIX that
+  // fits, and cut only from the tail of that ordering.
+  //
+  // Greedy first-fit is a different rule, and not the documented one: it can
+  // render a small low-priority section into room a larger high-priority
+  // section could not use, so "Blockers" could be missing while "Phase" is
+  // present. "Cut lowest-priority-first" has to mean what it says.
+  const optional = ranked.filter(({ item }) => item.text && !item.mandatory);
+  let prefix = optional.length;
+  while (prefix > 0) {
+    const total = optional
+      .slice(0, prefix)
+      .reduce((sum, { item }) => sum + item.text.length, 0);
+    if (rendered.length + total <= budget) break;
+    prefix--;
+  }
+  for (const { item } of optional.slice(0, prefix)) {
+    rendered += item.text;
+    included.push(item.id);
+  }
+  for (const { item } of optional.slice(prefix)) {
+    dropped.push(item.id);
+  }
+
+  // Whatever room is left goes to the FIRST section that did not fit, rendered
+  // partially and cut at a line boundary. Exactly one section can be partial,
+  // so the cut is explainable ("this one did not fit whole") rather than a
+  // scatter of half-rendered sections.
+  const next = optional[prefix];
+  if (next) {
+    const room = budget - rendered.length;
+    if (room >= TRUNCATION_MIN_CHARS) {
+      rendered += truncateAtLine(next.item.text, room);
+      included.push(next.item.id);
+      dropped.shift();
     }
   }
-  return { rendered, included };
+  return { rendered, included, dropped, protectedOverflow };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // v2.9: Prompt Requests — model-expressed information needs
 // ═══════════════════════════════════════════════════════════════════════════
 
-/** Match a free-text emphasis target against state items.
- *  v2.11: ID-first matching. When a target is an ID (c-/cr-/sg-XXXXXXXX),
- *  candidates that derive to the same ID get score 1.0. Falls back to
- *  Jaccard similarity otherwise. */
+/** Match an emphasis target against state items.
+ *  v2.11: ID-first — a target written as a stable id (`c-`/`cr-`/`sg-` + 8 hex)
+ *  matches the candidate deriving to the same id.
+ *  v3.8.1: the other arm is NORMALIZED-EXACT text. The Jaccard fallback is
+ *  gone, so an emphasis can no longer pull in a near-miss because the two
+ *  strings happened to share tokens. An unmatched target still renders
+ *  nothing, keeping this a pure reorder with zero token overhead. */
 function matchEmphasize(
   targets: string[],
   candidates: string[],
   cap: number,
 ): string[] {
   if (targets.length === 0 || candidates.length === 0) return [];
-  const scored = candidates.map((c) => {
-    let best = 0;
-    for (const t of targets) {
-      let s = 0;
-      // Phase 1: exact ID match (v2.11)
-      const idMatch = t.match(STABLE_ID_RE);
+  const matched: string[] = [];
+  for (const candidate of candidates) {
+    const candidateText = normalizeText(candidate);
+    const hit = targets.some((target) => {
+      const idMatch = target.match(STABLE_ID_RE);
       if (idMatch) {
-        const candidateId = idMatch[1] + "-" + deriveItemId(c);
-        if (candidateId === t) s = 1.0;
+        return `${idMatch[1]}-${deriveItemId(candidate)}` === target;
       }
-      // Phase 2: Jaccard fallback
-      if (s === 0) s = jaccardSimilarity(t, c);
-      if (s > best) best = s;
-    }
-    return { text: c, score: best };
-  });
-  return scored
-    .filter((e) => e.score >= getPolicy().evolution.constraint_match_threshold)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, cap)
-    .map((e) => e.text);
+      return normalizeText(target) === candidateText;
+    });
+    if (hit) matched.push(candidate);
+  }
+  // Candidate order, capped — deterministic, and no score to sort by.
+  return matched.slice(0, cap);
 }
 
 /** Render the "Confusion Alerts" section that appears at the prompt top.
- *  Compiler auto-matches each confusion point against state sections. */
+ *
+ *  v3.8.1: the points are echoed back, truncated and capped — nothing more.
+ *  The compiler used to score each point against eight section keywords with
+ *  Jaccard similarity and point at the argmax. That pointer was both a
+ *  similarity verdict and, in practice, nearly always wrong: "I don't
+ *  understand milestone tracking" scores 1/8 = 0.125 against the keyword
+ *  `milestone`, below the 0.15 default, so it fell through to the generic
+ *  line anyway. The agent names the state file itself; the prompt does not
+ *  guess where to look. */
 function renderConfusionAlerts(
   points: string[],
-  state: CanonicalLoopState,
   fullDensity: boolean,
 ): string {
   if (points.length === 0) return "";
@@ -908,17 +759,6 @@ function renderConfusionAlerts(
     "Address each before proceeding — the state file has full context.",
     "",
   ];
-  const sections: Array<{ keyword: string; label: string; ref: string }> = [
-    { keyword: "milestone", label: "Phase History", ref: "## Phase History" },
-    { keyword: "sub-goal", label: "Sub-Goal Dashboard", ref: "## Sub-Goal Dashboard" },
-    { keyword: "constraint", label: "Active Constraints / Constraint Lifecycle", ref: "## Active Constraints" },
-    { keyword: "trust", label: "Agent Trust", ref: "## Agent Trust" },
-    { keyword: "progress", label: "Progress Dashboard", ref: "## Progress Dashboard" },
-    { keyword: "criteria", label: "Success Criteria", ref: "## Success Criteria" },
-    { keyword: "phase", label: "Phase History", ref: "## Phase History" },
-    { keyword: "objective", label: "Loop Objective", ref: "## Loop Objective" },
-  ];
-
   // v2.14: L2 renders up to the policy cap (was: every confusion point,
   // unbounded by max_confusion_points); L1 keeps a single alert.
   const shown = fullDensity
@@ -926,18 +766,8 @@ function renderConfusionAlerts(
     : points.slice(0, 1);
   for (const point of shown) {
     const truncated = point.length > 200 ? point.slice(0, 197) + "…" : point;
-    // Find best-matching state section
-    let bestSection: typeof sections[0] | null = null;
-    let bestScore = 0;
-    for (const sec of sections) {
-      const score = jaccardSimilarity(truncated.toLowerCase(), sec.keyword);
-      if (score > bestScore) { bestScore = score; bestSection = sec; }
-    }
-    const pointer = bestSection && bestScore >= getPolicy().prompt.confusion_section_threshold
-      ? `→ Check **${bestSection.label}** (\`${bestSection.ref}\`) in the state file.`
-      : "→ Read the full state file for relevant context.";
     lines.push(`- **"${truncated}"**`);
-    lines.push(`  ${pointer}`);
+    lines.push("  → Read the full state file for relevant context.");
     lines.push("");
   }
 
@@ -975,14 +805,13 @@ export function assemblePromptArtifact(input: PromptAssemblyInput): PromptArtifa
   const stateHash = hashCanonicalState(input.state);
   const attempt = Math.max(1, input.attempt ?? 1);
   // ── State file reference + conditional read instruction ────────────
-  // L2 rounds (full rehydration), recovery, rejection, and drift all
-  // benefit from the model reading the durable state file rather than
-  // relying on potentially-compacted conversation history.
+  // L2 rounds (full rehydration), recovery and rejection all benefit from the
+  // model reading the durable state file rather than relying on
+  // potentially-compacted conversation history.
   const fullContextReasons = new Set([
     "first_round", "plan_boundary", "checkpoint_boundary", "goal_changed",
     "missing_previous_state", "verification_contradicted",
-    "rejection_rehydrate", "recovery_boundary", "state_drift",
-    "periodic_refresh",
+    "rejection_rehydrate", "recovery_boundary",
   ]);
   const needsFullContext = input.level === "l2"
     || input.reasons.some((r) => fullContextReasons.has(r));
@@ -1060,7 +889,7 @@ export function assemblePromptArtifact(input: PromptAssemblyInput): PromptArtifa
 
   // Confusion alerts: L1/L2 only, rendered at the top (before mandatory sections)
   const confusionText = (!levelIsL0 && pr?.confusion_points?.length)
-    ? renderConfusionAlerts(pr.confusion_points, input.state, levelIsL2)
+    ? renderConfusionAlerts(pr.confusion_points, levelIsL2)
     : "";
 
   // Emphasize: L1/L2 only, matched against active state items
@@ -1100,30 +929,14 @@ export function assemblePromptArtifact(input: PromptAssemblyInput): PromptArtifa
         changesSinceLastRound: input.state.changesSinceLastRound.filter((item) => !emphasizedSet.has(item)),
       }
     : input.state;
-  const sections = selectSections({ ...input, state: stateForSections }, emphasizedSet);
+  const sections = selectSections({ ...input, state: stateForSections });
   const criticalContextText = renderCriticalContext(emphasized, input.state);
 
-  // v3.2: L1 only — snapshot what this prompt actually presented, so the
-  // NEXT L1 compile can diff against it (persisted via PromptArtifact →
-  // lineage). L0/L2 leave it undefined: their presentation semantics differ
-  // (L2's dashboard includes done/canceled sub-goals, which would
-  // contaminate the L1 active-set diff).
-  let presentedState: PresentedStateSnapshot | undefined;
-  if (levelIsL1) {
-    const activeSubsForSnapshot = stateForSections.subGoals.filter((sg) =>
-      sg.status === "in_progress" || sg.status === "pending");
-    presentedState = {
-      round: input.state.round,
-      constraintIds: activeNonHardConstraints(stateForSections)
-        .map((text) => constraintIdOf(text, stateForSections.constraintMetadata)),
-      subGoals: activeSubsForSnapshot.map(
-        (sg) => [sg.id, sg.status] as [string, string],
-      ),
-      milestoneRanges: input.state.milestones.map(
-        (m) => [m.round_range.start, m.round_range.end] as [number, number],
-      ),
-    };
-  }
+  // v3.8.1: no presentation snapshot. The artifact records what THIS prompt
+  // rendered (level, hashes, round identity, the sections it emitted) and
+  // nothing about what a LATER prompt should do differently — a prompt's
+  // content must follow from committed facts, not from what the previous
+  // prompt happened to show.
 
   // Inject confusion alerts into the header area (before mandatory sections)
   const fixedText = header + confusionText;
@@ -1141,18 +954,27 @@ export function assemblePromptArtifact(input: PromptAssemblyInput): PromptArtifa
     ];
   }
 
-  const selected = renderWithinBudget(augmentedSections, fixedText, budget - footer.length);
+  const sectionBudget = budget - footer.length;
+  const selected = renderWithinBudget(augmentedSections, fixedText, sectionBudget);
   const renderedPrompt = selected.rendered + footer;
   const promptHash = createHash("sha256").update(renderedPrompt).digest("hex");
 
   return {
     schemaVersion: PROMPT_ARTIFACT_SCHEMA_VERSION,
     roundId: `loop:${input.state.loopId}:round:${input.state.round}`,
+    round: input.state.round,
     attempt,
     level: input.level,
     renderedPrompt,
     promptHash,
     stateHash,
-    ...(presentedState ? { presentedState } : {}),
+    // v3.8.1: the artifact records what THIS prompt did — which sections it
+    // emitted, which the budget rule dropped, and whether the protected set
+    // overflowed. It records nothing about what a later prompt should do.
+    sections: selected.included,
+    droppedSections: selected.dropped,
+    protectedOverflow: selected.protectedOverflow,
+    budget: sectionBudget,
+    renderedChars: selected.rendered.length,
   };
 }

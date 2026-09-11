@@ -17,7 +17,7 @@
  * Persistence is owned by round-transaction.ts so reject paths remain
  * side-effect free and accepted decisions can be replayed idempotently.
  */
-import type { LoopStore } from "./loop-store.js";
+import type { LoopStore, VaultEntry } from "./loop-store.js";
 import type { MachineObservation } from "./protocol.js";
 import type { SelfEvaluation, RoundVerificationStatus, StopReason, VerificationFlag } from "./protocol.js";
 /** Input to a single round processing step. */
@@ -113,6 +113,31 @@ export interface RoundProcessResult {
      *  not still dirty (agent must restore workspace first). */
     backtrackSkippedFiles?: string[];
 }
+/** v3.8.1: The rolled-back branch's facts — the ONE derivation of which rounds
+ *  failed, which approaches must not be repeated, which assumptions were
+ *  falsified, and which files (with their failed-round git fingerprints) the
+ *  agent must restore.
+ *
+ *  Sources are COMMITTED rounds above the restore point; rejected attempts are
+ *  not durable history and never become a source. The in-flight attempt that
+ *  triggered the rollback is the one exception — its evaluation lives in this
+ *  process, not in committed history.
+ *
+ *  Extracted from the coordinator's inline walk so it is unit-testable without
+ *  driving a whole rollback, and so the prompt, the state file and the
+ *  committed decision all describe one event. */
+export declare function deriveBacktrackRecoveryFacts(input: {
+    currentRound: number;
+    restoreRound: number;
+    vaultEntries: VaultEntry[];
+    selfEval: SelfEvaluation;
+}): {
+    skippedFiles: string[];
+    skippedFingerprints: Record<string, string>;
+    failedRounds: number[];
+    approaches: string[];
+    wrongAssumptions: string[];
+};
 export declare class RoundCoordinator {
     private store;
     constructor(store?: LoopStore);

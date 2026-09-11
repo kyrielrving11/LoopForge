@@ -3,28 +3,22 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync, } from "node:fs";
 import { resolve } from "node:path";
 import { containInWorkspace } from "./workspace.js";
+/** v3.8.1: the policy schema version. A policy file that does not declare
+ *  exactly this version is REJECTED — see loadPolicy. */
+export const POLICY_SCHEMA_VERSION = "4";
 export const DEFAULT_POLICY = {
-    version: "3",
+    version: POLICY_SCHEMA_VERSION,
     constraints: { retire_window: 3 },
-    summary: { window: 5, health_check_interval: 1, milestone_interval: 20, max_milestones: 10, milestone_head_count: 3, milestone_tail_count: 3 },
+    summary: { window: 5, milestone_interval: 20 },
     engine: { stall_lookback_rounds: 3, max_rounds: 200, enforcement_escalation_enabled: true, backtrack_enabled: true, backtrack_max_depth: 3, backtrack_preserve_discoveries: true, unverified_claim_streak_limit: 3 },
     prompt: {
-        full_refresh_interval: 0,
         l0_max_chars: 3000,
         l1_max_chars: 7000,
         l2_max_chars: 18000,
-        l2_adaptive_enabled: true,
-        l2_adaptive_round_factor: 200,
-        l2_adaptive_milestone_factor: 1000,
-        l2_adaptive_max_chars: 40000,
-        l2_adaptive_subgoal_factor: 100,
         l2_pointer_enabled: true,
-        l1_collapse_enabled: true,
-        contract_nudge_on_l2: true,
         max_emphasize_l2: 5,
         max_emphasize_l1: 3,
         max_confusion_points: 3,
-        confusion_section_threshold: 0.15,
     },
     backend: { root_dir: ".loopforge" },
     evolution: {
@@ -32,14 +26,7 @@ export const DEFAULT_POLICY = {
         max_active_constraints: 15,
         max_objective_versions: 10,
         progress_stall_threshold: 0.05,
-        progress_mismatch_threshold: 0.3,
-        task_continuity_threshold: 0.2,
-        criteria_dedup_threshold: 0.45,
-        subgoal_dedup_threshold: 0.6,
-        subgoal_match_threshold: 0.5,
         max_active_subgoals: 12,
-        constraint_match_threshold: 0.5,
-        constraint_id_enabled: true,
     },
     checkpoint: { outcome_max_chars: 200 },
     state_file: {
@@ -71,6 +58,11 @@ export function writeDefaultPolicy(targetDir, force = false) {
     writeFileSync(target, JSON.stringify(DEFAULT_POLICY, null, 2) + "\n", "utf8");
     return { path: target, created: true };
 }
+/** Merge a declared policy file over the defaults.
+ *
+ *  v3.8.1: an unknown key is an ERROR, not a warning. A typo used to be
+ *  announced and then ignored, so the loop ran on a value the operator never
+ *  set — the one outcome a configuration defect must never produce. */
 function deepMerge(defaults, overrides) {
     const result = { ...defaults };
     for (const key of Object.keys(overrides)) {
@@ -85,25 +77,46 @@ function deepMerge(defaults, overrides) {
             result[key] = incoming;
         }
         else {
-            // Warn on unknown keys — a typo like "max_round" instead of
-            // "max_rounds" would otherwise be silently ignored.
-            console.warn(`loopforge: ignoring unknown policy key "${key}". Check loop_policy.json for typos.`);
+            throw new Error(`unknown policy key "${key}" — remove it, or fix the typo. ` +
+                "This release carries no compatibility layer: a config written for an " +
+                "older schema is not a valid config for this one.");
         }
     }
     return result;
 }
+/** Load the runtime policy, or fall back to the defaults when no file
+ *  declares one.
+ *
+ *  v3.8.1: the `version` field is load-bearing. Previously it was a
+ *  declarative string that NOTHING read, so a policy written for an older
+ *  schema was silently merged over the current defaults — options that no
+ *  longer exist evaporated and options that changed meaning were applied
+ *  under their old name. Now a file either declares the current schema
+ *  version or the load fails, and the failure surfaces as `policy_invalid`
+ *  rather than the loop running on a configuration nobody chose.
+ *
+ *  A MISSING or unparseable file still falls through to the defaults (running
+ *  with no policy file is normal). A file that exists and parses is a
+ *  declaration, so its defects propagate instead of being swallowed. */
 export function loadPolicy(path) {
     const candidates = [path, "loop_policy.json"].filter(Boolean);
     for (const candidate of candidates) {
+        let raw;
         try {
-            const raw = JSON.parse(readFileSync(resolve(candidate), "utf8"));
-            if (raw && typeof raw === "object" && !Array.isArray(raw)) {
-                return deepMerge(DEFAULT_POLICY, raw);
-            }
+            raw = JSON.parse(readFileSync(resolve(candidate), "utf8"));
         }
         catch {
-            // Try the next candidate.
+            continue; // absent or unreadable — try the next candidate
         }
+        if (!raw || typeof raw !== "object" || Array.isArray(raw))
+            continue;
+        const version = raw.version;
+        if (version !== POLICY_SCHEMA_VERSION) {
+            throw new Error(`policy version ${JSON.stringify(version)} does not match the current ` +
+                `schema version "${POLICY_SCHEMA_VERSION}". Update the file; there is ` +
+                "no migration path.");
+        }
+        return deepMerge(DEFAULT_POLICY, raw);
     }
     return structuredClone(DEFAULT_POLICY);
 }
@@ -120,7 +133,7 @@ export function resetPolicy() {
     policy = null;
 }
 /** v3.2: Test-only injection — mirrors resetPolicy so tests can exercise a
- *  specific policy configuration (e.g. l1_collapse_enabled=false). */
+ *  specific policy configuration (e.g. state_file.enabled=false). */
 export function setPolicyForTest(next) {
     policy = next;
 }

@@ -46,6 +46,7 @@ function declaringRound(): CommittedRoundView {
     contractProposal: CONTRACT,
     contractBinding: { rc_id: "rc-aaaaaaaa", item_ids: [], config_hash_by_command: {} },
     beforeEvidence: [], afterEvidence: [], observationDelta: [], evidenceIncomplete: false,
+    backtrack: null,
   };
 }
 

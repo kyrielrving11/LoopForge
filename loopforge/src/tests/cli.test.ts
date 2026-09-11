@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { FileLoopStore } from "../loop-store.js";
+import { PROMPT_ARTIFACT_SCHEMA_VERSION } from "../protocol.js";
+import { POLICY_SCHEMA_VERSION } from "../policy.js";
 
 const cli = resolve("dist/cli.js");
 
@@ -110,13 +112,19 @@ describe("loopforge CLI", () => {
               phase: "committed",
               beforeEvidence: [],
               promptArtifact: {
-                schemaVersion: 1,
+                schemaVersion: PROMPT_ARTIFACT_SCHEMA_VERSION,
                 roundId: "loop:inspect-me:round:1",
+                round: 1,
                 attempt: 1,
                 level: "l2",
                 renderedPrompt: "TOP-SECRET-PROMPT-TEXT",
                 promptHash: "abc123",
                 stateHash: "def456",
+                sections: ["objective"],
+                droppedSections: [],
+                protectedOverflow: false,
+                budget: 18000,
+                renderedChars: 21,
               },
               createdAt: Date.now(),
               updatedAt: Date.now(),
@@ -229,7 +237,10 @@ describe("loopforge CLI", () => {
       const policyPath = join(root, "loop_policy.json");
       assert.ok(existsSync(policyPath), "loop_policy.json should exist");
       const raw = JSON.parse(readFileSync(policyPath, "utf8"));
-      assert.equal(raw.version, "3");
+      // v3.8.1: the written file must declare the CURRENT schema version —
+      // the version is load-bearing now, so a stale literal here would make
+      // `init` produce a policy the runtime rejects.
+      assert.equal(raw.version, POLICY_SCHEMA_VERSION);
       assert.equal(raw.engine.max_rounds, 200);
       assert.equal(raw.evidence.providers[0], "git");
     } finally {

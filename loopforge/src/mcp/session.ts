@@ -32,12 +32,13 @@ import type {
 } from "../protocol.js";
 import { buildLoopProjection } from "../loop-projection.js";
 import { deriveCognitiveFacts } from "../cognitive-facts.js";
+import { NO_IN_FLIGHT_ROUND, deriveRoundFacts } from "../round-facts.js";
 import { listVerifiedClaims } from "../evidence-claims.js";
 import { buildAudit } from "../audit.js";
 import { buildExplain } from "../explain.js";
-import { checkLoopHealth } from "../loop-compiler.js";
+import { CHECK_CONTRACT_ITEMS_UNVERIFIED } from "../verification-gate.js";
 import { deriveEmergedItems, validateSubGoalUpdates } from "../subgoal-state.js";
-import { committedRoundsFromEntries } from "../committed-round.js";
+import { derivationRounds } from "../committed-round.js";
 import { deriveActiveRoundContract, type ActiveContractView } from "../round-contract.js";
 import { getPolicy, validateLoopId } from "../policy.js";
 import { isRecord } from "../token-utils.js";
@@ -945,9 +946,21 @@ export class SessionManager implements SessionRegistry {
     // round; a stop / terminate / max_rounds leaves currentRound ON the round
     // it just committed, so the bound silently dropped the loop's final round
     // and the projection disagreed with audit and explain about it.
+    // v3.8.1: one window, one decode, one derivation. The contract facts come
+    // from the same `deriveRoundFacts` the compile path calls, so the prompt
+    // and the projection cannot tell different stories about what the machine
+    // verified.
+    const rounds = derivationRounds(entries);
     const projection = buildLoopProjection(deriveCognitiveFacts({
       compileResponse,
-      rounds: committedRoundsFromEntries(entries),
+      rounds,
+      facts: deriveRoundFacts({
+        rounds,
+        currentRound: (rounds[rounds.length - 1]?.round ?? 0) + 1,
+        inFlight: NO_IN_FLIGHT_ROUND,
+        subGoals: compileResponse?.sub_goals ?? [],
+        commands: getPolicy().evidence.commands ?? [],
+      }),
       verifiedClaims: listVerifiedClaims(entries, session.loopId),
       openGates,
     }));
@@ -982,7 +995,7 @@ export class SessionManager implements SessionRegistry {
     // Zero committed decisions → nothing to audit. Returning null lets the
     // tools layer report "no audit data" instead of the external auditor
     // solemnly passing a loop that never ran (or a mistyped loopId).
-    const hasCommittedDecision = committedRoundsFromEntries(entries).length > 0;
+    const hasCommittedDecision = derivationRounds(entries).length > 0;
     if (!hasCommittedDecision) return null;
     const audit = buildAudit(loopId, entries, this.loopStore);
     return { ...audit };
@@ -1001,7 +1014,7 @@ export class SessionManager implements SessionRegistry {
       ...queryLoopEntries(this.loopStore, session.loopId, { prefix, feedbackOnly: true }),
     ];
     return deriveActiveRoundContract(
-      committedRoundsFromEntries(entries, session.currentRound),
+      derivationRounds(entries, session.currentRound),
     );
   }
 
@@ -1025,53 +1038,38 @@ export class SessionManager implements SessionRegistry {
     return mergePolicyMetrics(derived, live);
   }
 
-  /** Get loop health for a loop (in-memory or vault).
-   *  Computes goal alignment, constraint integrity, drift, strategy stability. */
+  /** Get machine facts about a loop (in-memory or vault).
+   *
+   *  v3.8.1: this view used to report `goal_alignment`, `drift_detected`,
+   *  `strategy_stability` and `task_continuity`. Every one was a
+   *  text-similarity verdict rather than a fact, and two were degenerate in
+   *  THIS method specifically: `task_continuity` was pinned to 1.0 because the
+   *  request was built with `round: 1`, so `getPreviousRound(loopId, 0)`
+   *  returned null and the code took its hardcoded `?? 1` branch; and
+   *  `strategy_stability` was a literal `true`. What remains is counted
+   *  directly from committed round flags. */
   getHealth(loopId: string): Record<string, unknown> | null {
-    // Find the task — check in-memory sessions first, then vault
-    let task = "";
-    let goalId = loopId;
-
-    for (const s of this.sessions.values()) {
-      if (s.loopId === loopId) {
-        task = s.task;
-        if (s.engine.state?.task_id) {
-          goalId = s.engine.state.task_id;
-        }
-        break;
-      }
-    }
-
-    // Fall back to vault for task
-    if (!task) {
-      const sessionEntry = this.findSessionEntry(loopId);
-      if (sessionEntry) {
-        task = (sessionEntry.task as string) ?? "";
-      }
-    }
-
-    if (!task) return null;
-
-    // Hydrate vault context
     const engine = new LoopForgeEngine(this.loopStore);
-    const vaultContext = engine.hydrateLoopContext(loopId);
-
-    // Build a minimal request for health check
-    const request = makeLoopCompileRequest({
-      task,
-      loop_id: loopId,
-      goal_id: goalId,
-      round: 1, // round doesn't matter for health check
-    });
-
-    const health = checkLoopHealth(loopId, request, vaultContext);
+    const context = engine.hydrateLoopContext(loopId);
+    // No hydratable context at all → unknown loop. A started-but-uncommitted
+    // loop DOES have a context (the compile persists a lineage entry), so it
+    // still gets a view — with zeros — exactly as it did before.
+    if (!context) return null;
+    const entries = Array.isArray(context.results) ? context.results : [];
+    const views = derivationRounds(entries);
+    const roundsWithUnverifiedItems = views.filter((view) =>
+      view.verificationFlags.some(
+        (flag) => flag.check === CHECK_CONTRACT_ITEMS_UNVERIFIED,
+      ),
+    ).length;
     return {
       loopId,
-      goal_alignment: health.goal_alignment,
-      constraint_integrity: health.constraint_integrity,
-      drift_detected: health.drift_detected,
-      strategy_stability: health.strategy_stability,
-      task_continuity: health.task_continuity,
+      committed_rounds: views.length,
+      rounds_with_unverified_items: roundsWithUnverifiedItems,
+      // The policy value the enforcement gate escalates on. The streak itself
+      // is derived in the gate — re-deriving it here would be a second
+      // implementation of the same rule, which is what this release removes.
+      unverified_streak_limit: getPolicy().engine.unverified_claim_streak_limit,
       policy_metrics: this.getPolicyMetrics(loopId),
     };
   }

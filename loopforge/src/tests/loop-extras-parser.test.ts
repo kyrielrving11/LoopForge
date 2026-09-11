@@ -173,7 +173,6 @@ describe("parseLoopExtras", () => {
       constraints_from_plan: ["No data loss", "Preserve API"],
       new_since_last_round: "Fixed reentrancy",
       force_level: "l2",
-      health_check_interval: 2,
       external_context: "Context from CI",
       max_rounds: 15,
       verification_flags: [{
@@ -197,7 +196,6 @@ describe("parseLoopExtras", () => {
     assert.equal(parsed.plan_source, "docs/plan.md");
     assert.deepEqual(parsed.constraints_from_plan, ["No data loss", "Preserve API"]);
     assert.equal(parsed.force_level, "l2");
-    assert.equal(parsed.health_check_interval, 2);
     assert.equal(parsed.max_rounds, 15);
     assert.equal(parsed.verification_flags.length, 1);
     assert.equal(parsed.attempt, 2);

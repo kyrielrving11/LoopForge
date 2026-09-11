@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { FileLoopStore, StorageCorruptionError } from "../loop-store.js";
 import { prepareRoundTransaction } from "../round-transaction.js";
 import type { PromptArtifact } from "../protocol.js";
+import { PROMPT_ARTIFACT_SCHEMA_VERSION } from "../protocol.js";
 import type { VaultEntry } from "../loop-store.js";
 
 function temporaryDirectory(): string {
@@ -53,13 +54,19 @@ describe("FileLoopStore", () => {
       const store = new FileLoopStore(root);
       const loopId = "typed-store";
       const artifact: PromptArtifact = {
-        schemaVersion: 1,
+        schemaVersion: PROMPT_ARTIFACT_SCHEMA_VERSION,
         roundId: `loop:${loopId}:round:1`,
+        round: 1,
         attempt: 1,
         level: "l2",
         renderedPrompt: "prompt",
         promptHash: "prompt-hash",
         stateHash: "state-hash",
+        sections: ["objective"],
+        droppedSections: [],
+        protectedOverflow: false,
+        budget: 18000,
+        renderedChars: 6,
       };
       const snapshot = {
         ...prepareRoundTransaction(loopId, 1, [], artifact),

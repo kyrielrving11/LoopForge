@@ -22,7 +22,7 @@ import { isPassedAfterObservation } from "./evidence-provider.js";
 import { getPolicy } from "./policy.js";
 import { makeVerificationFlag, makeVerificationResult } from "./protocol.js";
 import { isRecord, entryRound, extractFilePathTokens } from "./token-utils.js";
-import { committedRoundsFromEntries, machineGitMotionSeries, entryViolations, } from "./committed-round.js";
+import { derivationRounds, machineGitMotionSeries, entryViolations, } from "./committed-round.js";
 import { deriveActiveRoundContract, sameContract, } from "./round-contract.js";
 import { deriveContractItemStatuses, } from "./contract-items.js";
 import { deriveClaimView, resolveRoundFiles } from "./evidence-claims.js";
@@ -253,7 +253,7 @@ export function deriveEvidenceStatus(selfEval, evidenceSnapshots) {
 }
 /** Per-round machine progress over decoded committed history. */
 export function machineProgressSeries(vaultEntries, currentRound, lookback) {
-    return machineGitMotionSeries(committedRoundsFromEntries(vaultEntries, currentRound), currentRound, lookback);
+    return machineGitMotionSeries(derivationRounds(vaultEntries, currentRound), currentRound, lookback);
 }
 // ═══════════════════════════════════════════════════════════════════════════
 // Individual checks — each returns a VerificationFlag or null
@@ -1021,7 +1021,7 @@ gateEntries = []) {
     // round_contract is a PROPOSAL for the next round and never participates
     // (the eval under verification is not yet committed, so it structurally
     // cannot influence the derivation).
-    const committedRounds = committedRoundsFromEntries(vaultEntries, currentRound);
+    const committedRounds = derivationRounds(vaultEntries, currentRound);
     const activeContract = deriveActiveRoundContract(committedRounds);
     // v3.8: The item-level status of the ACTIVE contract for THIS round — the
     // same reducer the compile path, audit, and explain consume.

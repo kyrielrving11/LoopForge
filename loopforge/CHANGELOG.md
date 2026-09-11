@@ -1,5 +1,196 @@
 # Changelog
 
+## 3.8.1 (2026-09-11)
+
+**The convergence release.** 3.8.0 established the boundaries — one factual
+source, one cognitive source, a claim/observation/verification split. 3.8.1
+removes what grew on top of them: a single data flow that still had several
+parallel ways to say the same thing. Nothing is added. 1,799 lines in, 2,511
+lines out across `src/`. No compatibility is carried: the protocol field set,
+the policy schema and both versioned envelopes are this version's.
+
+### Text similarity is gone
+
+`jaccardSimilarity`, `tokenize`, `isCjkCodePoint` and all seven similarity
+thresholds (`criteria_dedup_threshold`, `subgoal_dedup_threshold`,
+`subgoal_match_threshold`, `constraint_match_threshold`,
+`task_continuity_threshold`, `progress_mismatch_threshold`,
+`confusion_section_threshold`) are deleted. Relationships are established by a
+stable id, explicit refs, normalized-exact text, or a content hash — never by a
+score.
+
+The honest accounting: **no verification check was ever driven by Jaccard**,
+and of the eleven enforcement rows exactly one (`round_scope_drift`) is
+matching-driven — and that is path containment, not text similarity. So this is
+not a bug fix in the gates. What it removes is the *concept*: a score that
+could stand in for an identity, plus the policy surface that made it
+configurable.
+
+- `criteriaMatch`, `matchesConstraintText`, `matchEmphasize`: id, then
+  normalized-exact. A paraphrase is a different thing.
+- `CriterionStatus.related_subgoal_ids` reads the Contract item's explicit
+  `subgoal_refs` — a criterion is never linked to a sub-goal it merely
+  resembles.
+- `possibleDuplicateSubGoals` (a cross-round near-duplicate warning that never
+  reached the prompt) becomes `duplicateEmergedDeclarations`: the same-round
+  EXACT repeats that `deriveEmergedItems` really did drop, reported as
+  `duplicate_declaration`. Those entries genuinely were discarded; saying so is
+  a fact, not a guess.
+- `confusion_points` keeps its section, cap and 200-char truncation; the
+  eight-keyword similarity scoring that picked a state-file section is gone.
+  It was nearly always wrong anyway — "I don't understand milestone tracking"
+  scores 0.125 against the keyword `milestone`, below the 0.15 default.
+- Dead `contractItemMatches` (zero callers) deleted.
+
+### The presentation layer stopped being an input
+
+`PresentedStateSnapshot` — persisted onto the vault lineage entry as
+`presented_constraint_ids` / `presented_subgoals` /
+`presented_milestone_ranges` — existed so the NEXT L1 prompt could fold
+unchanged content into "… N unchanged (see state file)" pointer lines. Those
+pointer lines entered the prompt text, so `promptHash` depended on what the
+previous prompt had happened to show. Deleted, along with `readPresentedBaseline`,
+`diffConstraints`, `diffSubGoals`, `milestoneBoundaryChanged`, `l1_collapse_enabled`,
+and the four `l2_adaptive_*` knobs (a budget that scaled with round count is a
+prompt whose allowed content depends on how long the loop has been running).
+
+Both the presentation snapshot and the adaptive budget are gone; `l2_pointer_enabled`
+stays. The one fact the folded branch carried that a plain list does not —
+"(violated this round)" — moved to the full render, so it was not lost with the
+mechanism that happened to host it.
+
+### Diagnostics left the prompt; the valueless ones were deleted
+
+Trust score and trend are **deleted outright**, not moved. The score was
+`1 - errors*0.15 - warns*0.03` — arbitrary weights re-encoding flag counts that
+are already visible. The trend was worse: `1 - violations*0.1` per round, from
+`constraint_violations`, i.e. a DIFFERENT source from the score it was
+displayed beside. "Trend" was never that score's history.
+
+`buildRoadmap` is deleted; its only non-duplicated fact — position and distance
+to the next boundary — survives as a one-line phase. The other three lines
+(met/remaining criteria with ids, sub-goal activity) were already rendered by
+the sections that own them. `LoopHealth` and `TaskAlignment` are deleted with
+it: every field was a similarity verdict, and two were degenerate in the
+view that reported them (`task_continuity` was pinned to 1.0 because the
+request was built with `round: 1`; `strategy_stability` was a literal `true`).
+
+The L2 Progress Dashboard and Round Stats sections are deleted — they
+re-composed `criterionStatuses` into a table and mixed in the agent's OWN
+completion estimate and test counts. The criterion list and the machine
+git/criteria rows still render in the state file.
+
+`roundStats` turned out to be **dead data that participated in `stateHash`**:
+its only reader was the L2 section being deleted, and the state file never
+rendered it. Deleted rather than given a new renderer.
+
+### One recurring-fact derivation, two windows
+
+`deriveLessons` (whole history, count >= 2), `rolling_summary.recurring_issues`
+(the last 5 rounds' raw violation texts, with NO threshold at all despite the
+name) and the prompt sections built on each were three windows over one fact
+set. `deriveRecurringFlags(committedRounds)` is now the single derivation
+(`{subject, kind, ref, count, rounds}`, no threshold — the threshold belongs to
+the renderer). The state file shows the genuinely recurring set
+(`## Recurring Flags`, rounds >= 2); the prompt shows the recent tail
+(`## Active Warnings`, last 3 committed rounds, <= 5 lines, each carrying the
+check, the id it was about, the count and the latest round). L1 and L2 call the
+same function, so the two levels cannot describe "what is going wrong right
+now" differently.
+
+A side effect worth naming: the derivation takes `CommittedRoundView[]`, while
+the old one fell back to reading raw entry fields. The "a delegation journal
+must not double-count a violation" regression therefore stopped being a
+behavioural invariant and became a structural one.
+
+### Fixed priority, a protected set, and deterministic truncation
+
+`renderWithinBudget` was greedy first-fit in declaration order: mandatory
+sections joined unconditionally, optional ones appended while they fit,
+otherwise dropped whole and silently. A single large early section could push
+out every later one.
+
+`SECTION_PRIORITY` (one table, in `prompt-assembler.ts`) fixes the order.
+Section order is a property of the section, not of policy: a budget knob must
+not be able to change which facts count as more important. The protected set
+(objective, current task, hard constraints, verification flags, the rejection's
+required fix, critical context) is never dropped or truncated. Everything else
+is cut **strictly lowest-priority-first** — greedy first-fit is explicitly NOT
+the rule, because it can render a small low-priority section into room a larger
+high-priority one could not use, so "Blockers" could be missing while "Phase"
+is present. At most one optional section may be rendered partially, cut at a
+line boundary. When the protected set alone exceeds the budget the prompt is
+rendered anyway and `protectedOverflow` is set: an over-budget prompt is
+recorded, never silently produced.
+
+`PromptArtifact` is schema 2 and records what THIS prompt did: `round`,
+`sections`, `droppedSections`, `protectedOverflow`, `budget`, `renderedChars`.
+It records nothing about what a later prompt should do.
+
+### The policy version became load-bearing
+
+`LoopPolicy.version` was read by NOTHING. A config written for an older schema
+was silently merged over the current defaults — options that no longer existed
+evaporated and options that had changed meaning were applied under their old
+name. Now `loadPolicy` rejects a file whose version is not the current schema
+version (4), and an unknown key is an ERROR rather than a warning (a typo used
+to be announced and then ignored, so the loop ran on a value the operator never
+set). A missing file still falls back to the defaults; a file that exists and
+parses is a declaration, so its defects propagate as `policy_invalid` instead
+of being swallowed by the candidate loop.
+
+### Two hard breaks, both reported
+
+The transaction schema (2) and the PromptArtifact schema (2) are both versioned
+envelopes, and both are HARD breaks: a round whose envelope does not parse is
+not history. `legacyTransactionRounds()` now reports which envelope rejected
+each round — reporting only the transaction version would let an
+artifact-version break delete committed history silently, which is the one
+outcome that function exists to prevent.
+
+### Deleted as dead
+
+`suggestedNextTask` (written into the canonical state and the response, read by
+nothing), `health_check_interval` (a protocol field parsed and passed through,
+never read), `full_refresh_interval` together with the `periodic_refresh` level
+reason (a switch whose default 0 disabled its own branch), `contract_nudge_on_l2`,
+`state_drift`'s branch, `ActiveRoundContract` and `ActiveContractItem` in
+`protocol.ts` (duplicate declarations of the runtime's `ActiveContractView`;
+the wire schema described a type the runtime never used while the type it did
+use was absent from the contract), the unused imports in `enforcement-gate.ts`,
+and `constraint_id_enabled` — which never switched the matching strategy, only
+whether ids RENDERED, so turning it off could only produce a prompt whose items
+the agent could not name.
+
+The per-rule rejection counter (same check accumulates, a different check
+resets to 1) was two byte-identical copies, in the live advance path and the
+crash replay. One implementation now, so the two paths cannot drift.
+
+### Verification-debt and recovery semantics: unchanged
+
+This release does not touch the contract item model, the strict
+`contract_invalid` boundary, the closure rules, `MachineObservation`, the
+verification/enforcement split, round identity, leases, crash recovery, or the
+backtrack directives. The backtrack prompt still states restore FACTS and never
+prescribes a git command — the agent owns the restore, the gate owns the check.
+
+### Test suite
+
+Sixteen test files changed. Tests that existed only to pin a deleted mechanism
+were deleted rather than adapted (the L1 collapse blocks, the tokenizer and
+Jaccard suites, `possibleDuplicateSubGoals`, `state_drift`, the
+`constraint_id_enabled` kill switch, the `LoopHealth`/`TaskAlignment` schema
+cases, the `contract_nudge_on_l2` kill switch, the periodic-refresh level
+cases). New invariants were added for what replaced them: normalized-exact
+identity (a paraphrase must compare unequal), same-round declaration
+duplicates, recurring flags counted once per occurrence, the two render windows
+over one list, the milestone history cap applied identically at every level,
+and the budget rules — protected content survives a crushing ceiling,
+`protectedOverflow` is recorded, every rendered optional section outranks every
+dropped one, and identical input yields an identical prompt and artifact.
+
+884 tests.
+
 ## 3.8.0 (2026-09-10)
 
 The verification-boundary version. The two sources are untouched — the Vault's

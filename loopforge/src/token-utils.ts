@@ -1,63 +1,14 @@
-/** Shared token utilities — Jaccard similarity, dedup, vault entry helpers.
+/** Shared token helpers — content-addressed ids, contract canonicalization,
+ *  normalization, and vault entry accessors.
  *
- * Single source of truth for tokenization and similarity functions used
- * by the compiler, verification gate, and canonical state renderer.
- *
- * Latin alphanumerics tokenize as whole words; consecutive CJK characters
- * tokenize as overlapping 2-grams (a lone CJK character is its own token)
- * so CJK similarity takes intermediate values instead of collapsing to
- * 0/1. The ranges cover Unified Ideographs, Compatibility Ideographs and
- * Extensions B–F (surrogate-pair code points the legacy regex missed).
+ *  v3.8.1: `tokenize`, `isCjkCodePoint` and `jaccardSimilarity` are gone.
+ *  They existed to grade how alike two strings were, and every caller used
+ *  that grade as a relationship (same criterion, same constraint, same
+ *  sub-goal, task drift). Relationships now come from stable ids, explicit
+ *  refs, normalized-exact text, or content hashes — never from a score.
  */
 
 import { createHash } from "node:crypto";
-
-// ── Tokenization & similarity ──────────────────────────────────────────────
-
-/** CJK ranges: Unified Ideographs (U+3400–U+9FFF), Compatibility Ideographs
- *  (U+F900–U+FAFF), Extensions B–F (U+20000–U+2FA1F). */
-function isCjkCodePoint(code: number): boolean {
-  return (code >= 0x3400 && code <= 0x9fff)
-    || (code >= 0xf900 && code <= 0xfaff)
-    || (code >= 0x20000 && code <= 0x2fa1f);
-}
-
-/** Tokenize text into a set of lowercase ASCII words and CJK bigrams.
- *  Scripts are tokenized independently, so mixed text yields per-script
- *  tokens (e.g. "修复bug重入" → {修复, bug, 重入}). */
-export function tokenize(text: string): Set<string> {
-  const tokens = new Set<string>();
-  let ascii = "";
-  let cjk: string[] = [];
-  const flushAscii = (): void => { if (ascii.length > 0) { tokens.add(ascii); ascii = ""; } };
-  const flushCjk = (): void => {
-    if (cjk.length === 1) tokens.add(cjk[0]);
-    else for (let i = 0; i + 1 < cjk.length; i++) tokens.add(cjk[i] + cjk[i + 1]);
-    cjk = [];
-  };
-  for (const ch of text.toLowerCase()) {
-    const code = ch.codePointAt(0) ?? 0;
-    if ((code >= 0x30 && code <= 0x39) || (code >= 0x61 && code <= 0x7a)) { flushCjk(); ascii += ch; }
-    else if (isCjkCodePoint(code)) { flushAscii(); cjk.push(ch); }
-    else { flushAscii(); flushCjk(); }
-  }
-  flushAscii();
-  flushCjk();
-  return tokens;
-}
-
-/** Jaccard similarity in [0, 1]. Returns 0 when either side is empty —
- *  an empty description carries no information and must not match
- *  everything (a score of 1 would make `[""]` a wildcard that falsely
- *  marks sub-goals done or suppresses criteria milestones). */
-export function jaccardSimilarity(left: string, right: string): number {
-  const a = tokenize(left);
-  const b = tokenize(right);
-  if (a.size === 0 || b.size === 0) return 0;
-  let intersection = 0;
-  for (const value of a) if (b.has(value)) intersection++;
-  return intersection / new Set([...a, ...b]).size;
-}
 
 // ── Dedup helper ───────────────────────────────────────────────────────────
 
@@ -111,7 +62,7 @@ export const STABLE_ID_RE = /^(c|cr|sg|rc|rci)-[a-f0-9]{8}$/;
 // ── v3.8: Contract identity (content-addressed, round-independent) ──────────
 
 /** Normalize one contract text field for identity purposes. */
-export function normalizeContractText(text: string): string {
+export function normalizeText(text: string): string {
   return text.trim().replace(/\s+/g, " ").toLowerCase();
 }
 
@@ -135,13 +86,13 @@ export function canonicalContractText(contract: {
   items: ContractIdentityItem[];
 }): string {
   const canonical = {
-    work_item: normalizeContractText(contract.work_item ?? ""),
-    scope: contract.scope.map(normalizeContractText),
+    work_item: normalizeText(contract.work_item ?? ""),
+    scope: contract.scope.map(normalizeText),
     items: contract.items.map((item) => ({
-      description: normalizeContractText(item.description),
-      criterion_refs: item.criterion_refs.map(normalizeContractText),
-      subgoal_refs: item.subgoal_refs.map(normalizeContractText),
-      verify_with: item.verify_with.map(normalizeContractText),
+      description: normalizeText(item.description),
+      criterion_refs: item.criterion_refs.map(normalizeText),
+      subgoal_refs: item.subgoal_refs.map(normalizeText),
+      verify_with: item.verify_with.map(normalizeText),
     })),
   };
   return JSON.stringify(canonical);
@@ -163,10 +114,10 @@ export function deriveContractItemId(
   duplicateOrdinal: number,
 ): string {
   const canonical = JSON.stringify({
-    description: normalizeContractText(item.description),
-    criterion_refs: item.criterion_refs.map(normalizeContractText),
-    subgoal_refs: item.subgoal_refs.map(normalizeContractText),
-    verify_with: item.verify_with.map(normalizeContractText),
+    description: normalizeText(item.description),
+    criterion_refs: item.criterion_refs.map(normalizeText),
+    subgoal_refs: item.subgoal_refs.map(normalizeText),
+    verify_with: item.verify_with.map(normalizeText),
     duplicate_ordinal: duplicateOrdinal,
   });
   return `rci-${deriveItemId(canonical)}`;
@@ -181,10 +132,10 @@ export function deriveContractItemIds(
   const seen = new Map<string, number>();
   return items.map((item) => {
     const key = JSON.stringify({
-      description: normalizeContractText(item.description),
-      criterion_refs: item.criterion_refs.map(normalizeContractText),
-      subgoal_refs: item.subgoal_refs.map(normalizeContractText),
-      verify_with: item.verify_with.map(normalizeContractText),
+      description: normalizeText(item.description),
+      criterion_refs: item.criterion_refs.map(normalizeText),
+      subgoal_refs: item.subgoal_refs.map(normalizeText),
+      verify_with: item.verify_with.map(normalizeText),
     });
     const ordinal = seen.get(key) ?? 0;
     seen.set(key, ordinal + 1);

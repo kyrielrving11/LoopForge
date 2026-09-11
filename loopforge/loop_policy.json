@@ -1,15 +1,11 @@
 {
-  "version": "3",
+  "version": "4",
   "constraints": {
     "retire_window": 3
   },
   "summary": {
     "window": 5,
-    "health_check_interval": 1,
-    "milestone_interval": 20,
-    "max_milestones": 10,
-    "milestone_head_count": 3,
-    "milestone_tail_count": 3
+    "milestone_interval": 20
   },
   "engine": {
     "stall_lookback_rounds": 3,
@@ -21,22 +17,13 @@
     "unverified_claim_streak_limit": 3
   },
   "prompt": {
-    "full_refresh_interval": 0,
     "l0_max_chars": 3000,
     "l1_max_chars": 7000,
     "l2_max_chars": 18000,
-    "l2_adaptive_enabled": true,
-    "l2_adaptive_round_factor": 200,
-    "l2_adaptive_milestone_factor": 1000,
-    "l2_adaptive_max_chars": 40000,
-    "l2_adaptive_subgoal_factor": 100,
     "l2_pointer_enabled": true,
-    "l1_collapse_enabled": true,
-    "contract_nudge_on_l2": true,
     "max_emphasize_l2": 5,
     "max_emphasize_l1": 3,
-    "max_confusion_points": 3,
-    "confusion_section_threshold": 0.15
+    "max_confusion_points": 3
   },
   "backend": {
     "root_dir": ".loopforge"
@@ -46,14 +33,7 @@
     "max_active_constraints": 15,
     "max_objective_versions": 10,
     "progress_stall_threshold": 0.05,
-    "progress_mismatch_threshold": 0.3,
-    "task_continuity_threshold": 0.2,
-    "criteria_dedup_threshold": 0.45,
-    "subgoal_dedup_threshold": 0.6,
-    "subgoal_match_threshold": 0.5,
-    "max_active_subgoals": 12,
-    "constraint_match_threshold": 0.5,
-    "constraint_id_enabled": true
+    "max_active_subgoals": 12
   },
   "checkpoint": {
     "outcome_max_chars": 200

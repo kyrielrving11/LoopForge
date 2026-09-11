@@ -10,19 +10,16 @@ import type { SummaryPolicy } from "./policy.js";
 import {
   AgentStatus,
   makeLoopCompileResponse,
-  makeLoopHealth,
   makeLoopObjective,
   makeConstraintMeta,
   makeMilestoneSummary,
   makeRollingSummary,
   makeSubGoal,
-  makeTaskAlignment,
   type ConstraintMeta,
   type CriterionStatus,
-  type Lesson,
+  type RecurringFlag,
   type LoopCompileRequest,
   type LoopCompileResponse,
-  type LoopHealth,
   type LoopObjective,
   type LoopRoundResult,
   type MilestoneSummary,
@@ -30,15 +27,15 @@ import {
   type ContractItemStatus,
   type SubGoal,
   type SubGoalUpdate,
-  type TaskAlignment,
   type VerificationFlag,
 } from "./protocol.js";
 import {
   createCanonicalLoopState,
   renderCanonicalStateMarkdown,
 } from "./canonical-state.js";
-import type { MachineStatus, PresentedStateSnapshot, RoundStat } from "./canonical-state.js";
+import type { MachineStatus } from "./canonical-state.js";
 import {
+  decodeBacktrackRecord,
   decodeRound,
   entryLineage,
   entryExecutionReport,
@@ -51,22 +48,20 @@ import {
   entrySubGoalUpdates,
   type CommittedRoundView,
   machineGitMotionSeries,
-  mergedRoundsFromEntries,
+  derivationRounds,
 } from "./committed-round.js";
 import { deriveActiveRoundContract, type ActiveContractView } from "./round-contract.js";
-import { deriveSubGoals, possibleDuplicateSubGoals } from "./subgoal-state.js";
-import { deriveVerifiedSubGoals } from "./cognitive-facts.js";
-import {
-  deriveContractItemStatuses,
-  type ContractItemStatusView,
-} from "./contract-items.js";
+import { NO_IN_FLIGHT_ROUND, deriveRoundFacts } from "./round-facts.js";
+import { recoveryBriefLines } from "./enforcement-gate.js";
+import { deriveSubGoals, duplicateEmergedDeclarations } from "./subgoal-state.js";
+import type { ContractItemStatusView } from "./contract-items.js";
 import { claimedMetCriteria, claimedRemainingCriteria } from "./self-eval.js";
 import { assemblePromptArtifact } from "./prompt-assembler.js";
 import {
   decidePromptLevel,
   type PromptLevelDecision,
 } from "./prompt-policy.js";
-import { deriveItemId, STABLE_ID_RE, jaccardSimilarity, unique, entryRound, isRecord } from "./token-utils.js";
+import { deriveItemId, STABLE_ID_RE, normalizeText, unique, entryRound, isRecord } from "./token-utils.js";
 
 type Entry = Record<string, unknown>;
 
@@ -129,42 +124,6 @@ export function deriveGoalId(loopId: string, task: string, explicit = ""): strin
     .replace(/[^a-z0-9\u4e00-\u9fff]+/g, "-")
     .replace(/^-|-$/g, "")
     .slice(0, 48) || computeGoalTextHash(task)}`;
-}
-
-/** v3.2: Read the previous round's persisted L1 presentation snapshot — the
- *  diff baseline for L1 collapse. Returns null when the previous round's
- *  lineage entry lacks the three presented_* fields (as on L0/L2 compiles),
- *  so callers render the full L1 state. */
-export function readPresentedBaseline(
-  loopId: string,
-  round: number,
-  context: Record<string, unknown> | null,
-): PresentedStateSnapshot | null {
-  const entry = roundCanonicalEntry(loopEntries(loopId, context), round - 1);
-  if (!entry) return null;
-  const data = entryLineage(entry);
-  const constraintIds = data.presented_constraint_ids;
-  const subGoals = data.presented_subgoals;
-  const milestoneRanges = data.presented_milestone_ranges;
-  if (
-    !Array.isArray(constraintIds) || !constraintIds.every((v) => typeof v === "string") ||
-    !Array.isArray(subGoals) || !subGoals.every(
-      (v) => Array.isArray(v) && v.length === 2 &&
-        typeof v[0] === "string" && typeof v[1] === "string",
-    ) ||
-    !Array.isArray(milestoneRanges) || !milestoneRanges.every(
-      (v) => Array.isArray(v) && v.length === 2 &&
-        typeof v[0] === "number" && typeof v[1] === "number",
-    )
-  ) {
-    return null;
-  }
-  return {
-    round: round - 1,
-    constraintIds: constraintIds as string[],
-    subGoals: subGoals as Array<[string, string]>,
-    milestoneRanges: milestoneRanges as Array<[number, number]>,
-  };
 }
 
 export function getPreviousRound(
@@ -318,94 +277,56 @@ function evolveConstraints(
 // Hierarchical Summary (v2.1)
 // ═══════════════════════════════════════════════════════════════════════════
 
-/** v3.2: Deterministic lessons learned — constraints violated repeatedly or
- *  verification checks failing repeatedly across rounds (full history, unlike
- *  the enforcement gate's R2 3-round window). Presentation only: the output
- *  never feeds enforcement decisions. */
-export function deriveLessons(
-  loopId: string,
-  context: Record<string, unknown> | null,
-  currentRound: number,
-): Lesson[] {
-  const entries = loopEntries(loopId, context).filter(
-    (entry) => entryRound(entry) >= 1 && entryRound(entry) < currentRound,
-  );
-  const violations = new Map<string, number[]>();
-  const errors = new Map<string, number[]>();
-  const warns = new Map<string, number[]>();
-  for (const entry of entries) {
-    const rnd = entryRound(entry);
-    const view = decodeRound(entry);
-    const viols = view
-      ? view.constraintViolations ?? []
-      : Array.isArray(entry.constraint_violations)
-        ? entry.constraint_violations.filter((v): v is string => typeof v === "string")
-        : [];
-    for (const text of viols) {
-      const list = violations.get(text) ?? [];
-      list.push(rnd);
-      violations.set(text, list);
+/** v3.8.1: THE recurring-fact derivation — one walk over the committed
+ *  history, grouping repeated machine facts by what they are ABOUT.
+ *
+ *  This replaces three separate answers to "what keeps going wrong":
+ *  `deriveLessons` (whole history, count >= 2, keyed by constraint text or
+ *  check id), `rolling_summary.recurring_issues` (the last 5 rounds' raw
+ *  violation texts, with NO threshold at all despite the name), and the L1/L2
+ *  sections built on top of each. Three windows over one fact set is exactly
+ *  the parallel semantics this release removes.
+ *
+ *  Callers FILTER this list rather than re-deriving: the state file renders
+ *  the genuinely recurring set (count >= 2), the prompt renders the recent
+ *  tail as Active Warnings.
+ *
+ *  Presentation only: the result never feeds enforcement. */
+export function deriveRecurringFlags(
+  committedRounds: ReadonlyArray<CommittedRoundView>,
+): RecurringFlag[] {
+  const byKey = new Map<string, RecurringFlag>();
+  const record = (
+    kind: RecurringFlag["kind"],
+    subject: string,
+    ref: string,
+    round: number,
+  ): void => {
+    const key = `${kind} ${subject} ${ref}`;
+    const existing = byKey.get(key);
+    if (existing) {
+      existing.count++;
+      if (!existing.rounds.includes(round)) existing.rounds.push(round);
+      return;
     }
-    const flags = view
-      ? view.verificationFlags
-      : Array.isArray(entry.verification_flags) ? entry.verification_flags : [];
-    for (const flag of flags) {
-      const target = flag.severity === "error"
-        ? errors
-        : flag.severity === "warn" ? warns : null;
-      if (!target) continue;
-      const list = target.get(flag.check) ?? [];
-      list.push(rnd);
-      target.set(flag.check, list);
+    byKey.set(key, { subject, kind, ref, count: 1, rounds: [round] });
+  };
+  for (const round of committedRounds) {
+    for (const text of round.constraintViolations ?? []) {
+      record("constraint_violation", text, "", round.round);
     }
-  }
-  const lessons: Lesson[] = [];
-  for (const [text, rounds] of violations) {
-    if (rounds.length >= 2) {
-      lessons.push({ text, kind: "constraint_violation", count: rounds.length, rounds });
-    }
-  }
-  for (const [text, rounds] of errors) {
-    if (rounds.length >= 2) {
-      lessons.push({ text, kind: "verification_error", count: rounds.length, rounds });
+    for (const flag of round.verificationFlags) {
+      const kind: RecurringFlag["kind"] | null = flag.severity === "error"
+        ? "verification_error"
+        : flag.severity === "warn" ? "verification_warning" : null;
+      if (!kind) continue;
+      record(kind, flag.check, flag.ref ?? "", round.round);
     }
   }
-  for (const [text, rounds] of warns) {
-    if (rounds.length >= 2) {
-      lessons.push({ text, kind: "verification_warning", count: rounds.length, rounds });
-    }
-  }
-  return lessons.sort((a, b) => b.count - a.count);
-}
-
-/** v3.3: Derive display-only round statistics over the last `window`
- *  committed rounds — files changed, rejected attempts (snapshot.attempt
- *  minus one: the successful commit's attempt counts the redo), and the
- *  self-reported progress delta vs the previous round. One row per round,
- *  preferring the :feedback entry when both lineage and feedback entries
- *  exist. Zero persistence — re-derived from committed entries. */
-function deriveRoundStats(
-  rounds: ReadonlyArray<CommittedRoundView>,
-  window = 5,
-): RoundStat[] {
-  const stats: RoundStat[] = [];
-  let prevProgress: number | null = null;
-  for (const round of rounds.slice(-window)) {
-    const ev = round.executionReport;
-    const files = ev?.files_changed;
-    const rawProgress = ev?.progress_estimate;
-    const progress = typeof rawProgress === "number" ? rawProgress : null;
-    stats.push({
-      round: round.round,
-      filesChangedCount: Array.isArray(files) ? files.length : null,
-      rejectedAttempts: round.attempt >= 1 ? round.attempt - 1 : null,
-      progressDelta: progress !== null && prevProgress !== null
-        ? Number((progress - prevProgress).toFixed(3))
-        : null,
-    });
-    if (progress !== null) prevProgress = progress;
-  }
-  return stats;
+  return [...byKey.values()].sort((a, b) =>
+    b.count - a.count ||
+    a.subject.localeCompare(b.subject) ||
+    a.ref.localeCompare(b.ref));
 }
 
 /** v3.3: Machine git-motion cross-check over the last 3 committed rounds
@@ -442,16 +363,16 @@ function deriveActiveContract(
     roundCanonicalEntry(entries, index + 1),
   ).filter((entry): entry is Entry => entry !== null);
   return deriveActiveRoundContract(
-    mergedRoundsFromEntries(canonical, currentRound),
+    derivationRounds(canonical, currentRound),
   );
 }
 
 /** v3.2: Derive per-criterion status — the "goal → criteria → evidence"
  *  vertical view. Each objective criterion gets: met/remaining/unknown
- *  (from per-round criterion_claims, ID-first
- *  matching), the round it was first reported met, and any sub-goals whose
- *  description matches it (Jaccard). Zero persistence — re-derived from the
- *  vault every compile. */
+ *  (from per-round criterion_claims, ID-first or normalized-exact matching),
+ *  the round it was first reported met, and the sub-goals a contract item
+ *  referencing it also names (explicit `subgoal_refs`, never a text guess).
+ *  Zero persistence — re-derived from the vault every compile. */
 export function deriveCriterionStatuses(
   loopId: string,
   context: Record<string, unknown> | null,
@@ -478,11 +399,28 @@ export function deriveCriterionStatuses(
   const lastRemaining = claimedRemainingCriteria(lastEv);
   const lastEntry = entries[entries.length - 1] ?? null;
   const lastEntryRemaining = lastEntry ? entryCriteriaRemaining(lastEntry) : [];
-  const matchThreshold = getPolicy().evolution.subgoal_match_threshold;
   // v3.8: criterion → item status, derived from the contract's item refs.
   type MachineCriterionStatus = Exclude<ContractItemStatus, "pending">;
   const itemStatusByCriterion = new Map<string, MachineCriterionStatus>();
+  // v3.8.1: criterion → the sub-goals an item referencing it also names.
+  // EXPLICIT refs only (`ContractItemProposal.subgoal_refs`); the former
+  // Jaccard guess at "which sub-goal is this criterion about" is gone, so a
+  // criterion is never linked to a sub-goal it merely resembles.
+  const subGoalsByCriterion = new Map<string, string[]>();
   const activeContract = verification?.activeContract ?? null;
+  if (activeContract) {
+    for (const item of activeContract.items) {
+      if (item.subgoal_refs.length === 0) continue;
+      for (const ref of item.criterion_refs) {
+        const criterionId = isCriterionId(ref) ? ref : deriveCriterionId(ref);
+        const linked = subGoalsByCriterion.get(criterionId) ?? [];
+        for (const subgoalId of item.subgoal_refs) {
+          if (!linked.includes(subgoalId)) linked.push(subgoalId);
+        }
+        subGoalsByCriterion.set(criterionId, linked);
+      }
+    }
+  }
   if (activeContract) {
     for (const item of activeContract.items) {
       const status = verification?.itemStatuses.items
@@ -527,9 +465,9 @@ export function deriveCriterionStatuses(
       text,
       status,
       ...(metAtRound !== null ? { met_at_round: metAtRound } : {}),
-      related_subgoal_ids: subGoals
-        .filter((sg) => jaccardSimilarity(text, sg.description) >= matchThreshold)
-        .map((sg) => sg.id),
+      // v3.8.1: explicit refs only — empty when no contract item links this
+      // criterion to a sub-goal.
+      related_subgoal_ids: subGoalsByCriterion.get(deriveCriterionId(text)) ?? [],
     };
   });
 }
@@ -549,11 +487,10 @@ function strongestStatus(
   return rank[right] > rank[left] ? right : left;
 }
 
-/** v2.11: Match two criterion references for deduplication.
- *  If either is a criterion ID (cr-XXXXXXXX), uses exact ID comparison.
- *  Otherwise falls back to Jaccard similarity.
- *  v3.3: exported for the verification gate's windowed criteria-completion
- *  scan (R4/R5 exculpatory cross-check). */
+/** Match two criterion references. If either is a criterion id
+ *  (cr-XXXXXXXX), compares ids; otherwise requires the two texts to be
+ *  EXACTLY equal after normalization (v3.8.1 — the similarity fallback is
+ *  gone, so a paraphrase is a different criterion). */
 export function criteriaMatch(a: string, b: string): boolean {
   const aIsId = isCriterionId(a);
   const bIsId = isCriterionId(b);
@@ -562,14 +499,17 @@ export function criteriaMatch(a: string, b: string): boolean {
   // One is an ID — derive ID from the other and compare
   if (aIsId) return a === deriveCriterionId(b);
   if (bIsId) return deriveCriterionId(a) === b;
-  // Neither is an ID — Jaccard fallback
-  return jaccardSimilarity(a, b) >= getPolicy().evolution.criteria_dedup_threshold;
+  // v3.8.1: normalized text must be EXACTLY equal. The former Jaccard
+  // fallback let two merely-similar criterion strings count as the same
+  // criterion, which could fuse distinct criteria (and suppress or invent a
+  // criteria milestone) on a similarity score rather than on an identity.
+  return normalizeText(a) === normalizeText(b);
 }
 
 /** Detect newly met criteria by comparing the current entry's
  *  met criterion_claims against the previous entry's.
- *  v2.11: ID-first matching (cr-XXXXXXXX) with Jaccard similarity
- *  fallback for natural-language references.
+ *  v2.11/v3.8.1: id-first (cr-XXXXXXXX), then normalized-exact text —
+ *  no similarity.
  *  Returns empty array when there is no previous entry — the first
  *  entry's criteria are the baseline, not a "new" event. */
 function detectNewCriteria(current: Entry, previous: Entry | null): string[] {
@@ -622,57 +562,13 @@ function buildMilestoneFromEntries(
   });
 }
 
-/** v3.0.1: Evenly sample `budget` entries from `mid`, preferring
- *  agent_declared milestones (human/agent-labeled anchors) first and filling
- *  the remainder at even time positions. The caller guarantees
- *  `mid.length > budget`. */
-function sampleMiddleMilestones(
-  mid: MilestoneSummary[],
-  budget: number,
-): MilestoneSummary[] {
-  if (budget <= 0) return [];
-  if (mid.length <= budget) return mid;
-  const chosen: MilestoneSummary[] = [];
-  const used = new Set<MilestoneSummary>();
-  for (const m of mid) {
-    if (m.kind === "agent_declared") {
-      chosen.push(m);
-      used.add(m);
-      if (chosen.length >= budget) return chosen;
-    }
-  }
-  const rest = mid.filter((m) => !used.has(m));
-  const need = budget - chosen.length;
-  for (let i = 0; i < need; i++) {
-    const idx = Math.floor(((i + 0.5) * rest.length) / need);
-    chosen.push(rest[idx]);
-  }
-  return chosen;
-}
-
-/** v3.0.1: L1 milestone sampling — when milestones exceed max_milestones,
- *  keep the oldest `milestone_head_count` (history anchors), the newest
- *  `milestone_tail_count` (current progress), and an even sample of the
- *  middle. L2 (full rehydration) is never sampled: the recovery view keeps
- *  every milestone as the loop's memory skeleton. */
-function sampleMilestones(
-  milestones: MilestoneSummary[],
-  policy: SummaryPolicy,
-  level?: string,
-): MilestoneSummary[] {
-  if (level === "l2") return milestones;
-  if (milestones.length <= policy.max_milestones) return milestones;
-  const head = Math.max(0, policy.milestone_head_count);
-  const tail = Math.max(0, policy.milestone_tail_count);
-  const midBudget = Math.max(0, policy.max_milestones - head - tail);
-  if (midBudget === 0) return milestones.slice(0, head).concat(milestones.slice(milestones.length - tail));
-  const mid = milestones.slice(head, milestones.length - tail);
-  return [
-    ...milestones.slice(0, head),
-    ...sampleMiddleMilestones(mid, midBudget),
-    ...milestones.slice(milestones.length - tail),
-  ];
-}
+/** v3.8.1: the milestone history bound. Applied identically at every prompt
+ *  level and in the state file, so the milestone set is a function of
+ *  committed facts rather than of which level happened to compile. (The
+ *  v3.0.1 sampler chose which milestones to keep from an UNBOUNDED list and
+ *  did nothing at L2 — so the state file’s phase history depended on the
+ *  prompt level and had no bound of its own.) */
+const MILESTONE_HISTORY_CAP = 50;
 
 export function buildRollingSummary(
   loopId: string,
@@ -692,7 +588,6 @@ export function buildRollingSummary(
     })
     .slice(-policy.window);
   const outcomes: string[] = [];
-  const issues: string[] = [];
   for (const entry of windowEntries) {
     const view = decodeRound(entry);
     const data = entryLineage(entry);
@@ -716,7 +611,6 @@ export function buildRollingSummary(
       : Array.isArray(entry.constraint_violations)
         ? entry.constraint_violations
         : Array.isArray(data.constraint_violations) ? data.constraint_violations : [];
-    issues.push(...violations.filter((item): item is string => typeof item === "string"));
   }
 
   // ── Phase 2: Milestone Accumulation ──
@@ -802,16 +696,18 @@ export function buildRollingSummary(
     }
   }
 
-  // v3.0.1: L1 keeps head anchors + newest tail + an even middle sample;
-  // L2 (full rehydration) keeps every milestone — the recovery view is the
-  // loop's memory skeleton and must not be truncated.
-  const cappedMilestones = sampleMilestones(milestones, policy, level);
+  // v3.8.1: one bound, applied identically at every prompt level. The v3.0.1
+  // sampler kept head anchors + a newest tail + an even middle sample, and
+  // deliberately did nothing at L2 — so the milestone set written to the state
+  // file depended on which level happened to compile, not on committed facts.
+  // It also did not bound growth at all (it only chose WHICH milestones to
+  // keep from an unbounded list), which is why the cap has to live here.
+  const cappedMilestones = milestones.slice(-MILESTONE_HISTORY_CAP);
 
   if (windowEntries.length === 0 && cappedMilestones.length === 0) return null;
 
   return makeRollingSummary({
     key_outcomes: unique(outcomes),
-    recurring_issues: unique(issues),
     rounds_sampled: windowEntries.length,
     generated_at_round: currentRound,
     failed_patterns: [],
@@ -861,19 +757,18 @@ function constraintSource(
   return "discovered";
 }
 
-/** Find the latest round a constraint was violated by scanning vault entries.
- *  v2.11: ID-first matching. Checks exact constraint ID match (c-XXXXXXXX)
- *  against the derived ID of each vault entry's constraint_violations, then
- *  falls back to Jaccard similarity on text. Returns 0 if never violated. */
-/** True when a reported violation text matches a constraint text — same
- *  ID-first + Jaccard fallback matching as findLastViolatedRound. */
+/** True when a reported violation text matches a constraint text.
+ *  v2.11: ID-first — an exact `c-XXXXXXXX` match against the derived id.
+ *  v3.8.1: the Jaccard fallback is gone; the remaining arm requires the
+ *  reported text to be EXACTLY equal to the constraint after normalization,
+ *  so a reported violation can no longer attach itself to a constraint it
+ *  merely resembles. */
 function matchesConstraintText(text: string, violation: string): boolean {
   const targetId = deriveConstraintId(text);
   if (violation === targetId || deriveConstraintId(violation) === targetId) {
     return true;
   }
-  return jaccardSimilarity(text, violation) >=
-    getPolicy().evolution.constraint_match_threshold;
+  return normalizeText(text) === normalizeText(violation);
 }
 
 function findLastViolatedRound(
@@ -960,51 +855,6 @@ function manageConstraintLifecycle(
   return { active, metadata };
 }
 
-export function alignTask(
-  proposedTask: string,
-  request: LoopCompileRequest,
-  context: Record<string, unknown> | null,
-): TaskAlignment {
-  const objective = request.loop_objective ?? latestObjective(request.loop_id, context);
-  if (!objective) return makeTaskAlignment();
-  // v2.14: threshold is policy-driven (evolution.progress_mismatch_threshold)
-  const threshold = getPolicy().evolution.progress_mismatch_threshold;
-  const score = jaccardSimilarity(
-    proposedTask,
-    [objective.objective, ...objective.success_criteria, ...objective.hard_constraints].join(" "),
-  );
-  return makeTaskAlignment({
-    is_aligned: score >= threshold,
-    alignment_score: Number(score.toFixed(2)),
-    warning: score < threshold ? "Current task may be drifting from the loop objective." : "",
-    escalation: score < threshold ? "warn" : "none",
-  });
-}
-
-export function checkLoopHealth(
-  loopId: string,
-  request: LoopCompileRequest,
-  context: Record<string, unknown> | null,
-): LoopHealth {
-  const previous = getPreviousRound(loopId, request.round - 1, context);
-  const alignment = alignTask(request.task, request, context);
-  const violations = request.last_round_result?.constraint_violations.length ?? 0;
-  const integrity = Math.max(0, 1 - violations * 0.2);
-  const continuity = previous ? jaccardSimilarity(previous.task, request.task) : 1;
-  // v2.14: thresholds are policy-driven
-  const drift =
-    alignment.alignment_score < getPolicy().evolution.progress_mismatch_threshold ||
-    continuity < getPolicy().evolution.task_continuity_threshold;
-  return makeLoopHealth({
-    goal_alignment: alignment.alignment_score,
-    constraint_integrity: integrity,
-    drift_detected: drift,
-    strategy_stability: true,
-    task_continuity: Number(continuity.toFixed(2)),
-    escalation_recommended: drift || integrity < 0.6 ? "l2" : "none",
-  });
-}
-
 function levelDecision(
   request: LoopCompileRequest,
   context: Record<string, unknown> | null,
@@ -1020,11 +870,6 @@ function levelDecision(
     last?.revised_success_criteria?.length ||
     last?.wrong_assumptions?.length,
   );
-  const lastFullRound = loopEntries(request.loop_id, context)
-    .filter((entry) => entryLineage(entry).recompile_level === "l2")
-    .map(entryRound)
-    .filter((round) => round < request.round)
-    .at(-1) ?? 1;
   // v2.14: a backtrack committed for this round means the loop is
   // re-walking restored state — the recovery boundary forces L2
   // rehydration (the decidePromptLevel recovery_boundary branch existed
@@ -1051,8 +896,6 @@ function levelDecision(
     verificationContradicted: (request.verification_flags ?? [])
       .some((flag) => flag.severity === "error"),
     consecutiveRejections: request.consecutive_rejections,
-    fullRefreshInterval: getPolicy().prompt.full_refresh_interval,
-    lastFullRound,
   });
 }
 
@@ -1075,12 +918,6 @@ export function buildSelfEvalBlock(
    *  to restate/propose it — a generic empty contract template would invite
    *  placeholder submissions that trigger round_underspecified noise. */
   hasContract = false,
-  /** v3.5: L2-only prose suggesting a Round Contract declaration when the
-   *  Current Task is NOT one (contract_nudge_on_l2 policy, computed at the
-   *  compileLoop call site). Mutually exclusive with hasContract. The prose
-   *  must never contain the JSON key name `round_contract` — contract-less
-   *  L2 tests assert its lowercase absence. */
-  proposalNudge = false,
 ): string {
   const declareOutcome = level !== "l0";
   const restateContract = hasContract && declareOutcome;
@@ -1151,17 +988,6 @@ export function buildSelfEvalBlock(
   lines.push("Use IDs for exact matching: c-XXXXXXXX, cr-XXXXXXXX, sg-XXXXXXXX.");
   lines.push("Sub-goal changes go through `subgoal_updates` (active sub-goal IDs only;");
   lines.push("done/canceled are terminal — reopen via `emerged_subtasks`; bad IDs reject).");
-  // v3.5: L2 contract-less nudge (prose only — never the JSON key name, so
-  // contract-less rounds keep their template-lean assertions).
-  if (proposalNudge) {
-    lines.push(
-      "",
-      "If the remaining work will span several rounds, consider declaring a",
-      "Round Contract for the next round — list its done_when items, the",
-      "verification_plan commands that will back them, and the scope. This",
-      "keeps each round's boundary machine-checkable.",
-    );
-  }
   if (restateContract) {
     lines.push(
       "Round Contract: restate the Current Task's contract UNCHANGED in",
@@ -1199,31 +1025,21 @@ function committedBacktrackBrief(
     (e) => entryLineage(e).committed_action === "backtrack" && entryRound(e) === round,
   );
   if (!entry) return undefined;
-  // Read the facts the engine stamped onto the merged lineage entry from
-  // the committed rollback decision (engine.ts mergeCommittedRound).
-  const lineage = entryLineage(entry);
-  const asStrings = (value: unknown): string[] =>
-    Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
-  const asNumbers = (value: unknown): number[] =>
-    Array.isArray(value) ? value.filter((v): v is number => typeof v === "number") : [];
-  const failedRounds = asNumbers(lineage.backtrackFailedRounds);
-  const approaches = asStrings(lineage.backtrackApproaches).slice(0, 6);
-  const assumptions = asStrings(lineage.backtrackWrongAssumptions).slice(0, 5);
-  const target = typeof lineage.backtrackTarget === "number" ? lineage.backtrackTarget : 0;
-  const trigger = typeof lineage.backtrackTriggerRule === "string"
-    ? lineage.backtrackTriggerRule
-    : "unknown";
-  const lines = [
-    `- **Trigger**: ${trigger}`,
-    `- **Restored to round**: ${target} (redo round ${target + 1})`,
-  ];
-  if (failedRounds.length > 0) lines.push(`- **Failed rounds**: ${failedRounds.join(", ")}`);
-  for (const approach of approaches) lines.push(`  - Failed approach: ${approach}`);
-  if (assumptions.length > 0) {
-    lines.push("- **Falsified assumptions** (do not rebuild on these):");
-    for (const assumption of assumptions) lines.push(`  - ${assumption}`);
-  }
-  return lines;
+  // v3.8.1: one decoder for the committed rollback record and one renderer for
+  // the brief. The facts ride on the merged lineage entry (engine.ts stamps
+  // them from the committed decision) and the same `decodeBacktrackRecord`
+  // reads the durable :feedback envelope, so both carriers decode to one shape
+  // — and this brief and the rollback prompt no longer render the same
+  // rollback with two hand-written line builders.
+  const record = decodeBacktrackRecord(entryLineage(entry));
+  if (!record) return undefined;
+  return recoveryBriefLines({
+    target: record.target,
+    triggerRule: record.triggerRule,
+    failedRounds: record.failedRounds,
+    approaches: record.approaches,
+    wrongAssumptions: record.wrongAssumptions,
+  });
 }
 
 export function compileLoop(
@@ -1245,7 +1061,7 @@ export function compileLoop(
   const rolling = buildRollingSummary(request.loop_id, request.round, context, 0, decision.level);
   // v3.8: ONE committed-round derivation feeds every projection below
   // (sub-goals, the active contract, its item statuses, criteria).
-  const derivationRounds = mergedRoundsFromEntries(
+  const windowRounds = derivationRounds(
     loopEntries(request.loop_id, context),
     request.round,
   );
@@ -1254,7 +1070,7 @@ export function compileLoop(
   const subGoals = deriveSubGoals({
     loopId: request.loop_id,
     currentRound: request.round,
-    rounds: derivationRounds,
+    rounds: windowRounds,
     currentReport: request.last_round_result
       ? {
           round: request.last_round_result.round || (request.round - 1),
@@ -1263,27 +1079,24 @@ export function compileLoop(
         }
       : null,
   });
-  // v3.4/v3.8: the ACTIVE Round Contract and its derived item statuses for
-  // this compile. Derived from committed rounds, so rejection retries, resume,
-  // unpause and backtrack compiles (which carry no last_round_result) keep
-  // showing the same contract, and a verified or blocked contract stops being
-  // shown. The compile path has no in-flight observations of its own.
-  const activeContract = deriveActiveRoundContract(derivationRounds);
-  const contractItemStatuses = deriveContractItemStatuses({
-    contract: activeContract,
-    rounds: derivationRounds,
+  // v3.4/v3.8/v3.8.1: the ACTIVE Round Contract, its per-item statuses and the
+  // verified sub-goal facts for this compile — ONE `deriveRoundFacts` call,
+  // the same bundle the projection consumes. Derived from committed rounds, so
+  // rejection retries, resume, unpause and backtrack compiles (which carry no
+  // last_round_result) keep showing the same contract, and a verified or
+  // blocked contract stops being shown. A verified item stays proven after its
+  // contract closes because the bundle reads the whole history, not the active
+  // contract. The compile path has no in-flight observations of its own.
+  const roundFacts = deriveRoundFacts({
+    rounds: windowRounds,
     currentRound: request.round,
-    currentReport: null,
-    currentObservations: [],
-    commands: getPolicy().evidence.commands ?? [],
-  });
-  // v3.8: derived from the committed history, not from `activeContract` — a
-  // verified item stays proven after its contract closes.
-  const verifiedSubGoals = deriveVerifiedSubGoals({
+    inFlight: NO_IN_FLIGHT_ROUND,
     subGoals,
-    rounds: derivationRounds,
     commands: getPolicy().evidence.commands ?? [],
   });
+  // `roundFacts.verifiedSubGoals` is not read here — it reaches the state file
+  // and the projection through the bundle itself.
+  const { activeContract, itemStatuses: contractItemStatuses } = roundFacts;
   // v3.2: Goal → criteria → evidence vertical view (derived, zero persistence).
   const criterionStatuses = deriveCriterionStatuses(
     request.loop_id,
@@ -1294,50 +1107,41 @@ export function compileLoop(
     request.last_round_result,
     { activeContract, itemStatuses: contractItemStatuses },
   );
-  // v3.2: Lessons learned — repeated violations / verification failures.
-  const lessons = deriveLessons(request.loop_id, context, request.round);
-  const alignment = alignTask(request.task, request, context);
-  const health = checkLoopHealth(request.loop_id, { ...request, loop_objective: objective }, context);
-  // v3.8: Jaccard similarity is DIAGNOSTIC ONLY for sub-goals — it never
-  // merges or blocks a declaration, and it never creates a second history
-  // interpretation (the set below is the same derived set everything else
-  // consumes).
-  const duplicateSubGoals = possibleDuplicateSubGoals(
-    subGoals,
-    getPolicy().evolution.subgoal_dedup_threshold,
+  // v3.8.1: the ONE recurring-fact derivation, over the shared window. The
+  // prompt renders its recent tail; the state file renders the recurring set.
+  const recurringFlags = deriveRecurringFlags(windowRounds);
+  // v3.8.1: a same-round exact repeat is the only sub-goal duplication the
+  // runtime can state as a fact — those entries really were dropped, so the
+  // agent is told. The cross-round near-duplicate similarity diagnostic is
+  // gone with the rest of the fuzzy matching, and so are the task-alignment
+  // and loop-health warnings: both were Jaccard scores over task/objective
+  // text, never machine facts.
+  const repeatedDeclarations = duplicateEmergedDeclarations(
+    request.last_round_result?.emerged_subtasks ?? [],
   );
   const warnings = unique([
-    alignment.warning,
-    health.escalation_recommended !== "none"
-      ? `Loop health recommends ${health.escalation_recommended}.`
+    repeatedDeclarations.length > 0
+      ? `duplicate_declaration: ${repeatedDeclarations.length} sub-goal ` +
+        `declaration(s) repeated an earlier entry in the same round and were ` +
+        `not created: ${repeatedDeclarations.join("; ")}`
       : "",
-    ...duplicateSubGoals.map(
-      (pair) => `possible_duplicate_subgoal: ${pair.left} ~ ${pair.right} ` +
-        `(${(pair.score * 100).toFixed(0)}% similar) — consider consolidating them.`,
-    ),
   ]);
 
-  // ── v2.5: Agent trust score ──────────────────────────────────────────
-  const flags = request.verification_flags ?? [];
-  const errors = flags.filter((f) => f.severity === "error").length;
-  const warns = flags.filter((f) => f.severity === "warn").length;
-  const trustScore = Math.max(0, Math.min(1, 1.0 - (errors * 0.15) - (warns * 0.03)));
-
-  // Trend — derive from vault entries (violation counts per round as proxy).
-  // No new persistence; reconstructed same as milestones/sub-goals.
+  // v3.8.1: the agent trust score and trend are deleted. The score was
+  // `1 - errors*0.15 - warns*0.03` — arbitrary weights with no machine
+  // meaning, re-encoding flag counts that are already visible. The trend was
+  // worse: `1 - violations*0.1` per round, computed from
+  // `constraint_violations`, i.e. a DIFFERENT source from the score it was
+  // displayed next to. "Trend" was therefore not the score's history at all.
+  // Neither fed a decision.
   const completedEntries = loopEntries(request.loop_id, context)
     .filter((e) => entryRound(e) >= 1 && entryRound(e) < request.round);
-  const committedRounds = mergedRoundsFromEntries(completedEntries, request.round);
-  const trend: number[] = [];
-  for (const round of committedRounds.slice(-10)) {
-    const viols = round.evaluation?.constraint_violations ?? [];
-    // Simple proxy: no violations = perfect trust, each violation = -0.1
-    const score = Math.max(0, 1.0 - viols.length * 0.1);
-    trend.push(Number(score.toFixed(2)));
-  }
+  const committedRounds = derivationRounds(completedEntries, request.round);
 
-  // v3.3: Round stats + machine git-motion status (display-only, derived).
-  const roundStats = deriveRoundStats(committedRounds);
+  // v3.3/v3.8.1: machine git-motion (display-only, derived). The per-round
+  // "round stats" table is deleted: its only renderer was the L2 prompt
+  // section removed above, so it was computed, put into the canonical state
+  // (and therefore into stateHash) and read by nothing.
   const machineStatus = deriveMachineStatus(committedRounds, request.round);
 
   const response = makeLoopCompileResponse({
@@ -1353,15 +1157,10 @@ export function compileLoop(
     goal_id: deriveGoalId(request.loop_id, request.task, request.goal_id),
     goal_text_hash: computeGoalTextHash(request.task),
     loop_objective: objective,
-    loop_health: health,
-    task_alignment: alignment,
     rolling_summary: rolling,
     sub_goals: subGoals,
     criterion_statuses: criterionStatuses,
-    lessons,
-    agent_trust_score: request.round > 1 ? Number(trustScore.toFixed(2)) : undefined,
-    agent_trust_trend: request.round > 1 ? trend : [],
-    suggested_next_task: request.last_round_result?.emerged_subtasks?.[0] || "",
+    recurring_flags: recurringFlags,
     plan_source: request.plan_source,
     warnings,
   });
@@ -1374,14 +1173,11 @@ export function compileLoop(
     ? `${policy.state_file.directory}/${request.loop_id}-state.md`
     : "";
   const state = createCanonicalLoopState(request, response, statePath, {
-    roundStats,
     machineStatus,
-    // v3.4: derived active contract — the Current Task's source of truth.
-    roundContract: activeContract,
-    // v3.8: the verification view of that contract, its derived sub-goal
-    // facts, and the static capability — all derived, all in the hash.
-    contractItemStatuses,
-    verifiedSubGoals,
+    // v3.4/v3.8.1: the contract-fact bundle — the Current Task's source of
+    // truth, its verification view and the machine-verified sub-goal facts as
+    // ONE derivation. The static capability rides on the state itself.
+    roundFacts,
   });
   const markdown = renderCanonicalStateMarkdown(state, {
     // v3.7.1: retry attempts are marked in the derived view (attempt is
@@ -1392,17 +1188,12 @@ export function compileLoop(
     recoveryBrief: committedBacktrackBrief(request.loop_id, request.round, context),
   });
 
-  // v2.4–v2.5: Adaptive L2 budget — scales with loop complexity
-  const adaptiveL2 = policy.prompt.l2_adaptive_enabled
-    ? Math.min(
-        policy.prompt.l2_max_chars
-          + (request.round * policy.prompt.l2_adaptive_round_factor)
-          + ((rolling?.milestones?.length ?? 0) * policy.prompt.l2_adaptive_milestone_factor)
-          + (subGoals.length * policy.prompt.l2_adaptive_subgoal_factor),
-        policy.prompt.l2_adaptive_max_chars,
-      )
-    : policy.prompt.l2_max_chars;
-
+  // v3.8.1: the L2 budget is a FIXED ceiling. The v2.4 adaptive budget
+  // scaled it by round count, milestone count and sub-goal count, which made
+  // the prompt's allowed content depend on how long the loop had been running
+  // rather than on the facts of this round — the same loop could render a
+  // section at round 5 and silently drop it at round 50.
+  //
   // v2.8: L2 pointer mode — when enabled, skip the monolithic markdown blob.
   // Structured L2 sections (milestones, sub-goals, trust, progress) still
   // render. The state file on disk is the durable source of truth.
@@ -1418,7 +1209,7 @@ export function compileLoop(
     budgets: {
       l0: policy.prompt.l0_max_chars,
       l1: policy.prompt.l1_max_chars,
-      l2: adaptiveL2,
+      l2: policy.prompt.l2_max_chars,
     },
     attempt: request.attempt,
     selfEvaluationBlock: buildSelfEvalBlock(
@@ -1428,16 +1219,10 @@ export function compileLoop(
       // the ACTIVE contract (derived — not the previous submission's field,
       // which is a proposal and may differ from what this round executes).
       activeContract != null,
-      // v3.5: L2-only declaration nudge when nothing is active (policy-gated;
-      // mutually exclusive with the restate template above).
-      decision.level === "l2" && activeContract === null &&
-        getPolicy().prompt.contract_nudge_on_l2,
     ),
     fullStateMarkdown: l2Pointer ? undefined : markdown,
     // v2.9: Model's information needs from the previous round's SelfEvaluation
     promptRequests: request.last_round_result?.prompt_requests,
-    // v3.2: Previous L1 presentation as the collapse diff baseline.
-    presentedBaseline: readPresentedBaseline(request.loop_id, request.round, context),
   });
   response.prompt = artifact.renderedPrompt;
   response.prompt_artifact = artifact;

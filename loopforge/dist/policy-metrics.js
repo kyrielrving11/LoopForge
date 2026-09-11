@@ -1,5 +1,5 @@
 /** In-process policy effectiveness metrics with no runtime dependency. */
-import { committedRoundsFromEntries } from "./committed-round.js";
+import { derivationRounds } from "./committed-round.js";
 function empty(loopId) {
     return {
         loopId,
@@ -139,7 +139,7 @@ function snapshotFrom(source) {
  *  restarted process reports nonzero metrics for persisted loops. */
 export function derivePolicyMetrics(loopId, entries) {
     const metric = empty(loopId);
-    for (const round of committedRoundsFromEntries(entries)) {
+    for (const round of derivationRounds(entries)) {
         if (round.loopId !== loopId)
             continue;
         const result = round.result;

@@ -283,10 +283,12 @@ for resume.
 
 L0 is a lean same-round retry, L1 is normal continuation, and L2 is full
 rehydration. They control state density only and never prescribe a reasoning
-technique. Mandatory prompt sections and the token budget remain enforced.
+technique. Protected prompt sections and the token budget remain enforced;
+when the protected content alone exceeds the ceiling the prompt records
+`protectedOverflow` rather than dropping it.
 
 Use `loopforge_status` with `view: "session"` for the live round and typed
-projection, `view: "loop"` for loop health and task alignment, `view: "all"`
+projection, `view: "loop"` for machine counts over committed rounds, `view: "all"`
 after a restart, `view: "audit"` for the read-only completeness and evidence
 audit, and `view: "explain"` (loopId, optional `round`) for the per-round "why"
 view — the active contract, item statuses, observations, and flags. The same

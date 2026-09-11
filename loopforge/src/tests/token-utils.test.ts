@@ -1,103 +1,41 @@
-/** Tests for token-utils — shared Jaccard similarity, dedup, and entry helpers. */
+/** Tests for token-utils — content-addressed ids, normalization, dedup, and
+ *  entry helpers. v3.8.1 deleted `tokenize` / `jaccardSimilarity` and their
+ *  tests with them; `normalizeText` is now the identity primitive the
+ *  criterion / constraint / emphasize matchers are built on, so it is
+ *  covered here. */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
-  tokenize,
-  jaccardSimilarity,
-  unique,
   entryRound,
+  normalizeText,
+  unique,
 } from "../token-utils.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
-// tokenize
+// normalizeText — the identity primitive for text-only references
 // ═══════════════════════════════════════════════════════════════════════════
 
-describe("tokenize", () => {
-  it("splits on word boundaries", () => {
-    const result = tokenize("hello world");
-    assert.deepEqual(result, new Set(["hello", "world"]));
-  });
-
-  it("lowercases all tokens", () => {
-    const result = tokenize("Hello WORLD");
-    assert.deepEqual(result, new Set(["hello", "world"]));
-  });
-
-  it("handles Chinese characters", () => {
-    // Consecutive CJK characters form overlapping 2-grams
-    const result = tokenize("修复重入漏洞");
-    assert.ok(result.has("修复"));
-    assert.ok(result.has("重入"));
-    assert.ok(result.has("漏洞"));
-  });
-
-  it("handles CJK Extension A", () => {
-    // Extension A chars are within 㐀-鿿 range; 3 chars → 2 bigrams
-    const result = tokenize("㐀㐁㐂");
-    assert.ok(result.has("㐀㐁"));
-    assert.ok(result.has("㐁㐂"));
-  });
-
-  it("returns empty set for empty input", () => {
-    assert.deepEqual(tokenize(""), new Set());
-  });
-
-  it("returns empty set for punctuation-only input", () => {
-    assert.deepEqual(tokenize("!@#$%^"), new Set());
-  });
-});
-
-// ═══════════════════════════════════════════════════════════════════════════
-// jaccardSimilarity
-// ═══════════════════════════════════════════════════════════════════════════
-
-describe("jaccardSimilarity", () => {
-  it("returns 1 for identical strings", () => {
-    assert.equal(jaccardSimilarity("hello world", "hello world"), 1);
-  });
-
-  it("returns 0 for completely different strings", () => {
-    assert.equal(jaccardSimilarity("hello world", "foo bar"), 0);
-  });
-
-  it("returns 1/3 for one shared token out of three", () => {
-    // {hello, world} ∩ {hello, foo} = {hello} → 1/3
-    const score = jaccardSimilarity("hello world", "hello foo");
-    assert.ok(Math.abs(score - 1/3) < 0.01);
-  });
-
-  it("returns 0 when either set is empty (empty never matches anything)", () => {
-    // v2.14: an empty description carries no information — a score of 1
-    // made `[""]` a wildcard that falsely marked sub-goals done and
-    // suppressed criteria milestones. The original comment's stated intent
-    // ("empty descriptions never match anything") requires 0.
-    assert.equal(jaccardSimilarity("", ""), 0);
-    assert.equal(jaccardSimilarity("hello", ""), 0);
-    assert.equal(jaccardSimilarity("", "world"), 0);
-  });
-
-  it("handles case-insensitive comparison", () => {
-    const score = jaccardSimilarity("Hello World", "hello world");
-    assert.equal(score, 1);
-  });
-
-  it("handles Chinese text similarity", () => {
-    const score = jaccardSimilarity("修复重入漏洞", "修复重入漏洞");
-    assert.equal(score, 1);
-    // Bigram overlap: {修复, 漏洞} shared out of 8 bigrams → 0.25,
-    // not 0 (single-token baseline) — CJK similarity is graded
-    const score2 = jaccardSimilarity("修复重入漏洞", "修复溢出漏洞");
-    assert.equal(score2, 0.25);
-  });
-
-  it("handles synonymous phrasing for criteria dedup", () => {
-    // "unit test coverage at 90 percent" vs "unit test coverage reached 90%"
-    const score = jaccardSimilarity(
-      "unit test coverage at 90 percent",
-      "unit test coverage reached 90%",
+describe("normalizeText", () => {
+  it("folds whitespace and case so restatements are equal", () => {
+    assert.equal(
+      normalizeText("Unit  test coverage at 90%"),
+      normalizeText("unit test coverage at 90%"),
     );
-    // Should be above 0.45 for dedup, but below 1
-    assert.ok(score >= 0.4, `score ${score} should be >= 0.4`);
+  });
+
+  it("does NOT fold wording — a paraphrase is a different string", () => {
+    // This is the point of the v3.8.1 change: criteriaMatch,
+    // matchesConstraintText and matchEmphasize all compare with this, so a
+    // near-miss must compare unequal. These two strings used to score >= 0.4
+    // by Jaccard and count as the same criterion.
+    assert.notEqual(
+      normalizeText("unit test coverage at 90 percent"),
+      normalizeText("unit test coverage reached 90%"),
+    );
+  });
+
+  it("trims the ends", () => {
+    assert.equal(normalizeText("  spaced  "), "spaced");
   });
 });
 

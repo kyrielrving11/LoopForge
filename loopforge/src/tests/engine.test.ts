@@ -330,12 +330,13 @@ describe("Engine — P0-P5 Cognitive Evolution (v1.7 E2E)", () => {
     assert.ok(stateFile!.includes("Progress Dashboard"), "P4: progress dashboard in state file");
     assert.ok(stateFile!.includes("1/3"), "P4: criteria count in state file");
     assert.ok(stateFile!.includes("Token.sol"), "P4: files_changed in state file");
-    // v1.16: With inline_in_prompt enabled (default), the state file content
-    // (including the progress dashboard) IS in the prompt — it's inlined as a
-    // Runtime guarantee. The state_file_content on the response is still set
-    // for disk writeback.
+    // v3.8.1: the dashboard is a STATE-FILE view. It used to also reach the
+    // prompt as an L2 structured section, which is where the assertion below
+    // used to pass from; that section is deleted (it re-composed facts the
+    // prompt already states elsewhere, plus the agent's own numbers).
     const prompt = r2.response!.prompt!;
-    assert.ok(prompt.includes("Progress Dashboard"), "P4: dashboard inlined in prompt via state file");
+    assert.ok(!prompt.includes("Progress Dashboard"),
+      "the L2 prompt no longer carries the dashboard; the state file does");
   });
 
   it("P5: wrong_assumptions are forwarded to compiler as key lessons", () => {
@@ -457,52 +458,6 @@ describe("Engine — P0-P5 Cognitive Evolution (v1.7 E2E)", () => {
     assert.ok(prompt.includes("→ Action: State the concrete blocker"),
       "warn flag must carry an Action instruction");
   });
-});
-
-describe("v3.2 — presented-state persistence", () => {
-
-  it("persists the L1 presented-state snapshot on the lineage entry (L0/L2 do not)", () => {
-    const engine = createEngine();
-    // Round 1: first_round → L2 → no presented snapshot.
-    engine.invokeLoopCompile(makeRequest({
-      mode: Mode.LOOP_COMPILE,
-      loop_id: "ps-test",
-      round: 1,
-      goal_id: "audit",
-      task: "Audit ERC20",
-    }));
-    // Round 2: continuation → L1 → presented snapshot persisted.
-    const r2 = engine.invokeLoopCompile({
-      ...makeRequest({
-        mode: Mode.LOOP_COMPILE,
-        loop_id: "ps-test",
-        round: 2,
-        goal_id: "audit",
-        task: "Audit ERC20",
-      }),
-      last_round_result: makeLoopRoundResult({
-        round: 1,
-        success: true,
-        output_summary: "Made progress",
-        constraint_violations: [],
-        manual_fixes_needed: "",
-      }),
-    });
-    assert.equal(r2.status, AgentStatus.OK);
-    assert.equal(r2.response!.prompt_artifact!.level, "l1");
-
-    const entries = engine.getStore().listEntries("ps-test");
-    const r1Lineage = entries.find((e) => e.task_id === "loop:ps-test:r1");
-    const r2Lineage = entries.find((e) => e.task_id === "loop:ps-test:r2");
-    const l1 = r1Lineage?.loop_lineage as Record<string, unknown>;
-    const l2 = r2Lineage?.loop_lineage as Record<string, unknown>;
-    assert.equal(l1.presented_constraint_ids, undefined,
-      "L2 compile must not persist a presented snapshot");
-    assert.ok(Array.isArray(l2.presented_constraint_ids), "L1 compile must persist constraint ids");
-    assert.ok(Array.isArray(l2.presented_subgoals), "L1 compile must persist sub-goals");
-    assert.ok(Array.isArray(l2.presented_milestone_ranges), "L1 compile must persist milestone ranges");
-  });
-
 });
 
 describe("Engine — last_round_result boundary (v3.3.1)", () => {

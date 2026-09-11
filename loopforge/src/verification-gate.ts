@@ -33,7 +33,7 @@ import { makeVerificationFlag, makeVerificationResult } from "./protocol.js";
 import { isRecord, entryRound, extractFilePathTokens } from "./token-utils.js";
 import { computeGoalTextHash } from "./loop-compiler.js";
 import {
-  committedRoundsFromEntries,
+  derivationRounds,
   machineGitMotionSeries,
   entryViolations,
 } from "./committed-round.js";
@@ -135,9 +135,10 @@ export type VerificationDomain =
   | "evaluation_consistency"
   /** Machine evidence and the agent's claims about it. */
   | "evidence_integrity"
-  /** Plan conformance: intent/sub-goal drift (two detection bases under the
-   *  "plan drift" label) and the Round Contract declaration/execution/closure
-   *  checks. */
+  /** Plan conformance: the Round Contract declaration/execution/closure
+   *  checks, scope containment, and cited-gate authorization. (The
+   *  intent/sub-goal "plan drift" checks this once named were deleted in
+   *  v3.8 — drift is not a machine fact.) */
   | "plan_contract"
   /** Workspace restore after backtrack. Machine-side progress enforcement
    *  (the stall evaluator) lives in the enforcement gate, not here. */
@@ -334,7 +335,7 @@ export function machineProgressSeries(
   lookback: number,
 ): boolean[] | null {
   return machineGitMotionSeries(
-    committedRoundsFromEntries(vaultEntries, currentRound),
+    derivationRounds(vaultEntries, currentRound),
     currentRound,
     lookback,
   );
@@ -1209,7 +1210,7 @@ export function verifySelfEvaluation(
   // round_contract is a PROPOSAL for the next round and never participates
   // (the eval under verification is not yet committed, so it structurally
   // cannot influence the derivation).
-  const committedRounds = committedRoundsFromEntries(vaultEntries, currentRound);
+  const committedRounds = derivationRounds(vaultEntries, currentRound);
   const activeContract = deriveActiveRoundContract(committedRounds);
 
   // v3.8: The item-level status of the ACTIVE contract for THIS round — the

@@ -114,6 +114,7 @@ function round(
     afterEvidence: opts.observations ?? [],
     observationDelta: opts.observations ?? [],
     evidenceIncomplete: false,
+    backtrack: null,
   };
 }
 

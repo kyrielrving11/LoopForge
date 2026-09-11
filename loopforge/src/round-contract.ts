@@ -26,7 +26,6 @@ import {
   deriveContractId,
   deriveContractItemIds,
   deriveItemId,
-  jaccardSimilarity,
 } from "./token-utils.js";
 import { deriveContractItemStatuses } from "./contract-items.js";
 import type { ContractItemStatusView } from "./contract-items.js";
@@ -125,22 +124,6 @@ export function deriveActiveRoundContract(
     // Otherwise the active contract stays; a different proposal is ignored.
   }
   return active;
-}
-
-/** v2.11: Match a user-provided reference against a criterion (cr-XXXXXXXX
- *  equality first, then Jaccard similarity). Kept for criterion claims — the
- *  contract layer no longer matches free text. */
-export function contractItemMatches(left: string, right: string): boolean {
-  const isId = (value: string): boolean => /^cr-[a-f0-9]{8}$/.test(value);
-  const leftIsId = isId(left);
-  const rightIsId = isId(right);
-  if (leftIsId && rightIsId) return left === right;
-  if (leftIsId !== rightIsId) {
-    const text = leftIsId ? right : left;
-    const id = leftIsId ? left : right;
-    return `cr-${deriveItemId(text)}` === id;
-  }
-  return jaccardSimilarity(left, right) >= getPolicy().evolution.criteria_dedup_threshold;
 }
 
 /** v3.8: Every criterion id referenced by the contract's items. */

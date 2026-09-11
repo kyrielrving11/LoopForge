@@ -104,11 +104,13 @@ status projection consume the same facts. Deleting the state file loses no
 truth because LoopForge can regenerate it.
 
 Stable IDs (`c-`, `cr-`, `sg-`, `rc-`, and `rci-XXXXXXXX`) provide exact
-references where the agent supplies them. Constraint and criterion matching
-keeps a policy-controlled similarity fallback for plain-text references.
-Sub-goal creation does not: a `sg-` ID is scoped to its declaration event, so
-re-declaring the same text in a later round is a new sub-goal, and similarity is
-only a `possible_duplicate_subgoal` diagnostic that never merges or blocks.
+references where the agent supplies them. Everything else is matched by
+normalized-exact text — there is no similarity fallback: a paraphrase is a
+different criterion, constraint or emphasis target, not a fuzzy match.
+Sub-goal creation is deliberately the opposite of a content hash: a `sg-` ID is
+scoped to its declaration event, so re-declaring the same text in a later round
+is a new sub-goal. Within one declaration round, exact repeats keep only their
+first entry and are reported as `duplicate_declaration`.
 `subgoal_updates` — the only way to change a sub-goal's status — must cite ACTIVE
 `sg-` IDs exactly: unknown, terminal (done/canceled), or illegal transitions are
 rejected as `evaluation_invalid` before the round advances.
@@ -324,8 +326,10 @@ Format errors are retryable and cannot contaminate round state.
 ### Deterministic state reconstruction
 
 The compiler reconstructs state from committed rounds. It tracks five-state
-sub-goals, discovered constraints, phase milestones, machine observations,
-trust, and the active Round Contract without adding another persistence model.
+sub-goals, discovered constraints, phase milestones, machine observations and
+the active Round Contract without adding another persistence model. Diagnostics
+— the progress dashboard, per-round stats, the recurring-flag history — live in
+the state file and the read-only status views, never in the prompt.
 L0, L1, and L2 select prompt density only. They do not prescribe a reasoning
 technique.
 
@@ -361,9 +365,11 @@ leases protect restart and concurrency paths.
 ### Agent-owned execution
 
 The external agent remains responsible for planning and tool use. It can ask
-the compiler to emphasize known state or surface confusion points, but cannot
-remove mandatory prompt sections or bypass the budget. LoopForge does not run
-a background agent.
+the compiler to emphasize known state (by stable id or exact text) or surface
+confusion points, but cannot remove protected prompt sections or bypass the
+budget: when protected content alone exceeds the ceiling the prompt says so
+(`protectedOverflow`) rather than dropping it. LoopForge does not run a
+background agent.
 
 Nine MCP tools expose the runtime: `start`, `next`, `status`, `stop`, `pause`,
 `resume`, `replay`, `gate_check`, and `gate_resolve`. The two gate tools are

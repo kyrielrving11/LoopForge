@@ -15,7 +15,7 @@ import { eventSequence, StorageCorruptionError } from "./loop-store.js";
 import { auditOrder, deriveGate } from "./cognitive-governance.js";
 import { rederiveClaimViewWithFlags, listVerifiedClaims } from "./evidence-claims.js";
 import { isRecord, entryRound } from "./token-utils.js";
-import { committedRoundsFromEntries, decodeCommittedRound, legacyTransactionRounds, machineEvidenceForRound, } from "./committed-round.js";
+import { derivationRounds, decodeCommittedRound, legacyTransactionRounds, machineEvidenceForRound, } from "./committed-round.js";
 import { deriveRoundContractView } from "./round-contract.js";
 import { getPolicy } from "./policy.js";
 /** Build the audit from committed vault entries. Pure, read-only.
@@ -25,7 +25,7 @@ export function buildAudit(loopId, entries, store) {
     const ordered = auditOrder(entries);
     // v3.8: the shared committed-round read model — ordering, dedup and rollback
     // exclusion come from it, not from a private rule.
-    const views = committedRoundsFromEntries(entries).filter((view) => view.loopId === loopId);
+    const views = derivationRounds(entries).filter((view) => view.loopId === loopId);
     const commands = getPolicy().evidence.commands ?? [];
     const viewByRound = new Map(views.map((view) => [view.round, view]));
     // The executed contract per round, through the ONE derivation explain and

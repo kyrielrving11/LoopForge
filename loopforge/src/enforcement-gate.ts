@@ -28,10 +28,10 @@ import { makeEnforcementResult } from "./protocol.js";
 import { machineProgressSeries, CHECK_SUCCESS_WITH_REMAINING_CRITERIA, CHECK_RECURRING_VIOLATION, CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE, CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED, CHECK_REQUIRED_COMMAND_FAILED, CHECK_COMMAND_EVIDENCE_MISMATCH, CHECK_OUTCOME_SUCCESS_CONTRADICTION, CHECK_VERIFICATION_ENTRYPOINT_MODIFIED, CHECK_ROUND_SCOPE_DRIFT, CHECK_CONTRACT_ITEMS_UNVERIFIED, CHECK_USER_GATE_UNRESOLVED } from "./verification-gate.js";
 import { effectiveSuccess } from "./self-eval.js";
 import { getPolicy } from "./policy.js";
-import { STABLE_ID_RE, isRecord, entryRound, extractFilePathTokens } from "./token-utils.js";
+import { isRecord, entryRound } from "./token-utils.js";
 import type { RoundProcessResult } from "./round-coordinator.js";
 import {
-  committedRoundsFromEntries,
+  derivationRounds,
   decodeCommittedRound,
   machineEvidenceForRound,
   type CommittedRoundView,
@@ -48,7 +48,7 @@ function collectProgressByRound(
   currentRound: number,
 ): Map<number, number> {
   const progressByRound = new Map<number, number>();
-  for (const round of committedRoundsFromEntries(vaultEntries, currentRound)) {
+  for (const round of derivationRounds(vaultEntries, currentRound)) {
     const progress = round.executionReport?.progress_estimate;
     if (typeof progress === "number") progressByRound.set(round.round, progress);
   }
@@ -122,7 +122,7 @@ export function findSafeRestorePoint(
   vaultEntries: VaultEntry[],
   maxDepth: number,
 ): { round: number; skippedDiscoveries: string[] } | null {
-  const completed = committedRoundsFromEntries(vaultEntries, currentRound)
+  const completed = derivationRounds(vaultEntries, currentRound)
     .sort((a, b) => b.round - a.round);
 
   const skippedDiscoveries: string[] = [];
@@ -163,7 +163,7 @@ export function findBacktrackTargetGitHead(
   restoreRound: number,
   vaultEntries: VaultEntry[],
 ): string | null {
-  const committed = committedRoundsFromEntries(vaultEntries)
+  const committed = derivationRounds(vaultEntries)
     .find((view) => view.round === restoreRound);
   if (!committed) return null;
   const evidence = machineEvidenceForRound(committed);
@@ -187,6 +187,56 @@ export interface BacktrackRecoveryFacts {
   approaches: string[];
   /** v3.7.1: Falsified assumptions collected from the failed rounds. */
   wrongAssumptions: string[];
+}
+
+/** v3.8.1: the ONE Recovery Brief renderer.
+ *
+ *  The rollback prompt and the state file's Recent tier used to carry two
+ *  hand-written copies of these lines — differing in punctuation
+ *  ("the redo is round N" vs "redo round N") and in whether an approach
+ *  overflow count was shown at all. Two renderers over one rollback meant the
+ *  two surfaces could describe the same event differently while both claiming
+ *  to be derived facts. The facts are supplied by the caller: the coordinator
+ *  from its live walk, the compile path from `decodeBacktrackRecord` on the
+ *  committed decision. */
+export function recoveryBriefLines(input: {
+  target: number;
+  triggerRule: string;
+  failedRounds: string[] | number[];
+  approaches: string[];
+  wrongAssumptions: string[];
+  recoveryRoundId?: string;
+  maxApproaches?: number;
+  maxAssumptions?: number;
+}): string[] {
+  const maxApproaches = input.maxApproaches ?? 6;
+  const maxAssumptions = input.maxAssumptions ?? 5;
+  const lines = [
+    `- **Trigger**: ${input.triggerRule || "unknown"}`,
+    `- **Restored to round**: ${input.target} (the redo is round ${input.target + 1})`,
+  ];
+  if (input.recoveryRoundId) {
+    lines.push(`- **Recovery Round ID**: \`${input.recoveryRoundId}\``);
+  }
+  if (input.failedRounds.length > 0) {
+    lines.push(`- **Failed rounds**: ${input.failedRounds.join(", ")}`);
+  }
+  const shown = input.approaches.slice(0, maxApproaches);
+  for (const approach of shown) {
+    lines.push(`  - Failed approach: ${approach}`);
+  }
+  if (input.approaches.length > shown.length) {
+    lines.push(
+      `  - … and ${input.approaches.length - shown.length} more failed approaches`,
+    );
+  }
+  if (input.wrongAssumptions.length > 0) {
+    lines.push("- **Falsified assumptions** (do not rebuild on these):");
+    for (const assumption of input.wrongAssumptions.slice(0, maxAssumptions)) {
+      lines.push(`  - ${assumption}`);
+    }
+  }
+  return lines;
 }
 
 export function buildBacktrackPrompt(
@@ -218,29 +268,14 @@ export function buildBacktrackPrompt(
   // why it was rolled back, what failed, and what the redo round is.
   if (recovery) {
     lines.push("### Recovery Brief", "");
-    lines.push(`- **Trigger**: ${triggerRule}`);
-    lines.push(
-      `- **Restored to round**: ${toRound} (the redo is round ${toRound + 1})`,
-    );
-    if (recoveryRoundId) {
-      lines.push(`- **Recovery Round ID**: \`${recoveryRoundId}\``);
-    }
-    if (recovery.failedRounds.length > 0) {
-      lines.push(`- **Failed rounds**: ${recovery.failedRounds.join(", ")}`);
-      const shown = recovery.approaches.slice(0, 6);
-      for (const approach of shown) {
-        lines.push(`  - Failed approach: ${approach}`);
-      }
-      if (recovery.approaches.length > shown.length) {
-        lines.push(`  - … and ${recovery.approaches.length - shown.length} more failed approaches`);
-      }
-    }
-    if (recovery.wrongAssumptions.length > 0) {
-      lines.push("- **Falsified assumptions** (do not rebuild on these):");
-      for (const assumption of recovery.wrongAssumptions.slice(0, 5)) {
-        lines.push(`  - ${assumption}`);
-      }
-    }
+    lines.push(...recoveryBriefLines({
+      target: toRound,
+      triggerRule,
+      failedRounds: recovery.failedRounds,
+      approaches: recovery.approaches,
+      wrongAssumptions: recovery.wrongAssumptions,
+      recoveryRoundId,
+    }));
     lines.push("");
   }
 

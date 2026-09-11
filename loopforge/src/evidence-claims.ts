@@ -16,7 +16,7 @@
  */
 
 import type { VaultEntry } from "./loop-store.js";
-import { committedRoundsFromEntries, machineEvidenceForRound } from "./committed-round.js";
+import { derivationRounds, machineEvidenceForRound } from "./committed-round.js";
 import type { MachineObservation } from "./protocol.js";
 import { isPassedAfterObservation } from "./evidence-provider.js";
 import { claimedMetCriteria } from "./self-eval.js";
@@ -122,7 +122,7 @@ export function resolveRoundFiles(
   loopId: string,
   round: number,
 ): string[] | null {
-  const committed = committedRoundsFromEntries(vaultEntries)
+  const committed = derivationRounds(vaultEntries)
     .find((view) => view.loopId === loopId && view.round === round);
   if (!committed) return null;
   const evidence = machineEvidenceForRound(committed);
@@ -141,7 +141,7 @@ export function listVerifiedClaims(
   loopId: string,
 ): string[] {
   const verified = new Set<string>();
-  for (const round of committedRoundsFromEntries(vaultEntries)) {
+  for (const round of derivationRounds(vaultEntries)) {
     if (round.loopId !== loopId || !round.evaluation) continue;
     const evidence = machineEvidenceForRound(round);
     const view = rederiveClaimViewWithFlags(

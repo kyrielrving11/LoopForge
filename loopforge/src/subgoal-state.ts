@@ -12,8 +12,8 @@
  * re-declaring the same text in a later round creates a NEW sub-goal — the
  * previous one may be terminal, and the old text-only hash silently dropped
  * the re-declaration. Within one round, exactly-equal text keeps only the
- * first entry. Jaccard similarity no longer merges anything: it only feeds
- * the `possible_duplicate_subgoal` diagnostic.
+ * first entry, and `duplicateEmergedDeclarations` reports what was dropped.
+ * v3.8.1: no similarity anywhere — a near-duplicate is not a fact.
  *
  * Input is committed round views plus the in-flight report — never raw vault
  * envelopes, so there is exactly one history interpretation.
@@ -22,7 +22,6 @@
 import { createHash } from "node:crypto";
 import type { SubGoal, SubGoalUpdate } from "./protocol.js";
 import { makeSubGoal } from "./protocol.js";
-import { jaccardSimilarity } from "./token-utils.js";
 
 /** Normalize a description for identity purposes: trim, collapse internal
  *  whitespace, lowercase. Mirrors deriveItemId's normalization. */
@@ -42,6 +41,33 @@ export function deriveSubGoalId(
     .digest("hex")
     .slice(0, 8);
   return `sg-${digest}`;
+}
+
+/** v3.8.1: The exact duplicates `deriveEmergedItems` discarded — entries whose
+ *  normalized text repeated an earlier entry in the SAME declaration round, so
+ *  no second sub-goal was created for them.
+ *
+ *  This replaces the former cross-round Jaccard near-duplicate diagnostic. A
+ *  near-duplicate is not a fact: two differently-worded sub-goals may be two
+ *  real pieces of work, and the message told the agent to "consider
+ *  consolidating" on the strength of a similarity score. An exact repeat
+ *  inside one round genuinely WAS dropped, so saying so is honest and
+ *  actionable. */
+export function duplicateEmergedDeclarations(
+  descriptions: ReadonlyArray<string>,
+): string[] {
+  const seen = new Set<string>();
+  const duplicates: string[] = [];
+  for (const raw of descriptions) {
+    const normalized = normalizeDescription(raw);
+    if (!normalized) continue;
+    if (seen.has(normalized)) {
+      if (!duplicates.includes(normalized)) duplicates.push(normalized);
+      continue;
+    }
+    seen.add(normalized);
+  }
+  return duplicates;
 }
 
 /** v3.8: The items a round's emerged list will create, in order. Exact
@@ -214,25 +240,4 @@ export function deriveSubGoals(input: {
   });
 
   return subGoals;
-}
-
-/** v3.8: Similarity is DIAGNOSTIC ONLY — it never merges or blocks a
- *  declaration. Pairs above the threshold are reported so the prompt can
- *  suggest consolidating them. */
-export function possibleDuplicateSubGoals(
-  subGoals: ReadonlyArray<SubGoal>,
-  threshold: number,
-): Array<{ left: string; right: string; score: number }> {
-  const out: Array<{ left: string; right: string; score: number }> = [];
-  for (let i = 0; i < subGoals.length; i++) {
-    for (let j = i + 1; j < subGoals.length; j++) {
-      if (subGoals[i].status === "done" || subGoals[i].status === "canceled") continue;
-      if (subGoals[j].status === "done" || subGoals[j].status === "canceled") continue;
-      const score = jaccardSimilarity(subGoals[i].description, subGoals[j].description);
-      if (score >= threshold) {
-        out.push({ left: subGoals[i].id, right: subGoals[j].id, score });
-      }
-    }
-  }
-  return out;
 }

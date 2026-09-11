@@ -9,6 +9,7 @@ import {
   resetPolicyMetrics,
 } from "../policy-metrics.js";
 import type { VaultEntry } from "../loop-store.js";
+import { PROMPT_ARTIFACT_SCHEMA_VERSION } from "../protocol.js";
 
 function committedFeedback(
   round: number,
@@ -37,7 +38,12 @@ function committedFeedback(
           afterEvidence: [],
           result,
           promptArtifact: level
-            ? { schemaVersion: 1, roundId: "", attempt: 1, level, renderedPrompt: "", promptHash: "h", stateHash: "s" }
+            ? {
+                schemaVersion: PROMPT_ARTIFACT_SCHEMA_VERSION, roundId: "", round: 1,
+                attempt: 1, level, renderedPrompt: "", promptHash: "h", stateHash: "s",
+                sections: [], droppedSections: [], protectedOverflow: false,
+                budget: 0, renderedChars: 0,
+              }
             : undefined,
           createdAt: Date.now(),
           updatedAt: Date.now(),

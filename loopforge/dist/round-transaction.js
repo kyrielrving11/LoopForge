@@ -9,6 +9,7 @@ import { diffSnapshotCollections } from "./evidence-provider.js";
 import { RoundCoordinator, } from "./round-coordinator.js";
 import { logEvent } from "./observability.js";
 import { deriveContractId, deriveContractItemIds, isRecord } from "./token-utils.js";
+import { PROMPT_ARTIFACT_SCHEMA_VERSION } from "./protocol.js";
 import { commandConfigHash, getPolicy } from "./policy.js";
 import { policyMetrics } from "./policy-metrics.js";
 import { VaultRoundCommitStore } from "./storage.js";
@@ -168,7 +169,13 @@ export function parseRoundTransactionSnapshot(value) {
         if (!isRecord(value.promptArtifact))
             return null;
         const artifact = value.promptArtifact;
-        if (artifact.schemaVersion !== 1 ||
+        // v3.8.1: schema 2 fixed the artifact's field set (it now records the
+        // sections rendered, the ones the budget rule dropped, and whether the
+        // protected set overflowed). Version 1 is a HARD break: a round whose
+        // envelope does not parse is not committed history, and
+        // `artifactVersionOf` lets the audit report the loss explicitly instead
+        // of the loop looking complete while rounds are missing.
+        if (artifact.schemaVersion !== PROMPT_ARTIFACT_SCHEMA_VERSION ||
             typeof artifact.roundId !== "string" ||
             typeof artifact.renderedPrompt !== "string" ||
             typeof artifact.promptHash !== "string" ||

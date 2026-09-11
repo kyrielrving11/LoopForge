@@ -8,7 +8,7 @@
  *     - L1 state_capsule (R2-R3, R5-R7)
  *     - L2 checkpoint_boundary (R4, via compression_checkpoint at R3)
  *     - L0 retry_delta (R8 rejection prompt + R8b post-retry)
- *     - L2 periodic_refresh (R9, interval=5 since last L2 at R4)
+ *     - L1 normal continuation (R8b, R9)
  *
  *   Constraint lifecycle (discovery → accumulation → retirement)
  *   Enforcement rejection + honest retry
@@ -28,6 +28,7 @@ import { randomUUID } from "node:crypto";
 import { createInterface, Interface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { testCommandProvider, criterionClaims } from "./_helpers.js";
+import { POLICY_SCHEMA_VERSION } from "../policy.js";
 
 const CLI_PATH = resolve(dirname(fileURLToPath(import.meta.url)), "..", "cli.js");
 
@@ -92,16 +93,16 @@ describe("Long-Horizon Verification", () => {
   before(() => {
     storeDir = join(tmpdir(), `loopforge-lh-${randomUUID()}`);
     mkdirSync(storeDir, { recursive: true });
-    // Write a policy with periodic_refresh enabled so the test exercises all L2 triggers.
     // v3.3: a passing verification command keeps success claims machine-backed
     // (R8 requires it — self-reported test results alone are not evidence).
+    // v3.8.1: the policy version is load-bearing, and full_refresh_interval is
+    // deleted (its default disabled its own L2 branch).
     writeFileSync(join(storeDir, "loop_policy.json"), JSON.stringify({
-      prompt: { full_refresh_interval: 5 },
+      version: POLICY_SCHEMA_VERSION,
       evidence: {
         providers: ["git"],
         timeout_ms: 120000,
         commands: [testCommandProvider()],
-        machine_backed_success: "required",
       },
     }));
     client = new McpClient(storeDir);
@@ -241,12 +242,14 @@ describe("Long-Horizon Verification", () => {
     LL.push("R8:REJECT(L0)");
   });
 
-  // ── R8b L2 — retry accepted, periodic_refresh fires ───────────────────
+  // ── R8b L1 — retry accepted, normal continuation ──────────────────────
   //
   // After the rejection is accepted, session advances to round 8.
-  // R8 - lastL2(R3) = 5 >= full_refresh_interval(5) → L2 periodic_refresh.
+  // v3.8.1: this used to be L2 via periodic_refresh (a round-count timer).
+  // That branch is deleted — L2 is reachable only by reasons that are FACTS
+  // about the round, and a clean continuation has none of them.
 
-  it("R8-retry L2 — retry accepted, L2 periodic_refresh for round 8", async () => {
+  it("R8-retry L1 — retry accepted, normal continuation for round 8", async () => {
     const r = await client.tool("loopforge_next", { sessionId, roundId, evaluation: {
       success: false, should_continue: true, constraint_violations: [],
       output_summary: "Reverted false claim. Implemented pipeline with full tests. Verified no runtime deps. 17/17 pass.",
@@ -254,19 +257,18 @@ describe("Long-Horizon Verification", () => {
       execution_report: { files_changed: ["src/strkit.ts", "src/pipeline.ts", "src/pipeline.test.ts"], tests_reported: { passed: 17, failed: 0, skipped: 0 }, criterion_claims: criterionClaims(["pipeline done", "no runtime deps"], ["Final polish"]), progress_estimate: 0.9 },
     }});
     assert.ok(!r.error);
-    // Retry accepted → session advances to round 8.
-    // R8 - lastL2(R3) = 5 >= interval(5) → L2 periodic_refresh.
+    // Retry accepted → session advances to round 8 as an ordinary round.
     const lv = String(r.level ?? "").toLowerCase();
-    assert.equal(lv, "l2", `R8b expected L2 (periodic_refresh: 8-3=5>=5), got '${lv}'`);
+    assert.equal(lv, "l1", `R8b expected L1 (clean continuation), got '${lv}'`);
     assert.ok(String(r.prompt ?? "").length > 200);
     roundId = String(r.roundId);
-    LL.push("R8b:L2");
+    LL.push("R8b:L1");
   });
 
-  // ── R9 L0 — previousFailedWithoutNewInfo preempts periodic_refresh ─────
+  // ── R9 L0 — previousFailedWithoutNewInfo ─────────────────────────────
   //
   // Note: R9's eval has no discovered_constraints etc. → hasNewInformation=false
-  // → previousFailedWithoutNewInfo fires BEFORE periodic_refresh.
+  // → previousFailedWithoutNewInfo fires before any other L2 reason could.
   // This demonstrates that failure-without-learning always gets minimal prompt.
 
   it("R9 L0 — previousFailedWithoutNewInfo fires (no new info in eval)", async () => {
@@ -276,7 +278,7 @@ describe("Long-Horizon Verification", () => {
       execution_report: { files_changed: ["src/strkit.ts", "src/pipeline.ts", "README.md"], tests_reported: { passed: 17, failed: 0, skipped: 0 }, criterion_claims: criterionClaims(["Final polish"], []), progress_estimate: 0.98 },
     }});
     assert.ok(!r.error);
-    // previousFailedWithoutNewInfo fires (priority before periodic_refresh)
+    // previousFailedWithoutNewInfo fires (no new information in the eval)
     // because the eval has success=false and no new-information fields.
     assert.equal(String(r.level ?? "").toLowerCase(), "l0");
     roundId = String(r.roundId);
@@ -302,15 +304,17 @@ describe("Long-Horizon Verification", () => {
   // CROSS-ROUND CHECKS
   // ═══════════════════════════════════════════════════════════════════════════
 
-  it("✓ levels: L0, L1, L2, checkpoint_boundary, periodic_refresh, REJECT", () => {
+  it("✓ levels: L0, L1, L2, checkpoint_boundary, REJECT", () => {
     const log = LL.join(" → ");
     assert.ok(log.includes("L2"), `Missing L2: ${log}`);
     assert.ok(log.includes("L1"), `Missing L1: ${log}`);
     assert.ok(log.includes("L0"), `Missing L0: ${log}`);
     assert.ok(log.includes("REJECT"), `Missing REJECT: ${log}`);
     // Specific transitions verified inline above:
-    //   R1:L2 (first_round), R4:L2 (checkpoint_boundary), R9:L2 (periodic_refresh)
-    //   R8:REJECT(L0) (retry_delta), R8b:L0 (previousFailedWithoutNewInfo)
+    //   R1:L2 (first_round), R3:L2 (checkpoint_boundary)
+    //   R8:REJECT(L0) (retry_delta), R9:L0 (previousFailedWithoutNewInfo)
+    //   R8b:L1 (an ordinary continuation — the round-count timer that used to
+    //   force L2 here is deleted)
   });
 
   it("✓ replay + health + list + status + storage", async () => {
@@ -321,8 +325,9 @@ describe("Long-Horizon Verification", () => {
 
     const health = await client.tool("loopforge_status", { loopId, view: "loop" });
     assert.ok(!health.error);
-    assert.equal(typeof health.drift_detected, "boolean");
-    for (const f of ["goal_alignment", "constraint_integrity", "strategy_stability", "task_continuity"])
+    // v3.8.1: counted facts, not similarity verdicts.
+    assert.equal(typeof health.committed_rounds, "number");
+    for (const f of ["rounds_with_unverified_items", "unverified_streak_limit"])
       assert.ok(health[f] !== undefined, `${f} missing`);
 
     const list = await client.tool("loopforge_status", { view: "all" });
@@ -351,8 +356,8 @@ describe("Long-Horizon Verification", () => {
       "    L1 state_capsule           ✓ R2-R3,R5-R7 incremental prompts",
       "    L2 checkpoint_boundary     ✓ R3  via compression_checkpoint at R2",
       "    L0 retry_delta             ✓ R8  rejection prompt (attempt>1)",
-      "    L2 periodic_refresh        ✓ R8b interval=5 since last L2 at R3",
-      "    L0 prevFailedWithoutNewInfo ✓ R9  fires before periodic_refresh",
+      "    L1 normal continuation     ✓ R8b clean retry, no L2 reason applies",
+      "    L0 prevFailedWithoutNewInfo ✓ R9  no new information in the eval",
       "    enforcement reject         ✓ R8  false success claim caught",
       "    circuit breaker removed    ✓ R1-R7 all success=false, loop continues",
       "    compression_checkpoint     ✓ R2→R3 checkpoint label in R3 prompt",

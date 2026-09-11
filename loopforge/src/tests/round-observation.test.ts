@@ -9,7 +9,7 @@ import {
   transactionSchemaVersionOf,
 } from "../round-transaction.js";
 import {
-  committedRoundsFromEntries,
+  derivationRounds,
   legacyTransactionRounds,
   machineGitMotionSeries,
 } from "../committed-round.js";
@@ -130,10 +130,40 @@ describe("v3.8 — transaction schema 2", () => {
 
   it("surfaces legacy rounds explicitly", () => {
     const entries = [feedbackEntry(1), feedbackEntry(2, { schemaVersion: 1 }), feedbackEntry(3)];
-    assert.deepEqual(legacyTransactionRounds(entries), [{ round: 2, schemaVersion: 1 }]);
-    const views = committedRoundsFromEntries(entries);
+    assert.deepEqual(legacyTransactionRounds(entries), [
+      { round: 2, schemaVersion: 1, envelope: "transaction" },
+    ]);
+    const views = derivationRounds(entries);
     assert.deepEqual(views.map((view) => view.round), [1, 3],
       "legacy rounds are not history — the loss is reported, never silent");
+  });
+
+  it("v3.8.1: reports a legacy PROMPT ARTIFACT version too", () => {
+    // The artifact schema is versioned separately from the transaction, and
+    // the transaction parser rejects a snapshot whose artifact version it does
+    // not know — dropping the whole round. Reporting only the transaction
+    // version would let that deletion happen silently.
+    const stale = feedbackEntry(2);
+    const envelope = (stale.loop_lineage as Record<string, unknown>)
+      .round_transaction as Record<string, unknown>;
+    (envelope.snapshot as Record<string, unknown>).promptArtifact = {
+      schemaVersion: 1,
+      roundId: "loop:obs:round:2",
+      attempt: 1,
+      level: "l1",
+      renderedPrompt: "p",
+      promptHash: "h",
+      stateHash: "s",
+    };
+    const entries = [feedbackEntry(1), stale];
+    assert.deepEqual(legacyTransactionRounds(entries), [
+      { round: 2, schemaVersion: 1, envelope: "prompt_artifact" },
+    ]);
+    assert.deepEqual(
+      derivationRounds(entries).map((view) => view.round),
+      [1],
+      "an unknown artifact version is not history either",
+    );
   });
 });
 
@@ -143,19 +173,19 @@ describe("v3.8 — read-model observation fields", () => {
       before: [gitObservation(["a.ts"], { "a.ts": "m:1" })],
       after: [gitObservation(["a.ts", "b.ts"], { "a.ts": "m:1", "b.ts": "m:1" })],
     });
-    const view = committedRoundsFromEntries([entry])[0];
+    const view = derivationRounds([entry])[0];
     assert.deepEqual(view.observationDelta[0].files, ["b.ts"]);
     assert.equal(view.evidenceIncomplete, false);
   });
 
   it("marks a round without after observations as evidence-incomplete", () => {
-    const view = committedRoundsFromEntries([feedbackEntry(1)])[0];
+    const view = derivationRounds([feedbackEntry(1)])[0];
     assert.equal(view.evidenceIncomplete, true);
     assert.deepEqual(view.observationDelta, []);
   });
 
   it("reads git motion from the derived delta", () => {
-    const rounds = committedRoundsFromEntries([
+    const rounds = derivationRounds([
       feedbackEntry(1, { before: [], after: [gitObservation(["a.ts"])] }),
       feedbackEntry(2, { before: [], after: [gitObservation([])] }),
       feedbackEntry(3, { before: [], after: [gitObservation(["c.ts"])] }),

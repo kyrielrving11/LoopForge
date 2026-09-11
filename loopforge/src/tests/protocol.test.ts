@@ -6,9 +6,7 @@ import {
   AgentStatus,
   makeExecutionFeedback,
   makeLoopObjective,
-  makeLoopHealth,
   makeRollingSummary,
-  makeTaskAlignment,
   makeLoopRoundResult,
   makeLoopCompileRequest,
   makeLoopCompileResponse,
@@ -38,7 +36,6 @@ describe("Protocol — Factory functions", () => {
     assert.equal(req.mode, "loop_compile");
     assert.equal(req.round, 1);
     assert.equal(req.force_level, "auto");
-    assert.equal(req.health_check_interval, 1);
     assert.equal(req.loop_objective, null);
     assert.deepEqual(req.constraints_from_plan, []);
   });

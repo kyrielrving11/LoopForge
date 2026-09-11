@@ -19,7 +19,7 @@ import { rederiveClaimViewWithFlags, listVerifiedClaims } from "./evidence-claim
 import type { VaultEntry } from "./loop-store.js";
 import { isRecord, entryRound } from "./token-utils.js";
 import {
-  committedRoundsFromEntries,
+  derivationRounds,
   decodeCommittedRound,
   legacyTransactionRounds,
   machineEvidenceForRound,
@@ -107,7 +107,7 @@ export function buildAudit(
   const ordered = auditOrder(entries);
   // v3.8: the shared committed-round read model — ordering, dedup and rollback
   // exclusion come from it, not from a private rule.
-  const views = committedRoundsFromEntries(entries).filter((view) => view.loopId === loopId);
+  const views = derivationRounds(entries).filter((view) => view.loopId === loopId);
   const commands = getPolicy().evidence.commands ?? [];
   const viewByRound = new Map(views.map((view) => [view.round, view] as const));
   // The executed contract per round, through the ONE derivation explain and

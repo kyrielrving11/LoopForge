@@ -93,7 +93,6 @@ function makeSessionEntry(overrides: {
       created_at: Date.now(),
       consecutive_rejections: 0,
       last_rejection_check: "",
-      drift_clarification_streak: 0,
       backtrack_skipped_files: [],
       backtrack_target_git_head: null,
       round_snapshot: overrides.roundSnapshot ?? null,
@@ -152,7 +151,6 @@ describe("RoundLifecycle — reconstructSession", async () => {
     });
     (entry.loop_lineage as Record<string, unknown>).backtrack_skipped_files = ["a.ts"];
     (entry.loop_lineage as Record<string, unknown>).backtrack_target_git_head = "abc123";
-    (entry.loop_lineage as Record<string, unknown>).drift_clarification_streak = 2;
     (entry.loop_lineage as Record<string, unknown>).consecutive_rejections = 1;
     (entry.loop_lineage as Record<string, unknown>).last_rejection_check = "R4";
 

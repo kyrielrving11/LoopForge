@@ -134,11 +134,13 @@ External agent
   ID and its commit retires the brief.
 - L0, L1, and L2 prompt density, five-state sub-goals with explicit
   `subgoal_updates` transitions (active `sg-` IDs only; done/canceled are
-  terminal), constraint lifecycle, milestones, and agent-requested emphasis or
-  confusion points. Prompts and the state file render active sub-goals only,
-  capped by policy; the state file is grouped into Current / Recent /
-  Historical Summary tiers with derived metadata (round, attempt, state hash)
-  and is byte-identical when regenerated from the Vault.
+  terminal), constraint lifecycle, milestones, and agent-requested emphasis
+  (by stable id or exact text) or confusion points. Prompts and the state file
+  render active sub-goals only, capped by policy; the state file is grouped
+  into Current / Recent / Historical Summary tiers with derived metadata
+  (round, attempt, state hash) and is byte-identical when regenerated from the
+  Vault — its content depends on committed facts, not on which prompt level
+  compiled.
 - Separate Replay and Audit views. Replay answers what happened; Audit checks
   evidence and completeness.
 - Durable sessions with atomic round documents, sequence checks, owned locks,

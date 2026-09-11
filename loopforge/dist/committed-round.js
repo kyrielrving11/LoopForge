@@ -4,6 +4,7 @@
  * place that interprets their transaction envelope or the compiler's merged
  * lineage representation. Consumers receive one stable, read-only view.
  */
+import { PROMPT_ARTIFACT_SCHEMA_VERSION } from "./protocol.js";
 import { ROUND_TRANSACTION_SCHEMA_VERSION, deriveRoundObservationDelta, parseRoundTransactionSnapshot, transactionSchemaVersionOf, } from "./round-transaction.js";
 import { claimedMetCriteria, claimedRemainingCriteria, effectiveOutcome, parseRoundContract } from "./self-eval.js";
 import { entryRound, isRecord } from "./token-utils.js";
@@ -28,6 +29,45 @@ function strings(value) {
     return Array.isArray(value)
         ? value.filter((item) => typeof item === "string")
         : [];
+}
+function numbers(value) {
+    return Array.isArray(value)
+        ? value.filter((item) => typeof item === "number")
+        : [];
+}
+function stringMap(value) {
+    if (!isRecord(value))
+        return {};
+    const out = {};
+    for (const [key, entry] of Object.entries(value)) {
+        if (typeof entry === "string")
+            out[key] = entry;
+    }
+    return out;
+}
+/** v3.8.1: decode a rollback directive's facts from either carrier —
+ *  `result.*` on a durable :feedback entry, `lineage.*` on a hydrated merged
+ *  entry. Returns null when no restore point is recorded, which is also the
+ *  signal that the record cannot serve as recovery guidance. */
+export function decodeBacktrackRecord(source) {
+    const value = isRecord(source) ? source : {};
+    const target = typeof value.backtrackTarget === "number" ? value.backtrackTarget : null;
+    if (target === null)
+        return null;
+    return {
+        target,
+        triggerRule: typeof value.backtrackTriggerRule === "string"
+            ? value.backtrackTriggerRule
+            : "",
+        failedRounds: numbers(value.backtrackFailedRounds),
+        approaches: strings(value.backtrackApproaches),
+        wrongAssumptions: strings(value.backtrackWrongAssumptions),
+        skippedFiles: strings(value.backtrackSkippedFiles),
+        skippedFingerprints: stringMap(value.backtrackSkippedFingerprints),
+        targetGitHead: typeof value.backtrackTargetGitHead === "string"
+            ? value.backtrackTargetGitHead
+            : undefined,
+    };
 }
 /** Normalize a raw subgoal_updates value into typed entries. Decode stays
  *  tolerant of any shape (parser caps apply at ingestion; this is the
@@ -123,6 +163,7 @@ export function decodeCommittedRound(entry) {
         retractedConstraints: strings(evaluation?.retracted_constraints),
         emergedSubtasks: strings(evaluation?.emerged_subtasks),
         subgoalUpdates: subGoalUpdates(evaluation?.subgoal_updates),
+        backtrack: action === "backtrack" ? decodeBacktrackRecord(resultValue) : null,
     };
 }
 /** Decode an in-memory lineage entry after the engine merged its committed
@@ -216,6 +257,7 @@ export function decodeMergedRound(entry) {
         retractedConstraints: strings(evaluationRaw.retracted_constraints),
         emergedSubtasks: strings(evaluationRaw.emerged_subtasks),
         subgoalUpdates: subGoalUpdates(evaluationRaw.subgoal_updates),
+        backtrack: action === "backtrack" ? decodeBacktrackRecord(lineage) : null,
     };
 }
 /** Normalize committed history: rollback directives disappear, later records
@@ -364,8 +406,20 @@ export function historyRounds(views, beforeRound = Number.POSITIVE_INFINITY) {
     }
     return [...byRound.values()].sort((a, b) => a.round - b.round);
 }
-export function committedRoundsFromEntries(entries, beforeRound = Number.POSITIVE_INFINITY) {
-    return historyRounds(entries.map(decodeCommittedRound), beforeRound);
+/** v3.8.1: the ONE committed-history window every derivation reads.
+ *
+ * `decodeRound` (hydrated merged lineage first, then the durable feedback
+ * entry) plus the rollback handling in `historyRounds` — so the compile path,
+ * the projection, the live coordinator, audit and explain can no longer
+ * disagree about which rounds are this branch's history, nor about how their
+ * envelope was interpreted.
+ *
+ * `currentRound` bounds the window exactly as before (default: unbounded). It
+ * is NOT a rollback fence: the redo re-commits the round numbers the abandoned
+ * rounds occupied, so abandonment is temporal, not numeric, and cannot be
+ * expressed as a bound here. */
+export function derivationRounds(entries, currentRound = Number.POSITIVE_INFINITY) {
+    return historyRounds(entries.map(decodeRound), currentRound);
 }
 /** The machine-evidence set that best represents a committed round: the
  *  after-phase observations (captured post-execution), else the derived round
@@ -381,13 +435,6 @@ export function machineEvidenceForRound(view) {
         return view.observationDelta;
     return view.beforeEvidence;
 }
-export function mergedRoundsFromEntries(entries, beforeRound = Number.POSITIVE_INFINITY) {
-    return historyRounds(entries.map(decodeMergedRound), beforeRound);
-}
-/** v3.8: Rounds whose persisted transaction carries a LEGACY schema version.
- *  A hard version break must be visible, not silent: these rounds drop out of
- *  history views, so audit/status surface them here instead of letting the
- *  loop look complete while rounds are missing. */
 export function legacyTransactionRounds(entries) {
     const out = [];
     for (const entry of entries) {
@@ -399,12 +446,27 @@ export function legacyTransactionRounds(entries) {
             : isRecord(entry.round_transaction) ? entry.round_transaction : null;
         if (!envelope || !isRecord(envelope.snapshot))
             continue;
-        const version = transactionSchemaVersionOf(envelope.snapshot);
-        if (version === null || version === ROUND_TRANSACTION_SCHEMA_VERSION)
-            continue;
         const round = entryRound(entry);
-        if (round >= 1)
-            out.push({ round, schemaVersion: version });
+        if (round < 1)
+            continue;
+        const version = transactionSchemaVersionOf(envelope.snapshot);
+        if (version !== null && version !== ROUND_TRANSACTION_SCHEMA_VERSION) {
+            out.push({ round, schemaVersion: version, envelope: "transaction" });
+            continue;
+        }
+        // v3.8.1: the PromptArtifact schema is versioned separately, and the
+        // transaction parser rejects a snapshot whose artifact version it does
+        // not know — dropping the whole round. Reporting only the transaction
+        // version would let an artifact-version break delete committed history
+        // silently, which is the one thing this function exists to prevent.
+        const snapshot = envelope.snapshot;
+        if (isRecord(snapshot.promptArtifact)) {
+            const artifactVersion = snapshot.promptArtifact.schemaVersion;
+            if (typeof artifactVersion === "number" &&
+                artifactVersion !== PROMPT_ARTIFACT_SCHEMA_VERSION) {
+                out.push({ round, schemaVersion: artifactVersion, envelope: "prompt_artifact" });
+            }
+        }
     }
     return out.sort((a, b) => a.round - b.round);
 }

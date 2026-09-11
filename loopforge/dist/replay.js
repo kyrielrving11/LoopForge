@@ -4,7 +4,7 @@
  * Enables audit, comparison, and timeline analysis of loop rounds.
  */
 import { queryLoopEntries } from "./loop-store.js";
-import { committedRoundsFromEntries, decodeCommittedRound } from "./committed-round.js";
+import { derivationRounds, decodeCommittedRound } from "./committed-round.js";
 // ═══════════════════════════════════════════════════════════════════════════
 // ReplayBackend
 // ═══════════════════════════════════════════════════════════════════════════
@@ -79,7 +79,7 @@ export class ReplayBackend {
     maxRound(loopId) {
         const prefix = `loop:${loopId}:r`;
         const feedback = queryLoopEntries(this.store, loopId, { prefix, feedbackOnly: true });
-        const rounds = committedRoundsFromEntries(feedback);
+        const rounds = derivationRounds(feedback);
         return rounds.length > 0 ? rounds[rounds.length - 1].round : 0;
     }
 }

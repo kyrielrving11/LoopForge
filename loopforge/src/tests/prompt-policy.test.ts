@@ -20,8 +20,6 @@ function defaults(overrides: Partial<PromptLevelInput> = {}): PromptLevelInput {
     previousStateMissing: false,
     previousFailedWithoutNewInformation: false,
     verificationContradicted: false,
-    fullRefreshInterval: 5,
-    lastFullRound: 1,
     ...overrides,
   };
 }
@@ -98,44 +96,6 @@ describe("decidePromptLevel", () => {
     const d = decidePromptLevel(defaults({ recoveryBoundary: true, round: 2 }));
     assert.equal(d.level, "l2");
     assert.ok(d.reasons.includes("recovery_boundary"));
-  });
-
-  it("returns L2 for state_drift", () => {
-    const d = decidePromptLevel(defaults({ stateDrift: true, round: 2 }));
-    assert.equal(d.level, "l2");
-    assert.ok(d.reasons.includes("state_drift"));
-  });
-
-  it("returns L2 for periodic_refresh when interval exceeded", () => {
-    const d = decidePromptLevel(defaults({
-      round: 7,
-      lastFullRound: 1,
-      fullRefreshInterval: 5,
-    }));
-    assert.equal(d.level, "l2");
-    assert.ok(d.reasons.includes("periodic_refresh"));
-  });
-
-  it("returns L1 when periodic_refresh interval not yet reached", () => {
-    const d = decidePromptLevel(defaults({
-      round: 3,
-      lastFullRound: 1,
-      fullRefreshInterval: 5,
-    }));
-    assert.equal(d.level, "l1");
-  });
-
-  it("returns L1 when fullRefreshInterval is 0 (periodic refresh disabled)", () => {
-    // v2.6 default: periodic refresh off — "thin prompt, fat state file"
-    const d = decidePromptLevel(defaults({
-      round: 100,
-      lastFullRound: 1,
-      fullRefreshInterval: 0,
-    }));
-    assert.equal(d.level, "l1");
-    // Reasons should NOT include periodic_refresh
-    const hasRefresh = d.reasons.includes("periodic_refresh");
-    assert.equal(hasRefresh, false);
   });
 
   it("L0 wins over L1 (attempt > 1 bypasses state_capsule)", () => {

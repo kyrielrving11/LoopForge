@@ -9,6 +9,25 @@ import type { VaultEntry } from "./loop-store.js";
 import type { ContractBinding, ExecutionReport, PromptArtifact, RoundContractProposal, RoundOutcome, SelfEvaluation, SubGoalUpdate, VerificationFlag } from "./protocol.js";
 import type { RoundProcessResult } from "./round-coordinator.js";
 export type CommittedAction = "continue" | "stop" | "backtrack";
+/** v3.8.1: the rolled-back branch's facts, decoded from a committed rollback
+ *  directive. One shape for the compile-side Recovery Brief, the state file's
+ *  Recent tier and the rollback prompt — these were three renderers over two
+ *  independent derivations (the committed record and an in-memory walk).
+ *
+ *  Note the target is a RESTORE POINT, not an upper bound: the redo re-commits
+ *  the same round numbers the abandoned rounds occupied (round-lifecycle.ts
+ *  sets `currentRound = backtrackTarget + 1`), so this is never a window
+ *  fence. Abandonment is temporal, not numeric. */
+export interface BacktrackRecoveryRecord {
+    readonly target: number;
+    readonly triggerRule: string;
+    readonly failedRounds: number[];
+    readonly approaches: string[];
+    readonly wrongAssumptions: string[];
+    readonly skippedFiles: string[];
+    readonly skippedFingerprints: Record<string, string>;
+    readonly targetGitHead?: string;
+}
 export interface CommittedRoundView {
     readonly source: "feedback" | "merged";
     readonly sourceEntry: VaultEntry | Record<string, unknown>;
@@ -45,7 +64,16 @@ export interface CommittedRoundView {
     readonly retractedConstraints?: string[];
     readonly emergedSubtasks?: string[];
     readonly subgoalUpdates?: SubGoalUpdate[];
+    /** v3.8.1: present only on a committed rollback directive, null elsewhere.
+     *  Decoded from `result.*` on the durable feedback entry and from the
+     *  `lineage.backtrack*` stamps on a hydrated merged entry. */
+    readonly backtrack: BacktrackRecoveryRecord | null;
 }
+/** v3.8.1: decode a rollback directive's facts from either carrier —
+ *  `result.*` on a durable :feedback entry, `lineage.*` on a hydrated merged
+ *  entry. Returns null when no restore point is recorded, which is also the
+ *  signal that the record cannot serve as recovery guidance. */
+export declare function decodeBacktrackRecord(source: unknown): BacktrackRecoveryRecord | null;
 /** Decode a durable :feedback entry. Reject/terminate/in-flight envelopes are
  * not committed history and therefore do not produce a view. */
 export declare function decodeCommittedRound(entry: VaultEntry): CommittedRoundView | null;
@@ -93,7 +121,19 @@ export declare function entrySubGoalUpdates(entry: unknown): SubGoalUpdate[];
  *  verification-gate so lineage-shape reads live in this module only. */
 export declare function entryViolations(entry: unknown): string[];
 export declare function historyRounds(views: Iterable<CommittedRoundView | null>, beforeRound?: number): CommittedRoundView[];
-export declare function committedRoundsFromEntries(entries: VaultEntry[], beforeRound?: number): CommittedRoundView[];
+/** v3.8.1: the ONE committed-history window every derivation reads.
+ *
+ * `decodeRound` (hydrated merged lineage first, then the durable feedback
+ * entry) plus the rollback handling in `historyRounds` — so the compile path,
+ * the projection, the live coordinator, audit and explain can no longer
+ * disagree about which rounds are this branch's history, nor about how their
+ * envelope was interpreted.
+ *
+ * `currentRound` bounds the window exactly as before (default: unbounded). It
+ * is NOT a rollback fence: the redo re-commits the round numbers the abandoned
+ * rounds occupied, so abandonment is temporal, not numeric, and cannot be
+ * expressed as a bound here. */
+export declare function derivationRounds(entries: ReadonlyArray<unknown>, currentRound?: number): CommittedRoundView[];
 /** The machine-evidence set that best represents a committed round: the
  *  after-phase observations (captured post-execution), else the derived round
  *  delta, else the pre-round baseline. Shared selector for the
@@ -102,15 +142,19 @@ export declare function committedRoundsFromEntries(entries: VaultEntry[], before
  *  machineGitMotionSeries, which deliberately reads the delta alone for the
  *  motion signal. */
 export declare function machineEvidenceForRound(view: CommittedRoundView): MachineObservation[];
-export declare function mergedRoundsFromEntries(entries: unknown[], beforeRound?: number): CommittedRoundView[];
 /** v3.8: Rounds whose persisted transaction carries a LEGACY schema version.
  *  A hard version break must be visible, not silent: these rounds drop out of
  *  history views, so audit/status surface them here instead of letting the
  *  loop look complete while rounds are missing. */
-export declare function legacyTransactionRounds(entries: unknown[]): Array<{
+export interface LegacyRound {
     round: number;
     schemaVersion: number;
-}>;
+    /** v3.8.1: which versioned envelope rejected the round. Both are hard
+     *  breaks — a round that fails either check is not committed history — so
+     *  both must be REPORTED, not just the transaction one. */
+    envelope: "transaction" | "prompt_artifact";
+}
+export declare function legacyTransactionRounds(entries: unknown[]): LegacyRound[];
 /** Machine-observed git motion for the most recent contiguous window.
  * Consumers must decode durable or hydrated entries before calling this;
  * transaction-envelope interpretation stays confined to this module. */

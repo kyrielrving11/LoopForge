@@ -224,6 +224,33 @@ export class RoundLifecycle {
     /** Apply a prepared round to the session, persist, and build the result.
      *  Shared by reconcileCommittedRound, resume, and unpause — the three
      *  compile-then-persist tails were previously copy-pasted. */
+    /** Apply a processed round's counters to the session.
+     *
+     *  v3.8.1: per-rule rejection tracking — same-check rejections accumulate,
+     *  and a DIFFERENT rejection reason resets the counter to 1, so an agent
+     *  that fixes what it was told to fix is not punished by an unrelated
+     *  earlier rejection. This rule ran as two byte-identical copies (the live
+     *  advance path and the crash replay); one rule, one implementation, so the
+     *  two paths cannot drift.
+     *
+     *  `newConsecutiveRejections` comes from the enforcement gate and already
+     *  counts the round; it is only honoured when the check is unchanged. */
+    applyRoundCounters(session, pr) {
+        if (pr.action === "reject" && pr.rejectionCheck) {
+            session.consecutiveRejections =
+                pr.rejectionCheck === session.lastRejectionCheck
+                    ? pr.newConsecutiveRejections
+                    : 1;
+            session.lastRejectionCheck = pr.rejectionCheck;
+        }
+        else {
+            session.consecutiveRejections = pr.newConsecutiveRejections;
+            if (pr.action !== "reject")
+                session.lastRejectionCheck = "";
+        }
+        if (pr.newLastSelfEval)
+            session.lastSelfEval = pr.newLastSelfEval;
+    }
     persistPrepared(session, prepared, roundSuccess, warningsOverride) {
         session.evidenceBaseline = prepared.baseline;
         session.roundSnapshot = prepared.snapshot;
@@ -271,21 +298,7 @@ export class RoundLifecycle {
             return null;
         const pr = recovered.result;
         session.roundSnapshot = recovered.snapshot;
-        // Replay the committed counter — but with per-rule tracking.
-        if (pr.action === "reject" && pr.rejectionCheck) {
-            session.consecutiveRejections =
-                pr.rejectionCheck === session.lastRejectionCheck
-                    ? pr.newConsecutiveRejections
-                    : 1;
-            session.lastRejectionCheck = pr.rejectionCheck;
-        }
-        else {
-            session.consecutiveRejections = pr.newConsecutiveRejections;
-            if (pr.action !== "reject")
-                session.lastRejectionCheck = "";
-        }
-        if (pr.newLastSelfEval)
-            session.lastSelfEval = pr.newLastSelfEval;
+        this.applyRoundCounters(session, pr);
         // L1 (v3.7.x): trajectory push guard must use the SAME judgement as the
         // counter guard below (recovered.snapshot.round). Comparing against
         // session.currentRound conflates two windows: the crash window (persisted
@@ -439,7 +452,6 @@ export class RoundLifecycle {
             domain: undefined,
             plan_source: null,
             constraints_from_plan: [],
-            health_check_interval: 1,
         });
         const compileRequest = {
             task: session.task,
@@ -453,7 +465,6 @@ export class RoundLifecycle {
             domain: lcr.domain ?? "",
             plan_source: lcr.plan_source ?? null,
             constraints_from_plan: lcr.constraints_from_plan ?? [],
-            health_check_interval: lcr.health_check_interval,
             max_rounds: session.maxRounds,
         };
         const prepared = await new RoundDriver(session.engine, this.store).prepare(compileRequest, session.loopId, session.currentRound);
@@ -545,22 +556,7 @@ export class RoundLifecycle {
         const actualEvidence = completed.actualEvidence;
         session.roundSnapshot = outcome.snapshot;
         const pr = outcome.result;
-        // Per-rule rejection tracking: same-check rejections accumulate;
-        // a different rejection reason resets the counter.
-        if (pr.action === "reject" && pr.rejectionCheck) {
-            session.consecutiveRejections =
-                pr.rejectionCheck === session.lastRejectionCheck
-                    ? pr.newConsecutiveRejections
-                    : 1;
-            session.lastRejectionCheck = pr.rejectionCheck;
-        }
-        else {
-            session.consecutiveRejections = pr.newConsecutiveRejections;
-            if (pr.action !== "reject")
-                session.lastRejectionCheck = "";
-        }
-        if (pr.newLastSelfEval)
-            session.lastSelfEval = pr.newLastSelfEval;
+        this.applyRoundCounters(session, pr);
         // L1 (v3.7.x): never push a REPLAYED outcome onto the trajectory. When a
         // crash/exception window left the committed round undelivered, the replay
         // re-executes the same round in memory — its success was already recorded

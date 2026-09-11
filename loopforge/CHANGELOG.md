@@ -174,6 +174,47 @@ verification/enforcement split, round identity, leases, crash recovery, or the
 backtrack directives. The backtrack prompt still states restore FACTS and never
 prescribes a git command — the agent owns the restore, the gate owns the check.
 
+### The submission boundary moved into the runtime
+
+`SessionManager` is exported from `index.ts`; `RoundLifecycle` is not. The five
+strict submission checks lived in the MCP tool handler, so "strict" was a
+property of one transport — a library caller, a future CLI command, or any
+direct `mgr.advance()` got none of it. A partial copy of two of them (the
+object check and the core-field validation) sat in the session manager too, so
+one rule had three homes across two layers.
+
+All five now live in `mcp/submission-boundary.ts` and are applied by
+`SessionManager.advance`, before its session queue and before its lease
+heartbeat. The handler only maps the result onto its tool envelope.
+
+Two orderings are part of the contract, and both are why the boundary sits
+where it does. **Before the session is resolved**: a malformed evaluation is a
+payload defect whatever the session's state, and answering `session_not_found`
+for it would send the agent after the wrong problem — the reference spaces that
+need a session fail open when there is none. **Before the queue and the lease
+heartbeat**: renewing a lease writes the session document, so a payload that is
+never accepted must not reach it. That second ordering is what makes AGENTS.md's
+"changes nothing durable" literally true rather than nearly true, and it is why
+the heartbeat did *not* simply move into the lifecycle: `RoundLifecycle.advance`
+has direct callers that hold no lease, and a heartbeat there would have fenced
+them out.
+
+Each reference space is null — fail open, shape checks still strict — when it
+cannot be observed. An unobserved session is not the same as a session with no
+active contract: the latter is an observed EMPTY space, and an item claim in it
+is false. `activeContractOf` and `compileSessionContext` moved into the new
+module so the session's own `getActiveContract` and `getProjection` share the
+boundary's derivation rather than keeping a second one.
+
+The visible consequence: a contract item binding a command that is not
+configured is now rejected on EVERY advance, not just through the MCP handler.
+One existing test had been passing `verify_with: ["run-tests"]` against a policy
+that configures `verify` — it had only ever been exercise-able because the
+direct-`mgr.advance` path skipped the check. That fixture now names a real
+command, and two new tests lock the invariant itself: a direct `advance` with an
+unconfigured command returns `contract_invalid`, and a payload defect is
+reported before the session is resolved.
+
 ### Test suite
 
 Sixteen test files changed. Tests that existed only to pin a deleted mechanism
@@ -189,7 +230,7 @@ and the budget rules — protected content survives a crushing ceiling,
 `protectedOverflow` is recorded, every rendered optional section outranks every
 dropped one, and identical input yields an identical prompt and artifact.
 
-884 tests.
+886 tests.
 
 ## 3.8.0 (2026-09-10)
 

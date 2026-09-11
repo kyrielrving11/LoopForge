@@ -26,4 +26,13 @@
  *  the process cwd without pre-resolving it.
  */
 export declare function containInWorkspace(workspace: string, target: string): string;
+/** v3.8.1: the Contract scope-entry check, in the module that owns workspace
+ *  containment.
+ *
+ *  It lives here rather than in the MCP transport because it is a filesystem
+ *  fact about the running process, not a property of the payload: the strict
+ *  contract boundary injects it so a declared scope entry that escapes the
+ *  workspace is rejected pre-advance. Returns the reason when the entry
+ *  escapes, null when it is contained. */
+export declare function scopeEntryDetail(entry: string): string | null;
 //# sourceMappingURL=workspace.d.ts.map

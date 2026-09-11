@@ -5,25 +5,10 @@
  * status is the unified inspection tool (view=session|loop|all|audit).
  * Each handler receives SessionManager + parsed input, returns the output object.
  */
-import { buildSelfEvaluation } from "../engine.js";
-import { parseSubGoalUpdates, validateCoreSelfEvaluation, validateContractShape, validateSubGoalUpdatesShape, } from "../self-eval.js";
+import { validateCoreSelfEvaluation } from "../self-eval.js";
 import { isRecord } from "../token-utils.js";
-import { getPolicy, isConfiguredCommand, validateLoopId } from "../policy.js";
+import { getPolicy, validateLoopId } from "../policy.js";
 import { deriveEvidenceCapability } from "../evidence-provider.js";
-import { containInWorkspace } from "../workspace.js";
-/** v3.8: A contract's `scope` is the round's declared file boundary, so it
- *  passes through the same workspace containment check as every other
- *  workspace path. Returns the reason when the entry escapes, null when it is
- *  contained. */
-function scopeEntryDetail(entry) {
-    try {
-        containInWorkspace(process.cwd(), entry);
-        return null;
-    }
-    catch (error) {
-        return error instanceof Error ? error.message : "leaves the workspace";
-    }
-}
 // ═══════════════════════════════════════════════════════════════════════════
 // Tool schemas (MCP JSON Schema format)
 // ═══════════════════════════════════════════════════════════════════════════
@@ -920,80 +905,22 @@ export const TOOL_HANDLERS = {
                     "loopforge_start / loopforge_next / loopforge_resume / loopforge_status response",
             };
         }
-        if (!rawEval || typeof rawEval !== "object" || Array.isArray(rawEval)) {
+        // v3.8.1: the submission boundary belongs to the RUNTIME, not to this
+        // transport. `mgr.advance` applies all of it — object shape, core fields,
+        // subgoal_updates structure and references, and the strict Round Contract
+        // declaration/claims boundary — before touching any state, and reports a
+        // refusal through `submissionError`. This handler only maps that onto the
+        // tool envelope, so a non-MCP caller gets exactly the same strictness.
+        const result = await mgr.advance(sessionId, output, rawEval, roundId);
+        if (result.submissionError) {
             return {
-                error: "evaluation_invalid",
-                details: {
-                    missing: ["evaluation"],
-                    invalid: [{ field: "evaluation", expected: "object" }],
-                },
+                error: result.submissionError.code,
+                errorMessage: result.stopDetail ?? "the submission was rejected",
+                details: result.submissionError.details,
                 sessionId,
                 roundId,
             };
         }
-        const validation = validateCoreSelfEvaluation(rawEval);
-        if (validation.missing.length > 0 || validation.invalid.length > 0) {
-            return {
-                error: "evaluation_invalid",
-                details: validation,
-                sessionId,
-                roundId,
-            };
-        }
-        // v3.7.1: subgoal_updates is a strict structural boundary. Shape errors
-        // (bad entries, sg- literals in the creation channel) and referential
-        // errors (unknown / terminal / illegal transitions, checked against the
-        // compiled sub-goal set) return evaluation_invalid BEFORE advance — no
-        // state change, no gates, no rejection counters; retry same roundId.
-        const subgoalErrors = validateSubGoalUpdatesShape(rawEval);
-        if (subgoalErrors.length > 0) {
-            return {
-                error: "evaluation_invalid",
-                details: { missing: [], invalid: [], subgoal_errors: subgoalErrors },
-                sessionId,
-                roundId,
-            };
-        }
-        // The emerged set is part of BOTH referential boundaries: a sub-goal may
-        // be created and referenced/transitioned in one round.
-        const emerged = Array.isArray(rawEval.emerged_subtasks)
-            ? rawEval.emerged_subtasks
-                .filter((v) => typeof v === "string")
-                .map((s) => s.slice(0, 500))
-            : [];
-        const updates = parseSubGoalUpdates(rawEval.subgoal_updates);
-        if (updates.length > 0) {
-            const referentialErrors = mgr.preflightSubGoalUpdates(sessionId, roundId, updates, emerged);
-            if (referentialErrors.length > 0) {
-                return {
-                    error: "evaluation_invalid",
-                    details: { missing: [], invalid: [], subgoal_errors: referentialErrors },
-                    sessionId,
-                    roundId,
-                };
-            }
-        }
-        // v3.8: the contract declaration and item claims are the same kind of
-        // strict structural boundary as subgoal_updates — a defect returns
-        // contract_invalid BEFORE advance, with zero state change and a
-        // same-roundId retry. The scope check is injected because containment is a
-        // filesystem fact, not a property of the payload.
-        const contractErrors = validateContractShape(rawEval, {
-            activeItemIds: mgr.preflightContractItems(sessionId),
-            knownSubGoalIds: mgr.preflightKnownSubGoalIds(sessionId, emerged),
-            isConfiguredCommand,
-            checkScopeEntry: scopeEntryDetail,
-        });
-        if (contractErrors.length > 0) {
-            return {
-                error: "contract_invalid",
-                details: { missing: [], invalid: [], contract_errors: contractErrors },
-                sessionId,
-                roundId,
-            };
-        }
-        const preExtractedEval = buildSelfEvaluation(rawEval);
-        const result = await mgr.advance(sessionId, output, preExtractedEval, roundId);
         // v2.12: Typed projection — runtime facts for the main agent, attached
         // on every accepted/continued round (not on errors).
         let projection = null;

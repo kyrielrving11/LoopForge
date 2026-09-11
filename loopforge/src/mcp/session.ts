@@ -21,11 +21,10 @@ import {
   preflightStructuredGate,
   type StructuredGateVerdict,
 } from "../cognitive-governance.js";
-import { makeGateDecision, Mode } from "../protocol.js";
+import { makeGateDecision } from "../protocol.js";
 import type { GateActionDescriptor } from "../protocol.js";
 import type {
   ExternalContextProvider,
-  LoopForgeRequest,
   LoopForgeResponse,
   LoopTerminalSink,
   SelfEvaluation,
@@ -37,15 +36,10 @@ import { listVerifiedClaims } from "../evidence-claims.js";
 import { buildAudit } from "../audit.js";
 import { buildExplain } from "../explain.js";
 import { CHECK_CONTRACT_ITEMS_UNVERIFIED } from "../verification-gate.js";
-import { deriveEmergedItems, validateSubGoalUpdates } from "../subgoal-state.js";
 import { derivationRounds } from "../committed-round.js";
-import { deriveActiveRoundContract, type ActiveContractView } from "../round-contract.js";
+import type { ActiveContractView } from "../round-contract.js";
 import { getPolicy, validateLoopId } from "../policy.js";
 import { isRecord } from "../token-utils.js";
-import {
-  buildSelfEvaluation,
-  validateCoreSelfEvaluation,
-} from "../self-eval.js";
 import { makeLoopCompileRequest } from "../protocol.js";
 import { ReplayBackend } from "../replay.js";
 import { FileLoopStore, queryLoopEntries } from "../loop-store.js";
@@ -73,6 +67,12 @@ import type {
   AdvanceResult,
   SessionRegistry,
 } from "./round-lifecycle.js";
+import {
+  activeContractOf,
+  compileSessionContext,
+  validateSubmission,
+} from "./submission-boundary.js";
+import type { CompileContextSession } from "./submission-boundary.js";
 
 // Public type surface preserved from before the v2.14 decomposition.
 export type {
@@ -805,127 +805,14 @@ export class SessionManager implements SessionRegistry {
 
   // ── v2.12: Typed projection + audit ────────────────────────────────────
 
-  /** Compile the current round context exactly once per derivation path.
-   *  v3.0.1: prefer the round-boundary compile cached on the session (the
-   *  artifact's deterministic roundId guards against stale reuse); fall
-   *  back to a read-only compile (persistLineage: false) that never writes
-   *  the vault. Single derivation — shared by the projection view and the
-   *  subgoal_updates preflight so they can never disagree. */
-  private compileContext(session: {
-    loopId: string;
-    task: string;
-    maxRounds: number;
-    currentRound: number;
-    lastCompileResponse?: LoopForgeResponse | null;
-    roundSnapshot?: { roundId: string } | null;
-    engine: LoopForgeEngine;
-  }): LoopForgeResponse | null {
-    const cached = session.lastCompileResponse;
-    const expectedRoundId = session.roundSnapshot?.roundId
-      ?? makeRoundId(session.loopId, session.currentRound);
-    if (cached?.prompt_artifact && cached.prompt_artifact.roundId === expectedRoundId) {
-      return cached;
-    }
-    try {
-      const request: LoopForgeRequest = {
-        task: session.task,
-        mode: Mode.LOOP_COMPILE,
-        feedback: null,
-        skill_name: null,
-        task_id: null,
-        loop_id: session.loopId,
-        round: session.currentRound,
-        max_rounds: session.maxRounds,
-        verification_flags: [],
-      };
-      const compiled = session.engine.invokeLoopCompile(request, undefined, { persistLineage: false });
-      return compiled.response ?? null;
-    } catch {
-      return null; // projection/preflight degrades gracefully
-    }
-  }
-
-  /** v3.7.1: pre-advance referential check for subgoal_updates. The
-   *  reference space is the SAME derivation the agent saw in its prompt
-   *  (the compiled sub_goals of the current round) plus this payload's own
-   *  emerged items (a sub-goal may be created and transitioned in one
-   *  round). Unknown IDs, terminal references, and illegal migrations
-   *  return evaluation_invalid before anything mutates. Compile failure
-   *  fails open (the shape checks above stay strict). */
-  preflightSubGoalUpdates(
-    sessionId: string,
-    roundId: string,
-    updates: import("../protocol.js").SubGoalUpdate[],
-    emerged: string[],
-  ): Array<{ field: string; reason: string; detail: string }> {
-    if (updates.length === 0) return [];
-    const session = this.sessions.get(sessionId);
-    if (!session) return [];
-    const expectedRoundId = session.roundSnapshot?.roundId
-      ?? makeRoundId(session.loopId, session.currentRound);
-    if (expectedRoundId !== roundId) return []; // stale/foreign submission — advance handles it
-    const known = this.knownSubGoals(session, emerged);
-    if (!known) return []; // fail open: cannot observe
-    return validateSubGoalUpdates(known, updates).map((error) => ({
-      field: "subgoal_updates",
-      reason: error.reason,
-      detail: `${error.reason.replace(/_/g, " ")}: ${error.id}`,
-    }));
-  }
-
-  /** v3.8: The reference space for sub-goal ids, shared by `subgoal_updates`
-   *  referential validation and contract-item `subgoal_refs` validation: the
-   *  compiled sub_goals of the current round (exactly the set the prompt
-   *  rendered) plus this payload's own emerged items, so a sub-goal may be
-   *  created and referenced in one round. Null when the compile cannot be
-   *  observed — callers fail open and keep their shape checks strict. */
-  private knownSubGoals(
-    session: McpSession,
-    emerged: string[],
-  ): import("../protocol.js").SubGoal[] | null {
-    const response = this.compileContext(session);
-    if (!response?.sub_goals) return null;
-    const known = [...response.sub_goals];
-    for (const item of deriveEmergedItems(session.loopId, session.currentRound, emerged)) {
-      if (!known.some((sg) => sg.id === item.id)) {
-        known.push({
-          id: item.id,
-          description: item.description,
-          status: "pending",
-          declared_at_round: session.currentRound,
-          status_changed_at_round: session.currentRound,
-          priority: known.length,
-        });
-      }
-    }
-    return known;
-  }
-
-  /** v3.8: pre-advance referential check for contract `subgoal_refs`. The
-   *  reference space is the SAME derived sub-goal set the agent saw in its
-   *  prompt plus its own same-round `emerged_subtasks` — a declaration may not
-   *  forge an `sg-` id that corresponds to nothing. Returns null when the
-   *  compile cannot be observed (fail open — the shape checks stay strict). */
-  preflightKnownSubGoalIds(
-    sessionId: string,
-    emerged: string[],
-  ): ReadonlySet<string> | null {
-    const session = this.sessions.get(sessionId);
-    if (!session) return null;
-    const known = this.knownSubGoals(session, emerged);
-    return known ? new Set(known.map((subGoal) => subGoal.id)) : null;
-  }
-
-  /** v3.8: pre-advance referential check for contract_item_claims. The
-   *  reference space is the SAME derived ACTIVE contract the agent saw in its
-   *  prompt. Returns the active contract's item ids, or null when the
-   *  contract cannot be observed (fail open — the shape checks stay strict). */
-  preflightContractItems(sessionId: string): ReadonlySet<string> | null {
-    const session = this.sessions.get(sessionId);
-    if (!session) return null;
-    const active = this.getActiveContract(sessionId);
-    if (!active) return new Set();
-    return new Set(active.items.map((item) => item.id));
+  /** The compile context for this round.
+   *
+   *  v3.8.1: delegates to the SHARED implementation in round-lifecycle.ts —
+   *  the runtime's submission boundary reads the same context (the sub-goal
+   *  reference space is exactly the compiled set the prompt carried), and two
+   *  copies would let the projection and the boundary disagree about it. */
+  private compileContext(session: CompileContextSession): LoopForgeResponse | null {
+    return compileSessionContext(session);
   }
 
   /** Typed cognitive state projection for an active session. Derived on
@@ -1008,14 +895,8 @@ export class SessionManager implements SessionRegistry {
   getActiveContract(sessionId: string): ActiveContractView | null {
     const session = this.sessions.get(sessionId);
     if (!session) return null;
-    const prefix = `loop:${session.loopId}:`;
-    const entries = [
-      ...queryLoopEntries(this.loopStore, session.loopId, { prefix }),
-      ...queryLoopEntries(this.loopStore, session.loopId, { prefix, feedbackOnly: true }),
-    ];
-    return deriveActiveRoundContract(
-      derivationRounds(entries, session.currentRound),
-    );
+    // One derivation, shared with the submission boundary.
+    return activeContractOf(this.loopStore, session);
   }
 
   /** v2.12: Policy metrics that survive restarts — vault-derived round
@@ -1082,39 +963,45 @@ export class SessionManager implements SessionRegistry {
    *    (from the last start/next/resume response). Anchors the submission so a
    *    stale or duplicate submission is not processed against a later round.
    *    Optional for library callers — when absent the anchor check is skipped. */
+  /** \`submission\` is the RAW evaluation payload, not a built one.
+   *
+   *  v3.8.1: this method used to carry a partial copy of the submission
+   *  boundary (an object check plus core-field validation) while the MCP tool
+   *  handler carried the rest — one rule, three copies, across two layers.
+   *  The boundary now lives entirely in the runtime
+   *  (`RoundLifecycle.submissionBoundary`), so every caller — this manager, a
+   *  library user, a future CLI command — gets the same strictness. */
+  /** \`submission\` is the RAW evaluation payload, not a built one.
+   *
+   *  v3.8.1: this method used to carry a partial copy of the submission
+   *  boundary (an object check plus core-field validation) while the MCP tool
+   *  handler carried the rest — one rule, three copies, across two layers.
+   *  The whole boundary now runs HERE, before the queue and before the lease
+   *  heartbeat, so every caller of the public API gets it and a rejected
+   *  payload leaves nothing durable behind. */
   async advance(
     sessionId: string,
     output: string,
-    preExtractedEval?: SelfEvaluation,
+    submission?: unknown,
     roundId?: string,
   ): Promise<AdvanceResult> {
-    const current = this.sessions.get(sessionId);
-    if (current && (current.status === "running" || current.status === "stalled")) {
-      const rawEvaluation: unknown = preExtractedEval;
-      if (!isRecord(rawEvaluation)) {
-        return {
-          sessionId,
-          round: current.currentRound,
-          roundId: current.roundSnapshot?.roundId
-            ?? makeRoundId(current.loopId, current.currentRound),
-          prompt: null,
-          stopReason: "evaluation_invalid",
-          stopDetail: "A structured evaluation object is required. Resubmit the same roundId with success, output_summary, constraint_violations, and should_continue.",
-        };
-      }
-      const validation = validateCoreSelfEvaluation(rawEvaluation);
-      if (validation.missing.length > 0 || validation.invalid.length > 0) {
-        return {
-          sessionId,
-          round: current.currentRound,
-          roundId: current.roundSnapshot?.roundId
-            ?? makeRoundId(current.loopId, current.currentRound),
-          prompt: null,
-          stopReason: "evaluation_invalid",
-          stopDetail: "The structured evaluation has missing or invalid core fields. Correct it and resubmit the same roundId.",
-        };
-      }
-      preExtractedEval = buildSelfEvaluation(rawEvaluation);
+    // Judged before the session is even resolved: a malformed evaluation is a
+    // payload defect whatever the session's state. See submission-boundary.ts.
+    const boundary = validateSubmission(
+      this.loopStore,
+      this.sessions.get(sessionId),
+      submission,
+    );
+    if (!boundary.ok) {
+      return {
+        sessionId,
+        round: this.sessions.get(sessionId)?.currentRound ?? 0,
+        ...(roundId !== undefined ? { roundId } : {}),
+        prompt: null,
+        stopReason: boundary.submissionError.code,
+        stopDetail: boundary.stopDetail,
+        submissionError: boundary.submissionError,
+      };
     }
 
     return this.withSessionQueue(sessionId, async () => {
@@ -1129,7 +1016,12 @@ export class SessionManager implements SessionRegistry {
         );
       }
       try {
-        return await this.lifecycle.advance(sessionId, output, preExtractedEval, roundId);
+        return await this.lifecycle.advance(
+          sessionId,
+          output,
+          boundary.evaluation,
+          roundId,
+        );
       } catch (error) {
         if (error instanceof SessionLeaseConflictError) {
           return this.leaseConflictResult(error.loopId, this.findSessionEntry(error.loopId));

@@ -1807,7 +1807,11 @@ describe("MCP — Round Contract flow", async () => {
       round_contract: {
         work_item: "Implement login flow",
         scope: ["src/auth"],
-        items: [{ description: "login works", criterion_refs: ["cr-login-works"], subgoal_refs: [], verify_with: ["run-tests"] }],
+        // "verify" is what installTestCommandProvider configures. v3.8.1:
+        // the strict boundary now runs on EVERY advance (not just through the
+        // MCP handler), so an item binding an unconfigured command really is
+        // rejected — this fixture has to name a command that exists.
+        items: [{ description: "login works", criterion_refs: ["cr-login-works"], subgoal_refs: [], verify_with: ["verify"] }],
       },
     };
     const r2 = await mgr.advance(sessionId, "Scaffolded the auth module.", evalBlock);
@@ -1816,7 +1820,47 @@ describe("MCP — Round Contract flow", async () => {
     assert.ok(r2.prompt.includes("**Implement login flow**"),
       "round 2 prompt must carry the contract as Current Task");
     assert.ok(r2.prompt.includes("login works"), "item descriptions render");
-    assert.ok(r2.prompt.includes("- Verify via: run-tests"));
+    assert.ok(r2.prompt.includes("- Verify via: verify"));
+  });
+
+  it("v3.8.1: the strict boundary runs on EVERY advance, not only through the MCP handler", async () => {
+    // The boundary used to live in the tool handler, which made "strict" a
+    // property of one transport: SessionManager.advance is exported from
+    // index.ts, so a library caller got none of it. This calls advance
+    // directly, with an item binding a command that is not configured.
+    const r1 = await mgr.create({ task: "Build the auth module", loopId: "boundary-runtime" });
+    const rejected = await mgr.advance(r1.sessionId, "Scaffolded.", {
+      success: false,
+      output_summary: "Scaffolded auth.",
+      constraint_violations: [],
+      should_continue: true,
+      round_contract: {
+        work_item: "Implement login flow",
+        scope: ["src/auth"],
+        items: [{ description: "login works", criterion_refs: [], subgoal_refs: [], verify_with: ["not-configured"] }],
+      },
+    });
+    assert.equal(rejected.stopReason, "contract_invalid");
+    assert.equal(rejected.submissionError?.code, "contract_invalid");
+    assert.equal(rejected.prompt, null, "a rejected submission compiles no prompt");
+    assert.ok(
+      JSON.stringify(rejected.submissionError?.details ?? {}).includes("not-configured"),
+      "the refusal names the offending command",
+    );
+  });
+
+  it("v3.8.1: a payload defect is reported before the session is resolved", async () => {
+    // A malformed evaluation is a payload defect whatever the session's state;
+    // answering session_not_found for it would send the agent after the wrong
+    // problem. The reference spaces that need a session fail open here.
+    const rejected = await mgr.advance("no-such-session", "output", {
+      success: "yes",
+      output_summary: "done",
+      constraint_violations: [],
+      should_continue: true,
+    });
+    assert.equal(rejected.stopReason, "evaluation_invalid");
+    assert.equal(rejected.submissionError?.code, "evaluation_invalid");
   });
 
   it("a contract-less round stays byte-identical to pre-contract rendering", async () => {

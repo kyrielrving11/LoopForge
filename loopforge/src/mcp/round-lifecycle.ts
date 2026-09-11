@@ -146,6 +146,15 @@ export interface AdvanceResult {
   /** v1.13: When enforcementAction is "reject" or "terminate", the reason
    *  why the round was rejected or the loop was terminated. */
   enforcementReason?: string;
+  /** v3.8.1: set when the RUNTIME refused the submission before touching any
+   *  state — the same `ToolErrorCode` as `stopReason`, plus the structured
+   *  details a transport maps onto its error envelope. Produced by
+   *  `validateSubmission` in submission-boundary.ts, which SessionManager
+   *  runs before its queue and lease heartbeat. */
+  submissionError?: {
+    code: "evaluation_invalid" | "contract_invalid";
+    details: Record<string, unknown>;
+  };
 }
 
 /** Narrow view of the session registry the lifecycle may touch. The owning

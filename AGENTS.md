@@ -103,7 +103,12 @@ loopforge/src/
   policy-metrics.ts     Diagnostic round and verification metrics
   cli.ts                Unified loopforge command
   mcp/
-    session.ts          Durable leased MCP sessions and read-only views
+    submission-boundary.ts THE submission boundary (the five strict checks)
+                        plus the compile context it reads; runs before the
+                        session queue and the lease heartbeat
+    session.ts          Durable leased MCP sessions and read-only views; the
+                        runtime's public entry point (index.ts exports it),
+                        and where the submission boundary is applied
     round-lifecycle.ts  Session round state machine and crash recovery
     tools.ts             Nine MCP tools and input/output schemas
     server.ts           Synchronous JSON-RPC stdio server
@@ -190,6 +195,33 @@ An invalid evaluation is handled before `RoundLifecycle.advance()`. It must not
 save session state, write the Vault, run verification or enforcement gates,
 increment rejection state, or record metrics. Natural-language evaluation
 inference is not allowed.
+
+### The submission boundary is the runtime's, not the transport's
+
+All five checks live in `mcp/submission-boundary.ts` and are applied by
+`SessionManager.advance` — the runtime's public entry point (`RoundLifecycle`
+is internal; the manager is what `index.ts` exports). They used to live in the
+MCP tool handler, which made "strict" a property of one transport: a library
+caller, a future CLI command, or any direct `mgr.advance()` got none of it, and
+a partial copy of two checks sat in the session manager as well.
+
+Two orderings are part of the contract, and both are why the boundary sits
+where it does:
+
+- **Before the session is resolved.** A malformed evaluation is a payload
+  defect whatever the session's state; answering `session_not_found` for it
+  would send the agent after the wrong problem. The reference spaces that need
+  a session fail open when there is none, so an unknown session still gets a
+  pure shape judgement.
+- **Before the queue and the lease heartbeat.** Renewing a lease writes the
+  session document, so a payload that is never accepted must not reach it.
+  This is the ordering that makes "changes nothing durable" literally true
+  rather than nearly true.
+
+Each reference space is `null` — fail open, shape checks still strict — when it
+cannot be observed. An unobserved session is NOT the same as a session with no
+active contract: the latter is an observed empty space, and an item claim in it
+is false.
 
 ## Round lifecycle
 

@@ -102,7 +102,7 @@ export interface SelfEvaluation {
      *  (current behavior) when absent. "blocked" means work cannot proceed
      *  under current constraints; "needs_human_input" requires intervention. */
     stop_reason?: "gave_up" | "blocked" | "needs_human_input";
-    /** v2.12: Declared tri-state outcome. When absent, derived from success
+    /** v2.12: Declared outcome (four values). When absent, derived from success
      *  (true → "success", false → "failed"). "partial" and "blocked" can only
      *  be declared explicitly. A declared non-success outcome suppresses the
      *  success-class verification checks even when success=true. */
@@ -475,7 +475,7 @@ export interface LoopRoundResult {
     /** Model's information needs for the next round's prompt.
      *  Carried forward from SelfEvaluation. Consumed by the Compiler. */
     prompt_requests?: PromptRequests;
-    /** v2.12: Declared tri-state outcome. Carried forward from SelfEvaluation. */
+    /** v2.12: Declared outcome. Carried forward from SelfEvaluation. */
     outcome?: RoundOutcome;
     /** v2.12: Flat blocker description (outcome==="blocked" only). */
     blocker?: string;

@@ -862,7 +862,7 @@ export function buildSelfEvalBlock(
     ],
   };
 
-  // v2.12: Declarative tri-state outcome (L1/L2 only — keeps L0 retry lean)
+  // v2.12: Declarative outcome (L1/L2 only — keeps L0 retry lean)
   if (declareOutcome) {
     evalObj.outcome = "<success|partial|failed|blocked>";
     evalObj.blocker = "<required only when outcome=blocked>";

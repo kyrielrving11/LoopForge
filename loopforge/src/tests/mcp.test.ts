@@ -1457,6 +1457,22 @@ describe("MCP — tool contract (v3.2.1)", async () => {
       "loopforge_status must exist (list functionality moved into it)");
   });
 
+  it("v3.8.1: server instructions name only fields the runtime accepts", () => {
+    // The instructions used to ask for "remaining criteria" and "a concrete
+    // next action" — `success_criteria_remaining` and `next_action` were both
+    // deleted in v3.8, so every client was told to submit fields the runtime
+    // drops. The report the runtime actually reads is execution_report with
+    // criterion_claims / contract_item_claims.
+    for (const removed of ["remaining criteria", "next action", "execution_evidence"]) {
+      assert.ok(!SERVER_INSTRUCTIONS.includes(removed),
+        `instructions must not ask for the removed field "${removed}"`);
+    }
+    assert.ok(SERVER_INSTRUCTIONS.includes("execution_report"),
+      "instructions must name the report the runtime reads");
+    assert.ok(SERVER_INSTRUCTIONS.includes("criterion_claims"),
+      "instructions must name the claim fields the runtime reads");
+  });
+
   it("loopforge_next schema requires the evaluation parameter", () => {
     assert.throws(() => {
       validateToolInput("loopforge_next", {

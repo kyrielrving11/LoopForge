@@ -1,6 +1,6 @@
 ---
 name: perception
-description: Drive a recoverable multi-round coding task through LoopForge MCP while the external Agent remains the execution owner.
+description: Drive a multi-round coding task through LoopForge MCP so goals, constraints, evidence, and decisions survive context loss and restarts. Use when a task needs several rounds, must survive context compression or a process restart, or needs an auditable record of what was verified by the machine rather than claimed by the model. The external Agent stays the execution owner.
 ---
 
 # Perception
@@ -22,6 +22,13 @@ Call `loopforge_start` with:
 - `constraints`: hard boundaries that must survive every round.
 - `maxRounds`: optional positive safety limit. The default is 200 from policy.
 - `domain`: optional context label.
+- `loopId`: optional stable loop id. Generated for you when omitted — pass one
+  when the caller already knows it, so later calls can address the loop.
+- `planSource`: optional path to a plan document to extract constraints from.
+
+Before starting, `loopforge_status` with `view: "all"` lists the loops the
+runtime already holds — reuse an existing session instead of opening a second
+one for the same objective.
 
 Keep the returned `sessionId`, `roundId`, prompt, and level. Always pass the
 most recent `roundId` to `loopforge_next`. It anchors the submission to the
@@ -81,12 +88,30 @@ All other evaluation fields are optional and normalized by LoopForge. Useful
 fields include `execution_report` (`files_changed`, `tests_reported`,
 `criterion_claims`, `contract_item_claims`, `progress_estimate`),
 `discovered_constraints`, `emerged_subtasks` (the only sub-goal creation
-channel — never an `sg-` ID), `subgoal_updates` (explicit status transitions:
-active `sg-` IDs with a target status; done/canceled are terminal and never
-reopen), `prompt_requests`, `outcome`, `blocker`, `round_contract`,
-`retroactiveClaims`, `gate_ids` (only when the gate layer is enabled), and
-`worker_results` (each entry declares an `outcome`; entries without one are
-dropped).
+channel — never an `sg-` ID; at most 50 entries, 500 characters each),
+`subgoal_updates` (explicit status transitions: active `sg-` IDs with a target
+status; done/canceled are terminal and never reopen), `prompt_requests`,
+`round_contract`, `retroactiveClaims`, `gate_ids` (only when the gate layer is
+enabled), and `worker_results` (entries need `agentId`, `subTask`,
+`resultSummary` and an `outcome` of `success` / `partial` / `failed`; entries
+missing any of these are dropped).
+
+The objective and the constraint set evolve only through your own reports:
+`objective_refinement` deepens the objective, `revised_success_criteria` (each
+entry `{old, new}`) replaces a criterion, `retracted_constraints` retires a
+constraint you now consider wrong, `wrong_assumptions` records what you
+believed and had to correct, and `compression_checkpoint` with a
+`checkpoint_label` marks a subtask boundary that forces a full-state prompt.
+`outcome` is the declared outcome (`success` / `partial` / `failed` /
+`blocked`) and `blocker` describes a `blocked` outcome; `stop_reason`
+(`"blocked"` or `"needs_human_input"`) is how you stop without claiming
+success. `no_change_reason` is the honest escape hatch for a round that
+genuinely produced no machine-verifiable work: it downgrades the "success with
+no machine evidence" finding to info, but only while NO enabled verification
+command is configured — a configured command closes that escape. It never
+excuses a success claim with no `execution_report` at all, and it never
+excuses a contract check: every successful round still needs `execution_report`
+with `files_changed` and `tests_reported`.
 
 Optional malformed values are ignored or defaulted — the Round Contract
 declaration, `contract_item_claims`, and `subgoal_updates` are the strict
@@ -180,11 +205,17 @@ Item status is machine-derived: `pending` (never claimed met), `insufficient`
 passing command's entrypoint changed that round), `verified` (you claimed `met`
 AND every bound command was observed passing — after phase, entrypoint
 untampered, same command configuration as at declaration). Claim an item by
-citing its `rci-` ID in `execution_report.contract_item_claims`. A claim never
-creates a verified fact, so claimed-but-unbacked is `insufficient`: the round
-still commits and the debt is surfaced, but once it persists for
-`engine.unverified_claim_streak_limit` consecutive rounds (default 3) the round
-is rejected, and the next same-check strike terminates the loop.
+citing its `rci-` ID in `execution_report.contract_item_claims`.
+
+A claim never creates a verified fact, and machine evidence can only go stale
+in one direction: the LATEST observation at or after your claim decides, so a
+command that passed early and FAILED in the closing round makes the item
+`contradicted` — a pass cannot outlive a later failure. Claimed-but-unbacked is
+`insufficient`: the round still commits and the debt is surfaced, but once the
+debt persists for `engine.unverified_claim_streak_limit` consecutive rounds
+(default 3) the round is rejected; a repeat of the SAME check rejects again with
+an escalation notice, and the third consecutive same-check rejection terminates
+the loop as `incomplete`.
 
 The contract closes when every item is `verified`, or when a round reports
 `outcome: "blocked"` with a `blocker`. While it is open, a DIFFERENT proposal is
@@ -196,24 +227,42 @@ Repeated drift terminates the loop.
 
 Declaration and item claims are a strict structural boundary — `contract_invalid`
 with a same-`roundId` retry and zero state change: a contract with no items, more
-items/scope/refs than the declared limits allow, an item with no `verify_with`,
-an item naming an unknown, disabled, or non-after-capable command, a `scope`
-entry that is not a string or that leaves the workspace, a malformed
-`subgoal_refs` entry, a `subgoal_refs` ID that names no sub-goal of this loop,
+items/scope/refs than the declared limits allow (20 items, 20 `criterion_refs`,
+20 `subgoal_refs` and 20 commands per item, 50 `scope` entries), an item with no
+`verify_with`, an item naming an unknown, disabled, or non-after-capable
+command, a `scope` entry that is not a string or that leaves the workspace, a
+malformed `subgoal_refs` entry, a `subgoal_refs` ID that names no sub-goal of
+this loop (including a sub-goal beyond the 50-entry `emerged_subtasks` intake),
 and a malformed, duplicate, or unknown `contract_item_claims` entry.
 `criterion_claims` are advisory and lenient: an entry with an unknown or
 malformed criterion ID, or an outcome other than `met` / `remaining`, is
 dropped with a warning and never rejects the round.
 
+The commands `verify_with` may name are the ones your `loop_policy.json`
+declares under `evidence.commands` and enables there; the runtime runs them
+itself, without a shell, inside the workspace. An item whose bound command
+changed configuration since the contract was declared is `insufficient`, not
+`verified` — the declaration stamps the command configuration it was made
+under.
+
 ## Backtrack
 
-A progress stall (stalled or exactly-flat window over the lookback rounds)
-can trigger backtrack to the last clean committed round — the most recent
-committed round with no error-level verification flags. The backtrack commits
-a rollback directive that stays out of final history: your next submission is
-the REDO of round `restorePoint + 1` and must reuse the round ID the prompt
-carries; when it commits, the rollback record is replaced and disappears from
-history views.
+A progress stall can trigger backtrack to the last clean committed round — the
+most recent committed round with no error-level verification flags. The window
+is `engine.stall_lookback_rounds` rounds (default 3), and the verdict is
+MACHINE-first: when git observations exist for the window, machine motion alone
+decides it, and your `progress_estimate` does not enter — a rising estimate
+cannot cancel a stall, and git motion can only excuse one (it never creates
+one). Your reported estimates are consulted only when the loop has no machine
+history to read (no git provider, or fewer rounds than the window). One
+machine fact is exempt by construction: a round whose success the machine
+verified is finishing, not churning — the closing round of a loop often changes
+no files at all. So the way out of a stall is real, observable work.
+
+The backtrack commits a rollback directive that stays out of final history:
+your next submission is the REDO of round `restorePoint + 1` and must reuse the
+round ID the prompt carries; when it commits, the rollback record is replaced
+and disappears from history views.
 
 The backtrack prompt opens with a derived **Recovery Brief**:
 
@@ -259,33 +308,51 @@ different proposal while an old contract is still open is ignored as
   the restored prompt and round.
 - `prompt` is null: inspect `stopReason`.
 
+Each response also carries the posture of the round that just committed:
+`verificationStatus` (`trusted` when everything you claimed is machine-backed,
+`insufficient` when claims are unbacked but nothing is denied, `contradicted`
+when a machine fact denies a claim — it is never a judgement about the quality
+of your work), `roundSuccess`, `level`, and `warnings`. `enforcementReason`
+explains a rejection or termination. Read these before planning the next round:
+an `insufficient` posture is a statement about evidence, not about effort.
+
 Errors arrive as `{ok: false, error: {code, message, retryable, ...}}`. `code` is
 stable — branch on it, not on the prose in `message`. `evaluation_invalid`,
-`contract_invalid`, `round_id_required`, `round_id_mismatch`, and
-`invalid_argument` are `retryable`: fix the payload and resubmit the same
-`roundId`. `session_not_found` and `state_unavailable` are state conditions, not
-payload defects.
+`contract_invalid`, `policy_invalid`, `round_id_required`, `round_id_mismatch`,
+and `invalid_argument` are `retryable`: fix the payload and resubmit the same
+`roundId`. `state_unavailable` means the record you asked for is not there (no
+audit data for that loop, no such gate record), `session_not_found` that the
+session is gone: state conditions, not payload defects — do not resubmit the
+same payload hoping for a different answer. `gate_disabled` means the gate layer
+is off in this policy, and `loop_already_running` that a session for this loop
+already exists in this process — inspect or resume it instead of starting a
+duplicate.
 
 `completed` means the machine verified the completion: success plus every
 contract item `verified`, or no active contract. An explicit `outcome:
 "blocked"` (or `stop_reason: "blocked"` / `"needs_human_input"`) always stops as
 `blocked`, never as `completed`. `incomplete` means you stopped while the
-machine could not verify completion — claims the bound commands did not back.
-`failed` means the Agent gave up. `max_rounds` is the safety limit. `stalled`
-means no usable next state was produced.
-`enforcement_terminated` means repeated integrity failures reached a terminal
-ladder — including contract verification debt that persisted past
-`engine.unverified_claim_streak_limit`, which ends the loop instead of accepting
-another unverified round. `paused` means the durable session remains available
-for resume.
+machine could not verify completion — claims the bound commands did not back;
+contract verification debt that persisted past
+`engine.unverified_claim_streak_limit` also ends here rather than accepting
+another unverified round. `failed` means the Agent gave up. `max_rounds` is the
+safety limit. `stalled` means the runtime could not produce the next round's
+prompt. `enforcement_terminated` means repeated integrity failures reached a
+terminal ladder. `paused` means the durable session remains available for
+resume, and `cancelled` that the session was deleted.
 
 ## Prompt levels and views
 
 L0 is a lean same-round retry, L1 is normal continuation, and L2 is full
 rehydration. They control state density only and never prescribe a reasoning
-technique. Protected prompt sections and the token budget remain enforced;
-when the protected content alone exceeds the ceiling the prompt records
-`protectedOverflow` rather than dropping it.
+technique. L2 is chosen from FACTS about the round — the first round, a plan or
+checkpoint boundary, a committed recovery, a machine contradiction, a repeated
+rejection, a changed objective, a previous state the runtime can no longer read
+— never from a round counter, so nothing changes in the prompt just because the
+loop has been running for a while. Protected prompt sections and
+the token budget remain enforced; when the protected content alone exceeds the
+ceiling the prompt records `protectedOverflow` rather than dropping it, and
+which sections were rendered is recorded in the prompt artifact.
 
 Use `loopforge_status` with `view: "session"` for the live round and typed
 projection, `view: "loop"` for machine counts over committed rounds, `view: "all"`
@@ -298,8 +365,9 @@ Replay answers what happened; Audit checks whether facts and claims are
 supported; Explain shows why a round was decided the way it was.
 
 The optional `.loopforge/state/<loopId>-state.md` file is derived and can be
-regenerated. Read it in L2 pointer mode when the prompt asks for full context,
-but do not treat it as an independent source of truth.
+regenerated. In L2 the prompt may omit the full markdown state and point at
+that file instead (pointer mode), so read it when the prompt says so — but it
+is a derived view, never an independent source of truth.
 
 ## Control and delegation
 
@@ -308,15 +376,26 @@ Use `loopforge_pause` before an intentional interruption,
 for an intentional terminal stop.
 
 The two gate tools are opt-in (`policy.gate.enabled`, default false) and are
-hidden from `tools/list` when disabled. When enabled, preflight a high-risk
-action with `loopforge_gate_check` (a structured `GateActionDescriptor`): a
-`user_required` verdict returns a gate id and an approval question, and only
-an approved gate may be cited via `evaluation.gate_ids` in the round that
-performs the action. Present the approval question to the human and record
-their decision with `loopforge_gate_resolve`. Safe preparation work
-(investigation, dry-runs, rollback evidence) never needs a gate. Remember:
-approval is recorded through you, the Agent — LoopForge cannot machine-verify
-a human is present.
+hidden from `tools/list` when disabled (a direct call then returns
+`gate_disabled`). When enabled, preflight a high-risk action with
+`loopforge_gate_check`, whose `action` is a structured descriptor:
+
+- `description`: what the action does ("Deploy to production");
+- `scope`: files, systems or services it touches;
+- `effects`: any of `workspace_write`, `production`, `credentials`,
+  `data_migration`, `public_api`, `publish`, `payment`,
+  `external_communication`, `network`;
+- `reversibility`: `reversible` / `recoverable` / `irreversible` / `unknown`;
+- `authorization`: `agent_allowed` / `user_required` / `unknown`.
+
+Classification is conservative: anything not provably safe is `user_required`,
+which returns a gate id and an approval question. Present that question to the
+human, record their decision with `loopforge_gate_resolve`, and cite the
+approved gate id via `evaluation.gate_ids` in the round that performs the
+action — an unapproved or unknown cited gate rejects the round. Safe
+preparation work (investigation, dry-runs, rollback evidence) never needs a
+gate. Remember: approval is recorded through you, the Agent — LoopForge cannot
+machine-verify a human is present.
 
 Delegation does not create a separate LoopForge mode. Give each worker a
 self-contained subtask and relevant hard constraints, then place its result in

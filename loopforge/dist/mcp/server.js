@@ -53,9 +53,16 @@ export const SERVER_INSTRUCTIONS = [
     "Use LoopForge directly for long-running work. Start by calling loopforge_status ",
     "with view=all to list loops, then loopforge_status for a matching session or ",
     "loopforge_start for a new one. ",
+    // v3.8.1: the report fields named here must exist. The old text asked for
+    // "remaining criteria" and "a concrete next action" — `success_criteria_remaining`
+    // and `next_action` were both deleted in v3.8, so the runtime was instructing
+    // every client to submit fields it would drop.
     "Before each agent-process boundary, call loopforge_next with the roundId from ",
-    "the most recent response, honest evidence, remaining criteria, and a concrete ",
-    "next action. Follow reject or backtrack prompts and retry loopforge_next. ",
+    "the most recent response, one honest evaluation (success, output_summary, ",
+    "constraint_violations, should_continue) plus an execution_report carrying ",
+    "files_changed, tests_reported, criterion_claims and contract_item_claims. ",
+    "Claims never verify themselves: only machine observations do. ",
+    "Follow reject or backtrack prompts and retry loopforge_next. ",
     "Keep one LoopForge session across outer agent rounds. ",
     "Do not replace these MCP calls with shell or CLI wrappers.",
 ].join("");

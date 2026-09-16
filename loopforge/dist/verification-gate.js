@@ -371,9 +371,11 @@ function checkRetroactiveClaims(selfEval, vaultEntries, currentRound) {
  *     evidence for it. The trigger is the runtime-derived providerStatus
  *     (verified / unavailable / absent) — "verified" requires an UNTAMPERED
  *     passed after-command, so an entrypoint-tampered command no longer
- *     counts as machine evidence. Severity follows evidence.machine_backed_
- *     success — "required" rejects (error), "warn" tolerates with a warn
- *     (round commits, success excluded from the trajectory, trust drops). A
+ *     counts as machine evidence. Severity is warn (v3.8: the former
+ *     `evidence.machine_backed_success` switch is gone — policy schema 4
+ *     rejects the key by name. An unbacked success is insufficient
+ *     observation, not a contradiction, so the round commits with the
+ *     success excluded from the trajectory and trust dropped). A
  *     declared no_change_reason is the honest escape hatch: it downgrades to
  *     info — honored only while NO enabled verification command is
  *     configured (machine verification was structurally impossible); a

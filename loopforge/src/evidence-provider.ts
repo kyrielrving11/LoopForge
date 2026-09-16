@@ -163,9 +163,19 @@ export function deriveObservedCapability(
 
 /** v3.8: Human-readable capability warnings for start/resume/status. A loop
  *  with no machine verification can still run — its success claims are simply
- *  recorded as `insufficient` instead of `verified`. */
+ *  recorded as `insufficient` instead of `verified`.
+ *
+ *  v3.8.2: `policy` is read for the per-command entrypoint warning. The three
+ *  checks above it speak only when capability is ABSENT (no provider, no
+ *  command, a dead provider); this one speaks when a command IS configured but
+ *  its true entrypoint is unobservable — the case where a reader would
+ *  otherwise believe the runtime is watching files it cannot see. Derived from
+ *  policy alone (no probing): the predicate is the same `isPackageManager-
+ *  Command` the entrypoint resolver uses, so the warning and the check that
+ *  would (not) fire can never disagree. */
 export function capabilityWarnings(
   configured: ConfiguredCapability,
+  policy: LoopPolicy,
   observed?: ObservedCapability,
 ): string[] {
   const warnings: string[] = [];
@@ -180,6 +190,22 @@ export function capabilityWarnings(
       "No enabled verification command is configured — Round Contract items " +
       "cannot be machine-verified; contract closure will require an explicit " +
       "blocked outcome.",
+    );
+  }
+  // v3.8.2: a configured command whose harness is named in package.json. The
+  // entrypoint set for `npm test` is ["package.json"], so the test files the
+  // script actually runs are never in it: editing one is a warning, not a
+  // machine fact. Stated as fact + consequence — the operator owns the policy,
+  // so this never reads as an instruction the Agent should carry out.
+  for (const command of policy.evidence.commands) {
+    if (command.enabled !== true) continue;
+    if (!isPackageManagerCommand(command.executable)) continue;
+    warnings.push(
+      `Command "${command.name}" runs through a package manager — what it ` +
+      "actually executes is named in package.json, so the scripts or test " +
+      "files it invokes are not entrypoint-protected: changing one in the " +
+      "same round is recorded as a warning and does not invalidate the " +
+      "command's result.",
     );
   }
   if (observed) {
@@ -227,7 +253,7 @@ export function deriveEvidenceCapability(
       ready: command.enabled && (command.phase === "after" || command.phase === "both"),
     })),
     contractVerificationAvailable: configured.contractVerificationAvailable,
-    warnings: capabilityWarnings(configured, observed),
+    warnings: capabilityWarnings(configured, policy, observed),
   };
 }
 

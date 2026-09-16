@@ -138,15 +138,56 @@ describe("v3.8 — ObservedCapability and warnings", () => {
   });
 
   it("warns when nothing can be observed or verified", () => {
-    const configured = deriveConfiguredCapability(policy({ providers: [], commands: [] }));
-    const warnings = capabilityWarnings(configured);
+    const bare = policy({ providers: [], commands: [] });
+    const configured = deriveConfiguredCapability(bare);
+    const warnings = capabilityWarnings(configured, bare);
     assert.equal(warnings.length, 2);
     assert.ok(warnings.some((warning) => warning.includes("No evidence provider")));
     assert.ok(warnings.some((warning) => warning.includes("No enabled verification command")));
   });
 
+  it("v3.8.2: warns when a configured command's true entrypoint is unobservable", () => {
+    // `npm test` resolves its entrypoint set to ["package.json"], so the test
+    // files the script actually runs are never in it. The warning states that
+    // fact at start, where the config can still be changed. It adds no check
+    // and changes no verdict — test-file changes stay warn-only.
+    const viaPackageManager = policy({
+      providers: ["git"],
+      commands: [{ ...command, executable: "npm", args: ["test"] }],
+    });
+    const warnings = capabilityWarnings(
+      deriveConfiguredCapability(viaPackageManager), viaPackageManager);
+    assert.equal(warnings.length, 1, "no other capability warning applies here");
+    assert.ok(warnings[0].includes("runs through a package manager"));
+    assert.ok(warnings[0].includes('"verify"'), "the warning names the command");
+
+    const pinned = policy({
+      providers: ["git"],
+      commands: [{ ...command, args: ["--test", "dist/x.test.js"] }],
+    });
+    assert.deepEqual(
+      capabilityWarnings(deriveConfiguredCapability(pinned), pinned), [],
+      "an explicit entrypoint command has no such hole");
+
+    const disabled = policy({
+      providers: ["git"],
+      commands: [{ ...command, executable: "npm", args: ["test"], enabled: false }],
+    });
+    const disabledWarnings =
+      capabilityWarnings(deriveConfiguredCapability(disabled), disabled);
+    assert.ok(
+      !disabledWarnings.some((warning) => warning.includes("package manager")),
+      "a disabled command cannot run — it states no hole");
+    assert.deepEqual(disabledWarnings, [
+      "No enabled verification command is configured — Round Contract items " +
+      "cannot be machine-verified; contract closure will require an explicit " +
+      "blocked outcome.",
+    ], "the absent-capability warning is the one that speaks here");
+  });
+
   it("warns when a configured provider produced no observation", () => {
-    const configured = deriveConfiguredCapability(policy({ providers: ["git"], commands: [command] }));
+    const configuredPolicy = policy({ providers: ["git"], commands: [command] });
+    const configured = deriveConfiguredCapability(configuredPolicy);
     const observed = deriveObservedCapability([
       {
         schemaVersion: 1, providerId: "git", kind: "custom", phase: "after",
@@ -154,7 +195,7 @@ describe("v3.8 — ObservedCapability and warnings", () => {
         data: { detail: "git is not a repository" },
       },
     ], configured);
-    const warnings = capabilityWarnings(configured, observed);
+    const warnings = capabilityWarnings(configured, configuredPolicy, observed);
     assert.ok(warnings.some((warning) => warning.includes("Evidence provider(s) unavailable: git")));
   });
 });
@@ -222,11 +263,14 @@ describe("v3.8 — EvidenceCapability (the prepared round's single fact)", () =>
   });
 
   it("carries the capability warnings so start/resume/status share one voice", () => {
-    const bare = deriveEvidenceCapability(policy({ providers: [], commands: [] }));
+    const empty = policy({ providers: [], commands: [] });
+    const configured = deriveConfiguredCapability(empty);
+    const bare = deriveEvidenceCapability(empty);
     assert.equal(bare.warnings.length, 2);
     assert.deepEqual(bare.warnings, capabilityWarnings(
-      deriveConfiguredCapability(policy({ providers: [], commands: [] })),
-      deriveObservedCapability([], deriveConfiguredCapability(policy({ providers: [], commands: [] }))),
+      configured,
+      empty,
+      deriveObservedCapability([], configured),
     ));
   });
 

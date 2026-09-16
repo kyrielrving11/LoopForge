@@ -67,8 +67,17 @@ export declare function gitChangedFiles(observations: ReadonlyArray<MachineObser
 export declare function deriveObservedCapability(observations: ReadonlyArray<MachineObservation>, configured: ConfiguredCapability): ObservedCapability;
 /** v3.8: Human-readable capability warnings for start/resume/status. A loop
  *  with no machine verification can still run — its success claims are simply
- *  recorded as `insufficient` instead of `verified`. */
-export declare function capabilityWarnings(configured: ConfiguredCapability, observed?: ObservedCapability): string[];
+ *  recorded as `insufficient` instead of `verified`.
+ *
+ *  v3.8.2: `policy` is read for the per-command entrypoint warning. The three
+ *  checks above it speak only when capability is ABSENT (no provider, no
+ *  command, a dead provider); this one speaks when a command IS configured but
+ *  its true entrypoint is unobservable — the case where a reader would
+ *  otherwise believe the runtime is watching files it cannot see. Derived from
+ *  policy alone (no probing): the predicate is the same `isPackageManager-
+ *  Command` the entrypoint resolver uses, so the warning and the check that
+ *  would (not) fire can never disagree. */
+export declare function capabilityWarnings(configured: ConfiguredCapability, policy: LoopPolicy, observed?: ObservedCapability): string[];
 /** v3.8: The ONE capability derivation. Everything that speaks about
  *  capability — `RoundDriver.prepare()`, MCP start/resume/next/status, the
  *  capability warnings — reads this, so the surfaces cannot drift into

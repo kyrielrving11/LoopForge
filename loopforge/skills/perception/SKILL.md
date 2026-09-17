@@ -159,7 +159,60 @@ Sub-goals may evolve during execution. LoopForge does not use fuzzy intent or
 similarity to judge drift. The enforced boundary is contract `scope`: work
 outside it is `round_scope_drift`, a machine fact no explanation waives. Revert
 the out-of-scope change, or close the contract as blocked and declare the
-expanded scope in a new proposal.
+expanded scope in a new proposal whose `scope` covers **every** file this round
+changed outside the current one — a partial expansion is still drift.
+
+## Evidence commands
+
+Contract items are backed by commands the OPERATOR configures. The Agent never
+declares one, and does not discover or run project scripts to invent one. They
+live in `loop_policy.json` under `evidence.commands`, in the workspace the
+server was started in:
+
+```json
+{
+  "version": "4",
+  "evidence": {
+    "commands": [{
+      "name": "verify",
+      "enabled": true,
+      "executable": "node",
+      "args": ["scripts/verify.mjs"],
+      "cwd": ".",
+      "phase": "after",
+      "required": true,
+      "timeout_ms": 120000,
+      "max_output_chars": 8000,
+      "success_exit_codes": [0]
+    }]
+  }
+}
+```
+
+`executable` and `args` are spawned without a shell and confined to the
+workspace. `loopforge doctor` statically checks every configured command —
+its name, executable, arguments, timeouts, and workspace containment — and
+never executes one.
+
+Every prepared round returns `capability`: which providers are available, which
+commands are enabled and after-capable, and `contractVerificationAvailable`.
+When that is `false`, no configured command can back a contract item: run
+rounds without a contract instead of declaring items that cannot close. The
+`warnings` list states the same thing in words.
+
+A command's ENTRYPOINT is the file it names plus `package.json` when a package
+manager runs it. It must already be part of the workspace when the round
+starts, and it must not change during the round that runs it — the runtime
+records those files at round start and compares them afterwards, whether or not
+git can see them. A changed entrypoint makes the observation untrustworthy:
+restore it to its round-start content. Do not author the verification script
+inside the round you expect it to verify — that round cannot be closed by it.
+
+To keep a script that must survive a rollback, it has to be part of the
+committed workspace rather than an uncommitted change: the post-backtrack
+restore check rejects a skipped file that is still byte-identical to its state
+at the rollback, so a script left sitting in the working tree blocks the redo.
+Prepare it before the round that depends on it.
 
 ## Backtrack and recovery
 

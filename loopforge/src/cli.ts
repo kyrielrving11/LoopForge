@@ -8,9 +8,9 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { initializeClient, type InitClient } from "./init.js";
 import { FileLoopStore, queryLoopEntries } from "./loop-store.js";
-import { getPolicy, validateLoopId, writeDefaultPolicy, DEFAULT_POLICY } from "./policy.js";
+import { getPolicy, validateLoopId, writeDefaultPolicy, DEFAULT_POLICY, POLICY_INVALID_CODE } from "./policy.js";
 import type { LoopPolicy } from "./policy.js";
-import { isProviderRegistered } from "./evidence-provider.js";
+import { deriveEvidenceCapability, isProviderRegistered } from "./evidence-provider.js";
 import { buildExplain, renderExplain } from "./explain.js";
 import { McpServer } from "./mcp/server.js";
 import { VERSION } from "./version.js";
@@ -18,20 +18,60 @@ import { VERSION } from "./version.js";
 const HELP = `LoopForge ${VERSION}
 
 Usage:
-  loopforge mcp
-  loopforge init --client claude|codex|generic [--target DIR] [--force]
+  loopforge mcp [--workspace DIR]
+  loopforge init --client claude|codex|generic [--target DIR] [--workspace DIR] [--force]
   loopforge doctor [--json]
   loopforge inspect LOOP_ID [--round N] [--prompt] [--json]
   loopforge explain LOOP_ID [--round N] [--json]
+
+  --target    where the client skill is installed
+  --workspace the runtime workspace: loop_policy.json, .loopforge/, and every
+              evidence command resolve against it (default: the current directory)
 `;
 
 function option(args: string[], name: string): string | undefined {
   const index = args.indexOf(name);
-  return index >= 0 ? args[index + 1] : undefined;
+  if (index < 0) return undefined;
+  const value = args[index + 1];
+  // v3.8.3: a flag with no value used to be indistinguishable from an absent
+  // flag, so `init --client generic --target` silently wrote the policy to the
+  // current directory instead of the one the user named.
+  if (value === undefined || value.startsWith("-")) {
+    throw new Error(`${name} requires a value`);
+  }
+  return value;
 }
 
 function has(args: string[], name: string): boolean {
   return args.includes(name);
+}
+
+/** Reject options a subcommand does not accept. Silently ignoring them made a
+ *  typo behave exactly like the flag was never passed. */
+function rejectUnknownFlags(args: string[], allowed: readonly string[]): void {
+  for (const arg of args) {
+    if (!arg.startsWith("-")) continue;
+    if (!allowed.includes(arg)) {
+      throw new Error(`unknown option: ${arg}`);
+    }
+  }
+}
+
+/** v3.8.3: set the runtime workspace boundary before anything captures it.
+ *
+ *  `process.cwd()` remains the single workspace boundary — this only chooses
+ *  it, and it has to run before the first `getPolicy()`, which caches the
+ *  policy for the process lifetime, and before the store root is resolved.
+ *  Callers therefore invoke it before constructing any runtime object. */
+function enterWorkspace(dir: string): void {
+  const target = resolve(dir);
+  if (!existsSync(target)) {
+    throw new Error(`--workspace ${dir} does not exist (resolved to ${target})`);
+  }
+  if (!statSync(target).isDirectory()) {
+    throw new Error(`--workspace ${dir} is not a directory (resolved to ${target})`);
+  }
+  process.chdir(target);
 }
 
 function print(value: unknown, json: boolean): void {
@@ -89,7 +129,15 @@ function doctor(json: boolean): number {
       detail: `schema version ${policy.version}, ${policy.evidence.commands.length} command(s)`,
     });
   } catch (error) {
-    checks.push({ name: "policy", ok: false, required: true, detail: String(error) });
+    checks.push({
+      name: "policy",
+      ok: false,
+      required: true,
+      // An actionable next step, not just the defect: the runtime only falls
+      // back to defaults when no file exists at all, so a broken file has to
+      // be fixed or removed before anything runs.
+      detail: `${String(error)} — fix it or delete it, then run doctor again.`,
+    });
     policy = structuredClone(DEFAULT_POLICY);
   }
   const nodeMajor = Number(process.versions.node.split(".")[0]);
@@ -106,8 +154,27 @@ function doctor(json: boolean): number {
     accessSync(writable, constants.W_OK);
     checks.push({ name: "store", ok: true, required: true, detail: root });
   } catch (error) {
-    checks.push({ name: "store", ok: false, required: true, detail: String(error) });
+    checks.push({
+      name: "store",
+      ok: false,
+      required: true,
+      detail: `${String(error)} — create the directory, or point backend.root_dir at one that is writable.`,
+    });
   }
+  // v3.8.3: state the evidence posture in the same words the round prompts and
+  // the MCP responses use — one derivation (`deriveEvidenceCapability`), so
+  // doctor cannot describe a capability the runtime does not have. With no
+  // command configured this is the row that says what is still possible.
+  const capability = deriveEvidenceCapability(policy);
+  checks.push({
+    name: "evidence",
+    ok: capability.contractVerificationAvailable,
+    required: false,
+    detail: capability.contractVerificationAvailable
+      ? `${capability.commands.filter((command) => command.ready).length} enabled after-capable command(s) can back a contract item`
+      : capability.warnings[0] ??
+        "no enabled verification command is configured — add one to evidence.commands",
+  });
   const git = spawnSync("git", ["--version"], {
     encoding: "utf8",
     shell: false,
@@ -128,7 +195,7 @@ function doctor(json: boolean): number {
       required: true,
       detail: isProviderRegistered(provider)
         ? "registered"
-        : "no provider factory is registered for this name",
+        : "no provider factory is registered for this name — remove it from evidence.providers",
     });
   }
   // v3.8: command ids must be unique — a duplicate name makes item
@@ -143,7 +210,7 @@ function doctor(json: boolean): number {
         name: `command-id:${name}`,
         ok: false,
         required: true,
-        detail: `duplicate command id declared ${count} times — item verification would be ambiguous`,
+        detail: `duplicate command id declared ${count} times — item verification would be ambiguous; give each command a unique name`,
       });
     }
   }
@@ -178,7 +245,8 @@ function doctor(json: boolean): number {
       }
     } catch (error) {
       ok = false;
-      detail = String(error);
+      // Every failure here is a policy defect the operator can fix in place.
+      detail = `${String(error)} — fix this entry in evidence.commands.`;
     }
     checks.push({
       name: `command:${command.name || "unnamed"}`,
@@ -267,23 +335,37 @@ function inspect(args: string[]): void {
 }
 
 function init(args: string[]): void {
+  rejectUnknownFlags(args, ["--client", "--target", "--workspace", "--force", "-f"]);
   const client = option(args, "--client") as InitClient | undefined;
   if (!client || !["claude", "codex", "generic"].includes(client)) {
     throw new Error("init requires --client claude|codex|generic");
   }
   const force = has(args, "--force") || has(args, "-f");
+  // v3.8.3: two different roots, named separately. `--target` is the skills
+  // root (the skill lands in <target>/perception/SKILL.md); `--workspace` is
+  // the runtime boundary (loop_policy.json lands directly in it). One flag
+  // meaning both is what made `--target` ambiguous: it wrote a policy the
+  // runtime would never read, because the runtime only ever reads the
+  // workspace it was started in.
   const target = option(args, "--target");
+  const workspace = option(args, "--workspace") ?? process.cwd();
+
   const result = initializeClient({ client, force, target });
   process.stdout.write(`${result.installed ? "Installed" : "Already present"}: ${result.skillPath}\n`);
   process.stdout.write("Register MCP with:\n");
   print(result.registration, typeof result.registration !== "string");
 
-  // Write default loop_policy.json alongside the skill so users can
-  // discover and tune runtime behaviour without reading source code.
-  const policyDir = target ?? process.cwd();
-  const policyResult = writeDefaultPolicy(policyDir, force);
+  const policyResult = writeDefaultPolicy(workspace, force);
   process.stdout.write(
     `${policyResult.created ? "Created" : "Already present"}: ${policyResult.path}\n`,
+  );
+  // State the three locations plainly: which skill file was installed, where
+  // the policy the runtime will actually read lives, and the command that
+  // starts the server against that workspace.
+  process.stdout.write(`Workspace: ${resolve(workspace)}\n`);
+  process.stdout.write(
+    "Start the server with:\n" +
+    `  loopforge mcp${workspace === process.cwd() ? "" : ` --workspace ${resolve(workspace)}`}\n`,
   );
 }
 
@@ -298,7 +380,28 @@ export function main(argv = process.argv.slice(2)): void {
     return;
   }
   if (command === "mcp") {
-    new McpServer().start();
+    rejectUnknownFlags(args, ["--workspace"]);
+    const workspace = option(args, "--workspace");
+    // Must happen before the server is constructed: the policy is read and
+    // cached, and the store root resolved, in the SessionManager constructor.
+    if (workspace) enterWorkspace(workspace);
+    try {
+      new McpServer().start();
+    } catch (error) {
+      // v3.8.3: a policy file that exists but is broken kills the server
+      // before it can answer anything. Report the stable code the MCP tool
+      // envelope already uses, with the path in the message, instead of the
+      // bare `loopforge: <message>` the top-level handler would print.
+      if ((error as { code?: string }).code === POLICY_INVALID_CODE) {
+        process.stderr.write(
+          `${POLICY_INVALID_CODE}: ${(error as Error).message}\n` +
+          "Run `loopforge doctor` for the full local readiness report.\n",
+        );
+        process.exitCode = 1;
+        return;
+      }
+      throw error;
+    }
     return;
   }
   if (command === "init") return init(args);

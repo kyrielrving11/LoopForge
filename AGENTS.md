@@ -91,6 +91,15 @@ SessionManager -> RoundLifecycle -> RoundDriver -> RoundCoordinator
 - Stop decisions prioritize an explicit blocked declaration. `completed`
   requires effective success and a verified contract, or no active contract.
   A blocked or contradicted contract cannot produce `completed`.
+- `declaresBlocked` (self-eval.ts) is the ONE definition of "this round
+  declares itself blocked" (`outcome: "blocked"`, or `stop_reason` of `blocked`
+  or `needs_human_input`). It is read by both the stop decision and the
+  scope-drift waiver, so the two boundaries cannot mean different things.
+- `finalizeStopReason` is the completion-truth guard: it runs in the
+  coordinator BEFORE the transaction commits (the committed round document
+  carries `result.stopReason`) and again at the lifecycle end where the reason
+  becomes client-visible. A violation is a code defect, so it downgrades to
+  `blocked` and reports rather than throwing.
 
 Round IDs prevent lost responses and duplicate submissions. Transaction
 recovery must remain idempotent after process interruption.
@@ -108,6 +117,19 @@ independent machine observation, normally a passed after-phase command whose
 entrypoint and configuration are untampered. `no_change_reason` is an escape
 only when no verification command is configured. Machine progress can excuse a
 stall verdict; self-reported progress cannot create or cancel a machine stall.
+
+The entrypoint check has two arms, unioned. The git-delta arm is unchanged. The
+absolute arm compares each entrypoint file's current content against a trusted
+baseline captured from the FILESYSTEM when the round was prepared
+(`captureEntrypointTrust`) — git only lists dirty tracked files, so a gitignored
+entrypoint is in no git diff, and a baseline re-derived from the current tree
+would compare tampered state against itself. The baseline lives in the session
+state entry (`entrypoint_trust`, read back leniently), never in committed round
+history; it is seeded only for a round being PREPARED, never for a same-round
+retry, and its absence means "no absolute arm", never a lost round. An
+entrypoint created during the round cannot back that round: restore it, or take
+the rollback so the work is redone where it is part of the starting state.
+Repeated non-restoration backtracks; it does not terminate.
 
 Every configured evidence provider emits one typed observation, including
 `unavailable`, `timeout`, `error`, or `aborted`. Do not silently filter failed or
@@ -132,7 +154,14 @@ Round Contract rules:
 - A claimed-but-unbacked item is recorded as verification debt. The bounded
   escalation uses `engine.unverified_claim_streak_limit` and the same-check
   streak only.
-- Scope drift is a machine fact with no clarification waiver.
+- Scope drift is a machine fact with no clarification waiver. Its one legal
+  exit is a blocked round that declares a successor contract covering EVERY
+  drifted file: that waives the rejection, never the fact, and the flag still
+  lands on the committed round. The coverage files come from
+  `roundDriftFiles()` — never from a flag's truncated `detail`. The waiver
+  removes the drift rejection only; contract debt, machine stalls, and
+  unrestored workspaces still apply, and a waived round does not reach the
+  rejection-counter catch-all.
 
 `deriveRoundContractView` is the shared contract derivation for the live
 coordinator, explain, and audit. `deriveVerifiedSubGoals` reads the whole
@@ -172,8 +201,23 @@ Writes are atomic and protected by owned locks. MCP mutations are serialized per
 session and fenced by renewable cross-process leases. Command evidence is
 disabled by default, uses an executable plus arguments with `shell: false`, and
 is restricted to the workspace. `deriveEvidenceCapability` is the single
-capability derivation used by preparation and MCP views; registry readiness and
-live statuses do not enter state or prompt hashes.
+capability derivation used by preparation, MCP views, and `doctor`; registry
+readiness and live statuses do not enter state or prompt hashes.
+
+The store lock's three staleness rules are three DIFFERENT rules — ownerless
+lock directory, dead owner, and Windows EPERM — each named separately with its
+own reason. The wait budget must exceed the dead-owner grace or the reclaim
+branch is unreachable, and it must stay well below the live-owner case, which
+blocks the single-threaded server and must fail fast. Attempts sleep between
+retries; the loop is never a CPU spin.
+
+Policy loading distinguishes "no file" from "defective file": ENOENT falls
+through to the defaults, while unreadable, unparseable, or non-object
+content throws with the stable `policy_invalid` code and the file path. The CLI
+reports that code at the `mcp` startup boundary with a `doctor` pointer. The
+`--target` flag selects the client skill location only; `--workspace` is the
+runtime boundary and sets `process.cwd()` before any runtime object is
+constructed.
 
 The MCP server is synchronous JSON-RPC over stdio. Public tools are
 `start`, `next`, `status`, `stop`, `pause`, `resume`, `replay`, `gate_check`,
@@ -219,3 +263,15 @@ a dirty worktree.
   `contract_invalid` retry.
 - Stop-reason changes: cover explicit blocked plus success and contradicted
   item plus success; `completed` must remain machine-true only.
+- Scope-drift waiver changes: cover a covering blocked proposal being accepted,
+  a non-covering one still being rejected, the waiver holding at a counter that
+  would otherwise terminate, and the independent rows (contract debt, stall,
+  unrestored workspace) still applying.
+- Entrypoint-trust changes: cover a modified entrypoint, one created during the
+  round (including a gitignored one git cannot see), restoration making the
+  same round pass, backtrack on repeated non-restoration, a corrupt or absent
+  baseline degrading to the git-delta arm, and the baseline surviving a
+  restart.
+- Store-lock timing changes: cover a lock left by a process that died moments
+  ago being reclaimed, a live owner still failing fast, the ownerless grace,
+  and the lock's release staying ownership-checked.

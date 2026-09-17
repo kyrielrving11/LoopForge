@@ -247,6 +247,7 @@ export class RoundTransactionCoordinator {
             backtrackSkippedFiles: input.backtrackSkippedFiles,
             backtrackSkippedFingerprints: input.backtrackSkippedFingerprints,
             backtrackTargetGitHead: input.backtrackTargetGitHead,
+            entrypointTrust: input.entrypointTrust,
         });
         const evaluated = {
             ...snapshot,

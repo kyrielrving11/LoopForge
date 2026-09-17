@@ -23,8 +23,8 @@ claude mcp add loopforge -- npx loopforge mcp
 The CLI provides the following entry points:
 
 ```text
-loopforge mcp
-loopforge init --client claude|codex|generic [--target DIR] [--force]
+loopforge mcp [--workspace DIR]
+loopforge init --client claude|codex|generic [--target DIR] [--workspace DIR] [--force]
 loopforge doctor [--json]
 loopforge inspect LOOP_ID [--round N] [--prompt] [--json]
 loopforge explain LOOP_ID [--round N] [--json]
@@ -33,6 +33,20 @@ loopforge explain LOOP_ID [--round N] [--json]
 `loopforge mcp` starts the synchronous MCP server. `init` installs the client
 configuration, `doctor` reports local readiness, `inspect` reads persisted loop
 state, and `explain` shows why a committed round received its disposition.
+
+The two directory flags answer different questions and are not
+interchangeable:
+
+- `--target DIR` is where the **client skill** is installed
+  (`DIR/perception/SKILL.md`). Without it, the skill goes to the client's own
+  skills directory.
+- `--workspace DIR` is the **runtime boundary**: `loop_policy.json`,
+  `.loopforge/`, evidence commands, and every workspace check resolve against
+  it. Without it, the current directory is used.
+
+`loopforge mcp --workspace DIR` switches to that directory before the server
+reads its policy or resolves its store root, which is why the policy it uses is
+always the one in the workspace it was started against.
 
 ## MCP integration
 
@@ -97,9 +111,17 @@ state under `.loopforge/state/`. Committed typed round documents are the source
 of truth. The state file can be regenerated and must not be treated as a second
 history.
 
-Runtime behavior is controlled by `loop_policy.json`. Evidence commands are
-explicitly configured, run without a shell, and restricted to the workspace.
-The default policy keeps the optional user gate disabled.
+Runtime behavior is controlled by `loop_policy.json`, read from the workspace
+the process was started in. Evidence commands are explicitly configured, run
+without a shell, and restricted to the workspace. The default policy keeps the
+optional user gate disabled.
+
+A **missing** policy file is normal: the defaults apply. A file that exists but
+cannot be read or parsed is reported as `policy_invalid` with its path rather
+than silently ignored — a configuration nobody chose must not look like a
+working one. `loopforge doctor` reports the policy, the store root, provider
+registration, every configured command's static validity, and the current
+evidence posture; it never executes a command.
 
 ## Development
 

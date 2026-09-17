@@ -3,7 +3,7 @@ import { committedFeedbackRound, criterionClaims, MemoryLoopStore } from "./_hel
 import { deriveContractItemIds } from "../token-utils.js";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { RoundCoordinator } from "../round-coordinator.js";
+import { finalizeStopReason, RoundCoordinator } from "../round-coordinator.js";
 import type { RoundProcessInput } from "../round-coordinator.js";
 import { makeSelfEvaluation, makeExecutionReport } from "../protocol.js";
 import type { SelfEvaluation } from "../protocol.js";
@@ -418,5 +418,67 @@ describe("round-coordinator — v2.12 outcome stop mapping", () => {
       consecutiveRejections: 0,
     });
     assert.equal(result.action, "continue");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v3.8.3 — completion truth (blocked never completes)
+//
+// A round that declares itself blocked is not a finished round. The stop
+// decision orders the blocked declaration first, so this guard cannot fire on
+// the ordinary path — it is the second line, applied where the reason becomes
+// durable and again where it becomes visible. A violation is a code defect:
+// the guard degrades and reports rather than throwing mid-lifecycle.
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("v3.8.3 — finalizeStopReason", () => {
+  const blockedEval = (): SelfEvaluation => se({ outcome: "blocked", should_continue: false });
+
+  it("downgrades a completed reason when the round declares blocked", () => {
+    // The input is deliberately impossible on the normal path: if a refactor
+    // ever routed a blocked round to `completed`, this is what stops it.
+    const result = finalizeStopReason("completed", blockedEval());
+    assert.equal(result.reason, "blocked");
+    assert.equal(result.flags.length, 1);
+    assert.equal(result.flags[0]?.check, "completion_truth_downgraded");
+    assert.equal(result.flags[0]?.severity, "warn");
+  });
+
+  it("treats stop_reason blocked / needs_human_input as the same declaration", () => {
+    for (const stop of ["blocked", "needs_human_input"] as const) {
+      assert.equal(
+        finalizeStopReason("completed", se({ stop_reason: stop })).reason,
+        "blocked",
+        `stop_reason ${stop} must declare a block`,
+      );
+    }
+  });
+
+  it("downgrades when the active contract closed on a blocked outcome", () => {
+    const result = finalizeStopReason("completed", se(), {
+      contractId: "rc-1",
+      closure: "blocked",
+      closed_at_round: 3,
+      items: [],
+      verifiedCount: 0,
+      contradictedCount: 0,
+      insufficientCount: 0,
+    });
+    assert.equal(result.reason, "blocked");
+    assert.equal(result.flags[0]?.field, "round_contract");
+  });
+
+  it("leaves a machine-true completion alone", () => {
+    const result = finalizeStopReason("completed", se({ outcome: "success", should_continue: false }));
+    assert.equal(result.reason, "completed");
+    assert.deepEqual(result.flags, []);
+  });
+
+  it("leaves every other reason untouched, including no reason at all", () => {
+    for (const reason of ["incomplete", "failed", "stalled", "max_rounds"] as const) {
+      assert.equal(finalizeStopReason(reason, blockedEval()).reason, reason);
+      assert.deepEqual(finalizeStopReason(reason, blockedEval()).flags, []);
+    }
+    assert.equal(finalizeStopReason(undefined, blockedEval()).reason, undefined);
   });
 });

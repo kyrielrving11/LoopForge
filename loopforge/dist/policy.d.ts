@@ -147,6 +147,11 @@ export declare function writeDefaultPolicy(targetDir: string, force?: boolean): 
     path: string;
     created: boolean;
 };
+/** v3.8.3: the stable code a broken policy file surfaces as. Every throw
+ *  below carries it, so the MCP boundary and the CLI can report a
+ *  machine-readable code instead of only prose — the same contract the MCP
+ *  tool envelope has had since v3.6. */
+export declare const POLICY_INVALID_CODE = "policy_invalid";
 /** Load the runtime policy, or fall back to the defaults when no file
  *  declares one.
  *
@@ -158,9 +163,14 @@ export declare function writeDefaultPolicy(targetDir: string, force?: boolean): 
  *  version or the load fails, and the failure surfaces as `policy_invalid`
  *  rather than the loop running on a configuration nobody chose.
  *
- *  A MISSING or unparseable file still falls through to the defaults (running
- *  with no policy file is normal). A file that exists and parses is a
- *  declaration, so its defects propagate instead of being swallowed. */
+ *  v3.8.3: a MISSING file still falls through to the defaults — running with
+ *  no policy file is normal. A file that IS there but cannot be read or
+ *  parsed no longer does: it is a defect the operator has to see. The old bare
+ *  `catch` could not tell "no file" from "EACCES" from "bad JSON", so a
+ *  mistyped or half-written policy ran the loop on defaults while the operator
+ *  believed their configuration was in force — the same outcome the version
+ *  boundary above exists to prevent. A file that exists is a declaration, so
+ *  its defects propagate. */
 export declare function loadPolicy(path?: string): LoopPolicy;
 export declare function getPolicy(path?: string): LoopPolicy;
 export declare function resetPolicy(): void;

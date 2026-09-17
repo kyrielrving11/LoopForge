@@ -57,6 +57,8 @@ export interface CompleteRoundInput {
   backtrackSkippedFingerprints?: Record<string, string>;
   /** v2.12: Git HEAD of the backtrack restore point (workspace restore check). */
   backtrackTargetGitHead?: string;
+  /** v3.8.3: trusted round-start entrypoint fingerprints (see RoundProcessInput). */
+  entrypointTrust?: Record<string, string>;
 }
 
 export interface CompletedRound {
@@ -177,6 +179,7 @@ export class RoundDriver {
       actualEvidence,
       backtrackSkippedFiles: input.backtrackSkippedFiles,
       backtrackSkippedFingerprints: input.backtrackSkippedFingerprints,
+      entrypointTrust: input.entrypointTrust,
       backtrackTargetGitHead: input.backtrackTargetGitHead,
     });
     return { outcome, actualEvidence };

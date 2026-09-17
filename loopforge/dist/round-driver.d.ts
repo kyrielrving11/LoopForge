@@ -39,6 +39,8 @@ export interface CompleteRoundInput {
     backtrackSkippedFingerprints?: Record<string, string>;
     /** v2.12: Git HEAD of the backtrack restore point (workspace restore check). */
     backtrackTargetGitHead?: string;
+    /** v3.8.3: trusted round-start entrypoint fingerprints (see RoundProcessInput). */
+    entrypointTrust?: Record<string, string>;
 }
 export interface CompletedRound {
     outcome: RoundTransactionOutcome;

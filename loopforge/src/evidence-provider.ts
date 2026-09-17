@@ -440,6 +440,118 @@ function isPackageManagerCommand(executable: string): boolean {
   return PACKAGE_MANAGER_EXECUTABLES.has(base.trim().toLowerCase());
 }
 
+/** The candidate workspace paths a command's execution depends on: the script
+ *  it names on its own command line, plus package.json when a package manager
+ *  is what runs it. Whether each candidate EXISTS is the caller's question —
+ *  `resolveEntrypointFiles` keeps only the ones that do, while
+ *  `captureEntrypointTrust` must also record the absent ones. */
+function entrypointCandidates(executable: string, args: string[]): string[] {
+  const candidates = [...args];
+  if (executable.includes("/") || executable.includes("\\")) {
+    candidates.unshift(executable);
+  }
+  // v3.8.1: `package.json` is a candidate only for a package-manager
+  // invocation, which is the only case where it defines what runs. Adding it
+  // unconditionally made EVERY command's entrypoint set include it, so a round
+  // that touched package.json — for any reason at all, with any command — was
+  // reported as "the verification entrypoint changed" and rejected, however
+  // unrelated the file was to what actually executed.
+  if (isPackageManagerCommand(executable)) candidates.push("package.json");
+  return candidates;
+}
+
+/** v3.8.3: The content fingerprint of one workspace file — `"<mode>:<sha256>"`,
+ *  or the `"missing"` sentinel when it cannot be read. ONE definition, shared
+ *  by the git provider's per-file map and the entrypoint trust baseline, so a
+ *  value captured at round start is literally comparable to one captured later
+ *  (and to a value inside a git observation). */
+function fileFingerprint(absolutePath: string): string {
+  try {
+    const stat = statSync(absolutePath);
+    const hash = createHash("sha256").update(readFileSync(absolutePath)).digest("hex");
+    return `${stat.mode}:${hash}`;
+  } catch {
+    // Deleted files are evidence too. A stable sentinel lets the diff
+    // distinguish deleted/restored transitions across a round.
+    return "missing";
+  }
+}
+
+/** v3.8.3: The round-start state of every enabled after-capable command's
+ *  entrypoint files — the TRUSTED baseline the tamper check compares against.
+ *
+ *  Taken from the filesystem, not from a git observation: `git diff` lists
+ *  only tracked-and-dirty files, so an entrypoint that is gitignored would be
+ *  absent from BOTH sides of a git-based comparison and a script created this
+ *  round would read as "unchanged". Absent candidates are recorded as
+ *  `"missing"` rather than dropped — that absence is exactly what makes
+ *  "created during this round" detectable.
+ *
+ *  Captured when a round is PREPARED, never when tampering is detected: a
+ *  baseline written at detection time could never catch its own first
+ *  occurrence. */
+export function captureEntrypointTrust(
+  policy: LoopPolicy,
+  workspace = process.cwd(),
+): Record<string, string> {
+  const trust: Record<string, string> = {};
+  for (const command of policy.evidence.commands ?? []) {
+    if (command.enabled !== true) continue;
+    if (command.phase !== "after" && command.phase !== "both") continue;
+    if (!command.executable) continue;
+    const cwd = command.cwd ?? workspace;
+    for (const candidate of entrypointCandidates(command.executable, command.args ?? [])) {
+      try {
+        const actual = containInWorkspace(workspace, resolve(cwd, candidate));
+        const rel = relative(realpathSync(workspace), actual).split(sep).join("/");
+        if (trust[rel] === undefined) trust[rel] = fileFingerprint(actual);
+      } catch {
+        // Outside the workspace or unresolvable — not an entrypoint fact.
+      }
+    }
+  }
+  return trust;
+}
+
+/** v3.8.3: One entrypoint file that no longer matches its round-start state,
+ *  with the state it must return to for the round to be verifiable.
+ *
+ *  `absent` is the case the old delta rule could not describe: the file did
+ *  not exist when the round started, so it was CREATED by this round and
+ *  cannot back a claim in it. There is nothing to restore — "keep it stable"
+ *  is not an instruction the agent can carry out — which is why the recovery
+ *  message must distinguish the two. */
+export interface EntrypointDrift {
+  file: string;
+  roundStart: "present" | "absent";
+}
+
+/** v3.8.3: The entrypoint files whose content no longer matches the trusted
+ *  round-start baseline — the ONE derivation of "this command's script was
+ *  changed during the round". The delta rule (does the file appear in the
+ *  round's git change set?) cannot answer this on its own: a gitignored
+ *  entrypoint is invisible to it, and a baseline re-derived from the current
+ *  tree would launder the change. This comparison does not read git at all. */
+export function driftedEntrypoints(
+  trust: Record<string, string> | undefined,
+  workspace = process.cwd(),
+): EntrypointDrift[] {
+  if (!trust) return [];
+  const drifted: EntrypointDrift[] = [];
+  for (const [file, trusted] of Object.entries(trust)) {
+    let current: string;
+    try {
+      current = fileFingerprint(containInWorkspace(workspace, resolve(workspace, file)));
+    } catch {
+      current = "missing";
+    }
+    if (current !== trusted) {
+      drifted.push({ file, roundStart: trusted === "missing" ? "absent" : "present" });
+    }
+  }
+  return drifted.sort((a, b) => a.file.localeCompare(b.file));
+}
+
 /** The workspace files a command's execution depends on, resolved
  *  statically: the script it names on its own command line, plus package.json
  *  when a package manager is what runs it. Exported for the pure-function
@@ -452,19 +564,8 @@ export function resolveEntrypointFiles(
 ): string[] {
   // v3.3.1: entrypoint containment uses the shared workspace check.
   const workspace = process.cwd();
-  const candidates = [...args];
-  if (executable.includes("/") || executable.includes("\\")) {
-    candidates.unshift(executable);
-  }
-  // v3.8.1: `package.json` is a candidate only for a package-manager
-  // invocation, which is the only case where it defines what runs. Adding it
-  // unconditionally made EVERY command's entrypoint set include it, so a round
-  // that touched package.json — for any reason at all, with any command — was
-  // reported as "the verification entrypoint changed" and rejected, however
-  // unrelated the file was to what actually executed.
-  if (isPackageManagerCommand(executable)) candidates.push("package.json");
   const found: string[] = [];
-  for (const candidate of candidates) {
+  for (const candidate of entrypointCandidates(executable, args)) {
     try {
       const actual = containInWorkspace(workspace, resolve(cwd, candidate));
       if (statSync(actual).isDirectory()) continue;
@@ -821,16 +922,8 @@ export class GitEvidenceProvider implements EvidenceProvider {
         // An injectable cwd (tests) must resolve explicitly.
         const fingerprints: Record<string, string> = {};
         for (const file of files) {
-          try {
-            const target = isAbsolute(file) ? file : resolve(workspace, file);
-            const stat = statSync(target);
-            const hash = createHash("sha256").update(readFileSync(target)).digest("hex");
-            fingerprints[file] = `${stat.mode}:${hash}`;
-          } catch {
-            // Deleted files are evidence too. A stable sentinel lets the diff
-            // distinguish deleted/restored transitions across a round.
-            fingerprints[file] = "missing";
-          }
+          const target = isAbsolute(file) ? file : resolve(workspace, file);
+          fingerprints[file] = fileFingerprint(target);
         }
         return {
           schemaVersion: 1,

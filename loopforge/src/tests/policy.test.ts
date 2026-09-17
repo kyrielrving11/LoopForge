@@ -1,7 +1,7 @@
 /** Tests for policy loading and singleton. */
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -10,6 +10,7 @@ import {
   resetPolicy,
   DEFAULT_POLICY,
   POLICY_SCHEMA_VERSION,
+  POLICY_INVALID_CODE,
 } from "../policy.js";
 
 describe("Policy — Defaults", () => {
@@ -73,26 +74,26 @@ describe("Policy — Loading", () => {
   });
 });
 
+/** Write a policy file into a throwaway directory and run loadPolicy on it. */
+function withPolicyFile(
+  body: Record<string, unknown> | string,
+  run: (path: string) => void,
+): void {
+  const dir = mkdtempSync(join(tmpdir(), "lf-policy-"));
+  try {
+    const path = join(dir, "loop_policy.json");
+    // A raw string body is needed for keys an object literal cannot carry
+    // ("__proto__" in a literal sets the prototype; JSON.parse makes it an
+    // own property — and the file on disk is what the runtime reads).
+    writeFileSync(path, typeof body === "string" ? body : JSON.stringify(body));
+    run(path);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 describe("Policy — the schema version is a boundary", () => {
   beforeEach(() => resetPolicy());
-
-  /** Write a policy file into a throwaway directory and run loadPolicy on it. */
-  const withPolicyFile = (
-    body: Record<string, unknown> | string,
-    run: (path: string) => void,
-  ): void => {
-    const dir = mkdtempSync(join(tmpdir(), "lf-policy-"));
-    try {
-      const path = join(dir, "loop_policy.json");
-      // A raw string body is needed for keys an object literal cannot carry
-      // ("__proto__" in a literal sets the prototype; JSON.parse makes it an
-      // own property — and the file on disk is what the runtime reads).
-      writeFileSync(path, typeof body === "string" ? body : JSON.stringify(body));
-      run(path);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  };
 
   it("loads the shipped loop_policy.json and inherits the keys it omits", () => {
     const policy = loadPolicy("loop_policy.json");
@@ -175,5 +176,70 @@ describe("Policy — the schema version is a boundary", () => {
         assert.throws(() => loadPolicy(path), /unknown policy key "__proto__"/);
       },
     );
+  });
+});
+
+describe("Policy — a file that exists is a declaration", () => {
+  beforeEach(() => resetPolicy());
+
+  /** Run `fn` against a throwaway path whose policy file is a DIRECTORY, so
+   *  the read fails with something other than ENOENT — portable enough to
+   *  exercise "present but unreadable" on every platform. */
+  const withUnreadablePolicy = (fn: (path: string) => void): void => {
+    const dir = mkdtempSync(join(tmpdir(), "lf-policy-dir-"));
+    try {
+      const path = join(dir, "loop_policy.json");
+      mkdirSync(path);
+      fn(path);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  it("still falls back to the defaults when there is simply no file", () => {
+    // Running with no policy file is normal and must stay silent.
+    const policy = loadPolicy(join(tmpdir(), "lf-absent", "loop_policy.json"));
+    assert.equal(policy.version, POLICY_SCHEMA_VERSION);
+    assert.equal(policy.engine.max_rounds, DEFAULT_POLICY.engine.max_rounds);
+  });
+
+  it("REJECTS a file that is present but cannot be read", () => {
+    // v3.8.3: the old bare catch could not tell ENOENT from EACCES, so a
+    // policy the operator could not read ran the loop on defaults while they
+    // believed their configuration was in force.
+    withUnreadablePolicy((path) => {
+      assert.throws(() => loadPolicy(path), /cannot be read/);
+    });
+  });
+
+  it("REJECTS a file that is present but not valid JSON", () => {
+    withPolicyFile("{ not json", (path) => {
+      assert.throws(() => loadPolicy(path), /is not valid JSON/);
+    });
+  });
+
+  it("REJECTS a file that parses to something other than an object", () => {
+    withPolicyFile("[1, 2]", (path) => {
+      assert.throws(() => loadPolicy(path), /must contain a JSON object/);
+    });
+  });
+
+  it("carries the stable policy_invalid code, not just prose", () => {
+    withPolicyFile("{ not json", (path) => {
+      try {
+        loadPolicy(path);
+        assert.fail("a malformed policy must not load");
+      } catch (error) {
+        assert.equal((error as { code?: string }).code, POLICY_INVALID_CODE);
+      }
+    });
+    withPolicyFile({ version: "3" }, (path) => {
+      try {
+        loadPolicy(path);
+        assert.fail("a version mismatch must not load");
+      } catch (error) {
+        assert.equal((error as { code?: string }).code, POLICY_INVALID_CODE);
+      }
+    });
   });
 });

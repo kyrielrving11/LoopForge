@@ -54,6 +54,16 @@ export declare function effectiveOutcome(selfEval: SelfEvaluation): RoundOutcome
 /** v2.12: Whether the effective outcome is a success claim. Shared by the
  *  verification gate (success-class checks) and enforcement gate (R3). */
 export declare function effectiveSuccess(selfEval: SelfEvaluation): boolean;
+/** v3.8.3: The ONE definition of "this round declares itself blocked".
+ *
+ *  A declared `outcome: "blocked"` and a `stop_reason` of `blocked` or
+ *  `needs_human_input` say the same thing — the agent is stopping because it
+ *  cannot continue, not because it finished. The stop decision
+ *  (round-coordinator) and the scope-drift waiver (enforcement gate) both read
+ *  this function, so "declared blocked" cannot mean two different things at
+ *  two different boundaries. `effectiveOutcome` alone is NOT this predicate:
+ *  it reads `outcome` only. */
+export declare function declaresBlocked(selfEval: SelfEvaluation): boolean;
 /** Required evaluation fields are the only format boundary. Optional fields
  * are deliberately normalized by buildSelfEvaluation instead of rejecting a
  * round for a non-authoritative reporting detail.

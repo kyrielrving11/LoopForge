@@ -26,6 +26,37 @@ import { parseRoundTransactionSnapshot } from "./round-transaction.js";
 import { validateLoopId } from "./policy.js";
 import { isRecord } from "./token-utils.js";
 
+// ── Store lock timing ──────────────────────────────────────────────────────
+//
+// Three DIFFERENT staleness rules, not one constant repeated. They are named
+// separately because collapsing them would either stretch the ownerless grace
+// to the Windows case or drop a promise the smaller one makes.
+//
+// The wait budget and the dead-owner grace are a pair: a reclaim that needs
+// more age than the budget allows can never run, which is what left a crashed
+// process's lock unreclaimable and made a quick restart fail outright.
+
+/** A lock directory with no owner.json — a crash inside mkdir→write. The
+ *  window is microseconds, so a short grace proves the lock stale. */
+const LOCK_OWNERLESS_STALE_MS = 500;
+/** The owner pid is gone. `process.kill(pid, 0)` is the real signal; this
+ *  grace only guards against pid reuse catching an unrelated new process, so
+ *  it stays small enough to be reachable within LOCK_WAIT_MS. */
+const LOCK_DEAD_OWNER_STALE_MS = 750;
+/** kill() answered EPERM: on Windows that can mean a dead process owned by
+ *  another user. Death cannot be proven, so the age bar is higher. */
+const LOCK_WINDOWS_EPERM_STALE_MS = 10_000;
+/** How long to wait for the lock before failing. Must exceed
+ *  LOCK_DEAD_OWNER_STALE_MS or the reclaim branch is unreachable — and is
+ *  deliberately far below LOCK_WINDOWS_EPERM_STALE_MS: this wait blocks the
+ *  whole (single-threaded) server, so a lock held by a LIVE process must fail
+ *  fast rather than hang, and a long stall would also widen the window in
+ *  which another process may steal the session lease. */
+const LOCK_WAIT_MS = 1_500;
+/** Sleep between attempts (see the file's `sleepSync`). Without it the loop
+ *  is a CPU spin. */
+const LOCK_RETRY_SLEEP_MS = 25;
+
 /** Loose per-loop entry shape shared by session documents, round documents,
  *  and the flat list views (listEntries/queryLoopEntries). The single
  *  durable truth is the typed per-loop documents; entries are what the
@@ -266,7 +297,7 @@ export class FileLoopStore implements LoopStore {
     const lockPath = join(this.root, ".store.lock");
     const ownerPath = join(lockPath, "owner.json");
     const token = randomUUID();
-    const deadline = Date.now() + 1000;
+    const deadline = Date.now() + LOCK_WAIT_MS;
     for (;;) {
       try {
         mkdirSync(lockPath);
@@ -284,23 +315,32 @@ export class FileLoopStore implements LoopStore {
           // a lock directory without an owner. That window is microseconds,
           // so after a short grace the lock is provably stale — previously
           // this state caused a permanent lock until manual deletion.
-          stale = age > 500;
+          stale = age > LOCK_OWNERLESS_STALE_MS;
         }
-        if (!stale && owner && age > 5000 && typeof owner.pid === "number") {
+        if (!stale && owner && age > LOCK_DEAD_OWNER_STALE_MS &&
+            typeof owner.pid === "number") {
           try { process.kill(owner.pid, 0); }
           catch (error) {
             // On Windows, EPERM may be returned for dead cross-user
-            // processes. Treat as stale when the lock is old regardless.
+            // processes. We cannot prove death there, so the age bar is
+            // higher than for ESRCH — but it still has to be reachable inside
+            // LOCK_WAIT_MS, or the crash-recovery promise is empty.
             const code = (error as NodeJS.ErrnoException).code;
             stale = code === "ESRCH"
-              || (code === "EPERM" && age > 10_000); // Windows safety: EPERM + old lock → stale
+              || (code === "EPERM" && age > LOCK_WINDOWS_EPERM_STALE_MS);
           }
         }
         if (stale) {
           try { rmSync(lockPath, { recursive: true }); } catch { /* race */ }
           continue;
         }
-        if (Date.now() >= deadline) throw new Error("LoopStore lock timeout (1000ms)");
+        if (Date.now() >= deadline) {
+          throw new Error(`LoopStore lock timeout (${LOCK_WAIT_MS}ms)`);
+        }
+        // Without this the loop is a CPU spin; `withLock` is synchronous, so
+        // an async sleep is not available and blocking here costs nothing the
+        // caller was not already paying.
+        sleepSync(LOCK_RETRY_SLEEP_MS);
       }
     }
     this.lockDepth = 1;

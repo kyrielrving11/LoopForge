@@ -29,9 +29,15 @@ import type {
   VerificationFlag,
   VerificationResult,
 } from "./protocol.js";
-import { CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE, verifySelfEvaluation } from "./verification-gate.js";
+import {
+  CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE,
+  collectOutOfScopeFiles,
+  roundDriftFiles,
+  verifySelfEvaluation,
+} from "./verification-gate.js";
 import { entryRound, isRecord } from "./token-utils.js";
-import { effectiveOutcome, effectiveSuccess } from "./self-eval.js";
+import { driftedEntrypoints } from "./evidence-provider.js";
+import { declaresBlocked, effectiveOutcome, effectiveSuccess } from "./self-eval.js";
 import { derivationRounds, decodeCommittedRound } from "./committed-round.js";
 import { makeRoundId } from "./round-transaction.js";
 import {
@@ -81,6 +87,12 @@ export interface RoundProcessInput {
   /** v2.12: Git HEAD of the backtrack restore point. The verification gate
    *  checks the workspace returns to this commit before accepting work. */
   backtrackTargetGitHead?: string;
+  /** v3.8.3: the trusted round-start fingerprint of every configured
+   *  command's entrypoint files, captured when this round was prepared. Only
+   *  the in-flight round has one — a round whose preparation predates the
+   *  baseline (or whose session lost it) simply runs without the absolute
+   *  arm and falls back to the git-delta rule. */
+  entrypointTrust?: Record<string, string>;
 }
 
 /** Result of processing a round through the coordinator. */
@@ -168,6 +180,53 @@ function shouldPushSuccess(
       flag.severity === "warn" &&
       flag.check === CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE,
   );
+}
+
+/** v3.8.3: Completion truth as a guard, not a convention.
+ *
+ *  A round that declares itself blocked is NOT a finished round — whatever
+ *  else it claims — and neither is one whose contract closed on a `blocked`
+ *  outcome. The stop decision below already orders `declaredBlocked` first,
+ *  and `contractClosed` admits only `verified` or no contract, so this can
+ *  never fire on the ordinary path. It is the SECOND line, called at the two
+ *  points where the reason becomes durable or visible:
+ *
+ *  - the coordinator, BEFORE the transaction commits — the committed round
+ *    document carries `result.stopReason`, so an unguarded reason here would
+ *    be a false fact in the Vault, not just a wrong reply;
+ *  - the lifecycle end, where the disposition is finalized into the reported
+ *    stop reason and the terminal notification.
+ *
+ *  A violation can only mean a code defect routed a blocked round to
+ *  `completed`. Throwing mid-lifecycle would kill the loop over a reporting
+ *  bug, so the guard degrades to the honest reason and returns the downgrade
+ *  as a flag: the loop keeps a truthful, observable stop instead of a false
+ *  completion. */
+export function finalizeStopReason(
+  /** `undefined` when the disposition named no terminal reason at all (the
+   *  callers fall back to their own default) — there is nothing to guard. */
+  reason: StopReason | undefined,
+  selfEval: SelfEvaluation,
+  contractStatuses?: ContractItemStatusView | null,
+): { reason: StopReason | undefined; flags: VerificationFlag[] } {
+  if (reason !== "completed") return { reason, flags: [] };
+  const declared = declaresBlocked(selfEval);
+  const blockedContract = contractStatuses?.closure === "blocked";
+  if (!declared && !blockedContract) return { reason, flags: [] };
+  return {
+    reason: "blocked",
+    flags: [{
+      severity: "warn",
+      field: declared ? "outcome" : "round_contract",
+      check: "completion_truth_downgraded",
+      detail: declared
+        ? "The round declared a blocked outcome but the stop decision produced " +
+          "`completed`; the declaration wins and the stop reason was downgraded " +
+          "to `blocked`."
+        : "The active contract closed on a blocked outcome but the stop decision " +
+          "produced `completed`; the stop reason was downgraded to `blocked`.",
+    }],
+  };
 }
 
 // ── RoundCoordinator ───────────────────────────────────────────────────────
@@ -323,6 +382,11 @@ export class RoundCoordinator {
       this.store
         ? queryLoopEntries(this.store, loopId, { prefix: `loop:${loopId}:gate:` })
         : [],
+      // v3.8.3: the absolute arm of the entrypoint check. Derived here, not in
+      // the gate, because it needs the filesystem and the in-flight trust map
+      // captured when this round was prepared — the gate stays a pure function
+      // of its inputs.
+      driftedEntrypoints(input.entrypointTrust),
     );
     const verificationFlags = verifyResult.flags;
     const gateContradicted = verifyResult.verdict === "contradicted";
@@ -333,14 +397,37 @@ export class RoundCoordinator {
     const committedRounds = derivationRounds(vaultEntries, currentRound);
     // v3.8: the shared executed-contract derivation — the same one explain and
     // audit call, so the live posture and the read-only views cannot diverge.
-    const { statuses: activeContractStatuses } = deriveRoundContractView({
-      rounds: committedRounds,
-      round: currentRound,
-      report: selfEval.execution_report ?? null,
-      observations: evidenceSnapshots ?? [],
-      outcome: effectiveOutcome(selfEval),
-      commands: getPolicy().evidence.commands ?? [],
-    });
+    const { contract: activeContract, statuses: activeContractStatuses } =
+      deriveRoundContractView({
+        rounds: committedRounds,
+        round: currentRound,
+        report: selfEval.execution_report ?? null,
+        observations: evidenceSnapshots ?? [],
+        outcome: effectiveOutcome(selfEval),
+        commands: getPolicy().evidence.commands ?? [],
+      });
+
+    // v3.8.3: the legal exit from scope drift — a round that declares itself
+    // blocked may switch contracts, but only by declaring a proposal whose
+    // scope covers EVERY file it changed out of scope. Computed here because
+    // this is the only place where the round's git delta, the active
+    // contract's scope and the submitted proposal are all in reach; the
+    // enforcement gate receives the verdict, not the inputs.
+    //
+    // `selfEval.round_contract` is already the parsed proposal (buildSelfEvaluation
+    // runs parseRoundContract), so the coverage test reads the same object the
+    // commit path will read back.
+    //
+    // The coverage requirement is what keeps this from being a universal
+    // escape: without it "declare blocked" would dissolve a machine fact
+    // without declaring anything. The drift FLAG is untouched — it still lands
+    // on the committed round, so audit/explain keep reporting it.
+    const driftedFiles = roundDriftFiles(activeContract, evidenceSnapshots ?? []);
+    const proposal = selfEval.round_contract;
+    const scopeDriftWaiver = driftedFiles.length > 0 &&
+      declaresBlocked(selfEval) &&
+      proposal !== undefined &&
+      collectOutOfScopeFiles(driftedFiles, proposal.scope).length === 0;
 
     if (gateContradicted) {
       logEvent("gate_contradicted", {
@@ -363,6 +450,7 @@ export class RoundCoordinator {
       vaultEntries,
       consecutiveRejections,
       input.lastRejectionCheck ?? "",
+      scopeDriftWaiver,
     );
 
     if (enforceResult.action === "reject") {
@@ -549,8 +637,7 @@ export class RoundCoordinator {
       // contradicted-and-stopping posture lands on `incomplete` at worst; the
       // reject/terminate path for it is the enforcement gate's, evaluated
       // before this point.
-      const declaredBlocked = selfEval.outcome === "blocked" ||
-        selfEval.stop_reason === "blocked" || selfEval.stop_reason === "needs_human_input";
+      const declaredBlocked = declaresBlocked(selfEval);
       let reason: StopReason;
       if (declaredBlocked) {
         reason = "blocked";
@@ -561,11 +648,18 @@ export class RoundCoordinator {
       } else {
         reason = "failed";
       }
+      // v3.8.3: the guard runs BEFORE the transaction commits — this reason
+      // is written into the committed round document below, so it must be
+      // truthful at the moment it becomes a fact, not only when it is
+      // returned to the client.
+      const finalized = finalizeStopReason(reason, selfEval, activeContractStatuses);
       return {
         action: "stop",
         verificationStatus: roundVerificationStatus(activeContractStatuses, selfEval.execution_report ?? null),
-        stopReason: reason,
-        verificationFlags,
+        stopReason: finalized.reason,
+        verificationFlags: finalized.flags.length > 0
+          ? [...verificationFlags, ...finalized.flags]
+          : verificationFlags,
         roundSuccess,
         gateContradicted,
         newConsecutiveRejections: 0,

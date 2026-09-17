@@ -214,6 +214,58 @@ describe("loopforge CLI", () => {
     }
   });
 
+  it("v3.8.3: doctor states the evidence posture the runtime will use", () => {
+    const root = temporaryDirectory();
+    try {
+      // No policy file: the defaults have no commands, so the report has to
+      // say what that means. Same wording the round prompts use, from the one
+      // capability derivation.
+      const report = JSON.parse(run(["doctor", "--json"], root).stdout) as {
+        checks: Array<{ name: string; ok: boolean; required: boolean; detail: string }>;
+      };
+      const evidence = report.checks.find((check) => check.name === "evidence");
+      assert.ok(evidence, "the evidence posture is reported");
+      assert.equal(evidence!.ok, false);
+      assert.equal(evidence!.required, false, "a contract-less loop is legitimate");
+      assert.match(evidence!.detail, /Round Contract items cannot be machine-verified/);
+
+      // With an after-capable command configured it flips to ready.
+      writeFileSync(join(root, "loop_policy.json"), JSON.stringify({
+        version: POLICY_SCHEMA_VERSION,
+        evidence: {
+          commands: [{
+            name: "verify", enabled: true, executable: "node", args: ["-e", "0"],
+            phase: "after", required: false, timeout_ms: 5000,
+            max_output_chars: 2000, success_exit_codes: [0],
+          }],
+        },
+      }));
+      const withCommand = JSON.parse(run(["doctor", "--json"], root).stdout) as {
+        checks: Array<{ name: string; ok: boolean; detail: string }>;
+      };
+      const ready = withCommand.checks.find((check) => check.name === "evidence");
+      assert.equal(ready!.ok, true);
+      assert.match(ready!.detail, /can back a contract item/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("v3.8.3: doctor's failures carry the next step, not only the defect", () => {
+    const root = temporaryDirectory();
+    try {
+      writeFileSync(join(root, "loop_policy.json"), "{ not json\n");
+      const report = JSON.parse(run(["doctor", "--json"], root).stdout) as {
+        checks: Array<{ name: string; ok: boolean; detail: string }>;
+      };
+      const policyCheck = report.checks.find((check) => check.name === "policy");
+      assert.equal(policyCheck!.ok, false);
+      assert.match(policyCheck!.detail, /fix it or delete it/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("v3.8.1: doctor REPORTS a policy defect instead of dying on it", () => {
     // Loading the policy used to run first and throw, so `doctor --json` died
     // on exactly the defect it exists to diagnose — the one situation where a
@@ -256,10 +308,15 @@ describe("loopforge CLI", () => {
     }
   });
 
-  it("writes a default loop_policy.json during init", () => {
+  it("writes the default loop_policy.json into the workspace", () => {
     const root = temporaryDirectory();
+    const skillsRoot = temporaryDirectory();
     try {
-      const result = run(["init", "--client", "generic", "--target", root]);
+      // v3.8.3: --workspace is the runtime boundary, so this is where the
+      // policy the runtime will actually read has to land.
+      const result = run([
+        "init", "--client", "generic", "--target", skillsRoot, "--workspace", root,
+      ]);
       assert.equal(result.status, 0, result.stderr);
       assert.match(result.stdout, /Created:/);
       const policyPath = join(root, "loop_policy.json");
@@ -271,8 +328,34 @@ describe("loopforge CLI", () => {
       assert.equal(raw.version, POLICY_SCHEMA_VERSION);
       assert.equal(raw.engine.max_rounds, 200);
       assert.equal(raw.evidence.providers[0], "git");
+      // The output names all three locations, so "where did it go?" is
+      // answered without reading the source.
+      assert.match(result.stdout, /(Installed|Already present):.*SKILL\.md/);
+      assert.match(result.stdout, /Workspace: /);
+      assert.match(result.stdout, /loopforge mcp/);
     } finally {
       rmSync(root, { recursive: true, force: true });
+      rmSync(skillsRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps --target about the skill and --workspace about the runtime", () => {
+    const skillsRoot = temporaryDirectory();
+    const workspaceRoot = temporaryDirectory();
+    try {
+      const result = run([
+        "init", "--client", "generic",
+        "--target", skillsRoot, "--workspace", workspaceRoot,
+      ]);
+      assert.equal(result.status, 0, result.stderr);
+      // The skill goes where --target says...
+      assert.ok(existsSync(join(skillsRoot, "perception", "SKILL.md")));
+      // ...and the policy goes where --workspace says, NOT under --target.
+      assert.ok(existsSync(join(workspaceRoot, "loop_policy.json")));
+      assert.equal(existsSync(join(skillsRoot, "loop_policy.json")), false);
+    } finally {
+      rmSync(skillsRoot, { recursive: true, force: true });
+      rmSync(workspaceRoot, { recursive: true, force: true });
     }
   });
 
@@ -280,11 +363,66 @@ describe("loopforge CLI", () => {
     const root = temporaryDirectory();
     try {
       // First init creates the policy
-      run(["init", "--client", "generic", "--target", root]);
+      run(["init", "--client", "generic", "--workspace", root]);
       // Second init without force should skip
-      const result = run(["init", "--client", "generic", "--target", root]);
+      const result = run(["init", "--client", "generic", "--workspace", root]);
       assert.equal(result.status, 0, result.stderr);
       assert.match(result.stdout, /Already present:.*loop_policy\.json/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects an unknown option instead of ignoring it", () => {
+    // A typo used to behave exactly like the flag was never passed.
+    const unknown = run(["mcp", "--targt", "x"]);
+    assert.equal(unknown.status, 1);
+    assert.match(unknown.stderr, /unknown option: --targt/);
+
+    const missingValue = run(["init", "--client", "generic", "--workspace"]);
+    assert.equal(missingValue.status, 1);
+    assert.match(missingValue.stderr, /--workspace requires a value/);
+  });
+
+  it("starts the MCP server against the workspace it is given", () => {
+    // The server reads its policy and resolves its store root at construction,
+    // so --workspace must take effect before that. Proven with a policy that
+    // is broken only inside the target directory: the diagnostic names it, so
+    // the server demonstrably read THAT file and not the cwd's.
+    const root = temporaryDirectory();
+    const elsewhere = temporaryDirectory();
+    try {
+      writeFileSync(join(root, "loop_policy.json"), "{ not json\n");
+      const result = run(["mcp", "--workspace", root], elsewhere);
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /policy_invalid:/);
+      // The path in the message is the workspace's, not the cwd's.
+      assert.ok(
+        result.stderr.includes(join(root, "loop_policy.json")),
+        `diagnostic must name the workspace policy, got: ${result.stderr}`,
+      );
+
+      // A directory that is not there is refused rather than ignored.
+      const missing = join(root, "does-not-exist");
+      const bad = run(["mcp", "--workspace", missing], elsewhere);
+      assert.equal(bad.status, 1);
+      assert.match(bad.stderr, /does not exist/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(elsewhere, { recursive: true, force: true });
+    }
+  });
+
+  it("reports a broken policy as policy_invalid with the file path", () => {
+    const root = temporaryDirectory();
+    try {
+      // Present but unparseable: the operator believes a policy is in force.
+      writeFileSync(join(root, "loop_policy.json"), "{ not json\n");
+      const result = run(["mcp"], root);
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /policy_invalid:/);
+      assert.match(result.stderr, /loop_policy\.json/);
+      assert.match(result.stderr, /loopforge doctor/);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

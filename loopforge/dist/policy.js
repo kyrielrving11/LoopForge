@@ -118,6 +118,18 @@ function deepMerge(defaults, overrides) {
     }
     return result;
 }
+/** v3.8.3: the stable code a broken policy file surfaces as. Every throw
+ *  below carries it, so the MCP boundary and the CLI can report a
+ *  machine-readable code instead of only prose — the same contract the MCP
+ *  tool envelope has had since v3.6. */
+export const POLICY_INVALID_CODE = "policy_invalid";
+/** Tag a defect as a policy defect. Message text is for humans; the code is
+ *  what callers branch on. */
+function policyInvalid(message) {
+    const error = new Error(message);
+    error.code = POLICY_INVALID_CODE;
+    return error;
+}
 /** Load the runtime policy, or fall back to the defaults when no file
  *  declares one.
  *
@@ -129,28 +141,55 @@ function deepMerge(defaults, overrides) {
  *  version or the load fails, and the failure surfaces as `policy_invalid`
  *  rather than the loop running on a configuration nobody chose.
  *
- *  A MISSING or unparseable file still falls through to the defaults (running
- *  with no policy file is normal). A file that exists and parses is a
- *  declaration, so its defects propagate instead of being swallowed. */
+ *  v3.8.3: a MISSING file still falls through to the defaults — running with
+ *  no policy file is normal. A file that IS there but cannot be read or
+ *  parsed no longer does: it is a defect the operator has to see. The old bare
+ *  `catch` could not tell "no file" from "EACCES" from "bad JSON", so a
+ *  mistyped or half-written policy ran the loop on defaults while the operator
+ *  believed their configuration was in force — the same outcome the version
+ *  boundary above exists to prevent. A file that exists is a declaration, so
+ *  its defects propagate. */
 export function loadPolicy(path) {
     const candidates = [path, "loop_policy.json"].filter(Boolean);
     for (const candidate of candidates) {
+        const file = resolve(candidate);
+        let source;
+        try {
+            source = readFileSync(file, "utf8");
+        }
+        catch (error) {
+            if (error?.code === "ENOENT") {
+                continue; // no file here — try the next candidate
+            }
+            throw policyInvalid(`policy file ${file} cannot be read (${error.message}). ` +
+                "Fix it or delete it; `loopforge doctor` reports the current state.");
+        }
         let raw;
         try {
-            raw = JSON.parse(readFileSync(resolve(candidate), "utf8"));
+            raw = JSON.parse(source);
         }
-        catch {
-            continue; // absent or unreadable — try the next candidate
+        catch (error) {
+            throw policyInvalid(`policy file ${file} is not valid JSON (${error.message}). ` +
+                "Fix it or delete it; `loopforge doctor` reports the current state.");
         }
-        if (!raw || typeof raw !== "object" || Array.isArray(raw))
-            continue;
+        if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+            throw policyInvalid(`policy file ${file} must contain a JSON object. ` +
+                "Fix it or delete it; `loopforge doctor` reports the current state.");
+        }
         const version = raw.version;
         if (version !== POLICY_SCHEMA_VERSION) {
-            throw new Error(`policy version ${JSON.stringify(version)} does not match the current ` +
+            throw policyInvalid(`policy version ${JSON.stringify(version)} does not match the current ` +
                 `schema version "${POLICY_SCHEMA_VERSION}". Update the file; there is ` +
                 "no migration path.");
         }
-        return deepMerge(DEFAULT_POLICY, raw);
+        try {
+            return deepMerge(DEFAULT_POLICY, raw);
+        }
+        catch (error) {
+            // An unknown key is the same class of defect as a bad version: the file
+            // declares a configuration the runtime cannot honour.
+            throw policyInvalid(error.message);
+        }
     }
     return structuredClone(DEFAULT_POLICY);
 }

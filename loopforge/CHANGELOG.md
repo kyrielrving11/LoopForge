@@ -1,5 +1,152 @@
 # Changelog
 
+## 3.8.3 (2026-09-17)
+
+**The unobstructed-path release.** Three dead ends removed, one opening closed,
+and the configuration surface made legible. No new persistence, no new source
+of truth: every change either completes a route the runtime already told the
+agent to take, or stops the runtime from describing a state it is not in.
+
+### Scope drift has the exit it always advertised (completing a half-fix)
+
+`enforceScopeDrift`'s instructions were rewritten in v3.7 after the old advice
+— "extend the scope in your re-declared round_contract" — was found to be
+structurally unreachable (a replacement proposal is ignored while the contract
+is open). The replacement text told the agent to resubmit with
+`outcome: "blocked"` plus the extended scope as the next contract. **That route
+was never implemented**, so the new guidance was as unreachable as the old one:
+the same `round_scope_drift` check kept rejecting, the streak accumulated, and
+the third occurrence terminated.
+
+A blocked round whose proposal's `scope` covers **every** file the round
+changed out of scope now passes that row. What is waived is the rejection,
+never the fact — `round_scope_drift` still lands on the committed round, so
+audit, explain and replay report it. The coverage set is derived by
+`roundDriftFiles()`, shared with the drift check itself; it is never read from
+the flag's `detail`, which truncates its file list at five and would have let a
+partial expansion through. The waiver is evaluated above the terminate arm
+(previously a streak of two killed the round before any waiver could be
+consulted), and the rejection-counter catch-all stands aside for a waived
+round — it exists for a round that looks clean while the counter says
+otherwise, which is not this shape. Ordinary drift still rejects, and no
+explanation channel was added.
+
+The route is narrow on purpose: contract debt, machine stalls, and an
+unrestored post-backtrack workspace still apply to the same round.
+
+### A rewritten verification entrypoint is a dead end no longer
+
+The check compared the entrypoint against the round's git change set. Two
+consequences, both wrong:
+
+- A **created** entrypoint stayed in that set for every retry — the round's
+  baseline is deliberately frozen — so "keep the entrypoint unchanged" was not
+  an instruction the agent could carry out, and the loop retried until the
+  uniform ladder terminated it.
+- An entrypoint git cannot see (**gitignored**) is in no git diff at all, so a
+  script rewritten this round read as untouched.
+
+The entrypoint's state is now captured from the **filesystem** when the round is
+prepared (never when tampering is detected — a baseline written at detection
+time could never catch its own first occurrence) and compared absolutely:
+current content against round-start content, unioned with the unchanged git
+arm. It is stored in the session state entry, read back leniently, seeded only
+for a round being prepared, and never enters committed round history; a corrupt
+or absent value drops the absolute arm rather than the round.
+
+Recovery is stated in the terms the round can actually satisfy, using the
+round-start state of each file: restore it, or — when it did not exist at round
+start — leave it in place and let a later round run it. Repeated
+non-restoration **backtracks** instead of terminating (this row now owns its
+escalation ladder, like the progress-stall row), so the work is redone in a
+round whose baseline already contains the entrypoint. Committing the script
+mid-round does not launder it: the comparison is against content, not against
+whether the file left the change set.
+
+### A first occurrence is no longer treated as a repeat
+
+The persisted rejection counter is one scalar. The L4 rule — a row escalates on
+its **own** streak — had been applied only to the uniform rows and the contract
+row, so `success_without_verified_evidence`, `round_scope_drift` and
+`progress_stall` still read the raw counter: a first-ever occurrence arriving
+after two unrelated rejections terminated the loop instead of rejecting it.
+Those three rows now use their own streak, matching the rule the code's own
+comments describe. The `max_rejections` row keeps the shared counter — that is
+what it is for.
+
+### Blocked can never be reported as completed
+
+The stop decision already ordered the blocked declaration first. It is now also
+a guard, `finalizeStopReason`, applied where the reason becomes durable (in the
+coordinator, before the transaction commits — the committed round document
+carries `result.stopReason`) and again where it becomes client-visible. A
+violation can only be a code defect, so the guard degrades to `blocked` and
+reports the downgrade as a flag rather than throwing mid-lifecycle. "This round
+declares itself blocked" is now one function (`declaresBlocked`), read by both
+the stop decision and the scope-drift waiver.
+
+Also fixed: `buildTerminationResult` and the crash-recovery path hard-coded
+`enforcement_terminated`, discarding the `incomplete` the contract-debt row
+sets. The specific reason reached neither observability nor the client.
+
+### An orphaned store lock no longer outlives its owner
+
+The lock's wait budget was 1s while the dead-owner reclaim required the lock to
+be older than 5s (Windows EPERM: 10s) — so a restart within five seconds of a
+crash **could not** reclaim it and failed with `LoopStore lock timeout`. The
+retry loop also spun without sleeping, burning CPU for that full second.
+
+The three staleness thresholds are now named separately with their reasons
+(they are three different rules, not one constant repeated), the dead-owner
+grace is small enough to be reachable inside the budget, and attempts sleep
+between retries. The budget stays far below the Windows case on purpose: it
+blocks the whole single-threaded server, so a lock held by a **live** process
+must fail fast rather than hang.
+
+### A broken policy file is no longer a silent one
+
+`loadPolicy`'s bare `catch` could not tell "no file" from "EACCES" from "not
+JSON", so a mistyped or half-written `loop_policy.json` ran the loop on the
+defaults while the operator believed their configuration was in force —
+exactly the outcome the v3.8.1 version boundary exists to prevent. A missing
+file still falls through to the defaults; a file that exists but is unreadable,
+unparseable, or not an object now throws with the stable `policy_invalid` code
+and its path. The CLI reports that code at the `mcp` startup boundary with a
+`doctor` pointer instead of a bare message.
+
+### `--target` means one thing, and the workspace is named
+
+`--target` was a shared root for two different layouts: the skill went to
+`<target>/perception/SKILL.md` and the policy to `<target>/loop_policy.json`.
+It also never influenced the **reader** — the runtime only ever read the
+workspace it was started in — so `init --target DIR` wrote a policy the runtime
+would not use.
+
+`--target` now selects the client skill location only. `--workspace DIR` names
+the runtime boundary: `loop_policy.json`, `.loopforge/`, evidence commands, and
+every workspace check resolve against it. `loopforge mcp --workspace DIR`
+switches directory before the server reads its policy or resolves its store
+root, which is why it must happen before the server is constructed. `init`
+prints the skill path, the policy path, and the command that starts the server
+against that workspace.
+
+Two smaller frictions went with it: a flag with no value was indistinguishable
+from an absent flag (`init --client generic --target` silently wrote the policy
+to the current directory), and an unknown option was silently ignored, so a
+typo behaved exactly like the flag was never passed.
+
+### Configuration is discoverable from both ends
+
+`doctor` now states the **evidence posture** in the same words the round
+prompts and MCP responses use — one derivation
+(`deriveEvidenceCapability`), so it cannot describe a capability the runtime
+does not have — and every failing check carries the next step, not only the
+defect. The Perception skill gained the piece it was missing entirely: where
+`evidence.commands` lives, what each field means, that commands are spawned
+without a shell inside the workspace, that `loopforge doctor` checks them
+statically, how to read the `capability` object a prepared round returns, and
+that a command's entrypoint must already exist when the round starts.
+
 ## 3.8.1 (2026-09-11)
 
 **The convergence release.** 3.8.0 established the boundaries — one factual

@@ -504,28 +504,83 @@ function enforceEvidenceContradiction(
 /** v3.3: R-EVID-VERIFY — the verification command's entrypoint changed in
  *  the same round the command ran. The runtime executed a script the agent
  *  just rewrote, so the "machine observation" has no stable baseline and
- *  cannot back the success claim. Reject so the agent resubmits the SAME
- *  round with the entrypoint unchanged (a freshly created entrypoint passes
- *  on the redo — the diff no longer contains it). */
+ *  cannot back the success claim.
+ *
+ *  v3.8.3: the row owns its whole ladder (RULE_TABLE ladder: "internal").
+ *
+ *  The old text said "resubmit with the entrypoint unchanged", which is not an
+ *  instruction the agent can carry out when the round CREATED the file — it
+ *  did not exist to keep unchanged — and the round's baseline never moves, so
+ *  the same file was re-detected on every retry until the uniform ladder
+ *  terminated the loop. The recovery text now states the round-start state of
+ *  each file (the gate puts it in the detail) and the two routes that exist:
+ *  restore it, or take the rollback so the work is redone in a round whose
+ *  baseline already contains the entrypoint. Repeated non-restoration is a
+ *  rollback, not a kill. */
 function enforceVerificationEntrypointTampered(
   flags: VerificationFlag[],
+  vaultEntries: VaultEntry[],
+  currentRound: number,
+  consecutiveRejections: number,
+  lastRejectionCheck: string,
 ): EnforcementResult | null {
   const flag = flags.find(
     (f) => f.check === CHECK_VERIFICATION_ENTRYPOINT_MODIFIED && f.severity === "error",
   );
   if (!flag) return null;
 
+  const check = "verification_entrypoint_modified";
+  const ownStreak = lastRejectionCheck === check ? consecutiveRejections : 0;
+
+  if (ownStreak >= 1) {
+    // The agent has already been told, once, exactly what to restore and has
+    // not restored it. Retrying the same round cannot help — the baseline is
+    // frozen on purpose — so escalate to the rollback, which redoes the work
+    // in a fresh round where the entrypoint is part of the starting state.
+    // `backtrack_enabled` off, or a rollback already committed for this round
+    // (which would loop), leaves termination as the honest end.
+    if (getPolicy().engine.backtrack_enabled &&
+        !hasCommittedBacktrack(vaultEntries, currentRound)) {
+      return makeEnforcementResult({
+        action: "backtrack",
+        reason:
+          "The verification command's entrypoint is still not back to its " +
+          "round-start state after being asked once, so this round cannot " +
+          "produce a trustworthy observation.",
+        fix_instructions:
+          "After the rollback, restore the workspace as the Recovery Brief " +
+          "states. The restore check requires every skipped file to differ " +
+          "from its state at the rollback, so no entrypoint may still be an " +
+          "uncommitted change: revert it, or make a script you intend to keep " +
+          "part of the committed workspace before the round that runs it. " +
+          "Then redo the round.",
+        check,
+      });
+    }
+    return makeEnforcementResult({
+      action: "terminate",
+      reason:
+        "The verification command's entrypoint was changed in the round it " +
+        "verified and was not restored after the rollback.",
+      check,
+    });
+  }
+
   return makeEnforcementResult({
     action: "reject",
     reason: flag.detail,
     fix_instructions:
       "The verification command entrypoint changed in this round, so its " +
-      "result cannot be trusted as machine evidence. You must: (a) keep the " +
-      "verification command (and its entrypoint files) stable, (b) resubmit " +
-      "your SelfEvaluation for the SAME round with the entrypoint unchanged " +
-      "so the runtime can re-run it against a stable baseline, and (c) do " +
-      "NOT rewrite the verification script to make it pass.",
-    check: "verification_entrypoint_modified",
+      "result cannot be trusted as machine evidence — the runtime executed a " +
+      "script this round rewrote. To make this round verifiable again: restore " +
+      "each of those files to the state it had when the round started (for a " +
+      "file that did not exist then, that means removing it), then resubmit " +
+      "this same round's SelfEvaluation. Do NOT rewrite the verification " +
+      "script to make it pass. If the work genuinely needs that file, this " +
+      "round cannot verify it: make the file part of the committed workspace " +
+      "first — a script that is not an uncommitted change — and let a later " +
+      "round run it.",
+    check,
   });
 }
 
@@ -534,16 +589,25 @@ function enforceVerificationEntrypointTampered(
  *  missing-evidence arm (v3.7: the ex-R3 empty_success posture moved into
  *  checkSuccessWithoutVerifiedEvidence) or the claims arm (zero verified
  *  claims). First occurrence → reject with concrete evidence requirements;
- *  second consecutive → terminate. */
+ *  second consecutive → terminate.
+ *
+ *  v3.8.3: "consecutive" means consecutive for THIS check (L4's own-streak
+ *  rule, which until now reached only the uniform rows and the contract row).
+ *  The persisted counter is one scalar, so a success-evidence round arriving
+ *  after two unrelated rejections used to terminate on its FIRST occurrence. */
 function enforceSuccessWithoutVerifiedEvidence(
   flags: VerificationFlag[],
   consecutiveRejections: number,
+  lastRejectionCheck: string,
 ): EnforcementResult | null {
   const flag = flags.find((f) =>
     f.check === CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE && f.severity === "error");
   if (!flag) return null;
 
-  if (consecutiveRejections >= 2) {
+  const ownStreak = lastRejectionCheck === CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE
+    ? consecutiveRejections
+    : 0;
+  if (ownStreak >= 2) {
     return makeEnforcementResult({
       action: "terminate",
       reason: "Repeated success claims with zero machine-verifiable evidence.",
@@ -551,7 +615,7 @@ function enforceSuccessWithoutVerifiedEvidence(
     });
   }
   const escalation = getPolicy().engine.enforcement_escalation_enabled &&
-    consecutiveRejections >= 1
+    ownStreak >= 1
     ? buildEscalationNotice()
     : "";
   return makeEnforcementResult({
@@ -649,15 +713,41 @@ function enforceContractItemsUnverified(
  *  scope. v3.8: scope drift is a MACHINE fact and is no longer waivable by an
  *  agent explanation (the drift_clarification channel was deleted) — the
  *  agent must revert the out-of-scope changes or close the active contract
- *  and declare an extended scope. Repeated drift terminates. */
+ *  and declare an extended scope.
+ *
+ *  v3.8.3: that second route is now actually reachable. The v3.7 wording
+ *  ("extend the scope in your re-declared round_contract") was structurally
+ *  dead — a replacement proposal is IGNORED while the active contract is open
+ *  — so the fix text was rewritten to the only legal route (blocked + the
+ *  extended scope as the next proposal) without the matching escape being
+ *  implemented. `scopeDriftWaiver` is that missing half: the coordinator has
+ *  verified that the round declares blocked AND that its proposal covers every
+ *  drifted file. What is waived is the REJECTION, never the fact. */
 function enforceScopeDrift(
   flags: VerificationFlag[],
   consecutiveRejections: number,
+  lastRejectionCheck: string,
+  scopeDriftWaiver: boolean,
 ): EnforcementResult | null {
   const flag = flags.find((f) => f.check === CHECK_ROUND_SCOPE_DRIFT);
   if (!flag) return null;
 
-  if (consecutiveRejections >= 2) {
+  // v3.8.3: the legal exit. A round that declares itself blocked may switch
+  // contracts, but only by declaring a proposal that covers every file it
+  // changed out of scope — the coverage test is the coordinator's, because
+  // only there are the git files and the active contract both in reach.
+  //
+  // Checked ABOVE the terminate arm on purpose: the counter accumulates while
+  // the agent tries to get the declaration right, so an escape that only
+  // works at streak 0 or 1 is not an escape — it is a race the agent loses.
+  // The flag is NOT suppressed; it stays on the committed round, so
+  // audit/explain still report the drift as a machine fact. */
+  if (scopeDriftWaiver) return null;
+
+  const ownStreak = lastRejectionCheck === CHECK_ROUND_SCOPE_DRIFT
+    ? consecutiveRejections
+    : 0;
+  if (ownStreak >= 2) {
     return makeEnforcementResult({
       action: "terminate",
       reason:
@@ -667,7 +757,7 @@ function enforceScopeDrift(
     });
   }
   const escalation = getPolicy().engine.enforcement_escalation_enabled &&
-    consecutiveRejections >= 1
+    ownStreak >= 1
     ? buildEscalationNotice()
     : "";
   return makeEnforcementResult({
@@ -680,13 +770,17 @@ function enforceScopeDrift(
     // legal scope change is to CLOSE the active contract first: resubmit with
     // outcome="blocked" (blocker naming the too-narrow scope) and the
     // extended scope as the NEXT round's contract in the same submission.
+    // v3.8.3: that route now works, and its one condition is stated here —
+    // the new scope must cover EVERY drifted file, not just the listed ones
+    // (the detail above truncates its list).
     fix_instructions:
       "Files changed outside the contract's declared scope. You must either: " +
       "(a) revert the out-of-scope changes, or (b) legally extend the scope: " +
       "a replacement contract is IGNORED while the current one is active, so " +
       "resubmit this work with outcome: \"blocked\" (blocker naming the " +
-      "too-narrow scope) plus the extended scope as the next round's " +
-      "round_contract. Scope drift is a machine fact — no explanation waives " +
+      "too-narrow scope) plus a round_contract whose scope covers EVERY file " +
+      "listed above (and any other file this round changed outside the current " +
+      "scope). Scope drift is a machine fact — no explanation waives " +
       "it. Repeated scope drift terminates the loop." +
       escalation,
     check: "round_scope_drift",
@@ -820,6 +914,7 @@ function resolveStallDisposition(
   currentRound: number,
   vaultEntries: VaultEntry[],
   consecutiveRejections: number,
+  lastRejectionCheck: string,
 ): EnforcementResult {
   const { tier, detail, window, threshold } = verdict;
   const flatline = tier === "progress_flatline";
@@ -833,7 +928,12 @@ function resolveStallDisposition(
   // survives only in the reason/fix wording (former progress_flatline id).
   const check = "progress_stall";
 
-  if ((flatline && consecutiveRejections >= 1) || consecutiveRejections >= 2) {
+  // v3.8.3: the stall escalates on its OWN streak. The persisted counter is
+  // one scalar shared by every check, so two rejections of any other kind used
+  // to turn a first-time stall straight into termination.
+  const ownStreak = lastRejectionCheck === check ? consecutiveRejections : 0;
+
+  if ((flatline && ownStreak >= 1) || ownStreak >= 2) {
     return makeEnforcementResult({
       action: "terminate",
       reason: `${stalledReason} The stall persisted after escalation. Terminating loop.`,
@@ -841,7 +941,7 @@ function resolveStallDisposition(
     });
   }
 
-  if (consecutiveRejections >= 1 && !escalation) {
+  if (ownStreak >= 1 && !escalation) {
     return makeEnforcementResult({
       action: "terminate",
       reason: `${stalledReason} The stall persisted after the previous rejection. Terminating loop.`,
@@ -849,7 +949,7 @@ function resolveStallDisposition(
     });
   }
 
-  const escalated = flatline ? escalation : consecutiveRejections >= 1 && escalation;
+  const escalated = flatline ? escalation : ownStreak >= 1 && escalation;
   if (escalated && getPolicy().engine.backtrack_enabled) {
     if (hasCommittedBacktrack(vaultEntries, currentRound)) {
       return makeEnforcementResult({
@@ -902,12 +1002,13 @@ function enforceProgressStall(
   vaultEntries: VaultEntry[],
   consecutiveRejections: number,
   machineBackedSuccess: boolean,
+  lastRejectionCheck: string,
 ): EnforcementResult | null {
   const verdict =
     evaluateStallWindow("progress_stall", selfEval, currentRound, vaultEntries, machineBackedSuccess)
     ?? evaluateStallWindow("progress_flatline", selfEval, currentRound, vaultEntries, machineBackedSuccess);
   return verdict
-    ? resolveStallDisposition(verdict, currentRound, vaultEntries, consecutiveRejections)
+    ? resolveStallDisposition(verdict, currentRound, vaultEntries, consecutiveRejections, lastRejectionCheck)
     : null;
 }
 
@@ -920,7 +1021,16 @@ function enforceProgressStall(
  *  (terminate at ≥2 rejections). */
 function enforceMaxRejections(
   consecutiveRejections: number,
+  driftWaived: boolean,
 ): EnforcementResult | null {
+  // v3.8.3: this row is the catch-all for a round that LOOKS clean while the
+  // persisted counter says otherwise. A round waived past scope drift is not
+  // that shape: it declares blocked and its new proposal covers every file it
+  // drifted into, so the counter it carries is the drift streak it just
+  // resolved — not unresolved persistence. Without this, the legal exit would
+  // still dead-end here at a counter of 2 or more.
+  if (driftWaived) return null;
+
   const escalation = getPolicy().engine.enforcement_escalation_enabled;
 
   if (escalation) {
@@ -1053,7 +1163,11 @@ const RULE_TABLE: readonly RuleRow[] = [
   { checks: ["success_with_remaining_criteria"], ladder: "uniform", terminalAfter: 2, noticeOnRepeat: true },
   { checks: ["recurring_violation"], ladder: "uniform", terminalAfter: 2, noticeOnRepeat: true },
   { checks: ["required_command_failed", "command_evidence_mismatch", "outcome_success_contradiction"], ladder: "uniform", terminalAfter: 2, noticeOnRepeat: true },
-  { checks: ["verification_entrypoint_modified"], ladder: "uniform", terminalAfter: 2, noticeOnRepeat: true },
+  // v3.8.3: own ladder — reject → backtrack → terminate. A rewritten
+  // entrypoint is not fixed by asking again (the round's baseline is frozen on
+  // purpose), so the second occurrence rolls the work back instead of killing
+  // the loop. See enforceVerificationEntrypointTampered.
+  { checks: ["verification_entrypoint_modified"], ladder: "internal" },
   { checks: ["success_without_verified_evidence"], ladder: "internal" },
   { checks: ["round_scope_drift"], ladder: "internal" },
   // v3.8.1: "internal" — the handler owns this row's ladder (it must terminate
@@ -1125,6 +1239,12 @@ export function enforceRound(
    *  check and lets uniform rows escalate on THEIR OWN streak instead of
    *  inheriting an unrelated history. */
   lastRejectionCheck: string = "",
+  /** v3.8.3: the coordinator has verified that this round declares itself
+   *  blocked AND that its new contract proposal's scope covers every file the
+   *  round changed outside the active contract's scope. Computed there, not
+   *  here: neither the observations nor the active contract reach this
+   *  function. See `enforceScopeDrift`. */
+  scopeDriftWaiver: boolean = false,
 ): EnforcementResult {
   const { flags } = verifyResult;
 
@@ -1140,7 +1260,8 @@ export function enforceRound(
     // v3.3: R-EVID-VERIFY — the verification command entrypoint changed in
     // the same round it ran. Runs before R8: when the entrypoint is tainted
     // R8 also fires, but this reason is more specific.
-    () => enforceVerificationEntrypointTampered(flags),
+    () => enforceVerificationEntrypointTampered(
+      flags, vaultEntries, currentRound, consecutiveRejections, lastRejectionCheck),
     // v3.5: contract completion claimed without its verification_plan
     // commands passing — runs before R-C1: the completion-truth question
     // outranks boundary nuance.
@@ -1151,9 +1272,11 @@ export function enforceRound(
 
     // v2.12/v3.7: R8 — the single success-evidence row (empty/missing-evidence
     // arm merged from the former R3 empty_success posture + claims arm)
-    () => enforceSuccessWithoutVerifiedEvidence(flags, consecutiveRejections),
+    () => enforceSuccessWithoutVerifiedEvidence(
+      flags, consecutiveRejections, lastRejectionCheck),
     // v3.3: R-C2 — files changed outside the contract's declared scope
-    () => enforceScopeDrift(flags, consecutiveRejections),
+    () => enforceScopeDrift(
+      flags, consecutiveRejections, lastRejectionCheck, scopeDriftWaiver),
     // v3.8: verification debt — contract items claimed met without machine
     // verification (fires only after the configured streak)
     () => enforceContractItemsUnverified(
@@ -1162,12 +1285,16 @@ export function enforceRound(
     // reject → backtrack → terminate with the deadlock guard
     () => enforceProgressStall(
       selfEval, flags, currentRound, vaultEntries, consecutiveRejections,
-      verifyResult.machineBackedSuccess),
+      verifyResult.machineBackedSuccess, lastRejectionCheck),
     // R6: rejection-counter catch-all (evaluated only when no row above
     // fired — a clean-looking round carrying a high persisted counter)
     // v3.7.1: cited gate without an approved human decision
     () => enforceUserGateUnresolved(flags),
-    () => enforceMaxRejections(consecutiveRejections),
+    // v3.8.3: the counter is shared, so this row must know that a scope-drift
+    // waiver already excused the streak it carries (see enforceMaxRejections).
+    () => enforceMaxRejections(
+      consecutiveRejections,
+      scopeDriftWaiver && flags.some((f) => f.check === CHECK_ROUND_SCOPE_DRIFT)),
     // v2.12: R9 — post-backtrack workspace not restored
     () => enforceBacktrackNotRestored(flags, vaultEntries, currentRound),
   ];

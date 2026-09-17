@@ -167,16 +167,26 @@ export function collectOutOfScopeFiles(files, scope) {
  *  round: the runtime executed a script the agent just rewrote, so the
  *  "machine observation" has no stable baseline. testFilesModified — the
  *  round changed test files (isTestFile): normal in TDD, so warn-only; the
- *  command result stays usable. Pure derivation — no fs access. */
-function commandTampered(observation, gitObservation) {
-    if (!gitObservation)
-        return { entrypointModified: false, testFilesModified: false };
-    const gitFiles = new Set(gitObservation.files);
+ *  command result stays usable. Pure derivation — no fs access.
+ *
+ *  v3.8.3: two arms, unioned.
+ *  - `drifted` comes from the trusted round-start baseline captured when the
+ *    round was prepared (`captureEntrypointTrust`). It is absolute — current
+ *    content vs round-start content — so it survives a re-derived baseline
+ *    and sees entrypoints git cannot (gitignored files are in no git diff).
+ *  - the git-delta arm is unchanged.
+ *  The drift arm does not depend on git: when the baseline exists the fact is
+ *  observable, and failing open on an observable fact is not fail-open, it is
+ *  a hole. */
+function commandTampered(observation, gitObservation, drifted) {
     const entrypoints = observation.kind === "command"
         ? observation.data.entrypointFiles ?? []
         : [];
-    const entrypointModified = entrypoints.some((file) => gitFiles.has(file));
-    const testFilesModified = [...gitFiles].some((file) => isTestFile(file));
+    const gitFiles = gitObservation ? new Set(gitObservation.files) : null;
+    const entrypointModified = entrypoints.some((file) => drifted.has(file) || (gitFiles?.has(file) ?? false));
+    const testFilesModified = gitObservation
+        ? gitObservation.files.some((file) => isTestFile(file))
+        : false;
     return { entrypointModified, testFilesModified };
 }
 /** v3.8: The single machine-backed predicate lives in evidence-provider.ts.
@@ -713,10 +723,14 @@ function checkCommandEvidenceIntegrity(selfEval, evidenceSnapshots) {
  *  the agent just rewrote). Test-file changes are normal dev activity (warn:
  *  confirm the tests still verify the task claims). Fail-open when the git
  *  snapshot is missing or the command has no resolvable entrypoint. */
-function checkVerificationDomainIntegrity(evidenceSnapshots) {
+function checkVerificationDomainIntegrity(evidenceSnapshots, drift) {
     const git = evidenceSnapshots.find((snapshot) => snapshot.providerId === "git") ?? null;
-    if (!git)
+    // v3.8.3: no git observation is no longer automatically silent — the
+    // trusted baseline answers "did the entrypoint change this round?" without
+    // git, so the drift arm still runs below.
+    if (!git && drift.length === 0)
         return null;
+    const drifted = new Set(drift.map((entry) => entry.file));
     // v3.8.1: EVERY after-phase command is scanned for a tampered entrypoint
     // before the test-file warn may answer for one of them. `testFilesModified`
     // is derived from the git file set alone, so it is true for every command as
@@ -729,15 +743,25 @@ function checkVerificationDomainIntegrity(evidenceSnapshots) {
             continue;
         if (snapshot.phase !== "after")
             continue;
-        if (!commandTampered(snapshot, git).entrypointModified)
+        if (!commandTampered(snapshot, git, drifted).entrypointModified)
             continue;
+        // v3.8.3: the detail states the round-start state of each changed
+        // entrypoint, because "unchanged" is not an instruction the agent can act
+        // on for a file the round CREATED — the enforcement row renders the two
+        // recovery routes from this, and the flag stays a fact rather than advice.
+        const changed = drift.filter((entry) => (snapshot.data.entrypointFiles ?? []).includes(entry.file));
         return makeVerificationFlag({
             severity: "error",
             field: "execution_report",
             check: CHECK_VERIFICATION_ENTRYPOINT_MODIFIED,
             detail: `Verification command "${snapshot.data.commandId}" entrypoint changed this round — ` +
-                "its result cannot be trusted as machine evidence. Keep the " +
-                "verification command stable or resubmit the same round with the " +
+                "its result cannot be trusted as machine evidence. " +
+                (changed.length > 0
+                    ? "At round start: " + changed.map((entry) => entry.roundStart === "absent"
+                        ? `"${entry.file}" did not exist`
+                        : `"${entry.file}" was present`).join("; ") + ". "
+                    : "") +
+                "Keep the verification command stable or resubmit the same round with the " +
                 "entrypoint unchanged.",
         });
     }
@@ -747,7 +771,7 @@ function checkVerificationDomainIntegrity(evidenceSnapshots) {
             continue;
         if (snapshot.phase !== "after")
             continue;
-        if (!commandTampered(snapshot, git).testFilesModified)
+        if (!commandTampered(snapshot, git, drifted).testFilesModified)
             continue;
         return makeVerificationFlag({
             severity: "warn",
@@ -848,18 +872,29 @@ function checkBacktrackGitHeadRestore(evidenceSnapshots, backtrackTargetGitHead)
 // (recorded, never a rejection), and a premature closure is structurally
 // impossible. The checks below only surface state the agent must see.
 // ═══════════════════════════════════════════════════════════════════════════
-/** The round changed files outside the ACTIVE contract's declared scope.
+/** v3.8.3: The round's out-of-scope files — the ONE derivation, shared by the
+ *  drift check below and the blocked-waiver test in RoundCoordinator. The two
+ *  must agree on the set, or a round could be waived for a drift the gate
+ *  still reports (or the reverse).
+ *
  *  Git diff files are the machine-authoritative "what actually changed" set.
- *  Silent when no active contract exists or it declares no scope. */
-function checkRoundScopeDrift(activeContract, evidenceSnapshots) {
+ *  Empty when there is nothing to compare: no active contract, no declared
+ *  scope, or no git observation (cannot observe → fail open). */
+export function roundDriftFiles(activeContract, evidenceSnapshots) {
     if (!activeContract)
-        return null;
+        return [];
     if (activeContract.scope.length === 0)
-        return null;
+        return [];
     const git = evidenceSnapshots.find((snapshot) => snapshot.providerId === "git");
     if (!git)
-        return null; // git unavailable → cannot observe → fail open
-    const outOfScope = collectOutOfScopeFiles(git.files, activeContract.scope);
+        return []; // git unavailable → cannot observe → fail open
+    return collectOutOfScopeFiles(git.files, activeContract.scope);
+}
+/** The round changed files outside the ACTIVE contract's declared scope.
+ *  Silent when no active contract exists, it declares no scope, or nothing
+ *  drifted out of it. */
+function checkRoundScopeDrift(activeContract, evidenceSnapshots) {
+    const outOfScope = roundDriftFiles(activeContract, evidenceSnapshots);
     if (outOfScope.length === 0)
         return null;
     return makeVerificationFlag({
@@ -1004,7 +1039,11 @@ backtrackSkippedFingerprints = {},
 backtrackTargetGitHead,
 /** v3.7.1: gate records (task_type gate_opened / gate_decision) live
  *  outside the round prefix — the caller passes them in explicitly. */
-gateEntries = []) {
+gateEntries = [],
+/** v3.8.3: entrypoint files that no longer match the trusted round-start
+ *  baseline. Derived by the caller (it needs the in-flight trust map and
+ *  filesystem access); this function stays a pure function of its inputs. */
+entrypointDrift = []) {
     const flags = [];
     // Collect violations from all previous vault entries for duplicate-discovery
     // and other checks that need deeper history.
@@ -1063,7 +1102,7 @@ gateEntries = []) {
         () => checkCommandEvidenceIntegrity(selfEval, evidenceSnapshots),
         // v3.3: Verification domain integrity — command entrypoint / test files
         // changed in the same round the command ran
-        () => checkVerificationDomainIntegrity(evidenceSnapshots),
+        () => checkVerificationDomainIntegrity(evidenceSnapshots, entrypointDrift),
         // v2.13: Post-backtrack workspace restore check
         () => checkBacktrackWorkspaceRestore(selfEval, backtrackSkippedFiles, backtrackSkippedFingerprints, evidenceSnapshots),
         // v2.12: Post-backtrack git HEAD restore check

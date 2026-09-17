@@ -90,6 +90,7 @@ export class RoundDriver {
             actualEvidence,
             backtrackSkippedFiles: input.backtrackSkippedFiles,
             backtrackSkippedFingerprints: input.backtrackSkippedFingerprints,
+            entrypointTrust: input.entrypointTrust,
             backtrackTargetGitHead: input.backtrackTargetGitHead,
         });
         return { outcome, actualEvidence };

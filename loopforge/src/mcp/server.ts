@@ -73,6 +73,13 @@ export const SERVER_INSTRUCTIONS = [
   "constraint_violations, should_continue) plus an execution_report carrying ",
   "files_changed, tests_reported, criterion_claims and contract_item_claims. ",
   "Claims never verify themselves: only machine observations do. ",
+  // v3.8.3: the capability object is where the operator's command
+  // configuration becomes visible to the agent. Naming it here (rather than
+  // restating what it says) keeps one source for the fact.
+  "Each response carries `capability` (providers, enabled after-capable ",
+  "commands, contractVerificationAvailable) and its `warnings`. Read them ",
+  "before declaring contract items: with no ready command, items cannot be ",
+  "machine-verified and will not close. ",
   "Follow reject or backtrack prompts and retry loopforge_next. ",
   "Keep one LoopForge session across outer agent rounds. ",
   "Do not replace these MCP calls with shell or CLI wrappers.",

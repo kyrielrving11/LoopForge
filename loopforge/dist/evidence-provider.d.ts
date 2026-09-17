@@ -107,6 +107,39 @@ export declare class EvidenceCollector {
     /** Capture all providers concurrently with per-provider timeout isolation. */
     collectAsync(options?: EvidenceCollectOptions): Promise<MachineObservation[]>;
 }
+/** v3.8.3: The round-start state of every enabled after-capable command's
+ *  entrypoint files — the TRUSTED baseline the tamper check compares against.
+ *
+ *  Taken from the filesystem, not from a git observation: `git diff` lists
+ *  only tracked-and-dirty files, so an entrypoint that is gitignored would be
+ *  absent from BOTH sides of a git-based comparison and a script created this
+ *  round would read as "unchanged". Absent candidates are recorded as
+ *  `"missing"` rather than dropped — that absence is exactly what makes
+ *  "created during this round" detectable.
+ *
+ *  Captured when a round is PREPARED, never when tampering is detected: a
+ *  baseline written at detection time could never catch its own first
+ *  occurrence. */
+export declare function captureEntrypointTrust(policy: LoopPolicy, workspace?: string): Record<string, string>;
+/** v3.8.3: One entrypoint file that no longer matches its round-start state,
+ *  with the state it must return to for the round to be verifiable.
+ *
+ *  `absent` is the case the old delta rule could not describe: the file did
+ *  not exist when the round started, so it was CREATED by this round and
+ *  cannot back a claim in it. There is nothing to restore — "keep it stable"
+ *  is not an instruction the agent can carry out — which is why the recovery
+ *  message must distinguish the two. */
+export interface EntrypointDrift {
+    file: string;
+    roundStart: "present" | "absent";
+}
+/** v3.8.3: The entrypoint files whose content no longer matches the trusted
+ *  round-start baseline — the ONE derivation of "this command's script was
+ *  changed during the round". The delta rule (does the file appear in the
+ *  round's git change set?) cannot answer this on its own: a gitignored
+ *  entrypoint is invisible to it, and a baseline re-derived from the current
+ *  tree would launder the change. This comparison does not read git at all. */
+export declare function driftedEntrypoints(trust: Record<string, string> | undefined, workspace?: string): EntrypointDrift[];
 /** The workspace files a command's execution depends on, resolved
  *  statically: the script it names on its own command line, plus package.json
  *  when a package manager is what runs it. Exported for the pure-function

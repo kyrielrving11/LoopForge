@@ -72,6 +72,28 @@ describe("FileLoopStore lock ownership", () => {
     assert.equal(store.readRound("lock-test", 1)?.round, 1);
   });
 
+  it("reclaims a crash's lock when the restart is immediate", () => {
+    // The regression this exists for: the reclaim branch required the lock to
+    // be older than the wait budget allowed, so a lock left by a process that
+    // died moments ago was unreclaimable and the restarted server failed
+    // outright with "lock timeout" instead of recovering.
+    const root = makeRoot();
+    const lockPath = join(root, ".store.lock");
+    mkdirSync(lockPath);
+    writeFileSync(
+      join(lockPath, "owner.json"),
+      JSON.stringify({ token: "crashed", pid: 2_147_483_647 }),
+    );
+    // Died just now — far younger than a person would call "old".
+    const justNow = new Date(Date.now() - 100);
+    utimesSync(lockPath, justNow, justNow);
+
+    const store = new FileLoopStore(root);
+    append(store);
+    assert.equal(existsSync(lockPath), false);
+    assert.equal(store.readRound("lock-test", 1)?.round, 1);
+  });
+
   it("self-heals a lock dir orphaned by a crash between mkdir and owner write", () => {
     const root = makeRoot();
     const lockPath = join(root, ".store.lock");

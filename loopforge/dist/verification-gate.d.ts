@@ -20,7 +20,9 @@
  */
 import type { VaultEntry } from "./loop-store.js";
 import type { MachineObservation } from "./protocol.js";
+import type { EntrypointDrift } from "./evidence-provider.js";
 import type { SelfEvaluation, VerificationResult } from "./protocol.js";
+import { type ActiveContractView } from "./round-contract.js";
 export declare const CHECK_SUCCESS_WITH_REMAINING_CRITERIA = "success_with_remaining_criteria";
 export declare const CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE = "success_without_verified_evidence";
 export declare const CHECK_OUTCOME_SUCCESS_CONTRADICTION = "outcome_success_contradiction";
@@ -121,6 +123,15 @@ interface ParsedTestCounts {
  *  Recognized formats: Jest verbose/compact, Mocha, pytest/unittest, Go test,
  *  and PHPUnit OK summaries. */
 export declare function parseTestOutput(stdout: string): ParsedTestCounts | null;
+/** v3.8.3: The round's out-of-scope files — the ONE derivation, shared by the
+ *  drift check below and the blocked-waiver test in RoundCoordinator. The two
+ *  must agree on the set, or a round could be waived for a drift the gate
+ *  still reports (or the reverse).
+ *
+ *  Git diff files are the machine-authoritative "what actually changed" set.
+ *  Empty when there is nothing to compare: no active contract, no declared
+ *  scope, or no git observation (cannot observe → fail open). */
+export declare function roundDriftFiles(activeContract: ActiveContractView | null, evidenceSnapshots: MachineObservation[]): string[];
 export declare function verifySelfEvaluation(selfEval: SelfEvaluation, currentRound: number, vaultEntries: VaultEntry[], prevSelfEval?: SelfEvaluation | null, evidenceSnapshots?: MachineObservation[],
 /** v2.13: Files from skipped backtrack rounds. If the agent's
  *  files_changed overlaps significantly with these, the workspace
@@ -135,6 +146,10 @@ backtrackSkippedFingerprints?: Record<string, string>,
 backtrackTargetGitHead?: string,
 /** v3.7.1: gate records (task_type gate_opened / gate_decision) live
  *  outside the round prefix — the caller passes them in explicitly. */
-gateEntries?: VaultEntry[]): VerificationResult;
+gateEntries?: VaultEntry[],
+/** v3.8.3: entrypoint files that no longer match the trusted round-start
+ *  baseline. Derived by the caller (it needs the in-flight trust map and
+ *  filesystem access); this function stays a pure function of its inputs. */
+entrypointDrift?: EntrypointDrift[]): VerificationResult;
 export {};
 //# sourceMappingURL=verification-gate.d.ts.map

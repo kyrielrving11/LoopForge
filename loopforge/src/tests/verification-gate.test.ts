@@ -9,6 +9,7 @@ import {
 } from "../protocol.js";
 import type { VaultEntry } from "../loop-store.js";
 import { committedFeedbackRound as committedRound, testCommandProvider, criterionClaims } from "./_helpers.js";
+import type { EntrypointDrift } from "../evidence-provider.js";
 import { verifySelfEvaluation as rawVerifySelfEvaluation, parseTestOutput, deriveEvidenceStatus, machineProgressSeries, CHECK_VERIFICATION_ENTRYPOINT_MODIFIED, CHECK_TEST_FILES_MODIFIED, CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE } from "../verification-gate.js";
 import type {
   CommandObservation,
@@ -130,6 +131,8 @@ function verifySelfEvaluation(
   backtrackSkippedFingerprints: Record<string, string> = {},
   backtrackTargetGitHead?: string,
   gateEntries: VaultEntry[] = [],
+  /** v3.8.3: the trusted entrypoint baseline drift the coordinator derives. */
+  entrypointDrift: EntrypointDrift[] = [],
 ): ReturnType<typeof rawVerifySelfEvaluation> {
   return rawVerifySelfEvaluation(
     selfEval,
@@ -141,6 +144,7 @@ function verifySelfEvaluation(
     backtrackSkippedFingerprints,
     backtrackTargetGitHead,
     gateEntries,
+    entrypointDrift,
   );
 }
 
@@ -1173,6 +1177,42 @@ describe("v3.3 — verification domain integrity", () => {
     const status = deriveEvidenceStatus(se(), [git, cmd]);
     assert.equal(status.providerStatus, "unavailable");
     assert.equal(status.commandVerified, false);
+  });
+
+  it("entrypoint drift is flagged even when git cannot see the file", () => {
+    // v3.8.3: the absolute arm. A gitignored entrypoint appears in no git
+    // diff, so the delta rule alone reads a rewritten script as untouched.
+    // The trusted round-start baseline is the fact that answers it.
+    const cmd = cmdSnap("passed", { entrypointFiles: ["verify.js"] });
+    const result = verifySelfEvaluation(
+      se(), 2, [], null, [cmd], [], {}, undefined, [],
+      [{ file: "verify.js", roundStart: "present" }],
+    );
+    const flag = result.flags.find((f) => f.check === CHECK_VERIFICATION_ENTRYPOINT_MODIFIED);
+    assert.ok(flag, "drift must be flagged without a git observation");
+    assert.match(flag!.detail, /"verify\.js" was present/);
+  });
+
+  it("states when the entrypoint did not exist at round start", () => {
+    // The case the old message could not describe: "keep it unchanged" is not
+    // an instruction the agent can act on for a file the round created.
+    const cmd = cmdSnap("passed", { entrypointFiles: ["verify.js"] });
+    const result = verifySelfEvaluation(
+      se(), 2, [], null, [cmd], [], {}, undefined, [],
+      [{ file: "verify.js", roundStart: "absent" }],
+    );
+    const flag = result.flags.find((f) => f.check === CHECK_VERIFICATION_ENTRYPOINT_MODIFIED);
+    assert.ok(flag);
+    assert.match(flag!.detail, /"verify\.js" did not exist/);
+  });
+
+  it("no drift and no git observation stays silent", () => {
+    const cmd = cmdSnap("passed", { entrypointFiles: ["verify.js"] });
+    const result = verifySelfEvaluation(se(), 2, [], null, [cmd]);
+    assert.equal(
+      result.flags.some((f) => f.check === CHECK_VERIFICATION_ENTRYPOINT_MODIFIED),
+      false,
+    );
   });
 
   it("test files changed in the same round → warn, command stays usable", () => {

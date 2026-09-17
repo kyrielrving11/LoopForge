@@ -260,10 +260,13 @@ describe("enforcement-gate — success evidence row (merged R8)", () => {
         progress_estimate: 1.0,
       }),
     });
+    // v3.8.3: "consecutive" means consecutive for THIS check — the counter is
+    // one scalar shared by every row, so the check it belongs to is part of
+    // the input, not an assumption.
     const result = enforceRound(
       curr,
       makeVerificationResult({ verdict: "contradicted", flags: [evidenceFlag()] }),
-      2, [], 2,
+      2, [], 2, "success_without_verified_evidence",
     );
     assert.equal(result.action, "terminate");
     assert.equal(result.check, "success_without_verified_evidence");
@@ -345,7 +348,9 @@ describe("enforcement-gate — progress stall evaluator (v3.7: R4/R5 merged)", (
     // v2.10: consecutiveRejections=1 + escalation + backtrack_enabled → backtrack
     // instead of v2.7's escalated reject. The agent is rolled back to the
     // last clean round rather than redoing the same round with guidance.
-    const result = enforceRound(curr, trusted(), 4, vault, 1);
+    // v3.8.3: the stall's own streak — the check name is the one the counter
+    // belongs to, not an assumption.
+    const result = enforceRound(curr, trusted(), 4, vault, 1, "progress_stall");
     assert.equal(result.action, "backtrack");
     assert.equal(result.check, "progress_stall");
   });
@@ -364,7 +369,7 @@ describe("enforcement-gate — progress stall evaluator (v3.7: R4/R5 merged)", (
       vaultRound(3, 0.32),
     ];
     // v2.7: consecutiveRejections=2 → terminate (escalation already given)
-    const result = enforceRound(curr, trusted(), 4, vault, 2);
+    const result = enforceRound(curr, trusted(), 4, vault, 2, "progress_stall");
     assert.equal(result.action, "terminate");
     assert.equal(result.check, "progress_stall");
   });
@@ -810,7 +815,7 @@ describe("enforcement-gate — progress stall: backtrack deadlock guard", () => 
       // the loop is re-walking rolled-back territory with the same stall.
       committedBacktrackRound(4),
     ];
-    const result = enforceRound(curr, trusted(), 4, vault, 1);
+    const result = enforceRound(curr, trusted(), 4, vault, 1, "progress_stall");
     assert.equal(result.action, "terminate");
     assert.equal(result.check, "progress_stall");
   });
@@ -833,7 +838,7 @@ describe("enforcement-gate — progress stall: backtrack deadlock guard", () => 
       vaultRound(4, 0.41),
       vaultRound(5, 0.42),
     ];
-    const result = enforceRound(curr, trusted(), 6, vault, 1);
+    const result = enforceRound(curr, trusted(), 6, vault, 1, "progress_stall");
     assert.equal(result.action, "backtrack");
     assert.equal(result.check, "progress_stall");
   });
@@ -1394,7 +1399,8 @@ describe("v3.8 — Round Contract item enforcement", () => {
   });
 
   it("repeated scope drift terminates", () => {
-    const result = enforceRound(se({ success: false }), scopeDriftFlag(), 3, [], 2);
+    const result = enforceRound(
+      se({ success: false }), scopeDriftFlag(), 3, [], 2, "round_scope_drift");
     assert.equal(result.action, "terminate");
     assert.equal(result.check, "round_scope_drift");
   });
@@ -1466,6 +1472,9 @@ describe("v3.7 — behavior-equality compatibility matrix", () => {
      *  same-issue streak shape the coordinator maintains. */
     lastCheck?: string;
     policy?: (p: LoopPolicy) => void;
+    /** v3.8.3: the coordinator's scope-drift waiver verdict (blocked round +
+     *  a proposal whose scope covers every drifted file). */
+    driftWaiver?: boolean;
     expected: "accept" | "reject" | "terminate" | "backtrack";
     check?: string;
   };
@@ -1493,7 +1502,20 @@ describe("v3.7 — behavior-equality compatibility matrix", () => {
     // ── verification_entrypoint_modified ─────────────────────────────────────
     { name: "entrypoint tampered rejects", flags: [flag("error", "verification_entrypoint_modified")], expected: "reject", check: "verification_entrypoint_modified" },
     { name: "entrypoint tampered outranks R8 (order lock)", flags: [flag("error", "verification_entrypoint_modified"), flag("error", "success_without_verified_evidence")], expected: "reject", check: "verification_entrypoint_modified" },
-    { name: "entrypoint tampered third strike terminates", flags: [flag("error", "verification_entrypoint_modified")], strikes: 2, expected: "terminate" },
+    // v3.8.3: the row owns its ladder. A frozen round baseline means asking
+    // again cannot fix a rewritten entrypoint, so the second occurrence rolls
+    // the work back instead of terminating the loop.
+    { name: "entrypoint tampered second strike backtracks",
+      flags: [flag("error", "verification_entrypoint_modified")], strikes: 1,
+      expected: "backtrack", check: "verification_entrypoint_modified" },
+    { name: "entrypoint tampered second strike terminates when backtrack disabled",
+      flags: [flag("error", "verification_entrypoint_modified")], strikes: 1,
+      policy: (p) => { p.engine.backtrack_enabled = false; },
+      expected: "terminate", check: "verification_entrypoint_modified" },
+    { name: "entrypoint tampered terminates when a backtrack already committed for this round",
+      flags: [flag("error", "verification_entrypoint_modified")], strikes: 1,
+      vault: deadlockVault(4), round: 4,
+      expected: "terminate", check: "verification_entrypoint_modified" },
 
     // ── contract closure family (internal ladders) ───────────────────────────
 
@@ -1511,6 +1533,39 @@ describe("v3.7 — behavior-equality compatibility matrix", () => {
     { name: "scope drift third strike terminates",
       selfEval: okEval(),
       flags: [flag("warn", "round_scope_drift")], strikes: 2, expected: "terminate" },
+    // v3.8.3: the legal exit. The coordinator has already verified that the
+    // round declares blocked AND that its proposal's scope covers every
+    // drifted file — what arrives here is that verdict, not a hint.
+    { name: "scope drift waived by a covering blocked contract is accepted",
+      selfEval: se({ outcome: "blocked", should_continue: false }),
+      flags: [flag("warn", "round_scope_drift")], driftWaiver: true, expected: "accept" },
+    { name: "the waiver holds after the streak would have terminated",
+      selfEval: se({ outcome: "blocked", should_continue: false }),
+      flags: [flag("warn", "round_scope_drift")], strikes: 2,
+      driftWaiver: true, expected: "accept" },
+    { name: "an identical round without the waiver still rejects",
+      selfEval: se({ outcome: "blocked", should_continue: false }),
+      flags: [flag("warn", "round_scope_drift")], expected: "reject", check: "round_scope_drift" },
+    // v3.8.3: a first-time occurrence is no longer converted into termination
+    // by a streak another check earned.
+    { name: "first scope drift after two foreign rejections still rejects",
+      selfEval: okEval(),
+      flags: [flag("warn", "round_scope_drift")], strikes: 2,
+      lastCheck: "success_without_verified_evidence",
+      expected: "reject", check: "round_scope_drift" },
+    { name: "first success-evidence failure after two foreign rejections still rejects",
+      selfEval: okEval(),
+      flags: [flag("error", "success_without_verified_evidence")], strikes: 2,
+      lastCheck: "round_scope_drift",
+      expected: "reject", check: "success_without_verified_evidence" },
+    { name: "first stall after two foreign rejections rejects rather than terminating",
+      selfEval: se({ execution_report: makeExecutionReport({ files_changed: ["src/foo.ts"], progress_estimate: 0.33 }) }),
+      vault: stallVault(), round: 4, strikes: 2,
+      lastCheck: "round_scope_drift",
+      expected: "reject", check: "progress_stall" },
+    { name: "max_rejections still escalates on the shared counter",
+      selfEval: okEval(), strikes: 2, lastCheck: "something_else",
+      expected: "reject", check: "max_rejections" },
 
     // ── progress stall (single evaluator after merge) ────────────────────────
     { name: "flat window first strike rejects",
@@ -1521,20 +1576,20 @@ describe("v3.7 — behavior-equality compatibility matrix", () => {
       vault: stallVault(), round: 4, strikes: 1, expected: "backtrack", check: "progress_stall" },
     { name: "flat window third strike terminates",
       selfEval: se({ execution_report: makeExecutionReport({ files_changed: ["src/foo.ts"], progress_estimate: 0.33 }) }),
-      vault: stallVault(), round: 4, strikes: 2, expected: "terminate" },
+      vault: stallVault(), round: 4, strikes: 2, expected: "terminate", check: "progress_stall" },
     { name: "stall deadlock guard terminates instead of re-backtracking",
       selfEval: se({ execution_report: makeExecutionReport({ files_changed: ["src/foo.ts"], progress_estimate: 0.33 }) }),
-      vault: deadlockVault(4), round: 4, strikes: 1, expected: "terminate" },
+      vault: deadlockVault(4), round: 4, strikes: 1, expected: "terminate", check: "progress_stall" },
     { name: "flat window terminates on second strike when escalation disabled",
       selfEval: se({ execution_report: makeExecutionReport({ files_changed: ["src/foo.ts"], progress_estimate: 0.33 }) }),
       vault: stallVault(), round: 4, strikes: 1,
       policy: (p) => { p.engine.enforcement_escalation_enabled = false; },
-      expected: "terminate" },
+      expected: "terminate", check: "progress_stall" },
     { name: "flat window rejects with notice on second strike when backtrack disabled",
       selfEval: se({ execution_report: makeExecutionReport({ files_changed: ["src/foo.ts"], progress_estimate: 0.33 }) }),
       vault: stallVault(), round: 4, strikes: 1,
       policy: (p) => { p.engine.backtrack_enabled = false; },
-      expected: "reject" },
+      expected: "reject", check: "progress_stall" },
 
     // ── backtrack_workspace_not_restored ─────────────────────────────────────
     { name: "workspace not restored backtracks once",
@@ -1585,6 +1640,7 @@ describe("v3.7 — behavior-equality compatibility matrix", () => {
           c.vault ?? [],
           c.strikes ?? 0,
           lastCheck,
+          c.driftWaiver ?? false,
         );
         return result.action;
       };

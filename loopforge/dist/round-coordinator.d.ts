@@ -20,6 +20,7 @@
 import type { LoopStore, VaultEntry } from "./loop-store.js";
 import type { MachineObservation } from "./protocol.js";
 import type { SelfEvaluation, RoundVerificationStatus, StopReason, VerificationFlag } from "./protocol.js";
+import { type ContractItemStatusView } from "./contract-items.js";
 /** Input to a single round processing step. */
 export interface RoundProcessInput {
     loopId: string;
@@ -49,6 +50,12 @@ export interface RoundProcessInput {
     /** v2.12: Git HEAD of the backtrack restore point. The verification gate
      *  checks the workspace returns to this commit before accepting work. */
     backtrackTargetGitHead?: string;
+    /** v3.8.3: the trusted round-start fingerprint of every configured
+     *  command's entrypoint files, captured when this round was prepared. Only
+     *  the in-flight round has one — a round whose preparation predates the
+     *  baseline (or whose session lost it) simply runs without the absolute
+     *  arm and falls back to the git-delta rule. */
+    entrypointTrust?: Record<string, string>;
 }
 /** Result of processing a round through the coordinator. */
 export interface RoundProcessResult {
@@ -113,6 +120,33 @@ export interface RoundProcessResult {
      *  not still dirty (agent must restore workspace first). */
     backtrackSkippedFiles?: string[];
 }
+/** v3.8.3: Completion truth as a guard, not a convention.
+ *
+ *  A round that declares itself blocked is NOT a finished round — whatever
+ *  else it claims — and neither is one whose contract closed on a `blocked`
+ *  outcome. The stop decision below already orders `declaredBlocked` first,
+ *  and `contractClosed` admits only `verified` or no contract, so this can
+ *  never fire on the ordinary path. It is the SECOND line, called at the two
+ *  points where the reason becomes durable or visible:
+ *
+ *  - the coordinator, BEFORE the transaction commits — the committed round
+ *    document carries `result.stopReason`, so an unguarded reason here would
+ *    be a false fact in the Vault, not just a wrong reply;
+ *  - the lifecycle end, where the disposition is finalized into the reported
+ *    stop reason and the terminal notification.
+ *
+ *  A violation can only mean a code defect routed a blocked round to
+ *  `completed`. Throwing mid-lifecycle would kill the loop over a reporting
+ *  bug, so the guard degrades to the honest reason and returns the downgrade
+ *  as a flag: the loop keeps a truthful, observable stop instead of a false
+ *  completion. */
+export declare function finalizeStopReason(
+/** `undefined` when the disposition named no terminal reason at all (the
+ *  callers fall back to their own default) — there is nothing to guard. */
+reason: StopReason | undefined, selfEval: SelfEvaluation, contractStatuses?: ContractItemStatusView | null): {
+    reason: StopReason | undefined;
+    flags: VerificationFlag[];
+};
 /** v3.8.1: The rolled-back branch's facts — the ONE derivation of which rounds
  *  failed, which approaches must not be repeated, which assumptions were
  *  falsified, and which files (with their failed-round git fingerprints) the

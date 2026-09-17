@@ -44,6 +44,15 @@ export interface McpSession {
      *  gate checks the workspace returns to this commit before accepting.
      *  Cleared after the first successful post-backtrack round. */
     backtrackTargetGitHead?: string;
+    /** v3.8.3: the trusted round-start fingerprint of every enabled command's
+     *  entrypoint files, captured when the CURRENT in-flight round was prepared.
+     *
+     *  In-flight only: it never enters committed round history. It exists so the
+     *  entrypoint check can be absolute (current content vs round-start content)
+     *  rather than relative to a git delta that a gitignored entrypoint never
+     *  appears in and a re-derived baseline could launder. Absent means the
+     *  round runs without that arm — never a lost round. */
+    entrypointTrust?: Record<string, string>;
     /** Evidence baseline captured immediately before the agent receives a prompt. */
     evidenceBaseline?: MachineObservation[];
     /** Schema-versioned transaction for the prompt currently held by the agent. */
@@ -162,6 +171,18 @@ export declare class RoundLifecycle {
      *  `newConsecutiveRejections` comes from the enforcement gate and already
      *  counts the round; it is only honoured when the check is unchanged. */
     private applyRoundCounters;
+    /** v3.8.3: capture the trusted entrypoint baseline for the round about to be
+     *  prepared.
+     *
+     *  Called wherever a NEW round is installed and NEVER for a same-round
+     *  retry: a retry must keep measuring against the state the round started
+     *  in, or the first rejection would silently re-baseline itself. What is
+     *  captured here is therefore the round's own start, taken before the agent
+     *  receives the prompt.
+     *
+     *  Best-effort: an unreadable policy or an unresolvable command must leave
+     *  the round without the absolute arm, not fail the preparation. */
+    private seedEntrypointTrust;
     private persistPrepared;
     private restoredPromptResult;
     /** Reconcile the crash window where feedback committed but session_state
@@ -206,7 +227,13 @@ export declare class RoundLifecycle {
      *           session.consecutiveRejections, session.lastSelfEval */
     private buildBacktrackResult;
     /** Build a termination result: persist stopped status, notify sinks.
-     *  MUTATES: session.status, session.currentPrompt */
+     *  MUTATES: session.status, session.currentPrompt
+     *
+     *  v3.8.3: the enforcement gate may NAME its own stop reason (the
+     *  contract-debt row terminates as `incomplete`). This used to hard-code
+     *  `enforcement_terminated`, so the specific reason reached observability
+     *  and the client as a generic one — the fact was computed and then thrown
+     *  away. Pass it through, falling back only when the gate named nothing. */
     private buildTerminationResult;
     /** Build a stop result: persist stopped/stalled status, notify sinks.
      *  MUTATES: session.status, session.currentPrompt */

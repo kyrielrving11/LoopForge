@@ -219,6 +219,53 @@ describe("RoundLifecycle — reconstructSession", async () => {
     assert.deepEqual(recovered.successTrajectory, [true]);
   });
 
+  it("survives a restart with the in-flight entrypoint trust intact", () => {
+    // v3.8.3: the trust baseline is what makes the entrypoint check absolute.
+    // Losing it across a crash would silently downgrade the round to the
+    // git-delta rule — the agent must not be able to erase it by restarting.
+    const engine = new LoopForgeEngine(store);
+    const trust = { "verify.js": "33188:abc", "gone.js": "missing" };
+    const original: McpSession = {
+      sessionId: "sess-trust",
+      loopId: "loop-trust",
+      task: "Trust round trip",
+      engine,
+      currentRound: 2,
+      maxRounds: 20,
+      successTrajectory: [],
+      status: "running",
+      createdAt: Date.now(),
+      consecutiveRejections: 0,
+      lastRejectionCheck: "",
+      backtrackSkippedFiles: [],
+      backtrackSkippedFingerprints: {},
+      entrypointTrust: trust,
+      evidenceBaseline: [],
+      roundSnapshot: prepareRoundTransaction("loop-trust", 2, []),
+      currentPrompt: "held",
+      currentLevel: "l1",
+    };
+
+    lifecycle.save(original);
+
+    const restarted = makeLifecycle(store, makeRegistry());
+    const entry = new VaultSessionStateStore(store).load("loop-trust")!;
+    const recovered = restarted.reconstructSession(entry)!;
+    assert.deepEqual(recovered.entrypointTrust, trust);
+  });
+
+  it("degrades a corrupt entrypoint trust to no baseline instead of failing", () => {
+    // Best-effort by design: a damaged value drops the absolute arm and the
+    // round still runs on the git-delta rule. It must never cost the round.
+    const dirty = makeSessionEntry({ loopId: "loop-bad-trust" });
+    (dirty.loop_lineage as Record<string, unknown>).entrypoint_trust = {
+      "ok.js": "33188:abc",
+      "corrupt.js": 42,
+    };
+    const recovered = lifecycle.reconstructSession(dirty)!;
+    assert.deepEqual(recovered.entrypointTrust, { "ok.js": "33188:abc" });
+  });
+
   it("surfaces round-sequence gaps at load time (reconstructSession)", () => {
     const store = new MemoryLoopStore();
     // Session entry claims the loop is running

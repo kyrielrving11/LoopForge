@@ -81,7 +81,13 @@ export declare function enforceRound(selfEval: SelfEvaluation, verifyResult: Ver
  *  counter only ever measures one check's streak — this field names that
  *  check and lets uniform rows escalate on THEIR OWN streak instead of
  *  inheriting an unrelated history. */
-lastRejectionCheck?: string): EnforcementResult;
+lastRejectionCheck?: string,
+/** v3.8.3: the coordinator has verified that this round declares itself
+ *  blocked AND that its new contract proposal's scope covers every file the
+ *  round changed outside the active contract's scope. Computed there, not
+ *  here: neither the observations nor the active contract reach this
+ *  function. See `enforceScopeDrift`. */
+scopeDriftWaiver?: boolean): EnforcementResult;
 /** Build a rejection prompt for the agent.
  *
  *  The prompt clearly states the round was rejected, why, what the agent

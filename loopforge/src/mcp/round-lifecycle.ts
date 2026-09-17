@@ -27,8 +27,9 @@ import type {
   LoopTerminalEvent,
   LoopTerminalSink,
   RoundVerificationStatus,
+  StopReason,
 } from "../protocol.js";
-import { EvidenceCollector } from "../evidence-provider.js";
+import { captureEntrypointTrust, EvidenceCollector } from "../evidence-provider.js";
 import type { MachineObservation } from "../protocol.js";
 import {
   makeRoundId,
@@ -37,6 +38,7 @@ import {
 } from "../round-transaction.js";
 import type { RoundTransactionSnapshot } from "../round-transaction.js";
 import { RoundDriver } from "../round-driver.js";
+import { finalizeStopReason } from "../round-coordinator.js";
 import type { RoundProcessResult } from "../round-coordinator.js";
 import type { PreparedRound } from "../round-driver.js";
 import { getPolicy } from "../policy.js";
@@ -48,7 +50,10 @@ import type { SessionStateStore } from "../storage.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
-/** M3: parse a persisted skipped-file fingerprint map (string → string). */
+/** M3: parse a persisted skipped-file fingerprint map (string → string).
+ *  Lenient by design — v3.8.3 reuses it for the entrypoint trust baseline,
+ *  where a corrupt or absent entry must degrade to "no baseline for that
+ *  file", never fail the round that would carry it. */
 function parseFingerprintMap(value: unknown): Record<string, string> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   const out: Record<string, string> = {};
@@ -88,6 +93,15 @@ export interface McpSession {
    *  gate checks the workspace returns to this commit before accepting.
    *  Cleared after the first successful post-backtrack round. */
   backtrackTargetGitHead?: string;
+  /** v3.8.3: the trusted round-start fingerprint of every enabled command's
+   *  entrypoint files, captured when the CURRENT in-flight round was prepared.
+   *
+   *  In-flight only: it never enters committed round history. It exists so the
+   *  entrypoint check can be absolute (current content vs round-start content)
+   *  rather than relative to a git delta that a gitignored entrypoint never
+   *  appears in and a re-derived baseline could launder. Absent means the
+   *  round runs without that arm — never a lost round. */
+  entrypointTrust?: Record<string, string>;
   /** Evidence baseline captured immediately before the agent receives a prompt. */
   evidenceBaseline?: MachineObservation[];
   /** Schema-versioned transaction for the prompt currently held by the agent. */
@@ -296,6 +310,10 @@ export class RoundLifecycle {
           // M3: skipped-file fingerprints at their failed rounds (restore
           // check machine arm) — empty unless a backtrack is pending
           backtrack_skipped_fingerprints: session.backtrackSkippedFingerprints,
+          // v3.8.3: the in-flight entrypoint trust baseline. Read back
+          // leniently (parseFingerprintMap) so a corrupt or absent value
+          // degrades to "no absolute arm" instead of costing the round.
+          entrypoint_trust: session.entrypointTrust ?? null,
           // v2.12: Backtrack restore-point git HEAD (crash recovery)
           backtrack_target_git_head: session.backtrackTargetGitHead ?? null,
           // v1.19: durable round transaction state
@@ -374,6 +392,7 @@ export class RoundLifecycle {
       backtrackSkippedFingerprints: parseFingerprintMap(
         lineage.backtrack_skipped_fingerprints,
       ),
+      entrypointTrust: parseFingerprintMap(lineage.entrypoint_trust),
       backtrackTargetGitHead:
         typeof lineage.backtrack_target_git_head === "string" &&
         lineage.backtrack_target_git_head.length > 0
@@ -423,6 +442,25 @@ export class RoundLifecycle {
     if (pr.newLastSelfEval) session.lastSelfEval = pr.newLastSelfEval;
   }
 
+  /** v3.8.3: capture the trusted entrypoint baseline for the round about to be
+   *  prepared.
+   *
+   *  Called wherever a NEW round is installed and NEVER for a same-round
+   *  retry: a retry must keep measuring against the state the round started
+   *  in, or the first rejection would silently re-baseline itself. What is
+   *  captured here is therefore the round's own start, taken before the agent
+   *  receives the prompt.
+   *
+   *  Best-effort: an unreadable policy or an unresolvable command must leave
+   *  the round without the absolute arm, not fail the preparation. */
+  private seedEntrypointTrust(session: McpSession): void {
+    try {
+      session.entrypointTrust = captureEntrypointTrust(getPolicy());
+    } catch {
+      session.entrypointTrust = undefined;
+    }
+  }
+
   private persistPrepared(
     session: McpSession,
     prepared: {
@@ -438,6 +476,7 @@ export class RoundLifecycle {
   ): AdvanceResult {
     session.evidenceBaseline = prepared.baseline;
     session.roundSnapshot = prepared.snapshot;
+    this.seedEntrypointTrust(session);
     session.currentPrompt = prepared.prompt;
     session.currentLevel = prepared.level;
     session.currentWarnings = prepared.warnings;
@@ -502,9 +541,12 @@ export class RoundLifecycle {
     session.currentPrompt = null;
 
     if (pr.action === "stop" || pr.action === "terminate") {
-      const reason = pr.action === "terminate"
-        ? "enforcement_terminated"
-        : pr.stopReason ?? "stalled";
+      // v3.8.3: a replayed termination carries the gate's own reason for the
+      // same reason the live path does (see buildTerminationResult) — the
+      // crash-recovery path must report the fact it replayed, not a generic
+      // substitute. Only a stop without a named reason falls back.
+      const reason = pr.stopReason
+        ?? (pr.action === "terminate" ? "enforcement_terminated" : "stalled");
       session.status = reason === "stalled" ? "stalled" : "stopped";
       this.save(session);
       void this.notifyTerminal(session, reason);
@@ -803,6 +845,7 @@ export class RoundLifecycle {
       backtrackSkippedFiles: session.backtrackSkippedFiles,
       backtrackSkippedFingerprints: session.backtrackSkippedFingerprints,
       backtrackTargetGitHead: session.backtrackTargetGitHead,
+      entrypointTrust: session.entrypointTrust,
     });
     const outcome = completed.outcome;
     const actualEvidence = completed.actualEvidence;
@@ -965,6 +1008,11 @@ export class RoundLifecycle {
 
     session.evidenceBaseline = prepared.evidenceBaseline;
     session.roundSnapshot = prepared.snapshot;
+    // v3.8.3: the rollback redo is a NEW round — `prepare` collected a fresh
+    // before capture above — so its entrypoint baseline is the workspace as it
+    // stands after the rollback, which is what lets a round that stalled on a
+    // rewritten entrypoint proceed once the entrypoint is in place.
+    this.seedEntrypointTrust(session);
     session.currentPrompt = fullPrompt;
     session.currentLevel = prepared.level;
     session.currentWarnings = prepared?.warnings ?? [];
@@ -985,26 +1033,39 @@ export class RoundLifecycle {
   }
 
   /** Build a termination result: persist stopped status, notify sinks.
-   *  MUTATES: session.status, session.currentPrompt */
+   *  MUTATES: session.status, session.currentPrompt
+   *
+   *  v3.8.3: the enforcement gate may NAME its own stop reason (the
+   *  contract-debt row terminates as `incomplete`). This used to hard-code
+   *  `enforcement_terminated`, so the specific reason reached observability
+   *  and the client as a generic one — the fact was computed and then thrown
+   *  away. Pass it through, falling back only when the gate named nothing. */
   private buildTerminationResult(
     sessionId: string,
     session: McpSession,
     pr: RoundProcessResult,
+    /** v3.8.3: see buildStopResult. */
+    guardedReason?: StopReason,
   ): AdvanceResult {
+    const reason = guardedReason ?? pr.stopReason ?? "enforcement_terminated";
     session.status = "stopped";
     session.currentPrompt = null;
+    // v3.8.3: no round is in flight once the loop stops — the in-flight trust
+    // baseline goes with it, so a later resume cannot compare against a state
+    // from a previous life.
+    session.entrypointTrust = undefined;
     this.save(session);
-    void this.notifyTerminal(session, "enforcement_terminated");
+    void this.notifyTerminal(session, reason);
     logEvent("session_end", {
       sessionId, loopId: session.loopId,
-      stopReason: "enforcement_terminated", round: session.currentRound,
+      stopReason: reason, round: session.currentRound,
     });
     return {
       sessionId,
       round: session.currentRound,
       roundId: session.roundSnapshot?.roundId,
       prompt: null,
-      stopReason: "enforcement_terminated",
+      stopReason: reason,
       stopDetail: pr.enforcementReason ?? "The enforcement gate terminated the loop.",
       enforcementAction: "terminate",
       verificationStatus: pr.verificationStatus,
@@ -1018,10 +1079,16 @@ export class RoundLifecycle {
     sessionId: string,
     session: McpSession,
     pr: RoundProcessResult,
+    /** v3.8.3: the reason AFTER the completion-truth guard (advanceUnlocked).
+     *  Absent on the replay paths, which then read `pr.stopReason` directly. */
+    guardedReason?: StopReason,
   ): AdvanceResult {
-    const reason = pr.stopReason ?? "stalled";
+    const reason = guardedReason ?? pr.stopReason ?? "stalled";
     session.status = reason === "stalled" ? "stalled" : "stopped";
     session.currentPrompt = null;
+    // v3.8.3: see buildTerminationResult — the in-flight trust baseline dies
+    // with the in-flight round.
+    session.entrypointTrust = undefined;
     this.save(session);
     void this.notifyTerminal(session, reason);
     logEvent("session_end", { sessionId, loopId: session.loopId, stopReason: reason, round: session.currentRound });
@@ -1153,6 +1220,9 @@ export class RoundLifecycle {
     const nextBaseline = prepared.evidenceBaseline ?? actualEvidence;
     session.evidenceBaseline = nextBaseline;
     session.roundSnapshot = prepared.snapshot;
+    // v3.8.3: the round that just committed is history; the trust baseline
+    // moves to the round being prepared now.
+    this.seedEntrypointTrust(session);
     session.currentPrompt = nextPrompt;
     session.currentLevel = nextLevel;
     session.currentWarnings = prepared.warnings ?? [];
@@ -1315,11 +1385,27 @@ export class RoundLifecycle {
     // retain the original baseline so their retry remains zero-commit.
     session.evidenceBaseline = tx.actualEvidence;
 
+    // v3.8.3: completion truth — the second line, at the point the disposition
+    // becomes the reported stop reason. The coordinator already guards the
+    // reason it COMMITS (the round document carries result.stopReason), so
+    // this guards what the client and the terminal notification see. A
+    // violation can only be a code defect: it degrades to the honest reason
+    // and leaves an observability record instead of throwing mid-lifecycle.
+    const finalized = finalizeStopReason(tx.pr.stopReason, selfEval);
+    if (finalized.reason !== tx.pr.stopReason) {
+      logEvent("completion_truth_downgraded", {
+        loopId: session.loopId,
+        round: session.currentRound,
+        from: tx.pr.stopReason ?? "",
+        to: finalized.reason ?? "",
+      });
+    }
+
     if (tx.pr.action === "terminate") {
-      return this.buildTerminationResult(sessionId, session, tx.pr);
+      return this.buildTerminationResult(sessionId, session, tx.pr, finalized.reason);
     }
     if (tx.pr.action === "stop") {
-      return this.buildStopResult(sessionId, session, tx.pr);
+      return this.buildStopResult(sessionId, session, tx.pr, finalized.reason);
     }
 
     // ── 5. Continue — compile next round ─────────────────────────────────

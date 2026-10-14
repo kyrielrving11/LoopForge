@@ -160,8 +160,8 @@ describe("Engine — Circuit breaker (v2.5: removed)", () => {
   it("shouldBreak() method no longer exists — stalled loops are now detected by enforcement gate R4/R5", () => {
     const engine = createEngine();
     // shouldBreak was removed in v2.5. The enforcement gate (R4/R5) now
-    // handles stall detection using progress_estimate gradients instead of
-    // binary success/failure counting.
+    // handles stall detection from machine-observed repository motion instead
+    // of subjective self-reported progress.
     assert.equal(typeof (engine as unknown as Record<string, unknown>).shouldBreak, "undefined");
   });
 });
@@ -319,7 +319,6 @@ describe("Engine — P0-P5 Cognitive Evolution (v1.7 E2E)", () => {
           files_changed: ["contracts/Token.sol", "test/Token.test.ts"],
           tests_reported: { passed: 24, failed: 0, skipped: 0 },
           criterion_claims: criterionClaims(["No reentrancy"], ["Access control OK", "Overflow checks"]),
-          progress_estimate: 0.33,
         },
       },
     } as unknown as LoopForgeRequest);

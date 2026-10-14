@@ -106,7 +106,6 @@ export interface CanonicalLoopState {
   externalContext: string;
   stateFilePath: string;
   progress: {
-    estimate: number | null;
     criteriaMet: string[];
     criteriaRemaining: string[];
     filesChanged: string[];
@@ -311,14 +310,14 @@ export function formatRoundContract(
 // v3.3.1: Shared presentation atoms
 // ═══════════════════════════════════════════════════════════════════════════
 
-/** Milestone heading line ("**🏁 Round 7** (Rounds 3–7, 60%)"). Shared by the
+/** Milestone heading line ("**🏁 Round 7** (Rounds 3–7)"). Shared by the
  *  L2 Phase History and the detailed L1 renderer; the L1 copy previously
  *  rendered the range as "R3–R7", a format only this heading used. */
 export function milestoneHeading(milestone: MilestoneSummary): string {
   const kindIcon = milestone.kind === "agent_declared"
     ? "🏁"
     : milestone.kind === "criteria_milestone" ? "✅" : "📍";
-  return `**${kindIcon} ${milestone.label}** (Rounds ${milestone.round_range.start}–${milestone.round_range.end}, ${(milestone.progress_at_boundary * 100).toFixed(0)}%)`;
+  return `**${kindIcon} ${milestone.label}** (Rounds ${milestone.round_range.start}–${milestone.round_range.end})`;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -436,7 +435,6 @@ function flatStateSections(state: CanonicalLoopState): Array<{ title: string; bo
   addListWithIdentities(lines, "Active Constraints", state.activeConstraints, state.constraintMetadata);
   addList(lines, "Changes Since Last Round", state.changesSinceLastRound);
   if (
-    state.progress.estimate !== null ||
     state.progress.criteriaMet.length > 0 ||
     state.progress.criteriaRemaining.length > 0 ||
     state.progress.filesChanged.length > 0 ||
@@ -447,11 +445,6 @@ function flatStateSections(state: CanonicalLoopState): Array<{ title: string; bo
     lines.push("## Progress Dashboard", "");
     if (total > 0) {
       lines.push(`**Criteria**: ${state.progress.criteriaMet.length}/${total}`);
-    }
-    if (state.progress.estimate !== null) {
-      lines.push(`**Estimated Completion**: ${(state.progress.estimate * 100).toFixed(0)}%`);
-      // v3.3: honest labeling — the estimate is the agent's own number.
-      lines.push("**Signal source**: self-reported estimate (unverified until machine-backed)");
     }
     // v3.3: machine side of the comparison — git motion over committed rounds
     // (v3.6: the object always carries definite values — no "unavailable" arm).
@@ -546,8 +539,7 @@ function flatStateSections(state: CanonicalLoopState): Array<{ title: string; bo
         : m.kind === "criteria_milestone" ? "✅" : "📍";
       lines.push(
         `### ${kindIcon} ${m.label}`,
-        `Rounds ${m.round_range.start}–${m.round_range.end} | ` +
-        `Progress: ${(m.progress_at_boundary * 100).toFixed(0)}%`,
+        `Rounds ${m.round_range.start}–${m.round_range.end}`,
         "",
         `**Outcome**: ${m.outcome}`,
         "",
@@ -717,7 +709,6 @@ export function createCanonicalLoopState(
     externalContext: request.external_context?.trim() ?? "",
     stateFilePath,
     progress: {
-      estimate: executionReport?.progress_estimate ?? null,
       criteriaMet: unique(claimedMetCriteria(executionReport)),
       criteriaRemaining: unique(
         claimedRemainingCriteria(executionReport),

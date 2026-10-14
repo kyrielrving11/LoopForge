@@ -95,9 +95,9 @@ export interface SelfEvaluation {
    *  the round advances. in_progress is only reachable through this
    *  field — the runtime no longer infers it. */
   subgoal_updates?: SubGoalUpdate[];
-  /** P4: Structured evidence of what was executed this round.
-   *  Files changed, test results, criteria met/remaining, progress estimate.
-   *  Enables the compiler to validate claims and compute real progress. */
+  /** P4: Structured claims about what was executed this round.
+   *  Files changed, test results, and criteria met/remaining are checked
+   *  against independent evidence where available. */
   execution_report?: ExecutionReport;
   /** P5: Constraints that the agent now believes are wrong or irrelevant.
    *  Removed from the active constraint set by the compiler.
@@ -321,8 +321,6 @@ export interface MilestoneSummary {
   carried_constraints: string[];
   /** Constraints resolved during this phase. */
   resolved_constraints: string[];
-  /** Agent's progress_estimate at the milestone boundary. */
-  progress_at_boundary: number;
   /** How this milestone was created. */
   kind: "agent_declared" | "criteria_milestone" | "auto";
   /** The round number when this milestone was created. */
@@ -338,7 +336,6 @@ export function makeMilestoneSummary(
     outcome: "",
     carried_constraints: [],
     resolved_constraints: [],
-    progress_at_boundary: 0,
     kind: "auto",
     generated_at_round: 0,
     ...overrides,
@@ -1004,7 +1001,7 @@ export type LoopTerminalSink = (event: LoopTerminalEvent) => Promise<void> | voi
 export interface VerificationFlag {
   /** info | warn | error — determines how aggressively the compiler reacts. */
   severity: "info" | "warn" | "error";
-  /** Which SelfEvaluation field triggered this flag (e.g. "progress_estimate"). */
+  /** Which SelfEvaluation field triggered this flag (e.g. "success"). */
   field: string;
   /** Check name for debugging / audit (e.g. "outcome_success_contradiction"). */
   check: string;
@@ -1085,8 +1082,6 @@ export interface ExecutionReport {
   /** Claims about ACTIVE contract items. STRICT: an unknown/duplicate item id
    *  or an illegal outcome is a structural defect (contract_invalid). */
   contract_item_claims?: ContractItemClaim[];
-  /** The agent's own progress estimate (0.0–1.0). Informational. */
-  progress_estimate?: number;
 }
 
 export function makeExecutionReport(
@@ -1097,7 +1092,6 @@ export function makeExecutionReport(
     tests_reported: null,
     criterion_claims: [],
     contract_item_claims: [],
-    progress_estimate: 0.0,
     ...overrides,
   };
 }

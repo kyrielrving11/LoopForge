@@ -10,13 +10,19 @@ import {
 } from "../round-transaction.js";
 import {
   derivationRounds,
+  gitMotionSignal,
+  inFlightGitMotion,
   legacyTransactionRounds,
   machineGitMotionSeries,
 } from "../committed-round.js";
 import type { GitObservation, MachineObservation } from "../protocol.js";
 import type { VaultEntry } from "../loop-store.js";
 
-function gitObservation(files: string[], fingerprints: Record<string, string> = {}): GitObservation {
+function gitObservation(
+  files: string[],
+  fingerprints: Record<string, string> = {},
+  head?: string,
+): GitObservation {
   return {
     schemaVersion: 1,
     providerId: "git",
@@ -26,7 +32,7 @@ function gitObservation(files: string[], fingerprints: Record<string, string> = 
     finishedAt: 0,
     status: "observed",
     files,
-    data: { tracked: files, staged: [], untracked: [], fingerprints },
+    data: { tracked: files, staged: [], untracked: [], fingerprints, head },
   };
 }
 
@@ -93,6 +99,83 @@ describe("v3.8 — round observation delta", () => {
     const before = [gitObservation(["a.ts"], { "a.ts": "m:same" })];
     const after = [gitObservation(["a.ts"], { "a.ts": "m:same" })];
     assert.deepEqual(deriveRoundObservationDelta(before, after)[0].files, []);
+  });
+});
+
+describe("gitMotionSignal — the one motion definition", () => {
+  it("counts a non-empty file list, a moved HEAD, and a HEAD at the restore point", () => {
+    assert.equal(gitMotionSignal({ files: ["a.ts"] }), true);
+    assert.equal(gitMotionSignal({ files: [], headBefore: "aaa", headAfter: "bbb" }), true);
+    assert.equal(
+      gitMotionSignal({ files: [], headAfter: "abcdef1234567890", restoreTargetHead: "abcdef123456ffff" }),
+      true,
+      "short-hash rule, matching the restore check",
+    );
+  });
+
+  it("counts nothing else as motion", () => {
+    assert.equal(gitMotionSignal({ files: [] }), false);
+    assert.equal(gitMotionSignal({ files: [], headBefore: "aaa", headAfter: "aaa" }), false);
+    assert.equal(
+      gitMotionSignal({ files: [], headAfter: "aaa", headBefore: undefined }),
+      false,
+      "one-sided HEAD is not a movement",
+    );
+  });
+});
+
+describe("inFlightGitMotion", () => {
+  it("reads the substituted round's own before/after observations", () => {
+    assert.equal(
+      inFlightGitMotion([gitObservation([], {}, "aaa")], [gitObservation([], {}, "bbb")]),
+      true,
+    );
+    assert.equal(inFlightGitMotion([], [gitObservation(["a.ts"])]), true);
+    assert.equal(inFlightGitMotion([], [gitObservation([])]), false);
+  });
+
+  it("returns null when Git never observed the round", () => {
+    assert.equal(inFlightGitMotion([], []), null);
+    assert.equal(
+      inFlightGitMotion([gitObservation([])], [{ ...gitObservation([]), status: "timeout" }]),
+      null,
+    );
+  });
+
+  it("counts a round that lands on the rollback's restore point as motion", () => {
+    assert.equal(
+      inFlightGitMotion([], [gitObservation([], {}, "abcdef123456")], "abcdef123456"),
+      true,
+    );
+  });
+});
+
+describe("machineGitMotionSeries", () => {
+  it("counts clean committed slices as motion when HEAD advances", () => {
+    const views = [
+      feedbackEntry(1, {
+        before: [gitObservation([], {}, "000000")],
+        after: [gitObservation([], {}, "aaa111")],
+      }),
+      feedbackEntry(2, { after: [gitObservation([], {}, "bbb222")] }),
+      feedbackEntry(3, { after: [gitObservation([], {}, "ccc333")] }),
+    ].flatMap((entry) => derivationRounds([entry]));
+    assert.deepEqual(machineGitMotionSeries(views, 4, 3), [true, true, true]);
+  });
+
+  it("treats failed Git captures as unknown, even if the derived delta lists files", () => {
+    for (const status of ["unavailable", "timeout", "error", "aborted"] as const) {
+      const views = derivationRounds([
+        feedbackEntry(1, {
+          before: [gitObservation(["a.ts"])],
+          after: [{ ...gitObservation([]), status }],
+        }),
+        feedbackEntry(2, { after: [gitObservation([])] }),
+        feedbackEntry(3, { after: [gitObservation([])] }),
+      ]);
+      assert.deepEqual(views[0].observationDelta[0].files, ["a.ts"]);
+      assert.equal(machineGitMotionSeries(views, 4, 3), null, status);
+    }
   });
 });
 

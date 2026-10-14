@@ -50,6 +50,9 @@ export interface RoundTransactionInput {
     /** v2.12: Git HEAD of the backtrack restore point. The verification gate
      *  checks the workspace returns to this commit before accepting work. */
     backtrackTargetGitHead?: string;
+    /** v3.9: files already dirty at the backtrack restore point (restore
+     *  baseline — see RoundProcessResult.backtrackTargetDirty). */
+    backtrackTargetDirty?: string[];
     /** v3.8.3: trusted round-start entrypoint fingerprints (see RoundProcessInput). */
     entrypointTrust?: Record<string, string>;
     actualEvidence: MachineObservation[];

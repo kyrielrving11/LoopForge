@@ -38,14 +38,14 @@ import {
 import { entryRound, isRecord } from "./token-utils.js";
 import { driftedEntrypoints } from "./evidence-provider.js";
 import { declaresBlocked, effectiveOutcome, effectiveSuccess } from "./self-eval.js";
-import { derivationRounds, decodeCommittedRound } from "./committed-round.js";
+import { derivationRounds, decodeCommittedRound, inFlightGitMotion } from "./committed-round.js";
 import { makeRoundId } from "./round-transaction.js";
 import {
   enforceRound,
   buildRejectionPrompt,
   findSafeRestorePoint,
   buildBacktrackPrompt,
-  findBacktrackTargetGitHead,
+  findBacktrackTargetSnapshot,
 } from "./enforcement-gate.js";
 import { logEvent } from "./observability.js";
 import { getPolicy } from "./policy.js";
@@ -75,6 +75,8 @@ export interface RoundProcessInput {
   lastRejectionCheck?: string;
   /** v1.18: Evidence snapshots from configured providers. */
   evidenceSnapshots?: MachineObservation[];
+  /** Full round-start observations for post-backtrack restore validation. */
+  beforeEvidence?: MachineObservation[];
   /** Success values from already committed rounds. */
   successTrajectory?: boolean[];
   /** v2.13: Files from skipped backtrack rounds. Passed to verification
@@ -87,6 +89,9 @@ export interface RoundProcessInput {
   /** v2.12: Git HEAD of the backtrack restore point. The verification gate
    *  checks the workspace returns to this commit before accepting work. */
   backtrackTargetGitHead?: string;
+  /** v3.9: files already dirty at that restore point (undefined = never
+   *  observed, so only HEAD can be judged). */
+  backtrackTargetDirty?: string[];
   /** v3.8.3: the trusted round-start fingerprint of every configured
    *  command's entrypoint files, captured when this round was prepared. Only
    *  the in-flight round has one — a round whose preparation predates the
@@ -153,6 +158,10 @@ export interface RoundProcessResult {
    *  Set when action is "backtrack". The verification gate uses this
    *  to check that the agent restored the workspace before working. */
   backtrackTargetGitHead?: string;
+  /** v3.9: Files already dirty at the backtrack target round. The restore
+   *  check requires the workspace's dirty set to be a subset of this
+   *  baseline — unrelated work in progress is not a failed restore. */
+  backtrackTargetDirty?: string[];
   /** v2.13: Files changed in skipped rounds during backtrack.
    *  The next round's verification gate checks that these files are
    *  not still dirty (agent must restore workspace first). */
@@ -356,7 +365,7 @@ export class RoundCoordinator {
 
     // ── 1. Query vault entries ──────────────────────────────────────────
     // Lineage entries (constraint violations, output summaries) and feedback
-    // entries (execution_report, progress estimates) are both needed by
+    // entries (including execution_report) are both needed by
     // the enforcement gate. queryLoopEntries excludes feedback by default,
     // so we issue a second query and merge both result sets.
     const prefix = `loop:${loopId}:r`;
@@ -387,6 +396,10 @@ export class RoundCoordinator {
       // captured when this round was prepared — the gate stays a pure function
       // of its inputs.
       driftedEntrypoints(input.entrypointTrust),
+      input.beforeEvidence ?? [],
+      // v3.9: the restore point's own dirty files — the baseline the restored
+      // workspace is compared against.
+      input.backtrackTargetDirty,
     );
     const verificationFlags = verifyResult.flags;
     const gateContradicted = verifyResult.verdict === "contradicted";
@@ -451,6 +464,14 @@ export class RoundCoordinator {
       consecutiveRejections,
       input.lastRejectionCheck ?? "",
       scopeDriftWaiver,
+      // v3.9: what THIS round moved, from the same Git motion rule the
+      // committed series uses. Absent observations stay null — an
+      // unobservable round never gains the stall excuse.
+      inFlightGitMotion(
+        input.beforeEvidence ?? [],
+        evidenceSnapshots ?? [],
+        input.backtrackTargetGitHead,
+      ),
     );
 
     if (enforceResult.action === "reject") {
@@ -555,9 +576,12 @@ export class RoundCoordinator {
         selfEval,
       });
 
-      // v2.12: Capture the restore point's git HEAD so the next round's
-      // verification can confirm the workspace returned to this commit.
-      const targetGitHead = findBacktrackTargetGitHead(restorePoint.round, vaultEntries);
+      // v2.12: Capture the restore point's machine snapshot — the commit the
+      // workspace must return to and what was already dirty there — so the
+      // next round's verification can confirm the workspace returned to this
+      // point without reading unrelated work in progress as a failed restore.
+      const targetSnapshot = findBacktrackTargetSnapshot(restorePoint.round, vaultEntries);
+      const targetGitHead = targetSnapshot?.head ?? null;
 
       const backtrackPrompt = buildBacktrackPrompt(
         currentRound,
@@ -592,6 +616,7 @@ export class RoundCoordinator {
         backtrackSkippedFiles: skippedFiles,
         backtrackSkippedFingerprints: skippedFingerprints,
         backtrackTargetGitHead: targetGitHead ?? undefined,
+        backtrackTargetDirty: targetSnapshot?.dirtyFiles,
         backtrackTriggerRule: enforceResult.check,
         backtrackFailedRounds: failedRounds,
         backtrackApproaches: approaches,

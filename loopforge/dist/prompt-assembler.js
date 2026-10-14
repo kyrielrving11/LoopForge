@@ -15,8 +15,8 @@ import { PROMPT_ARTIFACT_SCHEMA_VERSION } from "./protocol.js";
 import { deriveItemId, STABLE_ID_RE, normalizeText } from "./token-utils.js";
 import { getPolicy } from "./policy.js";
 export const DEFAULT_PROMPT_BUDGETS = {
-    l0: 3000,
-    l1: 7000,
+    l0: 5000,
+    l1: 10000,
     l2: 18000,
 };
 function section(title, body) {
@@ -450,7 +450,7 @@ function l2Sections(state, fullStateMarkdown) {
     // ── v2.8: Path B gap fills (previously only in full state markdown) ──
     // v3.8.1: the L2 Progress Dashboard and Round Stats sections are gone.
     // The dashboard was `criterionStatuses` re-composed into a table and mixed
-    // with the agent’s OWN completion estimate and test counts; Round Stats
+    // with reported test counts; Round Stats
     // re-listed per-round files and progress deltas, both self-reported. The
     // criterion list and the machine git/criteria rows still render in the
     // state file, where a human or external tool reads them — the prompt keeps
@@ -719,27 +719,11 @@ export function assemblePromptArtifact(input) {
     const howToRespond = [
         "## How to Complete This Round",
         "",
-        "1. Execute the task described above. Do NOT generate another prompt or plan — act.",
-        "2. When finished, call the MCP tool **`loopforge_next`** with these parameters:",
-        "   - `sessionId`: the session ID from `loopforge_start`.",
-        "   - `evaluation`: a structured self-assessment object (see schema below).",
-        "",
-        "### Evaluation Rules",
-        "",
-        "- `success`: Set to **`true` ONLY** when ALL hard constraints are met AND",
-        "  the task goal is fully achieved. If anything remains incomplete, set `false`.",
-        "- `should_continue`: Set to **`false` ONLY** when the ENTIRE loop task is done.",
-        "  Partial progress or completed subtasks → `true`.",
-        "- `constraint_violations`: Be honest. List every constraint you actually violated.",
-        "- `execution_report.files_changed`: List files you modified — used for verification.",
-        "- `execution_report.tests_reported`: Report actual test runner output.",
-        "- `progress_estimate`: A number 0.0–1.0 reflecting overall task completion.",
-        "",
-        "### If the Prompt Says \"REJECTED\"",
-        "",
-        "- Re-execute the **same round**. Do NOT advance the round counter.",
-        "- Read the Required Fix section, address every issue, then submit again.",
-        "- Use `loopforge_next` with a corrected evaluation.",
+        "1. Execute the task described above and submit one structured evaluation.",
+        "2. Call **`loopforge_next`** with the `sessionId` from `loopforge_start` and",
+        "   the latest `roundId` returned by LoopForge. A rejection keeps that same",
+        "   `roundId`; correct the evaluation and submit it again.",
+        "3. Use the JSON template below for `evaluation`.",
         "",
         evaluation,
     ].join("\n");

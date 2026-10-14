@@ -172,7 +172,7 @@ describe("Long-Horizon Verification", () => {
       // materializes them), and it does not touch package.json: the ESM
       // constraint is DISCOVERED here, and the verification command's own
       // entrypoints stay put in the round that runs it.
-      execution_report: { files_changed: ["src/strkit.ts"], tests_reported: { passed: 0, failed: 0, skipped: 0 }, criterion_claims: criterionClaims(["isPalindrome", "capitalize"], ["Write tests", "Implement truncate + toCamelCase"]), progress_estimate: 0.2 },
+      execution_report: { files_changed: ["src/strkit.ts"], tests_reported: { passed: 0, failed: 0, skipped: 0 }, criterion_claims: criterionClaims(["isPalindrome", "capitalize"], ["Write tests", "Implement truncate + toCamelCase"])},
     }});
     assert.ok(!r.error); assert.equal(String(r.level ?? "").toLowerCase(), "l1"); assert.equal(r.round, 2);
     roundId = String(r.roundId);
@@ -189,7 +189,7 @@ describe("Long-Horizon Verification", () => {
       output_summary: "Wrote tests for isPalindrome and capitalize. isPalindrome passes (3/3), capitalize fails on empty string. Declaring checkpoint.",
       discovered_constraints: ["All functions must handle empty string input gracefully"],
       compression_checkpoint: true, checkpoint_label: "core-functions-complete",
-      execution_report: { files_changed: ["src/strkit.test.ts"], tests_reported: { passed: 3, failed: 1, skipped: 0 }, criterion_claims: criterionClaims([], ["Fix capitalize bug", "Implement truncate + toCamelCase"]), progress_estimate: 0.3 },
+      execution_report: { files_changed: ["src/strkit.test.ts"], tests_reported: { passed: 3, failed: 1, skipped: 0 }, criterion_claims: criterionClaims([], ["Fix capitalize bug", "Implement truncate + toCamelCase"])},
     }});
     assert.ok(!r.error);
     // R2's eval declared compression_checkpoint → R3 prompt is L2.
@@ -211,7 +211,7 @@ describe("Long-Horizon Verification", () => {
       success: false, should_continue: true, constraint_violations: [],
       output_summary: "Fixed capitalize empty-string. All tests pass (6/6). Return types must be consistent.",
       discovered_constraints: ["Function return types must be consistent — always return string"],
-      execution_report: { files_changed: ["src/strkit.ts", "src/strkit.test.ts"], tests_reported: { passed: 6, failed: 0, skipped: 0 }, criterion_claims: criterionClaims(["isPalindrome + capitalize tested"], ["Implement truncate + toCamelCase"]), progress_estimate: 0.4 },
+      execution_report: { files_changed: ["src/strkit.ts", "src/strkit.test.ts"], tests_reported: { passed: 6, failed: 0, skipped: 0 }, criterion_claims: criterionClaims(["isPalindrome + capitalize tested"], ["Implement truncate + toCamelCase"])},
     }});
     assert.ok(!r.error);
     assert.equal(String(r.level ?? "").toLowerCase(), "l1");
@@ -227,7 +227,7 @@ describe("Long-Horizon Verification", () => {
       success: false, should_continue: true, constraint_violations: [],
       output_summary: "Implemented truncate with tests (9/9 pass). Unicode edge cases handled.",
       discovered_constraints: ["truncate must handle unicode multi-byte characters"],
-      execution_report: { files_changed: ["src/strkit.ts", "src/strkit.test.ts"], tests_reported: { passed: 9, failed: 0, skipped: 0 }, criterion_claims: criterionClaims(["truncate done"], ["Implement toCamelCase", "Write toCamelCase tests"]), progress_estimate: 0.55 },
+      execution_report: { files_changed: ["src/strkit.ts", "src/strkit.test.ts"], tests_reported: { passed: 9, failed: 0, skipped: 0 }, criterion_claims: criterionClaims(["truncate done"], ["Implement toCamelCase", "Write toCamelCase tests"])},
     }});
     assert.ok(!r.error); assert.equal(String(r.level ?? "").toLowerCase(), "l1"); assert.equal(r.round, 5);
     roundId = String(r.roundId);
@@ -242,7 +242,7 @@ describe("Long-Horizon Verification", () => {
       output_summary: "Implemented toCamelCase (13/13 pass). R3 empty-string constraint was wrong — each function handles edges naturally.",
       retracted_constraints: ["All functions must handle empty string input gracefully"],
       wrong_assumptions: ["Assumed empty strings needed per-function special-case handling"],
-      execution_report: { files_changed: ["src/strkit.ts", "src/strkit.test.ts"], tests_reported: { passed: 13, failed: 0, skipped: 0 }, criterion_claims: criterionClaims(["All four functions done"], ["Integration tests", "Verify no runtime deps"]), progress_estimate: 0.7 },
+      execution_report: { files_changed: ["src/strkit.ts", "src/strkit.test.ts"], tests_reported: { passed: 13, failed: 0, skipped: 0 }, criterion_claims: criterionClaims(["All four functions done"], ["Integration tests", "Verify no runtime deps"])},
     }});
     assert.ok(!r.error); assert.equal(String(r.level ?? "").toLowerCase(), "l1"); assert.equal(r.round, 6);
     roundId = String(r.roundId);
@@ -257,7 +257,7 @@ describe("Long-Horizon Verification", () => {
       output_summary: "Integration tests pass (13/13). Refined objective: add validateAndTransform pipeline.",
       objective_refinement: "The library should provide validateAndTransform(input, fns[]) pipeline utility",
       emerged_subtasks: ["Implement validateAndTransform pipeline", "Add pipeline integration tests"],
-      execution_report: { files_changed: ["src/strkit.ts"], tests_reported: { passed: 13, failed: 0, skipped: 0 }, criterion_claims: criterionClaims(["Core functions done"], ["Implement pipeline", "Verify no runtime deps", "Final polish"]), progress_estimate: 0.75 },
+      execution_report: { files_changed: ["src/strkit.ts"], tests_reported: { passed: 13, failed: 0, skipped: 0 }, criterion_claims: criterionClaims(["Core functions done"], ["Implement pipeline", "Verify no runtime deps", "Final polish"])},
     }});
     assert.ok(!r.error); assert.equal(r.round, 7); roundId = String(r.roundId); LL.push(`R7:${String(r.level ?? "").toUpperCase() || '?'}`);
   });
@@ -268,7 +268,7 @@ describe("Long-Horizon Verification", () => {
     const r = await client.tool("loopforge_next", { sessionId, roundId, evaluation: {
       success: true, should_continue: true, constraint_violations: [],
       output_summary: "Implemented validateAndTransform. Everything works!",
-      execution_report: { files_changed: ["src/pipeline.ts"], tests_reported: { passed: 15, failed: 0, skipped: 0 }, criterion_claims: criterionClaims(["pipeline done"], ["Verify no runtime deps", "Final lint"]), progress_estimate: 0.82 },
+      execution_report: { files_changed: ["src/pipeline.ts"], tests_reported: { passed: 15, failed: 0, skipped: 0 }, criterion_claims: criterionClaims(["pipeline done"], ["Verify no runtime deps", "Final lint"])},
     }});
     assert.ok(!r.error);
     assert.equal(r.enforcementAction, "reject");
@@ -290,7 +290,7 @@ describe("Long-Horizon Verification", () => {
       success: false, should_continue: true, constraint_violations: [],
       output_summary: "Reverted false claim. Implemented pipeline with full tests. Verified no runtime deps. 17/17 pass.",
       discovered_constraints: ["validateAndTransform pipeline pattern confirmed correct"],
-      execution_report: { files_changed: ["src/strkit.ts", "src/pipeline.ts", "src/pipeline.test.ts"], tests_reported: { passed: 17, failed: 0, skipped: 0 }, criterion_claims: criterionClaims(["pipeline done", "no runtime deps"], ["Final polish"]), progress_estimate: 0.9 },
+      execution_report: { files_changed: ["src/strkit.ts", "src/pipeline.ts", "src/pipeline.test.ts"], tests_reported: { passed: 17, failed: 0, skipped: 0 }, criterion_claims: criterionClaims(["pipeline done", "no runtime deps"], ["Final polish"])},
     }});
     assert.ok(!r.error);
     // Retry accepted → session advances to round 8 as an ordinary round.
@@ -311,7 +311,7 @@ describe("Long-Horizon Verification", () => {
     const r = await client.tool("loopforge_next", { sessionId, roundId, evaluation: {
       success: false, should_continue: true, constraint_violations: [],
       output_summary: "Ran linter, added JSDoc, updated README. All 17 tests pass. Ready to ship.",
-      execution_report: { files_changed: ["src/strkit.ts", "src/pipeline.ts", "README.md"], tests_reported: { passed: 17, failed: 0, skipped: 0 }, criterion_claims: criterionClaims(["Final polish"], []), progress_estimate: 0.98 },
+      execution_report: { files_changed: ["src/strkit.ts", "src/pipeline.ts", "README.md"], tests_reported: { passed: 17, failed: 0, skipped: 0 }, criterion_claims: criterionClaims(["Final polish"], [])},
     }});
     assert.ok(!r.error);
     // previousFailedWithoutNewInfo fires (no new information in the eval)
@@ -327,7 +327,7 @@ describe("Long-Horizon Verification", () => {
     const r = await client.tool("loopforge_next", { sessionId, roundId, evaluation: {
       success: true, should_continue: false, constraint_violations: [],
       output_summary: "All functions implemented, tested (17/17), documented. No runtime deps. ESM confirmed. Task complete.",
-      execution_report: { files_changed: [], tests_reported: { passed: 17, failed: 0, skipped: 0 }, criterion_claims: criterionClaims(["All functions", "Pipeline", "No runtime deps", "Final polish"]), progress_estimate: 1.0 },
+      execution_report: { files_changed: [], tests_reported: { passed: 17, failed: 0, skipped: 0 }, criterion_claims: criterionClaims(["All functions", "Pipeline", "No runtime deps", "Final polish"])},
     }});
     assert.ok(!r.error);
     assert.equal(String(r.stopReason ?? ""), "completed");

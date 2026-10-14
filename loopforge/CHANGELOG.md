@@ -1,5 +1,77 @@
 # Changelog
 
+## 3.9.0 (2026-10-14)
+
+**The machine-only verdict release.** Progress is judged by what the machine
+observed and nothing else. One self-report field is removed, the stall detector
+learns to see committed work, and the post-backtrack restore check stops
+demanding a globally clean tree.
+
+### `progress_estimate` is gone
+
+The field asked the agent to grade its own progress, and the runtime consulted
+that grade in the stall evaluator's fallback tier. A verdict about machine
+motion that the agent's own report could move is the one thing an external
+verifier must not allow, and the number never carried information the machine
+observations did not: a loop with no readable Git history has no honest basis
+for a stall verdict at all. Removed from `ExecutionReport`, the MCP tool
+schema, the prompt template, the canonical state, and the milestone summary
+(`progress_at_boundary` — a milestone renders its round range, not a
+percentage); `entryProgressEstimate` and the whole self-reported window are
+deleted. An evaluation that still sends the key is accepted, and the key is
+dropped: unknown optional fields are ignored, exactly as before.
+
+`evolution.progress_stall_threshold` goes with it — its last consumer was the
+removed tier. The policy schema version moves 4 → 5, so a file written for the
+old surface reports an outdated schema instead of a stray key.
+
+### Committed work is motion
+
+Motion was read from the round's file delta alone. In the commit-per-slice
+workflow — and LoopForge's own guidance tells the agent to commit each slice —
+every worktree is clean at the round boundary, so three rounds of real,
+committed progress read as three rounds of nothing: `progress_stall`, then a
+backtrack, then termination. The false verdict was systemic, not model-specific:
+any agent obeying the workflow hit it.
+
+`gitMotionSignal` is now the one definition of machine motion — a non-empty
+file delta, a Git HEAD that moved across the round, or a HEAD that landed back
+on a rollback's restore point — and it is read by both the committed series and
+the submitted round. A window that cannot be observed (a round with no observed
+Git snapshot) yields no verdict, never a stall by default. The submitted
+round's own motion is now part of the judgement too, which is what lets a redo
+that fixed its approach clear a window that legitimately stalled before the
+rollback, while a redo that moved nothing still reaches the deadlock guard and
+terminates.
+
+### Restoring a workspace no longer means a clean tree
+
+The post-backtrack check required HEAD equality *and* an empty working tree. Any
+unrelated work in progress — a developer's own edits, another task's files —
+made a correctly restored workspace read as unrestored, and because a rollback
+had already committed for that round, the loop terminated. A workspace with
+HEAD exactly at the restore commit was killed by files that had nothing to do
+with the loop.
+
+The restore point now carries its own machine snapshot: its HEAD and the files
+already dirty there. Restoration is the same HEAD with no dirty file the
+restore point did not already have, so unrelated work is tolerated and a file
+the failed rounds left behind is still caught — even when the HEAD matches. An
+absent baseline (a session from before this release) degrades to HEAD equality
+rather than to an empty baseline. The first post-rollback submission is a
+recovery checkpoint, stated as such in the Recovery Brief: prove the restore,
+then redo, and the redo may commit freely.
+
+### The round prompt's fixed footer is smaller
+
+The per-round footer carried evaluation rules and rejection guidance that the
+Perception skill states once, word for word, for every round. It now carries
+only what is specific to this round: execute, submit, read the current `roundId`
+from the latest response (a rejection keeps it), and the JSON template, which
+stays because its fields genuinely vary per round and per active contract.
+Prompt budgets were re-measured; no section that used to render is now dropped
+because of this.
+
 ## 3.8.3 (2026-09-17)
 
 **The unobstructed-path release.** Three dead ends removed, one opening closed,

@@ -180,8 +180,8 @@ export class LoopForgeEngine {
         skill_used: (signal.skill_used as string) ?? "",
         loop_id: signal.loop_id as string | undefined,
         loop_lineage: (signal.loop_lineage as Record<string, unknown>) ?? {},
-        // Persist execution_report so the enforcement gate (R4/R5) can
-        // read progress_estimate from vault entries across rounds.
+        // Persist execution_report so committed claims remain available
+        // to verification and the canonical state.
         execution_report: signal.execution_report ?? null,
         discovered_constraints: signal.discovered_constraints ?? [],
         emerged_subtasks: signal.emerged_subtasks ?? [],
@@ -857,9 +857,8 @@ export class LoopForgeEngine {
       this.state!.success_trend = this.state!.success_trend.slice(-20);
     }
 
-    // v2.5: Old binary-success circuit breaker removed — stalled loops
-    // are now detected by the enforcement gate (R4/R5) using
-    // progress_estimate gradients rather than success=true/false count.
+    // v2.5: Old binary-success circuit breaker removed. The enforcement
+    // gate now uses machine-observed Git motion for stall decisions.
 
     logEvent("round_complete", {
       loopId,

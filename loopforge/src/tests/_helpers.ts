@@ -96,7 +96,6 @@ export function committedFeedbackRound(
                   files_changed: opts.files ?? [],
                   tests_reported: { passed: 0, failed: 0, skipped: 0 },
                   criterion_claims: criterionClaims(opts.met ?? []),
-                  progress_estimate: opts.progress ?? 0.2,
                   ...(opts.contractItemClaims
                     ? { contract_item_claims: opts.contractItemClaims }
                     : {}),
@@ -190,7 +189,6 @@ export function mergedLineageRound(
       files_changed: opts.files ?? [],
       tests_reported: { passed: 0, failed: 0, skipped: 0 },
       criterion_claims: criterionClaims(opts.met ?? []),
-      progress_estimate: opts.progress ?? 0.2,
     },
   };
   if (opts.contract) lin.round_contract = opts.contract;
@@ -207,7 +205,6 @@ export function mergedLineageRound(
       files_changed: opts.files ?? [],
       tests_reported: { passed: 0, failed: 0, skipped: 0 },
       criterion_claims: criterionClaims(opts.met ?? []),
-      progress_estimate: opts.progress ?? 0.2,
     },
   };
   if (opts.contract) body.round_contract = opts.contract;

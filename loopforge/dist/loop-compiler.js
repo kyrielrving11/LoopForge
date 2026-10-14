@@ -7,7 +7,7 @@ import { createHash } from "node:crypto";
 import { getPolicy } from "./policy.js";
 import { AgentStatus, makeLoopCompileResponse, makeLoopObjective, makeConstraintMeta, makeMilestoneSummary, makeRollingSummary, } from "./protocol.js";
 import { createCanonicalLoopState, renderCanonicalStateMarkdown, } from "./canonical-state.js";
-import { decodeBacktrackRecord, decodeRound, entryLineage, entryCriteriaMet, entryCriteriaRemaining, entryActiveConstraints, entryRetractedConstraints, entryProgressEstimate, machineGitMotionSeries, derivationRounds, } from "./committed-round.js";
+import { decodeBacktrackRecord, decodeRound, entryLineage, entryCriteriaMet, entryCriteriaRemaining, entryActiveConstraints, entryRetractedConstraints, machineGitMotionSeries, derivationRounds, } from "./committed-round.js";
 import { NO_IN_FLIGHT_ROUND, deriveRoundFacts } from "./round-facts.js";
 import { recoveryBriefLines } from "./enforcement-gate.js";
 import { deriveSubGoals, duplicateEmergedDeclarations } from "./subgoal-state.js";
@@ -367,14 +367,12 @@ function buildMilestoneFromEntries(phaseEntries, startRound, endRound, label, ki
         : outcomeRaw;
     const carried = last ? entryActiveConstraints(last) : [];
     const resolved = unique(phaseEntries.flatMap((e) => entryRetractedConstraints(e)));
-    const progress = last ? entryProgressEstimate(last) : 0;
     return makeMilestoneSummary({
         label,
         round_range: { start: startRound, end: endRound },
         outcome,
         carried_constraints: carried,
         resolved_constraints: resolved,
-        progress_at_boundary: progress,
         kind,
         generated_at_round: endRound,
     });
@@ -657,7 +655,6 @@ hasContract = false) {
             contract_item_claims: [
                 { item_id: "<rci-XXXXXXXX from the Current Task>", outcome: "met" },
             ],
-            progress_estimate: 0,
         },
         wrong_assumptions: [],
         subgoal_updates: [

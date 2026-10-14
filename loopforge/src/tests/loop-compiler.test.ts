@@ -155,7 +155,6 @@ describe("cognitive-state compiler", () => {
           files_changed: ["src/store.ts"],
           tests_reported: { passed: 10, failed: 1, skipped: 0 },
           criterion_claims: criterionClaims([], ["All tests pass"]),
-          progress_estimate: 0.7,
         },
       }),
     }), null);
@@ -227,7 +226,7 @@ describe("cognitive-state compiler", () => {
   });
 
   it("honors L0 budget ceiling in prompt artifact", () => {
-    // L0 budget is 3000 chars. The compiler should respect this.
+    // L0 budget is the policy's l0_max_chars. The compiler should respect this.
     const response = compileLoop(makeLoopCompileRequest({
       loop_id: "budget",
       round: 3,
@@ -242,10 +241,11 @@ describe("cognitive-state compiler", () => {
       }],
     }), null);
     assert.equal(response.prompt_artifact?.level, "l0");
-    // L0 max is 3000 chars per policy — rendered prompt must be within budget
+    // L0 max comes from the policy — rendered prompt must be within budget
+    const l0Budget = DEFAULT_POLICY.prompt.l0_max_chars;
     assert.ok(
-      (response.prompt?.length ?? 0) <= 3000,
-      `L0 prompt length ${response.prompt?.length} exceeds 3000 char budget`,
+      (response.prompt?.length ?? 0) <= l0Budget,
+      `L0 prompt length ${response.prompt?.length} exceeds ${l0Budget} char budget`,
     );
   });
 
@@ -282,7 +282,6 @@ describe("cognitive-state compiler", () => {
             files_changed: ["db/migrate.ts"],
             tests_reported: { passed: 10, failed: 0, skipped: 0 },
             criterion_claims: criterionClaims(["Migration verified"], []),
-            progress_estimate: 0.35,
           },
           retracted_constraints: [],
         },
@@ -300,7 +299,6 @@ describe("cognitive-state compiler", () => {
             files_changed: ["api/routes.ts"],
             tests_reported: null,
             criterion_claims: criterionClaims(["Migration verified"], ["API coverage ≥ 90%"]),
-            progress_estimate: 0.40,
           },
         },
       ],
@@ -313,7 +311,7 @@ describe("cognitive-state compiler", () => {
     assert.equal(m.label, "数据层完成");
     assert.equal(m.round_range.start, 1);
     assert.equal(m.round_range.end, 2);
-    assert.equal(m.progress_at_boundary, 0.35);
+    assert.equal("progress_at_boundary" in m, false);
     assert.ok(m.carried_constraints.includes("No data loss"));
     assert.ok(m.outcome.includes("Data migration complete"));
   });
@@ -331,7 +329,6 @@ describe("cognitive-state compiler", () => {
             files_changed: ["test/unit.ts"],
             tests_reported: { passed: 20, failed: 0, skipped: 0 },
             criterion_claims: criterionClaims(["Unit tests ≥ 90%"], ["Integration tests pass", "E2E coverage"]),
-            progress_estimate: 0.30,
           },
           retracted_constraints: [],
         },
@@ -345,7 +342,6 @@ describe("cognitive-state compiler", () => {
             files_changed: ["test/integration.ts"],
             tests_reported: { passed: 15, failed: 0, skipped: 0 },
             criterion_claims: criterionClaims(["Unit tests ≥ 90%", "Integration tests pass"], ["E2E coverage"]),
-            progress_estimate: 0.65,
           },
           retracted_constraints: [],
         },
@@ -359,7 +355,6 @@ describe("cognitive-state compiler", () => {
             files_changed: ["test/e2e.ts"],
             tests_reported: null,
             criterion_claims: criterionClaims(["Unit tests ≥ 90%", "Integration tests pass"], ["E2E coverage"]),
-            progress_estimate: 0.70,
           },
         },
       ],
@@ -372,7 +367,7 @@ describe("cognitive-state compiler", () => {
     assert.match(critMs[0].label, /Integration tests pass/);
     assert.equal(critMs[0].round_range.start, 1);
     assert.equal(critMs[0].round_range.end, 2);
-    assert.equal(critMs[0].progress_at_boundary, 0.65);
+    assert.equal("progress_at_boundary" in critMs[0], false);
   });
 
   /** One committed round claiming the given criteria, for the two tests
@@ -387,7 +382,6 @@ describe("cognitive-state compiler", () => {
       files_changed: [`test/${round}.ts`],
       tests_reported: { passed: round * 5, failed: 0, skipped: 0 },
       criterion_claims: criterionClaims(met, []),
-      progress_estimate: 0.3 * round,
     },
   });
 
@@ -440,7 +434,6 @@ describe("cognitive-state compiler", () => {
             files_changed: ["test/unit.ts"],
             tests_reported: { passed: 20, failed: 0, skipped: 0 },
             criterion_claims: criterionClaims(["Unit tests done"], ["Integration done"]),
-            progress_estimate: 0.30,
           },
         },
         {
@@ -454,7 +447,6 @@ describe("cognitive-state compiler", () => {
             tests_reported: { passed: 15, failed: 0, skipped: 0 },
             // "Integration done" is genuinely different from "Unit tests done"
             criterion_claims: criterionClaims(["Unit tests done", "Integration done"], []),
-            progress_estimate: 0.70,
           },
         },
       ],
@@ -482,7 +474,6 @@ describe("cognitive-state compiler", () => {
       files_changed: [],
       tests_reported: null,
       criterion_claims: criterionClaims([], []),
-      progress_estimate: round / 100,
     },
   });
 
@@ -538,7 +529,6 @@ describe("cognitive-state compiler", () => {
           files_changed: [],
           tests_reported: null,
           criterion_claims: criterionClaims([], []),
-          progress_estimate: i / 15,
         },
       });
     }
@@ -568,7 +558,6 @@ describe("cognitive-state compiler", () => {
           files_changed: [],
           tests_reported: null,
           criterion_claims: criterionClaims([], []),
-          progress_estimate: i / 8,
         },
       });
     }
@@ -633,7 +622,6 @@ describe("cognitive-state compiler", () => {
             files_changed: ["data/store.ts"],
             tests_reported: { passed: 5, failed: 0, skipped: 0 },
             criterion_claims: criterionClaims([], []),
-            progress_estimate: 0.30,
           },
         },
         {
@@ -650,7 +638,6 @@ describe("cognitive-state compiler", () => {
             files_changed: ["api/routes.ts"],
             tests_reported: null,
             criterion_claims: criterionClaims([], []),
-            progress_estimate: 0.45,
           },
         },
         {
@@ -667,14 +654,13 @@ describe("cognitive-state compiler", () => {
             files_changed: ["api/middleware.ts"],
             tests_reported: { passed: 8, failed: 0, skipped: 0 },
             criterion_claims: criterionClaims([], []),
-            progress_estimate: 0.60,
           },
         },
       ],
     });
     assert.match(response.prompt, /Phase History/);
     assert.match(response.prompt, /Data Layer/);
-    assert.match(response.prompt, /30%/);
+    assert.match(response.prompt, /Data Layer\*\* \(Rounds 1–1\)/);
     // L2 includes the durable phase history; formulaic loop synthesis is removed.
     assert.match(response.prompt, /Phase History/);
   });
@@ -703,7 +689,6 @@ describe("cognitive-state compiler", () => {
             files_changed: ["core.ts"],
             tests_reported: null,
             criterion_claims: criterionClaims([], []),
-            progress_estimate: 0.30,
           },
         },
         {
@@ -996,7 +981,6 @@ describe("cognitive-state compiler", () => {
           files_changed: ["src/db.ts"],
           tests_reported: { passed: 8, failed: 2, skipped: 0 },
           criterion_claims: criterionClaims([], ["All tests pass"]),
-          progress_estimate: 0.3,
         },
       }),
     }), null);
@@ -1255,7 +1239,6 @@ describe("cognitive-state compiler", () => {
           tests_reported: null,
           // Both criteria met — use IDs for precise matching
           criterion_claims: criterionClaims(["cr-" + computeGoalTextHash("API returns valid JSON").slice(0, 8)], []),
-          progress_estimate: 0.8,
         },
       }),
     }), null);
@@ -1453,7 +1436,6 @@ describe("v3.2 — criterion status derivation", () => {
           files_changed: ["src/parser.ts"],
           tests_reported: { passed: 10, failed: 0, skipped: 0 },
           criterion_claims: criterionClaims(["Parser complete"], ["Tests ≥90%"]),
-          progress_estimate: 0.6,
         },
       }),
     }), null);

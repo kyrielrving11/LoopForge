@@ -254,7 +254,6 @@ describe("E2E MCP lifecycle", () => {
             "Fix any confirmed correctness bugs",
             "Preserve the public API",
           ],
-          progress_estimate: 0.25,
         },
       },
     });
@@ -294,7 +293,6 @@ describe("E2E MCP lifecycle", () => {
             "Fix any confirmed correctness bugs",
             "Preserve the public API",
           ]),
-          progress_estimate: 0.25,
         },
       },
     });
@@ -329,7 +327,6 @@ describe("E2E MCP lifecycle", () => {
           success_criteria_remaining: [
             "Fix any confirmed correctness bugs",
           ],
-          progress_estimate: 0.5,
         },
       },
     });
@@ -385,7 +382,6 @@ describe("E2E MCP lifecycle", () => {
             "Preserve the public API",
           ],
           criterion_claims: criterionClaims([], []),
-          progress_estimate: 1.0,
         },
       },
     });

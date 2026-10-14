@@ -32,7 +32,6 @@ const continuingEvaluation = (): SelfEvaluation => ({
     files_changed: ["src/a.ts"],
     tests_reported: { passed: 1, failed: 0, skipped: 0 },
     criterion_claims: criterionClaims([], ["more"]),
-    progress_estimate: 0.5,
   },
 });
 
@@ -291,7 +290,6 @@ describe("v3.5.1 — hydration stamps attempt/roundEvidence for the compile view
         files_changed: [],
         tests_reported: { passed: 0, failed: 0, skipped: 0 },
         criterion_claims: criterionClaims([], ["more"]),
-        progress_estimate: 0.1,
       },
     });
     assert.equal(rejected.enforcementAction, "reject");

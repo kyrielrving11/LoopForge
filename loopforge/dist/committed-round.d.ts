@@ -105,9 +105,6 @@ export declare function entryActiveConstraints(entry: unknown): string[];
 /** Read retracted_constraints from an entry (direct field, else nested in
  *  the lineage). */
 export declare function entryRetractedConstraints(entry: unknown): string[];
-/** Read progress_estimate from an entry's execution_report (0 when
- *  absent). */
-export declare function entryProgressEstimate(entry: unknown): number;
 /** Read emerged_subtasks from an entry (handles direct + lineage nesting). */
 export declare function entryEmergedSubtasks(entry: unknown): string[];
 /** Read subgoal_updates from an entry (handles direct + lineage nesting).
@@ -162,8 +159,8 @@ export declare function readOnlyRounds(entries: ReadonlyArray<unknown>): Committ
  *  delta, else the pre-round baseline. Shared selector for the
  *  evidence-fallback chains that audit, claims, and backtrack-restore each
  *  used to inline with subtly different tiers. Distinct from
- *  machineGitMotionSeries, which deliberately reads the delta alone for the
- *  motion signal. */
+ *  machineGitMotionSeries, which reads the derived delta plus Git HEAD
+ *  movement so commit-per-slice work remains visible. */
 export declare function machineEvidenceForRound(view: CommittedRoundView): MachineObservation[];
 /** v3.8: Rounds whose persisted transaction carries a LEGACY schema version.
  *  A hard version break must be visible, not silent: these rounds drop out of
@@ -178,8 +175,39 @@ export interface LegacyRound {
     envelope: "transaction" | "prompt_artifact";
 }
 export declare function legacyTransactionRounds(entries: unknown[]): LegacyRound[];
+/** The ONE definition of machine Git motion for a single round.
+ *
+ *  Motion is a non-empty file list, a HEAD that moved across the round, or a
+ *  HEAD that landed on the rollback's restore point — restoring the workspace
+ *  IS that round's work, and would otherwise read as a round that did
+ *  nothing. A clean worktree is not the same thing as no progress:
+ *  commit-per-slice workflows leave no file delta even though HEAD advanced.
+ *
+ *  Observability stays the caller's concern: this answers "did this round
+ *  move", never "could the round be observed". The restore-point arm compares
+ *  short hashes, the rule `checkBacktrackGitHeadRestore` uses; the
+ *  before/after arm compares the observations themselves. */
+export declare function gitMotionSignal(input: {
+    /** Files the round's observation delta lists. */
+    files: ReadonlyArray<string>;
+    headBefore?: string | null;
+    headAfter?: string | null;
+    restoreTargetHead?: string | null;
+}): boolean;
+/** Git HEAD as a machine observation exposes it, or null when it is silent. */
+export declare function observedGitHead(observation: MachineObservation | undefined): string | null;
+/** The in-flight round's own motion, from its before/after observations.
+ *  null when no Git observation was made at all — an unobservable round gains
+ *  no excuse.
+ *
+ *  The file list is the AFTER observation's alone, never the before/after
+ *  union a committed round's delta carries: the before side is the state the
+ *  round started from, and counting it as motion would let a submission that
+ *  sat on stale changes excuse its own stall. A round that only reverts work
+ *  is judged by the HEAD it moved and the restore point it returned to. */
+export declare function inFlightGitMotion(before: ReadonlyArray<MachineObservation>, after: ReadonlyArray<MachineObservation>, restoreTargetHead?: string): boolean | null;
 /** Machine-observed git motion for the most recent contiguous window.
- * Consumers must decode durable or hydrated entries before calling this;
- * transaction-envelope interpretation stays confined to this module. */
+ * A clean worktree is not the same thing as no progress: commit-per-slice
+ * workflows leave no file delta even though HEAD advanced. */
 export declare function machineGitMotionSeries(rounds: ReadonlyArray<CommittedRoundView>, currentRound: number, lookback: number): boolean[] | null;
 //# sourceMappingURL=committed-round.d.ts.map

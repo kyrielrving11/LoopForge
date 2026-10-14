@@ -149,6 +149,8 @@ export class RoundLifecycle {
                 entrypoint_trust: session.entrypointTrust ?? null,
                 // v2.12: Backtrack restore-point git HEAD (crash recovery)
                 backtrack_target_git_head: session.backtrackTargetGitHead ?? null,
+                // v3.9: Restore point's own dirty files (restore baseline)
+                backtrack_target_dirty: session.backtrackTargetDirty ?? null,
                 // v1.19: durable round transaction state
                 round_snapshot: session.roundSnapshot ?? null,
                 last_self_eval: session.lastSelfEval ?? null,
@@ -218,6 +220,12 @@ export class RoundLifecycle {
             backtrackTargetGitHead: typeof lineage.backtrack_target_git_head === "string" &&
                 lineage.backtrack_target_git_head.length > 0
                 ? lineage.backtrack_target_git_head
+                : undefined,
+            // v3.9: absent means "baseline unknown" (a session from before this
+            // field), never an empty baseline: the restore check then falls back
+            // to HEAD equality alone rather than reading unrelated dirt as failure.
+            backtrackTargetDirty: Array.isArray(lineage.backtrack_target_dirty)
+                ? lineage.backtrack_target_dirty.filter((file) => typeof file === "string")
                 : undefined,
             evidenceBaseline: roundSnapshot?.beforeEvidence ?? fallbackEvidence,
             roundSnapshot: roundSnapshot ?? prepareRoundTransaction(loopId, currentRound, fallbackEvidence),
@@ -583,6 +591,7 @@ export class RoundLifecycle {
             backtrackSkippedFiles: session.backtrackSkippedFiles,
             backtrackSkippedFingerprints: session.backtrackSkippedFingerprints,
             backtrackTargetGitHead: session.backtrackTargetGitHead,
+            backtrackTargetDirty: session.backtrackTargetDirty,
             entrypointTrust: session.entrypointTrust,
         });
         const outcome = completed.outcome;
@@ -669,6 +678,9 @@ export class RoundLifecycle {
         // v2.12: Remember the restore point's git HEAD — the next round's
         // verification gate confirms the workspace returned to this commit.
         session.backtrackTargetGitHead = pr.backtrackTargetGitHead;
+        // v3.9: …and what was already dirty there, so the restore check compares
+        // dirty sets instead of demanding a globally clean tree.
+        session.backtrackTargetDirty = pr.backtrackTargetDirty;
         session.lastSelfEval = undefined; // force L2 recompile from vault state
         session.currentPrompt = null;
         // Preserve discoveries from skipped rounds as constraints_from_plan
@@ -816,6 +828,7 @@ export class RoundLifecycle {
         // v2.12: The restore-point git HEAD check only applies to the first
         // post-backtrack round — clear it once we advance past it.
         session.backtrackTargetGitHead = undefined;
+        session.backtrackTargetDirty = undefined;
         // v1.8: Memory injection — tier-aware external context.
         const contextProvider = this.getContext();
         let externalCtx = "";

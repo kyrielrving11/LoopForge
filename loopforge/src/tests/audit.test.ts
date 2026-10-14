@@ -160,7 +160,6 @@ describe("buildAudit", () => {
           files_changed: ["src/a.ts"],
           tests_reported: { passed: 2, failed: 0, skipped: 0 },
           criterion_claims: criterionClaims(["tests pass"], []),
-          progress_estimate: 1,
         },
       }),
     ];

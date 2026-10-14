@@ -44,6 +44,10 @@ export interface McpSession {
      *  gate checks the workspace returns to this commit before accepting.
      *  Cleared after the first successful post-backtrack round. */
     backtrackTargetGitHead?: string;
+    /** v3.9: files already dirty at that restore point — the baseline the
+     *  restored workspace is compared against, so unrelated work in progress
+     *  does not read as a failed restore. Cleared with the HEAD above. */
+    backtrackTargetDirty?: string[];
     /** v3.8.3: the trusted round-start fingerprint of every enabled command's
      *  entrypoint files, captured when the CURRENT in-flight round was prepared.
      *

@@ -48,7 +48,6 @@ function minimalState(overrides: Partial<CanonicalLoopState> = {}): CanonicalLoo
     stateFilePath: ".loopforge/state/test.md",
     capability: deriveConfiguredCapability(DEFAULT_POLICY),
     progress: {
-      estimate: null,
       criteriaMet: [],
       criteriaRemaining: [],
       filesChanged: [],
@@ -92,9 +91,9 @@ describe("assemblePromptArtifact — L0", () => {
     assert.ok(artifact.renderedPrompt.includes("Retry Requirements"));
   });
 
-  it("keeps L0 prompts within the 3000-character budget", () => {
+  it("keeps L0 prompts within the L0 budget", () => {
     const artifact = assemblePromptArtifact(input({ level: "l0" }));
-    assert.ok(artifact.renderedPrompt.length <= 3000);
+    assert.ok(artifact.renderedPrompt.length <= DEFAULT_PROMPT_BUDGETS.l0);
   });
 });
 
@@ -110,9 +109,9 @@ describe("assemblePromptArtifact — L1", () => {
     assert.equal(artifact.level, "l1");
   });
 
-  it("keeps L1 prompts within the 7000-character budget", () => {
+  it("keeps L1 prompts within the L1 budget", () => {
     const artifact = assemblePromptArtifact(input({ level: "l1" }));
-    assert.ok(artifact.renderedPrompt.length <= 7000);
+    assert.ok(artifact.renderedPrompt.length <= DEFAULT_PROMPT_BUDGETS.l1);
   });
 
   it("includes sub-goals when present (compact, max 5)", () => {
@@ -160,7 +159,6 @@ describe("assemblePromptArtifact — L2", () => {
         outcome: "completed core",
         carried_constraints: ["no deps"],
         resolved_constraints: [],
-        progress_at_boundary: 0.5,
         kind: "auto",
         generated_at_round: 5,
       }],
@@ -235,8 +233,7 @@ describe("assemblePromptArtifact — L2", () => {
     const state = minimalState({
       milestones: [{
         label: "Phase 1", round_range: { start: 1, end: 5 },
-        outcome: "done", carried_constraints: [], resolved_constraints: [],
-        progress_at_boundary: 0.5, kind: "auto" as const, generated_at_round: 5,
+        outcome: "done", carried_constraints: [], resolved_constraints: [], kind: "auto" as const, generated_at_round: 5,
       }],
       subGoals: [
         { id: "sg-1", description: "Task A", status: "done" as const,
@@ -244,7 +241,7 @@ describe("assemblePromptArtifact — L2", () => {
           completed_at_round: 3, priority: 0 },
       ],
       progress: {
-        estimate: 0.6, criteriaMet: ["auth"], criteriaRemaining: ["api"],
+        criteriaMet: ["auth"], criteriaRemaining: ["api"],
         filesChanged: ["src/auth.ts"],
         tests: { passed: 42, failed: 0, skipped: 0 },
       },
@@ -342,6 +339,9 @@ describe("assemblePromptArtifact — metadata", () => {
   it("includes how-to-complete footer", () => {
     const artifact = assemblePromptArtifact(input());
     assert.ok(artifact.renderedPrompt.includes("How to Complete This Round"));
+    assert.ok(artifact.renderedPrompt.includes("latest `roundId` returned by LoopForge"));
+    assert.ok(!artifact.renderedPrompt.includes("progress_estimate`"));
+    assert.ok(!artifact.renderedPrompt.includes("Evaluation Rules"));
   });
 
   it("mandatory sections are always included even under budget", () => {
@@ -707,7 +707,7 @@ describe("v3.3 — Roadmap section", () => {
     milestones: [{
       label: "Core Module", round_range: { start: 1, end: 4 },
       outcome: "completed core module", carried_constraints: [],
-      resolved_constraints: [], progress_at_boundary: 0.4,
+      resolved_constraints: [],
       kind: "auto" as const, generated_at_round: 4,
     }],
     criterionStatuses: [
@@ -769,7 +769,6 @@ describe("v3.3 — machine dashboard rows and round stats", () => {
     // or external tool reads them — see canonical-state.test.ts.
     const state = minimalState({
       progress: {
-        estimate: 0.6,
         criteriaMet: [],
         criteriaRemaining: [],
         filesChanged: ["src/a.ts"],
@@ -813,7 +812,7 @@ describe("assemblePromptArtifact — budget determinism", () => {
     ],
     milestones: [{
       label: "Core Module", round_range: { start: 1, end: 2 }, outcome: "done",
-      carried_constraints: [], resolved_constraints: [], progress_at_boundary: 0.5,
+      carried_constraints: [], resolved_constraints: [],
       kind: "auto" as const, generated_at_round: 2,
     }],
   });
@@ -838,7 +837,7 @@ describe("assemblePromptArtifact — budget determinism", () => {
   it("drops optional sections lowest-priority-first", () => {
     const artifact = assemblePromptArtifact(input({
       level: "l2", fullStateMarkdown: undefined, state: loadedState(),
-      budgets: { l2: 2000 },
+      budgets: { l2: 1500 },
     }));
     // The invariant is about the CUT POINT, not about any single section:
     // every optional section that rendered must outrank every one that was

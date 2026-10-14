@@ -243,10 +243,12 @@ export class RoundTransactionCoordinator {
             consecutiveRejections: input.consecutiveRejections,
             lastRejectionCheck: input.lastRejectionCheck,
             evidenceSnapshots: roundDelta,
+            beforeEvidence: snapshot.beforeEvidence,
             successTrajectory: input.successTrajectory,
             backtrackSkippedFiles: input.backtrackSkippedFiles,
             backtrackSkippedFingerprints: input.backtrackSkippedFingerprints,
             backtrackTargetGitHead: input.backtrackTargetGitHead,
+            backtrackTargetDirty: input.backtrackTargetDirty,
             entrypointTrust: input.entrypointTrust,
         });
         const evaluated = {

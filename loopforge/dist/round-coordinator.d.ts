@@ -38,6 +38,8 @@ export interface RoundProcessInput {
     lastRejectionCheck?: string;
     /** v1.18: Evidence snapshots from configured providers. */
     evidenceSnapshots?: MachineObservation[];
+    /** Full round-start observations for post-backtrack restore validation. */
+    beforeEvidence?: MachineObservation[];
     /** Success values from already committed rounds. */
     successTrajectory?: boolean[];
     /** v2.13: Files from skipped backtrack rounds. Passed to verification
@@ -50,6 +52,9 @@ export interface RoundProcessInput {
     /** v2.12: Git HEAD of the backtrack restore point. The verification gate
      *  checks the workspace returns to this commit before accepting work. */
     backtrackTargetGitHead?: string;
+    /** v3.9: files already dirty at that restore point (undefined = never
+     *  observed, so only HEAD can be judged). */
+    backtrackTargetDirty?: string[];
     /** v3.8.3: the trusted round-start fingerprint of every configured
      *  command's entrypoint files, captured when this round was prepared. Only
      *  the in-flight round has one — a round whose preparation predates the
@@ -115,6 +120,10 @@ export interface RoundProcessResult {
      *  Set when action is "backtrack". The verification gate uses this
      *  to check that the agent restored the workspace before working. */
     backtrackTargetGitHead?: string;
+    /** v3.9: Files already dirty at the backtrack target round. The restore
+     *  check requires the workspace's dirty set to be a subset of this
+     *  baseline — unrelated work in progress is not a failed restore. */
+    backtrackTargetDirty?: string[];
     /** v2.13: Files changed in skipped rounds during backtrack.
      *  The next round's verification gate checks that these files are
      *  not still dirty (agent must restore workspace first). */

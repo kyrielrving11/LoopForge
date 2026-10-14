@@ -515,7 +515,7 @@ function checkSuccessWithoutVerifiedEvidence(
           "and no tests were run. There is no verifiable evidence of work."
         : "Agent claims success but provided no execution_report. " +
           "Every successful round MUST include execution_report with " +
-          "files_changed, tests_reported, and progress_estimate.",
+          "files_changed and tests_reported.",
     });
   }
 
@@ -1017,29 +1017,78 @@ function checkBacktrackWorkspaceRestore(
   });
 }
 
-/** v2.12: After a backtrack, the working tree must return to the restore
- *  point's git HEAD. Compares the first 12 characters (short hash), matching
- *  how git itself disambiguates. */
+/** v2.12: After a backtrack, the workspace must return to the restore point:
+ *  the same git HEAD that round committed, carrying no dirty file the restore
+ *  point did not already have. Compares HEAD's first 12 characters (short
+ *  hash), matching how git itself disambiguates.
+ *
+ *  The dirty-set comparison is against the restore point's OWN baseline, not
+ *  an empty tree: unrelated work in progress in the same workspace is no
+ *  evidence of a failed restore, while a file the failed rounds left behind
+ *  is — it is dirty now and was not dirty then. An absent baseline means the
+ *  restore point's dirt was never observed, so only HEAD can be judged.
+ *
+ *  A redo prepared before the agent restores the workspace has a stale before
+ *  snapshot, so its first submission is a recovery checkpoint; once the
+ *  restore is proven, later work may move HEAD freely. */
 function checkBacktrackGitHeadRestore(
   evidenceSnapshots: MachineObservation[],
   backtrackTargetGitHead?: string,
+  beforeEvidence: MachineObservation[] = [],
+  /** The restore point's own dirty files — undefined when never observed. */
+  backtrackTargetDirty?: string[],
 ): VerificationFlag | null {
   if (!backtrackTargetGitHead) return null;
-  const git = evidenceSnapshots.find((snapshot) =>
-    snapshot.providerId === "git" && isRecord(snapshot.data) &&
-    typeof snapshot.data.head === "string");
-  if (!git) return null; // git unavailable → cannot verify → skip (fail-open)
-  const currentHead = (git.data as Record<string, unknown>).head as string;
-  if (currentHead.length === 0) return null;
-  if (currentHead.slice(0, 12) === backtrackTargetGitHead.slice(0, 12)) return null;
+  const short = (hash: string) => hash.slice(0, 12);
+  const readGit = (observations: MachineObservation[]) => {
+    const snapshot = observations.find((item) =>
+      item.providerId === "git" && item.status === "observed" && isRecord(item.data) &&
+      typeof item.data.head === "string",
+    );
+    if (!snapshot || !isRecord(snapshot.data)) return null;
+    const data = snapshot.data as Record<string, unknown>;
+    const dirty: string[] = [];
+    for (const field of ["tracked", "staged", "untracked"]) {
+      const list = data[field];
+      if (!Array.isArray(list)) continue;
+      for (const file of list) {
+        if (typeof file === "string" && !dirty.includes(file)) dirty.push(file);
+      }
+    }
+    return { head: data.head as string, dirty };
+  };
+  const foreignDirty = (dirty: string[]): string[] =>
+    Array.isArray(backtrackTargetDirty)
+      ? dirty.filter((file) => !backtrackTargetDirty.includes(file))
+      : [];
+  const restored = (git: { head: string; dirty: string[] } | null): boolean =>
+    git !== null && git.head.length > 0 &&
+    short(git.head) === short(backtrackTargetGitHead) &&
+    foreignDirty(git.dirty).length === 0;
+  // When restoration happened before the redo was prepared, the before
+  // snapshot already proves it. The redo may then commit new work.
+  if (restored(readGit(beforeEvidence))) return null;
+  const afterGit = readGit(evidenceSnapshots);
+  if (!afterGit) return null; // git unavailable → cannot verify → skip (fail-open)
+  if (restored(afterGit)) return null;
+  // Normal lifecycle: prepare captured the pre-restore workspace. The first
+  // submission must prove restoration before a later submission can commit.
+  const headBack = afterGit.head.length > 0 &&
+    short(afterGit.head) === short(backtrackTargetGitHead);
+  const left = foreignDirty(afterGit.dirty);
   return makeVerificationFlag({
     severity: "error",
     field: "workspace",
     check: CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED,
-    detail:
-      `Workspace HEAD (${currentHead.slice(0, 12)}) does not match the ` +
-      `backtrack restore commit (${backtrackTargetGitHead.slice(0, 12)}). ` +
-      `Restore the working tree before continuing.`,
+    detail: headBack
+      ? `Workspace HEAD is back at the backtrack restore commit ` +
+        `(${short(backtrackTargetGitHead)}) but these files were not there at ` +
+        `the restore point and are still changed: ${left.slice(0, 5).join(", ")}` +
+        `${left.length > 5 ? ` (+${left.length - 5} more)` : ""}. Revert them ` +
+        `before redoing the work.`
+      : `Workspace HEAD (${short(afterGit.head)}) does not match the backtrack ` +
+        `restore commit (${short(backtrackTargetGitHead)}). Submit one recovery ` +
+        `evaluation at the restore point before redoing work.`,
   });
 }
 
@@ -1240,6 +1289,9 @@ export function verifySelfEvaluation(
    *  baseline. Derived by the caller (it needs the in-flight trust map and
    *  filesystem access); this function stays a pure function of its inputs. */
   entrypointDrift: EntrypointDrift[] = [],
+  beforeEvidence: MachineObservation[] = [],
+  /** v3.9: the restore point's own dirty files (undefined = never observed). */
+  backtrackTargetDirty?: string[],
 ): VerificationResult {
   const flags: VerificationFlag[] = [];
 
@@ -1309,7 +1361,8 @@ export function verifySelfEvaluation(
       selfEval, backtrackSkippedFiles, backtrackSkippedFingerprints, evidenceSnapshots,
     ),
     // v2.12: Post-backtrack git HEAD restore check
-    () => checkBacktrackGitHeadRestore(evidenceSnapshots, backtrackTargetGitHead),
+    () => checkBacktrackGitHeadRestore(
+      evidenceSnapshots, backtrackTargetGitHead, beforeEvidence, backtrackTargetDirty),
     // v3.8: Round Contract checks over the derived item model. Declaration
     // quality is enforced structurally (contract_invalid) before the round
     // advances, so the gate only reports execution state: scope drift,

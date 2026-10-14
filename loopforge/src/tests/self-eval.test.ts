@@ -22,12 +22,11 @@ describe("parseExecutionReport", () => {
       files_changed: ["a.ts", "b.ts"],
       tests_reported: { passed: 8, failed: 1, skipped: 2 },
       criterion_claims: criterionClaims(["reentrancy fixed"], ["access control"]),
-      progress_estimate: 0.5,
     });
     assert.ok(result);
     assert.deepEqual(result!.files_changed, ["a.ts", "b.ts"]);
     assert.equal(result!.tests_reported!.passed, 8);
-    assert.equal(result!.progress_estimate, 0.5);
+    assert.equal("progress_estimate" in result!, false);
   });
 
   it("returns undefined for null input", () => {
@@ -38,11 +37,9 @@ describe("parseExecutionReport", () => {
     assert.equal(parseExecutionReport(undefined), undefined);
   });
 
-  it("clamps progress_estimate to [0, 1]", () => {
-    const high = parseExecutionReport({ progress_estimate: 1.5 });
-    assert.equal(high!.progress_estimate, 1);
-    const low = parseExecutionReport({ progress_estimate: -0.5 });
-    assert.equal(low!.progress_estimate, 0);
+  it("ignores the removed progress_estimate field", () => {
+    const result = parseExecutionReport({ progress_estimate: 1.5 });
+    assert.equal("progress_estimate" in result!, false);
   });
 
   it("defaults missing tests_reported to null", () => {
@@ -76,7 +73,6 @@ describe("buildSelfEvaluation", () => {
         files_changed: ["token.sol"],
         tests_reported: { passed: 10, failed: 0, skipped: 0 },
         criterion_claims: criterionClaims(["no reentrancy"], []),
-        progress_estimate: 0.3,
       },
       subgoal_updates: [{ id: "sg-aabbccdd", status: "done", note: "ship it" }],
     };
@@ -86,7 +82,7 @@ describe("buildSelfEvaluation", () => {
     assert.deepEqual(result.discovered_constraints, ["use SafeERC20"]);
     assert.deepEqual(result.emerged_subtasks, ["audit timelock"]);
     assert.ok(result.execution_report);
-    assert.equal(result.execution_report!.progress_estimate, 0.3);
+    assert.equal("progress_estimate" in result.execution_report!, false);
     assert.deepEqual(result.subgoal_updates, [{ id: "sg-aabbccdd", status: "done", note: "ship it" }]);
   });
 

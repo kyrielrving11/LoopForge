@@ -58,7 +58,6 @@ export function makeMilestoneSummary(overrides = {}) {
         outcome: "",
         carried_constraints: [],
         resolved_constraints: [],
-        progress_at_boundary: 0,
         kind: "auto",
         generated_at_round: 0,
         ...overrides,
@@ -255,7 +254,6 @@ export function makeExecutionReport(overrides = {}) {
         tests_reported: null,
         criterion_claims: [],
         contract_item_claims: [],
-        progress_estimate: 0.0,
         ...overrides,
     };
 }

@@ -155,12 +155,6 @@ const TOOL_BASE_SCHEMAS = [
                     additionalProperties: false,
                   },
                 },
-                progress_estimate: {
-                  type: "number" as const,
-                  minimum: 0,
-                  maximum: 1,
-                  description: "Estimated progress toward task completion (0.0–1.0).",
-                },
               },
             },
             retracted_constraints: {

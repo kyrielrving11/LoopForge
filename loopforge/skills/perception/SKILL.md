@@ -60,9 +60,12 @@ completed task.
 ## Plan the next slice
 
 For work that spans rounds, submit `round_contract` as a proposal for the next
-slice. Keep `work_item` narrow, bind each item to a configured evidence command
-with `verify_with`, and limit `scope` to files or directories that slice may
-touch. The proposal becomes active only after its declaring round commits.
+slice. Size the slice by what one machine-checkable outcome covers — a
+requirements list is not a round list, and coupled changes that share one
+objective, one evidence story, and one recovery path belong in the same round.
+Bind each item to a configured evidence command with `verify_with`, and limit
+`scope` to files or directories that slice may touch. The proposal becomes
+active only after its declaring round commits.
 While it is open, restating the same proposal continues it; a different
 proposal is ignored as `contract_premature`. If the slice is blocked, report
 `outcome: "blocked"` with a concrete `blocker` instead of silently replacing
@@ -95,8 +98,8 @@ The four core evaluation fields are strict:
 | `should_continue` | Boolean. `false` only when the whole task is complete. |
 
 Useful optional fields include `execution_report` (`files_changed`,
-`tests_reported`, `criterion_claims`, `contract_item_claims`, and
-`progress_estimate`), `discovered_constraints`, `emerged_subtasks`,
+`tests_reported`, `criterion_claims`, and `contract_item_claims`),
+`discovered_constraints`, `emerged_subtasks`,
 `subgoal_updates`, `prompt_requests`, `round_contract`, `retroactiveClaims`,
 `gate_ids`, `worker_results`, and objective or constraint revisions.
 
@@ -171,7 +174,7 @@ server was started in:
 
 ```json
 {
-  "version": "4",
+  "version": "5",
   "evidence": {
     "commands": [{
       "name": "verify",
@@ -216,11 +219,12 @@ Prepare it before the round that depends on it.
 
 ## Backtrack and recovery
 
-A progress stall is machine-first when Git history is observable over the
-lookback window. Self-reported `progress_estimate` is only a fallback when
-machine history cannot be read. Machine motion can excuse a stall but cannot
-create one. A machine-backed success round is finishing, even if its closing
-round changes no files.
+A progress stall requires observable Git history over the lookback window.
+Committed work counts as motion through the Git HEAD change, even when the
+closing worktree is clean, and the round you are submitting counts too: if it
+moved files or committed, it cancels the verdict. If machine history cannot be
+read, no stall verdict is made. A machine-backed success round is finishing,
+even if its closing round changes no files.
 
 Backtrack records a rollback directive and restores the round counter to the
 last clean committed round. Rejected attempts are never history. The next
@@ -233,10 +237,14 @@ target HEAD. It states restoration facts, not a prescribed command.
 
 When backtrack occurs:
 
-1. Restore the workspace exactly as requested before doing more work.
-2. Read the Recovery Brief, restored prompt, and derived state.
-3. Do not repeat a failed approach without addressing its cause.
-4. Carry valid discoveries into later evaluations.
+1. Restore the workspace exactly as requested before doing more work: the
+   restore point's HEAD, with none of the failed rounds' changes left behind.
+   Work in progress the restore point already carried may stay.
+2. Submit one recovery evaluation from the restored state, so LoopForge can
+   verify the restore before the redo's own work — and any commit — follows.
+3. Read the Recovery Brief, restored prompt, and derived state.
+4. Do not repeat a failed approach without addressing its cause.
+5. Carry valid discoveries into later evaluations.
 
 If the rolled-back work used an active contract, close the stalled contract in
 the redo with `outcome: "blocked"` and declare the revised contract in that
@@ -247,8 +255,9 @@ same submission. Restating the stalled contract commits more of the same.
 - Non-null `prompt`: execute it and submit the next evaluation.
 - `enforcementAction: "reject"`: retry the same logical round and ID; the
   attempt increases.
-- `enforcementAction: "backtrack"`: restore the workspace, then continue from
-  the restored prompt and round.
+- `enforcementAction: "backtrack"`: restore the workspace, submit one recovery
+  evaluation from the restored state, then redo the round from its restored
+  prompt and round ID.
 - Null `prompt`: inspect `stopReason`.
 
 Read `verificationStatus`, `roundSuccess`, `level`, `warnings`, and

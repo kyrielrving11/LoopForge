@@ -73,10 +73,6 @@ export function parseExecutionReport(raw) {
             : null,
         criterion_claims: parseCriterionClaims(raw.criterion_claims),
         contract_item_claims: parseContractItemClaims(raw.contract_item_claims),
-        progress_estimate: typeof raw.progress_estimate === "number" &&
-            Number.isFinite(raw.progress_estimate)
-            ? Math.max(0, Math.min(1, raw.progress_estimate))
-            : 0.0,
     });
 }
 /** v3.8: The criterion ids the agent claims met this round. */

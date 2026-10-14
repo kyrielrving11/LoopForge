@@ -23,7 +23,6 @@ function continuingEvaluation(): SelfEvaluation {
       files_changed: [],
       tests_reported: null,
       criterion_claims: criterionClaims([], ["remaining"]),
-      progress_estimate: 0.4,
     },
   };
 }
@@ -38,7 +37,6 @@ function rejectedEvaluation(): SelfEvaluation {
       files_changed: ["src/change.ts"],
       tests_reported: { passed: 1, failed: 0, skipped: 0 },
       criterion_claims: criterionClaims([], ["still open"]),
-      progress_estimate: 0.5,
     },
   };
 }

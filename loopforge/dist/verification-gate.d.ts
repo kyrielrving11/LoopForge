@@ -150,6 +150,8 @@ gateEntries?: VaultEntry[],
 /** v3.8.3: entrypoint files that no longer match the trusted round-start
  *  baseline. Derived by the caller (it needs the in-flight trust map and
  *  filesystem access); this function stays a pure function of its inputs. */
-entrypointDrift?: EntrypointDrift[]): VerificationResult;
+entrypointDrift?: EntrypointDrift[], beforeEvidence?: MachineObservation[],
+/** v3.9: the restore point's own dirty files (undefined = never observed). */
+backtrackTargetDirty?: string[]): VerificationResult;
 export {};
 //# sourceMappingURL=verification-gate.d.ts.map

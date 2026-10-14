@@ -36,7 +36,6 @@ import {
   entryCriteriaRemaining,
   entryActiveConstraints,
   entryRetractedConstraints,
-  entryProgressEstimate,
   type CommittedRoundView,
   machineGitMotionSeries,
   derivationRounds,
@@ -477,7 +476,6 @@ function buildMilestoneFromEntries(
   const resolved = unique(
     phaseEntries.flatMap((e) => entryRetractedConstraints(e)),
   );
-  const progress = last ? entryProgressEstimate(last) : 0;
 
   return makeMilestoneSummary({
     label,
@@ -485,7 +483,6 @@ function buildMilestoneFromEntries(
     outcome,
     carried_constraints: carried,
     resolved_constraints: resolved,
-    progress_at_boundary: progress,
     kind,
     generated_at_round: endRound,
   });
@@ -854,7 +851,6 @@ export function buildSelfEvalBlock(
       contract_item_claims: [
         { item_id: "<rci-XXXXXXXX from the Current Task>", outcome: "met" },
       ],
-      progress_estimate: 0,
     },
     wrong_assumptions: [],
     subgoal_updates: [

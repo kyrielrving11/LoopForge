@@ -39,7 +39,6 @@ function stalledEval(round: number, progress: number, files: string[]) {
       files_changed: files,
       tests_reported: { passed: 0, failed: 0, skipped: 0 },
       criterion_claims: criterionClaims([] as string[], ["Complete the task"]),
-      progress_estimate: progress,
     },
   };
 }
@@ -63,7 +62,6 @@ function fixedEval(round: number, files: string[]) {
       files_changed: files,
       tests_reported: { passed: 5, failed: 0, skipped: 0 },
       criterion_claims: criterionClaims(["Complete the task"], [] as string[]),
-      progress_estimate: 1,
     },
   };
 }
@@ -330,6 +328,24 @@ describe("E2E Recovery Brief window (v3.7.1)", () => {
       "brief renders in the Recent tier during the window");
     assert.ok(during.includes(`**Source**: round 4`), "recovery compile marks its round");
 
+    // v3.9: the restore point's own machine snapshot — its HEAD and the files
+    // already dirty there — is session state, so a restart must carry it. This
+    // repository is dirty with work unrelated to the loop, which is exactly
+    // what the baseline exists to tolerate.
+    const beforeRestart = mgr.get(sessionId)!;
+    assert.ok(beforeRestart.backtrackTargetGitHead, "the rollback records the restore HEAD");
+    assert.ok(Array.isArray(beforeRestart.backtrackTargetDirty),
+      "the rollback records the restore point's own dirty files");
+    const baseline = beforeRestart.backtrackTargetDirty;
+    mgr.close();
+    mgr = createSessionManager(storeDir);
+    assert.ok(mgr.autoResumeAll() >= 1, "the loop resumes after a restart");
+    const resumed = mgr.get(sessionId)!;
+    assert.equal(resumed.backtrackTargetGitHead, beforeRestart.backtrackTargetGitHead,
+      "the restore HEAD survives a restart");
+    assert.deepEqual(resumed.backtrackTargetDirty, baseline,
+      "the restore baseline survives a restart");
+
     // Redo with the same roundId is evaluated and accepted.
     const restoredRoundId = mgr.get(sessionId)!.roundSnapshot?.roundId;
     assert.ok(restoredRoundId, "session holds the restored roundId");
@@ -340,6 +356,13 @@ describe("E2E Recovery Brief window (v3.7.1)", () => {
     assert.ok(!redo.enforcementAction || redo.enforcementAction === "accept",
       `redo must be accepted, got ${redo.enforcementAction ?? "accept"}`);
     assert.equal(redo.round, 5);
+
+    // The restore check applies to the first post-backtrack round only.
+    const advanced = mgr.get(sessionId)!;
+    assert.equal(advanced.backtrackTargetGitHead, undefined,
+      "the restore HEAD check is cleared once the loop advances");
+    assert.equal(advanced.backtrackTargetDirty, undefined,
+      "the restore baseline is cleared once the loop advances");
 
     // After the redo commits the rollback record is replaced — the brief
     // exits the projection by construction.

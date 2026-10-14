@@ -202,7 +202,6 @@ describe("required command verification", () => {
           files_changed: ["src/a.ts"],
           tests_reported: { passed: 1, failed: 0, skipped: 0 },
           criterion_claims: criterionClaims([], []),
-          progress_estimate: 0.5,
         },
       });
       const result = verifySelfEvaluation(evaluation, 1, [], null, [{

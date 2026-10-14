@@ -682,9 +682,6 @@
             "type": "string"
           }
         },
-        "progress_at_boundary": {
-          "type": "number"
-        },
         "kind": {
           "anyOf": [
             {
@@ -717,7 +714,6 @@
         "outcome",
         "carried_constraints",
         "resolved_constraints",
-        "progress_at_boundary",
         "kind",
         "generated_at_round"
       ],
@@ -2004,9 +2000,6 @@
           "items": {
             "$ref": "#/$defs/ContractItemClaim"
           }
-        },
-        "progress_estimate": {
-          "type": "number"
         }
       },
       "description": "v3.8: The agent's self-report for a round — renamed from ExecutionReport\r\nbecause these fields are claims, not evidence. The whole object is\r\noptional; a mistyped optional field is dropped with a warning and never\r\nrejects the round."

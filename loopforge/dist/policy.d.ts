@@ -72,8 +72,6 @@ export interface EvolutionPolicy {
     max_discovered_constraints_per_round: number;
     max_active_constraints: number;
     max_objective_versions: number;
-    /** Numeric progress tolerance for the stall evaluator — not a text score. */
-    progress_stall_threshold: number;
     /** v3.7.1: Max ACTIVE sub-goals (pending/in_progress/blocked) shown in
      *  prompts and the state file. done/canceled never render as items —
      *  they survive in the vault, replay, and counts. */
@@ -119,7 +117,7 @@ export interface GatePolicy {
 }
 /** v3.8.1: the policy schema version. A policy file that does not declare
  *  exactly this version is REJECTED — see loadPolicy. */
-export declare const POLICY_SCHEMA_VERSION = "4";
+export declare const POLICY_SCHEMA_VERSION = "5";
 export interface LoopPolicy {
     version: string;
     constraints: ConstraintsPolicy;

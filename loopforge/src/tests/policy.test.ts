@@ -122,6 +122,22 @@ describe("Policy — the schema version is a boundary", () => {
     });
   });
 
+  it("v3.9: reports the version, not a stray key, for a pre-5 policy", () => {
+    // The evolution surface lost `progress_stall_threshold` when the stall
+    // evaluator became machine-only. A v4 file still carrying it must fail as
+    // an outdated schema — the honest reason — rather than as an unknown key,
+    // which would send the operator looking for a typo.
+    withPolicyFile(
+      { version: "4", evolution: { progress_stall_threshold: 0.05 } },
+      (path) => {
+        assert.throws(
+          () => loadPolicy(path),
+          /does not match the current schema version/,
+        );
+      },
+    );
+  });
+
   it("REJECTS an unknown key instead of ignoring it", () => {
     // A typo used to be announced and then ignored, so the loop ran on a value
     // the operator never set.

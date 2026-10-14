@@ -11,7 +11,7 @@ import type { SelfEvaluation, VerificationFlag } from "../protocol.js";
 import type { GitObservation, MachineObservation } from "../protocol.js";
 import type { VaultEntry } from "../loop-store.js";
 import {
-  findBacktrackTargetGitHead,
+  findBacktrackTargetSnapshot,
   buildBacktrackPrompt,
   enforceRound,
 } from "../enforcement-gate.js";
@@ -20,7 +20,7 @@ import { verifySelfEvaluation } from "../verification-gate.js";
 const HEAD = "abcdef1234567890abcdef1234567890abcdef12";
 const OTHER_HEAD = "123456abcdef7890abcdef1234567890abcdef12";
 
-function gitSnapshot(head: string | undefined): GitObservation {
+function gitSnapshot(head: string | undefined, dirtyFiles: string[] = []): GitObservation {
   return {
     schemaVersion: 1,
     providerId: "git",
@@ -30,7 +30,7 @@ function gitSnapshot(head: string | undefined): GitObservation {
     finishedAt: 0,
     status: "observed",
     files: ["src/a.ts"],
-    data: { tracked: [], staged: [], untracked: [], fingerprints: {}, head },
+    data: { tracked: dirtyFiles, staged: [], untracked: [], fingerprints: {}, head },
   };
 }
 
@@ -79,25 +79,27 @@ function se(overrides: Partial<SelfEvaluation> = {}): SelfEvaluation {
       files_changed: ["src/a.ts"],
       tests_reported: null,
       criterion_claims: criterionClaims([], []),
-      progress_estimate: 0.3,
     }),
     ...overrides,
   });
 }
 
-describe("findBacktrackTargetGitHead", () => {
-  it("reads the git head from the restore round's after evidence", () => {
-    const entries = [committedFeedback(3, [gitSnapshot(HEAD)])];
-    assert.equal(findBacktrackTargetGitHead(3, entries), HEAD);
+describe("findBacktrackTargetSnapshot", () => {
+  it("reads the git head and the restore point's own dirty files", () => {
+    const entries = [committedFeedback(3, [gitSnapshot(HEAD, ["docs/notes.md"])])];
+    assert.deepEqual(findBacktrackTargetSnapshot(3, entries), {
+      head: HEAD,
+      dirtyFiles: ["docs/notes.md"],
+    });
   });
 
   it("falls back to before evidence when after evidence lacks git", () => {
     const entries = [committedFeedback(3, [gitSnapshot(HEAD)], false)];
-    assert.equal(findBacktrackTargetGitHead(3, entries), HEAD);
+    assert.equal(findBacktrackTargetSnapshot(3, entries)?.head, HEAD);
   });
 
   it("returns null when the restore round has no committed feedback", () => {
-    assert.equal(findBacktrackTargetGitHead(3, []), null);
+    assert.equal(findBacktrackTargetSnapshot(3, []), null);
   });
 
   it("returns null when the snapshot has no git provider", () => {
@@ -127,12 +129,12 @@ describe("findBacktrackTargetGitHead", () => {
         entrypointFiles: [],
       },
     }])];
-    assert.equal(findBacktrackTargetGitHead(3, entries), null);
+    assert.equal(findBacktrackTargetSnapshot(3, entries), null);
   });
 
   it("returns null when git head is empty", () => {
     const entries = [committedFeedback(3, [gitSnapshot("")])];
-    assert.equal(findBacktrackTargetGitHead(3, entries), null);
+    assert.equal(findBacktrackTargetSnapshot(3, entries), null);
   });
 });
 
@@ -173,12 +175,70 @@ describe("verification gate — backtrack git head restore", () => {
     );
     assert.equal(result.verdict, "trusted");
   });
+
+  it("allows a newer after-round HEAD after restoring at round start", () => {
+    const result = verifySelfEvaluation(
+      se(), 4, [], null, [gitSnapshot(OTHER_HEAD)], [], {}, HEAD,
+      [], [], [gitSnapshot(HEAD)],
+    );
+    assert.equal(result.verdict, "trusted");
+  });
+
+  it("accepts a recovery checkpoint when preparation saw the failed workspace", () => {
+    const result = verifySelfEvaluation(
+      se(), 4, [], null, [gitSnapshot(HEAD)], [], {}, HEAD,
+      [], [], [gitSnapshot(OTHER_HEAD)],
+    );
+    assert.equal(result.verdict, "trusted");
+  });
+
+  it("tolerates work in progress that was already dirty at the restore point", () => {
+    // The reproduced defect: HEAD is back at the restore commit and the only
+    // dirty files are the ones the restore point itself carried. Demanding a
+    // globally clean tree terminated this workspace.
+    const result = verifySelfEvaluation(
+      se(), 4, [], null, [gitSnapshot(HEAD, ["unrelated.md"])], [], {}, HEAD,
+      [], [], [], ["unrelated.md"],
+    );
+    assert.equal(result.verdict, "trusted");
+  });
+
+  it("rejects a file the failed rounds left dirty behind a matching HEAD", () => {
+    const result = verifySelfEvaluation(
+      se(), 4, [], null, [gitSnapshot(HEAD, ["src/failed.ts"])], [], {}, HEAD,
+      [], [], [], [],
+    );
+    assert.equal(result.verdict, "contradicted");
+    const flag = result.flags.find(
+      (f) => f.check === "backtrack_workspace_not_restored" && f.severity === "error");
+    assert.ok(flag);
+    assert.ok(flag.detail.includes("src/failed.ts"), "the leftover file is named");
+  });
+
+  it("rejects leftover files at round start even when the redo then moved HEAD", () => {
+    const result = verifySelfEvaluation(
+      se(), 4, [], null, [gitSnapshot(OTHER_HEAD, ["src/failed.ts"])], [], {}, HEAD,
+      [], [], [gitSnapshot(HEAD, ["src/failed.ts"])], [],
+    );
+    assert.equal(result.verdict, "contradicted");
+  });
+
+  it("judges HEAD alone when the restore point's dirt was never observed", () => {
+    // A session from before the baseline existed: absent means unobservable,
+    // never an empty baseline — otherwise unrelated dirt would be fatal.
+    const result = verifySelfEvaluation(
+      se(), 4, [], null, [gitSnapshot(HEAD, ["unrelated.md"])], [], {}, HEAD,
+      [], [], [], undefined,
+    );
+    assert.equal(result.verdict, "trusted");
+  });
 });
 
 describe("buildBacktrackPrompt — git head", () => {
   it("states the required HEAD as a restore fact when gitHead is provided", () => {
     const prompt = buildBacktrackPrompt(4, 3, "progress_stall", [], [], HEAD);
     assert.ok(prompt.includes(`HEAD must be at \`${HEAD.slice(0, 12)}\``));
+    assert.match(prompt, /Submit one recovery evaluation after the restore/);
     // v3.8: a FACT, never a command — the restore is the agent's action.
     for (const command of ["git stash", "git reset", "git checkout", "git clean"]) {
       assert.ok(!prompt.includes(command), `must not prescribe "${command}"`);

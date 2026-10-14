@@ -67,7 +67,6 @@ function se(overrides: Partial<SelfEvaluation> = {}): SelfEvaluation {
       files_changed: ["src/a.ts"],
       tests_reported: { passed: 1, failed: 0, skipped: 0 },
       criterion_claims: criterionClaims(["criterion A"], []),
-      progress_estimate: 0.5,
     }),
     ...overrides,
   });
@@ -173,7 +172,6 @@ describe("verification-gate — happy path", () => {
         files_changed: ["src/foo.ts"],
         tests_reported: { passed: 3, failed: 0, skipped: 0 },
         criterion_claims: criterionClaims(["impl"], ["tests"]),
-        progress_estimate: 0.7,
       }),
       constraint_violations: ["deadline"],
       discovered_constraints: ["new: must handle null"],
@@ -185,7 +183,6 @@ describe("verification-gate — happy path", () => {
         files_changed: ["src/bar.ts"],
         tests_reported: { passed: 1, failed: 0, skipped: 0 },
         criterion_claims: criterionClaims([], ["impl", "tests"]),
-        progress_estimate: 0.3,
       }),
       constraint_violations: ["missing docs"],
       discovered_constraints: ["must use async"],
@@ -205,7 +202,6 @@ describe("verification-gate — happy path", () => {
   it("trusted verdict for first round (no previous data)", () => {
     const curr = se({
       execution_report: makeExecutionReport({
-        progress_estimate: 0.0,
         tests_reported: { passed: 1, failed: 0, skipped: 0 },
         files_changed: ["src/a.ts"],
       }),
@@ -470,7 +466,6 @@ describe("verification-gate — verdict aggregation", () => {
         files_changed: ["src/foo.ts"],
         tests_reported: { passed: 3, failed: 1, skipped: 0 },
         criterion_claims: criterionClaims([], ["tests"]),
-        progress_estimate: 0.5,
       }),
       constraint_violations: ["minor"],
       discovered_constraints: ["unique constraint"],
@@ -478,7 +473,6 @@ describe("verification-gate — verdict aggregation", () => {
     const prev = se({
       success: false,
       execution_report: makeExecutionReport({
-        progress_estimate: 0.3,
       }),
       constraint_violations: ["other"],
       discovered_constraints: ["different constraint"],
@@ -747,7 +741,6 @@ describe("verification-gate — backtrack workspace restore", () => {
       should_continue: true,
       execution_report: makeExecutionReport({
         files_changed: ["src/new-feature.ts"],
-        progress_estimate: 0.5,
       }),
       ...overrides,
     });
@@ -910,7 +903,6 @@ describe("verification-gate — v2.12 outcome consistency", () => {
         files_changed: ["src/a.ts"],
         tests_reported: { passed: 1, failed: 0, skipped: 0 },
         criterion_claims: criterionClaims([], ["tests pass"]),
-        progress_estimate: 0.5,
       }),
     });
     const result = verifySelfEvaluation(curr, 2, [], null);
@@ -1039,7 +1031,6 @@ describe("verification-gate — v2.12 unverified criteria claims", () => {
         files_changed: ["src/a.ts"],
         tests_reported: null,
         criterion_claims: criterionClaims(["tests pass", "docs updated"], []),
-        progress_estimate: 0.5,
       }),
     });
     const result = verifySelfEvaluation(curr, 2, [], null);
@@ -1054,7 +1045,6 @@ describe("verification-gate — v2.12 unverified criteria claims", () => {
         files_changed: ["src/a.ts"],
         tests_reported: { passed: 4, failed: 0, skipped: 0 },
         criterion_claims: criterionClaims(["tests pass"], []),
-        progress_estimate: 0.8,
       }),
     });
     const result = verifySelfEvaluation(curr, 2, [], null);
@@ -1067,7 +1057,6 @@ describe("verification-gate — v2.12 unverified criteria claims", () => {
         files_changed: ["src/a.ts"],
         tests_reported: null,
         criterion_claims: criterionClaims([], ["tests pass"]),
-        progress_estimate: 0.3,
       }),
     });
     const result = verifySelfEvaluation(curr, 2, [], null);
@@ -1594,7 +1583,6 @@ describe("verification-gate — v3.7 success-evidence merge (empty arm)", () => 
       execution_report: makeExecutionReport({
         files_changed: [],
         tests_reported: null,
-        progress_estimate: 0.5,
       }),
       ...overrides,
     });

@@ -28,7 +28,6 @@ function evalWithCriteria(
       files_changed: ["src/a.ts"],
       tests_reported: { passed: 1, failed: 0, skipped: 0 },
       criterion_claims: criterionClaims(["tests pass"], []),
-      progress_estimate: 1,
     }),
     ...overrides,
   });
@@ -73,7 +72,6 @@ describe("deriveClaimView", () => {
         files_changed: ["src/a.ts"],
         tests_reported: null,
         criterion_claims: criterionClaims(["tests pass"], []),
-        progress_estimate: 0.5,
       }),
     });
     const view = deriveClaimView(selfEval, []);
@@ -117,7 +115,6 @@ describe("deriveClaimView", () => {
         files_changed: ["src/a.ts"],
         tests_reported: null,
         criterion_claims: criterionClaims(["tests pass"], []),
-        progress_estimate: 0.5,
       }),
     });
     const view = deriveClaimView(selfEval, [commandSnapshot("passed")]);
@@ -130,7 +127,6 @@ describe("deriveClaimView", () => {
         files_changed: ["src/a.ts"],
         tests_reported: { passed: 3, failed: 1, skipped: 0 },
         criterion_claims: criterionClaims(["tests pass"], []),
-        progress_estimate: 0.5,
       }),
     });
     const view = deriveClaimView(selfEval, [commandSnapshot("passed")]);
@@ -296,7 +292,6 @@ describe("listVerifiedClaims", () => {
             files_changed: ["src/b.ts"],
             tests_reported: null,
             criterion_claims: criterionClaims(["docs updated"], []),
-            progress_estimate: 0.6,
           }),
         }),
         [],

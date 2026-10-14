@@ -346,15 +346,6 @@ export function entryRetractedConstraints(entry) {
         return nested.filter((v) => typeof v === "string");
     return [];
 }
-/** Read progress_estimate from an entry's execution_report (0 when
- *  absent). */
-export function entryProgressEstimate(entry) {
-    const ev = entryExecutionReport(entry);
-    if (!ev)
-        return 0;
-    const pe = ev.progress_estimate;
-    return typeof pe === "number" ? pe : 0;
-}
 /** Read emerged_subtasks from an entry (handles direct + lineage nesting). */
 export function entryEmergedSubtasks(entry) {
     const view = decodeRound(entry);
@@ -465,8 +456,8 @@ export function readOnlyRounds(entries) {
  *  delta, else the pre-round baseline. Shared selector for the
  *  evidence-fallback chains that audit, claims, and backtrack-restore each
  *  used to inline with subtly different tiers. Distinct from
- *  machineGitMotionSeries, which deliberately reads the delta alone for the
- *  motion signal. */
+ *  machineGitMotionSeries, which reads the derived delta plus Git HEAD
+ *  movement so commit-per-slice work remains visible. */
 export function machineEvidenceForRound(view) {
     if (view.afterEvidence.length > 0)
         return view.afterEvidence;
@@ -509,24 +500,91 @@ export function legacyTransactionRounds(entries) {
     }
     return out.sort((a, b) => a.round - b.round);
 }
+/** The ONE definition of machine Git motion for a single round.
+ *
+ *  Motion is a non-empty file list, a HEAD that moved across the round, or a
+ *  HEAD that landed on the rollback's restore point — restoring the workspace
+ *  IS that round's work, and would otherwise read as a round that did
+ *  nothing. A clean worktree is not the same thing as no progress:
+ *  commit-per-slice workflows leave no file delta even though HEAD advanced.
+ *
+ *  Observability stays the caller's concern: this answers "did this round
+ *  move", never "could the round be observed". The restore-point arm compares
+ *  short hashes, the rule `checkBacktrackGitHeadRestore` uses; the
+ *  before/after arm compares the observations themselves. */
+export function gitMotionSignal(input) {
+    if (input.files.length > 0)
+        return true;
+    const { headBefore, headAfter, restoreTargetHead } = input;
+    if (headAfter && headBefore && headAfter !== headBefore)
+        return true;
+    if (headAfter && restoreTargetHead &&
+        headAfter.slice(0, 12) === restoreTargetHead.slice(0, 12))
+        return true;
+    return false;
+}
+/** Git HEAD as a machine observation exposes it, or null when it is silent. */
+export function observedGitHead(observation) {
+    return observation && isRecord(observation.data) &&
+        typeof observation.data.head === "string" && observation.data.head
+        ? observation.data.head
+        : null;
+}
+/** The in-flight round's own motion, from its before/after observations.
+ *  null when no Git observation was made at all — an unobservable round gains
+ *  no excuse.
+ *
+ *  The file list is the AFTER observation's alone, never the before/after
+ *  union a committed round's delta carries: the before side is the state the
+ *  round started from, and counting it as motion would let a submission that
+ *  sat on stale changes excuse its own stall. A round that only reverts work
+ *  is judged by the HEAD it moved and the restore point it returned to. */
+export function inFlightGitMotion(before, after, restoreTargetHead) {
+    const pick = (observations) => observations.find((snapshot) => snapshot.providerId === "git" && snapshot.status === "observed");
+    const observed = pick(after);
+    if (!observed)
+        return null;
+    return gitMotionSignal({
+        files: observed.files,
+        headBefore: observedGitHead(pick(before)),
+        headAfter: observedGitHead(observed),
+        restoreTargetHead: restoreTargetHead ?? null,
+    });
+}
 /** Machine-observed git motion for the most recent contiguous window.
- * Consumers must decode durable or hydrated entries before calling this;
- * transaction-envelope interpretation stays confined to this module. */
+ * A clean worktree is not the same thing as no progress: commit-per-slice
+ * workflows leave no file delta even though HEAD advanced. */
 export function machineGitMotionSeries(rounds, currentRound, lookback) {
+    if (!Number.isInteger(lookback) || lookback < 1 || currentRound <= lookback)
+        return null;
     const byRound = new Map();
     for (const round of rounds) {
         if (round.round < 1 || round.round >= currentRound)
             continue;
-        const git = round.observationDelta.find((snapshot) => snapshot.providerId === "git");
-        if (!git)
-            continue;
-        byRound.set(round.round, Array.isArray(git.files) && git.files.length > 0);
+        byRound.set(round.round, round);
     }
-    if (byRound.size < lookback)
-        return null;
-    const recent = [...byRound.keys()].sort((a, b) => a - b).slice(-lookback);
-    if (recent[0] < currentRound - lookback)
-        return null;
-    return recent.map((round) => byRound.get(round));
+    const recent = [];
+    for (let number = currentRound - lookback; number < currentRound; number++) {
+        const round = byRound.get(number);
+        if (!round?.observationDelta.some((snapshot) => snapshot.providerId === "git" && snapshot.status === "observed"))
+            return null;
+        recent.push(round);
+    }
+    const observedGit = (observations) => observations.find((snapshot) => snapshot.providerId === "git" && snapshot.status === "observed");
+    const motion = [];
+    for (const round of recent) {
+        const git = observedGit(round.observationDelta);
+        // The round's baseline: its own before observation, else the previous
+        // round's after observation. Older Git observations do not carry a HEAD
+        // field; their file list is still a valid motion signal.
+        const baseline = observedGit(round.beforeEvidence)
+            ?? observedGit(byRound.get(round.round - 1)?.afterEvidence ?? []);
+        motion.push(gitMotionSignal({
+            files: git.files,
+            headBefore: observedGitHead(baseline),
+            headAfter: observedGitHead(git),
+        }));
+    }
+    return motion;
 }
 //# sourceMappingURL=committed-round.js.map

@@ -92,6 +92,7 @@ export class RoundDriver {
             backtrackSkippedFingerprints: input.backtrackSkippedFingerprints,
             entrypointTrust: input.entrypointTrust,
             backtrackTargetGitHead: input.backtrackTargetGitHead,
+            backtrackTargetDirty: input.backtrackTargetDirty,
         });
         return { outcome, actualEvidence };
     }

@@ -4,6 +4,7 @@
 import { makeExecutionReport, makeSelfEvaluation, } from "./protocol.js";
 import { retiredFieldDetail, submittedFieldPaths, unknownExecutionReportEntryFields, unknownTopLevelFields, } from "./submission-guidance.js";
 import { DIAG_ALL_ENTRIES_DROPPED, DIAG_EMPTY_VALUE, } from "./submission-diagnostics.js";
+import { criterionRefMatches } from "./token-utils.js";
 const DIAGNOSTICS_LIMIT = 100;
 class DiagnosticsCollector {
     entries = [];
@@ -147,7 +148,7 @@ function parseRetroactiveClaims(raw, sink) {
     return claims;
 }
 /** Parse ExecutionReport from a raw JSON object. */
-export function parseExecutionReport(raw, sink) {
+export function parseExecutionReport(raw, sink, knownCriterionRefs) {
     if (raw === undefined || raw === null)
         return undefined;
     if (typeof raw !== "object" || Array.isArray(raw)) {
@@ -186,7 +187,7 @@ export function parseExecutionReport(raw, sink) {
     return makeExecutionReport({
         files_changed: boundedStringArray(raw.files_changed, 200, 500, sink, "execution_report.files_changed"),
         tests_reported: tests,
-        criterion_claims: parseCriterionClaims(raw.criterion_claims, sink),
+        criterion_claims: parseCriterionClaims(raw.criterion_claims, sink, knownCriterionRefs),
         contract_item_claims: parseContractItemClaims(raw.contract_item_claims, sink),
     });
 }
@@ -205,7 +206,7 @@ export function claimedRemainingCriteria(report) {
 /** v3.8: LENIENT parse of advisory criterion claims — unknown or malformed
  *  entries are dropped, never a rejection (the contract item layer is the
  *  strict one). */
-function parseCriterionClaims(raw, sink) {
+function parseCriterionClaims(raw, sink, knownCriterionRefs) {
     if (raw === undefined || raw === null)
         return [];
     if (!Array.isArray(raw)) {
@@ -214,6 +215,7 @@ function parseCriterionClaims(raw, sink) {
     }
     const claims = [];
     let invalid = 0;
+    let unknown = 0;
     for (let index = 0; index < raw.length; index++) {
         if (claims.length >= 100)
             break;
@@ -236,15 +238,35 @@ function parseCriterionClaims(raw, sink) {
         if (trimmed.length > 500) {
             sink?.push(`execution_report.criterion_claims[${index}].criterion_id`, "truncated", "truncated", "longer than 500 chars; truncated to the limit");
         }
+        const criterionId = trimmed.slice(0, 500);
+        if (knownCriterionRefs !== undefined && knownCriterionRefs !== null &&
+            !knownCriterionRefs.some((criterion) => criterionRefMatches(criterionId, criterion))) {
+            unknown++;
+            continue;
+        }
         claims.push({
-            criterion_id: trimmed.slice(0, 500),
+            criterion_id: criterionId,
             outcome: entry.outcome,
         });
     }
-    if (invalid > 0) {
-        sink?.push("execution_report.criterion_claims", claims.length === 0 ? DIAG_ALL_ENTRIES_DROPPED : "invalid_entry", "dropped", claims.length === 0
-            ? `all ${invalid} claims were malformed; the value was dropped (advisory)`
-            : `${invalid} malformed claim${invalid === 1 ? "" : "s"} dropped (advisory)`);
+    if (invalid > 0 || unknown > 0) {
+        if (claims.length === 0) {
+            const parts = [];
+            if (invalid > 0)
+                parts.push(`${invalid} malformed`);
+            if (unknown > 0)
+                parts.push(`${unknown} unknown criterion`);
+            sink?.push("execution_report.criterion_claims", DIAG_ALL_ENTRIES_DROPPED, "dropped", `all ${invalid + unknown} claims were dropped (${parts.join(", ")}; advisory)`);
+        }
+        else {
+            if (invalid > 0) {
+                sink?.push("execution_report.criterion_claims", "invalid_entry", "dropped", `${invalid} malformed claim${invalid === 1 ? "" : "s"} dropped (advisory)`);
+            }
+            if (unknown > 0) {
+                sink?.push("execution_report.criterion_claims", "unknown_id", "dropped", `${unknown} claim${unknown === 1 ? "" : "s"} cited a criterion the ` +
+                    "prompt did not render; dropped (advisory)");
+            }
+        }
     }
     if (raw.length > 100) {
         sink?.push("execution_report.criterion_claims", "too_many", "truncated", "only the first 100 claims are kept");
@@ -866,8 +888,8 @@ export function validateContractShape(raw, context) {
  *  diagnostic sink is supplied, every drop/truncation/normalization is
  *  reported; without one (the engine's historical payload parse) the values
  *  are normalized as before. */
-export function buildSelfEvaluation(raw, sink) {
-    const executionReport = parseExecutionReport(raw.execution_report, sink);
+export function buildSelfEvaluation(raw, sink, facts) {
+    const executionReport = parseExecutionReport(raw.execution_report, sink, facts?.knownCriterionRefs);
     const retractedConstraints = boundedStringArray(raw.retracted_constraints, 50, 500, sink, "retracted_constraints");
     const revisedCriteria = parseCriterionRevisions(raw.revised_success_criteria, sink);
     const wrongAssumptions = boundedStringArray(raw.wrong_assumptions, 50, 500, sink, "wrong_assumptions");
@@ -961,12 +983,12 @@ export function buildSelfEvaluation(raw, sink) {
 }
 /** Normalize a raw submission and report every lossy decision. Unknown and
  *  retired fields are diagnosed and dropped; they are never silently accepted. */
-export function normalizeSelfEvaluation(raw) {
+export function normalizeSelfEvaluation(raw, facts) {
     const collector = new DiagnosticsCollector();
     for (const key of unknownTopLevelFields(raw)) {
         collector.push(key, "unknown_field", "dropped", retiredFieldDetail(key) ?? "not a declared evaluation field; it was dropped");
     }
-    const evaluation = buildSelfEvaluation(raw, collector);
+    const evaluation = buildSelfEvaluation(raw, collector, facts);
     return {
         evaluation,
         diagnostics: collector.finish(),

@@ -77,6 +77,25 @@ export function isCriterionId(ref: string): boolean {
   return /^cr-[a-f0-9]{8}$/.test(ref);
 }
 
+/** v3.9.2: ONE criterion identity rule for the compiler, the prompt and the
+ *  submission boundary. A reference matches a criterion when it is the real
+ *  cr- id or the exact normalized criterion text. Never similarity. */
+export function criterionRefMatches(
+  ref: string,
+  criterion: string | { id?: string; text: string },
+): boolean {
+  const text = typeof criterion === "string" ? criterion : criterion.text;
+  const id = typeof criterion === "string"
+    ? deriveCriterionId(text)
+    : (criterion.id ?? deriveCriterionId(criterion.text));
+
+  if (isCriterionId(ref)) {
+    return isCriterionId(text) ? ref === text : ref === id;
+  }
+  if (isCriterionId(text)) return deriveCriterionId(ref) === text;
+  return normalizeText(ref) === normalizeText(text);
+}
+
 // ── v3.8: Contract identity (content-addressed, round-independent) ──────────
 
 /** Normalize one contract text field for identity purposes. */

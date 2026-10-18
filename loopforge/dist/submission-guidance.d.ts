@@ -12,7 +12,7 @@
 import type { ActiveContractView } from "./round-contract.js";
 import type { ContractItemStatusView } from "./contract-items.js";
 import type { CommittedRoundView } from "./committed-round.js";
-import type { LoopForgeResponse, PromptArtifact, SubGoal, SubmissionGuidance, VerificationFlag } from "./protocol.js";
+import type { CriterionStatus, LoopForgeResponse, PromptArtifact, SubGoal, SubmissionGuidance, VerificationFlag } from "./protocol.js";
 export type FieldNature = "report" | "claim" | "proposal" | "transition" | "control";
 export interface FieldGuide {
     /** Dotted path, e.g. `execution_report.files_changed`. */
@@ -31,6 +31,13 @@ export interface FieldGuide {
     reportOnly?: boolean;
     /** One of the four strict core fields. */
     core?: boolean;
+    /** v3.9.2: a compact trigger sentence used only by the prompt checklist. */
+    decision?: string;
+    /** Prompt levels whose compact checklist includes `decision`. Fields with
+     *  dedicated contract/sub-goal renderers leave this unset. */
+    promptLevels?: ReadonlyArray<"l0" | "l1" | "l2">;
+    /** Deterministic order inside the compact checklist. */
+    promptRank?: number;
 }
 /** Field order used by the prompt, guidance and receipts. Core fields first,
  *  then the execution report, then contract/sub-goal state, then the
@@ -47,6 +54,7 @@ export interface FieldExampleContext {
     activeSubGoals: ReadonlyArray<SubGoal>;
     commands: ReadonlyArray<string>;
     contractVerificationAvailable: boolean;
+    criteria?: ReadonlyArray<CriterionStatus>;
 }
 /** A legal minimal example for a field, or null when the current facts make the
  *  field unusable (no real id/command to cite). The renderer omits nulls; it
@@ -60,10 +68,19 @@ export interface GuidanceFacts {
     commands: ReadonlyArray<string>;
     contractVerificationAvailable: boolean;
     gateEnabled: boolean;
+    criteria?: ReadonlyArray<CriterionStatus>;
 }
-/** Which optional fields are worth showing at this submission point. Core
- *  fields and the execution report always are. */
+/** Semantic applicability — independent of prompt density. Core fields and
+ *  the two baseline execution-report fields are always applicable; the rest
+ *  depend on facts the runtime can actually observe. Future events
+ *  (delegation, a checkpoint boundary, a falsified assumption) remain
+ *  conditional opportunities, not render-time facts. */
 export declare function isFieldApplicable(path: string, facts: GuidanceFacts): boolean;
+/** Prompt density is a separate decision: which applicable fields the compact
+ *  trigger checklist renders at this level. */
+export declare function isFieldPrompted(path: string, facts: GuidanceFacts): boolean;
+/** Deterministic compact-checklist order, shared by the renderer and tests. */
+export declare function promptedFieldPaths(facts: GuidanceFacts): string[];
 export interface SelfEvalPromptContext {
     round: number;
     level: "l0" | "l1" | "l2";
@@ -75,6 +92,7 @@ export interface SelfEvalPromptContext {
     verificationFlags: ReadonlyArray<VerificationFlag>;
     recovery: boolean;
     gateEnabled?: boolean;
+    criteria?: ReadonlyArray<CriterionStatus>;
 }
 /** Render the evaluation block appended to every prompt. */
 export declare function renderSelfEvalBlock(ctx: SelfEvalPromptContext): string;

@@ -1103,7 +1103,7 @@ describe("v3.2 — deriveEvidenceStatus", () => {
     const status = deriveEvidenceStatus(se(), deltasFrom([gitSnap(["src/a.ts"])]));
     assert.equal(status.providerStatus, "unavailable");
     assert.equal(status.gitObserved, true);
-    assert.equal(status.reportedFilesMatch, true);
+    assert.equal(status.gitChangeState, "observed");
   });
 
   it("git snapshot present but no changes → observed boundary, unavailable verification", () => {
@@ -1703,5 +1703,57 @@ describe("verification-gate — v3.9.1 success-evidence report gap (empty arm)",
     );
     assert.ok(!emptyArmFlag(result));
     assert.equal(result.verdict, "trusted");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v3.9.2 — the shared files reconciliation
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("v3.9.2 — evidence_integrity uses the shared reconciliation", () => {
+  const withFiles = (files: string[]) => se({
+    execution_report: makeExecutionReport({
+      files_changed: files,
+      tests_reported: null,
+    }),
+  });
+
+  it("warns on a real mismatch", () => {
+    const result = verifySelfEvaluation(
+      withFiles(["src/a.ts"]), 2, [], null, [gitSnap(["src/b.ts"])],
+    );
+    assert.ok(result.flags.some((flag) => flag.check === "evidence_integrity"));
+  });
+
+  it("stays silent on a match", () => {
+    const result = verifySelfEvaluation(
+      withFiles(["src/a.ts"]), 2, [], null, [gitSnap(["src/a.ts"])],
+    );
+    assert.ok(!result.flags.some((flag) => flag.check === "evidence_integrity"));
+  });
+
+  it("stays silent on duplicate reported paths", () => {
+    const result = verifySelfEvaluation(
+      withFiles(["src/a.ts", "src/a.ts"]), 2, [], null, [gitSnap(["src/a.ts"])],
+    );
+    assert.ok(!result.flags.some((flag) => flag.check === "evidence_integrity"));
+  });
+
+  it("stays silent when the Git boundary is unknown", () => {
+    const result = rawVerifySelfEvaluation(
+      withFiles(["src/a.ts"]), 2, [], null, [{
+        providerId: "git", kind: "git", before: null, after: null,
+        changedFiles: null,
+      }],
+    );
+    assert.ok(!result.flags.some((flag) => flag.check === "evidence_integrity"));
+  });
+
+  it("stays silent when the execution report is missing", () => {
+    const selfEval = se({ execution_report: undefined });
+    const result = verifySelfEvaluation(
+      selfEval, 2, [], null, [gitSnap(["src/a.ts"])],
+    );
+    assert.ok(!result.flags.some((flag) => flag.check === "evidence_integrity"));
   });
 });

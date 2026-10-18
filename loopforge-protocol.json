@@ -689,6 +689,85 @@
         "not_applied"
       ]
     },
+    "FilesReconciliation": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "match"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "mismatch"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "unknown"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "not_applicable"
+              ]
+            }
+          ]
+        },
+        "scope": {
+          "type": "string",
+          "const": "tracked_and_non_ignored_untracked"
+        },
+        "attempted": {
+          "type": "boolean"
+        },
+        "reported": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "observed": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "unreported": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "unconfirmed": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "status",
+        "scope",
+        "attempted",
+        "reported",
+        "unreported",
+        "unconfirmed"
+      ]
+    },
     "SubmissionReceipt": {
       "type": "object",
       "properties": {
@@ -1059,6 +1138,9 @@
             "contract_items"
           ]
         },
+        "files_reconciliation": {
+          "$ref": "#/$defs/FilesReconciliation"
+        },
         "prompt": {
           "anyOf": [
             {
@@ -1126,6 +1208,7 @@
         "reports",
         "effects",
         "verification",
+        "files_reconciliation",
         "diagnostics"
       ],
       "description": "v3.9.1: The machine's report of what one submission DID. It is derived\r\nfrom the transaction + the shared read model; it is never a second ledger."
@@ -1280,6 +1363,28 @@
             ]
           }
         },
+        "criteria": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              },
+              "status": {
+                "description": "Not representable in JSON Schema: IndexedAccessType"
+              }
+            },
+            "required": [
+              "id",
+              "text",
+              "status"
+            ]
+          }
+        },
         "recovery": {
           "anyOf": [
             {
@@ -1407,6 +1512,7 @@
         "contract_commands",
         "contract_verification_available",
         "subgoals",
+        "criteria",
         "prompt",
         "fields",
         "findings"

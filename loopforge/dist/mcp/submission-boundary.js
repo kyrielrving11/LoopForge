@@ -68,8 +68,7 @@ export function compileSessionContext(session) {
  *  prompt carried, PLUS this submission's own `emerged_subtasks` — a sub-goal
  *  may be created and referenced (or transitioned) in one round. Null when it
  *  cannot be observed. */
-export function knownSubGoalsFor(session, emerged) {
-    const response = compileSessionContext(session);
+export function knownSubGoalsFor(session, emerged, response = compileSessionContext(session)) {
     if (!response?.sub_goals)
         return null;
     const known = [...response.sub_goals];
@@ -174,7 +173,8 @@ export function validateSubmission(store, session, submission) {
             },
         };
     }
-    const known = session ? knownSubGoalsFor(session, emerged) : null;
+    const compileResponse = session ? compileSessionContext(session) : null;
+    const known = session ? knownSubGoalsFor(session, emerged, compileResponse) : null;
     const updates = parseSubGoalUpdates(submission.subgoal_updates);
     if (updates.length > 0 && known) {
         const referentialErrors = validateSubGoalUpdates(known, updates).map((error) => ({
@@ -217,7 +217,20 @@ export function validateSubmission(store, session, submission) {
             },
         };
     }
-    return { ok: true, ...normalizeSelfEvaluation(submission) };
+    return {
+        ok: true,
+        ...normalizeSelfEvaluation(submission, {
+            knownCriterionRefs: knownCriterionRefsFor(compileResponse),
+        }),
+    };
+}
+function knownCriterionRefsFor(response) {
+    return Array.isArray(response?.criterion_statuses)
+        ? response.criterion_statuses.map((criterion) => ({
+            id: criterion.id,
+            text: criterion.text,
+        }))
+        : null;
 }
 function contractShapeErrors(store, session, submission, knownSubGoals) {
     const active = session ? activeContractOf(store, session) : null;

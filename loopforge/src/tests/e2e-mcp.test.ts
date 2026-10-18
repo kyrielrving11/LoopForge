@@ -18,7 +18,11 @@ import { join, resolve, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { createInterface, Interface } from "node:readline";
-import { writeMachineBackedPolicy, criterionClaims } from "./_helpers.js";
+import {
+  writeMachineBackedPolicy,
+  criterionClaims,
+  DEFAULT_SUCCESS_CRITERION,
+} from "./_helpers.js";
 import { fileURLToPath } from "node:url";
 
 // ── MCP stdio client ─────────────────────────────────────────────────────────
@@ -312,10 +316,7 @@ describe("E2E MCP lifecycle", () => {
         execution_report: {
           files_changed: [],
           tests_reported: { passed: 0, failed: 5, skipped: 0 },
-          criterion_claims: criterionClaims([], [
-            "Fix any confirmed correctness bugs",
-            "Preserve the public API",
-          ]),
+          criterion_claims: criterionClaims([], [DEFAULT_SUCCESS_CRITERION]),
         },
       },
     });

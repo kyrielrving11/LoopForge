@@ -18,6 +18,8 @@ function committedFeedback(
   submittedFields?: string[],
   evaluation?: Record<string, unknown>,
   normalizationDiagnostics?: Array<Record<string, unknown>>,
+  beforeEvidence?: unknown[],
+  afterEvidence?: unknown[],
 ): VaultEntry {
   const fields = submittedFields ?? [
     "success", "output_summary", "constraint_violations", "should_continue",
@@ -40,8 +42,8 @@ function committedFeedback(
           round,
           attempt: 1,
           phase: "committed",
-          beforeEvidence: [],
-          afterEvidence: [],
+          beforeEvidence: beforeEvidence ?? [],
+          afterEvidence: afterEvidence ?? [],
           result,
           ...(evaluation ? { evaluation } : {}),
           ...(normalizationDiagnostics ? { normalizationDiagnostics } : {}),
@@ -265,5 +267,75 @@ describe("live collector — commit semantics (v3.3.1)", () => {
       "only continue/stop decisions commit — terminate/backtrack must not inflate it");
     assert.equal(live.terminatedRounds, 1);
     assert.equal(live.rejectedAttempts, 0);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v3.9.2 — file reconciliation metrics
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("v3.9.2 — files reconciliation metrics", () => {
+  const git = (
+    phase: "before" | "after",
+    files: string[],
+    fingerprints: Record<string, string>,
+  ) => ({
+    schemaVersion: 2 as const,
+    providerId: "git",
+    kind: "git" as const,
+    phase,
+    startedAt: 0,
+    finishedAt: 0,
+    status: "observed" as const,
+    files,
+    data: {
+      dirty: files,
+      fingerprints,
+      coverage: "tracked_and_non_ignored_untracked" as const,
+    },
+  });
+  const fields = [
+    "success", "output_summary", "constraint_violations", "should_continue",
+    "execution_report.files_changed",
+  ];
+  const evaluation = (filesChanged: string[]) => ({
+    success: false,
+    output_summary: "made progress",
+    constraint_violations: [],
+    should_continue: true,
+    execution_report: {
+      files_changed: filesChanged,
+      tests_reported: null,
+      criterion_claims: [],
+      contract_item_claims: [],
+    },
+  });
+  const result = {
+    action: "continue",
+    roundSuccess: true,
+    gateContradicted: false,
+    verificationFlags: [],
+  };
+
+  it("counts reconciliation statuses from the shared delta", () => {
+    const entries = [
+      committedFeedback(
+        1, result, "l1", fields, evaluation(["a.ts"]), [],
+        [git("before", [], {})],
+        [git("after", ["a.ts"], { "a.ts": "m:1" })],
+      ),
+      committedFeedback(
+        2, result, "l1", fields, evaluation(["a.ts", "ghost.ts"]), [],
+        [git("before", ["a.ts"], { "a.ts": "m:1" })],
+        [git("after", ["a.ts"], { "a.ts": "m:1" })],
+      ),
+    ];
+    const metrics = derivePolicyMetrics("metrics-loop", entries);
+    assert.equal(metrics.filesChangedRounds, 1);
+    assert.equal(metrics.filesChangedTotal, 1);
+    assert.equal(metrics.filesReconciliation.match, 1);
+    assert.equal(metrics.filesReconciliation.mismatch, 1);
+    assert.equal(metrics.filesReconciliation.unknown, 0);
+    assert.equal(metrics.filesReconciliation.not_applicable, 0);
   });
 });

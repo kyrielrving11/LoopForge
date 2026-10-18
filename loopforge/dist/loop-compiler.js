@@ -15,7 +15,7 @@ import { claimedMetCriteria, claimedRemainingCriteria } from "./self-eval.js";
 import { assemblePromptArtifact } from "./prompt-assembler.js";
 import { renderSelfEvalBlock, } from "./submission-guidance.js";
 import { decidePromptLevel, } from "./prompt-policy.js";
-import { deriveCriterionId, deriveItemId, isCriterionId, normalizeText, unique, entryRound, } from "./token-utils.js";
+import { criterionRefMatches, deriveCriterionId, deriveItemId, normalizeText, unique, entryRound, } from "./token-utils.js";
 function contextEntries(context) {
     if (!context || !Array.isArray(context.results))
         return [];
@@ -320,21 +320,8 @@ criterionFacts = []) {
  *  EXACTLY equal after normalization (v3.8.1 — the similarity fallback is
  *  gone, so a paraphrase is a different criterion). */
 export function criteriaMatch(a, b) {
-    const aIsId = isCriterionId(a);
-    const bIsId = isCriterionId(b);
-    // Both are IDs — exact string comparison
-    if (aIsId && bIsId)
-        return a === b;
-    // One is an ID — derive ID from the other and compare
-    if (aIsId)
-        return a === deriveCriterionId(b);
-    if (bIsId)
-        return deriveCriterionId(a) === b;
-    // v3.8.1: normalized text must be EXACTLY equal. The former Jaccard
-    // fallback let two merely-similar criterion strings count as the same
-    // criterion, which could fuse distinct criteria (and suppress or invent a
-    // criteria milestone) on a similarity score rather than on an identity.
-    return normalizeText(a) === normalizeText(b);
+    // v3.9.2: ONE identity rule, shared with the prompt and submission boundary.
+    return criterionRefMatches(a, b);
 }
 /** Detect newly met criteria by comparing the current entry's
  *  met criterion_claims against the previous entry's.
@@ -824,6 +811,7 @@ export function compileLoop(request, context) {
             verificationFlags: request.verification_flags ?? [],
             recovery: recoveryBrief !== undefined,
             gateEnabled: policy.gate.enabled === true,
+            criteria: criterionStatuses,
         }),
         fullStateMarkdown: l2Pointer ? undefined : markdown,
         // v2.9: Model's information needs from the previous round's SelfEvaluation

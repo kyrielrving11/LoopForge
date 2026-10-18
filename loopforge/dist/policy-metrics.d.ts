@@ -1,6 +1,7 @@
 /** In-process policy effectiveness metrics with no runtime dependency. */
 import type { RoundProcessResult } from "./round-coordinator.js";
 import type { VaultEntry } from "./loop-store.js";
+import type { FilesReconciliation } from "./protocol.js";
 export interface PolicyMetricsSnapshot {
     loopId?: string;
     roundAttempts: number;
@@ -40,6 +41,9 @@ export interface PolicyMetricsSnapshot {
     retainedFieldUsage: Record<string, number>;
     fieldAccountingRounds: number;
     fieldAccountingIncompleteRounds: number;
+    /** v3.9.2: read-only file-report reconciliation counts, derived from the
+     *  same helper the gate and receipt use. */
+    filesReconciliation: Record<FilesReconciliation["status"], number>;
     acceptanceRate: number;
     evidenceAvailabilityRate: number;
 }

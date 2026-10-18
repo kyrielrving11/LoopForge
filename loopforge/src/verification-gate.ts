@@ -23,6 +23,7 @@ import type { VaultEntry } from "./loop-store.js";
 import type { MachineObservation } from "./protocol.js";
 import type { GitDeltaState, ObservationDelta } from "./evidence-provider.js";
 import { afterObservations, gitDeltaState } from "./evidence-provider.js";
+import { deriveFilesReconciliation } from "./files-reconciliation.js";
 import { isPassedAfterObservation } from "./evidence-provider.js";
 import type { EntrypointDrift } from "./evidence-provider.js";
 import { getPolicy } from "./policy.js";
@@ -228,9 +229,6 @@ export interface EvidenceStatus {
   commandVerified: boolean;
   /** Agent-reported tests_reported agree with a passed command's parsed stdout. */
   testsMachineBacked: boolean;
-  /** Agent-reported files_changed equals the git change set exactly; null
-   *  when the machine change set is not observable. */
-  reportedFilesMatch: boolean | null;
 }
 
 /** v3.3: Detect verification-domain tampering for a command observation.
@@ -305,16 +303,6 @@ export function deriveEvidenceStatus(
       parsed.skipped === reported.skipped;
   }
 
-  // reportedFilesMatch: agent-reported files_changed equals the observed
-  // change set. Unknown is null, not false.
-  let reportedFilesMatch: boolean | null = null;
-  if (git.state === "observed" && selfEval.execution_report) {
-    const reportedSet = [...(selfEval.execution_report.files_changed ?? [])].sort();
-    const actualSet = [...git.changedFiles].sort();
-    reportedFilesMatch = reportedSet.length === actualSet.length &&
-      reportedSet.every((file, index) => file === actualSet[index]);
-  }
-
   // v3.3: git observation alone is no longer "verified" — the machine seeing
   // file changes is not the machine verifying success. Only a passed
   // after-phase command (observed by the runtime itself) upgrades a round.
@@ -333,7 +321,6 @@ export function deriveEvidenceStatus(
     gitChangeState: git.state,
     commandVerified,
     testsMachineBacked,
-    reportedFilesMatch,
   };
 }
 
@@ -691,42 +678,25 @@ function checkEvidenceIntegrity(
   evidenceDeltas: ReadonlyArray<ObservationDelta>,
 ): VerificationFlag | null {
   if (!selfEval.execution_report) return null;
+  const reconciliation = deriveFilesReconciliation(
+    selfEval.execution_report,
+    evidenceDeltas,
+  );
+  if (reconciliation.status !== "mismatch") return null;
 
-  const git = gitDeltaState(evidenceDeltas);
-  // An unknown change set cannot contradict the agent's report.
-  if (git.state !== "observed") return null;
-
-  const reported = [...(selfEval.execution_report.files_changed ?? [])].sort();
-  const actual = [...git.changedFiles].sort();
-
-  if (reported.length === 0 && actual.length === 0) return null;
-
-  if (reported.length === 0 && actual.length > 0) {
-    return makeVerificationFlag({
-      severity: "warn",
-      field: "files_changed",
-      check: CHECK_EVIDENCE_INTEGRITY,
-      detail:
-        `Agent reported no files changed but evidence shows: ${actual.join(", ")}`,
-    });
+  const parts: string[] = [];
+  if (reconciliation.unreported.length > 0) {
+    parts.push(`unreported: [${reconciliation.unreported.join(", ")}]`);
   }
-
-  const ghostFiles = reported.filter((f) => !actual.includes(f));
-  const missedFiles = actual.filter((f) => !reported.includes(f));
-
-  if (ghostFiles.length > 0 || missedFiles.length > 0) {
-    const parts: string[] = [];
-    if (ghostFiles.length > 0) parts.push(`unconfirmed: [${ghostFiles.join(", ")}]`);
-    if (missedFiles.length > 0) parts.push(`unreported: [${missedFiles.join(", ")}]`);
-    return makeVerificationFlag({
-      severity: "warn",
-      field: "files_changed",
-      check: CHECK_EVIDENCE_INTEGRITY,
-      detail: `Agent files_changed doesn't match evidence: ${parts.join("; ")}`,
-    });
+  if (reconciliation.unconfirmed.length > 0) {
+    parts.push(`unconfirmed: [${reconciliation.unconfirmed.join(", ")}]`);
   }
-
-  return null;
+  return makeVerificationFlag({
+    severity: "warn",
+    field: "files_changed",
+    check: CHECK_EVIDENCE_INTEGRITY,
+    detail: `Agent files_changed doesn't match evidence: ${parts.join("; ")}`,
+  });
 }
 
 /** A required, explicitly configured verification command is authoritative

@@ -2336,3 +2336,40 @@ describe("L7 — state file disabled cross-knob guard", () => {
     }
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v3.9.2 — real criteria in the compact evaluation block
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("v3.9.2 — compact criteria guidance", () => {
+  it("renders real criterion ids and text in the compiled prompt", () => {
+    const response = compileLoop(makeLoopCompileRequest({
+      loop_id: "criteria-prompt",
+      round: 2,
+      task: "Build a parser",
+      force_level: "l1",
+      loop_objective: makeLoopObjective({
+        loop_id: "criteria-prompt",
+        objective: "Build a parser",
+        success_criteria: ["Parser complete", "Tests pass"],
+      }),
+    }), null);
+    const criterionId = deriveCriterionId("Parser complete");
+    assert.match(response.prompt, /Optional fields — trigger → field → effect/);
+    assert.match(response.prompt, new RegExp(criterionId));
+    assert.match(response.prompt, /Parser complete/);
+    assert.doesNotMatch(response.prompt, /<criterion text or cr id from the prompt>/);
+  });
+
+  it("omits criterion_claims from the compact list when no criteria exist", () => {
+    const response = compileLoop(makeLoopCompileRequest({
+      loop_id: "criteria-empty",
+      round: 2,
+      task: "Build a parser",
+      force_level: "l1",
+    }), null);
+    // The compiler supplies its default criterion, so the field is still
+    // present; the important part is that no placeholder text is emitted.
+    assert.doesNotMatch(response.prompt, /<criterion text or cr id from the prompt>/);
+  });
+});

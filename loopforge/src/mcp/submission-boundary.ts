@@ -101,8 +101,8 @@ export function compileSessionContext(
 export function knownSubGoalsFor(
   session: CompileContextSession,
   emerged: string[],
+  response: LoopForgeResponse | null = compileSessionContext(session),
 ): SubGoal[] | null {
-  const response = compileSessionContext(session);
   if (!response?.sub_goals) return null;
   const known = [...response.sub_goals];
   for (const item of deriveEmergedItems(session.loopId, session.currentRound, emerged)) {
@@ -244,7 +244,8 @@ export function validateSubmission(
       },
     };
   }
-  const known = session ? knownSubGoalsFor(session, emerged) : null;
+  const compileResponse = session ? compileSessionContext(session) : null;
+  const known = session ? knownSubGoalsFor(session, emerged, compileResponse) : null;
   const updates = parseSubGoalUpdates(submission.subgoal_updates);
   if (updates.length > 0 && known) {
     const referentialErrors = validateSubGoalUpdates(known, updates).map((error) => ({
@@ -291,7 +292,23 @@ export function validateSubmission(
       },
     };
   }
-  return { ok: true, ...normalizeSelfEvaluation(submission) };
+  return {
+    ok: true,
+    ...normalizeSelfEvaluation(submission, {
+      knownCriterionRefs: knownCriterionRefsFor(compileResponse),
+    }),
+  };
+}
+
+function knownCriterionRefsFor(
+  response: LoopForgeResponse | null,
+): ReadonlyArray<{ id: string; text: string }> | null {
+  return Array.isArray(response?.criterion_statuses)
+    ? response.criterion_statuses.map((criterion) => ({
+        id: criterion.id,
+        text: criterion.text,
+      }))
+    : null;
 }
 
 function contractShapeErrors(

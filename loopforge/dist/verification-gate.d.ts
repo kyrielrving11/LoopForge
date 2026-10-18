@@ -100,9 +100,6 @@ export interface EvidenceStatus {
     commandVerified: boolean;
     /** Agent-reported tests_reported agree with a passed command's parsed stdout. */
     testsMachineBacked: boolean;
-    /** Agent-reported files_changed equals the git change set exactly; null
-     *  when the machine change set is not observable. */
-    reportedFilesMatch: boolean | null;
 }
 /** v3.2: Derive the machine-verification status of a round. The verification
  *  capability is modeled explicitly (verified / unavailable / absent) instead

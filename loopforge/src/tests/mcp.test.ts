@@ -6,7 +6,12 @@
 
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { MemoryLoopStore, installTestCommandProvider, criterionClaims } from "./_helpers.js";
+import {
+  MemoryLoopStore,
+  installTestCommandProvider,
+  criterionClaims,
+  DEFAULT_SUCCESS_CRITERION,
+} from "./_helpers.js";
 import { queryLoopEntries } from "../loop-store.js";
 import type { LoopSessionDocument } from "../loop-store.js";
 import { deriveSubGoalId } from "../subgoal-state.js";
@@ -1140,7 +1145,7 @@ describe("MCP P0 lifecycle regressions", () => {
       execution_report: {
         files_changed: ["src/change.ts"],
         tests_reported: { passed: 1, failed: 0, skipped: 0 },
-        criterion_claims: criterionClaims([], ["still open"]),
+        criterion_claims: criterionClaims([], [DEFAULT_SUCCESS_CRITERION]),
       },
     };
     const rejected = await mgr.advance(
@@ -2066,7 +2071,7 @@ describe("MCP — Round Contract flow", async () => {
       execution_report: {
         files_changed: ["src/auth.ts"],
         tests_reported: { passed: 1, failed: 0, skipped: 0 },
-        criterion_claims: criterionClaims([], ["cr-login-works"]),
+        criterion_claims: criterionClaims([], [DEFAULT_SUCCESS_CRITERION]),
       },
     });
     assert.equal(rejected.enforcementAction, "reject");

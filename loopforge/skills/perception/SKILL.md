@@ -112,6 +112,7 @@ matching field only when it did; omit it otherwise.
 | You delegated work | `worker_results` | Saves the report and delegation journal entry; does **not** promote worker discoveries |
 | You are planning the next slice | `round_contract` | Becomes active only after this round commits |
 | A contract item progressed | `execution_report.contract_item_claims` | Starts machine evaluation; the item is verified only when its bound commands pass |
+| A success criterion moved | `execution_report.criterion_claims` | Advisory; cite the real `cr-` id/text from the prompt. Unknown references are dropped with a diagnostic; machine evidence still decides |
 | You need context emphasized | `prompt_requests` | Exact-match reorder or confusion alerts in the next prompt; never long-term knowledge |
 | You reached a meaningful boundary | `compression_checkpoint`, `checkpoint_label` | Creates a recoverable milestone |
 | You are blocked or stopping | `outcome`, `blocker`, `stop_reason`, `no_change_reason` | Runs the corresponding stop/lifecycle rule |
@@ -122,7 +123,10 @@ matching field only when it did; omit it otherwise.
 `execution_report.files_changed` is the **boundary net change**: paths whose
 content or file type differs between round preparation and this submission,
 including deletions. A commit alone adds no entry when content is unchanged.
-Do not list gitignored paths merely to look complete.
+Do not list gitignored paths merely to look complete. The receipt's
+`files_reconciliation` block compares your report with the machine change set
+and reports match/mismatch/unknown/not_applicable; an unobservable Git boundary
+is `unknown`, never an empty diff.
 
 `emerged_subtasks` is the only sub-goal creation channel. It contains plain
 descriptions, never `sg-` IDs. `subgoal_updates` changes existing active IDs;
@@ -153,10 +157,11 @@ satisfy a coverage check, and do not put a guessed evaluation in free text.
 When no event occurred, omit the field.
 
 Each prepared response carries `submission_guidance` with the real contract
-item ids/statuses, active sub-goal ids, usable commands and the fields that
-apply now. Each submission returns `submission_receipt`, which separates:
-reports that were saved, derived state that actually changed, and machine
-verification results. A report marked `saved` is not a verified fact.
+item ids/statuses, active sub-goal ids, real criterion ids/text, usable
+commands and the fields that apply now. Each submission returns
+`submission_receipt`, which separates: reports that were saved, derived state
+that actually changed, and machine verification results, plus the structured
+`files_reconciliation` block. A report marked `saved` is not a verified fact.
 
 ## IDs and contracts
 

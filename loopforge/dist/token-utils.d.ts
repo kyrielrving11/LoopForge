@@ -38,6 +38,13 @@ export declare function deriveCriterionId(text: string): string;
 /** The cr-XXXXXXXX shape — the ONE predicate every criterion-reference reader
  *  uses (round-contract.ts kept an inline copy before v3.8.1). */
 export declare function isCriterionId(ref: string): boolean;
+/** v3.9.2: ONE criterion identity rule for the compiler, the prompt and the
+ *  submission boundary. A reference matches a criterion when it is the real
+ *  cr- id or the exact normalized criterion text. Never similarity. */
+export declare function criterionRefMatches(ref: string, criterion: string | {
+    id?: string;
+    text: string;
+}): boolean;
 /** Normalize one contract text field for identity purposes. */
 export declare function normalizeText(text: string): string;
 /** The contract-item fields that participate in rci-/rc- identity. Structural

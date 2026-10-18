@@ -87,6 +87,13 @@ with its diagnostic visible. `attemptedFieldUsage` and `retainedFieldUsage` are
 separate metrics; `retainedFieldUsage` is the adoption metric and must be shown
 with its round coverage, never as a bare count.
 
+`criterion_claims` references are matched against the criterion set the compile
+rendered: a real `cr-` id or the exact normalized text. A reference the prompt
+did not render is dropped with a diagnostic (`unknown_id`, or
+`all_entries_dropped` when none survive), never a rejection. An unobservable
+reference space fails open; an observed empty one drops every claim. The
+display cap does not narrow validation.
+
 A success claim with an empty/missing `execution_report` is a reporting gap
 (warn), never an acceptance gate: acceptance is decided by machine evidence and
 contract rules, not optional-field coverage. The machine-evidence warn still
@@ -223,13 +230,26 @@ the prompt's evaluation block, `submission_guidance` and the receipt all read
 it; none owns a second copy. Prompt examples may cite only real ids rendered by
 the current prompt or the live guidance — never a fabricated `sg-`/`rci-` id.
 
+The prompt's evaluation block uses a compact trigger checklist built from the
+same `GUIDES` table. `isFieldApplicable` is the one semantic applicability rule;
+`isFieldPrompted` is the level-aware presentation subset. There is no
+hand-maintained optional-field list. Real criterion ids/text come from the
+compile's `criterion_statuses`; the full legal shapes remain in
+`submission_guidance`. Optional fields are opportunities, not a coverage
+checklist — omission stays correct. `round_contract`, `contract_item_claims`
+and `subgoal_updates` keep their dedicated renderers with real ids.
+
 `submission_guidance` and `submission_receipt` are read-only projections of
 current/committed facts. They are not persisted as a second ledger. The
 receipt separates saved reports, derived-state effects and machine verification;
 a rejected/terminated attempt is `not_applied`, and a backtrack reports only
-what it actually preserved. `promptRequestEffects` records what the CURRENT
-prompt did — it must never be read by compile or decision code as an
-instruction for a later prompt.
+what it actually preserved. `submission_receipt.files_reconciliation` is the
+one reported-vs-observed comparison (`deriveFilesReconciliation`) over the
+shared `ObservationDelta.changedFiles`: exact path sets, `[]` = observed no
+change, `null` = unknown, and `unknown`/`not_applicable` never become a
+mismatch. It is receipt-only and never next-prompt input. `promptRequestEffects`
+records what the CURRENT prompt did — it must never be read by compile or
+decision code as an instruction for a later prompt.
 
 L0, L1, and L2 select prompt density only. L2 is entered for factual round
 conditions such as first round, plan boundary, committed recovery, machine
@@ -310,6 +330,12 @@ run the scripted prepack in the clean mirror.
 - Prompt changes: cover budgets, hashing, density levels, same-round retry,
   protected overflow, deterministic truncation, rendered-vs-dropped priority,
   and identical-input determinism.
+- Field-decision changes: cover the compact trigger checklist (max seven
+  fields), semantic applicability vs level-aware prompting, real `cr-` ids and
+  texts, the L0 subset, no fabricated ids, and omission-stays-correct.
+- Criterion-claim changes: cover real-id and exact-text matches, unknown
+  references dropped with diagnostics, partial/all drops, fail-open on an
+  unobservable reference space, and an observed-empty space.
 - Policy changes: cover schema version and unknown-key rejection.
 - Protocol or evaluation changes: cover schema, handlers, lifecycle, malformed
   input, same-round retry, and unchanged state.
@@ -317,6 +343,10 @@ run the scripted prepack in the clean mirror.
   pause, stop, and restart.
 - Evidence changes: cover timeout, abort, unavailable provider, output caps,
   workspace boundaries, and contradictions.
+- Files-reconciliation changes: cover match/mismatch/unknown/not_applicable,
+  omitted vs explicit-empty reports, duplicate reported paths, multiple Git
+  deltas, exact-path semantics, gate/receipt/metrics agreement, and live vs
+  committed rebuilds.
 - MCP changes: cover primitive JSON arguments, strict core arguments,
   structured output, uniform envelopes, stable error codes, and stdio.
 - Contract changes: cover identity stability, item statuses, verified-fact

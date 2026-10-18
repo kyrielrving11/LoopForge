@@ -137,6 +137,8 @@ describe("E2E backtrack lifecycle", () => {
   });
 
   it("step 5 — round 4 triggers progress_stall REJECT (first occurrence)", async () => {
+    const before = mgr.get(sessionId)!;
+    const roundId = before.roundSnapshot?.roundId;
     const result = await mgr.advance(
       sessionId,
       "Round 4 output",
@@ -150,6 +152,15 @@ describe("E2E backtrack lifecycle", () => {
       `expected enforcementAction=reject (first stall), got ${result.enforcementAction} (reason: ${result.enforcementReason ?? "none"})`,
     );
     assert.equal(result.round, 4, "reject must not advance the round counter");
+    assert.equal(mgr.get(sessionId)!.roundSnapshot?.roundId, roundId,
+      "reject keeps the logical round identity for retry");
+    const feedback = queryLoopEntries(
+      new FileLoopStore(join(storeDir, ".loopforge")),
+      loopId,
+      { prefix: `loop:${loopId}:r4`, feedbackOnly: true },
+    );
+    assert.equal(feedback.length, 0,
+      "a rejected attempt must not become committed round history");
   });
 
   it("step 6 — round 4 retry triggers BACKTRACK (second consecutive stall)", async () => {

@@ -28,6 +28,7 @@ import {
   DIAG_ALL_ENTRIES_DROPPED,
   DIAG_EMPTY_VALUE,
 } from "./submission-diagnostics.js";
+import { criterionRefMatches } from "./token-utils.js";
 
 // ── Diagnostics ───────────────────────────────────────────────────────────
 
@@ -41,6 +42,13 @@ export interface DiagnosticSink {
     handling: SubmissionDiagnosticHandling,
     detail: string,
   ): void;
+}
+
+/** v3.9.2: reference spaces that only the submission boundary can observe.
+ *  `null`/undefined = the space was not observable (fail open); an empty array
+ *  = an observed empty space (every reference is unknown). */
+export interface NormalizationFacts {
+  knownCriterionRefs?: ReadonlyArray<{ id: string; text: string }> | null;
 }
 
 const DIAGNOSTICS_LIMIT = 100;
@@ -237,6 +245,7 @@ function parseRetroactiveClaims(
 export function parseExecutionReport(
   raw: Record<string, unknown> | undefined | null,
   sink?: DiagnosticSink,
+  knownCriterionRefs?: ReadonlyArray<{ id: string; text: string }> | null,
 ): ExecutionReport | undefined {
   if (raw === undefined || raw === null) return undefined;
   if (typeof raw !== "object" || Array.isArray(raw)) {
@@ -282,7 +291,7 @@ export function parseExecutionReport(
     files_changed: boundedStringArray(
       raw.files_changed, 200, 500, sink, "execution_report.files_changed"),
     tests_reported: tests,
-    criterion_claims: parseCriterionClaims(raw.criterion_claims, sink),
+    criterion_claims: parseCriterionClaims(raw.criterion_claims, sink, knownCriterionRefs),
     contract_item_claims: parseContractItemClaims(raw.contract_item_claims, sink),
   });
 }
@@ -311,6 +320,7 @@ export function claimedRemainingCriteria(
 function parseCriterionClaims(
   raw: unknown,
   sink?: DiagnosticSink,
+  knownCriterionRefs?: ReadonlyArray<{ id: string; text: string }> | null,
 ): CriterionClaim[] {
   if (raw === undefined || raw === null) return [];
   if (!Array.isArray(raw)) {
@@ -320,6 +330,7 @@ function parseCriterionClaims(
   }
   const claims: CriterionClaim[] = [];
   let invalid = 0;
+  let unknown = 0;
   for (let index = 0; index < raw.length; index++) {
     if (claims.length >= 100) break;
     const item = raw[index];
@@ -343,17 +354,35 @@ function parseCriterionClaims(
       sink?.push(`execution_report.criterion_claims[${index}].criterion_id`,
         "truncated", "truncated", "longer than 500 chars; truncated to the limit");
     }
+    const criterionId = trimmed.slice(0, 500);
+    if (knownCriterionRefs !== undefined && knownCriterionRefs !== null &&
+        !knownCriterionRefs.some((criterion) => criterionRefMatches(criterionId, criterion))) {
+      unknown++;
+      continue;
+    }
     claims.push({
-      criterion_id: trimmed.slice(0, 500),
+      criterion_id: criterionId,
       outcome: entry.outcome,
     });
   }
-  if (invalid > 0) {
-    sink?.push("execution_report.criterion_claims",
-      claims.length === 0 ? DIAG_ALL_ENTRIES_DROPPED : "invalid_entry", "dropped",
-      claims.length === 0
-        ? `all ${invalid} claims were malformed; the value was dropped (advisory)`
-        : `${invalid} malformed claim${invalid === 1 ? "" : "s"} dropped (advisory)`);
+  if (invalid > 0 || unknown > 0) {
+    if (claims.length === 0) {
+      const parts: string[] = [];
+      if (invalid > 0) parts.push(`${invalid} malformed`);
+      if (unknown > 0) parts.push(`${unknown} unknown criterion`);
+      sink?.push("execution_report.criterion_claims", DIAG_ALL_ENTRIES_DROPPED, "dropped",
+        `all ${invalid + unknown} claims were dropped (${parts.join(", ")}; advisory)`);
+    } else {
+      if (invalid > 0) {
+        sink?.push("execution_report.criterion_claims", "invalid_entry", "dropped",
+          `${invalid} malformed claim${invalid === 1 ? "" : "s"} dropped (advisory)`);
+      }
+      if (unknown > 0) {
+        sink?.push("execution_report.criterion_claims", "unknown_id", "dropped",
+          `${unknown} claim${unknown === 1 ? "" : "s"} cited a criterion the ` +
+          "prompt did not render; dropped (advisory)");
+      }
+    }
   }
   if (raw.length > 100) {
     sink?.push("execution_report.criterion_claims", "too_many", "truncated",
@@ -1077,10 +1106,12 @@ export function validateContractShape(
 export function buildSelfEvaluation(
   raw: Record<string, unknown>,
   sink?: DiagnosticSink,
+  facts?: NormalizationFacts,
 ): SelfEvaluation {
   const executionReport = parseExecutionReport(
     raw.execution_report as Record<string, unknown> | undefined,
     sink,
+    facts?.knownCriterionRefs,
   );
 
   const retractedConstraints = boundedStringArray(
@@ -1210,6 +1241,7 @@ export interface NormalizationResult {
  *  retired fields are diagnosed and dropped; they are never silently accepted. */
 export function normalizeSelfEvaluation(
   raw: Record<string, unknown>,
+  facts?: NormalizationFacts,
 ): NormalizationResult {
   const collector = new DiagnosticsCollector();
   for (const key of unknownTopLevelFields(raw)) {
@@ -1220,7 +1252,7 @@ export function normalizeSelfEvaluation(
       retiredFieldDetail(key) ?? "not a declared evaluation field; it was dropped",
     );
   }
-  const evaluation = buildSelfEvaluation(raw, collector);
+  const evaluation = buildSelfEvaluation(raw, collector, facts);
   return {
     evaluation,
     diagnostics: collector.finish(),

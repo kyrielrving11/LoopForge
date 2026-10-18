@@ -4,6 +4,9 @@ import type { RoundProcessResult } from "./round-coordinator.js";
 import type { VaultEntry } from "./loop-store.js";
 import { observedGitHead, readOnlyRounds } from "./committed-round.js";
 import { deriveFieldAccounting } from "./field-accounting.js";
+import { deriveFilesReconciliation } from "./files-reconciliation.js";
+import { gitDeltaState } from "./evidence-provider.js";
+import type { FilesReconciliation } from "./protocol.js";
 
 export interface PolicyMetricsSnapshot {
   loopId?: string;
@@ -44,6 +47,9 @@ export interface PolicyMetricsSnapshot {
   retainedFieldUsage: Record<string, number>;
   fieldAccountingRounds: number;
   fieldAccountingIncompleteRounds: number;
+  /** v3.9.2: read-only file-report reconciliation counts, derived from the
+   *  same helper the gate and receipt use. */
+  filesReconciliation: Record<FilesReconciliation["status"], number>;
   acceptanceRate: number;
   evidenceAvailabilityRate: number;
 }
@@ -84,6 +90,12 @@ function empty(loopId?: string): MutableMetrics {
     retainedFieldUsage: {},
     fieldAccountingRounds: 0,
     fieldAccountingIncompleteRounds: 0,
+    filesReconciliation: {
+      match: 0,
+      mismatch: 0,
+      unknown: 0,
+      not_applicable: 0,
+    },
   };
 }
 
@@ -192,6 +204,7 @@ function snapshotFrom(source: MutableMetrics): PolicyMetricsSnapshot {
     enforcementReasons: { ...source.enforcementReasons },
     evidenceOutcomesByProvider: { ...source.evidenceOutcomesByProvider },
     levels: { ...source.levels },
+    filesReconciliation: { ...source.filesReconciliation },
     acceptanceRate: attempts === 0 ? 0 : source.committedRounds / attempts,
     evidenceAvailabilityRate: evidence === 0 ? 0 : source.evidenceAvailable / evidence,
     // evidenceLatencyMs is a raw sum; derive the average for consumers
@@ -229,11 +242,20 @@ export function derivePolicyMetrics(
     }
     // v3.9.1: the shared delta is the only file-change source.
     if (round.evidenceIncomplete) metric.unobservableGitRounds++;
-    const gitDelta = round.observationDelta.find((item) => item.kind === "git");
-    if (gitDelta?.changedFiles && gitDelta.changedFiles.length > 0) {
+    const git = gitDeltaState(round.observationDelta);
+    if (git.state === "observed" && git.changedFiles.size > 0) {
       metric.filesChangedRounds++;
-      metric.filesChangedTotal += gitDelta.changedFiles.length;
+      metric.filesChangedTotal += git.changedFiles.size;
     }
+    const reconciliation = deriveFilesReconciliation(
+      round.executionReport,
+      round.observationDelta,
+      {
+        attempted: round.submittedFields.includes(
+          "execution_report.files_changed"),
+      },
+    );
+    metric.filesReconciliation[reconciliation.status]++;
     const headBefore = observedGitHead(
       round.beforeEvidence.find((item) => item.providerId === "git"),
     );
@@ -314,6 +336,7 @@ export function mergePolicyMetrics(
     retainedFieldUsage: { ...derived.retainedFieldUsage },
     fieldAccountingRounds: derived.fieldAccountingRounds,
     fieldAccountingIncompleteRounds: derived.fieldAccountingIncompleteRounds,
+    filesReconciliation: { ...derived.filesReconciliation },
   };
   return snapshotFrom(merged);
 }

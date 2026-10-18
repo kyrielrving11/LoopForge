@@ -19,7 +19,12 @@ import { derivationRounds } from "../committed-round.js";
 import { FileLoopStore } from "../loop-store.js";
 import type { VaultEntry } from "../loop-store.js";
 import { SessionManager } from "../mcp/session.js";
-import { MemoryLoopStore, criterionClaims, installTestCommandProvider } from "./_helpers.js";
+import {
+  MemoryLoopStore,
+  criterionClaims,
+  DEFAULT_SUCCESS_CRITERION,
+  installTestCommandProvider,
+} from "./_helpers.js";
 import { resetPolicy } from "../policy.js";
 import { Mode, type LoopForgeRequest, type SelfEvaluation } from "../protocol.js";
 
@@ -292,7 +297,7 @@ describe("v3.5.1 — hydration stamps attempt/roundEvidence for the compile view
       execution_report: {
         files_changed: [],
         tests_reported: { passed: 0, failed: 0, skipped: 0 },
-        criterion_claims: criterionClaims([], ["more"]),
+        criterion_claims: criterionClaims([], [DEFAULT_SUCCESS_CRITERION]),
       },
     });
     assert.equal(rejected.enforcementAction, "reject");

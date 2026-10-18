@@ -267,6 +267,23 @@ export interface SubmissionDiagnostic {
 }
 /** v3.9.1: How a submitted field was handled in the round's receipt. */
 export type SubmissionReportHandling = "saved" | "saved_not_expanded" | "dropped" | "truncated" | "normalized" | "not_applied";
+/** v3.9.2: The machine boundary the agent's files_changed report is compared
+ *  against. Receipt-only; never persisted, never next-prompt input. */
+export declare const FILES_RECONCILIATION_SCOPE: "tracked_and_non_ignored_untracked";
+export interface FilesReconciliation {
+    status: "match" | "mismatch" | "unknown" | "not_applicable";
+    scope: typeof FILES_RECONCILIATION_SCOPE;
+    /** True when the raw submission named execution_report.files_changed. */
+    attempted: boolean;
+    /** Submitted paths, first-seen order, exact strings, duplicates retained. */
+    reported: string[];
+    /** Observed Git change set, sorted; null when unknown/not applicable. */
+    observed: string[] | null;
+    /** observed - reported, sorted. */
+    unreported: string[];
+    /** reported - observed, sorted. */
+    unconfirmed: string[];
+}
 /** v3.9.1: The machine's report of what one submission DID. It is derived
  *  from the transaction + the shared read model; it is never a second ledger. */
 export interface SubmissionReceipt {
@@ -333,6 +350,8 @@ export interface SubmissionReceipt {
             status: ContractItemStatus;
         }>;
     };
+    /** v3.9.2: agent report vs the shared Git change set. Read-only. */
+    files_reconciliation: FilesReconciliation;
     prompt: {
         level: "l0" | "l1" | "l2";
         dropped_sections: string[];
@@ -372,6 +391,12 @@ export interface SubmissionGuidance {
         id: string;
         description: string;
         status: string;
+    }>;
+    /** Current real criteria, for criterion_claims selection/examples. */
+    criteria: Array<{
+        id: string;
+        text: string;
+        status: CriterionStatus["status"];
     }>;
     recovery: {
         required: boolean;

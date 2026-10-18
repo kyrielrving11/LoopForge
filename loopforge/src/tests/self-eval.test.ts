@@ -632,3 +632,81 @@ describe("v3.9.1 — normalization diagnostics", () => {
     assert.equal(result.evaluation.execution_report, undefined);
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v3.9.2 — criterion claim reference filtering
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("v3.9.2 — criterion claim reference filtering", () => {
+  const core = {
+    success: false,
+    output_summary: "made progress",
+    constraint_violations: [],
+    should_continue: true,
+  };
+  const known = { id: "cr-12345678", text: "All tests pass" };
+  const payload = (claims: Array<{ criterion_id: string; outcome: string }>) => ({
+    ...core,
+    execution_report: { criterion_claims: claims },
+  });
+
+  it("drops an unknown reference with an all-entries diagnostic", () => {
+    const result = normalizeSelfEvaluation(
+      payload([{ criterion_id: "cr-deadbeef", outcome: "met" }]),
+      { knownCriterionRefs: [known] },
+    );
+    assert.deepEqual(result.evaluation.execution_report?.criterion_claims, []);
+    assert.ok(result.diagnostics.some((diagnostic) =>
+      diagnostic.path === "execution_report.criterion_claims" &&
+      diagnostic.code === "all_entries_dropped" &&
+      diagnostic.handling === "dropped"));
+  });
+
+  it("keeps a real id and an exact criterion text", () => {
+    const result = normalizeSelfEvaluation(
+      payload([
+        { criterion_id: "cr-12345678", outcome: "met" },
+        { criterion_id: "All tests pass", outcome: "remaining" },
+      ]),
+      { knownCriterionRefs: [known] },
+    );
+    assert.equal(result.evaluation.execution_report?.criterion_claims?.length, 2);
+    assert.deepEqual(result.diagnostics, []);
+  });
+
+  it("drops only the unknown part of a mixed payload", () => {
+    const result = normalizeSelfEvaluation(
+      payload([
+        { criterion_id: "cr-12345678", outcome: "met" },
+        { criterion_id: "cr-deadbeef", outcome: "remaining" },
+      ]),
+      { knownCriterionRefs: [known] },
+    );
+    assert.deepEqual(result.evaluation.execution_report?.criterion_claims, [
+      { criterion_id: "cr-12345678", outcome: "met" },
+    ]);
+    assert.ok(result.diagnostics.some((diagnostic) =>
+      diagnostic.path === "execution_report.criterion_claims" &&
+      diagnostic.code === "unknown_id" &&
+      diagnostic.handling === "dropped"));
+  });
+
+  it("fails open when the reference space is unobservable", () => {
+    const result = normalizeSelfEvaluation(
+      payload([{ criterion_id: "cr-deadbeef", outcome: "met" }]),
+      { knownCriterionRefs: null },
+    );
+    assert.equal(result.evaluation.execution_report?.criterion_claims?.length, 1);
+    assert.deepEqual(result.diagnostics, []);
+  });
+
+  it("drops every claim when the reference space is observed and empty", () => {
+    const result = normalizeSelfEvaluation(
+      payload([{ criterion_id: "cr-12345678", outcome: "met" }]),
+      { knownCriterionRefs: [] },
+    );
+    assert.deepEqual(result.evaluation.execution_report?.criterion_claims, []);
+    assert.ok(result.diagnostics.some((diagnostic) =>
+      diagnostic.code === "all_entries_dropped"));
+  });
+});

@@ -51,6 +51,9 @@ export function makeGateDecision(overrides = {}) {
         ...overrides,
     };
 }
+/** v3.9.2: The machine boundary the agent's files_changed report is compared
+ *  against. Receipt-only; never persisted, never next-prompt input. */
+export const FILES_RECONCILIATION_SCOPE = "tracked_and_non_ignored_untracked";
 export function makeMilestoneSummary(overrides = {}) {
     return {
         label: "",

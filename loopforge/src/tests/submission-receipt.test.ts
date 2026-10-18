@@ -6,7 +6,7 @@ import {
   deriveSubmissionReceipt,
 } from "../submission-receipt.js";
 import type { ReceiptInput } from "../submission-receipt.js";
-import { makeSelfEvaluation } from "../protocol.js";
+import { makeExecutionReport, makeSelfEvaluation } from "../protocol.js";
 import type {
   PromptArtifact,
   SubGoal,
@@ -323,5 +323,113 @@ describe("v3.9.1 — submission receipt", () => {
       true,
     );
     assert.deepEqual(receipt.effects.constraints_declared, ["history constraint"]);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v3.9.2 — files reconciliation
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("v3.9.2 — files reconciliation", () => {
+  const CORE = [
+    "success", "output_summary", "constraint_violations", "should_continue",
+  ];
+  const gitDelta = (changedFiles: string[] | null) => ({
+    providerId: "git",
+    kind: "git" as const,
+    before: null,
+    after: null,
+    changedFiles,
+  });
+
+  it("compares the report with the shared Git change set", () => {
+    const receipt = deriveSubmissionReceipt(input({
+      selfEval: makeSelfEvaluation({
+        success: true,
+        output_summary: "did the work",
+        constraint_violations: [],
+        should_continue: true,
+        execution_report: makeExecutionReport({
+          files_changed: ["a.ts"],
+          tests_reported: null,
+        }),
+      }),
+      submittedFields: [...CORE, "execution_report.files_changed"],
+      evidenceDeltas: [gitDelta(["a.ts", "b.ts"])],
+    }));
+    assert.equal(receipt.files_reconciliation.status, "mismatch");
+    assert.equal(receipt.files_reconciliation.attempted, true);
+    assert.deepEqual(receipt.files_reconciliation.reported, ["a.ts"]);
+    assert.deepEqual(receipt.files_reconciliation.observed, ["a.ts", "b.ts"]);
+    assert.deepEqual(receipt.files_reconciliation.unreported, ["b.ts"]);
+    assert.deepEqual(receipt.files_reconciliation.unconfirmed, []);
+  });
+
+  it("marks a no-Git round as not applicable", () => {
+    const receipt = deriveSubmissionReceipt(input({
+      selfEval: makeSelfEvaluation({
+        success: true,
+        output_summary: "did the work",
+        constraint_violations: [],
+        should_continue: true,
+        execution_report: makeExecutionReport({ files_changed: [] }),
+      }),
+      submittedFields: [...CORE, "execution_report.files_changed"],
+      evidenceDeltas: [],
+    }));
+    assert.equal(receipt.files_reconciliation.status, "not_applicable");
+    assert.equal(receipt.files_reconciliation.observed, null);
+  });
+
+  it("rebuilds the same reconciliation from committed history", () => {
+    const git = (
+      phase: "before" | "after",
+      files: string[],
+      fingerprints: Record<string, string>,
+    ) => ({
+      schemaVersion: 2 as const,
+      providerId: "git",
+      kind: "git" as const,
+      phase,
+      startedAt: 0,
+      finishedAt: 0,
+      status: "observed" as const,
+      files,
+      data: {
+        dirty: files,
+        fingerprints,
+        coverage: "tracked_and_non_ignored_untracked" as const,
+      },
+    });
+    const entry = committedFeedbackRound(1, {
+      loopId: "receipt-files",
+      files: ["a.ts"],
+      beforeEvidence: [git("before", [], {})],
+      roundEvidence: [git("after", ["a.ts"], { "a.ts": "m:1" })],
+    });
+    const view = decodeCommittedRound(entry);
+    assert.ok(view);
+    const receipt = deriveCommittedSubmissionView(view!, [view!]);
+    assert.equal(receipt.files_reconciliation.status, "match");
+    assert.deepEqual(receipt.files_reconciliation.observed, ["a.ts"]);
+  });
+
+  it("still derives reconciliation on a rejected attempt", () => {
+    const receipt = deriveSubmissionReceipt(input({
+      selfEval: makeSelfEvaluation({
+        success: true,
+        output_summary: "premature",
+        constraint_violations: [],
+        should_continue: true,
+        execution_report: makeExecutionReport({ files_changed: ["a.ts"] }),
+      }),
+      pr: result({ action: "reject" }),
+      disposition: "rejected",
+      submittedFields: [...CORE, "execution_report.files_changed"],
+      evidenceDeltas: [gitDelta(["a.ts", "b.ts"])],
+    }));
+    assert.equal(receipt.files_reconciliation.status, "mismatch");
+    assert.deepEqual(receipt.files_reconciliation.unreported, ["b.ts"]);
+    assert.ok(receipt.reports.every((entry) => entry.handling === "not_applied"));
   });
 });

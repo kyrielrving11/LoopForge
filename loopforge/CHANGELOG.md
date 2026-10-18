@@ -1,5 +1,69 @@
 # Changelog
 
+## 3.9.2 (2026-10-18)
+
+**The field-decision release.** 3.9.1 made the submission channel complete; the
+case data showed agents still treated the optional fields as a catalog. This
+release replaces the long optional-field list with a compact trigger checklist,
+puts real criterion ids/text in front of the agent, and adds one structured
+`files_changed` reconciliation to the receipt.
+
+### Compact trigger checklist
+
+The evaluation block now carries at most seven `trigger → field → effect`
+lines. A field is shown only when its trigger is a real fact (criteria exist,
+no active contract and a usable command, gate enabled) or a conditional
+opportunity the agent can recognize after doing the work (a discovered
+constraint, a falsified assumption, a new sub-problem, a delegation, a phase
+boundary, a next-prompt need). The full legal shapes remain in
+`submission_guidance`; the prompt no longer contains the 15-field form.
+
+`isFieldApplicable` is the one semantic applicability rule. `isFieldPrompted`
+is the level-aware presentation subset; both live in `submission-guidance.ts`.
+`round_contract`, `contract_item_claims` and `subgoal_updates` keep their
+dedicated renderers with real `rci-`/`sg-` ids; the active-contract block still
+explains the successor path. L0 retries show only the retry findings and the
+two introspection triggers (plus real criteria when a criterion finding is what
+the retry is fixing).
+
+### Real criterion references and lenient filtering
+
+`criterion_claims` now uses the real `cr-` ids and text derived from
+`criterion_statuses`; the old `<criterion text or cr id from the prompt>`
+placeholder is gone. The compile response's full criterion set is also
+available as `submission_guidance.criteria`.
+
+A claim that cites a criterion the prompt did not render is dropped with a
+diagnostic (`unknown_id`, or `all_entries_dropped` when none survive). This is
+lenient, never a rejection. When the reference space is unobservable (no
+compile response), the boundary fails open; an observed empty space drops every
+claim. The display cap (three criteria plus `+N more`) never narrows validation.
+
+### Structured `files_changed` reconciliation
+
+`submission_receipt.files_reconciliation` compares the agent report with the
+shared `ObservationDelta.changedFiles` using one derivation:
+`status` (`match` / `mismatch` / `unknown` / `not_applicable`), `attempted`,
+`reported`, `observed`, `unreported`, `unconfirmed`, and the machine scope.
+`reportedFilesMatch` is removed — it was dead output and encoded a second
+comparison rule. The `evidence_integrity` warning now reads the same helper and
+fires only on `mismatch`; duplicates collapse for the status, an omitted report
+with observed changes is a mismatch, and unknown Git stays unknown. Paths are
+exact strings: no separator, `./`, case, or Unicode normalization is applied.
+
+### Metrics
+
+`filesChangedRounds` / `filesChangedTotal` now use the union Git state instead
+of the first Git delta. A new `filesReconciliation` record counts each status
+from the same committed-round view; nothing is persisted or fed back into a
+later prompt.
+
+### Envelope versions
+
+No transaction, observation, prompt-artifact, or policy version changes. The
+receipt is a returned projection, not persisted. The generated protocol schema
+gains `FilesReconciliation` (`$defs` 63 → 64). Package version is 3.9.2.
+
 ## 3.9.1 (2026-10-18)
 
 **The submission-channel release.** The evaluation fields stop being a form to

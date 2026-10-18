@@ -54,7 +54,7 @@ export declare function compileSessionContext(session: CompileContextSession): L
  *  prompt carried, PLUS this submission's own `emerged_subtasks` — a sub-goal
  *  may be created and referenced (or transitioned) in one round. Null when it
  *  cannot be observed. */
-export declare function knownSubGoalsFor(session: CompileContextSession, emerged: string[]): SubGoal[] | null;
+export declare function knownSubGoalsFor(session: CompileContextSession, emerged: string[], response?: LoopForgeResponse | null): SubGoal[] | null;
 /** The ACTIVE Round Contract governing a session's next round — ONE
  *  derivation, shared by the session's public view and the boundary. */
 export declare function activeContractOf(store: LoopStore, session: {

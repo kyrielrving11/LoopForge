@@ -28,6 +28,10 @@ import type { GitDeltaState, ObservationDelta } from "../evidence-provider.js";
 import { getPolicy } from "../policy.js";
 import { POLICY_SCHEMA_VERSION } from "../policy.js";
 
+/** The compiler's default objective criterion when the task declares none. */
+export const DEFAULT_SUCCESS_CRITERION =
+  "Task goal achieved with verifiable evidence";
+
 /** v3.8: Build the criterion claims an evaluation submits. */
 export function criterionClaims(met: string[] = [], remaining: string[] = []): CriterionClaim[] {
   return [

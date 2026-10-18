@@ -141,7 +141,8 @@ describe("Generated JSON Schema — top-level", () => {
     // deleted too (60 → 58... 57 with the second boundary deletion).
     // v3.9.1: SubmissionGuidance, the submission diagnostic/receipt types
     // and PromptRequestEffect joined (57 → 63).
-    assert.equal(names.length, 63, `expected 63, got ${names.length}: ${names.join(", ")}`);
+    // v3.9.2: FilesReconciliation joined (63 → 64).
+    assert.equal(names.length, 64, `expected 64, got ${names.length}: ${names.join(", ")}`);
     assert.ok(names.includes("PromptArtifact"));
     assert.ok(names.includes("RoundOutcome"));
     assert.ok(names.includes("RoundContractProposal"));
@@ -151,6 +152,7 @@ describe("Generated JSON Schema — top-level", () => {
     assert.ok(names.includes("EvidenceCapability"));
     assert.ok(names.includes("SubmissionGuidance"));
     assert.ok(names.includes("SubmissionReceipt"));
+    assert.ok(names.includes("FilesReconciliation"));
     assert.ok(names.includes("SubmissionDiagnostic"));
     assert.ok(names.includes("PromptRequestEffect"));
     assert.ok(names.includes("ToolError"));

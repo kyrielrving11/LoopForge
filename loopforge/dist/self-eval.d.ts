@@ -8,6 +8,15 @@ import { type CriterionRevision, type ExecutionReport, type PromptRequests, type
 export interface DiagnosticSink {
     push(path: string, code: string, handling: SubmissionDiagnosticHandling, detail: string): void;
 }
+/** v3.9.2: reference spaces that only the submission boundary can observe.
+ *  `null`/undefined = the space was not observable (fail open); an empty array
+ *  = an observed empty space (every reference is unknown). */
+export interface NormalizationFacts {
+    knownCriterionRefs?: ReadonlyArray<{
+        id: string;
+        text: string;
+    }> | null;
+}
 /** v3.8.1: the emerged-subtask intake bound — ONE constant, because the
  *  sub-goal ids are derived by ORDINAL over this list. The strict submission
  *  boundary builds the reference space the agent may transition from, and the
@@ -23,7 +32,10 @@ export declare const EMERGED_LIMITS: {
  *  evaluation call this, so the two sets cannot disagree. */
 export declare function boundedEmergedSubtasks(value: unknown, sink?: DiagnosticSink): string[];
 /** Parse ExecutionReport from a raw JSON object. */
-export declare function parseExecutionReport(raw: Record<string, unknown> | undefined | null, sink?: DiagnosticSink): ExecutionReport | undefined;
+export declare function parseExecutionReport(raw: Record<string, unknown> | undefined | null, sink?: DiagnosticSink, knownCriterionRefs?: ReadonlyArray<{
+    id: string;
+    text: string;
+}> | null): ExecutionReport | undefined;
 /** v3.8: The criterion ids the agent claims met this round. */
 export declare function claimedMetCriteria(report: {
     criterion_claims?: Array<{
@@ -153,7 +165,7 @@ export declare function validateContractShape(raw: Record<string, unknown>, cont
  *  diagnostic sink is supplied, every drop/truncation/normalization is
  *  reported; without one (the engine's historical payload parse) the values
  *  are normalized as before. */
-export declare function buildSelfEvaluation(raw: Record<string, unknown>, sink?: DiagnosticSink): SelfEvaluation;
+export declare function buildSelfEvaluation(raw: Record<string, unknown>, sink?: DiagnosticSink, facts?: NormalizationFacts): SelfEvaluation;
 /** v3.9.1: normalization result used by the submission boundary. */
 export interface NormalizationResult {
     evaluation: SelfEvaluation;
@@ -162,7 +174,7 @@ export interface NormalizationResult {
 }
 /** Normalize a raw submission and report every lossy decision. Unknown and
  *  retired fields are diagnosed and dropped; they are never silently accepted. */
-export declare function normalizeSelfEvaluation(raw: Record<string, unknown>): NormalizationResult;
+export declare function normalizeSelfEvaluation(raw: Record<string, unknown>, facts?: NormalizationFacts): NormalizationResult;
 /** v3.8: The ONE set of contract-declaration limits. `validateContractShape`
  *  (the strict boundary) rejects a declaration over these; `parseRoundContract`
  *  (the lenient path, reached only after the strict boundary passed) truncates

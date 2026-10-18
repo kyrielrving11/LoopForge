@@ -27,7 +27,11 @@ import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { createInterface, Interface } from "node:readline";
 import { fileURLToPath } from "node:url";
-import { testCommandProvider, criterionClaims } from "./_helpers.js";
+import {
+  testCommandProvider,
+  criterionClaims,
+  DEFAULT_SUCCESS_CRITERION,
+} from "./_helpers.js";
 import { POLICY_SCHEMA_VERSION } from "../policy.js";
 
 const CLI_PATH = resolve(dirname(fileURLToPath(import.meta.url)), "..", "cli.js");
@@ -268,7 +272,7 @@ describe("Long-Horizon Verification", () => {
     const r = await client.tool("loopforge_next", { sessionId, roundId, evaluation: {
       success: true, should_continue: true, constraint_violations: [],
       output_summary: "Implemented validateAndTransform. Everything works!",
-      execution_report: { files_changed: ["src/pipeline.ts"], tests_reported: { passed: 15, failed: 0, skipped: 0 }, criterion_claims: criterionClaims(["pipeline done"], ["Verify no runtime deps", "Final lint"])},
+      execution_report: { files_changed: ["src/pipeline.ts"], tests_reported: { passed: 15, failed: 0, skipped: 0 }, criterion_claims: criterionClaims([], [DEFAULT_SUCCESS_CRITERION])},
     }});
     assert.ok(!r.error);
     assert.equal(r.enforcementAction, "reject");

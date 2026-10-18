@@ -4,15 +4,31 @@ import assert from "node:assert/strict";
 import {
   allFieldGuidePaths,
   deriveSubmissionGuidance,
+  fieldExample,
   fieldGuideDescription,
+  isFieldApplicable,
+  isFieldPrompted,
+  promptedFieldPaths,
+  renderSelfEvalBlock,
   submittedFieldPaths,
   unknownExecutionReportFields,
   unknownTopLevelFields,
 } from "../submission-guidance.js";
+import type {
+  GuidanceFacts,
+  SelfEvalPromptContext,
+} from "../submission-guidance.js";
 import { TOOL_SCHEMAS } from "../mcp/tools.js";
 import { buildLoopRequest } from "../mcp/round-lifecycle.js";
 import type { McpSession } from "../mcp/round-lifecycle.js";
-import type { LoopForgeResponse, LoopRoundResult, SelfEvaluation } from "../protocol.js";
+import type {
+  CriterionStatus,
+  LoopForgeResponse,
+  LoopRoundResult,
+  SelfEvaluation,
+  SubGoal,
+} from "../protocol.js";
+import type { ActiveContractView } from "../round-contract.js";
 import { makeSelfEvaluation } from "../protocol.js";
 import { deriveContractItemIds } from "../token-utils.js";
 import { committedFeedbackRound } from "./_helpers.js";
@@ -256,5 +272,206 @@ describe("v3.9.1 — worker discoveries are reports, not constraints", () => {
     const request = buildLoopRequest(sessionView() as McpSession, evaluation);
     const result = request.last_round_result as Record<string, unknown> | undefined;
     assert.deepEqual(result?.discovered_constraints, ["never touch prod data"]);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v3.9.2 — compact trigger guidance and real criteria
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("v3.9.2 — compact trigger guidance", () => {
+  const criterion: CriterionStatus = {
+    id: "cr-12345678",
+    text: "All tests pass",
+    status: "remaining",
+    related_subgoal_ids: [],
+  };
+  const activeContract: ActiveContractView = {
+    id: "rc-12345678",
+    work_item: "Slice A",
+    declared_at_round: 1,
+    scope: ["src"],
+    config_hash_by_command: {},
+    items: [{
+      id: "rci-12345678",
+      description: "works",
+      criterion_refs: [],
+      subgoal_refs: [],
+      verify_with: ["verify"],
+    }],
+  };
+  const activeSubGoal: SubGoal = {
+    id: "sg-12345678",
+    description: "login works",
+    status: "in_progress",
+    declared_at_round: 1,
+    status_changed_at_round: 1,
+    priority: 0,
+  };
+  const doneSubGoal: SubGoal = { ...activeSubGoal, status: "done" };
+
+  const facts = (overrides: Partial<GuidanceFacts> = {}): GuidanceFacts => ({
+    level: "l1",
+    activeContract: null,
+    itemStatuses: null,
+    subGoals: [],
+    commands: ["verify"],
+    contractVerificationAvailable: true,
+    gateEnabled: false,
+    criteria: [],
+    ...overrides,
+  });
+
+  it("applies the semantic applicability rules", () => {
+    assert.equal(isFieldApplicable("execution_report.criterion_claims", facts()), false);
+    assert.equal(
+      isFieldApplicable("execution_report.criterion_claims", facts({ criteria: [criterion] })),
+      true,
+    );
+    assert.equal(isFieldApplicable("round_contract", facts()), true);
+    assert.equal(
+      isFieldApplicable("round_contract", facts({ activeContract })),
+      false,
+    );
+    assert.equal(isFieldApplicable("round_contract", facts({ commands: [] })), false);
+    assert.equal(isFieldApplicable("no_change_reason", facts()), false);
+    assert.equal(isFieldApplicable("no_change_reason", facts({ commands: [] })), true);
+    assert.equal(
+      isFieldApplicable("execution_report.contract_item_claims", facts({ activeContract })),
+      true,
+    );
+    assert.equal(isFieldApplicable("subgoal_updates", facts({ subGoals: [doneSubGoal] })), false);
+    assert.equal(isFieldApplicable("subgoal_updates", facts({ subGoals: [activeSubGoal] })), true);
+    assert.equal(isFieldApplicable("gate_ids", facts({ gateEnabled: true })), true);
+    assert.equal(isFieldApplicable("gate_ids", facts()), false);
+  });
+
+  it("separates prompt density from semantic applicability", () => {
+    const l0 = promptedFieldPaths(facts({ level: "l0" }));
+    assert.deepEqual(l0, ["discovered_constraints", "wrong_assumptions"]);
+
+    const l1 = promptedFieldPaths(facts({ criteria: [criterion] }));
+    assert.deepEqual(l1, [
+      "execution_report.criterion_claims",
+      "discovered_constraints",
+      "wrong_assumptions",
+      "emerged_subtasks",
+      "worker_results",
+      "compression_checkpoint",
+      "prompt_requests",
+    ]);
+    assert.equal(isFieldPrompted("round_contract", facts()), false,
+      "the dedicated contract renderer owns this field");
+    assert.equal(isFieldPrompted("subgoal_updates", facts({ subGoals: [activeSubGoal] })), false,
+      "the dedicated sub-goal renderer owns this field");
+  });
+
+  it("uses a real criterion id and text, never the old placeholder", () => {
+    const ctx = {
+      activeContract: null,
+      activeSubGoals: [],
+      commands: [],
+      contractVerificationAvailable: false,
+      criteria: [criterion],
+    };
+    assert.deepEqual(
+      fieldExample("execution_report.criterion_claims", ctx),
+      [{ criterion_id: "cr-12345678", outcome: "met" }],
+    );
+    assert.equal(
+      fieldExample("execution_report.criterion_claims", { ...ctx, criteria: [] }),
+      null,
+    );
+  });
+
+  it("renders the compact block with real criteria at L1", () => {
+    const ctx: SelfEvalPromptContext = {
+      round: 2,
+      level: "l1",
+      activeContract: null,
+      itemStatuses: null,
+      commands: ["verify"],
+      contractVerificationAvailable: true,
+      subGoals: [],
+      verificationFlags: [],
+      recovery: false,
+      gateEnabled: false,
+      criteria: [criterion],
+    };
+    const block = renderSelfEvalBlock(ctx);
+    assert.match(block, /Optional fields — trigger → field → effect/);
+    assert.match(block, /cr-12345678/);
+    assert.match(block, /All tests pass/);
+    assert.doesNotMatch(block, /<criterion text or cr id from the prompt>/);
+    assert.doesNotMatch(block, /`objective_refinement`/);
+  });
+
+  it("keeps L0 lean while retaining the dedicated contract block", () => {
+    const ctx: SelfEvalPromptContext = {
+      round: 2,
+      level: "l0",
+      activeContract: null,
+      itemStatuses: null,
+      commands: ["verify"],
+      contractVerificationAvailable: true,
+      subGoals: [],
+      verificationFlags: [],
+      recovery: true,
+      gateEnabled: false,
+      criteria: [criterion],
+    };
+    const block = renderSelfEvalBlock(ctx);
+    assert.match(block, /`discovered_constraints`/);
+    assert.match(block, /`wrong_assumptions`/);
+    assert.doesNotMatch(block, /`execution_report.criterion_claims`/);
+    assert.doesNotMatch(block, /`worker_results`/);
+    assert.doesNotMatch(block, /`compression_checkpoint`/);
+    assert.doesNotMatch(block, /`prompt_requests`/);
+    assert.match(block, /No active contract/);
+  });
+
+  it("caps criterion display without narrowing validation", () => {
+    const criteria = Array.from({ length: 5 }, (_, index) => ({
+      ...criterion,
+      id: `cr-0000000${index}`,
+      text: `Criterion ${index}`,
+    }));
+    const ctx: SelfEvalPromptContext = {
+      round: 2,
+      level: "l1",
+      activeContract: null,
+      itemStatuses: null,
+      commands: ["verify"],
+      contractVerificationAvailable: true,
+      subGoals: [],
+      verificationFlags: [],
+      recovery: false,
+      gateEnabled: false,
+      criteria,
+    };
+    const block = renderSelfEvalBlock(ctx);
+    assert.match(block, /\+2 more/);
+    assert.doesNotMatch(block, /cr-00000003/);
+  });
+
+  it("exposes criteria in submission_guidance", () => {
+    const session = {
+      loopId: "guidance-criteria",
+      currentRound: 1,
+      lastCompileResponse: {
+        criterion_statuses: [criterion],
+        prompt_artifact: { level: "l1" },
+      } as unknown as LoopForgeResponse,
+    };
+    const guidance = deriveSubmissionGuidance(session, { rounds: [] });
+    assert.deepEqual(guidance.criteria, [{
+      id: "cr-12345678",
+      text: "All tests pass",
+      status: "remaining",
+    }]);
+    const field = guidance.fields.find(
+      (entry) => entry.path === "execution_report.criterion_claims");
+    assert.ok(field);
+    assert.deepEqual(field?.example, [{ criterion_id: "cr-12345678", outcome: "met" }]);
   });
 });

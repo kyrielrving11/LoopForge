@@ -5,6 +5,11 @@
 import { describe, it } from "node:test";
 import { criterionClaims, deltasFrom } from "./_helpers.js";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { existsSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { execFileSync } from "node:child_process";
 import {
   makeVerificationResult, makeExecutionReport, makeSelfEvaluation } from "../protocol.js";
 import type { SelfEvaluation, VerificationFlag } from "../protocol.js";
@@ -239,6 +244,67 @@ describe("verification gate — backtrack git head restore", () => {
       [], [], [], undefined,
     );
     assert.equal(result.verdict, "trusted");
+  });
+});
+
+describe("backtrack recovery experiment — real Git workspace", () => {
+  it("rejects polluted state, accepts restored checkpoint, then permits redo changes", () => {
+    const dir = mkdtempSync(join(tmpdir(), "loopforge-backtrack-experiment-"));
+    const git = (...args: string[]) => execFileSync("git", args, {
+      cwd: dir,
+      encoding: "utf8",
+      env: { ...process.env, GIT_AUTHOR_NAME: "LoopForge Test", GIT_AUTHOR_EMAIL: "test@example.invalid",
+        GIT_COMMITTER_NAME: "LoopForge Test", GIT_COMMITTER_EMAIL: "test@example.invalid" },
+    }).trim();
+    const fingerprint = (file: string) => createHash("sha256")
+      .update(readFileSync(join(dir, file))).digest("hex");
+    try {
+      git("init", "-q");
+      writeFileSync(join(dir, "stable.txt"), "baseline\n");
+      git("add", ".");
+      git("commit", "-q", "-m", "restore point");
+      const restoreHead = git("rev-parse", "HEAD");
+
+      writeFileSync(join(dir, "failed.ts"), "polluted state\n");
+      const failedFingerprint = fingerprint("failed.ts");
+      const polluted = verifySelfEvaluation(
+        se({ execution_report: makeExecutionReport({
+          files_changed: [], tests_reported: null, criterion_claims: criterionClaims([], []),
+        }) }),
+        2, [], null,
+        deltasFrom([gitSnapshot(restoreHead, ["failed.ts"])]),
+        ["failed.ts"], { "failed.ts": failedFingerprint }, restoreHead,
+        [], [], [gitSnapshot(restoreHead, ["failed.ts"])], [],
+      );
+      assert.equal(polluted.verdict, "contradicted",
+        "same HEAD with failed-round dirty file must not count as restored");
+
+      // Agent performs the restore. LoopForge observes the result at the
+      // recovery checkpoint before any redo work is allowed to commit.
+      rmSync(join(dir, "failed.ts"));
+      assert.equal(git("rev-parse", "HEAD"), restoreHead);
+      assert.equal(existsSync(join(dir, "failed.ts")), false);
+      const restored = verifySelfEvaluation(
+        se(), 2, [], null, deltasFrom([gitSnapshot(restoreHead)]),
+        ["failed.ts"], { "failed.ts": failedFingerprint }, restoreHead,
+        [], [], [gitSnapshot(restoreHead)], [],
+      );
+      assert.equal(restored.verdict, "trusted",
+        "restored workspace passes the machine checkpoint");
+
+      // The redo is allowed to change files after the clean checkpoint.
+      writeFileSync(join(dir, "fixed.ts"), "redo\n");
+      const redo = verifySelfEvaluation(
+        se(), 2, [], null,
+        deltasFrom([gitSnapshot(restoreHead, ["fixed.ts"])]),
+        ["failed.ts"], { "failed.ts": failedFingerprint }, restoreHead,
+        [], [], [gitSnapshot(restoreHead)], [],
+      );
+      assert.equal(redo.verdict, "trusted",
+        "post-checkpoint redo motion is not mistaken for failed restoration");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

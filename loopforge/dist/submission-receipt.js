@@ -16,6 +16,7 @@ import { deriveSubGoals } from "./subgoal-state.js";
 import { deriveEvidenceStatus } from "./verification-gate.js";
 import { fieldGuide } from "./submission-guidance.js";
 import { deriveFieldAccounting } from "./field-accounting.js";
+import { deriveFilesReconciliation } from "./files-reconciliation.js";
 import { getPolicy } from "./policy.js";
 const HANDLING_PRIORITY = {
     "not_applied": 6,
@@ -190,6 +191,9 @@ export function deriveSubmissionReceipt(input) {
     const contractAfter = input.facts.contractAfter;
     // ── verification ───────────────────────────────────────────────────────
     const evidence = deriveEvidenceStatus(selfEval, input.evidenceDeltas);
+    const filesReconciliation = deriveFilesReconciliation(selfEval.execution_report ?? null, input.evidenceDeltas, {
+        attempted: input.submittedFields.includes("execution_report.files_changed"),
+    });
     return {
         round_id: input.snapshot.roundId,
         attempt: input.snapshot.attempt,
@@ -225,6 +229,7 @@ export function deriveSubmissionReceipt(input) {
             })),
             contract_items: input.contractItems,
         },
+        files_reconciliation: filesReconciliation,
         prompt: input.nextArtifact
             ? {
                 level: input.nextArtifact.level,

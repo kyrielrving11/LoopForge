@@ -179,15 +179,6 @@ returns `evaluation_invalid`, can be retried for the same round, and does not
 modify the session, Vault, gates, rejection counter, or metrics. Round Contract
 declarations and `contract_item_claims` are also strict structural boundaries.
 
-Each prepared response carries `submission_guidance` (real ids, usable commands
-and the fields that apply now); each submission returns `submission_receipt`,
-which keeps saved reports, derived-state effects and machine verification
-separate. `execution_report.files_changed` is the boundary net change from round
-start, including deletions; the derived delta's `changedFiles` is the only
-change set, and an unobservable boundary is `null`, not an empty diff. Worker
-discoveries are reports; only top-level `discovered_constraints` promotes one
-into the active set.
-
 ## Architecture
 
 ```text

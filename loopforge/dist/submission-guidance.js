@@ -112,6 +112,7 @@ const GUIDES = [
         purpose: "Claims about items of the ACTIVE Round Contract.",
         when: "Only when an active contract is open; cite the rci-XXXXXXXX ids rendered in the prompt.",
         nature: "claim",
+        decision: "Claim completed items of the active contract with their real rci- ids",
         downstream: "Starts machine evaluation of the item; the item becomes verified only when its bound commands pass.",
         toolDescription: "Claims about items of the ACTIVE contract, cited by the rci-XXXXXXXX id " +
             "the prompt rendered. A claim never verifies anything by itself — the " +
@@ -123,6 +124,9 @@ const GUIDES = [
         purpose: "Advisory claims about objective criteria.",
         when: "When you want to state which criteria are met or still remaining.",
         nature: "claim",
+        decision: "You can state which criteria are met or still outstanding",
+        promptLevels: ["l1", "l2"],
+        promptRank: 10,
         downstream: "Advisory only: unbacked claims warn; they never upgrade a criterion to verified.",
         toolDescription: "Advisory claims about objective criteria. LENIENT: unknown or malformed " +
             "ids are dropped with a diagnostic, never a rejection. A criterion claim " +
@@ -133,6 +137,7 @@ const GUIDES = [
         purpose: "Explicit status transitions for existing sub-goals.",
         when: "When an active sg-XXXXXXXX sub-goal starts, is blocked, completes, or is canceled.",
         nature: "transition",
+        decision: "An active sub-goal moved status; cite its real sg- id",
         downstream: "Sub-goal state derived from committed rounds; done/canceled are terminal.",
         toolDescription: "Explicit status transitions for EXISTING sub-goals. Each entry references " +
             "an ACTIVE sg-XXXXXXXX id from the prompt. Unknown ids, done/canceled " +
@@ -145,6 +150,9 @@ const GUIDES = [
         purpose: "New sub-problems that surfaced during execution.",
         when: "When a new work item appears or an existing one must be split.",
         nature: "transition",
+        decision: "A new sub-problem surfaced (plain text, never sg- ids)",
+        promptLevels: ["l1", "l2"],
+        promptRank: 40,
         downstream: "The only sub-goal creation channel; the runtime derives stable sg- ids.",
         toolDescription: "Sub-problems that surfaced during execution. The ONLY sub-goal creation " +
             "channel. Plain descriptions, never sg-XXXXXXXX ids.",
@@ -154,6 +162,9 @@ const GUIDES = [
         purpose: "New constraints that later rounds must respect.",
         when: "When this round discovered a limit that was not known before.",
         nature: "report",
+        decision: "You discovered a limit later rounds must respect",
+        promptLevels: ["l0", "l1", "l2"],
+        promptRank: 20,
         downstream: "Merged into the active constraint set by the compiler (bounded per round).",
         toolDescription: "New constraints that must apply to later rounds. This is the ONLY " +
             "promotion channel for a worker-discovered constraint: a worker result " +
@@ -164,6 +175,9 @@ const GUIDES = [
         purpose: "Assumptions from earlier rounds that this round falsified.",
         when: "When evidence proved an earlier assumption wrong; omit when none.",
         nature: "report",
+        decision: "Evidence falsified an earlier assumption",
+        promptLevels: ["l0", "l1", "l2"],
+        promptRank: 30,
         downstream: "State-file 'Corrected assumption', recovery brief, and backtrack wrong-assumption facts.",
         toolDescription: "Assumptions from earlier rounds that turned out to be wrong. Record one " +
             "only when this round actually falsified it; otherwise omit. This is not " +
@@ -203,6 +217,7 @@ const GUIDES = [
             "contract is open, omit it (or restate it unchanged) unless this round " +
             "closes it and declares a successor.",
         nature: "proposal",
+        decision: "No active contract: if the next slice is machine-checkable, declare it",
         downstream: "Becomes active only after this round commits; item ids rci-XXXXXXXX are " +
             "derived by the runtime.",
         toolDescription: "Proposal for the NEXT round's contract (items + verify_with + scope). " +
@@ -218,6 +233,9 @@ const GUIDES = [
         purpose: "Results of sub-agent / worker delegations.",
         when: "Only when work was actually delegated.",
         nature: "report",
+        decision: "You delegated work",
+        promptLevels: ["l1", "l2"],
+        promptRank: 50,
         downstream: "Saved with its source and written to the delegation journal; worker " +
             "discoveredConstraints is NOT auto-promoted.",
         toolDescription: "Optional. Results of sub-agent / Worker delegations this round. Each " +
@@ -232,6 +250,9 @@ const GUIDES = [
         purpose: "Information needs for the next round's prompt.",
         when: "When you know what context the next round will need.",
         nature: "control",
+        decision: "You know what the next prompt needs",
+        promptLevels: ["l1", "l2"],
+        promptRank: 70,
         downstream: "Matched exactly against state items; applied to the next prompt only " +
             "(L0 ignores it). Unmatched entries have no effect.",
         toolDescription: "Optional. Information needs for the NEXT prompt. emphasize entries are " +
@@ -244,6 +265,9 @@ const GUIDES = [
         purpose: "Mark a meaningful work boundary.",
         when: "At a phase/subtask boundary worth a full-state milestone.",
         nature: "report",
+        decision: "This round reached a real phase boundary; pair with checkpoint_label",
+        promptLevels: ["l1", "l2"],
+        promptRank: 60,
         downstream: "Creates an agent-declared milestone and forces an L2 rehydration boundary.",
         toolDescription: "Optional. true at a subtask boundary to create a recoverable milestone " +
             "and force a full-state checkpoint. Pair with checkpoint_label.",
@@ -363,8 +387,12 @@ export function fieldExample(path, ctx) {
             const item = firstActiveItem(ctx.activeContract);
             return item ? [{ item_id: item.id, outcome: "met" }] : null;
         }
-        case "execution_report.criterion_claims":
-            return [{ criterion_id: "<criterion text or cr id from the prompt>", outcome: "met" }];
+        case "execution_report.criterion_claims": {
+            const criterion = ctx.criteria?.[0];
+            return criterion
+                ? [{ criterion_id: criterion.id, outcome: "met" }]
+                : null;
+        }
         case "subgoal_updates": {
             const subGoal = firstActiveSubGoal(ctx.activeSubGoals);
             return subGoal ? [{ id: subGoal.id, status: "done" }] : null;
@@ -422,30 +450,58 @@ export function fieldExample(path, ctx) {
         default: return null;
     }
 }
-/** Which optional fields are worth showing at this submission point. Core
- *  fields and the execution report always are. */
+/** Semantic applicability — independent of prompt density. Core fields and
+ *  the two baseline execution-report fields are always applicable; the rest
+ *  depend on facts the runtime can actually observe. Future events
+ *  (delegation, a checkpoint boundary, a falsified assumption) remain
+ *  conditional opportunities, not render-time facts. */
 export function isFieldApplicable(path, facts) {
     const guide = GUIDE_BY_PATH.get(path);
     if (!guide)
         return false;
-    if (guide.core || path.startsWith("execution_report.")) {
-        if (path === "execution_report.contract_item_claims") {
-            return facts.activeContract !== null;
-        }
+    if (guide.core)
         return true;
-    }
     switch (path) {
+        case "execution_report.files_changed":
+        case "execution_report.tests_reported":
+            return true;
+        case "execution_report.contract_item_claims":
+            return facts.activeContract !== null;
+        case "execution_report.criterion_claims":
+            return (facts.criteria ?? []).length > 0;
         case "subgoal_updates":
             return firstActiveSubGoal(facts.subGoals) !== null;
         case "round_contract":
-            // Applicable either for a first declaration or for the closing round's
-            // successor. The example is null while an active contract is open.
-            return facts.contractVerificationAvailable;
+            // A first declaration needs no active contract and a usable command.
+            // While a contract is open, the dedicated active-contract block carries
+            // the successor instruction instead of a competing proposal example.
+            return facts.activeContract === null &&
+                facts.contractVerificationAvailable &&
+                facts.commands.length > 0;
         case "gate_ids":
             return facts.gateEnabled;
+        case "no_change_reason":
+            return facts.commands.length === 0;
         default:
             return true;
     }
+}
+/** Prompt density is a separate decision: which applicable fields the compact
+ *  trigger checklist renders at this level. */
+export function isFieldPrompted(path, facts) {
+    const guide = GUIDE_BY_PATH.get(path);
+    if (!guide?.decision || !guide.promptLevels)
+        return false;
+    if (!guide.promptLevels.includes(facts.level))
+        return false;
+    return isFieldApplicable(path, facts);
+}
+/** Deterministic compact-checklist order, shared by the renderer and tests. */
+export function promptedFieldPaths(facts) {
+    return FIELD_ORDER
+        .filter((path) => isFieldPrompted(path, facts))
+        .sort((left, right) => (GUIDE_BY_PATH.get(left)?.promptRank ?? Number.MAX_SAFE_INTEGER) -
+        (GUIDE_BY_PATH.get(right)?.promptRank ?? Number.MAX_SAFE_INTEGER));
 }
 function statusOfItem(itemId, statuses) {
     return statuses?.items.find((item) => item.itemId === itemId)?.status ?? "pending";
@@ -466,7 +522,9 @@ function renderContractGuidance(ctx) {
         if (contract.items.length > shown.length) {
             lines.push(`  - … and ${contract.items.length - shown.length} more in the Current Task.`);
         }
-        lines.push("Claim completed items with `execution_report.contract_item_claims` using the", "rci- ids above. A claim alone leaves an item insufficient; its bound command", "must be observed passing. Omit `round_contract` to continue this contract; a", "different proposal is ignored (contract_premature). If this round closes the", "contract and another slice follows, declare the successor proposal here.");
+        const claimDecision = GUIDE_BY_PATH.get("execution_report.contract_item_claims")?.decision
+            ?? "Claim completed items of the active contract with their real rci- ids";
+        lines.push(`${claimDecision} via \`execution_report.contract_item_claims\`.`, "A claim alone leaves an item insufficient; its bound command must be observed", "passing. Omit `round_contract` to continue this contract; a different proposal", "is ignored (contract_premature). If this round closes the contract and another", "slice follows, declare the successor proposal here.");
         return lines;
     }
     if (!ctx.contractVerificationAvailable || ctx.commands.length === 0) {
@@ -476,8 +534,10 @@ function renderContractGuidance(ctx) {
         ];
     }
     const commands = ctx.commands.slice(0, 3).join(", ");
+    const proposalDecision = GUIDE_BY_PATH.get("round_contract")?.decision
+        ?? "No active contract: if the next slice is machine-checkable, declare it";
     return [
-        "No active contract. If you can define a machine-checkable next slice, propose one:",
+        `${proposalDecision} → proposal below:`,
         "```json",
         JSON.stringify({
             round_contract: {
@@ -500,52 +560,68 @@ function renderSubGoalGuidance(ctx) {
     if (active.length === 0)
         return [];
     const shown = active.slice(0, 5);
+    const updateDecision = GUIDE_BY_PATH.get("subgoal_updates")?.decision
+        ?? "An active sub-goal moved status; cite its real sg- id";
     return [
         "Active sub-goals — update only with their real ids:",
         ...shown.map((item) => `- [${item.id}] ${item.description} — ${item.status}`),
-        "Use `subgoal_updates` for status changes; done/canceled are terminal.",
+        `${updateDecision} via \`subgoal_updates\`; done/canceled are terminal.`,
     ];
 }
-function renderOptionalGuidance(ctx) {
-    const lines = [];
-    const add = (path, ctxForExample) => {
-        const example = fieldExample(path, ctxForExample);
-        if (example === null)
-            return;
-        const guide = GUIDE_BY_PATH.get(path);
-        if (!guide)
-            return;
-        lines.push(`- \`${path}\` — ${guide.when}`);
-        lines.push(`  ${JSON.stringify(example)}`);
-    };
-    const exampleCtx = {
+const CRITERIA_DISPLAY_LIMIT = 3;
+const CRITERIA_TEXT_LIMIT = 80;
+function clipCriterionText(text) {
+    const collapsed = text.trim().replace(/\s+/g, " ");
+    return collapsed.length > CRITERIA_TEXT_LIMIT
+        ? collapsed.slice(0, CRITERIA_TEXT_LIMIT - 3) + "..."
+        : collapsed;
+}
+function criteriaDetailLines(criteria) {
+    if (criteria.length === 0)
+        return [];
+    const shown = criteria.slice(0, CRITERIA_DISPLAY_LIMIT);
+    const more = criteria.length - shown.length;
+    const detail = shown
+        .map((criterion) => `\`${criterion.id}\` "${clipCriterionText(criterion.text)}" (${criterion.status})`)
+        .join("; ");
+    return [
+        `  Real criteria: ${detail}${more > 0 ? `; +${more} more in the objective.` : "."}`,
+    ];
+}
+/** The compact decision checklist. Only fields whose trigger facts are known
+ *  or whose event is a conditional opportunity are rendered; the full
+ *  per-field shapes remain in `submission_guidance`. */
+function renderCompactTriggers(ctx) {
+    const facts = {
+        level: ctx.level,
         activeContract: ctx.activeContract,
-        activeSubGoals: ctx.subGoals,
+        itemStatuses: ctx.itemStatuses,
+        subGoals: ctx.subGoals,
         commands: ctx.commands,
         contractVerificationAvailable: ctx.contractVerificationAvailable,
+        gateEnabled: ctx.gateEnabled === true,
+        criteria: ctx.criteria ?? [],
     };
-    add("discovered_constraints", exampleCtx);
-    add("wrong_assumptions", exampleCtx);
-    if (ctx.level !== "l0") {
-        add("objective_refinement", exampleCtx);
-        add("emerged_subtasks", exampleCtx);
-        add("retracted_constraints", exampleCtx);
-        add("revised_success_criteria", exampleCtx);
-        add("worker_results", exampleCtx);
-        add("prompt_requests", exampleCtx);
-        add("compression_checkpoint", exampleCtx);
-        add("checkpoint_label", exampleCtx);
-        add("retroactiveClaims", exampleCtx);
-        add("outcome", exampleCtx);
-        add("blocker", exampleCtx);
-        add("stop_reason", exampleCtx);
-        add("no_change_reason", exampleCtx);
-        if (ctx.gateEnabled)
-            add("gate_ids", exampleCtx);
+    const paths = promptedFieldPaths(facts);
+    if (paths.length === 0)
+        return [];
+    const lines = [
+        "Optional fields — trigger → field → effect. Include a field ONLY when its",
+        "trigger actually happened; omitting any of them is always correct. Legal",
+        "shapes: see the `submission_guidance` field in the round response.",
+    ];
+    for (const path of paths) {
+        const guide = GUIDE_BY_PATH.get(path);
+        if (!guide?.decision)
+            continue;
+        lines.push(`- ${guide.decision} → \`${path}\` → ${guide.downstream}`);
+        if (path === "execution_report.criterion_claims") {
+            lines.push(...criteriaDetailLines(ctx.criteria ?? []));
+        }
     }
     return lines;
 }
-function renderFlagGuidance(flags) {
+function renderFlagGuidance(flags, criteria = []) {
     if (flags.length === 0)
         return [];
     const fields = [...new Set(flags.map((flag) => flag.field).filter(Boolean))];
@@ -556,6 +632,13 @@ function renderFlagGuidance(flags) {
             return `- \`${field}\`${guide ? ` — ${guide.purpose}` : ""}`;
         }),
     ];
+    const criterionFinding = flags.some((flag) => flag.field === "execution_report.criterion_claims" ||
+        flag.field === "criterion_claims" ||
+        flag.check === "criteria_claims_unverified" ||
+        flag.check === "success_with_remaining_criteria");
+    if (criterionFinding && criteria.length > 0) {
+        lines.push(...criteriaDetailLines(criteria));
+    }
     lines.push("Correct the relevant field(s) in the same round. If this attempt falsified an", "earlier assumption, record it in `wrong_assumptions`; otherwise omit it.");
     return lines;
 }
@@ -572,6 +655,7 @@ export function renderSelfEvalBlock(ctx) {
         activeSubGoals: ctx.subGoals,
         commands: ctx.commands,
         contractVerificationAvailable: ctx.contractVerificationAvailable,
+        criteria: ctx.criteria ?? [],
     };
     const lines = [
         "### LoopForge Evaluation (Required)",
@@ -596,16 +680,13 @@ export function renderSelfEvalBlock(ctx) {
         "file type), including deletions. A commit alone adds no entry when content",
         "is unchanged. Do not list gitignored paths merely to look complete.",
     ];
-    const optional = renderOptionalGuidance(ctx);
-    if (optional.length > 0) {
-        lines.push("Optional fields — include ONLY when the event happened; omit otherwise:", ...optional);
-    }
+    lines.push(...renderCompactTriggers(ctx));
     lines.push(...renderContractGuidance(ctx));
     lines.push(...renderSubGoalGuidance(ctx));
     if (ctx.recovery || ctx.verificationFlags.length > 0) {
-        lines.push(...renderFlagGuidance(ctx.verificationFlags));
+        lines.push(...renderFlagGuidance(ctx.verificationFlags, ctx.criteria ?? []));
     }
-    lines.push("Never invent an id. Use only ids rendered in this prompt; when an id is", "absent, omit the field rather than writing a placeholder id.");
+    lines.push("Never invent an id. Use only ids rendered in this prompt or", "`submission_guidance`; when an id is absent, omit the field rather than", "writing a placeholder id.");
     return lines.join("\n");
 }
 function activeSubGoals(subGoals) {
@@ -640,6 +721,7 @@ export function deriveSubmissionGuidance(session, options) {
     });
     const activeContract = facts.activeContract;
     const itemStatuses = facts.itemStatuses;
+    const criteria = session.lastCompileResponse?.criterion_statuses ?? [];
     const guidanceFacts = {
         level,
         activeContract,
@@ -648,12 +730,14 @@ export function deriveSubmissionGuidance(session, options) {
         commands: commandNames,
         contractVerificationAvailable: capability.contractVerificationAvailable,
         gateEnabled: policy.gate?.enabled === true,
+        criteria,
     };
     const exampleCtx = {
         activeContract,
         activeSubGoals: activeSubGoals(subGoals),
         commands: commandNames,
         contractVerificationAvailable: capability.contractVerificationAvailable,
+        criteria,
     };
     const artifact = session.roundSnapshot?.promptArtifact ??
         session.lastCompileResponse?.prompt_artifact;
@@ -680,6 +764,11 @@ export function deriveSubmissionGuidance(session, options) {
             id: item.id,
             description: item.description,
             status: item.status,
+        })),
+        criteria: criteria.map((criterion) => ({
+            id: criterion.id,
+            text: criterion.text,
+            status: criterion.status,
         })),
         recovery: options.recovery ?? (session.backtrackTargetGitHead
             ? {

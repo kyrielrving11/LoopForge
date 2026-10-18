@@ -17,40 +17,13 @@
  *              with stopReason "enforcement_terminated".
  */
 import { makeEnforcementResult } from "./protocol.js";
-import { machineProgressSeries, CHECK_SUCCESS_WITH_REMAINING_CRITERIA, CHECK_RECURRING_VIOLATION, CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE, CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED, CHECK_REQUIRED_COMMAND_FAILED, CHECK_COMMAND_EVIDENCE_MISMATCH, CHECK_OUTCOME_SUCCESS_CONTRADICTION, CHECK_VERIFICATION_ENTRYPOINT_MODIFIED, CHECK_ROUND_SCOPE_DRIFT, CHECK_CONTRACT_ITEMS_UNVERIFIED, CHECK_USER_GATE_UNRESOLVED } from "./verification-gate.js";
+import { machineProgressSeries, CHECK_SUCCESS_WITH_REMAINING_CRITERIA, CHECK_RECURRING_VIOLATION, CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED, CHECK_REQUIRED_COMMAND_FAILED, CHECK_COMMAND_EVIDENCE_MISMATCH, CHECK_OUTCOME_SUCCESS_CONTRADICTION, CHECK_VERIFICATION_ENTRYPOINT_MODIFIED, CHECK_ROUND_SCOPE_DRIFT, CHECK_CONTRACT_ITEMS_UNVERIFIED, CHECK_USER_GATE_UNRESOLVED } from "./verification-gate.js";
 import { getPolicy } from "./policy.js";
 import { isRecord, entryRound } from "./token-utils.js";
 import { derivationRounds, decodeCommittedRound, machineEvidenceForRound, } from "./committed-round.js";
 // ═══════════════════════════════════════════════════════════════════════════
 // Helpers
 // ═══════════════════════════════════════════════════════════════════════════
-/** Collect progress estimates from vault entries into a round→estimate map.
- *  Shared by the progress evaluator's stall and flatline tiers. */
-function collectProgressByRound(vaultEntries, currentRound) {
-    const progressByRound = new Map();
-    for (const round of derivationRounds(vaultEntries, currentRound)) {
-        const progress = round.executionReport?.progress_estimate;
-        if (typeof progress === "number")
-            progressByRound.set(round.round, progress);
-    }
-    return progressByRound;
-}
-/** v3.2.1: R4/R5 progress window — after a backtrack committed for this
- *  round, the agent's redo submission is the freshest data point. The
- *  pre-rollback history (which triggered the stall) stays in the vault and
- *  the redo does not commit while it is being evaluated, so without this
- *  the window never changes: a genuinely fixed redo is rejected forever and
- *  the loop dies in a spurious terminate. A redo that is STILL stalled
- *  keeps the window flat and hits the normal reject → terminate ladder. */
-function progressWindow(vaultEntries, currentRound, selfEval) {
-    const progressByRound = collectProgressByRound(vaultEntries, currentRound);
-    if (hasCommittedBacktrack(vaultEntries, currentRound)) {
-        const pe = selfEval.execution_report?.progress_estimate;
-        if (typeof pe === "number")
-            progressByRound.set(currentRound, pe);
-    }
-    return progressByRound;
-}
 // ═══════════════════════════════════════════════════════════════════════════
 // v2.10: Backtrack helpers
 // ═══════════════════════════════════════════════════════════════════════════
@@ -118,22 +91,23 @@ export function findSafeRestorePoint(currentRound, vaultEntries, maxDepth) {
     }
     return null;
 }
-/** v2.12: Git HEAD commit hash at the restore point. Read from the restore
- *  round's committed transaction snapshot (after evidence preferred, before
- *  evidence as fallback). Returns null when the round has no git snapshot
- *  or no committed feedback entry. */
-export function findBacktrackTargetGitHead(restoreRound, vaultEntries) {
+export function findBacktrackTargetSnapshot(restoreRound, vaultEntries) {
     const committed = derivationRounds(vaultEntries)
         .find((view) => view.round === restoreRound);
     if (!committed)
         return null;
-    const evidence = machineEvidenceForRound(committed);
-    for (const item of evidence) {
-        if (!isRecord(item) || item.providerId !== "git" || !isRecord(item.data))
+    for (const item of machineEvidenceForRound(committed)) {
+        if (!isRecord(item) || item.providerId !== "git" ||
+            item.status !== "observed" || !isRecord(item.data))
             continue;
         const head = item.data.head;
-        if (typeof head === "string" && head.length > 0)
-            return head;
+        if (typeof head !== "string" || head.length === 0)
+            continue;
+        // v3.9.1: the restore baseline is the boundary's one dirty list.
+        const dirtyFiles = Array.isArray(item.data.dirty)
+            ? item.data.dirty.filter((file) => typeof file === "string")
+            : [];
+        return { head, dirtyFiles };
     }
     return null;
 }
@@ -215,8 +189,7 @@ recovery) {
     // tier still distinguishes the enforcement reason itself.
     if (triggerRule === "progress_stall") {
         lines.push("### Why This Happened", "", `Progress stalled over rounds ${toRound + 1}–${fromRound}: the work ` +
-            `produced no verifiable forward motion — no new files changed, no ` +
-            `criteria met, no progress estimates moving.`, "", "The approach used in those rounds **did not work**. It should not be " +
+            `produced no machine-observed Git changes.`, "", "The approach used in those rounds **did not work**. It should not be " +
             "repeated — a **radically different** strategy is needed.", "");
     }
     // ── v2.13: Workspace Restore ──────────────────────────────────────────
@@ -242,9 +215,14 @@ recovery) {
     // belongs here.
     if (gitHead) {
         lines.push("**The workspace must be returned to the restore point before you " +
-            "continue:**", "", `- HEAD must be at \`${gitHead.slice(0, 12)}\``, `- Every file listed above must be back in its state at Round ${toRound}`, `- No leftover change from rounds ${toRound + 1}–${fromRound} may remain`, "", "Your next submission's git observation is compared against that HEAD, " +
-            "and a file whose fingerprint still matches the failed round proves the " +
-            "restore did not happen.", "");
+            "continue:**", "", `- HEAD must be at \`${gitHead.slice(0, 12)}\``, `- Every file listed above must be back in its state at Round ${toRound}`, `- No leftover change from rounds ${toRound + 1}–${fromRound} may remain`, "", "Your next submission's git observation is compared against that HEAD " +
+            "and against the files Round " + toRound + " already had dirty — work " +
+            "that was already in progress then may stay, but a file whose " +
+            "fingerprint still matches the failed round, or any change the restore " +
+            "point did not already carry, proves the restore did not happen. Submit " +
+            "one recovery evaluation after the restore so LoopForge can verify the " +
+            "restored starting state before you redo the work; only then continue " +
+            "with the next slice.", "");
     }
     else {
         lines.push(`**The workspace must be returned to its state at Round ${toRound}** — ` +
@@ -413,47 +391,6 @@ function enforceVerificationEntrypointTampered(flags, vaultEntries, currentRound
             "first — a script that is not an uncommitted change — and let a later " +
             "round run it.",
         check,
-    });
-}
-/** R8 (v2.12/v3.7): The single success-evidence row. The verification gate
- *  produced success_without_verified_evidence (error) — either the empty/
- *  missing-evidence arm (v3.7: the ex-R3 empty_success posture moved into
- *  checkSuccessWithoutVerifiedEvidence) or the claims arm (zero verified
- *  claims). First occurrence → reject with concrete evidence requirements;
- *  second consecutive → terminate.
- *
- *  v3.8.3: "consecutive" means consecutive for THIS check (L4's own-streak
- *  rule, which until now reached only the uniform rows and the contract row).
- *  The persisted counter is one scalar, so a success-evidence round arriving
- *  after two unrelated rejections used to terminate on its FIRST occurrence. */
-function enforceSuccessWithoutVerifiedEvidence(flags, consecutiveRejections, lastRejectionCheck) {
-    const flag = flags.find((f) => f.check === CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE && f.severity === "error");
-    if (!flag)
-        return null;
-    const ownStreak = lastRejectionCheck === CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE
-        ? consecutiveRejections
-        : 0;
-    if (ownStreak >= 2) {
-        return makeEnforcementResult({
-            action: "terminate",
-            reason: "Repeated success claims with zero machine-verifiable evidence.",
-            check: "success_without_verified_evidence",
-        });
-    }
-    const escalation = getPolicy().engine.enforcement_escalation_enabled &&
-        ownStreak >= 1
-        ? buildEscalationNotice()
-        : "";
-    return makeEnforcementResult({
-        action: "reject",
-        reason: "Agent claims success but the runtime verified zero claims: no passing " +
-            "test evidence and no test results were observed. Success must be backed " +
-            "by machine-verifiable evidence.",
-        fix_instructions: "Provide verifiable evidence for your success claim: (a) run tests and " +
-            "report results in execution_report.tests_reported, or (b) configure a " +
-            "required verification command and run it, or (c) if no change was " +
-            "genuinely needed, declare no_change_reason explaining why." + escalation,
-        check: "success_without_verified_evidence",
     });
 }
 /** v3.8: Verification debt — contract items claimed met without machine
@@ -625,83 +562,52 @@ function enforceBacktrackNotRestored(flags, vaultEntries = [], currentRound = 0)
     });
 }
 /** Shared observation pipeline for the progress evaluator (stall window,
- *  flatline tier). Machine git motion is exculpatory only: it may veto a
- *  self-reported stall but can never create one. */
-function evaluateStallWindow(tier, selfEval, currentRound, vaultEntries,
+ *  flatline tier). Only observable machine history can establish a stall. */
+function evaluateStallWindow(tier, currentRound, vaultEntries,
 /** v3.8.1: the round's success is machine-verified (`deriveEvidenceStatus`).
  *  A verified round is finishing work; a motion window cannot outvote it. */
-machineBackedSuccess) {
+machineBackedSuccess,
+/** v3.9: the submitted round's own Git motion (`inFlightGitMotion`).
+ *  null = no Git observation, so no excuse. */
+inFlightMotion) {
     // A round the machine verified is not churn, whatever the window says. This
     // is the machine-backed replacement for the old self-reported `>= 0.95`
     // near-completion guard: it lets a loop FINISH (a closing round that only
     // runs the verification and declares success changes no files).
     if (machineBackedSuccess)
         return null;
+    // The round being submitted is part of the recent work: when IT shows
+    // machine motion, no window of older rounds can call the loop stalled.
+    // Without this the abandoned window that triggered a rollback judges every
+    // redo forever — the redo's work is in flight and cannot be in that window.
+    // This is the machine replacement for the removed self-reported progress
+    // injection; a round that moves nothing still reaches the verdict and its
+    // deadlock guard.
+    if (inFlightMotion === true)
+        return null;
     const window = tier === "progress_stall"
         ? 3
         : Math.max(1, getPolicy().engine.stall_lookback_rounds);
     if (currentRound < window)
         return null;
-    const progressByRound = progressWindow(vaultEntries, currentRound, selfEval);
-    const threshold = getPolicy().evolution.progress_stall_threshold;
-    let stalled = false;
-    let detail = "";
-    // v3.8.1: when the MACHINE series is observable it decides the verdict, and
-    // the agent's own estimates are not consulted at all. Reading the estimates
-    // first (the pre-3.8.1 order) let an agent cancel a stall by writing a
-    // rising `progress_estimate` every round — a verdict about machine motion
-    // that the agent's own report could move, which is the one thing an external
-    // verifier must not allow. Machine motion still only ever EXCUSES: it can
-    // veto a stall it did not create; it can never create one.
-    //
-    // The self-reported window is the FALLBACK for a loop with no machine
-    // history to read (no git provider, or fewer rounds than the window). There
-    // the evaluator can only catch a stall the agent's own reports state, and
-    // the near-completion guard keeps it from rejecting a loop that reports
-    // itself nearly done.
     const machine = machineProgressSeries(vaultEntries, currentRound, window);
-    if (machine !== null) {
-        stalled = machine.every((value) => !value);
-        detail = tier === "progress_stall"
-            ? `no machine-observed changes in the last ${window} rounds`
-            : `no machine-observed changes for ${window} consecutive rounds`;
-    }
-    else if (progressByRound.size >= window) {
-        const recent = [...progressByRound.keys()].sort((a, b) => a - b).slice(-window);
-        if (recent[0] < currentRound - window)
-            return null;
-        const values = recent.map((round) => progressByRound.get(round));
-        if (values[values.length - 1] >= 0.95)
-            return null;
-        if (tier === "progress_stall") {
-            stalled = values.slice(1).every((value, index) => value - values[index] < threshold);
-            detail = `${values.map((value) => `${(value * 100).toFixed(0)}%`).join(" → ")}` +
-                " (agent-reported, no machine history to read)";
-        }
-        else {
-            const first = values[0];
-            stalled = values.every((value) => Math.abs(value - first) < 1e-10);
-            detail = `completely flat at ${(first * 100).toFixed(0)}%`;
-        }
-    }
-    else {
+    if (machine === null || machine.some((value) => value))
         return null;
-    }
-    if (!stalled)
-        return null;
-    return { tier, detail, window, threshold };
+    const detail = tier === "progress_stall"
+        ? `no machine-observed changes in the last ${window} rounds`
+        : `no machine-observed changes for ${window} consecutive rounds`;
+    return { tier, detail, window };
 }
 /** Shared progress escalation and backtrack deadlock guard (v3.7: one
- * evaluator). The flatline tier keeps its steeper threshold-0 ladder while
+ * evaluator). The flatline tier keeps its steeper ladder while
  * using the same mechanics — the tier is an internal diagnostic only. */
 function resolveStallDisposition(verdict, currentRound, vaultEntries, consecutiveRejections, lastRejectionCheck) {
-    const { tier, detail, window, threshold } = verdict;
+    const { tier, detail, window } = verdict;
     const flatline = tier === "progress_flatline";
     const escalation = getPolicy().engine.enforcement_escalation_enabled;
     const stalledReason = flatline
         ? `Progress has been ${detail} for ${window} consecutive rounds.`
-        : `Progress has stalled: ${detail} over the last ${window} rounds` +
-            `${threshold > 0 ? ` (delta < ${(threshold * 100).toFixed(0)}% each round)` : ""}.`;
+        : `Progress has stalled: ${detail}.`;
     // v3.7: both tiers emit the single progress_stall check id — the tier
     // survives only in the reason/fix wording (former progress_flatline id).
     const check = "progress_stall";
@@ -758,17 +664,11 @@ function resolveStallDisposition(verdict, currentRound, vaultEntries, consecutiv
         check,
     });
 }
-/** v3.7: The single progress evaluator (former R4 stall and R5 flatline rows
- *  merged into one). The stall-tier window is consulted first — under the
- *  default positive threshold its predicate covers exactly-flat runs too,
- *  reproducing the v3.6 R4-before-R5 shadowing; the flatline tier is
- *  consulted only when the stall predicate cannot hold (threshold ≤ 0,
- *  shorter lookback configs), where it applies its steeper disposition
- *  ladder. Machine git motion is exculpatory only — it may veto a
- *  self-reported stall but can never create one. */
-function enforceProgressStall(selfEval, _flags, currentRound, vaultEntries, consecutiveRejections, machineBackedSuccess, lastRejectionCheck) {
-    const verdict = evaluateStallWindow("progress_stall", selfEval, currentRound, vaultEntries, machineBackedSuccess)
-        ?? evaluateStallWindow("progress_flatline", selfEval, currentRound, vaultEntries, machineBackedSuccess);
+/** The stall-tier window is consulted first. A shorter configured flatline
+ * lookback retains its steeper disposition ladder. */
+function enforceProgressStall(_flags, currentRound, vaultEntries, consecutiveRejections, machineBackedSuccess, lastRejectionCheck, inFlightMotion) {
+    const verdict = evaluateStallWindow("progress_stall", currentRound, vaultEntries, machineBackedSuccess, inFlightMotion)
+        ?? evaluateStallWindow("progress_flatline", currentRound, vaultEntries, machineBackedSuccess, inFlightMotion);
     return verdict
         ? resolveStallDisposition(verdict, currentRound, vaultEntries, consecutiveRejections, lastRejectionCheck)
         : null;
@@ -882,7 +782,6 @@ const RULE_TABLE = [
     // purpose), so the second occurrence rolls the work back instead of killing
     // the loop. See enforceVerificationEntrypointTampered.
     { checks: ["verification_entrypoint_modified"], ladder: "internal" },
-    { checks: ["success_without_verified_evidence"], ladder: "internal" },
     { checks: ["round_scope_drift"], ladder: "internal" },
     // v3.8.1: "internal" — the handler owns this row's ladder (it must terminate
     // as `incomplete`, with its own reason). Declaring it uniform as well ran the
@@ -948,7 +847,10 @@ lastRejectionCheck = "",
  *  round changed outside the active contract's scope. Computed there, not
  *  here: neither the observations nor the active contract reach this
  *  function. See `enforceScopeDrift`. */
-scopeDriftWaiver = false) {
+scopeDriftWaiver = false,
+/** v3.9: the submitted round's own Git motion — see `inFlightGitMotion`.
+ *  null when no Git observation was made. */
+inFlightMotion = null) {
     const { flags } = verifyResult;
     // Run enforcement rules in priority order — the array order IS the
     // priority; the R-labels in the comments are historical (RULE_TABLE is
@@ -960,18 +862,17 @@ scopeDriftWaiver = false) {
         // a self-contradictory outcome claim contradicts the success claim
         () => enforceEvidenceContradiction(flags),
         // v3.3: R-EVID-VERIFY — the verification command entrypoint changed in
-        // the same round it ran. Runs before R8: when the entrypoint is tainted
-        // R8 also fires, but this reason is more specific.
+        // the same round it ran.
         () => enforceVerificationEntrypointTampered(flags, vaultEntries, currentRound, consecutiveRejections, lastRejectionCheck),
         // v3.5: contract completion claimed without its verification_plan
         // commands passing — runs before R-C1: the completion-truth question
         // outranks boundary nuance.
         // v3.3: R-C1 — contract boundary claimed prematurely (contract-specific
-        // wording and check counting; runs before R8 so contract rounds get the
-        // contract's own reason.)
-        // v2.12/v3.7: R8 — the single success-evidence row (empty/missing-evidence
-        // arm merged from the former R3 empty_success posture + claims arm)
-        () => enforceSuccessWithoutVerifiedEvidence(flags, consecutiveRejections, lastRejectionCheck),
+        // wording and check counting).
+        // v3.9.1: R8 was removed. Its only trigger was the empty-report arm of
+        // success_without_verified_evidence, which is now a warn: report coverage
+        // no longer decides acceptance, and the machine-evidence warn still keeps
+        // an unbacked success out of the trajectory.
         // v3.3: R-C2 — files changed outside the contract's declared scope
         () => enforceScopeDrift(flags, consecutiveRejections, lastRejectionCheck, scopeDriftWaiver),
         // v3.8: verification debt — contract items claimed met without machine
@@ -979,7 +880,7 @@ scopeDriftWaiver = false) {
         () => enforceContractItemsUnverified(flags, currentRound, vaultEntries, consecutiveRejections, lastRejectionCheck),
         // v3.7: single progress evaluator (former R4/R5 slots merged) —
         // reject → backtrack → terminate with the deadlock guard
-        () => enforceProgressStall(selfEval, flags, currentRound, vaultEntries, consecutiveRejections, verifyResult.machineBackedSuccess, lastRejectionCheck),
+        () => enforceProgressStall(flags, currentRound, vaultEntries, consecutiveRejections, verifyResult.machineBackedSuccess, lastRejectionCheck, inFlightMotion),
         // R6: rejection-counter catch-all (evaluated only when no row above
         // fired — a clean-looking round carrying a high persisted counter)
         // v3.7.1: cited gate without an approved human decision

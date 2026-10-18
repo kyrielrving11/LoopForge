@@ -221,6 +221,11 @@ describe("E2E MCP lifecycle", () => {
     assert.equal(String(result.level).toUpperCase(), "L2");
     assert.ok(typeof result.prompt === "string" && result.prompt.length > 100);
     assert.ok(typeof result.roundId === "string");
+    // v3.9.1: every prepared response carries current-fact guidance.
+    const guidance = result.submission_guidance as Record<string, unknown> | undefined;
+    assert.ok(guidance, "start returns submission_guidance");
+    assert.ok(Array.isArray(guidance.fields), "guidance lists applicable fields");
+    assert.equal(guidance.active_contract, null, "round 1 has no active contract");
     // Assign module-level variables BEFORE any assertion that could throw.
     sessionId = String(result.sessionId);
     roundId = String(result.roundId);
@@ -254,8 +259,10 @@ describe("E2E MCP lifecycle", () => {
             "Fix any confirmed correctness bugs",
             "Preserve the public API",
           ],
-          progress_estimate: 0.25,
         },
+        // v3.9.1: a retired field must reach the RUNTIME and be diagnosed,
+        // not fail as a JSON-RPC argument error.
+        progress_estimate: 0.9,
       },
     });
 
@@ -265,6 +272,21 @@ describe("E2E MCP lifecycle", () => {
     assert.ok(typeof result.prompt === "string" && result.prompt.length > 50);
     // Round 2 is L1 (normal continuation).
     assert.equal(String(result.level).toUpperCase(), "L1");
+    // v3.9.1: the continue result carries guidance for the newly prepared round.
+    const guidance = result.submission_guidance as Record<string, unknown> | undefined;
+    assert.ok(guidance, "continue returns submission_guidance");
+    assert.ok(Array.isArray(guidance.fields));
+    // v3.9.1: the receipt separates saved reports from effects/verification.
+    const receipt = result.submission_receipt as Record<string, unknown> | undefined;
+    assert.ok(receipt, "continue returns submission_receipt");
+    assert.equal(receipt.entered_history, true);
+    assert.equal(receipt.record, "committed");
+    const reports = receipt.reports as Array<{ path: string; handling: string }>;
+    assert.ok(reports.some((report) =>
+      report.path === "execution_report.files_changed" && report.handling === "saved"));
+    assert.ok(reports.some((report) =>
+      report.path === "progress_estimate" && report.handling === "dropped"),
+    "the retired field is diagnosed, not silently accepted");
     // enforcementAction is only present on reject/terminate; accept is the default.
     if (result.enforcementAction) {
       assert.notEqual(result.enforcementAction, "reject");
@@ -294,7 +316,6 @@ describe("E2E MCP lifecycle", () => {
             "Fix any confirmed correctness bugs",
             "Preserve the public API",
           ]),
-          progress_estimate: 0.25,
         },
       },
     });
@@ -305,6 +326,15 @@ describe("E2E MCP lifecycle", () => {
     assert.ok(typeof result.prompt === "string" && result.prompt.length > 20);
     assert.equal(result.enforcementAction, "reject");
     assert.ok(typeof result.enforcementReason === "string");
+    // v3.9.1: a rejected attempt never reports an applied effect.
+    const receipt = result.submission_receipt as Record<string, unknown> | undefined;
+    assert.ok(receipt, "reject returns submission_receipt");
+    assert.equal(receipt.entered_history, false);
+    assert.equal(receipt.record, "none");
+    const reports = receipt.reports as Array<{ handling: string }>;
+    assert.ok(reports.length > 0);
+    assert.ok(reports.every((report) => report.handling === "not_applied"),
+      "a rejected attempt is never shown as applied");
     // Rejection keeps the logical round — the roundId anchor stays put.
     assert.equal(result.roundId, roundId);
   });
@@ -329,7 +359,6 @@ describe("E2E MCP lifecycle", () => {
           success_criteria_remaining: [
             "Fix any confirmed correctness bugs",
           ],
-          progress_estimate: 0.5,
         },
       },
     });
@@ -385,7 +414,6 @@ describe("E2E MCP lifecycle", () => {
             "Preserve the public API",
           ],
           criterion_claims: criterionClaims([], []),
-          progress_estimate: 1.0,
         },
       },
     });
@@ -411,6 +439,11 @@ describe("E2E MCP lifecycle", () => {
       result.status === "stopped" || result.status === "paused",
       `expected stopped or paused, got ${String(result.status)}`,
     );
+    // v3.9.1: the latest committed submission is rebuilt for status.
+    const last = result.last_submission as Record<string, unknown> | null;
+    assert.ok(last, "status exposes the latest committed receipt");
+    assert.equal(last.record, "committed");
+    assert.equal(last.entered_history, true);
   });
 
   it("replay returns auditable round timeline", async () => {
@@ -422,6 +455,15 @@ describe("E2E MCP lifecycle", () => {
     const timeline = result.timeline as Array<Record<string, unknown>>;
     assert.ok(Array.isArray(timeline), "timeline must be an array");
     assert.ok(timeline.length >= 1, `expected >=1 entries in timeline, got ${timeline.length}`);
+    // v3.9.1: the shared delta and explicit legacy reporting.
+    assert.ok(Array.isArray(result.legacyRounds), "legacyRounds is always present");
+    for (const row of timeline) {
+      if (row.legacy === true) continue;
+      assert.ok(
+        row.files_changed === null || Array.isArray(row.files_changed),
+        "each row carries files_changed, or null when the boundary is unknown",
+      );
+    }
   });
 
   it("health returns machine counts for the loop", async () => {

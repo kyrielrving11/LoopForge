@@ -65,7 +65,10 @@ export interface LoopRoundDocument {
     updatedAt: string;
     lineage?: VaultEntry;
     feedback?: VaultEntry;
+    /** DERIVED ON READ from feedback.loop_lineage.round_transaction; never
+     *  persisted. The factual copy lives in the feedback entry (one copy). */
     transaction?: RoundTransactionSnapshot;
+    /** DERIVED ON READ from the transaction snapshot; never persisted. */
     promptArtifact?: PromptArtifact;
     events: VaultEntry[];
 }

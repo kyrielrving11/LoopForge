@@ -16,9 +16,9 @@
 import type {
   ContractItemProposal,
   ExecutionReport,
-  MachineObservation,
   RoundContractProposal,
 } from "./protocol.js";
+import type { ObservationDelta } from "./evidence-provider.js";
 import type { CommittedRoundView } from "./committed-round.js";
 import type { CommandEvidencePolicy } from "./policy.js";
 import {
@@ -113,7 +113,7 @@ export function deriveActiveRoundContract(
       rounds: rounds.slice(0, index + 1),
       currentRound: round.round + 1,
       currentReport: null,
-      currentObservations: [],
+      currentDeltas: [],
       commands,
     });
     if (statuses.closure === "verified") {
@@ -147,15 +147,15 @@ export function contractCriterionIds(contract: ActiveContractView): string[] {
  *    declared in round R becomes active in R+1, and a contract round R CLOSES
  *    must still be reported as round R's contract — folding R's own proposal
  *    into the walker would hand the round the successor (or nothing).
- *  - The round's own report and observations enter as the in-flight slice, so
- *    its claims and its bound commands are judged with the same reducer the
+ *  - The round's own report and deltas enter as the in-flight slice, so its
+ *    claims and its bound commands are judged with the same reducer the
  *    coordinator uses before the round commits. */
 export function deriveRoundContractView(input: {
   /** Committed rounds (rollback-excluded), ascending. */
   rounds: ReadonlyArray<CommittedRoundView>;
   round: number;
   report: ExecutionReport | null;
-  observations: ReadonlyArray<MachineObservation>;
+  deltas: ReadonlyArray<ObservationDelta>;
   /** The round's committed/effective outcome — `blocked` closes its contract. */
   outcome: string | null;
   commands: ReadonlyArray<CommandEvidencePolicy>;
@@ -169,7 +169,7 @@ export function deriveRoundContractView(input: {
       rounds: prior,
       currentRound: input.round,
       currentReport: input.report,
-      currentObservations: input.observations,
+      currentDeltas: input.deltas,
       currentOutcome: input.outcome,
       commands: input.commands,
     }),

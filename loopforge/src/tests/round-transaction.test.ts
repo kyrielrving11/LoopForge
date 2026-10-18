@@ -23,7 +23,6 @@ function continuingEvaluation(): SelfEvaluation {
       files_changed: [],
       tests_reported: null,
       criterion_claims: criterionClaims([], ["remaining"]),
-      progress_estimate: 0.4,
     },
   };
 }
@@ -38,7 +37,6 @@ function rejectedEvaluation(): SelfEvaluation {
       files_changed: ["src/change.ts"],
       tests_reported: { passed: 1, failed: 0, skipped: 0 },
       criterion_claims: criterionClaims([], ["still open"]),
-      progress_estimate: 0.5,
     },
   };
 }
@@ -129,6 +127,9 @@ describe("backtrack commit replay", () => {
         constraint_violations: [],
         should_continue: true,
       },
+      submittedFields: [
+        "success", "output_summary", "constraint_violations", "should_continue",
+      ],
       result: {
         action: "backtrack",
         verificationStatus: "trusted",
@@ -162,6 +163,9 @@ describe("backtrack commit replay", () => {
       attempt: 1,
       afterEvidence: [],
       evaluation: continuingEvaluation(),
+      submittedFields: [
+        "success", "output_summary", "constraint_violations", "should_continue",
+      ],
       result: {
         action: "backtrack",
         verificationStatus: "trusted",
@@ -186,7 +190,7 @@ describe("backtrack commit replay", () => {
       5,
       "test task",
       {
-        schema_version: 2,
+        schema_version: 3,
         round_id: committed.roundId,
         snapshot: committed,
         result: committed.result!,

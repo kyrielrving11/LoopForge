@@ -16,7 +16,7 @@ import { deriveActiveRoundContract, deriveRoundContractView } from "./round-cont
 import { deriveCriterionId, isCriterionId } from "./token-utils.js";
 export const NO_IN_FLIGHT_ROUND = {
     currentReport: null,
-    currentObservations: [],
+    currentDeltas: [],
     currentOutcome: null,
 };
 export function deriveRoundFacts(input) {
@@ -26,7 +26,7 @@ export function deriveRoundFacts(input) {
         rounds: input.rounds,
         currentRound: input.currentRound,
         currentReport: input.inFlight.currentReport,
-        currentObservations: input.inFlight.currentObservations,
+        currentDeltas: input.inFlight.currentDeltas,
         currentOutcome: input.inFlight.currentOutcome ?? null,
         commands: input.commands,
     });
@@ -85,7 +85,7 @@ function deriveCriterionFacts(input) {
             rounds: input.rounds,
             round: round.round,
             report: round.executionReport,
-            observations: round.observationDelta,
+            deltas: round.observationDelta,
             outcome: round.outcome,
             commands: input.commands,
         });
@@ -164,7 +164,7 @@ export function deriveVerifiedSubGoals(input) {
             rounds: input.rounds,
             round: round.round,
             report: round.executionReport,
-            observations: round.observationDelta,
+            deltas: round.observationDelta,
             outcome: round.outcome,
             commands: input.commands,
         });

@@ -20,6 +20,7 @@
  */
 import type { VaultEntry } from "./loop-store.js";
 import type { MachineObservation } from "./protocol.js";
+import type { GitDeltaState, ObservationDelta } from "./evidence-provider.js";
 import type { EntrypointDrift } from "./evidence-provider.js";
 import type { SelfEvaluation, VerificationResult } from "./protocol.js";
 import { type ActiveContractView } from "./round-contract.js";
@@ -91,20 +92,23 @@ export declare function collectOutOfScopeFiles(files: string[], scope: string[])
 export interface EvidenceStatus {
     /** Whether this round produced a machine-verified observation. */
     providerStatus: "verified" | "unavailable" | "absent";
-    /** Git snapshot exists and diffed file changes this round. */
+    /** The Git boundary was observed and its change set is known. */
     gitObserved: boolean;
+    /** Applicability vs observability of the Git change set. */
+    gitChangeState: GitDeltaState["state"];
     /** A passed after-phase command snapshot exists. */
     commandVerified: boolean;
     /** Agent-reported tests_reported agree with a passed command's parsed stdout. */
     testsMachineBacked: boolean;
-    /** Agent-reported files_changed equals the git diff set exactly. */
-    reportedFilesMatch: boolean;
+    /** Agent-reported files_changed equals the git change set exactly; null
+     *  when the machine change set is not observable. */
+    reportedFilesMatch: boolean | null;
 }
 /** v3.2: Derive the machine-verification status of a round. The verification
  *  capability is modeled explicitly (verified / unavailable / absent) instead
  *  of letting evidence-dependent checks silently disappear when snapshots are
  *  missing — the fix for the "weakest when it matters most" gap. */
-export declare function deriveEvidenceStatus(selfEval: SelfEvaluation, evidenceSnapshots: MachineObservation[]): EvidenceStatus;
+export declare function deriveEvidenceStatus(selfEval: SelfEvaluation, evidenceDeltas: ReadonlyArray<ObservationDelta>): EvidenceStatus;
 /** Per-round machine progress over decoded committed history. */
 export declare function machineProgressSeries(vaultEntries: VaultEntry[], currentRound: number, lookback: number): boolean[] | null;
 interface ParsedTestCounts {
@@ -131,8 +135,8 @@ export declare function parseTestOutput(stdout: string): ParsedTestCounts | null
  *  Git diff files are the machine-authoritative "what actually changed" set.
  *  Empty when there is nothing to compare: no active contract, no declared
  *  scope, or no git observation (cannot observe → fail open). */
-export declare function roundDriftFiles(activeContract: ActiveContractView | null, evidenceSnapshots: MachineObservation[]): string[];
-export declare function verifySelfEvaluation(selfEval: SelfEvaluation, currentRound: number, vaultEntries: VaultEntry[], prevSelfEval?: SelfEvaluation | null, evidenceSnapshots?: MachineObservation[],
+export declare function roundDriftFiles(activeContract: ActiveContractView | null, evidenceDeltas: ReadonlyArray<ObservationDelta>): string[] | null;
+export declare function verifySelfEvaluation(selfEval: SelfEvaluation, currentRound: number, vaultEntries: VaultEntry[], prevSelfEval?: SelfEvaluation | null, evidenceDeltas?: ReadonlyArray<ObservationDelta>,
 /** v2.13: Files from skipped backtrack rounds. If the agent's
  *  files_changed overlaps significantly with these, the workspace
  *  was not properly restored before working. */
@@ -150,6 +154,8 @@ gateEntries?: VaultEntry[],
 /** v3.8.3: entrypoint files that no longer match the trusted round-start
  *  baseline. Derived by the caller (it needs the in-flight trust map and
  *  filesystem access); this function stays a pure function of its inputs. */
-entrypointDrift?: EntrypointDrift[]): VerificationResult;
+entrypointDrift?: EntrypointDrift[], beforeEvidence?: MachineObservation[],
+/** v3.9: the restore point's own dirty files (undefined = never observed). */
+backtrackTargetDirty?: string[]): VerificationResult;
 export {};
 //# sourceMappingURL=verification-gate.d.ts.map

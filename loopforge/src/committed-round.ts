@@ -6,7 +6,11 @@
  */
 
 import type { MachineObservation } from "./protocol.js";
-import { PROMPT_ARTIFACT_SCHEMA_VERSION } from "./protocol.js";
+import type { ObservationDelta } from "./evidence-provider.js";
+import {
+  GIT_OBSERVATION_SCHEMA_VERSION,
+  PROMPT_ARTIFACT_SCHEMA_VERSION,
+} from "./protocol.js";
 import type { VaultEntry } from "./loop-store.js";
 import type {
   ContractBinding,
@@ -15,6 +19,7 @@ import type {
   RoundContractProposal,
   RoundOutcome,
   SelfEvaluation,
+  SubmissionDiagnostic,
   SubGoalUpdate,
   VerificationFlag,
 } from "./protocol.js";
@@ -25,6 +30,7 @@ import {
   parseRoundTransactionSnapshot,
   transactionSchemaVersionOf,
 } from "./round-transaction.js";
+import type { RoundTransactionSnapshot } from "./round-transaction.js";
 import { claimedMetCriteria, claimedRemainingCriteria, effectiveOutcome, parseRoundContract } from "./self-eval.js";
 import { entryRound, isRecord } from "./token-utils.js";
 
@@ -71,9 +77,12 @@ export interface CommittedRoundView {
   readonly contractBinding: ContractBinding | null;
   readonly beforeEvidence: MachineObservation[];
   readonly afterEvidence: MachineObservation[];
-  /** v3.8: derived before→after delta — never persisted (transaction
-   *  schema 2 stores only the two factual collections). */
-  readonly observationDelta: MachineObservation[];
+  /** v3.8: derived before→after delta — never persisted (the transaction
+   *  stores only the two factual collections). */
+  readonly observationDelta: ObservationDelta[];
+  /** v3.9.1: persisted normalization metadata. */
+  readonly normalizationDiagnostics: SubmissionDiagnostic[];
+  readonly submittedFields: string[];
   /** v3.8: true when the round committed without after-phase observations —
    *  its machine evidence is incomplete and must never be substituted with
    *  the before baseline. */
@@ -183,6 +192,84 @@ function subGoalUpdates(value: unknown): SubGoalUpdate[] {
 
 /** Decode a durable :feedback entry. Reject/terminate/in-flight envelopes are
  * not committed history and therefore do not produce a view. */
+/** v3.9.1: a round is evidence-incomplete when it has no after evidence at
+ *  all, or when Git was configured/appeared but either boundary is not
+ *  observable. A command-only round is not incomplete merely because it has
+ *  no Git observation. */
+function evidenceIncomplete(
+  after: ReadonlyArray<MachineObservation>,
+  deltas: ReadonlyArray<ObservationDelta>,
+): boolean {
+  if (after.length === 0) return true;
+  // No Git delta means Git was not part of this round. A Git delta whose
+  // change set is null means the boundary pair could not be compared —
+  // including a missing before baseline.
+  return deltas.some((delta) =>
+    delta.kind === "git" && delta.changedFiles === null);
+}
+
+/** v3.9.1: ONE view builder over ONE transaction snapshot. Both the durable
+ *  feedback entry and the engine's hydrated merged entry call it, so there is
+ *  no second evaluation/history interpretation. */
+function viewFromSnapshot(input: {
+  source: "feedback" | "merged";
+  sourceEntry: VaultEntry | Record<string, unknown>;
+  lineage: Record<string, unknown> | null;
+  snapshot: RoundTransactionSnapshot;
+  result: RoundProcessResult;
+  sequence?: number;
+}): CommittedRoundView | null {
+  const { snapshot, result, lineage } = input;
+  if (snapshot.phase !== "committed") return null;
+  const action = committedAction(result.action);
+  if (!action) return null;
+  const round = snapshot.round;
+  const loopId = snapshot.loopId;
+  if (round < 1 || !loopId) return null;
+  const evaluation = snapshot.evaluation ?? null;
+  const outcome = evaluation ? effectiveOutcome(evaluation) : null;
+  const beforeEvidence = snapshots(snapshot.beforeEvidence);
+  const afterEvidence = snapshots(snapshot.afterEvidence);
+  const observationDelta = deriveRoundObservationDelta(beforeEvidence, afterEvidence);
+  return {
+    source: input.source,
+    sourceEntry: input.sourceEntry,
+    loopId,
+    round,
+    roundId: snapshot.roundId,
+    sequence: input.sequence,
+    attempt: snapshot.attempt,
+    promptArtifact: snapshot.promptArtifact ?? null,
+    evaluation,
+    executionReport: evaluation?.execution_report ?? null,
+    verificationFlags: flags(result.verificationFlags),
+    result,
+    action,
+    success: result.roundSuccess === true,
+    outcome,
+    contractProposal: evaluation?.round_contract
+      ? parseRoundContract(evaluation.round_contract) ?? null
+      : null,
+    contractBinding: snapshot.contractBinding ?? null,
+    beforeEvidence,
+    afterEvidence,
+    observationDelta,
+    normalizationDiagnostics: snapshot.normalizationDiagnostics ?? [],
+    submittedFields: snapshot.submittedFields ?? [],
+    evidenceIncomplete: evidenceIncomplete(afterEvidence, observationDelta),
+    outputSummary: evaluation?.output_summary,
+    constraintViolations: strings(evaluation?.constraint_violations),
+    discoveredConstraints: strings(evaluation?.discovered_constraints),
+    activeConstraints: strings(lineage?.constraints_active),
+    retractedConstraints: strings(evaluation?.retracted_constraints),
+    emergedSubtasks: strings(evaluation?.emerged_subtasks),
+    subgoalUpdates: subGoalUpdates(evaluation?.subgoal_updates),
+    backtrack: action === "backtrack"
+      ? decodeBacktrackRecord(result as unknown as Record<string, unknown>)
+      : null,
+  };
+}
+
 export function decodeCommittedRound(entry: VaultEntry): CommittedRoundView | null {
   if (!String(entry.task_id ?? "").endsWith(":feedback")) return null;
   const lineage = isRecord(entry.loop_lineage) ? entry.loop_lineage : null;
@@ -196,151 +283,50 @@ export function decodeCommittedRound(entry: VaultEntry): CommittedRoundView | nu
   // silently decoded into a partial view.
   const snapshot = parseRoundTransactionSnapshot(transaction.snapshot);
   if (!snapshot) return null;
-  if (snapshot.phase !== "committed") return null;
   const resultValue = isRecord(transaction.result)
     ? transaction.result
     : snapshot.result;
   if (!isRecord(resultValue)) return null;
-  const action = committedAction(resultValue.action);
-  if (!action) return null;
-  const result = resultValue as unknown as RoundProcessResult;
-  const round = snapshot?.round ?? entryRound(entry as unknown as Record<string, unknown>);
-  const loopId = snapshot?.loopId ?? String(entry.loop_id ?? lineage?.loop_id ?? "");
-  if (round < 1 || !loopId) return null;
-  const evaluation = snapshot?.evaluation ?? null;
-  const outcome = evaluation ? effectiveOutcome(evaluation) : null;
-  const sequence = typeof entry.sequence === "number" ? entry.sequence : undefined;
-  return {
+  return viewFromSnapshot({
     source: "feedback",
     sourceEntry: entry,
-    loopId,
-    round,
-    roundId: snapshot?.roundId ?? String(transaction.round_id ?? `loop:${loopId}:round:${round}`),
-    sequence,
-    attempt: snapshot?.attempt ?? 1,
-    promptArtifact: snapshot?.promptArtifact ?? null,
-    evaluation,
-    executionReport: evaluation?.execution_report ?? null,
-    verificationFlags: flags(result.verificationFlags),
-    result,
-    action,
-    success: result.roundSuccess === true,
-    outcome,
-    contractProposal: evaluation?.round_contract
-      ? parseRoundContract(evaluation.round_contract) ?? null
-      : null,
-    contractBinding: snapshot?.contractBinding ?? null,
-    beforeEvidence: snapshots(snapshot?.beforeEvidence),
-    afterEvidence: snapshots(snapshot?.afterEvidence),
-    observationDelta: deriveRoundObservationDelta(
-      snapshots(snapshot?.beforeEvidence),
-      snapshots(snapshot?.afterEvidence),
-    ),
-    evidenceIncomplete: (snapshot?.afterEvidence?.length ?? 0) === 0,
-    outputSummary: evaluation?.output_summary,
-    constraintViolations: strings(evaluation?.constraint_violations),
-    discoveredConstraints: strings(evaluation?.discovered_constraints),
-    activeConstraints: strings(lineage?.constraints_active),
-    retractedConstraints: strings(evaluation?.retracted_constraints),
-    emergedSubtasks: strings(evaluation?.emerged_subtasks),
-    subgoalUpdates: subGoalUpdates(evaluation?.subgoal_updates),
-    backtrack: action === "backtrack" ? decodeBacktrackRecord(resultValue) : null,
-  };
+    lineage,
+    snapshot,
+    result: resultValue as unknown as RoundProcessResult,
+    sequence: typeof entry.sequence === "number" ? entry.sequence : undefined,
+  });
 }
 
 /** Decode an in-memory lineage entry after the engine merged its committed
- * feedback. The merged shape is intentionally accepted only when stamped
- * with committed_action. */
+ * feedback. The merged entry MUST carry the embedded transaction snapshot;
+ * the old raw top-level evaluation reconstruction is gone, so a partial
+ * lineage entry cannot become a second history. */
 export function decodeMergedRound(entry: unknown): CommittedRoundView | null {
   if (!isRecord(entry)) return null;
   const raw = entry as Record<string, unknown>;
-  // v3.7: the legacy top-level `lineage` alias was removed — committed
-  // entries always carry `loop_lineage`.
   const lineage = isRecord(raw.loop_lineage) ? raw.loop_lineage : {};
   const action = committedAction(lineage.committed_action ?? raw.committed_action);
   if (!action) return null;
-  const round = entryRound(raw);
-  if (round < 1) return null;
-  const loopId = typeof raw.loop_id === "string"
-    ? raw.loop_id
-    : typeof lineage.loop_id === "string" ? lineage.loop_id : "";
-  const roundId = typeof lineage.round_id === "string"
-    ? lineage.round_id
-    : `loop:${loopId}:round:${round}`;
-  const evaluationRaw: Record<string, unknown> = {};
-  const evaluationKeys = [
-    "success", "output_summary", "constraint_violations", "should_continue",
-    "discovered_constraints", "objective_refinement", "emerged_subtasks",
-    "execution_report", "retracted_constraints", "revised_success_criteria",
-    "wrong_assumptions", "worker_results", "compression_checkpoint",
-    "checkpoint_label", "subgoal_updates", "stop_reason",
-    "outcome", "blocker", "gate_ids",
-    "retroactiveClaims", "no_change_reason",
-    "prompt_requests", "round_contract",
-  ];
-  let hasEvaluation = false;
-  for (const key of evaluationKeys) {
-    const value = raw[key] ?? lineage[key];
-    if (value !== undefined) {
-      evaluationRaw[key] = value;
-      hasEvaluation = true;
-    }
-  }
-  const evaluation = hasEvaluation
-    ? evaluationRaw as unknown as SelfEvaluation
-    : null;
-  const resultRaw = isRecord(lineage.result) ? lineage.result : null;
-  const result = resultRaw ? resultRaw as unknown as RoundProcessResult : null;
-  const outcome = roundOutcome(evaluationRaw.outcome) ??
-    (typeof evaluationRaw.success === "boolean"
-      ? evaluationRaw.success ? "success" : "failed"
-      : null);
-  const proposal = parseRoundContract(evaluationRaw.round_contract) ?? null;
-  const executionReport = isRecord(evaluationRaw.execution_report)
-    ? evaluationRaw.execution_report as unknown as ExecutionReport
-    : null;
-  return {
+  const transaction = isRecord(lineage.round_transaction)
+    ? lineage.round_transaction
+    : isRecord(raw.round_transaction)
+      ? raw.round_transaction
+      : null;
+  if (!transaction) return null;
+  const snapshot = parseRoundTransactionSnapshot(transaction.snapshot);
+  if (!snapshot) return null;
+  const resultValue = isRecord(transaction.result)
+    ? transaction.result
+    : snapshot.result;
+  if (!isRecord(resultValue)) return null;
+  return viewFromSnapshot({
     source: "merged",
     sourceEntry: raw,
-    loopId,
-    round,
-    roundId,
+    lineage,
+    snapshot,
+    result: resultValue as unknown as RoundProcessResult,
     sequence: typeof lineage.sequence === "number" ? lineage.sequence : undefined,
-    attempt: typeof lineage.attempt === "number" ? lineage.attempt : 1,
-    promptArtifact: isRecord(lineage.prompt_artifact)
-      ? lineage.prompt_artifact as unknown as PromptArtifact
-      : null,
-    evaluation,
-    executionReport,
-    verificationFlags: flags(raw.verification_flags ?? lineage.verification_flags),
-    result,
-    action,
-    success: typeof raw.success === "boolean"
-      ? raw.success
-      : typeof lineage.success === "boolean" ? lineage.success : false,
-    outcome,
-    contractProposal: proposal,
-    contractBinding: isRecord(lineage.contract_binding)
-      ? lineage.contract_binding as unknown as ContractBinding
-      : null,
-    beforeEvidence: snapshots(lineage.before_evidence),
-    afterEvidence: snapshots(lineage.after_evidence),
-    observationDelta: deriveRoundObservationDelta(
-      snapshots(lineage.before_evidence),
-      snapshots(lineage.after_evidence),
-    ),
-    evidenceIncomplete: snapshots(lineage.after_evidence).length === 0,
-    outputSummary: typeof evaluationRaw.output_summary === "string"
-      ? evaluationRaw.output_summary
-      : undefined,
-    constraintViolations: strings(evaluationRaw.constraint_violations),
-    discoveredConstraints: strings(evaluationRaw.discovered_constraints),
-    activeConstraints: strings(raw.constraints_active ?? lineage.constraints_active),
-    retractedConstraints: strings(evaluationRaw.retracted_constraints),
-    emergedSubtasks: strings(evaluationRaw.emerged_subtasks),
-    subgoalUpdates: subGoalUpdates(evaluationRaw.subgoal_updates),
-    backtrack: action === "backtrack" ? decodeBacktrackRecord(lineage) : null,
-  };
+  });
 }
 
 /** Normalize committed history: rollback directives disappear, later records
@@ -426,15 +412,6 @@ export function entryRetractedConstraints(entry: unknown): string[] {
   const nested = entryLineage(entry).retracted_constraints;
   if (Array.isArray(nested)) return nested.filter((v): v is string => typeof v === "string");
   return [];
-}
-
-/** Read progress_estimate from an entry's execution_report (0 when
- *  absent). */
-export function entryProgressEstimate(entry: unknown): number {
-  const ev = entryExecutionReport(entry);
-  if (!ev) return 0;
-  const pe = ev.progress_estimate;
-  return typeof pe === "number" ? pe : 0;
 }
 
 /** Read emerged_subtasks from an entry (handles direct + lineage nesting). */
@@ -548,17 +525,13 @@ export function readOnlyRounds(
 }
 
 /** The machine-evidence set that best represents a committed round: the
- *  after-phase observations (captured post-execution), else the derived round
- *  delta, else the pre-round baseline. Shared selector for the
- *  evidence-fallback chains that audit, claims, and backtrack-restore each
- *  used to inline with subtly different tiers. Distinct from
- *  machineGitMotionSeries, which deliberately reads the delta alone for the
- *  motion signal. */
+ *  after-phase observations (captured post-execution), else the pre-round
+ *  baseline. The derived delta is never evidence — it is a change-set view
+ *  over these facts, not a second observation collection. */
 export function machineEvidenceForRound(
   view: CommittedRoundView,
 ): MachineObservation[] {
   if (view.afterEvidence.length > 0) return view.afterEvidence;
-  if (view.observationDelta.length > 0) return view.observationDelta;
   return view.beforeEvidence;
 }
 
@@ -569,10 +542,12 @@ export function machineEvidenceForRound(
 export interface LegacyRound {
   round: number;
   schemaVersion: number;
-  /** v3.8.1: which versioned envelope rejected the round. Both are hard
-   *  breaks — a round that fails either check is not committed history — so
-   *  both must be REPORTED, not just the transaction one. */
-  envelope: "transaction" | "prompt_artifact";
+  /** v3.8.1: which versioned envelope rejected the round. All are hard
+   *  breaks — a round that fails any check is not committed history — so all
+   *  must be REPORTED, not just the transaction one.
+   *  v3.9.1 adds "observation": a transaction whose embedded Git/command
+   *  observation schema is unsupported. */
+  envelope: "transaction" | "prompt_artifact" | "observation";
 }
 
 export function legacyTransactionRounds(entries: unknown[]): LegacyRound[] {
@@ -602,29 +577,147 @@ export function legacyTransactionRounds(entries: unknown[]): LegacyRound[] {
       if (typeof artifactVersion === "number" &&
           artifactVersion !== PROMPT_ARTIFACT_SCHEMA_VERSION) {
         out.push({ round, schemaVersion: artifactVersion, envelope: "prompt_artifact" });
+        continue;
+      }
+    }
+    // v3.9.1: an observation schema mismatch is also a hard break. The
+    // transaction parser drops the whole round on it; report the loss here
+    // instead of letting the round vanish from history.
+    const observations = [
+      ...(Array.isArray(snapshot.beforeEvidence) ? snapshot.beforeEvidence : []),
+      ...(Array.isArray(snapshot.afterEvidence) ? snapshot.afterEvidence : []),
+    ];
+    for (const item of observations) {
+      if (!isRecord(item) || typeof item.kind !== "string") {
+        out.push({ round, schemaVersion: -1, envelope: "observation" });
+        break;
+      }
+      const expected = item.kind === "git" ? GIT_OBSERVATION_SCHEMA_VERSION : 1;
+      const observationVersion = item.schemaVersion;
+      if (typeof observationVersion !== "number" || observationVersion !== expected) {
+        out.push({
+          round,
+          schemaVersion: typeof observationVersion === "number" ? observationVersion : -1,
+          envelope: "observation",
+        });
+        break;
       }
     }
   }
   return out.sort((a, b) => a.round - b.round);
 }
 
+/** The ONE definition of machine Git motion for a single round.
+ *
+ *  Motion is a non-empty file list, a HEAD that moved across the round, or a
+ *  HEAD that landed on the rollback's restore point — restoring the workspace
+ *  IS that round's work, and would otherwise read as a round that did
+ *  nothing. A clean worktree is not the same thing as no progress:
+ *  commit-per-slice workflows leave no file delta even though HEAD advanced.
+ *
+ *  Observability stays the caller's concern: this answers "did this round
+ *  move", never "could the round be observed". The restore-point arm compares
+ *  short hashes, the rule `checkBacktrackGitHeadRestore` uses; the
+ *  before/after arm compares the observations themselves. */
+export function gitMotionSignal(input: {
+  /** The round's derived Git change set; null means unknown. */
+  changedFiles: ReadonlyArray<string> | null;
+  headBefore?: string | null;
+  headAfter?: string | null;
+  restoreTargetHead?: string | null;
+}): boolean | null {
+  if (input.changedFiles !== null && input.changedFiles.length > 0) return true;
+  const { headBefore, headAfter, restoreTargetHead } = input;
+  if (headAfter && headBefore && headAfter !== headBefore) return true;
+  if (headAfter && restoreTargetHead &&
+      headAfter.slice(0, 12) === restoreTargetHead.slice(0, 12)) return true;
+  if (input.changedFiles === null) return null;
+  // An observed empty change set is no motion only when both HEADs are known;
+  // otherwise a commit-only slice could still have moved HEAD.
+  if (!headBefore || !headAfter) return null;
+  return false;
+}
+
+/** Git HEAD as a machine observation exposes it, or null when it is silent. */
+export function observedGitHead(observation: MachineObservation | undefined): string | null {
+  return observation && isRecord(observation.data) &&
+      typeof observation.data.head === "string" && observation.data.head
+    ? observation.data.head
+    : null;
+}
+
+function observedGitObservation(
+  observation: MachineObservation | null | undefined,
+): MachineObservation | null {
+  return observation && observation.kind === "git" && observation.status === "observed"
+    ? observation
+    : null;
+}
+
+function observedGitIn(
+  observations: ReadonlyArray<MachineObservation>,
+): MachineObservation | null {
+  return observations.find((observation) =>
+    observation.kind === "git" && observation.status === "observed") ?? null;
+}
+
+/** The in-flight round's own motion, from its derived Git delta. A Git
+ *  boundary that cannot be compared yields `null` unless HEAD movement or the
+ *  restore point independently proves motion. */
+export function inFlightGitMotion(
+  deltas: ReadonlyArray<ObservationDelta>,
+  restoreTargetHead?: string,
+): boolean | null {
+  const git = deltas.find((delta) => delta.kind === "git");
+  if (!git) return null;
+  const before = observedGitObservation(git.before);
+  const after = observedGitObservation(git.after);
+  return gitMotionSignal({
+    changedFiles: git.changedFiles,
+    headBefore: observedGitHead(before ?? undefined),
+    headAfter: observedGitHead(after ?? undefined),
+    restoreTargetHead: restoreTargetHead ?? null,
+  });
+}
+
 /** Machine-observed git motion for the most recent contiguous window.
- * Consumers must decode durable or hydrated entries before calling this;
- * transaction-envelope interpretation stays confined to this module. */
+ * A clean worktree is not the same thing as no progress: commit-per-slice
+ * workflows leave no file delta even though HEAD advanced. Unknown motion in
+ * any round makes the window undecidable rather than falsely empty. */
 export function machineGitMotionSeries(
   rounds: ReadonlyArray<CommittedRoundView>,
   currentRound: number,
   lookback: number,
 ): boolean[] | null {
-  const byRound = new Map<number, boolean>();
+  if (!Number.isInteger(lookback) || lookback < 1 || currentRound <= lookback) return null;
+  const byRound = new Map<number, CommittedRoundView>();
   for (const round of rounds) {
     if (round.round < 1 || round.round >= currentRound) continue;
-    const git = round.observationDelta.find((snapshot) => snapshot.providerId === "git");
-    if (!git) continue;
-    byRound.set(round.round, Array.isArray(git.files) && git.files.length > 0);
+    byRound.set(round.round, round);
   }
-  if (byRound.size < lookback) return null;
-  const recent = [...byRound.keys()].sort((a, b) => a - b).slice(-lookback);
-  if (recent[0] < currentRound - lookback) return null;
-  return recent.map((round) => byRound.get(round)!);
+  const recent: CommittedRoundView[] = [];
+  for (let number = currentRound - lookback; number < currentRound; number++) {
+    const round = byRound.get(number);
+    if (!round) return null;
+    if (!round.observationDelta.some((delta) => delta.kind === "git")) return null;
+    recent.push(round);
+  }
+  const motion: boolean[] = [];
+  for (const round of recent) {
+    const git = round.observationDelta.find((delta) => delta.kind === "git")!;
+    // The round's baseline: its own before observation, else the previous
+    // round's after observation. Older Git observations do not carry a HEAD
+    // field; their change set is still a valid motion signal.
+    const baseline = observedGitObservation(git.before)
+      ?? observedGitIn(byRound.get(round.round - 1)?.afterEvidence ?? []);
+    const after = observedGitObservation(git.after);
+    const signal = gitMotionSignal({
+      changedFiles: git.changedFiles,
+      headBefore: observedGitHead(baseline ?? undefined),
+      headAfter: observedGitHead(after ?? undefined),
+    });
+    if (signal === null) return null;
+    motion.push(signal);
+  }
+  return motion;
 }

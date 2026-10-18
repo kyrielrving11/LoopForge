@@ -76,6 +76,21 @@ writing session state, a round, gate records, rejection counters, or metrics.
 Agent reports remain claims. Only independent observations can support a
 verified fact.
 
+Prepared responses carry `submission_guidance` with the real contract item and
+sub-goal ids, usable commands and the fields that apply now. Each submission
+returns `submission_receipt`, which separates saved reports, derived-state
+effects and machine verification; a rejected attempt is never shown as applied.
+`execution_report.files_changed` is the boundary net change from round
+preparation, including deletions — a commit alone adds no entry when content is
+unchanged. The derived round delta exposes that set as `changedFiles`; raw
+observation `files` is display data only. A missing or unobservable boundary is
+`null`, never the dirty list and never an empty diff. A worker's
+`discoveredConstraints` stays a report; only top-level `discovered_constraints`
+promotes it into the active set. Unknown or retired optional fields are
+diagnosed and dropped, never silently accepted; field metrics separate
+attempted from retained values. A success claim with an empty report is a
+reporting gap (warn), not an acceptance gate.
+
 ## TypeScript API
 
 The package exports the runtime in separate entry points:

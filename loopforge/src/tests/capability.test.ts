@@ -12,6 +12,7 @@ import {
 import { commandConfigHash, deriveConfiguredCapability, DEFAULT_POLICY } from "../policy.js";
 import type { CommandObservation, MachineObservation } from "../protocol.js";
 import type { LoopPolicy } from "../policy.js";
+import { gitState } from "./_helpers.js";
 
 function policy(overrides: Partial<LoopPolicy["evidence"]> = {}): LoopPolicy {
   return {
@@ -116,9 +117,13 @@ describe("v3.8 — ObservedCapability and warnings", () => {
     const configured = deriveConfiguredCapability(policy({ providers: ["git"], commands: [command] }));
     const observations: MachineObservation[] = [
       {
-        schemaVersion: 1, providerId: "git", kind: "git", phase: "after",
+        schemaVersion: 2, providerId: "git", kind: "git", phase: "after",
         startedAt: 0, finishedAt: 0, status: "observed", files: [],
-        data: { tracked: [], staged: [], untracked: [], fingerprints: {} },
+        data: {
+          dirty: [],
+          fingerprints: {},
+          coverage: "tracked_and_non_ignored_untracked",
+        },
       },
       commandObservation("passed"),
     ];
@@ -202,10 +207,10 @@ describe("v3.8 — ObservedCapability and warnings", () => {
 
 describe("v3.8 — the single machine-backed predicate", () => {
   it("accepts only after-phase passed commands", () => {
-    assert.equal(isPassedAfterObservation(commandObservation("passed"), null), true);
-    assert.equal(isPassedAfterObservation(commandObservation("failed"), null), false);
+    assert.equal(isPassedAfterObservation(commandObservation("passed"), gitState()), true);
+    assert.equal(isPassedAfterObservation(commandObservation("failed"), gitState()), false);
     assert.equal(
-      isPassedAfterObservation({ ...commandObservation("passed"), phase: "before" }, null),
+      isPassedAfterObservation({ ...commandObservation("passed"), phase: "before" }, gitState()),
       false,
       "a before-phase baseline is never evidence",
     );
@@ -213,22 +218,31 @@ describe("v3.8 — the single machine-backed predicate", () => {
 
   it("excludes a command whose entrypoint changed this round", () => {
     const observation = commandObservation("passed", { entrypointFiles: ["package.json"] });
-    assert.equal(isPassedAfterObservation(observation, new Set(["package.json"])), false);
-    assert.equal(isPassedAfterObservation(observation, new Set(["src/a.ts"])), true);
+    assert.equal(isPassedAfterObservation(observation, gitState(["package.json"])), false);
+    assert.equal(isPassedAfterObservation(observation, gitState(["src/a.ts"])), true);
     assert.equal(
-      isPassedAfterObservation(observation, null),
+      isPassedAfterObservation(observation, gitState()),
       true,
-      "no git delta → the entrypoint arm fails open",
+      "no git provider → the entrypoint arm is not applicable",
+    );
+    assert.equal(
+      isPassedAfterObservation(observation, gitState(null)),
+      false,
+      "an applicable but unobservable boundary cannot prove the entrypoint clean",
     );
   });
 
   it("never treats non-command observations as machine-backed", () => {
     const git: MachineObservation = {
-      schemaVersion: 1, providerId: "git", kind: "git", phase: "after",
+      schemaVersion: 2, providerId: "git", kind: "git", phase: "after",
       startedAt: 0, finishedAt: 0, status: "passed", files: [],
-      data: { tracked: [], staged: [], untracked: [], fingerprints: {} },
+      data: {
+        dirty: [],
+        fingerprints: {},
+        coverage: "tracked_and_non_ignored_untracked",
+      },
     };
-    assert.equal(isPassedAfterObservation(git, null), false);
+    assert.equal(isPassedAfterObservation(git, gitState()), false);
   });
 });
 
@@ -251,9 +265,13 @@ describe("v3.8 — EvidenceCapability (the prepared round's single fact)", () =>
 
   it("reports the live provider status from the baseline observations", () => {
     const git: MachineObservation = {
-      schemaVersion: 1, providerId: "git", kind: "git", phase: "before",
+      schemaVersion: 2, providerId: "git", kind: "git", phase: "before",
       startedAt: 0, finishedAt: 0, status: "observed", files: ["src/a.ts"],
-      data: { tracked: ["src/a.ts"], staged: [], untracked: [], fingerprints: {} },
+      data: {
+        dirty: ["src/a.ts"],
+        fingerprints: { "src/a.ts": "m:1" },
+        coverage: "tracked_and_non_ignored_untracked",
+      },
     };
     const withBaseline = deriveEvidenceCapability(policy({ providers: ["git"] }), [git]);
     assert.equal(withBaseline.providers[0].status, "observed");

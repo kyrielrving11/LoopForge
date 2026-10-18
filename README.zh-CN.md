@@ -139,6 +139,14 @@ MCP 服务是主要集成方式，支持 Claude Code、Codex CLI 以及其他兼
 `evaluation_invalid`，允许同一轮重试，且不会修改 session、Vault、门、拒绝计数或
 指标。Round Contract 声明和 `contract_item_claims` 也属于严格结构边界。
 
+每个准备结果携带 `submission_guidance`（真实 ID、可用命令和当前适用字段）；
+每次提交返回 `submission_receipt`，分别表达已保存的报告、实际变化的派生状态和
+机器验证结果。`execution_report.files_changed` 是本轮准备基线与提交时相比的边界
+净变化（包括删除）；派生 delta 的 `changedFiles` 是唯一的变化集，原始观测的
+`files` 只是展示数据，不可观测的边界是 `null`，不是空 diff。worker 的发现只是
+报告，只有顶层 `discovered_constraints` 才会提升为全局约束。未知或已移除的可选
+字段会被诊断并丢弃，不会被静默接受；字段指标区分“尝试提交”和“规范化后保留”。
+
 ## 架构
 
 ```text

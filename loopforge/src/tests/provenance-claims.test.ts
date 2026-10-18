@@ -3,7 +3,7 @@
  */
 
 import { describe, it } from "node:test";
-import { criterionClaims } from "./_helpers.js";
+import { criterionClaims, deltaAfter } from "./_helpers.js";
 import assert from "node:assert/strict";
 import { makeExecutionReport, makeSelfEvaluation } from "../protocol.js";
 import type { SelfEvaluation, VerificationFlag } from "../protocol.js";
@@ -28,7 +28,6 @@ function evalWithCriteria(
       files_changed: ["src/a.ts"],
       tests_reported: { passed: 1, failed: 0, skipped: 0 },
       criterion_claims: criterionClaims(["tests pass"], []),
-      progress_estimate: 1,
     }),
     ...overrides,
   });
@@ -73,7 +72,6 @@ describe("deriveClaimView", () => {
         files_changed: ["src/a.ts"],
         tests_reported: null,
         criterion_claims: criterionClaims(["tests pass"], []),
-        progress_estimate: 0.5,
       }),
     });
     const view = deriveClaimView(selfEval, []);
@@ -86,7 +84,7 @@ describe("deriveClaimView", () => {
 
   it("upgrades to verified only with passing test results AND passed after-command", () => {
     const selfEval = evalWithCriteria();
-    const view = deriveClaimView(selfEval, [commandSnapshot("passed")]);
+    const view = deriveClaimView(selfEval, [deltaAfter(commandSnapshot("passed"))]);
     assert.equal(view.verifiedCount, 1);
     assert.equal(view.claims[0].status, "verified");
     assert.equal(view.claims[0].source, "command");
@@ -106,7 +104,7 @@ describe("deriveClaimView", () => {
     const view = deriveClaimView(selfEval, []);
     assert.equal(view.hasMachineEvidence, false,
       "self-reported test results alone must not count as machine evidence");
-    const withCommand = deriveClaimView(selfEval, [commandSnapshot("passed")]);
+    const withCommand = deriveClaimView(selfEval, [deltaAfter(commandSnapshot("passed"))]);
     assert.equal(withCommand.hasMachineEvidence, true,
       "a passed after-phase command upgrades the claim to machine evidence");
   });
@@ -117,10 +115,9 @@ describe("deriveClaimView", () => {
         files_changed: ["src/a.ts"],
         tests_reported: null,
         criterion_claims: criterionClaims(["tests pass"], []),
-        progress_estimate: 0.5,
       }),
     });
-    const view = deriveClaimView(selfEval, [commandSnapshot("passed")]);
+    const view = deriveClaimView(selfEval, [deltaAfter(commandSnapshot("passed"))]);
     assert.equal(view.verifiedCount, 0);
   });
 
@@ -130,10 +127,9 @@ describe("deriveClaimView", () => {
         files_changed: ["src/a.ts"],
         tests_reported: { passed: 3, failed: 1, skipped: 0 },
         criterion_claims: criterionClaims(["tests pass"], []),
-        progress_estimate: 0.5,
       }),
     });
-    const view = deriveClaimView(selfEval, [commandSnapshot("passed")]);
+    const view = deriveClaimView(selfEval, [deltaAfter(commandSnapshot("passed"))]);
     assert.equal(view.verifiedCount, 0);
   });
 });
@@ -147,7 +143,7 @@ describe("rederiveClaimViewWithFlags", () => {
       check: "required_command_failed",
       detail: "npm-test failed",
     }];
-    const view = rederiveClaimViewWithFlags(selfEval, [commandSnapshot("passed")], flags);
+    const view = rederiveClaimViewWithFlags(selfEval, [deltaAfter(commandSnapshot("passed"))], flags);
     assert.equal(view.claims[0].status, "contradicted");
     assert.equal(view.claims[0].source, "verification");
     assert.equal(view.verifiedCount, 0);
@@ -162,7 +158,7 @@ describe("rederiveClaimViewWithFlags", () => {
       check: "evidence_integrity",
       detail: "ghost file",
     }];
-    const view = rederiveClaimViewWithFlags(selfEval, [commandSnapshot("passed")], flags);
+    const view = rederiveClaimViewWithFlags(selfEval, [deltaAfter(commandSnapshot("passed"))], flags);
     assert.equal(view.claims[0].status, "verified");
   });
 });
@@ -177,18 +173,33 @@ describe("resolveRoundFiles", () => {
     loop_lineage: {
       round: 1,
       round_transaction: {
-        schema_version: 2,
+        schema_version: 3,
         round_id: "loop:provenance-loop:round:1",
         snapshot: {
-          schemaVersion: 2,
+          schemaVersion: 3,
           roundId: "loop:provenance-loop:round:1",
           loopId: "provenance-loop",
           round: 1,
           attempt: 1,
           phase: "committed",
-          beforeEvidence: [],
+          beforeEvidence: [{
+            schemaVersion: 2,
+            providerId: "git",
+            kind: "git",
+            phase: "before",
+            startedAt: 0,
+            finishedAt: 0,
+            status: "observed",
+            files: [],
+            data: {
+              dirty: [],
+              fingerprints: {},
+              head: "abc123",
+              coverage: "tracked_and_non_ignored_untracked",
+            },
+          }],
           afterEvidence: [{
-            schemaVersion: 1,
+            schemaVersion: 2,
             providerId: "git",
             kind: "git",
             phase: "after",
@@ -196,8 +207,16 @@ describe("resolveRoundFiles", () => {
             finishedAt: 0,
             status: "observed",
             files: ["src/a.ts", "src/b.ts"],
-            data: { head: "abc123", fingerprints: {} },
+            data: {
+              dirty: ["src/a.ts", "src/b.ts"],
+              fingerprints: { "src/a.ts": "m:1", "src/b.ts": "m:1" },
+              head: "abc123",
+              coverage: "tracked_and_non_ignored_untracked",
+            },
           }],
+          submittedFields: [
+            "success", "output_summary", "constraint_violations", "should_continue",
+          ],
           createdAt: Date.now(),
           updatedAt: Date.now(),
         },
@@ -206,7 +225,7 @@ describe("resolveRoundFiles", () => {
     },
   };
 
-  it("returns git files from the committed after evidence", () => {
+  it("returns the committed boundary change set", () => {
     const files = resolveRoundFiles([feedback], "provenance-loop", 1);
     assert.deepEqual(files, ["src/a.ts", "src/b.ts"]);
   });
@@ -221,10 +240,10 @@ describe("resolveRoundFiles", () => {
       loop_lineage: {
         round: 1,
         round_transaction: {
-          schema_version: 2,
+          schema_version: 3,
           round_id: "loop:provenance-loop:round:1",
           snapshot: {
-            schemaVersion: 2,
+            schemaVersion: 3,
             roundId: "loop:provenance-loop:round:1",
             loopId: "provenance-loop",
             round: 1,
@@ -232,11 +251,19 @@ describe("resolveRoundFiles", () => {
             phase: "committed",
             beforeEvidence: [],
             afterEvidence: [{
-              provider: "command:npm-test",
-              timestamp: Date.now(),
+              schemaVersion: 1,
+              providerId: "command:npm-test",
+              kind: "command",
+              phase: "after",
+              startedAt: 0,
+              finishedAt: 0,
+              status: "passed",
               files: [],
-              data: { kind: "command", phase: "after", status: "passed" },
+              data: { commandId: "npm-test" },
             }],
+            submittedFields: [
+              "success", "output_summary", "constraint_violations", "should_continue",
+            ],
             createdAt: Date.now(),
             updatedAt: Date.now(),
           },
@@ -264,10 +291,10 @@ describe("listVerifiedClaims", () => {
       loop_lineage: {
         round,
         round_transaction: {
-          schema_version: 2,
+          schema_version: 3,
           round_id: `loop:provenance-loop:round:${round}`,
           snapshot: {
-            schemaVersion: 2,
+            schemaVersion: 3,
             roundId: `loop:provenance-loop:round:${round}`,
             loopId: "provenance-loop",
             round,
@@ -276,6 +303,9 @@ describe("listVerifiedClaims", () => {
             beforeEvidence: [],
             afterEvidence: snapshots,
             evaluation,
+            submittedFields: [
+              "success", "output_summary", "constraint_violations", "should_continue",
+            ],
             result: { action: "continue", verificationFlags: flags },
             createdAt: Date.now(),
             updatedAt: Date.now(),
@@ -296,7 +326,6 @@ describe("listVerifiedClaims", () => {
             files_changed: ["src/b.ts"],
             tests_reported: null,
             criterion_claims: criterionClaims(["docs updated"], []),
-            progress_estimate: 0.6,
           }),
         }),
         [],

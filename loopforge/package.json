@@ -1,6 +1,6 @@
 {
   "name": "loopforge",
-  "version": "3.8.3",
+  "version": "3.9.1",
   "description": "External cognitive infrastructure for AI coding agents — breaks the summary cascade, provides independent verification, and enables model-directed prompt prioritization for 100+ round agent loops.",
   "type": "module",
   "main": "./dist/index.js",
@@ -40,6 +40,7 @@
     "test:watch": "node scripts/sync-version.mjs && tsc && node scripts/trim-dist.mjs && node --test --watch dist/tests/*.test.js",
     "check": "node scripts/sync-version.mjs && tsc --noEmit",
     "verify:artifacts": "node scripts/verify-artifacts.mjs",
+    "measure:boundary": "node scripts/measure-boundary.mjs",
     "prepack": "npm run verify:artifacts && npm run build"
   },
   "repository": {

@@ -1,5 +1,5 @@
 /** Tests for RoundCoordinator — verify → enforce → stop pipeline. */
-import { committedFeedbackRound, criterionClaims, MemoryLoopStore } from "./_helpers.js";
+import { committedFeedbackRound, criterionClaims, deltasFrom, MemoryLoopStore } from "./_helpers.js";
 import { deriveContractItemIds } from "../token-utils.js";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -23,7 +23,6 @@ function se(overrides: Partial<SelfEvaluation> = {}): SelfEvaluation {
       files_changed: ["auth.ts"],
       tests_reported: { passed: 10, failed: 0, skipped: 0 },
       criterion_claims: criterionClaims([], ["add unit tests"]),
-      progress_estimate: 0.4,
     }),
     ...overrides,
   });
@@ -69,7 +68,7 @@ function minimalInput(overrides: Partial<RoundProcessInput> = {}): RoundProcessI
     maxRounds: 20,
     selfEval: se(),
     consecutiveRejections: 0,
-    evidenceSnapshots: [commandSnap()],
+    evidenceDeltas: deltasFrom([commandSnap()]),
     ...overrides,
   };
 }
@@ -111,7 +110,6 @@ describe("RoundCoordinator — stop conditions", () => {
           files_changed: ["auth.ts"],
           tests_reported: { passed: 10, failed: 0, skipped: 0 },
           criterion_claims: criterionClaims([], []),
-          progress_estimate: 1.0,
         }),
       }),
     }));
@@ -142,7 +140,6 @@ describe("RoundCoordinator — stop conditions", () => {
           files_changed: ["src/auth/a.ts"],
           tests_reported: { passed: 1, failed: 0, skipped: 0 },
           contract_item_claims: [{ item_id: itemId, outcome: "met" }],
-          progress_estimate: 1.0,
         }),
       }),
     }));
@@ -201,7 +198,6 @@ describe("RoundCoordinator — stop conditions", () => {
           files_changed: ["auth.ts"],
           tests_reported: { passed: 10, failed: 0, skipped: 0 },
           criterion_claims: criterionClaims([], []),
-          progress_estimate: 1.0,
         }),
       }),
     }));
@@ -237,7 +233,6 @@ describe("RoundCoordinator — stop conditions", () => {
           files_changed: [],
           tests_reported: { passed: 0, failed: 0, skipped: 0 },
           contract_item_claims: [{ item_id: itemId, outcome: "met" }],
-          progress_estimate: 1.0,
         }),
       }),
     }));
@@ -269,7 +264,6 @@ describe("RoundCoordinator — rejection", () => {
         success: true,
         execution_report: makeExecutionReport({
           criterion_claims: criterionClaims([], ["unfinished criteria"]),
-          progress_estimate: 0.5,
         }),
       }),
     }));
@@ -286,7 +280,6 @@ describe("RoundCoordinator — rejection", () => {
         success: true,
         execution_report: makeExecutionReport({
           criterion_claims: criterionClaims([], ["unfinished criteria"]),
-          progress_estimate: 0.5,
         }),
       }),
       consecutiveRejections: 1,
@@ -340,7 +333,6 @@ describe("RoundCoordinator — verification flags", () => {
         success: true,
         execution_report: makeExecutionReport({
           criterion_claims: criterionClaims([], ["unmet criteria", "more unmet"]),
-          progress_estimate: 0.5,
         }),
       }),
     }));
@@ -383,7 +375,6 @@ describe("round-coordinator — v2.12 outcome stop mapping", () => {
         files_changed: ["src/a.ts"],
         tests_reported: { passed: 1, failed: 0, skipped: 0 },
         criterion_claims: criterionClaims([], []),
-        progress_estimate: 1,
       },
     });
   }
@@ -391,7 +382,7 @@ describe("round-coordinator — v2.12 outcome stop mapping", () => {
   it("maps outcome=blocked + should_continue=false to stopReason blocked", () => {
     const result = new RoundCoordinator().processRound({
       loopId: "x", task: "t", currentRound: 2, maxRounds: 10,
-      evidenceSnapshots: [commandSnap()],
+      evidenceDeltas: deltasFrom([commandSnap()]),
       selfEval: outcomeEval("blocked"),
       consecutiveRejections: 0,
     });
@@ -402,7 +393,7 @@ describe("round-coordinator — v2.12 outcome stop mapping", () => {
   it("keeps completed for effective success", () => {
     const result = new RoundCoordinator().processRound({
       loopId: "x", task: "t", currentRound: 2, maxRounds: 10,
-      evidenceSnapshots: [commandSnap()],
+      evidenceDeltas: deltasFrom([commandSnap()]),
       selfEval: outcomeEval("success"),
       consecutiveRejections: 0,
     });
@@ -413,7 +404,7 @@ describe("round-coordinator — v2.12 outcome stop mapping", () => {
   it("does not stop when outcome=blocked but should_continue=true", () => {
     const result = new RoundCoordinator().processRound({
       loopId: "x", task: "t", currentRound: 2, maxRounds: 10,
-      evidenceSnapshots: [commandSnap()],
+      evidenceDeltas: deltasFrom([commandSnap()]),
       selfEval: { ...outcomeEval("blocked"), should_continue: true },
       consecutiveRejections: 0,
     });

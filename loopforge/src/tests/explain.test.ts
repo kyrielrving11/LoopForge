@@ -9,7 +9,7 @@ import { deriveContractId, deriveContractItemIds } from "../token-utils.js";
 
 describe("v3.8 — explain view", () => {
   const gitObservation = (files: string[]) => ({
-    schemaVersion: 1,
+    schemaVersion: 2 as const,
     providerId: "git",
     kind: "git" as const,
     phase: "after" as const,
@@ -17,7 +17,11 @@ describe("v3.8 — explain view", () => {
     finishedAt: 0,
     status: "observed" as const,
     files,
-    data: { tracked: files, staged: [], untracked: [], fingerprints: {} },
+    data: {
+      dirty: files,
+      fingerprints: Object.fromEntries(files.map((file) => [file, "m:1"])),
+      coverage: "tracked_and_non_ignored_untracked" as const,
+    },
   });
 
   const entry = (round: number, opts: Parameters<typeof committedFeedbackRound>[1] = {}) =>
@@ -60,6 +64,7 @@ describe("v3.8 — explain view", () => {
   it("reports each committed round with its report, observations, and flags", () => {
     const result = buildExplain("explain-loop", [
       entry(1, {
+        beforeEvidence: [gitObservation([])],
         roundEvidence: [gitObservation(["src/a.ts"])],
         verificationFlags: [{
           check: "evidence_integrity", field: "files_changed", severity: "warn", detail: "mismatch",
@@ -72,8 +77,13 @@ describe("v3.8 — explain view", () => {
     assert.equal(round.action, "continue");
     assert.equal(round.observations.length, 1);
     assert.equal(round.observations[0].providerId, "git");
-    assert.deepEqual(round.observationDelta[0].files, ["src/a.ts"]);
+    assert.deepEqual(round.observationDelta[0].changedFiles, ["src/a.ts"]);
     assert.equal(round.flags[0].check, "evidence_integrity");
+    // v3.9.1: explain reads the same receipt projection as status.
+    assert.equal(round.submission.record, "committed");
+    assert.equal(round.submission.entered_history, true);
+    assert.equal(round.git_status, "observed");
+    assert.deepEqual(round.files_changed, ["src/a.ts"]);
   });
 
   it("marks a round without after-phase observations as evidence-incomplete", () => {

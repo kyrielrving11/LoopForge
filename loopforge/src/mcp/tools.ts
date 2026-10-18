@@ -11,6 +11,7 @@ import { validateCoreSelfEvaluation } from "../self-eval.js";
 import { isRecord } from "../token-utils.js";
 import { getPolicy, validateLoopId } from "../policy.js";
 import { deriveEvidenceCapability } from "../evidence-provider.js";
+import { fieldGuideDescription } from "../submission-guidance.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Tool schemas (MCP JSON Schema format)
@@ -80,36 +81,34 @@ const TOOL_BASE_SCHEMAS = [
           properties: {
             success: {
               type: "boolean" as const,
-              description: "true ONLY if all hard constraints met AND the task goal achieved.",
+              description: fieldGuideDescription("success"),
             },
             output_summary: {
               type: "string" as const,
-              description: "Specific, actionable summary of what was DONE this round — not what was attempted.",
+              description: fieldGuideDescription("output_summary"),
             },
             should_continue: {
               type: "boolean" as const,
-              description: "false ONLY when the ENTIRE task is complete. Partial progress = true.",
+              description: fieldGuideDescription("should_continue"),
             },
             constraint_violations: {
               type: "array" as const,
               items: { type: "string" as const },
-              description: "Constraints the agent actually violated this round. Be honest.",
+              description: fieldGuideDescription("constraint_violations"),
             },
             discovered_constraints: {
               type: "array" as const,
               items: { type: "string" as const },
-              description: "Optional. New constraints discovered this round.",
+              description: fieldGuideDescription("discovered_constraints"),
             },
             objective_refinement: {
               type: "string" as const,
-              description: "Optional. If this round deepened understanding of the task objective.",
+              description: fieldGuideDescription("objective_refinement"),
             },
             emerged_subtasks: {
               type: "array" as const,
               items: { type: "string" as const },
-              description:
-                "Optional. Sub-problems that surfaced during execution. The only " +
-                "sub-goal creation channel — sg-XXXXXXXX ID literals are rejected here.",
+              description: fieldGuideDescription("emerged_subtasks"),
             },
             execution_report: {
               type: "object" as const,
@@ -118,11 +117,11 @@ const TOOL_BASE_SCHEMAS = [
                 files_changed: {
                   type: "array" as const,
                   items: { type: "string" as const },
-                  description: "Files modified this round.",
+                  description: fieldGuideDescription("execution_report.files_changed"),
                 },
                 tests_reported: {
                   type: "object" as const,
-                  description: "Test results from this round.",
+                  description: fieldGuideDescription("execution_report.tests_reported"),
                   properties: {
                     passed: { type: "integer" as const, minimum: 0, description: "Number of passing tests." },
                     failed: { type: "integer" as const, minimum: 0, description: "Number of failing tests." },
@@ -131,7 +130,7 @@ const TOOL_BASE_SCHEMAS = [
                 },
                 criterion_claims: {
                   type: "array" as const,
-                  description: "v3.8: advisory claims about objective criteria. LENIENT — unknown or malformed ids are dropped with a warning, never a rejection.",
+                  description: fieldGuideDescription("execution_report.criterion_claims"),
                   items: {
                     type: "object" as const,
                     properties: {
@@ -144,7 +143,7 @@ const TOOL_BASE_SCHEMAS = [
                 },
                 contract_item_claims: {
                   type: "array" as const,
-                  description: "Claims about items of the ACTIVE contract, cited by the rci-XXXXXXXX id the prompt rendered. LENIENT at declaration: an unknown/malformed id is reported as contract_invalid so you can correct the payload and resubmit the same roundId. A claim never verifies anything by itself — the runtime only marks an item verified when its bound commands are observed passing.",
+                  description: fieldGuideDescription("execution_report.contract_item_claims"),
                   items: {
                     type: "object" as const,
                     properties: {
@@ -155,22 +154,16 @@ const TOOL_BASE_SCHEMAS = [
                     additionalProperties: false,
                   },
                 },
-                progress_estimate: {
-                  type: "number" as const,
-                  minimum: 0,
-                  maximum: 1,
-                  description: "Estimated progress toward task completion (0.0–1.0).",
-                },
               },
             },
             retracted_constraints: {
               type: "array" as const,
               items: { type: "string" as const },
-              description: "Optional. Constraints the agent now believes are wrong.",
+              description: fieldGuideDescription("retracted_constraints"),
             },
             revised_success_criteria: {
               type: "array" as const,
-              description: "Optional. Success criteria that need reformulation.",
+              description: fieldGuideDescription("revised_success_criteria"),
               items: {
                 type: "object" as const,
                 properties: {
@@ -182,15 +175,11 @@ const TOOL_BASE_SCHEMAS = [
             wrong_assumptions: {
               type: "array" as const,
               items: { type: "string" as const },
-              description: "Optional. Assumptions from earlier rounds that were incorrect.",
+              description: fieldGuideDescription("wrong_assumptions"),
             },
             worker_results: {
               type: "array" as const,
-              description:
-                "Optional. Results of sub-agent / Worker delegations this round. " +
-                "Each entry must declare an outcome — the single reported fact. " +
-                "Entries without a valid outcome are dropped by the runtime. " +
-                "Omit or empty when nothing was delegated.",
+              description: fieldGuideDescription("worker_results"),
               items: {
                 type: "object" as const,
                 properties: {
@@ -212,22 +201,16 @@ const TOOL_BASE_SCHEMAS = [
             },
             compression_checkpoint: {
               type: "boolean" as const,
-              description: "Optional. Set true at subtask boundaries to trigger a full-state checkpoint (L2 prompt) that survives rolling-window eviction. The checkpoint label is carried into future prompts.",
+              description: fieldGuideDescription("compression_checkpoint"),
             },
             checkpoint_label: {
               type: "string" as const,
-              description: "Optional. Human-readable label for this checkpoint (e.g. 'core-functions-complete'). Only meaningful when compression_checkpoint is true.",
+              description: fieldGuideDescription("checkpoint_label"),
             },
             subgoal_updates: {
               type: "array" as const,
               maxItems: 20,
-              description:
-                "Optional. Explicit status transitions for EXISTING sub-goals. " +
-                "Each entry references an ACTIVE sub-goal ID (sg-XXXXXXXX) from " +
-                "the dashboard with a target status. Unknown IDs, done/canceled " +
-                "(terminal) references, and illegal migrations are rejected " +
-                "before the round advances. done/canceled items must never be " +
-                "referenced again — re-open via a NEW emerged_subtasks item.",
+              description: fieldGuideDescription("subgoal_updates"),
               items: {
                 type: "object" as const,
                 properties: {
@@ -250,28 +233,25 @@ const TOOL_BASE_SCHEMAS = [
             stop_reason: {
               type: "string" as const,
               enum: ["gave_up", "blocked", "needs_human_input"],
-              description: "Optional. Why the agent is stopping. Only meaningful when should_continue=false and success=false. 'blocked' means work cannot proceed under current constraints.",
+              description: fieldGuideDescription("stop_reason"),
             },
             no_change_reason: {
               type: "string" as const,
-              description: "Optional. Declared reason for claiming success with no machine-verifiable evidence (e.g. documentation-only round). Downgrades the success_without_verified_evidence check from error to info. Max 200 chars.",
+              description: fieldGuideDescription("no_change_reason"),
             },
             outcome: {
               type: "string" as const,
               enum: ["success", "partial", "failed", "blocked"],
-              description: "Optional. Tri-state outcome. When absent, derived from success (true→success, false→failed). 'partial' and 'blocked' must be declared explicitly. A declared non-success outcome suppresses the success-class checks even when success=true.",
+              description: fieldGuideDescription("outcome"),
             },
             blocker: {
               type: "string" as const,
-              description: "Optional. Flat blocker description, required only when outcome=blocked. Also feeds the user/agent gate classification. Max 500 chars.",
+              description: fieldGuideDescription("blocker"),
             },
             gate_ids: {
               type: "array" as const,
               maxItems: 20,
-              description:
-                "Optional. gate_opened ids this round's work depended on (from " +
-                "loopforge_gate_check). Enforced only when policy.gate.enabled: " +
-                "an unapproved cited gate rejects the round.",
+              description: fieldGuideDescription("gate_ids"),
               items: { type: "string" as const },
             },
             retroactiveClaims: {
@@ -285,11 +265,11 @@ const TOOL_BASE_SCHEMAS = [
                 required: ["round", "claim"],
                 additionalProperties: false,
               },
-              description: "Optional. Claims that a PRIOR round satisfied a criterion. The runtime verifies them against the prior round's git evidence. Max 20 entries.",
+              description: fieldGuideDescription("retroactiveClaims"),
             },
             prompt_requests: {
               type: "object" as const,
-              description: "Optional. Information needs for the next round's prompt. Use when you know what context you'll need to succeed in the next round.",
+              description: fieldGuideDescription("prompt_requests"),
               properties: {
                 emphasize: {
                   type: "array" as const,
@@ -305,7 +285,7 @@ const TOOL_BASE_SCHEMAS = [
             },
             round_contract: {
               type: "object" as const,
-              description: "Optional. Proposal for the NEXT round's contract (v3.8 item model). Declared here, it becomes the ACTIVE contract (rendered as the Current Task) only after this round commits. It closes when EVERY item is machine-verified (its bound commands observed passing, untampered, with the declared config), or when a round reports outcome=blocked. While it is open, restate it unchanged here — a different proposal is ignored. DECLARATION IS STRICT: an item with no bound command, one naming an unknown/disabled/non-after-capable command, a scope entry leaving the workspace, a malformed reference, or a count over the declared limits returns contract_invalid and the round may be retried with the same roundId.",
+              description: fieldGuideDescription("round_contract"),
               properties: {
                 work_item: {
                   type: "string" as const,
@@ -558,6 +538,23 @@ const ADVANCE_OUTPUT_SCHEMA: JsonSchema = {
     roundSuccess: { type: ["boolean", "null"] },
     enforcementAction: { enum: ["accept", "reject", "terminate", "backtrack"] },
     enforcementReason: { type: ["string", "null"] },
+    verificationStatus: { enum: ["trusted", "insufficient", "contradicted"] },
+    submission_guidance: {
+      type: ["object", "null"],
+      additionalProperties: true,
+      description:
+        "v3.9.1: current-fact submission guidance (real contract item ids, " +
+        "active sub-goal ids, usable commands, applicable fields). Derived, " +
+        "never persisted; terminal results with no prompt omit it.",
+    },
+    submission_receipt: {
+      type: ["object", "null"],
+      additionalProperties: true,
+      description:
+        "v3.9.1: what this submission did — saved/not-applied reports, " +
+        "derived-state effects, and machine verification, kept separate. " +
+        "Returned by loopforge_next only.",
+    },
     warnings: { type: "array", items: { type: "string" } },
     projection: {
       type: "object",
@@ -594,6 +591,10 @@ export const TOOL_OUTPUT_SCHEMAS: Record<string, JsonSchema> = {
       // from committed rounds — null when the whole task is the Current
       // Task).
       activeContract: { type: ["object", "null"] },
+      // v3.9.1: same current-fact guidance start/next/resume return, plus the
+      // latest committed submission's receipt.
+      submission_guidance: { type: ["object", "null"], additionalProperties: true },
+      last_submission: { type: ["object", "null"], additionalProperties: true },
     },
     additionalProperties: true,
   },
@@ -627,6 +628,13 @@ export const TOOL_OUTPUT_SCHEMAS: Record<string, JsonSchema> = {
       sessionId: { type: "string" },
       loopId: { type: "string" },
       timeline: { type: "array", items: { type: "object", additionalProperties: true } },
+      legacyRounds: {
+        type: "array",
+        items: { type: "object", additionalProperties: true },
+        description:
+          "v3.9.1: rounds whose persisted envelope version is unsupported. " +
+          "They are NOT history; the list makes the loss visible.",
+      },
     },
     additionalProperties: true,
   },
@@ -704,6 +712,11 @@ function prepareInputSchema(name: string, schema: JsonSchema): JsonSchema {
         : {}];
     }),
   );
+  // v3.9.1: unknown evaluation keys must reach the runtime normalizer so it
+  // can diagnose and drop them (e.g. a retired progress_estimate) instead of
+  // failing as a JSON-RPC argument error. The runtime boundary remains the
+  // authority; the four core fields above stay strict.
+  evaluation.additionalProperties = true;
   return result;
 }
 
@@ -1074,6 +1087,10 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
       // verification gates derive the same value from the same committed
       // evals via the shared round-contract walker).
       activeContract: mgr.getActiveContract(sessionId),
+      // v3.9.1: current-fact submission guidance for the held round. Same
+      // derivation as start/next/resume; read-only and never persisted.
+      submission_guidance: mgr.getSubmissionGuidance(sessionId),
+      last_submission: mgr.getLastSubmissionReceipt(sessionId),
       // v3.8: the ONE capability fact — the static half the compile hashes
       // (what verification is possible) plus the live half rendered from the
       // last baseline. `available` is provider-registry state: reported here
@@ -1140,7 +1157,12 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
       const session = mgr.get(sessionId);
       if (session) {
         const timeline = mgr.replayTimeline(sessionId) ?? [];
-        return { sessionId, loopId: session.loopId, timeline };
+        return {
+          sessionId,
+          loopId: session.loopId,
+          timeline,
+          legacyRounds: mgr.replayLegacyRounds(session.loopId),
+        };
       }
       // v3.3.1: session not in memory (restart). Fall through to the vault
       // path when a loopId was also provided; otherwise say so plainly.
@@ -1164,7 +1186,12 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
       };
     }
     // sessionId omitted on the vault path (its output schema is string-only).
-    return { ...(sessionId ? { sessionId } : {}), loopId, timeline };
+    return {
+      ...(sessionId ? { sessionId } : {}),
+      loopId,
+      timeline,
+      legacyRounds: mgr.replayLegacyRounds(loopId),
+    };
   },
 
   async loopforge_resume(mgr, input): Promise<Record<string, unknown>> {

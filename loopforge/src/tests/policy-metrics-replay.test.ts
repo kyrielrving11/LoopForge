@@ -15,7 +15,13 @@ function committedFeedback(
   round: number,
   result: Record<string, unknown>,
   level?: string,
+  submittedFields?: string[],
+  evaluation?: Record<string, unknown>,
+  normalizationDiagnostics?: Array<Record<string, unknown>>,
 ): VaultEntry {
+  const fields = submittedFields ?? [
+    "success", "output_summary", "constraint_violations", "should_continue",
+  ];
   return {
     id: `loop:metrics-loop:r${round}:feedback`,
     task_id: `loop:metrics-loop:r${round}:feedback`,
@@ -25,10 +31,10 @@ function committedFeedback(
     loop_lineage: {
       round,
       round_transaction: {
-        schema_version: 2,
+        schema_version: 3,
         round_id: `loop:metrics-loop:round:${round}`,
         snapshot: {
-          schemaVersion: 2,
+          schemaVersion: 3,
           roundId: `loop:metrics-loop:round:${round}`,
           loopId: "metrics-loop",
           round,
@@ -37,6 +43,9 @@ function committedFeedback(
           beforeEvidence: [],
           afterEvidence: [],
           result,
+          ...(evaluation ? { evaluation } : {}),
+          ...(normalizationDiagnostics ? { normalizationDiagnostics } : {}),
+          submittedFields: fields,
           promptArtifact: level
             ? {
                 schemaVersion: PROMPT_ARTIFACT_SCHEMA_VERSION, roundId: "", round: 1,
@@ -68,6 +77,82 @@ describe("derivePolicyMetrics", () => {
     assert.equal(metrics.verificationFlags.evidence_integrity, 1);
     assert.equal(metrics.levels.l2, 1);
     assert.equal(metrics.levels.l1, 2);
+  });
+
+  it("counts attempted and retained optional field usage (excluding core)", () => {
+    const entries = [
+      committedFeedback(1, {
+        action: "continue",
+        roundSuccess: true,
+        gateContradicted: false,
+        verificationFlags: [],
+      }, "l1", [
+        "success", "output_summary", "constraint_violations", "should_continue",
+        "discovered_constraints", "execution_report.files_changed",
+        "worker_results",
+      ], {
+        success: false,
+        output_summary: "made progress",
+        constraint_violations: [],
+        should_continue: true,
+        discovered_constraints: ["commands must not touch prod"],
+        execution_report: {
+          files_changed: ["src/a.ts"],
+          tests_reported: null,
+          criterion_claims: [],
+          contract_item_claims: [],
+        },
+        worker_results: [{
+          agentId: "w1",
+          subAgentType: "general-purpose",
+          subTask: "scan",
+          resultSummary: "found the seam",
+          outcome: "success",
+          discoveredConstraints: [],
+        }],
+      }),
+    ];
+    const metrics = derivePolicyMetrics("metrics-loop", entries);
+    assert.equal(metrics.attemptedFieldUsage.discovered_constraints, 1);
+    assert.equal(metrics.attemptedFieldUsage["execution_report.files_changed"], 1);
+    assert.equal(metrics.attemptedFieldUsage.worker_results, 1);
+    assert.equal(metrics.attemptedFieldUsage.success, undefined,
+      "core fields are not field-usage counts");
+    assert.equal(metrics.retainedFieldUsage.discovered_constraints, 1);
+    assert.equal(metrics.retainedFieldUsage["execution_report.files_changed"], 1);
+    assert.equal(metrics.retainedFieldUsage.worker_results, 1);
+    assert.equal(metrics.fieldAccountingRounds, 1);
+    assert.equal(metrics.fieldAccountingIncompleteRounds, 0);
+  });
+
+  it("does not count a whole-field drop as retained", () => {
+    const entries = [
+      committedFeedback(1, {
+        action: "continue",
+        roundSuccess: true,
+        gateContradicted: false,
+        verificationFlags: [],
+      }, "l1", [
+        "success", "output_summary", "constraint_violations", "should_continue",
+        "compression_checkpoint",
+      ], {
+        success: false,
+        output_summary: "made progress",
+        constraint_violations: [],
+        should_continue: true,
+        compression_checkpoint: false,
+      }, [{
+        path: "compression_checkpoint",
+        code: "invalid_value",
+        handling: "dropped",
+        detail: "expected a boolean; normalized to false",
+      }]),
+    ];
+    const metrics = derivePolicyMetrics("metrics-loop", entries);
+    assert.equal(metrics.attemptedFieldUsage.compression_checkpoint, 1);
+    assert.equal(metrics.retainedFieldUsage.compression_checkpoint, undefined);
+    assert.equal(metrics.fieldAccountingRounds, 1);
+    assert.equal(metrics.fieldAccountingIncompleteRounds, 0);
   });
 
   it("ignores non-feedback entries and rounds of other loops", () => {

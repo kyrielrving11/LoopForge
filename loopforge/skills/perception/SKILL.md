@@ -60,13 +60,18 @@ completed task.
 ## Plan the next slice
 
 For work that spans rounds, submit `round_contract` as a proposal for the next
-slice. Keep `work_item` narrow, bind each item to a configured evidence command
-with `verify_with`, and limit `scope` to files or directories that slice may
-touch. The proposal becomes active only after its declaring round commits.
-While it is open, restating the same proposal continues it; a different
-proposal is ignored as `contract_premature`. If the slice is blocked, report
-`outcome: "blocked"` with a concrete `blocker` instead of silently replacing
-the active contract.
+slice. Size the slice by what one machine-checkable outcome covers — a
+requirements list is not a round list, and coupled changes that share one
+objective, one evidence story, and one recovery path belong in the same round.
+Bind each item to a configured evidence command with `verify_with`, and limit
+`scope` to files or directories that slice may touch. The proposal becomes
+active only after its declaring round commits.
+While it is open, you do **not** need to restate it: omitting `round_contract`
+continues the active contract. A different proposal is ignored as
+`contract_premature`. If this round closes the contract and another slice
+follows, declare the successor in this same submission. If the slice is
+blocked, report `outcome: "blocked"` with a concrete `blocker` instead of
+silently replacing the active contract.
 
 This is a planning aid, not a second gate. LoopForge learns the plan only from
 committed evaluation fields, contract proposals, observations, and changes.
@@ -94,15 +99,35 @@ The four core evaluation fields are strict:
 | `constraint_violations` | Array of real violations, preferably using `c-XXXXXXXX` IDs. |
 | `should_continue` | Boolean. `false` only when the whole task is complete. |
 
-Useful optional fields include `execution_report` (`files_changed`,
-`tests_reported`, `criterion_claims`, `contract_item_claims`, and
-`progress_estimate`), `discovered_constraints`, `emerged_subtasks`,
-`subgoal_updates`, `prompt_requests`, `round_contract`, `retroactiveClaims`,
-`gate_ids`, `worker_results`, and objective or constraint revisions.
+Before submitting, check whether any of these events actually happened. Fill the
+matching field only when it did; omit it otherwise.
+
+| Event | Field | What LoopForge does with it |
+| --- | --- | --- |
+| The round changed files or ran tests | `execution_report.files_changed`, `execution_report.tests_reported` | Compares the report with machine observations; test counts stay self-reported |
+| You found a constraint later rounds must respect | `discovered_constraints` | The compiler merges it into the active set |
+| Evidence falsified an earlier assumption | `wrong_assumptions` | Feeds corrected-assumption state and recovery facts |
+| A sub-problem surfaced | `emerged_subtasks` | The only sub-goal creation channel |
+| An active sub-goal moved status | `subgoal_updates` | Applies an explicit transition |
+| You delegated work | `worker_results` | Saves the report and delegation journal entry; does **not** promote worker discoveries |
+| You are planning the next slice | `round_contract` | Becomes active only after this round commits |
+| A contract item progressed | `execution_report.contract_item_claims` | Starts machine evaluation; the item is verified only when its bound commands pass |
+| You need context emphasized | `prompt_requests` | Exact-match reorder or confusion alerts in the next prompt; never long-term knowledge |
+| You reached a meaningful boundary | `compression_checkpoint`, `checkpoint_label` | Creates a recoverable milestone |
+| You are blocked or stopping | `outcome`, `blocker`, `stop_reason`, `no_change_reason` | Runs the corresponding stop/lifecycle rule |
+| You understand the objective better | `objective_refinement` | Appends to the objective; never replaces it |
+| A constraint or criterion is wrong | `retracted_constraints`, `revised_success_criteria` | Updates derived state within existing boundaries |
+| You need a prior approval checked | `gate_ids`; `retroactiveClaims` | Checks existing gate references or prior-round evidence |
+
+`execution_report.files_changed` is the **boundary net change**: paths whose
+content or file type differs between round preparation and this submission,
+including deletions. A commit alone adds no entry when content is unchanged.
+Do not list gitignored paths merely to look complete.
 
 `emerged_subtasks` is the only sub-goal creation channel. It contains plain
 descriptions, never `sg-` IDs. `subgoal_updates` changes existing active IDs;
-done and canceled are terminal and cannot be reopened.
+done and canceled are terminal and cannot be reopened. The prompt or
+`submission_guidance` renders the real active IDs; never invent one.
 
 `outcome` may be `success`, `partial`, `failed`, or `blocked`. A blocked
 outcome needs a concrete `blocker`; `stop_reason` of `blocked` or
@@ -115,14 +140,23 @@ and workspace-containment errors return `evaluation_invalid` or
 `contract_invalid` before advance. Correct the payload and resubmit the same
 `roundId`; nothing is committed and no rejection counter moves.
 
-Every successful round still needs an `execution_report` with
-`files_changed` and `tests_reported`. `no_change_reason` is an escape only when
-no enabled verification command exists. It never creates evidence and never
-excuses an open contract.
+A successful round should include an `execution_report`. An empty or missing
+report is a reporting gap (a `warn`), not by itself a rejection: acceptance is
+decided by machine evidence and contract rules, never by how many optional
+fields were filled. `no_change_reason` is an escape only when no enabled
+verification command exists. It never creates evidence and never excuses an
+open contract.
 
 Agent reports are claims quoted for audit. They never become verified facts.
-Do not infer a missing field from natural language or put a guessed evaluation
-in free text.
+Do not infer a missing field from natural language, do not fill a field to
+satisfy a coverage check, and do not put a guessed evaluation in free text.
+When no event occurred, omit the field.
+
+Each prepared response carries `submission_guidance` with the real contract
+item ids/statuses, active sub-goal ids, usable commands and the fields that
+apply now. Each submission returns `submission_receipt`, which separates:
+reports that were saved, derived state that actually changed, and machine
+verification results. A report marked `saved` is not a verified fact.
 
 ## IDs and contracts
 
@@ -171,7 +205,7 @@ server was started in:
 
 ```json
 {
-  "version": "4",
+  "version": "5",
   "evidence": {
     "commands": [{
       "name": "verify",
@@ -194,11 +228,12 @@ workspace. `loopforge doctor` statically checks every configured command —
 its name, executable, arguments, timeouts, and workspace containment — and
 never executes one.
 
-Every prepared round returns `capability`: which providers are available, which
-commands are enabled and after-capable, and `contractVerificationAvailable`.
-When that is `false`, no configured command can back a contract item: run
-rounds without a contract instead of declaring items that cannot close. The
-`warnings` list states the same thing in words.
+Every prepared response carries `submission_guidance.contract_commands` and
+`submission_guidance.contract_verification_available`; `loopforge_status`
+`view=session` also returns the full `capability` object. When verification is
+unavailable, no configured command can back a contract item: run rounds without
+a contract instead of declaring items that cannot close. The `warnings` list
+states the same thing in words.
 
 A command's ENTRYPOINT is the file it names plus `package.json` when a package
 manager runs it. It must already be part of the workspace when the round
@@ -216,11 +251,12 @@ Prepare it before the round that depends on it.
 
 ## Backtrack and recovery
 
-A progress stall is machine-first when Git history is observable over the
-lookback window. Self-reported `progress_estimate` is only a fallback when
-machine history cannot be read. Machine motion can excuse a stall but cannot
-create one. A machine-backed success round is finishing, even if its closing
-round changes no files.
+A progress stall requires observable Git history over the lookback window.
+Committed work counts as motion through the Git HEAD change, even when the
+closing worktree is clean, and the round you are submitting counts too: if it
+moved files or committed, it cancels the verdict. If machine history cannot be
+read, no stall verdict is made. A machine-backed success round is finishing,
+even if its closing round changes no files.
 
 Backtrack records a rollback directive and restores the round counter to the
 last clean committed round. Rejected attempts are never history. The next
@@ -233,10 +269,14 @@ target HEAD. It states restoration facts, not a prescribed command.
 
 When backtrack occurs:
 
-1. Restore the workspace exactly as requested before doing more work.
-2. Read the Recovery Brief, restored prompt, and derived state.
-3. Do not repeat a failed approach without addressing its cause.
-4. Carry valid discoveries into later evaluations.
+1. Restore the workspace exactly as requested before doing more work: the
+   restore point's HEAD, with none of the failed rounds' changes left behind.
+   Work in progress the restore point already carried may stay.
+2. Submit one recovery evaluation from the restored state, so LoopForge can
+   verify the restore before the redo's own work — and any commit — follows.
+3. Read the Recovery Brief, restored prompt, and derived state.
+4. Do not repeat a failed approach without addressing its cause.
+5. Carry valid discoveries into later evaluations.
 
 If the rolled-back work used an active contract, close the stalled contract in
 the redo with `outcome: "blocked"` and declare the revised contract in that
@@ -247,15 +287,20 @@ same submission. Restating the stalled contract commits more of the same.
 - Non-null `prompt`: execute it and submit the next evaluation.
 - `enforcementAction: "reject"`: retry the same logical round and ID; the
   attempt increases.
-- `enforcementAction: "backtrack"`: restore the workspace, then continue from
-  the restored prompt and round.
+- `enforcementAction: "backtrack"`: restore the workspace, submit one recovery
+  evaluation from the restored state, then redo the round from its restored
+  prompt and round ID.
 - Null `prompt`: inspect `stopReason`.
 
-Read `verificationStatus`, `roundSuccess`, `level`, `warnings`, and
-`enforcementReason` before planning the next slice. `trusted` means claimed
-work is machine-backed, `insufficient` means evidence is missing, and
-`contradicted` means a machine fact denies a claim. These are evidence
-postures, not subjective quality scores.
+Read `submission_guidance` before composing the next evaluation, and read
+`verificationStatus`, `roundSuccess`, `level`, `warnings`, and
+`enforcementReason` before planning the next slice. In
+`submission_receipt.verification`, `contract_status` is the contract-item
+posture and `evidence_status` is the round-level machine evidence posture; do
+not read "no active contract" as "verified". `submission_receipt.reports`
+distinguishes a saved report from derived state that changed and from a machine
+verification result; `not_applied` means the submission did not become history.
+These are evidence postures, not subjective quality scores.
 
 Errors use `{ok: false, error: {code, message, retryable, ...}}`. Branch on the
 stable `code`, not the prose in `message`. Payload errors such as
@@ -303,7 +348,10 @@ call. Safe investigation and dry-runs need no gate.
 
 Delegation does not create another LoopForge mode. Give each worker a
 self-contained subtask and hard constraints, then place the result in
-`worker_results` so it can enter the next Canonical State.
+`worker_results`. A worker result is a report with its source: its
+`discoveredConstraints` does **not** enter the global constraint set by itself.
+If you accept a worker's finding, state it in top-level
+`discovered_constraints` — that is the only promotion channel.
 
 ## Rules
 

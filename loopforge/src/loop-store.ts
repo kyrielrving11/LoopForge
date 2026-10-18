@@ -148,7 +148,10 @@ export interface LoopRoundDocument {
   updatedAt: string;
   lineage?: VaultEntry;
   feedback?: VaultEntry;
+  /** DERIVED ON READ from feedback.loop_lineage.round_transaction; never
+   *  persisted. The factual copy lives in the feedback entry (one copy). */
   transaction?: RoundTransactionSnapshot;
+  /** DERIVED ON READ from the transaction snapshot; never persisted. */
   promptArtifact?: PromptArtifact;
   events: VaultEntry[];
 }
@@ -274,10 +277,6 @@ function roundFromEntry(entry: VaultEntry): number | null {
   }
   const match = String(entry.task_id ?? "").match(/:r(\d+)(?::|$)/);
   return match ? Number(match[1]) : null;
-}
-
-function promptFromSnapshot(snapshot: RoundTransactionSnapshot | null): PromptArtifact | undefined {
-  return snapshot?.promptArtifact;
 }
 
 export class FileLoopStore implements LoopStore {
@@ -432,7 +431,14 @@ export class FileLoopStore implements LoopStore {
     const events = Array.isArray(value.events)
       ? value.events.filter(isRecord) as VaultEntry[]
       : [];
-    const transaction = parseRoundTransactionSnapshot(value.transaction);
+    const feedback = isRecord(value.feedback) ? value.feedback as VaultEntry : undefined;
+    // v3.9.1: the feedback entry is the one persisted copy of the
+    // transaction. `value.transaction` exists only in documents written by
+    // older builds and is deliberately not read (no compatibility layer).
+    const transactionRaw = feedback?.loop_lineage?.round_transaction;
+    const transaction = parseRoundTransactionSnapshot(
+      isRecord(transactionRaw) ? transactionRaw.snapshot : undefined,
+    );
     return {
       schemaVersion: LOOP_STORE_SCHEMA_VERSION,
       loopId,
@@ -440,7 +446,7 @@ export class FileLoopStore implements LoopStore {
       sequence: typeof value.sequence === "number" ? value.sequence : undefined,
       updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : "",
       lineage: isRecord(value.lineage) ? value.lineage as VaultEntry : undefined,
-      feedback: isRecord(value.feedback) ? value.feedback as VaultEntry : undefined,
+      feedback,
       transaction: transaction ?? undefined,
       promptArtifact: transaction?.promptArtifact,
       events,
@@ -562,15 +568,23 @@ export class FileLoopStore implements LoopStore {
     }
     const transactionRaw = current.feedback?.loop_lineage?.round_transaction ??
       entry.loop_lineage?.round_transaction;
-    const transaction = parseRoundTransactionSnapshot(
+    // Validate the envelope on write, but do NOT persist a second copy: the
+    // feedback entry above already carries the one factual transaction.
+    parseRoundTransactionSnapshot(
       isRecord(transactionRaw) ? transactionRaw.snapshot : undefined,
     );
-    if (transaction) {
-      current.transaction = transaction;
-      current.promptArtifact = promptFromSnapshot(transaction);
-    }
     current.updatedAt = now;
-    this.atomicWrite(join(dir, "rounds", `${round}.json`), current);
+    const persisted: LoopRoundDocument = {
+      schemaVersion: current.schemaVersion,
+      loopId: current.loopId,
+      round: current.round,
+      ...(current.sequence !== undefined ? { sequence: current.sequence } : {}),
+      updatedAt: now,
+      ...(current.lineage ? { lineage: current.lineage } : {}),
+      ...(current.feedback ? { feedback: current.feedback } : {}),
+      events: current.events,
+    };
+    this.atomicWrite(join(dir, "rounds", `${round}.json`), persisted);
   }
 
   private loopDir(loopId: string): string {

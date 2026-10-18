@@ -6,7 +6,13 @@
 
 import { queryLoopEntries } from "./loop-store.js";
 import type { LoopStore, VaultEntry } from "./loop-store.js";
-import { decodeCommittedRound, readOnlyRounds } from "./committed-round.js";
+import {
+  decodeCommittedRound,
+  legacyTransactionRounds,
+  observedGitHead,
+  readOnlyRounds,
+} from "./committed-round.js";
+import type { LegacyRound } from "./committed-round.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ReplayBackend
@@ -74,25 +80,69 @@ export class ReplayBackend {
   // ── Timeline ──────────────────────────────────────────────────────────
 
   timeline(loopId: string): Record<string, unknown>[] {
-    const entries = this.replay(loopId);
+    const prefix = `loop:${loopId}:r`;
+    const feedback = queryLoopEntries(this.store, loopId, {
+      prefix,
+      feedbackOnly: true,
+    });
+    const views = new Map(
+      readOnlyRounds(feedback).map((view) => [view.round, view]),
+    );
     const timeline: Record<string, unknown>[] = [];
-
-    for (const entry of entries) {
+    // `replay()` keeps the lineage projection (task/goal/level/full_prompt)
+    // while the derived delta comes from the same committed-round view.
+    for (const entry of this.replay(loopId)) {
       const lineage = (entry.loop_lineage ?? {}) as Record<string, unknown>;
+      const round = typeof lineage.round === "number" ? lineage.round : 0;
+      const view = views.get(round);
+      const gitDelta = view?.observationDelta.find(
+        (item) => item.kind === "git",
+      );
+      const gitBefore = view?.beforeEvidence.find((item) => item.providerId === "git");
+      const gitAfter = view?.afterEvidence.find((item) => item.providerId === "git");
       timeline.push({
-        round: lineage.round ?? 0,
-        recompile_level: lineage.recompile_level ?? "l2",
-        success: entry.success ?? lineage.success ?? false,
+        round,
+        recompile_level: lineage.recompile_level ?? view?.promptArtifact?.level ?? "l2",
+        success: entry.success ?? view?.success ?? false,
         task: (lineage.task as string) ?? "",
         goal_id: lineage.goal_id ?? "",
+        // v3.9.1: the shared round delta and Git boundary facts.
+        files_changed: gitDelta?.changedFiles ?? null,
+        git_change_state: gitDelta === undefined
+          ? "not_applicable"
+          : gitDelta.changedFiles === null ? "unknown" : "observed",
+        head_before: observedGitHead(gitBefore),
+        head_after: observedGitHead(gitAfter),
+        git_status: gitAfter?.status ?? null,
         // v3.5: the round's declared contract (proposal for the next round),
         // when it committed one — lets replay show the contract arc.
-        ...(entry.round_contract ? { proposal: entry.round_contract } : {}),
+        ...(entry.round_contract
+          ? { proposal: entry.round_contract }
+          : view?.contractProposal
+            ? { proposal: view.contractProposal }
+            : {}),
       });
     }
-
+    // Unsupported envelope versions are NOT history. Keep them visible in the
+    // timeline instead of letting the loop look shorter than it was.
+    for (const legacy of legacyTransactionRounds(feedback)) {
+      timeline.push({
+        round: legacy.round,
+        legacy: true,
+        envelope: legacy.envelope,
+        schema_version: legacy.schemaVersion,
+      });
+    }
     timeline.sort((a, b) => (a.round as number) - (b.round as number));
     return timeline;
+  }
+
+  /** v3.9.1: explicit legacy-envelope report for the tool envelope. */
+  legacyRounds(loopId: string): LegacyRound[] {
+    const prefix = `loop:${loopId}:r`;
+    return legacyTransactionRounds(
+      queryLoopEntries(this.store, loopId, { prefix, feedbackOnly: true }),
+    );
   }
 
   // ── Helpers ─────────────────────────────────────────────────────────────

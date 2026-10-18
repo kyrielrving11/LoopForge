@@ -8,17 +8,16 @@ import {
   EvidenceCollector,
   GitEvidenceProvider,
   captureGitFileStateAsync,
-  diffSnapshotCollections,
-  diffSnapshots,
+  deriveObservationDeltas,
 } from "../evidence-provider.js";
-import type { GitObservation } from "../protocol.js";
+import type { GitObservation, MachineObservation } from "../protocol.js";
 
 function gitSnapshot(
   files: string[],
   fingerprints: Record<string, string>,
 ): GitObservation {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     providerId: "git",
     kind: "git",
     phase: "after",
@@ -26,7 +25,11 @@ function gitSnapshot(
     finishedAt: 0,
     status: "observed",
     files,
-    data: { tracked: files, staged: [], untracked: [], fingerprints },
+    data: {
+      dirty: files,
+      fingerprints,
+      coverage: "tracked_and_non_ignored_untracked",
+    },
   };
 }
 
@@ -35,9 +38,8 @@ describe("EvidenceProvider round diffs", () => {
     const before = [gitSnapshot(["src/dirty.ts"], { "src/dirty.ts": "v1" })];
     const after = [gitSnapshot(["src/dirty.ts"], { "src/dirty.ts": "v2" })];
 
-    assert.deepEqual(diffSnapshots(before, after), ["src/dirty.ts"]);
     assert.deepEqual(
-      diffSnapshotCollections(before, after)[0]?.files,
+      deriveObservationDeltas(before, after)[0]?.changedFiles,
       ["src/dirty.ts"],
     );
   });
@@ -45,7 +47,10 @@ describe("EvidenceProvider round diffs", () => {
   it("detects a dirty file restored to its baseline", () => {
     const before = [gitSnapshot(["src/restored.ts"], { "src/restored.ts": "v1" })];
     const after = [gitSnapshot([], {})];
-    assert.deepEqual(diffSnapshots(before, after), ["src/restored.ts"]);
+    assert.deepEqual(
+      deriveObservationDeltas(before, after)[0]?.changedFiles,
+      ["src/restored.ts"],
+    );
   });
 
   it("honours an empty evidence provider policy", async () => {
@@ -75,12 +80,16 @@ describe("EvidenceProvider round diffs", () => {
         phase: "after",
         cwd: dir,
       });
-      assert.ok(snapshot, "the git provider observes a real repository");
-      assert.ok(snapshot!.files.includes("src.ts"), "the agent's own file is observed");
-      assert.ok(!snapshot!.files.some((file) => file.startsWith(".loopforge/")),
+      assert.ok(snapshot && snapshot.kind === "git",
+        "the git provider observes a real repository");
+      assert.ok(snapshot.files.includes("src.ts"), "the agent's own file is observed");
+      assert.ok(!snapshot.files.some((file) => file.startsWith(".loopforge/")),
         "the runtime's state must not count as the agent's work");
-      assert.ok(!snapshot!.data.untracked.some((file) => file.startsWith(".loopforge/")),
-        "the raw lists exclude it too — one observation, one file set");
+      assert.ok(!snapshot.data.dirty.some((file) => file.startsWith(".loopforge/")),
+        "the raw dirty list excludes it too — one observation, one file set");
+      assert.ok(!Object.keys(snapshot.data.fingerprints)
+        .some((file) => file.startsWith(".loopforge/")),
+      "the boundary excludes the runtime state directory");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -107,7 +116,7 @@ describe("EvidenceProvider round diffs", () => {
       // file is listed in BOTH captures, so only the fingerprint can see
       // the content change.
       const provider = new GitEvidenceProvider();
-      const capture = (): Promise<GitObservation | null> => provider.capture({
+      const capture = (): Promise<MachineObservation | null> => provider.capture({
         signal: new AbortController().signal,
         timeoutMs: 10000,
         phase: "after",
@@ -116,13 +125,14 @@ describe("EvidenceProvider round diffs", () => {
       writeFileSync(join(dir, fileName), "v1\n");
       const snapBefore = await capture();
       const before = await captureGitFileStateAsync(undefined, 10000, dir);
-      assert.ok(before?.tracked.includes(fileName),
+      assert.ok(before.ok && before.state.tracked.some((entry) => entry.path === fileName),
         "the modified Chinese-named file must be listed raw (no octal escapes)");
       writeFileSync(join(dir, fileName), "v2\n");
       const after = await captureGitFileStateAsync(undefined, 10000, dir);
-      assert.ok(after?.tracked.includes(fileName));
+      assert.ok(after.ok && after.state.tracked.some((entry) => entry.path === fileName));
       const snapAfter = await capture();
       assert.ok(snapBefore && snapAfter);
+      assert.ok(snapBefore.kind === "git" && snapAfter.kind === "git");
       const fpsBefore = snapBefore.data.fingerprints as Record<string, string>;
       const fpsAfter = snapAfter.data.fingerprints as Record<string, string>;
       assert.notEqual(
@@ -130,7 +140,9 @@ describe("EvidenceProvider round diffs", () => {
         fpsAfter[fileName],
         "content fingerprints must differ across the modification",
       );
-      assert.deepEqual(diffSnapshots([snapBefore], [snapAfter]), [fileName],
+      assert.deepEqual(
+        deriveObservationDeltas([snapBefore], [snapAfter])[0]?.changedFiles,
+        [fileName],
         "a pure content change to a Chinese-named file must surface in the diff");
     } finally {
       rmSync(dir, { recursive: true, force: true });

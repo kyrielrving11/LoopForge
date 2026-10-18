@@ -7,9 +7,10 @@
  *  it is a pure function of the committed round views, the current report,
  *  the current observations, and policy.
  */
-import type { ContractItemStatus, ExecutionReport, MachineObservation } from "./protocol.js";
+import type { ContractItemStatus, ExecutionReport } from "./protocol.js";
 import type { ActiveContractView } from "./round-contract.js";
 import type { CommittedRoundView } from "./committed-round.js";
+import type { ObservationDelta } from "./evidence-provider.js";
 import type { CommandEvidencePolicy } from "./policy.js";
 export interface ItemStatusHistoryEntry {
     round: number;
@@ -40,7 +41,7 @@ export interface ContractItemInput {
     rounds: ReadonlyArray<CommittedRoundView>;
     currentRound: number;
     currentReport: ExecutionReport | null;
-    currentObservations: ReadonlyArray<MachineObservation>;
+    currentDeltas: ReadonlyArray<ObservationDelta>;
     /** The in-flight round's own effective outcome. A `blocked` round CLOSES its
      *  contract, so the closure cannot be derived from the committed slices
      *  alone — the round being decided is not committed yet. Leave null where no

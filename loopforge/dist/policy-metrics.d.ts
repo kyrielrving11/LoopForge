@@ -26,6 +26,20 @@ export interface PolicyMetricsSnapshot {
     /** Per-reason breakdown of persistence failures. */
     vaultWriteReasons: Record<string, number>;
     levels: Record<string, number>;
+    /** v3.9.1: file-delta / Git boundary counts, all derived from the shared
+     *  round delta. Display only — never a gate. */
+    filesChangedRounds: number;
+    filesChangedTotal: number;
+    unobservableGitRounds: number;
+    headMoveRounds: number;
+    /** Optional-field counts (core fields excluded). `attempted` = the raw
+     *  payload named the field; `retained` = the normalizer kept a value.
+     *  `retained` covers only complete accounting rounds; the two round counts
+     *  make that coverage explicit. Pure observation — never a gate. */
+    attemptedFieldUsage: Record<string, number>;
+    retainedFieldUsage: Record<string, number>;
+    fieldAccountingRounds: number;
+    fieldAccountingIncompleteRounds: number;
     acceptanceRate: number;
     evidenceAvailabilityRate: number;
 }

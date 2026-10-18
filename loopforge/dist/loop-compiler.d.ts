@@ -6,6 +6,7 @@
 import { type CriterionStatus, type RecurringFlag, type LoopCompileRequest, type LoopCompileResponse, type LoopObjective, type LoopRoundResult, type RollingSummary } from "./protocol.js";
 import { type CommittedRoundView } from "./committed-round.js";
 import type { CriterionMachineFact } from "./round-facts.js";
+import { type SelfEvalPromptContext } from "./submission-guidance.js";
 export interface PreviousRound {
     round: number;
     goal_id: string;
@@ -60,16 +61,9 @@ export declare function buildRollingSummary(loopId: string, currentRound: number
 export declare function deriveConstraintId(text: string): string;
 export { deriveCriterionId, isCriterionId } from "./token-utils.js";
 export declare function decideLevel(request: LoopCompileRequest, context: Record<string, unknown> | null): "l0" | "l1" | "l2";
-export declare function buildSelfEvalBlock(round: number,
-/** v2.12: L0 is the minimal retry template — the v2.12 declarative fields
- *  (outcome/blocker/retroactiveClaims) are L1/L2 additions so the retry
- *  prompt stays within its tight budget. */
-level?: "l0" | "l1" | "l2",
-/** v3.3/v3.4: Whether this round's Current Task IS the ACTIVE Round
- *  Contract (derived from committed rounds — compileLoop passes
- *  `activeContract != null`). Only then does the template ask the agent
- *  to restate/propose it — a generic empty contract template would invite
- *  placeholder submissions that trigger round_underspecified noise. */
-hasContract?: boolean): string;
+/** The prompt's evaluation block. All content (examples, contract/sub-goal
+ *  guidance, flag-specific hints) comes from the one FIELD_GUIDES table in
+ *  submission-guidance.ts; this function owns no second copy. */
+export declare function buildSelfEvalBlock(ctx: SelfEvalPromptContext): string;
 export declare function compileLoop(request: LoopCompileRequest, context: Record<string, unknown> | null): LoopCompileResponse;
 //# sourceMappingURL=loop-compiler.d.ts.map

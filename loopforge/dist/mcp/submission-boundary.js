@@ -27,7 +27,7 @@ import { queryLoopEntries } from "../loop-store.js";
 import { Mode } from "../protocol.js";
 import { deriveActiveRoundContract } from "../round-contract.js";
 import { derivationRounds } from "../committed-round.js";
-import { boundedEmergedSubtasks, buildSelfEvaluation, parseSubGoalUpdates, validateContractShape, validateCoreSelfEvaluation, validateSubGoalUpdatesShape, } from "../self-eval.js";
+import { boundedEmergedSubtasks, normalizeSelfEvaluation, parseSubGoalUpdates, validateContractShape, validateCoreSelfEvaluation, validateSubGoalUpdatesShape, } from "../self-eval.js";
 import { deriveEmergedItems, validateSubGoalUpdates } from "../subgoal-state.js";
 import { isConfiguredCommand } from "../policy.js";
 import { scopeEntryDetail } from "../workspace.js";
@@ -97,6 +97,11 @@ export function activeContractOf(store, session) {
     ];
     return deriveActiveRoundContract(derivationRounds(entries, session.currentRound));
 }
+/** Map a strict boundary error onto the same diagnostic vocabulary, without
+ *  persisting it. Strict failures are returned only for that attempt. */
+function rejectedDiagnostic(path, code, detail) {
+    return { path, code, handling: "rejected", detail };
+}
 const EVALUATION_REQUIRED = "A structured evaluation object is required. Resubmit the same roundId " +
     "with success, output_summary, constraint_violations, and should_continue.";
 /** THE submission boundary. Five checks, in this order, all of them before
@@ -124,6 +129,9 @@ export function validateSubmission(store, session, submission) {
                 details: {
                     missing: ["evaluation"],
                     invalid: [{ field: "evaluation", expected: "object" }],
+                    diagnostics: [
+                        rejectedDiagnostic("evaluation", "invalid_value", "expected an evaluation object"),
+                    ],
                 },
             },
         };
@@ -133,7 +141,16 @@ export function validateSubmission(store, session, submission) {
         return {
             ok: false,
             stopDetail: EVALUATION_REQUIRED,
-            submissionError: { code: "evaluation_invalid", details: { ...core } },
+            submissionError: {
+                code: "evaluation_invalid",
+                details: {
+                    ...core,
+                    diagnostics: [
+                        ...core.missing.map((field) => rejectedDiagnostic(field, "required", "core field is required")),
+                        ...core.invalid.map((item) => rejectedDiagnostic(item.field, "invalid_value", `expected ${item.expected}`)),
+                    ],
+                },
+            },
         };
     }
     // The emerged set is part of BOTH referential spaces below. It goes through
@@ -148,7 +165,12 @@ export function validateSubmission(store, session, submission) {
             stopDetail: "subgoal_updates is malformed. Fix the entries and resubmit the same roundId.",
             submissionError: {
                 code: "evaluation_invalid",
-                details: { missing: [], invalid: [], subgoal_errors: subgoalShapeErrors },
+                details: {
+                    missing: [],
+                    invalid: [],
+                    subgoal_errors: subgoalShapeErrors,
+                    diagnostics: subgoalShapeErrors.map((error) => rejectedDiagnostic(error.field, error.reason, error.detail)),
+                },
             },
         };
     }
@@ -168,7 +190,12 @@ export function validateSubmission(store, session, submission) {
                     "resubmit the same roundId.",
                 submissionError: {
                     code: "evaluation_invalid",
-                    details: { missing: [], invalid: [], subgoal_errors: referentialErrors },
+                    details: {
+                        missing: [],
+                        invalid: [],
+                        subgoal_errors: referentialErrors,
+                        diagnostics: referentialErrors.map((error) => rejectedDiagnostic(error.field, error.reason, error.detail)),
+                    },
                 },
             };
         }
@@ -181,11 +208,16 @@ export function validateSubmission(store, session, submission) {
                 "Fix them and resubmit the same roundId.",
             submissionError: {
                 code: "contract_invalid",
-                details: { missing: [], invalid: [], contract_errors: contractErrors },
+                details: {
+                    missing: [],
+                    invalid: [],
+                    contract_errors: contractErrors,
+                    diagnostics: contractErrors.map((error) => rejectedDiagnostic(error.field, error.reason, error.detail)),
+                },
             },
         };
     }
-    return { ok: true, evaluation: buildSelfEvaluation(submission) };
+    return { ok: true, ...normalizeSelfEvaluation(submission) };
 }
 function contractShapeErrors(store, session, submission, knownSubGoals) {
     const active = session ? activeContractOf(store, session) : null;

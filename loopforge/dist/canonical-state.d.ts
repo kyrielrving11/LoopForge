@@ -67,7 +67,6 @@ export interface CanonicalLoopState {
     externalContext: string;
     stateFilePath: string;
     progress: {
-        estimate: number | null;
         criteriaMet: string[];
         criteriaRemaining: string[];
         filesChanged: string[];
@@ -121,7 +120,7 @@ export declare function formatRoundContract(contract: ActiveContractView,
 /** v3.8: the derived item statuses. When given, each item renders with its
  *  machine status — the agent sees the verification debt in its own task. */
 statuses?: ContractItemStatusView | null): string;
-/** Milestone heading line ("**🏁 Round 7** (Rounds 3–7, 60%)"). Shared by the
+/** Milestone heading line ("**🏁 Round 7** (Rounds 3–7)"). Shared by the
  *  L2 Phase History and the detailed L1 renderer; the L1 copy previously
  *  rendered the range as "R3–R7", a format only this heading used. */
 export declare function milestoneHeading(milestone: MilestoneSummary): string;

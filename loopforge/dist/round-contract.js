@@ -65,7 +65,7 @@ export function deriveActiveRoundContract(rounds, commands = getPolicy().evidenc
             rounds: rounds.slice(0, index + 1),
             currentRound: round.round + 1,
             currentReport: null,
-            currentObservations: [],
+            currentDeltas: [],
             commands,
         });
         if (statuses.closure === "verified") {
@@ -98,8 +98,8 @@ export function contractCriterionIds(contract) {
  *    declared in round R becomes active in R+1, and a contract round R CLOSES
  *    must still be reported as round R's contract — folding R's own proposal
  *    into the walker would hand the round the successor (or nothing).
- *  - The round's own report and observations enter as the in-flight slice, so
- *    its claims and its bound commands are judged with the same reducer the
+ *  - The round's own report and deltas enter as the in-flight slice, so its
+ *    claims and its bound commands are judged with the same reducer the
  *    coordinator uses before the round commits. */
 export function deriveRoundContractView(input) {
     const prior = input.rounds.filter((candidate) => candidate.round < input.round);
@@ -111,7 +111,7 @@ export function deriveRoundContractView(input) {
             rounds: prior,
             currentRound: input.round,
             currentReport: input.report,
-            currentObservations: input.observations,
+            currentDeltas: input.deltas,
             currentOutcome: input.outcome,
             commands: input.commands,
         }),

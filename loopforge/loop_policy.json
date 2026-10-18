@@ -1,5 +1,5 @@
 {
-  "version": "4",
+  "version": "5",
   "constraints": {
     "retire_window": 3
   },
@@ -17,8 +17,8 @@
     "unverified_claim_streak_limit": 3
   },
   "prompt": {
-    "l0_max_chars": 3000,
-    "l1_max_chars": 7000,
+    "l0_max_chars": 5000,
+    "l1_max_chars": 10000,
     "l2_max_chars": 18000,
     "l2_pointer_enabled": true,
     "max_emphasize_l2": 5,
@@ -32,7 +32,6 @@
     "max_discovered_constraints_per_round": 5,
     "max_active_constraints": 15,
     "max_objective_versions": 10,
-    "progress_stall_threshold": 0.05,
     "max_active_subgoals": 12
   },
   "checkpoint": {

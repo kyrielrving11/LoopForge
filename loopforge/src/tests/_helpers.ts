@@ -14,8 +14,17 @@ import type {
   VaultEntry,
 } from "../loop-store.js";
 import { LOOP_STORE_SCHEMA_VERSION } from "../loop-store.js";
+import { ROUND_TRANSACTION_SCHEMA_VERSION } from "../round-transaction.js";
 import { makeExecutionReport, makeSelfEvaluation } from "../protocol.js";
-import type { CriterionClaim, RoundContractProposal, RoundOutcome, VerificationFlag } from "../protocol.js";
+import type {
+  CriterionClaim,
+  MachineObservation,
+  RoundContractProposal,
+  RoundOutcome,
+  SelfEvaluation,
+  VerificationFlag,
+} from "../protocol.js";
+import type { GitDeltaState, ObservationDelta } from "../evidence-provider.js";
 import { getPolicy } from "../policy.js";
 import { POLICY_SCHEMA_VERSION } from "../policy.js";
 
@@ -25,6 +34,67 @@ export function criterionClaims(met: string[] = [], remaining: string[] = []): C
     ...met.map((criterion_id) => ({ criterion_id, outcome: "met" as const })),
     ...remaining.map((criterion_id) => ({ criterion_id, outcome: "remaining" as const })),
   ];
+}
+
+/** A committed round always carries its attempted manifest. Tests build the
+ *  manifest from what the fixture evaluation actually contains, so the
+ *  accounting read model sees the same fields the round declared. */
+export function manifestFor(evaluation: SelfEvaluation): string[] {
+  const fields = [
+    "success", "output_summary", "constraint_violations", "should_continue",
+  ];
+  if (evaluation.execution_report) {
+    fields.push("execution_report.files_changed", "execution_report.tests_reported");
+    if ((evaluation.execution_report.criterion_claims ?? []).length > 0) {
+      fields.push("execution_report.criterion_claims");
+    }
+    if ((evaluation.execution_report.contract_item_claims ?? []).length > 0) {
+      fields.push("execution_report.contract_item_claims");
+    }
+  }
+  if ((evaluation.discovered_constraints ?? []).length > 0) fields.push("discovered_constraints");
+  if ((evaluation.emerged_subtasks ?? []).length > 0) fields.push("emerged_subtasks");
+  if ((evaluation.subgoal_updates ?? []).length > 0) fields.push("subgoal_updates");
+  if ((evaluation.retracted_constraints ?? []).length > 0) fields.push("retracted_constraints");
+  if ((evaluation.wrong_assumptions ?? []).length > 0) fields.push("wrong_assumptions");
+  if (evaluation.round_contract) fields.push("round_contract");
+  if (evaluation.outcome) fields.push("outcome");
+  return fields;
+}
+
+/** Test-only: wrap raw after observations as after-only deltas. A Git
+ *  observation's own `files` is its test-authored change set; command/custom
+ *  deltas carry no file-change concept. */
+export function deltasFrom(observations: MachineObservation[]): ObservationDelta[] {
+  return observations.map((observation) => ({
+    providerId: observation.providerId,
+    kind: observation.kind,
+    before: null,
+    after: observation,
+    changedFiles: observation.kind === "git" ? [...observation.files] : null,
+  }));
+}
+
+/** Test-only: one explicit delta. */
+export function deltaAfter(
+  observation: MachineObservation,
+  changedFiles: string[] | null = null,
+): ObservationDelta {
+  return {
+    providerId: observation.providerId,
+    kind: observation.kind,
+    before: null,
+    after: observation,
+    changedFiles,
+  };
+}
+
+/** Test-only: build the Git applicability/observability tri-state.
+ *  undefined = not applicable, null = unknown, array = observed. */
+export function gitState(files?: string[] | null): GitDeltaState {
+  if (files === undefined) return { state: "not_applicable" };
+  if (files === null) return { state: "unknown" };
+  return { state: "observed", changedFiles: new Set(files) };
 }
 
 // ── v3.5.1: shared committed-round fixtures ─────────────────────────────────
@@ -48,6 +118,7 @@ export function committedFeedbackRound(
     met?: string[];
     action?: string;
     attempt?: number;
+    beforeEvidence?: unknown[];
     roundEvidence?: unknown[];
     files?: string[];
     progress?: number;
@@ -62,46 +133,47 @@ export function committedFeedbackRound(
   } = {},
 ): VaultEntry {
   const loopId = opts.loopId ?? "cc";
+  const evaluation = makeSelfEvaluation({
+    success: false,
+    output_summary: `Committed round ${round}.`,
+    constraint_violations: [],
+    should_continue: true,
+    outcome: opts.outcome,
+    round_contract: opts.contract,
+    discovered_constraints: opts.discoveredConstraints ?? [],
+    execution_report: opts.noExecutionReport
+      ? undefined
+      : makeExecutionReport({
+          files_changed: opts.files ?? [],
+          tests_reported: { passed: 0, failed: 0, skipped: 0 },
+          criterion_claims: criterionClaims(opts.met ?? []),
+          ...(opts.contractItemClaims
+            ? { contract_item_claims: opts.contractItemClaims }
+            : {}),
+        }),
+  });
   return {
     task_id: `loop:${loopId}:r${round}:feedback`,
     loop_id: loopId,
     loop_lineage: {
       round,
       round_transaction: {
-        schema_version: 2,
+        schema_version: ROUND_TRANSACTION_SCHEMA_VERSION,
         round_id: `loop:${loopId}:round:${round}`,
         snapshot: {
-          schemaVersion: 2,
+          schemaVersion: ROUND_TRANSACTION_SCHEMA_VERSION,
           roundId: `loop:${loopId}:round:${round}`,
           loopId,
           round,
           attempt: opts.attempt ?? 1,
           phase: "committed",
-          beforeEvidence: [],
+          beforeEvidence: opts.beforeEvidence ?? [],
           afterEvidence: opts.roundEvidence,
           ...(opts.contractBinding !== undefined ? { contractBinding: opts.contractBinding } : {}),
           createdAt: 0,
           updatedAt: 0,
-          evaluation: makeSelfEvaluation({
-            success: false,
-            output_summary: `Committed round ${round}.`,
-            constraint_violations: [],
-            should_continue: true,
-            outcome: opts.outcome,
-            round_contract: opts.contract,
-            discovered_constraints: opts.discoveredConstraints ?? [],
-            execution_report: opts.noExecutionReport
-              ? undefined
-              : makeExecutionReport({
-                  files_changed: opts.files ?? [],
-                  tests_reported: { passed: 0, failed: 0, skipped: 0 },
-                  criterion_claims: criterionClaims(opts.met ?? []),
-                  progress_estimate: opts.progress ?? 0.2,
-                  ...(opts.contractItemClaims
-                    ? { contract_item_claims: opts.contractItemClaims }
-                    : {}),
-                }),
-          }),
+          evaluation,
+          submittedFields: manifestFor(evaluation),
         },
         result: {
           action: opts.action ?? "continue",
@@ -120,16 +192,22 @@ export function committedBacktrackRound(
   round: number,
   loopId = "test-loop",
 ): VaultEntry {
+  const evaluation = makeSelfEvaluation({
+    success: false,
+    output_summary: `Rolled back round ${round}.`,
+    constraint_violations: [],
+    should_continue: true,
+  });
   return {
     task_id: `loop:${loopId}:r${round}:feedback`,
     loop_id: loopId,
     loop_lineage: {
       round,
       round_transaction: {
-        schema_version: 2,
+        schema_version: ROUND_TRANSACTION_SCHEMA_VERSION,
         round_id: `loop:${loopId}:round:${round}`,
         snapshot: {
-          schemaVersion: 2,
+          schemaVersion: ROUND_TRANSACTION_SCHEMA_VERSION,
           roundId: `loop:${loopId}:round:${round}`,
           loopId,
           round,
@@ -137,12 +215,8 @@ export function committedBacktrackRound(
           phase: "committed",
           beforeEvidence: [],
           afterEvidence: [],
-          evaluation: makeSelfEvaluation({
-            success: false,
-            output_summary: `Rolled back round ${round}.`,
-            constraint_violations: [],
-            should_continue: true,
-          }),
+          evaluation,
+          submittedFields: manifestFor(evaluation),
           createdAt: 0,
           updatedAt: 0,
         },
@@ -150,6 +224,82 @@ export function committedBacktrackRound(
       },
     },
   };
+}
+
+/** v3.9.1: attach the embedded transaction snapshot a hydrated merged entry
+ *  must carry. Ad-hoc test entries used to rely on raw-field reconstruction;
+ *  the read model now has one source, so fixtures stamp the envelope too. */
+export function withTransaction(
+  entry: Record<string, unknown>,
+  action: "continue" | "stop" | "backtrack" = "continue",
+): Record<string, unknown> {
+  const lineage = (entry.loop_lineage ?? {}) as Record<string, unknown>;
+  const loopId = String(entry.loop_id ?? lineage.loop_id ?? "");
+  const round = Number(lineage.round ?? entry.round ?? 0);
+  const evaluation = {
+    success: entry.success === true,
+    output_summary: String(entry.output_summary ?? ""),
+    constraint_violations: Array.isArray(entry.constraint_violations)
+      ? entry.constraint_violations
+      : [],
+    should_continue: true,
+    ...(Array.isArray(entry.emerged_subtasks)
+      ? { emerged_subtasks: entry.emerged_subtasks }
+      : {}),
+    ...(Array.isArray(entry.subgoal_updates)
+      ? { subgoal_updates: entry.subgoal_updates }
+      : {}),
+    ...(Array.isArray(entry.discovered_constraints)
+      ? { discovered_constraints: entry.discovered_constraints }
+      : {}),
+    ...(Array.isArray(entry.retracted_constraints)
+      ? { retracted_constraints: entry.retracted_constraints }
+      : {}),
+    ...(Array.isArray(entry.wrong_assumptions)
+      ? { wrong_assumptions: entry.wrong_assumptions }
+      : {}),
+    ...(entry.execution_report !== undefined
+      ? { execution_report: entry.execution_report }
+      : {}),
+    ...(entry.outcome !== undefined ? { outcome: entry.outcome } : {}),
+    ...(entry.round_contract !== undefined
+      ? { round_contract: entry.round_contract }
+      : {}),
+  } as unknown as SelfEvaluation;
+  const result = {
+    action,
+    verificationFlags: Array.isArray(entry.verification_flags)
+      ? entry.verification_flags
+      : [],
+    roundSuccess: entry.success === true,
+    gateContradicted: false,
+    verificationStatus: "trusted",
+    newConsecutiveRejections: 0,
+    shouldPushSuccessTrajectory: false,
+  };
+  const snapshot = {
+    schemaVersion: ROUND_TRANSACTION_SCHEMA_VERSION,
+    roundId: `loop:${loopId}:round:${round}`,
+    loopId,
+    round,
+    attempt: Number(lineage.attempt ?? 1),
+    phase: "committed",
+    beforeEvidence: [],
+    afterEvidence: [],
+    evaluation,
+    submittedFields: manifestFor(evaluation),
+    result,
+    createdAt: 0,
+    updatedAt: 0,
+  };
+  lineage.round_transaction = {
+    schema_version: ROUND_TRANSACTION_SCHEMA_VERSION,
+    round_id: snapshot.roundId,
+    snapshot,
+    result,
+  };
+  entry.loop_lineage = lineage;
+  return entry;
 }
 
 /** v3.5.1: Merged production-shape lineage entry — engine hydration merges
@@ -168,6 +318,7 @@ export function mergedLineageRound(
     /** false → omit committed_action (an uncommitted compile-time entry). */
     committed?: boolean;
     attempt?: number;
+    beforeEvidence?: unknown[];
     roundEvidence?: unknown[];
     files?: string[];
     progress?: number;
@@ -176,6 +327,11 @@ export function mergedLineageRound(
     contractBinding?: unknown;
     /** v3.8: the round's committed item claims. */
     contractItemClaims?: Array<{ item_id: string; outcome: "met" | "remaining" }>;
+    /** v3.9.1: the committed output summary carried by the evaluation. */
+    outputSummary?: string;
+    /** v3.9.1: committed constraint violations and verification flags. */
+    constraintViolations?: string[];
+    verificationFlags?: VerificationFlag[];
   } = {},
 ): Record<string, unknown> {
   const loopId = opts.loopId ?? "me";
@@ -183,6 +339,7 @@ export function mergedLineageRound(
     loop_id: loopId,
     round,
     success: false,
+    ...(opts.outputSummary !== undefined ? { output_summary: opts.outputSummary } : {}),
     ...(opts.committed === false
       ? {}
       : { committed_action: opts.action ?? "continue" }),
@@ -190,12 +347,12 @@ export function mergedLineageRound(
       files_changed: opts.files ?? [],
       tests_reported: { passed: 0, failed: 0, skipped: 0 },
       criterion_claims: criterionClaims(opts.met ?? []),
-      progress_estimate: opts.progress ?? 0.2,
     },
   };
   if (opts.contract) lin.round_contract = opts.contract;
   if (opts.outcome !== undefined) lin.outcome = opts.outcome;
   if (opts.attempt !== undefined) lin.attempt = opts.attempt;
+  if (opts.beforeEvidence !== undefined) lin.before_evidence = opts.beforeEvidence;
   if (opts.roundEvidence !== undefined) lin.after_evidence = opts.roundEvidence;
   if (opts.contractBinding !== undefined) lin.contract_binding = opts.contractBinding;
   const body: Record<string, unknown> = {
@@ -203,11 +360,11 @@ export function mergedLineageRound(
     task_id: `${loopId}:r${round}`,
     task_type: "loop_lineage",
     success: false,
+    ...(opts.outputSummary !== undefined ? { output_summary: opts.outputSummary } : {}),
     execution_report: {
       files_changed: opts.files ?? [],
       tests_reported: { passed: 0, failed: 0, skipped: 0 },
       criterion_claims: criterionClaims(opts.met ?? []),
-      progress_estimate: opts.progress ?? 0.2,
     },
   };
   if (opts.contract) body.round_contract = opts.contract;
@@ -222,6 +379,58 @@ export function mergedLineageRound(
     lin.execution_report = withClaims(lin.execution_report as Record<string, unknown>);
     body.execution_report = withClaims(body.execution_report as Record<string, unknown>);
   }
+  // v3.9.1: a merged entry is only committed history when it carries the
+  // embedded transaction snapshot. Build the SAME envelope a real commit
+  // writes, so decodeMergedRound has one factual source.
+  const evaluation = makeSelfEvaluation({
+    success: false,
+    output_summary: opts.outputSummary ?? "",
+    constraint_violations: opts.constraintViolations ?? [],
+    should_continue: true,
+    outcome: opts.outcome,
+    round_contract: opts.contract,
+    execution_report: makeExecutionReport({
+      files_changed: opts.files ?? [],
+      tests_reported: { passed: 0, failed: 0, skipped: 0 },
+      criterion_claims: criterionClaims(opts.met ?? []),
+      ...(opts.contractItemClaims
+        ? { contract_item_claims: opts.contractItemClaims }
+        : {}),
+    }),
+  });
+  const result = {
+    action: opts.action ?? "continue",
+    verificationFlags: opts.verificationFlags ?? [],
+    roundSuccess: false,
+    gateContradicted: false,
+    verificationStatus: "trusted",
+    newConsecutiveRejections: 0,
+    shouldPushSuccessTrajectory: false,
+  };
+  const snapshot = {
+    schemaVersion: ROUND_TRANSACTION_SCHEMA_VERSION,
+    roundId: `loop:${loopId}:round:${round}`,
+    loopId,
+    round,
+    attempt: opts.attempt ?? 1,
+    phase: "committed",
+    beforeEvidence: opts.beforeEvidence ?? [],
+    afterEvidence: opts.roundEvidence ?? [],
+    evaluation,
+    submittedFields: manifestFor(evaluation),
+    result,
+    ...(opts.contractBinding !== undefined
+      ? { contractBinding: opts.contractBinding }
+      : {}),
+    createdAt: 0,
+    updatedAt: 0,
+  };
+  lin.round_transaction = {
+    schema_version: ROUND_TRANSACTION_SCHEMA_VERSION,
+    round_id: snapshot.roundId,
+    snapshot,
+    result,
+  };
   body.loop_lineage = lin;
   return body;
 }

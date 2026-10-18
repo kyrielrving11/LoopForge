@@ -148,7 +148,6 @@ describe("RoundDriver", () => {
         files_changed: ["src/a.ts"],
         tests_reported: { passed: 1, failed: 0, skipped: 0 },
         criterion_claims: criterionClaims(["cr-11111111", "Parser handles edge cases"], []),
-        progress_estimate: 0.5,
       }),
     });
     const c1 = await driver.complete({
@@ -224,7 +223,6 @@ describe("RoundDriver", () => {
             files_changed: ["src/store.ts"],
             tests_reported: { passed: 1, failed: 0, skipped: 0 },
             criterion_claims: criterionClaims([], ["Finish the task"]),
-            progress_estimate: 0.4,
           }),
         }),
         consecutiveRejections: 0,

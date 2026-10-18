@@ -1,5 +1,221 @@
 # Changelog
 
+## 3.9.1 (2026-10-18)
+
+**The submission-channel release.** The evaluation fields stop being a form to
+fill and become a closed channel: the runtime says which fields apply now, what
+happened to each submitted value, which derived state actually changed, and
+what the machine verified. `files_changed` gets one boundary definition, and a
+worker's discovery stops becoming a global constraint without the main agent
+saying so.
+
+### One field guide, real examples, no phantom ids
+
+`submission-guidance.ts` is now the single source for every evaluation field's
+meaning, applicable event, legal example and downstream effect. The tool
+schema, the round prompt and `submission_guidance` all read it.
+
+The prompt's base template is only the four required fields. Optional fields
+are shown as separate, legal snippets, and only when the current facts make
+them usable. An active contract renders its REAL `rci-` ids, statuses and bound
+commands; continuing it no longer requires restating it, and a different
+proposal is surfaced as `contract_premature`. With no active contract and a
+usable command, a first declaration example appears with the real command name;
+with no usable command, the prompt says the contract cannot be machine-verified
+instead of inviting one. Sub-goal examples use real active `sg-` ids. The old
+`done_when` / `verification_plan` template — which the parser rejected — is
+gone.
+
+### `submission_guidance` and `submission_receipt`
+
+Every prepared response (`start`, `next`, `resume`, `status`) carries
+`submission_guidance`: active contract items/statuses, active sub-goals, usable
+commands, recovery facts, findings from a retry, and the fields applicable at
+this submission point. It is derived from current facts and never persisted.
+
+Every `loopforge_next` submission returns `submission_receipt`, which keeps
+three facts separate:
+
+- **reports** — saved, saved-but-not-expanded, dropped, truncated, normalized,
+  or `not_applied` for a rejected/terminated attempt;
+- **effects** — contract activation/closure, sub-goal creation/update,
+  constraints declared/retracted/active-after, checkpoints, rollback facts;
+- **verification** — contract-item posture, round-level machine evidence
+  posture, checks and item statuses.
+
+A saved report is never displayed as verified, and a rejected attempt never
+shows an applied effect. A backtrack reports only the discoveries and
+assumptions it actually preserves. Lost-response replay rebuilds the receipt
+from the committed transaction; it is not a second ledger.
+
+### Diagnostics instead of silent drops
+
+Optional fields are normalized through `normalizeSelfEvaluation`, which returns
+a stable list of diagnostics: path, reason code, handling and correction. A
+retired field such as `progress_estimate` is reported as an unknown field and
+dropped instead of looking accepted. Strict core/structural failures remain
+pre-persistence and are retryable with the same round id; their details now
+carry the same diagnostic vocabulary. Unknown optional evaluation keys reach
+the runtime (the transport no longer rejects them first), so the normalizer,
+not the JSON-RPC schema, owns the drop.
+
+### Field accounting: attempted vs retained
+
+`submittedFields` now means exactly what it says: the known paths that appeared
+in the raw payload. Whether a value survived normalization is a separate,
+read-time derivation (`deriveFieldAccounting`) over the already-persisted
+manifest, diagnostics and normalized evaluation. No new persisted field, no
+second ledger, and no re-parse of the raw payload.
+
+The metrics split the old ambiguous `fieldUsage` into `attemptedFieldUsage` and
+`retainedFieldUsage`, with `fieldAccountingRounds` / `fieldAccountingIncompleteRounds`
+making coverage explicit. A committed round always carries its manifest; a
+missing manifest is not a supported shape. The receipt labels a partial array
+loss as retained-with-detail instead of downgrading the whole field to
+`dropped`. `all_entries_dropped` and `empty_value` close the remaining silent
+losses, so the accounting invariant — attempted implies retained or an
+exact-path whole-field drop — is testable for every field.
+
+### Worker findings are reports
+
+`worker_results.discoveredConstraints` is no longer merged into the global
+constraint stream in either the runtime or the compiler request. The worker
+report and delegation journal are preserved; the main agent promotes a finding
+by submitting it in top-level `discovered_constraints`.
+
+### `files_changed` is a boundary net change
+
+The Git provider now enumerates every tracked path and every non-ignored
+untracked path at both boundaries and fingerprints the actual workspace
+content (regular file, symlink link text, gitlink index commit, directory,
+missing, unreadable) with bounded streaming concurrency. The round delta is the
+union-key comparison of those two maps, so committed work, deletions, renames
+and `--amend` are seen without consulting the last commit. The dirty list is
+display-only. Unavailable/timeout/error/aborted captures are explicit
+observation statuses and fail open; they are never an empty diff or a reason to
+blame the agent. Gitignored paths are outside the declared coverage, while the
+filesystem entrypoint-trust baseline still covers entrypoints independently.
+
+`execution_report.files_changed` is defined against that same boundary: paths
+whose content or type differs between round preparation and submission,
+including deletions; a commit alone adds no entry when content is unchanged.
+The round document no longer stores a second copy of the transaction or prompt
+artifact; the feedback entry is the one persisted copy.
+
+### One delta type; unknown is not empty
+
+`MachineObservation.files` is now documented and used only as observation-local
+display data: Git's dirty list, a command's empty list, or a custom provider's
+metadata. The round change set lives on the derived `ObservationDelta.changedFiles`
+and nowhere else. The old copy-and-overwrite helpers are removed; `before` and
+`after` are raw observation references and are never mutated.
+
+`[]` means an observed no-change; `null` means the change set is unknown. A
+missing before boundary, a failed capture, an unreadable fingerprint map or an
+ambiguous duplicate is null — never the after dirty list. The Git state is
+three-valued: no Git provider is `not_applicable`, an unobservable pair is
+`unknown`, and a passed command is not machine-backed under `unknown`. Contract
+items become `insufficient` in that case; command-only rounds remain
+`not_applicable` and can still verify. Stall motion is likewise tri-state: HEAD
+movement can prove motion, but unknown files with no HEAD evidence produce no
+verdict. `evidenceIncomplete` is true for a no-baseline Git round.
+
+Historical explain/audit/replay/metrics views are re-derived under these rules.
+The delta is still never persisted, and no envelope version changes for it.
+
+### A success report gap is not an acceptance gate
+
+`success=true` with a missing/empty `execution_report` is now a warning, not an
+error. Acceptance is decided by machine evidence and contract rules, not by how
+many optional fields were filled. The machine-evidence arm still keeps an
+unbacked success out of the success trajectory, and the R8 enforcement row —
+whose only trigger was the removed error arm — is deleted with its tests.
+
+### Envelope versions
+
+`ROUND_TRANSACTION_SCHEMA_VERSION` moves 2 → 3 together with Git observation
+schema 2; `PROMPT_ARTIFACT_SCHEMA_VERSION` moves 2 → 3 with the prompt-request
+effects. Old transaction, observation and artifact versions are not parsed or
+migrated; audit/replay report them as legacy, and upgrade acceptance uses a new
+session. Policy schema remains 5: no policy key or switch changed.
+
+The field-accounting and delta changes add no envelope bump: the attempted
+manifest already exists in transaction schema 3, and the delta is derived and
+never persisted. There is no compatibility shim for a committed transaction
+without a manifest.
+
+## 3.9.0 (2026-10-14)
+
+**The machine-only verdict release.** Progress is judged by what the machine
+observed and nothing else. One self-report field is removed, the stall detector
+learns to see committed work, and the post-backtrack restore check stops
+demanding a globally clean tree.
+
+### `progress_estimate` is gone
+
+The field asked the agent to grade its own progress, and the runtime consulted
+that grade in the stall evaluator's fallback tier. A verdict about machine
+motion that the agent's own report could move is the one thing an external
+verifier must not allow, and the number never carried information the machine
+observations did not: a loop with no readable Git history has no honest basis
+for a stall verdict at all. Removed from `ExecutionReport`, the MCP tool
+schema, the prompt template, the canonical state, and the milestone summary
+(`progress_at_boundary` — a milestone renders its round range, not a
+percentage); `entryProgressEstimate` and the whole self-reported window are
+deleted. An evaluation that still sends the key is accepted, and the key is
+dropped: unknown optional fields are ignored, exactly as before.
+
+`evolution.progress_stall_threshold` goes with it — its last consumer was the
+removed tier. The policy schema version moves 4 → 5, so a file written for the
+old surface reports an outdated schema instead of a stray key.
+
+### Committed work is motion
+
+Motion was read from the round's file delta alone. In the commit-per-slice
+workflow — and LoopForge's own guidance tells the agent to commit each slice —
+every worktree is clean at the round boundary, so three rounds of real,
+committed progress read as three rounds of nothing: `progress_stall`, then a
+backtrack, then termination. The false verdict was systemic, not model-specific:
+any agent obeying the workflow hit it.
+
+`gitMotionSignal` is now the one definition of machine motion — a non-empty
+file delta, a Git HEAD that moved across the round, or a HEAD that landed back
+on a rollback's restore point — and it is read by both the committed series and
+the submitted round. A window that cannot be observed (a round with no observed
+Git snapshot) yields no verdict, never a stall by default. The submitted
+round's own motion is now part of the judgement too, which is what lets a redo
+that fixed its approach clear a window that legitimately stalled before the
+rollback, while a redo that moved nothing still reaches the deadlock guard and
+terminates.
+
+### Restoring a workspace no longer means a clean tree
+
+The post-backtrack check required HEAD equality *and* an empty working tree. Any
+unrelated work in progress — a developer's own edits, another task's files —
+made a correctly restored workspace read as unrestored, and because a rollback
+had already committed for that round, the loop terminated. A workspace with
+HEAD exactly at the restore commit was killed by files that had nothing to do
+with the loop.
+
+The restore point now carries its own machine snapshot: its HEAD and the files
+already dirty there. Restoration is the same HEAD with no dirty file the
+restore point did not already have, so unrelated work is tolerated and a file
+the failed rounds left behind is still caught — even when the HEAD matches. An
+absent baseline (a session from before this release) degrades to HEAD equality
+rather than to an empty baseline. The first post-rollback submission is a
+recovery checkpoint, stated as such in the Recovery Brief: prove the restore,
+then redo, and the redo may commit freely.
+
+### The round prompt's fixed footer is smaller
+
+The per-round footer carried evaluation rules and rejection guidance that the
+Perception skill states once, word for word, for every round. It now carries
+only what is specific to this round: execute, submit, read the current `roundId`
+from the latest response (a rejection keeps it), and the JSON template, which
+stays because its fields genuinely vary per round and per active contract.
+Prompt budgets were re-measured; no section that used to render is now dropped
+because of this.
+
 ## 3.8.3 (2026-09-17)
 
 **The unobstructed-path release.** Three dead ends removed, one opening closed,

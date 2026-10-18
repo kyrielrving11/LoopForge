@@ -5,7 +5,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { getPolicy } from "./policy.js";
+import { deriveConfiguredCapability, getPolicy } from "./policy.js";
 import {
   AgentStatus,
   makeLoopCompileResponse,
@@ -36,7 +36,6 @@ import {
   entryCriteriaRemaining,
   entryActiveConstraints,
   entryRetractedConstraints,
-  entryProgressEstimate,
   type CommittedRoundView,
   machineGitMotionSeries,
   derivationRounds,
@@ -47,6 +46,10 @@ import { recoveryBriefLines } from "./enforcement-gate.js";
 import { deriveSubGoals, duplicateEmergedDeclarations } from "./subgoal-state.js";
 import { claimedMetCriteria, claimedRemainingCriteria } from "./self-eval.js";
 import { assemblePromptArtifact } from "./prompt-assembler.js";
+import {
+  renderSelfEvalBlock,
+  type SelfEvalPromptContext,
+} from "./submission-guidance.js";
 import {
   decidePromptLevel,
   type PromptLevelDecision,
@@ -299,7 +302,7 @@ export function deriveRecurringFlags(
     ref: string,
     round: number,
   ): void => {
-    const key = `${kind} ${subject} ${ref}`;
+    const key = JSON.stringify([kind, subject, ref]);
     const existing = byKey.get(key);
     if (existing) {
       existing.count++;
@@ -477,7 +480,6 @@ function buildMilestoneFromEntries(
   const resolved = unique(
     phaseEntries.flatMap((e) => entryRetractedConstraints(e)),
   );
-  const progress = last ? entryProgressEstimate(last) : 0;
 
   return makeMilestoneSummary({
     label,
@@ -485,7 +487,6 @@ function buildMilestoneFromEntries(
     outcome,
     carried_constraints: carried,
     resolved_constraints: resolved,
-    progress_at_boundary: progress,
     kind,
     generated_at_round: endRound,
   });
@@ -822,104 +823,11 @@ export function decideLevel(
   return levelDecision(request, context).level;
 }
 
-export function buildSelfEvalBlock(
-  round: number,
-  /** v2.12: L0 is the minimal retry template — the v2.12 declarative fields
-   *  (outcome/blocker/retroactiveClaims) are L1/L2 additions so the retry
-   *  prompt stays within its tight budget. */
-  level?: "l0" | "l1" | "l2",
-  /** v3.3/v3.4: Whether this round's Current Task IS the ACTIVE Round
-   *  Contract (derived from committed rounds — compileLoop passes
-   *  `activeContract != null`). Only then does the template ask the agent
-   *  to restate/propose it — a generic empty contract template would invite
-   *  placeholder submissions that trigger round_underspecified noise. */
-  hasContract = false,
-): string {
-  const declareOutcome = level !== "l0";
-  const restateContract = hasContract && declareOutcome;
-
-  const evalObj: Record<string, unknown> = {
-    success: false,
-    output_summary: `<verified result of round ${round}>`,
-    constraint_violations: ["<c-XXXXXXXX or text>"],
-    should_continue: true,
-    discovered_constraints: ["<new constraint>"],
-    emerged_subtasks: [],
-    execution_report: {
-      files_changed: [],
-      tests_reported: { passed: 0, failed: 0, skipped: 0 },
-      // The contract claim is functional (it is what advances an item), so it
-      // stays at every level. The advisory criterion claim is an L1/L2
-      // addition — the L0 retry template is a lean delta kept under budget.
-      contract_item_claims: [
-        { item_id: "<rci-XXXXXXXX from the Current Task>", outcome: "met" },
-      ],
-      progress_estimate: 0,
-    },
-    wrong_assumptions: [],
-    subgoal_updates: [
-      { id: "<sg-XXXXXXXX from the Sub-Goal Dashboard>", status: "done" },
-    ],
-  };
-
-  // v2.12: Declarative outcome (L1/L2 only — keeps L0 retry lean)
-  if (declareOutcome) {
-    evalObj.outcome = "<success|partial|failed|blocked>";
-    evalObj.blocker = "<required only when outcome=blocked>";
-    evalObj.retroactiveClaims = [];
-    // v3.8: the advisory criterion claim rides with the other L1/L2 additions.
-    (evalObj.execution_report as Record<string, unknown>).criterion_claims = [
-      { criterion_id: "<cr-XXXXXXXX or text>", outcome: "met" },
-    ];
-  }
-
-  // v3.3/v3.4: Round Contract proposal template (L1/L2, active-contract
-  // rounds only — L0 retry stays lean, and rounds without an active
-  // contract never see the template). When the prompt's Current Task IS the
-  // ACTIVE contract, the agent restates it unchanged as its proposal; when
-  // the active contract's done_when are all satisfied (or the round is
-  // blocked), a NEW contract is declared for the next round instead.
-  if (restateContract) {
-    evalObj.round_contract = {
-      work_item: "<this round's focus, or empty>",
-      done_when: [],
-      verification_plan: [],
-      scope: [],
-    };
-  }
-
-  const lines = [
-    "### LoopForge Evaluation (Required)",
-    "",
-    `After completing Round ${round}, replace the placeholder values below`,
-    "with your actual results and pass this object as `loopforge_next.evaluation`.",
-  ];
-
-  lines.push("```json");
-  lines.push(JSON.stringify(evalObj, null, 2));
-  lines.push("```");
-  lines.push("");
-  lines.push("IMPORTANT: Replace every <placeholder> with your actual data.");
-  lines.push("Set success=true only when the full goal and ALL hard constraints are verified.");
-  lines.push("Use IDs for exact matching: c-XXXXXXXX, cr-XXXXXXXX, sg-XXXXXXXX.");
-  lines.push("Sub-goal changes go through `subgoal_updates` (active sub-goal IDs only;");
-  lines.push("done/canceled are terminal — reopen via `emerged_subtasks`; bad IDs reject).");
-  if (restateContract) {
-    lines.push(
-      "Round Contract: restate the Current Task's contract UNCHANGED in",
-      "`round_contract` (work_item/items/scope) and run each item's Verify",
-      "commands; claim the items you completed in",
-      "`execution_report.contract_item_claims` using the `rci-XXXXXXXX` ids",
-      "the Current Task renders. An item only becomes verified when its bound",
-      "command is observed passing — a claim alone leaves it insufficient.",
-      "When every item is verified, or the round is blocked (outcome=blocked",
-      "+ blocker), declare the NEXT round's contract instead (or omit",
-      "`round_contract` when the whole task is done — the Current Task",
-      "reverts to the original task).",
-    );
-  }
-
-  return lines.join("\n");
+/** The prompt's evaluation block. All content (examples, contract/sub-goal
+ *  guidance, flag-specific hints) comes from the one FIELD_GUIDES table in
+ *  submission-guidance.ts; this function owns no second copy. */
+export function buildSelfEvalBlock(ctx: SelfEvalPromptContext): string {
+  return renderSelfEvalBlock(ctx);
 }
 
 // v2.5: checkpoint() removed — agent_declared milestones from
@@ -1094,13 +1002,21 @@ export function compileLoop(
     // ONE derivation. The static capability rides on the state itself.
     roundFacts,
   });
+  // The recovery brief is a current-round fact, computed once and shared by
+  // the state file and the evaluation block. It never becomes prompt control
+  // state.
+  const recoveryBrief = committedBacktrackBrief(request.loop_id, request.round, context);
+  const configuredCapability = deriveConfiguredCapability(policy);
+  const contractCommands = configuredCapability.commands
+    .filter((command) => command.enabled)
+    .map((command) => command.commandId);
   const markdown = renderCanonicalStateMarkdown(state, {
     // v3.7.1: retry attempts are marked in the derived view (attempt is
     // request context, not a committed fact). The Recovery Brief renders in
     // the Recent tier only while a committed backtrack decision is this
     // round's record; the redo commit removes it by construction.
     attempt: request.attempt,
-    recoveryBrief: committedBacktrackBrief(request.loop_id, request.round, context),
+    recoveryBrief,
   });
 
   // v3.8.1: the L2 budget is a FIXED ceiling. The v2.4 adaptive budget
@@ -1127,14 +1043,18 @@ export function compileLoop(
       l2: policy.prompt.l2_max_chars,
     },
     attempt: request.attempt,
-    selfEvaluationBlock: buildSelfEvalBlock(
-      request.round,
-      decision.level,
-      // v3.4: restate the contract only when this prompt's Current Task IS
-      // the ACTIVE contract (derived — not the previous submission's field,
-      // which is a proposal and may differ from what this round executes).
-      activeContract != null,
-    ),
+    selfEvaluationBlock: buildSelfEvalBlock({
+      round: request.round,
+      level: decision.level,
+      activeContract,
+      itemStatuses: roundFacts.itemStatuses,
+      commands: contractCommands,
+      contractVerificationAvailable: configuredCapability.contractVerificationAvailable,
+      subGoals,
+      verificationFlags: request.verification_flags ?? [],
+      recovery: recoveryBrief !== undefined,
+      gateEnabled: policy.gate.enabled === true,
+    }),
     fullStateMarkdown: l2Pointer ? undefined : markdown,
     // v2.9: Model's information needs from the previous round's SelfEvaluation
     promptRequests: request.last_round_result?.prompt_requests,

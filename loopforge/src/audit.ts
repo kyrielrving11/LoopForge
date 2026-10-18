@@ -20,11 +20,12 @@ import type { VaultEntry } from "./loop-store.js";
 import { isRecord, entryRound } from "./token-utils.js";
 import {
   legacyTransactionRounds,
-  machineEvidenceForRound,
   readOnlyRounds,
 } from "./committed-round.js";
 import { deriveRoundContractView } from "./round-contract.js";
-import type { ContractItemStatus } from "./protocol.js";
+import { deriveCommittedSubmissionView } from "./submission-receipt.js";
+import type { ContractItemStatus, SubmissionDiagnostic } from "./protocol.js";
+import type { SubmissionReceipt } from "./protocol.js";
 import { getPolicy } from "./policy.js";
 
 export interface AuditRound {
@@ -40,6 +41,14 @@ export interface AuditRound {
     closure: string;
     items: Array<{ itemId: string; status: ContractItemStatus }>;
   } | null;
+  /** v3.9.1: compact submission accounting. The full receipt is available in
+   *  explain/status; audit keeps the fields that matter for its verdict. */
+  submission: {
+    diagnostics: SubmissionDiagnostic[];
+    saved_not_expanded: string[];
+    effects: SubmissionReceipt["effects"];
+    prompt: { level: string; dropped_sections: string[] } | null;
+  };
 }
 
 export interface AuditGate {
@@ -121,7 +130,7 @@ export function buildAudit(
       rounds: views,
       round: view.round,
       report: view.executionReport,
-      observations: view.observationDelta,
+      deltas: view.observationDelta,
       outcome: view.outcome,
       commands,
     }));
@@ -142,11 +151,12 @@ export function buildAudit(
     const claimView = view.evaluation
       ? rederiveClaimViewWithFlags(
           view.evaluation,
-          machineEvidenceForRound(view),
+          view.observationDelta,
           view.verificationFlags,
         )
       : null;
     const executed = contractByRound.get(round);
+    const receipt = deriveCommittedSubmissionView(view, views);
     rounds.push({
       round,
       outcome,
@@ -172,6 +182,19 @@ export function buildAudit(
             })),
           }
         : null,
+      submission: {
+        diagnostics: receipt.diagnostics,
+        saved_not_expanded: receipt.reports
+          .filter((report) => report.handling === "saved_not_expanded")
+          .map((report) => report.path),
+        effects: receipt.effects,
+        prompt: receipt.prompt
+          ? {
+              level: receipt.prompt.level,
+              dropped_sections: receipt.prompt.dropped_sections,
+            }
+          : null,
+      },
     });
   }
 

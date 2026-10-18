@@ -6,7 +6,9 @@
  * writes. Every fact it prints is one the runtime already derived.
  */
 
-import { readOnlyRounds } from "./committed-round.js";
+import { observedGitHead, readOnlyRounds } from "./committed-round.js";
+import { deriveCommittedSubmissionView } from "./submission-receipt.js";
+import type { SubmissionReceipt } from "./protocol.js";
 import { deriveActiveRoundContract, deriveRoundContractView } from "./round-contract.js";
 import { getPolicy } from "./policy.js";
 import type { VaultEntry } from "./loop-store.js";
@@ -32,9 +34,26 @@ export interface ExplainRound {
     status: string;
     files: string[];
   }>;
-  /** The derived before→after delta — never persisted. */
-  observationDelta: Array<{ providerId: string; files: string[] }>;
-  /** True when the round committed without after-phase observations. */
+  /** The derived before→after delta — never persisted. Raw observations keep
+   *  their own `files` in `observations`; this block carries only the change
+   *  set, which is null when the boundary pair is not comparable. */
+  observationDelta: Array<{
+    providerId: string;
+    kind: string;
+    changedFiles: string[] | null;
+    beforeStatus: string | null;
+    afterStatus: string | null;
+  }>;
+  /** v3.9.1: the Git boundary facts, from the same shared derivation. */
+  files_changed: string[] | null;
+  git_change_state: "not_applicable" | "unknown" | "observed";
+  head_before: string | null;
+  head_after: string | null;
+  git_status: string | null;
+  coverage: string | null;
+  /** v3.9.1: the committed submission's receipt (same derivation as status). */
+  submission: SubmissionReceipt;
+  /** True when the round committed without a complete observable boundary. */
   evidenceIncomplete: boolean;
   /** Committed verification findings. */
   flags: Array<{ check: string; severity: string; detail: string }>;
@@ -79,10 +98,18 @@ export function buildExplain(
       rounds: all,
       round: view.round,
       report: view.executionReport,
-      observations: view.observationDelta,
+      deltas: view.observationDelta,
       outcome: view.outcome,
       commands,
     });
+    const gitBefore = view.beforeEvidence.find((item) => item.providerId === "git");
+    const gitAfter = view.afterEvidence.find((item) => item.providerId === "git");
+    const gitDelta = view.observationDelta.find((item) => item.kind === "git");
+    const coverage = gitAfter && gitAfter.kind === "git" &&
+      typeof gitAfter.data.coverage === "string"
+      ? gitAfter.data.coverage
+      : null;
+    const submission = deriveCommittedSubmissionView(view, all);
     return {
       round: view.round,
       roundId: view.roundId,
@@ -110,10 +137,22 @@ export function buildExplain(
         status: observation.status,
         files: observation.files,
       })),
-      observationDelta: view.observationDelta.map((observation) => ({
-        providerId: observation.providerId,
-        files: observation.files,
+      observationDelta: view.observationDelta.map((delta) => ({
+        providerId: delta.providerId,
+        kind: delta.kind,
+        changedFiles: delta.changedFiles === null ? null : [...delta.changedFiles],
+        beforeStatus: delta.before?.status ?? null,
+        afterStatus: delta.after?.status ?? null,
       })),
+      files_changed: gitDelta?.changedFiles ?? null,
+      git_change_state: gitDelta === undefined
+        ? "not_applicable"
+        : gitDelta.changedFiles === null ? "unknown" : "observed",
+      head_before: observedGitHead(gitBefore),
+      head_after: observedGitHead(gitAfter),
+      git_status: gitAfter?.status ?? null,
+      coverage,
+      submission,
       evidenceIncomplete: view.evidenceIncomplete,
       flags: view.verificationFlags.map((flag) => ({
         check: flag.check,

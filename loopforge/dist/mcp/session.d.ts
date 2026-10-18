@@ -13,7 +13,7 @@
  * SessionManager → RoundDriver → RoundCoordinator path.
  */
 import type { GateActionDescriptor } from "../protocol.js";
-import type { ExternalContextProvider, LoopTerminalSink } from "../protocol.js";
+import type { ExternalContextProvider, LoopTerminalSink, SubmissionGuidance, SubmissionReceipt } from "../protocol.js";
 import type { ActiveContractView } from "../round-contract.js";
 import type { LoopStore } from "../loop-store.js";
 import type { PolicyMetricsSnapshot } from "../policy-metrics.js";
@@ -50,6 +50,13 @@ export declare class SessionManager implements SessionRegistry {
     private leaseConflictResult;
     private withSessionQueue;
     create(input: StartInput): Promise<AdvanceResult>;
+    /** v3.9.1: current-fact submission guidance for the session's held round.
+     *  Read-only projection; null when the session is unknown. */
+    getSubmissionGuidance(sessionId: string): SubmissionGuidance | null;
+    /** v3.9.1: the most recent committed round's receipt, rebuilt from the
+     *  transaction + shared read model. Rejected/terminated attempts are not in
+     *  history; their receipt exists only on their own response. */
+    getLastSubmissionReceipt(sessionId: string): SubmissionReceipt | null;
     get(sessionId: string): McpSession | undefined;
     getLeaseStatus(loopId: string): Record<string, unknown> | null;
     delete(sessionId: string): boolean;
@@ -164,5 +171,12 @@ export declare class SessionManager implements SessionRegistry {
      *  made every vault loop unreplayable after restart.
      *  Returns null when the loop has no committed rounds. */
     replayByLoop(loopId: string): Record<string, unknown>[] | null;
+    /** v3.9.1: unsupported envelope versions for a loop, reported explicitly
+     *  rather than silently dropped from replay/audit. */
+    replayLegacyRounds(loopId: string): Array<{
+        round: number;
+        schemaVersion: number;
+        envelope: string;
+    }>;
 }
 //# sourceMappingURL=session.d.ts.map

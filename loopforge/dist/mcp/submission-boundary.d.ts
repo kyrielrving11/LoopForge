@@ -27,7 +27,8 @@ import type { LoopStore } from "../loop-store.js";
 import type { LoopForgeResponse, SubGoal } from "../protocol.js";
 import { LoopForgeEngine } from "../engine.js";
 import type { ActiveContractView } from "../round-contract.js";
-import { buildSelfEvaluation } from "../self-eval.js";
+import { normalizeSelfEvaluation } from "../self-eval.js";
+import type { SubmissionDiagnostic } from "../protocol.js";
 import type { AdvanceResult } from "./round-lifecycle.js";
 /** What `compileSessionContext` needs from a session. Structural, so both the
  *  session manager and the boundary can pass their own view of it. */
@@ -64,7 +65,9 @@ export declare function activeContractOf(store: LoopStore, session: {
  *  a caller maps it straight onto its error envelope. */
 export type SubmissionBoundary = {
     ok: true;
-    evaluation: ReturnType<typeof buildSelfEvaluation>;
+    evaluation: ReturnType<typeof normalizeSelfEvaluation>["evaluation"];
+    diagnostics: SubmissionDiagnostic[];
+    submittedFields: string[];
 } | {
     ok: false;
     stopDetail: string;

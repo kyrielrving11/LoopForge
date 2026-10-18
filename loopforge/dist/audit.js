@@ -15,8 +15,9 @@ import { eventSequence, StorageCorruptionError } from "./loop-store.js";
 import { auditOrder, deriveGate } from "./cognitive-governance.js";
 import { rederiveClaimViewWithFlags, listVerifiedClaims } from "./evidence-claims.js";
 import { isRecord, entryRound } from "./token-utils.js";
-import { legacyTransactionRounds, machineEvidenceForRound, readOnlyRounds, } from "./committed-round.js";
+import { legacyTransactionRounds, readOnlyRounds, } from "./committed-round.js";
 import { deriveRoundContractView } from "./round-contract.js";
+import { deriveCommittedSubmissionView } from "./submission-receipt.js";
 import { getPolicy } from "./policy.js";
 /** Build the audit from committed vault entries. Pure, read-only.
  *  @param store Optional LoopStore — when provided, sequence integrity is
@@ -40,7 +41,7 @@ export function buildAudit(loopId, entries, store) {
             rounds: views,
             round: view.round,
             report: view.executionReport,
-            observations: view.observationDelta,
+            deltas: view.observationDelta,
             outcome: view.outcome,
             commands,
         }));
@@ -58,9 +59,10 @@ export function buildAudit(loopId, entries, store) {
         const round = view.round;
         const outcome = view.outcome ?? "unknown";
         const claimView = view.evaluation
-            ? rederiveClaimViewWithFlags(view.evaluation, machineEvidenceForRound(view), view.verificationFlags)
+            ? rederiveClaimViewWithFlags(view.evaluation, view.observationDelta, view.verificationFlags)
             : null;
         const executed = contractByRound.get(round);
+        const receipt = deriveCommittedSubmissionView(view, views);
         rounds.push({
             round,
             outcome,
@@ -86,6 +88,19 @@ export function buildAudit(loopId, entries, store) {
                     })),
                 }
                 : null,
+            submission: {
+                diagnostics: receipt.diagnostics,
+                saved_not_expanded: receipt.reports
+                    .filter((report) => report.handling === "saved_not_expanded")
+                    .map((report) => report.path),
+                effects: receipt.effects,
+                prompt: receipt.prompt
+                    ? {
+                        level: receipt.prompt.level,
+                        dropped_sections: receipt.prompt.dropped_sections,
+                    }
+                    : null,
+            },
         });
     }
     // ── Contract item axis — the verification skeleton ─────────────────────

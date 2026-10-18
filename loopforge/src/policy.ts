@@ -95,8 +95,6 @@ export interface EvolutionPolicy {
   max_discovered_constraints_per_round: number;
   max_active_constraints: number;
   max_objective_versions: number;
-  /** Numeric progress tolerance for the stall evaluator — not a text score. */
-  progress_stall_threshold: number;
   /** v3.7.1: Max ACTIVE sub-goals (pending/in_progress/blocked) shown in
    *  prompts and the state file. done/canceled never render as items —
    *  they survive in the vault, replay, and counts. */
@@ -149,7 +147,7 @@ export interface GatePolicy {
 
 /** v3.8.1: the policy schema version. A policy file that does not declare
  *  exactly this version is REJECTED — see loadPolicy. */
-export const POLICY_SCHEMA_VERSION = "4";
+export const POLICY_SCHEMA_VERSION = "5";
 
 export interface LoopPolicy {
   version: string;
@@ -172,8 +170,8 @@ export const DEFAULT_POLICY: LoopPolicy = {
   summary: { window: 5, milestone_interval: 20 },
   engine: { stall_lookback_rounds: 3, max_rounds: 200, enforcement_escalation_enabled: true, backtrack_enabled: true, backtrack_max_depth: 3, backtrack_preserve_discoveries: true, unverified_claim_streak_limit: 3 },
   prompt: {
-    l0_max_chars: 3000,
-    l1_max_chars: 7000,
+    l0_max_chars: 5000,
+    l1_max_chars: 10000,
     l2_max_chars: 18000,
     l2_pointer_enabled: true,
     max_emphasize_l2: 5,
@@ -185,7 +183,6 @@ export const DEFAULT_POLICY: LoopPolicy = {
     max_discovered_constraints_per_round: 5,
     max_active_constraints: 15,
     max_objective_versions: 10,
-    progress_stall_threshold: 0.05,
     max_active_subgoals: 12,
   },
   checkpoint: { outcome_max_chars: 200 },

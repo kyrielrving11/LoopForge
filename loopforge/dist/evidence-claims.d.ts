@@ -15,7 +15,7 @@
  *    the machine contradicted the claim.
  */
 import type { VaultEntry } from "./loop-store.js";
-import type { MachineObservation } from "./protocol.js";
+import type { ObservationDelta } from "./evidence-provider.js";
 import type { SelfEvaluation, VerificationFlag } from "./protocol.js";
 export interface DerivedClaim {
     /** Success criterion text as reported by the agent. */
@@ -35,13 +35,14 @@ export interface ClaimView {
 }
 /** Derive the runtime claim view for a round. No file-level or text-level
  *  guessing: git observations only serve the evidence_integrity warn. */
-export declare function deriveClaimView(selfEval: SelfEvaluation, evidenceSnapshots: MachineObservation[]): ClaimView;
+export declare function deriveClaimView(selfEval: SelfEvaluation, evidenceDeltas: ReadonlyArray<ObservationDelta>): ClaimView;
 /** Re-derive a claim view including the contradiction downgrade driven by
  *  verification flags. Used by audit and listVerifiedClaims on persisted
  *  snapshots; the live round path uses deriveClaimView only. */
-export declare function rederiveClaimViewWithFlags(selfEval: SelfEvaluation, evidenceSnapshots: MachineObservation[], flags: VerificationFlag[]): ClaimView;
-/** Files actually changed in a committed round (git provider, after evidence
- *  preferred). Returns null when the round has no observable git snapshot. */
+export declare function rederiveClaimViewWithFlags(selfEval: SelfEvaluation, evidenceDeltas: ReadonlyArray<ObservationDelta>, flags: VerificationFlag[]): ClaimView;
+/** Files actually changed in a committed round — the shared observation
+ *  delta, not the full after snapshot. Returns null when the round has no
+ *  observable Git boundary. */
 export declare function resolveRoundFiles(vaultEntries: VaultEntry[], loopId: string, round: number): string[] | null;
 /** Stable cr-IDs (and criterion texts) backed by verified claims across all
  *  committed rounds. Criterion texts are mapped to cr-IDs by callers that

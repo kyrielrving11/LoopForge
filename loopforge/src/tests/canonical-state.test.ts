@@ -194,7 +194,7 @@ describe("createCanonicalLoopState", () => {
       rolling_summary: null,
     }), "test.md");
     assert.ok(state.objective);
-    assert.equal(state.progress.estimate, null);
+    assert.equal("estimate" in state.progress, false);
   });
 });
 
@@ -226,7 +226,7 @@ describe("renderCanonicalStateMarkdown", () => {
     assert.ok(md.includes("c2"));
   });
 
-  it("renders progress dashboard when estimate is set", () => {
+  it("renders objective progress evidence without a subjective percentage", () => {
     const req = request({
       last_round_result: {
         round: 1,
@@ -238,14 +238,14 @@ describe("renderCanonicalStateMarkdown", () => {
           files_changed: ["a.ts"],
           tests_reported: { passed: 8, failed: 1, skipped: 0 },
           criterion_claims: criterionClaims(["c1"], ["c2"]),
-          progress_estimate: 0.5,
         },
       },
     });
     const state = createCanonicalLoopState(req, response(), "test.md");
     const md = renderCanonicalStateMarkdown(state);
     assert.ok(md.includes("Progress Dashboard"));
-    assert.ok(md.includes("50%"));
+    assert.ok(md.includes("**Criteria**: 1/2"));
+    assert.ok(!md.includes("Estimated Completion"));
     assert.ok(md.includes("8 passed"));
     assert.ok(md.includes("1 failed"));
   });
@@ -262,7 +262,6 @@ describe("renderCanonicalStateMarkdown", () => {
           outcome: "Completed auth module",
           carried_constraints: ["no deps"],
           resolved_constraints: [],
-          progress_at_boundary: 0.3,
           kind: "agent_declared",
           generated_at_round: 5,
         }],
@@ -331,7 +330,6 @@ describe("state-file tiering (v3.7.1)", () => {
           outcome: "done",
           carried_constraints: [],
           resolved_constraints: [],
-          progress_at_boundary: 0.5,
           kind: "auto",
           generated_at_round: 2,
         }],
@@ -409,7 +407,6 @@ describe("v3.3 — Roadmap and derived state", () => {
         outcome: "completed core module",
         carried_constraints: [],
         resolved_constraints: [],
-        progress_at_boundary: 0.4,
         kind: "auto" as const,
         generated_at_round: 4,
       }],
@@ -581,21 +578,20 @@ describe("Shared presentation atoms (v3.3.1)", () => {
       outcome: "phase done",
       carried_constraints: [],
       resolved_constraints: [],
-      progress_at_boundary: 0.6,
       kind: "auto",
       generated_at_round: 7,
     };
     assert.equal(
       milestoneHeading({ ...base, kind: "auto" }),
-      "**📍 Round 7** (Rounds 3–7, 60%)",
+      "**📍 Round 7** (Rounds 3–7)",
     );
     assert.equal(
       milestoneHeading({ ...base, kind: "agent_declared" }),
-      "**🏁 Round 7** (Rounds 3–7, 60%)",
+      "**🏁 Round 7** (Rounds 3–7)",
     );
     assert.equal(
       milestoneHeading({ ...base, kind: "criteria_milestone", label: "Done: X" }),
-      "**✅ Done: X** (Rounds 3–7, 60%)",
+      "**✅ Done: X** (Rounds 3–7)",
     );
   });
 });

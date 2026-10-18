@@ -1,5 +1,5 @@
 import { describe, it } from "node:test";
-import { criterionClaims } from "./_helpers.js";
+import { criterionClaims, deltasFrom } from "./_helpers.js";
 import assert from "node:assert/strict";
 import { CommandEvidenceProvider, resolveEntrypointFiles } from "../evidence-provider.js";
 import type { CommandEvidencePolicy } from "../policy.js";
@@ -160,7 +160,7 @@ describe("CommandEvidenceProvider", () => {
 describe("required command verification", () => {
   it("contradicts a success claim when a required command failed", () => {
     const evaluation = makeSelfEvaluation({ success: true });
-    const result = verifySelfEvaluation(evaluation, 1, [], null, [{
+    const result = verifySelfEvaluation(evaluation, 1, [], null, deltasFrom([{
       schemaVersion: 1,
       providerId: "command:test",
       kind: "command",
@@ -185,7 +185,7 @@ describe("required command verification", () => {
         truncated: false,
         entrypointFiles: [],
       },
-    }]);
+    }]));
     assert.equal(result.verdict, "contradicted");
     assert.equal(result.flags.some((flag) => flag.check === "required_command_failed"), true);
   });
@@ -202,10 +202,9 @@ describe("required command verification", () => {
           files_changed: ["src/a.ts"],
           tests_reported: { passed: 1, failed: 0, skipped: 0 },
           criterion_claims: criterionClaims([], []),
-          progress_estimate: 0.5,
         },
       });
-      const result = verifySelfEvaluation(evaluation, 1, [], null, [{
+      const result = verifySelfEvaluation(evaluation, 1, [], null, deltasFrom([{
         schemaVersion: 1,
         providerId: "command:optional",
         kind: "command",
@@ -230,7 +229,7 @@ describe("required command verification", () => {
           truncated: false,
           entrypointFiles: [],
         },
-      }]);
+      }]));
       // v3.2: optional failure + claimed success = unverified success — the
       // round is suspect (success_unverified warn), not contradicted (error).
       assert.equal(result.verdict, "suspect");

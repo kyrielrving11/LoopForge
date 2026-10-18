@@ -5,8 +5,9 @@
  * lineage representation. Consumers receive one stable, read-only view.
  */
 import type { MachineObservation } from "./protocol.js";
+import type { ObservationDelta } from "./evidence-provider.js";
 import type { VaultEntry } from "./loop-store.js";
-import type { ContractBinding, ExecutionReport, PromptArtifact, RoundContractProposal, RoundOutcome, SelfEvaluation, SubGoalUpdate, VerificationFlag } from "./protocol.js";
+import type { ContractBinding, ExecutionReport, PromptArtifact, RoundContractProposal, RoundOutcome, SelfEvaluation, SubmissionDiagnostic, SubGoalUpdate, VerificationFlag } from "./protocol.js";
 import type { RoundProcessResult } from "./round-coordinator.js";
 export type CommittedAction = "continue" | "stop" | "backtrack";
 /** v3.8.1: the rolled-back branch's facts, decoded from a committed rollback
@@ -49,9 +50,12 @@ export interface CommittedRoundView {
     readonly contractBinding: ContractBinding | null;
     readonly beforeEvidence: MachineObservation[];
     readonly afterEvidence: MachineObservation[];
-    /** v3.8: derived before→after delta — never persisted (transaction
-     *  schema 2 stores only the two factual collections). */
-    readonly observationDelta: MachineObservation[];
+    /** v3.8: derived before→after delta — never persisted (the transaction
+     *  stores only the two factual collections). */
+    readonly observationDelta: ObservationDelta[];
+    /** v3.9.1: persisted normalization metadata. */
+    readonly normalizationDiagnostics: SubmissionDiagnostic[];
+    readonly submittedFields: string[];
     /** v3.8: true when the round committed without after-phase observations —
      *  its machine evidence is incomplete and must never be substituted with
      *  the before baseline. */
@@ -74,12 +78,11 @@ export interface CommittedRoundView {
  *  entry. Returns null when no restore point is recorded, which is also the
  *  signal that the record cannot serve as recovery guidance. */
 export declare function decodeBacktrackRecord(source: unknown): BacktrackRecoveryRecord | null;
-/** Decode a durable :feedback entry. Reject/terminate/in-flight envelopes are
- * not committed history and therefore do not produce a view. */
 export declare function decodeCommittedRound(entry: VaultEntry): CommittedRoundView | null;
 /** Decode an in-memory lineage entry after the engine merged its committed
- * feedback. The merged shape is intentionally accepted only when stamped
- * with committed_action. */
+ * feedback. The merged entry MUST carry the embedded transaction snapshot;
+ * the old raw top-level evaluation reconstruction is gone, so a partial
+ * lineage entry cannot become a second history. */
 export declare function decodeMergedRound(entry: unknown): CommittedRoundView | null;
 /** Normalize committed history: rollback directives disappear, later records
  * replace earlier records for the same logical round, and output is ascending. */
@@ -105,9 +108,6 @@ export declare function entryActiveConstraints(entry: unknown): string[];
 /** Read retracted_constraints from an entry (direct field, else nested in
  *  the lineage). */
 export declare function entryRetractedConstraints(entry: unknown): string[];
-/** Read progress_estimate from an entry's execution_report (0 when
- *  absent). */
-export declare function entryProgressEstimate(entry: unknown): number;
 /** Read emerged_subtasks from an entry (handles direct + lineage nesting). */
 export declare function entryEmergedSubtasks(entry: unknown): string[];
 /** Read subgoal_updates from an entry (handles direct + lineage nesting).
@@ -158,12 +158,9 @@ export declare function persistedFrontier(entries: ReadonlyArray<unknown>): numb
  *  view never invents a fence, it only applies the one the runtime recorded. */
 export declare function readOnlyRounds(entries: ReadonlyArray<unknown>): CommittedRoundView[];
 /** The machine-evidence set that best represents a committed round: the
- *  after-phase observations (captured post-execution), else the derived round
- *  delta, else the pre-round baseline. Shared selector for the
- *  evidence-fallback chains that audit, claims, and backtrack-restore each
- *  used to inline with subtly different tiers. Distinct from
- *  machineGitMotionSeries, which deliberately reads the delta alone for the
- *  motion signal. */
+ *  after-phase observations (captured post-execution), else the pre-round
+ *  baseline. The derived delta is never evidence — it is a change-set view
+ *  over these facts, not a second observation collection. */
 export declare function machineEvidenceForRound(view: CommittedRoundView): MachineObservation[];
 /** v3.8: Rounds whose persisted transaction carries a LEGACY schema version.
  *  A hard version break must be visible, not silent: these rounds drop out of
@@ -172,14 +169,42 @@ export declare function machineEvidenceForRound(view: CommittedRoundView): Machi
 export interface LegacyRound {
     round: number;
     schemaVersion: number;
-    /** v3.8.1: which versioned envelope rejected the round. Both are hard
-     *  breaks — a round that fails either check is not committed history — so
-     *  both must be REPORTED, not just the transaction one. */
-    envelope: "transaction" | "prompt_artifact";
+    /** v3.8.1: which versioned envelope rejected the round. All are hard
+     *  breaks — a round that fails any check is not committed history — so all
+     *  must be REPORTED, not just the transaction one.
+     *  v3.9.1 adds "observation": a transaction whose embedded Git/command
+     *  observation schema is unsupported. */
+    envelope: "transaction" | "prompt_artifact" | "observation";
 }
 export declare function legacyTransactionRounds(entries: unknown[]): LegacyRound[];
+/** The ONE definition of machine Git motion for a single round.
+ *
+ *  Motion is a non-empty file list, a HEAD that moved across the round, or a
+ *  HEAD that landed on the rollback's restore point — restoring the workspace
+ *  IS that round's work, and would otherwise read as a round that did
+ *  nothing. A clean worktree is not the same thing as no progress:
+ *  commit-per-slice workflows leave no file delta even though HEAD advanced.
+ *
+ *  Observability stays the caller's concern: this answers "did this round
+ *  move", never "could the round be observed". The restore-point arm compares
+ *  short hashes, the rule `checkBacktrackGitHeadRestore` uses; the
+ *  before/after arm compares the observations themselves. */
+export declare function gitMotionSignal(input: {
+    /** The round's derived Git change set; null means unknown. */
+    changedFiles: ReadonlyArray<string> | null;
+    headBefore?: string | null;
+    headAfter?: string | null;
+    restoreTargetHead?: string | null;
+}): boolean | null;
+/** Git HEAD as a machine observation exposes it, or null when it is silent. */
+export declare function observedGitHead(observation: MachineObservation | undefined): string | null;
+/** The in-flight round's own motion, from its derived Git delta. A Git
+ *  boundary that cannot be compared yields `null` unless HEAD movement or the
+ *  restore point independently proves motion. */
+export declare function inFlightGitMotion(deltas: ReadonlyArray<ObservationDelta>, restoreTargetHead?: string): boolean | null;
 /** Machine-observed git motion for the most recent contiguous window.
- * Consumers must decode durable or hydrated entries before calling this;
- * transaction-envelope interpretation stays confined to this module. */
+ * A clean worktree is not the same thing as no progress: commit-per-slice
+ * workflows leave no file delta even though HEAD advanced. Unknown motion in
+ * any round makes the window undecidable rather than falsely empty. */
 export declare function machineGitMotionSeries(rounds: ReadonlyArray<CommittedRoundView>, currentRound: number, lookback: number): boolean[] | null;
 //# sourceMappingURL=committed-round.d.ts.map

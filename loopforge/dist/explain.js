@@ -5,7 +5,8 @@
  * the committed enforcement result. It never rebuilds history and never
  * writes. Every fact it prints is one the runtime already derived.
  */
-import { readOnlyRounds } from "./committed-round.js";
+import { observedGitHead, readOnlyRounds } from "./committed-round.js";
+import { deriveCommittedSubmissionView } from "./submission-receipt.js";
 import { deriveActiveRoundContract, deriveRoundContractView } from "./round-contract.js";
 import { getPolicy } from "./policy.js";
 /** Build the explain view. Pure and read-only. */
@@ -27,10 +28,18 @@ export function buildExplain(loopId, entries, round) {
             rounds: all,
             round: view.round,
             report: view.executionReport,
-            observations: view.observationDelta,
+            deltas: view.observationDelta,
             outcome: view.outcome,
             commands,
         });
+        const gitBefore = view.beforeEvidence.find((item) => item.providerId === "git");
+        const gitAfter = view.afterEvidence.find((item) => item.providerId === "git");
+        const gitDelta = view.observationDelta.find((item) => item.kind === "git");
+        const coverage = gitAfter && gitAfter.kind === "git" &&
+            typeof gitAfter.data.coverage === "string"
+            ? gitAfter.data.coverage
+            : null;
+        const submission = deriveCommittedSubmissionView(view, all);
         return {
             round: view.round,
             roundId: view.roundId,
@@ -58,10 +67,22 @@ export function buildExplain(loopId, entries, round) {
                 status: observation.status,
                 files: observation.files,
             })),
-            observationDelta: view.observationDelta.map((observation) => ({
-                providerId: observation.providerId,
-                files: observation.files,
+            observationDelta: view.observationDelta.map((delta) => ({
+                providerId: delta.providerId,
+                kind: delta.kind,
+                changedFiles: delta.changedFiles === null ? null : [...delta.changedFiles],
+                beforeStatus: delta.before?.status ?? null,
+                afterStatus: delta.after?.status ?? null,
             })),
+            files_changed: gitDelta?.changedFiles ?? null,
+            git_change_state: gitDelta === undefined
+                ? "not_applicable"
+                : gitDelta.changedFiles === null ? "unknown" : "observed",
+            head_before: observedGitHead(gitBefore),
+            head_after: observedGitHead(gitAfter),
+            git_status: gitAfter?.status ?? null,
+            coverage,
+            submission,
             evidenceIncomplete: view.evidenceIncomplete,
             flags: view.verificationFlags.map((flag) => ({
                 check: flag.check,

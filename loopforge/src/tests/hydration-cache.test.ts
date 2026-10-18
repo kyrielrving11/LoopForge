@@ -32,7 +32,6 @@ const continuingEvaluation = (): SelfEvaluation => ({
     files_changed: ["src/a.ts"],
     tests_reported: { passed: 1, failed: 0, skipped: 0 },
     criterion_claims: criterionClaims([], ["more"]),
-    progress_estimate: 0.5,
   },
 });
 
@@ -209,10 +208,10 @@ describe("Hydration cache — backtrack redo replace (v3.3.1)", () => {
     // v3.8: a realistic committed envelope — the engine's merge decodes it
     // through the shared read model, which requires the schema-2 snapshot.
     const transaction = (action: "backtrack" | "continue", round = 1) => ({
-      schema_version: 2,
+      schema_version: 3,
       round_id: `loop:${loopId}:round:${round}`,
       snapshot: {
-        schemaVersion: 2,
+        schemaVersion: 3,
         roundId: `loop:${loopId}:round:${round}`,
         loopId,
         round,
@@ -221,6 +220,9 @@ describe("Hydration cache — backtrack redo replace (v3.3.1)", () => {
         beforeEvidence: [],
         afterEvidence: [],
         evaluation: continuingEvaluation(),
+        submittedFields: [
+          "success", "output_summary", "constraint_violations", "should_continue",
+        ],
         createdAt: 0,
         updatedAt: 0,
       },
@@ -291,7 +293,6 @@ describe("v3.5.1 — hydration stamps attempt/roundEvidence for the compile view
         files_changed: [],
         tests_reported: { passed: 0, failed: 0, skipped: 0 },
         criterion_claims: criterionClaims([], ["more"]),
-        progress_estimate: 0.1,
       },
     });
     assert.equal(rejected.enforcementAction, "reject");

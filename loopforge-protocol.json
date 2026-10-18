@@ -646,6 +646,773 @@
       },
       "description": "v2.9: Model-expressed information needs for the next round.\r\nSubmitted via SelfEvaluation.prompt_requests, consumed by the\r\nCompiler when assembling the next prompt. Transient — each round's\r\nrequests apply to that round only."
     },
+    "SubmissionDiagnosticHandling": {
+      "type": "string",
+      "enum": [
+        "dropped",
+        "truncated",
+        "normalized",
+        "rejected"
+      ]
+    },
+    "SubmissionDiagnostic": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "code": {
+          "type": "string"
+        },
+        "handling": {
+          "$ref": "#/$defs/SubmissionDiagnosticHandling"
+        },
+        "detail": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "code",
+        "handling",
+        "detail"
+      ]
+    },
+    "SubmissionReportHandling": {
+      "type": "string",
+      "enum": [
+        "saved",
+        "saved_not_expanded",
+        "dropped",
+        "truncated",
+        "normalized",
+        "not_applied"
+      ]
+    },
+    "SubmissionReceipt": {
+      "type": "object",
+      "properties": {
+        "round_id": {
+          "type": "string"
+        },
+        "attempt": {
+          "type": "number"
+        },
+        "disposition": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "accepted"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "rejected"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "terminated"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "backtracked"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "stopped"
+              ]
+            }
+          ]
+        },
+        "record": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "committed"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "rollback_directive"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "none"
+              ]
+            }
+          ]
+        },
+        "entered_history": {
+          "type": "boolean"
+        },
+        "reports": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "handling": {
+                "$ref": "#/$defs/SubmissionReportHandling"
+              },
+              "detail": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "handling"
+            ]
+          }
+        },
+        "effects": {
+          "type": "object",
+          "properties": {
+            "contract": {
+              "type": "object",
+              "properties": {
+                "before_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "after_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "activated": {
+                  "type": "boolean"
+                },
+                "closed": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "activated",
+                "closed"
+              ]
+            },
+            "subgoals_created": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "description"
+                ]
+              }
+            },
+            "subgoals_updated": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "from": {
+                    "type": "string"
+                  },
+                  "to": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "from",
+                  "to"
+                ]
+              }
+            },
+            "constraints_declared": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "constraints_retracted": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "constraints_activation": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "observed"
+                  ]
+                },
+                {
+                  "type": "string",
+                  "enum": [
+                    "not_observed"
+                  ]
+                }
+              ]
+            },
+            "constraints_active_after": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "constraints_not_expanded": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "checkpoint": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "label": {
+                      "type": "string"
+                    },
+                    "round": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "label",
+                    "round"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "rollback": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "restore_point": {
+                      "type": "number"
+                    },
+                    "preserved_discoveries": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "wrong_assumptions": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "required": [
+                    "restore_point",
+                    "preserved_discoveries",
+                    "wrong_assumptions"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "contract",
+            "subgoals_created",
+            "subgoals_updated",
+            "constraints_declared",
+            "constraints_retracted",
+            "constraints_activation",
+            "constraints_not_expanded"
+          ]
+        },
+        "verification": {
+          "type": "object",
+          "properties": {
+            "contract_status": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "trusted"
+                  ]
+                },
+                {
+                  "type": "string",
+                  "enum": [
+                    "insufficient"
+                  ]
+                },
+                {
+                  "type": "string",
+                  "enum": [
+                    "contradicted"
+                  ]
+                }
+              ]
+            },
+            "evidence_status": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "verified"
+                  ]
+                },
+                {
+                  "type": "string",
+                  "enum": [
+                    "unavailable"
+                  ]
+                },
+                {
+                  "type": "string",
+                  "enum": [
+                    "absent"
+                  ]
+                }
+              ]
+            },
+            "checks": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "field": {
+                    "type": "string"
+                  },
+                  "check": {
+                    "type": "string"
+                  },
+                  "severity": {
+                    "type": "string"
+                  },
+                  "detail": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "field",
+                  "check",
+                  "severity",
+                  "detail"
+                ]
+              }
+            },
+            "contract_items": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "item_id": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "$ref": "#/$defs/ContractItemStatus"
+                  }
+                },
+                "required": [
+                  "item_id",
+                  "status"
+                ]
+              }
+            }
+          },
+          "required": [
+            "contract_status",
+            "evidence_status",
+            "checks",
+            "contract_items"
+          ]
+        },
+        "prompt": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "level": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "enum": [
+                        "l0"
+                      ]
+                    },
+                    {
+                      "type": "string",
+                      "enum": [
+                        "l1"
+                      ]
+                    },
+                    {
+                      "type": "string",
+                      "enum": [
+                        "l2"
+                      ]
+                    }
+                  ]
+                },
+                "dropped_sections": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "prompt_request_effects": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/PromptRequestEffect"
+                  }
+                }
+              },
+              "required": [
+                "level",
+                "dropped_sections",
+                "prompt_request_effects"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "diagnostics": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SubmissionDiagnostic"
+          }
+        }
+      },
+      "required": [
+        "round_id",
+        "attempt",
+        "disposition",
+        "record",
+        "entered_history",
+        "reports",
+        "effects",
+        "verification",
+        "diagnostics"
+      ],
+      "description": "v3.9.1: The machine's report of what one submission DID. It is derived\r\nfrom the transaction + the shared read model; it is never a second ledger."
+    },
+    "PromptRequestEffect": {
+      "type": "object",
+      "properties": {
+        "field": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "emphasize"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "confusion_points"
+              ]
+            }
+          ]
+        },
+        "request": {
+          "type": "string"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "applied"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "no_match"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "level_ignored"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "capped"
+              ]
+            }
+          ]
+        }
+      },
+      "required": [
+        "field",
+        "request",
+        "status"
+      ],
+      "description": "v3.9.1: What a prompt request actually did in the rendered prompt. This is\r\nan OUTPUT fact about the current render; it is never an instruction for a\r\nlater prompt."
+    },
+    "SubmissionGuidance": {
+      "type": "object",
+      "properties": {
+        "round_id": {
+          "type": "string"
+        },
+        "active_contract": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "work_item": {
+                  "type": "string"
+                },
+                "declared_at_round": {
+                  "type": "number"
+                },
+                "items": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "description": {
+                        "type": "string"
+                      },
+                      "status": {
+                        "$ref": "#/$defs/ContractItemStatus"
+                      },
+                      "verify_with": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "description",
+                      "status",
+                      "verify_with"
+                    ]
+                  }
+                }
+              },
+              "required": [
+                "id",
+                "declared_at_round",
+                "items"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "contract_commands": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "contract_verification_available": {
+          "type": "boolean"
+        },
+        "subgoals": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "description",
+              "status"
+            ]
+          }
+        },
+        "recovery": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "required": {
+                  "type": "boolean"
+                },
+                "restore_point": {
+                  "type": "number"
+                },
+                "target_head": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "required"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "prompt": {
+          "type": "object",
+          "properties": {
+            "level": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "l0"
+                  ]
+                },
+                {
+                  "type": "string",
+                  "enum": [
+                    "l1"
+                  ]
+                },
+                {
+                  "type": "string",
+                  "enum": [
+                    "l2"
+                  ]
+                }
+              ]
+            },
+            "dropped_sections": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "protected_overflow": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "level",
+            "dropped_sections",
+            "protected_overflow"
+          ]
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "when": {
+                "type": "string"
+              },
+              "example": {
+                "anyOf": [
+                  {},
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "effect": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "when",
+              "effect"
+            ]
+          }
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "field": {
+                "type": "string"
+              },
+              "check": {
+                "type": "string"
+              },
+              "severity": {
+                "type": "string"
+              },
+              "detail": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "field",
+              "check",
+              "severity",
+              "detail"
+            ]
+          }
+        }
+      },
+      "required": [
+        "round_id",
+        "contract_commands",
+        "contract_verification_available",
+        "subgoals",
+        "prompt",
+        "fields",
+        "findings"
+      ],
+      "description": "v3.9.1: The live submission-guidance projection returned with a prepared\r\nround. It is derived from current facts only (committed rounds, policy,\r\nthe compiled state); it is never persisted and never becomes input to a\r\nlater prompt. Real ids are rendered only when the facts exist; a null\r\nexample means \"not usable at this submission point\"."
+    },
     "MilestoneSummary": {
       "type": "object",
       "properties": {
@@ -682,9 +1449,6 @@
             "type": "string"
           }
         },
-        "progress_at_boundary": {
-          "type": "number"
-        },
         "kind": {
           "anyOf": [
             {
@@ -717,7 +1481,6 @@
         "outcome",
         "carried_constraints",
         "resolved_constraints",
-        "progress_at_boundary",
         "kind",
         "generated_at_round"
       ],
@@ -1388,7 +2151,7 @@
       "properties": {
         "schemaVersion": {
           "type": "number",
-          "const": 2
+          "const": 3
         },
         "roundId": {
           "type": "string"
@@ -1450,6 +2213,12 @@
         },
         "renderedChars": {
           "type": "number"
+        },
+        "promptRequestEffects": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PromptRequestEffect"
+          }
         }
       },
       "required": [
@@ -2004,9 +2773,6 @@
           "items": {
             "$ref": "#/$defs/ContractItemClaim"
           }
-        },
-        "progress_estimate": {
-          "type": "number"
         }
       },
       "description": "v3.8: The agent's self-report for a round — renamed from ExecutionReport\r\nbecause these fields are claims, not evidence. The whole object is\r\noptional; a mistyped optional field is dropped with a warning and never\r\nrejects the round."
@@ -2186,7 +2952,14 @@
       "type": "object",
       "properties": {
         "schemaVersion": {
-          "type": "number"
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ]
         },
         "providerId": {
           "type": "string"
@@ -2260,19 +3033,7 @@
     "GitObservationData": {
       "type": "object",
       "properties": {
-        "tracked": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "staged": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "untracked": {
+        "dirty": {
           "type": "array",
           "items": {
             "type": "string"
@@ -2286,13 +3047,18 @@
         },
         "head": {
           "type": "string"
+        },
+        "coverage": {
+          "type": "string",
+          "enum": [
+            "tracked_and_non_ignored_untracked"
+          ]
         }
       },
       "required": [
-        "tracked",
-        "staged",
-        "untracked",
-        "fingerprints"
+        "dirty",
+        "fingerprints",
+        "coverage"
       ]
     },
     "GitObservation": {

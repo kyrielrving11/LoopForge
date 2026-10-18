@@ -1,7 +1,13 @@
 /** Structured self-evaluation parsing and normalization — pure functions.
  * The MCP boundary validates required fields before these helpers run.
  */
-import { type CriterionRevision, type ExecutionReport, type PromptRequests, type RoundContractProposal, type RoundOutcome, type SelfEvaluation, type SubGoalUpdate } from "./protocol.js";
+import { type CriterionRevision, type ExecutionReport, type PromptRequests, type RoundContractProposal, type RoundOutcome, type SelfEvaluation, type SubGoalUpdate, type SubmissionDiagnostic, type SubmissionDiagnosticHandling } from "./protocol.js";
+/** A diagnostics sink. `buildSelfEvaluation` keeps working without one (the
+ *  engine parses historical last_round_result payloads); the submission
+ *  boundary always supplies one. */
+export interface DiagnosticSink {
+    push(path: string, code: string, handling: SubmissionDiagnosticHandling, detail: string): void;
+}
 /** v3.8.1: the emerged-subtask intake bound — ONE constant, because the
  *  sub-goal ids are derived by ORDINAL over this list. The strict submission
  *  boundary builds the reference space the agent may transition from, and the
@@ -15,9 +21,9 @@ export declare const EMERGED_LIMITS: {
 };
 /** THE emerged-list normalization. Both the boundary and the committed
  *  evaluation call this, so the two sets cannot disagree. */
-export declare function boundedEmergedSubtasks(value: unknown): string[];
+export declare function boundedEmergedSubtasks(value: unknown, sink?: DiagnosticSink): string[];
 /** Parse ExecutionReport from a raw JSON object. */
-export declare function parseExecutionReport(raw: Record<string, unknown> | undefined | null): ExecutionReport | undefined;
+export declare function parseExecutionReport(raw: Record<string, unknown> | undefined | null, sink?: DiagnosticSink): ExecutionReport | undefined;
 /** v3.8: The criterion ids the agent claims met this round. */
 export declare function claimedMetCriteria(report: {
     criterion_claims?: Array<{
@@ -33,19 +39,19 @@ export declare function claimedRemainingCriteria(report: {
     }>;
 } | undefined | null): string[];
 /** Parse CriterionRevision[] from a raw JSON array. */
-export declare function parseCriterionRevisions(raw: unknown): CriterionRevision[];
+export declare function parseCriterionRevisions(raw: unknown, sink?: DiagnosticSink): CriterionRevision[];
 /** Parse SubGoalUpdate[] from a raw JSON array.
  *  v3.7.1: lenient per-entry filtering (id/status shape) with fixed caps
  *  (20 entries, id ≤ 64, note ≤ 300). Referential validity — unknown IDs
  *  and illegal migrations — is NOT checked here: that needs the committed
  *  sub-goal set and runs as a pre-advance validation (evaluation_invalid). */
-export declare function parseSubGoalUpdates(raw: unknown): SubGoalUpdate[];
+export declare function parseSubGoalUpdates(raw: unknown, sink?: DiagnosticSink): SubGoalUpdate[];
 /** Parse WorkerResult[] from a raw JSON array.
  *  v3.7.1: `outcome` is the single fact. An entry without a valid outcome
  *  is dropped (not derived, not defaulted) — the array stays informational:
  *  absent/empty arrays are accepted unchanged, so a round without any
  *  delegation can never be rejected over worker fields. */
-export declare function parseWorkerResults(raw: unknown): import("./protocol.js").WorkerResult[];
+export declare function parseWorkerResults(raw: unknown, sink?: DiagnosticSink): import("./protocol.js").WorkerResult[];
 /** v2.12: The effective round outcome — declared outcome wins, otherwise
  *  derived from `success`. "partial" can only be declared explicitly (never
  *  silently derived from success=false, which would quietly change the
@@ -143,8 +149,20 @@ export interface ContractValidationContext {
  *  active contract is known — reference an item of the ACTIVE contract. */
 export declare function validateContractShape(raw: Record<string, unknown>, context: ContractValidationContext): ContractValidationError[];
 /** Build a SelfEvaluation from a parsed JSON object.
- *  Lenient parsing: missing optional fields get sensible defaults. */
-export declare function buildSelfEvaluation(raw: Record<string, unknown>): SelfEvaluation;
+ *  Lenient parsing: missing optional fields get sensible defaults. When a
+ *  diagnostic sink is supplied, every drop/truncation/normalization is
+ *  reported; without one (the engine's historical payload parse) the values
+ *  are normalized as before. */
+export declare function buildSelfEvaluation(raw: Record<string, unknown>, sink?: DiagnosticSink): SelfEvaluation;
+/** v3.9.1: normalization result used by the submission boundary. */
+export interface NormalizationResult {
+    evaluation: SelfEvaluation;
+    diagnostics: SubmissionDiagnostic[];
+    submittedFields: string[];
+}
+/** Normalize a raw submission and report every lossy decision. Unknown and
+ *  retired fields are diagnosed and dropped; they are never silently accepted. */
+export declare function normalizeSelfEvaluation(raw: Record<string, unknown>): NormalizationResult;
 /** v3.8: The ONE set of contract-declaration limits. `validateContractShape`
  *  (the strict boundary) rejects a declaration over these; `parseRoundContract`
  *  (the lenient path, reached only after the strict boundary passed) truncates
@@ -161,7 +179,7 @@ export declare const CONTRACT_LIMITS: {
  *  capped, non-string array entries are dropped. Item ORDER and COUNT are
  *  preserved — the derived rci- ids depend on them. Returns undefined only
  *  when the raw value is absent or not an object. */
-export declare function parseRoundContract(raw: unknown): RoundContractProposal | undefined;
+export declare function parseRoundContract(raw: unknown, sink?: DiagnosticSink): RoundContractProposal | undefined;
 /** Parse a PromptRequests object from raw JSON input.
  *  Lenient: missing or invalid fields get sensible defaults.
  *  Returns undefined if the raw value is absent or not an object,
@@ -170,5 +188,5 @@ export declare function parseRoundContract(raw: unknown): RoundContractProposal 
  *  lifecycle assembles prompt_requests into the request, but every
  *  compile path funnels through engine.invokeLoopCompile, whose
  *  field-by-field reconstruction must preserve them (v3.3.1). */
-export declare function parsePromptRequests(raw: unknown): PromptRequests | undefined;
+export declare function parsePromptRequests(raw: unknown, sink?: DiagnosticSink): PromptRequests | undefined;
 //# sourceMappingURL=self-eval.d.ts.map

@@ -18,7 +18,11 @@ import {
   hashCanonicalState,
   milestoneHeading,
 } from "./canonical-state.js";
-import type { PromptArtifact, PromptRequests } from "./protocol.js";
+import type {
+  PromptArtifact,
+  PromptRequestEffect,
+  PromptRequests,
+} from "./protocol.js";
 import { PROMPT_ARTIFACT_SCHEMA_VERSION } from "./protocol.js";
 import type {
   ConstraintMeta,
@@ -40,8 +44,8 @@ export interface PromptBudgets {
 }
 
 export const DEFAULT_PROMPT_BUDGETS: PromptBudgets = {
-  l0: 3000,
-  l1: 7000,
+  l0: 5000,
+  l1: 10000,
   l2: 18000,
 };
 
@@ -551,7 +555,7 @@ function l2Sections(
 
   // v3.8.1: the L2 Progress Dashboard and Round Stats sections are gone.
   // The dashboard was `criterionStatuses` re-composed into a table and mixed
-  // with the agent’s OWN completion estimate and test counts; Round Stats
+  // with reported test counts; Round Stats
   // re-listed per-round files and progress deltas, both self-reported. The
   // criterion list and the machine git/criteria rows still render in the
   // state file, where a human or external tool reads them — the prompt keeps
@@ -718,22 +722,41 @@ function matchEmphasize(
   targets: string[],
   candidates: string[],
   cap: number,
-): string[] {
-  if (targets.length === 0 || candidates.length === 0) return [];
+): { matched: string[]; effects: PromptRequestEffect[] } {
+  if (targets.length === 0) return { matched: [], effects: [] };
+  const hitsByTarget = new Map<string, string[]>();
   const matched: string[] = [];
   for (const candidate of candidates) {
     const candidateText = normalizeText(candidate);
-    const hit = targets.some((target) => {
+    let hit = false;
+    for (const target of targets) {
       const idMatch = target.match(STABLE_ID_RE);
-      if (idMatch) {
-        return `${idMatch[1]}-${deriveItemId(candidate)}` === target;
-      }
-      return normalizeText(target) === candidateText;
-    });
+      const targetHit = idMatch
+        ? `${idMatch[1]}-${deriveItemId(candidate)}` === target
+        : normalizeText(target) === candidateText;
+      if (!targetHit) continue;
+      hit = true;
+      const list = hitsByTarget.get(target) ?? [];
+      list.push(candidate);
+      hitsByTarget.set(target, list);
+    }
     if (hit) matched.push(candidate);
   }
   // Candidate order, capped — deterministic, and no score to sort by.
-  return matched.slice(0, cap);
+  const kept = matched.slice(0, cap);
+  const keptSet = new Set(kept);
+  const effects: PromptRequestEffect[] = targets.map((target) => {
+    const hits = hitsByTarget.get(target) ?? [];
+    if (hits.length === 0) {
+      return { field: "emphasize", request: target, status: "no_match" };
+    }
+    return {
+      field: "emphasize",
+      request: target,
+      status: hits.some((candidate) => keptSet.has(candidate)) ? "applied" : "capped",
+    };
+  });
+  return { matched: kept, effects };
 }
 
 /** Render the "Confusion Alerts" section that appears at the prompt top.
@@ -850,27 +873,11 @@ export function assemblePromptArtifact(input: PromptAssemblyInput): PromptArtifa
   const howToRespond = [
     "## How to Complete This Round",
     "",
-    "1. Execute the task described above. Do NOT generate another prompt or plan — act.",
-    "2. When finished, call the MCP tool **`loopforge_next`** with these parameters:",
-    "   - `sessionId`: the session ID from `loopforge_start`.",
-    "   - `evaluation`: a structured self-assessment object (see schema below).",
-    "",
-    "### Evaluation Rules",
-    "",
-    "- `success`: Set to **`true` ONLY** when ALL hard constraints are met AND",
-    "  the task goal is fully achieved. If anything remains incomplete, set `false`.",
-    "- `should_continue`: Set to **`false` ONLY** when the ENTIRE loop task is done.",
-    "  Partial progress or completed subtasks → `true`.",
-    "- `constraint_violations`: Be honest. List every constraint you actually violated.",
-    "- `execution_report.files_changed`: List files you modified — used for verification.",
-    "- `execution_report.tests_reported`: Report actual test runner output.",
-    "- `progress_estimate`: A number 0.0–1.0 reflecting overall task completion.",
-    "",
-    "### If the Prompt Says \"REJECTED\"",
-    "",
-    "- Re-execute the **same round**. Do NOT advance the round counter.",
-    "- Read the Required Fix section, address every issue, then submit again.",
-    "- Use `loopforge_next` with a corrected evaluation.",
+    "1. Execute the task described above and submit one structured evaluation.",
+    "2. Call **`loopforge_next`** with the `sessionId` from `loopforge_start` and",
+    "   the latest `roundId` returned by LoopForge. A rejection keeps that same",
+    "   `roundId`; correct the evaluation and submit it again.",
+    "3. Use the JSON template below for `evaluation`.",
     "",
     evaluation,
   ].join("\n");
@@ -890,7 +897,7 @@ export function assemblePromptArtifact(input: PromptAssemblyInput): PromptArtifa
   // Emphasize: L1/L2 only, matched against active state items
   const policy = getPolicy().prompt;
   const emphasizeCap = levelIsL2 ? policy.max_emphasize_l2 : policy.max_emphasize_l1;
-  const emphasized = (!levelIsL0 && pr?.emphasize?.length)
+  const emphasis = (!levelIsL0 && pr?.emphasize?.length)
     ? matchEmphasize(
         pr.emphasize,
         [
@@ -901,7 +908,38 @@ export function assemblePromptArtifact(input: PromptAssemblyInput): PromptArtifa
         ],
         emphasizeCap,
       )
-    : [];
+    : { matched: [], effects: [] };
+  const emphasized = emphasis.matched;
+  // v3.9.1: prompt-request effects are OUTPUT facts about this render. They
+  // are never read by compile/decision code.
+  const promptRequestEffects: PromptRequestEffect[] = [...emphasis.effects];
+  if (levelIsL0 && pr?.emphasize?.length) {
+    for (const target of pr.emphasize) {
+      promptRequestEffects.push({
+        field: "emphasize",
+        request: target,
+        status: "level_ignored",
+      });
+    }
+  }
+  if (pr?.confusion_points?.length) {
+    const shown = levelIsL0
+      ? 0
+      : levelIsL2
+        ? policy.max_confusion_points
+        : 1;
+    pr.confusion_points.forEach((point, index) => {
+      promptRequestEffects.push({
+        field: "confusion_points",
+        request: point,
+        status: levelIsL0
+          ? "level_ignored"
+          : index < shown
+            ? "applied"
+            : "capped",
+      });
+    });
+  }
 
   // v2.14: emphasize is a pure reorder (zero token overhead) — the matched
   // items are MOVED to the Critical Context section, not duplicated. Filter
@@ -971,5 +1009,6 @@ export function assemblePromptArtifact(input: PromptAssemblyInput): PromptArtifa
     protectedOverflow: selected.protectedOverflow,
     budget: sectionBudget,
     renderedChars: selected.rendered.length,
+    promptRequestEffects,
   };
 }

@@ -13,6 +13,7 @@ import type { ContractItemStatusView } from "../contract-items.js";
 import type { CommandObservation, RoundContractProposal, SubGoal } from "../protocol.js";
 import type { CommittedRoundView } from "../committed-round.js";
 import type { CommandEvidencePolicy } from "../policy.js";
+import { deltaAfter, deltasFrom } from "./_helpers.js";
 
 const COMMAND: CommandEvidencePolicy = {
   name: "verify",
@@ -46,7 +47,9 @@ function declaringRound(): CommittedRoundView {
     action: "continue", success: false, outcome: null,
     contractProposal: CONTRACT,
     contractBinding: { rc_id: "rc-aaaaaaaa", item_ids: [], config_hash_by_command: {} },
-    beforeEvidence: [], afterEvidence: [], observationDelta: [], evidenceIncomplete: false,
+    beforeEvidence: [], afterEvidence: [], observationDelta: [],
+    normalizationDiagnostics: [], submittedFields: [],
+    evidenceIncomplete: false,
     backtrack: null,
   };
 }
@@ -61,7 +64,7 @@ function verifyingRound(): CommittedRoundView {
     roundId: "loop:vf-loop:round:2",
     contractProposal: null,
     executionReport: { contract_item_claims: [{ item_id: itemId(), outcome: "met" }] },
-    observationDelta: [commandObservation("passed")],
+    observationDelta: [deltaAfter(commandObservation("passed"))],
     outcome: "success",
     afterEvidence: [commandObservation("passed")],
     evidenceIncomplete: false,
@@ -80,7 +83,7 @@ function statusesFor(
     rounds,
     currentRound,
     currentReport: claims ? { contract_item_claims: claims } : null,
-    currentObservations: observations,
+    currentDeltas: deltasFrom(observations),
     commands: [COMMAND],
   });
 }
@@ -142,6 +145,22 @@ describe("v3.8 — verified sub-goal facts", () => {
       [],
       "an unverified claim never produces a machine fact",
     );
+  });
+
+  it("does not verify a passed command when the Git boundary is unknown", () => {
+    const statuses = deriveContractItemStatuses({
+      contract: deriveActiveRoundContract([declaringRound()], [COMMAND]),
+      rounds: [declaringRound()],
+      currentRound: 2,
+      currentReport: { contract_item_claims: [{ item_id: itemId(), outcome: "met" }] },
+      currentDeltas: [
+        { providerId: "git", kind: "git", before: null, after: null, changedFiles: null },
+        deltaAfter(commandObservation("passed")),
+      ],
+      commands: [COMMAND],
+    });
+    assert.equal(statuses.items[0].status, "insufficient",
+      "an unobservable boundary cannot prove the entrypoint was stable");
   });
 
   it("never writes SubGoal.status — the fact is a separate statement", () => {

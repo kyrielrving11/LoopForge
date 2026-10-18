@@ -23,6 +23,9 @@ export { getPolicy, loadPolicy, resetPolicy, DEFAULT_POLICY, writeStateFile, } f
 export { FileLoopStore, queryLoopEntries, LOOP_STORE_SCHEMA_VERSION, } from "./loop-store.js";
 // Loop Compiler
 export { compileLoop, decideLevel, computeGoalTextHash, deriveGoalId, getPreviousRound, buildSelfEvalBlock, buildRollingSummary, } from "./loop-compiler.js";
+// Submission channel (v3.9.1)
+export { allFieldGuidePaths, deriveSubmissionGuidance, fieldGuide, fieldGuideDescription, renderSelfEvalBlock, } from "./submission-guidance.js";
+export { deriveCommittedSubmissionView, deriveSubmissionReceipt, } from "./submission-receipt.js";
 // Replay
 export { ReplayBackend } from "./replay.js";
 // Engine
@@ -31,7 +34,7 @@ export { LoopForgeEngine, createEngine, buildSelfEvaluation, parseExecutionRepor
 export { McpServer } from "./mcp/server.js";
 export { SessionManager } from "./mcp/session.js";
 // EvidenceProvider (v1.18 / v3.8: machine observations)
-export { EvidenceCollector, GitEvidenceProvider, CommandEvidenceProvider, registerEvidenceProvider, unregisterEvidenceProvider, isProviderRegistered, isPassedAfterObservation, gitChangedFiles, extractFilesFromSnapshots, diffSnapshots, diffSnapshotCollections, } from "./evidence-provider.js";
+export { EvidenceCollector, GitEvidenceProvider, CommandEvidenceProvider, registerEvidenceProvider, unregisterEvidenceProvider, isProviderRegistered, isPassedAfterObservation, deriveObservationDeltas, gitDeltaState, } from "./evidence-provider.js";
 // Structured tracing and policy effectiveness metrics (v1.20)
 export { logEvent, } from "./observability.js";
 export { PolicyMetricsCollector, policyMetrics, getPolicyMetrics, resetPolicyMetrics, } from "./policy-metrics.js";

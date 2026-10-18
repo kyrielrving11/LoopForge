@@ -12,7 +12,8 @@
  *  identity and the item ids the agent already cited. This is deliberately
  *  the opposite of a SubGoal, whose id includes its declaration round.
  */
-import type { ContractItemProposal, ExecutionReport, MachineObservation, RoundContractProposal } from "./protocol.js";
+import type { ContractItemProposal, ExecutionReport, RoundContractProposal } from "./protocol.js";
+import type { ObservationDelta } from "./evidence-provider.js";
 import type { CommittedRoundView } from "./committed-round.js";
 import type { CommandEvidencePolicy } from "./policy.js";
 import type { ContractItemStatusView } from "./contract-items.js";
@@ -57,15 +58,15 @@ export declare function contractCriterionIds(contract: ActiveContractView): stri
  *    declared in round R becomes active in R+1, and a contract round R CLOSES
  *    must still be reported as round R's contract — folding R's own proposal
  *    into the walker would hand the round the successor (or nothing).
- *  - The round's own report and observations enter as the in-flight slice, so
- *    its claims and its bound commands are judged with the same reducer the
+ *  - The round's own report and deltas enter as the in-flight slice, so its
+ *    claims and its bound commands are judged with the same reducer the
  *    coordinator uses before the round commits. */
 export declare function deriveRoundContractView(input: {
     /** Committed rounds (rollback-excluded), ascending. */
     rounds: ReadonlyArray<CommittedRoundView>;
     round: number;
     report: ExecutionReport | null;
-    observations: ReadonlyArray<MachineObservation>;
+    deltas: ReadonlyArray<ObservationDelta>;
     /** The round's committed/effective outcome — `blocked` closes its contract. */
     outcome: string | null;
     commands: ReadonlyArray<CommandEvidencePolicy>;

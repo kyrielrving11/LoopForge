@@ -37,7 +37,6 @@ const continuingEvaluation = (): SelfEvaluation => ({
     files_changed: ["src/a.ts"],
     tests_reported: { passed: 1, failed: 0, skipped: 0 },
     criterion_claims: criterionClaims([], ["more"]),
-    progress_estimate: 0.5,
   },
 });
 

@@ -8,7 +8,7 @@
 import type { LoopStore } from "./loop-store.js";
 import { LoopForgeEngine } from "./engine.js";
 import type { MachineObservation } from "./protocol.js";
-import type { LoopForgeRequest, LoopForgeResponse, PromptArtifact, SelfEvaluation } from "./protocol.js";
+import type { LoopForgeRequest, LoopForgeResponse, PromptArtifact, SelfEvaluation, SubmissionDiagnostic } from "./protocol.js";
 import type { RoundTransactionOutcome, RoundTransactionSnapshot } from "./round-transaction.js";
 export interface PreparedRound {
     prompt: string;
@@ -39,8 +39,13 @@ export interface CompleteRoundInput {
     backtrackSkippedFingerprints?: Record<string, string>;
     /** v2.12: Git HEAD of the backtrack restore point (workspace restore check). */
     backtrackTargetGitHead?: string;
+    /** v3.9: files already dirty at the backtrack restore point. */
+    backtrackTargetDirty?: string[];
     /** v3.8.3: trusted round-start entrypoint fingerprints (see RoundProcessInput). */
     entrypointTrust?: Record<string, string>;
+    /** v3.9.1: normalization diagnostics and the submitted-field manifest. */
+    normalizationDiagnostics?: SubmissionDiagnostic[];
+    submittedFields?: string[];
 }
 export interface CompletedRound {
     outcome: RoundTransactionOutcome;

@@ -25,11 +25,18 @@ export declare function findSafeRestorePoint(currentRound: number, vaultEntries:
     round: number;
     skippedDiscoveries: string[];
 } | null;
-/** v2.12: Git HEAD commit hash at the restore point. Read from the restore
+/** v2.12: The restore point's machine snapshot. `head` is the commit the
+ *  workspace must return to; `dirtyFiles` is what was ALREADY dirty there —
+ *  the baseline a restored workspace is compared against, so unrelated work
+ *  in progress is never mistaken for a failed restore. Read from the restore
  *  round's committed transaction snapshot (after evidence preferred, before
- *  evidence as fallback). Returns null when the round has no git snapshot
- *  or no committed feedback entry. */
-export declare function findBacktrackTargetGitHead(restoreRound: number, vaultEntries: VaultEntry[]): string | null;
+ *  evidence as fallback). Returns null when the round has no git snapshot or
+ *  no committed feedback entry. */
+export interface BacktrackTargetSnapshot {
+    head: string;
+    dirtyFiles: string[];
+}
+export declare function findBacktrackTargetSnapshot(restoreRound: number, vaultEntries: VaultEntry[]): BacktrackTargetSnapshot | null;
 /** Build the backtrack prompt injected at the top of the restored round.
  *
  *  v2.13: Includes concrete workspace restore instructions with affected
@@ -87,7 +94,10 @@ lastRejectionCheck?: string,
  *  round changed outside the active contract's scope. Computed there, not
  *  here: neither the observations nor the active contract reach this
  *  function. See `enforceScopeDrift`. */
-scopeDriftWaiver?: boolean): EnforcementResult;
+scopeDriftWaiver?: boolean,
+/** v3.9: the submitted round's own Git motion — see `inFlightGitMotion`.
+ *  null when no Git observation was made. */
+inFlightMotion?: boolean | null): EnforcementResult;
 /** Build a rejection prompt for the agent.
  *
  *  The prompt clearly states the round was rejected, why, what the agent

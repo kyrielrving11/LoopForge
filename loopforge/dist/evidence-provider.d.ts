@@ -9,7 +9,7 @@
  * Built-in: GitEvidenceProvider — git file state capture with parallel async
  * execution (v2.0.1), plus explicitly configured shell-free command providers.
  */
-import type { CommandObservation, ConfiguredCapability, EvidenceCapability, GitObservation, MachineObservation, ObservedCapability } from "./protocol.js";
+import type { CommandObservation, ConfiguredCapability, EvidenceCapability, MachineObservation, ObservedCapability } from "./protocol.js";
 import type { CommandEvidencePolicy, LoopPolicy } from "./policy.js";
 /** Interface for evidence capture providers.
  *
@@ -52,15 +52,15 @@ export declare function isProviderRegistered(name: string): boolean;
 /** v3.8: The ONE machine-backed predicate. A command observation proves a
  *  claim only when it is an after-phase command that PASSED and whose
  *  entrypoint was not modified in the same round. Before-phase observations
- *  are the baseline and never evidence. When no git delta is available the
- *  entrypoint arm fails open (matching the historical behaviour).
+ *  are the baseline and never evidence.
+ *
+ *  `not_applicable` (no Git provider participated) leaves the entrypoint arm
+ *  out; `unknown` (a Git boundary existed but its change set is unobservable)
+ *  is NOT a pass — the boundary cannot rule out entrypoint tampering.
  *
  *  v3.8 replaced two divergent implementations (the gate excluded tampered
  *  commands, evidence-claims did not) with this single function. */
-export declare function isPassedAfterObservation(observation: MachineObservation, gitChangedFiles: ReadonlySet<string> | null): boolean;
-/** v3.8: The changed-file set of a round's git observation, or null when no
- *  git observation exists (entrypoint checks then fail open). */
-export declare function gitChangedFiles(observations: ReadonlyArray<MachineObservation>): Set<string> | null;
+export declare function isPassedAfterObservation(observation: MachineObservation, git: GitDeltaState): boolean;
 /** v3.8: Live capability derived from observations. Rendered only — never
  *  hashed, never persisted independently (it is a pure function of the
  *  observations it is given). */
@@ -156,50 +156,81 @@ export declare class CommandEvidenceProvider implements EvidenceProvider {
     capture(context?: EvidenceCaptureContext): Promise<CommandObservation | null>;
     private observation;
 }
-/** v1.17: Result of capturing git file state across all three categories. */
+/** A tracked index entry. `mode` is the stage mode (100644, 100755, 120000,
+ *  160000); `object` is the index blob/commit id. */
+export interface GitTrackedEntry {
+    path: string;
+    mode: string;
+    object: string;
+}
+/** v3.9.1: the complete workspace boundary at one instant. */
 export interface GitFileState {
-    /** Tracked files modified but unstaged (git diff --name-only). */
-    tracked: string[];
-    /** Files in the staging area (git diff --cached --name-only). */
-    staged: string[];
-    /** Untracked files not yet known to git (git ls-files --others --exclude-standard). */
+    /** Every path in the index, including paths deleted from the worktree. */
+    tracked: GitTrackedEntry[];
+    /** Non-ignored untracked paths. */
     untracked: string[];
-    /** v2.13: HEAD commit hash for backtrack restore point.
-     *  undefined when git is unavailable or not a repository. */
+    /** Dirty-since-HEAD paths, for display only. */
+    dirty: string[];
+    /** HEAD at this boundary; absent in a repository with no commit. */
     head?: string;
 }
-/** v2.0.1: Capture git file state using parallel async execFile.
- *
- * Runs three git commands concurrently via Promise.all. Uses a single
- * timeout (shared across all commands) and an optional AbortSignal for
- * early cancellation. Shell-free (execFile, not exec).
- *
- * On any command failure, returns null — the caller should treat git
- * evidence as unavailable and degrade gracefully.
- *
- * Performance: wall-clock time is max(single-command), not sum(3).
- * On a normal repo (~200ms/command): ~200ms vs ~600ms sequential.
- * On Windows with antivirus (~4s/command): ~4s vs ~12s sequential. */
+/** An explicit capture failure. The collector records the status; null is no
+ *  longer used as an ambiguous "unavailable". */
+export type GitCaptureResult = {
+    ok: true;
+    state: GitFileState;
+} | {
+    ok: false;
+    status: "timeout" | "unavailable" | "aborted" | "error";
+    detail: string;
+};
+/** v3.9.1: capture the complete boundary. All required git commands run in
+ *  one parallel batch; HEAD is best-effort (a repository with no commit is a
+ *  valid boundary with no head). Any required-command failure returns an
+ *  explicit status — never an empty-but-observed boundary. */
 export declare function captureGitFileStateAsync(signal?: AbortSignal, timeoutMs?: number,
 /** Workspace root; injectable so tests can capture against a temp repo.
  *  Defaults to the process cwd, matching the evidence providers. */
-cwd?: string): Promise<GitFileState | null>;
+cwd?: string): Promise<GitCaptureResult>;
 export declare class GitEvidenceProvider implements EvidenceProvider {
     readonly name = "git";
     readonly kind: "git";
-    capture(context?: EvidenceCaptureContext): Promise<GitObservation | null>;
+    capture(context?: EvidenceCaptureContext): Promise<MachineObservation | null>;
 }
-/** Extract merged file list from observations for backward compat with
- *  runtimeFilesChanged (string[] | null).
- *
- *  Looks for the "git" provider first; falls back to merging all providers'
- *  files arrays (deduplicated). */
-export declare function extractFilesFromSnapshots(observations: MachineObservation[]): string[] | null;
-/** v3.8: The round delta of two observation collections (before → after):
- *  files that appeared, disappeared, or changed content. The full payload of
- *  each after-observation is preserved; only `files` is narrowed. This is the
- *  single derivation the transaction persists and every reader consumes. */
-export declare function diffSnapshotCollections(before: MachineObservation[], after: MachineObservation[]): MachineObservation[];
-/** Compute a diff between two observation collections (before → after). */
-export declare function diffSnapshots(before: MachineObservation[], after: MachineObservation[]): string[] | null;
+/** v3.9.1: One provider's derived before→after view. `before`/`after` are
+ *  references to the persisted observations — never copies, never mutated.
+ *  Only `changedFiles` is a derived fact; it is null for every non-Git
+ *  provider (command entrypoints are not a change set) and for any Git pair
+ *  whose boundary cannot be compared. */
+export interface ObservationDelta {
+    providerId: string;
+    kind: MachineObservation["kind"];
+    before: MachineObservation | null;
+    after: MachineObservation | null;
+    /** Git only. [] = observed no change; null = unknown.
+     *  command/custom always null (no file-change concept). */
+    changedFiles: string[] | null;
+}
+/** The Git change set for a round, with applicability kept distinct from
+ *  observability: no Git provider is `not_applicable`; a Git provider whose
+ *  boundary cannot be compared is `unknown` (never an empty set). */
+export type GitDeltaState = {
+    state: "not_applicable";
+} | {
+    state: "unknown";
+} | {
+    state: "observed";
+    changedFiles: ReadonlySet<string>;
+};
+/** The ONE before→after derivation. Delta entries are one per
+ *  kind+providerId in the union of both collections, in deterministic order.
+ *  Missing sides and duplicate keys are explicit; they never masquerade as an
+ *  observed no-change. */
+export declare function deriveObservationDeltas(before: readonly MachineObservation[], after: readonly MachineObservation[]): ObservationDelta[];
+/** Resolve the round's Git change state once. No Git provider =
+ *  not_applicable; any Git delta with an unknown change set = unknown; else
+ *  the union of every observed Git change set. */
+export declare function gitDeltaState(deltas: readonly ObservationDelta[]): GitDeltaState;
+/** The after-phase observations referenced by a delta collection. */
+export declare function afterObservations(deltas: readonly ObservationDelta[]): MachineObservation[];
 //# sourceMappingURL=evidence-provider.d.ts.map

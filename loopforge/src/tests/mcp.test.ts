@@ -54,7 +54,6 @@ function evalParam(opts: {
       files_changed: ["src/test.ts"],
       tests_reported: { passed: 1, failed: 0, skipped: 0 },
       criterion_claims: criterionClaims([], []),
-      progress_estimate: 0.5,
     } : undefined,
   };
 }
@@ -397,7 +396,6 @@ describe("MCP — multi-round lifecycle", async () => {
           files_changed: ["Token.sol"],
           tests_reported: { passed: 20, failed: 2, skipped: 0 },
           criterion_claims: criterionClaims(["Reentrancy guard added to withdraw()"], ["Reentrancy guard for deposit()", "Access control audit"]),
-          progress_estimate: 0.4,
         },
       },
     });
@@ -416,7 +414,6 @@ describe("MCP — multi-round lifecycle", async () => {
           files_changed: ["Token.sol"],
           tests_reported: { passed: 24, failed: 0, skipped: 0 },
           criterion_claims: criterionClaims(["Reentrancy guard for deposit()", "Access control audit"], []),
-          progress_estimate: 1.0,
         },
       },
     });
@@ -466,7 +463,6 @@ describe("MCP — multi-round lifecycle", async () => {
         files_changed: [`src/r${round}.ts`],
         tests_reported: { passed: 1, failed: 0, skipped: 0 },
         criterion_claims: criterionClaims([], ["Complete the task"]),
-        progress_estimate: 0.2 + round * 0.1,
       },
     });
 
@@ -695,7 +691,6 @@ describe("MCP — session persistence (save / resume)", async () => {
         files_changed: ["src/test.ts"],
         tests_reported: { passed: 1, failed: 0, skipped: 0 },
         criterion_claims: criterionClaims([], []),
-        progress_estimate: 1.0,
       },
     } as SelfEvaluation);
 
@@ -902,7 +897,6 @@ describe("MCP P0 lifecycle regressions", () => {
       files_changed: [],
       tests_reported: null,
       criterion_claims: criterionClaims([], ["remaining"]),
-      progress_estimate: 0.4,
     },
   });
 
@@ -999,7 +993,6 @@ describe("MCP P0 lifecycle regressions", () => {
         files_changed: [],
         tests_reported: null,
         criterion_claims: criterionClaims([], ["remaining"]),
-        progress_estimate: 0.4,
       },
     } as SelfEvaluation;
 
@@ -1148,7 +1141,6 @@ describe("MCP P0 lifecycle regressions", () => {
         files_changed: ["src/change.ts"],
         tests_reported: { passed: 1, failed: 0, skipped: 0 },
         criterion_claims: criterionClaims([], ["still open"]),
-        progress_estimate: 0.5,
       },
     };
     const rejected = await mgr.advance(
@@ -1217,7 +1209,7 @@ describe("MCP P0 lifecycle regressions", () => {
 
     const persisted = counting.readSession("atomic-session-save")
       ?.entry?.loop_lineage?.round_snapshot as Record<string, unknown> | undefined;
-    assert.equal(persisted?.schemaVersion, 2);
+    assert.equal(persisted?.schemaVersion, 3);
     assert.equal(persisted?.roundId, started.roundId);
   });
 });
@@ -1469,8 +1461,10 @@ describe("MCP — tool contract (v3.2.1)", async () => {
     }
     assert.ok(SERVER_INSTRUCTIONS.includes("execution_report"),
       "instructions must name the report the runtime reads");
-    assert.ok(SERVER_INSTRUCTIONS.includes("criterion_claims"),
-      "instructions must name the claim fields the runtime reads");
+    assert.ok(SERVER_INSTRUCTIONS.includes("submission_guidance"),
+      "instructions must point at the current-fact submission guidance");
+    assert.ok(SERVER_INSTRUCTIONS.includes("submission_receipt"),
+      "instructions must point at the submission receipt");
   });
 
   it("loopforge_next schema requires the evaluation parameter", () => {
@@ -1572,7 +1566,6 @@ describe("MCP — sub-goal persistence (v3.2.1)", async () => {
           files_changed: ["src/a.ts"],
           tests_reported: { passed: 1, failed: 0, skipped: 0 },
           criterion_claims: criterionClaims([], ["Complete the task"]),
-          progress_estimate: 0.3,
         },
       },
     });
@@ -1606,7 +1599,6 @@ describe("MCP — sub-goal persistence (v3.2.1)", async () => {
           files_changed: ["src/a.ts"],
           tests_reported: { passed: 1, failed: 0, skipped: 0 },
           criterion_claims: criterionClaims([], ["Complete the task"]),
-          progress_estimate: 0.3,
         },
       },
     });
@@ -1633,7 +1625,6 @@ describe("MCP — sub-goal persistence (v3.2.1)", async () => {
           files_changed: ["src/a.ts"],
           tests_reported: { passed: 1, failed: 0, skipped: 0 },
           criterion_claims: criterionClaims([], ["Complete the task"]),
-          progress_estimate: 0.3,
         },
       },
     });
@@ -1677,7 +1668,6 @@ describe("MCP — sub-goal persistence (v3.2.1)", async () => {
           files_changed: ["src/withdraw.ts"],
           tests_reported: { passed: 1, failed: 0, skipped: 0 },
           criterion_claims: criterionClaims([], ["Complete the task"]),
-          progress_estimate: 0.3,
         },
       },
     });
@@ -1746,7 +1736,6 @@ describe("MCP — sub-goal persistence (v3.2.1)", async () => {
           files_changed: ["src/withdraw.ts"],
           tests_reported: { passed: 1, failed: 0, skipped: 0 },
           criterion_claims: criterionClaims([], ["Complete the task"]),
-          progress_estimate: 0.3,
         },
       },
     });
@@ -1803,7 +1792,6 @@ describe("MCP — sub-goal persistence (v3.2.1)", async () => {
             files_changed: ["deploy.yml"],
             tests_reported: { passed: 1, failed: 0, skipped: 0 },
             criterion_claims: criterionClaims([], ["Complete the task"]),
-            progress_estimate: 0.5,
           },
         },
       });
@@ -1836,7 +1824,6 @@ describe("MCP — sub-goal persistence (v3.2.1)", async () => {
             files_changed: ["deploy.yml"],
             tests_reported: { passed: 1, failed: 0, skipped: 0 },
             criterion_claims: criterionClaims([], ["Complete the task"]),
-            progress_estimate: 0.5,
           },
         },
       });
@@ -1896,7 +1883,6 @@ describe("MCP — Round Contract flow", async () => {
         files_changed: ["src/auth.ts"],
         tests_reported: { passed: 0, failed: 0, skipped: 0 },
         criterion_claims: criterionClaims([], ["cr-login-works"]),
-        progress_estimate: 0.2,
       },
       round_contract: {
         work_item: "Implement login flow",
@@ -1993,7 +1979,6 @@ describe("MCP — Round Contract flow", async () => {
       files_changed: ["src/auth.ts"],
       tests_reported: { passed: 1, failed: 0, skipped: 0 },
       criterion_claims: criterionClaims(met, remaining),
-      progress_estimate: 0.4,
     },
     ...(contract ? { round_contract: contract } : {}),
   });
@@ -2082,7 +2067,6 @@ describe("MCP — Round Contract flow", async () => {
         files_changed: ["src/auth.ts"],
         tests_reported: { passed: 1, failed: 0, skipped: 0 },
         criterion_claims: criterionClaims([], ["cr-login-works"]),
-        progress_estimate: 0.5,
       },
     });
     assert.equal(rejected.enforcementAction, "reject");
@@ -2091,8 +2075,8 @@ describe("MCP — Round Contract flow", async () => {
     // ACTIVE contract still renders as the Current Task…
     assert.ok(String(rejected.prompt ?? "").includes("**Implement login flow**"),
       "the L0 retry must keep the contract as Current Task (derived, not last_round_result)");
-    assert.ok(!String(rejected.prompt ?? "").includes("round_contract"),
-      "L0 retry stays lean — no restatement template");
+    assert.ok(!String(rejected.prompt ?? "").includes("restate the Current Task's contract UNCHANGED"),
+      "L0 retry stays lean — no restatement requirement");
   });
 
   it("v3.8: a verified contract closes and the Current Task reverts", async () => {
@@ -2117,7 +2101,6 @@ describe("MCP — Round Contract flow", async () => {
       execution_report: {
         files_changed: ["src/auth.ts"],
         tests_reported: { passed: 1, failed: 0, skipped: 0 },
-        progress_estimate: 0.6,
         contract_item_claims: [{ item_id: itemId, outcome: "met" }],
       },
     });
@@ -2213,7 +2196,6 @@ describe("MCP — audit & vault replay (v3.3.1)", async () => {
             files_changed: [`src/r${i}.ts`],
             tests_reported: { passed: 1, failed: 0, skipped: 0 },
             criterion_claims: criterionClaims([], ["Complete the task"]),
-            progress_estimate: 0.2 + i * 0.1,
           },
         },
       });

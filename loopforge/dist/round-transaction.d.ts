@@ -7,12 +7,13 @@
  */
 import type { LoopStore } from "./loop-store.js";
 import { LoopForgeEngine } from "./engine.js";
-import type { ContractBinding, MachineObservation } from "./protocol.js";
-import type { SelfEvaluation } from "./protocol.js";
-import type { PromptArtifact } from "./protocol.js";
+import type { ObservationDelta } from "./evidence-provider.js";
+import type { ContractBinding, MachineObservation, PromptArtifact, SelfEvaluation, SubmissionDiagnostic } from "./protocol.js";
 import { type RoundProcessResult } from "./round-coordinator.js";
 import type { RoundCommitStore } from "./storage.js";
-export declare const ROUND_TRANSACTION_SCHEMA_VERSION: 2;
+/** v3.9.1: schema 3 embeds Git observation schema 2 (complete boundary
+ *  fingerprints) and later adds optional diagnostics/manifest fields. */
+export declare const ROUND_TRANSACTION_SCHEMA_VERSION: 3;
 export type RoundTransactionPhase = "prepared" | "prompted" | "evaluated" | "rejected" | "committed" | "terminated";
 export interface RoundTransactionSnapshot {
     schemaVersion: typeof ROUND_TRANSACTION_SCHEMA_VERSION;
@@ -25,6 +26,12 @@ export interface RoundTransactionSnapshot {
     afterEvidence?: MachineObservation[];
     evaluation?: SelfEvaluation;
     result?: RoundProcessResult;
+    /** v3.9.1: every lossy normalization decision for this submission. Saved
+     *  with the transaction; strict boundary failures never reach here. */
+    normalizationDiagnostics?: SubmissionDiagnostic[];
+    /** v3.9.1: the known evaluation paths present in the raw submission. The
+     *  receipt uses this manifest; unknown paths live in diagnostics only. */
+    submittedFields?: string[];
     /** v3.8: the contract binding resolved at commit time (see ContractBinding).
      *  Absent when the committing round declared no contract. */
     contractBinding?: ContractBinding;
@@ -50,8 +57,14 @@ export interface RoundTransactionInput {
     /** v2.12: Git HEAD of the backtrack restore point. The verification gate
      *  checks the workspace returns to this commit before accepting work. */
     backtrackTargetGitHead?: string;
+    /** v3.9: files already dirty at the backtrack restore point (restore
+     *  baseline — see RoundProcessResult.backtrackTargetDirty). */
+    backtrackTargetDirty?: string[];
     /** v3.8.3: trusted round-start entrypoint fingerprints (see RoundProcessInput). */
     entrypointTrust?: Record<string, string>;
+    /** v3.9.1: normalization metadata carried into the evaluated snapshot. */
+    normalizationDiagnostics?: SubmissionDiagnostic[];
+    submittedFields?: string[];
     actualEvidence: MachineObservation[];
 }
 export interface RoundTransactionOutcome {
@@ -60,12 +73,13 @@ export interface RoundTransactionOutcome {
     /** true when a prior committed decision was replayed from the vault. */
     replayed: boolean;
 }
-/** v3.8: The round's observation delta (before → after) — files that
- *  appeared, disappeared, or changed content. DERIVED, never persisted: the
- *  transaction stores only the two factual observation collections, and every
- *  reader (gates, metrics, git-motion series, replay, audit) consumes this one
- *  derivation. */
-export declare function deriveRoundObservationDelta(before: MachineObservation[], after: MachineObservation[]): MachineObservation[];
+/** v3.8/v3.9.1: The round's observation delta (before → after). Each entry
+ *  carries raw before/after references; Git's `changedFiles` is the only
+ *  file-change fact and is null when the pair cannot be compared. DERIVED,
+ *  never persisted: the transaction stores only the two factual observation
+ *  collections, and every reader (gates, metrics, git-motion series, replay,
+ *  audit) consumes this one derivation. */
+export declare function deriveRoundObservationDelta(before: MachineObservation[], after: MachineObservation[]): ObservationDelta[];
 /** v3.8: The schema version stamped on a persisted transaction envelope, or
  *  null when the value is not a transaction envelope at all. Used to surface
  *  legacy documents explicitly instead of letting them vanish from history. */

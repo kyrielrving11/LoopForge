@@ -1,5 +1,6 @@
 /** In-process policy effectiveness metrics with no runtime dependency. */
-import { readOnlyRounds } from "./committed-round.js";
+import { observedGitHead, readOnlyRounds } from "./committed-round.js";
+import { deriveFieldAccounting } from "./field-accounting.js";
 function empty(loopId) {
     return {
         loopId,
@@ -23,6 +24,14 @@ function empty(loopId) {
         vaultWriteErrors: 0,
         vaultWriteReasons: {},
         levels: {},
+        filesChangedRounds: 0,
+        filesChangedTotal: 0,
+        unobservableGitRounds: 0,
+        headMoveRounds: 0,
+        attemptedFieldUsage: {},
+        retainedFieldUsage: {},
+        fieldAccountingRounds: 0,
+        fieldAccountingIncompleteRounds: 0,
     };
 }
 function increment(target, key) {
@@ -164,6 +173,41 @@ export function derivePolicyMetrics(loopId, entries) {
         if (round.promptArtifact?.level) {
             increment(metric.levels, round.promptArtifact.level);
         }
+        // v3.9.1: the shared delta is the only file-change source.
+        if (round.evidenceIncomplete)
+            metric.unobservableGitRounds++;
+        const gitDelta = round.observationDelta.find((item) => item.kind === "git");
+        if (gitDelta?.changedFiles && gitDelta.changedFiles.length > 0) {
+            metric.filesChangedRounds++;
+            metric.filesChangedTotal += gitDelta.changedFiles.length;
+        }
+        const headBefore = observedGitHead(round.beforeEvidence.find((item) => item.providerId === "git"));
+        const headAfter = observedGitHead(round.afterEvidence.find((item) => item.providerId === "git"));
+        if (headBefore && headAfter && headBefore !== headAfter) {
+            metric.headMoveRounds++;
+        }
+        const CORE = new Set([
+            "success", "output_summary", "constraint_violations", "should_continue",
+        ]);
+        for (const path of round.submittedFields) {
+            if (!CORE.has(path))
+                increment(metric.attemptedFieldUsage, path);
+        }
+        const accounting = deriveFieldAccounting({
+            submittedFields: round.submittedFields,
+            normalizationDiagnostics: round.normalizationDiagnostics,
+            evaluation: round.evaluation,
+        });
+        if (accounting.incomplete) {
+            metric.fieldAccountingIncompleteRounds++;
+        }
+        else {
+            metric.fieldAccountingRounds++;
+            for (const path of accounting.retained) {
+                if (!CORE.has(path))
+                    increment(metric.retainedFieldUsage, path);
+            }
+        }
     }
     return snapshotFrom(metric);
 }
@@ -203,6 +247,14 @@ export function mergePolicyMetrics(derived, live) {
         vaultWriteErrors: live.vaultWriteErrors,
         vaultWriteReasons: { ...live.vaultWriteReasons },
         levels: { ...derived.levels },
+        filesChangedRounds: derived.filesChangedRounds,
+        filesChangedTotal: derived.filesChangedTotal,
+        unobservableGitRounds: derived.unobservableGitRounds,
+        headMoveRounds: derived.headMoveRounds,
+        attemptedFieldUsage: { ...derived.attemptedFieldUsage },
+        retainedFieldUsage: { ...derived.retainedFieldUsage },
+        fieldAccountingRounds: derived.fieldAccountingRounds,
+        fieldAccountingIncompleteRounds: derived.fieldAccountingIncompleteRounds,
     };
     return snapshotFrom(merged);
 }

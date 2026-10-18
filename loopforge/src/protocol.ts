@@ -95,9 +95,9 @@ export interface SelfEvaluation {
    *  the round advances. in_progress is only reachable through this
    *  field — the runtime no longer infers it. */
   subgoal_updates?: SubGoalUpdate[];
-  /** P4: Structured evidence of what was executed this round.
-   *  Files changed, test results, criteria met/remaining, progress estimate.
-   *  Enables the compiler to validate claims and compute real progress. */
+  /** P4: Structured claims about what was executed this round.
+   *  Files changed, test results, and criteria met/remaining are checked
+   *  against independent evidence where available. */
   execution_report?: ExecutionReport;
   /** P5: Constraints that the agent now believes are wrong or irrelevant.
    *  Removed from the active constraint set by the compiler.
@@ -298,6 +298,151 @@ export interface PromptRequests {
   confusion_points?: string[];
 }
 
+/** v3.9.1: One normalization diagnostic. The submission boundary NEVER drops
+ *  an optional value silently: every drop, truncation or normalization is
+ *  reported with a stable code and an actionable detail. Strict boundary
+ *  failures use `handling: "rejected"` and are returned only for that attempt;
+ *  they are never written to history. */
+export type SubmissionDiagnosticHandling =
+  | "dropped"
+  | "truncated"
+  | "normalized"
+  | "rejected";
+
+export interface SubmissionDiagnostic {
+  /** Dotted field path, e.g. `execution_report.files_changed`. */
+  path: string;
+  /** Stable reason code (e.g. `unknown_field`, `not_array`, `too_many`). */
+  code: string;
+  handling: SubmissionDiagnosticHandling;
+  /** What happened and how to correct it. */
+  detail: string;
+}
+
+/** v3.9.1: How a submitted field was handled in the round's receipt. */
+export type SubmissionReportHandling =
+  | "saved"
+  | "saved_not_expanded"
+  | "dropped"
+  | "truncated"
+  | "normalized"
+  | "not_applied";
+
+/** v3.9.1: The machine's report of what one submission DID. It is derived
+ *  from the transaction + the shared read model; it is never a second ledger. */
+export interface SubmissionReceipt {
+  round_id: string;
+  attempt: number;
+  disposition: "accepted" | "rejected" | "terminated" | "backtracked" | "stopped";
+  /** Which record, if any, the transaction persisted. A rollback directive is
+   *  a committed record but NOT the submitted evaluation applied. */
+  record: "committed" | "rollback_directive" | "none";
+  entered_history: boolean;
+  reports: Array<{
+    path: string;
+    handling: SubmissionReportHandling;
+    detail?: string;
+  }>;
+  effects: {
+    contract: {
+      before_id: string | null;
+      after_id: string | null;
+      activated: boolean;
+      closed: boolean;
+    };
+    subgoals_created: Array<{ id: string; description: string }>;
+    subgoals_updated: Array<{ id: string; from: string; to: string }>;
+    constraints_declared: string[];
+    constraints_retracted: string[];
+    /** "observed" only when a next compile (or the next committed round's
+     *  stamped active set) exists; "not_observed" for stop/terminate/reject/
+     *  backtrack. Never guess an active set from the agent's report. */
+    constraints_activation: "observed" | "not_observed";
+    constraints_active_after: string[] | null;
+    constraints_not_expanded: string[];
+    checkpoint: { label: string; round: number } | null;
+    rollback: {
+      restore_point: number;
+      preserved_discoveries: string[];
+      wrong_assumptions: string[];
+    } | null;
+  };
+  verification: {
+    /** Contract-item posture (RoundVerificationStatus). */
+    contract_status: "trusted" | "insufficient" | "contradicted";
+    /** Round-level machine evidence posture. A round can have trusted
+     *  contract items while a bare success claim has no machine evidence. */
+    evidence_status: "verified" | "unavailable" | "absent";
+    checks: Array<{
+      field: string;
+      check: string;
+      severity: string;
+      detail: string;
+    }>;
+    contract_items: Array<{ item_id: string; status: ContractItemStatus }>;
+  };
+  prompt: {
+    level: "l0" | "l1" | "l2";
+    dropped_sections: string[];
+    prompt_request_effects: PromptRequestEffect[];
+  } | null;
+  diagnostics: SubmissionDiagnostic[];
+}
+
+/** v3.9.1: What a prompt request actually did in the rendered prompt. This is
+ *  an OUTPUT fact about the current render; it is never an instruction for a
+ *  later prompt. */
+export interface PromptRequestEffect {
+  field: "emphasize" | "confusion_points";
+  request: string;
+  status: "applied" | "no_match" | "level_ignored" | "capped";
+}
+
+/** v3.9.1: The live submission-guidance projection returned with a prepared
+ *  round. It is derived from current facts only (committed rounds, policy,
+ *  the compiled state); it is never persisted and never becomes input to a
+ *  later prompt. Real ids are rendered only when the facts exist; a null
+ *  example means "not usable at this submission point". */
+export interface SubmissionGuidance {
+  round_id: string;
+  active_contract: {
+    id: string;
+    work_item?: string;
+    declared_at_round: number;
+    items: Array<{
+      id: string;
+      description: string;
+      status: ContractItemStatus;
+      verify_with: string[];
+    }>;
+  } | null;
+  contract_commands: string[];
+  contract_verification_available: boolean;
+  subgoals: Array<{ id: string; description: string; status: string }>;
+  recovery: {
+    required: boolean;
+    restore_point?: number;
+    target_head?: string;
+  } | null;
+  prompt: {
+    level: "l0" | "l1" | "l2";
+    dropped_sections: string[];
+    protected_overflow: boolean;
+  };
+  fields: Array<{
+    path: string;
+    when: string;
+    example: unknown | null;
+    effect: string;
+  }>;
+  findings: Array<{
+    field: string;
+    check: string;
+    severity: string;
+    detail: string;
+  }>;
+}
+
 /** v2.1: Milestone summary — a phase-boundary snapshot that survives
  *  rolling-window eviction. Triggered by three signals in priority order:
  *
@@ -321,8 +466,6 @@ export interface MilestoneSummary {
   carried_constraints: string[];
   /** Constraints resolved during this phase. */
   resolved_constraints: string[];
-  /** Agent's progress_estimate at the milestone boundary. */
-  progress_at_boundary: number;
   /** How this milestone was created. */
   kind: "agent_declared" | "criteria_milestone" | "auto";
   /** The round number when this milestone was created. */
@@ -338,7 +481,6 @@ export function makeMilestoneSummary(
     outcome: "",
     carried_constraints: [],
     resolved_constraints: [],
-    progress_at_boundary: 0,
     kind: "auto",
     generated_at_round: 0,
     ...overrides,
@@ -738,12 +880,13 @@ export function makeLoopCompileRequest(
 /** v3.8.1: the artifact schema version, next to the type it versions. The
  *  transaction envelope parser reads it, so the constant lives here rather
  *  than in the renderer. */
-export const PROMPT_ARTIFACT_SCHEMA_VERSION = 2 as const;
+export const PROMPT_ARTIFACT_SCHEMA_VERSION = 3 as const;
 
 export interface PromptArtifact {
-  /** v3.8.1: schema 2. Version 1 is a HARD break — a round whose artifact
-   *  does not parse is not committed history, and `legacyTransactionRounds`
-   *  reports the loss rather than letting it vanish. */
+  /** v3.9.1: schema 3 adds prompt-request render effects. Older versions are
+   *  a HARD break — a round whose artifact does not parse is not committed
+   *  history, and `legacyTransactionRounds` reports the loss rather than
+   *  letting it vanish. */
   schemaVersion: typeof PROMPT_ARTIFACT_SCHEMA_VERSION;
   /** Round identity: `loop:<loopId>:round:<n>`. */
   roundId: string;
@@ -770,6 +913,9 @@ export interface PromptArtifact {
    *  alerts and the rendered sections — everything except the footer. NOT the
    *  full prompt length; `renderedPrompt` adds the footer on top. */
   renderedChars: number;
+  /** v3.9.1: what the PREVIOUS round's prompt_requests did in this render.
+   *  OUTPUT ONLY — no compile or decision path may read it as control state. */
+  promptRequestEffects?: PromptRequestEffect[];
 }
 
 export interface LoopCompileResponse {
@@ -1004,7 +1150,7 @@ export type LoopTerminalSink = (event: LoopTerminalEvent) => Promise<void> | voi
 export interface VerificationFlag {
   /** info | warn | error — determines how aggressively the compiler reacts. */
   severity: "info" | "warn" | "error";
-  /** Which SelfEvaluation field triggered this flag (e.g. "progress_estimate"). */
+  /** Which SelfEvaluation field triggered this flag (e.g. "success"). */
   field: string;
   /** Check name for debugging / audit (e.g. "outcome_success_contradiction"). */
   check: string;
@@ -1085,8 +1231,6 @@ export interface ExecutionReport {
   /** Claims about ACTIVE contract items. STRICT: an unknown/duplicate item id
    *  or an illegal outcome is a structural defect (contract_invalid). */
   contract_item_claims?: ContractItemClaim[];
-  /** The agent's own progress estimate (0.0–1.0). Informational. */
-  progress_estimate?: number;
 }
 
 export function makeExecutionReport(
@@ -1097,7 +1241,6 @@ export function makeExecutionReport(
     tests_reported: null,
     criterion_claims: [],
     contract_item_claims: [],
-    progress_estimate: 0.0,
     ...overrides,
   };
 }
@@ -1193,25 +1336,47 @@ export type ObservationStatus =
  *  record of what the machine saw; they are persisted with the round and are
  *  the only input that can create a `verified` fact. */
 export interface MachineObservationBase {
-  schemaVersion: 1;
+  /** v3.9.1: Git observations are schema 2 (complete boundary), command and
+   *  custom observations remain schema 1. The persisted parser validates the
+   *  version per kind; an unsupported pair is a hard break. */
+  schemaVersion: 1 | 2;
   providerId: string;
   kind: "git" | "command" | "custom";
   phase: "before" | "after";
   startedAt: number;
   finishedAt: number;
   status: ObservationStatus;
-  /** Files this observation reports (git: changed paths; command: resolved
-   *  entrypoint files). */
+  /** Observation-local file list. NEVER the round change set:
+   *  - git: the dirty display list at this boundary; the complete boundary is
+   *    `data.fingerprints` and the round delta is derived from before/after;
+   *  - command: always empty; entrypoints live in `data.entrypointFiles`;
+   *  - custom: provider-defined display metadata. */
   files: string[];
 }
 
+/** v3.9.1: the Git observation's data schema. Version 1 was the
+ *  dirty-files-only shape; version 2 is the complete workspace boundary. */
+export const GIT_OBSERVATION_SCHEMA_VERSION = 2 as const;
+
 export interface GitObservationData {
-  tracked: string[];
-  staged: string[];
-  untracked: string[];
-  /** path -> "<mode>:<sha256>" (or the literal "missing"). */
+  /** Paths dirty relative to HEAD at this boundary. Informational only; the
+   *  round's change set is derived from `fingerprints`, never from this list. */
+  dirty: string[];
+  /** Every tracked path plus every non-ignored untracked path at this
+   *  boundary. Value: a content/type fingerprint.
+   *  - regular file: `<mode>:<sha256>`
+   *  - symlink: `link:<sha256(target text)>`
+   *  - gitlink (submodule): `gitlink:<index commit sha>`
+   *  - other directory: `dir:<mode>`
+   *  - absent: `missing`
+   *  - unreadable: `unreadable:<mode>`
+   *  The delta is the union-key comparison of the before/after maps. */
   fingerprints: Record<string, string>;
   head?: string;
+  /** Explicit coverage statement. Gitignored paths and submodule contents are
+   *  NOT enumerated; the filesystem entrypoint-trust baseline independently
+   *  covers entrypoints. */
+  coverage: "tracked_and_non_ignored_untracked";
 }
 
 export interface GitObservation extends MachineObservationBase {

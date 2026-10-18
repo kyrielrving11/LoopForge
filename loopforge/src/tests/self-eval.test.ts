@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   buildSelfEvaluation,
+  normalizeSelfEvaluation,
   parseExecutionReport,
   parseRoundContract,
   effectiveOutcome,
@@ -22,12 +23,11 @@ describe("parseExecutionReport", () => {
       files_changed: ["a.ts", "b.ts"],
       tests_reported: { passed: 8, failed: 1, skipped: 2 },
       criterion_claims: criterionClaims(["reentrancy fixed"], ["access control"]),
-      progress_estimate: 0.5,
     });
     assert.ok(result);
     assert.deepEqual(result!.files_changed, ["a.ts", "b.ts"]);
     assert.equal(result!.tests_reported!.passed, 8);
-    assert.equal(result!.progress_estimate, 0.5);
+    assert.equal("progress_estimate" in result!, false);
   });
 
   it("returns undefined for null input", () => {
@@ -38,11 +38,9 @@ describe("parseExecutionReport", () => {
     assert.equal(parseExecutionReport(undefined), undefined);
   });
 
-  it("clamps progress_estimate to [0, 1]", () => {
-    const high = parseExecutionReport({ progress_estimate: 1.5 });
-    assert.equal(high!.progress_estimate, 1);
-    const low = parseExecutionReport({ progress_estimate: -0.5 });
-    assert.equal(low!.progress_estimate, 0);
+  it("ignores the removed progress_estimate field", () => {
+    const result = parseExecutionReport({ progress_estimate: 1.5 });
+    assert.equal("progress_estimate" in result!, false);
   });
 
   it("defaults missing tests_reported to null", () => {
@@ -76,7 +74,6 @@ describe("buildSelfEvaluation", () => {
         files_changed: ["token.sol"],
         tests_reported: { passed: 10, failed: 0, skipped: 0 },
         criterion_claims: criterionClaims(["no reentrancy"], []),
-        progress_estimate: 0.3,
       },
       subgoal_updates: [{ id: "sg-aabbccdd", status: "done", note: "ship it" }],
     };
@@ -86,7 +83,7 @@ describe("buildSelfEvaluation", () => {
     assert.deepEqual(result.discovered_constraints, ["use SafeERC20"]);
     assert.deepEqual(result.emerged_subtasks, ["audit timelock"]);
     assert.ok(result.execution_report);
-    assert.equal(result.execution_report!.progress_estimate, 0.3);
+    assert.equal("progress_estimate" in result.execution_report!, false);
     assert.deepEqual(result.subgoal_updates, [{ id: "sg-aabbccdd", status: "done", note: "ship it" }]);
   });
 
@@ -306,13 +303,18 @@ describe("v3.3 — round_contract parsing", () => {
     assert.equal(parsed?.work_item?.length, 200, "strings capped at 200");
   });
 
-  it("parseRoundContract: absent or non-object → undefined; empty object survives", () => {
+  it("parseRoundContract: absent or non-object → undefined; empty object is diagnosed and dropped", () => {
     assert.equal(parseRoundContract(undefined), undefined);
     assert.equal(parseRoundContract("not an object"), undefined);
     assert.equal(parseRoundContract(42), undefined);
-    const empty = parseRoundContract({});
-    assert.ok(empty, "a declared (empty) contract survives — the strict declaration boundary catches it");
-    assert.deepEqual(empty?.items, []);
+    const diagnostics: Array<{ path: string; code: string; handling: string }> = [];
+    const empty = parseRoundContract({}, {
+      push: (path, code, handling) => { diagnostics.push({ path, code, handling }); },
+    });
+    assert.equal(empty, undefined);
+    assert.ok(diagnostics.some((entry) =>
+      entry.path === "round_contract" && entry.handling === "dropped"),
+      "an empty contract is an attempted field that did not survive");
   });
 
   it("buildSelfEvaluation carries round_contract through and defaults absent", () => {
@@ -538,5 +540,95 @@ describe("validateContractShape", () => {
 
   it("stays silent when neither field is present", () => {
     assert.deepEqual(check({}), []);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v3.9.1 — normalization diagnostics
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("v3.9.1 — normalization diagnostics", () => {
+  const base = {
+    success: true,
+    output_summary: "done",
+    constraint_violations: [],
+    should_continue: false,
+  };
+
+  it("diagnoses and drops unknown/retired fields", () => {
+    const result = normalizeSelfEvaluation({
+      ...base,
+      progress_estimate: 0.5,
+      bogus_field: "x",
+    });
+    assert.equal("progress_estimate" in result.evaluation, false);
+    assert.equal("bogus_field" in result.evaluation, false);
+    const paths = result.diagnostics.map((item) => item.path);
+    assert.deepEqual(paths, ["bogus_field", "progress_estimate"],
+      "unknown keys are sorted and deterministic");
+    for (const diagnostic of result.diagnostics) {
+      assert.equal(diagnostic.code, "unknown_field");
+      assert.equal(diagnostic.handling, "dropped");
+    }
+    assert.ok(result.diagnostics.find((item) => item.path === "progress_estimate")
+      ?.detail.includes("removed in 3.9.0"));
+    assert.ok(!result.submittedFields.includes("progress_estimate"));
+  });
+
+  it("diagnoses wrong types, caps, truncation and invalid enums", () => {
+    const result = normalizeSelfEvaluation({
+      ...base,
+      discovered_constraints: "not an array",
+      emerged_subtasks: [1, "ok"],
+      retracted_constraints: Array.from({ length: 55 }, (_, index) => `c${index}`),
+      wrong_assumptions: ["x".repeat(600)],
+      outcome: "maybe",
+      execution_report: {
+        files_changed: "not an array",
+        tests_reported: { passed: "many", failed: -1 },
+        unknown_report_key: true,
+      },
+      worker_results: [
+        { agentId: "w1", subTask: "s", resultSummary: "r", outcome: "success" },
+        { agentId: "w2" },
+      ],
+      prompt_requests: { emphasize: ["a", "b", "c", "d", "e", "f"], odd: 1 },
+    });
+    const byPath = new Map(result.diagnostics.map((item) => [item.path, item]));
+    assert.equal(byPath.get("discovered_constraints")?.code, "not_array");
+    assert.equal(byPath.get("emerged_subtasks")?.code, "invalid_entry");
+    assert.equal(byPath.get("retracted_constraints")?.code, "too_many");
+    assert.equal(byPath.get("wrong_assumptions")?.code, "truncated");
+    assert.equal(byPath.get("outcome")?.code, "invalid_enum");
+    assert.equal(byPath.get("execution_report.files_changed")?.code, "not_array");
+    assert.equal(byPath.get("execution_report.tests_reported")?.code, "invalid_value");
+    assert.equal(byPath.get("execution_report.unknown_report_key")?.code, "unknown_field");
+    assert.equal(byPath.get("worker_results")?.code, "invalid_entry");
+    assert.equal(byPath.get("prompt_requests.emphasize")?.code, "too_many");
+    assert.equal(byPath.get("prompt_requests.odd")?.code, "unknown_field");
+  });
+
+  it("keeps a valid payload diagnostic-free and deterministic", () => {
+    const raw = {
+      ...base,
+      discovered_constraints: ["no prod"],
+      execution_report: {
+        files_changed: ["src/a.ts"],
+        tests_reported: { passed: 1, failed: 0, skipped: 0 },
+      },
+    };
+    const a = normalizeSelfEvaluation(raw);
+    const b = normalizeSelfEvaluation(raw);
+    assert.deepEqual(a.diagnostics, []);
+    assert.deepEqual(a.submittedFields, b.submittedFields);
+    assert.deepEqual(a.evaluation, b.evaluation);
+    assert.ok(a.submittedFields.includes("execution_report.files_changed"));
+  });
+
+  it("diagnoses a malformed execution_report object", () => {
+    const result = normalizeSelfEvaluation({ ...base, execution_report: "nope" });
+    assert.equal(result.diagnostics[0]?.path, "execution_report");
+    assert.equal(result.diagnostics[0]?.code, "invalid_entry");
+    assert.equal(result.evaluation.execution_report, undefined);
   });
 });

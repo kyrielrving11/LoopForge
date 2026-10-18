@@ -119,8 +119,8 @@ export class LoopForgeEngine {
                 skill_used: signal.skill_used ?? "",
                 loop_id: signal.loop_id,
                 loop_lineage: signal.loop_lineage ?? {},
-                // Persist execution_report so the enforcement gate (R4/R5) can
-                // read progress_estimate from vault entries across rounds.
+                // Persist execution_report so committed claims remain available
+                // to verification and the canonical state.
                 execution_report: signal.execution_report ?? null,
                 discovered_constraints: signal.discovered_constraints ?? [],
                 emerged_subtasks: signal.emerged_subtasks ?? [],
@@ -327,6 +327,17 @@ export class LoopForgeEngine {
             }
         }
         if (committed) {
+            // v3.9.1: the merged entry carries the SAME transaction snapshot the
+            // feedback entry persisted. decodeMergedRound reads that one envelope
+            // (never a second raw-field reconstruction), so the compile path and
+            // the durable read model see one evaluation/history interpretation.
+            // In-memory only — disk lineage entries are re-hydrated from feedback.
+            const transaction = isRecord(fb.loop_lineage)
+                ? fb.loop_lineage.round_transaction
+                : undefined;
+            if (isRecord(transaction)) {
+                lineage.round_transaction = transaction;
+            }
             // v3.5.1: compile-side display readers (Round Stats rejected attempts,
             // the Machine (git) dashboard row) never see raw :feedback entries —
             // only this merged view — so the machine-observed data they need is
@@ -346,7 +357,7 @@ export class LoopForgeEngine {
                 lineage.contract_binding = committed.contractBinding;
             }
             // v3.8: the factual observation collections are stamped (the round
-            // delta is derived from them by the read model — transaction schema 2
+            // delta is derived from them by the read model — transaction schema 3
             // persists no pre-computed delta).
             if (committed.beforeEvidence.length > 0) {
                 lineage.before_evidence = committed.beforeEvidence;
@@ -676,13 +687,9 @@ export class LoopForgeEngine {
             const result = isRecord(transaction) ? transaction.result : null;
             return !(isRecord(result) && result.action === "backtrack");
         });
-        // Multi-agent: Merge sub-agent discovered constraints into the main constraint flow
-        const subDiscovered = (selfEval.worker_results ?? [])
-            .flatMap((w) => w.discoveredConstraints ?? [])
-            .filter((c) => c.length > 0);
-        const mergedDiscovered = [
-            ...new Set([...(selfEval.discovered_constraints ?? []), ...subDiscovered]),
-        ];
+        // v3.9.1: worker_results is a REPORT. Its discoveredConstraints never
+        // enters the global constraint stream by itself; the main agent promotes
+        // a worker finding explicitly through top-level discovered_constraints.
         const signal = {
             task_id: taskId,
             task_type: task.slice(0, 80),
@@ -693,7 +700,7 @@ export class LoopForgeEngine {
             loop_id: loopId,
             round,
             // P0–P2: Evolution fields
-            discovered_constraints: mergedDiscovered,
+            discovered_constraints: selfEval.discovered_constraints ?? [],
             objective_refinement: selfEval.objective_refinement ?? "",
             emerged_subtasks: selfEval.emerged_subtasks ?? [],
             // v3.7.1: explicit transitions persist with the committed evaluation;
@@ -746,9 +753,8 @@ export class LoopForgeEngine {
         if (this.state.success_trend.length > 20) {
             this.state.success_trend = this.state.success_trend.slice(-20);
         }
-        // v2.5: Old binary-success circuit breaker removed — stalled loops
-        // are now detected by the enforcement gate (R4/R5) using
-        // progress_estimate gradients rather than success=true/false count.
+        // v2.5: Old binary-success circuit breaker removed. The enforcement
+        // gate now uses machine-observed Git motion for stall decisions.
         logEvent("round_complete", {
             loopId,
             round,

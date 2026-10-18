@@ -18,6 +18,7 @@
  * changes run order or verdict aggregation. Round Contract checks are further
  * framed as declaration / execution / closure stages in their doc comments.
  */
+import { afterObservations, gitDeltaState } from "./evidence-provider.js";
 import { isPassedAfterObservation } from "./evidence-provider.js";
 import { getPolicy } from "./policy.js";
 import { makeVerificationFlag, makeVerificationResult } from "./protocol.js";
@@ -178,32 +179,34 @@ export function collectOutOfScopeFiles(files, scope) {
  *  The drift arm does not depend on git: when the baseline exists the fact is
  *  observable, and failing open on an observable fact is not fail-open, it is
  *  a hole. */
-function commandTampered(observation, gitObservation, drifted) {
+function commandTampered(observation, git, drifted) {
     const entrypoints = observation.kind === "command"
         ? observation.data.entrypointFiles ?? []
         : [];
-    const gitFiles = gitObservation ? new Set(gitObservation.files) : null;
+    // The absolute entrypoint-trust arm always runs; the Git arm runs only when
+    // the change set is observed. An unknown boundary is not an empty one.
+    const gitFiles = git.state === "observed" ? git.changedFiles : null;
     const entrypointModified = entrypoints.some((file) => drifted.has(file) || (gitFiles?.has(file) ?? false));
-    const testFilesModified = gitObservation
-        ? gitObservation.files.some((file) => isTestFile(file))
+    const testFilesModified = git.state === "observed"
+        ? [...git.changedFiles].some((file) => isTestFile(file))
         : false;
     return { entrypointModified, testFilesModified };
 }
 /** v3.8: The single machine-backed predicate lives in evidence-provider.ts.
- *  This wrapper resolves the round's git observation once for a collection. */
-function passedAfterCommand(observations) {
-    const git = observations.find((item) => item.providerId === "git") ?? null;
-    const changed = git ? new Set(git.files) : null;
-    return observations.find((item) => isPassedAfterObservation(item, changed)) ?? null;
+ *  This wrapper resolves the round's Git state once for a collection. */
+function passedAfterCommand(deltas) {
+    const git = gitDeltaState(deltas);
+    return afterObservations(deltas)
+        .find((observation) => isPassedAfterObservation(observation, git)) ?? null;
 }
 /** v3.2: Derive the machine-verification status of a round. The verification
  *  capability is modeled explicitly (verified / unavailable / absent) instead
  *  of letting evidence-dependent checks silently disappear when snapshots are
  *  missing — the fix for the "weakest when it matters most" gap. */
-export function deriveEvidenceStatus(selfEval, evidenceSnapshots) {
-    const gitSnap = evidenceSnapshots.find((item) => item.providerId === "git") ?? null;
-    const gitObserved = gitSnap !== null && gitSnap.files.length > 0;
-    const command = passedAfterCommand(evidenceSnapshots);
+export function deriveEvidenceStatus(selfEval, evidenceDeltas) {
+    const git = gitDeltaState(evidenceDeltas);
+    const gitObserved = git.state === "observed";
+    const command = passedAfterCommand(evidenceDeltas);
     const commandVerified = command !== null;
     // testsMachineBacked: agent-reported tests_reported agree with a passed
     // command's parsed stdout (the same comparison checkCommandEvidenceIntegrity
@@ -217,21 +220,22 @@ export function deriveEvidenceStatus(selfEval, evidenceSnapshots) {
             parsed.failed === reported.failed &&
             parsed.skipped === reported.skipped;
     }
-    // reportedFilesMatch: agent-reported files_changed equals the git diff set.
-    let reportedFilesMatch = false;
-    if (gitSnap && selfEval.execution_report) {
+    // reportedFilesMatch: agent-reported files_changed equals the observed
+    // change set. Unknown is null, not false.
+    let reportedFilesMatch = null;
+    if (git.state === "observed" && selfEval.execution_report) {
         const reportedSet = [...(selfEval.execution_report.files_changed ?? [])].sort();
-        const actualSet = [...gitSnap.files].sort();
+        const actualSet = [...git.changedFiles].sort();
         reportedFilesMatch = reportedSet.length === actualSet.length &&
             reportedSet.every((file, index) => file === actualSet[index]);
     }
     // v3.3: git observation alone is no longer "verified" — the machine seeing
     // file changes is not the machine verifying success. Only a passed
     // after-phase command (observed by the runtime itself) upgrades a round.
-    // Any other snapshot presence is "unavailable": the machine saw activity
+    // Any other delta presence is "unavailable": the machine saw activity
     // (or nothing at all this round) but could not verify the success claim,
     // so R8 warns and trust drops (v3.6: merged success_unverified semantics).
-    const providerStatus = evidenceSnapshots.length === 0
+    const providerStatus = evidenceDeltas.length === 0
         ? "absent"
         : commandVerified
             ? "verified"
@@ -239,6 +243,7 @@ export function deriveEvidenceStatus(selfEval, evidenceSnapshots) {
     return {
         providerStatus,
         gitObserved,
+        gitChangeState: git.state,
         commandVerified,
         testsMachineBacked,
         reportedFilesMatch,
@@ -368,15 +373,13 @@ function checkRetroactiveClaims(selfEval, vaultEntries, currentRound) {
     // hid all but the first problem until the next round.
     return flags.length > 0 ? flags : null;
 }
-/** v2.12/v3.6/v3.7: success without machine backing — the single
+/** v2.12/v3.6/v3.7/v3.9.1: success without machine backing — the single
  *  "success evidence" semantic. Two arms, evaluated in order:
- *  1. Empty/missing-evidence arm (v3.7: absorbed the enforcement-only
- *     empty_success rule): success=true with NO execution_report at all, or
- *     with files_changed empty AND tests_reported null, is an error
- *     unconditionally — BEFORE the providerStatus early-exit, so a passed
- *     command never rescues it (execution_report stays mandatory), and
- *     no declared no_change_reason downgrades it ("no change" with literally
- *     no evidence recorded is still an unbacked claim).
+ *  1. Empty/missing-report arm: success=true with NO execution_report at all,
+ *     or with files_changed empty AND tests_reported null, is a WARN. It is a
+ *     reporting gap, not an acceptance gate: 3.9.1 does not reject a round
+ *     because an optional report field was not filled. The warn still keeps
+ *     success out of the success trajectory.
  *  2. Claims arm (v3.6): success=true but the runtime observed no machine
  *     evidence for it. The trigger is the runtime-derived providerStatus
  *     (verified / unavailable / absent) — "verified" requires an UNTAMPERED
@@ -394,19 +397,23 @@ function checkRetroactiveClaims(selfEval, vaultEntries, currentRound) {
 function checkSuccessWithoutVerifiedEvidence(selfEval, status) {
     if (!effectiveSuccess(selfEval))
         return null;
-    // v3.7: empty/missing-evidence arm (ex-R3 empty_success posture).
+    // v3.9.1: report-coverage arm. A missing/empty execution_report is a
+    // REPORTING GAP, never an acceptance gate: 3.9.1 does not reject a round
+    // because an optional field was not filled. The machine-evidence arm below
+    // remains the verification fact, and the warn still keeps success out of
+    // the success trajectory (shouldPushSuccess keys on this check).
     const ev = selfEval.execution_report;
     if (!ev || ((ev.files_changed ?? []).length === 0 && ev.tests_reported === null)) {
         return makeVerificationFlag({
-            severity: "error",
+            severity: "warn",
             field: "success",
             check: CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE,
             detail: ev
                 ? "Agent claims success but execution_report shows no files changed " +
-                    "and no tests were run. There is no verifiable evidence of work."
-                : "Agent claims success but provided no execution_report. " +
-                    "Every successful round MUST include execution_report with " +
-                    "files_changed, tests_reported, and progress_estimate.",
+                    "and no tests were run. This is a reporting gap, not machine evidence."
+                : "Agent claims success but provided no execution_report. The report is " +
+                    "expected but missing; this is a reporting gap, not by itself a " +
+                    "rejection. No machine evidence backs the claim.",
         });
     }
     // Claims arm (v3.6).
@@ -536,16 +543,15 @@ function checkRetractFreshConstraint(selfEval, prevSelfEval, currentRound) {
 }
 /** v1.18: Cross-validate agent-reported files_changed against git evidence
  *  from the configured evidence providers (MachineObservation array). */
-function checkEvidenceIntegrity(selfEval, evidenceSnapshots) {
+function checkEvidenceIntegrity(selfEval, evidenceDeltas) {
     if (!selfEval.execution_report)
         return null;
-    if (evidenceSnapshots.length === 0)
-        return null;
-    const gitSnap = evidenceSnapshots.find((s) => s.providerId === "git");
-    if (!gitSnap)
+    const git = gitDeltaState(evidenceDeltas);
+    // An unknown change set cannot contradict the agent's report.
+    if (git.state !== "observed")
         return null;
     const reported = [...(selfEval.execution_report.files_changed ?? [])].sort();
-    const actual = [...gitSnap.files].sort();
+    const actual = [...git.changedFiles].sort();
     if (reported.length === 0 && actual.length === 0)
         return null;
     if (reported.length === 0 && actual.length > 0) {
@@ -575,10 +581,10 @@ function checkEvidenceIntegrity(selfEval, evidenceSnapshots) {
 }
 /** A required, explicitly configured verification command is authoritative
  * when the Agent claims success. Optional commands remain observational. */
-function checkRequiredCommandEvidence(selfEval, evidenceSnapshots) {
+function checkRequiredCommandEvidence(selfEval, evidenceDeltas) {
     if (!effectiveSuccess(selfEval))
         return null;
-    for (const snapshot of evidenceSnapshots) {
+    for (const snapshot of afterObservations(evidenceDeltas)) {
         if (snapshot.kind !== "command")
             continue;
         if (snapshot.phase !== "after" || snapshot.data.required !== true)
@@ -679,11 +685,11 @@ export function parseTestOutput(stdout) {
  *
  *  Non-command evidence providers are skipped (no structural cross-check is
  *  defined for them yet). */
-function checkCommandEvidenceIntegrity(selfEval, evidenceSnapshots) {
+function checkCommandEvidenceIntegrity(selfEval, evidenceDeltas) {
     const reported = selfEval.execution_report?.tests_reported;
     if (!reported)
         return null;
-    for (const snapshot of evidenceSnapshots) {
+    for (const snapshot of afterObservations(evidenceDeltas)) {
         if (snapshot.kind !== "command")
             continue;
         if (snapshot.status !== "passed")
@@ -723,13 +729,14 @@ function checkCommandEvidenceIntegrity(selfEval, evidenceSnapshots) {
  *  the agent just rewrote). Test-file changes are normal dev activity (warn:
  *  confirm the tests still verify the task claims). Fail-open when the git
  *  snapshot is missing or the command has no resolvable entrypoint. */
-function checkVerificationDomainIntegrity(evidenceSnapshots, drift) {
-    const git = evidenceSnapshots.find((snapshot) => snapshot.providerId === "git") ?? null;
+function checkVerificationDomainIntegrity(evidenceDeltas, drift) {
+    const git = gitDeltaState(evidenceDeltas);
     // v3.8.3: no git observation is no longer automatically silent — the
     // trusted baseline answers "did the entrypoint change this round?" without
     // git, so the drift arm still runs below.
-    if (!git && drift.length === 0)
+    if (git.state === "not_applicable" && drift.length === 0)
         return null;
+    const observations = afterObservations(evidenceDeltas);
     const drifted = new Set(drift.map((entry) => entry.file));
     // v3.8.1: EVERY after-phase command is scanned for a tampered entrypoint
     // before the test-file warn may answer for one of them. `testFilesModified`
@@ -738,7 +745,7 @@ function checkVerificationDomainIntegrity(evidenceSnapshots, drift) {
     // first command in array order meant a rewritten verification entrypoint
     // produced no error flag at all, and the enforcement row that reacts to it
     // never fired. The verdict depended on observation order.
-    for (const snapshot of evidenceSnapshots) {
+    for (const snapshot of observations) {
         if (!isRecord(snapshot.data) || snapshot.kind !== "command")
             continue;
         if (snapshot.phase !== "after")
@@ -766,7 +773,7 @@ function checkVerificationDomainIntegrity(evidenceSnapshots, drift) {
         });
     }
     // Only when NO entrypoint was tampered does the test-file warn stand in.
-    for (const snapshot of evidenceSnapshots) {
+    for (const snapshot of observations) {
         if (!isRecord(snapshot.data) || snapshot.kind !== "command")
             continue;
         if (snapshot.phase !== "after")
@@ -798,13 +805,14 @@ function checkVerificationDomainIntegrity(evidenceSnapshots, drift) {
  *     otherwise be falsely terminated — so overlap is guidance, not a
  *     verdict. (The old error tier for >= 3 overlapping files was removed
  *     for exactly this reason: it fired on honest redos.) */
-function checkBacktrackWorkspaceRestore(selfEval, backtrackSkippedFiles, backtrackSkippedFingerprints = {}, evidenceSnapshots = []) {
+function checkBacktrackWorkspaceRestore(selfEval, backtrackSkippedFiles, backtrackSkippedFingerprints = {}, evidenceDeltas = []) {
     // Machine arm — untouched-since-rollback proof, independent of claims.
     const failedEntries = Object.entries(backtrackSkippedFingerprints);
     if (failedEntries.length > 0) {
-        const git = evidenceSnapshots.find((snapshot) => snapshot.kind === "git" && isRecord(snapshot.data.fingerprints));
-        const currentFingerprints = git && git.kind === "git"
-            ? git.data.fingerprints
+        const afterGit = evidenceDeltas.find((delta) => delta.kind === "git")?.after;
+        const currentFingerprints = afterGit && afterGit.kind === "git" &&
+            isRecord(afterGit.data.fingerprints)
+            ? afterGit.data.fingerprints
             : null;
         if (currentFingerprints) {
             const untouched = failedEntries
@@ -839,28 +847,73 @@ function checkBacktrackWorkspaceRestore(selfEval, backtrackSkippedFiles, backtra
             `${overlap.join(", ")}. Verify the workspace was restored.`,
     });
 }
-/** v2.12: After a backtrack, the working tree must return to the restore
- *  point's git HEAD. Compares the first 12 characters (short hash), matching
- *  how git itself disambiguates. */
-function checkBacktrackGitHeadRestore(evidenceSnapshots, backtrackTargetGitHead) {
+/** v2.12: After a backtrack, the workspace must return to the restore point:
+ *  the same git HEAD that round committed, carrying no dirty file the restore
+ *  point did not already have. Compares HEAD's first 12 characters (short
+ *  hash), matching how git itself disambiguates.
+ *
+ *  The dirty-set comparison is against the restore point's OWN baseline, not
+ *  an empty tree: unrelated work in progress in the same workspace is no
+ *  evidence of a failed restore, while a file the failed rounds left behind
+ *  is — it is dirty now and was not dirty then. An absent baseline means the
+ *  restore point's dirt was never observed, so only HEAD can be judged.
+ *
+ *  A redo prepared before the agent restores the workspace has a stale before
+ *  snapshot, so its first submission is a recovery checkpoint; once the
+ *  restore is proven, later work may move HEAD freely. */
+function checkBacktrackGitHeadRestore(evidenceDeltas, backtrackTargetGitHead, beforeEvidence = [],
+/** The restore point's own dirty files — undefined when never observed. */
+backtrackTargetDirty) {
     if (!backtrackTargetGitHead)
         return null;
-    const git = evidenceSnapshots.find((snapshot) => snapshot.providerId === "git" && isRecord(snapshot.data) &&
-        typeof snapshot.data.head === "string");
-    if (!git)
+    const short = (hash) => hash.slice(0, 12);
+    const readGit = (observations) => {
+        const snapshot = observations.find((item) => item.providerId === "git" && item.status === "observed" && isRecord(item.data) &&
+            typeof item.data.head === "string");
+        if (!snapshot || !isRecord(snapshot.data))
+            return null;
+        const data = snapshot.data;
+        // v3.9.1: the workspace's dirty set is one explicit list. "Tracked /
+        // staged / untracked" were dirty-since-HEAD categories, not the complete
+        // boundary, and are gone.
+        const dirty = Array.isArray(data.dirty)
+            ? data.dirty.filter((file) => typeof file === "string")
+            : [];
+        return { head: data.head, dirty };
+    };
+    const foreignDirty = (dirty) => Array.isArray(backtrackTargetDirty)
+        ? dirty.filter((file) => !backtrackTargetDirty.includes(file))
+        : [];
+    const restored = (git) => git !== null && git.head.length > 0 &&
+        short(git.head) === short(backtrackTargetGitHead) &&
+        foreignDirty(git.dirty).length === 0;
+    // When restoration happened before the redo was prepared, the before
+    // snapshot already proves it. The redo may then commit new work.
+    if (restored(readGit(beforeEvidence)))
+        return null;
+    const afterGit = readGit(afterObservations(evidenceDeltas));
+    if (!afterGit)
         return null; // git unavailable → cannot verify → skip (fail-open)
-    const currentHead = git.data.head;
-    if (currentHead.length === 0)
+    if (restored(afterGit))
         return null;
-    if (currentHead.slice(0, 12) === backtrackTargetGitHead.slice(0, 12))
-        return null;
+    // Normal lifecycle: prepare captured the pre-restore workspace. The first
+    // submission must prove restoration before a later submission can commit.
+    const headBack = afterGit.head.length > 0 &&
+        short(afterGit.head) === short(backtrackTargetGitHead);
+    const left = foreignDirty(afterGit.dirty);
     return makeVerificationFlag({
         severity: "error",
         field: "workspace",
         check: CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED,
-        detail: `Workspace HEAD (${currentHead.slice(0, 12)}) does not match the ` +
-            `backtrack restore commit (${backtrackTargetGitHead.slice(0, 12)}). ` +
-            `Restore the working tree before continuing.`,
+        detail: headBack
+            ? `Workspace HEAD is back at the backtrack restore commit ` +
+                `(${short(backtrackTargetGitHead)}) but these files were not there at ` +
+                `the restore point and are still changed: ${left.slice(0, 5).join(", ")}` +
+                `${left.length > 5 ? ` (+${left.length - 5} more)` : ""}. Revert them ` +
+                `before redoing the work.`
+            : `Workspace HEAD (${short(afterGit.head)}) does not match the backtrack ` +
+                `restore commit (${short(backtrackTargetGitHead)}). Submit one recovery ` +
+                `evaluation at the restore point before redoing work.`,
     });
 }
 // ═══════════════════════════════════════════════════════════════════════════
@@ -880,22 +933,26 @@ function checkBacktrackGitHeadRestore(evidenceSnapshots, backtrackTargetGitHead)
  *  Git diff files are the machine-authoritative "what actually changed" set.
  *  Empty when there is nothing to compare: no active contract, no declared
  *  scope, or no git observation (cannot observe → fail open). */
-export function roundDriftFiles(activeContract, evidenceSnapshots) {
+export function roundDriftFiles(activeContract, evidenceDeltas) {
     if (!activeContract)
         return [];
     if (activeContract.scope.length === 0)
         return [];
-    const git = evidenceSnapshots.find((snapshot) => snapshot.providerId === "git");
-    if (!git)
-        return []; // git unavailable → cannot observe → fail open
-    return collectOutOfScopeFiles(git.files, activeContract.scope);
+    const git = gitDeltaState(evidenceDeltas);
+    if (git.state === "not_applicable")
+        return [];
+    // An unobservable change set is not "no drift". No verdict; contract-item
+    // insufficiency and evidenceIncomplete carry the gap.
+    if (git.state === "unknown")
+        return null;
+    return collectOutOfScopeFiles([...git.changedFiles], activeContract.scope);
 }
 /** The round changed files outside the ACTIVE contract's declared scope.
  *  Silent when no active contract exists, it declares no scope, or nothing
  *  drifted out of it. */
-function checkRoundScopeDrift(activeContract, evidenceSnapshots) {
-    const outOfScope = roundDriftFiles(activeContract, evidenceSnapshots);
-    if (outOfScope.length === 0)
+function checkRoundScopeDrift(activeContract, evidenceDeltas) {
+    const outOfScope = roundDriftFiles(activeContract, evidenceDeltas);
+    if (outOfScope === null || outOfScope.length === 0)
         return null;
     return makeVerificationFlag({
         severity: "warn",
@@ -963,9 +1020,9 @@ function checkContractPremature(activeContract, statuses, selfEval) {
  *                             entries feed the ACTIVE-contract derivation).
  * @param prevSelfEval         The agent's self-evaluation from the previous round
  *                             (null for round 1).
- * @param evidenceSnapshots    v1.18: Evidence snapshots from configured providers.
- *                             Used by checkEvidenceIntegrity for multi-provider
- *                             cross-validation. Defaults to empty array. */
+ * @param evidenceDeltas       The derived per-provider before→after deltas.
+ *                             Evidence checks read `after`; file checks read
+ *                             `changedFiles`. Defaults to an empty array. */
 /** v3.7.1: Opt-in round blocking for the gate layer. For every gate id the
  *  round cites (gate_ids), the gate_opened record must exist, must be a
  *  USER gate, and must have an approved gate_decision. Error flags list
@@ -1025,7 +1082,7 @@ function checkUserGateUnresolved(selfEval, gateEntries) {
             `loopforge_gate_resolve before claiming the action is done.`,
     });
 }
-export function verifySelfEvaluation(selfEval, currentRound, vaultEntries, prevSelfEval = null, evidenceSnapshots = [],
+export function verifySelfEvaluation(selfEval, currentRound, vaultEntries, prevSelfEval = null, evidenceDeltas = [],
 /** v2.13: Files from skipped backtrack rounds. If the agent's
  *  files_changed overlaps significantly with these, the workspace
  *  was not properly restored before working. */
@@ -1043,7 +1100,9 @@ gateEntries = [],
 /** v3.8.3: entrypoint files that no longer match the trusted round-start
  *  baseline. Derived by the caller (it needs the in-flight trust map and
  *  filesystem access); this function stays a pure function of its inputs. */
-entrypointDrift = []) {
+entrypointDrift = [], beforeEvidence = [],
+/** v3.9: the restore point's own dirty files (undefined = never observed). */
+backtrackTargetDirty) {
     const flags = [];
     // Collect violations from all previous vault entries for duplicate-discovery
     // and other checks that need deeper history.
@@ -1066,16 +1125,16 @@ entrypointDrift = []) {
         rounds: committedRounds,
         currentRound,
         currentReport: selfEval.execution_report ?? null,
-        currentObservations: evidenceSnapshots,
+        currentDeltas: evidenceDeltas,
         commands: getPolicy().evidence.commands ?? [],
     });
     // v2.12: Derived claim provenance — which reported criteria completions
     // are backed by machine evidence (pure derivation, not persisted).
-    const claimView = deriveClaimView(selfEval, evidenceSnapshots);
+    const claimView = deriveClaimView(selfEval, evidenceDeltas);
     // v3.2: Runtime machine-verification status (git observed / command passed /
     // absent). v3.6: feeds the merged R8 check (providerStatus lens) that
     // never self-skips.
-    const evidenceStatus = deriveEvidenceStatus(selfEval, evidenceSnapshots);
+    const evidenceStatus = deriveEvidenceStatus(selfEval, evidenceDeltas);
     // Run all checks
     // v3.3.1: a check may return several flags (checkRetroactiveClaims raises
     // one per offending claim) — the previous single-flag contract truncated
@@ -1096,22 +1155,22 @@ entrypointDrift = []) {
         () => checkRecurringViolation(selfEval, prevSelfEval, vaultEntries, currentRound),
         () => checkRetractFreshConstraint(selfEval, prevSelfEval, currentRound),
         // v1.18: Cross-validate agent-reported files_changed against git evidence
-        () => checkEvidenceIntegrity(selfEval, evidenceSnapshots),
-        () => checkRequiredCommandEvidence(selfEval, evidenceSnapshots),
+        () => checkEvidenceIntegrity(selfEval, evidenceDeltas),
+        () => checkRequiredCommandEvidence(selfEval, evidenceDeltas),
         // v2.0: Cross-validate agent-reported tests_reported against command output
-        () => checkCommandEvidenceIntegrity(selfEval, evidenceSnapshots),
+        () => checkCommandEvidenceIntegrity(selfEval, evidenceDeltas),
         // v3.3: Verification domain integrity — command entrypoint / test files
         // changed in the same round the command ran
-        () => checkVerificationDomainIntegrity(evidenceSnapshots, entrypointDrift),
+        () => checkVerificationDomainIntegrity(evidenceDeltas, entrypointDrift),
         // v2.13: Post-backtrack workspace restore check
-        () => checkBacktrackWorkspaceRestore(selfEval, backtrackSkippedFiles, backtrackSkippedFingerprints, evidenceSnapshots),
+        () => checkBacktrackWorkspaceRestore(selfEval, backtrackSkippedFiles, backtrackSkippedFingerprints, evidenceDeltas),
         // v2.12: Post-backtrack git HEAD restore check
-        () => checkBacktrackGitHeadRestore(evidenceSnapshots, backtrackTargetGitHead),
+        () => checkBacktrackGitHeadRestore(evidenceDeltas, backtrackTargetGitHead, beforeEvidence, backtrackTargetDirty),
         // v3.8: Round Contract checks over the derived item model. Declaration
         // quality is enforced structurally (contract_invalid) before the round
         // advances, so the gate only reports execution state: scope drift,
         // claimed-but-unverified items, and an ignored replacement proposal.
-        () => checkRoundScopeDrift(activeContract, evidenceSnapshots),
+        () => checkRoundScopeDrift(activeContract, evidenceDeltas),
         () => checkContractItemsUnverified(contractStatuses),
         () => checkContractPremature(activeContract, contractStatuses, selfEval),
         // v3.7.1: opt-in gate-layer blocking (skipped when disabled)
@@ -1144,7 +1203,7 @@ entrypointDrift = []) {
     // and the old self-reported `>= 0.95` guard said it with the agent's own
     // number.
     const machineBackedSuccess = effectiveSuccess(selfEval) &&
-        deriveEvidenceStatus(selfEval, evidenceSnapshots).providerStatus === "verified";
+        evidenceStatus.providerStatus === "verified";
     return makeVerificationResult({ verdict, flags, machineBackedSuccess });
 }
 //# sourceMappingURL=verification-gate.js.map

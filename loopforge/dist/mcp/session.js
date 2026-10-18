@@ -24,6 +24,7 @@ import { buildAudit } from "../audit.js";
 import { buildExplain } from "../explain.js";
 import { CHECK_CONTRACT_ITEMS_UNVERIFIED } from "../verification-gate.js";
 import { readOnlyRounds } from "../committed-round.js";
+import { deriveCommittedSubmissionView } from "../submission-receipt.js";
 import { getPolicy, validateLoopId } from "../policy.js";
 import { isRecord } from "../token-utils.js";
 import { ReplayBackend } from "../replay.js";
@@ -272,7 +273,33 @@ export class SessionManager {
             level: initialLevel,
             roundSuccess: false,
             warnings: prepared?.warnings ?? [],
+            submission_guidance: this.lifecycle.guidanceFor(session),
         };
+    }
+    /** v3.9.1: current-fact submission guidance for the session's held round.
+     *  Read-only projection; null when the session is unknown. */
+    getSubmissionGuidance(sessionId) {
+        const session = this.sessions.get(sessionId);
+        return session ? this.lifecycle.guidanceFor(session) : null;
+    }
+    /** v3.9.1: the most recent committed round's receipt, rebuilt from the
+     *  transaction + shared read model. Rejected/terminated attempts are not in
+     *  history; their receipt exists only on their own response. */
+    getLastSubmissionReceipt(sessionId) {
+        const session = this.sessions.get(sessionId);
+        if (!session)
+            return null;
+        const prefix = `loop:${session.loopId}:r`;
+        const entries = [
+            ...queryLoopEntries(this.loopStore, session.loopId, { prefix }),
+            ...queryLoopEntries(this.loopStore, session.loopId, {
+                prefix,
+                feedbackOnly: true,
+            }),
+        ];
+        const views = readOnlyRounds(entries);
+        const latest = views[views.length - 1];
+        return latest ? deriveCommittedSubmissionView(latest, views) : null;
     }
     get(sessionId) {
         return this.sessions.get(sessionId);
@@ -882,7 +909,7 @@ export class SessionManager {
                 return this.leaseConflictResult(session.loopId, this.findSessionEntry(session.loopId));
             }
             try {
-                return await this.lifecycle.advance(sessionId, output, boundary.evaluation, roundId);
+                return await this.lifecycle.advance(sessionId, output, boundary.evaluation, roundId, boundary.diagnostics, boundary.submittedFields);
             }
             catch (error) {
                 if (error instanceof SessionLeaseConflictError) {
@@ -910,6 +937,12 @@ export class SessionManager {
         const replay = new ReplayBackend(this.loopStore);
         const timeline = replay.timeline(loopId);
         return timeline.length > 0 ? timeline : null;
+    }
+    /** v3.9.1: unsupported envelope versions for a loop, reported explicitly
+     *  rather than silently dropped from replay/audit. */
+    replayLegacyRounds(loopId) {
+        validateLoopId(loopId);
+        return new ReplayBackend(this.loopStore).legacyRounds(loopId);
     }
 }
 //# sourceMappingURL=session.js.map

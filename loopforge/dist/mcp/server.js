@@ -53,22 +53,25 @@ export const SERVER_INSTRUCTIONS = [
     "Use LoopForge directly for long-running work. Start by calling loopforge_status ",
     "with view=all to list loops, then loopforge_status for a matching session or ",
     "loopforge_start for a new one. ",
-    // v3.8.1: the report fields named here must exist. The old text asked for
-    // "remaining criteria" and "a concrete next action" — `success_criteria_remaining`
-    // and `next_action` were both deleted in v3.8, so the runtime was instructing
-    // every client to submit fields it would drop.
+    // v3.9.1: the guidance projection carries the current facts (real ids,
+    // usable commands, applicable fields); do not restate a second copy here.
     "Before each agent-process boundary, call loopforge_next with the roundId from ",
-    "the most recent response, one honest evaluation (success, output_summary, ",
-    "constraint_violations, should_continue) plus an execution_report carrying ",
-    "files_changed, tests_reported, criterion_claims and contract_item_claims. ",
+    "the most recent response and one honest evaluation: the four core fields ",
+    "(success, output_summary, constraint_violations, should_continue) plus only ",
+    "the optional fields whose event actually occurred. ",
+    "Each prepared response carries `submission_guidance`: active contract item ids ",
+    "and statuses, active sub-goal ids, usable after-capable commands, recovery ",
+    "facts, and the fields applicable at this submission point. Read it before ",
+    "composing the evaluation; use only ids it or the prompt rendered, never invent ",
+    "an id. Submission_guidance is a projection of current facts, not state. ",
+    "Each submission returns `submission_receipt`, which separates reports that were ",
+    "saved, derived state that actually changed, and machine verification results. ",
+    "A saved report is never a verified fact. ",
+    "`execution_report` is expected. `files_changed` is the net boundary change ",
+    "from round start (content or file type, including deletions), not merely the ",
+    "files left dirty by the last commit. An empty report is a reporting gap, not ",
+    "machine evidence. ",
     "Claims never verify themselves: only machine observations do. ",
-    // v3.8.3: the capability object is where the operator's command
-    // configuration becomes visible to the agent. Naming it here (rather than
-    // restating what it says) keeps one source for the fact.
-    "Each response carries `capability` (providers, enabled after-capable ",
-    "commands, contractVerificationAvailable) and its `warnings`. Read them ",
-    "before declaring contract items: with no ready command, items cannot be ",
-    "machine-verified and will not close. ",
     "Follow reject or backtrack prompts and retry loopforge_next. ",
     "Keep one LoopForge session across outer agent rounds. ",
     "Do not replace these MCP calls with shell or CLI wrappers.",

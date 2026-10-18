@@ -71,6 +71,9 @@ describe("FileLoopStore", () => {
       const snapshot = {
         ...prepareRoundTransaction(loopId, 1, [], artifact),
         phase: "committed" as const,
+        submittedFields: [
+          "success", "output_summary", "constraint_violations", "should_continue",
+        ],
       };
       store.appendEntry(entry(
         loopId,
@@ -100,6 +103,15 @@ describe("FileLoopStore", () => {
       assert.equal(round?.feedback?.success, true);
       assert.equal(round?.transaction?.phase, "committed");
       assert.equal(round?.promptArtifact?.renderedPrompt, "prompt");
+      // v3.9.1: the transaction lives ONCE, in the feedback entry. The round
+      // document no longer persists a second copy (or a third prompt copy).
+      const roundPath = allFiles(root).find(
+        (path) => /[\\/]rounds[\\/]1\.json$/.test(path),
+      );
+      assert.ok(roundPath, "round document exists");
+      const raw = JSON.parse(readFileSync(roundPath!, "utf8")) as Record<string, unknown>;
+      assert.ok(!("transaction" in raw), "no duplicate transaction copy");
+      assert.ok(!("promptArtifact" in raw), "no duplicate prompt artifact copy");
       assert.equal(allFiles(root).some((path) => path.endsWith(".md")), false);
     } finally {
       rmSync(root, { recursive: true, force: true });

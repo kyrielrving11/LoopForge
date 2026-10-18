@@ -101,16 +101,19 @@ describe("loopforge CLI", () => {
         loop_lineage: {
           round: 1,
           round_transaction: {
-            schema_version: 2,
+            schema_version: 3,
             round_id: "loop:inspect-me:round:1",
             snapshot: {
-              schemaVersion: 2,
+              schemaVersion: 3,
               roundId: "loop:inspect-me:round:1",
               loopId: "inspect-me",
               round: 1,
               attempt: 1,
               phase: "committed",
               beforeEvidence: [],
+              submittedFields: [
+                "success", "output_summary", "constraint_violations", "should_continue",
+              ],
               promptArtifact: {
                 schemaVersion: PROMPT_ARTIFACT_SCHEMA_VERSION,
                 roundId: "loop:inspect-me:round:1",
@@ -160,10 +163,10 @@ describe("loopforge CLI", () => {
         loop_lineage: {
           round: 1,
           round_transaction: {
-            schema_version: 2,
+            schema_version: 3,
             round_id: "loop:explain-me:round:1",
             snapshot: {
-              schemaVersion: 2,
+              schemaVersion: 3,
               roundId: "loop:explain-me:round:1",
               loopId: "explain-me",
               round: 1,
@@ -177,6 +180,9 @@ describe("loopforge CLI", () => {
                 constraint_violations: [],
                 should_continue: true,
               },
+              submittedFields: [
+                "success", "output_summary", "constraint_violations", "should_continue",
+              ],
               createdAt: 0,
               updatedAt: 0,
             },

@@ -105,7 +105,7 @@ describe("v3.8.1 — schema fidelity", () => {
     // must read it rather than guess.
     const version = props("PromptArtifact").schemaVersion;
     assert.equal(version.type, "number", "the artifact schema version is a number");
-    assert.equal(version.const, 2);
+    assert.equal(version.const, 3);
   });
 });
 
@@ -139,7 +139,9 @@ describe("Generated JSON Schema — top-level", () => {
     // Then ActiveRoundContract/ActiveContractItem, duplicate declarations of
     // the runtime’s ActiveContractView that only the schema ever saw, were
     // deleted too (60 → 58... 57 with the second boundary deletion).
-    assert.equal(names.length, 57, `expected 57, got ${names.length}: ${names.join(", ")}`);
+    // v3.9.1: SubmissionGuidance, the submission diagnostic/receipt types
+    // and PromptRequestEffect joined (57 → 63).
+    assert.equal(names.length, 63, `expected 63, got ${names.length}: ${names.join(", ")}`);
     assert.ok(names.includes("PromptArtifact"));
     assert.ok(names.includes("RoundOutcome"));
     assert.ok(names.includes("RoundContractProposal"));
@@ -147,6 +149,10 @@ describe("Generated JSON Schema — top-level", () => {
     assert.ok(names.includes("MachineObservationBase"));
     assert.ok(names.includes("ConfiguredCapability"));
     assert.ok(names.includes("EvidenceCapability"));
+    assert.ok(names.includes("SubmissionGuidance"));
+    assert.ok(names.includes("SubmissionReceipt"));
+    assert.ok(names.includes("SubmissionDiagnostic"));
+    assert.ok(names.includes("PromptRequestEffect"));
     assert.ok(names.includes("ToolError"));
     assert.ok(names.includes("ToolErrorCode"));
   });

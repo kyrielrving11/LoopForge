@@ -15,11 +15,11 @@
 import type { CommittedRoundView } from "./committed-round.js";
 import type { ContractItemStatusView } from "./contract-items.js";
 import { deriveContractItemStatuses } from "./contract-items.js";
+import type { ObservationDelta } from "./evidence-provider.js";
 import type { CommandEvidencePolicy } from "./policy.js";
 import type {
   ContractItemStatus,
   ExecutionReport,
-  MachineObservation,
   SubGoal,
   VerifiedSubGoalFact,
 } from "./protocol.js";
@@ -60,7 +60,7 @@ export interface CriterionMachineFact {
  *  wants. */
 export interface InFlightRoundSlice {
   currentReport: ExecutionReport | null;
-  currentObservations: ReadonlyArray<MachineObservation>;
+  currentDeltas: ReadonlyArray<ObservationDelta>;
   /** The in-flight round's own effective outcome. A `blocked` round CLOSES its
    *  contract, so closure cannot be derived from committed slices alone. */
   currentOutcome?: string | null;
@@ -68,7 +68,7 @@ export interface InFlightRoundSlice {
 
 export const NO_IN_FLIGHT_ROUND: InFlightRoundSlice = {
   currentReport: null,
-  currentObservations: [],
+  currentDeltas: [],
   currentOutcome: null,
 };
 
@@ -86,7 +86,7 @@ export function deriveRoundFacts(input: {
     rounds: input.rounds,
     currentRound: input.currentRound,
     currentReport: input.inFlight.currentReport,
-    currentObservations: input.inFlight.currentObservations,
+    currentDeltas: input.inFlight.currentDeltas,
     currentOutcome: input.inFlight.currentOutcome ?? null,
     commands: input.commands,
   });
@@ -157,7 +157,7 @@ function deriveCriterionFacts(input: {
       rounds: input.rounds,
       round: round.round,
       report: round.executionReport,
-      observations: round.observationDelta,
+      deltas: round.observationDelta,
       outcome: round.outcome,
       commands: input.commands,
     });
@@ -246,7 +246,7 @@ export function deriveVerifiedSubGoals(input: {
       rounds: input.rounds,
       round: round.round,
       report: round.executionReport,
-      observations: round.observationDelta,
+      deltas: round.observationDelta,
       outcome: round.outcome,
       commands: input.commands,
     });

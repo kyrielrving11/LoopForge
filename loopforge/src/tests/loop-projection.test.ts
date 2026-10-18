@@ -41,6 +41,8 @@ function round(
     beforeEvidence: [],
     afterEvidence: [],
     observationDelta: [],
+    normalizationDiagnostics: [],
+    submittedFields: [],
     evidenceIncomplete: true,
     ...view,
     // A Partial spread can carry `backtrack: undefined`; the view contract is
@@ -96,7 +98,13 @@ function verifiedHistory(): CommittedRoundView[] {
       executionReport: {
         contract_item_claims: [{ item_id: deriveContractItemIds(CONTRACT.items)[0], outcome: "met" }],
       },
-      observationDelta: [commandObservation()],
+      observationDelta: [{
+        providerId: "command:verify",
+        kind: "command",
+        before: null,
+        after: commandObservation(),
+        changedFiles: null,
+      }],
       outcome: "success",
     }),
   ];

@@ -69,10 +69,10 @@ function committedFeedback(
     loop_lineage: {
       round,
       round_transaction: {
-        schema_version: 2,
+        schema_version: 3,
         round_id: `loop:audit-loop:round:${round}`,
         snapshot: {
-          schemaVersion: 2,
+          schemaVersion: 3,
           roundId: `loop:audit-loop:round:${round}`,
           loopId: "audit-loop",
           round,
@@ -81,6 +81,9 @@ function committedFeedback(
           beforeEvidence: [],
           afterEvidence,
           evaluation,
+          submittedFields: [
+            "success", "output_summary", "constraint_violations", "should_continue",
+          ],
           result: { action, verificationFlags: flags },
           createdAt: Date.now(),
           updatedAt: Date.now(),
@@ -147,6 +150,11 @@ describe("buildAudit", () => {
     assert.equal(audit.rounds[1].outcome, "failed");
     assert.equal(audit.rounds[1].checks[0].verdict, "failed");
     assert.equal(audit.verdict, "contradicted");
+    // v3.9.1: audit exposes the same submission accounting as explain/status.
+    assert.ok(Array.isArray(audit.rounds[0].submission.diagnostics));
+    assert.ok(Array.isArray(audit.rounds[0].submission.saved_not_expanded));
+    assert.equal(typeof audit.rounds[0].submission.effects.contract.activated,
+      "boolean");
   });
 
   it("reports criteria as evidenced only when claims are machine-verified", () => {
@@ -160,7 +168,6 @@ describe("buildAudit", () => {
           files_changed: ["src/a.ts"],
           tests_reported: { passed: 2, failed: 0, skipped: 0 },
           criterion_claims: criterionClaims(["tests pass"], []),
-          progress_estimate: 1,
         },
       }),
     ];

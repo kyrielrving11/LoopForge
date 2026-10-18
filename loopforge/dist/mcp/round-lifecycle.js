@@ -14,11 +14,17 @@ import { LoopForgeEngine } from "../engine.js";
 import { deriveGate } from "../cognitive-governance.js";
 import { Mode, makeLoopCompileRequest, makeLoopRoundResult, } from "../protocol.js";
 import { captureEntrypointTrust, EvidenceCollector } from "../evidence-provider.js";
-import { makeRoundId, parseRoundTransactionSnapshot, prepareRoundTransaction, } from "../round-transaction.js";
+import { deriveRoundObservationDelta, makeRoundId, parseRoundTransactionSnapshot, prepareRoundTransaction, } from "../round-transaction.js";
+import { deriveActiveRoundContract, deriveRoundContractView } from "../round-contract.js";
+import { deriveSubGoals } from "../subgoal-state.js";
+import { effectiveOutcome } from "../self-eval.js";
+import { deriveSubmissionReceipt } from "../submission-receipt.js";
 import { RoundDriver } from "../round-driver.js";
 import { finalizeStopReason } from "../round-coordinator.js";
 import { getPolicy } from "../policy.js";
 import { checkRoundSequence, queryLoopEntries } from "../loop-store.js";
+import { derivationRounds } from "../committed-round.js";
+import { deriveSubmissionGuidance } from "../submission-guidance.js";
 import { logEvent } from "../observability.js";
 import { policyMetrics } from "../policy-metrics.js";
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -56,14 +62,10 @@ export function buildLoopRequest(session, lastEval, verificationFlags) {
             output_summary: lastEval.output_summary,
             constraint_violations: lastEval.constraint_violations,
             manual_fixes_needed: "",
-            // P0–P2: Forward evolution fields to next compile
-            // Merge sub-agent discovered constraints into the active set
-            discovered_constraints: [
-                ...new Set([
-                    ...(lastEval.discovered_constraints ?? []),
-                    ...(lastEval.worker_results ?? []).flatMap((w) => w.discoveredConstraints ?? []).filter((c) => c.length > 0),
-                ]),
-            ],
+            // P0–P2: Forward evolution fields to next compile.
+            // v3.9.1: worker_results stays a report; only top-level
+            // discovered_constraints promotes a finding into the active set.
+            discovered_constraints: lastEval.discovered_constraints ?? [],
             objective_refinement: lastEval.objective_refinement ?? "",
             emerged_subtasks: lastEval.emerged_subtasks ?? [],
             // P4: Execution evidence
@@ -115,6 +117,98 @@ export class RoundLifecycle {
         this.leaseMs = deps.leaseMs;
         this.getContext = deps.getContext;
     }
+    /** v3.9.1: the submission-guidance projection for a session's held round.
+     *  One history window (`derivationRounds`, the compile window), no writes.
+     *  Findings from a rejected/retried attempt are supplied by the caller. */
+    guidanceFor(session, extras = {}) {
+        const prefix = `loop:${session.loopId}:`;
+        const entries = [
+            ...queryLoopEntries(this.store, session.loopId, { prefix }),
+            ...queryLoopEntries(this.store, session.loopId, { prefix, feedbackOnly: true }),
+        ];
+        return deriveSubmissionGuidance(session, {
+            rounds: derivationRounds(entries, session.currentRound),
+            ...extras,
+        });
+    }
+    /** v3.9.1: the before facts of the round being submitted, from the SAME
+     *  history window the compile uses. Works on a replay too: rounds below the
+     *  logical round exclude the round itself. */
+    beforeFactsFor(session) {
+        const prefix = `loop:${session.loopId}:`;
+        const entries = [
+            ...queryLoopEntries(this.store, session.loopId, { prefix }),
+            ...queryLoopEntries(this.store, session.loopId, { prefix, feedbackOnly: true }),
+        ];
+        const rounds = derivationRounds(entries, session.currentRound);
+        return {
+            contractId: deriveActiveRoundContract(rounds, getPolicy().evidence.commands ?? [])?.id ?? null,
+            subGoals: deriveSubGoals({
+                loopId: session.loopId,
+                currentRound: session.currentRound,
+                rounds,
+            }),
+        };
+    }
+    /** v3.9.1: derive this submission's receipt from the transaction and the
+     *  shared read model. Never writes and never invents an applied effect. */
+    buildReceipt(base, opts) {
+        const prefix = `loop:${base.snapshot.loopId}:`;
+        const entries = [
+            ...queryLoopEntries(this.store, base.snapshot.loopId, { prefix }),
+            ...queryLoopEntries(this.store, base.snapshot.loopId, {
+                prefix,
+                feedbackOnly: true,
+            }),
+        ];
+        const committed = opts.disposition === "accepted" || opts.disposition === "stopped";
+        const rounds = derivationRounds(entries, committed ? base.snapshot.round + 1 : base.snapshot.round);
+        const commands = getPolicy().evidence.commands ?? [];
+        const roundDeltas = deriveRoundObservationDelta(base.snapshot.beforeEvidence, base.actualEvidence);
+        const contractView = deriveRoundContractView({
+            rounds,
+            round: base.snapshot.round,
+            report: base.selfEval.execution_report ?? null,
+            deltas: roundDeltas,
+            outcome: effectiveOutcome(base.selfEval),
+            commands,
+        });
+        const contractAfterId = opts.contractAfterId !== undefined
+            ? opts.contractAfterId
+            : committed
+                ? deriveActiveRoundContract(rounds, commands)?.id ?? null
+                : base.beforeContractId;
+        const afterSubGoals = opts.afterSubGoals !== undefined
+            ? opts.afterSubGoals
+            : committed
+                ? deriveSubGoals({
+                    loopId: base.snapshot.loopId,
+                    currentRound: base.snapshot.round + 1,
+                    rounds,
+                })
+                : base.beforeSubGoals;
+        return deriveSubmissionReceipt({
+            snapshot: base.snapshot,
+            selfEval: base.selfEval,
+            pr: base.pr,
+            disposition: opts.disposition,
+            diagnostics: base.diagnostics,
+            submittedFields: base.submittedFields,
+            facts: {
+                contractBefore: base.beforeContractId,
+                contractAfter: contractAfterId,
+                subGoalsBefore: base.beforeSubGoals,
+                subGoalsAfter: afterSubGoals,
+                constraintsActiveAfter: opts.constraintsActiveAfter ?? null,
+            },
+            nextArtifact: opts.nextArtifact ?? null,
+            contractItems: contractView.statuses.items.map((item) => ({
+                item_id: item.itemId,
+                status: item.status,
+            })),
+            evidenceDeltas: roundDeltas,
+        });
+    }
     /** Persist session state to vault for cross-process recovery.
      *  The filtered vault and replacement entry are written once under the
      *  backend lock, so recovery never observes the old two-write gap. */
@@ -149,6 +243,8 @@ export class RoundLifecycle {
                 entrypoint_trust: session.entrypointTrust ?? null,
                 // v2.12: Backtrack restore-point git HEAD (crash recovery)
                 backtrack_target_git_head: session.backtrackTargetGitHead ?? null,
+                // v3.9: Restore point's own dirty files (restore baseline)
+                backtrack_target_dirty: session.backtrackTargetDirty ?? null,
                 // v1.19: durable round transaction state
                 round_snapshot: session.roundSnapshot ?? null,
                 last_self_eval: session.lastSelfEval ?? null,
@@ -218,6 +314,12 @@ export class RoundLifecycle {
             backtrackTargetGitHead: typeof lineage.backtrack_target_git_head === "string" &&
                 lineage.backtrack_target_git_head.length > 0
                 ? lineage.backtrack_target_git_head
+                : undefined,
+            // v3.9: absent means "baseline unknown" (a session from before this
+            // field), never an empty baseline: the restore check then falls back
+            // to HEAD equality alone rather than reading unrelated dirt as failure.
+            backtrackTargetDirty: Array.isArray(lineage.backtrack_target_dirty)
+                ? lineage.backtrack_target_dirty.filter((file) => typeof file === "string")
                 : undefined,
             evidenceBaseline: roundSnapshot?.beforeEvidence ?? fallbackEvidence,
             roundSnapshot: roundSnapshot ?? prepareRoundTransaction(loopId, currentRound, fallbackEvidence),
@@ -300,6 +402,7 @@ export class RoundLifecycle {
             // transaction's committed result, not recomputed here.
             verificationStatus: session.roundSnapshot?.result?.verificationStatus,
             warnings: warningsOverride ?? session.currentWarnings ?? [],
+            submission_guidance: this.guidanceFor(session),
         };
     }
     restoredPromptResult(session) {
@@ -313,6 +416,7 @@ export class RoundLifecycle {
             level: session.currentLevel ?? "l2",
             roundSuccess: undefined,
             warnings: (session.currentWarnings ?? []),
+            submission_guidance: this.guidanceFor(session),
         };
     }
     /** Reconcile the crash window where feedback committed but session_state
@@ -568,7 +672,7 @@ export class RoundLifecycle {
      *  MUTATES: session.roundSnapshot, session.consecutiveRejections,
      *           session.lastRejectionCheck, session.lastSelfEval,
      *           session.successTrajectory */
-    async executeRoundTransaction(session, selfEval) {
+    async executeRoundTransaction(session, selfEval, normalizationDiagnostics, submittedFields) {
         const snapshot = session.roundSnapshot ?? prepareRoundTransaction(session.loopId, session.currentRound, session.evidenceBaseline ?? []);
         const completed = await new RoundDriver(session.engine, this.store).complete({
             snapshot,
@@ -583,7 +687,10 @@ export class RoundLifecycle {
             backtrackSkippedFiles: session.backtrackSkippedFiles,
             backtrackSkippedFingerprints: session.backtrackSkippedFingerprints,
             backtrackTargetGitHead: session.backtrackTargetGitHead,
+            backtrackTargetDirty: session.backtrackTargetDirty,
             entrypointTrust: session.entrypointTrust,
+            normalizationDiagnostics,
+            submittedFields,
         });
         const outcome = completed.outcome;
         const actualEvidence = completed.actualEvidence;
@@ -598,11 +705,16 @@ export class RoundLifecycle {
         if (pr.shouldPushSuccessTrajectory && !completed.outcome.replayed) {
             session.successTrajectory.push(pr.roundSuccess);
         }
-        return { pr, verificationFlags: pr.verificationFlags, actualEvidence };
+        return {
+            pr,
+            verificationFlags: pr.verificationFlags,
+            actualEvidence,
+            replayed: completed.outcome.replayed,
+        };
     }
     /** Build a rejection result: compile a retry prompt, persist, return.
      *  MUTATES: session.roundSnapshot, session.currentPrompt, session.currentLevel */
-    async buildRejectionResult(sessionId, session, pr, verificationFlags) {
+    async buildRejectionResult(sessionId, session, pr, verificationFlags, receiptBase) {
         const retryRequest = buildLoopRequest(session, undefined, verificationFlags);
         const preparedRetry = await new RoundDriver(session.engine, this.store).prepareRetry(retryRequest, session.roundSnapshot, pr.rejectionPrompt ?? "", session.consecutiveRejections);
         if (!preparedRetry) {
@@ -633,6 +745,17 @@ export class RoundLifecycle {
             enforcementAction: "reject",
             verificationStatus: pr.verificationStatus,
             enforcementReason: pr.enforcementReason,
+            submission_guidance: this.guidanceFor(session, {
+                verificationFlags: pr.verificationFlags,
+            }),
+            submission_receipt: this.buildReceipt(receiptBase, {
+                disposition: "rejected",
+                nextArtifact: preparedRetry.artifact ??
+                    preparedRetry.compileResponse?.prompt_artifact ?? null,
+                afterSubGoals: null,
+                constraintsActiveAfter: null,
+                contractAfterId: receiptBase.beforeContractId,
+            }),
         };
     }
     /** v2.10: Build a backtrack result — roll back to last clean round.
@@ -642,7 +765,7 @@ export class RoundLifecycle {
      *  MUTATES: session.currentRound, session.roundSnapshot,
      *           session.currentPrompt, session.currentLevel,
      *           session.consecutiveRejections, session.lastSelfEval */
-    async buildBacktrackResult(sessionId, session, pr) {
+    async buildBacktrackResult(sessionId, session, pr, receiptBase) {
         // v3.8: LoopForge never mutates the working tree. The backtrack prompt
         // carries the restore facts (files, fingerprints, target HEAD) and the
         // verification gate enforces the check on the redo submission; the agent
@@ -669,6 +792,9 @@ export class RoundLifecycle {
         // v2.12: Remember the restore point's git HEAD — the next round's
         // verification gate confirms the workspace returned to this commit.
         session.backtrackTargetGitHead = pr.backtrackTargetGitHead;
+        // v3.9: …and what was already dirty there, so the restore check compares
+        // dirty sets instead of demanding a globally clean tree.
+        session.backtrackTargetDirty = pr.backtrackTargetDirty;
         session.lastSelfEval = undefined; // force L2 recompile from vault state
         session.currentPrompt = null;
         // Preserve discoveries from skipped rounds as constraints_from_plan
@@ -730,6 +856,24 @@ export class RoundLifecycle {
             verificationStatus: pr.verificationStatus,
             enforcementReason: pr.enforcementReason,
             warnings: prepared?.warnings ?? [],
+            submission_guidance: this.guidanceFor(session, {
+                verificationFlags: pr.verificationFlags,
+                recovery: {
+                    required: true,
+                    restore_point: pr.backtrackTarget ?? Math.max(1, newRound - 1),
+                    ...(pr.backtrackTargetGitHead
+                        ? { target_head: pr.backtrackTargetGitHead }
+                        : {}),
+                },
+            }),
+            submission_receipt: this.buildReceipt(receiptBase, {
+                disposition: "backtracked",
+                nextArtifact: prepared.artifact ??
+                    prepared.compileResponse?.prompt_artifact ?? null,
+                afterSubGoals: null,
+                constraintsActiveAfter: null,
+                contractAfterId: receiptBase.beforeContractId,
+            }),
         };
     }
     /** Build a termination result: persist stopped status, notify sinks.
@@ -742,7 +886,7 @@ export class RoundLifecycle {
      *  away. Pass it through, falling back only when the gate named nothing. */
     buildTerminationResult(sessionId, session, pr,
     /** v3.8.3: see buildStopResult. */
-    guardedReason) {
+    guardedReason, receiptBase) {
         const reason = guardedReason ?? pr.stopReason ?? "enforcement_terminated";
         session.status = "stopped";
         session.currentPrompt = null;
@@ -766,6 +910,13 @@ export class RoundLifecycle {
             enforcementAction: "terminate",
             verificationStatus: pr.verificationStatus,
             enforcementReason: pr.enforcementReason,
+            submission_receipt: this.buildReceipt(receiptBase, {
+                disposition: "terminated",
+                nextArtifact: null,
+                afterSubGoals: null,
+                constraintsActiveAfter: null,
+                contractAfterId: receiptBase.beforeContractId,
+            }),
         };
     }
     /** Build a stop result: persist stopped/stalled status, notify sinks.
@@ -773,7 +924,7 @@ export class RoundLifecycle {
     buildStopResult(sessionId, session, pr,
     /** v3.8.3: the reason AFTER the completion-truth guard (advanceUnlocked).
      *  Absent on the replay paths, which then read `pr.stopReason` directly. */
-    guardedReason) {
+    guardedReason, receiptBase) {
         const reason = guardedReason ?? pr.stopReason ?? "stalled";
         session.status = reason === "stalled" ? "stalled" : "stopped";
         session.currentPrompt = null;
@@ -791,13 +942,18 @@ export class RoundLifecycle {
                 ? "The configured maximum number of rounds has been reached."
                 : `Loop stopped: ${reason}.`,
             roundSuccess: pr.roundSuccess,
+            submission_receipt: this.buildReceipt(receiptBase, {
+                disposition: "stopped",
+                nextArtifact: null,
+                constraintsActiveAfter: null,
+            }),
         };
     }
     /** Compile the next round's prompt and advance the session.
      *  Includes the commit fence (pause/delete race guard) and context provider.
      *  MUTATES: session.currentRound, session.currentPrompt, session.currentLevel,
      *           session.evidenceBaseline, session.roundSnapshot */
-    async advanceToNextRound(sessionId, session, selfEval, pr, verificationFlags, actualEvidence) {
+    async advanceToNextRound(sessionId, session, selfEval, pr, verificationFlags, actualEvidence, receiptBase) {
         const roundSuccess = pr.roundSuccess;
         // M4 (v3.7.x): replay guard. The counter may already point past the
         // committed round when this continue is a REPLAY — after a crash or an
@@ -816,6 +972,7 @@ export class RoundLifecycle {
         // v2.12: The restore-point git HEAD check only applies to the first
         // post-backtrack round — clear it once we advance past it.
         session.backtrackTargetGitHead = undefined;
+        session.backtrackTargetDirty = undefined;
         // v1.8: Memory injection — tier-aware external context.
         const contextProvider = this.getContext();
         let externalCtx = "";
@@ -908,6 +1065,7 @@ export class RoundLifecycle {
             return this.stalledAfterCommit(sessionId, session, roundSuccess, `The round committed but the session state could not be persisted: ${String(error).slice(0, 300)}. ` +
                 `Resume the loop to recover the held prompt.`);
         }
+        const compiled = prepared.compileResponse;
         return {
             sessionId,
             round: session.currentRound,
@@ -916,6 +1074,13 @@ export class RoundLifecycle {
             level: nextLevel,
             roundSuccess,
             warnings: prepared.warnings ?? [],
+            submission_guidance: this.guidanceFor(session),
+            submission_receipt: this.buildReceipt(receiptBase, {
+                disposition: "accepted",
+                nextArtifact: prepared.artifact ?? compiled?.prompt_artifact ?? null,
+                afterSubGoals: compiled?.sub_goals ?? null,
+                constraintsActiveAfter: compiled?.constraints_active ?? null,
+            }),
         };
     }
     /** M4: mark a session stalled after its round committed but the next
@@ -946,7 +1111,7 @@ export class RoundLifecycle {
             roundSuccess,
         };
     }
-    async advanceUnlocked(sessionId, output, preExtractedEval, roundId) {
+    async advanceUnlocked(sessionId, output, preExtractedEval, roundId, normalizationDiagnostics, submittedFields) {
         // ── 1. Validate session ──────────────────────────────────────────────
         const session = this.registry.get(sessionId);
         if (!session)
@@ -1009,7 +1174,23 @@ export class RoundLifecycle {
         }
         const selfEval = extracted;
         // ── 3. Execute round transaction ─────────────────────────────────────
-        const tx = await this.executeRoundTransaction(session, selfEval);
+        // Capture the before facts from the shared compile window BEFORE the
+        // transaction commits (a replay sees the same window: rounds < R).
+        const beforeFacts = this.beforeFactsFor(session);
+        const tx = await this.executeRoundTransaction(session, selfEval, normalizationDiagnostics, submittedFields);
+        const receiptSnapshot = session.roundSnapshot ?? prepareRoundTransaction(session.loopId, session.currentRound, session.evidenceBaseline ?? []);
+        const receiptBase = {
+            snapshot: receiptSnapshot,
+            selfEval,
+            pr: tx.pr,
+            actualEvidence: tx.actualEvidence,
+            diagnostics: receiptSnapshot.normalizationDiagnostics ??
+                normalizationDiagnostics ?? [],
+            submittedFields: receiptSnapshot.submittedFields ?? submittedFields ?? [],
+            beforeContractId: beforeFacts.contractId,
+            beforeSubGoals: beforeFacts.subGoals,
+            replayed: tx.replayed,
+        };
         // v2.12: Record a user gate when an accepted round reports a high-risk
         // blocker. Record layer only — never blocks the round decision flow.
         if (tx.pr.action !== "reject" && tx.pr.action !== "terminate" &&
@@ -1018,11 +1199,11 @@ export class RoundLifecycle {
         }
         // ── 4. Route disposition ─────────────────────────────────────────────
         if (tx.pr.action === "reject") {
-            return this.buildRejectionResult(sessionId, session, tx.pr, tx.verificationFlags);
+            return this.buildRejectionResult(sessionId, session, tx.pr, tx.verificationFlags, receiptBase);
         }
         // ── v2.10: Backtrack — roll back to last clean round ──────────────────
         if (tx.pr.action === "backtrack") {
-            return this.buildBacktrackResult(sessionId, session, tx.pr);
+            return this.buildBacktrackResult(sessionId, session, tx.pr, receiptBase);
         }
         // Accepted rounds advance the before-snapshot baseline. Rejected rounds
         // retain the original baseline so their retry remains zero-commit.
@@ -1043,13 +1224,13 @@ export class RoundLifecycle {
             });
         }
         if (tx.pr.action === "terminate") {
-            return this.buildTerminationResult(sessionId, session, tx.pr, finalized.reason);
+            return this.buildTerminationResult(sessionId, session, tx.pr, finalized.reason, receiptBase);
         }
         if (tx.pr.action === "stop") {
-            return this.buildStopResult(sessionId, session, tx.pr, finalized.reason);
+            return this.buildStopResult(sessionId, session, tx.pr, finalized.reason, receiptBase);
         }
         // ── 5. Continue — compile next round ─────────────────────────────────
-        return this.advanceToNextRound(sessionId, session, selfEval, tx.pr, tx.verificationFlags, tx.actualEvidence);
+        return this.advanceToNextRound(sessionId, session, selfEval, tx.pr, tx.verificationFlags, tx.actualEvidence, receiptBase);
     }
     /** Core cycle entry used by SessionManager.advance after the queue + lease
      *  dance: validate → extract → execute transaction → route disposition
@@ -1058,8 +1239,8 @@ export class RoundLifecycle {
      *    on (from the last start/next/resume response). Anchors the submission;
      *    a stale or duplicate submission returns the held prompt instead of
      *    being processed. Optional — when absent the anchor check is skipped. */
-    async advance(sessionId, output, preExtractedEval, roundId) {
-        return this.advanceUnlocked(sessionId, output, preExtractedEval, roundId);
+    async advance(sessionId, output, preExtractedEval, roundId, normalizationDiagnostics, submittedFields) {
+        return this.advanceUnlocked(sessionId, output, preExtractedEval, roundId, normalizationDiagnostics, submittedFields);
     }
     /** Write back loop knowledge to long-term memory.
      *  Uses shared base builder from policy.ts. Called when a loop terminates. */

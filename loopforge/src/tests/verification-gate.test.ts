@@ -8,7 +8,7 @@ import {
   type VerificationFlag,
 } from "../protocol.js";
 import type { VaultEntry } from "../loop-store.js";
-import { committedFeedbackRound as committedRound, testCommandProvider, criterionClaims } from "./_helpers.js";
+import { committedFeedbackRound as committedRound, testCommandProvider, criterionClaims, deltasFrom } from "./_helpers.js";
 import type { EntrypointDrift } from "../evidence-provider.js";
 import { verifySelfEvaluation as rawVerifySelfEvaluation, parseTestOutput, deriveEvidenceStatus, machineProgressSeries, CHECK_VERIFICATION_ENTRYPOINT_MODIFIED, CHECK_TEST_FILES_MODIFIED, CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE } from "../verification-gate.js";
 import type {
@@ -45,7 +45,7 @@ import * as verificationGate from "../verification-gate.js";
  *  success_unverified check silent in tests that assert "no flag" outcomes. */
 function gitSnap(files: string[] = ["src/a.ts"]): GitObservation {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     providerId: "git",
     kind: "git",
     phase: "after",
@@ -53,7 +53,11 @@ function gitSnap(files: string[] = ["src/a.ts"]): GitObservation {
     finishedAt: 0,
     status: "observed",
     files,
-    data: { tracked: files, staged: [], untracked: [], fingerprints: {} },
+    data: {
+      dirty: files,
+      fingerprints: Object.fromEntries(files.map((file) => [file, "m:1"])),
+      coverage: "tracked_and_non_ignored_untracked",
+    },
   };
 }
 
@@ -67,7 +71,6 @@ function se(overrides: Partial<SelfEvaluation> = {}): SelfEvaluation {
       files_changed: ["src/a.ts"],
       tests_reported: { passed: 1, failed: 0, skipped: 0 },
       criterion_claims: criterionClaims(["criterion A"], []),
-      progress_estimate: 0.5,
     }),
     ...overrides,
   });
@@ -139,7 +142,7 @@ function verifySelfEvaluation(
     currentRound,
     vaultEntries,
     prevSelfEval,
-    evidenceSnapshots,
+    deltasFrom(evidenceSnapshots),
     backtrackSkippedFiles,
     backtrackSkippedFingerprints,
     backtrackTargetGitHead,
@@ -173,7 +176,6 @@ describe("verification-gate — happy path", () => {
         files_changed: ["src/foo.ts"],
         tests_reported: { passed: 3, failed: 0, skipped: 0 },
         criterion_claims: criterionClaims(["impl"], ["tests"]),
-        progress_estimate: 0.7,
       }),
       constraint_violations: ["deadline"],
       discovered_constraints: ["new: must handle null"],
@@ -185,7 +187,6 @@ describe("verification-gate — happy path", () => {
         files_changed: ["src/bar.ts"],
         tests_reported: { passed: 1, failed: 0, skipped: 0 },
         criterion_claims: criterionClaims([], ["impl", "tests"]),
-        progress_estimate: 0.3,
       }),
       constraint_violations: ["missing docs"],
       discovered_constraints: ["must use async"],
@@ -205,7 +206,6 @@ describe("verification-gate — happy path", () => {
   it("trusted verdict for first round (no previous data)", () => {
     const curr = se({
       execution_report: makeExecutionReport({
-        progress_estimate: 0.0,
         tests_reported: { passed: 1, failed: 0, skipped: 0 },
         files_changed: ["src/a.ts"],
       }),
@@ -470,7 +470,6 @@ describe("verification-gate — verdict aggregation", () => {
         files_changed: ["src/foo.ts"],
         tests_reported: { passed: 3, failed: 1, skipped: 0 },
         criterion_claims: criterionClaims([], ["tests"]),
-        progress_estimate: 0.5,
       }),
       constraint_violations: ["minor"],
       discovered_constraints: ["unique constraint"],
@@ -478,7 +477,6 @@ describe("verification-gate — verdict aggregation", () => {
     const prev = se({
       success: false,
       execution_report: makeExecutionReport({
-        progress_estimate: 0.3,
       }),
       constraint_violations: ["other"],
       discovered_constraints: ["different constraint"],
@@ -747,7 +745,6 @@ describe("verification-gate — backtrack workspace restore", () => {
       should_continue: true,
       execution_report: makeExecutionReport({
         files_changed: ["src/new-feature.ts"],
-        progress_estimate: 0.5,
       }),
       ...overrides,
     });
@@ -822,7 +819,7 @@ describe("verification-gate — backtrack workspace restore", () => {
     // recorded at the failed round → the file was never touched since the
     // rollback → the workspace was not restored.
     const git: GitObservation = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       providerId: "git",
       kind: "git",
       phase: "after",
@@ -831,8 +828,9 @@ describe("verification-gate — backtrack workspace restore", () => {
       status: "observed",
       files: ["src/a.ts"],
       data: {
-        tracked: ["src/a.ts"], staged: [], untracked: [],
+        dirty: ["src/a.ts"],
         fingerprints: { "src/a.ts": "m:same", "lib/other.ts": "m:other" },
+        coverage: "tracked_and_non_ignored_untracked",
       },
     };
     const result = verifySelfEvaluation(
@@ -855,7 +853,7 @@ describe("verification-gate — backtrack workspace restore", () => {
     // file during the redo — the fingerprint moved on, so no machine
     // contradiction exists even though the claimed file overlaps.
     const git: GitObservation = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       providerId: "git",
       kind: "git",
       phase: "after",
@@ -864,8 +862,9 @@ describe("verification-gate — backtrack workspace restore", () => {
       status: "observed",
       files: ["src/a.ts"],
       data: {
-        tracked: ["src/a.ts"], staged: [], untracked: [],
+        dirty: ["src/a.ts"],
         fingerprints: { "src/a.ts": "m:redone" },
+        coverage: "tracked_and_non_ignored_untracked",
       },
     };
     const result = verifySelfEvaluation(
@@ -910,7 +909,6 @@ describe("verification-gate — v2.12 outcome consistency", () => {
         files_changed: ["src/a.ts"],
         tests_reported: { passed: 1, failed: 0, skipped: 0 },
         criterion_claims: criterionClaims([], ["tests pass"]),
-        progress_estimate: 0.5,
       }),
     });
     const result = verifySelfEvaluation(curr, 2, [], null);
@@ -991,18 +989,33 @@ describe("verification-gate — v2.12 outcome consistency", () => {
       loop_lineage: {
         round: 1,
         round_transaction: {
-          schema_version: 2,
+          schema_version: 3,
           round_id: "loop:test-loop:round:1",
           snapshot: {
-            schemaVersion: 2,
+            schemaVersion: 3,
             roundId: "loop:test-loop:round:1",
             loopId: "test-loop",
             round: 1,
             attempt: 1,
             phase: "committed" as const,
-            beforeEvidence: [],
+            beforeEvidence: [{
+              schemaVersion: 2,
+              providerId: "git",
+              kind: "git",
+              phase: "before",
+              startedAt: 0,
+              finishedAt: 0,
+              status: "observed",
+              files: [],
+              data: {
+                dirty: [],
+                fingerprints: {},
+                head: "abc",
+                coverage: "tracked_and_non_ignored_untracked",
+              },
+            }],
             afterEvidence: [{
-              schemaVersion: 1,
+              schemaVersion: 2,
               providerId: "git",
               kind: "git",
               phase: "after",
@@ -1010,8 +1023,16 @@ describe("verification-gate — v2.12 outcome consistency", () => {
               finishedAt: 0,
               status: "observed",
               files: ["src/fixed.ts"],
-              data: { head: "abc", fingerprints: {} },
+              data: {
+                dirty: ["src/fixed.ts"],
+                fingerprints: { "src/fixed.ts": "m:1" },
+                head: "abc",
+                coverage: "tracked_and_non_ignored_untracked",
+              },
             }],
+            submittedFields: [
+              "success", "output_summary", "constraint_violations", "should_continue",
+            ],
             createdAt: Date.now(),
             updatedAt: Date.now(),
           },
@@ -1039,7 +1060,6 @@ describe("verification-gate — v2.12 unverified criteria claims", () => {
         files_changed: ["src/a.ts"],
         tests_reported: null,
         criterion_claims: criterionClaims(["tests pass", "docs updated"], []),
-        progress_estimate: 0.5,
       }),
     });
     const result = verifySelfEvaluation(curr, 2, [], null);
@@ -1054,7 +1074,6 @@ describe("verification-gate — v2.12 unverified criteria claims", () => {
         files_changed: ["src/a.ts"],
         tests_reported: { passed: 4, failed: 0, skipped: 0 },
         criterion_claims: criterionClaims(["tests pass"], []),
-        progress_estimate: 0.8,
       }),
     });
     const result = verifySelfEvaluation(curr, 2, [], null);
@@ -1067,7 +1086,6 @@ describe("verification-gate — v2.12 unverified criteria claims", () => {
         files_changed: ["src/a.ts"],
         tests_reported: null,
         criterion_claims: criterionClaims([], ["tests pass"]),
-        progress_estimate: 0.3,
       }),
     });
     const result = verifySelfEvaluation(curr, 2, [], null);
@@ -1082,16 +1100,17 @@ describe("verification-gate — v2.12 unverified criteria claims", () => {
 
 describe("v3.2 — deriveEvidenceStatus", () => {
   it("git diff observed but no passed command → unavailable (v3.3)", () => {
-    const status = deriveEvidenceStatus(se(), [gitSnap(["src/a.ts"])]);
+    const status = deriveEvidenceStatus(se(), deltasFrom([gitSnap(["src/a.ts"])]));
     assert.equal(status.providerStatus, "unavailable");
     assert.equal(status.gitObserved, true);
     assert.equal(status.reportedFilesMatch, true);
   });
 
-  it("git snapshot present but no changes → unavailable", () => {
-    const status = deriveEvidenceStatus(se(), [gitSnap([])]);
+  it("git snapshot present but no changes → observed boundary, unavailable verification", () => {
+    const status = deriveEvidenceStatus(se(), deltasFrom([gitSnap([])]));
     assert.equal(status.providerStatus, "unavailable");
-    assert.equal(status.gitObserved, false);
+    assert.equal(status.gitObserved, true,
+      "an observed empty boundary is not the same as an unobservable one");
   });
 
   it("no snapshots → absent", () => {
@@ -1106,14 +1125,14 @@ describe("v3.2 — deriveEvidenceStatus", () => {
         tests_reported: { passed: 1, failed: 0, skipped: 0 },
       }),
     });
-    const status = deriveEvidenceStatus(selfEval, [cmdSnap("passed")]);
+    const status = deriveEvidenceStatus(selfEval, deltasFrom([cmdSnap("passed")]));
     assert.equal(status.providerStatus, "verified");
     assert.equal(status.commandVerified, true);
     assert.equal(status.testsMachineBacked, true);
   });
 
   it("failed after-command → unavailable, testsMachineBacked false", () => {
-    const status = deriveEvidenceStatus(se(), [cmdSnap("failed")]);
+    const status = deriveEvidenceStatus(se(), deltasFrom([cmdSnap("failed")]));
     assert.equal(status.providerStatus, "unavailable");
     assert.equal(status.testsMachineBacked, false);
   });
@@ -1126,15 +1145,43 @@ describe("v3.2 — deriveEvidenceStatus", () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("v3.2 — machineProgressSeries", () => {
-  const feedbackRound = (round: number, gitFiles: string[]): VaultEntry =>
-    committedRound(round, {
+  const feedbackRound = (
+    round: number,
+    changedFiles: string[],
+    beforeHead: string,
+    afterHead: string,
+  ): VaultEntry => {
+    const fingerprints = Object.fromEntries(
+      changedFiles.map((file) => [file, "m:1"]),
+    );
+    return committedRound(round, {
       loopId: "mp",
-      roundEvidence: [{ schemaVersion: 1, providerId: "git", kind: "git", phase: "after", startedAt: 0, finishedAt: 0, status: "observed", files: gitFiles, data: { fingerprints: {} } }],
+      beforeEvidence: [{
+        schemaVersion: 2, providerId: "git", kind: "git", phase: "before",
+        startedAt: 0, finishedAt: 0, status: "observed", files: [],
+        data: {
+          dirty: [], fingerprints: {}, head: beforeHead,
+          coverage: "tracked_and_non_ignored_untracked",
+        },
+      }],
+      roundEvidence: [{
+        schemaVersion: 2, providerId: "git", kind: "git", phase: "after",
+        startedAt: 0, finishedAt: 0, status: "observed", files: changedFiles,
+        data: {
+          dirty: changedFiles, fingerprints, head: afterHead,
+          coverage: "tracked_and_non_ignored_untracked",
+        },
+      }],
     });
+  };
 
   it("reports per-round git observations for the lookback window", () => {
     const series = machineProgressSeries(
-      [feedbackRound(1, ["a.ts"]), feedbackRound(2, []), feedbackRound(3, ["b.ts"])],
+      [
+        feedbackRound(1, ["a.ts"], "h0", "h1"),
+        feedbackRound(2, [], "h1", "h1"),
+        feedbackRound(3, ["b.ts"], "h1", "h2"),
+      ],
       4,
       3,
     );
@@ -1143,7 +1190,7 @@ describe("v3.2 — machineProgressSeries", () => {
 
   it("returns null when fewer than lookback rounds carry git snapshots", () => {
     const series = machineProgressSeries(
-      [feedbackRound(1, []), feedbackRound(2, [])],
+      [feedbackRound(1, [], "h0", "h1"), feedbackRound(2, [], "h1", "h1")],
       4,
       3,
     );
@@ -1152,7 +1199,7 @@ describe("v3.2 — machineProgressSeries", () => {
 
   it("returns null when the recent rounds are not contiguous (unknown motion)", () => {
     const series = machineProgressSeries(
-      [feedbackRound(1, []), feedbackRound(3, [])],
+      [feedbackRound(1, [], "h0", "h1"), feedbackRound(3, [], "h1", "h1")],
       4,
       2,
     );
@@ -1174,7 +1221,7 @@ describe("v3.3 — verification domain integrity", () => {
     assert.ok(flag, "entrypoint modification must be flagged");
     assert.equal(flag!.severity, "error");
     // The tainted command must not count as machine verification.
-    const status = deriveEvidenceStatus(se(), [git, cmd]);
+    const status = deriveEvidenceStatus(se(), deltasFrom([git, cmd]));
     assert.equal(status.providerStatus, "unavailable");
     assert.equal(status.commandVerified, false);
   });
@@ -1223,7 +1270,7 @@ describe("v3.3 — verification domain integrity", () => {
     assert.ok(flag, "test-file change must be flagged");
     assert.equal(flag!.severity, "warn");
     // TDD flow: the passed command still backs the success.
-    const status = deriveEvidenceStatus(se(), [git, cmd]);
+    const status = deriveEvidenceStatus(se(), deltasFrom([git, cmd]));
     assert.equal(status.providerStatus, "verified");
     assert.equal(status.commandVerified, true);
   });
@@ -1585,7 +1632,7 @@ describe("verification-gate — v3.7.1 user_gate_unresolved", () => {
 // and suppressed by the declared outcome (effectiveSuccess).
 // ═══════════════════════════════════════════════════════════════════════════
 
-describe("verification-gate — v3.7 success-evidence merge (empty arm)", () => {
+describe("verification-gate — v3.9.1 success-evidence report gap (empty arm)", () => {
   afterEach(() => resetPolicy());
 
   const successNoEvidence = (overrides: Partial<SelfEvaluation> = {}): SelfEvaluation =>
@@ -1594,46 +1641,46 @@ describe("verification-gate — v3.7 success-evidence merge (empty arm)", () => 
       execution_report: makeExecutionReport({
         files_changed: [],
         tests_reported: null,
-        progress_estimate: 0.5,
       }),
       ...overrides,
     });
 
   const emptyArmFlag = (result: ReturnType<typeof rawVerifySelfEvaluation>) =>
     result.flags.find((f) =>
-      f.check === CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE && f.severity === "error");
+      f.check === CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE && f.severity === "warn");
 
-  it("errors when success=true with no files changed and no tests run", () => {
+  it("warns (does not reject) when success=true with no files changed and no tests run", () => {
     const result = verifySelfEvaluation(successNoEvidence(), 2);
-    assert.equal(result.verdict, "contradicted");
-    assert.ok(emptyArmFlag(result), "empty arm must fire");
+    assert.equal(result.verdict, "suspect");
+    assert.ok(emptyArmFlag(result), "empty arm must fire as a report gap");
   });
 
-  it("errors when success=true carries no execution_report at all (mandatory)", () => {
+  it("warns when success=true carries no execution_report at all", () => {
     const bare = se({ success: true });
     (bare as unknown as Record<string, unknown>).execution_report = undefined;
     const result = verifySelfEvaluation(bare, 2);
-    assert.equal(result.verdict, "contradicted");
+    assert.equal(result.verdict, "suspect");
     const flag = emptyArmFlag(result);
     assert.ok(flag);
     assert.ok(flag.detail.includes("no execution_report"),
-      `detail should say evidence is missing, got: ${flag.detail}`);
+      `detail should say the report is missing, got: ${flag.detail}`);
   });
 
-  it("still errors when no_change_reason is declared (no change with zero evidence is unbacked)", () => {
+  it("still warns when no_change_reason is declared (the report gap remains visible)", () => {
     const result = verifySelfEvaluation(
       successNoEvidence({ no_change_reason: "Nothing needed changing." }),
       2,
     );
-    assert.equal(result.verdict, "contradicted");
-    assert.ok(emptyArmFlag(result), "no_change_reason only downgrades the claims arm");
+    assert.equal(result.verdict, "suspect");
+    assert.ok(emptyArmFlag(result), "no_change_reason only affects the claims arm");
   });
 
-  it("still errors when a machine command verified this round (evidence stays mandatory)", () => {
-    // The empty arm runs BEFORE the providerStatus==="verified" early exit —
-    // a passed command never rescues a success claim that recorded no work.
+  it("warns even when a machine command verified this round", () => {
+    // Report coverage and machine evidence are separate facts: the passed
+    // command keeps the evidence posture honest, while the empty report is
+    // still a reporting gap.
     const result = verifySelfEvaluation(successNoEvidence(), 2, [], null, [cmdSnap("passed")]);
-    assert.equal(result.verdict, "contradicted");
+    assert.equal(result.verdict, "suspect");
     assert.ok(emptyArmFlag(result));
   });
 

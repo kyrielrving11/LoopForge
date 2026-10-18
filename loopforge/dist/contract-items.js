@@ -7,6 +7,7 @@
  *  it is a pure function of the committed round views, the current report,
  *  the current observations, and policy.
  */
+import { gitDeltaState } from "./evidence-provider.js";
 const EMPTY_VIEW = {
     contractId: "",
     closure: "open",
@@ -47,7 +48,10 @@ function evaluateCommand(commandId, declaredHash, slices, fromRound, configured)
     for (const slice of [...slices].reverse()) {
         if (slice.round < fromRound)
             continue;
-        const observation = slice.observations.find((item) => item.kind === "command" &&
+        const observation = slice.deltas
+            .map((delta) => delta.after)
+            .find((item) => item !== null &&
+            item.kind === "command" &&
             item.phase === "after" &&
             item.data.commandId === commandId);
         if (!observation || observation.kind !== "command")
@@ -59,16 +63,23 @@ function evaluateCommand(commandId, declaredHash, slices, fromRound, configured)
                 reason: `command "${commandId}" was reconfigured after declaration (round ${slice.round})`,
             };
         }
-        const changed = new Set(slice.observations
-            .filter((item) => item.providerId === "git")
-            .flatMap((item) => item.files));
+        const git = gitDeltaState(slice.deltas);
         if (observation.status === "passed") {
+            // An unknown boundary cannot rule out entrypoint tampering; it is not
+            // an empty change set. The absolute entrypoint-trust arm still runs in
+            // the verification gate.
+            if (git.state === "unknown") {
+                return {
+                    verdict: "insufficient",
+                    reason: `command "${commandId}" passed, but the Git boundary is unobservable in round ${slice.round}`,
+                };
+            }
             // A malformed observation must not crash the derivation the compile
             // path, the projection, the coordinator, explain and audit all share:
             // no entrypoint list means the tamper check simply has nothing to
             // compare, the same posture as a command with no entrypoint files.
             const entrypoints = Array.isArray(data.entrypointFiles) ? data.entrypointFiles : [];
-            if (changed.size > 0 && entrypoints.some((file) => changed.has(file))) {
+            if (git.state === "observed" && entrypoints.some((file) => git.changedFiles.has(file))) {
                 return {
                     verdict: "contradicted",
                     reason: `command "${commandId}" passed but its entrypoint changed in round ${slice.round}`,
@@ -102,13 +113,13 @@ export function deriveContractItemStatuses(input) {
         ...input.rounds.map((round) => ({
             round: round.round,
             report: round.executionReport,
-            observations: round.observationDelta,
+            deltas: round.observationDelta,
             outcome: round.outcome,
         })),
         {
             round: input.currentRound,
             report: input.currentReport,
-            observations: input.currentObservations,
+            deltas: input.currentDeltas,
             outcome: input.currentOutcome ?? null,
         },
     ].filter((slice) => slice.round < input.currentRound || slice.round === input.currentRound);

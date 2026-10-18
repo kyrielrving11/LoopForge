@@ -16,6 +16,7 @@ import type {
   RoundOutcome,
 } from "../protocol.js";
 import type { CommandEvidencePolicy } from "../policy.js";
+import { deltasFrom } from "./_helpers.js";
 
 const COMMAND: CommandEvidencePolicy = {
   name: "run-tests",
@@ -117,7 +118,9 @@ function round(
     contractBinding: contract ? bindingFor(contract, loopId) : null,
     beforeEvidence: [],
     afterEvidence: opts.observations ?? [],
-    observationDelta: opts.observations ?? [],
+    observationDelta: deltasFrom(opts.observations ?? []),
+    normalizationDiagnostics: [],
+    submittedFields: [],
     evidenceIncomplete: false,
     backtrack: null,
   };
@@ -260,7 +263,7 @@ describe("v3.8 — active contract walker", () => {
     const malformed = commandObservation("passed");
     delete (malformed.data as Record<string, unknown>).entrypointFiles;
     const git: MachineObservation = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       providerId: "git",
       kind: "git",
       phase: "after",
@@ -268,7 +271,11 @@ describe("v3.8 — active contract walker", () => {
       finishedAt: 0,
       status: "observed",
       files: ["scripts/run-tests.sh"],
-      data: { tracked: [], staged: [], untracked: [], fingerprints: {} },
+      data: {
+        dirty: ["scripts/run-tests.sh"],
+        fingerprints: { "scripts/run-tests.sh": "m:1" },
+        coverage: "tracked_and_non_ignored_untracked",
+      },
     };
     assert.doesNotThrow(() => deriveActiveRoundContract([
       round(1, { contract: first }),

@@ -21,8 +21,64 @@ import {
   type SubGoal,
 } from "../protocol.js";
 import { getPolicy, resetPolicy, setPolicyForTest, DEFAULT_POLICY } from "../policy.js";
-import { committedFeedbackRound, mergedLineageRound, criterionClaims } from "./_helpers.js";
+import {
+  committedFeedbackRound,
+  mergedLineageRound,
+  criterionClaims,
+  withTransaction,
+} from "./_helpers.js";
 import type { MachineObservation, VerificationFlag } from "../protocol.js";
+import type { ActiveContractView } from "../round-contract.js";
+import type { SelfEvalPromptContext } from "../submission-guidance.js";
+
+/** Minimal prompt context for the evaluation-block tests. */
+function evalCtx(
+  overrides: Partial<SelfEvalPromptContext> = {},
+): SelfEvalPromptContext {
+  return {
+    round: 3,
+    level: "l1",
+    activeContract: null,
+    itemStatuses: null,
+    commands: ["verify"],
+    contractVerificationAvailable: true,
+    subGoals: [],
+    verificationFlags: [],
+    recovery: false,
+    gateEnabled: false,
+    ...overrides,
+  };
+}
+
+function testContract(overrides: Partial<ActiveContractView> = {}): ActiveContractView {
+  return {
+    id: "rc-12345678",
+    declared_at_round: 2,
+    work_item: "Next slice",
+    scope: ["src"],
+    items: [{
+      id: "rci-12345678",
+      description: "verification command passes",
+      criterion_refs: [],
+      subgoal_refs: [],
+      verify_with: ["verify"],
+    }],
+    config_hash_by_command: {},
+    ...overrides,
+  };
+}
+
+function testSubGoal(overrides: Partial<SubGoal> = {}): SubGoal {
+  return {
+    id: "sg-12345678",
+    description: "sub-goal under test",
+    status: "pending",
+    declared_at_round: 1,
+    status_changed_at_round: 1,
+    priority: 0,
+    ...overrides,
+  };
+}
 
 /** v3.8: a passed after-phase command observation for contract verification. */
 function commandObservation(status: "passed" | "failed"): MachineObservation {
@@ -76,10 +132,8 @@ describe("cognitive-state compiler", () => {
       files: ["src/index.ts"],
       progress: 0.4,
       met: ["criterion-a"],
+      outputSummary: "Committed round 1.",
     });
-    const summary = "Committed round 1.";
-    merged.output_summary = summary;
-    (merged.loop_lineage as Record<string, unknown>).output_summary = summary;
 
     const fromFeedback = buildRollingSummary("round-parity", 2, {
       results: [feedback as unknown as Record<string, unknown>],
@@ -155,7 +209,6 @@ describe("cognitive-state compiler", () => {
           files_changed: ["src/store.ts"],
           tests_reported: { passed: 10, failed: 1, skipped: 0 },
           criterion_claims: criterionClaims([], ["All tests pass"]),
-          progress_estimate: 0.7,
         },
       }),
     }), null);
@@ -227,7 +280,7 @@ describe("cognitive-state compiler", () => {
   });
 
   it("honors L0 budget ceiling in prompt artifact", () => {
-    // L0 budget is 3000 chars. The compiler should respect this.
+    // L0 budget is the policy's l0_max_chars. The compiler should respect this.
     const response = compileLoop(makeLoopCompileRequest({
       loop_id: "budget",
       round: 3,
@@ -242,10 +295,11 @@ describe("cognitive-state compiler", () => {
       }],
     }), null);
     assert.equal(response.prompt_artifact?.level, "l0");
-    // L0 max is 3000 chars per policy — rendered prompt must be within budget
+    // L0 max comes from the policy — rendered prompt must be within budget
+    const l0Budget = DEFAULT_POLICY.prompt.l0_max_chars;
     assert.ok(
-      (response.prompt?.length ?? 0) <= 3000,
-      `L0 prompt length ${response.prompt?.length} exceeds 3000 char budget`,
+      (response.prompt?.length ?? 0) <= l0Budget,
+      `L0 prompt length ${response.prompt?.length} exceeds ${l0Budget} char budget`,
     );
   });
 
@@ -282,7 +336,6 @@ describe("cognitive-state compiler", () => {
             files_changed: ["db/migrate.ts"],
             tests_reported: { passed: 10, failed: 0, skipped: 0 },
             criterion_claims: criterionClaims(["Migration verified"], []),
-            progress_estimate: 0.35,
           },
           retracted_constraints: [],
         },
@@ -300,7 +353,6 @@ describe("cognitive-state compiler", () => {
             files_changed: ["api/routes.ts"],
             tests_reported: null,
             criterion_claims: criterionClaims(["Migration verified"], ["API coverage ≥ 90%"]),
-            progress_estimate: 0.40,
           },
         },
       ],
@@ -313,7 +365,7 @@ describe("cognitive-state compiler", () => {
     assert.equal(m.label, "数据层完成");
     assert.equal(m.round_range.start, 1);
     assert.equal(m.round_range.end, 2);
-    assert.equal(m.progress_at_boundary, 0.35);
+    assert.equal("progress_at_boundary" in m, false);
     assert.ok(m.carried_constraints.includes("No data loss"));
     assert.ok(m.outcome.includes("Data migration complete"));
   });
@@ -331,7 +383,6 @@ describe("cognitive-state compiler", () => {
             files_changed: ["test/unit.ts"],
             tests_reported: { passed: 20, failed: 0, skipped: 0 },
             criterion_claims: criterionClaims(["Unit tests ≥ 90%"], ["Integration tests pass", "E2E coverage"]),
-            progress_estimate: 0.30,
           },
           retracted_constraints: [],
         },
@@ -345,7 +396,6 @@ describe("cognitive-state compiler", () => {
             files_changed: ["test/integration.ts"],
             tests_reported: { passed: 15, failed: 0, skipped: 0 },
             criterion_claims: criterionClaims(["Unit tests ≥ 90%", "Integration tests pass"], ["E2E coverage"]),
-            progress_estimate: 0.65,
           },
           retracted_constraints: [],
         },
@@ -359,7 +409,6 @@ describe("cognitive-state compiler", () => {
             files_changed: ["test/e2e.ts"],
             tests_reported: null,
             criterion_claims: criterionClaims(["Unit tests ≥ 90%", "Integration tests pass"], ["E2E coverage"]),
-            progress_estimate: 0.70,
           },
         },
       ],
@@ -372,7 +421,7 @@ describe("cognitive-state compiler", () => {
     assert.match(critMs[0].label, /Integration tests pass/);
     assert.equal(critMs[0].round_range.start, 1);
     assert.equal(critMs[0].round_range.end, 2);
-    assert.equal(critMs[0].progress_at_boundary, 0.65);
+    assert.equal("progress_at_boundary" in critMs[0], false);
   });
 
   /** One committed round claiming the given criteria, for the two tests
@@ -387,7 +436,6 @@ describe("cognitive-state compiler", () => {
       files_changed: [`test/${round}.ts`],
       tests_reported: { passed: round * 5, failed: 0, skipped: 0 },
       criterion_claims: criterionClaims(met, []),
-      progress_estimate: 0.3 * round,
     },
   });
 
@@ -440,7 +488,6 @@ describe("cognitive-state compiler", () => {
             files_changed: ["test/unit.ts"],
             tests_reported: { passed: 20, failed: 0, skipped: 0 },
             criterion_claims: criterionClaims(["Unit tests done"], ["Integration done"]),
-            progress_estimate: 0.30,
           },
         },
         {
@@ -454,7 +501,6 @@ describe("cognitive-state compiler", () => {
             tests_reported: { passed: 15, failed: 0, skipped: 0 },
             // "Integration done" is genuinely different from "Unit tests done"
             criterion_claims: criterionClaims(["Unit tests done", "Integration done"], []),
-            progress_estimate: 0.70,
           },
         },
       ],
@@ -482,7 +528,6 @@ describe("cognitive-state compiler", () => {
       files_changed: [],
       tests_reported: null,
       criterion_claims: criterionClaims([], []),
-      progress_estimate: round / 100,
     },
   });
 
@@ -538,7 +583,6 @@ describe("cognitive-state compiler", () => {
           files_changed: [],
           tests_reported: null,
           criterion_claims: criterionClaims([], []),
-          progress_estimate: i / 15,
         },
       });
     }
@@ -568,7 +612,6 @@ describe("cognitive-state compiler", () => {
           files_changed: [],
           tests_reported: null,
           criterion_claims: criterionClaims([], []),
-          progress_estimate: i / 8,
         },
       });
     }
@@ -633,7 +676,6 @@ describe("cognitive-state compiler", () => {
             files_changed: ["data/store.ts"],
             tests_reported: { passed: 5, failed: 0, skipped: 0 },
             criterion_claims: criterionClaims([], []),
-            progress_estimate: 0.30,
           },
         },
         {
@@ -650,7 +692,6 @@ describe("cognitive-state compiler", () => {
             files_changed: ["api/routes.ts"],
             tests_reported: null,
             criterion_claims: criterionClaims([], []),
-            progress_estimate: 0.45,
           },
         },
         {
@@ -667,14 +708,13 @@ describe("cognitive-state compiler", () => {
             files_changed: ["api/middleware.ts"],
             tests_reported: { passed: 8, failed: 0, skipped: 0 },
             criterion_claims: criterionClaims([], []),
-            progress_estimate: 0.60,
           },
         },
       ],
     });
     assert.match(response.prompt, /Phase History/);
     assert.match(response.prompt, /Data Layer/);
-    assert.match(response.prompt, /30%/);
+    assert.match(response.prompt, /Data Layer\*\* \(Rounds 1–1\)/);
     // L2 includes the durable phase history; formulaic loop synthesis is removed.
     assert.match(response.prompt, /Phase History/);
   });
@@ -703,7 +743,6 @@ describe("cognitive-state compiler", () => {
             files_changed: ["core.ts"],
             tests_reported: null,
             criterion_claims: criterionClaims([], []),
-            progress_estimate: 0.30,
           },
         },
         {
@@ -781,7 +820,7 @@ describe("cognitive-state compiler", () => {
   it("applies a done transition by exact sub-goal ID", () => {
     // Simulate a vault with a previously declared sub-goal
     const vault = {
-      results: [{
+      results: [withTransaction({
         loop_id: "sg-id-match",
         loop_lineage: {
           loop_id: "sg-id-match",
@@ -795,7 +834,7 @@ describe("cognitive-state compiler", () => {
         emerged_subtasks: ["Add error handling to login"],
         success: true,
         output_summary: "Started auth fix",
-      }],
+      })],
     };
     // Round 2: agent completes the sub-goal by transitioning its ID
     const sgId = deriveSubGoalId("sg-id-match", 1, 0, "Add error handling to login");
@@ -851,7 +890,7 @@ describe("cognitive-state compiler", () => {
 
   it("reaches in_progress only through an explicit update", () => {
     const vault = {
-      results: [{
+      results: [withTransaction({
         loop_id: "sg-inprogress",
         loop_lineage: {
           loop_id: "sg-inprogress",
@@ -865,7 +904,7 @@ describe("cognitive-state compiler", () => {
         emerged_subtasks: ["Add rate limiting"],
         success: true,
         output_summary: "Started",
-      }],
+      })],
     };
     const sgId = deriveSubGoalId("sg-inprogress", 1, 0, "Add rate limiting");
     const response = compileLoop(makeLoopCompileRequest({
@@ -889,7 +928,7 @@ describe("cognitive-state compiler", () => {
     const sgId = deriveSubGoalId("sg-persist", 1, 0, "Add error handling to login");
     const vault = {
       results: [
-        {
+        withTransaction({
           loop_id: "sg-persist",
           loop_lineage: {
             loop_id: "sg-persist", round: 1, goal_id: deriveGoalId("sg-persist", "Fix auth"),
@@ -899,8 +938,8 @@ describe("cognitive-state compiler", () => {
           emerged_subtasks: ["Add error handling to login"],
           success: true,
           output_summary: "Started",
-        },
-        {
+        }),
+        withTransaction({
           loop_id: "sg-persist",
           loop_lineage: {
             loop_id: "sg-persist", round: 2, goal_id: deriveGoalId("sg-persist", "Fix auth"),
@@ -910,7 +949,7 @@ describe("cognitive-state compiler", () => {
           subgoal_updates: [{ id: sgId, status: "done" }],
           success: true,
           output_summary: "Done auth",
-        },
+        }),
       ],
     };
     const response = compileLoop(makeLoopCompileRequest({
@@ -968,11 +1007,13 @@ describe("cognitive-state compiler", () => {
 
   // ── v2.8: Self-eval block sub-goal ID hints ────────────────────────────
 
-  it("buildSelfEvalBlock includes sub-goal ID usage hints", () => {
-    const block = buildSelfEvalBlock(3);
-    assert.ok(block.includes("sub-goal ID"), "should mention sub-goal IDs");
-    assert.ok(block.includes("sg-"), "should show ID format example");
-    assert.ok(block.includes("Sub-Goal Dashboard"), "should reference the dashboard");
+  it("buildSelfEvalBlock renders a real active sub-goal id and no placeholder id", () => {
+    const block = buildSelfEvalBlock(evalCtx({ subGoals: [testSubGoal()] }));
+    assert.ok(block.includes("sg-12345678"), "uses the real active sub-goal id");
+    assert.ok(block.includes("subgoal_updates"), "shows the update field");
+    const without = buildSelfEvalBlock(evalCtx({ subGoals: [] }));
+    assert.ok(!without.includes("sg-12345678"), "does not invent an id when none exists");
+    assert.ok(!without.includes("<sg-"), "does not render a placeholder id");
   });
 
   // ── v2.8: L2 pointer mode ─────────────────────────────────────────────
@@ -996,7 +1037,6 @@ describe("cognitive-state compiler", () => {
           files_changed: ["src/db.ts"],
           tests_reported: { passed: 8, failed: 2, skipped: 0 },
           criterion_claims: criterionClaims([], ["All tests pass"]),
-          progress_estimate: 0.3,
         },
       }),
     }), null);
@@ -1138,26 +1178,18 @@ describe("cognitive-state compiler", () => {
       "State file should render criterion IDs with cr- prefix");
   });
 
-  it("self-eval template includes ID usage guidance", () => {
-    const block = buildSelfEvalBlock(3);
-    assert.ok(block.includes("c-XXXXXXXX"),
-      "should mention c-XXXXXXXX constraint ID format");
-    assert.ok(block.includes("cr-XXXXXXXX"),
-      "should mention cr-XXXXXXXX criterion ID format");
-    assert.ok(block.includes("sg-XXXXXXXX"),
-      "should mention sg-XXXXXXXX sub-goal ID format");
-    assert.ok(block.includes("sub-goal ID"),
-      "should mention sub-goal IDs");
+  it("self-eval template never fabricates stable id formats", () => {
+    const block = buildSelfEvalBlock(evalCtx());
+    assert.ok(block.includes("Never invent an id"));
+    assert.ok(!block.includes("<sg-"), "no phantom sub-goal id");
+    assert.ok(!block.includes("<rci-"), "no phantom contract item id");
   });
 
-  it("self-eval template placeholders use ID format", () => {
-    const block = buildSelfEvalBlock(5);
-    // constraint_violations placeholder should mention c-XXXXXXXX
-    assert.ok(block.includes("c-XXXXXXXX"),
-      "constraint_violations placeholder should use c-XXXXXXXX");
-    // the criterion-claim placeholder should mention cr-XXXXXXXX
-    assert.ok(block.includes("cr-XXXXXXXX"),
-      "criterion_claims placeholder should use cr-XXXXXXXX");
+  it("self-eval template explains the boundary files_changed meaning", () => {
+    const block = buildSelfEvalBlock(evalCtx());
+    assert.ok(block.includes("files_changed"));
+    assert.ok(block.includes("net boundary change from round start"));
+    assert.ok(block.includes("including deletions"));
   });
 
   it("older vault entries without IDs still match via Jaccard fallback", () => {
@@ -1255,7 +1287,6 @@ describe("cognitive-state compiler", () => {
           tests_reported: null,
           // Both criteria met — use IDs for precise matching
           criterion_claims: criterionClaims(["cr-" + computeGoalTextHash("API returns valid JSON").slice(0, 8)], []),
-          progress_estimate: 0.8,
         },
       }),
     }), null);
@@ -1284,7 +1315,7 @@ describe("cognitive-state compiler", () => {
             success: true,
           },
         },
-        {
+        withTransaction({
           loop_id: "recovery-loop",
           loop_lineage: {
             loop_id: "recovery-loop",
@@ -1294,7 +1325,7 @@ describe("cognitive-state compiler", () => {
             constraints_active: [],
             success: true,
           },
-        },
+        }, "backtrack"),
       ],
       global_entries: [],
     };
@@ -1453,7 +1484,6 @@ describe("v3.2 — criterion status derivation", () => {
           files_changed: ["src/parser.ts"],
           tests_reported: { passed: 10, failed: 0, skipped: 0 },
           criterion_claims: criterionClaims(["Parser complete"], ["Tests ≥90%"]),
-          progress_estimate: 0.6,
         },
       }),
     }), null);
@@ -1497,6 +1527,8 @@ describe("v3.8.1 — recurring flags", () => {
     beforeEvidence: [],
     afterEvidence: [],
     observationDelta: [],
+    normalizationDiagnostics: [],
+    submittedFields: [],
     evidenceIncomplete: true,
     constraintViolations: opts.violations ?? [],
     backtrack: null,
@@ -1570,12 +1602,12 @@ describe("v3.8.1 — Active Warnings (prompt) vs Recurring Flags (state file)", 
     round: number,
     violations: string[],
     flags: VerificationFlag[],
-  ): Record<string, unknown> => {
-    const entry = mergedLineageRound(round, { loopId });
-    entry.verification_flags = flags;
-    entry.constraint_violations = violations;
-    return entry;
-  };
+  ): Record<string, unknown> =>
+    mergedLineageRound(round, {
+      loopId,
+      constraintViolations: violations,
+      verificationFlags: flags,
+    });
   const warn = (check: string): VerificationFlag =>
     ({ severity: "warn", field: "x", check, detail: "d" });
 
@@ -1753,7 +1785,24 @@ describe("v3.3 — round stats and machine status threading", () => {
     attempt,
     files,
     progress,
-    roundEvidence: [{ schemaVersion: 1, providerId: "git", kind: "git", phase: "after", startedAt: 0, finishedAt: 0, status: "observed", files, data: { fingerprints: {} } }],
+    beforeEvidence: [{
+      schemaVersion: 2, providerId: "git", kind: "git", phase: "before",
+      startedAt: 0, finishedAt: 0, status: "observed", files: [],
+      data: {
+        dirty: [], fingerprints: {}, head: `h${round - 1}`,
+        coverage: "tracked_and_non_ignored_untracked",
+      },
+    }],
+    roundEvidence: [{
+      schemaVersion: 2, providerId: "git", kind: "git", phase: "after",
+      startedAt: 0, finishedAt: 0, status: "observed", files,
+      data: {
+        dirty: files,
+        fingerprints: Object.fromEntries(files.map((file) => [file, "m:1"])),
+        head: `h${round}`,
+        coverage: "tracked_and_non_ignored_untracked",
+      },
+    }],
   });
 
   it("derives round stats and machine git-motion from committed context entries", () => {
@@ -1806,24 +1855,47 @@ describe("v3.3 — round stats and machine status threading", () => {
     // lineage.round_evidence onto merged lineage entries (raw :feedback
     // entries never reach the compile view). Before the stamp, this fixture
     // rendered "— rejected attempts" and no Machine row at all.
-    const mergedRound = (round: number, attempt: number, gitMotion: boolean): Record<string, unknown> =>
-      mergedLineageRound(round, {
+    const mergedRound = (round: number, attempt: number, gitMotion: boolean): Record<string, unknown> => {
+      const changed = gitMotion ? [`src/r${round}.ts`] : [];
+      return mergedLineageRound(round, {
         loopId: "stats-loop",
         attempt,
         files: [`src/r${round}.ts`],
         progress: 0.2 + round * 0.1,
+        beforeEvidence: [{
+          schemaVersion: 2,
+          providerId: "git",
+          kind: "git",
+          phase: "before",
+          startedAt: 0,
+          finishedAt: 0,
+          status: "observed",
+          files: [],
+          data: {
+            dirty: [],
+            fingerprints: {},
+            head: `h${round - 1}`,
+            coverage: "tracked_and_non_ignored_untracked",
+          },
+        }],
         roundEvidence: [{
-          schemaVersion: 1,
+          schemaVersion: 2,
           providerId: "git",
           kind: "git",
           phase: "after",
           startedAt: 0,
           finishedAt: 0,
           status: "observed",
-          files: gitMotion ? [`src/r${round}.ts`] : [],
-          data: { fingerprints: {} },
+          files: changed,
+          data: {
+            dirty: changed,
+            fingerprints: Object.fromEntries(changed.map((file) => [file, "m:1"])),
+            head: gitMotion ? `h${round}` : `h${round - 1}`,
+            coverage: "tracked_and_non_ignored_untracked",
+          },
         }],
       });
+    };
     const response = compileLoop(makeLoopCompileRequest({
       loop_id: "stats-loop",
       round: 4,
@@ -1850,18 +1922,46 @@ describe("v3.3 — round stats and machine status threading", () => {
 // v3.3 — Round Contract self-eval template
 // ═══════════════════════════════════════════════════════════════════════════
 
-describe("v3.3 — Round Contract eval template", () => {
-  it("restates the contract in L1/L2 templates when hasContract is set", () => {
-    const block = buildSelfEvalBlock(4, "l2", true);
-    assert.ok(block.includes("round_contract"), "template must carry the contract key");
-    assert.ok(block.includes("restate the Current Task's contract UNCHANGED"));
+describe("v3.9.1 — Round Contract eval template", () => {
+  it("shows real active-contract item ids without requiring a restatement", () => {
+    const block = buildSelfEvalBlock(evalCtx({
+      round: 4,
+      level: "l2",
+      activeContract: testContract(),
+    }));
+    assert.ok(block.includes("rci-12345678"), "renders the real rci id");
+    assert.ok(block.includes("do NOT need to restate"), "no mechanical restatement");
+    assert.ok(!block.includes("done_when"), "old contract shape is gone");
+    assert.ok(!block.includes("verification_plan"), "old contract shape is gone");
   });
 
-  it("non-contract rounds and L0 retries never see the contract template", () => {
-    const plain = buildSelfEvalBlock(4, "l2", false);
-    assert.ok(!plain.includes("round_contract"), "no contract → no template key");
-    const retry = buildSelfEvalBlock(4, "l0", true);
-    assert.ok(!retry.includes("round_contract"), "L0 retry stays lean even with a contract");
+  it("shows a first declaration only when a contract command is available", () => {
+    const first = buildSelfEvalBlock(evalCtx({
+      round: 4,
+      activeContract: null,
+      commands: ["verify"],
+    }));
+    assert.ok(first.includes("round_contract"), "first declaration is offered");
+    assert.ok(first.includes("verify"), "uses the real command name");
+    const noCommand = buildSelfEvalBlock(evalCtx({
+      activeContract: null,
+      commands: [],
+      contractVerificationAvailable: false,
+    }));
+    assert.ok(!noCommand.includes("round_contract"),
+      "no command → no contract proposal");
+    assert.ok(noCommand.includes("run without a contract"));
+  });
+
+  it("L0 retry stays lean but keeps functional contract claims", () => {
+    const retry = buildSelfEvalBlock(evalCtx({
+      round: 4,
+      level: "l0",
+      activeContract: testContract(),
+      subGoals: [testSubGoal()],
+    }));
+    assert.ok(!retry.includes("retroactiveClaims"), "no L1/L2 extras at L0");
+    assert.ok(retry.includes("rci-12345678"), "item claims remain functional");
   });
 });
 
@@ -1870,6 +1970,7 @@ describe("v3.3 — Round Contract eval template", () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("v3.4 — ACTIVE Round Contract derivation (compileLoop)", () => {
+  beforeEach(() => resetPolicy());
   /** Merged production-shape lineage entry (shared fixture, derive-cc loop). */
   const mergedRound = (r: number, o: Parameters<typeof mergedLineageRound>[1] = {}) =>
     mergedLineageRound(r, { loopId: "derive-cc", ...o });
@@ -1922,8 +2023,8 @@ describe("v3.4 — ACTIVE Round Contract derivation (compileLoop)", () => {
     ]);
     assert.ok(res.prompt.includes("**Slice A**"),
       "an L0 retry under an active contract must keep showing it");
-    assert.ok(!res.prompt.includes("round_contract"),
-      "L0 retry stays lean — no restatement template");
+    assert.ok(!res.prompt.includes("restate the Current Task's contract UNCHANGED"),
+      "L0 retry stays lean — no restatement requirement");
   });
 
   it("a fully verified contract reverts the Current Task to the original task", () => {
@@ -1949,8 +2050,8 @@ describe("v3.4 — ACTIVE Round Contract derivation (compileLoop)", () => {
       }),
     ]);
     assert.ok(!res.prompt.includes("**Slice A**"), "satisfied contract must stop rendering");
-    assert.ok(!res.prompt.includes("round_contract"),
-      "no active contract → no restatement template");
+    assert.ok(res.prompt.includes("round_contract"),
+      "the closing round may declare a successor proposal");
     assert.ok(res.prompt.includes(TASK), "objective still present");
   });
 

@@ -8,23 +8,34 @@
 
 import type { LoopStore, VaultEntry } from "./loop-store.js";
 import { LoopForgeEngine } from "./engine.js";
-import { diffSnapshotCollections } from "./evidence-provider.js";
-import type { ContractBinding, MachineObservation, RoundContractProposal } from "./protocol.js";
-import type { SelfEvaluation } from "./protocol.js";
-import type { PromptArtifact } from "./protocol.js";
+import { deriveObservationDeltas } from "./evidence-provider.js";
+import type { ObservationDelta } from "./evidence-provider.js";
+import type {
+  ContractBinding,
+  MachineObservation,
+  PromptArtifact,
+  RoundContractProposal,
+  SelfEvaluation,
+  SubmissionDiagnostic,
+} from "./protocol.js";
 import {
   RoundCoordinator,
   type RoundProcessResult,
 } from "./round-coordinator.js";
 import { logEvent } from "./observability.js";
 import { deriveContractId, deriveContractItemIds, isRecord } from "./token-utils.js";
-import { PROMPT_ARTIFACT_SCHEMA_VERSION } from "./protocol.js";
+import {
+  GIT_OBSERVATION_SCHEMA_VERSION,
+  PROMPT_ARTIFACT_SCHEMA_VERSION,
+} from "./protocol.js";
 import { commandConfigHash, getPolicy } from "./policy.js";
 import { policyMetrics } from "./policy-metrics.js";
 import { VaultRoundCommitStore } from "./storage.js";
 import type { RoundCommitStore } from "./storage.js";
 
-export const ROUND_TRANSACTION_SCHEMA_VERSION = 2 as const;
+/** v3.9.1: schema 3 embeds Git observation schema 2 (complete boundary
+ *  fingerprints) and later adds optional diagnostics/manifest fields. */
+export const ROUND_TRANSACTION_SCHEMA_VERSION = 3 as const;
 
 /** v3.8: the closed set of machine-observation statuses. */
 const OBSERVATION_STATUSES = [
@@ -50,6 +61,12 @@ export interface RoundTransactionSnapshot {
   afterEvidence?: MachineObservation[];
   evaluation?: SelfEvaluation;
   result?: RoundProcessResult;
+  /** v3.9.1: every lossy normalization decision for this submission. Saved
+   *  with the transaction; strict boundary failures never reach here. */
+  normalizationDiagnostics?: SubmissionDiagnostic[];
+  /** v3.9.1: the known evaluation paths present in the raw submission. The
+   *  receipt uses this manifest; unknown paths live in diagnostics only. */
+  submittedFields?: string[];
   /** v3.8: the contract binding resolved at commit time (see ContractBinding).
    *  Absent when the committing round declared no contract. */
   contractBinding?: ContractBinding;
@@ -76,8 +93,14 @@ export interface RoundTransactionInput {
   /** v2.12: Git HEAD of the backtrack restore point. The verification gate
    *  checks the workspace returns to this commit before accepting work. */
   backtrackTargetGitHead?: string;
+  /** v3.9: files already dirty at the backtrack restore point (restore
+   *  baseline — see RoundProcessResult.backtrackTargetDirty). */
+  backtrackTargetDirty?: string[];
   /** v3.8.3: trusted round-start entrypoint fingerprints (see RoundProcessInput). */
   entrypointTrust?: Record<string, string>;
+  /** v3.9.1: normalization metadata carried into the evaluated snapshot. */
+  normalizationDiagnostics?: SubmissionDiagnostic[];
+  submittedFields?: string[];
   actualEvidence: MachineObservation[];
 }
 
@@ -88,16 +111,17 @@ export interface RoundTransactionOutcome {
   replayed: boolean;
 }
 
-/** v3.8: The round's observation delta (before → after) — files that
- *  appeared, disappeared, or changed content. DERIVED, never persisted: the
- *  transaction stores only the two factual observation collections, and every
- *  reader (gates, metrics, git-motion series, replay, audit) consumes this one
- *  derivation. */
+/** v3.8/v3.9.1: The round's observation delta (before → after). Each entry
+ *  carries raw before/after references; Git's `changedFiles` is the only
+ *  file-change fact and is null when the pair cannot be compared. DERIVED,
+ *  never persisted: the transaction stores only the two factual observation
+ *  collections, and every reader (gates, metrics, git-motion series, replay,
+ *  audit) consumes this one derivation. */
 export function deriveRoundObservationDelta(
   before: MachineObservation[],
   after: MachineObservation[],
-): MachineObservation[] {
-  return diffSnapshotCollections(before, after);
+): ObservationDelta[] {
+  return deriveObservationDeltas(before, after);
 }
 
 /** v3.8: The schema version stamped on a persisted transaction envelope, or
@@ -187,6 +211,10 @@ export function prepareRejectedAttempt(
     afterEvidence: undefined,
     evaluation: undefined,
     result: undefined,
+    // The rejected attempt's diagnostics were returned in its receipt; the
+    // retry has not submitted a new payload yet.
+    normalizationDiagnostics: undefined,
+    submittedFields: undefined,
     promptArtifact,
     updatedAt: Date.now(),
   };
@@ -214,7 +242,6 @@ function parseMachineObservations(value: unknown): MachineObservation[] | null {
   for (const item of value) {
     if (!isRecord(item)) return null;
     if (
-      item.schemaVersion !== 1 ||
       typeof item.providerId !== "string" ||
       (item.kind !== "git" && item.kind !== "command" && item.kind !== "custom") ||
       (item.phase !== "before" && item.phase !== "after") ||
@@ -225,6 +252,25 @@ function parseMachineObservations(value: unknown): MachineObservation[] | null {
       !item.files.every((file) => typeof file === "string") ||
       !isRecord(item.data)
     ) return null;
+    // v3.9.1: Git observations moved to schema 2 (complete boundary
+    // fingerprints); command/custom observations remain schema 1. A
+    // mismatched Git observation is a hard break, reported by
+    // legacyTransactionRounds as an "observation" envelope loss.
+    const expectedVersion = item.kind === "git"
+      ? GIT_OBSERVATION_SCHEMA_VERSION
+      : 1;
+    if (item.schemaVersion !== expectedVersion) return null;
+    if (item.kind === "git" && item.status === "observed") {
+      const data = item.data;
+      if (!Array.isArray(data.dirty) ||
+          !data.dirty.every((file) => typeof file === "string") ||
+          !isRecord(data.fingerprints) ||
+          !Object.values(data.fingerprints).every((fp) => typeof fp === "string") ||
+          (data.head !== undefined && typeof data.head !== "string") ||
+          data.coverage !== "tracked_and_non_ignored_untracked") {
+        return null;
+      }
+    }
     observations.push(item as unknown as MachineObservation);
   }
   return observations;
@@ -253,15 +299,42 @@ export function parseRoundTransactionSnapshot(
   if (value.afterEvidence !== undefined && !afterEvidence) return null;
   if (value.result !== undefined && !isProcessResult(value.result)) return null;
   if (value.contractBinding !== undefined && !isContractBinding(value.contractBinding)) return null;
+  if (value.normalizationDiagnostics !== undefined) {
+    if (!Array.isArray(value.normalizationDiagnostics) ||
+        value.normalizationDiagnostics.length > 200) return null;
+    for (const item of value.normalizationDiagnostics) {
+      if (!isRecord(item) ||
+          typeof item.path !== "string" ||
+          typeof item.code !== "string" ||
+          !["dropped", "truncated", "normalized", "rejected"]
+            .includes(String(item.handling)) ||
+          typeof item.detail !== "string") {
+        return null;
+      }
+    }
+  }
+  if (value.submittedFields !== undefined) {
+    if (!Array.isArray(value.submittedFields) ||
+        value.submittedFields.length > 100 ||
+        !value.submittedFields.every((item) => typeof item === "string") ||
+        new Set(value.submittedFields).size !== value.submittedFields.length) {
+      return null;
+    }
+  }
+  // A normalized/committed round always carries its attempted manifest. Its
+  // absence is not a supported legacy shape.
+  if ((value.phase === "evaluated" || value.phase === "committed") &&
+      value.submittedFields === undefined) {
+    return null;
+  }
   if (value.promptArtifact !== undefined) {
     if (!isRecord(value.promptArtifact)) return null;
     const artifact = value.promptArtifact;
-    // v3.8.1: schema 2 fixed the artifact's field set (it now records the
-    // sections rendered, the ones the budget rule dropped, and whether the
-    // protected set overflowed). Version 1 is a HARD break: a round whose
-    // envelope does not parse is not committed history, and
-    // `artifactVersionOf` lets the audit report the loss explicitly instead
-    // of the loop looking complete while rounds are missing.
+    // v3.9.1: schema 3 adds prompt-request render effects. An unsupported
+    // artifact version is a HARD break: a round whose envelope does not parse
+    // is not committed history, and `legacyTransactionRounds` reports the
+    // loss explicitly instead of the loop looking complete while rounds are
+    // missing.
     if (
       artifact.schemaVersion !== PROMPT_ARTIFACT_SCHEMA_VERSION ||
       typeof artifact.roundId !== "string" ||
@@ -333,7 +406,7 @@ export class RoundTransactionCoordinator {
     // v3.8: the round delta is DERIVED, never persisted — the transaction
     // stores the two factual observation collections and this pure function
     // is the single derivation every reader shares.
-    const roundDelta = deriveRoundObservationDelta(
+    const roundDeltas = deriveRoundObservationDelta(
       snapshot.beforeEvidence,
       input.actualEvidence,
     );
@@ -347,11 +420,13 @@ export class RoundTransactionCoordinator {
       lastSelfEval: input.lastSelfEval,
       consecutiveRejections: input.consecutiveRejections,
       lastRejectionCheck: input.lastRejectionCheck,
-      evidenceSnapshots: roundDelta,
+      evidenceDeltas: roundDeltas,
+      beforeEvidence: snapshot.beforeEvidence,
       successTrajectory: input.successTrajectory,
       backtrackSkippedFiles: input.backtrackSkippedFiles,
       backtrackSkippedFingerprints: input.backtrackSkippedFingerprints,
       backtrackTargetGitHead: input.backtrackTargetGitHead,
+      backtrackTargetDirty: input.backtrackTargetDirty,
       entrypointTrust: input.entrypointTrust,
     });
 
@@ -362,6 +437,14 @@ export class RoundTransactionCoordinator {
       afterEvidence: input.actualEvidence,
       evaluation: input.selfEval,
       result,
+      ...(input.normalizationDiagnostics !== undefined
+        ? { normalizationDiagnostics: input.normalizationDiagnostics }
+        : {}),
+      // Every evaluated/committed snapshot carries the attempted manifest.
+      // The MCP boundary always supplies it; direct library callers that do
+      // not are recorded with an empty manifest rather than an unsupported
+      // missing key.
+      submittedFields: input.submittedFields ?? [],
       updatedAt: Date.now(),
     };
 

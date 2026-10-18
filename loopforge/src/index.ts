@@ -60,6 +60,12 @@ export type {
   SubGoal,
   ConstraintMeta,
   PromptArtifact,
+  PromptRequestEffect,
+  SubmissionDiagnostic,
+  SubmissionDiagnosticHandling,
+  SubmissionGuidance,
+  SubmissionReceipt,
+  SubmissionReportHandling,
 } from "./protocol.js";
 
 // Policy
@@ -108,6 +114,29 @@ export {
   buildRollingSummary,
 } from "./loop-compiler.js";
 
+// Submission channel (v3.9.1)
+export {
+  allFieldGuidePaths,
+  deriveSubmissionGuidance,
+  fieldGuide,
+  fieldGuideDescription,
+  renderSelfEvalBlock,
+} from "./submission-guidance.js";
+export type {
+  FieldGuide,
+  GuidanceOptions,
+  GuidanceSessionView,
+  SelfEvalPromptContext,
+} from "./submission-guidance.js";
+export {
+  deriveCommittedSubmissionView,
+  deriveSubmissionReceipt,
+} from "./submission-receipt.js";
+export type {
+  ReceiptFacts,
+  ReceiptInput,
+} from "./submission-receipt.js";
+
 // Replay
 export { ReplayBackend } from "./replay.js";
 
@@ -138,10 +167,8 @@ export {
   unregisterEvidenceProvider,
   isProviderRegistered,
   isPassedAfterObservation,
-  gitChangedFiles,
-  extractFilesFromSnapshots,
-  diffSnapshots,
-  diffSnapshotCollections,
+  deriveObservationDeltas,
+  gitDeltaState,
 } from "./evidence-provider.js";
 export type {
   EvidenceProvider,
@@ -149,6 +176,8 @@ export type {
   EvidenceCaptureResult,
   EvidenceCollectOptions,
   EvidenceProviderFactory,
+  ObservationDelta,
+  GitDeltaState,
 } from "./evidence-provider.js";
 
 // Structured tracing and policy effectiveness metrics (v1.20)

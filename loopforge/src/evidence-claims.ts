@@ -16,9 +16,13 @@
  */
 
 import type { VaultEntry } from "./loop-store.js";
-import { machineEvidenceForRound, readOnlyRounds } from "./committed-round.js";
-import type { MachineObservation } from "./protocol.js";
-import { isPassedAfterObservation } from "./evidence-provider.js";
+import { readOnlyRounds } from "./committed-round.js";
+import type { ObservationDelta } from "./evidence-provider.js";
+import {
+  afterObservations,
+  gitDeltaState,
+  isPassedAfterObservation,
+} from "./evidence-provider.js";
 import { claimedMetCriteria } from "./self-eval.js";
 import type { SelfEvaluation, VerificationFlag } from "./protocol.js";
 export interface DerivedClaim {
@@ -56,23 +60,23 @@ function hasPassingTestEvidence(selfEval: SelfEvaluation): boolean {
     results.passed > 0;
 }
 
-function hasPassedAfterCommand(observations: MachineObservation[]): boolean {
+function hasPassedAfterCommand(deltas: ReadonlyArray<ObservationDelta>): boolean {
   // v3.8: ONE predicate — the gate's entrypoint-tamper exclusion and this
   // module's check were two divergent definitions of "machine-backed".
-  const git = observations.find((item) => item.providerId === "git") ?? null;
-  const changed = git ? new Set(git.files) : null;
-  return observations.some((item) => isPassedAfterObservation(item, changed));
+  const git = gitDeltaState(deltas);
+  return afterObservations(deltas)
+    .some((observation) => isPassedAfterObservation(observation, git));
 }
 
 /** Derive the runtime claim view for a round. No file-level or text-level
  *  guessing: git observations only serve the evidence_integrity warn. */
 export function deriveClaimView(
   selfEval: SelfEvaluation,
-  evidenceSnapshots: MachineObservation[],
+  evidenceDeltas: ReadonlyArray<ObservationDelta>,
 ): ClaimView {
   const met = claimedMetCriteria(selfEval.execution_report);
   const machineVerified = hasPassingTestEvidence(selfEval) &&
-    hasPassedAfterCommand(evidenceSnapshots);
+    hasPassedAfterCommand(evidenceDeltas);
   const claims: DerivedClaim[] = met.map((targetId) => ({
     targetId,
     status: machineVerified ? "verified" : "claimed",
@@ -87,7 +91,7 @@ export function deriveClaimView(
     // claim, not evidence. Without a passed command, R8 and the
     // criteria-claims check can no longer be satisfied by fabrication.
     hasMachineEvidence: hasPassingTestEvidence(selfEval) &&
-      hasPassedAfterCommand(evidenceSnapshots),
+      hasPassedAfterCommand(evidenceDeltas),
   };
 }
 
@@ -96,10 +100,10 @@ export function deriveClaimView(
  *  snapshots; the live round path uses deriveClaimView only. */
 export function rederiveClaimViewWithFlags(
   selfEval: SelfEvaluation,
-  evidenceSnapshots: MachineObservation[],
+  evidenceDeltas: ReadonlyArray<ObservationDelta>,
   flags: VerificationFlag[],
 ): ClaimView {
-  const view = deriveClaimView(selfEval, evidenceSnapshots);
+  const view = deriveClaimView(selfEval, evidenceDeltas);
   const contradicted = flags.some((flag) =>
     flag.severity === "error" && CONTRADICTING_CHECKS.has(flag.check));
   if (contradicted) {
@@ -114,8 +118,9 @@ export function rederiveClaimViewWithFlags(
   return view;
 }
 
-/** Files actually changed in a committed round (git provider, after evidence
- *  preferred). Returns null when the round has no observable git snapshot. */
+/** Files actually changed in a committed round — the shared observation
+ *  delta, not the full after snapshot. Returns null when the round has no
+ *  observable Git boundary. */
 export function resolveRoundFiles(
   vaultEntries: VaultEntry[],
   loopId: string,
@@ -123,13 +128,10 @@ export function resolveRoundFiles(
 ): string[] | null {
   const committed = readOnlyRounds(vaultEntries)
     .find((view) => view.loopId === loopId && view.round === round);
-  if (!committed) return null;
-  const evidence = machineEvidenceForRound(committed);
-  const git = evidence.find((item) =>
-    item.providerId === "git" && Array.isArray(item.files)) as
-    Record<string, unknown> | undefined;
-  if (!git) return null;
-  return (git.files as unknown[]).filter((file): file is string => typeof file === "string");
+  if (!committed || committed.evidenceIncomplete) return null;
+  const git = committed.observationDelta.find((delta) => delta.kind === "git");
+  if (!git || git.changedFiles === null) return null;
+  return [...git.changedFiles];
 }
 
 /** Stable cr-IDs (and criterion texts) backed by verified claims across all
@@ -142,10 +144,11 @@ export function listVerifiedClaims(
   const verified = new Set<string>();
   for (const round of readOnlyRounds(vaultEntries)) {
     if (round.loopId !== loopId || !round.evaluation) continue;
-    const evidence = machineEvidenceForRound(round);
+    // v3.9.1: claims are checked against what THAT round changed, not the
+    // whole after-snapshot (which would include pre-existing dirt).
     const view = rederiveClaimViewWithFlags(
       round.evaluation,
-      evidence,
+      round.observationDelta,
       round.verificationFlags,
     );
     for (const claim of view.claims) {

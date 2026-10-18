@@ -5,6 +5,7 @@
  * the committed enforcement result. It never rebuilds history and never
  * writes. Every fact it prints is one the runtime already derived.
  */
+import type { SubmissionReceipt } from "./protocol.js";
 import type { VaultEntry } from "./loop-store.js";
 export interface ExplainRound {
     round: number;
@@ -33,12 +34,26 @@ export interface ExplainRound {
         status: string;
         files: string[];
     }>;
-    /** The derived before→after delta — never persisted. */
+    /** The derived before→after delta — never persisted. Raw observations keep
+     *  their own `files` in `observations`; this block carries only the change
+     *  set, which is null when the boundary pair is not comparable. */
     observationDelta: Array<{
         providerId: string;
-        files: string[];
+        kind: string;
+        changedFiles: string[] | null;
+        beforeStatus: string | null;
+        afterStatus: string | null;
     }>;
-    /** True when the round committed without after-phase observations. */
+    /** v3.9.1: the Git boundary facts, from the same shared derivation. */
+    files_changed: string[] | null;
+    git_change_state: "not_applicable" | "unknown" | "observed";
+    head_before: string | null;
+    head_after: string | null;
+    git_status: string | null;
+    coverage: string | null;
+    /** v3.9.1: the committed submission's receipt (same derivation as status). */
+    submission: SubmissionReceipt;
+    /** True when the round committed without a complete observable boundary. */
     evidenceIncomplete: boolean;
     /** Committed verification findings. */
     flags: Array<{

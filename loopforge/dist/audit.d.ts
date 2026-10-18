@@ -13,7 +13,8 @@
  */
 import type { LoopStore } from "./loop-store.js";
 import type { VaultEntry } from "./loop-store.js";
-import type { ContractItemStatus } from "./protocol.js";
+import type { ContractItemStatus, SubmissionDiagnostic } from "./protocol.js";
+import type { SubmissionReceipt } from "./protocol.js";
 export interface AuditRound {
     round: number;
     outcome: string;
@@ -37,6 +38,17 @@ export interface AuditRound {
             status: ContractItemStatus;
         }>;
     } | null;
+    /** v3.9.1: compact submission accounting. The full receipt is available in
+     *  explain/status; audit keeps the fields that matter for its verdict. */
+    submission: {
+        diagnostics: SubmissionDiagnostic[];
+        saved_not_expanded: string[];
+        effects: SubmissionReceipt["effects"];
+        prompt: {
+            level: string;
+            dropped_sections: string[];
+        } | null;
+    };
 }
 export interface AuditGate {
     gateId: string;

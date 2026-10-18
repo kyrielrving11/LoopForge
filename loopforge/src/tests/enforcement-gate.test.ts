@@ -85,15 +85,48 @@ function contradictedRecurringViolation(violation: string): VerificationResult {
   });
 }
 
-/** Build a vault entry with round and optional progress data. */
+/** Build a committed round with an observable Git delta. */
 function vaultRound(
   round: number,
-  progressEstimate?: number,
+  gitFiles: string[] = [],
 ): VaultEntry {
+  const beforeHead = `h${round - 1}`;
+  const afterHead = gitFiles.length > 0 ? `h${round}` : beforeHead;
   return committedFeedbackRound(round, {
     loopId: "test-loop",
     files: ["src/foo.ts"],
-    progress: progressEstimate,
+    beforeEvidence: [{
+      schemaVersion: 2,
+      providerId: "git",
+      kind: "git",
+      phase: "before",
+      startedAt: 0,
+      finishedAt: 0,
+      status: "observed",
+      files: [],
+      data: {
+        dirty: [],
+        fingerprints: {},
+        head: beforeHead,
+        coverage: "tracked_and_non_ignored_untracked",
+      },
+    }],
+    roundEvidence: [{
+      schemaVersion: 2,
+      providerId: "git",
+      kind: "git",
+      phase: "after",
+      startedAt: 0,
+      finishedAt: 0,
+      status: "observed",
+      files: gitFiles,
+      data: {
+        dirty: gitFiles,
+        fingerprints: Object.fromEntries(gitFiles.map((file) => [file, "m:1"])),
+        head: afterHead,
+        coverage: "tracked_and_non_ignored_untracked",
+      },
+    }],
   });
 }
 
@@ -108,7 +141,6 @@ describe("enforcement-gate — happy path", () => {
       execution_report: makeExecutionReport({
         files_changed: ["src/foo.ts"],
         tests_reported: { passed: 3, failed: 1, skipped: 0 },
-        progress_estimate: 0.5,
       }),
     });
     const result = enforceRound(curr, trusted(), 2, [], 0);
@@ -122,7 +154,6 @@ describe("enforcement-gate — happy path", () => {
       execution_report: makeExecutionReport({
         files_changed: ["src/bar.ts"],
         tests_reported: { passed: 5, failed: 0, skipped: 0 },
-        progress_estimate: 0.3,
       }),
     });
     const suspect: VerificationResult = makeVerificationResult({
@@ -158,7 +189,6 @@ describe("enforcement-gate — R1: fake success", () => {
       execution_report: makeExecutionReport({
         files_changed: ["src/foo.ts"],
         criterion_claims: criterionClaims(["criteria-1"], ["criteria-2", "criteria-3"]),
-        progress_estimate: 0.5,
       }),
     });
     const result = enforceRound(
@@ -195,16 +225,20 @@ describe("enforcement-gate — R2: recurring violation", () => {
 
 // ═══════════════════════════════════════════════════════════════════════════
 // v3.7: success evidence row — the ex-R3 empty/missing-evidence posture is
-// now raised by the verification gate (checkSuccessWithoutVerifiedEvidence's
-// empty arm, check id success_without_verified_evidence) and enforced by the
-// single R8 ladder below. The enforcement row consumes gate flags; the empty-
-// arm flag production is covered in verification-gate.test.ts.
+// v3.9.1: R8 was removed. Its only trigger was the empty-report arm of
+// success_without_verified_evidence, which is now a warn; report coverage no
+// longer decides acceptance. The machine-evidence warn still excludes an
+// unbacked success from the success trajectory. Flag production is covered in
+// verification-gate.test.ts.
 // ═══════════════════════════════════════════════════════════════════════════
 
-describe("enforcement-gate — success evidence row (merged R8)", () => {
-  const evidenceFlag = (detail = "Agent claims success but provided no execution_report."): VerificationFlag =>
+describe("enforcement-gate — success evidence row (R8 removed in v3.9.1)", () => {
+  const evidenceFlag = (
+    severity: "warn" | "error" = "warn",
+    detail = "Agent claims success but provided no execution_report.",
+  ): VerificationFlag =>
     makeVerificationFlag({
-      severity: "error",
+      severity,
       field: "success",
       check: "success_without_verified_evidence",
       detail,
@@ -216,79 +250,38 @@ describe("enforcement-gate — success evidence row (merged R8)", () => {
       execution_report: makeExecutionReport({
         files_changed: ["src/fixed.ts"],
         tests_reported: { passed: 10, failed: 0, skipped: 0 },
-        progress_estimate: 1.0,
       }),
     });
     const result = enforceRound(curr, trusted(), 2, [], 0);
     assert.equal(result.action, "accept");
   });
 
-  it("rejects on the empty-evidence error flag (required mode)", () => {
+  it("does not reject on a warn-severity success-evidence flag", () => {
     const curr = se({
       success: true,
       execution_report: makeExecutionReport({
         files_changed: [],
         tests_reported: null,
-        progress_estimate: 1.0,
       }),
     });
     const result = enforceRound(
       curr,
-      makeVerificationResult({ verdict: "contradicted", flags: [evidenceFlag()] }),
+      makeVerificationResult({ verdict: "contradicted", flags: [evidenceFlag("warn")] }),
       2, [], 0,
     );
-    assert.equal(result.action, "reject");
-    assert.equal(result.check, "success_without_verified_evidence");
+    assert.equal(result.action, "accept",
+      "an unbacked success commits as insufficient; no R8 rejection exists");
   });
 
-  it("rejects on the missing-execution_report error flag (mandatory evidence)", () => {
-    const result = enforceRound(
-      se({ success: true }),
-      makeVerificationResult({ verdict: "contradicted", flags: [evidenceFlag("no execution_report")] }),
-      2, [], 0,
-    );
-    assert.equal(result.action, "reject");
-    assert.equal(result.check, "success_without_verified_evidence");
-  });
-
-  it("terminates on the third consecutive empty-evidence strike", () => {
-    const curr = se({
-      success: true,
-      execution_report: makeExecutionReport({
-        files_changed: [],
-        tests_reported: null,
-        progress_estimate: 1.0,
-      }),
-    });
-    // v3.8.3: "consecutive" means consecutive for THIS check — the counter is
-    // one scalar shared by every row, so the check it belongs to is part of
-    // the input, not an assumption.
+  it("does not act on a legacy error-severity flag (no producer, no row)", () => {
+    const curr = se({ success: true });
     const result = enforceRound(
       curr,
-      makeVerificationResult({ verdict: "contradicted", flags: [evidenceFlag()] }),
-      2, [], 2, "success_without_verified_evidence",
-    );
-    assert.equal(result.action, "terminate");
-    assert.equal(result.check, "success_without_verified_evidence");
-  });
-
-  it("rejects on the empty-evidence flag", () => {
-    const curr = se({
-      success: true,
-      execution_report: makeExecutionReport({
-        files_changed: [],
-        tests_reported: null,
-        progress_estimate: 1.0,
-      }),
-    });
-    const p = structuredClone(getPolicy());
-    setPolicyForTest(p);
-    const result = enforceRound(
-      curr,
-      makeVerificationResult({ verdict: "contradicted", flags: [evidenceFlag()] }),
+      makeVerificationResult({ verdict: "contradicted", flags: [evidenceFlag("error")] }),
       2, [], 0,
     );
-    assert.equal(result.action, "reject");
+    assert.equal(result.action, "accept",
+      "R8 is gone; a stale error flag cannot revive it");
   });
 });
 
@@ -297,36 +290,34 @@ describe("enforcement-gate — success evidence row (merged R8)", () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("enforcement-gate — progress stall evaluator (v3.7: R4/R5 merged)", () => {
-  it("rejects when progress is flat for 3 rounds", () => {
+  it("rejects when Git shows no motion for 3 rounds", () => {
     const curr = se({
       success: false,
       execution_report: makeExecutionReport({
         files_changed: ["src/foo.ts"],
-        progress_estimate: 0.33,
       }),
     });
     const vault = [
-      vaultRound(1, 0.30),
-      vaultRound(2, 0.31),
-      vaultRound(3, 0.32),
+      vaultRound(1, []),
+      vaultRound(2, []),
+      vaultRound(3, []),
     ];
     const result = enforceRound(curr, trusted(), 4, vault, 0);
     assert.equal(result.action, "reject");
     assert.ok(result.reason.includes("stalled"));
   });
 
-  it("accepts when progress is increasing", () => {
+  it("accepts when Git observes file changes in the window", () => {
     const curr = se({
       success: false,
       execution_report: makeExecutionReport({
         files_changed: ["src/foo.ts"],
-        progress_estimate: 0.80,
       }),
     });
     const vault = [
-      vaultRound(1, 0.30),
-      vaultRound(2, 0.50),
-      vaultRound(3, 0.70),
+      vaultRound(1, []),
+      vaultRound(2, ["src/a.ts"]),
+      vaultRound(3, []),
     ];
     const result = enforceRound(curr, trusted(), 4, vault, 0);
     assert.equal(result.action, "accept");
@@ -337,13 +328,12 @@ describe("enforcement-gate — progress stall evaluator (v3.7: R4/R5 merged)", (
       success: false,
       execution_report: makeExecutionReport({
         files_changed: ["src/foo.ts"],
-        progress_estimate: 0.33,
       }),
     });
     const vault = [
-      vaultRound(1, 0.30),
-      vaultRound(2, 0.31),
-      vaultRound(3, 0.32),
+      vaultRound(1, []),
+      vaultRound(2, []),
+      vaultRound(3, []),
     ];
     // v2.10: consecutiveRejections=1 + escalation + backtrack_enabled → backtrack
     // instead of v2.7's escalated reject. The agent is rolled back to the
@@ -360,13 +350,12 @@ describe("enforcement-gate — progress stall evaluator (v3.7: R4/R5 merged)", (
       success: false,
       execution_report: makeExecutionReport({
         files_changed: ["src/foo.ts"],
-        progress_estimate: 0.33,
       }),
     });
     const vault = [
-      vaultRound(1, 0.30),
-      vaultRound(2, 0.31),
-      vaultRound(3, 0.32),
+      vaultRound(1, []),
+      vaultRound(2, []),
+      vaultRound(3, []),
     ];
     // v2.7: consecutiveRejections=2 → terminate (escalation already given)
     const result = enforceRound(curr, trusted(), 4, vault, 2, "progress_stall");
@@ -378,10 +367,9 @@ describe("enforcement-gate — progress stall evaluator (v3.7: R4/R5 merged)", (
     const curr = se({
       success: false,
       execution_report: makeExecutionReport({
-        progress_estimate: 0.32,
       }),
     });
-    const vault = [vaultRound(1, 0.30)];
+    const vault = [vaultRound(1, [])];
     const result = enforceRound(curr, trusted(), 2, vault, 0);
     assert.equal(result.action, "accept");
   });
@@ -429,7 +417,6 @@ describe("enforcement-gate — rule priority", () => {
         files_changed: [],       // triggers R3
         tests_reported: null,       // triggers R3
         criterion_claims: criterionClaims(["x"], ["y", "z"]),  // triggers R1
-        progress_estimate: 1.0,
       }),
     });
     const result = enforceRound(
@@ -707,7 +694,7 @@ describe("buildBacktrackPrompt", () => {
     verifyBacktrackPrompt(prompt, 45, 42, [
       "did not work",
       "radically different",
-      "no verifiable forward motion",
+      "no machine-observed Git changes",
     ]);
   });
 
@@ -804,13 +791,12 @@ describe("enforcement-gate — progress stall: backtrack deadlock guard", () => 
       success: false,
       execution_report: makeExecutionReport({
         files_changed: ["src/foo.ts"],
-        progress_estimate: 0.33,
       }),
     });
     const vault = [
-      vaultRound(1, 0.30),
-      vaultRound(2, 0.31),
-      vaultRound(3, 0.32),
+      vaultRound(1, []),
+      vaultRound(2, []),
+      vaultRound(3, []),
       // The previous stall cycle already committed a backtrack for round 4 —
       // the loop is re-walking rolled-back territory with the same stall.
       committedBacktrackRound(4),
@@ -825,21 +811,62 @@ describe("enforcement-gate — progress stall: backtrack deadlock guard", () => 
       success: false,
       execution_report: makeExecutionReport({
         files_changed: ["src/foo.ts"],
-        progress_estimate: 0.43,
       }),
     });
     // A backtrack committed at round 2 is BELOW the current window — the
     // agent recovered, progressed, and then stalled again at rounds 3-5.
     const vault = [
-      vaultRound(1, 0.30),
-      vaultRound(2, 0.31),
+      vaultRound(1, []),
+      vaultRound(2, []),
       committedBacktrackRound(2),
-      vaultRound(3, 0.40),
-      vaultRound(4, 0.41),
-      vaultRound(5, 0.42),
+      vaultRound(3, []),
+      vaultRound(4, []),
+      vaultRound(5, []),
     ];
     const result = enforceRound(curr, trusted(), 6, vault, 1, "progress_stall");
     assert.equal(result.action, "backtrack");
+    assert.equal(result.check, "progress_stall");
+  });
+
+  it("excuses a stalled window when the submitted round itself moved Git", () => {
+    // v3.9: the redo's own work is in flight and cannot be in the committed
+    // window — without this the abandoned window judges every redo forever.
+    const curr = se({
+      success: false,
+      execution_report: makeExecutionReport({ files_changed: ["src/foo.ts"] }),
+    });
+    const vault = [vaultRound(1, []), vaultRound(2, []), vaultRound(3, [])];
+    const result = enforceRound(curr, trusted(), 4, vault, 0, "", false, true);
+    assert.equal(result.action, "accept");
+  });
+
+  it("keeps the verdict when the submitted round moved nothing", () => {
+    const curr = se({
+      success: false,
+      execution_report: makeExecutionReport({ files_changed: ["src/foo.ts"] }),
+    });
+    const vault = [vaultRound(1, []), vaultRound(2, []), vaultRound(3, [])];
+    // null = no Git observation: an unobservable round gains no excuse either.
+    for (const motion of [false, null]) {
+      const result = enforceRound(curr, trusted(), 4, vault, 0, "", false, motion);
+      assert.equal(result.action, "reject", `motion=${motion}`);
+      assert.equal(result.check, "progress_stall");
+    }
+  });
+
+  it("still terminates a stalled redo that a rollback already moved", () => {
+    // The deadlock guard must survive the in-flight excuse: a round that
+    // moved nothing after its own rollback is not a recovery checkpoint.
+    const curr = se({
+      success: false,
+      execution_report: makeExecutionReport({ files_changed: ["src/foo.ts"] }),
+    });
+    const vault = [
+      vaultRound(1, []), vaultRound(2, []), vaultRound(3, []),
+      committedBacktrackRound(4),
+    ];
+    const result = enforceRound(curr, trusted(), 4, vault, 1, "progress_stall", false, false);
+    assert.equal(result.action, "terminate");
     assert.equal(result.check, "progress_stall");
   });
 });
@@ -1018,13 +1045,12 @@ describe("enforcement-gate — progress stall: continuity guard (v3.7: R4/R5 mer
       success: false,
       execution_report: makeExecutionReport({
         files_changed: ["src/foo.ts"],
-        progress_estimate: 0.40,
       }),
     });
     const vault = [
-      vaultRound(1, 0.30),
-      vaultRound(2, 0.30),
-      vaultRound(3, 0.30),
+      vaultRound(1, []),
+      vaultRound(2, []),
+      vaultRound(3, []),
       // Rounds 4-5 committed without execution_report — unknown motion,
       // not zero motion. The stall window is discontinuous (both tiers
       // return null); the pre-v3.7 flatline slot looked at rounds 1-3 and
@@ -1041,15 +1067,14 @@ describe("enforcement-gate — progress stall: continuity guard (v3.7: R4/R5 mer
       success: false,
       execution_report: makeExecutionReport({
         files_changed: ["src/foo.ts"],
-        progress_estimate: 0.30,
       }),
     });
     const vault = [
-      vaultRound(1, 0.30),
-      vaultRound(2, 0.30),
-      vaultRound(3, 0.30),
-      vaultRound(4, 0.30),
-      vaultRound(5, 0.30),
+      vaultRound(1, []),
+      vaultRound(2, []),
+      vaultRound(3, []),
+      vaultRound(4, []),
+      vaultRound(5, []),
     ];
     // A continuous flatline satisfies the stall predicate (delta 0 < the
     // positive threshold), so the evaluator fires on the stall tier; the
@@ -1141,11 +1166,31 @@ describe("enforcement-gate — R9: workspace restore guard", () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("v3.2 — R4 machine progress fallback", () => {
-  const feedbackRound = (round: number, gitFiles: string[]): VaultEntry =>
-    committedFeedbackRound(round, {
+  const feedbackRound = (round: number, gitFiles: string[]): VaultEntry => {
+    const beforeHead = `h${round - 1}`;
+    const afterHead = gitFiles.length > 0 ? `h${round}` : beforeHead;
+    return committedFeedbackRound(round, {
       loopId: "test-loop",
-      roundEvidence: [{ schemaVersion: 1, providerId: "git", kind: "git", phase: "after", startedAt: 0, finishedAt: 0, status: "observed", files: gitFiles, data: { fingerprints: {} } }],
+      beforeEvidence: [{
+        schemaVersion: 2, providerId: "git", kind: "git", phase: "before",
+        startedAt: 0, finishedAt: 0, status: "observed", files: [],
+        data: {
+          dirty: [], fingerprints: {}, head: beforeHead,
+          coverage: "tracked_and_non_ignored_untracked",
+        },
+      }],
+      roundEvidence: [{
+        schemaVersion: 2, providerId: "git", kind: "git", phase: "after",
+        startedAt: 0, finishedAt: 0, status: "observed", files: gitFiles,
+        data: {
+          dirty: gitFiles,
+          fingerprints: Object.fromEntries(gitFiles.map((file) => [file, "m:1"])),
+          head: afterHead,
+          coverage: "tracked_and_non_ignored_untracked",
+        },
+      }],
     });
+  };
 
   it("detects stall from three rounds without git changes on the heuristic path", () => {
     const entries = [feedbackRound(1, []), feedbackRound(2, []), feedbackRound(3, [])];
@@ -1186,13 +1231,34 @@ describe("v3.3 — progress stall exculpatory machine cross-check", () => {
     progress: number,
     gitFiles: string[],
     met: string[] = [],
-  ): VaultEntry => committedFeedbackRound(round, {
-    loopId: "test-loop",
-    files: gitFiles,
-    progress,
-    met,
-    roundEvidence: [{ schemaVersion: 1, providerId: "git", kind: "git", phase: "after", startedAt: 0, finishedAt: 0, status: "observed", files: gitFiles, data: { fingerprints: {} } }],
-  });
+  ): VaultEntry => {
+    const beforeHead = `h${round - 1}`;
+    const afterHead = gitFiles.length > 0 ? `h${round}` : beforeHead;
+    return committedFeedbackRound(round, {
+      loopId: "test-loop",
+      files: gitFiles,
+      progress,
+      met,
+      beforeEvidence: [{
+        schemaVersion: 2, providerId: "git", kind: "git", phase: "before",
+        startedAt: 0, finishedAt: 0, status: "observed", files: [],
+        data: {
+          dirty: [], fingerprints: {}, head: beforeHead,
+          coverage: "tracked_and_non_ignored_untracked",
+        },
+      }],
+      roundEvidence: [{
+        schemaVersion: 2, providerId: "git", kind: "git", phase: "after",
+        startedAt: 0, finishedAt: 0, status: "observed", files: gitFiles,
+        data: {
+          dirty: gitFiles,
+          fingerprints: Object.fromEntries(gitFiles.map((file) => [file, "m:1"])),
+          head: afterHead,
+          coverage: "tracked_and_non_ignored_untracked",
+        },
+      }],
+    });
+  };
 
   it("does not fire R4 when git motion was observed in the window (evidence path)", () => {
     const entries = [
@@ -1428,19 +1494,18 @@ describe("v3.7 — behavior-equality compatibility matrix", () => {
       detail: `detail for ${check}`,
     });
 
-  const okEval = (progress = 0.5): SelfEvaluation => se({
+  const okEval = (): SelfEvaluation => se({
     execution_report: makeExecutionReport({
       files_changed: ["src/foo.ts"],
       tests_reported: { passed: 1, failed: 0, skipped: 0 },
-      progress_estimate: progress,
     }),
   });
 
   /** Flat 3-round progress window (rounds 1-3), the current round is 4. */
   const stallVault = (): VaultEntry[] => [
-    vaultRound(1, 0.30),
-    vaultRound(2, 0.31),
-    vaultRound(3, 0.32),
+    vaultRound(1, []),
+    vaultRound(2, []),
+    vaultRound(3, []),
   ];
 
   /** Vault with a backtrack committed for the CURRENT round (deadlock). */
@@ -1501,7 +1566,7 @@ describe("v3.7 — behavior-equality compatibility matrix", () => {
 
     // ── verification_entrypoint_modified ─────────────────────────────────────
     { name: "entrypoint tampered rejects", flags: [flag("error", "verification_entrypoint_modified")], expected: "reject", check: "verification_entrypoint_modified" },
-    { name: "entrypoint tampered outranks R8 (order lock)", flags: [flag("error", "verification_entrypoint_modified"), flag("error", "success_without_verified_evidence")], expected: "reject", check: "verification_entrypoint_modified" },
+    { name: "entrypoint tampered wins over a legacy success-evidence flag", flags: [flag("error", "verification_entrypoint_modified"), flag("error", "success_without_verified_evidence")], expected: "reject", check: "verification_entrypoint_modified" },
     // v3.8.3: the row owns its ladder. A frozen round baseline means asking
     // again cannot fix a rewritten entrypoint, so the second occurrence rolls
     // the work back instead of terminating the loop.
@@ -1519,10 +1584,13 @@ describe("v3.7 — behavior-equality compatibility matrix", () => {
 
     // ── contract closure family (internal ladders) ───────────────────────────
 
-    // ── success evidence (merged R8/R3 semantics) ────────────────────────────
-    { name: "success without verified evidence rejects (required mode)", flags: [flag("error", "success_without_verified_evidence")], expected: "reject", check: "success_without_verified_evidence" },
-    { name: "R8 second strike rejects with escalation notice", flags: [flag("error", "success_without_verified_evidence")], strikes: 1, expected: "reject" },
-    { name: "R8 third strike terminates", flags: [flag("error", "success_without_verified_evidence")], strikes: 2, expected: "terminate" },
+    // ── success evidence (R8 removed in v3.9.1) ──────────────────────────────
+    // The empty-report arm is now a warn and has no enforcement row; report
+    // coverage is not an acceptance gate. The claims-arm info flag still
+    // accepts, and an unbacked success is excluded from the trajectory.
+    { name: "success-evidence warn flag is not enforced",
+      flags: [flag("warn", "success_without_verified_evidence")],
+      expected: "accept" },
     { name: "no_change_reason claims-arm info flag accepts",
       flags: [flag("info", "success_without_verified_evidence")],
       expected: "accept" },
@@ -1553,13 +1621,8 @@ describe("v3.7 — behavior-equality compatibility matrix", () => {
       flags: [flag("warn", "round_scope_drift")], strikes: 2,
       lastCheck: "success_without_verified_evidence",
       expected: "reject", check: "round_scope_drift" },
-    { name: "first success-evidence failure after two foreign rejections still rejects",
-      selfEval: okEval(),
-      flags: [flag("error", "success_without_verified_evidence")], strikes: 2,
-      lastCheck: "round_scope_drift",
-      expected: "reject", check: "success_without_verified_evidence" },
     { name: "first stall after two foreign rejections rejects rather than terminating",
-      selfEval: se({ execution_report: makeExecutionReport({ files_changed: ["src/foo.ts"], progress_estimate: 0.33 }) }),
+      selfEval: se({ execution_report: makeExecutionReport({ files_changed: ["src/foo.ts"]}) }),
       vault: stallVault(), round: 4, strikes: 2,
       lastCheck: "round_scope_drift",
       expected: "reject", check: "progress_stall" },
@@ -1569,24 +1632,24 @@ describe("v3.7 — behavior-equality compatibility matrix", () => {
 
     // ── progress stall (single evaluator after merge) ────────────────────────
     { name: "flat window first strike rejects",
-      selfEval: se({ execution_report: makeExecutionReport({ files_changed: ["src/foo.ts"], progress_estimate: 0.33 }) }),
+      selfEval: se({ execution_report: makeExecutionReport({ files_changed: ["src/foo.ts"]}) }),
       vault: stallVault(), round: 4, expected: "reject", check: "progress_stall" },
     { name: "flat window second strike backtracks (escalation + backtrack)",
-      selfEval: se({ execution_report: makeExecutionReport({ files_changed: ["src/foo.ts"], progress_estimate: 0.33 }) }),
+      selfEval: se({ execution_report: makeExecutionReport({ files_changed: ["src/foo.ts"]}) }),
       vault: stallVault(), round: 4, strikes: 1, expected: "backtrack", check: "progress_stall" },
     { name: "flat window third strike terminates",
-      selfEval: se({ execution_report: makeExecutionReport({ files_changed: ["src/foo.ts"], progress_estimate: 0.33 }) }),
+      selfEval: se({ execution_report: makeExecutionReport({ files_changed: ["src/foo.ts"]}) }),
       vault: stallVault(), round: 4, strikes: 2, expected: "terminate", check: "progress_stall" },
     { name: "stall deadlock guard terminates instead of re-backtracking",
-      selfEval: se({ execution_report: makeExecutionReport({ files_changed: ["src/foo.ts"], progress_estimate: 0.33 }) }),
+      selfEval: se({ execution_report: makeExecutionReport({ files_changed: ["src/foo.ts"]}) }),
       vault: deadlockVault(4), round: 4, strikes: 1, expected: "terminate", check: "progress_stall" },
     { name: "flat window terminates on second strike when escalation disabled",
-      selfEval: se({ execution_report: makeExecutionReport({ files_changed: ["src/foo.ts"], progress_estimate: 0.33 }) }),
+      selfEval: se({ execution_report: makeExecutionReport({ files_changed: ["src/foo.ts"]}) }),
       vault: stallVault(), round: 4, strikes: 1,
       policy: (p) => { p.engine.enforcement_escalation_enabled = false; },
       expected: "terminate", check: "progress_stall" },
     { name: "flat window rejects with notice on second strike when backtrack disabled",
-      selfEval: se({ execution_report: makeExecutionReport({ files_changed: ["src/foo.ts"], progress_estimate: 0.33 }) }),
+      selfEval: se({ execution_report: makeExecutionReport({ files_changed: ["src/foo.ts"]}) }),
       vault: stallVault(), round: 4, strikes: 1,
       policy: (p) => { p.engine.backtrack_enabled = false; },
       expected: "reject", check: "progress_stall" },
@@ -1595,7 +1658,7 @@ describe("v3.7 — behavior-equality compatibility matrix", () => {
     { name: "workspace not restored backtracks once",
       flags: [flag("error", "backtrack_workspace_not_restored")], round: 4, expected: "backtrack", check: "backtrack_workspace_not_restored" },
     { name: "workspace not restored after a committed backtrack terminates",
-      flags: [flag("error", "backtrack_workspace_not_restored")], vault: deadlockVault(4), round: 4, expected: "terminate" },
+      flags: [flag("error", "backtrack_workspace_not_restored")], vault: [committedBacktrackRound(4)], round: 4, expected: "terminate" },
     { name: "workspace-not-restored row is inactive when backtrack disabled",
       flags: [flag("error", "backtrack_workspace_not_restored")], round: 4,
       policy: (p) => { p.engine.backtrack_enabled = false; },

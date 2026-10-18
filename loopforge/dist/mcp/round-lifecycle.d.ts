@@ -10,7 +10,7 @@
  * session ownership, queues, and leases remain in SessionManager.
  */
 import { LoopForgeEngine } from "../engine.js";
-import type { LoopForgeRequest, LoopForgeResponse, SelfEvaluation, VerificationFlag, ExternalContextProvider, LoopTerminalSink, RoundVerificationStatus } from "../protocol.js";
+import type { LoopForgeRequest, LoopForgeResponse, SelfEvaluation, SubmissionDiagnostic, SubmissionGuidance, SubmissionReceipt, VerificationFlag, ExternalContextProvider, LoopTerminalSink, RoundVerificationStatus } from "../protocol.js";
 import type { MachineObservation } from "../protocol.js";
 import type { RoundTransactionSnapshot } from "../round-transaction.js";
 import type { LoopStore, VaultEntry } from "../loop-store.js";
@@ -44,6 +44,10 @@ export interface McpSession {
      *  gate checks the workspace returns to this commit before accepting.
      *  Cleared after the first successful post-backtrack round. */
     backtrackTargetGitHead?: string;
+    /** v3.9: files already dirty at that restore point — the baseline the
+     *  restored workspace is compared against, so unrelated work in progress
+     *  does not read as a failed restore. Cleared with the HEAD above. */
+    backtrackTargetDirty?: string[];
     /** v3.8.3: the trusted round-start fingerprint of every enabled command's
      *  entrypoint files, captured when the CURRENT in-flight round was prepared.
      *
@@ -117,6 +121,12 @@ export interface AdvanceResult {
         code: "evaluation_invalid" | "contract_invalid";
         details: Record<string, unknown>;
     };
+    /** v3.9.1: current-fact submission guidance for the held/prepared round.
+     *  Derived, never persisted; omitted on terminal results with no prompt. */
+    submission_guidance?: SubmissionGuidance;
+    /** v3.9.1: what this submission actually did. Returned by loopforge_next
+     *  only; rebuilt from the transaction on a lost-response replay. */
+    submission_receipt?: SubmissionReceipt;
 }
 /** Narrow view of the session registry the lifecycle may touch. The owning
  *  SessionManager implements this over its private Map, so the lifecycle
@@ -148,6 +158,24 @@ export declare class RoundLifecycle {
     private readonly leaseMs;
     private readonly getContext;
     constructor(deps: RoundLifecycleDeps);
+    /** v3.9.1: the submission-guidance projection for a session's held round.
+     *  One history window (`derivationRounds`, the compile window), no writes.
+     *  Findings from a rejected/retried attempt are supplied by the caller. */
+    guidanceFor(session: McpSession, extras?: {
+        verificationFlags?: ReadonlyArray<VerificationFlag>;
+        recovery?: {
+            required: boolean;
+            restore_point?: number;
+            target_head?: string;
+        } | null;
+    }): SubmissionGuidance;
+    /** v3.9.1: the before facts of the round being submitted, from the SAME
+     *  history window the compile uses. Works on a replay too: rounds below the
+     *  logical round exclude the round itself. */
+    private beforeFactsFor;
+    /** v3.9.1: derive this submission's receipt from the transaction and the
+     *  shared read model. Never writes and never invents an applied effect. */
+    private buildReceipt;
     /** Persist session state to vault for cross-process recovery.
      *  The filtered vault and replacement entry are written once under the
      *  backend lock, so recovery never observes the old two-write gap. */
@@ -257,7 +285,7 @@ export declare class RoundLifecycle {
      *    on (from the last start/next/resume response). Anchors the submission;
      *    a stale or duplicate submission returns the held prompt instead of
      *    being processed. Optional — when absent the anchor check is skipped. */
-    advance(sessionId: string, output: string, preExtractedEval?: SelfEvaluation, roundId?: string): Promise<AdvanceResult>;
+    advance(sessionId: string, output: string, preExtractedEval?: SelfEvaluation, roundId?: string, normalizationDiagnostics?: SubmissionDiagnostic[], submittedFields?: string[]): Promise<AdvanceResult>;
     /** Write back loop knowledge to long-term memory.
      *  Uses shared base builder from policy.ts. Called when a loop terminates. */
     notifyTerminal(session: McpSession, stopReason: string): Promise<void>;

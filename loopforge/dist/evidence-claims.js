@@ -14,8 +14,8 @@
  *  - downgraded to `contradicted` when error-level verification flags say
  *    the machine contradicted the claim.
  */
-import { machineEvidenceForRound, readOnlyRounds } from "./committed-round.js";
-import { isPassedAfterObservation } from "./evidence-provider.js";
+import { readOnlyRounds } from "./committed-round.js";
+import { afterObservations, gitDeltaState, isPassedAfterObservation, } from "./evidence-provider.js";
 import { claimedMetCriteria } from "./self-eval.js";
 /** Contradicting error flags that invalidate agent claims. */
 // NOTE: keep these as literals — importing the CHECK_* constants here would
@@ -32,19 +32,19 @@ function hasPassingTestEvidence(selfEval) {
         results.failed === 0 &&
         results.passed > 0;
 }
-function hasPassedAfterCommand(observations) {
+function hasPassedAfterCommand(deltas) {
     // v3.8: ONE predicate — the gate's entrypoint-tamper exclusion and this
     // module's check were two divergent definitions of "machine-backed".
-    const git = observations.find((item) => item.providerId === "git") ?? null;
-    const changed = git ? new Set(git.files) : null;
-    return observations.some((item) => isPassedAfterObservation(item, changed));
+    const git = gitDeltaState(deltas);
+    return afterObservations(deltas)
+        .some((observation) => isPassedAfterObservation(observation, git));
 }
 /** Derive the runtime claim view for a round. No file-level or text-level
  *  guessing: git observations only serve the evidence_integrity warn. */
-export function deriveClaimView(selfEval, evidenceSnapshots) {
+export function deriveClaimView(selfEval, evidenceDeltas) {
     const met = claimedMetCriteria(selfEval.execution_report);
     const machineVerified = hasPassingTestEvidence(selfEval) &&
-        hasPassedAfterCommand(evidenceSnapshots);
+        hasPassedAfterCommand(evidenceDeltas);
     const claims = met.map((targetId) => ({
         targetId,
         status: machineVerified ? "verified" : "claimed",
@@ -59,14 +59,14 @@ export function deriveClaimView(selfEval, evidenceSnapshots) {
         // claim, not evidence. Without a passed command, R8 and the
         // criteria-claims check can no longer be satisfied by fabrication.
         hasMachineEvidence: hasPassingTestEvidence(selfEval) &&
-            hasPassedAfterCommand(evidenceSnapshots),
+            hasPassedAfterCommand(evidenceDeltas),
     };
 }
 /** Re-derive a claim view including the contradiction downgrade driven by
  *  verification flags. Used by audit and listVerifiedClaims on persisted
  *  snapshots; the live round path uses deriveClaimView only. */
-export function rederiveClaimViewWithFlags(selfEval, evidenceSnapshots, flags) {
-    const view = deriveClaimView(selfEval, evidenceSnapshots);
+export function rederiveClaimViewWithFlags(selfEval, evidenceDeltas, flags) {
+    const view = deriveClaimView(selfEval, evidenceDeltas);
     const contradicted = flags.some((flag) => flag.severity === "error" && CONTRADICTING_CHECKS.has(flag.check));
     if (contradicted) {
         view.claims = view.claims.map((claim) => ({
@@ -79,18 +79,18 @@ export function rederiveClaimViewWithFlags(selfEval, evidenceSnapshots, flags) {
     }
     return view;
 }
-/** Files actually changed in a committed round (git provider, after evidence
- *  preferred). Returns null when the round has no observable git snapshot. */
+/** Files actually changed in a committed round — the shared observation
+ *  delta, not the full after snapshot. Returns null when the round has no
+ *  observable Git boundary. */
 export function resolveRoundFiles(vaultEntries, loopId, round) {
     const committed = readOnlyRounds(vaultEntries)
         .find((view) => view.loopId === loopId && view.round === round);
-    if (!committed)
+    if (!committed || committed.evidenceIncomplete)
         return null;
-    const evidence = machineEvidenceForRound(committed);
-    const git = evidence.find((item) => item.providerId === "git" && Array.isArray(item.files));
-    if (!git)
+    const git = committed.observationDelta.find((delta) => delta.kind === "git");
+    if (!git || git.changedFiles === null)
         return null;
-    return git.files.filter((file) => typeof file === "string");
+    return [...git.changedFiles];
 }
 /** Stable cr-IDs (and criterion texts) backed by verified claims across all
  *  committed rounds. Criterion texts are mapped to cr-IDs by callers that
@@ -100,8 +100,9 @@ export function listVerifiedClaims(vaultEntries, loopId) {
     for (const round of readOnlyRounds(vaultEntries)) {
         if (round.loopId !== loopId || !round.evaluation)
             continue;
-        const evidence = machineEvidenceForRound(round);
-        const view = rederiveClaimViewWithFlags(round.evaluation, evidence, round.verificationFlags);
+        // v3.9.1: claims are checked against what THAT round changed, not the
+        // whole after-snapshot (which would include pre-existing dirt).
+        const view = rederiveClaimViewWithFlags(round.evaluation, round.observationDelta, round.verificationFlags);
         for (const claim of view.claims) {
             if (claim.status === "verified")
                 verified.add(claim.targetId);

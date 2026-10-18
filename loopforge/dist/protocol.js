@@ -58,7 +58,6 @@ export function makeMilestoneSummary(overrides = {}) {
         outcome: "",
         carried_constraints: [],
         resolved_constraints: [],
-        progress_at_boundary: 0,
         kind: "auto",
         generated_at_round: 0,
         ...overrides,
@@ -186,7 +185,7 @@ export function makeLoopCompileRequest(overrides = {}) {
 /** v3.8.1: the artifact schema version, next to the type it versions. The
  *  transaction envelope parser reads it, so the constant lives here rather
  *  than in the renderer. */
-export const PROMPT_ARTIFACT_SCHEMA_VERSION = 2;
+export const PROMPT_ARTIFACT_SCHEMA_VERSION = 3;
 export function makeLoopCompileResponse(overrides = {}) {
     return {
         status: AgentStatus.OK,
@@ -255,10 +254,12 @@ export function makeExecutionReport(overrides = {}) {
         tests_reported: null,
         criterion_claims: [],
         contract_item_claims: [],
-        progress_estimate: 0.0,
         ...overrides,
     };
 }
+/** v3.9.1: the Git observation's data schema. Version 1 was the
+ *  dirty-files-only shape; version 2 is the complete workspace boundary. */
+export const GIT_OBSERVATION_SCHEMA_VERSION = 2;
 // ── Factory helpers ─────────────────────────────────────────────────────────
 export function makeTaskId(taskDescription) {
     let slug = taskDescription.toLowerCase().trim().slice(0, 60);

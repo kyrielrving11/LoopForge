@@ -22,9 +22,9 @@ import { CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE, collectOutOfScopeFiles, roundD
 import { entryRound, isRecord } from "./token-utils.js";
 import { driftedEntrypoints } from "./evidence-provider.js";
 import { declaresBlocked, effectiveOutcome, effectiveSuccess } from "./self-eval.js";
-import { derivationRounds, decodeCommittedRound } from "./committed-round.js";
+import { derivationRounds, decodeCommittedRound, inFlightGitMotion } from "./committed-round.js";
 import { makeRoundId } from "./round-transaction.js";
-import { enforceRound, buildRejectionPrompt, findSafeRestorePoint, buildBacktrackPrompt, findBacktrackTargetGitHead, } from "./enforcement-gate.js";
+import { enforceRound, buildRejectionPrompt, findSafeRestorePoint, buildBacktrackPrompt, findBacktrackTargetSnapshot, } from "./enforcement-gate.js";
 import { logEvent } from "./observability.js";
 import { getPolicy } from "./policy.js";
 import { deriveRoundContractView } from "./round-contract.js";
@@ -126,10 +126,18 @@ export function deriveBacktrackRecoveryFacts(input) {
         const evaluation = view?.evaluation ?? null;
         if (entry?.execution_report) {
             const ev = entry.execution_report;
-            const files = Array.isArray(ev.files_changed)
+            const reported = Array.isArray(ev.files_changed)
                 ? ev.files_changed.filter((f) => typeof f === "string")
                 : [];
+            // v3.9.1: the machine delta is the primary set of files the failed
+            // round changed; the agent report is unioned in so an ignored file the
+            // agent named is not lost from the recovery brief.
+            const machineFiles = (view?.observationDelta ?? [])
+                .filter((delta) => delta.kind === "git" && delta.changedFiles !== null)
+                .flatMap((delta) => delta.changedFiles);
+            const files = [...new Set([...machineFiles, ...reported])];
             const git = view?.afterEvidence.find((snapshot) => snapshot.kind === "git" &&
+                snapshot.status === "observed" &&
                 isRecord(snapshot.data.fingerprints));
             const gitFingerprints = git && git.kind === "git"
                 ? git.data.fingerprints
@@ -191,11 +199,11 @@ export class RoundCoordinator {
      *  - Transactional feedback commit (accepted rounds only)
      *  - State file I/O (both paths, after compiling) */
     processRound(input) {
-        const { loopId, task, currentRound, maxRounds, selfEval, lastSelfEval, consecutiveRejections, evidenceSnapshots, } = input;
+        const { loopId, task, currentRound, maxRounds, selfEval, lastSelfEval, consecutiveRejections, evidenceDeltas, } = input;
         const roundSuccess = selfEval.success ?? false;
         // ── 1. Query vault entries ──────────────────────────────────────────
         // Lineage entries (constraint violations, output summaries) and feedback
-        // entries (execution_report, progress estimates) are both needed by
+        // entries (including execution_report) are both needed by
         // the enforcement gate. queryLoopEntries excludes feedback by default,
         // so we issue a second query and merge both result sets.
         const prefix = `loop:${loopId}:r`;
@@ -206,7 +214,7 @@ export class RoundCoordinator {
             ]
             : [];
         // ── 2. Verification gate ────────────────────────────────────────────
-        const verifyResult = verifySelfEvaluation(selfEval, currentRound, vaultEntries, lastSelfEval ?? null, evidenceSnapshots ?? [], input.backtrackSkippedFiles ?? [], input.backtrackSkippedFingerprints ?? {}, input.backtrackTargetGitHead,
+        const verifyResult = verifySelfEvaluation(selfEval, currentRound, vaultEntries, lastSelfEval ?? null, evidenceDeltas ?? [], input.backtrackSkippedFiles ?? [], input.backtrackSkippedFingerprints ?? {}, input.backtrackTargetGitHead,
         // v3.7.1: gate records live under the gate: prefix — outside the round
         // entries above — and are passed separately to the gate check.
         this.store
@@ -216,7 +224,10 @@ export class RoundCoordinator {
         // the gate, because it needs the filesystem and the in-flight trust map
         // captured when this round was prepared — the gate stays a pure function
         // of its inputs.
-        driftedEntrypoints(input.entrypointTrust));
+        driftedEntrypoints(input.entrypointTrust), input.beforeEvidence ?? [],
+        // v3.9: the restore point's own dirty files — the baseline the restored
+        // workspace is compared against.
+        input.backtrackTargetDirty);
         const verificationFlags = verifyResult.flags;
         const gateContradicted = verifyResult.verdict === "contradicted";
         // v3.8: the ACTIVE contract's derived item statuses for this round — the
@@ -229,7 +240,7 @@ export class RoundCoordinator {
             rounds: committedRounds,
             round: currentRound,
             report: selfEval.execution_report ?? null,
-            observations: evidenceSnapshots ?? [],
+            deltas: evidenceDeltas ?? [],
             outcome: effectiveOutcome(selfEval),
             commands: getPolicy().evidence.commands ?? [],
         });
@@ -248,9 +259,9 @@ export class RoundCoordinator {
         // escape: without it "declare blocked" would dissolve a machine fact
         // without declaring anything. The drift FLAG is untouched — it still lands
         // on the committed round, so audit/explain keep reporting it.
-        const driftedFiles = roundDriftFiles(activeContract, evidenceSnapshots ?? []);
+        const driftedFiles = roundDriftFiles(activeContract, evidenceDeltas ?? []);
         const proposal = selfEval.round_contract;
-        const scopeDriftWaiver = driftedFiles.length > 0 &&
+        const scopeDriftWaiver = driftedFiles !== null && driftedFiles.length > 0 &&
             declaresBlocked(selfEval) &&
             proposal !== undefined &&
             collectOutOfScopeFiles(driftedFiles, proposal.scope).length === 0;
@@ -267,7 +278,11 @@ export class RoundCoordinator {
         // transaction reaches enforcement with a fully extracted self-evaluation.
         // The old v2.5 "heuristic partial enforcement" plumbing (extractionSucceeded
         // flag, enforcement skipEvidenceRules mode) was removed as unreachable.
-        const enforceResult = enforceRound(selfEval, verifyResult, currentRound, vaultEntries, consecutiveRejections, input.lastRejectionCheck ?? "", scopeDriftWaiver);
+        const enforceResult = enforceRound(selfEval, verifyResult, currentRound, vaultEntries, consecutiveRejections, input.lastRejectionCheck ?? "", scopeDriftWaiver,
+        // v3.9: what THIS round moved, from the same Git motion rule the
+        // committed series uses. Unknown motion stays null — an unobservable
+        // round never gains the stall excuse.
+        inFlightGitMotion(evidenceDeltas ?? [], input.backtrackTargetGitHead));
         if (enforceResult.action === "reject") {
             const newRejections = consecutiveRejections + 1;
             const rejectionPrompt = buildRejectionPrompt(currentRound, task, enforceResult, verificationFlags);
@@ -355,9 +370,12 @@ export class RoundCoordinator {
                 vaultEntries,
                 selfEval,
             });
-            // v2.12: Capture the restore point's git HEAD so the next round's
-            // verification can confirm the workspace returned to this commit.
-            const targetGitHead = findBacktrackTargetGitHead(restorePoint.round, vaultEntries);
+            // v2.12: Capture the restore point's machine snapshot — the commit the
+            // workspace must return to and what was already dirty there — so the
+            // next round's verification can confirm the workspace returned to this
+            // point without reading unrelated work in progress as a failed restore.
+            const targetSnapshot = findBacktrackTargetSnapshot(restorePoint.round, vaultEntries);
+            const targetGitHead = targetSnapshot?.head ?? null;
             const backtrackPrompt = buildBacktrackPrompt(currentRound, restorePoint.round, enforceResult.check ?? "progress_stall", getPolicy().engine.backtrack_preserve_discoveries
                 ? restorePoint.skippedDiscoveries
                 : [], skippedFiles, targetGitHead ?? undefined, makeRoundId(loopId, restorePoint.round + 1), { failedRounds, approaches, wrongAssumptions });
@@ -380,6 +398,7 @@ export class RoundCoordinator {
                 backtrackSkippedFiles: skippedFiles,
                 backtrackSkippedFingerprints: skippedFingerprints,
                 backtrackTargetGitHead: targetGitHead ?? undefined,
+                backtrackTargetDirty: targetSnapshot?.dirtyFiles,
                 backtrackTriggerRule: enforceResult.check,
                 backtrackFailedRounds: failedRounds,
                 backtrackApproaches: approaches,

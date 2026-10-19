@@ -624,6 +624,7 @@ describe("verification-gate — command evidence integrity", () => {
     const flag = result.flags.find(f => f.check === "command_evidence_mismatch");
     assert.ok(flag, "should flag mismatch");
     assert.equal(flag!.severity, "warn");
+    assert.equal(flag!.ref, "test", "v3.9.4: the finding names its command");
     assert.ok(flag!.detail.includes("reported 10"), "should mention reported count");
     assert.ok(flag!.detail.includes("shows 8"), "should mention command count");
   });
@@ -1387,6 +1388,33 @@ describe("Round Contract checks (v3.8 item model)", () => {
     assert.equal(flag!.severity, "warn");
   });
 
+  it("v3.9.4: contract_items_unverified names EVERY insufficient item", () => {
+    withRunTestsConfigured();
+    const contract = itemContract({
+      items: Array.from({ length: 5 }, (_, index) => ({
+        description: `slice ${index}`,
+        criterion_refs: [],
+        subgoal_refs: [],
+        verify_with: ["run-tests"],
+      })),
+    });
+    const result = verifySelfEvaluation(
+      se({
+        execution_report: makeExecutionReport({ contract_item_claims: claimsMet(contract) }),
+      }),
+      2,
+      [activeRound(contract)],
+      null,
+      [gitSnap(["src/auth/a.ts"])],
+    );
+    const flag = result.flags.find((f) => f.check === CHECK_CONTRACT_ITEMS_UNVERIFIED);
+    assert.ok(flag);
+    for (const itemId of itemIds(contract)) {
+      assert.ok(flag!.detail.includes(itemId),
+        `the debt detail must name ${itemId}`);
+    }
+  });
+
   it("contract_items_unverified: silent when the bound command passed", () => {
     withRunTestsConfigured();
     const contract = itemContract();
@@ -1749,10 +1777,20 @@ describe("v3.9.2 — evidence_integrity uses the shared reconciliation", () => {
     assert.ok(!result.flags.some((flag) => flag.check === "evidence_integrity"));
   });
 
-  it("stays silent when the execution report is missing", () => {
+  it("v3.9.4: an omitted report with observed changes is the SAME mismatch the receipt reports", () => {
     const selfEval = se({ execution_report: undefined });
     const result = verifySelfEvaluation(
       selfEval, 2, [], null, [gitSnap(["src/a.ts"])],
+    );
+    const flag = result.flags.find((entry) => entry.check === "evidence_integrity");
+    assert.ok(flag, "an omitted files_changed field is a reporting gap, not silence");
+    assert.match(flag!.detail, /unreported: \[src\/a\.ts\]/);
+  });
+
+  it("stays silent when the report is absent and the Git boundary observed no change", () => {
+    const selfEval = se({ execution_report: undefined });
+    const result = verifySelfEvaluation(
+      selfEval, 2, [], null, [gitSnap([])],
     );
     assert.ok(!result.flags.some((flag) => flag.check === "evidence_integrity"));
   });

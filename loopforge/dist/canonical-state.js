@@ -4,7 +4,7 @@
  * consume the same value so they cannot silently drift apart.
  */
 import { createHash } from "node:crypto";
-import { deriveItemId, STABLE_ID_RE, unique } from "./token-utils.js";
+import { deriveCriterionId, deriveItemId, normalizeText, STABLE_ID_RE, unique, uniqueNormalized, } from "./token-utils.js";
 import { claimedMetCriteria, claimedRemainingCriteria } from "./self-eval.js";
 import { getPolicy } from "./policy.js";
 import { deriveConfiguredCapability } from "./policy.js";
@@ -30,6 +30,82 @@ export function activeSubGoalView(subGoals, cap) {
         canceled: subGoals.filter((s) => s.status === "canceled").length,
         total: subGoals.length,
     };
+}
+export function partitionActiveConstraints(state) {
+    const criteriaKeys = new Set(state.successCriteria.map((text) => normalizeText(text)));
+    const hardKeys = new Set(state.hardConstraints.map((text) => normalizeText(text)));
+    const hard = [];
+    const other = [];
+    for (const text of state.activeConstraints) {
+        const key = normalizeText(text);
+        if (criteriaKeys.has(key))
+            continue;
+        if (hardKeys.has(key))
+            hard.push(text);
+        else
+            other.push(text);
+    }
+    return { criteria: [...state.successCriteria], hard, other };
+}
+function criterionIcon(status) {
+    switch (status) {
+        case "verified": return "✅";
+        case "claimed": return "🟡";
+        case "insufficient": return "🟠";
+        case "contradicted": return "⛔";
+        case "remaining": return "⬜";
+        default: return "❔";
+    }
+}
+/** v3.9.4: the ONE criterion row renderer for the normative prompt section.
+ *  It consumes the same `successCriteria`/`criterionStatuses` pair the state
+ *  file and submission boundary use, and reports the exact ids it emitted so
+ *  prompt coverage can prove them. */
+export function formatCriterionRows(statuses, successCriteria) {
+    const byText = new Map(statuses.map((status) => [normalizeText(status.text), status]));
+    const seen = new Set();
+    const lines = [];
+    const ids = [];
+    for (const text of successCriteria) {
+        const status = byText.get(normalizeText(text));
+        const id = status?.id ?? deriveCriterionId(text);
+        if (seen.has(id))
+            continue;
+        seen.add(id);
+        ids.push(id);
+        const related = status && status.related_subgoal_ids.length > 0
+            ? ` (related: ${status.related_subgoal_ids.join(", ")})`
+            : "";
+        lines.push(`- ${criterionIcon(status?.status ?? "unknown")} [\`${id}\`] ${text}${related}`);
+    }
+    return { lines, ids };
+}
+/** v3.9.4: the ONE active-sub-goal formatter shared by the prompt and the
+ *  state file. Rows past `cap` lose their descriptions but NEVER their ids:
+ *  the overflow line lists every remaining `sg-*`. */
+export function formatActiveSubGoals(subGoals, round, cap = getPolicy().evolution.max_active_subgoals) {
+    const view = activeSubGoalView([...subGoals], Number.POSITIVE_INFINITY);
+    const shown = view.active.slice(0, Math.max(0, cap));
+    const hidden = view.active.slice(shown.length);
+    const lines = [];
+    for (const sg of shown) {
+        const statusIcon = sg.status === "in_progress" ? "🔄" :
+            sg.status === "blocked" ? "🚫" : "⏳";
+        const stale = sg.status === "pending" &&
+            round - sg.declared_at_round >= 10 ? " ⚠️ stale" : "";
+        const detail = sg.status === "in_progress"
+            ? ` (since R${sg.status_changed_at_round})`
+            : sg.status === "pending"
+                ? ` (since R${sg.declared_at_round})`
+                : ` (blocked R${sg.status_changed_at_round})`;
+        lines.push(`- ${statusIcon} [\`${sg.id}\`] ${sg.description}${detail}${stale}`);
+    }
+    if (hidden.length > 0) {
+        lines.push(`- also active (ids only): ${hidden.map((sg) => `\`${sg.id}\``).join(", ")}`);
+    }
+    lines.push(`> ${view.total} total · ${view.activeTotal} active · ` +
+        `${view.done} done · ${view.canceled} canceled`);
+    return { lines, ids: view.active.map((sg) => sg.id) };
 }
 // unique() imported from token-utils.ts
 /** Deterministic JSON serialization used by state and prompt hashes. */
@@ -280,10 +356,13 @@ export function renderCanonicalStateMarkdown(state, options) {
 function flatStateSections(state) {
     const lines = [];
     lines.push("## Loop Objective", "", state.objective, "", "## Current Task", "", state.currentTask);
-    // v2.11: Success Criteria and Constraints render with stable IDs for exact agent matching
-    addListWithIds(lines, "Success Criteria", state.successCriteria, "cr");
-    addListWithIds(lines, "Hard Constraints", state.hardConstraints, "c");
-    addListWithIdentities(lines, "Active Constraints", state.activeConstraints, state.constraintMetadata);
+    // v2.11: Success Criteria and Constraints render with stable IDs for exact
+    // agent matching. v3.9.4: the three groups are the SAME mutually exclusive
+    // partition the prompt uses, so one text never appears with two prefixes.
+    const constraintPartition = partitionActiveConstraints(state);
+    addListWithIds(lines, "Success Criteria", constraintPartition.criteria, "cr");
+    addListWithIdentities(lines, "Hard Constraints", constraintPartition.hard, state.constraintMetadata);
+    addListWithIdentities(lines, "Active Constraints", constraintPartition.other, state.constraintMetadata);
     addList(lines, "Changes Since Last Round", state.changesSinceLastRound);
     if (state.progress.criteriaMet.length > 0 ||
         state.progress.criteriaRemaining.length > 0 ||
@@ -373,7 +452,8 @@ function flatStateSections(state) {
     if (state.verificationFlags.length > 0) {
         lines.push("## Verification", "");
         for (const flag of state.verificationFlags) {
-            lines.push(`- [${flag.severity}] [${flag.check}] ${flag.detail}`);
+            lines.push(`- [${flag.severity}] [${flag.check}] \`${flag.field}\` — ${flag.detail}` +
+                (flag.ref ? ` [ref: \`${flag.ref}\`]` : ""));
         }
         lines.push("");
     }
@@ -399,31 +479,14 @@ function flatStateSections(state) {
         }
     }
     if (state.subGoals.length > 0) {
-        // v3.7.1: only ACTIVE items render as rows; done/canceled survive in
-        // the vault, replay, and the counts line below.
-        const cap = getPolicy().evolution.max_active_subgoals;
-        const view = activeSubGoalView(state.subGoals, cap);
+        // v3.9.4: the SAME formatter the prompt uses. Rows past the display cap
+        // keep their ids in an overflow line, so the state file's active id set
+        // can never be narrower than the prompt's.
         // L8: the heading is emitted whenever sub-goals exist — with every
         // sub-goal terminal (0 active rows) the counts line must still live
         // under its own section instead of leaking into the previous one.
         lines.push("## Sub-Goal Dashboard", "");
-        if (view.active.length > 0) {
-            for (const sg of view.active) {
-                const statusIcon = sg.status === "in_progress" ? "🔄" :
-                    sg.status === "blocked" ? "🚫" : "⏳";
-                const stale = sg.status === "pending" &&
-                    state.round - sg.declared_at_round >= 10 ? " ⚠️ stale" : "";
-                const detail = sg.status === "in_progress"
-                    ? ` (since R${sg.status_changed_at_round})`
-                    : sg.status === "pending"
-                        ? ` (since R${sg.declared_at_round})`
-                        : ` (blocked R${sg.status_changed_at_round})`;
-                lines.push(`- ${statusIcon} [\`${sg.id}\`] ${sg.description}${detail}${stale}`);
-            }
-            lines.push("");
-        }
-        lines.push(`> ${view.total} total · ${view.activeTotal} active · ` +
-            `${view.done} done · ${view.canceled} canceled`, "");
+        lines.push(...formatActiveSubGoals(state.subGoals, state.round).lines, "");
     }
     if (state.externalContext) {
         lines.push("## External Context", "", state.externalContext, "");
@@ -496,6 +559,24 @@ derived) {
     // section above. No active contract → the original task text is used,
     // byte-identical to pre-v3.3 behavior.
     const roundContract = derived?.roundFacts?.activeContract ?? null;
+    // v3.9.4: the rendered criterion/hard sets are ACTIVE sets. The compile
+    // response's `criterion_statuses` is the active criterion reference space
+    // (loop-compiler filters it); `constraints_active` is the active constraint
+    // set. A direct caller that omits `criterion_statuses` gets the objective
+    // fallback so library-level state construction still works.
+    const activeConstraints = uniqueNormalized(response.constraints_active);
+    const activeConstraintKeys = new Set(activeConstraints.map((text) => normalizeText(text)));
+    const observedCompile = response.criterion_statuses !== undefined;
+    const successCriteria = observedCompile
+        ? uniqueNormalized(response.criterion_statuses.map((criterion) => criterion.text))
+        : uniqueNormalized(objective?.success_criteria ?? []);
+    const criteriaKeys = new Set(successCriteria.map((text) => normalizeText(text)));
+    const hardConstraints = uniqueNormalized(objective?.hard_constraints ?? [])
+        .filter((text) => {
+        const key = normalizeText(text);
+        return !criteriaKeys.has(key) &&
+            (!observedCompile || activeConstraintKeys.has(key));
+    });
     return {
         schemaVersion: CANONICAL_STATE_SCHEMA_VERSION,
         loopId: response.loop_id || request.loop_id,
@@ -507,9 +588,9 @@ derived) {
         currentTask: roundContract
             ? formatRoundContract(roundContract, derived?.roundFacts?.itemStatuses ?? null)
             : request.task,
-        successCriteria: unique(objective?.success_criteria ?? []),
-        hardConstraints: unique(objective?.hard_constraints ?? []),
-        activeConstraints: unique(response.constraints_active),
+        successCriteria,
+        hardConstraints,
+        activeConstraints,
         retiredConstraints: unique(response.constraints_retired),
         constraintMetadata: response.constraint_metadata ?? [],
         changesSinceLastRound: changes,

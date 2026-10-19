@@ -17,7 +17,6 @@ import type { GitObservation, MachineObservation } from "../protocol.js";
 import type { VaultEntry } from "../loop-store.js";
 import {
   findBacktrackTargetSnapshot,
-  buildBacktrackPrompt,
   enforceRound,
 } from "../enforcement-gate.js";
 import { verifySelfEvaluation } from "../verification-gate.js";
@@ -305,24 +304,6 @@ describe("backtrack recovery experiment — real Git workspace", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  });
-});
-
-describe("buildBacktrackPrompt — git head", () => {
-  it("states the required HEAD as a restore fact when gitHead is provided", () => {
-    const prompt = buildBacktrackPrompt(4, 3, "progress_stall", [], [], HEAD);
-    assert.ok(prompt.includes(`HEAD must be at \`${HEAD.slice(0, 12)}\``));
-    assert.match(prompt, /Submit one recovery evaluation after the restore/);
-    // v3.8: a FACT, never a command — the restore is the agent's action.
-    for (const command of ["git stash", "git reset", "git checkout", "git clean"]) {
-      assert.ok(!prompt.includes(command), `must not prescribe "${command}"`);
-    }
-  });
-
-  it("omits the HEAD fact when gitHead is absent", () => {
-    const prompt = buildBacktrackPrompt(4, 3, "progress_stall", [], []);
-    assert.ok(!prompt.includes("HEAD must be at"));
-    assert.ok(prompt.includes("Restoring the workspace is **your** responsibility"));
   });
 });
 

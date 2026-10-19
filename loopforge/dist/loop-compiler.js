@@ -16,7 +16,7 @@ import { claimedMetCriteria, claimedRemainingCriteria } from "./self-eval.js";
 import { assemblePromptArtifact } from "./prompt-assembler.js";
 import { renderSelfEvalBlock, } from "./submission-guidance.js";
 import { decidePromptLevel, } from "./prompt-policy.js";
-import { criterionRefMatches, deriveCriterionId, deriveItemId, normalizeText, unique, entryRound, } from "./token-utils.js";
+import { criterionRefMatches, deriveCriterionId, deriveItemId, normalizeText, unique, uniqueNormalized, entryRound, } from "./token-utils.js";
 function contextEntries(context) {
     if (!context || !Array.isArray(context.results))
         return [];
@@ -86,11 +86,16 @@ export function getPreviousRound(loopId, round, context) {
 function latestObjective(loopId, context,
 /** Exclusive compile-round bound. A deep-restore redo must never read the
  *  abandoned branch's objective (and its rolled-back refinements). */
-beforeRound) {
+beforeRound,
+/** v3.9.4: a round-1 same-round retry has no earlier committed objective.
+ *  Reading the prior compile of the SAME round recovers the initial
+ *  criteria supplied to `loopforge_start`. It is never enabled for a first
+ *  attempt or for later rounds, so it cannot read an abandoned branch. */
+includeRoundOne = false) {
     const candidates = loopEntries(loopId, context)
         .filter((entry) => {
         const round = entryRound(entry);
-        return round >= 1 && round < beforeRound;
+        return round >= 1 && (round < beforeRound || (includeRoundOne && round === 1));
     })
         .reverse();
     for (const entry of candidates) {
@@ -118,7 +123,7 @@ beforeRound) {
 }
 function evolveObjective(request, context, previous) {
     const current = request.loop_objective ??
-        latestObjective(request.loop_id, context, request.round) ??
+        latestObjective(request.loop_id, context, request.round, request.round === 1 && (request.attempt ?? 1) > 1) ??
         makeLoopObjective({
             objective: request.task,
             success_criteria: ["Task goal achieved with verifiable evidence"],
@@ -149,14 +154,24 @@ function evolveObjective(request, context, previous) {
         objective,
         version,
         refinement_history: history.slice(-getPolicy().evolution.max_objective_versions),
-        success_criteria: unique(current.success_criteria.map((item) => revisions.get(item) ?? item)),
-        hard_constraints: unique(current.hard_constraints),
+        // v3.9.4: one normalized-exact text, one cr-* identity. `unique` was
+        // trim-only, so case/whitespace variants survived as two entries that
+        // derived to the SAME criterion id.
+        success_criteria: uniqueNormalized(current.success_criteria
+            .filter((item) => typeof item === "string")
+            .map((item) => revisions.get(item) ?? item)),
+        hard_constraints: uniqueNormalized(current.hard_constraints),
         loop_id: request.loop_id,
     });
 }
 function evolveConstraints(request, objective, previous, windowRounds) {
     const retired = unique(previous.result?.retracted_constraints ?? []);
-    const retiredSet = new Set(retired);
+    // v3.9.4: a revised-away criterion text is no longer an objective criterion.
+    // It must not survive as a "discovered" active constraint just because the
+    // previous round's active set carried it. This is a merge-time suppression,
+    // not an alias and not a constraint retirement.
+    const revisedAway = unique((previous.result?.revised_success_criteria ?? []).map((item) => item.old));
+    const immediateRetired = new Set([...retired, ...revisedAway].map((text) => normalizeText(text)));
     const discovered = unique(previous.result?.discovered_constraints ?? [])
         .slice(0, getPolicy().evolution.max_discovered_constraints_per_round);
     // v2.14: agent-declared retractions of plan/hard/criteria constraints
@@ -174,28 +189,34 @@ function evolveConstraints(request, objective, previous, windowRounds) {
             for (const text of retractedList) {
                 if (!text)
                     continue;
-                const previousRound = lastRetractedRound.get(text);
+                const key = normalizeText(text);
+                const previousRound = lastRetractedRound.get(key);
                 if (previousRound === undefined || round.round > previousRound) {
-                    lastRetractedRound.set(text, round.round);
+                    lastRetractedRound.set(key, round.round);
                 }
             }
         }
     }
-    const active = unique([
+    // v3.9.4: normalized-exact dedupe. The trim-only `unique` let case/space
+    // variants coexist while deriving the SAME c-/cr- id. The silent
+    // max_active_constraints slice is gone: every merged active constraint is
+    // normative, and prompt budget pressure is reported as protectedOverflow.
+    const active = uniqueNormalized([
         ...(previous.view?.activeConstraints ?? []),
         ...request.constraints_from_plan,
         ...objective.hard_constraints,
         ...objective.success_criteria,
         ...discovered,
     ]).filter((item) => {
-        if (retiredSet.has(item))
+        const key = normalizeText(item);
+        if (immediateRetired.has(key))
             return false;
-        const retractedRound = lastRetractedRound.get(item);
+        const retractedRound = lastRetractedRound.get(key);
         if (retractedRound !== undefined && request.round - retractedRound < window) {
             return false;
         }
         return true;
-    }).slice(0, getPolicy().evolution.max_active_constraints);
+    });
     return { active, retired };
 }
 // ═══════════════════════════════════════════════════════════════════════════
@@ -287,7 +308,16 @@ criterionFacts = []) {
     // sub-goal links carried on the same item, disappeared while the sub-goal
     // side of the very same fact survived. One derivation, one window.
     const factsByCriterion = new Map(criterionFacts.map((fact) => [fact.criterion_id, fact]));
-    return objective.success_criteria.map((text) => {
+    // v3.9.4: one row per derived id. The objective is authored text; a case or
+    // whitespace variant derives the same cr-* and must not produce a second
+    // row (nor a second contract reference space).
+    const seenIds = new Set();
+    const statuses = [];
+    for (const text of objective.success_criteria) {
+        const id = deriveCriterionId(text);
+        if (seenIds.has(id))
+            continue;
+        seenIds.add(id);
         let metAtRound = null;
         for (const entry of entries) {
             const rnd = entryRound(entry);
@@ -307,18 +337,19 @@ criterionFacts = []) {
                 lastEntryRemaining.some((remaining) => criteriaMatch(remaining, text))
                 ? "remaining"
                 : "unknown";
-        const fact = factsByCriterion.get(deriveCriterionId(text));
+        const fact = factsByCriterion.get(id);
         const status = fact?.status ?? claimedStatus;
-        return {
-            id: deriveCriterionId(text),
+        statuses.push({
+            id,
             text,
             status,
             ...(metAtRound !== null ? { met_at_round: metAtRound } : {}),
             // v3.8.1: explicit refs only — empty when no contract item links this
             // criterion to a sub-goal.
             related_subgoal_ids: fact?.related_subgoal_ids ?? [],
-        };
-    });
+        });
+    }
+    return statuses;
 }
 /** v3.8: Rank item statuses so the strongest machine fact wins when several
  *  items reference the same criterion. */
@@ -501,13 +532,16 @@ export { deriveCriterionId, isCriterionId } from "./token-utils.js";
 // ═══════════════════════════════════════════════════════════════════════════
 /** Determine the source of a constraint by matching against known sources. */
 function constraintSource(text, objective, constraintsFromPlan) {
-    const norm = text.toLowerCase().trim();
-    if (objective.hard_constraints.some((c) => c.toLowerCase().trim() === norm))
-        return "hard";
-    if (constraintsFromPlan.some((c) => c.toLowerCase().trim() === norm))
-        return "plan";
-    if (objective.success_criteria.some((c) => c.toLowerCase().trim() === norm))
+    const norm = normalizeText(text);
+    // v3.9.4: criteria identity wins. A text that is both a criterion and a
+    // hard/plan constraint keeps its cr-* id everywhere; the prompt partition
+    // renders it once, in the criteria section.
+    if (objective.success_criteria.some((c) => normalizeText(c) === norm))
         return "criteria";
+    if (objective.hard_constraints.some((c) => normalizeText(c) === norm))
+        return "hard";
+    if (constraintsFromPlan.some((c) => normalizeText(c) === norm))
+        return "plan";
     return "discovered";
 }
 /** True when a reported violation text matches a constraint text.
@@ -662,13 +696,47 @@ function committedBacktrackBrief(loopId, round, context) {
     const record = view?.backtrack;
     if (!record)
         return undefined;
-    return recoveryBriefLines({
+    const lines = recoveryBriefLines({
         target: record.target,
         triggerRule: record.triggerRule,
+        // The committed decision's own sentence — the machine's reason for the
+        // rollback, preserved as a fact (the old prose header's "Why" content).
+        ...(typeof view?.result?.enforcementReason === "string" &&
+            view.result.enforcementReason.trim()
+            ? { failureReason: view.result.enforcementReason }
+            : {}),
         failedRounds: record.failedRounds,
         approaches: record.approaches,
         wrongAssumptions: record.wrongAssumptions,
+        // The redo round's stable identity is a fact the old prepended prose
+        // carried; keep it inside the artifact now.
+        recoveryRoundId: `loop:${loopId}:round:${record.target + 1}`,
     });
+    // v3.9.4: the restore point's machine facts belong in the prompt, not only
+    // in the prose backtrack header. Deterministic order and a visible overflow
+    // count keep the fact complete without making the section unbounded.
+    if (record.targetGitHead) {
+        lines.push(`- **Restore HEAD**: \`${record.targetGitHead}\``);
+    }
+    if (record.skippedFiles.length > 0) {
+        const files = [...record.skippedFiles].sort();
+        const shown = files.slice(0, 15);
+        lines.push("- **Files changed in failed rounds**:");
+        for (const file of shown)
+            lines.push(`  - \`${file}\``);
+        if (files.length > shown.length) {
+            lines.push(`  - … and ${files.length - shown.length} more files`);
+        }
+    }
+    // The machine requirement the recovery checkpoint enforces. A fact, not a
+    // recipe: LoopForge never says HOW to restore the workspace.
+    if (record.targetGitHead || record.skippedFiles.length > 0) {
+        lines.push(`- **Restore requirement**: the next submission's workspace is checked ` +
+            `against round ${record.target}` +
+            (record.targetGitHead ? ` (HEAD \`${record.targetGitHead}\`)` : "") +
+            "; a leftover change from the failed rounds rejects the recovery checkpoint.");
+    }
+    return lines;
 }
 export function compileLoop(request, context) {
     // ONE history window and ONE previous-round fact bundle for the whole
@@ -720,8 +788,18 @@ export function compileLoop(request, context) {
     // `roundFacts.verifiedSubGoals` is not read here — it reaches the state file
     // and the projection through the bundle itself.
     const { activeContract } = roundFacts;
+    // v3.9.4: the criterion reference space is the ACTIVE criterion set, not
+    // every text the objective ever carried. A retracted criterion must not be
+    // claimable or contract-referenceable while the prompt does not render it.
+    const activeConstraintKeys = new Set(constraintLifecycle.active.map((text) => normalizeText(text)));
+    const activeCriteria = uniqueNormalized(objective.success_criteria)
+        .filter((text) => activeConstraintKeys.has(normalizeText(text)));
+    const criterionObjective = {
+        ...objective,
+        success_criteria: activeCriteria,
+    };
     // v3.2: Goal → criteria → evidence vertical view (derived, zero persistence).
-    const criterionStatuses = deriveCriterionStatuses(request.loop_id, context, objective, request.round, previous.result, roundFacts.criterionFacts);
+    const criterionStatuses = deriveCriterionStatuses(request.loop_id, context, criterionObjective, request.round, previous.result, roundFacts.criterionFacts);
     // v3.8.1: the ONE recurring-fact derivation, over the shared window. The
     // prompt renders its recent tail; the state file renders the recurring set.
     const recurringFlags = deriveRecurringFlags(windowRounds);
@@ -845,6 +923,10 @@ export function compileLoop(request, context) {
             currentRequirement: state.currentTask,
         }),
         fullStateMarkdown: l2Pointer ? undefined : markdown,
+        // v3.9.4: the SAME committed-backtrack facts the state file renders. The
+        // recovery section is part of the artifact, so the delivered prompt is
+        // exactly `artifact.renderedPrompt` (no post-compile prepend).
+        recoveryBrief,
         // v2.9: Model's information needs from the previous round's SelfEvaluation
         promptRequests: previous.result?.prompt_requests,
     });

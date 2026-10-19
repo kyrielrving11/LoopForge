@@ -25,7 +25,25 @@ const RETRYABLE_ERROR_CODES = new Set([
  *  `error` and the human sentence in `errorMessage` (absent → the code is also
  *  the message, for the errors whose code IS self-explanatory); every other
  *  result is `ok: true` with its payload unchanged. */
-function applyToolEnvelope(output) {
+export function applyToolEnvelope(output) {
+    // v3.9.4: a post-commit projection defect carries its own field so it never
+    // masquerades as a submission refusal. It is always a non-retryable code.
+    if (isRecord(output.projectionError)) {
+        const projection = output.projectionError;
+        const { projectionError: _projectionError, ...rest } = output;
+        return {
+            ok: false,
+            error: {
+                code: "projection_incomplete",
+                message: typeof output.stopDetail === "string"
+                    ? output.stopDetail
+                    : "prompt projection incomplete",
+                retryable: false,
+                details: isRecord(projection.details) ? projection.details : {},
+            },
+            ...rest,
+        };
+    }
     const code = typeof output.error === "string" ? output.error : null;
     if (code === null)
         return { ok: true, ...output };

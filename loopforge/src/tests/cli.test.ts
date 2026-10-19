@@ -128,6 +128,7 @@ describe("loopforge CLI", () => {
                 protectedOverflow: false,
                 budget: 18000,
                 renderedChars: 21,
+                coverage: { active: [], rendered: [], omitted: [], complete: true },
               },
               createdAt: Date.now(),
               updatedAt: Date.now(),

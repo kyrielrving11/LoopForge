@@ -13,10 +13,12 @@
 import { createHash } from "node:crypto";
 import type { CanonicalLoopState } from "./canonical-state.js";
 import {
-  activeSubGoalView,
   buildPhaseLine,
+  formatActiveSubGoals,
+  formatCriterionRows,
   hashCanonicalState,
   milestoneHeading,
+  partitionActiveConstraints,
 } from "./canonical-state.js";
 import type {
   PromptArtifact,
@@ -25,17 +27,27 @@ import type {
 } from "./protocol.js";
 import { PROMPT_ARTIFACT_SCHEMA_VERSION } from "./protocol.js";
 import type {
-  ConstraintMeta,
   RecurringFlag,
-  SubGoal,
 } from "./protocol.js";
 import type {
   PromptLevel,
   PromptLevelReason,
 } from "./prompt-policy.js";
-import { deriveItemId, STABLE_ID_RE, normalizeText } from "./token-utils.js";
+import {
+  deriveCriterionId,
+  deriveItemId,
+  findingKey,
+  STABLE_ID_RE,
+  normalizeText,
+} from "./token-utils.js";
 import { getPolicy } from "./policy.js";
 import { verificationActionFor } from "./verification-actions.js";
+import {
+  assertPromptCoverage,
+  derivePromptCoverage,
+  type ActiveNormativeId,
+  type CoverageKind,
+} from "./prompt-coverage.js";
 
 
 export interface PromptBudgets {
@@ -58,6 +70,10 @@ export interface PromptAssemblyInput {
   attempt?: number;
   selfEvaluationBlock: string;
   fullStateMarkdown?: string;
+  /** v3.9.4: the committed-backtrack recovery facts, from the SAME
+   *  `committedBacktrackBrief` the state file renders. Present only while a
+   *  committed rollback directive is the current redo boundary. */
+  recoveryBrief?: string[];
   /** v2.9: Model's information needs for this prompt. L0: ignored. */
   promptRequests?: PromptRequests;
 }
@@ -66,6 +82,10 @@ interface Section {
   id: string;
   text: string;
   mandatory: boolean;
+  /** v3.9.4: the active normative ids this section actually rendered. A
+   *  narrative section declares `[]`; coverage is computed from these
+   *  declarations, never by scanning the prompt text. */
+  coverageIds: string[];
 }
 
 function section(title: string, body: string): string {
@@ -74,46 +94,6 @@ function section(title: string, body: string): string {
 
 function bullets(values: string[], prefix = "- "): string {
   return values.map((value) => `${prefix}${value}`).join("\n");
-}
-
-/** v2.11: Derive a stable item ID from text content.
- *  Same hash strategy as computeGoalTextHash in loop-compiler.ts. */
-/** v2.11: Render a bullet list with ID prefixes for constraints/criteria.
- *  Each item gets a [prefix-XXXXXXXX] tag. Items that already look like IDs
- *  are rendered as-is. v3.8.1: IDs are always rendered — the
- *  `constraint_id_enabled` escape hatch is gone. */
-function bulletsWithIds(values: string[], prefix: string): string {
-  return values.map((v) => {
-    const trimmed = v.trim();
-    if (STABLE_ID_RE.test(trimmed)) {
-      return `- [\`${trimmed}\`] ${trimmed}`;
-    }
-    const id = prefix + "-" + deriveItemId(trimmed);
-    return `- [\`${id}\`] ${trimmed}`;
-  }).join("\n");
-}
-
-/** v3.3.1: Render an identity-HETEROGENEOUS list — the merged active
- *  constraint set holds hard/plan/criteria/discovered texts together, so no
- *  single prefix fits. Each item's authoritative ID comes from constraint
- *  metadata (criteria texts carry cr-XXXXXXXX, everything else
- *  c-XXXXXXXX), keeping the active list in the same identity namespace as
- *  the item's own section — one text never renders under two prefixes in
- *  one prompt. Falls back to a c- derivation only when metadata is missing
- *  (defensive: metadata covers every active text by construction). */
-function bulletsWithIdentities(
-  values: string[],
-  metadata: ConstraintMeta[],
-): string {
-  const idByText = new Map(metadata.map((meta) => [meta.text, meta.id]));
-  return values.map((v) => {
-    const trimmed = v.trim();
-    if (STABLE_ID_RE.test(trimmed)) {
-      return `- [\`${trimmed}\`] ${trimmed}`;
-    }
-    const id = idByText.get(trimmed) ?? `c-${deriveItemId(trimmed)}`;
-    return `- [\`${id}\`] ${trimmed}`;
-  }).join("\n");
 }
 
 /** 3.9.3: The action table lives in a neutral module so the evaluation-field
@@ -129,7 +109,10 @@ function verificationText(
     const icon = flag.severity === "error"
       ? "🚫"
       : flag.severity === "warn" ? "⚠️" : "ℹ️";
-    const base = `- ${icon} [${flag.check}] ${flag.detail}`;
+    const ref = flag.ref ? ` [ref: \`${flag.ref}\`]` : "";
+    // v3.9.4: the finding names the affected field AND the concrete subject;
+    // the repair surface is a fact, not a next-action instruction.
+    const base = `- ${icon} [${flag.check}] \`${flag.field}\` — ${flag.detail}${ref}`;
     // v3.2: error/warn flags get an actionable continuation line in L1/L2 —
     // the verdict is translated into what to DO. L0 keeps the compact retry
     // prompt byte-identical; info flags stay informational.
@@ -145,50 +128,157 @@ function verificationText(
   return lines.join("\n");
 }
 
-function activeNonHardConstraints(state: CanonicalLoopState): string[] {
-  const hard = new Set(state.hardConstraints);
-  return state.activeConstraints.filter((value) => !hard.has(value));
+/** v3.9.4: the ONE identity of a text in the prompt's normative namespaces.
+ *  A criterion keeps its cr-* even when it also appears in an active list;
+ *  metadata supplies the id for everything else. */
+function identityForText(state: CanonicalLoopState, text: string): string {
+  // Criteria identity wins even if a stale/hand-built metadata row disagrees.
+  const status = state.criterionStatuses.find(
+    (criterion) => normalizeText(criterion.text) === normalizeText(text),
+  );
+  if (status) return status.id;
+  if (state.successCriteria.some(
+    (criterion) => normalizeText(criterion) === normalizeText(text))) {
+    return deriveCriterionId(text);
+  }
+  const meta = state.constraintMetadata.find((entry) => entry.text === text);
+  if (meta) return meta.id;
+  return `c-${deriveItemId(text)}`;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// v3.2: L1 diff-collapse helpers
-// ═══════════════════════════════════════════════════════════════════════════
+/** v3.9.4: active constraint rows with their real ids and the machine fact
+ *  that this round violated them. Shared by the hard and other partitions. */
+function constraintLines(
+  state: CanonicalLoopState,
+  texts: ReadonlyArray<string>,
+): string {
+  return texts.map((text) => {
+    const violated = state.constraintMetadata.find((meta) => meta.text === text)
+      ?.last_violated_at_round === state.round;
+    return `- [\`${identityForText(state, text)}\`] ${text}` +
+      (violated ? " (violated this round)" : "");
+  }).join("\n");
+}
 
-/** v3.2: Stable ID of a constraint text as rendered by bulletsWithIds —
- *  metadata's own id when present, else the derived hash. */
-function constraintIdOf(text: string, metadata: ConstraintMeta[]): string {
-  const meta = metadata.find((m) => m.text === text);
-  return meta?.id ?? `c-${deriveItemId(text)}`;
+/** v3.9.4: every active normative object the current prompt MUST render. */
+function activeNormativeIds(
+  state: CanonicalLoopState,
+  recoveryBrief: ReadonlyArray<string> | undefined,
+): ActiveNormativeId[] {
+  const out: ActiveNormativeId[] = [];
+  const partition = partitionActiveConstraints(state);
+  for (const text of partition.hard) {
+    out.push({ id: identityForText(state, text), kind: "constraint" });
+  }
+  for (const text of partition.other) {
+    out.push({ id: identityForText(state, text), kind: "constraint" });
+  }
+  for (const text of partition.criteria) {
+    out.push({ id: identityForText(state, text), kind: "criterion" });
+  }
+  if (state.roundContract) {
+    out.push({ id: state.roundContract.id, kind: "contract" });
+    for (const item of state.roundContract.items) {
+      out.push({ id: item.id, kind: "contract_item" });
+    }
+  }
+  for (const subGoal of state.subGoals) {
+    if (subGoal.status !== "done" && subGoal.status !== "canceled") {
+      out.push({ id: subGoal.id, kind: "subgoal" });
+    }
+  }
+  for (const flag of state.verificationFlags) {
+    out.push({ id: findingKey(flag), kind: "finding" });
+  }
+  if (recoveryBrief && recoveryBrief.length > 0) {
+    out.push({ id: "recovery", kind: "recovery" });
+  }
+  return out;
 }
 
 
+/** v3.9.4: the normative sections shared by L0/L1/L2. Levels change ONLY the
+ *  density of narrative sections; they never change which active normative
+ *  ids are rendered. Every section here is mandatory (protected). */
 function commonMandatorySections(
   state: CanonicalLoopState,
-  /** v2.11: L0 skips ID rendering to stay within tight budget. */
-  level?: "l0" | "l1" | "l2",
+  level: "l0" | "l1" | "l2",
+  recoveryBrief?: ReadonlyArray<string>,
 ): Section[] {
+  const partition = partitionActiveConstraints(state);
   const sections: Section[] = [
     {
       id: "objective",
       text: section("Objective", state.objective),
       mandatory: true,
+      coverageIds: [],
     },
     {
       id: "current_task",
       text: section("Current Task", state.currentTask),
       mandatory: true,
+      // Declare what this text actually carries. `createCanonicalLoopState`
+      // builds currentTask with `formatRoundContract`, so this is the
+      // structured source, not a text guess; an inconsistent hand-built state
+      // therefore fails closed instead of claiming an id it did not render.
+      coverageIds: state.roundContract
+        ? [
+            state.roundContract.id,
+            ...state.roundContract.items.map((item) => item.id),
+          ].filter((id) => state.currentTask.includes(id))
+        : [],
     },
   ];
 
-  if (state.hardConstraints.length > 0) {
-    // v2.11: L0 uses plain bullets (tight budget); L1/L2 show constraint IDs
-    const body = level === "l0"
-      ? bullets(state.hardConstraints)
-      : bulletsWithIds(state.hardConstraints, "c");
+  const criteria = formatCriterionRows(
+    state.criterionStatuses,
+    state.successCriteria,
+  );
+  if (criteria.lines.length > 0) {
+    sections.push({
+      id: "criteria",
+      text: section("Success Criteria", criteria.lines.join("\n")),
+      mandatory: true,
+      coverageIds: criteria.ids,
+    });
+  }
+  if (partition.hard.length > 0) {
     sections.push({
       id: "hard_constraints",
-      text: section("Active Hard Constraints", body),
+      text: section(
+        "Active Hard Constraints",
+        constraintLines(state, partition.hard),
+      ),
       mandatory: true,
+      coverageIds: partition.hard.map((text) => identityForText(state, text)),
+    });
+  }
+  if (partition.other.length > 0) {
+    sections.push({
+      id: "active_constraints",
+      text: section(
+        "Active Constraints",
+        constraintLines(state, partition.other),
+      ),
+      mandatory: true,
+      coverageIds: partition.other.map((text) => identityForText(state, text)),
+    });
+  }
+  if (state.subGoals.length > 0) {
+    const subGoals = formatActiveSubGoals(state.subGoals, state.round);
+    sections.push({
+      id: "sub_goals",
+      text: section("Active Sub-Goals", subGoals.lines.join("\n")),
+      mandatory: true,
+      coverageIds: subGoals.ids,
+    });
+  }
+  if (recoveryBrief && recoveryBrief.length > 0) {
+    sections.push({
+      id: "recovery",
+      text: section("Recovery Brief", recoveryBrief.join("\n")),
+      mandatory: true,
+      coverageIds: ["recovery"],
     });
   }
   if (state.verificationFlags.length > 0) {
@@ -196,21 +286,29 @@ function commonMandatorySections(
       id: "verification",
       text: section("Verification Gate", verificationText(state, level)),
       mandatory: true,
+      coverageIds: state.verificationFlags.map((flag) => findingKey(flag)),
     });
   }
   return sections;
 }
 
-function l0Sections(state: CanonicalLoopState): Section[] {
+function l0Sections(
+  state: CanonicalLoopState,
+  recoveryBrief?: ReadonlyArray<string>,
+): Section[] {
   const retryRequirements = [
     ...state.blockers,
     ...state.verificationFlags.map((flag) => flag.detail),
   ];
-  const sections = commonMandatorySections(state, "l0");
-  if (retryRequirements.length > 0) {    sections.push({
+  const sections = commonMandatorySections(state, "l0", recoveryBrief);
+  if (retryRequirements.length > 0) {
+    sections.push({
       id: "retry_requirements",
       text: section("Retry Requirements", bullets(retryRequirements)),
       mandatory: true,
+      // The same finding keys as the Verification Gate: either repair surface
+      // proves the finding was delivered, and both derive from the one list.
+      coverageIds: state.verificationFlags.map((flag) => findingKey(flag)),
     });
   }
   if (state.changesSinceLastRound.length > 0) {
@@ -218,6 +316,7 @@ function l0Sections(state: CanonicalLoopState): Section[] {
       id: "changes",
       text: section("New Evidence / Changes", bullets(state.changesSinceLastRound)),
       mandatory: false,
+      coverageIds: [],
     });
   }
   return sections;
@@ -256,43 +355,15 @@ function activeWarnings(flags: RecurringFlag[], currentRound: number): string {
 
 function l1Sections(
   state: CanonicalLoopState,
+  recoveryBrief?: ReadonlyArray<string>,
 ): Section[] {
-  const sections = commonMandatorySections(state, "l1");
-  const active = activeNonHardConstraints(state);
+  const sections = commonMandatorySections(state, "l1", recoveryBrief);
   if (state.changesSinceLastRound.length > 0) {
     sections.push({
       id: "changes",
       text: section("Changes Since Last Round", bullets(state.changesSinceLastRound)),
       mandatory: false,
-    });
-  }
-  // v3.8.1: Active Constraints render IN FULL. v3.2 folded unchanged items
-  // into "… N unchanged constraints (see state file)" pointer lines, which
-  // made the prompt's content depend on what the PREVIOUS prompt happened to
-  // show rather than on committed facts — and those pointer lines fed the
-  // prompt hash. The fold needed the previous round's persisted presentation
-  // snapshot, which is deleted.
-  if (active.length > 0) {
-    // The one thing the folded branch carried that a plain bullet list does
-    // not: the machine fact that this round broke the constraint. Kept so the
-    // annotation is not lost along with the fold.
-    const lines = active.map((text) => {
-      const violated = state.constraintMetadata.find((m) => m.text === text)
-        ?.last_violated_at_round === state.round;
-      return `- [\`${constraintIdOf(text, state.constraintMetadata)}\`] ${text}` +
-        (violated ? " (violated this round)" : "");
-    });
-    sections.push({
-      id: "active_constraints",
-      text: section("Active Constraints / Success Criteria", lines.join("\n")),
-      mandatory: false,
-    });
-  }
-  if (state.remainingCriteria.length > 0) {
-    sections.push({
-      id: "remaining",
-      text: section("Remaining", bulletsWithIds(state.remainingCriteria, "cr")),
-      mandatory: false,
+      coverageIds: [],
     });
   }
   if (state.blockers.length > 0) {
@@ -300,26 +371,7 @@ function l1Sections(
       id: "blockers",
       text: section("Blockers", bullets(state.blockers)),
       mandatory: false,
-    });
-  }
-  // v2.2: Sub-Goal Dashboard (compact — L1). v3.7.1: only ACTIVE items
-  // (pending/in_progress/blocked) enter the view; done/canceled never render
-  // as rows. v3.8.1: rendered in full — the unchanged-count fold is gone.
-  const view = activeSubGoalView(state.subGoals, Number.POSITIVE_INFINITY);
-  const activeSubs = view.active;
-  if (activeSubs.length > 0) {
-    const iconOf = (sg: SubGoal): string =>
-      sg.status === "in_progress" ? "🔄" : sg.status === "blocked" ? "🚫" : "⏳";
-    const maxShow = 5;
-    const items = activeSubs.slice(0, maxShow).map((sg) =>
-      `${iconOf(sg)} [\`${sg.id}\`] ${sg.description}`);
-    if (activeSubs.length > maxShow) {
-      items.push(`... and ${activeSubs.length - maxShow} more`);
-    }
-    sections.push({
-      id: "sub_goals",
-      text: section("Active Sub-Goals", items.join("\n")),
-      mandatory: false,
+      coverageIds: [],
     });
   }
   if (state.discoveries.length > 0) {
@@ -327,6 +379,7 @@ function l1Sections(
       id: "discoveries",
       text: section("New Discoveries", bullets(state.discoveries)),
       mandatory: false,
+      coverageIds: [],
     });
   }
   // v3.2: Recent Rounds. v3.8.1: rendered in full — the keep-newest-N fold and
@@ -336,6 +389,7 @@ function l1Sections(
       id: "rolling_outcomes",
       text: section("Recent Rounds", bullets(state.rollingOutcomes)),
       mandatory: false,
+      coverageIds: [],
     });
   }
   // v3.2: L1 also renders the explicit external context (previously L2-only).
@@ -345,6 +399,7 @@ function l1Sections(
       id: "external_context",
       text: section("External Context", state.externalContext),
       mandatory: false,
+      coverageIds: [],
     });
   }
   // v3.8.1: one compact phase line, not the Roadmap prose.
@@ -354,6 +409,7 @@ function l1Sections(
       id: "phase",
       text: section("Phase", l1Phase),
       mandatory: false,
+      coverageIds: [],
     });
   }
   // v3.8.1: Active Warnings — the recent tail of the ONE recurring-fact
@@ -368,6 +424,7 @@ function l1Sections(
       id: "active_warnings",
       text: section("Active Warnings", warnings),
       mandatory: false,
+      coverageIds: [],
     });
   }
   return sections;
@@ -376,42 +433,38 @@ function l1Sections(
 function l2Sections(
   state: CanonicalLoopState,
   fullStateMarkdown?: string,
+  recoveryBrief?: ReadonlyArray<string>,
 ): Section[] {
-  const sections = commonMandatorySections(state, "l2");
+  const sections = commonMandatorySections(state, "l2", recoveryBrief);
   const fullState = fullStateMarkdown?.trim();
   if (fullState) {
     sections.push({
       id: "full_state",
       text: section("Full Rehydrated State", fullState),
       mandatory: false,
+      coverageIds: [],
     });
     return sections;
   }
 
-  // v2.11: Groups with an idPrefix use ID-aware rendering; others use plain bullets.
-  const groups: Array<[string, string, string[], string | null]> = [
-    ["success_criteria", "Success Criteria", state.successCriteria, "cr"],
-    ["active_constraints", "Active Constraints", activeNonHardConstraints(state), "c"],
-    ["changes", "Changes Since Last Round", state.changesSinceLastRound, null],
-    ["remaining", "Remaining", state.remainingCriteria, "cr"],
-    ["blockers", "Blockers", state.blockers, null],
-    ["discoveries", "Discoveries", state.discoveries, null],
-    ["rolling_outcomes", "Cross-Round Outcomes", state.rollingOutcomes, null],
-    ["failed_patterns", "Failed Patterns", state.failedPatterns, null],
+  // v2.11: narrative groups. v3.9.4: criteria, active constraints and active
+  // sub-goals moved to the shared mandatory sections, so they are not repeated
+  // here; these groups carry no normative ids.
+  const groups: Array<[string, string, string[]]> = [
+    ["changes", "Changes Since Last Round", state.changesSinceLastRound],
+    ["blockers", "Blockers", state.blockers],
+    ["discoveries", "Discoveries", state.discoveries],
+    ["rolling_outcomes", "Cross-Round Outcomes", state.rollingOutcomes],
+    ["failed_patterns", "Failed Patterns", state.failedPatterns],
   ];
-  for (const [id, title, values, idPrefix] of groups) {
+  for (const [id, title, values] of groups) {
     if (values.length === 0) continue;
-    // v3.3.1: the active set is identity-heterogeneous (hard/plan/criteria/
-    // discovered merged) — render through constraint metadata so criteria
-    // texts keep their cr- identity here too (same namespace as their own
-    // Success Criteria section). Every other group is homogeneous and keeps
-    // its single-prefix renderer.
-    const body = id === "active_constraints"
-      ? bulletsWithIdentities(values, state.constraintMetadata)
-      : idPrefix
-        ? bulletsWithIds(values, idPrefix)
-        : bullets(values);
-    sections.push({ id, text: section(title, body), mandatory: false });
+    sections.push({
+      id,
+      text: section(title, bullets(values)),
+      mandatory: false,
+      coverageIds: [],
+    });
   }
   // v3.8.1: Active Warnings — the recent tail of the ONE recurring-fact
   // derivation (see l1Sections). The whole-history recurring set is the state
@@ -423,6 +476,7 @@ function l2Sections(
       id: "active_warnings",
       text: section("Active Warnings", warnings),
       mandatory: false,
+      coverageIds: [],
     });
   }
   // v3.8.1: one compact phase line, not the Roadmap prose — rendered right
@@ -434,6 +488,7 @@ function l2Sections(
       id: "phase",
       text: section("Phase", l2Phase),
       mandatory: false,
+      coverageIds: [],
     });
   }
   if (state.milestones.length > 0) {
@@ -453,35 +508,7 @@ function l2Sections(
       id: "milestones",
       text: section("Phase History", milestoneText),
       mandatory: false,
-    });
-  }
-  if (state.subGoals.length > 0) {
-    // v3.7.1: active-only rows ordered blocked → in_progress → pending
-    // (priority asc, recently changed first), capped by policy; done and
-    // canceled appear only in the stats line.
-    const cap = getPolicy().evolution.max_active_subgoals;
-    const view = activeSubGoalView(state.subGoals, cap);
-    const lines: string[] = [];
-    for (const sg of view.active) {
-      if (sg.status === "in_progress") {
-        lines.push(`🔄 [\`${sg.id}\`] ${sg.description} (since R${sg.status_changed_at_round})`);
-      } else if (sg.status === "blocked") {
-        lines.push(`🚫 [\`${sg.id}\`] ${sg.description} (blocked since R${sg.status_changed_at_round})`);
-      } else {
-        const age = state.round - sg.declared_at_round;
-        const stale = age >= 10 ? " ⚠️ stale" : "";
-        lines.push(`⏳ [\`${sg.id}\`] ${sg.description} (pending ${age} rounds)${stale}`);
-      }
-    }
-    // Stats line (full counts — rows may be capped)
-    lines.push(
-      `─── ${view.total} total: ${view.activeTotal} active, ${view.done} done, ${view.canceled} canceled`,
-    );
-
-    sections.push({
-      id: "sub_goals_full",
-      text: section("Sub-Goal Dashboard", lines.join("\n")),
-      mandatory: false,
+      coverageIds: [],
     });
   }
   if (state.externalContext) {
@@ -489,26 +516,16 @@ function l2Sections(
       id: "external_context",
       text: section("External Context", state.externalContext),
       mandatory: false,
+      coverageIds: [],
     });
   }
-
-  // ── v2.8: Path B gap fills (previously only in full state markdown) ──
-
-  // v3.8.1: the L2 Progress Dashboard and Round Stats sections are gone.
-  // The dashboard was `criterionStatuses` re-composed into a table and mixed
-  // with reported test counts; Round Stats
-  // re-listed per-round files and progress deltas, both self-reported. The
-  // criterion list and the machine git/criteria rows still render in the
-  // state file, where a human or external tool reads them — the prompt keeps
-  // only the current round’s own facts.
-
-  // Retired Constraints
   if (state.retiredConstraints.length > 0) {
     const lines = state.retiredConstraints.map((c) => `- ~${c}~ (retired)`);
     sections.push({
       id: "retired_constraints",
       text: section("Retired Constraints", lines.join("\n")),
       mandatory: false,
+      coverageIds: [],
     });
   }
 
@@ -516,9 +533,17 @@ function l2Sections(
 }
 
 function selectSections(input: PromptAssemblyInput): Section[] {
-  if (input.level === "l0") return l0Sections(input.state);
-  if (input.level === "l1") return l1Sections(input.state);
-  return l2Sections(input.state, input.fullStateMarkdown);
+  if (input.level === "l0") {
+    return l0Sections(input.state, input.recoveryBrief);
+  }
+  if (input.level === "l1") {
+    return l1Sections(input.state, input.recoveryBrief);
+  }
+  return l2Sections(
+    input.state,
+    input.fullStateMarkdown,
+    input.recoveryBrief,
+  );
 }
 
 /** v3.8.1: render order, in ONE place.
@@ -534,33 +559,32 @@ function selectSections(input: PromptAssemblyInput): Section[] {
  *  single large early section silently pushed out every later one.)
  */
 const SECTION_PRIORITY: Readonly<Record<string, number>> = {
-  // ── protected ───────────────────────────────────────────────────────────
+  // ── protected (every active normative id lives here) ────────────────────
   objective: 0,
   current_task: 1,
-  hard_constraints: 2,
-  verification: 3,
-  retry_requirements: 4,
+  criteria: 2,
+  hard_constraints: 3,
+  active_constraints: 4,
+  sub_goals: 5,
+  recovery: 6,
+  verification: 7,
+  retry_requirements: 8,
   // Zero-token pure reorder, but it is the ONLY place emphasized items render
   // (they are MOVED out of their source sections), so dropping it would delete
   // them rather than just deprioritize them.
-  critical_context: 5,
-  // ── optional, most to least important ───────────────────────────────────
-  success_criteria: 10,
-  active_constraints: 11,
-  remaining: 12,
-  sub_goals: 13,
-  blockers: 14,
-  changes: 15,
-  discoveries: 16,
-  rolling_outcomes: 17,
-  phase: 18,
-  active_warnings: 19,
-  external_context: 20,
-  failed_patterns: 21,
-  retired_constraints: 22,
-  milestones: 23,
-  sub_goals_full: 24,
-  full_state: 25,
+  critical_context: 9,
+  // ── optional narrative, most to least important ─────────────────────────
+  blockers: 20,
+  changes: 21,
+  discoveries: 22,
+  rolling_outcomes: 23,
+  phase: 24,
+  active_warnings: 25,
+  external_context: 26,
+  failed_patterns: 27,
+  retired_constraints: 28,
+  milestones: 29,
+  full_state: 30,
 };
 
 const DEFAULT_SECTION_PRIORITY = 50;
@@ -744,7 +768,24 @@ function renderConfusionAlerts(
 
 /** Render the "Critical Context" section — items the model emphasized.
  *  Pulled from active constraints, discoveries, and blocking issues. */
-function renderCriticalContext(emphasized: string[]): string {
+/** v3.9.4: an emphasized item that is also an active normative constraint
+ *  reports its real id here, because it is MOVED out of its source section
+ *  and this is the only place it renders. Narrative items carry no id. */
+function normativeIdForText(
+  state: CanonicalLoopState,
+  text: string,
+): string | null {
+  const key = normalizeText(text);
+  const normative =
+    state.activeConstraints.some((item) => normalizeText(item) === key) ||
+    state.successCriteria.some((item) => normalizeText(item) === key) ||
+    state.hardConstraints.some((item) => normalizeText(item) === key);
+  return normative ? identityForText(state, text) : null;
+}
+
+function renderCriticalContext(
+  emphasized: ReadonlyArray<{ text: string; id: string | null }>,
+): string {
   if (emphasized.length === 0) return "";
   const lines: string[] = [
     "## 🔴 Critical Context",
@@ -753,7 +794,9 @@ function renderCriticalContext(emphasized: string[]): string {
     "",
   ];
   for (const item of emphasized) {
-    lines.push(`- ${item}`);
+    lines.push(item.id
+      ? `- [\`${item.id}\`] ${item.text}`
+      : `- ${item.text}`);
   }
   lines.push("");
   return lines.join("\n");
@@ -904,7 +947,13 @@ export function assemblePromptArtifact(input: PromptAssemblyInput): PromptArtifa
       }
     : input.state;
   const sections = selectSections({ ...input, state: stateForSections });
-  const criticalContextText = renderCriticalContext(emphasized);
+  // The ID attached here comes from the ORIGINAL state: emphasize moved the
+  // item out of its source section, so this is the only renderer for it.
+  const emphasizedItems = emphasized.map((text) => ({
+    text,
+    id: normativeIdForText(input.state, text),
+  }));
+  const criticalContextText = renderCriticalContext(emphasizedItems);
 
   // v3.8.1: no presentation snapshot. The artifact records what THIS prompt
   // rendered (level, hashes, round identity, the sections it emitted) and
@@ -923,6 +972,7 @@ export function assemblePromptArtifact(input: PromptAssemblyInput): PromptArtifa
         id: "critical_context",
         text: criticalContextText,
         mandatory: true,
+        coverageIds: emphasizedItems.flatMap((item) => item.id ? [item.id] : []),
       },
       ...sections,
     ];
@@ -932,6 +982,27 @@ export function assemblePromptArtifact(input: PromptAssemblyInput): PromptArtifa
   const selected = renderWithinBudget(augmentedSections, fixedText, sectionBudget);
   const renderedPrompt = selected.rendered + footer;
   const promptHash = createHash("sha256").update(renderedPrompt).digest("hex");
+
+  // v3.9.4: coverage is derived from the ORIGINAL state and the sections that
+  // actually rendered. It is not text-scanned and not a second fact source.
+  // An incomplete projection fails closed — no prompt or artifact escapes.
+  const active = activeNormativeIds(input.state, input.recoveryBrief);
+  const declaredIds = new Set<string>();
+  for (const section of augmentedSections) {
+    for (const id of section.coverageIds) declaredIds.add(id);
+  }
+  const renderedIds = new Set<string>();
+  for (const sectionId of selected.included) {
+    const section = augmentedSections.find((entry) => entry.id === sectionId);
+    if (!section) continue;
+    for (const id of section.coverageIds) renderedIds.add(id);
+  }
+  const coverage = derivePromptCoverage({
+    active,
+    rendered: renderedIds,
+    declared: declaredIds,
+  });
+  assertPromptCoverage(coverage);
 
   return {
     schemaVersion: PROMPT_ARTIFACT_SCHEMA_VERSION,
@@ -951,5 +1022,6 @@ export function assemblePromptArtifact(input: PromptAssemblyInput): PromptArtifa
     budget: sectionBudget,
     renderedChars: selected.rendered.length,
     promptRequestEffects,
+    coverage,
   };
 }

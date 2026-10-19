@@ -56,7 +56,7 @@ export interface ExplainRound {
   /** True when the round committed without a complete observable boundary. */
   evidenceIncomplete: boolean;
   /** Committed verification findings. */
-  flags: Array<{ check: string; severity: string; detail: string }>;
+  flags: Array<{ check: string; severity: string; detail: string; ref?: string }>;
   /** The contract the round executed under, and every item's derived status. */
   contract: {
     id: string;
@@ -158,6 +158,7 @@ export function buildExplain(
         check: flag.check,
         severity: flag.severity,
         detail: flag.detail,
+        ...(flag.ref ? { ref: flag.ref } : {}),
       })),
       contract: statuses.contractId
         ? {

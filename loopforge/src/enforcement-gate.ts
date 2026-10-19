@@ -153,33 +153,21 @@ export function findBacktrackTargetSnapshot(
   return null;
 }
 
-/** Build the backtrack prompt injected at the top of the restored round.
- *
- *  v2.13: Includes concrete workspace restore instructions with affected
- *  file lists from skipped rounds. The agent must restore the working tree
- *  to the clean round's state before proceeding. */
-export interface BacktrackRecoveryFacts {
-  /** v3.7.1: Rolled-back rounds (restore point + 1 … trigger round). */
-  failedRounds: number[];
-  /** v3.7.1: One approach per failed round — what must NOT be repeated. */
-  approaches: string[];
-  /** v3.7.1: Falsified assumptions collected from the failed rounds. */
-  wrongAssumptions: string[];
-}
-
 /** v3.8.1: the ONE Recovery Brief renderer.
  *
- *  The rollback prompt and the state file's Recent tier used to carry two
- *  hand-written copies of these lines — differing in punctuation
- *  ("the redo is round N" vs "redo round N") and in whether an approach
- *  overflow count was shown at all. Two renderers over one rollback meant the
- *  two surfaces could describe the same event differently while both claiming
- *  to be derived facts. The facts are supplied by the caller: the coordinator
- *  from its live walk, the compile path from `decodeBacktrackRecord` on the
+ *  v3.9.4: it is the shared fact renderer for the prompt's protected
+ *  `recovery` section and the state file's Recent tier. The post-compile
+ *  backtrack prompt (and its action advice) is gone: `committedBacktrackBrief`
+ *  appends the restore HEAD/file set and the artifact is the delivered prompt.
+ *  The facts are supplied by the caller from `decodeBacktrackRecord` on the
  *  committed decision. */
 export function recoveryBriefLines(input: {
   target: number;
   triggerRule: string;
+  /** v3.9.4: the enforcement gate's own sentence for WHY it rolled back.
+   *  This is a fact from the committed decision, not action advice — it is
+   *  the "Why This Happened" content the old prose header carried. */
+  failureReason?: string;
   failedRounds: string[] | number[];
   approaches: string[];
   wrongAssumptions: string[];
@@ -191,8 +179,13 @@ export function recoveryBriefLines(input: {
   const maxAssumptions = input.maxAssumptions ?? 5;
   const lines = [
     `- **Trigger**: ${input.triggerRule || "unknown"}`,
-    `- **Restored to round**: ${input.target} (the redo is round ${input.target + 1})`,
   ];
+  if (input.failureReason?.trim()) {
+    lines.push(`- **Failure reason**: ${input.failureReason.trim()}`);
+  }
+  lines.push(
+    `- **Restored to round**: ${input.target} (the redo is round ${input.target + 1})`,
+  );
   if (input.recoveryRoundId) {
     lines.push(`- **Recovery Round ID**: \`${input.recoveryRoundId}\``);
   }
@@ -217,190 +210,6 @@ export function recoveryBriefLines(input: {
   return lines;
 }
 
-export function buildBacktrackPrompt(
-  fromRound: number,
-  toRound: number,
-  triggerRule: string,
-  skippedDiscoveries: string[],
-  /** v2.13: Files changed in the skipped rounds (from evidence snapshots).
-   *  Used to show the agent exactly what needs to be reverted. */
-  skippedFiles: string[] = [],
-  /** v2.12: Git HEAD commit hash at the backtrack point (current HEAD).
-   *  The agent must discard work back to the clean round's state. */
-  gitHead?: string,
-  /** v3.7.1: The redo submission's roundId (loop:<id>:round:<toRound+1>). */
-  recoveryRoundId?: string,
-  /** v3.7.1: Derived Recovery Brief facts — committed facts + the
-   *  in-flight attempt only; never rejected payloads. */
-  recovery?: BacktrackRecoveryFacts,
-): string {
-  const lines: string[] = [
-    `## ⛔ Backtrack — Round ${fromRound} → Restored to Round ${toRound}`,
-    "",
-  ];
-
-  // ── Recovery Brief (v3.7.1) ──────────────────────────────────────────
-  // A compact structured summary at the top of the rollback directive. The
-  // detailed sections below (workspace restore, discoveries, instructions)
-  // keep their existing wording; the brief exists so the agent cannot miss
-  // why it was rolled back, what failed, and what the redo round is.
-  if (recovery) {
-    lines.push("### Recovery Brief", "");
-    lines.push(...recoveryBriefLines({
-      target: toRound,
-      triggerRule,
-      failedRounds: recovery.failedRounds,
-      approaches: recovery.approaches,
-      wrongAssumptions: recovery.wrongAssumptions,
-      recoveryRoundId,
-    }));
-    lines.push("");
-  }
-
-  // ── Why This Happened ────────────────────────────────────────────────
-  // v3.7: stall and flatline are one evaluator emitting progress_stall; the
-  // former flatline-specific wording ("zero forward motion → radically
-  // different strategy") is folded into the single section — the disposition
-  // tier still distinguishes the enforcement reason itself.
-  if (triggerRule === "progress_stall") {
-    lines.push(
-      "### Why This Happened",
-      "",
-      `Progress stalled over rounds ${toRound + 1}–${fromRound}: the work ` +
-      `produced no machine-observed Git changes.`,
-      "",
-      "The approach used in those rounds **did not work**. It should not be " +
-      "repeated — a **radically different** strategy is needed.",
-      "",
-    );
-  }
-
-  // ── v2.13: Workspace Restore ──────────────────────────────────────────
-  lines.push(
-    "### ⚠️ Workspace Restore Required",
-    "",
-    `Your working directory still contains changes from the **failed** ` +
-    `rounds (${toRound + 1}–${fromRound}). You MUST discard those changes ` +
-    `before starting Round ${toRound + 1}. Working on top of stale changes ` +
-    `will cause the verification gate to reject your next submission.`,
-    "",
-  );
-
-  if (skippedFiles.length > 0) {
-    lines.push(
-      "**Files modified in skipped rounds (must be reverted):**",
-      "",
-    );
-    for (const f of skippedFiles.slice(0, 15)) {
-      lines.push(`- \`${f}\``);
-    }
-    if (skippedFiles.length > 15) {
-      lines.push(`- … and ${skippedFiles.length - 15} more files`);
-    }
-    lines.push("");
-  }
-
-  // v3.8: FACTS, not commands. LoopForge never mutates the working tree, and it
-  // does not prescribe how the agent restores it either — the restore is the
-  // AGENT's action, so the prompt states what must be true (the target HEAD and
-  // the files that must be reverted) and leaves the means entirely to the
-  // agent. No `git stash` / `git reset` / `git checkout` / `git clean` line
-  // belongs here.
-  if (gitHead) {
-    lines.push(
-      "**The workspace must be returned to the restore point before you " +
-      "continue:**",
-      "",
-      `- HEAD must be at \`${gitHead.slice(0, 12)}\``,
-      `- Every file listed above must be back in its state at Round ${toRound}`,
-      `- No leftover change from rounds ${toRound + 1}–${fromRound} may remain`,
-      "",
-      "Your next submission's git observation is compared against that HEAD " +
-      "and against the files Round " + toRound + " already had dirty — work " +
-      "that was already in progress then may stay, but a file whose " +
-      "fingerprint still matches the failed round, or any change the restore " +
-      "point did not already carry, proves the restore did not happen. Submit " +
-      "one recovery evaluation after the restore so LoopForge can verify the " +
-      "restored starting state before you redo the work; only then continue " +
-      "with the next slice.",
-      "",
-    );
-  } else {
-    lines.push(
-      `**The workspace must be returned to its state at Round ${toRound}** — ` +
-      "every file listed above reverted, with nothing left over from the " +
-      "failed rounds.",
-      "",
-    );
-  }
-  lines.push(
-    "Restoring the workspace is **your** responsibility. LoopForge never " +
-    "modifies the working tree; it only records the restore requirement and " +
-    "checks the result.",
-    "",
-    `**If git is unavailable**, revert the files listed above by hand to ` +
-    `their state at Round ${toRound}. Re-read the state file below — ` +
-    `it reflects the correct state at Round ${toRound}.`,
-    "",
-    "> 🛡️ **Verification:** The next round's evidence check will verify that " +
-    "> your workspace no longer contains the failed changes. Submissions " +
-    "> with unrestored files will be **rejected**.",
-    "",
-  );
-
-  // ── What Must Change ──────────────────────────────────────────────────
-  lines.push(
-    "### What Must Change",
-    "",
-    "- Do **NOT** repeat the approach used in the skipped rounds.",
-    "- Try a **different** task decomposition or technique.",
-    "- If the current sub-goal is stuck, consider canceling it " +
-      "(`subgoal_updates` to canceled) and working on a different one.",
-    // v3.5: the restored Current Task may be the very Round Contract that
-    // stalled — the agent must be told the sanctioned way to revise it
-    // (outcome=blocked closes the active contract; the revised proposal in
-    // the same submission becomes active next round). Without this the
-    // agent's revision would be silently ignored as premature.
-    "- If the restored Current Task is a Round Contract that caused the stall: " +
-      "close it in this submission with `outcome=\"blocked\"` (+ a blocker " +
-      "explaining why it stalled) and declare the REVISED contract in the " +
-      "same submission. Do **NOT** silently restate the stalled contract.",
-    "- Use the `prompt_requests.confusion_points` field in your self-evaluation " +
-      "to flag anything you don't understand about the task or the blockage.",
-    "",
-  );
-
-  // ── Preserved Discoveries ─────────────────────────────────────────────
-  if (skippedDiscoveries.length > 0) {
-    lines.push(
-      "### Preserved Discoveries",
-      "",
-      "These were discovered in the skipped rounds and remain valid:",
-      "",
-    );
-    for (const d of skippedDiscoveries) {
-      lines.push(`- ${d}`);
-    }
-    lines.push("");
-  }
-
-  // ── Instructions ──────────────────────────────────────────────────────
-  lines.push(
-    "### Instructions",
-    "",
-    `You have been rolled back to Round ${toRound}. ` +
-    `You are now starting **Round ${toRound + 1}** with the lessons above.`,
-    "",
-    "1. **First**: restore your workspace using the commands above.",
-    "2. Read the restored state below — it reflects Round " + toRound + ".",
-    "3. The discoveries from skipped rounds (if any) have been merged " +
-      "into the active constraints.",
-    "4. Do NOT retrace the steps that led to the stall. Choose a new path.",
-    "",
-  );
-
-  return lines.join("\n");
-}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Individual enforcement rules — each returns EnforcementResult | null

@@ -26,6 +26,10 @@ export interface PromptAssemblyInput {
     attempt?: number;
     selfEvaluationBlock: string;
     fullStateMarkdown?: string;
+    /** v3.9.4: the committed-backtrack recovery facts, from the SAME
+     *  `committedBacktrackBrief` the state file renders. Present only while a
+     *  committed rollback directive is the current redo boundary. */
+    recoveryBrief?: string[];
     /** v2.9: Model's information needs for this prompt. L0: ignored. */
     promptRequests?: PromptRequests;
 }

@@ -18,7 +18,7 @@ describe("Policy — Defaults", () => {
 
   it("DEFAULT_POLICY has correct constraint values", () => {
     assert.equal(DEFAULT_POLICY.constraints.retire_window, 3);
-    assert.equal(DEFAULT_POLICY.evolution.max_active_constraints, 15);
+    assert.equal(DEFAULT_POLICY.evolution.max_start_criteria, 12);
   });
 
   it("DEFAULT_POLICY has correct summary values", () => {

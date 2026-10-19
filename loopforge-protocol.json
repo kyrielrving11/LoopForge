@@ -1102,6 +1102,9 @@
                   },
                   "detail": {
                     "type": "string"
+                  },
+                  "ref": {
+                    "type": "string"
                   }
                 },
                 "required": [
@@ -1495,6 +1498,9 @@
                 "type": "string"
               },
               "detail": {
+                "type": "string"
+              },
+              "ref": {
                 "type": "string"
               }
             },
@@ -2252,12 +2258,137 @@
         "rejection_notice"
       ]
     },
+    "PromptCoverage": {
+      "type": "object",
+      "properties": {
+        "active": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "kind": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "constraint"
+                    ]
+                  },
+                  {
+                    "type": "string",
+                    "enum": [
+                      "criterion"
+                    ]
+                  },
+                  {
+                    "type": "string",
+                    "enum": [
+                      "contract"
+                    ]
+                  },
+                  {
+                    "type": "string",
+                    "enum": [
+                      "contract_item"
+                    ]
+                  },
+                  {
+                    "type": "string",
+                    "enum": [
+                      "subgoal"
+                    ]
+                  },
+                  {
+                    "type": "string",
+                    "enum": [
+                      "finding"
+                    ]
+                  },
+                  {
+                    "type": "string",
+                    "enum": [
+                      "recovery"
+                    ]
+                  }
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "kind"
+            ]
+          }
+        },
+        "rendered": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "omitted": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "reason": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "budget"
+                    ]
+                  },
+                  {
+                    "type": "string",
+                    "enum": [
+                      "level"
+                    ]
+                  },
+                  {
+                    "type": "string",
+                    "enum": [
+                      "not_current"
+                    ]
+                  },
+                  {
+                    "type": "string",
+                    "enum": [
+                      "defect"
+                    ]
+                  }
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "reason"
+            ]
+          }
+        },
+        "complete": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "active",
+        "rendered",
+        "omitted",
+        "complete"
+      ],
+      "description": "v3.9.4: ID-level proof that the current prompt rendered every active\r\nnormative object. This is an OUTPUT fact about one render — never an\r\ninstruction for a later prompt and never an input to fact derivation.\r\n\r\n`active` is the required set derived from the same `CanonicalLoopState`\r\nthe renderer consumed; `rendered` is the union of the IDs the included\r\nsections declared; `omitted = active - rendered`. `complete` is false only\r\nwhen a normative ID was lost; prompt preparation then fails closed.\r\n\r\nOrdering is deterministic: `active` by (kind rank, id), `rendered` sorted\r\nunique, `omitted` by id."
+    },
     "PromptArtifact": {
       "type": "object",
       "properties": {
         "schemaVersion": {
           "type": "number",
-          "const": 3
+          "const": 4
         },
         "roundId": {
           "type": "string"
@@ -2325,6 +2456,9 @@
           "items": {
             "$ref": "#/$defs/PromptRequestEffect"
           }
+        },
+        "coverage": {
+          "$ref": "#/$defs/PromptCoverage"
         }
       },
       "required": [
@@ -2340,7 +2474,8 @@
         "droppedSections",
         "protectedOverflow",
         "budget",
-        "renderedChars"
+        "renderedChars",
+        "coverage"
       ]
     },
     "LoopCompileResponse": {
@@ -3580,6 +3715,7 @@
         "evaluation_invalid",
         "contract_invalid",
         "policy_invalid",
+        "projection_incomplete",
         "session_not_found",
         "round_id_required",
         "round_id_mismatch",

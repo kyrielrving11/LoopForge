@@ -21,7 +21,7 @@ import {
   preflightStructuredGate,
   type StructuredGateVerdict,
 } from "../cognitive-governance.js";
-import { makeGateDecision } from "../protocol.js";
+import { makeGateDecision, makeLoopObjective } from "../protocol.js";
 import type { GateActionDescriptor } from "../protocol.js";
 import type {
   ExternalContextProvider,
@@ -41,7 +41,7 @@ import { readOnlyRounds } from "../committed-round.js";
 import { deriveCommittedSubmissionView } from "../submission-receipt.js";
 import type { ActiveContractView } from "../round-contract.js";
 import { getPolicy, validateLoopId } from "../policy.js";
-import { isRecord } from "../token-utils.js";
+import { isRecord, unique } from "../token-utils.js";
 import { ReplayBackend } from "../replay.js";
 import { FileLoopStore, queryLoopEntries } from "../loop-store.js";
 import type { LoopStore, VaultEntry } from "../loop-store.js";
@@ -60,7 +60,11 @@ import {
 } from "../storage.js";
 import type { SessionStateStore } from "../storage.js";
 import { StorageCorruptionError } from "../loop-store.js";
-import { RoundLifecycle, buildLoopRequest } from "./round-lifecycle.js";
+import {
+  RoundLifecycle,
+  buildLoopRequest,
+  normalizeStartCriteria,
+} from "./round-lifecycle.js";
 import type {
   McpSession,
   McpSessionSummary,
@@ -267,6 +271,11 @@ export class SessionManager implements SessionRegistry {
       throw new SessionLeaseConflictError(loopId);
     }
 
+    // v3.9.4: normalize initial criteria before any runtime object is created.
+    // A structural defect throws StartCriteriaError (mapped to
+    // invalid_argument); empty/duplicate/over-cap entries produce warnings.
+    const startCriteria = normalizeStartCriteria(input.criteria);
+
     const engine = new LoopForgeEngine(this.loopStore);
     const maxRounds = input.maxRounds ?? getPolicy().engine.max_rounds;
 
@@ -283,6 +292,20 @@ export class SessionManager implements SessionRegistry {
     request.domain = input.domain ?? "";
     request.plan_source = input.planSource ?? null;
     request.constraints_from_plan = input.constraints ?? [];
+    // The initial criteria are real objective criteria, not a second ledger.
+    // Supplying the objective here means the first compile persists these
+    // texts (and therefore their cr- ids) through the existing lineage.
+    if (startCriteria.criteria.length > 0) {
+      request.loop_objective = makeLoopObjective({
+        objective: input.task,
+        success_criteria: startCriteria.criteria,
+        hard_constraints: unique(input.constraints ?? []),
+        created_at_round: 1,
+        loop_id: loopId,
+        version: 1,
+        refinement_history: [],
+      });
+    }
 
     // Explicit context is requested by the MCP embedding; no auto-discovery.
     if (this.contextProvider) {
@@ -328,7 +351,7 @@ export class SessionManager implements SessionRegistry {
       roundSnapshot: prepared?.snapshot ?? prepareRoundTransaction(loopId, 1, evidenceBaseline),
       currentPrompt: initialPrompt,
       currentLevel: initialLevel,
-      currentWarnings: prepared?.warnings ?? [],
+      currentWarnings: [...startCriteria.warnings, ...(prepared?.warnings ?? [])],
       lastCompileResponse: prepared?.compileResponse ?? null,
     };
     this.sessions.set(sessionId, session);
@@ -361,7 +384,7 @@ export class SessionManager implements SessionRegistry {
       prompt: initialPrompt,
       level: initialLevel,
       roundSuccess: false,
-      warnings: prepared?.warnings ?? [],
+      warnings: [...startCriteria.warnings, ...(prepared?.warnings ?? [])],
       submission_guidance: this.lifecycle.guidanceFor(session),
     };
   }

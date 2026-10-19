@@ -37,32 +37,21 @@ export interface BacktrackTargetSnapshot {
     dirtyFiles: string[];
 }
 export declare function findBacktrackTargetSnapshot(restoreRound: number, vaultEntries: VaultEntry[]): BacktrackTargetSnapshot | null;
-/** Build the backtrack prompt injected at the top of the restored round.
- *
- *  v2.13: Includes concrete workspace restore instructions with affected
- *  file lists from skipped rounds. The agent must restore the working tree
- *  to the clean round's state before proceeding. */
-export interface BacktrackRecoveryFacts {
-    /** v3.7.1: Rolled-back rounds (restore point + 1 … trigger round). */
-    failedRounds: number[];
-    /** v3.7.1: One approach per failed round — what must NOT be repeated. */
-    approaches: string[];
-    /** v3.7.1: Falsified assumptions collected from the failed rounds. */
-    wrongAssumptions: string[];
-}
 /** v3.8.1: the ONE Recovery Brief renderer.
  *
- *  The rollback prompt and the state file's Recent tier used to carry two
- *  hand-written copies of these lines — differing in punctuation
- *  ("the redo is round N" vs "redo round N") and in whether an approach
- *  overflow count was shown at all. Two renderers over one rollback meant the
- *  two surfaces could describe the same event differently while both claiming
- *  to be derived facts. The facts are supplied by the caller: the coordinator
- *  from its live walk, the compile path from `decodeBacktrackRecord` on the
+ *  v3.9.4: it is the shared fact renderer for the prompt's protected
+ *  `recovery` section and the state file's Recent tier. The post-compile
+ *  backtrack prompt (and its action advice) is gone: `committedBacktrackBrief`
+ *  appends the restore HEAD/file set and the artifact is the delivered prompt.
+ *  The facts are supplied by the caller from `decodeBacktrackRecord` on the
  *  committed decision. */
 export declare function recoveryBriefLines(input: {
     target: number;
     triggerRule: string;
+    /** v3.9.4: the enforcement gate's own sentence for WHY it rolled back.
+     *  This is a fact from the committed decision, not action advice — it is
+     *  the "Why This Happened" content the old prose header carried. */
+    failureReason?: string;
     failedRounds: string[] | number[];
     approaches: string[];
     wrongAssumptions: string[];
@@ -70,18 +59,6 @@ export declare function recoveryBriefLines(input: {
     maxApproaches?: number;
     maxAssumptions?: number;
 }): string[];
-export declare function buildBacktrackPrompt(fromRound: number, toRound: number, triggerRule: string, skippedDiscoveries: string[],
-/** v2.13: Files changed in the skipped rounds (from evidence snapshots).
- *  Used to show the agent exactly what needs to be reverted. */
-skippedFiles?: string[],
-/** v2.12: Git HEAD commit hash at the backtrack point (current HEAD).
- *  The agent must discard work back to the clean round's state. */
-gitHead?: string,
-/** v3.7.1: The redo submission's roundId (loop:<id>:round:<toRound+1>). */
-recoveryRoundId?: string,
-/** v3.7.1: Derived Recovery Brief facts — committed facts + the
- *  in-flight attempt only; never rejected payloads. */
-recovery?: BacktrackRecoveryFacts): string;
 export declare function enforceRound(selfEval: SelfEvaluation, verifyResult: VerificationResult, currentRound: number, vaultEntries: VaultEntry[], consecutiveRejections?: number,
 /** L4 (v3.7.x): which check rejected the PREVIOUS round. The coordinator
  *  resets consecutiveRejections to 1 whenever the check changes, so the

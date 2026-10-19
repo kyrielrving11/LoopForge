@@ -415,7 +415,8 @@ describe("validateContractShape", () => {
     overrides: Partial<ContractValidationContext> = {},
   ): ContractValidationContext => ({
     activeItemIds: null,
-    knownSubGoalIds: null,
+    knownCriterionIds: null,
+    displayedSubGoalIds: null,
     isConfiguredCommand: known,
     checkScopeEntry: () => null,
     ...overrides,
@@ -507,7 +508,7 @@ describe("validateContractShape", () => {
     assert.equal(duplicate[0]?.reason, "duplicate_subgoal_ref");
     const unknown = check(
       { round_contract: { scope: [], items: [item({ subgoal_refs: ["sg-11111111"] })] } },
-      { knownSubGoalIds: new Set(["sg-22222222"]) },
+      { displayedSubGoalIds: new Set(["sg-22222222"]) },
     );
     assert.equal(unknown[0]?.reason, "unknown_subgoal_ref");
     // Fail open: an unobservable sub-goal set never invents a rejection.

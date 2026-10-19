@@ -23,8 +23,7 @@ import { entryRound, isRecord } from "./token-utils.js";
 import { driftedEntrypoints } from "./evidence-provider.js";
 import { declaresBlocked, effectiveOutcome, effectiveSuccess } from "./self-eval.js";
 import { derivationRounds, decodeCommittedRound, inFlightGitMotion } from "./committed-round.js";
-import { makeRoundId } from "./round-transaction.js";
-import { enforceRound, buildRejectionPrompt, findSafeRestorePoint, buildBacktrackPrompt, findBacktrackTargetSnapshot, } from "./enforcement-gate.js";
+import { enforceRound, buildRejectionPrompt, findSafeRestorePoint, findBacktrackTargetSnapshot, } from "./enforcement-gate.js";
 import { logEvent } from "./observability.js";
 import { getPolicy } from "./policy.js";
 import { deriveRoundContractView } from "./round-contract.js";
@@ -227,7 +226,12 @@ export class RoundCoordinator {
         driftedEntrypoints(input.entrypointTrust), input.beforeEvidence ?? [],
         // v3.9: the restore point's own dirty files — the baseline the restored
         // workspace is compared against.
-        input.backtrackTargetDirty);
+        input.backtrackTargetDirty,
+        // v3.9.4: the SAME manifest basis the receipt uses. An omitted
+        // files_changed field is not silently treated as "a report exists".
+        input.submittedFields
+            ? input.submittedFields.includes("execution_report.files_changed")
+            : undefined);
         const verificationFlags = verifyResult.flags;
         const gateContradicted = verifyResult.verdict === "contradicted";
         // v3.8: the ACTIVE contract's derived item statuses for this round — the
@@ -376,9 +380,6 @@ export class RoundCoordinator {
             // point without reading unrelated work in progress as a failed restore.
             const targetSnapshot = findBacktrackTargetSnapshot(restorePoint.round, vaultEntries);
             const targetGitHead = targetSnapshot?.head ?? null;
-            const backtrackPrompt = buildBacktrackPrompt(currentRound, restorePoint.round, enforceResult.check ?? "progress_stall", getPolicy().engine.backtrack_preserve_discoveries
-                ? restorePoint.skippedDiscoveries
-                : [], skippedFiles, targetGitHead ?? undefined, makeRoundId(loopId, restorePoint.round + 1), { failedRounds, approaches, wrongAssumptions });
             logEvent("enforcement_backtrack", {
                 loopId,
                 round: currentRound,
@@ -390,7 +391,6 @@ export class RoundCoordinator {
             return {
                 action: "backtrack",
                 verificationStatus: roundVerificationStatus(activeContractStatuses, selfEval.execution_report ?? null),
-                backtrackPrompt,
                 backtrackTarget: restorePoint.round,
                 backtrackSkippedDiscoveries: getPolicy().engine.backtrack_preserve_discoveries
                     ? restorePoint.skippedDiscoveries

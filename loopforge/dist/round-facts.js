@@ -13,7 +13,7 @@
  */
 import { deriveContractItemStatuses } from "./contract-items.js";
 import { deriveActiveRoundContract, deriveRoundContractView } from "./round-contract.js";
-import { deriveCriterionId, isCriterionId } from "./token-utils.js";
+import { isCriterionId } from "./token-utils.js";
 export const NO_IN_FLIGHT_ROUND = {
     currentReport: null,
     currentDeltas: [],
@@ -66,7 +66,11 @@ function deriveCriterionFacts(input) {
     // ever machine facts from the history walk below (`pending` says nothing).
     for (const item of input.activeContract?.items ?? []) {
         for (const ref of item.criterion_refs) {
-            const criterionId = isCriterionId(ref) ? ref : deriveCriterionId(ref);
+            // v3.9.4: relationships are explicit stable ids only. A free-text ref is
+            // not an identity and must never be hashed into a criterion fact.
+            if (!isCriterionId(ref))
+                continue;
+            const criterionId = ref;
             const existing = byCriterion.get(criterionId);
             const links = existing?.related_subgoal_ids ?? [];
             for (const subgoalId of item.subgoal_refs) {
@@ -95,7 +99,9 @@ function deriveCriterionFacts(input) {
         for (const item of contract.items) {
             const itemStatus = statusByItem.get(item.id);
             for (const ref of item.criterion_refs) {
-                const criterionId = isCriterionId(ref) ? ref : deriveCriterionId(ref);
+                if (!isCriterionId(ref))
+                    continue;
+                const criterionId = ref;
                 const existing = byCriterion.get(criterionId);
                 const links = existing?.related_subgoal_ids ?? [];
                 for (const subgoalId of item.subgoal_refs) {

@@ -62,6 +62,10 @@ export interface RoundProcessInput {
      *  baseline (or whose session lost it) simply runs without the absolute
      *  arm and falls back to the git-delta rule. */
     entrypointTrust?: Record<string, string>;
+    /** v3.9.4: the persisted submitted-field manifest. The files-reconciliation
+     *  gate uses the same `execution_report.files_changed` attempt basis as the
+     *  receipt; undefined keeps the legacy "report exists" fallback. */
+    submittedFields?: string[];
 }
 /** Result of processing a round through the coordinator. */
 export interface RoundProcessResult {
@@ -71,8 +75,6 @@ export interface RoundProcessResult {
     stopReason?: StopReason;
     /** Rejection prompt (set when action is "reject"). */
     rejectionPrompt?: string;
-    /** v2.10: Backtrack prompt (set when action is "backtrack"). */
-    backtrackPrompt?: string;
     /** v2.10: Round to restore state from (set when action is "backtrack"). */
     backtrackTarget?: number;
     /** v2.10: Discovered constraints from skipped rounds to preserve. */

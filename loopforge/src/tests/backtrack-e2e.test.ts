@@ -183,22 +183,26 @@ describe("E2E backtrack lifecycle", () => {
       !result.prompt!.includes("${"),
       "backtrack prompt must not contain un-interpolated ${...} literals",
     );
-    assert.ok(result.prompt!.includes("Backtrack"),
-      "prompt must contain Backtrack header");
-    assert.ok(result.prompt!.includes("Workspace Restore"),
-      "prompt must contain Workspace Restore section");
-    assert.ok(result.prompt!.includes("Round"),
-      "prompt must reference round numbers");
-    // v3.7.1: the backtrack directive carries the derived Recovery Brief —
-    // trigger, the redo round ID, and the failed (in-flight) approach.
-    assert.ok(result.prompt!.includes("### Recovery Brief"),
-      "prompt must contain the Recovery Brief header");
+    assert.ok(result.prompt!.includes("Recovery Brief"),
+      "the protected recovery section is part of the compiled prompt");
+    assert.match(result.prompt!, /Restored to round\*\*: \d+/,
+      "prompt must reference the restore point");
+    // v3.7.1: the Recovery Brief carries the derived facts — trigger and the
+    // failed (in-flight) approach. v3.9.4: it is inside the artifact, so the
+    // delivered prompt equals `prompt_artifact.renderedPrompt`.
     assert.ok(result.prompt!.includes("**Trigger**: progress_stall"),
       "brief must name the trigger rule");
-    assert.ok(result.prompt!.includes("Recovery Round ID"),
-      "brief must carry the redo round's ID");
+    assert.match(result.prompt!, /Failure reason\*\*: .*no machine-observed changes/,
+      "brief must preserve the machine's reason for the rollback");
+    assert.match(result.prompt!, /Restore requirement\*\*: .*checked against round/,
+      "brief must state the machine-checked restore requirement");
     assert.ok(result.prompt!.includes(`Failed approach: Round 4: reviewed src/d.ts, no new progress.`),
       "brief must record the failed approach");
+    assert.equal(
+      result.prompt,
+      mgr.get(sessionId)?.roundSnapshot?.promptArtifact?.renderedPrompt,
+      "the artifact must describe the exact prompt delivered",
+    );
   });
 
   // ── Step 7: Simulate crash and recover ─────────────────────────────────

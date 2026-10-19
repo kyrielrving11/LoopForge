@@ -133,10 +133,14 @@ export interface ContractValidationContext {
     /** rci- ids of the ACTIVE contract; null when it cannot be observed (fail
      *  open — shape checks stay strict either way). */
     activeItemIds: ReadonlySet<string> | null;
-    /** sg- ids the agent may legitimately reference: the compiled set plus the
-     *  submission's own same-round `emerged_subtasks`; null when it cannot be
-     *  observed (fail open). */
-    knownSubGoalIds: ReadonlySet<string> | null;
+    /** v3.9.4: cr- ids of the ACTIVE criterion set rendered by the prompt. Null
+     *  when the compile response cannot be observed (fail open). */
+    knownCriterionIds: ReadonlySet<string> | null;
+    /** v3.9.4: sg- ids displayed as ACTIVE in the current prompt (compiled,
+     *  non-terminal). Same-round `emerged_subtasks` are deliberately absent —
+     *  a new sub-goal can be referenced by a contract only next round. Null
+     *  when it cannot be observed (fail open). */
+    displayedSubGoalIds: ReadonlySet<string> | null;
     /** Configured AND enabled AND after-capable evidence command. */
     isConfiguredCommand: (name: string) => boolean;
     /** Returns a detail string when a declared scope entry leaves the

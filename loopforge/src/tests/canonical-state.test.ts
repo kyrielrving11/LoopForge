@@ -351,7 +351,7 @@ describe("state-file tiering (v3.7.1)", () => {
     // Sections are demoted to H3 under their tier.
     const current = md.slice(idxCurrent, idxRecent);
     assert.ok(current.includes("### Loop Objective"), "Current holds the objective");
-    assert.ok(current.includes("### Active Constraints"), "Current holds active constraints");
+    assert.ok(current.includes("### Success Criteria"), "Current holds active criteria");
     const recent = md.slice(idxRecent, idxHistorical);
     assert.ok(recent.includes("### Verification"), "Recent holds verification findings");
     const historical = md.slice(idxHistorical);

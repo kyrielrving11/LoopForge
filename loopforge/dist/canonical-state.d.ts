@@ -22,6 +22,36 @@ export declare function activeSubGoalView(subGoals: SubGoal[], cap: number): {
     canceled: number;
     total: number;
 };
+/** v3.9.4: the ONE active-constraint partition. `criteria` is the active
+ *  success-criteria set; `hard` is the active hard set minus criteria;
+ *  `other` is every remaining active constraint. The three groups are
+ *  mutually exclusive and partition the active constraint texts that are
+ *  rendered by the prompt/state file. */
+export interface ActiveConstraintPartition {
+    criteria: string[];
+    hard: string[];
+    other: string[];
+}
+export declare function partitionActiveConstraints(state: {
+    successCriteria: ReadonlyArray<string>;
+    hardConstraints: ReadonlyArray<string>;
+    activeConstraints: ReadonlyArray<string>;
+}): ActiveConstraintPartition;
+/** v3.9.4: the ONE criterion row renderer for the normative prompt section.
+ *  It consumes the same `successCriteria`/`criterionStatuses` pair the state
+ *  file and submission boundary use, and reports the exact ids it emitted so
+ *  prompt coverage can prove them. */
+export declare function formatCriterionRows(statuses: ReadonlyArray<CriterionStatus>, successCriteria: ReadonlyArray<string>): {
+    lines: string[];
+    ids: string[];
+};
+/** v3.9.4: the ONE active-sub-goal formatter shared by the prompt and the
+ *  state file. Rows past `cap` lose their descriptions but NEVER their ids:
+ *  the overflow line lists every remaining `sg-*`. */
+export declare function formatActiveSubGoals(subGoals: ReadonlyArray<SubGoal>, round: number, cap?: number): {
+    lines: string[];
+    ids: string[];
+};
 /** v3.3: Machine git-motion cross-check over the last committed rounds.
  *  Display-only companion to the R4/R5 exculpatory signal. Optional:
  *  absent when no committed rounds carry git snapshots — the object, when

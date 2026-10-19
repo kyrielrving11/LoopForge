@@ -676,11 +676,15 @@ function checkRetractFreshConstraint(
 function checkEvidenceIntegrity(
   selfEval: SelfEvaluation,
   evidenceDeltas: ReadonlyArray<ObservationDelta>,
+  /** v3.9.4: whether the raw submission named
+   *  `execution_report.files_changed`. The receipt uses the SAME manifest, so
+   *  the two projections can never disagree about an omitted report. */
+  filesReported: boolean,
 ): VerificationFlag | null {
-  if (!selfEval.execution_report) return null;
   const reconciliation = deriveFilesReconciliation(
-    selfEval.execution_report,
+    selfEval.execution_report ?? null,
     evidenceDeltas,
+    { attempted: filesReported },
   );
   if (reconciliation.status !== "mismatch") return null;
 
@@ -720,6 +724,7 @@ function checkRequiredCommandEvidence(
       field: "execution_report",
       check: CHECK_REQUIRED_COMMAND_FAILED,
       detail: `Agent claims success but required command "${name}" ${String(status)}${exitCode}`,
+      ref: name,
     });
   }
   return null;
@@ -859,6 +864,7 @@ function checkCommandEvidenceIntegrity(
       field: "tests_reported",
       check: CHECK_COMMAND_EVIDENCE_MISMATCH,
       detail: `Agent tests_reported don't match "${name}" output: ${mismatches.join("; ")}`,
+      ref: name,
     });
   }
 
@@ -914,6 +920,7 @@ function checkVerificationDomainIntegrity(
           : "") +
         "Keep the verification command stable or resubmit the same round with the " +
         "entrypoint unchanged.",
+      ref: snapshot.data.commandId,
     });
   }
   // Only when NO entrypoint was tampered does the test-file warn stand in.
@@ -928,6 +935,7 @@ function checkVerificationDomainIntegrity(
       detail:
         `Test files changed in the same round command "${snapshot.data.commandId}" passed — ` +
         "confirm the tests still verify the task claims.",
+      ref: snapshot.data.commandId,
     });
   }
   return null;
@@ -1135,9 +1143,10 @@ function checkContractItemsUnverified(
   statuses: ContractItemStatusView,
 ): VerificationFlag | null {
   if (statuses.insufficientCount === 0) return null;
+  // v3.9.4: EVERY insufficient item is named. The previous 3-item cap hid the
+  // rest of the debt from the one repair surface the agent reads.
   const unverified = statuses.items
     .filter((item) => item.status === "insufficient")
-    .slice(0, 3)
     .map((item) => item.itemId);
   return makeVerificationFlag({
     severity: "warn",
@@ -1277,8 +1286,14 @@ export function verifySelfEvaluation(
   beforeEvidence: MachineObservation[] = [],
   /** v3.9: the restore point's own dirty files (undefined = never observed). */
   backtrackTargetDirty?: string[],
+  /** v3.9.4: whether the raw submission attempted
+   *  `execution_report.files_changed` (from the persisted submittedFields
+   *  manifest). Undefined falls back to "an execution report exists". */
+  filesReported?: boolean,
 ): VerificationResult {
   const flags: VerificationFlag[] = [];
+  const filesReportedForGate =
+    filesReported ?? (selfEval.execution_report != null);
 
   // Collect violations from all previous vault entries for duplicate-discovery
   // and other checks that need deeper history.
@@ -1334,7 +1349,7 @@ export function verifySelfEvaluation(
     () => checkRecurringViolation(selfEval, prevSelfEval, vaultEntries, currentRound),
     () => checkRetractFreshConstraint(selfEval, prevSelfEval, currentRound),
     // v1.18: Cross-validate agent-reported files_changed against git evidence
-    () => checkEvidenceIntegrity(selfEval, evidenceDeltas),
+    () => checkEvidenceIntegrity(selfEval, evidenceDeltas, filesReportedForGate),
     () => checkRequiredCommandEvidence(selfEval, evidenceDeltas),
     // v2.0: Cross-validate agent-reported tests_reported against command output
     () => checkCommandEvidenceIntegrity(selfEval, evidenceDeltas),

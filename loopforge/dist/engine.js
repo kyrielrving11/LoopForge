@@ -874,9 +874,13 @@ export class LoopForgeEngine {
                 loop_id: obj.loop_id ?? "",
             });
         }
-        // Hydrate vault context for cross-round memory
+        // Hydrate vault context for cross-round memory. v3.9.4: a round-1
+        // same-round retry also hydrates, so `latestObjective` can recover the
+        // initial criteria persisted by the first compile of that round.
         let context = hydrateResults ?? null;
-        if (context === null && lcr.loop_id && lcr.round > 1) {
+        if (context === null &&
+            lcr.loop_id &&
+            (lcr.round > 1 || (lcr.round === 1 && (lcr.attempt ?? 1) > 1))) {
             // v3.0.1: the compile round anchors the hydration cache — warm caches
             // skip the read entirely; otherwise only rounds committed since the
             // last hydration are read.
@@ -888,6 +892,13 @@ export class LoopForgeEngine {
             response = compileLoop(lcr, context);
         }
         catch (exc) {
+            // v3.9.4: a projection-coverage defect is a FAIL CLOSED signal, not a
+            // generic compile failure. Converting it to `prompt: null` would let the
+            // caller create/stall a session without the diagnostic, so rethrow it
+            // for the MCP boundary to surface as `projection_incomplete`.
+            if (exc?.code === "projection_incomplete") {
+                throw exc;
+            }
             return {
                 status: AgentStatus.ERROR,
                 response: {

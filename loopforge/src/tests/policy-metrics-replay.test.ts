@@ -54,6 +54,7 @@ function committedFeedback(
                 attempt: 1, level, renderedPrompt: "", promptHash: "h", stateHash: "s",
                 sections: [], droppedSections: [], protectedOverflow: false,
                 budget: 0, renderedChars: 0,
+                coverage: { active: [], rendered: [], omitted: [], complete: true },
               }
             : undefined,
           createdAt: Date.now(),

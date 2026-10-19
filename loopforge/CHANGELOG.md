@@ -1,5 +1,63 @@
 # Changelog
 
+## 3.9.4 (2026-10-19)
+
+**The normative-projection release.** The prompt could omit an active
+requirement without saying so: L0 carried no criteria, discovered
+constraints or sub-goals, every level capped or dropped normative
+sections, and a contract could cite criterion/sub-goal text the prompt
+never rendered. Machine findings were prose-only, and a backtrack prefix
+was appended after the artifact was hashed. 3.9.4 makes the projection
+provable and closes the repair loop.
+
+### Criterion anchors and explicit relations
+
+`loopforge_start.criteria` turns initial local requirements into real
+objective criteria with stable `cr-*` ids (normalized-exact dedupe,
+empty/duplicate/over-cap warnings, default criterion when omitted, and
+round-1 retry preservation). Criterion identity is normalized-exact
+everywhere; `unique`'s trim-only dedupe no longer lets case variants share
+one id. `criterion_refs` must cite an active `cr-*` the prompt rendered;
+`subgoal_refs` may cite only an active displayed `sg-*` (same-round
+emerged sub-goals become referenceable next round); duplicate refs and
+duplicate normalized items are `contract_invalid`. `deriveCriterionFacts`
+no longer hashes free text into a relationship. A revised-away criterion
+text is suppressed from the active merge instead of lingering as a
+discovered constraint. The silent `max_active_constraints` slice is gone:
+every merged active constraint is normative.
+
+### Prompt coverage
+
+`PromptCoverage` on every `PromptArtifact` (schema 4) records the active
+normative ids, the ids the included sections actually rendered, and any
+omission with a reason. L0/L1/L2 now share one protected normative entry
+set — criteria, hard/other active constraints, the active contract and all
+its items, every active sub-goal (display caps keep ids via an id-only
+overflow line), every verification finding, and the committed recovery
+brief. Optional narrative sections never carry a normative id. A missing
+id throws `ProjectionCoverageError`; the engine rethrows it instead of
+turning it into `prompt: null`, and MCP returns the new non-retryable
+`projection_incomplete` code. Prompt/state-file/guidance id sets now come
+from the same partition and formatters.
+
+### Repair-fact loop
+
+`VerificationFlag.ref` is populated for command-triggered findings and is
+rendered in the prompt, state file, receipt, guidance and explain. Contract
+debt names every insufficient `rci-*`. The gate and the receipt use the
+same `submittedFields` attempt basis: an omitted `files_changed` with Git-
+observed changes is the same `evidence_integrity` mismatch in both. The
+recovery brief now carries the restore HEAD and skipped file set inside the
+artifact; the post-compile backtrack prefix (and its action advice) is gone,
+so the delivered prompt equals `prompt_artifact.renderedPrompt`.
+
+### Breaking boundaries
+
+- `PROMPT_ARTIFACT_SCHEMA_VERSION` is `4`; schema-3 artifacts are legacy.
+- `POLICY_SCHEMA_VERSION` is `"6"`; `evolution.max_active_constraints` is
+  removed and `evolution.max_start_criteria` is added.
+- No migration is provided.
+
 ## 3.9.3 (2026-10-19)
 
 **The committed-fact prompt-level release.** 3.9.2 made the optional fields

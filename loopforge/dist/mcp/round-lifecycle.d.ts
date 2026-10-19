@@ -85,7 +85,29 @@ export interface StartInput {
     domain?: string;
     planSource?: string;
     constraints?: string[];
+    /** v3.9.4: initial local requirements, each becoming a stable `cr-*` anchor
+     *  in the objective. Omit to keep the default criterion. */
+    criteria?: string[];
 }
+/** v3.9.4: a structural defect in the start criteria argument. The MCP
+ *  handler maps this to `invalid_argument`; it is never a policy defect. */
+export declare class StartCriteriaError extends Error {
+    readonly code = "invalid_argument";
+}
+/** v3.9.4: normalize initial criteria at the start boundary.
+ *
+ *  - a non-array / non-string element is a structural defect (throws);
+ *  - empty text is dropped with a warning;
+ *  - duplicate normalized-exact text keeps the first spelling, with a
+ *    warning (the stable id derivation would otherwise produce two entries
+ *    with one `cr-*` id);
+ *  - over `policy.evolution.max_start_criteria` is dropped from the tail with
+ *    a warning;
+ *  - an empty result is the caller's signal to keep the default criterion. */
+export declare function normalizeStartCriteria(raw: unknown): {
+    criteria: string[];
+    warnings: string[];
+};
 export interface AdvanceResult {
     sessionId: string;
     round: number;
@@ -119,6 +141,14 @@ export interface AdvanceResult {
      *  runs before its queue and lease heartbeat. */
     submissionError?: {
         code: "evaluation_invalid" | "contract_invalid";
+        details: Record<string, unknown>;
+    };
+    /** v3.9.4: a prompt-projection code defect. This is NOT a submission
+     *  refusal (the round may already be committed); the next prompt was not
+     *  delivered and the session is stalled. The MCP envelope maps it to the
+     *  `projection_incomplete` error code. */
+    projectionError?: {
+        code: "projection_incomplete";
         details: Record<string, unknown>;
     };
     /** v3.9.1: current-fact submission guidance for the held/prepared round.

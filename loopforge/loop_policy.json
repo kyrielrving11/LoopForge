@@ -1,5 +1,5 @@
 {
-  "version": "5",
+  "version": "6",
   "constraints": {
     "retire_window": 3
   },
@@ -30,7 +30,7 @@
   },
   "evolution": {
     "max_discovered_constraints_per_round": 5,
-    "max_active_constraints": 15,
+    "max_start_criteria": 12,
     "max_objective_versions": 10,
     "max_active_subgoals": 12
   },

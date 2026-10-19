@@ -20,6 +20,24 @@ export function unique(values: Array<string | null | undefined>): string[] {
     .filter(Boolean))];
 }
 
+/** v3.9.4: deduplicate by the SAME normalized-exact identity the stable ID
+ *  derivation uses. `unique` is trim-only, so "Tests pass" and "tests pass"
+ *  survived as two entries with one `cr-*` id. The first spelling wins. */
+export function uniqueNormalized(values: Array<string | null | undefined>): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const value of values) {
+    if (typeof value !== "string") continue;
+    const text = value.trim();
+    if (!text) continue;
+    const key = normalizeText(text);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(text);
+  }
+  return out;
+}
+
 // ── Type guard ──────────────────────────────────────────────────────────────
 
 /** Narrow `unknown` to a non-array object. Used across storage, MCP, and
@@ -96,6 +114,19 @@ export function criterionRefMatches(
   return normalizeText(ref) === normalizeText(text);
 }
 
+/** v3.9.4: the stable identity of one machine finding for prompt coverage.
+ *  It is a DERIVED audit key — never persisted as a second finding source and
+ *  never read by compile/decision code. `(check, field, ref)` is the same
+ *  subject vocabulary `RecurringFlag` groups on; JSON encoding keeps it
+ *  unambiguous and deterministic. */
+export function findingKey(flag: {
+  check: string;
+  field: string;
+  ref?: string;
+}): string {
+  return JSON.stringify([flag.check, flag.field, flag.ref ?? ""]);
+}
+
 // ── v3.8: Contract identity (content-addressed, round-independent) ──────────
 
 /** Normalize one contract text field for identity purposes. */
@@ -160,6 +191,19 @@ export function deriveContractItemId(
   return `rci-${deriveItemId(canonical)}`;
 }
 
+/** v3.9.4: the normalized content identity of ONE contract item (without the
+ *  duplicate ordinal). Used by the strict declaration boundary to reject two
+ *  semantically identical items, so an `rci-*` citation can never be
+ *  ambiguous between restatements. */
+export function canonicalContractItemText(item: ContractIdentityItem): string {
+  return JSON.stringify({
+    description: normalizeText(item.description),
+    criterion_refs: item.criterion_refs.map(normalizeText),
+    subgoal_refs: item.subgoal_refs.map(normalizeText),
+    verify_with: item.verify_with.map(normalizeText),
+  });
+}
+
 /** v3.8: Assign ids to a proposal's items in declaration order. Items with
  *  identical normalized content get distinct ids through their duplicate
  *  ordinal. */
@@ -168,12 +212,7 @@ export function deriveContractItemIds(
 ): string[] {
   const seen = new Map<string, number>();
   return items.map((item) => {
-    const key = JSON.stringify({
-      description: normalizeText(item.description),
-      criterion_refs: item.criterion_refs.map(normalizeText),
-      subgoal_refs: item.subgoal_refs.map(normalizeText),
-      verify_with: item.verify_with.map(normalizeText),
-    });
+    const key = canonicalContractItemText(item);
     const ordinal = seen.get(key) ?? 0;
     seen.set(key, ordinal + 1);
     return deriveContractItemId(item, ordinal);

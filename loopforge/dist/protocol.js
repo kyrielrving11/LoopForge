@@ -188,7 +188,10 @@ export function makeLoopCompileRequest(overrides = {}) {
 /** v3.8.1: the artifact schema version, next to the type it versions. The
  *  transaction envelope parser reads it, so the constant lives here rather
  *  than in the renderer. */
-export const PROMPT_ARTIFACT_SCHEMA_VERSION = 3;
+/** v3.9.4: schema 4 adds `coverage`. Older versions are a HARD break — a
+ *  round whose artifact does not parse is not committed history, and
+ *  `legacyTransactionRounds` reports the loss rather than letting it vanish. */
+export const PROMPT_ARTIFACT_SCHEMA_VERSION = 4;
 export function makeLoopCompileResponse(overrides = {}) {
     return {
         status: AgentStatus.OK,

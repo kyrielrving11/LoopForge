@@ -12,14 +12,21 @@ import {
   criterionClaims,
   DEFAULT_SUCCESS_CRITERION,
 } from "./_helpers.js";
+import { deriveCriterionId } from "../token-utils.js";
 import { queryLoopEntries } from "../loop-store.js";
 import type { LoopSessionDocument } from "../loop-store.js";
+
 import { deriveSubGoalId } from "../subgoal-state.js";
+import { deriveContractItemIds } from "../token-utils.js";
+
+/** v3.9.4: the real cr-* id of the compiler's default criterion. Contract
+ *  declarations may only cite ids the prompt rendered, so fixtures use this
+ *  instead of invented text-like ids. */
+const DEFAULT_CRITERION_ID = deriveCriterionId(DEFAULT_SUCCESS_CRITERION);
 
 /** v3.8.1: the emerged intake cap (`EMERGED_LIMITS.items`). Spelled out here so
  *  this regression test also compiles against the pre-fix source. */
 const EMERGED_CAP = 50;
-import { deriveContractItemIds } from "../token-utils.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Helpers
@@ -1897,7 +1904,7 @@ describe("MCP — Round Contract flow", async () => {
     input.round_contract = {
       work_item: "Implement auth",
       scope: ["src/auth"],
-      items: [{ description: "login works", criterion_refs: ["cr-auth-login"], subgoal_refs: [], verify_with: ["run-tests"] }],
+      items: [{ description: "login works", criterion_refs: [DEFAULT_CRITERION_ID], subgoal_refs: [], verify_with: ["run-tests"] }],
     };
     assert.doesNotThrow(() => {
       validateToolInput("loopforge_next", {
@@ -1920,7 +1927,7 @@ describe("MCP — Round Contract flow", async () => {
       execution_report: {
         files_changed: ["src/auth.ts"],
         tests_reported: { passed: 0, failed: 0, skipped: 0 },
-        criterion_claims: criterionClaims([], ["cr-login-works"]),
+        criterion_claims: criterionClaims([], [DEFAULT_CRITERION_ID]),
       },
       round_contract: {
         work_item: "Implement login flow",
@@ -1929,7 +1936,7 @@ describe("MCP — Round Contract flow", async () => {
         // the strict boundary now runs on EVERY advance (not just through the
         // MCP handler), so an item binding an unconfigured command really is
         // rejected — this fixture has to name a command that exists.
-        items: [{ description: "login works", criterion_refs: ["cr-login-works"], subgoal_refs: [], verify_with: ["verify"] }],
+        items: [{ description: "login works", criterion_refs: [DEFAULT_CRITERION_ID], subgoal_refs: [], verify_with: ["verify"] }],
       },
     };
     const r2 = await mgr.advance(sessionId, "Scaffolded the auth module.", evalBlock);
@@ -2000,7 +2007,7 @@ describe("MCP — Round Contract flow", async () => {
     work_item: workItem,
     scope: ["src/auth"],
     // "verify" is the command installTestCommandProvider configures.
-    items: [{ description: "login works", criterion_refs: ["cr-login-works"], subgoal_refs: [], verify_with: ["verify"] }],
+    items: [{ description: "login works", criterion_refs: [DEFAULT_CRITERION_ID], subgoal_refs: [], verify_with: ["verify"] }],
   });
 
   /** Partial honest eval: success=false + a declared proposal (or none). */
@@ -2042,12 +2049,20 @@ describe("MCP — Round Contract flow", async () => {
     };
     const itemId = deriveContractItemIds(contract.items)[0];
 
+    // v3.9.4: a sub-goal must be committed/displayed before a contract can
+    // cite it. Declare it in round 1, declare the contract in round 2.
+    await mgr.advance(started.sessionId, "", {
+      success: false,
+      output_summary: "Declared the sub-goal.",
+      constraint_violations: [],
+      should_continue: true,
+      emerged_subtasks: ["wire the widget"],
+    });
     await mgr.advance(started.sessionId, "", {
       success: false,
       output_summary: "Declared the contract.",
       constraint_violations: [],
       should_continue: true,
-      emerged_subtasks: ["wire the widget"],
       round_contract: contract,
     });
 
@@ -2068,7 +2083,7 @@ describe("MCP — Round Contract flow", async () => {
     const projection = await mgr.getProjection(started.sessionId) as Record<string, unknown>;
     assert.deepEqual(
       projection.verified_subgoals,
-      [{ subgoal_id: subGoalId, contract_item_ids: [itemId], verified_at_round: 2 }],
+      [{ subgoal_id: subGoalId, contract_item_ids: [itemId], verified_at_round: 3 }],
       "the final committed round is machine history — the projection must include it",
     );
     // The audit reads the same history and must agree.
@@ -2089,7 +2104,7 @@ describe("MCP — Round Contract flow", async () => {
     const r2 = await mgr.advance(
       started.sessionId,
       "",
-      honest([], ["cr-login-works"], a),
+      honest([], [DEFAULT_CRITERION_ID], a),
     );
     assert.equal(r2.round, 2);
     assert.ok(String(r2.prompt ?? "").includes("**Implement login flow**"),
@@ -2125,7 +2140,7 @@ describe("MCP — Round Contract flow", async () => {
     });
     const contract = CONTRACT("Implement login flow");
     const itemId = deriveContractItemIds(contract!.items)[0];
-    const r2 = await mgr.advance(started.sessionId, "", honest([], ["cr-login-works"], contract));
+    const r2 = await mgr.advance(started.sessionId, "", honest([], [DEFAULT_CRITERION_ID], contract));
     assert.ok(String(r2.prompt ?? "").includes("**Implement login flow**"));
 
     // v3.8: the item closes only when its bound command was observed passing
@@ -2157,11 +2172,11 @@ describe("MCP — Round Contract flow", async () => {
     });
     const a = CONTRACT("Implement login flow");
     const b = CONTRACT("Implement the admin panel");
-    const r2 = await mgr.advance(started.sessionId, "", honest([], ["cr-login-works"], a));
+    const r2 = await mgr.advance(started.sessionId, "", honest([], [DEFAULT_CRITERION_ID], a));
     assert.ok(String(r2.prompt ?? "").includes("**Implement login flow**"));
     // Round 2 proposes B while A is still open (nothing met, not blocked) —
     // the machine keeps A as the Current Task for round 3.
-    const r3 = await mgr.advance(started.sessionId, "", honest([], ["cr-login-works"], b));
+    const r3 = await mgr.advance(started.sessionId, "", honest([], [DEFAULT_CRITERION_ID], b));
     assert.equal(r3.round, 3);
     assert.ok(String(r3.prompt ?? "").includes("**Implement login flow**"),
       "the open ACTIVE contract must continue — B was premature");
@@ -2180,7 +2195,7 @@ describe("MCP — Round Contract flow", async () => {
       maxRounds: 4,
     });
     const a = CONTRACT("Implement login flow");
-    const r2 = await mgr.advance(started.sessionId, "", honest([], ["cr-login-works"], a));
+    const r2 = await mgr.advance(started.sessionId, "", honest([], [DEFAULT_CRITERION_ID], a));
     assert.ok(String(r2.prompt ?? "").includes("**Implement login flow**"));
 
     // Session view: the ACTIVE contract governing the next round.

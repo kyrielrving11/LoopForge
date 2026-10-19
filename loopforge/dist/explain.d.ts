@@ -60,6 +60,7 @@ export interface ExplainRound {
         check: string;
         severity: string;
         detail: string;
+        ref?: string;
     }>;
     /** The contract the round executed under, and every item's derived status. */
     contract: {

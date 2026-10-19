@@ -88,6 +88,7 @@ export function buildExplain(loopId, entries, round) {
                 check: flag.check,
                 severity: flag.severity,
                 detail: flag.detail,
+                ...(flag.ref ? { ref: flag.ref } : {}),
             })),
             contract: statuses.contractId
                 ? {

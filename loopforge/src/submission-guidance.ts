@@ -1112,6 +1112,7 @@ export function deriveSubmissionGuidance(
       check: flag.check,
       severity: flag.severity,
       detail: flag.detail,
+      ...(flag.ref ? { ref: flag.ref } : {}),
     })),
   };
 }

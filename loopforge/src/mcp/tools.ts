@@ -7,6 +7,8 @@
  */
 
 import type { SessionManager, StartInput } from "./session.js";
+import { StartCriteriaError } from "./round-lifecycle.js";
+import { ProjectionCoverageError } from "../prompt-coverage.js";
 import { validateCoreSelfEvaluation } from "../self-eval.js";
 import { isRecord } from "../token-utils.js";
 import { getPolicy, validateLoopId } from "../policy.js";
@@ -50,6 +52,14 @@ const TOOL_BASE_SCHEMAS = [
           type: "array" as const,
           items: { type: "string" as const },
           description: "Hard constraints to enforce across all rounds.",
+        },
+        criteria: {
+          type: "array" as const,
+          items: { type: "string" as const },
+          description:
+            "Initial success criteria. Each becomes a stable cr-XXXXXXXX anchor " +
+            "rendered in every prompt and usable by contract items. Omit to keep " +
+            "the default criterion.",
         },
       },
       required: ["task"],
@@ -304,12 +314,12 @@ const TOOL_BASE_SCHEMAS = [
                       criterion_refs: {
                         type: "array" as const,
                         items: { type: "string" as const },
-                        description: "Optional. cr-XXXXXXXX criterion ids this item is evidence for (free text allowed). Max 20.",
+                        description: "Optional. Real cr-XXXXXXXX ids of ACTIVE criteria rendered in this prompt. Free text and unknown ids are rejected. Max 20.",
                       },
                       subgoal_refs: {
                         type: "array" as const,
                         items: { type: "string" as const },
-                        description: "Optional. sg-XXXXXXXX sub-goals THIS ITEM is evidence for. Must name sub-goals that exist (or that this same submission creates via emerged_subtasks). Max 20 ids. A machine-verified item produces the derived verified-subgoal fact for exactly the ids it names here.",
+                        description: "Optional. sg-XXXXXXXX ids of ACTIVE sub-goals displayed in this prompt. A sub-goal created by this same submission's emerged_subtasks becomes referenceable next round. Max 20 ids. A machine-verified item produces the derived verified-subgoal fact for exactly the ids it names here.",
                       },
                       verify_with: {
                         type: "array" as const,
@@ -883,6 +893,18 @@ function capabilityWarningList(existing?: string[]): string[] {
   ])];
 }
 
+/** v3.9.4: the stable envelope for a prompt-projection code defect. */
+function projectionErrorResult(error: unknown): Record<string, unknown> | null {
+  if (error instanceof ProjectionCoverageError) {
+    return {
+      error: "projection_incomplete",
+      errorMessage: error.message,
+      details: { coverage: error.coverage },
+    };
+  }
+  return null;
+}
+
 export const TOOL_HANDLERS: Record<string, ToolHandler> = {
   async loopforge_start(mgr, input): Promise<Record<string, unknown>> {
     const startInput: StartInput = {
@@ -894,7 +916,17 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
       constraints: Array.isArray(input.constraints)
         ? (input.constraints as string[])
         : undefined,
+      criteria: Array.isArray(input.criteria)
+        ? (input.criteria as string[])
+        : undefined,
     };
+
+    if (input.criteria !== undefined && !Array.isArray(input.criteria)) {
+      return {
+        error: "invalid_argument",
+        errorMessage: "criteria must be an array of non-empty strings",
+      };
+    }
 
     if (!startInput.task.trim()) {
       return {
@@ -931,6 +963,14 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
     try {
       result = await mgr.create(startInput);
     } catch (error) {
+      if (error instanceof StartCriteriaError) {
+        return {
+          error: "invalid_argument",
+          errorMessage: error.message,
+        };
+      }
+      const projectionFailure = projectionErrorResult(error);
+      if (projectionFailure) return projectionFailure;
       return {
         error: "policy_invalid",
         errorMessage: `the runtime policy could not be loaded: ${(error as Error).message}`,
@@ -981,7 +1021,14 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
     // declaration/claims boundary — before touching any state, and reports a
     // refusal through `submissionError`. This handler only maps that onto the
     // tool envelope, so a non-MCP caller gets exactly the same strictness.
-    const result = await mgr.advance(sessionId, output, rawEval, roundId);
+    let result: Awaited<ReturnType<SessionManager["advance"]>>;
+    try {
+      result = await mgr.advance(sessionId, output, rawEval, roundId);
+    } catch (error) {
+      const projectionFailure = projectionErrorResult(error);
+      if (projectionFailure) return projectionFailure;
+      throw error;
+    }
 
     if (result.submissionError) {
       return {
@@ -1210,9 +1257,16 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
 
     // Paused recovery must run first so the persisted status is atomically
     // changed back to running before a prompt is returned.
-    let result = await mgr.unpause(loopId);
-    if (!result) {
-      result = await mgr.resume(loopId);
+    let result: Awaited<ReturnType<SessionManager["unpause"]>>;
+    try {
+      result = await mgr.unpause(loopId);
+      if (!result) {
+        result = await mgr.resume(loopId);
+      }
+    } catch (error) {
+      const projectionFailure = projectionErrorResult(error);
+      if (projectionFailure) return projectionFailure;
+      throw error;
     }
     if (!result) {
       return {

@@ -175,7 +175,7 @@ describe("assemblePromptArtifact — L2", () => {
       ],
     });
     const artifact = assemblePromptArtifact(input({ level: "l2", state }));
-    assert.ok(artifact.renderedPrompt.includes("Sub-Goal Dashboard"));
+    assert.ok(artifact.renderedPrompt.includes("Active Sub-Goals"));
     // v3.7.1: done rows no longer render — done survives in the stats line
     assert.ok(artifact.renderedPrompt.includes("1 done"));
     assert.ok(!artifact.renderedPrompt.includes("`sg-1`"), "done rows never render in prompts");
@@ -205,13 +205,19 @@ describe("assemblePromptArtifact — L2", () => {
     });
     const state = minimalState({ subGoals: subGoals as never });
     const artifact = assemblePromptArtifact(input({ level: "l2", state }));
-    const dashboard = artifact.renderedPrompt.split("Sub-Goal Dashboard")[1]?.split("───")[0] ?? "";
-    const rows = dashboard.split("\n").filter((line) => /^[🔄🚫⏳]/.test(line.trim()));
+    const dashboard = artifact.renderedPrompt.split("Active Sub-Goals")[1] ?? "";
+    const rows = dashboard.split("\n").filter((line) => /^- [🔄🚫⏳]/.test(line.trim()));
     assert.equal(rows.length, 12, "rows are capped at max_active_subgoals");
     // Blocked items outrank pending regardless of priority.
     assert.ok(rows[0]?.includes("sg-b1111111"), "blocked rows come first");
+    // v3.9.4: the cap hides DESCRIPTIONS, never ids — every active id renders.
+    assert.ok(dashboard.includes("also active (ids only)"), "overflow ids render");
+    for (const subGoal of subGoals) {
+      assert.ok(artifact.renderedPrompt.includes(`\`${subGoal.id}\``),
+        `active id ${subGoal.id} must survive the display cap`);
+    }
     // Full counts survive the cap in the stats line.
-    assert.match(artifact.renderedPrompt, /─── 16 total: 16 active, 0 done, 0 canceled/);
+    assert.match(artifact.renderedPrompt, /16 total · 16 active · 0 done · 0 canceled/);
   });
 
   it("includes failed patterns when present", () => {
@@ -254,7 +260,7 @@ describe("assemblePromptArtifact — L2", () => {
     }));
     // Path B structured rendering
     assert.ok(artifact.renderedPrompt.includes("Phase History"));
-    assert.ok(artifact.renderedPrompt.includes("Sub-Goal Dashboard"));
+    assert.ok(artifact.renderedPrompt.includes("Active Sub-Goals"));
     // v2.8 gap fills
     // v3.8.1: Progress Dashboard is gone from the prompt entirely — see the
     // dedicated invariant test below.
@@ -575,7 +581,7 @@ describe("v3.2 — verification flag actions", () => {
     }));
     assert.match(artifact.renderedPrompt, /→ Fix: Complete the remaining criteria/);
     // The base line keeps its exact prefix.
-    assert.match(artifact.renderedPrompt, /- 🚫 \[success_with_remaining_criteria\] detail for success_with_remaining_criteria\n  → Fix:/);
+    assert.match(artifact.renderedPrompt, /- 🚫 \[success_with_remaining_criteria\] `field` — detail for success_with_remaining_criteria\n  → Fix:/);
   });
 
   it("appends an Action continuation to warn flags in L2", () => {

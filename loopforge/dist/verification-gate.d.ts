@@ -153,6 +153,10 @@ gateEntries?: VaultEntry[],
  *  filesystem access); this function stays a pure function of its inputs. */
 entrypointDrift?: EntrypointDrift[], beforeEvidence?: MachineObservation[],
 /** v3.9: the restore point's own dirty files (undefined = never observed). */
-backtrackTargetDirty?: string[]): VerificationResult;
+backtrackTargetDirty?: string[],
+/** v3.9.4: whether the raw submission attempted
+ *  `execution_report.files_changed` (from the persisted submittedFields
+ *  manifest). Undefined falls back to "an execution report exists". */
+filesReported?: boolean): VerificationResult;
 export {};
 //# sourceMappingURL=verification-gate.d.ts.map

@@ -9,6 +9,10 @@
  */
 /** Filter null/undefined/empty strings, trim, and deduplicate via Set. */
 export declare function unique(values: Array<string | null | undefined>): string[];
+/** v3.9.4: deduplicate by the SAME normalized-exact identity the stable ID
+ *  derivation uses. `unique` is trim-only, so "Tests pass" and "tests pass"
+ *  survived as two entries with one `cr-*` id. The first spelling wins. */
+export declare function uniqueNormalized(values: Array<string | null | undefined>): string[];
 /** Narrow `unknown` to a non-array object. Used across storage, MCP, and
  *  transaction modules to validate JSON-deserialized data before field access. */
 export declare function isRecord(value: unknown): value is Record<string, unknown>;
@@ -45,6 +49,16 @@ export declare function criterionRefMatches(ref: string, criterion: string | {
     id?: string;
     text: string;
 }): boolean;
+/** v3.9.4: the stable identity of one machine finding for prompt coverage.
+ *  It is a DERIVED audit key — never persisted as a second finding source and
+ *  never read by compile/decision code. `(check, field, ref)` is the same
+ *  subject vocabulary `RecurringFlag` groups on; JSON encoding keeps it
+ *  unambiguous and deterministic. */
+export declare function findingKey(flag: {
+    check: string;
+    field: string;
+    ref?: string;
+}): string;
 /** Normalize one contract text field for identity purposes. */
 export declare function normalizeText(text: string): string;
 /** The contract-item fields that participate in rci-/rc- identity. Structural
@@ -71,6 +85,11 @@ export declare function deriveContractId(loopId: string, contract: Parameters<ty
  *  Deliberately independent of the contract id: editing `work_item` or
  *  `scope` must not invalidate every item id the agent already cited. */
 export declare function deriveContractItemId(item: ContractIdentityItem, duplicateOrdinal: number): string;
+/** v3.9.4: the normalized content identity of ONE contract item (without the
+ *  duplicate ordinal). Used by the strict declaration boundary to reject two
+ *  semantically identical items, so an `rci-*` citation can never be
+ *  ambiguous between restatements. */
+export declare function canonicalContractItemText(item: ContractIdentityItem): string;
 /** v3.8: Assign ids to a proposal's items in declaration order. Items with
  *  identical normalized content get distinct ids through their duplicate
  *  ordinal. */

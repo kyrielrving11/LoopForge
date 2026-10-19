@@ -67,6 +67,7 @@ describe("FileLoopStore", () => {
         protectedOverflow: false,
         budget: 18000,
         renderedChars: 6,
+        coverage: { active: [], rendered: [], omitted: [], complete: true },
       };
       const snapshot = {
         ...prepareRoundTransaction(loopId, 1, [], artifact),

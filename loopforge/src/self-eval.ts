@@ -28,7 +28,11 @@ import {
   DIAG_ALL_ENTRIES_DROPPED,
   DIAG_EMPTY_VALUE,
 } from "./submission-diagnostics.js";
-import { criterionRefMatches } from "./token-utils.js";
+import {
+  canonicalContractItemText,
+  criterionRefMatches,
+  isCriterionId,
+} from "./token-utils.js";
 
 // ── Diagnostics ───────────────────────────────────────────────────────────
 
@@ -906,12 +910,30 @@ function validateContractItem(
             `${CONTRACT_LIMITS.criterionRefs} ids (got ${criterionRefs.length})`,
         });
       }
+      const seen = new Set<string>();
       criterionRefs.forEach((ref, refIndex) => {
-        if (typeof ref !== "string" || ref.trim().length === 0) {
+        if (typeof ref !== "string" || !isCriterionId(ref.trim())) {
           errors.push({
             field: "round_contract",
             reason: "invalid_criterion_ref",
-            detail: `item ${index} criterion_refs entry ${refIndex} must be a non-empty string`,
+            detail: `item ${index} criterion_refs entry ${refIndex} must be a cr-XXXXXXXX id`,
+          });
+          return;
+        }
+        const id = ref.trim();
+        if (seen.has(id)) {
+          errors.push({
+            field: "round_contract",
+            reason: "duplicate_criterion_ref",
+            detail: `item ${index} criterion_refs repeats ${id}`,
+          });
+        }
+        seen.add(id);
+        if (context.knownCriterionIds && !context.knownCriterionIds.has(id)) {
+          errors.push({
+            field: "round_contract",
+            reason: "unknown_criterion_ref",
+            detail: `item ${index} references ${id}, which is not an active criterion of this loop`,
           });
         }
       });
@@ -954,16 +976,32 @@ function validateContractItem(
           });
         }
         seen.add(id);
-        if (context.knownSubGoalIds && !context.knownSubGoalIds.has(id)) {
+        if (context.displayedSubGoalIds && !context.displayedSubGoalIds.has(id)) {
           errors.push({
             field: "round_contract",
             reason: "unknown_subgoal_ref",
-            detail: `item ${index} references ${id}, which is not a sub-goal of this loop`,
+            detail: `item ${index} references ${id}, which is not an active sub-goal displayed in this prompt`,
           });
         }
       }
     }
   }
+}
+
+/** v3.9.4: the normalized content identity of a RAW proposal item. Malformed
+ *  items return null (their own shape errors already fire); valid items use
+ *  the same canonical text as `deriveContractItemIds`. */
+function rawContractItemIdentity(item: unknown): string | null {
+  if (typeof item !== "object" || item === null || Array.isArray(item)) return null;
+  const entry = item as Record<string, unknown>;
+  const strings = (value: unknown): string[] =>
+    Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
+  return canonicalContractItemText({
+    description: typeof entry.description === "string" ? entry.description : "",
+    criterion_refs: strings(entry.criterion_refs),
+    subgoal_refs: strings(entry.subgoal_refs),
+    verify_with: strings(entry.verify_with),
+  });
 }
 
 /** v3.8: Everything the strict contract boundary needs to judge a declaration
@@ -973,10 +1011,14 @@ export interface ContractValidationContext {
   /** rci- ids of the ACTIVE contract; null when it cannot be observed (fail
    *  open — shape checks stay strict either way). */
   activeItemIds: ReadonlySet<string> | null;
-  /** sg- ids the agent may legitimately reference: the compiled set plus the
-   *  submission's own same-round `emerged_subtasks`; null when it cannot be
-   *  observed (fail open). */
-  knownSubGoalIds: ReadonlySet<string> | null;
+  /** v3.9.4: cr- ids of the ACTIVE criterion set rendered by the prompt. Null
+   *  when the compile response cannot be observed (fail open). */
+  knownCriterionIds: ReadonlySet<string> | null;
+  /** v3.9.4: sg- ids displayed as ACTIVE in the current prompt (compiled,
+   *  non-terminal). Same-round `emerged_subtasks` are deliberately absent —
+   *  a new sub-goal can be referenced by a contract only next round. Null
+   *  when it cannot be observed (fail open). */
+  displayedSubGoalIds: ReadonlySet<string> | null;
   /** Configured AND enabled AND after-capable evidence command. */
   isConfiguredCommand: (name: string) => boolean;
   /** Returns a detail string when a declared scope entry leaves the
@@ -1030,8 +1072,24 @@ export function validateContractShape(
           detail: `a contract may declare at most ${CONTRACT_LIMITS.items} items (got ${items.length})`,
         });
       } else {
+        const seenItems = new Map<string, number>();
         items.forEach((item, index) => {
           validateContractItem(item, index, context, errors);
+          // v3.9.4: two identical normalized items would derive two rci- ids
+          // for one semantic object. Reject the restatement instead of
+          // letting a citation become ambiguous.
+          const identity = rawContractItemIdentity(item);
+          if (identity === null) return;
+          const first = seenItems.get(identity);
+          if (first !== undefined) {
+            errors.push({
+              field: "round_contract",
+              reason: "duplicate_contract_item",
+              detail: `item ${index} duplicates item ${first} by normalized content`,
+            });
+            return;
+          }
+          seenItems.set(identity, index);
         });
       }
     }

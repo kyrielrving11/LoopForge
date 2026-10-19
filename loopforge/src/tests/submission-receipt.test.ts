@@ -67,7 +67,7 @@ function input(overrides: Partial<ReceiptInput> = {}): ReceiptInput {
     updatedAt: 0,
   } as RoundTransactionSnapshot;
   const artifact: PromptArtifact = {
-    schemaVersion: 3,
+    schemaVersion: 4,
     roundId: "loop:receipt:round:2",
     round: 2,
     attempt: 1,
@@ -85,6 +85,7 @@ function input(overrides: Partial<ReceiptInput> = {}): ReceiptInput {
       request: "never touch prod",
       status: "applied",
     }],
+    coverage: { active: [], rendered: [], omitted: [], complete: true },
   };
   return {
     snapshot,

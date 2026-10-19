@@ -398,6 +398,8 @@ export interface SubmissionReceipt {
       check: string;
       severity: string;
       detail: string;
+      /** v3.9.4: the concrete subject (command id, path, or stable id). */
+      ref?: string;
     }>;
     contract_items: Array<{ item_id: string; status: ContractItemStatus }>;
   };
@@ -468,6 +470,8 @@ export interface SubmissionGuidance {
     check: string;
     severity: string;
     detail: string;
+    /** v3.9.4: the concrete subject (command id, path, or stable id). */
+    ref?: string;
   }>;
 }
 
@@ -904,17 +908,50 @@ export function makeLoopCompileRequest(
   };
 }
 
+/** v3.9.4: ID-level proof that the current prompt rendered every active
+ *  normative object. This is an OUTPUT fact about one render — never an
+ *  instruction for a later prompt and never an input to fact derivation.
+ *
+ *  `active` is the required set derived from the same `CanonicalLoopState`
+ *  the renderer consumed; `rendered` is the union of the IDs the included
+ *  sections declared; `omitted = active - rendered`. `complete` is false only
+ *  when a normative ID was lost; prompt preparation then fails closed.
+ *
+ *  Ordering is deterministic: `active` by (kind rank, id), `rendered` sorted
+ *  unique, `omitted` by id. */
+export interface PromptCoverage {
+  active: Array<{
+    id: string;
+    kind:
+      | "constraint"
+      | "criterion"
+      | "contract"
+      | "contract_item"
+      | "subgoal"
+      | "finding"
+      | "recovery";
+  }>;
+  rendered: string[];
+  omitted: Array<{
+    id: string;
+    /** `defect` is added to Plan 5's three reasons because every normative
+     *  section is protected: a normative omission can only be a renderer
+     *  defect, and disguising it as level/budget would hide the bug. */
+    reason: "budget" | "level" | "not_current" | "defect";
+  }>;
+  complete: boolean;
+}
+
 /** Immutable record of the exact prompt delivered for one round attempt. */
 /** v3.8.1: the artifact schema version, next to the type it versions. The
  *  transaction envelope parser reads it, so the constant lives here rather
  *  than in the renderer. */
-export const PROMPT_ARTIFACT_SCHEMA_VERSION = 3 as const;
+/** v3.9.4: schema 4 adds `coverage`. Older versions are a HARD break — a
+ *  round whose artifact does not parse is not committed history, and
+ *  `legacyTransactionRounds` reports the loss rather than letting it vanish. */
+export const PROMPT_ARTIFACT_SCHEMA_VERSION = 4 as const;
 
 export interface PromptArtifact {
-  /** v3.9.1: schema 3 adds prompt-request render effects. Older versions are
-   *  a HARD break — a round whose artifact does not parse is not committed
-   *  history, and `legacyTransactionRounds` reports the loss rather than
-   *  letting it vanish. */
   schemaVersion: typeof PROMPT_ARTIFACT_SCHEMA_VERSION;
   /** Round identity: `loop:<loopId>:round:<n>`. */
   roundId: string;
@@ -944,6 +981,9 @@ export interface PromptArtifact {
   /** v3.9.1: what the PREVIOUS round's prompt_requests did in this render.
    *  OUTPUT ONLY — no compile or decision path may read it as control state. */
   promptRequestEffects?: PromptRequestEffect[];
+  /** v3.9.4: ID-level proof that every active normative object was rendered.
+   *  Required: a schema-4 artifact without it is a hard break. */
+  coverage: PromptCoverage;
 }
 
 export interface LoopCompileResponse {
@@ -1298,9 +1338,11 @@ export interface ContractItemClaim {
  *  per-item instead of "every verified item backs every sub-goal". */
 export interface ContractItemProposal {
   description: string;
-  /** cr-XXXXXXXX criterion ids this item is evidence for (or free text). */
+  /** v3.9.4: real cr-XXXXXXXX ids of ACTIVE criteria rendered in the
+   *  current prompt. Free text and unknown ids are `contract_invalid`. */
   criterion_refs: string[];
-  /** sg-XXXXXXXX sub-goals this item is evidence for. */
+  /** v3.9.4: sg-XXXXXXXX ids of ACTIVE sub-goals displayed in the current
+   *  prompt. A same-submission emerged sub-goal is referenceable next round. */
   subgoal_refs: string[];
   /** Evidence command ids (policy.evidence.commands[].name). */
   verify_with: string[];
@@ -1531,6 +1573,9 @@ export interface VerifiedSubGoalFact {
  *
  *  - `evaluation_invalid` / `contract_invalid` / `policy_invalid` — a payload
  *    or configuration defect; the same roundId may be retried.
+ *  - `projection_incomplete` — a code defect in the prompt projection: an
+ *    active normative ID was not rendered, so no prompt is delivered. Not
+ *    retryable by the agent.
  *  - `round_id_required` / `round_id_mismatch` — the anchor is missing or no
  *    longer names the current round.
  *  - `session_not_found` / `state_unavailable` — the named session or read
@@ -1547,6 +1592,7 @@ export type ToolErrorCode =
   | "evaluation_invalid"
   | "contract_invalid"
   | "policy_invalid"
+  | "projection_incomplete"
   | "session_not_found"
   | "round_id_required"
   | "round_id_mismatch"

@@ -21,6 +21,8 @@ session for the same objective instead of opening a second loop.
 Call `loopforge_start` with:
 
 - `task`: the complete user objective;
+- `criteria`: the initial success criteria, each becoming a stable `cr-*`
+  anchor rendered in every prompt (omit to keep the default criterion);
 - `constraints`: hard boundaries that must survive every round;
 - optional `maxRounds`, `domain`, `loopId`, and `planSource`.
 
@@ -64,8 +66,12 @@ slice. Size the slice by what one machine-checkable outcome covers — a
 requirements list is not a round list, and coupled changes that share one
 objective, one evidence story, and one recovery path belong in the same round.
 Bind each item to a configured evidence command with `verify_with`, and limit
-`scope` to files or directories that slice may touch. The proposal becomes
-active only after its declaring round commits.
+`scope` to files or directories that slice may touch. `criterion_refs` must
+cite real `cr-*` ids rendered in the current prompt; `subgoal_refs` may cite
+only active `sg-*` ids shown in it — a sub-goal declared in this same
+submission becomes referenceable next round. Free text, unknown ids, duplicate
+refs, and duplicate normalized items are rejected as `contract_invalid`. The
+proposal becomes active only after its declaring round commits.
 While it is open, you do **not** need to restate it: omitting `round_contract`
 continues the active contract. A different proposal is ignored as
 `contract_premature`. If this round closes the contract and another slice
@@ -168,6 +174,14 @@ that actually changed, and machine verification results, plus the structured
 Prompts render stable IDs beside constraints, criteria, sub-goals, and contract
 items. Prefer those IDs for `constraint_violations`, criterion claims, status
 updates, and item claims.
+
+Every level renders the same protected normative set — criteria, active
+constraints, the active contract and all items, active sub-goal ids, current
+findings, and (when present) the recovery brief. Display caps may shorten
+descriptions but never remove ids. `prompt_artifact.coverage` records the
+proof; a missing active id fails closed with `projection_incomplete` rather
+than delivering a partial prompt. A redo prompt carries the restore HEAD and
+failed-round file facts in its protected Recovery Brief.
 
 A sub-goal ID belongs to its declaration event. Re-declaring the same text in a
 later round creates a new sub-goal. Status changes require the exact active

@@ -335,13 +335,32 @@ export function parseRoundTransactionSnapshot(
     // is not committed history, and `legacyTransactionRounds` reports the
     // loss explicitly instead of the loop looking complete while rounds are
     // missing.
+    // v3.9.4: schema 4 requires the ID-level coverage proof. A missing or
+    // malformed coverage object is a hard break, never an empty projection.
+    const coverage = artifact.coverage;
+    const coverageValid =
+      isRecord(coverage) &&
+      Array.isArray(coverage.active) &&
+      coverage.active.every((entry) =>
+        isRecord(entry) &&
+        typeof entry.id === "string" &&
+        typeof entry.kind === "string") &&
+      Array.isArray(coverage.rendered) &&
+      coverage.rendered.every((id) => typeof id === "string") &&
+      Array.isArray(coverage.omitted) &&
+      coverage.omitted.every((entry) =>
+        isRecord(entry) &&
+        typeof entry.id === "string" &&
+        typeof entry.reason === "string") &&
+      typeof coverage.complete === "boolean";
     if (
       artifact.schemaVersion !== PROMPT_ARTIFACT_SCHEMA_VERSION ||
       typeof artifact.roundId !== "string" ||
       typeof artifact.renderedPrompt !== "string" ||
       typeof artifact.promptHash !== "string" ||
       typeof artifact.stateHash !== "string" ||
-      !["l0", "l1", "l2"].includes(String(artifact.level))
+      !["l0", "l1", "l2"].includes(String(artifact.level)) ||
+      !coverageValid
     ) return null;
   }
 
@@ -428,6 +447,8 @@ export class RoundTransactionCoordinator {
       backtrackTargetGitHead: input.backtrackTargetGitHead,
       backtrackTargetDirty: input.backtrackTargetDirty,
       entrypointTrust: input.entrypointTrust,
+      // v3.9.4: the SAME manifest the receipt reads.
+      submittedFields: input.submittedFields ?? snapshot.submittedFields,
     });
 
     const evaluated: RoundTransactionSnapshot = {

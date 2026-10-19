@@ -23,7 +23,6 @@ import {
   enforceRound,
   buildRejectionPrompt,
   findSafeRestorePoint,
-  buildBacktrackPrompt,
 } from "../enforcement-gate.js";
 
 import { verifyBacktrackPrompt } from "./_backtrack-asserts.js";
@@ -652,112 +651,6 @@ describe("findSafeRestorePoint", () => {
   });
 });
 
-// ═══════════════════════════════════════════════════════════════════════════
-// v2.10: Build backtrack prompt
-// ═══════════════════════════════════════════════════════════════════════════
-
-describe("buildBacktrackPrompt", () => {
-  // ── Round-number exactness (regression guard for ${fromRound} literal bug) ──
-
-  it("renders exact round numbers in all key positions", () => {
-    const prompt = buildBacktrackPrompt(45, 42, "progress_stall", [],
-      ["src/auth.ts"]);
-    verifyBacktrackPrompt(prompt, 45, 42, [
-      "Backtrack",
-      "did not work",
-      "different",
-    ]);
-    // No literal template expressions survive
-    assert.ok(!prompt.includes("${"), "prompt must not contain any ${...} literal");
-  });
-
-  // ── v3.5: stalled Round Contract revision channel ────────────────────────
-
-  it("tells the agent to close a stalled Round Contract via blocked + revision", () => {
-    const prompt = buildBacktrackPrompt(45, 42, "progress_stall", []);
-    assert.ok(prompt.includes("Round Contract that caused the stall"),
-      "the stalled-contract bullet must appear");
-    assert.ok(prompt.includes('outcome="blocked"'),
-      "the closed-with-blocked channel must be named");
-    assert.ok(prompt.includes("REVISED contract"),
-      "declaring the revised contract in the same submission must be named");
-    assert.ok(prompt.includes("silently restate the stalled contract"),
-      "the forbidden silent restate must be named");
-  });
-
-  // ── Trigger-rule guidance ────────────────────────────────────────────────
-  // v3.7: stall and flatline share one trigger (progress_stall) and one
-  // prose section — the radical-change wording is folded in.
-
-  it("renders unified stall guidance", () => {
-    const prompt = buildBacktrackPrompt(45, 42, "progress_stall", []);
-    verifyBacktrackPrompt(prompt, 45, 42, [
-      "did not work",
-      "radically different",
-      "no machine-observed Git changes",
-    ]);
-  });
-
-  // ── Discoveries + workspace restore ──────────────────────────────────────
-
-  it("renders preserved discoveries and skipped files", () => {
-    const discoveries = ["SafeERC20 required", "2-day timelock"];
-    const skippedFiles = ["src/auth.ts", "lib/utils.go", "README.md"];
-    const prompt = buildBacktrackPrompt(10, 8, "progress_stall",
-      discoveries, skippedFiles);
-    verifyBacktrackPrompt(prompt, 10, 8, [
-      "Preserved Discoveries",
-      "SafeERC20 required",
-      "2-day timelock",
-      "Workspace Restore",
-      "src/auth.ts",
-      "lib/utils.go",
-      "README.md",
-      "If git is unavailable",
-      "rejected",
-    ]);
-  });
-
-  it("truncates long file lists and omits discovery section when empty", () => {
-    const manyFiles = Array.from({ length: 20 }, (_, i) => `src/file${i}.ts`);
-    const prompt = buildBacktrackPrompt(10, 5, "progress_stall", [],
-      manyFiles);
-    verifyBacktrackPrompt(prompt, 10, 5, [
-      "Workspace Restore",
-      "and 5 more files",
-      "Files modified in skipped rounds",
-    ]);
-    assert.ok(!prompt.includes("Preserved Discoveries"),
-      "should not render discovery section when empty");
-  });
-
-  it("v3.7.1: renders the Recovery Brief with trigger, round ID, approaches and falsified assumptions", () => {
-    const prompt = buildBacktrackPrompt(
-      7, 4, "progress_stall", [], ["src/a.ts"], "abcdef12",
-      "loop:recovery-loop:round:5",
-      {
-        failedRounds: [5, 6, 7],
-        approaches: ["chased the wrong seam", "rewrote the scheduler again"],
-        wrongAssumptions: ["the DB was the bottleneck"],
-      },
-    );
-    assert.ok(prompt.includes("### Recovery Brief"));
-    assert.ok(prompt.includes("**Trigger**: progress_stall"));
-    assert.ok(prompt.includes("**Restored to round**: 4 (the redo is round 5)"));
-    assert.ok(prompt.includes("**Recovery Round ID**: `loop:recovery-loop:round:5`"));
-    assert.ok(prompt.includes("**Failed rounds**: 5, 6, 7"));
-    assert.ok(prompt.includes("Failed approach: chased the wrong seam"));
-    assert.ok(prompt.includes("Failed approach: rewrote the scheduler again"));
-    assert.ok(prompt.includes("**Falsified assumptions** (do not rebuild on these):"));
-    assert.ok(prompt.includes("- the DB was the bottleneck"));
-  });
-
-  it("v3.7.1: omits the Recovery Brief when no recovery facts were derived", () => {
-    const prompt = buildBacktrackPrompt(7, 4, "progress_stall", [], ["src/a.ts"]);
-    assert.ok(!prompt.includes("Recovery Brief"),
-      "no brief section without derived recovery facts");
-  });
-});
 
 // ═══════════════════════════════════════════════════════════════════════════
 // v2.12: Effective-success semantics (R3) with declared outcomes
@@ -1131,17 +1024,6 @@ describe("enforcement-gate — R9: workspace restore guard", () => {
     const result = enforceRound(curr, unrestoredVerify(), 3, vault, 0);
     assert.equal(result.action, "terminate");
     assert.equal(result.check, "backtrack_workspace_not_restored");
-  });
-
-  it("buildBacktrackPrompt states the restore requirement without prescribing a command", () => {
-    const prompt = buildBacktrackPrompt(5, 3, "progress_stall", [], [], "abc123def4567890");
-    assert.ok(prompt.includes("HEAD must be at `abc123def456`"),
-      "prompt must state where HEAD has to end up");
-    assert.ok(prompt.includes("Restoring the workspace is **your** responsibility"));
-    for (const command of ["git stash", "git reset", "git checkout", "git clean"]) {
-      assert.ok(!prompt.includes(command),
-        "LoopForge does not prescribe how the agent restores the workspace");
-    }
   });
 
   it("R9 fix_instructions state the requirement, not a recipe", () => {

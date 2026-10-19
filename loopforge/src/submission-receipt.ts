@@ -291,6 +291,7 @@ export function deriveSubmissionReceipt(input: ReceiptInput): SubmissionReceipt 
         check: flag.check,
         severity: flag.severity,
         detail: flag.detail,
+        ...(flag.ref ? { ref: flag.ref } : {}),
       })),
       contract_items: input.contractItems,
     },

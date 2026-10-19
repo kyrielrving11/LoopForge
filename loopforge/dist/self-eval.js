@@ -4,7 +4,7 @@
 import { makeExecutionReport, makeSelfEvaluation, } from "./protocol.js";
 import { retiredFieldDetail, submittedFieldPaths, unknownExecutionReportEntryFields, unknownTopLevelFields, } from "./submission-guidance.js";
 import { DIAG_ALL_ENTRIES_DROPPED, DIAG_EMPTY_VALUE, } from "./submission-diagnostics.js";
-import { criterionRefMatches } from "./token-utils.js";
+import { canonicalContractItemText, criterionRefMatches, isCriterionId, } from "./token-utils.js";
 const DIAGNOSTICS_LIMIT = 100;
 class DiagnosticsCollector {
     entries = [];
@@ -711,12 +711,30 @@ function validateContractItem(item, index, context, errors) {
                         `${CONTRACT_LIMITS.criterionRefs} ids (got ${criterionRefs.length})`,
                 });
             }
+            const seen = new Set();
             criterionRefs.forEach((ref, refIndex) => {
-                if (typeof ref !== "string" || ref.trim().length === 0) {
+                if (typeof ref !== "string" || !isCriterionId(ref.trim())) {
                     errors.push({
                         field: "round_contract",
                         reason: "invalid_criterion_ref",
-                        detail: `item ${index} criterion_refs entry ${refIndex} must be a non-empty string`,
+                        detail: `item ${index} criterion_refs entry ${refIndex} must be a cr-XXXXXXXX id`,
+                    });
+                    return;
+                }
+                const id = ref.trim();
+                if (seen.has(id)) {
+                    errors.push({
+                        field: "round_contract",
+                        reason: "duplicate_criterion_ref",
+                        detail: `item ${index} criterion_refs repeats ${id}`,
+                    });
+                }
+                seen.add(id);
+                if (context.knownCriterionIds && !context.knownCriterionIds.has(id)) {
+                    errors.push({
+                        field: "round_contract",
+                        reason: "unknown_criterion_ref",
+                        detail: `item ${index} references ${id}, which is not an active criterion of this loop`,
                     });
                 }
             });
@@ -759,16 +777,31 @@ function validateContractItem(item, index, context, errors) {
                     });
                 }
                 seen.add(id);
-                if (context.knownSubGoalIds && !context.knownSubGoalIds.has(id)) {
+                if (context.displayedSubGoalIds && !context.displayedSubGoalIds.has(id)) {
                     errors.push({
                         field: "round_contract",
                         reason: "unknown_subgoal_ref",
-                        detail: `item ${index} references ${id}, which is not a sub-goal of this loop`,
+                        detail: `item ${index} references ${id}, which is not an active sub-goal displayed in this prompt`,
                     });
                 }
             }
         }
     }
+}
+/** v3.9.4: the normalized content identity of a RAW proposal item. Malformed
+ *  items return null (their own shape errors already fire); valid items use
+ *  the same canonical text as `deriveContractItemIds`. */
+function rawContractItemIdentity(item) {
+    if (typeof item !== "object" || item === null || Array.isArray(item))
+        return null;
+    const entry = item;
+    const strings = (value) => Array.isArray(value) ? value.filter((v) => typeof v === "string") : [];
+    return canonicalContractItemText({
+        description: typeof entry.description === "string" ? entry.description : "",
+        criterion_refs: strings(entry.criterion_refs),
+        subgoal_refs: strings(entry.subgoal_refs),
+        verify_with: strings(entry.verify_with),
+    });
 }
 /** v3.8: Strict STRUCTURAL boundary for the Round Contract declaration and
  *  the contract item claims — the same pre-advance contract as
@@ -816,8 +849,25 @@ export function validateContractShape(raw, context) {
                 });
             }
             else {
+                const seenItems = new Map();
                 items.forEach((item, index) => {
                     validateContractItem(item, index, context, errors);
+                    // v3.9.4: two identical normalized items would derive two rci- ids
+                    // for one semantic object. Reject the restatement instead of
+                    // letting a citation become ambiguous.
+                    const identity = rawContractItemIdentity(item);
+                    if (identity === null)
+                        return;
+                    const first = seenItems.get(identity);
+                    if (first !== undefined) {
+                        errors.push({
+                            field: "round_contract",
+                            reason: "duplicate_contract_item",
+                            detail: `item ${index} duplicates item ${first} by normalized content`,
+                        });
+                        return;
+                    }
+                    seenItems.set(identity, index);
                 });
             }
         }

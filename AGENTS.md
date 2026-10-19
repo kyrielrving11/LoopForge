@@ -94,6 +94,20 @@ did not render is dropped with a diagnostic (`unknown_id`, or
 reference space fails open; an observed empty one drops every claim. The
 display cap does not narrow validation.
 
+`loopforge_start.criteria` declares the initial success criteria; they become
+the objective's criteria and therefore the stable `cr-*` anchors. An empty,
+duplicate (normalized-exact), or over-limit entry is diagnosed, never silently
+stored; omitting the field keeps the default criterion, and a round-1 retry
+recovers the initial objective from that round's persisted lineage.
+
+Contract references are stricter than claims: `criterion_refs` must be real
+`cr-*` ids from the ACTIVE criterion set the prompt rendered, and
+`subgoal_refs` must name an active compiled `sg-*` shown in the current prompt
+— same-round `emerged_subtasks` are referenceable only next round. Free text,
+unknown ids, duplicate refs, and duplicate normalized item content are
+`contract_invalid`. `CriterionMachineFact`/`VerifiedSubGoalFact` derive only
+from real ids; there is no text-hash fallback.
+
 A success claim with an empty/missing `execution_report` is a reporting gap
 (warn), never an acceptance gate: acceptance is decided by machine evidence and
 contract rules, not optional-field coverage. The machine-evidence warn still
@@ -261,11 +275,16 @@ what it actually preserved. `submission_receipt.files_reconciliation` is the
 one reported-vs-observed comparison (`deriveFilesReconciliation`) over the
 shared `ObservationDelta.changedFiles`: exact path sets, `[]` = observed no
 change, `null` = unknown, and `unknown`/`not_applicable` never become a
-mismatch. It is receipt-only and never next-prompt input; the next-round fix
-item comes from the committed verification flag, which is the one machine-
-finding channel. `promptRequestEffects` records what the CURRENT prompt did —
-it must never be read by compile or decision code as an instruction for a
-later prompt.
+mismatch. The verification gate and the receipt use the SAME `submittedFields`
+attempt basis: an omitted `files_changed` with Git-observed changes is an
+`evidence_integrity` mismatch in both projections, never silence in one and a
+mismatch in the other. It is receipt-only and never next-prompt input; the
+next-round fix item comes from the committed verification flag, which is the
+one machine-finding channel. `VerificationFlag.ref` names the concrete
+command/path/stable id where one exists and is rendered by every finding
+surface. `promptRequestEffects` records what the CURRENT prompt did — it must
+never be read by compile or decision code as an instruction for a later
+prompt.
 
 L0, L1, and L2 select prompt density only. L0 is a same-round retry, or a
 committed failed round whose freshness derivation PROVES no machine activity
@@ -276,6 +295,25 @@ repeated rejection; there is no round-count timer. The Recovery Brief and the
 recovery boundary share `pendingBacktrackRecord` (backtrack `target + 1 ===
 redoRound`), and objective/constraint evolution is bounded by the compile
 window so an abandoned branch cannot leak into the redo prompt.
+
+Every level renders the same protected normative entry set: the active
+criteria, every active constraint (hard and other), the active contract and
+all its items, every active sub-goal id, every current verification finding,
+and the committed recovery brief. Display caps may drop descriptions but
+never ids (the sub-goal overflow line keeps them). Optional narrative
+sections carry no normative id. `partitionActiveConstraints` is the one
+criteria/hard/other split; prompt, state file, and guidance consume it.
+There is no silent active-constraint cap.
+
+`PromptArtifact` schema 4 carries `coverage`: the active ids derived from the
+same `CanonicalLoopState`, the ids the included sections declared, and any
+omission with a reason. Coverage is per-artifact output, never a decision
+input or a second fact source. A missing active id fails closed:
+`ProjectionCoverageError` is rethrown by `invokeLoopCompile` (never converted
+to `prompt: null`) and mapped to the non-retryable `projection_incomplete`
+tool code. The prompt is never rewritten after artifact creation; a backtrack
+recovery brief is a protected section inside the artifact, so the delivered
+prompt equals `renderedPrompt` on every path.
 
 One fixed section-priority table owns prompt assembly. Mandatory sections are
 protected: they render first and are never dropped or truncated. Optional
@@ -351,6 +389,14 @@ run the scripted prepack in the clean mirror.
 - Prompt changes: cover budgets, hashing, density levels, same-round retry,
   protected overflow, deterministic truncation, rendered-vs-dropped priority,
   and identical-input determinism.
+- Prompt-coverage changes: cover the identical L0/L1/L2 active id set, every
+  active id in the delivered prompt, sub-goal id overflow, emphasize moves
+  into Critical Context, contract closure, recovery facts, and the
+  `ProjectionCoverageError` → engine rethrow → `projection_incomplete`
+  envelope chain. Assert `prompt === prompt_artifact.renderedPrompt`.
+- Strict-relation changes: cover free-text/unknown/duplicate `criterion_refs`,
+  non-displayed and same-round emerged `subgoal_refs`, duplicate normalized
+  items, and fail-open only when the compile response is unobservable.
 - Field-decision changes: cover the compact trigger checklist (max seven
   fields), level-independent applicability, the explicit `compact` marker,
   real `cr-` ids and texts, the same L0/L1/L2 trigger set, no fabricated ids,

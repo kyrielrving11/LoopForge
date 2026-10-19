@@ -273,7 +273,7 @@ export function validateSubmission(
       };
     }
   }
-  const contractErrors = contractShapeErrors(store, session, submission, known);
+  const contractErrors = contractShapeErrors(store, session, submission, compileResponse);
   if (contractErrors.length > 0) {
     return {
       ok: false,
@@ -315,16 +315,29 @@ function contractShapeErrors(
   store: LoopStore,
   session: CompileContextSession | undefined,
   submission: Record<string, unknown>,
-  knownSubGoals: SubGoal[] | null,
+  compileResponse: LoopForgeResponse | null,
 ): ContractValidationError[] {
   const active = session ? activeContractOf(store, session) : null;
+  const knownCriteria = knownCriterionRefsFor(compileResponse);
+  // v3.9.4: contract refs can only cite what the prompt actually displays.
+  // Same-round emerged sub-goals are deliberately excluded; they are not in
+  // the prompt and become referenceable in the NEXT round.
+  const displayedSubGoals = compileResponse?.sub_goals
+    ? new Set(
+        compileResponse.sub_goals
+          .filter((subGoal) =>
+            subGoal.status !== "done" && subGoal.status !== "canceled")
+          .map((subGoal) => subGoal.id),
+      )
+    : null;
   return validateContractShape(submission, {
     activeItemIds: session
       ? new Set((active?.items ?? []).map((item) => item.id))
       : null,
-    knownSubGoalIds: knownSubGoals
-      ? new Set(knownSubGoals.map((subGoal) => subGoal.id))
+    knownCriterionIds: knownCriteria
+      ? new Set(knownCriteria.map((criterion) => criterion.id))
       : null,
+    displayedSubGoalIds: displayedSubGoals,
     isConfiguredCommand,
     checkScopeEntry: scopeEntryDetail,
   });

@@ -105,7 +105,7 @@ describe("v3.8.1 — schema fidelity", () => {
     // must read it rather than guess.
     const version = props("PromptArtifact").schemaVersion;
     assert.equal(version.type, "number", "the artifact schema version is a number");
-    assert.equal(version.const, 3);
+    assert.equal(version.const, 4);
   });
 });
 
@@ -142,7 +142,8 @@ describe("Generated JSON Schema — top-level", () => {
     // v3.9.1: SubmissionGuidance, the submission diagnostic/receipt types
     // and PromptRequestEffect joined (57 → 63).
     // v3.9.2: FilesReconciliation joined (63 → 64).
-    assert.equal(names.length, 64, `expected 64, got ${names.length}: ${names.join(", ")}`);
+    // v3.9.4: PromptCoverage joined (64 → 65).
+    assert.equal(names.length, 65, `expected 65, got ${names.length}: ${names.join(", ")}`);
     assert.ok(names.includes("PromptArtifact"));
     assert.ok(names.includes("RoundOutcome"));
     assert.ok(names.includes("RoundContractProposal"));
@@ -155,6 +156,7 @@ describe("Generated JSON Schema — top-level", () => {
     assert.ok(names.includes("FilesReconciliation"));
     assert.ok(names.includes("SubmissionDiagnostic"));
     assert.ok(names.includes("PromptRequestEffect"));
+    assert.ok(names.includes("PromptCoverage"));
     assert.ok(names.includes("ToolError"));
     assert.ok(names.includes("ToolErrorCode"));
   });

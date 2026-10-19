@@ -5,7 +5,7 @@ import { resolve } from "node:path";
 import { containInWorkspace } from "./workspace.js";
 /** v3.8.1: the policy schema version. A policy file that does not declare
  *  exactly this version is REJECTED — see loadPolicy. */
-export const POLICY_SCHEMA_VERSION = "5";
+export const POLICY_SCHEMA_VERSION = "6";
 export const DEFAULT_POLICY = {
     version: POLICY_SCHEMA_VERSION,
     constraints: { retire_window: 3 },
@@ -23,7 +23,7 @@ export const DEFAULT_POLICY = {
     backend: { root_dir: ".loopforge" },
     evolution: {
         max_discovered_constraints_per_round: 5,
-        max_active_constraints: 15,
+        max_start_criteria: 12,
         max_objective_versions: 10,
         max_active_subgoals: 12,
     },

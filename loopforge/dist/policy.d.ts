@@ -70,7 +70,10 @@ export interface BackendPolicy {
 }
 export interface EvolutionPolicy {
     max_discovered_constraints_per_round: number;
-    max_active_constraints: number;
+    /** v3.9.4: initial criteria accepted by `loopforge_start`. Extras are
+     *  dropped with a warning; there is no silent truncation anywhere in the
+     *  active constraint set. */
+    max_start_criteria: number;
     max_objective_versions: number;
     /** v3.7.1: Max ACTIVE sub-goals (pending/in_progress/blocked) shown in
      *  prompts and the state file. done/canceled never render as items —
@@ -117,7 +120,7 @@ export interface GatePolicy {
 }
 /** v3.8.1: the policy schema version. A policy file that does not declare
  *  exactly this version is REJECTED — see loadPolicy. */
-export declare const POLICY_SCHEMA_VERSION = "5";
+export declare const POLICY_SCHEMA_VERSION = "6";
 export interface LoopPolicy {
     version: string;
     constraints: ConstraintsPolicy;

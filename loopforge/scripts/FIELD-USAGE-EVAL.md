@@ -63,6 +63,27 @@ truncated, normalized, dropped) shows what happened to each attempt.
 
 ## Procedure
 
+### Optional real-model runner
+
+The repository includes `scripts/real-field-usage-experiment.ts` as a
+transport and accounting harness. It starts the real LoopForge MCP server,
+passes each returned prompt to `codex exec`, submits only the model's parsed
+JSON response, and writes a per-round trace. Run it from `loopforge/` after a
+build:
+
+```bash
+node --experimental-strip-types scripts/real-field-usage-experiment.ts
+```
+
+The runner records an unavailable or unparseable model response as an
+experiment failure and never manufactures an evaluation. A standalone model
+process is not equivalent to an agent with LoopForge MCP tools: if it tries to
+read the state file or call `loopforge_next` itself, the run has tested the
+executor boundary, not field adoption. For a valid adoption run, the model
+must receive the prompt through the same MCP/client integration used in
+production, or the harness must explicitly force evaluation-only output while
+retaining the full prompt and its field guidance.
+
 1. Prepare the sample task, the constraints, and a list of labeled opportunity
    points with the round in which each is expected.
 2. Run the agent loop with LoopForge 3.9.2; store each `loopforge_next`

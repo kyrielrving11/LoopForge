@@ -60,6 +60,8 @@ import type { LoopStore, VaultEntry } from "../loop-store.js";
 import { logEvent } from "../observability.js";
 import { policyMetrics } from "../policy-metrics.js";
 import type { SessionStateStore } from "../storage.js";
+import { normalizeText } from "../token-utils.js";
+import { ProjectionCoverageError } from "../prompt-coverage.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -149,6 +151,78 @@ export interface StartInput {
   domain?: string;
   planSource?: string;
   constraints?: string[];
+  /** v3.9.4: initial local requirements, each becoming a stable `cr-*` anchor
+   *  in the objective. Omit to keep the default criterion. */
+  criteria?: string[];
+}
+
+/** v3.9.4: a structural defect in the start criteria argument. The MCP
+ *  handler maps this to `invalid_argument`; it is never a policy defect. */
+export class StartCriteriaError extends Error {
+  readonly code = "invalid_argument";
+}
+
+/** v3.9.4: normalize initial criteria at the start boundary.
+ *
+ *  - a non-array / non-string element is a structural defect (throws);
+ *  - empty text is dropped with a warning;
+ *  - duplicate normalized-exact text keeps the first spelling, with a
+ *    warning (the stable id derivation would otherwise produce two entries
+ *    with one `cr-*` id);
+ *  - over `policy.evolution.max_start_criteria` is dropped from the tail with
+ *    a warning;
+ *  - an empty result is the caller's signal to keep the default criterion. */
+export function normalizeStartCriteria(raw: unknown): {
+  criteria: string[];
+  warnings: string[];
+} {
+  if (raw === undefined) return { criteria: [], warnings: [] };
+  if (!Array.isArray(raw)) {
+    throw new StartCriteriaError("criteria must be an array of non-empty strings");
+  }
+  const values: string[] = [];
+  let empty = 0;
+  for (const entry of raw) {
+    if (typeof entry !== "string") {
+      throw new StartCriteriaError("criteria entries must be strings");
+    }
+    const text = entry.trim();
+    if (!text) {
+      empty++;
+      continue;
+    }
+    values.push(text);
+  }
+  const warnings: string[] = [];
+  if (empty > 0) {
+    warnings.push(`start_criteria_empty: dropped ${empty} empty criteria`);
+  }
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  let duplicates = 0;
+  for (const text of values) {
+    const key = normalizeText(text);
+    if (seen.has(key)) {
+      duplicates++;
+      continue;
+    }
+    seen.add(key);
+    unique.push(text);
+  }
+  if (duplicates > 0) {
+    warnings.push(
+      `start_criteria_duplicate: dropped ${duplicates} duplicate criteria`,
+    );
+  }
+  const cap = Math.max(0, getPolicy().evolution.max_start_criteria);
+  const criteria = unique.slice(0, cap);
+  if (unique.length > criteria.length) {
+    warnings.push(
+      `start_criteria_capped: kept ${criteria.length} of ${unique.length} ` +
+      `(max_start_criteria=${cap})`,
+    );
+  }
+  return { criteria, warnings };
 }
 
 export interface AdvanceResult {
@@ -184,6 +258,14 @@ export interface AdvanceResult {
    *  runs before its queue and lease heartbeat. */
   submissionError?: {
     code: "evaluation_invalid" | "contract_invalid";
+    details: Record<string, unknown>;
+  };
+  /** v3.9.4: a prompt-projection code defect. This is NOT a submission
+   *  refusal (the round may already be committed); the next prompt was not
+   *  delivered and the session is stalled. The MCP envelope maps it to the
+   *  `projection_incomplete` error code. */
+  projectionError?: {
+    code: "projection_incomplete";
     details: Record<string, unknown>;
   };
   /** v3.9.1: current-fact submission guidance for the held/prepared round.
@@ -1168,12 +1250,9 @@ export class RoundLifecycle {
       };
     }
 
-    // Inject backtrack prompt at the top of the compiled prompt
-    const backtrackHeader = pr.backtrackPrompt ?? "";
-    const fullPrompt = backtrackHeader
-      ? backtrackHeader + "\n" + (prepared.prompt ?? "")
-      : prepared.prompt ?? "";
-
+    // v3.9.4: the recovery facts are a protected section INSIDE the compiled
+    // artifact. Never rewrite the prompt after compilation: the delivered
+    // prompt must equal `prompt_artifact.renderedPrompt` and its hash.
     session.evidenceBaseline = prepared.evidenceBaseline;
     session.roundSnapshot = prepared.snapshot;
     // v3.8.3: the rollback redo is a NEW round — `prepare` collected a fresh
@@ -1181,7 +1260,7 @@ export class RoundLifecycle {
     // stands after the rollback, which is what lets a round that stalled on a
     // rewritten entrypoint proceed once the entrypoint is in place.
     this.seedEntrypointTrust(session);
-    session.currentPrompt = fullPrompt;
+    session.currentPrompt = prepared.prompt;
     session.currentLevel = prepared.level;
     session.currentWarnings = prepared?.warnings ?? [];
     session.lastCompileResponse = prepared?.compileResponse ?? null;
@@ -1191,7 +1270,7 @@ export class RoundLifecycle {
       sessionId,
       round: newRound,
       roundId: session.roundSnapshot?.roundId,
-      prompt: fullPrompt,
+      prompt: prepared.prompt,
       level: prepared.level,
       enforcementAction: "backtrack",
       verificationStatus: pr.verificationStatus,
@@ -1393,6 +1472,17 @@ export class RoundLifecycle {
         round: session.currentRound,
         error: String(error),
       });
+      if (error instanceof ProjectionCoverageError) {
+        // v3.9.4: the failure is a projection code defect, not a work-quality
+        // verdict. Keep the committed round held and surface the stable code.
+        return this.stalledAfterCommit(
+          sessionId,
+          session,
+          roundSuccess,
+          error.message,
+          { code: "projection_incomplete", details: { coverage: error.coverage } },
+        );
+      }
       return this.stalledAfterCommit(
         sessionId,
         session,
@@ -1484,6 +1574,7 @@ export class RoundLifecycle {
     session: McpSession,
     roundSuccess: boolean,
     detail: string,
+    projectionError?: AdvanceResult["projectionError"],
   ): AdvanceResult {
     session.status = "stalled";
     session.currentPrompt = null;
@@ -1504,6 +1595,7 @@ export class RoundLifecycle {
       stopReason: "stalled",
       stopDetail: detail,
       roundSuccess,
+      ...(projectionError ? { projectionError } : {}),
     };
   }
 

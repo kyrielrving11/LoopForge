@@ -170,7 +170,6 @@ describe("backtrack commit replay", () => {
         action: "backtrack",
         verificationStatus: "trusted",
         backtrackTarget: 2,
-        backtrackPrompt: "## Backtrack — Round 5 → Restored to Round 2",
         backtrackTriggerRule: "progress_stall",
         backtrackSkippedDiscoveries: [],
         backtrackSkippedFiles: [],

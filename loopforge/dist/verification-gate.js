@@ -534,10 +534,12 @@ function checkRetractFreshConstraint(selfEval, prevSelfEval, currentRound) {
 }
 /** v1.18: Cross-validate agent-reported files_changed against git evidence
  *  from the configured evidence providers (MachineObservation array). */
-function checkEvidenceIntegrity(selfEval, evidenceDeltas) {
-    if (!selfEval.execution_report)
-        return null;
-    const reconciliation = deriveFilesReconciliation(selfEval.execution_report, evidenceDeltas);
+function checkEvidenceIntegrity(selfEval, evidenceDeltas,
+/** v3.9.4: whether the raw submission named
+ *  `execution_report.files_changed`. The receipt uses the SAME manifest, so
+ *  the two projections can never disagree about an omitted report. */
+filesReported) {
+    const reconciliation = deriveFilesReconciliation(selfEval.execution_report ?? null, evidenceDeltas, { attempted: filesReported });
     if (reconciliation.status !== "mismatch")
         return null;
     const parts = [];
@@ -576,6 +578,7 @@ function checkRequiredCommandEvidence(selfEval, evidenceDeltas) {
             field: "execution_report",
             check: CHECK_REQUIRED_COMMAND_FAILED,
             detail: `Agent claims success but required command "${name}" ${String(status)}${exitCode}`,
+            ref: name,
         });
     }
     return null;
@@ -694,6 +697,7 @@ function checkCommandEvidenceIntegrity(selfEval, evidenceDeltas) {
             field: "tests_reported",
             check: CHECK_COMMAND_EVIDENCE_MISMATCH,
             detail: `Agent tests_reported don't match "${name}" output: ${mismatches.join("; ")}`,
+            ref: name,
         });
     }
     return null;
@@ -745,6 +749,7 @@ function checkVerificationDomainIntegrity(evidenceDeltas, drift) {
                     : "") +
                 "Keep the verification command stable or resubmit the same round with the " +
                 "entrypoint unchanged.",
+            ref: snapshot.data.commandId,
         });
     }
     // Only when NO entrypoint was tampered does the test-file warn stand in.
@@ -761,6 +766,7 @@ function checkVerificationDomainIntegrity(evidenceDeltas, drift) {
             check: CHECK_TEST_FILES_MODIFIED,
             detail: `Test files changed in the same round command "${snapshot.data.commandId}" passed — ` +
                 "confirm the tests still verify the task claims.",
+            ref: snapshot.data.commandId,
         });
     }
     return null;
@@ -946,9 +952,10 @@ function checkRoundScopeDrift(activeContract, evidenceDeltas) {
 function checkContractItemsUnverified(statuses) {
     if (statuses.insufficientCount === 0)
         return null;
+    // v3.9.4: EVERY insufficient item is named. The previous 3-item cap hid the
+    // rest of the debt from the one repair surface the agent reads.
     const unverified = statuses.items
         .filter((item) => item.status === "insufficient")
-        .slice(0, 3)
         .map((item) => item.itemId);
     return makeVerificationFlag({
         severity: "warn",
@@ -1077,8 +1084,13 @@ gateEntries = [],
  *  filesystem access); this function stays a pure function of its inputs. */
 entrypointDrift = [], beforeEvidence = [],
 /** v3.9: the restore point's own dirty files (undefined = never observed). */
-backtrackTargetDirty) {
+backtrackTargetDirty,
+/** v3.9.4: whether the raw submission attempted
+ *  `execution_report.files_changed` (from the persisted submittedFields
+ *  manifest). Undefined falls back to "an execution report exists". */
+filesReported) {
     const flags = [];
+    const filesReportedForGate = filesReported ?? (selfEval.execution_report != null);
     // Collect violations from all previous vault entries for duplicate-discovery
     // and other checks that need deeper history.
     const olderViolations = [];
@@ -1130,7 +1142,7 @@ backtrackTargetDirty) {
         () => checkRecurringViolation(selfEval, prevSelfEval, vaultEntries, currentRound),
         () => checkRetractFreshConstraint(selfEval, prevSelfEval, currentRound),
         // v1.18: Cross-validate agent-reported files_changed against git evidence
-        () => checkEvidenceIntegrity(selfEval, evidenceDeltas),
+        () => checkEvidenceIntegrity(selfEval, evidenceDeltas, filesReportedForGate),
         () => checkRequiredCommandEvidence(selfEval, evidenceDeltas),
         // v2.0: Cross-validate agent-reported tests_reported against command output
         () => checkCommandEvidenceIntegrity(selfEval, evidenceDeltas),

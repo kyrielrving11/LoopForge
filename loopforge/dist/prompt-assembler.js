@@ -14,6 +14,7 @@ import { activeSubGoalView, buildPhaseLine, hashCanonicalState, milestoneHeading
 import { PROMPT_ARTIFACT_SCHEMA_VERSION } from "./protocol.js";
 import { deriveItemId, STABLE_ID_RE, normalizeText } from "./token-utils.js";
 import { getPolicy } from "./policy.js";
+import { verificationActionFor } from "./verification-actions.js";
 export const DEFAULT_PROMPT_BUDGETS = {
     l0: 5000,
     l1: 10000,
@@ -60,47 +61,10 @@ function bulletsWithIdentities(values, metadata) {
         return `- [\`${id}\`] ${trimmed}`;
     }).join("\n");
 }
-/** v3.2: Short imperative fix/action per verification check, appended to the
- *  L1/L2 Verification Gate lines. Deliberately shorter than the rejection-
- *  prompt wording in enforcement-gate.ts; keys are the plain check-name
- *  strings (NOT imported from verification-gate.ts — it already imports
- *  loop-compiler, which imports this module, so importing back would cycle).
- *  Full coverage of every CHECK_* constant is enforced by a test that
- *  iterates the verification-gate module's CHECK_ exports (no hardcoded
- *  list — a new constant can never silently lack an action entry). */
-const VERIFICATION_ACTIONS = {
-    success_with_remaining_criteria: "Complete the remaining criteria before claiming success, or set success=false and report what remains.",
-    success_without_verified_evidence: "Back the success claim with machine-verifiable evidence: run tests or a required verification command and report the actual output. If you genuinely performed no work, provide execution_report and declare no_change_reason.",
-    outcome_success_contradiction: "Reconcile the declared outcome with the success flag and resubmit an honest evaluation.",
-    blocked_without_blocker: "State the concrete blocker, or drop the blocked outcome.",
-    retroactive_claim_bad_round: "Correct the referenced round number, or withdraw the retroactive claim.",
-    retroactive_claim_unverified: "Provide evidence for the retroactive claim, or withdraw it.",
-    duplicate_constraint_discovery: "Update the existing constraint entry instead of duplicating it.",
-    recurring_violation: "Explain why this violation keeps recurring and try a different approach — do not repeat the failed strategy.",
-    retract_fresh_constraint: "Justify the retraction explicitly, or restore the constraint.",
-    evidence_integrity: "Correct the mismatch between your claims and the recorded evidence.",
-    required_command_failed: "Re-run the required verification command and report its actual output before claiming success.",
-    command_evidence_mismatch: "Report the true command output and reconcile the mismatch.",
-    backtrack_workspace_not_restored: "Restore the skipped-round files and the expected git HEAD, then resubmit.",
-    criteria_claims_unverified: "Provide evidence for each claimed success criterion.",
-    // v3.3 — Round Contract checks (and the three v3.3 checks that predated
-    // this table entry and fell back to the generic action).
-    verification_entrypoint_modified: "Re-run the verification command on the changed entrypoint, or revert the entrypoint change and re-run.",
-    test_files_modified: "Re-run the verification command after the test-file changes and report the fresh output.",
-    round_scope_drift: "Revert the out-of-scope file changes, or close the active contract and declare the extended scope in a new proposal. Scope drift is a machine fact and is not waivable by explanation.",
-    // v3.8 — item model: claimed-but-unverified debt
-    contract_items_unverified: "Run the bound command(s) for each claimed item so they are observed passing, or report the item as remaining (or declare outcome=\"blocked\").",
-    contract_premature: "The ACTIVE contract is still open — restate it unchanged to continue it; a different contract is ignored until every item is verified or the round reports blocked.",
-    // v3.7.1 — opt-in gate layer: cited gates need an approved human decision
-    user_gate_unresolved: "The round cites a high-risk action without an approved human decision. Run loopforge_gate_check, present the approval question, call loopforge_gate_resolve after the human decides, and resubmit with the approved gate id in evaluation.gate_ids.",
-};
-/** Fallback for unmapped check names (forward-compat with future checks). */
-const VERIFICATION_ACTION_FALLBACK = "Re-examine the flagged claim and correct your evaluation before resubmitting.";
-/** v3.2: The actionable instruction for a verification check. Exported for
- *  the coverage test (which imports the CHECK_* constants). */
-export function verificationActionFor(check) {
-    return VERIFICATION_ACTIONS[check] ?? VERIFICATION_ACTION_FALLBACK;
-}
+/** 3.9.3: The action table lives in a neutral module so the evaluation-field
+ *  guidance can quote the same wording without depending on a renderer.
+ *  Re-exported here for the existing CHECK_* coverage test. */
+export { verificationActionFor } from "./verification-actions.js";
 function verificationText(state, level) {
     const lines = state.verificationFlags.map((flag) => {
         const icon = flag.severity === "error"

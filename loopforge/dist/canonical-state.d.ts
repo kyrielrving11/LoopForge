@@ -3,7 +3,7 @@
  * The canonical state is data, not Markdown. Prompt and state-file renderers
  * consume the same value so they cannot silently drift apart.
  */
-import type { ConstraintMeta, CriterionStatus, RecurringFlag, LoopCompileRequest, LoopCompileResponse, MilestoneSummary, SubGoal, VerificationFlag } from "./protocol.js";
+import type { ConstraintMeta, CriterionStatus, RecurringFlag, LoopCompileRequest, LoopCompileResponse, LoopRoundResult, MilestoneSummary, SubGoal, VerificationFlag } from "./protocol.js";
 import type { ActiveContractView } from "./round-contract.js";
 import type { ContractItemStatusView } from "./contract-items.js";
 import type { ConfiguredCapability, VerifiedSubGoalFact } from "./protocol.js";
@@ -152,5 +152,13 @@ derived?: {
      *  assemble a state out of values derived over different history windows —
      *  v3.4/v3.8 passed them as three independent options. */
     roundFacts?: RoundFacts;
+    /** 3.9.3: the compile's ONE previous-round bundle. Structural subset of
+     *  `PreviousRoundFacts` so this module never imports the compiler. When
+     *  absent (direct/library callers) the request fields remain the
+     *  fallback. */
+    previousRound?: {
+        result: LoopRoundResult | null;
+        verificationFlags: VerificationFlag[];
+    };
 }): CanonicalLoopState;
 //# sourceMappingURL=canonical-state.d.ts.map

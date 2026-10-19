@@ -321,10 +321,15 @@ and `cancelled`.
 
 ## Prompt levels and views
 
-L0 is a lean same-round retry, L1 normal continuation, and L2 full
-rehydration. They control state density only, never a reasoning technique. L2
-comes from round facts such as the first round, a plan or checkpoint boundary,
-recovery, contradiction, or repeated rejection. It is not a round-count timer.
+L0 is a lean same-round retry (or a committed failed round with proven no
+activity), L1 normal continuation, and L2 full rehydration. They control state
+density only, never a reasoning technique or the set of evaluation fields you
+may use: L0/L1/L2 offer the same applicable trigger checklist, including real
+`cr-`/`rci-`/`sg-` ids. If this prompt is L0, it does not apply the previous
+round's `prompt_requests`; the field you submit in this round can still be
+applied to the next prompt. L2 comes from round facts such as the first round,
+a plan or checkpoint boundary, recovery, contradiction, or repeated rejection.
+It is not a round-count timer.
 
 Use `loopforge_status` with `view: "session"` for the live round,
 `view: "loop"` for committed health, `view: "all"` after a restart,

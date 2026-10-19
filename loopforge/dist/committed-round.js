@@ -4,7 +4,7 @@
  * place that interprets their transaction envelope or the compiler's merged
  * lineage representation. Consumers receive one stable, read-only view.
  */
-import { GIT_OBSERVATION_SCHEMA_VERSION, PROMPT_ARTIFACT_SCHEMA_VERSION, } from "./protocol.js";
+import { GIT_OBSERVATION_SCHEMA_VERSION, PROMPT_ARTIFACT_SCHEMA_VERSION, makeLoopRoundResult, } from "./protocol.js";
 import { ROUND_TRANSACTION_SCHEMA_VERSION, deriveRoundObservationDelta, parseRoundTransactionSnapshot, transactionSchemaVersionOf, } from "./round-transaction.js";
 import { claimedMetCriteria, claimedRemainingCriteria, effectiveOutcome, parseRoundContract } from "./self-eval.js";
 import { entryRound, isRecord } from "./token-utils.js";
@@ -241,6 +241,63 @@ export function decodeMergedRound(entry) {
  *  `committedView` helper. */
 export function decodeRound(entry) {
     return decodeMergedRound(entry) ?? decodeCommittedRound(entry);
+}
+/** THE committed-view → compiler-request projection.
+ *
+ *  The compiler once received these fields from the caller's mutable
+ *  `last_round_result`, which existed on the live path and was absent on
+ *  resume/unpause/backtrack compiles. This projection lets one committed
+ *  fact source feed every consumer. Optional declarations are read from the
+ *  decoded view where it exposes them; `manual_fixes_needed` has no
+ *  committed source and stays empty. */
+export function roundResultFromCommittedRound(view) {
+    const evaluation = view.evaluation;
+    return makeLoopRoundResult({
+        round: view.round,
+        success: view.success,
+        output_summary: evaluation?.output_summary ?? "",
+        constraint_violations: [...(evaluation?.constraint_violations ?? [])],
+        manual_fixes_needed: "",
+        discovered_constraints: [...(view.discoveredConstraints ?? [])],
+        objective_refinement: evaluation?.objective_refinement ?? "",
+        emerged_subtasks: [...(view.emergedSubtasks ?? [])],
+        subgoal_updates: [...(view.subgoalUpdates ?? [])],
+        execution_report: view.executionReport ?? undefined,
+        retracted_constraints: [...(view.retractedConstraints ?? [])],
+        revised_success_criteria: [...(evaluation?.revised_success_criteria ?? [])],
+        wrong_assumptions: [...(evaluation?.wrong_assumptions ?? [])],
+        worker_results: [...(evaluation?.worker_results ?? [])],
+        compression_checkpoint: evaluation?.compression_checkpoint === true,
+        checkpoint_label: evaluation?.checkpoint_label ?? "",
+        prompt_requests: evaluation?.prompt_requests,
+        outcome: evaluation?.outcome,
+        blocker: evaluation?.blocker,
+        retroactiveClaims: [...(evaluation?.retroactiveClaims ?? [])],
+        no_change_reason: evaluation?.no_change_reason,
+    });
+}
+/** The ONE pending-backtrack lookup for a redo round.
+ *
+ *  A backtrack commits at the failed round R, while the redo targets
+ *  `backtrackTarget + 1`, which is lower than R for a deep restore. Matching
+ *  the decoded target (with the legacy exact-round fallback when the record
+ *  carries no target) keeps the recovery boundary AND the Recovery Brief
+ *  correct for every backtrack depth. */
+export function pendingBacktrackRecord(entries, redoRound) {
+    for (let index = entries.length - 1; index >= 0; index--) {
+        const view = decodeRound(entries[index]);
+        if (!view || view.action !== "backtrack")
+            continue;
+        const target = view.backtrack?.target;
+        if (typeof target === "number") {
+            if (target + 1 === redoRound)
+                return view;
+            continue;
+        }
+        if (view.round === redoRound)
+            return view;
+    }
+    return null;
 }
 /** Lineage sub-object of an entry (`loop_lineage`; v3.7: the legacy
  *  top-level `lineage` alias was removed), or {} when absent. */
@@ -536,21 +593,37 @@ function observedGitObservation(observation) {
 function observedGitIn(observations) {
     return observations.find((observation) => observation.kind === "git" && observation.status === "observed") ?? null;
 }
-/** The in-flight round's own motion, from its derived Git delta. A Git
- *  boundary that cannot be compared yields `null` unless HEAD movement or the
- *  restore point independently proves motion. */
+/** A round's own motion, from its derived Git deltas. A Git boundary that
+ *  cannot be compared yields `null` unless HEAD movement or the restore point
+ *  independently proves motion. Every Git delta participates: one moving
+ *  provider is motion, one undecidable provider makes the aggregate unknown,
+ *  and only an all-provider observed no-change is `false`. */
 export function inFlightGitMotion(deltas, restoreTargetHead) {
-    const git = deltas.find((delta) => delta.kind === "git");
-    if (!git)
+    const gitDeltas = deltas.filter((delta) => delta.kind === "git");
+    if (gitDeltas.length === 0)
         return null;
-    const before = observedGitObservation(git.before);
-    const after = observedGitObservation(git.after);
-    return gitMotionSignal({
-        changedFiles: git.changedFiles,
-        headBefore: observedGitHead(before ?? undefined),
-        headAfter: observedGitHead(after ?? undefined),
-        restoreTargetHead: restoreTargetHead ?? null,
-    });
+    let sawUnknown = false;
+    for (const git of gitDeltas) {
+        const before = observedGitObservation(git.before);
+        const after = observedGitObservation(git.after);
+        const signal = gitMotionSignal({
+            changedFiles: git.changedFiles,
+            headBefore: observedGitHead(before ?? undefined),
+            headAfter: observedGitHead(after ?? undefined),
+            restoreTargetHead: restoreTargetHead ?? null,
+        });
+        if (signal === true)
+            return true;
+        if (signal === null)
+            sawUnknown = true;
+    }
+    return sawUnknown ? null : false;
+}
+/** The committed-round form of the same motion rule. Named separately so a
+ *  reader can see that prompt freshness never passes an in-flight restore
+ *  head (a committed round has no pending backtrack of its own). */
+export function committedRoundGitMotion(view) {
+    return inFlightGitMotion(view.observationDelta);
 }
 /** Machine-observed git motion for the most recent contiguous window.
  * A clean worktree is not the same thing as no progress: commit-per-slice

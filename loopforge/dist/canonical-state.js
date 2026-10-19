@@ -469,9 +469,10 @@ export function createCanonicalLoopState(request, response, stateFilePath,
 /** v3.3: Display-only derived data. Optional 4th param — callers that
  *  predate v3.3 stay on 3-arg calls. */
 derived) {
-    const last = request.last_round_result;
+    const last = derived?.previousRound?.result ?? request.last_round_result;
     const objective = response.loop_objective;
-    const verificationFlags = request.verification_flags ?? [];
+    const verificationFlags = derived?.previousRound?.verificationFlags ??
+        request.verification_flags ?? [];
     const rolling = response.rolling_summary;
     const executionReport = last?.execution_report;
     const changes = unique([

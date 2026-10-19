@@ -18,7 +18,8 @@ function defaults(overrides: Partial<PromptLevelInput> = {}): PromptLevelInput {
     checkpointBoundary: false,
     goalChanged: false,
     previousStateMissing: false,
-    previousFailedWithoutNewInformation: false,
+    previousRoundFailed: false,
+    previousRoundObservableNewInformation: null,
     verificationContradicted: false,
     ...overrides,
   };
@@ -65,19 +66,40 @@ describe("decidePromptLevel", () => {
     assert.ok(d.reasons.includes("missing_previous_state"));
   });
 
-  it("returns L0 for attempt > 1 (retry_delta)", () => {
+  it("returns L0 for attempt > 1 (same_round_retry)", () => {
     const d = decidePromptLevel(defaults({ attempt: 2, round: 2 }));
     assert.equal(d.level, "l0");
-    assert.ok(d.reasons.includes("retry_delta"));
+    assert.ok(d.reasons.includes("same_round_retry"));
   });
 
-  it("returns L0 for previousFailedWithoutNewInformation (retry_delta)", () => {
+  it("returns L0 only when the failed previous round is provably stale", () => {
     const d = decidePromptLevel(defaults({
-      previousFailedWithoutNewInformation: true,
+      previousRoundFailed: true,
+      previousRoundObservableNewInformation: false,
       round: 2,
     }));
     assert.equal(d.level, "l0");
-    assert.ok(d.reasons.includes("retry_delta"));
+    assert.ok(d.reasons.includes("failed_without_observable_new_information"));
+  });
+
+  it("keeps L1 when the failed previous round has observable new information", () => {
+    const d = decidePromptLevel(defaults({
+      previousRoundFailed: true,
+      previousRoundObservableNewInformation: true,
+      round: 2,
+    }));
+    assert.equal(d.level, "l1");
+    assert.ok(d.reasons.includes("state_capsule"));
+  });
+
+  it("keeps L1 when the failed previous round's activity is unknown", () => {
+    const d = decidePromptLevel(defaults({
+      previousRoundFailed: true,
+      previousRoundObservableNewInformation: null,
+      round: 2,
+    }));
+    assert.equal(d.level, "l1");
+    assert.ok(d.reasons.includes("state_capsule"));
   });
 
   it("returns L2 for verification_contradicted", () => {
@@ -107,7 +129,7 @@ describe("decidePromptLevel", () => {
     // attempt > 1 fires before round === 1 in priority order
     const d = decidePromptLevel(defaults({ round: 1, attempt: 2 }));
     assert.equal(d.level, "l0");
-    assert.ok(d.reasons.includes("retry_delta"));
+    assert.ok(d.reasons.includes("same_round_retry"));
   });
 
   it("explicit_override honors force Level", () => {

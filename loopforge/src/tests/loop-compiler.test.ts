@@ -23,6 +23,7 @@ import {
 import { getPolicy, resetPolicy, setPolicyForTest, DEFAULT_POLICY } from "../policy.js";
 import {
   committedFeedbackRound,
+  committedBacktrackRound,
   mergedLineageRound,
   criterionClaims,
   withTransaction,
@@ -144,29 +145,54 @@ describe("cognitive-state compiler", () => {
     assert.deepEqual(fromFeedback, fromMerged);
   });
 
-  it("uses L2 first, L1 for normal continuation, and L0 for empty failed retry", () => {
+  it("uses L2 first, L1 for normal continuation, and L0 for a proven-empty failed retry", () => {
     const first = makeLoopCompileRequest({ loop_id: "levels", task: "Do work" });
     assert.equal(decideLevel(first, null), "l2");
-    const vault = {
-      results: [{
+
+    const gitObservation = (phase: "before" | "after") => ({
+      schemaVersion: 2,
+      providerId: "git",
+      kind: "git",
+      phase,
+      startedAt: 0,
+      finishedAt: 0,
+      status: "observed",
+      files: [],
+      data: {
+        dirty: [],
+        fingerprints: {},
+        head: "abc123",
+        coverage: "tracked_and_non_ignored_untracked",
+      },
+    });
+    const continuing = makeLoopCompileRequest({
+      loop_id: "levels", round: 2, task: "Do work",
+    });
+    const failedButEmpty = {
+      results: [committedFeedbackRound(1, {
+        loopId: "levels",
+        beforeEvidence: [gitObservation("before")],
+        roundEvidence: [gitObservation("after")],
+      })],
+    };
+    assert.equal(decideLevel(continuing, failedButEmpty), "l0",
+      "the committed fixture is success=false and the Git pair is observed " +
+      "with identical fingerprints and HEAD → proven stale");
+
+    const succeeded = {
+      results: [withTransaction({
         loop_id: "levels",
         loop_lineage: {
           loop_id: "levels",
           round: 1,
-          goal_id: deriveGoalId("levels", "Do work"),
-          task: "Do work",
           constraints_active: [],
-          recompile_level: "l2",
+          committed_action: "continue",
         },
-      }],
+        success: true,
+        output_summary: "Done",
+      })],
     };
-    const continuing = makeLoopCompileRequest({
-      loop_id: "levels", round: 2, task: "Do work",
-      last_round_result: makeLoopRoundResult({ success: true }),
-    });
-    assert.equal(decideLevel(continuing, vault), "l1");
-    continuing.last_round_result = makeLoopRoundResult({ success: false });
-    assert.equal(decideLevel(continuing, vault), "l0");
+    assert.equal(decideLevel(continuing, succeeded), "l1");
   });
 
   it("renders one hashed prompt artifact without a reasoning technique", () => {
@@ -818,7 +844,9 @@ describe("cognitive-state compiler", () => {
   // ── v2.8: Sub-goal ID referencing ──────────────────────────────────────
 
   it("applies a done transition by exact sub-goal ID", () => {
-    // Simulate a vault with a previously declared sub-goal
+    const sgId = deriveSubGoalId("sg-id-match", 1, 0, "Add error handling to login");
+    // The transition is a COMMITTED fact in round 1 — the same source the
+    // real MCP path commits before the next compile.
     const vault = {
       results: [withTransaction({
         loop_id: "sg-id-match",
@@ -832,23 +860,17 @@ describe("cognitive-state compiler", () => {
           committed_action: "continue",
         },
         emerged_subtasks: ["Add error handling to login"],
+        subgoal_updates: [{ id: sgId, status: "done" }],
         success: true,
         output_summary: "Started auth fix",
       })],
     };
-    // Round 2: agent completes the sub-goal by transitioning its ID
-    const sgId = deriveSubGoalId("sg-id-match", 1, 0, "Add error handling to login");
+    // Round 2: the committed transition is replayed from the vault.
     const response = compileLoop(makeLoopCompileRequest({
       loop_id: "sg-id-match",
       round: 2,
       task: "Fix auth bug",
       force_level: "l2",
-      last_round_result: makeLoopRoundResult({
-        round: 1,
-        success: true,
-        output_summary: "Completed auth fix",
-        subgoal_updates: [{ id: sgId, status: "done" }],
-      }),
     }), vault);
     const doneSubs = response.sub_goals?.filter(sg => sg.status === "done") ?? [];
     assert.equal(doneSubs.length, 1, "should mark sub-goal as done by ID reference");
@@ -889,6 +911,7 @@ describe("cognitive-state compiler", () => {
   });
 
   it("reaches in_progress only through an explicit update", () => {
+    const sgId = deriveSubGoalId("sg-inprogress", 1, 0, "Add rate limiting");
     const vault = {
       results: [withTransaction({
         loop_id: "sg-inprogress",
@@ -902,22 +925,16 @@ describe("cognitive-state compiler", () => {
           committed_action: "continue",
         },
         emerged_subtasks: ["Add rate limiting"],
+        subgoal_updates: [{ id: sgId, status: "in_progress" }],
         success: true,
         output_summary: "Started",
       })],
     };
-    const sgId = deriveSubGoalId("sg-inprogress", 1, 0, "Add rate limiting");
     const response = compileLoop(makeLoopCompileRequest({
       loop_id: "sg-inprogress",
       round: 2,
       task: "Fix auth bug",
       force_level: "l2",
-      last_round_result: makeLoopRoundResult({
-        round: 1,
-        success: true,
-        output_summary: "Started rate limiting",
-        subgoal_updates: [{ id: sgId, status: "in_progress" }],
-      }),
     }), vault);
     const active = response.sub_goals?.find(sg => sg.id === sgId);
     assert.equal(active?.status, "in_progress",
@@ -1340,7 +1357,7 @@ describe("cognitive-state compiler", () => {
     const constraint = "Never log secrets";
     const context = {
       results: [
-        {
+        withTransaction({
           loop_id: "retract-loop",
           loop_lineage: {
             loop_id: "retract-loop",
@@ -1349,9 +1366,10 @@ describe("cognitive-state compiler", () => {
             goal_id: "g",
             constraints_active: [constraint],
             success: true,
-            retracted_constraints: [constraint],
+            committed_action: "continue",
           },
-        },
+          retracted_constraints: [constraint],
+        }),
       ],
       global_entries: [],
     };
@@ -1682,7 +1700,7 @@ describe("v3.8.1 — Active Warnings (prompt) vs Recurring Flags (state file)", 
 // collapse "(violated this round)" annotation and inactive re-activation.
 // ═══════════════════════════════════════════════════════════════════════════
 describe("manageConstraintLifecycle — current-round violations (v3.2.1)", () => {
-  it("marks a constraint violated this round with last_violated_at_round = currentRound", () => {
+  it("marks a committed violation at its own round, not the compile round", () => {
     const response = compileLoop(makeLoopCompileRequest({
       loop_id: "id-vr",
       round: 3,
@@ -1694,21 +1712,28 @@ describe("manageConstraintLifecycle — current-round violations (v3.2.1)", () =
         loop_id: "id-vr",
       }),
       constraints_from_plan: ["Use bcrypt for hashing"],
-      last_round_result: makeLoopRoundResult({
-        round: 2,
+    }), {
+      results: [withTransaction({
+        loop_id: "id-vr",
+        loop_lineage: {
+          loop_id: "id-vr",
+          round: 2,
+          constraints_active: ["No plaintext passwords"],
+          committed_action: "continue",
+        },
         success: false,
         output_summary: "Tried without hashing",
         constraint_violations: ["No plaintext passwords"],
-      }),
-    }), null);
+      })],
+    });
 
     const meta = response.constraint_metadata ?? [];
     const hard = meta.find((m) => m.text === "No plaintext passwords");
     assert.ok(hard, "hard constraint must be in metadata");
     assert.equal(
-      hard!.last_violated_at_round, 3,
-      "a violation reported this round must mark last_violated_at_round = currentRound " +
-      "(drives the L1 collapse '(violated this round)' annotation)",
+      hard!.last_violated_at_round, 2,
+      "a committed violation belongs to its own round; findLastViolatedRound " +
+      "is the one fact source, not a relabel at the compile round",
     );
   });
 
@@ -1721,24 +1746,28 @@ describe("manageConstraintLifecycle — current-round violations (v3.2.1)", () =
     // fixture mirrors the real lineage chain.
     const discoveredText = "Rate limit login attempts";
     const results = [
-      {
+      withTransaction({
         loop_id: "id-re",
         loop_lineage: {
           loop_id: "id-re", round: 1,
           constraints_active: [discoveredText],
+          committed_action: "continue",
         },
+        success: true,
         constraint_violations: [] as string[],
         discovered_constraints: [discoveredText],
-      },
-      {
+      }),
+      withTransaction({
         loop_id: "id-re",
         loop_lineage: {
           loop_id: "id-re", round: 17,
           constraints_active: [discoveredText],
+          committed_action: "continue",
         },
+        success: true,
         constraint_violations: [] as string[],
         discovered_constraints: [] as string[],
-      },
+      }),
     ];
     const base = makeLoopCompileRequest({
       loop_id: "id-re",
@@ -2280,17 +2309,19 @@ describe("L7 — state file disabled cross-knob guard", () => {
       state_file: { ...DEFAULT_POLICY.state_file, enabled: false },
     });
   };
-  const baselineRound1 = (loopId: string): Record<string, unknown> => ({
-    loop_id: loopId,
-    output_summary: "Round 1 done",
-    success: true,
-    loop_lineage: {
+  const baselineRound1 = (loopId: string): Record<string, unknown> =>
+    withTransaction({
       loop_id: loopId,
-      round: 1,
-      constraints_active: ["Tests must pass", "Keep API stable", "Migrate data"],
-    },
-    constraint_violations: [],
-  });
+      output_summary: "Round 1 done",
+      success: true,
+      loop_lineage: {
+        loop_id: loopId,
+        round: 1,
+        constraints_active: ["Tests must pass", "Keep API stable", "Migrate data"],
+        committed_action: "continue",
+      },
+      constraint_violations: [],
+    });
 
   it("L2 keeps the full state in the prompt instead of pointing at nothing", () => {
     disableStateFile();
@@ -2371,5 +2402,276 @@ describe("v3.9.2 — compact criteria guidance", () => {
     // The compiler supplies its default criterion, so the field is still
     // present; the important part is that no placeholder text is emitted.
     assert.doesNotMatch(response.prompt, /<criterion text or cr id from the prompt>/);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 3.9.3 — committed-fact prompt level and the L0 field interface
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("3.9.3 — committed-fact prompt level", () => {
+  const gitObservation = (
+    phase: "before" | "after",
+    fingerprints: Record<string, string>,
+    head: string,
+  ): MachineObservation => ({
+    schemaVersion: 2,
+    providerId: "git",
+    kind: "git",
+    phase,
+    startedAt: 0,
+    finishedAt: 0,
+    status: "observed",
+    files: [],
+    data: {
+      dirty: [],
+      fingerprints,
+      head,
+      coverage: "tracked_and_non_ignored_untracked",
+    },
+  } as MachineObservation);
+
+  const noMotionEvidence = () => ({
+    beforeEvidence: [gitObservation("before", {}, "aaa")],
+    afterEvidence: [gitObservation("after", {}, "aaa")],
+  });
+
+  const committed = (
+    loopId: string,
+    round: number,
+    entry: Record<string, unknown> = {},
+    success = false,
+  ) => withTransaction({
+    loop_id: loopId,
+    loop_lineage: {
+      loop_id: loopId,
+      round,
+      constraints_active: [],
+      committed_action: "continue",
+    },
+    success,
+    ...entry,
+  }, "continue", noMotionEvidence());
+
+  it("ignores a caller last_round_result when committed history exists", () => {
+    const loopId = "det";
+    const context = {
+      results: [committed(loopId, 2)],
+    };
+    const base = makeLoopCompileRequest({
+      loop_id: loopId,
+      round: 3,
+      task: "Do work",
+    });
+    const without = compileLoop(base, context);
+    const withLegacy = compileLoop({
+      ...base,
+      last_round_result: makeLoopRoundResult({
+        round: 2,
+        success: true,
+        output_summary: "a stale caller projection",
+        discovered_constraints: ["stale constraint"],
+      }),
+    }, context);
+
+    assert.equal(withLegacy.recompile_level, without.recompile_level);
+    assert.equal(withLegacy.diff_from_previous, without.diff_from_previous);
+    assert.equal(
+      withLegacy.prompt_artifact?.promptHash,
+      without.prompt_artifact?.promptHash,
+    );
+    assert.equal(
+      withLegacy.prompt_artifact?.stateHash,
+      without.prompt_artifact?.stateHash,
+    );
+    assert.deepEqual(withLegacy.warnings, without.warnings);
+    assert.equal(withLegacy.state_file_content, without.state_file_content);
+    assert.ok(!without.prompt.includes("stale constraint"),
+      "the caller projection must not leak into the prompt");
+  });
+
+  it("stays L0 only when the committed round proves no activity", () => {
+    const loopId = "stale";
+    const response = compileLoop(makeLoopCompileRequest({
+      loop_id: loopId,
+      round: 3,
+      task: "Do work",
+      loop_objective: makeLoopObjective({
+        loop_id: loopId,
+        objective: "Do work",
+        success_criteria: ["Ship it"],
+      }),
+    }), { results: [committed(loopId, 2)] });
+
+    assert.equal(response.recompile_level, "l0");
+    assert.equal(response.diff_from_previous,
+      "failed_without_observable_new_information");
+    const prompt = response.prompt;
+    for (const path of [
+      "execution_report.criterion_claims",
+      "discovered_constraints",
+      "wrong_assumptions",
+      "emerged_subtasks",
+      "worker_results",
+      "compression_checkpoint",
+      "prompt_requests",
+    ]) {
+      assert.match(prompt, new RegExp("`" + path.replace(/\./g, "\.") + "`"),
+        `L0 must still offer ${path}`);
+    }
+    assert.match(prompt, /cr-[a-f0-9]{8}/, "real criterion id at L0");
+    assert.match(prompt, /Ship it/);
+  });
+
+  it("does not let an empty retry inherit the previous committed flags", () => {
+    const loopId = "retry-flags";
+    const staleFlag = {
+      severity: "warn" as const,
+      field: "files_changed",
+      check: "evidence_integrity",
+      detail: "STALE_PREVIOUS_FINDING",
+    };
+    const context = {
+      results: [withTransaction({
+        loop_id: loopId,
+        loop_lineage: {
+          loop_id: loopId,
+          round: 1,
+          constraints_active: [],
+          committed_action: "continue",
+        },
+        success: false,
+        verification_flags: [staleFlag],
+      }, "continue", noMotionEvidence())],
+    };
+
+    const nextRound = compileLoop(makeLoopCompileRequest({
+      loop_id: loopId,
+      round: 2,
+      task: "Do work",
+    }), context);
+    assert.match(nextRound.prompt, /STALE_PREVIOUS_FINDING/,
+      "a normal new round shows the committed previous findings");
+
+    const retry = compileLoop(makeLoopCompileRequest({
+      loop_id: loopId,
+      round: 2,
+      task: "Do work",
+      attempt: 2,
+      verification_flags: [],
+    }), context);
+    assert.equal(retry.recompile_level, "l0");
+    assert.doesNotMatch(retry.prompt, /STALE_PREVIOUS_FINDING/,
+      "an in-flight retry's empty findings are authoritative; they must not " +
+      "fall back to the previous committed round's flags");
+  });
+
+  it("keeps L1 when the committed round has observable machine motion", () => {
+    const loopId = "motion";
+    const context = {
+      results: [withTransaction({
+        loop_id: loopId,
+        loop_lineage: {
+          loop_id: loopId,
+          round: 2,
+          constraints_active: [],
+          committed_action: "continue",
+        },
+        success: false,
+      }, "continue", {
+        beforeEvidence: [gitObservation("before", { "a.ts": "m:1" }, "aaa")],
+        afterEvidence: [gitObservation("after", { "a.ts": "m:2" }, "bbb")],
+      })],
+    };
+    const response = compileLoop(makeLoopCompileRequest({
+      loop_id: loopId,
+      round: 3,
+      task: "Do work",
+    }), context);
+    assert.equal(response.recompile_level, "l1");
+    assert.equal(response.diff_from_previous, "state_capsule");
+  });
+
+  it("offers the current requirement as the natural contract work item", () => {
+    setPolicyForTest({
+      ...DEFAULT_POLICY,
+      evidence: {
+        ...DEFAULT_POLICY.evidence,
+        commands: [{
+          name: "verify",
+          enabled: true,
+          executable: process.execPath,
+          args: ["-e", "process.exit(0)"],
+          phase: "after",
+          required: true,
+          timeout_ms: 1000,
+          max_output_chars: 2000,
+          success_exit_codes: [0],
+        }],
+      },
+    });
+    try {
+      const response = compileLoop(makeLoopCompileRequest({
+        loop_id: "contract-natural",
+        round: 2,
+        task: "Build the parser",
+        force_level: "l2",
+        loop_objective: makeLoopObjective({
+          loop_id: "contract-natural",
+          objective: "Build the parser",
+          success_criteria: ["Ship the parser"],
+        }),
+      }), null);
+      const prompt = response.prompt;
+      assert.match(prompt, /The current requirement is the natural work item/);
+      assert.match(prompt, /"work_item": "Build the parser"/);
+      assert.match(prompt, /"criterion_refs": \[/);
+      assert.match(prompt, /cr-[a-f0-9]{8}/);
+      assert.match(prompt, /"verify_with": \[/);
+      assert.match(prompt, /"verify"/);
+      assert.doesNotMatch(prompt, /\bsg-[a-f0-9]{8}\b/);
+      assert.doesNotMatch(prompt, /\brci-[a-f0-9]{8}\b/);
+    } finally {
+      resetPolicy();
+    }
+  });
+
+  it("keeps the deep-restore recovery boundary and brief on the redo round", () => {
+    const loopId = "deep-restore";
+    const context = {
+      results: [
+        committed(loopId, 1, {}, true),
+        committed(loopId, 2, {}, true),
+        // Abandoned branch above the redo round: must not leak its objective.
+        withTransaction({
+          loop_id: loopId,
+          loop_lineage: {
+            loop_id: loopId,
+            round: 4,
+            constraints_active: [],
+            committed_action: "continue",
+          },
+          success: true,
+          loop_objective: makeLoopObjective({
+            loop_id: loopId,
+            objective: "ABANDONED branch",
+            success_criteria: ["never"],
+          }),
+        }),
+        committedBacktrackRound(5, loopId, 2),
+      ],
+    };
+    const response = compileLoop(makeLoopCompileRequest({
+      loop_id: loopId,
+      round: 3,
+      task: "Restore the parser",
+    }), context);
+
+    assert.equal(response.recompile_level, "l2");
+    assert.equal(response.diff_from_previous, "recovery_boundary");
+    assert.ok((response.state_file_content ?? "").includes("Restored to round**: 2"),
+      "the Recovery Brief must use the decoded backtrack target");
+    assert.ok(!response.prompt.includes("ABANDONED branch"),
+      "the abandoned branch's objective must not leak into the redo prompt");
   });
 });

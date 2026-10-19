@@ -11,7 +11,7 @@ export function decidePromptLevel(input) {
         return { level: "l2", reasons: ["recovery_boundary"] };
     }
     if ((input.attempt ?? 1) > 1) {
-        return { level: "l0", reasons: ["retry_delta"] };
+        return { level: "l0", reasons: ["same_round_retry"] };
     }
     if (input.verificationContradicted) {
         return { level: "l2", reasons: ["verification_contradicted"] };
@@ -36,15 +36,18 @@ export function decidePromptLevel(input) {
     if (input.previousStateMissing) {
         return { level: "l2", reasons: ["missing_previous_state"] };
     }
-    if (input.previousFailedWithoutNewInformation) {
-        return { level: "l0", reasons: ["retry_delta"] };
+    if (input.previousRoundFailed &&
+        input.previousRoundObservableNewInformation === false) {
+        return {
+            level: "l0",
+            reasons: ["failed_without_observable_new_information"],
+        };
     }
     // v3.8.1: no periodic_refresh branch. It was gated on
     // `full_refresh_interval`, whose default is 0 — a switch that disables its
-    // own branch out of the box. L2 is reachable by six reasons that are FACTS
-    // about the round (first round, plan boundary, recovery, machine
-    // contradiction, checkpoint, repeated rejection); a round-count timer was
-    // the one that was not.
+    // own branch out of the box. L2 is reachable only by FACTS about the round
+    // (first round, plan boundary, recovery, machine contradiction, checkpoint,
+    // repeated rejection); a round-count timer was the one that was not.
     return { level: "l1", reasons: ["state_capsule"] };
 }
 //# sourceMappingURL=prompt-policy.js.map

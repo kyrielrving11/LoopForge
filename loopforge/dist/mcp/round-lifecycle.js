@@ -12,7 +12,7 @@
 import { randomUUID } from "node:crypto";
 import { LoopForgeEngine } from "../engine.js";
 import { deriveGate } from "../cognitive-governance.js";
-import { Mode, makeLoopCompileRequest, makeLoopRoundResult, } from "../protocol.js";
+import { Mode, makeLoopCompileRequest, } from "../protocol.js";
 import { captureEntrypointTrust, EvidenceCollector } from "../evidence-provider.js";
 import { deriveRoundObservationDelta, makeRoundId, parseRoundTransactionSnapshot, prepareRoundTransaction, } from "../round-transaction.js";
 import { deriveActiveRoundContract, deriveRoundContractView } from "../round-contract.js";
@@ -43,8 +43,16 @@ function parseFingerprintMap(value) {
     return out;
 }
 // ── Helpers ────────────────────────────────────────────────────────────────
-export function buildLoopRequest(session, lastEval, verificationFlags) {
-    const req = {
+export function buildLoopRequest(session) {
+    // The request carries CURRENT-ROUND context only. Every previous-round
+    // fact is read from the Vault's committed rounds by the compiler, so live,
+    // resume, unpause and backtrack compiles cannot disagree about the same
+    // history. `attempt` is restored only while the held snapshot belongs to
+    // the current round; entering the next round resets it to 1.
+    const heldAttempt = session.roundSnapshot?.round === session.currentRound
+        ? session.roundSnapshot.attempt
+        : 1;
+    return {
         task: session.task,
         mode: Mode.LOOP_COMPILE,
         feedback: null,
@@ -53,51 +61,9 @@ export function buildLoopRequest(session, lastEval, verificationFlags) {
         loop_id: session.loopId,
         round: session.currentRound,
         max_rounds: session.maxRounds,
-        verification_flags: verificationFlags ?? [],
+        attempt: heldAttempt,
+        consecutive_rejections: session.consecutiveRejections,
     };
-    if (lastEval) {
-        req.last_round_result = makeLoopRoundResult({
-            round: session.currentRound - 1,
-            success: lastEval.success,
-            output_summary: lastEval.output_summary,
-            constraint_violations: lastEval.constraint_violations,
-            manual_fixes_needed: "",
-            // P0–P2: Forward evolution fields to next compile.
-            // v3.9.1: worker_results stays a report; only top-level
-            // discovered_constraints promotes a finding into the active set.
-            discovered_constraints: lastEval.discovered_constraints ?? [],
-            objective_refinement: lastEval.objective_refinement ?? "",
-            emerged_subtasks: lastEval.emerged_subtasks ?? [],
-            // P4: Execution evidence
-            execution_report: lastEval.execution_report ?? undefined,
-            // P5: Self-correction
-            retracted_constraints: lastEval.retracted_constraints ?? [],
-            revised_success_criteria: lastEval.revised_success_criteria ?? [],
-            wrong_assumptions: lastEval.wrong_assumptions ?? [],
-            // Multi-agent: Forward delegation results to next compile
-            worker_results: lastEval.worker_results ?? [],
-            // v1.10: Checkpoint boundary
-            compression_checkpoint: lastEval.compression_checkpoint ?? false,
-            checkpoint_label: lastEval.checkpoint_label ?? "",
-            // v3.7.1: Sub-goal lifecycle — explicit transitions
-            subgoal_updates: lastEval.subgoal_updates ?? [],
-            // v2.9: Model's information needs for the next prompt
-            prompt_requests: lastEval.prompt_requests,
-            // v2.12: Tri-state outcome + blocker + retroactive claims
-            outcome: lastEval.outcome,
-            blocker: lastEval.blocker,
-            retroactiveClaims: lastEval.retroactiveClaims ?? [],
-            // v3.3: round_contract was carried here so it could drive the next
-            // round's Current Task. v3.4: intentionally NOT forwarded — the
-            // submission's round_contract is a PROPOSAL for the next round, and
-            // the ACTIVE contract is derived from committed rounds at compile time
-            // (`deriveRoundFacts` → `deriveActiveRoundContract`), which also keeps
-            // it correct on retry / resume / unpause / backtrack compiles that have
-            // no last_round_result. Reading this field again would reintroduce the
-            // second source of truth the derivation replaced.
-        });
-    }
-    return req;
 }
 // ── RoundLifecycle ─────────────────────────────────────────────────────────
 export class RoundLifecycle {
@@ -493,7 +459,7 @@ export class RoundLifecycle {
         if (session.currentRound <= recovered.snapshot.round) {
             session.currentRound = recovered.snapshot.round + 1;
         }
-        const request = buildLoopRequest(session, pr.newLastSelfEval, pr.verificationFlags);
+        const request = buildLoopRequest(session);
         const prepared = await new RoundDriver(session.engine, this.store).prepare(request, session.loopId, session.currentRound);
         if (!prepared) {
             session.status = "stalled";
@@ -602,6 +568,12 @@ export class RoundLifecycle {
             plan_source: lcr.plan_source ?? null,
             constraints_from_plan: lcr.constraints_from_plan ?? [],
             max_rounds: session.maxRounds,
+            // Preserve an in-flight retry's attempt; a next-round compile resets
+            // it because the held snapshot belongs to the previous round.
+            attempt: session.roundSnapshot?.round === session.currentRound
+                ? session.roundSnapshot.attempt
+                : 1,
+            consecutive_rejections: session.consecutiveRejections,
         };
         const prepared = await new RoundDriver(session.engine, this.store).prepare(compileRequest, session.loopId, session.currentRound);
         if (!prepared) {
@@ -715,7 +687,10 @@ export class RoundLifecycle {
     /** Build a rejection result: compile a retry prompt, persist, return.
      *  MUTATES: session.roundSnapshot, session.currentPrompt, session.currentLevel */
     async buildRejectionResult(sessionId, session, pr, verificationFlags, receiptBase) {
-        const retryRequest = buildLoopRequest(session, undefined, verificationFlags);
+        // In-flight attempt findings are authority for THIS attempt, not
+        // committed history: write them explicitly on the retry request.
+        const retryRequest = buildLoopRequest(session);
+        retryRequest.verification_flags = verificationFlags;
         const preparedRetry = await new RoundDriver(session.engine, this.store).prepareRetry(retryRequest, session.roundSnapshot, pr.rejectionPrompt ?? "", session.consecutiveRejections);
         if (!preparedRetry) {
             session.status = "stalled";
@@ -953,7 +928,7 @@ export class RoundLifecycle {
      *  Includes the commit fence (pause/delete race guard) and context provider.
      *  MUTATES: session.currentRound, session.currentPrompt, session.currentLevel,
      *           session.evidenceBaseline, session.roundSnapshot */
-    async advanceToNextRound(sessionId, session, selfEval, pr, verificationFlags, actualEvidence, receiptBase) {
+    async advanceToNextRound(sessionId, session, selfEval, pr, actualEvidence, receiptBase) {
         const roundSuccess = pr.roundSuccess;
         // M4 (v3.7.x): replay guard. The counter may already point past the
         // committed round when this continue is a REPLAY — after a crash or an
@@ -1005,7 +980,7 @@ export class RoundLifecycle {
                 roundSuccess,
             };
         }
-        const request = buildLoopRequest(session, selfEval, verificationFlags);
+        const request = buildLoopRequest(session);
         if (externalCtx) {
             request.external_context = externalCtx;
         }
@@ -1230,7 +1205,7 @@ export class RoundLifecycle {
             return this.buildStopResult(sessionId, session, tx.pr, finalized.reason, receiptBase);
         }
         // ── 5. Continue — compile next round ─────────────────────────────────
-        return this.advanceToNextRound(sessionId, session, selfEval, tx.pr, tx.verificationFlags, tx.actualEvidence, receiptBase);
+        return this.advanceToNextRound(sessionId, session, selfEval, tx.pr, tx.actualEvidence, receiptBase);
     }
     /** Core cycle entry used by SessionManager.advance after the queue + lease
      *  dance: validate → extract → execute transaction → route disposition

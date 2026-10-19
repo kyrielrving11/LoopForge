@@ -631,6 +631,39 @@ describe("MCP — session persistence (save / resume)", async () => {
     assert.ok(resumed!.prompt!.length > 0);
   });
 
+  it("resume() recompiles the same prompt when the held prompt is lost", async () => {
+    const loopId = "resume-recompile";
+    const r1 = await mgr.create({ task: "Test task", loopId });
+    const r2 = await mgr.advance(r1.sessionId, agentOutput({
+      success: false, shouldContinue: true,
+    }), evalParam({ success: false, shouldContinue: true }));
+    assert.equal(r2.level, "l1",
+      "machine command activity keeps a failed round at normal density");
+    assert.ok(r2.prompt);
+
+    // Simulate a restart that lost the held prompt: the session document is
+    // durable, but the prompt is absent, so resume must recompile from the
+    // committed history.
+    const doc = store.readSession(loopId);
+    assert.ok(doc);
+    const lineage = doc!.entry.loop_lineage as Record<string, unknown>;
+    store.writeSession(loopId, {
+      ...doc!,
+      entry: {
+        ...doc!.entry,
+        loop_lineage: { ...lineage, current_prompt: null },
+      },
+    });
+
+    mgr.close();
+    const mgr2 = new SessionManager(store);
+    const resumed = await mgr2.resume(loopId);
+    assert.ok(resumed?.prompt);
+    assert.equal(resumed!.level, r2.level);
+    assert.equal(resumed!.prompt, r2.prompt,
+      "the same committed history must compile the same prompt");
+  });
+
   it("resume() returns stopped result for completed loop", async () => {
     const r1 = await mgr.create({ task: "Test task", loopId: "resume-done" });
     await mgr.advance(r1.sessionId, agentOutput({

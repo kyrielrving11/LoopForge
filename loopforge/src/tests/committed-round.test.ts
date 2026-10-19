@@ -1,14 +1,18 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  committedRoundGitMotion,
   decodeCommittedRound,
   decodeMergedRound,
   derivationRounds,
   historyRounds,
+  pendingBacktrackRecord,
   persistedFrontier,
   readOnlyRounds,
+  roundResultFromCommittedRound,
 } from "../committed-round.js";
-import { committedBacktrackRound, committedFeedbackRound, mergedLineageRound } from "./_helpers.js";
+import type { MachineObservation } from "../protocol.js";
+import { committedBacktrackRound, committedFeedbackRound, mergedLineageRound, withTransaction } from "./_helpers.js";
 import { claimedMetCriteria } from "../self-eval.js";
 
 /** The durable session document — the frontier a read-only view reads. */
@@ -130,5 +134,79 @@ describe("CommittedRoundView", () => {
     const transaction = entry.loop_lineage!.round_transaction as Record<string, unknown>;
     delete transaction.snapshot;
     assert.equal(decodeCommittedRound(entry), null);
+  });
+
+  it("projects a committed view to the compiler's previous-round shape", () => {
+    const view = decodeCommittedRound(committedFeedbackRound(2, {
+      loopId: "parity",
+      success: true,
+      outcome: "partial",
+      discoveredConstraints: ["a limit"],
+      files: ["src/a.ts"],
+      met: ["criterion"],
+    }));
+    assert.ok(view);
+    const result = roundResultFromCommittedRound(view);
+    assert.equal(result.round, 2);
+    assert.equal(result.success, true);
+    assert.equal(result.output_summary, "Committed round 2.");
+    assert.deepEqual(result.discovered_constraints, ["a limit"]);
+    assert.equal(result.outcome, "partial");
+    assert.equal(result.manual_fixes_needed, "");
+    assert.deepEqual(result.execution_report, view.executionReport);
+    assert.deepEqual(result.constraint_violations, []);
+  });
+
+  it("finds a deep-restore backtrack by target + 1", () => {
+    const deep = committedBacktrackRound(5, "bt", 2);
+    assert.equal(pendingBacktrackRecord([deep], 3)?.round, 5);
+    assert.equal(pendingBacktrackRecord([deep], 4), null);
+    const shallow = committedBacktrackRound(4, "bt", 3);
+    assert.equal(pendingBacktrackRecord([deep, shallow], 4)?.round, 4);
+  });
+
+  it("aggregates every Git provider when deriving round motion", () => {
+    const git = (
+      providerId: string,
+      phase: "before" | "after",
+      head: string,
+    ): MachineObservation => ({
+      schemaVersion: 2,
+      providerId,
+      kind: "git",
+      phase,
+      startedAt: 0,
+      finishedAt: 0,
+      status: "observed",
+      files: [],
+      data: {
+        dirty: [],
+        fingerprints: {},
+        head,
+        coverage: "tracked_and_non_ignored_untracked",
+      },
+    } as MachineObservation);
+    const view = decodeMergedRound(withTransaction({
+      loop_id: "motion",
+      loop_lineage: {
+        loop_id: "motion",
+        round: 1,
+        constraints_active: [],
+        committed_action: "continue",
+      },
+      success: false,
+    }, "continue", {
+      beforeEvidence: [
+        git("git", "before", "aaa"),
+        git("git-alt", "before", "bbb"),
+      ],
+      afterEvidence: [
+        git("git", "after", "aaa"),
+        git("git-alt", "after", "ccc"),
+      ],
+    }));
+    assert.ok(view);
+    assert.equal(committedRoundGitMotion(view), true,
+      "the second Git provider's HEAD move is motion even when the first is still");
   });
 });

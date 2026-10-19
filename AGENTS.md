@@ -231,13 +231,27 @@ it; none owns a second copy. Prompt examples may cite only real ids rendered by
 the current prompt or the live guidance — never a fabricated `sg-`/`rci-` id.
 
 The prompt's evaluation block uses a compact trigger checklist built from the
-same `GUIDES` table. `isFieldApplicable` is the one semantic applicability rule;
-`isFieldPrompted` is the level-aware presentation subset. There is no
-hand-maintained optional-field list. Real criterion ids/text come from the
-compile's `criterion_statuses`; the full legal shapes remain in
-`submission_guidance`. Optional fields are opportunities, not a coverage
-checklist — omission stays correct. `round_contract`, `contract_item_claims`
-and `subgoal_updates` keep their dedicated renderers with real ids.
+same `GUIDES` table. `isFieldApplicable` is the one semantic applicability rule
+and is independent of prompt level. `compact` is the only marker of
+compact-checklist membership; `isFieldPrompted` is that marker plus
+applicability. There is no hand-maintained optional-field list and no
+level-specific field subset. Real criterion ids/text come from the compile's
+`criterion_statuses`; the full legal shapes remain in `submission_guidance`.
+Optional fields are opportunities, not a coverage checklist — omission stays
+correct. `round_contract`, `contract_item_claims` and `subgoal_updates` keep
+their dedicated renderers with real ids and are never compact members.
+
+Previous-round facts are read from committed history, never from the MCP
+request. One `PreviousRoundFacts` bundle (`CommittedRoundView` projection,
+committed verification flags, `derivePromptFreshness`) feeds the level policy,
+canonical state and the evaluation block. `request.last_round_result` is only
+the in-flight/library fallback when no committed view exists. `derivePromptFreshness`
+is pure and unpersisted: motion is the shared Git rule over every Git delta,
+activity is an attributable after-phase command, and evolution is a committed
+semantic declaration. `observableNewInformation` is false only when the
+machine PROVES no activity; `null` (unknown) never downgrades to L0.
+`prompt_requests` remains applicable in an L0 submission; only a NEXT prompt
+that is L0 ignores the incoming requests.
 
 `submission_guidance` and `submission_receipt` are read-only projections of
 current/committed facts. They are not persisted as a second ledger. The
@@ -247,14 +261,21 @@ what it actually preserved. `submission_receipt.files_reconciliation` is the
 one reported-vs-observed comparison (`deriveFilesReconciliation`) over the
 shared `ObservationDelta.changedFiles`: exact path sets, `[]` = observed no
 change, `null` = unknown, and `unknown`/`not_applicable` never become a
-mismatch. It is receipt-only and never next-prompt input. `promptRequestEffects`
-records what the CURRENT prompt did — it must never be read by compile or
-decision code as an instruction for a later prompt.
+mismatch. It is receipt-only and never next-prompt input; the next-round fix
+item comes from the committed verification flag, which is the one machine-
+finding channel. `promptRequestEffects` records what the CURRENT prompt did —
+it must never be read by compile or decision code as an instruction for a
+later prompt.
 
-L0, L1, and L2 select prompt density only. L2 is entered for factual round
-conditions such as first round, plan boundary, committed recovery, machine
-contradiction, checkpoint boundary, or repeated rejection; there is no
-round-count timer.
+L0, L1, and L2 select prompt density only. L0 is a same-round retry, or a
+committed failed round whose freshness derivation PROVES no machine activity
+and no declared evolution. An unobservable boundary stays L1. L2 is entered
+for factual round conditions such as first round, plan boundary, deep or
+shallow committed recovery, machine contradiction, checkpoint boundary, or
+repeated rejection; there is no round-count timer. The Recovery Brief and the
+recovery boundary share `pendingBacktrackRecord` (backtrack `target + 1 ===
+redoRound`), and objective/constraint evolution is bounded by the compile
+window so an abandoned branch cannot leak into the redo prompt.
 
 One fixed section-priority table owns prompt assembly. Mandatory sections are
 protected: they render first and are never dropped or truncated. Optional
@@ -331,8 +352,13 @@ run the scripted prepack in the clean mirror.
   protected overflow, deterministic truncation, rendered-vs-dropped priority,
   and identical-input determinism.
 - Field-decision changes: cover the compact trigger checklist (max seven
-  fields), semantic applicability vs level-aware prompting, real `cr-` ids and
-  texts, the L0 subset, no fabricated ids, and omission-stays-correct.
+  fields), level-independent applicability, the explicit `compact` marker,
+  real `cr-` ids and texts, the same L0/L1/L2 trigger set, no fabricated ids,
+  and omission-stays-correct.
+- Prompt-level changes: cover committed-fact freshness (motion true/false/
+  null × command activity × declared evolution), unknown-never-downgrades,
+  live-vs-resume determinism, retry-attempt restoration, and deep-restore
+  recovery.
 - Criterion-claim changes: cover real-id and exact-text matches, unknown
   references dropped with diagnostics, partial/all drops, fail-open on an
   unobservable reference space, and an observed-empty space.

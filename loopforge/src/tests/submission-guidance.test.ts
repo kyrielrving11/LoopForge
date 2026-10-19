@@ -24,12 +24,9 @@ import type { McpSession } from "../mcp/round-lifecycle.js";
 import type {
   CriterionStatus,
   LoopForgeResponse,
-  LoopRoundResult,
-  SelfEvaluation,
   SubGoal,
 } from "../protocol.js";
 import type { ActiveContractView } from "../round-contract.js";
-import { makeSelfEvaluation } from "../protocol.js";
 import { deriveContractItemIds } from "../token-utils.js";
 import { committedFeedbackRound } from "./_helpers.js";
 import { decodeCommittedRound } from "../committed-round.js";
@@ -226,52 +223,29 @@ describe("v3.9.1 — submission_guidance", () => {
   });
 });
 
-describe("v3.9.1 — worker discoveries are reports, not constraints", () => {
-  it("buildLoopRequest forwards only top-level discovered_constraints", () => {
-    const evaluation = makeSelfEvaluation({
-      success: false,
-      output_summary: "delegated",
-      constraint_violations: [],
-      should_continue: true,
-      discovered_constraints: [],
-      worker_results: [{
-        agentId: "w1",
-        subTask: "scan",
-        resultSummary: "found a limit",
-        outcome: "success",
-        discoveredConstraints: ["never touch prod data"],
-      }],
-    });
-    const request = buildLoopRequest(sessionView() as McpSession, evaluation);
-    const result = request.last_round_result as LoopRoundResult | null | undefined;
-    assert.ok(result, "last_round_result is forwarded");
-    assert.deepEqual(result.discovered_constraints, [],
-      "a worker discovery does not enter the global constraint stream");
-    assert.equal(
-      result.worker_results?.[0]?.discoveredConstraints?.[0],
-      "never touch prod data",
-      "the worker report itself is preserved",
-    );
+describe("3.9.3 — MCP requests carry current-round context only", () => {
+  it("buildLoopRequest no longer forwards last_round_result", () => {
+    const request = buildLoopRequest(sessionView());
+    assert.equal(request.last_round_result, undefined,
+      "previous-round facts come from the committed Vault read model");
+    assert.equal(request.attempt, 1);
+    assert.equal(request.consecutive_rejections, 0);
   });
 
-  it("a top-level discovery is still forwarded", () => {
-    const evaluation: SelfEvaluation = makeSelfEvaluation({
-      success: false,
-      output_summary: "accepted a worker finding",
-      constraint_violations: [],
-      should_continue: true,
-      discovered_constraints: ["never touch prod data"],
-      worker_results: [{
-        agentId: "w1",
-        subTask: "scan",
-        resultSummary: "found a limit",
-        outcome: "success",
-        discoveredConstraints: ["never touch prod data"],
-      }],
+  it("restores the held attempt only while the snapshot belongs to the current round", () => {
+    const session = sessionView({
+      currentRound: 3,
+      roundSnapshot: {
+        ...(sessionView().roundSnapshot as object),
+        round: 2,
+        attempt: 2,
+      } as McpSession["roundSnapshot"],
     });
-    const request = buildLoopRequest(sessionView() as McpSession, evaluation);
-    const result = request.last_round_result as Record<string, unknown> | undefined;
-    assert.deepEqual(result?.discovered_constraints, ["never touch prod data"]);
+    assert.equal(buildLoopRequest(session).attempt, 1,
+      "a next-round compile must not inherit the previous round's retry");
+    session.currentRound = 2;
+    assert.equal(buildLoopRequest(session).attempt, 2,
+      "an in-flight retry keeps its attempt");
   });
 });
 
@@ -311,7 +285,6 @@ describe("v3.9.2 — compact trigger guidance", () => {
   const doneSubGoal: SubGoal = { ...activeSubGoal, status: "done" };
 
   const facts = (overrides: Partial<GuidanceFacts> = {}): GuidanceFacts => ({
-    level: "l1",
     activeContract: null,
     itemStatuses: null,
     subGoals: [],
@@ -346,12 +319,9 @@ describe("v3.9.2 — compact trigger guidance", () => {
     assert.equal(isFieldApplicable("gate_ids", facts()), false);
   });
 
-  it("separates prompt density from semantic applicability", () => {
-    const l0 = promptedFieldPaths(facts({ level: "l0" }));
-    assert.deepEqual(l0, ["discovered_constraints", "wrong_assumptions"]);
-
-    const l1 = promptedFieldPaths(facts({ criteria: [criterion] }));
-    assert.deepEqual(l1, [
+  it("keeps one level-independent compact subset", () => {
+    const compact = promptedFieldPaths(facts({ criteria: [criterion] }));
+    assert.deepEqual(compact, [
       "execution_report.criterion_claims",
       "discovered_constraints",
       "wrong_assumptions",
@@ -360,10 +330,15 @@ describe("v3.9.2 — compact trigger guidance", () => {
       "compression_checkpoint",
       "prompt_requests",
     ]);
+    assert.ok(compact.length <= 7, "the compact checklist is structurally max seven");
     assert.equal(isFieldPrompted("round_contract", facts()), false,
       "the dedicated contract renderer owns this field");
     assert.equal(isFieldPrompted("subgoal_updates", facts({ subGoals: [activeSubGoal] })), false,
       "the dedicated sub-goal renderer owns this field");
+    assert.equal(isFieldPrompted("execution_report.contract_item_claims", facts({ activeContract })), false,
+      "the dedicated contract-item renderer owns this field");
+    assert.equal(isFieldPrompted("prompt_requests", facts()), true,
+      "L0 can still submit next-prompt needs; only the receiving L0 ignores them");
   });
 
   it("uses a real criterion id and text, never the old placeholder", () => {
@@ -406,7 +381,7 @@ describe("v3.9.2 — compact trigger guidance", () => {
     assert.doesNotMatch(block, /`objective_refinement`/);
   });
 
-  it("keeps L0 lean while retaining the dedicated contract block", () => {
+  it("keeps L0's field interface complete while its state body stays lean", () => {
     const ctx: SelfEvalPromptContext = {
       round: 2,
       level: "l0",
@@ -419,15 +394,79 @@ describe("v3.9.2 — compact trigger guidance", () => {
       recovery: true,
       gateEnabled: false,
       criteria: [criterion],
+      currentRequirement: "Build the thing",
     };
     const block = renderSelfEvalBlock(ctx);
-    assert.match(block, /`discovered_constraints`/);
-    assert.match(block, /`wrong_assumptions`/);
-    assert.doesNotMatch(block, /`execution_report.criterion_claims`/);
-    assert.doesNotMatch(block, /`worker_results`/);
-    assert.doesNotMatch(block, /`compression_checkpoint`/);
-    assert.doesNotMatch(block, /`prompt_requests`/);
+    for (const path of [
+      "execution_report.criterion_claims",
+      "discovered_constraints",
+      "wrong_assumptions",
+      "emerged_subtasks",
+      "worker_results",
+      "compression_checkpoint",
+      "prompt_requests",
+    ]) {
+      assert.match(block, new RegExp(`\`${path.replace(/\./g, "\\.")}\``),
+        `L0 must offer the applicable field ${path}`);
+    }
+    assert.match(block, /cr-12345678/);
+    assert.match(block, /The current requirement is the natural work item/);
     assert.match(block, /No active contract/);
+  });
+
+  it("renders the current requirement as the natural contract work item", () => {
+    const ctx: SelfEvalPromptContext = {
+      round: 2,
+      level: "l2",
+      activeContract: null,
+      itemStatuses: null,
+      commands: ["verify"],
+      contractVerificationAvailable: true,
+      subGoals: [],
+      verificationFlags: [],
+      recovery: false,
+      gateEnabled: false,
+      criteria: [criterion],
+      currentRequirement: "Build the thing",
+    };
+    const block = renderSelfEvalBlock(ctx);
+    assert.match(block, /"work_item": "Build the thing"/);
+    assert.match(block, /cr-12345678/);
+    assert.match(block, /"verify_with": \[/);
+    assert.match(block, /"verify"/);
+    assert.doesNotMatch(block, /<the next slice, one line>/);
+    assert.doesNotMatch(block, /\bsg-[a-f0-9]{8}\b/);
+    assert.doesNotMatch(block, /\brci-[a-f0-9]{8}\b/);
+  });
+
+  it("makes an L0 committed files mismatch actionable without touching the gate", () => {
+    const ctx: SelfEvalPromptContext = {
+      round: 2,
+      level: "l0",
+      activeContract: null,
+      itemStatuses: null,
+      commands: ["verify"],
+      contractVerificationAvailable: true,
+      subGoals: [],
+      verificationFlags: [{
+        severity: "warn",
+        field: "files_changed",
+        check: "evidence_integrity",
+        detail: "Agent files_changed doesn't match evidence: unreported: [a.ts]; unconfirmed: [b.ts]",
+      }],
+      recovery: false,
+      gateEnabled: false,
+      criteria: [criterion],
+    };
+    const block = renderSelfEvalBlock(ctx);
+    assert.match(block, /Previous machine findings name these fields/);
+    assert.match(block, /execution_report\.files_changed/);
+    assert.match(block, /→ Action: Report only the net boundary change/);
+    assert.match(block, /add every machine-observed path you omitted/);
+
+    const l1Block = renderSelfEvalBlock({ ...ctx, level: "l1" });
+    assert.doesNotMatch(l1Block, /→ Action: Report only the net boundary change/,
+      "L1/L2 gate actions are not duplicated in the evaluation block");
   });
 
   it("caps criterion display without narrowing validation", () => {

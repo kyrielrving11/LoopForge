@@ -7,7 +7,8 @@ import { createHash } from "node:crypto";
 import { deriveConfiguredCapability, getPolicy } from "./policy.js";
 import { AgentStatus, makeLoopCompileResponse, makeLoopObjective, makeConstraintMeta, makeMilestoneSummary, makeRollingSummary, } from "./protocol.js";
 import { createCanonicalLoopState, renderCanonicalStateMarkdown, } from "./canonical-state.js";
-import { decodeBacktrackRecord, decodeRound, entryLineage, entryCriteriaMet, entryCriteriaRemaining, entryActiveConstraints, entryRetractedConstraints, machineGitMotionSeries, derivationRounds, } from "./committed-round.js";
+import { decodeRound, entryLineage, entryCriteriaMet, entryCriteriaRemaining, entryActiveConstraints, entryRetractedConstraints, pendingBacktrackRecord, roundResultFromCommittedRound, machineGitMotionSeries, derivationRounds, } from "./committed-round.js";
+import { derivePromptFreshness, UNKNOWN_PROMPT_FRESHNESS, } from "./prompt-freshness.js";
 import { NO_IN_FLIGHT_ROUND, deriveRoundFacts } from "./round-facts.js";
 import { recoveryBriefLines } from "./enforcement-gate.js";
 import { deriveSubGoals, duplicateEmergedDeclarations } from "./subgoal-state.js";
@@ -82,8 +83,16 @@ export function getPreviousRound(loopId, round, context) {
             : typeof data.output_summary === "string" ? data.output_summary : "",
     };
 }
-function latestObjective(loopId, context) {
-    const candidates = loopEntries(loopId, context).reverse();
+function latestObjective(loopId, context,
+/** Exclusive compile-round bound. A deep-restore redo must never read the
+ *  abandoned branch's objective (and its rolled-back refinements). */
+beforeRound) {
+    const candidates = loopEntries(loopId, context)
+        .filter((entry) => {
+        const round = entryRound(entry);
+        return round >= 1 && round < beforeRound;
+    })
+        .reverse();
     for (const entry of candidates) {
         const raw = entry.loop_objective;
         if (!raw || typeof raw !== "object" || Array.isArray(raw))
@@ -107,8 +116,9 @@ function latestObjective(loopId, context) {
     }
     return null;
 }
-function evolveObjective(request, context) {
-    const current = request.loop_objective ?? latestObjective(request.loop_id, context) ??
+function evolveObjective(request, context, previous) {
+    const current = request.loop_objective ??
+        latestObjective(request.loop_id, context, request.round) ??
         makeLoopObjective({
             objective: request.task,
             success_criteria: ["Task goal achieved with verifiable evidence"],
@@ -116,7 +126,7 @@ function evolveObjective(request, context) {
             created_at_round: 1,
             loop_id: request.loop_id,
         });
-    const last = request.last_round_result;
+    const last = previous.result;
     const history = [...(current.refinement_history ?? [])];
     let objective = current.objective || request.task;
     let version = current.version ?? 1;
@@ -124,9 +134,9 @@ function evolveObjective(request, context) {
         const refinement = last.objective_refinement.trim();
         // M5: fold each refinement exactly once per persisted objective state.
         // A retry recompiles the same round against the same committed
-        // last_round_result; without this guard every retry attempt re-appends
-        // the refinement and inflates the version — the objective text and the
-        // state file grew "Refinement: X" once per attempt.
+        // previous-round projection; without this guard every retry attempt
+        // re-appends the refinement and inflates the version — the objective text
+        // and the state file grew "Refinement: X" once per attempt.
         if (!history.includes(refinement)) {
             history.push(refinement);
             objective = `${objective}\nRefinement: ${refinement}`;
@@ -144,38 +154,35 @@ function evolveObjective(request, context) {
         loop_id: request.loop_id,
     });
 }
-function evolveConstraints(request, objective, previous, context) {
-    const retired = unique(request.last_round_result?.retracted_constraints ?? []);
+function evolveConstraints(request, objective, previous, windowRounds) {
+    const retired = unique(previous.result?.retracted_constraints ?? []);
     const retiredSet = new Set(retired);
-    const discovered = unique(request.last_round_result?.discovered_constraints ?? [])
+    const discovered = unique(previous.result?.discovered_constraints ?? [])
         .slice(0, getPolicy().evolution.max_discovered_constraints_per_round);
     // v2.14: agent-declared retractions of plan/hard/criteria constraints
     // persist for constraints.retire_window rounds (they are re-merged from
     // the request/objective every round, so without this the documented
     // "Removed from the active constraint set" never held for them). The
-    // retraction rounds are derived from vault entries — no new persistence
-    // format. After the window the constraint returns (hard/plan/criteria
-    // constraints never auto-decay — only agent action removes them, and the
-    // action's memory expires).
+    // retraction rounds are derived from the SAME committed window as every
+    // other compile fact — an abandoned branch above the compile round can
+    // never suppress a constraint on the restored branch.
     const window = getPolicy().constraints.retire_window;
     const lastRetractedRound = new Map();
     if (window > 0) {
-        for (const entry of loopEntries(request.loop_id, context)) {
-            const retractedList = entryLineage(entry).retracted_constraints;
-            if (!Array.isArray(retractedList))
-                continue;
-            const rnd = entryRound(entry);
+        for (const round of windowRounds) {
+            const retractedList = round.retractedConstraints ?? [];
             for (const text of retractedList) {
-                if (typeof text !== "string" || !text)
+                if (!text)
                     continue;
-                const prev = lastRetractedRound.get(text);
-                if (prev === undefined || rnd > prev)
-                    lastRetractedRound.set(text, rnd);
+                const previousRound = lastRetractedRound.get(text);
+                if (previousRound === undefined || round.round > previousRound) {
+                    lastRetractedRound.set(text, round.round);
+                }
             }
         }
     }
     const active = unique([
-        ...(previous?.constraints_active ?? []),
+        ...(previous.view?.activeConstraints ?? []),
         ...request.constraints_from_plan,
         ...objective.hard_constraints,
         ...objective.success_criteria,
@@ -266,8 +273,8 @@ criterionFacts = []) {
     if (!objective || objective.success_criteria.length === 0)
         return [];
     const entries = loopEntries(loopId, context).filter((entry) => entryRound(entry) >= 1 && entryRound(entry) < currentRound);
-    // The current round's report lives in last_round_result (the vault only
-    // gains it on commit); treat it as the report for round currentRound - 1.
+    // The previous round's report, resolved from the committed view (or the
+    // library fallback), is treated as the report for round currentRound - 1.
     const lastEv = lastRoundResult?.execution_report;
     const lastMet = claimedMetCriteria(lastEv);
     const lastRemaining = claimedRemainingCriteria(lastEv);
@@ -579,40 +586,57 @@ function manageConstraintLifecycle(active, objective, constraintsFromPlan, vault
     }
     return { active, metadata };
 }
-function levelDecision(request, context) {
-    const previous = getPreviousRound(request.loop_id, request.round - 1, context);
-    const last = request.last_round_result;
-    const hasNewInformation = Boolean(request.new_since_last_round.trim() ||
-        last?.discovered_constraints?.length ||
-        last?.objective_refinement?.trim() ||
-        last?.emerged_subtasks?.length ||
-        last?.retracted_constraints?.length ||
-        last?.revised_success_criteria?.length ||
-        last?.wrong_assumptions?.length);
-    // v2.14: a backtrack committed for this round means the loop is
-    // re-walking restored state — the recovery boundary forces L2
-    // rehydration (the decidePromptLevel recovery_boundary branch existed
-    // but no caller ever set it).
-    const recoveryBoundary = loopEntries(request.loop_id, context)
-        .some((entry) => entryLineage(entry).committed_action === "backtrack" &&
-        entryRound(entry) === request.round);
+/** Resolve the ONE previous-round fact bundle for a compile.
+ *
+ *  The committed view wins whenever a round is committed. `last_round_result`
+ *  is only the caller's in-flight projection for engine/library callers with
+ *  no committed round in the context. In-flight attempt findings are
+ *  authoritative even when empty: a retry must never inherit the previous
+ *  committed round's flags. */
+function resolvePreviousRoundFacts(request, context, windowRounds) {
+    const rounds = windowRounds ??
+        derivationRounds(loopEntries(request.loop_id, context), request.round);
+    const view = rounds.find((round) => round.round === request.round - 1) ?? null;
+    const recoveryBoundary = pendingBacktrackRecord(loopEntries(request.loop_id, context), request.round) !== null;
+    const inFlight = (request.attempt ?? 1) > 1 || recoveryBoundary;
+    return {
+        view,
+        result: view
+            ? roundResultFromCommittedRound(view)
+            : request.last_round_result,
+        verificationFlags: inFlight
+            ? (request.verification_flags ?? [])
+            : (view?.verificationFlags ?? request.verification_flags ?? []),
+        freshness: view ? derivePromptFreshness(view) : UNKNOWN_PROMPT_FRESHNESS,
+        recoveryBoundary,
+    };
+}
+function levelDecision(request, prior, previous) {
     return decidePromptLevel({
         round: request.round,
         attempt: request.attempt,
         forceLevel: request.force_level,
         hasPlanSource: Boolean(request.plan_source),
-        recoveryBoundary,
-        checkpointBoundary: last?.compression_checkpoint === true,
-        goalChanged: previous !== null && previous.goal_id !== deriveGoalId(request.loop_id, request.task, request.goal_id),
-        previousStateMissing: request.round > 1 && previous === null,
-        previousFailedWithoutNewInformation: last?.success === false && !hasNewInformation,
-        verificationContradicted: (request.verification_flags ?? [])
+        recoveryBoundary: previous.recoveryBoundary,
+        checkpointBoundary: previous.result?.compression_checkpoint === true,
+        // An empty goal_id is unobservable, not a goal change: never fabricate L2.
+        goalChanged: prior !== null && prior.goal_id !== "" &&
+            prior.goal_id !== deriveGoalId(request.loop_id, request.task, request.goal_id),
+        previousStateMissing: request.round > 1 && prior === null,
+        previousRoundFailed: previous.view
+            ? previous.view.success === false
+            : previous.result?.success === false,
+        previousRoundObservableNewInformation: previous.view
+            ? previous.freshness.observableNewInformation
+            : null,
+        verificationContradicted: previous.verificationFlags
             .some((flag) => flag.severity === "error"),
         consecutiveRejections: request.consecutive_rejections,
     });
 }
 export function decideLevel(request, context) {
-    return levelDecision(request, context).level;
+    const prior = getPreviousRound(request.loop_id, request.round - 1, context);
+    return levelDecision(request, prior, resolvePreviousRoundFacts(request, context)).level;
 }
 /** The prompt's evaluation block. All content (examples, contract/sub-goal
  *  guidance, flag-specific hints) comes from the one FIELD_GUIDES table in
@@ -630,16 +654,12 @@ export function buildSelfEvalBlock(ctx) {
  *  rollback decision's own fields — no new persistence, no rejected
  *  payloads. */
 function committedBacktrackBrief(loopId, round, context) {
-    const entry = loopEntries(loopId, context).find((e) => entryLineage(e).committed_action === "backtrack" && entryRound(e) === round);
-    if (!entry)
-        return undefined;
-    // v3.8.1: one decoder for the committed rollback record and one renderer for
-    // the brief. The facts ride on the merged lineage entry (engine.ts stamps
-    // them from the committed decision) and the same `decodeBacktrackRecord`
-    // reads the durable :feedback envelope, so both carriers decode to one shape
-    // — and this brief and the rollback prompt no longer render the same
-    // rollback with two hand-written line builders.
-    const record = decodeBacktrackRecord(entryLineage(entry));
+    // The SAME pending-backtrack lookup the recovery boundary uses: a deep
+    // restore commits at the failed round while its redo targets
+    // `backtrackTarget + 1`, so an exact-round match loses both the boundary
+    // and this brief.
+    const view = pendingBacktrackRecord(loopEntries(loopId, context), round);
+    const record = view?.backtrack;
     if (!record)
         return undefined;
     return recoveryBriefLines({
@@ -651,26 +671,34 @@ function committedBacktrackBrief(loopId, round, context) {
     });
 }
 export function compileLoop(request, context) {
-    const decision = levelDecision(request, context);
-    const previous = getPreviousRound(request.loop_id, request.round - 1, context);
-    const objective = evolveObjective(request, context);
-    const constraints = evolveConstraints(request, objective, previous, context);
-    const constraintLifecycle = manageConstraintLifecycle(constraints.active, objective, request.constraints_from_plan, context, request.round, request.last_round_result?.constraint_violations ?? []);
-    const rolling = buildRollingSummary(request.loop_id, request.round, context, 0);
-    // v3.8: ONE committed-round derivation feeds every projection below
-    // (sub-goals, the active contract, its item statuses, criteria).
+    // ONE history window and ONE previous-round fact bundle for the whole
+    // compile. Every consumer below reads these values; none re-reads the
+    // caller's mutable last_round_result.
     const windowRounds = derivationRounds(loopEntries(request.loop_id, context), request.round);
+    const prior = getPreviousRound(request.loop_id, request.round - 1, context);
+    const previous = resolvePreviousRoundFacts(request, context, windowRounds);
+    const decision = levelDecision(request, prior, previous);
+    const objective = evolveObjective(request, context, previous);
+    const constraints = evolveConstraints(request, objective, previous, windowRounds);
+    const constraintLifecycle = manageConstraintLifecycle(constraints.active, objective, request.constraints_from_plan, context, request.round,
+    // "Violated this round" means the CURRENT compile round's report. A
+    // committed previous round's violations are found by the committed
+    // history scan at their real round, not relabelled as this round.
+    previous.view ? [] : (request.last_round_result?.constraint_violations ?? []));
+    const rolling = buildRollingSummary(request.loop_id, request.round, context, 0);
     // v3.8: sub-goal lifecycle lives in subgoal-state.ts and consumes the
-    // shared committed-round view — one history interpretation.
+    // shared committed-round view — one history interpretation. The previous
+    // round's report is idempotently replayed; a committed round is already in
+    // the window, while the library fallback has no view.
     const subGoals = deriveSubGoals({
         loopId: request.loop_id,
         currentRound: request.round,
         rounds: windowRounds,
-        currentReport: request.last_round_result
+        currentReport: previous.result
             ? {
-                round: request.last_round_result.round || (request.round - 1),
-                emergedSubtasks: request.last_round_result.emerged_subtasks ?? [],
-                subgoalUpdates: request.last_round_result.subgoal_updates ?? [],
+                round: previous.result.round || (request.round - 1),
+                emergedSubtasks: previous.result.emerged_subtasks ?? [],
+                subgoalUpdates: previous.result.subgoal_updates ?? [],
             }
             : null,
     });
@@ -693,7 +721,7 @@ export function compileLoop(request, context) {
     // and the projection through the bundle itself.
     const { activeContract } = roundFacts;
     // v3.2: Goal → criteria → evidence vertical view (derived, zero persistence).
-    const criterionStatuses = deriveCriterionStatuses(request.loop_id, context, objective, request.round, request.last_round_result, roundFacts.criterionFacts);
+    const criterionStatuses = deriveCriterionStatuses(request.loop_id, context, objective, request.round, previous.result, roundFacts.criterionFacts);
     // v3.8.1: the ONE recurring-fact derivation, over the shared window. The
     // prompt renders its recent tail; the state file renders the recurring set.
     const recurringFlags = deriveRecurringFlags(windowRounds);
@@ -703,7 +731,7 @@ export function compileLoop(request, context) {
     // gone with the rest of the fuzzy matching, and so are the task-alignment
     // and loop-health warnings: both were Jaccard scores over task/objective
     // text, never machine facts.
-    const repeatedDeclarations = duplicateEmergedDeclarations(request.last_round_result?.emerged_subtasks ?? []);
+    const repeatedDeclarations = duplicateEmergedDeclarations(previous.result?.emerged_subtasks ?? []);
     const warnings = unique([
         repeatedDeclarations.length > 0
             ? `duplicate_declaration: ${repeatedDeclarations.length} sub-goal ` +
@@ -718,14 +746,12 @@ export function compileLoop(request, context) {
     // `constraint_violations`, i.e. a DIFFERENT source from the score it was
     // displayed next to. "Trend" was therefore not the score's history at all.
     // Neither fed a decision.
-    const completedEntries = loopEntries(request.loop_id, context)
-        .filter((e) => entryRound(e) >= 1 && entryRound(e) < request.round);
-    const committedRounds = derivationRounds(completedEntries, request.round);
     // v3.3/v3.8.1: machine git-motion (display-only, derived). The per-round
     // "round stats" table is deleted: its only renderer was the L2 prompt
     // section removed above, so it was computed, put into the canonical state
-    // (and therefore into stateHash) and read by nothing.
-    const machineStatus = deriveMachineStatus(committedRounds, request.round);
+    // (and therefore into stateHash) and read by nothing. `windowRounds` is the
+    // ONE window computed at the top of this function.
+    const machineStatus = deriveMachineStatus(windowRounds, request.round);
     const response = makeLoopCompileResponse({
         status: AgentStatus.OK,
         recompile_level: decision.level,
@@ -760,6 +786,10 @@ export function compileLoop(request, context) {
         // truth, its verification view and the machine-verified sub-goal facts as
         // ONE derivation. The static capability rides on the state itself.
         roundFacts,
+        // 3.9.3: the same previous-round bundle the level decision used. This is
+        // what keeps changes/discoveries/blockers/remaining/progress identical on
+        // live, resume, and unpause compiles.
+        previousRound: previous,
     });
     // The recovery brief is a current-round fact, computed once and shared by
     // the state file and the evaluation block. It never becomes prompt control
@@ -808,14 +838,15 @@ export function compileLoop(request, context) {
             commands: contractCommands,
             contractVerificationAvailable: configuredCapability.contractVerificationAvailable,
             subGoals,
-            verificationFlags: request.verification_flags ?? [],
+            verificationFlags: previous.verificationFlags,
             recovery: recoveryBrief !== undefined,
             gateEnabled: policy.gate.enabled === true,
             criteria: criterionStatuses,
+            currentRequirement: state.currentTask,
         }),
         fullStateMarkdown: l2Pointer ? undefined : markdown,
         // v2.9: Model's information needs from the previous round's SelfEvaluation
-        promptRequests: request.last_round_result?.prompt_requests,
+        promptRequests: previous.result?.prompt_requests,
     });
     response.prompt = artifact.renderedPrompt;
     response.prompt_artifact = artifact;

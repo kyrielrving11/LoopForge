@@ -305,24 +305,25 @@ describe("Long-Horizon Verification", () => {
     LL.push("R8b:L1");
   });
 
-  // ── R9 L0 — previousFailedWithoutNewInfo ─────────────────────────────
+  // ── R9 L1 — machine motion is new information ─────────────────────────
   //
-  // Note: R9's eval has no discovered_constraints etc. → hasNewInformation=false
-  // → previousFailedWithoutNewInfo fires before any other L2 reason could.
-  // This demonstrates that failure-without-learning always gets minimal prompt.
+  // R9's eval declares no introspection fields, but the round actually
+  // changes files and runs the configured command. The committed Git/command
+  // facts prove activity, so the next prompt must stay L1. The old
+  // self-report-only predicate downgraded this exact case to L0 — the
+  // negative feedback loop this release removes.
 
-  it("R9 L0 — previousFailedWithoutNewInfo fires (no new info in eval)", async () => {
+  it("R9 L1 — machine activity keeps a failed round at normal density", async () => {
     const r = await client.tool("loopforge_next", { sessionId, roundId, evaluation: {
       success: false, should_continue: true, constraint_violations: [],
       output_summary: "Ran linter, added JSDoc, updated README. All 17 tests pass. Ready to ship.",
       execution_report: { files_changed: ["src/strkit.ts", "src/pipeline.ts", "README.md"], tests_reported: { passed: 17, failed: 0, skipped: 0 }, criterion_claims: criterionClaims(["Final polish"], [])},
     }});
     assert.ok(!r.error);
-    // previousFailedWithoutNewInfo fires (no new information in the eval)
-    // because the eval has success=false and no new-information fields.
-    assert.equal(String(r.level ?? "").toLowerCase(), "l0");
+    assert.equal(String(r.level ?? "").toLowerCase(), "l1",
+      "observed file/command activity must not be mistaken for no new information");
     roundId = String(r.roundId);
-    LL.push("R9:L0");
+    LL.push("R9:L1");
   });
 
   // ── R10 COMPLETE ─────────────────────────────────────────────────────────
@@ -352,7 +353,7 @@ describe("Long-Horizon Verification", () => {
     assert.ok(log.includes("REJECT"), `Missing REJECT: ${log}`);
     // Specific transitions verified inline above:
     //   R1:L2 (first_round), R3:L2 (checkpoint_boundary)
-    //   R8:REJECT(L0) (retry_delta), R9:L0 (previousFailedWithoutNewInfo)
+    //   R8:REJECT(L0) (same_round_retry), R9:L1 (machine motion is fresh)
     //   R8b:L1 (an ordinary continuation — the round-count timer that used to
     //   force L2 here is deleted)
   });
@@ -395,9 +396,9 @@ describe("Long-Horizon Verification", () => {
       "    L2 first_round             ✓ R1  initial full-state prompt",
       "    L1 state_capsule           ✓ R2-R3,R5-R7 incremental prompts",
       "    L2 checkpoint_boundary     ✓ R3  via compression_checkpoint at R2",
-      "    L0 retry_delta             ✓ R8  rejection prompt (attempt>1)",
+      "    L0 same_round_retry        ✓ R8  rejection prompt (attempt>1)",
       "    L1 normal continuation     ✓ R8b clean retry, no L2 reason applies",
-      "    L0 prevFailedWithoutNewInfo ✓ R9  no new information in the eval",
+      "    L1 machine-motion freshness ✓ R9  files/command activity beats empty self-report",
       "    enforcement reject         ✓ R8  false success claim caught",
       "    circuit breaker removed    ✓ R1-R7 all success=false, loop continues",
       "    compression_checkpoint     ✓ R2→R3 checkpoint label in R3 prompt",

@@ -122,6 +122,9 @@ export function committedFeedbackRound(
     met?: string[];
     action?: string;
     attempt?: number;
+    /** 3.9.3: the committed round's effective success. Fixtures used to omit
+     *  `roundSuccess`, making every decoded view look failed. */
+    success?: boolean;
     beforeEvidence?: unknown[];
     roundEvidence?: unknown[];
     files?: string[];
@@ -138,7 +141,7 @@ export function committedFeedbackRound(
 ): VaultEntry {
   const loopId = opts.loopId ?? "cc";
   const evaluation = makeSelfEvaluation({
-    success: false,
+    success: opts.success ?? false,
     output_summary: `Committed round ${round}.`,
     constraint_violations: [],
     should_continue: true,
@@ -182,6 +185,7 @@ export function committedFeedbackRound(
         result: {
           action: opts.action ?? "continue",
           verificationFlags: opts.verificationFlags ?? [],
+          roundSuccess: opts.success ?? false,
         },
       },
     },
@@ -195,6 +199,8 @@ export function committedFeedbackRound(
 export function committedBacktrackRound(
   round: number,
   loopId = "test-loop",
+  /** Restore point; defaults to the depth-1 target `round - 1`. */
+  target = round - 1,
 ): VaultEntry {
   const evaluation = makeSelfEvaluation({
     success: false,
@@ -224,7 +230,13 @@ export function committedBacktrackRound(
           createdAt: 0,
           updatedAt: 0,
         },
-        result: { action: "backtrack", verificationFlags: [], roundSuccess: false },
+        result: {
+          action: "backtrack",
+          verificationFlags: [],
+          roundSuccess: false,
+          backtrackTarget: target,
+          backtrackTriggerRule: "test_restore",
+        },
       },
     },
   };
@@ -236,6 +248,10 @@ export function committedBacktrackRound(
 export function withTransaction(
   entry: Record<string, unknown>,
   action: "continue" | "stop" | "backtrack" = "continue",
+  evidence: {
+    beforeEvidence?: unknown[];
+    afterEvidence?: unknown[];
+  } = {},
 ): Record<string, unknown> {
   const lineage = (entry.loop_lineage ?? {}) as Record<string, unknown>;
   const loopId = String(entry.loop_id ?? lineage.loop_id ?? "");
@@ -261,6 +277,26 @@ export function withTransaction(
       : {}),
     ...(Array.isArray(entry.wrong_assumptions)
       ? { wrong_assumptions: entry.wrong_assumptions }
+      : {}),
+    ...(typeof entry.objective_refinement === "string"
+      ? { objective_refinement: entry.objective_refinement }
+      : {}),
+    ...(Array.isArray(entry.revised_success_criteria)
+      ? { revised_success_criteria: entry.revised_success_criteria }
+      : {}),
+    ...(Array.isArray(entry.worker_results)
+      ? { worker_results: entry.worker_results }
+      : {}),
+    ...(entry.compression_checkpoint === true
+      ? {
+          compression_checkpoint: true,
+          ...(typeof entry.checkpoint_label === "string"
+            ? { checkpoint_label: entry.checkpoint_label }
+            : {}),
+        }
+      : {}),
+    ...(entry.prompt_requests !== undefined
+      ? { prompt_requests: entry.prompt_requests }
       : {}),
     ...(entry.execution_report !== undefined
       ? { execution_report: entry.execution_report }
@@ -288,8 +324,8 @@ export function withTransaction(
     round,
     attempt: Number(lineage.attempt ?? 1),
     phase: "committed",
-    beforeEvidence: [],
-    afterEvidence: [],
+    beforeEvidence: evidence.beforeEvidence ?? [],
+    afterEvidence: evidence.afterEvidence ?? [],
     evaluation,
     submittedFields: manifestFor(evaluation),
     result,
@@ -322,6 +358,8 @@ export function mergedLineageRound(
     /** false → omit committed_action (an uncommitted compile-time entry). */
     committed?: boolean;
     attempt?: number;
+    /** 3.9.3: the committed round's effective success. */
+    success?: boolean;
     beforeEvidence?: unknown[];
     roundEvidence?: unknown[];
     files?: string[];
@@ -342,7 +380,7 @@ export function mergedLineageRound(
   const lin: Record<string, unknown> = {
     loop_id: loopId,
     round,
-    success: false,
+    success: opts.success ?? false,
     ...(opts.outputSummary !== undefined ? { output_summary: opts.outputSummary } : {}),
     ...(opts.committed === false
       ? {}
@@ -363,7 +401,7 @@ export function mergedLineageRound(
     loop_id: loopId,
     task_id: `${loopId}:r${round}`,
     task_type: "loop_lineage",
-    success: false,
+    success: opts.success ?? false,
     ...(opts.outputSummary !== undefined ? { output_summary: opts.outputSummary } : {}),
     execution_report: {
       files_changed: opts.files ?? [],
@@ -387,7 +425,7 @@ export function mergedLineageRound(
   // embedded transaction snapshot. Build the SAME envelope a real commit
   // writes, so decodeMergedRound has one factual source.
   const evaluation = makeSelfEvaluation({
-    success: false,
+    success: opts.success ?? false,
     output_summary: opts.outputSummary ?? "",
     constraint_violations: opts.constraintViolations ?? [],
     should_continue: true,
@@ -405,7 +443,7 @@ export function mergedLineageRound(
   const result = {
     action: opts.action ?? "continue",
     verificationFlags: opts.verificationFlags ?? [],
-    roundSuccess: false,
+    roundSuccess: opts.success ?? false,
     gateContradicted: false,
     verificationStatus: "trusted",
     newConsecutiveRejections: 0,

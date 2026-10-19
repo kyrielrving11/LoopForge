@@ -33,9 +33,11 @@ export interface FieldGuide {
     core?: boolean;
     /** v3.9.2: a compact trigger sentence used only by the prompt checklist. */
     decision?: string;
-    /** Prompt levels whose compact checklist includes `decision`. Fields with
-     *  dedicated contract/sub-goal renderers leave this unset. */
-    promptLevels?: ReadonlyArray<"l0" | "l1" | "l2">;
+    /** 3.9.3: the ONLY marker of compact-checklist membership. The set is
+     *  level-independent: L0/L1/L2 differ in state density, never in which
+     *  evaluation fields they offer. Fields with dedicated contract/sub-goal
+     *  renderers leave this unset. */
+    compact?: true;
     /** Deterministic order inside the compact checklist. */
     promptRank?: number;
 }
@@ -55,13 +57,18 @@ export interface FieldExampleContext {
     commands: ReadonlyArray<string>;
     contractVerificationAvailable: boolean;
     criteria?: ReadonlyArray<CriterionStatus>;
+    /** The task / current work item, used as the natural first contract item. */
+    currentRequirement?: string;
 }
+/** The first criterion the next slice can still work on: `remaining` or
+ *  `unknown`. `claimed` is the Agent's own completion claim (machine
+ *  unverified), so it is not a natural NEXT work item. */
+export declare function outstandingCriterion(criteria: ReadonlyArray<CriterionStatus> | undefined): CriterionStatus | null;
 /** A legal minimal example for a field, or null when the current facts make the
  *  field unusable (no real id/command to cite). The renderer omits nulls; it
  *  never invents an sg-/rci- reference. */
 export declare function fieldExample(path: string, ctx: FieldExampleContext): unknown | null;
 export interface GuidanceFacts {
-    level: "l0" | "l1" | "l2";
     activeContract: ActiveContractView | null;
     itemStatuses?: ContractItemStatusView | null;
     subGoals: ReadonlyArray<SubGoal>;
@@ -70,14 +77,17 @@ export interface GuidanceFacts {
     gateEnabled: boolean;
     criteria?: ReadonlyArray<CriterionStatus>;
 }
-/** Semantic applicability — independent of prompt density. Core fields and
- *  the two baseline execution-report fields are always applicable; the rest
- *  depend on facts the runtime can actually observe. Future events
- *  (delegation, a checkpoint boundary, a falsified assumption) remain
- *  conditional opportunities, not render-time facts. */
+/** Semantic applicability — the ONE rule, deliberately independent of prompt
+ *  level. Core fields and the two baseline execution-report fields are always
+ *  applicable; the rest depend on facts the runtime can actually observe.
+ *  Future events (delegation, a checkpoint boundary, a falsified assumption)
+ *  remain conditional opportunities, not render-time facts. */
 export declare function isFieldApplicable(path: string, facts: GuidanceFacts): boolean;
-/** Prompt density is a separate decision: which applicable fields the compact
- *  trigger checklist renders at this level. */
+/** Compact-checklist membership: the explicit `compact` marker plus semantic
+ *  applicability. The level is deliberately absent — L0/L1/L2 offer the same
+ *  evaluation fields; only state density changes. Dedicated renderer fields
+ *  (`round_contract`, `subgoal_updates`, `contract_item_claims`) are never
+ *  compact members, so they cannot duplicate their own blocks. */
 export declare function isFieldPrompted(path: string, facts: GuidanceFacts): boolean;
 /** Deterministic compact-checklist order, shared by the renderer and tests. */
 export declare function promptedFieldPaths(facts: GuidanceFacts): string[];
@@ -93,6 +103,8 @@ export interface SelfEvalPromptContext {
     recovery: boolean;
     gateEnabled?: boolean;
     criteria?: ReadonlyArray<CriterionStatus>;
+    /** The task / current work item; the natural first contract work_item. */
+    currentRequirement?: string;
 }
 /** Render the evaluation block appended to every prompt. */
 export declare function renderSelfEvalBlock(ctx: SelfEvalPromptContext): string;
@@ -101,6 +113,8 @@ export declare function renderSelfEvalBlock(ctx: SelfEvalPromptContext): string;
 export interface GuidanceSessionView {
     loopId: string;
     currentRound: number;
+    /** The task / current work item, when the caller can observe it. */
+    task?: string;
     roundSnapshot?: {
         roundId: string;
         promptArtifact?: PromptArtifact;

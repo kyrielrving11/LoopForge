@@ -3,8 +3,9 @@
  * The compiler evolves structured state and renders one prompt artifact.
  * L0/L1/L2 control state density only; the external Agent owns reasoning.
  */
-import { type CriterionStatus, type RecurringFlag, type LoopCompileRequest, type LoopCompileResponse, type LoopObjective, type LoopRoundResult, type RollingSummary } from "./protocol.js";
+import { type CriterionStatus, type RecurringFlag, type LoopCompileRequest, type LoopCompileResponse, type LoopObjective, type LoopRoundResult, type RollingSummary, type VerificationFlag } from "./protocol.js";
 import { type CommittedRoundView } from "./committed-round.js";
+import { type PromptFreshness } from "./prompt-freshness.js";
 import type { CriterionMachineFact } from "./round-facts.js";
 import { type SelfEvalPromptContext } from "./submission-guidance.js";
 export interface PreviousRound {
@@ -15,6 +16,21 @@ export interface PreviousRound {
     task: string;
     constraints_active: string[];
     output_summary: string;
+}
+/** ONE bundle of previous-round facts for a compile.
+ *
+ *  Every consumer (level policy, canonical state, evaluation block) reads
+ *  this bundle instead of re-reading the caller's mutable projection. The
+ *  committed view wins whenever it exists; `request.last_round_result` is
+ *  only the in-flight/library fallback for callers with no committed round
+ *  in the context. */
+export interface PreviousRoundFacts {
+    view: CommittedRoundView | null;
+    result: LoopRoundResult | null;
+    verificationFlags: VerificationFlag[];
+    freshness: PromptFreshness;
+    /** A committed backtrack directive targets this compile round's redo. */
+    recoveryBoundary: boolean;
 }
 export declare function computeGoalTextHash(text: string): string;
 export declare function deriveGoalId(loopId: string, task: string, explicit?: string): string;

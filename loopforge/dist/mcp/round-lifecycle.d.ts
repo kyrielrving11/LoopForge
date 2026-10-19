@@ -148,7 +148,7 @@ export interface RoundLifecycleDeps {
     /** Live accessor for the mutable contextProvider field on SessionManager. */
     getContext: () => ExternalContextProvider | undefined;
 }
-export declare function buildLoopRequest(session: McpSession, lastEval?: SelfEvaluation, verificationFlags?: VerificationFlag[]): LoopForgeRequest;
+export declare function buildLoopRequest(session: McpSession): LoopForgeRequest;
 export declare class RoundLifecycle {
     private readonly store;
     private readonly sessionStore;

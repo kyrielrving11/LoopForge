@@ -7,7 +7,7 @@
 import type { MachineObservation } from "./protocol.js";
 import type { ObservationDelta } from "./evidence-provider.js";
 import type { VaultEntry } from "./loop-store.js";
-import type { ContractBinding, ExecutionReport, PromptArtifact, RoundContractProposal, RoundOutcome, SelfEvaluation, SubmissionDiagnostic, SubGoalUpdate, VerificationFlag } from "./protocol.js";
+import type { ContractBinding, ExecutionReport, LoopRoundResult, PromptArtifact, RoundContractProposal, RoundOutcome, SelfEvaluation, SubmissionDiagnostic, SubGoalUpdate, VerificationFlag } from "./protocol.js";
 import type { RoundProcessResult } from "./round-coordinator.js";
 export type CommittedAction = "continue" | "stop" | "backtrack";
 /** v3.8.1: the rolled-back branch's facts, decoded from a committed rollback
@@ -91,6 +91,23 @@ export declare function decodeMergedRound(entry: unknown): CommittedRoundView | 
  *  entry. Compile-side callers used to inline this chain as a private
  *  `committedView` helper. */
 export declare function decodeRound(entry: unknown): CommittedRoundView | null;
+/** THE committed-view → compiler-request projection.
+ *
+ *  The compiler once received these fields from the caller's mutable
+ *  `last_round_result`, which existed on the live path and was absent on
+ *  resume/unpause/backtrack compiles. This projection lets one committed
+ *  fact source feed every consumer. Optional declarations are read from the
+ *  decoded view where it exposes them; `manual_fixes_needed` has no
+ *  committed source and stays empty. */
+export declare function roundResultFromCommittedRound(view: CommittedRoundView): LoopRoundResult;
+/** The ONE pending-backtrack lookup for a redo round.
+ *
+ *  A backtrack commits at the failed round R, while the redo targets
+ *  `backtrackTarget + 1`, which is lower than R for a deep restore. Matching
+ *  the decoded target (with the legacy exact-round fallback when the record
+ *  carries no target) keeps the recovery boundary AND the Recovery Brief
+ *  correct for every backtrack depth. */
+export declare function pendingBacktrackRecord(entries: ReadonlyArray<unknown>, redoRound: number): CommittedRoundView | null;
 /** Lineage sub-object of an entry (`loop_lineage`; v3.7: the legacy
  *  top-level `lineage` alias was removed), or {} when absent. */
 export declare function entryLineage(entry: unknown): Record<string, unknown>;
@@ -198,10 +215,16 @@ export declare function gitMotionSignal(input: {
 }): boolean | null;
 /** Git HEAD as a machine observation exposes it, or null when it is silent. */
 export declare function observedGitHead(observation: MachineObservation | undefined): string | null;
-/** The in-flight round's own motion, from its derived Git delta. A Git
- *  boundary that cannot be compared yields `null` unless HEAD movement or the
- *  restore point independently proves motion. */
+/** A round's own motion, from its derived Git deltas. A Git boundary that
+ *  cannot be compared yields `null` unless HEAD movement or the restore point
+ *  independently proves motion. Every Git delta participates: one moving
+ *  provider is motion, one undecidable provider makes the aggregate unknown,
+ *  and only an all-provider observed no-change is `false`. */
 export declare function inFlightGitMotion(deltas: ReadonlyArray<ObservationDelta>, restoreTargetHead?: string): boolean | null;
+/** The committed-round form of the same motion rule. Named separately so a
+ *  reader can see that prompt freshness never passes an in-flight restore
+ *  head (a committed round has no pending backtrack of its own). */
+export declare function committedRoundGitMotion(view: CommittedRoundView): boolean | null;
 /** Machine-observed git motion for the most recent contiguous window.
  * A clean worktree is not the same thing as no progress: commit-per-slice
  * workflows leave no file delta even though HEAD advanced. Unknown motion in

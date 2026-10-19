@@ -11,6 +11,7 @@ import type {
   RecurringFlag,
   LoopCompileRequest,
   LoopCompileResponse,
+  LoopRoundResult,
   MilestoneSummary,
   SubGoal,
   VerificationFlag,
@@ -642,11 +643,20 @@ export function createCanonicalLoopState(
      *  assemble a state out of values derived over different history windows —
      *  v3.4/v3.8 passed them as three independent options. */
     roundFacts?: RoundFacts;
+    /** 3.9.3: the compile's ONE previous-round bundle. Structural subset of
+     *  `PreviousRoundFacts` so this module never imports the compiler. When
+     *  absent (direct/library callers) the request fields remain the
+     *  fallback. */
+    previousRound?: {
+      result: LoopRoundResult | null;
+      verificationFlags: VerificationFlag[];
+    };
   },
 ): CanonicalLoopState {
-  const last = request.last_round_result;
+  const last = derived?.previousRound?.result ?? request.last_round_result;
   const objective = response.loop_objective;
-  const verificationFlags = request.verification_flags ?? [];
+  const verificationFlags = derived?.previousRound?.verificationFlags ??
+    request.verification_flags ?? [];
   const rolling = response.rolling_summary;
   const executionReport = last?.execution_report;
 

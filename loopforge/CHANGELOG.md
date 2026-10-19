@@ -1,5 +1,97 @@
 # Changelog
 
+## 3.9.3 (2026-10-19)
+
+**The committed-fact prompt-level release.** 3.9.2 made the optional fields
+visible and real-id-bound; the case data then showed a self-reinforcing L0
+loop: an Agent changed files and ran commands, but reported no introspection
+fields, so `hasNewInformation` stayed false, the next prompt dropped to L0,
+and L0 hid the very triggers that would have produced future information. The
+root cause was that prompt level, and much of the prompt's previous-round
+content, came from a mutable caller projection (`last_round_result`) that
+existed on the live path and vanished on resume/unpause/backtrack compiles.
+
+### Prompt level from committed facts
+
+`derivePromptFreshness` is a pure derivation over one `CommittedRoundView`:
+
+- `machineMotion` reuses the ONE Git motion rule (now over every Git delta)
+  and stays tri-state: `true` motion, `false` proven no-motion, `null`
+  unobservable;
+- `machineActivity` is an after-phase command with an attributable result
+  (`passed`/`failed`/`timeout`/`aborted`/`error`, never `unavailable`);
+- `declaredEvolution` is a committed semantic declaration the compiler
+  already consumes.
+
+`observableNewInformation` is false ONLY when the machine proves no activity
+and nothing was declared. Unknown is never read as "nothing changed". The
+failed-round downgrade now fires only for that proven-stale case; every other
+new round is L1, and same-round retries remain L0. L2's fact-based reasons are
+unchanged. `new_since_last_round` is no longer a level input.
+
+One `PreviousRoundFacts` bundle now feeds the level policy, canonical state
+(including `changesSinceLastRound`, discoveries, blockers, remaining criteria,
+progress), and the evaluation block. The MCP request builder no longer carries
+`last_round_result`; live, resume, unpause and backtrack compiles read the
+same committed history. A caller projection remains the fallback only when no
+committed view exists, and that path fails open to L1.
+
+### One field interface at every level
+
+`promptLevels` is gone. `compact` is the only marker of compact-checklist
+membership, and `isFieldApplicable` is the one semantic rule, independent of
+level. L0/L1/L2 now offer the same applicable trigger set (at most seven), so
+L0 again shows `criterion_claims` with real `cr-` ids/text, `emerged_subtasks`,
+`worker_results`, `compression_checkpoint`, and `prompt_requests`.
+`round_contract`, `subgoal_updates` and `contract_item_claims` keep their
+dedicated renderers and never duplicate into the compact list. Level still
+controls state density, not which evaluation fields the Agent may use.
+`prompt_requests` remains applicable in an L0 round; only a NEXT prompt that
+is L0 ignores the incoming requests.
+
+### Natural requirement contract guidance
+
+With no active contract and a usable command, the proposal now uses the
+current requirement as `work_item`, the first `remaining`/`unknown` criterion
+as the item description and real `criterion_refs`, and the real command as
+`verify_with`. It is still a proposal: LoopForge never auto-declares or
+auto-activates a contract. The Agent decides whether the command is the
+requirement's acceptance check.
+
+### Deep-restore recovery
+
+`pendingBacktrackRecord` matches a rollback directive by
+`backtrack.target + 1 === redoRound` (with an exact-round fallback for legacy
+records), so the recovery boundary AND the Recovery Brief work at every
+`backtrack_max_depth`. The objective lookup and the constraint-retirement scan
+are bounded by the compile window, so an abandoned branch cannot leak its
+refinements or retractions into the redo prompt.
+
+### Actionable committed findings
+
+The `evidence_integrity` action now tells the Agent exactly how to fix a
+reported-vs-observed files mismatch (add unreported, remove unconfirmed, list
+the net boundary change). At L0, where the Verification Gate stays compact,
+the evaluation block adds up to three deduplicated error/warn actions. The
+receipt remains a read-only projection; the prompt reads the committed
+verification flag, not the receipt.
+
+### Public behavior changes
+
+- A library/engine caller with no committed view and a failed
+  `last_round_result` now stays L1 instead of downgrading to L0.
+- `new_since_last_round` no longer influences prompt freshness; it still
+  feeds `changesSinceLastRound`.
+- `inFlightGitMotion` aggregates all Git providers: any motion wins, any
+  undecidable provider makes the aggregate unknown, and only all-provider
+  observed no-change is false.
+
+### Envelope versions
+
+No transaction, observation, prompt-artifact, receipt, or policy version
+changes. The protocol schema's `$defs` count stays 64. Package version is
+3.9.3.
+
 ## 3.9.2 (2026-10-18)
 
 **The field-decision release.** 3.9.1 made the submission channel complete; the

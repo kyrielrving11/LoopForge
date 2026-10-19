@@ -29,8 +29,9 @@ export interface PromptAssemblyInput {
     /** v2.9: Model's information needs for this prompt. L0: ignored. */
     promptRequests?: PromptRequests;
 }
-/** v3.2: The actionable instruction for a verification check. Exported for
- *  the coverage test (which imports the CHECK_* constants). */
-export declare function verificationActionFor(check: string): string;
+/** 3.9.3: The action table lives in a neutral module so the evaluation-field
+ *  guidance can quote the same wording without depending on a renderer.
+ *  Re-exported here for the existing CHECK_* coverage test. */
+export { verificationActionFor } from "./verification-actions.js";
 export declare function assemblePromptArtifact(input: PromptAssemblyInput): PromptArtifact;
 //# sourceMappingURL=prompt-assembler.d.ts.map

@@ -207,6 +207,13 @@ describe("createCanonicalLoopState", () => {
       constraint_violations: ["committed violation"],
       manual_fixes_needed: "manual cleanup",
       wrong_assumptions: ["old belief"],
+      discovered_constraints: ["uncommitted discovery"],
+      emerged_subtasks: ["uncommitted subtask"],
+      execution_report: {
+        files_changed: ["uncommitted.ts"],
+        tests_reported: { passed: 1, failed: 0, skipped: 0 },
+        criterion_claims: criterionClaims(["met criterion"], ["remaining criterion"]),
+      },
     });
     const fallback = createCanonicalLoopState(
       request({ last_round_result: previous }),
@@ -217,6 +224,12 @@ describe("createCanonicalLoopState", () => {
       "fallback wrong assumptions do not enter Corrections");
     assert.ok(!fallback.blockers.includes("committed violation"));
     assert.ok(!fallback.blockers.includes("manual cleanup"));
+    assert.deepEqual(fallback.discoveries, []);
+    assert.deepEqual(fallback.remainingCriteria, []);
+    assert.deepEqual(fallback.progress.filesChanged, []);
+    assert.equal(fallback.progress.tests, null);
+    assert.deepEqual(fallback.progress.criteriaMet, []);
+    assert.deepEqual(fallback.progress.criteriaRemaining, []);
 
     const committed = createCanonicalLoopState(
       request(),
@@ -228,6 +241,10 @@ describe("createCanonicalLoopState", () => {
     assert.ok(committed.blockers.includes("committed violation"));
     assert.ok(!committed.blockers.includes("manual cleanup"),
       "manual_fixes_needed has no committed source");
+    assert.deepEqual(committed.discoveries, ["uncommitted discovery", "uncommitted subtask"]);
+    assert.deepEqual(committed.remainingCriteria, ["remaining criterion"]);
+    assert.deepEqual(committed.progress.filesChanged, ["uncommitted.ts"]);
+    assert.deepEqual(committed.progress.tests, { passed: 1, failed: 0, skipped: 0 });
     assert.ok(!committed.corrections.join(" ").includes("previous summary"));
   });
 });
@@ -275,7 +292,9 @@ describe("renderCanonicalStateMarkdown", () => {
         },
       },
     });
-    const state = createCanonicalLoopState(req, response(), "test.md");
+    const state = createCanonicalLoopState(req, response(), "test.md", {
+      previousRound: { result: req.last_round_result!, verificationFlags: [], committed: true },
+    });
     const md = renderCanonicalStateMarkdown(state);
     assert.ok(md.includes("Progress Dashboard"));
     assert.ok(md.includes("**Criteria**: 1/2"));

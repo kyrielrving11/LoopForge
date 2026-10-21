@@ -778,11 +778,15 @@ export function createCanonicalLoopState(
   const verificationFlags = derived?.previousRound?.verificationFlags ??
     request.verification_flags ?? [];
   const rolling = response.rolling_summary;
-  const executionReport = last?.execution_report;
   // v3.9.5: only committed previous-round reports enter the projection.
   // `last_round_result` remains a library/in-flight fallback for semantic
   // evolution, but it must not create prompt/state narrative.
   const committed = derived?.previousRound?.committed === true;
+  // Keep the report projection behind the same boundary as corrections and
+  // blockers.  The fallback result may still be consumed by compiler
+  // evolution, but an uncommitted/rejected attempt cannot become durable
+  // progress, discovery, or criterion state.
+  const executionReport = committed ? last?.execution_report : undefined;
 
   const corrections = committed
     ? unique(
@@ -792,10 +796,12 @@ export function createCanonicalLoopState(
       )
     : [];
 
-  const discoveries = unique([
-    ...(last?.discovered_constraints ?? []),
-    ...(last?.emerged_subtasks ?? []),
-  ]);
+  const discoveries = committed
+    ? unique([
+        ...(last?.discovered_constraints ?? []),
+        ...(last?.emerged_subtasks ?? []),
+      ])
+    : [];
 
   const blockers = unique([
     ...(committed ? (last?.constraint_violations ?? []) : []),
@@ -847,9 +853,7 @@ export function createCanonicalLoopState(
     retiredConstraints: unique(response.constraints_retired),
     constraintMetadata: response.constraint_metadata ?? [],
     corrections,
-    remainingCriteria: unique(
-      claimedRemainingCriteria(last?.execution_report),
-    ),
+    remainingCriteria: unique(claimedRemainingCriteria(executionReport)),
     blockers,
     verificationFlags,
     discoveries,

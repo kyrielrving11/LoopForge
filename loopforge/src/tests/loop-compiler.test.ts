@@ -241,7 +241,9 @@ describe("cognitive-state compiler", () => {
     assert.ok(response.constraints_active.includes("Keep rollback path"));
     assert.ok(response.constraints_retired.includes("Temporary freeze"));
     assert.match(response.prompt, /rollback verification|Run rollback test/);
-    assert.match(response.state_file_content ?? "", /src\/store\.ts|10 passed/);
+    // last_round_result remains available for objective/constraint evolution,
+    // but without a committed view its report must not enter the state file.
+    assert.doesNotMatch(response.state_file_content ?? "", /src\/store\.ts|10 passed/);
   });
 
   it("keeps mandatory verification findings in an L0 retry", () => {

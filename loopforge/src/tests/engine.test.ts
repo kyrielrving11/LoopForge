@@ -275,7 +275,7 @@ describe("Engine — P0-P5 Cognitive Evolution (v1.7 E2E)", () => {
       "P2: emerged subtasks not forwarded");
   });
 
-  it("P4: execution_report survives engine boundary and generates progress dashboard", () => {
+  it("P4: uncommitted fallback execution_report does not enter the state projection", () => {
     const engine = createEngine();
     // Round 1
     engine.invokeLoopCompile(makeRequest({
@@ -323,12 +323,12 @@ describe("Engine — P0-P5 Cognitive Evolution (v1.7 E2E)", () => {
       },
     } as unknown as LoopForgeRequest);
     assert.equal(r2.status, AgentStatus.OK);
-    // v1.14 Thin Prompt: progress dashboard lives in state file, not in prompt
+    // The request fallback is available for compiler evolution, but only a
+    // committed round may contribute report-derived progress to the state.
     const stateFile = r2.response!.state_file_content;
     assert.ok(stateFile, "P4: state_file_content should be set for L2 compile");
-    assert.ok(stateFile!.includes("Progress Dashboard"), "P4: progress dashboard in state file");
-    assert.ok(stateFile!.includes("1/3"), "P4: criteria count in state file");
-    assert.ok(stateFile!.includes("Token.sol"), "P4: files_changed in state file");
+    assert.ok(!stateFile!.includes("Progress Dashboard"), "fallback report must not create progress");
+    assert.ok(!stateFile!.includes("Token.sol"), "fallback files_changed must not enter the state file");
     // v3.8.1: the dashboard is a STATE-FILE view. It used to also reach the
     // prompt as an L2 structured section, which is where the assertion below
     // used to pass from; that section is deleted (it re-composed facts the

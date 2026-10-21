@@ -260,7 +260,7 @@ contract closure.
 
 ## Prompt and projection invariants
 
-v3.9.5 memory boundary: the prompt is a current-governance projection, not a
+Memory boundary: the prompt is a current-governance projection, not a
 narrative of recent work. `output_summary` remains a strict committed report
 for audit/replay/explain/backtrack, but it is never a default prompt input,
 never a projection focus, and never machine evidence. `Recent Rounds`,
@@ -275,7 +275,8 @@ contain unsubmitted, rejected or rolled-back work; a current user instruction
 defines the task. `state_file_content` remains a derived view; the prompt must
 never call it the source of truth. `Corrections` is committed
 `wrong_assumptions` only; fallback `last_round_result` narrative,
-`prompt_requests` and agent-reported blockers do not enter the next prompt.
+`prompt_requests`, agent-reported blockers, discoveries, progress evidence and
+remaining criteria do not become durable prompt/state projection input.
 `emphasize` only reorders current active governance items.
 
 `submission-guidance.ts` is the single source for evaluation-field meaning,

@@ -19,10 +19,11 @@ history. L2 renders at most three `Phase Anchors` (labels/ranges only, never
 `outcome`) and never embeds the state markdown.
 
 Committed-only gating: `prompt_requests`, `Corrections` (wrong assumptions),
-agent-reported blockers, and duplicate-declaration warnings read the committed
-previous round, not the library `last_round_result` fallback. The fallback may
-still drive semantic evolution when no committed view exists, but it cannot
-become prompt narrative.
+agent-reported blockers, discoveries, progress evidence, remaining criteria,
+and duplicate-declaration warnings read the committed previous round, not the
+library `last_round_result` fallback. The fallback may still drive semantic
+evolution when no committed view exists, but it cannot become prompt or
+state-file narrative.
 
 The fixed prompt header now states the authority boundary: LoopForge's current
 committed projection wins for committed/verified state; the Agent's session

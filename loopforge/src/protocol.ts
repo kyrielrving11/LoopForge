@@ -1581,7 +1581,8 @@ export interface VerifiedSubGoalFact {
  *  - `session_not_found` / `state_unavailable` — the named session or read
  *    model is not there.
  *  - `invalid_argument` — the request itself is malformed at the tool boundary.
- *  - `gate_disabled` / `loop_already_running` — a state condition, not a defect.
+ *  - `gate_disabled` / `loop_already_running` / `lease_conflict` — a state
+ *    condition, not a defect.
  *
  *  Note: a `loopforge_next` submission whose roundId no longer matches is NOT
  *  `round_id_mismatch` — it returns the held prompt with a warning and
@@ -1599,7 +1600,8 @@ export type ToolErrorCode =
   | "state_unavailable"
   | "invalid_argument"
   | "gate_disabled"
-  | "loop_already_running";
+  | "loop_already_running"
+  | "lease_conflict";
 
 /** v3.8: The structured error inside the uniform `{ok: false}` envelope. */
 export interface ToolError {

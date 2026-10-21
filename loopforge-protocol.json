@@ -3722,7 +3722,8 @@
         "state_unavailable",
         "invalid_argument",
         "gate_disabled",
-        "loop_already_running"
+        "loop_already_running",
+        "lease_conflict"
       ]
     },
     "ToolError": {

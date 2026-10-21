@@ -12,6 +12,7 @@ import { isRecord } from "../token-utils.js";
 import { getPolicy, validateLoopId } from "../policy.js";
 import { deriveEvidenceCapability } from "../evidence-provider.js";
 import { fieldGuideDescription } from "../submission-guidance.js";
+import { SessionLeaseConflictError } from "../storage.js";
 // ═══════════════════════════════════════════════════════════════════════════
 // Tool schemas (MCP JSON Schema format)
 // ═══════════════════════════════════════════════════════════════════════════
@@ -920,6 +921,12 @@ export const TOOL_HANDLERS = {
             const projectionFailure = projectionErrorResult(error);
             if (projectionFailure)
                 return projectionFailure;
+            if (error instanceof SessionLeaseConflictError) {
+                return {
+                    error: "lease_conflict",
+                    errorMessage: `loop "${error.loopId}" is owned by another running LoopForge process`,
+                };
+            }
             return {
                 error: "policy_invalid",
                 errorMessage: `the runtime policy could not be loaded: ${error.message}`,

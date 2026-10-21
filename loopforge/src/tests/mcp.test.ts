@@ -106,6 +106,26 @@ describe("MCP — loopforge_start", async () => {
     assert.ok((result.prompt as string).includes("LoopForge"));
     assert.equal(typeof result.level, "string");
   });
+
+  it("reports a cross-process lease conflict without mislabeling it as policy_invalid", async () => {
+    const loopId = "start-lease-conflict";
+    const owner = new SessionManager(store);
+    const started = await TOOL_HANDLERS.loopforge_start(owner, {
+      task: "Keep the existing loop",
+      loopId,
+    });
+    assert.ok(typeof started.sessionId === "string");
+
+    const contender = new SessionManager(store);
+    const result = await TOOL_HANDLERS.loopforge_start(contender, {
+      task: "Start a competing loop",
+      loopId,
+    });
+
+    assert.equal(result.error, "lease_conflict");
+    assert.match(String(result.errorMessage), /owned by another running LoopForge process/);
+    assert.notEqual(result.error, "policy_invalid");
+  });
 });
 
 describe("MCP — durable gate resolution", async () => {

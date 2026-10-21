@@ -4,17 +4,17 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
-const skillSource = join(packageRoot, "skills", "perception", "SKILL.md");
+const skillSource = join(packageRoot, "skills", "forge", "SKILL.md");
 function destination(options) {
     if (options.target)
-        return resolve(options.target, "perception", "SKILL.md");
+        return resolve(options.target, "forge", "SKILL.md");
     if (options.client === "claude") {
-        return join(homedir(), ".claude", "skills", "perception", "SKILL.md");
+        return join(homedir(), ".claude", "skills", "forge", "SKILL.md");
     }
     if (options.client === "codex") {
-        return join(homedir(), ".codex", "skills", "perception", "SKILL.md");
+        return join(homedir(), ".codex", "skills", "forge", "SKILL.md");
     }
-    return resolve(".loopforge", "skills", "perception", "SKILL.md");
+    return resolve(".loopforge", "skills", "forge", "SKILL.md");
 }
 function registration(client) {
     if (client === "claude") {
@@ -31,7 +31,7 @@ function registration(client) {
 }
 export function initializeClient(options) {
     if (!existsSync(skillSource)) {
-        throw new Error(`Packaged Perception skill not found: ${skillSource}`);
+        throw new Error(`Packaged Forge skill not found: ${skillSource}`);
     }
     const skillPath = destination(options);
     const installed = options.force === true || !existsSync(skillPath);

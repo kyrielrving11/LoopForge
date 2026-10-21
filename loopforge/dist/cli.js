@@ -347,7 +347,7 @@ function init(args) {
     }
     const force = has(args, "--force") || has(args, "-f");
     // v3.8.3: two different roots, named separately. `--target` is the skills
-    // root (the skill lands in <target>/perception/SKILL.md); `--workspace` is
+    // root (the skill lands in <target>/forge/SKILL.md); `--workspace` is
     // the runtime boundary (loop_policy.json lands directly in it). One flag
     // meaning both is what made `--target` ambiguous: it wrote a policy the
     // runtime would never read, because the runtime only ever reads the

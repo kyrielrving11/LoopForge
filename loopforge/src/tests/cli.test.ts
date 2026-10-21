@@ -301,7 +301,7 @@ describe("loopforge CLI", () => {
     }
   });
 
-  it("installs only the Perception skill for a generic client", () => {
+  it("installs only the Forge skill for a generic client", () => {
     const root = temporaryDirectory();
     try {
       const target = join(root, "skills");
@@ -356,7 +356,7 @@ describe("loopforge CLI", () => {
       ]);
       assert.equal(result.status, 0, result.stderr);
       // The skill goes where --target says...
-      assert.ok(existsSync(join(skillsRoot, "perception", "SKILL.md")));
+      assert.ok(existsSync(join(skillsRoot, "forge", "SKILL.md")));
       // ...and the policy goes where --workspace says, NOT under --target.
       assert.ok(existsSync(join(workspaceRoot, "loop_policy.json")));
       assert.equal(existsSync(join(skillsRoot, "loop_policy.json")), false);

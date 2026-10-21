@@ -1203,14 +1203,15 @@ export interface VerifiedSubGoalFact {
  *  - `session_not_found` / `state_unavailable` — the named session or read
  *    model is not there.
  *  - `invalid_argument` — the request itself is malformed at the tool boundary.
- *  - `gate_disabled` / `loop_already_running` — a state condition, not a defect.
+ *  - `gate_disabled` / `loop_already_running` / `lease_conflict` — a state
+ *    condition, not a defect.
  *
  *  Note: a `loopforge_next` submission whose roundId no longer matches is NOT
  *  `round_id_mismatch` — it returns the held prompt with a warning and
  *  `ok: true` so the agent can recover the response it missed. That recovery
  *  contract (v3.0.1) is deliberate; `round_id_mismatch` is for the places with
  *  no held prompt to return (the gate preflight). */
-export type ToolErrorCode = "evaluation_invalid" | "contract_invalid" | "policy_invalid" | "projection_incomplete" | "session_not_found" | "round_id_required" | "round_id_mismatch" | "state_unavailable" | "invalid_argument" | "gate_disabled" | "loop_already_running";
+export type ToolErrorCode = "evaluation_invalid" | "contract_invalid" | "policy_invalid" | "projection_incomplete" | "session_not_found" | "round_id_required" | "round_id_mismatch" | "state_unavailable" | "invalid_argument" | "gate_disabled" | "loop_already_running" | "lease_conflict";
 /** v3.8: The structured error inside the uniform `{ok: false}` envelope. */
 export interface ToolError {
     code: ToolErrorCode;

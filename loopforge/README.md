@@ -38,7 +38,7 @@ The two directory flags answer different questions and are not
 interchangeable:
 
 - `--target DIR` is where the **client skill** is installed
-  (`DIR/perception/SKILL.md`). Without it, the skill goes to the client's own
+  (`DIR/forge/SKILL.md`). Without it, the skill goes to the client's own
   skills directory.
 - `--workspace DIR` is the **runtime boundary**: `loop_policy.json`,
   `.loopforge/`, evidence commands, and every workspace check resolve against

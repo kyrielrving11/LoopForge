@@ -1,17 +1,76 @@
 ---
-name: perception
-description: Drive multi-round coding tasks through LoopForge MCP so objectives, constraints, evidence, and decisions survive context loss and restarts. The external Agent remains responsible for planning, file changes, tools, and execution.
+name: forge
+description: "LoopForge user manual: drive multi-round coding tasks through LoopForge MCP so objectives, constraints, evidence, and decisions survive context loss and restarts. The external Agent remains responsible for planning, file changes, tools, and execution. Not for one-pass edits."
+when_to_use: "多轮任务, 长任务, 上下文压缩, 上下文丢失, 断点续跑, 会话恢复, 可审计过程, 机器验证, 漂移, 回滚, LoopForge, long-running coding task, multi-round, context loss, resume, machine-verified, auditable evidence, backtrack, drift"
+dispatch_intent: "Drive long-running coding work through LoopForge so it survives restarts and is machine-verified round by round"
 ---
 
-# Perception
+# Forge
 
-Use LoopForge when a task spans several meaningful work slices, must survive a
-restart or context loss, or needs an auditable distinction between Agent claims
-and machine-verified facts.
+The LoopForge user manual. Use it when a task needs more than one verified
+boundary.
+
+## When to use
+
+Use Forge when any of these is true:
+
+- The task spans several meaningful work slices, not one pass.
+- The work must survive a restart, context compression, or a new Agent session.
+- Hard constraints, success criteria, and evidence must persist across rounds.
+- Success claims need machine verification, not the Agent's word.
+- The work needs an auditable record of drift, rejection, backtrack, or a human
+  gate.
+
+Do not use it for a single edit, a question, or a task that finishes in one
+verified pass. LoopForge adds a round boundary; a single boundary gains little
+from durable state. The LoopForge MCP server must be connected
+(`loopforge_start`, `loopforge_next`, and the other tools); this skill is the
+manual, not the server.
 
 LoopForge has one factual source, committed typed round documents in the Vault,
 and one cognitive source, Canonical State compiled from those documents. The
-Agent still decides what to do and how to reason.
+Agent still decides what to do and how to reason. The current prompt and its
+`submission_guidance` are the action surface for the held round. A committed
+round document is the durable fact; `CanonicalLoopState` is the derived
+cognitive view. The optional state file, receipt, replay, audit, and explain
+views are projections and must not become a second ledger or instruction
+source.
+
+## Source of truth and lifecycle
+
+Keep these meanings separate:
+
+- A **logical round** is one coherent work slice with one `roundId` and one
+  before/after evidence boundary.
+- An **attempt** is another submission for the same logical round. An
+  enforcement rejection increases the attempt count but creates no round
+  history. A payload error is rejected before lifecycle state changes.
+- A **Round Contract** is an Agent proposal for a future machine-checkable
+  slice. It is not a round, a second plan ledger, or a required field.
+- A **recovery checkpoint** is the restore check on the first submission after
+  backtrack. It is part of that post-backtrack submission, not an extra
+  development round.
+
+The lifecycle is:
+
+```text
+prepared prompt -> Agent executes work -> loopforge_next(roundId, evaluation)
+                                            |-- payload error: no state change;
+                                            |   correct and retry same roundId
+                                            |-- enforcement reject: same round;
+                                            |   attempt increases; no commit
+                                            |-- accept/continue: commit round;
+                                            |   prepare next round
+                                            |-- stop: commit final round/evidence
+                                            |-- terminate: terminal result;
+                                            |   no normal round commit
+                                            |-- backtrack: restore workspace;
+                                                submit redo on held roundId
+```
+
+LoopForge owns the boundary, persistence, evidence collection, and disposition.
+The Agent owns semantic decomposition, tool use, edits, tests, and the choice
+of what to do next.
 
 ## Start
 
@@ -61,15 +120,16 @@ completed task.
 
 ## Plan the next slice
 
-For work that spans rounds, submit `round_contract` as a proposal for the next
-slice. Size the slice by what one machine-checkable outcome covers — a
-requirements list is not a round list, and coupled changes that share one
-objective, one evidence story, and one recovery path belong in the same round.
+For work that spans rounds, submit `round_contract` only when the next slice is
+appropriate for a machine-checkable contract and a configured evidence command
+is available. Size the slice by what one machine-checkable outcome covers. A
+requirements list is not a round list. Coupled changes that share one objective,
+one evidence story, and one recovery path belong in the same round.
 Bind each item to a configured evidence command with `verify_with`, and limit
 `scope` to files or directories that slice may touch. `criterion_refs` must
 cite real `cr-*` ids rendered in the current prompt; `subgoal_refs` may cite
-only active `sg-*` ids shown in it — a sub-goal declared in this same
-submission becomes referenceable next round. Free text, unknown ids, duplicate
+only active `sg-*` ids shown in it. A sub-goal declared in this same submission
+becomes referenceable next round. Free text, unknown ids, duplicate
 refs, and duplicate normalized items are rejected as `contract_invalid`. The
 proposal becomes active only after its declaring round commits.
 While it is open, you do **not** need to restate it: omitting `round_contract`
@@ -80,14 +140,20 @@ blocked, report `outcome: "blocked"` with a concrete `blocker` instead of
 silently replacing the active contract.
 
 This is a planning aid, not a second gate. LoopForge learns the plan only from
-committed evaluation fields, contract proposals, observations, and changes.
+committed evaluation fields, contract proposals, observations, and changes. If
+no enabled after-capable command can verify the slice, do not invent a contract
+just to make the round look complete; continue with Agent-directed work and
+report the available evidence honestly.
 
 ## Execute a round
 
 1. Execute the returned prompt and do the repository work.
 2. Use the tools and reasoning approach that fit the slice.
 3. Check actual evidence before claiming success.
-4. Submit exactly one structured evaluation with `loopforge_next`.
+4. Submit exactly one honest structured evaluation attempt with
+   `loopforge_next`. Multiple commands, edits, and tests may happen inside one
+   round before this submission. A rejected attempt may be corrected and
+   resubmitted with the same `roundId`.
 
 After the strict boundary accepts the payload, LoopForge collects before/after
 evidence, runs the **verification gate**, then runs the **enforcement gate**.
@@ -103,28 +169,31 @@ The four core evaluation fields are strict:
 | `success` | Boolean. `true` only when the whole objective and hard constraints are satisfied. |
 | `output_summary` | String describing what changed and what was verified. |
 | `constraint_violations` | Array of real violations, preferably using `c-XXXXXXXX` IDs. |
-| `should_continue` | Boolean. `false` only when the whole task is complete. |
+| `should_continue` | Boolean. `false` only when the whole task is complete or the Agent must stop. |
 
-Before submitting, check whether any of these events actually happened. Fill the
-matching field only when it did; omit it otherwise.
+Optional fields are event-driven declarations, not a completion form. Before
+submitting, read the current prompt and `submission_guidance`; use their real
+IDs, applicability, and legal shapes. Include a field only when its event
+actually happened. Omission is correct when it did not.
 
-| Event | Field | What LoopForge does with it |
-| --- | --- | --- |
-| The round changed files or ran tests | `execution_report.files_changed`, `execution_report.tests_reported` | Compares the report with machine observations; test counts stay self-reported |
-| You found a constraint later rounds must respect | `discovered_constraints` | The compiler merges it into the active set |
-| Evidence falsified an earlier assumption | `wrong_assumptions` | Feeds corrected-assumption state and recovery facts |
-| A sub-problem surfaced | `emerged_subtasks` | The only sub-goal creation channel |
-| An active sub-goal moved status | `subgoal_updates` | Applies an explicit transition |
-| You delegated work | `worker_results` | Saves the report and delegation journal entry; does **not** promote worker discoveries |
-| You are planning the next slice | `round_contract` | Becomes active only after this round commits |
-| A contract item progressed | `execution_report.contract_item_claims` | Starts machine evaluation; the item is verified only when its bound commands pass |
-| A success criterion moved | `execution_report.criterion_claims` | Advisory; cite the real `cr-` id/text from the prompt. Unknown references are dropped with a diagnostic; machine evidence still decides |
-| You need context emphasized | `prompt_requests` | Exact-match reorder or confusion alerts in the next prompt; never long-term knowledge |
-| You reached a meaningful boundary | `compression_checkpoint`, `checkpoint_label` | Creates a recoverable milestone |
-| You are blocked or stopping | `outcome`, `blocker`, `stop_reason`, `no_change_reason` | Runs the corresponding stop/lifecycle rule |
-| You understand the objective better | `objective_refinement` | Appends to the objective; never replaces it |
-| A constraint or criterion is wrong | `retracted_constraints`, `revised_success_criteria` | Updates derived state within existing boundaries |
-| You need a prior approval checked | `gate_ids`; `retroactiveClaims` | Checks existing gate references or prior-round evidence |
+The fields fall into four semantic groups. Use the live guidance for their
+current applicability and exact shape:
+
+- **Reports:** `execution_report`, `discovered_constraints`,
+  `wrong_assumptions`, `worker_results`.
+- **State transitions:** `emerged_subtasks`, `subgoal_updates`,
+  `objective_refinement`, `retracted_constraints`,
+  `revised_success_criteria`.
+- **Claims and verification proposals:** criterion claims, active contract
+  item claims, and `round_contract`.
+- **Prompt and lifecycle controls:** `prompt_requests`,
+  `compression_checkpoint` / `checkpoint_label`, `outcome`, `blocker`,
+  `stop_reason`, `no_change_reason`, and `gate_ids`.
+
+Reports and claims are not machine evidence. A criterion claim is advisory,
+while a contract item becomes verified only from its configured machine
+observations. A worker's discoveries remain a report until the main Agent
+promotes a finding through the supported top-level field.
 
 `execution_report.files_changed` is the **boundary net change**: paths whose
 content or file type differs between round preparation and this submission,
@@ -143,19 +212,24 @@ done and canceled are terminal and cannot be reopened. The prompt or
 outcome needs a concrete `blocker`; `stop_reason` of `blocked` or
 `needs_human_input` also stops without claiming success.
 
-Optional malformed values are normalized or dropped. The strict exceptions are
-`subgoal_updates`, `round_contract`, and
+Optional malformed values are diagnosed and normalized or dropped. The strict
+exceptions are `subgoal_updates`, `round_contract`, and
 `execution_report.contract_item_claims`. Shape, reference, duplicate, command,
 and workspace-containment errors return `evaluation_invalid` or
 `contract_invalid` before advance. Correct the payload and resubmit the same
-`roundId`; nothing is committed and no rejection counter moves.
+`roundId`; the invalid attempt is not persisted and no rejection counter moves.
+`projection_incomplete` is different: it reports a LoopForge projection defect,
+not poor Agent work. Do not retry the evaluation as though it were a payload
+error. For `round_id_mismatch`, fetch the current session prompt and use its
+current `roundId` rather than replaying a stale submission.
 
-A successful round should include an `execution_report`. An empty or missing
-report is a reporting gap (a `warn`), not by itself a rejection: acceptance is
-decided by machine evidence and contract rules, never by how many optional
-fields were filled. `no_change_reason` is an escape only when no enabled
-verification command exists. It never creates evidence and never excuses an
-open contract.
+When the round actually changed the workspace or ran relevant tests, report the
+corresponding `execution_report`. Do not invent an empty report or test counts
+to satisfy a field checklist. A missing or empty report on a success claim is a
+reporting gap (a `warn`), not by itself a rejection: acceptance is decided by
+machine evidence and contract rules, never by optional-field coverage.
+`no_change_reason` is an escape only when no enabled verification command
+exists. It never creates evidence and never excuses an open contract.
 
 Agent reports are claims quoted for audit. They never become verified facts.
 Do not infer a missing field from natural language, do not fill a field to
@@ -164,10 +238,13 @@ When no event occurred, omit the field.
 
 Each prepared response carries `submission_guidance` with the real contract
 item ids/statuses, active sub-goal ids, real criterion ids/text, usable
-commands and the fields that apply now. Each submission returns
-`submission_receipt`, which separates: reports that were saved, derived state
-that actually changed, and machine verification results, plus the structured
-`files_reconciliation` block. A report marked `saved` is not a verified fact.
+commands and the fields that apply now. Treat it as the authoritative shape for
+the current submission, rather than copying examples from an older prompt.
+Each submission returns `submission_receipt`, which separates reports that
+were saved, derived state that actually changed, and machine verification
+results, plus the structured `files_reconciliation` block. A report marked
+`saved` is not a verified fact. The receipt is read-only feedback for this
+submission; it is never a later prompt's independent fact source.
 
 ## IDs and contracts
 
@@ -175,7 +252,7 @@ Prompts render stable IDs beside constraints, criteria, sub-goals, and contract
 items. Prefer those IDs for `constraint_violations`, criterion claims, status
 updates, and item claims.
 
-Every level renders the same protected normative set — criteria, active
+Every level renders the same protected normative set, criteria, active
 constraints, the active contract and all items, active sub-goal ids, current
 findings, and (when present) the recovery brief. Display caps may shorten
 descriptions but never remove ids. `prompt_artifact.coverage` records the
@@ -213,7 +290,7 @@ similarity to judge drift. The enforced boundary is contract `scope`: work
 outside it is `round_scope_drift`, a machine fact no explanation waives. Revert
 the out-of-scope change, or close the contract as blocked and declare the
 expanded scope in a new proposal whose `scope` covers **every** file this round
-changed outside the current one — a partial expansion is still drift.
+changed outside the current one, a partial expansion is still drift.
 
 ## Evidence commands
 
@@ -243,8 +320,8 @@ server was started in:
 ```
 
 `executable` and `args` are spawned without a shell and confined to the
-workspace. `loopforge doctor` statically checks every configured command —
-its name, executable, arguments, timeouts, and workspace containment — and
+workspace. `loopforge doctor` statically checks every configured command,
+its name, executable, arguments, timeouts, and workspace containment, and
 never executes one.
 
 Every prepared response carries `submission_guidance.contract_commands` and
@@ -256,11 +333,11 @@ states the same thing in words.
 
 A command's ENTRYPOINT is the file it names plus `package.json` when a package
 manager runs it. It must already be part of the workspace when the round
-starts, and it must not change during the round that runs it — the runtime
+starts, and it must not change during the round that runs it, the runtime
 records those files at round start and compares them afterwards, whether or not
 git can see them. A changed entrypoint makes the observation untrustworthy:
 restore it to its round-start content. Do not author the verification script
-inside the round you expect it to verify — that round cannot be closed by it.
+inside the round you expect it to verify. That round cannot be closed by it.
 
 To keep a script that must survive a rollback, it has to be part of the
 committed workspace rather than an uncommitted change: the post-backtrack
@@ -278,9 +355,9 @@ read, no stall verdict is made. A machine-backed success round is finishing,
 even if its closing round changes no files.
 
 Backtrack records a rollback directive and restores the round counter to the
-last clean committed round. Rejected attempts are never history. The next
-submission is the redo of `restorePoint + 1` and must reuse the prompt's round
-ID. A successful redo retires the rollback record.
+last clean committed round. Rejected attempts are never history. The held
+post-backtrack prompt is the redo of `restorePoint + 1`; use its `roundId`.
+There is no extra recovery round.
 
 The Recovery Brief identifies the trigger, restore point, redo ID, failed
 approaches, falsified assumptions, valid discoveries, files to revert, and
@@ -288,27 +365,30 @@ target HEAD. It states restoration facts, not a prescribed command.
 
 When backtrack occurs:
 
-1. Restore the workspace exactly as requested before doing more work: the
-   restore point's HEAD, with none of the failed rounds' changes left behind.
-   Work in progress the restore point already carried may stay.
-2. Submit one recovery evaluation from the restored state, so LoopForge can
-   verify the restore before the redo's own work — and any commit — follows.
-3. Read the Recovery Brief, restored prompt, and derived state.
-4. Do not repeat a failed approach without addressing its cause.
-5. Carry valid discoveries into later evaluations.
+1. Restore the workspace before doing more work: the restore point's HEAD,
+   with none of the failed rounds' changes left behind. Work in progress the
+   restore point already carried may stay.
+2. Read the protected Recovery Brief and current prompt. The restore check is
+   judged against the restore point's machine snapshot at the redo round's
+   start; it permits only the work-in-progress already present there.
+3. Continue the redo only after restoring that boundary. Submit its work and
+   evidence using the held `roundId`; LoopForge validates restoration before
+   the redo can commit.
+4. Do not repeat a failed approach without addressing its cause. Carry valid
+   discoveries into the redo evaluation.
 
-If the rolled-back work used an active contract, close the stalled contract in
-the redo with `outcome: "blocked"` and declare the revised contract in that
-same submission. Restating the stalled contract commits more of the same.
+If the rolled-back work used an active contract, follow the Recovery Brief and
+live `submission_guidance` for that contract. Do not blindly restate or replace
+it; a successor proposal is subject to the same contract lifecycle rules.
 
 ## Interpret results
 
 - Non-null `prompt`: execute it and submit the next evaluation.
 - `enforcementAction: "reject"`: retry the same logical round and ID; the
   attempt increases.
-- `enforcementAction: "backtrack"`: restore the workspace, submit one recovery
-  evaluation from the restored state, then redo the round from its restored
-  prompt and round ID.
+- `enforcementAction: "backtrack"`: restore the workspace, then submit the
+  first post-backtrack redo evaluation with the held prompt and round ID; the
+  runtime checks the restore boundary before that redo commits.
 - Null `prompt`: inspect `stopReason`.
 
 Read `submission_guidance` before composing the next evaluation, and read
@@ -335,9 +415,11 @@ and `cancelled`.
 
 ## Prompt levels and views
 
-L0 is a lean same-round retry (or a committed failed round with proven no
-activity), L1 normal continuation, and L2 full rehydration. They control state
-density only, never a reasoning technique or the set of evaluation fields you
+L0 is a lean same-round retry, or follows a committed failed round only when
+the runtime proves there was no machine activity and no declared evolution.
+Unknown machine activity does not qualify for L0. L1 is normal continuation;
+L2 is full rehydration. Levels control state density only, never a reasoning
+technique or the set of evaluation fields you
 may use: L0/L1/L2 offer the same applicable trigger checklist, including real
 `cr-`/`rci-`/`sg-` ids. If this prompt is L0, it does not apply the previous
 round's `prompt_requests`; the field you submit in this round can still be
@@ -375,12 +457,26 @@ self-contained subtask and hard constraints, then place the result in
 `worker_results`. A worker result is a report with its source: its
 `discoveredConstraints` does **not** enter the global constraint set by itself.
 If you accept a worker's finding, state it in top-level
-`discovered_constraints` — that is the only promotion channel.
+`discovered_constraints`. That is the only promotion channel.
+
+## Avoid these mistakes
+
+- Do not start a new round for each file, command, test, commit, or elapsed
+  time interval.
+- Do not treat a rejection attempt as a new round or submit it under a new ID.
+- Do not fill optional fields to satisfy a checklist; report only events that
+  actually occurred.
+- Do not create a contract when no configured command can verify it.
+- Do not treat a receipt, state file, or agent report as committed machine
+  evidence.
+- Do not continue coding after backtrack until the restore boundary is in place.
+- Do not continue after `prompt: null` without interpreting `stopReason`.
 
 ## Rules
 
 1. Execute the prompt instead of generating another prompt.
-2. Submit one honest structured evaluation after each attempt.
+2. Submit one honest structured evaluation after each completed work slice;
+   correct rejected submissions under the same `roundId`.
 3. Treat required command evidence and verification findings as authoritative.
 4. Restore the workspace before working after backtrack.
 5. Keep one loop focused on one user objective.

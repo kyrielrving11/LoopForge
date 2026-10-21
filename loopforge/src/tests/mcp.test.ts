@@ -1994,6 +1994,43 @@ describe("MCP — Round Contract flow", async () => {
     );
   });
 
+  it("v3.9.5: a new contract without work_item is contract_invalid, then retries", async () => {
+    const r1 = await mgr.create({ task: "Build the auth module", loopId: "contract-work-item" });
+    const invalid = evalParam({ success: false, shouldContinue: true });
+    invalid.round_contract = {
+      scope: ["src/auth"],
+      items: [{
+        description: "login works",
+        criterion_refs: [DEFAULT_CRITERION_ID],
+        subgoal_refs: [],
+        verify_with: ["verify"],
+      }],
+    } as never;
+    const rejected = await mgr.advance(r1.sessionId, "Scaffolded.", invalid);
+    assert.equal(rejected.stopReason, "contract_invalid");
+    assert.equal(rejected.submissionError?.code, "contract_invalid");
+    assert.equal(rejected.prompt, null);
+    assert.ok(
+      JSON.stringify(rejected.submissionError?.details ?? {}).includes("missing_work_item"),
+      "the refusal names the missing deliverable",
+    );
+
+    const valid = evalParam({ success: false, shouldContinue: true });
+    valid.round_contract = {
+      work_item: "Login flow is implemented",
+      scope: ["src/auth"],
+      items: [{
+        description: "login works",
+        criterion_refs: [DEFAULT_CRITERION_ID],
+        subgoal_refs: [],
+        verify_with: ["verify"],
+      }],
+    };
+    const accepted = await mgr.advance(r1.sessionId, "Scaffolded.", valid);
+    assert.ok(accepted.prompt !== null, "the same round retries with work_item");
+    assert.ok(accepted.prompt.includes("**Login flow is implemented**"));
+  });
+
   it("v3.8.1: a payload defect is reported before the session is resolved", async () => {
     // A malformed evaluation is a payload defect whatever the session's state;
     // answering session_not_found for it would send the agent after the wrong
@@ -2018,7 +2055,10 @@ describe("MCP — Round Contract flow", async () => {
     );
     assert.ok(r2.prompt !== null);
     assert.ok(r2.prompt.includes("Plain task"), "original task stays the Current Task");
-    assert.ok(!r2.prompt.includes("Round Contract"), "no contract template without a contract");
+    assert.ok(!r2.prompt.includes("Acceptance conditions"),
+      "no contract block without an active contract");
+    assert.ok(!r2.prompt.includes("(rc-"),
+      "no contract id without an active contract");
   });
 
   // ── v3.4: active-contract lifecycle through the real advance path ────────

@@ -50,7 +50,7 @@ function check(
   overrides: Partial<ContractValidationContext> = {},
 ) {
   return validateContractShape(
-    { round_contract: { scope: [], items } },
+    { round_contract: { work_item: "Login slice", scope: [], items } },
     context(overrides),
   );
 }

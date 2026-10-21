@@ -171,7 +171,6 @@ export interface ParsedLoopExtras {
   next_task_proposal: string;
   plan_source: string | null;
   constraints_from_plan: string[];
-  new_since_last_round: string;
   force_level: string;
   external_context: string;
   max_rounds: number | undefined;
@@ -200,7 +199,6 @@ export function parseLoopExtras(
     next_task_proposal: ctx.string("next_task_proposal"),
     plan_source: ctx.optionalString("plan_source"),
     constraints_from_plan: ctx.stringArray("constraints_from_plan"),
-    new_since_last_round: ctx.string("new_since_last_round"),
     force_level: ctx.string("force_level", "auto"),
     external_context: ctx.string("external_context"),
     max_rounds: ctx.has("max_rounds")

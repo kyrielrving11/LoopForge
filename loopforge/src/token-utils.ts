@@ -147,7 +147,10 @@ export interface ContractIdentityItem {
 /** v3.8: Canonical form of a contract proposal. Identity is CONTENT only —
  *  restating an unchanged contract keeps the same rc-/rci- ids, unlike a
  *  SubGoal whose id includes its declaration round. Array order is part of
- *  the identity. */
+ *  the identity.
+ *
+ *  v3.9.5: `work_item` is the slice's deliverable label (optional in this
+ *  legacy-readable type); the item list is the acceptance surface. */
 export function canonicalContractText(contract: {
   work_item?: string;
   scope: string[];

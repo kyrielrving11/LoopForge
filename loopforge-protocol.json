@@ -217,28 +217,6 @@
     "LoopProjection": {
       "type": "object",
       "properties": {
-        "focus": {
-          "anyOf": [
-            {
-              "type": "object",
-              "properties": {
-                "what": {
-                  "type": "string"
-                },
-                "since_round": {
-                  "type": "number"
-                }
-              },
-              "required": [
-                "what",
-                "since_round"
-              ]
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "todo": {
           "type": "array",
           "items": {
@@ -389,7 +367,7 @@
         "handoff",
         "verified_subgoals"
       ],
-      "description": "v2.12: Typed cognitive state projection — runtime-derived facts shipped\r\nwith advance/status outputs. All fields are derived, zero persistence.\r\nConsumers: advance output (main agent), status (human/tooling), resume\r\nhandoff. The runtime provides facts; the agent decides actions."
+      "description": "v2.12: Typed cognitive state projection — runtime-derived facts shipped\r\nwith advance/status outputs. All fields are derived, zero persistence.\r\nConsumers: advance output (main agent), status (human/tooling), resume\r\nhandoff. The runtime provides current governance facts; the agent decides\r\nactions. v3.9.5: no agent-authored \"latest outcome\" focus — projection\r\nnever competes with the agent's own memory."
     },
     "GateActionDescriptor": {
       "type": "object",
@@ -2204,9 +2182,6 @@
             "type": "string"
           }
         },
-        "new_since_last_round": {
-          "type": "string"
-        },
         "last_round_result": {
           "anyOf": [
             {
@@ -2251,7 +2226,6 @@
         "domain",
         "next_task_proposal",
         "constraints_from_plan",
-        "new_since_last_round",
         "force_level",
         "attempt",
         "consecutive_rejections",
@@ -3107,7 +3081,7 @@
         "subgoal_refs",
         "verify_with"
       ],
-      "description": "v3.8: One declared contract item. `verify_with` must name configured,\r\nenabled, after-capable evidence commands — the declaration is strict.\r\n\r\n`subgoal_refs` lives HERE, not on the contract: a machine-verified item\r\nbacks exactly the sub-goals it names, so \"item A verifies SubGoal 1, item B\r\nverifies SubGoal 2\" is expressible and `VerifiedSubGoalFact` attribution is\r\nper-item instead of \"every verified item backs every sub-goal\"."
+      "description": "v3.8/v3.9.5: One acceptance condition inside a Round Contract slice.\r\n`description` states what must be true, not an activity. `verify_with`\r\nmust name configured, enabled, after-capable evidence commands — the\r\ndeclaration is strict. A command may back several conditions, and one\r\ncondition may bind several commands.\r\n\r\n`subgoal_refs` lives HERE, not on the contract: a machine-verified item\r\nbacks exactly the sub-goals it names, so \"item A verifies SubGoal 1, item B\r\nverifies SubGoal 2\" is expressible and `VerifiedSubGoalFact` attribution is\r\nper-item instead of \"every verified item backs every sub-goal\"."
     },
     "RoundContractProposal": {
       "type": "object",
@@ -3132,7 +3106,7 @@
         "scope",
         "items"
       ],
-      "description": "v3.8: A Round Contract proposal for the NEXT round. It becomes ACTIVE only\r\nafter the declaring round commits. Identity (rc-/rci-) is derived from\r\nCONTENT ONLY — restating an unchanged contract keeps the same identity,\r\nunlike a SubGoal whose id includes its declaration round."
+      "description": "v3.9.5: A Round Contract proposal for the NEXT round. It becomes ACTIVE\r\nonly after the declaring round commits. Identity (rc-/rci-) is derived\r\nfrom CONTENT ONLY — restating an unchanged contract keeps the same\r\nidentity, unlike a SubGoal whose id includes its declaration round.\r\n\r\n`work_item` is the bounded deliverable this slice produces (an outcome,\r\nnot an activity). New declarations must provide it; it stays optional in\r\nthis persisted type because committed history may contain legacy\r\ncontracts without a label. `items[]` are the acceptance conditions;\r\n`verify_with` remains item-level."
     },
     "ContractBinding": {
       "type": "object",

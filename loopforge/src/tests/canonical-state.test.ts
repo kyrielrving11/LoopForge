@@ -12,11 +12,13 @@ import {
   CANONICAL_STATE_SCHEMA_VERSION,
 } from "../canonical-state.js";
 import type { ActiveContractView } from "../round-contract.js";
+import type { ContractItemStatusView } from "../contract-items.js";
 import type { RoundFacts } from "../round-facts.js";
 import {
   makeLoopCompileRequest,
   makeLoopCompileResponse,
   makeLoopObjective,
+  makeLoopRoundResult,
   type LoopCompileRequest,
   type LoopCompileResponse,
 } from "../protocol.js";
@@ -196,6 +198,38 @@ describe("createCanonicalLoopState", () => {
     assert.ok(state.objective);
     assert.equal("estimate" in state.progress, false);
   });
+
+  it("v3.9.5: only committed reports become corrections/blockers", () => {
+    const previous = makeLoopRoundResult({
+      round: 1,
+      success: false,
+      output_summary: "previous summary",
+      constraint_violations: ["committed violation"],
+      manual_fixes_needed: "manual cleanup",
+      wrong_assumptions: ["old belief"],
+    });
+    const fallback = createCanonicalLoopState(
+      request({ last_round_result: previous }),
+      response(),
+      "test.md",
+    );
+    assert.deepEqual(fallback.corrections, [],
+      "fallback wrong assumptions do not enter Corrections");
+    assert.ok(!fallback.blockers.includes("committed violation"));
+    assert.ok(!fallback.blockers.includes("manual cleanup"));
+
+    const committed = createCanonicalLoopState(
+      request(),
+      response(),
+      "test.md",
+      { previousRound: { result: previous, verificationFlags: [], committed: true } },
+    );
+    assert.deepEqual(committed.corrections, ["Corrected assumption: old belief"]);
+    assert.ok(committed.blockers.includes("committed violation"));
+    assert.ok(!committed.blockers.includes("manual cleanup"),
+      "manual_fixes_needed has no committed source");
+    assert.ok(!committed.corrections.join(" ").includes("previous summary"));
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -270,6 +304,27 @@ describe("renderCanonicalStateMarkdown", () => {
     const md = renderCanonicalStateMarkdown(state);
     assert.ok(md.includes("Phase History"));
     assert.ok(md.includes("Phase 1: Auth done"));
+    assert.ok(md.includes("Outcome (agent report)"));
+  });
+
+  it("v3.9.5: renders the authority header and committed corrections", () => {
+    const previous = makeLoopRoundResult({
+      round: 1,
+      success: false,
+      output_summary: "previous summary",
+      wrong_assumptions: ["old belief"],
+    });
+    const state = createCanonicalLoopState(request(), response(), "test.md", {
+      previousRound: { result: previous, verificationFlags: [], committed: true },
+    });
+    const md = renderCanonicalStateMarkdown(state);
+    assert.ok(md.includes("**Authority**: committed typed rounds are the factual source"));
+    assert.ok(md.includes("**Agent reports**:"));
+    assert.ok(md.includes("### Corrections"));
+    assert.ok(md.includes("Corrected assumption: old belief"));
+    assert.ok(!md.includes("Changes Since Last Round"));
+    assert.ok(md.indexOf("## Recent") < md.indexOf("### Corrections"),
+      "Corrections belongs to the Recent tier");
   });
 
   it("renders sub-goal dashboard", () => {
@@ -345,8 +400,11 @@ describe("state-file tiering (v3.7.1)", () => {
     const idxHistorical = md.indexOf("## Historical Summary");
     assert.ok(idxCurrent >= 0 && idxRecent > idxCurrent && idxHistorical > idxRecent,
       "tiers must render in order: Current → Recent → Historical Summary");
+    assert.ok(md.includes("**Schema**: 2"), "v3.9.5 schema marker");
     assert.ok(md.includes("**Derived**: true"), "derived marker in the header");
     assert.ok(md.includes("**Source**: round 2 (attempt 2)"), "attempt marker");
+    assert.ok(md.includes("**Authority**: committed typed rounds"));
+    assert.ok(md.includes("**Agent reports**:"));
     assert.match(md, /\*\*State hash\*\*: [a-f0-9]{12}/);
     // Sections are demoted to H3 under their tier.
     const current = md.slice(idxCurrent, idxRecent);
@@ -523,10 +581,12 @@ describe("Round Contract state (v3.3 rendering, v3.4 active source)", () => {
     const state = withActiveContract();
     assert.equal(state.roundContract?.work_item, "Implement auth");
     assert.ok(state.currentTask.includes("**Implement auth** (rc-aaaaaaaa)"));
+    assert.ok(state.currentTask.includes("- Acceptance conditions:"));
     assert.ok(state.currentTask.includes("- [`rci-11111111`] login works"));
     assert.ok(state.currentTask.includes("- Verify via: run-tests"));
     assert.ok(state.currentTask.includes("- Criteria: cr-auth-login"));
-    assert.ok(state.currentTask.includes("- Scope: src/auth"));
+    assert.ok(state.currentTask.includes("- Allowed scope:"));
+    assert.ok(state.currentTask.includes("  - src/auth"));
     assert.ok(!state.currentTask.includes("Fix bugs in auth module"),
       "the original task is NOT the Current Task on a contract round");
   });
@@ -554,7 +614,11 @@ describe("Round Contract state (v3.3 rendering, v3.4 active source)", () => {
       items: [{ id: "rci-33333333", description: "lint clean", criterion_refs: [], subgoal_refs: [], verify_with: [] }],
       config_hash_by_command: {},
     });
-    assert.equal(text, "**Tidy** (rc-bbbbbbbb)\n- [`rci-33333333`] lint clean");
+    assert.equal(
+      text,
+      "**Tidy** (rc-bbbbbbbb)\n- Acceptance conditions:\n" +
+        "  - [`rci-33333333`] lint clean",
+    );
     const noWorkItem = formatRoundContract({
       id: "rc-cccccccc",
       declared_at_round: 1,
@@ -564,8 +628,49 @@ describe("Round Contract state (v3.3 rendering, v3.4 active source)", () => {
     });
     assert.equal(
       noWorkItem,
-      "**Round Contract** (rc-cccccccc)\n- [`rci-44444444`] tests pass\n  - Verify via: run-tests",
+      "**Round Contract** (rc-cccccccc)\n- Acceptance conditions:\n" +
+        "  - [`rci-44444444`] tests pass\n    - Verify via: run-tests",
     );
+  });
+
+  it("v3.9.5: renders item status, sub-goal refs and scope hierarchy", () => {
+    const statuses: ContractItemStatusView = {
+      contractId: "rc-dddddddd",
+      closure: "open",
+      closed_at_round: null,
+      items: [{
+        itemId: "rci-55555555",
+        description: "login works",
+        status: "insufficient",
+        status_at_round: 2,
+        history: [],
+        reasons: ["command \"verify\" produced no after-phase observation"],
+      }],
+      verifiedCount: 0,
+      contradictedCount: 0,
+      insufficientCount: 1,
+    };
+    const text = formatRoundContract({
+      id: "rc-dddddddd",
+      declared_at_round: 1,
+      work_item: "Login works end to end",
+      scope: ["src/auth"],
+      items: [{
+        id: "rci-55555555",
+        description: "login works",
+        criterion_refs: ["cr-11111111"],
+        subgoal_refs: ["sg-11111111"],
+        verify_with: ["verify", "lint"],
+      }],
+      config_hash_by_command: {},
+    }, statuses);
+    assert.match(text, /Acceptance conditions:/);
+    assert.match(text, /— insufficient/);
+    assert.match(text, /Verify via: verify, lint/);
+    assert.match(text, /Criteria: cr-11111111/);
+    assert.match(text, /Sub-goals: sg-11111111/);
+    assert.match(text, /Unverified because: command/);
+    assert.match(text, /Allowed scope:\n  - src\/auth/);
   });
 });
 

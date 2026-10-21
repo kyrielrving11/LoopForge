@@ -187,7 +187,7 @@ describe("Long-Horizon Verification", () => {
   //
   // R2's eval declared compression_checkpoint → R3's prompt is L2.
 
-  it("R3 L2 — checkpoint_boundary: full-state prompt with checkpoint label", async () => {
+  it("R3 L2 — checkpoint_boundary: boundary prompt with checkpoint label", async () => {
     const r = await client.tool("loopforge_next", { sessionId, roundId, evaluation: {
       success: false, should_continue: true, constraint_violations: [],
       output_summary: "Wrote tests for isPalindrome and capitalize. isPalindrome passes (3/3), capitalize fails on empty string. Declaring checkpoint.",

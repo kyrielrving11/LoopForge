@@ -120,10 +120,9 @@ function convertTypeNode(
     if (nullIndex >= 0 && nonNull.length === 1) {
       const inner = convertTypeNode(nonNull[0], checker);
       // `{ type: [T, "null"] }` can only carry `type`. A $ref cannot sit
-      // beside it, and an inline object would lose its properties — which is
-      // how `LoopProjection.focus` was published as "object or null" with no
-      // shape at all. Only the bare-type case collapses; anything richer
-      // states its two arms as anyOf.
+      // beside it, and an inline object would lose its properties. Only the
+      // bare-type case collapses; anything richer states its two arms as
+      // anyOf.
       const bareType = inner.$ref === undefined && inner.type !== undefined &&
         Object.keys(inner).length === 1;
       if (bareType) {
@@ -222,8 +221,8 @@ function convertTypeNode(
 
   // Inline object type: { a: string; b?: number }. These used to fall through
   // to the `{ type: "string" }` catch-all, so every inline shape in the
-  // protocol (the projection's focus/phase/delegation/handoff, the todo list,
-  // the reported test counts, the capability rows) was published as a string.
+  // protocol (the projection's phase/delegation/handoff, the todo list, the
+  // reported test counts, the capability rows) was published as a string.
   if (ts.isTypeLiteralNode(typeNode)) {
     const properties: Record<string, SchemaNode> = {};
     const required: string[] = [];

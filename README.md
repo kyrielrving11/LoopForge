@@ -48,6 +48,22 @@ LoopForge deliberately keeps two sources separate:
 The Agent still owns planning, code changes, tool use, and the choice of
 reasoning approach. LoopForge owns the round boundary and the checks around it.
 
+### Memory boundary
+
+LoopForge is not the Agent's memory. The prompt carries the current governance
+projection: objective, criteria, constraints, the active contract and its
+acceptance conditions, active sub-goals, machine findings and recovery facts.
+Agent-authored progress summaries (`output_summary`) remain committed reports
+for audit, replay, explain and backtrack diagnosis, but they are not replayed
+into every prompt. Full history lives in the derived state file and the
+read-only views; it is read on demand, not pushed every round.
+
+The fixed prompt header states the precedence rule: for committed rounds,
+active governance and machine verification, LoopForge's current projection
+wins; the Agent's session history and long-term memory are background and may
+contain unsubmitted, rejected or rolled-back work. A current explicit user
+instruction defines the task.
+
 ```text
 Agent executes work
   -> submits a structured evaluation (claim)
@@ -82,12 +98,21 @@ After:  close items with independent machine evidence
 
 ### Before: Declaration
 
-The Agent submits `round_contract` as a proposal for the next round. The
-submission boundary checks its structure, item limits, evidence bindings,
-workspace scope, and criterion or sub-goal references. A proposal becomes
-active only after its declaring round commits. While the active contract is
-open, a different proposal is ignored; restating it unchanged continues the
-current contract.
+The Agent submits `round_contract` as a proposal for the next round.
+`work_item` names the bounded deliverable this slice produces (an outcome, not
+an activity) and is required for a new proposal. `items[]` are acceptance
+conditions inside that slice; each item binds its own `verify_with` commands,
+and one command may back several conditions. `scope` is the machine-enforced
+file boundary, not the deliverable. The submission boundary checks structure,
+item limits, command bindings, scope containment, unknown fields, and
+criterion/sub-goal references. A proposal becomes active only after its
+declaring round commits. While the active contract is open, a different
+proposal is ignored; restating it unchanged continues the current contract.
+
+Criteria are the operator's acceptance surface, sub-goals are the Agent's
+execution plan, and the Round Contract is the current slice connecting them.
+LoopForge does not auto-decompose one layer into another or judge semantic
+fit; relationships are explicit `criterion_refs`/`subgoal_refs` only.
 
 ### During: Execution
 
@@ -137,10 +162,11 @@ its policy. The result is an explicit round disposition:
 
 ### Contracts close only on machine-backed facts
 
-A Round Contract is a set of items bound to evidence commands. An item becomes
-`verified` only when the Agent claims it is met and every bound command is
-observed passing in the closing round. Claimed but unbacked work is recorded as
-`insufficient`, creating bounded verification debt instead of silently passing.
+A Round Contract is a bounded deliverable (`work_item`) plus acceptance
+conditions (`items`) bound to evidence commands. An item becomes `verified` only
+when the Agent claims it is met and every bound command is observed passing in
+the closing round. Claimed but unbacked work is recorded as `insufficient`,
+creating bounded verification debt instead of silently passing.
 
 ### Recovery does not rewrite history
 

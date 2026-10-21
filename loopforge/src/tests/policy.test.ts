@@ -99,8 +99,16 @@ describe("Policy — the schema version is a boundary", () => {
     const policy = loadPolicy("loop_policy.json");
     assert.equal(policy.version, POLICY_SCHEMA_VERSION);
     assert.equal(policy.engine.backtrack_enabled, true);
-    assert.equal(policy.prompt.l2_pointer_enabled, true);
     assert.equal(policy.gate.enabled, false);
+  });
+
+  it("v3.9.5: rejects the removed l2_pointer_enabled key as unknown", () => {
+    withPolicyFile(
+      { version: POLICY_SCHEMA_VERSION, prompt: { l2_pointer_enabled: true } },
+      (path) => {
+        assert.throws(() => loadPolicy(path), /unknown policy key/);
+      },
+    );
   });
 
   it("REJECTS a file that declares a different schema version", () => {

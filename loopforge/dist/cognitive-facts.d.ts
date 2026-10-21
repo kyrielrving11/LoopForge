@@ -3,7 +3,6 @@ import type { CommittedRoundView } from "./committed-round.js";
 import type { LoopForgeResponse, LoopProjection } from "./protocol.js";
 import type { RoundFacts } from "./round-facts.js";
 export interface DerivedCognitiveFacts {
-    focus: LoopProjection["focus"];
     todo: LoopProjection["todo"];
     phase: LoopProjection["phase"];
     delegation: LoopProjection["delegation"];

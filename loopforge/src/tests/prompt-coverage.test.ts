@@ -65,7 +65,7 @@ function contract(): ActiveContractView {
 function state(overrides: Partial<CanonicalLoopState> = {}): CanonicalLoopState {
   const activeContract = contract();
   const base: CanonicalLoopState = {
-    schemaVersion: 1 as const,
+    schemaVersion: 2 as const,
     loopId: "coverage-loop",
     round: 3,
     maxRounds: 20,
@@ -83,7 +83,7 @@ function state(overrides: Partial<CanonicalLoopState> = {}): CanonicalLoopState 
       meta("no runtime deps", "hard", "c-11111111"),
       meta("discovered rule", "discovered", "c-22222222"),
     ],
-    changesSinceLastRound: [],
+    corrections: [],
     remainingCriteria: [],
     blockers: [],
     verificationFlags: [{
@@ -140,6 +140,31 @@ describe("v3.9.4 — PromptCoverage", () => {
     assert.ok(prompt.includes("rc-12345678"));
     assert.ok(prompt.includes("evidence_integrity"), "findings render their check");
     assert.ok(prompt.includes("unreported: [src/a.ts]"), "findings render their detail");
+  });
+
+  it("renders every id of a 20-item, multi-command contract", () => {
+    const items = Array.from({ length: 20 }, (_, index) => ({
+      id: `rci-${(index + 1).toString(16).padStart(8, "0")}`,
+      description: `condition ${index}`,
+      criterion_refs: [],
+      subgoal_refs: [],
+      verify_with: ["verify", "lint"],
+    }));
+    const active: ActiveContractView = {
+      ...contract(),
+      id: "rc-99999999",
+      items,
+    };
+    const current = artifact("l1", state({
+      roundContract: active,
+      currentTask: formatRoundContract(active, null),
+    }));
+    assert.equal(current.coverage.complete, true);
+    for (const item of items) {
+      assert.ok(current.renderedPrompt.includes(`\`${item.id}\``),
+        `item ${item.id} must render`);
+    }
+    assert.ok(current.renderedPrompt.includes("Verify via: verify, lint"));
   });
 
   it("does not include solved historical facts or closed-contract ids", () => {

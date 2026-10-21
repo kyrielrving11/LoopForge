@@ -184,6 +184,8 @@ export declare function normalizeSelfEvaluation(raw: Record<string, unknown>, fa
  *  (the lenient path, reached only after the strict boundary passed) truncates
  *  to the same numbers. One source, so the two can never drift. */
 export declare const CONTRACT_LIMITS: {
+    readonly workItem: 200;
+    readonly itemDescription: 200;
     readonly items: 20;
     readonly scope: 50;
     readonly criterionRefs: 20;

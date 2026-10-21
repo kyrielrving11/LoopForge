@@ -171,7 +171,6 @@ describe("parseLoopExtras", () => {
       next_task_proposal: "Audit upgrade",
       plan_source: "docs/plan.md",
       constraints_from_plan: ["No data loss", "Preserve API"],
-      new_since_last_round: "Fixed reentrancy",
       force_level: "l2",
       external_context: "Context from CI",
       max_rounds: 15,

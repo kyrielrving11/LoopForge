@@ -30,6 +30,28 @@ LoopForge 刻意分开两种来源：
 
 Agent 仍然负责规划、改代码、使用工具和选择推理方式。LoopForge 负责轮次边界以及边界周围的检查。
 
+### 记忆边界
+
+LoopForge 不是 Agent 的记忆系统。Prompt 只携带当前治理投影：目标、criteria、
+约束、活动契约及其验收条件、活动 sub-goals、机器发现和恢复事实。Agent 写的
+`output_summary` 仍作为已提交报告保留给 audit、replay、explain 和 backtrack
+诊断，但不会被每轮重新注入 prompt。完整历史保存在派生的 state file 和只读视图里，
+按需读取，而不是每轮推送。
+
+Prompt 固定头部写明优先级：已提交轮次、活动治理和机器验证以 LoopForge 当前投影为准；
+Agent 的会话历史和长期记忆只是背景，可能包含未提交、被拒绝或已回退的工作。用户当前
+明确指令决定任务目标。
+
+### 三层分解
+
+- **Criteria（`cr-*`）：** 操作者的验收面，回答“什么算完成”。
+- **Subgoals（`sg-*`）：** Agent 的动态执行计划，回答“打算怎么做、当前在做哪块”。
+- **Round Contract（`rc-*`/`rci-*`）：** 本轮的交付切片及其验收条件；`work_item`
+  是交付物，`items` 是验收条件，`verify_with` 绑定每个条件的命令。
+
+三者通过显式 `criterion_refs`/`subgoal_refs` 连接；LoopForge 不做语义相似匹配，
+不自动拆解，也不强制创建 subgoal。`emerged_subtasks` 为 0 是合法结果。
+
 ```text
 Agent 执行工作
   -> 提交结构化 evaluation（声明）
@@ -63,10 +85,12 @@ evaluation 来自执行工作的参与者，因此首先只被视为声明（cla
 
 ### 事前：Declaration
 
-Agent 提交 `round_contract`，它是下一轮的契约提案。提交边界检查它的结构、条目
-数量限制、证据绑定、工作区范围以及 criterion / sub-goal 引用。只有声明它的轮次
-成功提交后，提案才会成为 active contract。活动契约未关闭时，不同的新提案会被忽略；
-原样重申则表示继续当前契约。
+Agent 提交 `round_contract`，它是下一轮的契约提案。`work_item` 是本轮交付物
+（结果，而不是活动），新提案必须提供；`items[]` 是验收条件，每个 item 绑定自己的
+`verify_with` 命令；`scope` 是机器强制的文件边界，不是交付物。提交边界检查结构、
+条目数量、命令绑定、scope 包含关系、未知字段以及 criterion / sub-goal 引用。
+只有声明它的轮次成功提交后，提案才会成为 active contract。活动契约未关闭时，不同的
+新提案会被忽略；原样重申则表示继续当前契约。
 
 ### 事中：Execution
 

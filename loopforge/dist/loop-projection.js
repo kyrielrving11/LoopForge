@@ -3,7 +3,6 @@
 import { makeLoopProjection } from "./protocol.js";
 export function buildLoopProjection(facts) {
     const projection = makeLoopProjection({
-        focus: facts.focus,
         todo: [...facts.todo],
         phase: facts.phase,
         delegation: {
@@ -17,7 +16,7 @@ export function buildLoopProjection(facts) {
         },
         verified_subgoals: [...facts.verified_subgoals],
     });
-    const empty = projection.focus === null && projection.todo.length === 0 &&
+    const empty = projection.todo.length === 0 &&
         projection.phase === null && projection.delegation.last_results.length === 0 &&
         projection.handoff.summary.length === 0 &&
         projection.handoff.verified.length === 0 &&

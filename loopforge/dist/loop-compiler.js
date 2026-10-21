@@ -809,7 +809,11 @@ export function compileLoop(request, context) {
     // gone with the rest of the fuzzy matching, and so are the task-alignment
     // and loop-health warnings: both were Jaccard scores over task/objective
     // text, never machine facts.
-    const repeatedDeclarations = duplicateEmergedDeclarations(previous.result?.emerged_subtasks ?? []);
+    // v3.9.5: only committed declarations are history. A library fallback is
+    // in-flight and must not manufacture a prompt warning.
+    const repeatedDeclarations = previous.view
+        ? duplicateEmergedDeclarations(previous.view.emergedSubtasks ?? [])
+        : [];
     const warnings = unique([
         repeatedDeclarations.length > 0
             ? `duplicate_declaration: ${repeatedDeclarations.length} sub-goal ` +
@@ -865,9 +869,11 @@ export function compileLoop(request, context) {
         // ONE derivation. The static capability rides on the state itself.
         roundFacts,
         // 3.9.3: the same previous-round bundle the level decision used. This is
-        // what keeps changes/discoveries/blockers/remaining/progress identical on
-        // live, resume, and unpause compiles.
-        previousRound: previous,
+        // what keeps corrections/blockers/remaining/progress identical on live,
+        // resume, and unpause compiles.
+        // v3.9.5: the committed flag is what keeps a caller fallback out of the
+        // prompt/state narrative.
+        previousRound: { ...previous, committed: previous.view !== null },
     });
     // The recovery brief is a current-round fact, computed once and shared by
     // the state file and the evaluation block. It never becomes prompt control
@@ -891,13 +897,9 @@ export function compileLoop(request, context) {
     // rather than on the facts of this round — the same loop could render a
     // section at round 5 and silently drop it at round 50.
     //
-    // v2.8: L2 pointer mode — when enabled, skip the monolithic markdown blob.
-    // Structured L2 sections (milestones, sub-goals, trust, progress) still
-    // render. The state file on disk is the durable source of truth.
-    // L7: pointer mode REQUIRES the file — with state_file disabled it would
-    // silently drop the full state from L2 prompts and point at nothing.
-    const l2Pointer = policy.state_file.enabled &&
-        policy.prompt.l2_pointer_enabled && decision.level === "l2";
+    // v3.9.5: L2 never embeds the monolithic state markdown. The prompt is a
+    // current-governance projection; full history stays in the optional state
+    // file / replay / audit.
     const artifact = assemblePromptArtifact({
         state,
         level: decision.level,
@@ -922,13 +924,13 @@ export function compileLoop(request, context) {
             criteria: criterionStatuses,
             currentRequirement: state.currentTask,
         }),
-        fullStateMarkdown: l2Pointer ? undefined : markdown,
         // v3.9.4: the SAME committed-backtrack facts the state file renders. The
         // recovery section is part of the artifact, so the delivered prompt is
         // exactly `artifact.renderedPrompt` (no post-compile prepend).
         recoveryBrief,
-        // v2.9: Model's information needs from the previous round's SelfEvaluation
-        promptRequests: previous.result?.prompt_requests,
+        // v3.9.5: prompt requests are committed facts. A library fallback
+        // `last_round_result` is in-flight and must not steer the next prompt.
+        promptRequests: previous.view?.evaluation?.prompt_requests,
     });
     response.prompt = artifact.renderedPrompt;
     response.prompt_artifact = artifact;

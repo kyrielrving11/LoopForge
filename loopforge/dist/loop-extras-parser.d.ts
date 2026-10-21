@@ -60,7 +60,6 @@ export interface ParsedLoopExtras {
     next_task_proposal: string;
     plan_source: string | null;
     constraints_from_plan: string[];
-    new_since_last_round: string;
     force_level: string;
     external_context: string;
     max_rounds: number | undefined;

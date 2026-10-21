@@ -25,7 +25,6 @@ export interface PromptAssemblyInput {
     budgets?: Partial<PromptBudgets>;
     attempt?: number;
     selfEvaluationBlock: string;
-    fullStateMarkdown?: string;
     /** v3.9.4: the committed-backtrack recovery facts, from the SAME
      *  `committedBacktrackBrief` the state file renders. Present only while a
      *  committed rollback directive is the current redo boundary. */

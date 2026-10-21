@@ -7,7 +7,6 @@ import type { LoopForgeResponse, LoopProjection, SubGoal } from "./protocol.js";
 import type { RoundFacts } from "./round-facts.js";
 
 export interface DerivedCognitiveFacts {
-  focus: LoopProjection["focus"];
   todo: LoopProjection["todo"];
   phase: LoopProjection["phase"];
   delegation: LoopProjection["delegation"];
@@ -84,11 +83,6 @@ export function deriveCognitiveFacts(input: {
   openGates?: string[];
 }): DerivedCognitiveFacts {
   const { compileResponse, rounds } = input;
-  const latestFocus = [...rounds].reverse().find((round) =>
-    round.outcome !== "failed" &&
-    typeof round.evaluation?.output_summary === "string" &&
-    round.evaluation.output_summary.length > 0,
-  );
   const milestones = compileResponse?.rolling_summary?.milestones ?? [];
   const boundaries = milestones
     .filter((milestone) => typeof milestone.round_range?.end === "number")
@@ -99,7 +93,6 @@ export function deriveCognitiveFacts(input: {
   );
   const latestWorkerRound = workerRounds[workerRounds.length - 1];
   const workerResults = latestWorkerRound?.evaluation?.worker_results ?? [];
-  const rolling = compileResponse?.rolling_summary;
   // v3.8.1: read from the caller's derivation — do NOT re-run the reducers
   // here. Two derivations of the same fact is how the projection and the
   // prompt start disagreeing.
@@ -109,17 +102,18 @@ export function deriveCognitiveFacts(input: {
     verifiedSubGoals,
     verificationDebt,
   } = input.facts;
-  const currentTask = activeContract?.work_item ??
-    compileResponse?.loop_objective?.objective ?? "";
-  const latestOutcome = rolling?.key_outcomes[rolling.key_outcomes.length - 1] ??
-    latestFocus?.evaluation?.output_summary ?? "";
+  // v3.9.5: the projection names the current deliverable, never the latest
+  // Agent-authored outcome. A legacy contract without a work_item falls back
+  // to the contract label, not to the objective.
+  const currentTask = activeContract
+    ? (activeContract.work_item?.trim() || "Round Contract")
+    : (compileResponse?.loop_objective?.objective ?? "");
   const remainingCriteria = (compileResponse?.criterion_statuses ?? [])
     .filter((criterion) => criterion.status !== "verified" && criterion.status !== "claimed")
     .map((criterion) => criterion.text)
     .slice(0, 5);
   const summary = [
     currentTask ? `Current task: ${currentTask.slice(0, 200)}` : "",
-    latestOutcome ? `Latest outcome: ${latestOutcome.slice(0, 200)}` : "",
     remainingCriteria.length > 0
       ? `Remaining criteria: ${remainingCriteria.join("; ").slice(0, 300)}`
       : "",
@@ -128,9 +122,6 @@ export function deriveCognitiveFacts(input: {
     .find((round) => round.outcome === "blocked")?.evaluation?.blocker;
 
   return {
-    focus: latestFocus
-      ? { what: latestFocus.evaluation!.output_summary.slice(0, 200), since_round: latestFocus.round }
-      : null,
     todo: deriveTodo(compileResponse, contractItemStatuses),
     phase: lastBoundary
       ? { current: lastBoundary.label, label: lastBoundary.label, boundaries }

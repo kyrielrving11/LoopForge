@@ -30,8 +30,13 @@ LoopForge has one factual source and one cognitive source.
 - `derivationRounds(entries, N)` is the one history window used by compilation,
   projections, gates, audit, explain, and metrics.
 - The cognitive source is `CanonicalLoopState`, compiled from committed facts.
-- `DerivedCognitiveFacts` supplies focus, todo, phase, delegation, and handoff
-  to the prompt, state-file, and status projections.
+- `DerivedCognitiveFacts` supplies todo, phase, delegation, and handoff (current
+  deliverable + remaining criteria + risks) to the status/advance projections.
+  It has no latest-outcome focus: Agent-authored progress narrative is not a
+  LoopForge projection.
+- Agent conversation history and long-term memory are background, never an
+  input. The prompt carries current governance facts; full history is read on
+  demand from the derived state file, replay, audit or explain.
 - Replay, Audit, Metrics, and Explain are read-only views. They must not create
   a second history or independent derivation rule.
 
@@ -211,6 +216,23 @@ Round Contract rules:
 
 - A proposal is item-based and becomes active only after its declaring round
   commits.
+- v3.9.5: `work_item` is the bounded deliverable this slice produces (an
+  outcome, not an activity). New declarations must provide it, non-empty and
+  <=200 chars, at the strict boundary; the persisted type stays optional so
+  legacy committed contracts remain readable. `scope` must be present (empty
+  is allowed).
+- `items[]` are acceptance conditions, not a task checklist. Each item binds
+  its own `verify_with` commands; one condition may use several commands and
+  one command may back several conditions. `verify_with` never moves to the
+  contract/work_item level. There is no work_item-level claim: the contract is
+  verified only when every item is verified (or a blocked round closes it).
+- LoopForge validates structure, configured/enabled/after-capable command
+  bindings, scope containment and references. It never judges whether a
+  `work_item` sounds like a deliverable, whether an item matches a command
+  semantically, or whether a command is the "right" acceptance test. That is
+  Agent/operator semantic judgment.
+- Unknown top-level contract fields and unknown item fields are
+  `contract_invalid`; a top-level `verify_with` is not a second binding site.
 - Each item has at least one configured, enabled, after-capable evidence
   command.
 - Contract and item IDs are content-addressed; restating an unchanged contract
@@ -237,6 +259,24 @@ verified sub-goal facts read the whole committed history so they survive
 contract closure.
 
 ## Prompt and projection invariants
+
+v3.9.5 memory boundary: the prompt is a current-governance projection, not a
+narrative of recent work. `output_summary` remains a strict committed report
+for audit/replay/explain/backtrack, but it is never a default prompt input,
+never a projection focus, and never machine evidence. `Recent Rounds`,
+`Cross-Round Outcomes`, `Full Rehydrated State`, agent `Discoveries`, and
+retired/failed-pattern history do not render in prompts; they remain in the
+derived state file and read models. L2 renders the shared protected sections,
+a `Phase` line, and at most three `Phase Anchors` (labels/ranges, no outcome);
+the full phase history stays in the state file. The fixed prompt header carries
+a static authority boundary: LoopForge's current committed projection wins for
+committed/verified state; Agent memory/session history is background and may
+contain unsubmitted, rejected or rolled-back work; a current user instruction
+defines the task. `state_file_content` remains a derived view; the prompt must
+never call it the source of truth. `Corrections` is committed
+`wrong_assumptions` only; fallback `last_round_result` narrative,
+`prompt_requests` and agent-reported blockers do not enter the next prompt.
+`emphasize` only reorders current active governance items.
 
 `submission-guidance.ts` is the single source for evaluation-field meaning,
 applicable events, legal examples and downstream effects. The tool schema,
@@ -389,6 +429,15 @@ run the scripted prepack in the clean mirror.
 - Prompt changes: cover budgets, hashing, density levels, same-round retry,
   protected overflow, deterministic truncation, rendered-vs-dropped priority,
   and identical-input determinism.
+- Memory-boundary changes: cover no `output_summary`/recent-round/full-state
+  prompt narrative, committed-only Corrections/blockers/prompt_requests,
+  Phase Anchors without outcomes, authority-header presence at L0/L1/L2,
+  state-file-derived wording, no dangling state-file pointer, and that
+  emphasize cannot resurrect removed history.
+- Contract-semantics changes: cover required work_item/scope at the strict
+  boundary, optional legacy reads, item-level verify_with, unknown fields,
+  length boundaries, semantic non-validation, and prompt/state hierarchy
+  rendering with rc-/rci- coverage.
 - Prompt-coverage changes: cover the identical L0/L1/L2 active id set, every
   active id in the delivered prompt, sub-goal id overflow, emphasize moves
   into Critical Context, contract closure, recovery facts, and the

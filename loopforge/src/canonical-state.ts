@@ -32,7 +32,7 @@ import { deriveConfiguredCapability } from "./policy.js";
 import type { ConfiguredCapability, VerifiedSubGoalFact } from "./protocol.js";
 import type { RoundFacts } from "./round-facts.js";
 
-export const CANONICAL_STATE_SCHEMA_VERSION = 1 as const;
+export const CANONICAL_STATE_SCHEMA_VERSION = 2 as const;
 
 /** v3.7.1: Presentation view of sub-goals shared by prompts and the state
  *  file (one derivation, no second copy). Only ACTIVE items render as rows
@@ -201,7 +201,10 @@ export interface CanonicalLoopState {
   retiredConstraints: string[];
   /** v2.3: Per-constraint lifecycle metadata. */
   constraintMetadata: ConstraintMeta[];
-  changesSinceLastRound: string[];
+  /** v3.9.5: committed Agent corrections (wrong assumptions). This is a
+   *  REPORT, never machine evidence; fallback last_round_result does not
+   *  enter this field. */
+  corrections: string[];
   remainingCriteria: string[];
   blockers: string[];
   verificationFlags: VerificationFlag[];
@@ -397,6 +400,9 @@ export function formatRoundContract(
   const statusById = new Map(
     (statuses?.items ?? []).map((item) => [item.itemId, item]),
   );
+  if (contract.items.length > 0) {
+    lines.push("- Acceptance conditions:");
+  }
   for (const item of contract.items) {
     const machine = statusById.get(item.id);
     const mark = machine?.status === "verified" ? "✅"
@@ -404,19 +410,28 @@ export function formatRoundContract(
       : machine?.status === "contradicted" ? "⛔"
       : machine?.status === "pending" ? "⬜"
       : "";
-    lines.push(`- ${mark ? `${mark} ` : ""}[\`${item.id}\`] ${item.description}${machine ? ` — ${machine.status}` : ""}`);
+    const status = machine ? ` — ${machine.status}` : "";
+    lines.push(
+      `  - ${mark ? `${mark} ` : ""}[\`${item.id}\`] ${item.description}${status}`,
+    );
     if (item.verify_with.length > 0) {
-      lines.push(`  - Verify via: ${item.verify_with.join(", ")}`);
+      lines.push(`    - Verify via: ${item.verify_with.join(", ")}`);
     }
     if (item.criterion_refs.length > 0) {
-      lines.push(`  - Criteria: ${item.criterion_refs.join(", ")}`);
+      lines.push(`    - Criteria: ${item.criterion_refs.join(", ")}`);
+    }
+    if (item.subgoal_refs.length > 0) {
+      lines.push(`    - Sub-goals: ${item.subgoal_refs.join(", ")}`);
     }
     if (machine?.reasons.length) {
-      lines.push(`  - Unverified because: ${machine.reasons[0]}`);
+      lines.push(`    - Unverified because: ${machine.reasons[0]}`);
     }
   }
-  for (const entry of contract.scope) {
-    lines.push(`- Scope: ${entry}`);
+  if (contract.scope.length > 0) {
+    lines.push("- Allowed scope:");
+    for (const entry of contract.scope) {
+      lines.push(`  - ${entry}`);
+    }
   }
   return lines.join("\n");
 }
@@ -467,7 +482,7 @@ const STATE_SECTION_TIER: Record<string, StateTier> = {
   // derived Recovery Brief injected at the top of this tier).
   "Progress Dashboard": "Recent",
   Verification: "Recent",
-  "Changes Since Last Round": "Recent",
+  Corrections: "Recent",
   Discoveries: "Recent",
   // Historical Summary — the loop's memory skeleton, kept under existing
   // milestone/window caps.
@@ -508,6 +523,8 @@ export function renderCanonicalStateMarkdown(
     `**Goal ID**: ${state.goalId}`,
     "**Derived**: true",
     `**Source**: round ${state.round} (attempt ${options?.attempt ?? 1})`,
+    "**Authority**: committed typed rounds are the factual source; this file is a derived view.",
+    "**Agent reports**: summaries below are claims, not machine evidence.",
     `**State hash**: ${hashCanonicalState(state).slice(0, 12)}`,
     "",
   ];
@@ -551,7 +568,7 @@ function flatStateSections(state: CanonicalLoopState): Array<{ title: string; bo
   addListWithIds(lines, "Success Criteria", constraintPartition.criteria, "cr");
   addListWithIdentities(lines, "Hard Constraints", constraintPartition.hard, state.constraintMetadata);
   addListWithIdentities(lines, "Active Constraints", constraintPartition.other, state.constraintMetadata);
-  addList(lines, "Changes Since Last Round", state.changesSinceLastRound);
+  addList(lines, "Corrections", state.corrections);
   if (
     state.progress.criteriaMet.length > 0 ||
     state.progress.criteriaRemaining.length > 0 ||
@@ -662,7 +679,7 @@ function flatStateSections(state: CanonicalLoopState): Array<{ title: string; bo
         `### ${kindIcon} ${m.label}`,
         `Rounds ${m.round_range.start}–${m.round_range.end}`,
         "",
-        `**Outcome**: ${m.outcome}`,
+        `**Outcome (agent report)**: ${m.outcome}`,
         "",
       );
       if (m.carried_constraints.length > 0) {
@@ -749,6 +766,10 @@ export function createCanonicalLoopState(
     previousRound?: {
       result: LoopRoundResult | null;
       verificationFlags: VerificationFlag[];
+      /** v3.9.5: true only when `result` came from a committed round view.
+       *  Agent reports (wrong assumptions, blockers) enter the prompt/state
+       *  projection only under this flag; a library fallback is in-flight. */
+      committed?: boolean;
     };
   },
 ): CanonicalLoopState {
@@ -758,14 +779,18 @@ export function createCanonicalLoopState(
     request.verification_flags ?? [];
   const rolling = response.rolling_summary;
   const executionReport = last?.execution_report;
+  // v3.9.5: only committed previous-round reports enter the projection.
+  // `last_round_result` remains a library/in-flight fallback for semantic
+  // evolution, but it must not create prompt/state narrative.
+  const committed = derived?.previousRound?.committed === true;
 
-  const changes = unique([
-    request.new_since_last_round,
-    last?.output_summary,
-    ...(last?.wrong_assumptions ?? []).map((value) =>
-      `Corrected assumption: ${value}`,
-    ),
-  ]);
+  const corrections = committed
+    ? unique(
+        (last?.wrong_assumptions ?? []).map((value) =>
+          `Corrected assumption: ${value}`,
+        ),
+      )
+    : [];
 
   const discoveries = unique([
     ...(last?.discovered_constraints ?? []),
@@ -773,8 +798,7 @@ export function createCanonicalLoopState(
   ]);
 
   const blockers = unique([
-    ...(last?.constraint_violations ?? []),
-    last?.manual_fixes_needed,
+    ...(committed ? (last?.constraint_violations ?? []) : []),
     request.rejection_notice,
     ...response.warnings,
   ]);
@@ -822,7 +846,7 @@ export function createCanonicalLoopState(
     activeConstraints,
     retiredConstraints: unique(response.constraints_retired),
     constraintMetadata: response.constraint_metadata ?? [],
-    changesSinceLastRound: changes,
+    corrections,
     remainingCriteria: unique(
       claimedRemainingCriteria(last?.execution_report),
     ),

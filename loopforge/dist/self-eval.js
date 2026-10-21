@@ -612,8 +612,14 @@ const SUBGOAL_ID_RE = /^sg-[a-f0-9]{8}$/;
  *  `/etc` or `../outside` is rejected, not silently normalized into a string
  *  the drift check can never match. */
 function validateContractScope(scope, checkScopeEntry, errors) {
-    if (scope === undefined)
+    if (scope === undefined) {
+        errors.push({
+            field: "round_contract",
+            reason: "missing_scope",
+            detail: "scope is required (use [] for no scope constraint)",
+        });
         return;
+    }
     if (!Array.isArray(scope)) {
         errors.push({
             field: "round_contract",
@@ -658,11 +664,28 @@ function validateContractItem(item, index, context, errors) {
         return;
     }
     const entry = item;
+    for (const key of Object.keys(entry)) {
+        if (!["description", "criterion_refs", "subgoal_refs", "verify_with"].includes(key)) {
+            errors.push({
+                field: "round_contract",
+                reason: "unknown_field",
+                detail: `item ${index} has unknown field "${key}"`,
+            });
+        }
+    }
     if (typeof entry.description !== "string" || entry.description.trim().length === 0) {
         errors.push({
             field: "round_contract",
             reason: "empty_item_description",
             detail: `item ${index} needs a non-empty description`,
+        });
+    }
+    else if (entry.description.trim().length > CONTRACT_LIMITS.itemDescription) {
+        errors.push({
+            field: "round_contract",
+            reason: "item_description_too_long",
+            detail: `item ${index} description may be at most ` +
+                `${CONTRACT_LIMITS.itemDescription} chars`,
         });
     }
     const verifyWith = entry.verify_with;
@@ -832,6 +855,43 @@ export function validateContractShape(raw, context) {
         }
         else {
             const obj = contract;
+            for (const key of Object.keys(obj)) {
+                if (!["work_item", "scope", "items"].includes(key)) {
+                    errors.push({
+                        field: "round_contract",
+                        reason: "unknown_field",
+                        detail: `round_contract has unknown field "${key}"`,
+                    });
+                }
+            }
+            if (obj.work_item === undefined) {
+                errors.push({
+                    field: "round_contract",
+                    reason: "missing_work_item",
+                    detail: "a contract must name the deliverable in work_item",
+                });
+            }
+            else if (typeof obj.work_item !== "string") {
+                errors.push({
+                    field: "round_contract",
+                    reason: "invalid_work_item",
+                    detail: "work_item must be a string",
+                });
+            }
+            else if (obj.work_item.trim().length === 0) {
+                errors.push({
+                    field: "round_contract",
+                    reason: "empty_work_item",
+                    detail: "work_item must not be empty",
+                });
+            }
+            else if (obj.work_item.trim().length > CONTRACT_LIMITS.workItem) {
+                errors.push({
+                    field: "round_contract",
+                    reason: "work_item_too_long",
+                    detail: `work_item may be at most ${CONTRACT_LIMITS.workItem} chars`,
+                });
+            }
             validateContractScope(obj.scope, context.checkScopeEntry, errors);
             const items = obj.items;
             if (!Array.isArray(items) || items.length === 0) {
@@ -1050,6 +1110,8 @@ export function normalizeSelfEvaluation(raw, facts) {
  *  (the lenient path, reached only after the strict boundary passed) truncates
  *  to the same numbers. One source, so the two can never drift. */
 export const CONTRACT_LIMITS = {
+    workItem: 200,
+    itemDescription: 200,
     items: 20,
     scope: 50,
     criterionRefs: 20,
@@ -1132,12 +1194,12 @@ export function parseRoundContract(raw, sink) {
             sink?.push(`round_contract.items[${index}].description`, "invalid_value", "dropped", "expected a string; the description was dropped");
         }
         if (typeof item.description === "string" &&
-            item.description.trim().length > 200) {
-            sink?.push(`round_contract.items[${index}].description`, "truncated", "truncated", "longer than 200 chars; truncated to the limit");
+            item.description.trim().length > CONTRACT_LIMITS.itemDescription) {
+            sink?.push(`round_contract.items[${index}].description`, "truncated", "truncated", `longer than ${CONTRACT_LIMITS.itemDescription} chars; truncated to the limit`);
         }
         return {
             description: typeof item.description === "string"
-                ? item.description.trim().slice(0, 200)
+                ? item.description.trim().slice(0, CONTRACT_LIMITS.itemDescription)
                 : "",
             criterion_refs: capStrings(item.criterion_refs, 200, CONTRACT_LIMITS.criterionRefs, `round_contract.items[${index}].criterion_refs`),
             subgoal_refs: capStrings(item.subgoal_refs, 64, CONTRACT_LIMITS.subgoalRefs, `round_contract.items[${index}].subgoal_refs`),
@@ -1157,12 +1219,13 @@ export function parseRoundContract(raw, sink) {
     else if (typeof obj.work_item === "string" && obj.work_item.trim().length === 0) {
         sink?.push("round_contract.work_item", DIAG_EMPTY_VALUE, "dropped", "empty work_item was dropped");
     }
-    else if (typeof obj.work_item === "string" && obj.work_item.trim().length > 200) {
-        sink?.push("round_contract.work_item", "truncated", "truncated", "longer than 200 chars; truncated to the limit");
+    else if (typeof obj.work_item === "string" &&
+        obj.work_item.trim().length > CONTRACT_LIMITS.workItem) {
+        sink?.push("round_contract.work_item", "truncated", "truncated", `longer than ${CONTRACT_LIMITS.workItem} chars; truncated to the limit`);
     }
     return {
         work_item: typeof obj.work_item === "string" && obj.work_item.trim().length > 0
-            ? obj.work_item.trim().slice(0, 200)
+            ? obj.work_item.trim().slice(0, CONTRACT_LIMITS.workItem)
             : undefined,
         scope: capStrings(obj.scope, 500, CONTRACT_LIMITS.scope, "round_contract.scope"),
         items,

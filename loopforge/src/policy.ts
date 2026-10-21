@@ -69,12 +69,6 @@ export interface PromptPolicy {
   l0_max_chars: number;
   l1_max_chars: number;
   l2_max_chars: number;
-  /** v2.8: When true, L2 prompts skip inline fullStateMarkdown and
-   *  instruct the agent to read the state file instead. Structured
-   *  sections (milestones, sub-goals, trust, progress) are still
-   *  rendered. Default: true. Set to false to restore pre-v2.8 L2
-   *  behavior. */
-  l2_pointer_enabled: boolean;
   /** v2.9: Max emphasize items when level is L2. Default: 5. */
   max_emphasize_l2: number;
   /** v2.9: Max emphasize items when level is L1. Default: 3. */
@@ -150,7 +144,7 @@ export interface GatePolicy {
 
 /** v3.8.1: the policy schema version. A policy file that does not declare
  *  exactly this version is REJECTED — see loadPolicy. */
-export const POLICY_SCHEMA_VERSION = "6";
+export const POLICY_SCHEMA_VERSION = "7";
 
 export interface LoopPolicy {
   version: string;
@@ -176,7 +170,6 @@ export const DEFAULT_POLICY: LoopPolicy = {
     l0_max_chars: 5000,
     l1_max_chars: 10000,
     l2_max_chars: 18000,
-    l2_pointer_enabled: true,
     max_emphasize_l2: 5,
     max_emphasize_l1: 3,
     max_confusion_points: 3,

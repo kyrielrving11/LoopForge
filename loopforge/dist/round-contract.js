@@ -1,5 +1,11 @@
 /** Round Contract derivation — the ACTIVE contract a round executes under.
  *
+ *  v3.9.5 semantics: `work_item` is the bounded deliverable this slice
+ *  produces (an outcome, not an activity); `items[]` are acceptance
+ *  conditions inside that slice; each item binds its own `verify_with`
+ *  commands. The contract is verified only when every item is verified, so
+ *  there is no work_item-level claim. A command may back several conditions.
+ *
  *  A submission's `round_contract` is a PROPOSAL for the next round. It
  *  becomes ACTIVE only after the declaring round commits; the active contract
  *  is then derived from committed rounds on every compile path (retry,
@@ -9,7 +15,8 @@
  *
  *  v3.8 identity: `rc-` / `rci-` are derived from CONTENT ONLY (loop id +
  *  canonical proposal), so restating an unchanged contract keeps the same
- *  identity and the item ids the agent already cited. This is deliberately
+ *  identity and the item ids the agent already cited. `rci-` is deliberately
+ *  independent of `work_item`/`scope`, which stay slice-level labels. This is
  *  the opposite of a SubGoal, whose id includes its declaration round.
  */
 import { canonicalContractText, deriveContractId, deriveContractItemIds, } from "./token-utils.js";

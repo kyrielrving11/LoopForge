@@ -338,7 +338,7 @@ describe("Engine — P0-P5 Cognitive Evolution (v1.7 E2E)", () => {
       "the L2 prompt no longer carries the dashboard; the state file does");
   });
 
-  it("P5: wrong_assumptions are forwarded to compiler as key lessons", () => {
+  it("v3.9.5: fallback wrong_assumptions do not become prompt lessons", () => {
     const engine = createEngine();
     engine.invokeLoopCompile(makeRequest({
       mode: Mode.LOOP_COMPILE,
@@ -368,12 +368,11 @@ describe("Engine — P0-P5 Cognitive Evolution (v1.7 E2E)", () => {
     } as unknown as LoopForgeRequest);
     assert.equal(r2.status, AgentStatus.OK);
     const prompt = r2.response!.prompt!;
-    // Wrong assumptions should appear in the prompt
-    assert.ok(
-      prompt.includes("wrong assumption") || prompt.includes("Wrong assumption") ||
-      prompt.includes("assumed") || prompt.includes("Assumed"),
-      "P5: wrong_assumptions not reflected in prompt",
-    );
+    // v3.9.5: only committed corrections reach the prompt. This caller
+    // fallback is in-flight, so it must not become prompt narrative.
+    assert.ok(!prompt.includes("Assumed OZ v4.0"),
+      "fallback wrong_assumptions must not leak into the prompt");
+    assert.ok(!prompt.includes("Corrected assumption"));
   });
 
   it("P5: retracted_constraints are removed from active set", () => {
@@ -465,12 +464,9 @@ describe("Engine — last_round_result boundary (v3.3.1)", () => {
     installTestCommandProvider();
   });
 
-  it("preserves prompt_requests across the invokeLoopCompile boundary", () => {
-    // Regression: the field-by-field last_round_result rebuild in
-    // invokeLoopCompile silently dropped prompt_requests. Every compile path
-    // funnels through this boundary, so on the real MCP flow
-    // prompt_requests (emphasize / confusion_points) never reached the
-    // compiler — unit tests fed compileLoop directly and missed the gap.
+  it("v3.9.5: fallback prompt_requests do not steer the next prompt", () => {
+    // prompt_requests are committed facts. A library fallback is in-flight
+    // and must not reach the next prompt.
     const engine = createEngine();
     const result = engine.invokeLoopCompile(makeRequest({
       loop_id: "engine-boundary-next",
@@ -491,11 +487,10 @@ describe("Engine — last_round_result boundary (v3.3.1)", () => {
     }));
     assert.equal(result.status, AgentStatus.OK);
     const prompt = result.response?.prompt ?? "";
-    // prompt_requests must survive the boundary.
-    assert.ok(prompt.includes("🔴 Critical Context"),
-      "emphasize must reach the Critical Context section");
-    assert.ok(prompt.includes("⚠️ Confusion Alerts"),
-      "confusion_points must render the Confusion Alerts section");
+    assert.ok(!prompt.includes("🔴 Critical Context"),
+      "fallback emphasize must not reach the prompt");
+    assert.ok(!prompt.includes("⚠️ Confusion Alerts"),
+      "fallback confusion_points must not reach the prompt");
   });
 });
 

@@ -787,7 +787,6 @@ export class LoopForgeEngine {
             next_task_proposal: parsed.next_task_proposal,
             plan_source: parsed.plan_source,
             constraints_from_plan: parsed.constraints_from_plan,
-            new_since_last_round: parsed.new_since_last_round,
             force_level: parsed.force_level,
             external_context: parsed.external_context,
             max_rounds: parsed.max_rounds,

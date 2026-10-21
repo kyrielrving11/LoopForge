@@ -120,7 +120,10 @@ const GUIDES: FieldGuide[] = [
     purpose: "What was actually done this round, not what was attempted.",
     when: "Every round.",
     nature: "report",
-    downstream: "Rolling summary, focus/handoff projection, backtrack failed-approach list.",
+    downstream:
+      "Committed record, rolling summary, state file, audit/replay/explain, " +
+      "and backtrack failed-approach facts — never machine evidence or a " +
+      "current-prompt narrative.",
     toolDescription:
       "Specific, actionable summary of what was DONE this round — not what was " +
       "attempted. Do not restate the plan.",
@@ -199,11 +202,13 @@ const GUIDES: FieldGuide[] = [
     compact: true,
     promptRank: 10,
     downstream:
-      "Advisory only: unbacked claims warn; they never upgrade a criterion to verified.",
+      "Advisory only: unbacked claims warn; a criterion becomes verified only " +
+      "through a contract item that references it and whose bound commands pass.",
     toolDescription:
       "Advisory claims about objective criteria. LENIENT: unknown or malformed " +
       "ids are dropped with a diagnostic, never a rejection. A criterion claim " +
-      "never becomes machine-verified by itself.",
+      "never becomes machine-verified by itself; cite the contract item whose " +
+      "commands actually check it.",
   },
   {
     path: "subgoal_updates",
@@ -221,16 +226,20 @@ const GUIDES: FieldGuide[] = [
   },
   {
     path: "emerged_subtasks",
-    purpose: "New sub-problems that surfaced during execution.",
-    when: "When a new work item appears or an existing one must be split.",
+    purpose: "New execution-plan work that the active criteria/contract do not already cover.",
+    when:
+      "Only when new work appears or an existing work item must be split. Zero " +
+      "is correct when the current criteria/contract already cover the round.",
     nature: "transition",
     decision: "A new sub-problem surfaced (plain text, never sg- ids)",
     compact: true,
     promptRank: 40,
     downstream: "The only sub-goal creation channel; the runtime derives stable sg- ids.",
     toolDescription:
-      "Sub-problems that surfaced during execution. The ONLY sub-goal creation " +
-      "channel. Plain descriptions, never sg-XXXXXXXX ids.",
+      "New work that surfaced during execution and was not already covered by " +
+      "the active criteria or current contract. The ONLY sub-goal creation " +
+      "channel. Plain descriptions, never sg-XXXXXXXX ids. Do not restate the " +
+      "criteria as sub-goals; zero entries is a valid result.",
   },
   {
     path: "discovered_constraints",
@@ -256,7 +265,9 @@ const GUIDES: FieldGuide[] = [
     compact: true,
     promptRank: 30,
     downstream:
-      "State-file 'Corrected assumption', recovery brief, and backtrack wrong-assumption facts.",
+      "Committed Corrections section, state-file 'Corrections', recovery brief, " +
+      "and backtrack wrong-assumption facts. Only committed corrections reach " +
+      "the next prompt.",
     toolDescription:
       "Assumptions from earlier rounds that turned out to be wrong. Record one " +
       "only when this round actually falsified it; otherwise omit. This is not " +
@@ -292,28 +303,37 @@ const GUIDES: FieldGuide[] = [
     downstream: "Applied to the Loop Objective with a version bump.",
     toolDescription:
       "Optional. Success criteria that need reformulation: each entry has the " +
-      "old and new wording.",
+      "old and new wording. Keep criteria at acceptance granularity — if you " +
+      "cannot write a check for it, put the detail in sub-goals or task text.",
   },
   {
     path: "round_contract",
-    purpose: "A proposal for the NEXT round's evidence-bound contract.",
+    purpose:
+      "A proposal for the NEXT round's bounded deliverable and its acceptance " +
+      "conditions.",
     when:
       "When no contract is active and a contract command is available; while a " +
       "contract is open, omit it (or restate it unchanged) unless this round " +
       "closes it and declares a successor.",
     nature: "proposal",
-    decision: "No active contract: if the next slice is machine-checkable, declare it",
+    decision:
+      "No active contract: if the next slice is machine-checkable, name its " +
+      "deliverable and acceptance conditions",
     downstream:
       "Becomes active only after this round commits; item ids rci-XXXXXXXX are " +
       "derived by the runtime.",
     toolDescription:
-      "Proposal for the NEXT round's contract (items + verify_with + scope). " +
-      "Declared here, it becomes the ACTIVE contract only after this round " +
-      "commits. While it is open, omitting it continues the contract; a " +
-      "different proposal is ignored (contract_premature). DECLARATION IS " +
-      "STRICT: an item with no bound command, an unknown/disabled command, a " +
-      "scope entry outside the workspace, a malformed reference, or a count " +
-      "over the limits returns contract_invalid.",
+      "Proposal for the NEXT round's contract. work_item is the bounded " +
+      "deliverable this slice produces (an outcome, not an activity) and is " +
+      "required for a new proposal. items are acceptance conditions; each " +
+      "item binds its own verify_with commands. scope is the machine-enforced " +
+      "file boundary. Declared here, it becomes the ACTIVE contract only after " +
+      "this round commits. While it is open, omitting it continues the " +
+      "contract; a different proposal is ignored (contract_premature). " +
+      "DECLARATION IS STRICT: missing work_item/scope, an item with no bound " +
+      "command, an unknown/disabled command, a scope entry outside the " +
+      "workspace, a malformed reference, an unknown field, or a count over the " +
+      "limits returns contract_invalid.",
   },
   {
     path: "worker_results",
@@ -343,8 +363,10 @@ const GUIDES: FieldGuide[] = [
     compact: true,
     promptRank: 70,
     downstream:
-      "Matched exactly against state items; applied to the NEXT round's prompt. " +
-      "If that prompt is L0 it is ignored. Unmatched entries have no effect.",
+      "Matched exactly against state items; applied to the NEXT round's prompt " +
+      "only after this round commits. If that prompt is L0 it is ignored. " +
+      "Unmatched entries have no effect; an uncommitted attempt's requests " +
+      "never steer a later prompt.",
     toolDescription:
       "Optional. Information needs for the NEXT prompt. emphasize entries are " +
       "matched by stable id or normalized-exact text; a paraphrase matches " +
@@ -711,7 +733,7 @@ function renderContractGuidance(ctx: SelfEvalPromptContext): string[] {
   if (contract) {
     const lines = [
       "Active Round Contract — continue it; you do NOT need to restate it:",
-      `- ${contract.work_item ? `${contract.work_item} ` : ""}(${contract.id})`,
+      `- Deliverable: ${contract.work_item ?? "(not named; legacy contract)"} (${contract.id})`,
     ];
     const shown = contract.items.slice(0, 5);
     for (const item of shown) {
@@ -742,10 +764,10 @@ function renderContractGuidance(ctx: SelfEvalPromptContext): string[] {
   const commands = ctx.commands.slice(0, 3).join(", ");
   const proposalDecision = GUIDE_BY_PATH.get("round_contract")?.decision
     ?? "No active contract: if the next slice is machine-checkable, declare it";
-  // The current requirement — not an invented slice — is the natural work
-  // item. Real criterion ids/text and the real command are rendered; the
-  // runtime still derives rci- ids and the Agent still decides whether this
-  // is the right machine-checkable outcome.
+  // The current requirement — not an invented slice — is the natural
+  // deliverable seed. Real criterion ids/text and the real command are
+  // rendered; the runtime still derives rci- ids and the Agent still decides
+  // whether this is the right machine-checkable outcome.
   const example = fieldExample("round_contract", {
     activeContract: null,
     activeSubGoals: ctx.subGoals,
@@ -755,10 +777,12 @@ function renderContractGuidance(ctx: SelfEvalPromptContext): string[] {
     currentRequirement: ctx.currentRequirement,
   });
   return [
-    "The current requirement is the natural work item — not an invented slice.",
+    "The current requirement is the natural deliverable seed — not an invented slice.",
+    "Phrase work_item as the outcome this slice produces, not the activity.",
     "Declare it as-is only if the command below is its acceptance check; otherwise",
     "describe the machine-checkable outcome and bind the command that actually",
-    "verifies it. The proposal activates only after this round commits.",
+    "verifies it. items are acceptance conditions, not a task checklist.",
+    "The proposal activates only after this round commits.",
     `${proposalDecision} → proposal below:`,
     "```json",
     JSON.stringify({ round_contract: example }, null, 1),

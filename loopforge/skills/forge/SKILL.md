@@ -125,13 +125,18 @@ appropriate for a machine-checkable contract and a configured evidence command
 is available. Size the slice by what one machine-checkable outcome covers. A
 requirements list is not a round list. Coupled changes that share one objective,
 one evidence story, and one recovery path belong in the same round.
-Bind each item to a configured evidence command with `verify_with`, and limit
-`scope` to files or directories that slice may touch. `criterion_refs` must
+`work_item` is the bounded deliverable this slice produces — an outcome, not an
+activity — and is required. `items[]` are acceptance conditions inside that
+slice; bind each item to its own configured evidence commands with
+`verify_with`. One condition may use several commands and one command may back
+several conditions. Limit `scope` to files or directories that slice may touch;
+it is a machine-enforced boundary, not the deliverable. `criterion_refs` must
 cite real `cr-*` ids rendered in the current prompt; `subgoal_refs` may cite
 only active `sg-*` ids shown in it. A sub-goal declared in this same submission
 becomes referenceable next round. Free text, unknown ids, duplicate
-refs, and duplicate normalized items are rejected as `contract_invalid`. The
-proposal becomes active only after its declaring round commits.
+refs, duplicate normalized items, unknown fields, and missing work_item/scope
+are rejected as `contract_invalid`. The proposal becomes active only after its
+declaring round commits.
 While it is open, you do **not** need to restate it: omitting `round_contract`
 continues the active contract. A different proposal is ignored as
 `contract_premature`. If this round closes the contract and another slice
@@ -264,12 +269,18 @@ A sub-goal ID belongs to its declaration event. Re-declaring the same text in a
 later round creates a new sub-goal. Status changes require the exact active
 `sg-` ID; description matching is not a fallback.
 
-A Round Contract is a set of evidence-bound items, not prose. Each item must
-bind at least one configured, enabled, after-capable command. The runtime
-derives content-addressed `rc-XXXXXXXX` and `rci-XXXXXXXX` IDs, so restating an
-unchanged proposal keeps its identity. `subgoal_refs` belongs on the item; a
-machine-verified item backs exactly the sub-goals it names, without changing
-their declared `SubGoal.status`.
+A Round Contract is a bounded deliverable plus evidence-bound acceptance
+conditions, not prose. Criteria (`cr-*`) are the operator's acceptance surface;
+sub-goals (`sg-*`) are your execution plan; the contract is the current slice
+that connects them. Do not restate criteria as sub-goals, and do not use a
+sub-goal as an acceptance check. `work_item` is the deliverable label; `items`
+are acceptance conditions; each item must bind at least one configured,
+enabled, after-capable command. The runtime derives content-addressed
+`rc-XXXXXXXX` and `rci-XXXXXXXX` IDs, so restating an unchanged proposal keeps
+its identity. `subgoal_refs` belongs on the item; a machine-verified item backs
+exactly the sub-goals it names, without changing their declared
+`SubGoal.status`. A criterion becomes `verified` only through a verified item
+that references it; `emerged_subtasks` may legitimately be zero.
 
 Item status is machine-derived:
 
@@ -301,7 +312,7 @@ server was started in:
 
 ```json
 {
-  "version": "5",
+  "version": "7",
   "evidence": {
     "commands": [{
       "name": "verify",
@@ -418,8 +429,10 @@ and `cancelled`.
 L0 is a lean same-round retry, or follows a committed failed round only when
 the runtime proves there was no machine activity and no declared evolution.
 Unknown machine activity does not qualify for L0. L1 is normal continuation;
-L2 is full rehydration. Levels control state density only, never a reasoning
-technique or the set of evaluation fields you
+L2 is boundary rehydration: it carries the shared current-governance sections,
+one phase line, at most three phase anchors, and (when enabled) a pointer to the
+derived state file. It does not embed the full history. Levels control state
+density only, never a reasoning technique or the set of evaluation fields you
 may use: L0/L1/L2 offer the same applicable trigger checklist, including real
 `cr-`/`rci-`/`sg-` ids. If this prompt is L0, it does not apply the previous
 round's `prompt_requests`; the field you submit in this round can still be
@@ -435,7 +448,8 @@ round's active contract, observations, flags, and decision. Use
 
 The optional `.loopforge/state/<loopId>-state.md` is derived and regenerable.
 Read it when an L2 prompt points to it, but never treat it as a second source
-of truth.
+of truth: committed typed rounds are authoritative, and the file's
+Agent-reported summaries are claims, not machine evidence.
 
 ## Gates and delegation
 
@@ -467,6 +481,10 @@ If you accept a worker's finding, state it in top-level
 - Do not fill optional fields to satisfy a checklist; report only events that
   actually occurred.
 - Do not create a contract when no configured command can verify it.
+- Do not turn criteria into a function/implementation checklist; keep them at
+  acceptance granularity and use sub-goals for the execution plan.
+- Do not create a sub-goal just to fill `emerged_subtasks`; zero is correct
+  when the current criteria/contract already cover the work.
 - Do not treat a receipt, state file, or agent report as committed machine
   evidence.
 - Do not continue coding after backtrack until the restore boundary is in place.

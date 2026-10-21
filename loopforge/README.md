@@ -129,6 +129,11 @@ state under `.loopforge/state/`. Committed typed round documents are the source
 of truth. The state file can be regenerated and must not be treated as a second
 history.
 
+The prompt is a current-governance projection, not a replay of the Agent's own
+progress summaries. `output_summary` remains a committed report for audit,
+replay, explain and backtrack diagnosis; full history is read on demand from the
+derived state file or the read-only views.
+
 Runtime behavior is controlled by `loop_policy.json`, read from the workspace
 the process was started in. Evidence commands are explicitly configured, run
 without a shell, and restricted to the workspace. The default policy keeps the

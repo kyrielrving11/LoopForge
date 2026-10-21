@@ -146,16 +146,14 @@ describe("cognitive facts and projection", () => {
     assert.equal(buildLoopProjection(facts), null);
   });
 
-  it("derives focus from committed rounds", () => {
+  it("v3.9.5: an Agent output summary alone creates no projection focus", () => {
     const facts = cognitiveFacts({
       compileResponse: null,
       rounds: [round(1, { outcome: "partial", output_summary: "implemented parser" })],
     });
-    const projection = buildLoopProjection(facts)!;
-    assert.equal(projection.focus?.what, "implemented parser");
-    assert.equal(projection.focus?.since_round, 1);
-    // v3.8: the agent's own next_action is no longer a projection input.
-    assert.deepEqual(projection.todo, []);
+    // The projection has no "latest outcome" field and no todo/phase facts
+    // here, so nothing meaningful exists — it collapses to null.
+    assert.equal(buildLoopProjection(facts), null);
   });
 
   it("deduplicates and prioritizes todo facts", () => {
@@ -213,7 +211,8 @@ describe("cognitive facts and projection", () => {
     assert.equal(projection.phase?.current, "foundation");
     assert.equal(projection.delegation.pending, 1);
     assert.match(projection.handoff.summary, /Current task: finish parser/);
-    assert.match(projection.handoff.summary, /Latest outcome: latest outcome/);
+    assert.doesNotMatch(projection.handoff.summary, /Latest outcome/,
+      "the projection must not replay Agent-authored outcomes");
     assert.match(projection.handoff.summary, /Remaining criteria: parser passes/);
     assert.deepEqual(projection.handoff.verified, ["cr-12345678"]);
     assert.ok(projection.handoff.open_risks.some((risk) => risk.includes("publish package")));

@@ -75,14 +75,8 @@ describe("v3.8.1 — schema fidelity", () => {
     // These used to fall through to the `{ type: "string" }` catch-all — the
     // projection and the reported test counts were published as strings while
     // the runtime sends objects.
-    const focus = props("LoopProjection").focus as Record<string, unknown>;
-    const focusObject = ((focus.anyOf ?? []) as Array<Record<string, unknown>>)
-      .find((branch) => branch.type === "object");
-    assert.ok(focusObject, "focus is an object (or null)");
-    assert.deepEqual(
-      Object.keys(focusObject!.properties as Record<string, unknown>).sort(),
-      ["since_round", "what"],
-    );
+    assert.ok(!("focus" in props("LoopProjection")),
+      "v3.9.5: the projection has no latest-outcome focus");
 
     const todoItem = (props("LoopProjection").todo as Record<string, unknown>).items as Record<string, unknown>;
     assert.equal(todoItem.type, "object", "todo items are objects");
@@ -312,6 +306,9 @@ describe("required arrays", () => {
     assert.ok(!req.includes("loop_objective"));
     assert.ok(!req.includes("plan_source"));
     assert.ok(!req.includes("last_round_result"));
+    assert.ok(!req.includes("new_since_last_round"));
+    assert.ok(!("new_since_last_round" in props("LoopCompileRequest")),
+      "v3.9.5 removed the caller narrative field from the protocol");
   });
 
 });

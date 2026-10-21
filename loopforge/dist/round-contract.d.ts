@@ -1,5 +1,11 @@
 /** Round Contract derivation — the ACTIVE contract a round executes under.
  *
+ *  v3.9.5 semantics: `work_item` is the bounded deliverable this slice
+ *  produces (an outcome, not an activity); `items[]` are acceptance
+ *  conditions inside that slice; each item binds its own `verify_with`
+ *  commands. The contract is verified only when every item is verified, so
+ *  there is no work_item-level claim. A command may back several conditions.
+ *
  *  A submission's `round_contract` is a PROPOSAL for the next round. It
  *  becomes ACTIVE only after the declaring round commits; the active contract
  *  is then derived from committed rounds on every compile path (retry,
@@ -9,7 +15,8 @@
  *
  *  v3.8 identity: `rc-` / `rci-` are derived from CONTENT ONLY (loop id +
  *  canonical proposal), so restating an unchanged contract keeps the same
- *  identity and the item ids the agent already cited. This is deliberately
+ *  identity and the item ids the agent already cited. `rci-` is deliberately
+ *  independent of `work_item`/`scope`, which stay slice-level labels. This is
  *  the opposite of a SubGoal, whose id includes its declaration round.
  */
 import type { ContractItemProposal, ExecutionReport, RoundContractProposal } from "./protocol.js";
@@ -27,7 +34,10 @@ export interface ActiveContractView {
     /** The round that declared the proposal that became active (a fact, not
      *  part of the identity hash). */
     declared_at_round: number;
+    /** The bounded deliverable label. Optional only for legacy committed
+     *  contracts; new declarations require it at the strict boundary. */
     work_item?: string;
+    /** Machine-enforced files/directories this slice may touch. */
     scope: string[];
     items: ActiveContractItem[];
     /** The command configuration in force at declaration (machine-stamped at

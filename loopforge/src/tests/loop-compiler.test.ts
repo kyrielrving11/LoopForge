@@ -738,11 +738,12 @@ describe("cognitive-state compiler", () => {
         },
       ],
     });
-    assert.match(response.prompt, /Phase History/);
+    assert.match(response.prompt, /Phase Anchors/);
     assert.match(response.prompt, /Data Layer/);
     assert.match(response.prompt, /Data Layer\*\* \(Rounds 1–1\)/);
-    // L2 includes the durable phase history; formulaic loop synthesis is removed.
-    assert.match(response.prompt, /Phase History/);
+    // v3.9.5: L2 carries stage anchors only; full phase history is state-file.
+    assert.match(response.prompt, /Phase Anchors/);
+    assert.doesNotMatch(response.prompt, /Phase History/);
   });
 
   it("L1 prompt includes recent rounds but not milestones", () => {
@@ -787,17 +788,13 @@ describe("cognitive-state compiler", () => {
         },
       ],
     });
-    // L1 shows recent rounds and ONE phase line — never L2's Phase History.
-    assert.match(response.prompt, /Recent Rounds/);
-    assert.doesNotMatch(response.prompt, /Phase History/);
-    // v3.8.1: the phase line NAMES the current phase. The old rule that L1
-    // must never echo a milestone label existed because labels were collapsed
-    // content in the L1 diff (see the deleted collapse invariant); with the
-    // diff gone, naming the phase the agent itself declared is the point of
-    // the line.
+    // v3.9.5: L1 never replays recent-round narratives or L2's anchors.
+    assert.doesNotMatch(response.prompt, /Recent Rounds/);
+    assert.doesNotMatch(response.prompt, /Phase Anchors/);
+    // v3.8.1: the phase line NAMES the current phase.
     assert.match(response.prompt, /Phase/);
     assert.match(response.prompt, /Core Module/);
-    // It must still not re-render the milestone as a Phase History entry.
+    // It must still not re-render the milestone as an anchor entry.
     assert.doesNotMatch(response.prompt, /round_range|Phase 1\b/);
   });
 
@@ -1035,7 +1032,7 @@ describe("cognitive-state compiler", () => {
 
   // ── v2.8: L2 pointer mode ─────────────────────────────────────────────
 
-  it("skips fullStateMarkdown at L2 when l2_pointer_enabled is true", () => {
+  it("v3.9.5: L2 never embeds the full state blob, but still writes the state file", () => {
     const response = compileLoop(makeLoopCompileRequest({
       loop_id: "p2-pointer",
       round: 2,
@@ -1057,15 +1054,12 @@ describe("cognitive-state compiler", () => {
         },
       }),
     }), null);
-    // L2 pointer mode: should NOT contain the monolithic blob
     assert.ok(!(response.prompt ?? "").includes("Full Rehydrated State"),
-      "L2 prompt should not contain full state blob when l2_pointer_enabled is true");
-    // v3.8.1: the Progress Dashboard / Round Stats sections are gone from the
-    // prompt entirely (they re-composed facts the prompt already states, plus
-    // the agent’s own numbers). The prompt keeps what THIS round needs.
+      "L2 prompt must not embed the full state blob");
     assert.ok(!(response.prompt ?? "").includes("Progress Dashboard"),
       "the L2 prompt carries no re-composed dashboard");
-    // State file should still be written
+    assert.ok(!(response.prompt ?? "").includes("Started refactor"),
+      "a fallback output summary is not prompt narrative");
     assert.ok(response.state_file_content,
       "state_file_content should still be present");
     assert.ok(response.state_file_content.includes("LoopForge State"),
@@ -1613,7 +1607,7 @@ describe("v3.8.1 — recurring flags", () => {
 // v3.8.1 — the two render windows over ONE recurring-fact list
 // ═══════════════════════════════════════════════════════════════════════════
 
-describe("v3.8.1 — Active Warnings (prompt) vs Recurring Flags (state file)", () => {
+describe("v3.8.1 — Recurring Findings (prompt) vs Recurring Flags (state file)", () => {
   /** A committed merged round carrying flags and violations. */
   const committed = (
     loopId: string,
@@ -1648,7 +1642,7 @@ describe("v3.8.1 — Active Warnings (prompt) vs Recurring Flags (state file)", 
     });
 
     const prompt = response.prompt;
-    assert.match(prompt, /Active Warnings/);
+    assert.match(prompt, /Recurring Findings/);
     assert.match(prompt, /test_files_modified — 2×, latest R3/);
     assert.match(prompt, /Never touch prod data — 1×, latest R1/);
 
@@ -1673,7 +1667,7 @@ describe("v3.8.1 — Active Warnings (prompt) vs Recurring Flags (state file)", 
         committed("stale", 1, [], [warn("test_files_modified")]),
       ],
     });
-    assert.doesNotMatch(response.prompt, /Active Warnings/,
+    assert.doesNotMatch(response.prompt, /Recurring Findings/,
       "nothing is firing inside the recent window");
   });
 
@@ -1690,7 +1684,7 @@ describe("v3.8.1 — Active Warnings (prompt) vs Recurring Flags (state file)", 
         committed("l0-clean", 2, ["Never touch prod data"], [warn("test_files_modified")]),
       ],
     });
-    assert.doesNotMatch(response.prompt, /Active Warnings/);
+    assert.doesNotMatch(response.prompt, /Recurring Findings/);
     assert.doesNotMatch(response.prompt, /Recurring Flags/);
   });
 });
@@ -2323,7 +2317,7 @@ describe("L7 — state file disabled cross-knob guard", () => {
       constraint_violations: [],
     });
 
-  it("L2 keeps the full state in the prompt instead of pointing at nothing", () => {
+  it("L2 stays self-contained with current governance, without a history blob", () => {
     disableStateFile();
     const response = compileLoop(makeLoopCompileRequest({
       loop_id: "l7-l2",
@@ -2338,8 +2332,10 @@ describe("L7 — state file disabled cross-knob guard", () => {
       "the L2 pointer line must not reference a file that is never written");
     assert.ok(!response.prompt.includes("Read the full state file"),
       "no read-the-file instruction may appear");
+    assert.ok(!response.prompt.includes("Full Rehydrated State"),
+      "L2 never falls back to a monolithic history blob");
     assert.ok(response.prompt.includes("Continue the migration"),
-      "the prompt stays self-contained when the file is disabled");
+      "the prompt stays self-contained for current governance");
   });
 
   it("L1 renders full constraints instead of collapsing behind a missing file", () => {
@@ -2452,6 +2448,52 @@ describe("3.9.3 — committed-fact prompt level", () => {
     success,
     ...entry,
   }, "continue", noMotionEvidence());
+
+  it("v3.9.5: committed corrections and prompt_requests reach the next prompt", () => {
+    const loopId = "committed-reports";
+    const context = {
+      results: [committed(loopId, 2, {
+        output_summary: "a prior summary that must not be replayed",
+        wrong_assumptions: ["old belief"],
+        prompt_requests: { confusion_points: ["what does committed mean?"] },
+      })],
+    };
+    const response = compileLoop(makeLoopCompileRequest({
+      loop_id: loopId,
+      round: 3,
+      task: "Continue",
+      force_level: "l2",
+    }), context);
+    assert.match(response.prompt, /Corrections \(committed reports\)/);
+    assert.match(response.prompt, /Corrected assumption: old belief/);
+    assert.match(response.prompt, /Confusion Alerts/);
+    assert.match(response.prompt, /what does committed mean\?/);
+    assert.doesNotMatch(response.prompt, /a prior summary that must not be replayed/);
+  });
+
+  it("v3.9.5: no prompt level replays a committed output_summary", () => {
+    const loopId = "no-summary-any-level";
+    const context = {
+      results: [committed(loopId, 2, {
+        output_summary: "UNIQUE_COMMITTED_SUMMARY",
+        emerged_subtasks: [],
+      })],
+    };
+    for (const level of ["l0", "l1", "l2"] as const) {
+      const response = compileLoop(makeLoopCompileRequest({
+        loop_id: loopId,
+        round: 3,
+        task: "Continue",
+        force_level: level,
+      }), context);
+      assert.equal(response.prompt_artifact?.level, level);
+      assert.ok(!response.prompt.includes("UNIQUE_COMMITTED_SUMMARY"),
+        `${level} must not replay the committed output summary`);
+      assert.ok(!response.warnings.some((warning) =>
+        warning.includes("duplicate_declaration")),
+        "zero emerged_subtasks is not a warning");
+    }
+  });
 
   it("ignores a caller last_round_result when committed history exists", () => {
     const loopId = "det";
@@ -2623,7 +2665,7 @@ describe("3.9.3 — committed-fact prompt level", () => {
         }),
       }), null);
       const prompt = response.prompt;
-      assert.match(prompt, /The current requirement is the natural work item/);
+      assert.match(prompt, /The current requirement is the natural deliverable seed/);
       assert.match(prompt, /"work_item": "Build the parser"/);
       assert.match(prompt, /"criterion_refs": \[/);
       assert.match(prompt, /cr-[a-f0-9]{8}/);

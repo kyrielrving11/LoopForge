@@ -442,15 +442,77 @@ describe("validateContractShape", () => {
     }), []);
   });
 
+  it("v3.9.5: requires a non-empty, bounded work_item and scope", () => {
+    const missing = check({ round_contract: { scope: [], items: [item()] } });
+    assert.equal(missing[0]?.reason, "missing_work_item");
+    const invalid = check({ round_contract: { work_item: 42, scope: [], items: [item()] } });
+    assert.equal(invalid[0]?.reason, "invalid_work_item");
+    const empty = check({ round_contract: { work_item: "   ", scope: [], items: [item()] } });
+    assert.equal(empty[0]?.reason, "empty_work_item");
+    const long = check({ round_contract: { work_item: "x".repeat(201), scope: [], items: [item()] } });
+    assert.equal(long[0]?.reason, "work_item_too_long");
+    const noScope = check({ round_contract: { work_item: "Slice", items: [item()] } });
+    assert.equal(noScope[0]?.reason, "missing_scope");
+    assert.deepEqual(
+      check({ round_contract: { work_item: "x".repeat(200), scope: [], items: [item()] } }),
+      [],
+      "200 characters is accepted",
+    );
+  });
+
+  it("v3.9.5: rejects unknown contract/item fields and long descriptions", () => {
+    const unknownTop = check({
+      round_contract: {
+        work_item: "Slice", scope: [], items: [item()], verify_with: ["verify"],
+      },
+    });
+    assert.equal(unknownTop[0]?.reason, "unknown_field");
+    const unknownItem = check({
+      round_contract: {
+        work_item: "Slice", scope: [], items: [item({ work_item: "nested" })],
+      },
+    });
+    assert.equal(unknownItem[0]?.reason, "unknown_field");
+    const longDescription = check({
+      round_contract: {
+        work_item: "Slice", scope: [], items: [item({ description: "x".repeat(201) })],
+      },
+    });
+    assert.equal(longDescription[0]?.reason, "item_description_too_long");
+    assert.deepEqual(
+      check({
+        round_contract: {
+          work_item: "Slice", scope: [], items: [item({ description: "x".repeat(200) })],
+        },
+      }),
+      [],
+      "200-character item description is accepted",
+    );
+  });
+
+  it("v3.9.5: does not semantically judge work_item or item descriptions", () => {
+    assert.deepEqual(
+      check({
+        round_contract: {
+          work_item: "edit src/auth.ts",
+          scope: [],
+          items: [item({ description: "the file is edited", verify_with: ["verify"] })],
+        },
+      }),
+      [],
+      "structure/binding are valid, so no semantic rejection is invented",
+    );
+  });
+
   it("rejects a declaration with no items", () => {
-    const errors = check({ round_contract: { scope: [], items: [] } });
+    const errors = check({ round_contract: { work_item: "Slice", scope: [], items: [] } });
     assert.equal(errors[0]?.reason, "no_items");
   });
 
   it("rejects an item that binds no command or an unknown one", () => {
-    const none = check({ round_contract: { scope: [], items: [item({ verify_with: [] })] } });
+    const none = check({ round_contract: { work_item: "Slice", scope: [], items: [item({ verify_with: [] })] } });
     assert.equal(none[0]?.reason, "no_verify_with");
-    const unknown = check({ round_contract: { scope: [], items: [item({ verify_with: ["nope"] })] } });
+    const unknown = check({ round_contract: { work_item: "Slice", scope: [], items: [item({ verify_with: ["nope"] })] } });
     assert.equal(unknown[0]?.reason, "unknown_command");
   });
 
@@ -459,17 +521,19 @@ describe("validateContractShape", () => {
     // parser — a declaration over the cap simply lost its tail.
     const tooMany = check({
       round_contract: {
+        work_item: "Slice",
         scope: [],
         items: Array.from({ length: 21 }, (_, i) => item({ description: `i${i}` })),
       },
     });
     assert.equal(tooMany[0]?.reason, "too_many_items");
     const tooWide = check({
-      round_contract: { scope: Array.from({ length: 51 }, (_, i) => `src/${i}`), items: [item()] },
+      round_contract: { work_item: "Slice", scope: Array.from({ length: 51 }, (_, i) => `src/${i}`), items: [item()] },
     });
     assert.equal(tooWide[0]?.reason, "too_many_scope_entries");
     const tooManyRefs = check({
       round_contract: {
+        work_item: "Slice",
         scope: [],
         items: [item({ verify_with: Array.from({ length: 21 }, () => "verify") })],
       },
@@ -478,12 +542,12 @@ describe("validateContractShape", () => {
   });
 
   it("rejects a scope that is not a string array or leaves the workspace", () => {
-    const notArray = check({ round_contract: { scope: "src/a", items: [item()] } });
+    const notArray = check({ round_contract: { work_item: "Slice", scope: "src/a", items: [item()] } });
     assert.equal(notArray[0]?.reason, "invalid_scope");
-    const notString = check({ round_contract: { scope: ["src/a", 7], items: [item()] } });
+    const notString = check({ round_contract: { work_item: "Slice", scope: ["src/a", 7], items: [item()] } });
     assert.equal(notString[0]?.reason, "invalid_scope_entry");
     const escapes = check(
-      { round_contract: { scope: ["../outside"], items: [item()] } },
+      { round_contract: { work_item: "Slice", scope: ["../outside"], items: [item()] } },
       { checkScopeEntry: (entry) => (entry === "../outside" ? "leaves the workspace" : null) },
     );
     assert.equal(escapes[0]?.reason, "scope_outside_workspace");
@@ -492,28 +556,28 @@ describe("validateContractShape", () => {
 
   it("rejects non-string criterion refs instead of dropping them", () => {
     const errors = check({
-      round_contract: { scope: [], items: [item({ criterion_refs: ["cr-11111111", 42] })] },
+      round_contract: { work_item: "Slice", scope: [], items: [item({ criterion_refs: ["cr-11111111", 42] })] },
     });
     assert.equal(errors[0]?.reason, "invalid_criterion_ref");
   });
 
   it("rejects malformed, duplicate, and unknown sub-goal refs on an item", () => {
     const malformed = check({
-      round_contract: { scope: [], items: [item({ subgoal_refs: ["nope"] })] },
+      round_contract: { work_item: "Slice", scope: [], items: [item({ subgoal_refs: ["nope"] })] },
     });
     assert.equal(malformed[0]?.reason, "invalid_subgoal_ref");
     const duplicate = check({
-      round_contract: { scope: [], items: [item({ subgoal_refs: ["sg-11111111", "sg-11111111"] })] },
+      round_contract: { work_item: "Slice", scope: [], items: [item({ subgoal_refs: ["sg-11111111", "sg-11111111"] })] },
     });
     assert.equal(duplicate[0]?.reason, "duplicate_subgoal_ref");
     const unknown = check(
-      { round_contract: { scope: [], items: [item({ subgoal_refs: ["sg-11111111"] })] } },
+      { round_contract: { work_item: "Slice", scope: [], items: [item({ subgoal_refs: ["sg-11111111"] })] } },
       { displayedSubGoalIds: new Set(["sg-22222222"]) },
     );
     assert.equal(unknown[0]?.reason, "unknown_subgoal_ref");
     // Fail open: an unobservable sub-goal set never invents a rejection.
     assert.deepEqual(
-      check({ round_contract: { scope: [], items: [item({ subgoal_refs: ["sg-11111111"] })] } }),
+      check({ round_contract: { work_item: "Slice", scope: [], items: [item({ subgoal_refs: ["sg-11111111"] })] } }),
       [],
     );
   });

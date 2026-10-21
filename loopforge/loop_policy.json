@@ -1,5 +1,5 @@
 {
-  "version": "6",
+  "version": "7",
   "constraints": {
     "retire_window": 3
   },
@@ -20,7 +20,6 @@
     "l0_max_chars": 5000,
     "l1_max_chars": 10000,
     "l2_max_chars": 18000,
-    "l2_pointer_enabled": true,
     "max_emphasize_l2": 5,
     "max_emphasize_l1": 3,
     "max_confusion_points": 3

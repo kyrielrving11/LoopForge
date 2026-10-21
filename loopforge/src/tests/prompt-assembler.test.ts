@@ -20,7 +20,7 @@ import * as verificationGate from "../verification-gate.js";
 
 function minimalState(overrides: Partial<CanonicalLoopState> = {}): CanonicalLoopState {
   return {
-    schemaVersion: 1 as const,
+    schemaVersion: 2 as const,
     loopId: "test-loop",
     round: 1,
     maxRounds: 20,
@@ -33,7 +33,7 @@ function minimalState(overrides: Partial<CanonicalLoopState> = {}): CanonicalLoo
     activeConstraints: ["no runtime deps", "all tests pass"],
     retiredConstraints: [],
     constraintMetadata: [],
-    changesSinceLastRound: [],
+    corrections: [],
     remainingCriteria: [],
     blockers: [],
     verificationFlags: [],
@@ -128,12 +128,13 @@ describe("assemblePromptArtifact — L1", () => {
     assert.ok(artifact.renderedPrompt.includes("`sg-2`"), "should render sub-goal ID sg-2");
   });
 
-  it("shows recent rounds when outcomes exist", () => {
+  it("v3.9.5: does not replay recent-round outcomes", () => {
     const state = minimalState({
       rollingOutcomes: ["[R1] accepted: fixed auth"],
     });
     const artifact = assemblePromptArtifact(input({ level: "l1", state }));
-    assert.ok(artifact.renderedPrompt.includes("Recent Rounds"));
+    assert.ok(!artifact.renderedPrompt.includes("Recent Rounds"));
+    assert.ok(!artifact.renderedPrompt.includes("fixed auth"));
   });
 });
 
@@ -142,16 +143,7 @@ describe("assemblePromptArtifact — L1", () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("assemblePromptArtifact — L2", () => {
-  it("includes full state when fullStateMarkdown is provided", () => {
-    const md = "# Full State\nThe complete state content.";
-    const artifact = assemblePromptArtifact(input({
-      level: "l2",
-      fullStateMarkdown: md,
-    }));
-    assert.ok(artifact.renderedPrompt.includes("Full Rehydrated State"));
-  });
-
-  it("includes milestones section when milestones exist", () => {
+  it("v3.9.5: renders phase anchors without milestone outcomes or history", () => {
     const state = minimalState({
       milestones: [{
         label: "Phase 1",
@@ -164,7 +156,11 @@ describe("assemblePromptArtifact — L2", () => {
       }],
     });
     const artifact = assemblePromptArtifact(input({ level: "l2", state }));
-    assert.ok(artifact.renderedPrompt.includes("Phase History"));
+    assert.ok(artifact.renderedPrompt.includes("Phase Anchors"));
+    assert.ok(artifact.renderedPrompt.includes("Phase 1"));
+    assert.ok(!artifact.renderedPrompt.includes("Outcome:"));
+    assert.ok(!artifact.renderedPrompt.includes("completed core"));
+    assert.ok(!artifact.renderedPrompt.includes("no deps"));
   });
 
   it("includes sub-goal dashboard when sub-goals exist", () => {
@@ -220,12 +216,13 @@ describe("assemblePromptArtifact — L2", () => {
     assert.match(artifact.renderedPrompt, /16 total · 16 active · 0 done · 0 canceled/);
   });
 
-  it("includes failed patterns when present", () => {
+  it("v3.9.5: does not render failed patterns in the prompt", () => {
     const state = minimalState({
       failedPatterns: ["repeated auth failure pattern"],
     });
     const artifact = assemblePromptArtifact(input({ level: "l2", state }));
-    assert.ok(artifact.renderedPrompt.includes("Failed Patterns"));
+    assert.ok(!artifact.renderedPrompt.includes("Failed Patterns"));
+    assert.ok(!artifact.renderedPrompt.includes("repeated auth failure pattern"));
   });
 
   it("keeps L2 prompts within the L2 budget", () => {
@@ -233,9 +230,7 @@ describe("assemblePromptArtifact — L2", () => {
     assert.ok(artifact.renderedPrompt.length <= DEFAULT_PROMPT_BUDGETS.l2);
   });
 
-  // ── v2.8: L2 pointer mode — path B structured rendering ──────────────
-
-  it("renders structured sections (not blob) when fullStateMarkdown is absent", () => {
+  it("v3.9.5: L2 always renders structured sections, never the state blob", () => {
     const state = minimalState({
       milestones: [{
         label: "Phase 1", round_range: { start: 1, end: 5 },
@@ -253,43 +248,142 @@ describe("assemblePromptArtifact — L2", () => {
       },
       retiredConstraints: ["old-rule"],
     });
-    const artifact = assemblePromptArtifact(input({
-      level: "l2",
-      fullStateMarkdown: undefined, // ← pointer mode
-      state,
-    }));
-    // Path B structured rendering
-    assert.ok(artifact.renderedPrompt.includes("Phase History"));
+    const artifact = assemblePromptArtifact(input({ level: "l2", state }));
+    assert.ok(artifact.renderedPrompt.includes("Phase Anchors"));
     assert.ok(artifact.renderedPrompt.includes("Active Sub-Goals"));
-    // v2.8 gap fills
-    // v3.8.1: Progress Dashboard is gone from the prompt entirely — see the
-    // dedicated invariant test below.
     assert.ok(!artifact.renderedPrompt.includes("Progress Dashboard"));
-    assert.ok(artifact.renderedPrompt.includes("Retired Constraints"));
-    // v3.8.1: the Agent Trust section is gone — the score was an arbitrary
-    // weighting of flag counts and its "trend" was computed from a different
-    // source, so neither was a fact about the loop.
+    assert.ok(!artifact.renderedPrompt.includes("Retired Constraints"));
     assert.ok(!artifact.renderedPrompt.includes("Agent Trust"));
-    // Must NOT contain the monolithic blob header
     assert.ok(!artifact.renderedPrompt.includes("Full Rehydrated State"));
   });
 
-  it("renders full state blob when fullStateMarkdown is provided", () => {
-    const md = "# Full State\nThe complete cognitive state.";
-    const artifact = assemblePromptArtifact(input({
-      level: "l2",
-      fullStateMarkdown: md,
-    }));
-    assert.ok(artifact.renderedPrompt.includes("Full Rehydrated State"));
-  });
-
-  it("includes read instruction for L2 pointer mode reasons", () => {
+  it("includes read instruction for L2 boundary reasons", () => {
     const artifact = assemblePromptArtifact(input({
       level: "l2",
       reasons: ["recovery_boundary"],
-      fullStateMarkdown: undefined,
     }));
     assert.ok(artifact.renderedPrompt.includes("Read the full state file before acting"));
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v3.9.5 — memory boundary
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("assemblePromptArtifact — memory boundary", () => {
+  it("renders the static authority boundary at every level", () => {
+    for (const level of ["l0", "l1", "l2"] as const) {
+      const artifact = assemblePromptArtifact(input({ level }));
+      assert.ok(artifact.renderedPrompt.includes("LoopForge authority boundary"),
+        `${level} must carry the authority boundary`);
+      assert.ok(artifact.renderedPrompt.includes("Criteria are the operator's acceptance surface"));
+      assert.ok(artifact.renderedPrompt.includes("Round Contract is this round's deliverable"));
+    }
+  });
+
+  it("does not call the state file the source of truth", () => {
+    const artifact = assemblePromptArtifact(input({
+      level: "l2",
+      reasons: ["recovery_boundary"],
+    }));
+    assert.ok(artifact.renderedPrompt.includes("Read the full state file before acting"));
+    assert.ok(!artifact.renderedPrompt.includes("the state file is the source of truth"));
+    assert.ok(artifact.renderedPrompt.includes("derived"));
+  });
+
+  it("renders only the latest three phase anchors, never outcomes", () => {
+    const milestones = Array.from({ length: 5 }, (_, index) => ({
+      label: `Phase ${index + 1}`,
+      round_range: { start: index + 1, end: index + 1 },
+      outcome: `outcome ${index + 1}`,
+      carried_constraints: [],
+      resolved_constraints: [],
+      kind: "auto" as const,
+      generated_at_round: index + 1,
+    }));
+    const artifact = assemblePromptArtifact(input({
+      level: "l2",
+      state: minimalState({ milestones }),
+    }));
+    assert.ok(artifact.renderedPrompt.includes("Phase 3"));
+    assert.ok(artifact.renderedPrompt.includes("Phase 4"));
+    assert.ok(artifact.renderedPrompt.includes("Phase 5"));
+    assert.ok(!artifact.renderedPrompt.includes("Phase 1"));
+    assert.ok(!artifact.renderedPrompt.includes("Phase 2"));
+    assert.ok(!artifact.renderedPrompt.includes("outcome 5"));
+  });
+
+  it("renders committed Corrections but not output summaries", () => {
+    const artifact = assemblePromptArtifact(input({
+      level: "l1",
+      state: minimalState({
+        corrections: ["Corrected assumption: old belief"],
+        rollingOutcomes: ["[R1] accepted: prior summary"],
+      }),
+    }));
+    assert.ok(artifact.renderedPrompt.includes("Corrections (committed reports)"));
+    assert.ok(artifact.renderedPrompt.includes("Corrected assumption: old belief"));
+    assert.ok(!artifact.renderedPrompt.includes("prior summary"));
+  });
+
+  it("labels reported and agent-supplied optional sections", () => {
+    const artifact = assemblePromptArtifact(input({
+      level: "l2",
+      state: minimalState({
+        blockers: ["reported blocker"],
+        externalContext: "external notes",
+        recurringFlags: [{
+          subject: "test_files_modified",
+          kind: "verification_warning",
+          ref: "",
+          count: 2,
+          rounds: [1, 2],
+        }],
+        corrections: ["Corrected assumption: old belief"],
+      }),
+    }));
+    assert.ok(artifact.renderedPrompt.includes("Blockers (reported/current)"));
+    assert.ok(artifact.renderedPrompt.includes("External Context (agent-supplied)"));
+    assert.ok(artifact.renderedPrompt.includes("Recurring Findings"));
+    assert.ok(artifact.renderedPrompt.includes("Corrections (committed reports)"));
+  });
+
+  it("records no removed narrative sections", () => {
+    const artifact = assemblePromptArtifact(input({
+      level: "l2",
+      state: minimalState({
+        corrections: ["Corrected assumption: old belief"],
+        rollingOutcomes: ["[R1] accepted: prior summary"],
+        discoveries: ["a discovery"],
+        retiredConstraints: ["old rule"],
+        failedPatterns: ["pattern"],
+        milestones: [{
+          label: "Core",
+          round_range: { start: 1, end: 2 },
+          outcome: "done",
+          carried_constraints: [],
+          resolved_constraints: [],
+          kind: "auto",
+          generated_at_round: 2,
+        }],
+      }),
+    }));
+    for (const id of [
+      "changes", "rolling_outcomes", "discoveries", "failed_patterns",
+      "retired_constraints", "full_state",
+    ]) {
+      assert.ok(!artifact.sections.includes(id), `${id} must not render`);
+    }
+  });
+
+  it("does not point confusion alerts at a disabled state file", () => {
+    const artifact = assemblePromptArtifact(input({
+      level: "l1",
+      state: minimalState({ stateFilePath: "" }),
+      promptRequests: { confusion_points: ["what is this?"] },
+    }));
+    assert.ok(artifact.renderedPrompt.includes("no state file is enabled"));
+    assert.ok(!artifact.renderedPrompt.includes("the state file has full context"));
   });
 });
 
@@ -334,11 +428,11 @@ describe("assemblePromptArtifact — metadata", () => {
   });
 
   it("drops optional sections under a tight budget", () => {
-    const state = minimalState({ changesSinceLastRound: ["added auth.ts"] });
-    const tight = assemblePromptArtifact(input({ level: "l0", budgets: { l0: 10 }, state }));
-    const ample = assemblePromptArtifact(input({ level: "l0", state }));
-    assert.ok(ample.renderedPrompt.includes("New Evidence / Changes"));
-    assert.ok(!tight.renderedPrompt.includes("New Evidence / Changes"));
+    const state = minimalState({ corrections: ["Corrected assumption: added auth.ts"] });
+    const tight = assemblePromptArtifact(input({ level: "l1", budgets: { l1: 10 }, state }));
+    const ample = assemblePromptArtifact(input({ level: "l1", state }));
+    assert.ok(ample.renderedPrompt.includes("Corrections"));
+    assert.ok(!tight.renderedPrompt.includes("Corrections"));
     assert.ok(tight.renderedPrompt.includes("Current Task"));
   });
 
@@ -442,8 +536,11 @@ describe("assemblePromptArtifact — prompt_requests L2", () => {
     const artifact = assemblePromptArtifact(input({
       level: "l2",
       state: minimalState({
-        activeConstraints: ["no runtime deps", "all tests pass"],
-        discoveries: ["SafeERC20 required for all external contract calls"],
+        activeConstraints: [
+          "no runtime deps",
+          "all tests pass",
+          "SafeERC20 required for all external contract calls",
+        ],
       }),
       promptRequests: {
         confusion_points: ["confused about X"],
@@ -452,6 +549,21 @@ describe("assemblePromptArtifact — prompt_requests L2", () => {
     }));
     assert.ok(artifact.renderedPrompt.includes("Confusion Alerts"));
     assert.ok(artifact.renderedPrompt.includes("Critical Context"));
+  });
+
+  it("v3.9.5: emphasize cannot resurrect a removed discovery narrative", () => {
+    const artifact = assemblePromptArtifact(input({
+      level: "l2",
+      state: minimalState({
+        activeConstraints: ["no runtime deps"],
+        discoveries: ["SafeERC20 required for all external contract calls"],
+      }),
+      promptRequests: {
+        emphasize: ["SafeERC20 required for all external contract calls"],
+      },
+    }));
+    assert.ok(!artifact.renderedPrompt.includes("Critical Context"));
+    assert.ok(!artifact.renderedPrompt.includes("SafeERC20"));
   });
 
 });
@@ -728,7 +840,7 @@ describe("v3.3 — Roadmap section", () => {
 
   it("includes the one-line Phase section in structured L2 when data present", () => {
     const artifact = assemblePromptArtifact(input({
-      level: "l2", fullStateMarkdown: undefined, state: roadmapState(),
+      level: "l2", state: roadmapState(),
     }));
     assert.ok(artifact.renderedPrompt.includes("### Phase"));
     assert.ok(artifact.renderedPrompt.includes("round 7/20"));
@@ -748,21 +860,18 @@ describe("v3.3 — Roadmap section", () => {
 
   it("empty roadmap renders nothing (L2)", () => {
     const artifact = assemblePromptArtifact(input({
-      level: "l2", fullStateMarkdown: undefined, state: minimalState(),
+      level: "l2", state: minimalState(),
     }));
     assert.ok(!artifact.renderedPrompt.includes("Roadmap"));
   });
 
-  it("L1 names the current phase but never renders Phase History", () => {
-    // v3.8.1: the old rule ("L1 must never echo a milestone label") was a
-    // consequence of L1 diff-collapse — labels were collapsed content, and the
-    // roadmap reported distance only to keep the diff stable. The collapse is
-    // gone, so the phase line may name the phase the agent declared. What must
-    // NOT appear is L2's Phase History, which is the full-rehydration view.
+  it("L1 names the current phase but never renders Phase Anchors", () => {
+    // The phase line may name the phase the agent declared. What must NOT
+    // appear is L2's Phase Anchors section.
     const artifact = assemblePromptArtifact(input({ level: "l1", state: roadmapState() }));
     assert.ok(artifact.renderedPrompt.includes("Core Module"),
       "the phase line names the current phase");
-    assert.ok(!artifact.renderedPrompt.includes("Phase History"));
+    assert.ok(!artifact.renderedPrompt.includes("Phase Anchors"));
   });
 });
 
@@ -786,7 +895,7 @@ describe("v3.3 — machine dashboard rows and round stats", () => {
       ],
     });
     const artifact = assemblePromptArtifact(input({
-      level: "l2", fullStateMarkdown: undefined, state,
+      level: "l2", state,
     }));
     const prompt = artifact.renderedPrompt;
     assert.ok(!prompt.includes("Progress Dashboard"));
@@ -809,6 +918,7 @@ describe("assemblePromptArtifact — budget determinism", () => {
     ],
     remainingCriteria: ["criterion one", "criterion two"],
     blockers: ["a blocker"],
+    corrections: ["Corrected assumption: an old belief"],
     discoveries: ["a discovery"],
     rollingOutcomes: ["[R1] accepted: something"],
     externalContext: "external notes",
@@ -826,7 +936,7 @@ describe("assemblePromptArtifact — budget determinism", () => {
   it("renders the protected set even when the budget cannot hold it", () => {
     // 200 chars is far below the protected content of a loaded L2 prompt.
     const artifact = assemblePromptArtifact(input({
-      level: "l2", fullStateMarkdown: undefined, state: loadedState(),
+      level: "l2", state: loadedState(),
       budgets: { l2: 200 },
     }));
     const prompt = artifact.renderedPrompt;
@@ -842,8 +952,8 @@ describe("assemblePromptArtifact — budget determinism", () => {
 
   it("drops optional sections lowest-priority-first", () => {
     const artifact = assemblePromptArtifact(input({
-      level: "l2", fullStateMarkdown: undefined, state: loadedState(),
-      budgets: { l2: 1500 },
+      level: "l2", state: loadedState(),
+      budgets: { l2: 2100 },
     }));
     // The invariant is about the CUT POINT, not about any single section:
     // every optional section that rendered must outrank every one that was
@@ -851,9 +961,8 @@ describe("assemblePromptArtifact — budget determinism", () => {
     // low-priority section into room a larger high-priority one could not
     // use.)
     const order = [
-      "active_constraints", "remaining", "sub_goals", "blockers",
-      "discoveries", "rolling_outcomes", "phase", "active_warnings",
-      "external_context", "retired_constraints", "milestones",
+      "blockers", "corrections", "phase", "active_warnings",
+      "external_context", "milestones",
     ];
     const rendered = order.filter((id) => artifact.sections.includes(id));
     const dropped = order.filter((id) => artifact.droppedSections.includes(id));
@@ -869,7 +978,7 @@ describe("assemblePromptArtifact — budget determinism", () => {
 
   it("is deterministic: identical input gives an identical prompt and artifact", () => {
     const make = () => assemblePromptArtifact(input({
-      level: "l2", fullStateMarkdown: undefined, state: loadedState(),
+      level: "l2", state: loadedState(),
       budgets: { l2: 2000 },
     }));
     const a = make();
@@ -883,7 +992,7 @@ describe("assemblePromptArtifact — budget determinism", () => {
 
   it("never truncates mid-line", () => {
     const artifact = assemblePromptArtifact(input({
-      level: "l2", fullStateMarkdown: undefined, state: loadedState(),
+      level: "l2", state: loadedState(),
       budgets: { l2: 1400 },
     }));
     // A truncated section is cut at a newline, so the budgeted area ends a

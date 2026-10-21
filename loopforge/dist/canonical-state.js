@@ -8,7 +8,7 @@ import { deriveCriterionId, deriveItemId, normalizeText, STABLE_ID_RE, unique, u
 import { claimedMetCriteria, claimedRemainingCriteria } from "./self-eval.js";
 import { getPolicy } from "./policy.js";
 import { deriveConfiguredCapability } from "./policy.js";
-export const CANONICAL_STATE_SCHEMA_VERSION = 1;
+export const CANONICAL_STATE_SCHEMA_VERSION = 2;
 /** v3.7.1: Presentation view of sub-goals shared by prompts and the state
  *  file (one derivation, no second copy). Only ACTIVE items render as rows
  *  — pending/in_progress/blocked — ordered blocked → in_progress → pending
@@ -237,6 +237,9 @@ statuses) {
     const heading = contract.work_item?.trim();
     lines.push(`**${heading || "Round Contract"}** (${contract.id})`);
     const statusById = new Map((statuses?.items ?? []).map((item) => [item.itemId, item]));
+    if (contract.items.length > 0) {
+        lines.push("- Acceptance conditions:");
+    }
     for (const item of contract.items) {
         const machine = statusById.get(item.id);
         const mark = machine?.status === "verified" ? "✅"
@@ -244,19 +247,26 @@ statuses) {
                 : machine?.status === "contradicted" ? "⛔"
                     : machine?.status === "pending" ? "⬜"
                         : "";
-        lines.push(`- ${mark ? `${mark} ` : ""}[\`${item.id}\`] ${item.description}${machine ? ` — ${machine.status}` : ""}`);
+        const status = machine ? ` — ${machine.status}` : "";
+        lines.push(`  - ${mark ? `${mark} ` : ""}[\`${item.id}\`] ${item.description}${status}`);
         if (item.verify_with.length > 0) {
-            lines.push(`  - Verify via: ${item.verify_with.join(", ")}`);
+            lines.push(`    - Verify via: ${item.verify_with.join(", ")}`);
         }
         if (item.criterion_refs.length > 0) {
-            lines.push(`  - Criteria: ${item.criterion_refs.join(", ")}`);
+            lines.push(`    - Criteria: ${item.criterion_refs.join(", ")}`);
+        }
+        if (item.subgoal_refs.length > 0) {
+            lines.push(`    - Sub-goals: ${item.subgoal_refs.join(", ")}`);
         }
         if (machine?.reasons.length) {
-            lines.push(`  - Unverified because: ${machine.reasons[0]}`);
+            lines.push(`    - Unverified because: ${machine.reasons[0]}`);
         }
     }
-    for (const entry of contract.scope) {
-        lines.push(`- Scope: ${entry}`);
+    if (contract.scope.length > 0) {
+        lines.push("- Allowed scope:");
+        for (const entry of contract.scope) {
+            lines.push(`  - ${entry}`);
+        }
     }
     return lines.join("\n");
 }
@@ -294,7 +304,7 @@ const STATE_SECTION_TIER = {
     // derived Recovery Brief injected at the top of this tier).
     "Progress Dashboard": "Recent",
     Verification: "Recent",
-    "Changes Since Last Round": "Recent",
+    Corrections: "Recent",
     Discoveries: "Recent",
     // Historical Summary — the loop's memory skeleton, kept under existing
     // milestone/window caps.
@@ -321,6 +331,8 @@ export function renderCanonicalStateMarkdown(state, options) {
         `**Goal ID**: ${state.goalId}`,
         "**Derived**: true",
         `**Source**: round ${state.round} (attempt ${options?.attempt ?? 1})`,
+        "**Authority**: committed typed rounds are the factual source; this file is a derived view.",
+        "**Agent reports**: summaries below are claims, not machine evidence.",
         `**State hash**: ${hashCanonicalState(state).slice(0, 12)}`,
         "",
     ];
@@ -363,7 +375,7 @@ function flatStateSections(state) {
     addListWithIds(lines, "Success Criteria", constraintPartition.criteria, "cr");
     addListWithIdentities(lines, "Hard Constraints", constraintPartition.hard, state.constraintMetadata);
     addListWithIdentities(lines, "Active Constraints", constraintPartition.other, state.constraintMetadata);
-    addList(lines, "Changes Since Last Round", state.changesSinceLastRound);
+    addList(lines, "Corrections", state.corrections);
     if (state.progress.criteriaMet.length > 0 ||
         state.progress.criteriaRemaining.length > 0 ||
         state.progress.filesChanged.length > 0 ||
@@ -463,7 +475,7 @@ function flatStateSections(state) {
             const kindIcon = m.kind === "agent_declared"
                 ? "🏁"
                 : m.kind === "criteria_milestone" ? "✅" : "📍";
-            lines.push(`### ${kindIcon} ${m.label}`, `Rounds ${m.round_range.start}–${m.round_range.end}`, "", `**Outcome**: ${m.outcome}`, "");
+            lines.push(`### ${kindIcon} ${m.label}`, `Rounds ${m.round_range.start}–${m.round_range.end}`, "", `**Outcome (agent report)**: ${m.outcome}`, "");
             if (m.carried_constraints.length > 0) {
                 lines.push("**Carried Constraints**:");
                 for (const c of m.carried_constraints)
@@ -538,18 +550,19 @@ derived) {
         request.verification_flags ?? [];
     const rolling = response.rolling_summary;
     const executionReport = last?.execution_report;
-    const changes = unique([
-        request.new_since_last_round,
-        last?.output_summary,
-        ...(last?.wrong_assumptions ?? []).map((value) => `Corrected assumption: ${value}`),
-    ]);
+    // v3.9.5: only committed previous-round reports enter the projection.
+    // `last_round_result` remains a library/in-flight fallback for semantic
+    // evolution, but it must not create prompt/state narrative.
+    const committed = derived?.previousRound?.committed === true;
+    const corrections = committed
+        ? unique((last?.wrong_assumptions ?? []).map((value) => `Corrected assumption: ${value}`))
+        : [];
     const discoveries = unique([
         ...(last?.discovered_constraints ?? []),
         ...(last?.emerged_subtasks ?? []),
     ]);
     const blockers = unique([
-        ...(last?.constraint_violations ?? []),
-        last?.manual_fixes_needed,
+        ...(committed ? (last?.constraint_violations ?? []) : []),
         request.rejection_notice,
         ...response.warnings,
     ]);
@@ -593,7 +606,7 @@ derived) {
         activeConstraints,
         retiredConstraints: unique(response.constraints_retired),
         constraintMetadata: response.constraint_metadata ?? [],
-        changesSinceLastRound: changes,
+        corrections,
         remainingCriteria: unique(claimedRemainingCriteria(last?.execution_report)),
         blockers,
         verificationFlags,

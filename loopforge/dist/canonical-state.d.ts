@@ -8,7 +8,7 @@ import type { ActiveContractView } from "./round-contract.js";
 import type { ContractItemStatusView } from "./contract-items.js";
 import type { ConfiguredCapability, VerifiedSubGoalFact } from "./protocol.js";
 import type { RoundFacts } from "./round-facts.js";
-export declare const CANONICAL_STATE_SCHEMA_VERSION: 1;
+export declare const CANONICAL_STATE_SCHEMA_VERSION: 2;
 /** v3.7.1: Presentation view of sub-goals shared by prompts and the state
  *  file (one derivation, no second copy). Only ACTIVE items render as rows
  *  — pending/in_progress/blocked — ordered blocked → in_progress → pending
@@ -77,7 +77,10 @@ export interface CanonicalLoopState {
     retiredConstraints: string[];
     /** v2.3: Per-constraint lifecycle metadata. */
     constraintMetadata: ConstraintMeta[];
-    changesSinceLastRound: string[];
+    /** v3.9.5: committed Agent corrections (wrong assumptions). This is a
+     *  REPORT, never machine evidence; fallback last_round_result does not
+     *  enter this field. */
+    corrections: string[];
     remainingCriteria: string[];
     blockers: string[];
     verificationFlags: VerificationFlag[];
@@ -189,6 +192,10 @@ derived?: {
     previousRound?: {
         result: LoopRoundResult | null;
         verificationFlags: VerificationFlag[];
+        /** v3.9.5: true only when `result` came from a committed round view.
+         *  Agent reports (wrong assumptions, blockers) enter the prompt/state
+         *  projection only under this flag; a library fallback is in-flight. */
+        committed?: boolean;
     };
 }): CanonicalLoopState;
 //# sourceMappingURL=canonical-state.d.ts.map

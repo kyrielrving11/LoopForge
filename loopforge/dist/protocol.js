@@ -30,7 +30,6 @@ export function makeExecutionFeedback(overrides = {}) {
 }
 export function makeLoopProjection(overrides = {}) {
     return {
-        focus: null,
         todo: [],
         phase: null,
         delegation: { pending: 0, last_results: [] },
@@ -173,7 +172,6 @@ export function makeLoopCompileRequest(overrides = {}) {
         loop_objective: null,
         plan_source: null,
         constraints_from_plan: [],
-        new_since_last_round: "",
         last_round_result: null,
         force_level: "auto",
         external_context: "",

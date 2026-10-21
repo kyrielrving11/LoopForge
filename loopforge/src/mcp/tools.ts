@@ -58,7 +58,9 @@ const TOOL_BASE_SCHEMAS = [
           type: "array" as const,
           items: { type: "string" as const },
           description:
-            "Initial success criteria. Each becomes a stable cr-XXXXXXXX anchor " +
+            "Initial success criteria — the operator's acceptance surface. Phrase " +
+            "each as an observable outcome; implementation detail belongs in " +
+            "sub-goals or task text. Each becomes a stable cr-XXXXXXXX anchor " +
             "rendered in every prompt and usable by contract items. Omit to keep " +
             "the default criterion.",
         },
@@ -300,32 +302,57 @@ const TOOL_BASE_SCHEMAS = [
               properties: {
                 work_item: {
                   type: "string" as const,
-                  description: "Optional. Round focus, one line. Rendered as the active contract's Current Task first line. Max 200 chars.",
+                  minLength: 1,
+                  maxLength: 200,
+                  description:
+                    "Required. The bounded deliverable this contract slice " +
+                    "produces — an outcome, not an activity. Rendered as the " +
+                    "Current Task heading. 1–200 chars.",
                 },
                 items: {
                   type: "array" as const,
-                  description: "Required, at least one (max 20). Each item is a verification unit bound to evidence commands. The runtime derives a stable rci-XXXXXXXX id per item and renders it in the prompt — cite that id in execution_report.contract_item_claims.",
+                  minItems: 1,
+                  maxItems: 20,
+                  description:
+                    "Required, at least one (max 20). Each item is an " +
+                    "acceptance condition for the deliverable, bound to its own " +
+                    "evidence commands. The runtime derives a stable " +
+                    "rci-XXXXXXXX id per item and renders it in the prompt — " +
+                    "cite that id in execution_report.contract_item_claims.",
                   items: {
                     type: "object" as const,
                     properties: {
                       description: {
                         type: "string" as const,
-                        description: "What must be true for this item. Max 200 chars.",
+                        minLength: 1,
+                        maxLength: 200,
+                        description:
+                          "What must be true for this acceptance condition. " +
+                          "1–200 chars.",
                       },
                       criterion_refs: {
                         type: "array" as const,
+                        maxItems: 20,
                         items: { type: "string" as const },
                         description: "Optional. Real cr-XXXXXXXX ids of ACTIVE criteria rendered in this prompt. Free text and unknown ids are rejected. Max 20.",
                       },
                       subgoal_refs: {
                         type: "array" as const,
+                        maxItems: 20,
                         items: { type: "string" as const },
                         description: "Optional. sg-XXXXXXXX ids of ACTIVE sub-goals displayed in this prompt. A sub-goal created by this same submission's emerged_subtasks becomes referenceable next round. Max 20 ids. A machine-verified item produces the derived verified-subgoal fact for exactly the ids it names here.",
                       },
                       verify_with: {
                         type: "array" as const,
+                        minItems: 1,
+                        maxItems: 20,
                         items: { type: "string" as const },
-                        description: "Required, at least one. Names of configured, enabled, after-capable evidence.commands (loop_policy.json) that verify this item. Unknown or disabled names are rejected.",
+                        description:
+                          "Required, at least one. Names of configured, " +
+                          "enabled, after-capable evidence.commands " +
+                          "(loop_policy.json) that check this acceptance " +
+                          "condition. Unknown or disabled names are rejected. A " +
+                          "command may be shared by multiple conditions.",
                       },
                     },
                     required: ["description", "verify_with"],
@@ -334,11 +361,20 @@ const TOOL_BASE_SCHEMAS = [
                 },
                 scope: {
                   type: "array" as const,
+                  maxItems: 50,
                   items: { type: "string" as const },
-                  description: "Files/directories this round may touch (workspace-relative; './' and trailing slashes accepted; must stay inside the workspace). Out-of-scope git changes trigger round_scope_drift, which is a machine fact and is not waivable by explanation. Max 50 items.",
+                  description:
+                    "Required (may be empty). Files/directories this round may " +
+                    "touch (workspace-relative; './' and trailing slashes " +
+                    "accepted; must stay inside the workspace). This is a " +
+                    "machine-enforced file boundary, not the deliverable. " +
+                    "Out-of-scope git changes trigger round_scope_drift, which " +
+                    "is a machine fact and is not waivable by explanation. Max " +
+                    "50 items.",
                 },
               },
-              required: ["items", "scope"],
+              required: ["work_item", "items", "scope"],
+              additionalProperties: false,
             },
           },
         },
@@ -570,7 +606,7 @@ const ADVANCE_OUTPUT_SCHEMA: JsonSchema = {
     projection: {
       type: "object",
       additionalProperties: true,
-      description: "v2.12: Typed cognitive state projection (focus/todo/phase/delegation/handoff).",
+      description: "v2.12: Typed cognitive state projection (todo/phase/delegation/handoff).",
     },
   },
   additionalProperties: true,

@@ -207,14 +207,6 @@ function l0Sections(state, recoveryBrief) {
             coverageIds: state.verificationFlags.map((flag) => findingKey(flag)),
         });
     }
-    if (state.changesSinceLastRound.length > 0) {
-        sections.push({
-            id: "changes",
-            text: section("New Evidence / Changes", bullets(state.changesSinceLastRound)),
-            mandatory: false,
-            coverageIds: [],
-        });
-    }
     return sections;
 }
 /** v3.8.1: the committed-round window Active Warnings reports on. */
@@ -248,10 +240,10 @@ function activeWarnings(flags, currentRound) {
 }
 function l1Sections(state, recoveryBrief) {
     const sections = commonMandatorySections(state, "l1", recoveryBrief);
-    if (state.changesSinceLastRound.length > 0) {
+    if (state.corrections.length > 0) {
         sections.push({
-            id: "changes",
-            text: section("Changes Since Last Round", bullets(state.changesSinceLastRound)),
+            id: "corrections",
+            text: section("Corrections (committed reports)", bullets(state.corrections)),
             mandatory: false,
             coverageIds: [],
         });
@@ -259,35 +251,16 @@ function l1Sections(state, recoveryBrief) {
     if (state.blockers.length > 0) {
         sections.push({
             id: "blockers",
-            text: section("Blockers", bullets(state.blockers)),
+            text: section("Blockers (reported/current)", bullets(state.blockers)),
             mandatory: false,
             coverageIds: [],
         });
     }
-    if (state.discoveries.length > 0) {
-        sections.push({
-            id: "discoveries",
-            text: section("New Discoveries", bullets(state.discoveries)),
-            mandatory: false,
-            coverageIds: [],
-        });
-    }
-    // v3.2: Recent Rounds. v3.8.1: rendered in full — the keep-newest-N fold and
-    // its milestone-boundary exception are gone.
-    if (state.rollingOutcomes.length > 0) {
-        sections.push({
-            id: "rolling_outcomes",
-            text: section("Recent Rounds", bullets(state.rollingOutcomes)),
-            mandatory: false,
-            coverageIds: [],
-        });
-    }
-    // v3.2: L1 also renders the explicit external context (previously L2-only).
-    // Placed after the changes delta, within the soft budget.
+    // v3.2: L1 also renders explicit external context supplied by the caller.
     if (state.externalContext) {
         sections.push({
             id: "external_context",
-            text: section("External Context", state.externalContext),
+            text: section("External Context (agent-supplied)", state.externalContext),
             mandatory: false,
             coverageIds: [],
         });
@@ -302,71 +275,53 @@ function l1Sections(state, recoveryBrief) {
             coverageIds: [],
         });
     }
-    // v3.8.1: Active Warnings — the recent tail of the ONE recurring-fact
-    // derivation. It replaces two prompt sections ("Recurring Issues", fed by
-    // the last 5 rounds' raw violations with no threshold, and "Lessons
-    // Learned", fed by the whole-history count >= 2 view) that were two windows
-    // over one fact set. What the agent needs in the prompt is the recent tail;
-    // the full recurring set lives in the state file.
+    // v3.8.1: the recent tail of the ONE recurring-fact derivation. It mixes
+    // committed Agent violation reports with machine verification flags, so the
+    // heading names findings rather than implying all of it is machine evidence.
     const warnings = activeWarnings(state.recurringFlags, state.round);
     if (warnings) {
         sections.push({
             id: "active_warnings",
-            text: section("Active Warnings", warnings),
+            text: section("Recurring Findings", warnings),
             mandatory: false,
             coverageIds: [],
         });
     }
     return sections;
 }
-function l2Sections(state, fullStateMarkdown, recoveryBrief) {
+function l2Sections(state, recoveryBrief) {
     const sections = commonMandatorySections(state, "l2", recoveryBrief);
-    const fullState = fullStateMarkdown?.trim();
-    if (fullState) {
+    // v3.9.5: L2 is a boundary rehydration, not a history dump. The full state
+    // lives in the optional state file / replay / audit; the prompt carries the
+    // current governance projection plus a small stage anchor.
+    if (state.corrections.length > 0) {
         sections.push({
-            id: "full_state",
-            text: section("Full Rehydrated State", fullState),
-            mandatory: false,
-            coverageIds: [],
-        });
-        return sections;
-    }
-    // v2.11: narrative groups. v3.9.4: criteria, active constraints and active
-    // sub-goals moved to the shared mandatory sections, so they are not repeated
-    // here; these groups carry no normative ids.
-    const groups = [
-        ["changes", "Changes Since Last Round", state.changesSinceLastRound],
-        ["blockers", "Blockers", state.blockers],
-        ["discoveries", "Discoveries", state.discoveries],
-        ["rolling_outcomes", "Cross-Round Outcomes", state.rollingOutcomes],
-        ["failed_patterns", "Failed Patterns", state.failedPatterns],
-    ];
-    for (const [id, title, values] of groups) {
-        if (values.length === 0)
-            continue;
-        sections.push({
-            id,
-            text: section(title, bullets(values)),
+            id: "corrections",
+            text: section("Corrections (committed reports)", bullets(state.corrections)),
             mandatory: false,
             coverageIds: [],
         });
     }
-    // v3.8.1: Active Warnings — the recent tail of the ONE recurring-fact
-    // derivation (see l1Sections). The whole-history recurring set is the state
-    // file's job; L2 shows the same recent slice as L1 so the two levels cannot
-    // tell different stories about what is going wrong right now.
+    if (state.blockers.length > 0) {
+        sections.push({
+            id: "blockers",
+            text: section("Blockers (reported/current)", bullets(state.blockers)),
+            mandatory: false,
+            coverageIds: [],
+        });
+    }
+    // The recent tail of the ONE recurring-fact derivation. The full recurring
+    // set lives in the state file; the heading names mixed provenance.
     const warnings = activeWarnings(state.recurringFlags, state.round);
     if (warnings) {
         sections.push({
             id: "active_warnings",
-            text: section("Active Warnings", warnings),
+            text: section("Recurring Findings", warnings),
             mandatory: false,
             coverageIds: [],
         });
     }
-    // v3.8.1: one compact phase line, not the Roadmap prose — rendered right
-    // before the (backward-looking) Phase History so the agent sees where it is
-    // before where it has been.
+    // One compact phase line, not the Roadmap prose.
     const l2Phase = buildPhaseLine(state);
     if (l2Phase) {
         sections.push({
@@ -376,22 +331,17 @@ function l2Sections(state, fullStateMarkdown, recoveryBrief) {
             coverageIds: [],
         });
     }
+    // Stage anchors only: milestone labels/ranges, never the Agent's outcome
+    // text or the carried/resolved constraint history. Those remain in the
+    // derived state file, audit and replay.
     if (state.milestones.length > 0) {
-        const milestoneText = state.milestones
-            .map((m) => {
-            const lines = [
-                milestoneHeading(m),
-                `  Outcome: ${m.outcome}`,
-            ];
-            if (m.resolved_constraints.length > 0) {
-                lines.push(`  Resolved: ${m.resolved_constraints.slice(0, 3).join("; ")}`);
-            }
-            return lines.join("\n");
-        })
-            .join("\n\n");
+        const anchors = state.milestones
+            .slice(-3)
+            .map((m) => milestoneHeading(m))
+            .join("\n");
         sections.push({
             id: "milestones",
-            text: section("Phase History", milestoneText),
+            text: section("Phase Anchors", anchors),
             mandatory: false,
             coverageIds: [],
         });
@@ -399,16 +349,7 @@ function l2Sections(state, fullStateMarkdown, recoveryBrief) {
     if (state.externalContext) {
         sections.push({
             id: "external_context",
-            text: section("External Context", state.externalContext),
-            mandatory: false,
-            coverageIds: [],
-        });
-    }
-    if (state.retiredConstraints.length > 0) {
-        const lines = state.retiredConstraints.map((c) => `- ~${c}~ (retired)`);
-        sections.push({
-            id: "retired_constraints",
-            text: section("Retired Constraints", lines.join("\n")),
+            text: section("External Context (agent-supplied)", state.externalContext),
             mandatory: false,
             coverageIds: [],
         });
@@ -422,7 +363,7 @@ function selectSections(input) {
     if (input.level === "l1") {
         return l1Sections(input.state, input.recoveryBrief);
     }
-    return l2Sections(input.state, input.fullStateMarkdown, input.recoveryBrief);
+    return l2Sections(input.state, input.recoveryBrief);
 }
 /** v3.8.1: render order, in ONE place.
  *
@@ -451,18 +392,13 @@ const SECTION_PRIORITY = {
     // (they are MOVED out of their source sections), so dropping it would delete
     // them rather than just deprioritize them.
     critical_context: 9,
-    // ── optional narrative, most to least important ─────────────────────────
+    // ── optional current-governance / anchor sections ───────────────────────
     blockers: 20,
-    changes: 21,
-    discoveries: 22,
-    rolling_outcomes: 23,
+    corrections: 21,
     phase: 24,
     active_warnings: 25,
     external_context: 26,
-    failed_patterns: 27,
-    retired_constraints: 28,
     milestones: 29,
-    full_state: 30,
 };
 const DEFAULT_SECTION_PRIORITY = 50;
 /** v3.8.1: the smallest remaining room worth spending on a truncated
@@ -591,16 +527,18 @@ function matchEmphasize(targets, candidates, cap) {
  *  similarity verdict and, in practice, nearly always wrong: "I don't
  *  understand milestone tracking" scores 1/8 = 0.125 against the keyword
  *  `milestone`, below the 0.15 default, so it fell through to the generic
- *  line anyway. The agent names the state file itself; the prompt does not
- *  guess where to look. */
-function renderConfusionAlerts(points, fullDensity) {
+ *  line anyway. v3.9.5: the pointer is conditional — a disabled state file
+ *  must never be named as the place to look. */
+function renderConfusionAlerts(points, fullDensity, hasStateFile) {
     if (points.length === 0)
         return "";
     const lines = [
         "## ⚠️ Confusion Alerts",
         "",
         "You flagged these as confusing in the previous round.",
-        "Address each before proceeding — the state file has full context.",
+        hasStateFile
+            ? "Address each before proceeding — the state file has full context."
+            : "Address each before proceeding — no state file is enabled; use the live prompt, replay, or status views.",
         "",
     ];
     // v2.14: L2 renders up to the policy cap (was: every confusion point,
@@ -611,17 +549,22 @@ function renderConfusionAlerts(points, fullDensity) {
     for (const point of shown) {
         const truncated = point.length > 200 ? point.slice(0, 197) + "…" : point;
         lines.push(`- **"${truncated}"**`);
-        lines.push("  → Read the full state file for relevant context.");
+        lines.push(hasStateFile
+            ? "  → Read the full state file for relevant context."
+            : "  → Use the current prompt, replay, or status views for context.");
         lines.push("");
     }
     if (!fullDensity && points.length > 1) {
-        lines.push(`*… and ${points.length - 1} more confusion point(s) — see state file.*`);
+        lines.push(hasStateFile
+            ? `*… and ${points.length - 1} more confusion point(s) — see state file.*`
+            : `*… and ${points.length - 1} more confusion point(s).*`);
         lines.push("");
     }
     return lines.join("\n");
 }
-/** Render the "Critical Context" section — items the model emphasized.
- *  Pulled from active constraints, discoveries, and blocking issues. */
+/** Render the "Critical Context" section — current governance items the model
+ *  emphasized. v3.9.5: only active constraints are candidates, so this can
+ *  never resurrect a removed historical narrative. */
 /** v3.9.4: an emphasized item that is also an active normative constraint
  *  reports its real id here, because it is MOVED out of its source section
  *  and this is the only place it renders. Narrative items carry no id. */
@@ -674,20 +617,44 @@ export function assemblePromptArtifact(input) {
             ? `📄 Full state: \`${stateFilePath}\` (updated round ${input.state.round})\n`
             : `📄 Full state: \`${stateFilePath}\`\n`)
         : "";
+    // v3.9.5: a static boundary rule, not a fact source. It resolves the real
+    // competition between the Agent's own memory/context and LoopForge's
+    // committed governance projection, and names the three decomposition layers.
+    const authorityBoundary = [
+        "## LoopForge authority boundary",
+        "",
+        "- For committed rounds, active criteria/constraints/contracts, machine",
+        "  verification and recovery state, use LoopForge's current projection.",
+        "- Your conversation history and long-term memory are background. They may",
+        "  contain unsubmitted, rejected, or rolled-back work; if they disagree,",
+        "  re-check the workspace and machine evidence. Do not treat remembered",
+        "  work as committed or verified.",
+        "- A current explicit user instruction defines the task; LoopForge's old",
+        "  objective does not override it.",
+        "- Criteria are the operator's acceptance surface; sub-goals are your",
+        "  execution plan; the Round Contract is this round's deliverable and its",
+        "  acceptance conditions.",
+        "- You own semantic judgment, decomposition, and action; LoopForge owns",
+        "  durable facts, machine checks, and governance.",
+        "",
+    ].join("\n");
     const readInstruction = needsFullContext && stateFilePath
         ? [
             "",
-            "> ⚠️ **Read the full state file before acting.** The summary below is a",
-            "> capsule. The durable state file contains complete phase history,",
-            "> sub-goal dashboard, constraint lifecycle, and agent trust data.",
-            "> Conversation history may be incomplete after compaction or session",
-            "> resume — the state file is the source of truth.",
+            "> ⚠️ **Read the full state file before acting when you need history.**",
+            "> It contains complete phase history, the sub-goal dashboard, constraint",
+            "> lifecycle, and diagnostic facts. Conversation history may be",
+            "> incomplete after compaction or resume. The state file is a derived",
+            "> view of committed typed rounds — not an independent ledger or a",
+            "> second factual source.",
             "",
         ].join("\n")
         : "";
     const header = [
         `## LoopForge Round ${input.state.round}`,
         `State: ${stateHash.slice(0, 12)} | Level: ${input.level.toUpperCase()} | Attempt: ${attempt}`,
+        "",
+        authorityBoundary,
         stateFileRef,
         readInstruction,
         "",
@@ -716,18 +683,16 @@ export function assemblePromptArtifact(input) {
     const levelIsL2 = input.level === "l2";
     // Confusion alerts: L1/L2 only, rendered at the top (before mandatory sections)
     const confusionText = (!levelIsL0 && pr?.confusion_points?.length)
-        ? renderConfusionAlerts(pr.confusion_points, levelIsL2)
+        ? renderConfusionAlerts(pr.confusion_points, levelIsL2, Boolean(stateFilePath))
         : "";
     // Emphasize: L1/L2 only, matched against active state items
     const policy = getPolicy().prompt;
     const emphasizeCap = levelIsL2 ? policy.max_emphasize_l2 : policy.max_emphasize_l1;
     const emphasis = (!levelIsL0 && pr?.emphasize?.length)
-        ? matchEmphasize(pr.emphasize, [
-            ...input.state.activeConstraints,
-            ...input.state.discoveries,
-            ...input.state.blockers,
-            ...input.state.changesSinceLastRound,
-        ], emphasizeCap)
+        ? matchEmphasize(pr.emphasize,
+        // v3.9.5: emphasize is a pure reorder over current governance items,
+        // never a way to resurrect removed historical narrative.
+        [...input.state.activeConstraints], emphasizeCap)
         : { matched: [], effects: [] };
     const emphasized = emphasis.matched;
     // v3.9.1: prompt-request effects are OUTPUT facts about this render. They
@@ -776,9 +741,7 @@ export function assemblePromptArtifact(input) {
             activeConstraints: input.state.activeConstraints.filter((item) => !emphasizedSet.has(item)),
             hardConstraints: input.state.hardConstraints.filter((item) => !emphasizedSet.has(item)),
             successCriteria: input.state.successCriteria.filter((item) => !emphasizedSet.has(item)),
-            discoveries: input.state.discoveries.filter((item) => !emphasizedSet.has(item)),
             blockers: input.state.blockers.filter((item) => !emphasizedSet.has(item)),
-            changesSinceLastRound: input.state.changesSinceLastRound.filter((item) => !emphasizedSet.has(item)),
         }
         : input.state;
     const sections = selectSections({ ...input, state: stateForSections });

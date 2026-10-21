@@ -147,13 +147,10 @@ export type RoundOutcome = "success" | "partial" | "failed" | "blocked";
 /** v2.12: Typed cognitive state projection — runtime-derived facts shipped
  *  with advance/status outputs. All fields are derived, zero persistence.
  *  Consumers: advance output (main agent), status (human/tooling), resume
- *  handoff. The runtime provides facts; the agent decides actions. */
+ *  handoff. The runtime provides current governance facts; the agent decides
+ *  actions. v3.9.5: no agent-authored "latest outcome" focus — projection
+ *  never competes with the agent's own memory. */
 export interface LoopProjection {
-    /** Current focus — last non-failed round's output summary. */
-    focus: {
-        what: string;
-        since_round: number;
-    } | null;
     /** Suggested next steps, derived from the active contract, sub-goals, and
      *  open gates/recovery requirements. Non-authoritative. v3.8: the
      *  `agent_intent` source was deleted with `next_action` — the agent's own
@@ -673,7 +670,6 @@ export interface LoopCompileRequest {
     loop_objective: LoopObjective | null;
     plan_source: string | null;
     constraints_from_plan: string[];
-    new_since_last_round: string;
     last_round_result: LoopRoundResult | null;
     force_level: string;
     /** Optional context supplied explicitly by the embedding Agent. */
@@ -980,14 +976,18 @@ export interface ContractItemClaim {
     item_id: string;
     outcome: "met" | "remaining";
 }
-/** v3.8: One declared contract item. `verify_with` must name configured,
- *  enabled, after-capable evidence commands — the declaration is strict.
+/** v3.8/v3.9.5: One acceptance condition inside a Round Contract slice.
+ *  `description` states what must be true, not an activity. `verify_with`
+ *  must name configured, enabled, after-capable evidence commands — the
+ *  declaration is strict. A command may back several conditions, and one
+ *  condition may bind several commands.
  *
  *  `subgoal_refs` lives HERE, not on the contract: a machine-verified item
  *  backs exactly the sub-goals it names, so "item A verifies SubGoal 1, item B
  *  verifies SubGoal 2" is expressible and `VerifiedSubGoalFact` attribution is
  *  per-item instead of "every verified item backs every sub-goal". */
 export interface ContractItemProposal {
+    /** The acceptance condition: what must be true for this slice. */
     description: string;
     /** v3.9.4: real cr-XXXXXXXX ids of ACTIVE criteria rendered in the
      *  current prompt. Free text and unknown ids are `contract_invalid`. */
@@ -995,16 +995,26 @@ export interface ContractItemProposal {
     /** v3.9.4: sg-XXXXXXXX ids of ACTIVE sub-goals displayed in the current
      *  prompt. A same-submission emerged sub-goal is referenceable next round. */
     subgoal_refs: string[];
-    /** Evidence command ids (policy.evidence.commands[].name). */
+    /** Evidence command ids (policy.evidence.commands[].name) that check this
+     *  acceptance condition. */
     verify_with: string[];
 }
-/** v3.8: A Round Contract proposal for the NEXT round. It becomes ACTIVE only
- *  after the declaring round commits. Identity (rc-/rci-) is derived from
- *  CONTENT ONLY — restating an unchanged contract keeps the same identity,
- *  unlike a SubGoal whose id includes its declaration round. */
+/** v3.9.5: A Round Contract proposal for the NEXT round. It becomes ACTIVE
+ *  only after the declaring round commits. Identity (rc-/rci-) is derived
+ *  from CONTENT ONLY — restating an unchanged contract keeps the same
+ *  identity, unlike a SubGoal whose id includes its declaration round.
+ *
+ *  `work_item` is the bounded deliverable this slice produces (an outcome,
+ *  not an activity). New declarations must provide it; it stays optional in
+ *  this persisted type because committed history may contain legacy
+ *  contracts without a label. `items[]` are the acceptance conditions;
+ *  `verify_with` remains item-level. */
 export interface RoundContractProposal {
+    /** The bounded deliverable this slice produces. Required for NEW
+     *  declarations, optional when reading legacy committed history. */
     work_item?: string;
-    /** Files/directories the round may touch. Empty = no scope constraint. */
+    /** Files/directories the round may touch. Empty = no scope constraint.
+     *  This is a machine-enforced file boundary, not the deliverable. */
     scope: string[];
     items: ContractItemProposal[];
 }

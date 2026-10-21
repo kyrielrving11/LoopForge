@@ -114,6 +114,20 @@ describe("v3.9.1 — FIELD_GUIDES and tool schema", () => {
     }
   });
 
+  it("v3.9.5: the round_contract guide names the required deliverable", () => {
+    const next = TOOL_SCHEMAS.find((schema) => schema.name === "loopforge_next");
+    const evaluation = (next!.inputSchema.properties as Record<string, unknown>)
+      .evaluation as Record<string, unknown>;
+    const contract = (evaluation.properties as Record<string, unknown>)
+      .round_contract as Record<string, unknown>;
+    // The transport keeps optional evaluation fields advisory so the runtime
+    // can return contract_invalid instead of a JSON-RPC argument error.
+    // The guide description still carries the strict declaration rule.
+    assert.match(String(contract.description), /work_item/);
+    assert.match(String(contract.description), /required/);
+    assert.match(String(contract.description), /contract_invalid/);
+  });
+
   it("does not advertise retired fields as evaluation properties", () => {
     const next = TOOL_SCHEMAS.find((schema) => schema.name === "loopforge_next");
     const evaluation = (next!.inputSchema.properties as Record<string, unknown>)
@@ -410,11 +424,11 @@ describe("v3.9.2 — compact trigger guidance", () => {
         `L0 must offer the applicable field ${path}`);
     }
     assert.match(block, /cr-12345678/);
-    assert.match(block, /The current requirement is the natural work item/);
+    assert.match(block, /The current requirement is the natural deliverable seed/);
     assert.match(block, /No active contract/);
   });
 
-  it("renders the current requirement as the natural contract work item", () => {
+  it("renders the current requirement as the natural contract deliverable seed", () => {
     const ctx: SelfEvalPromptContext = {
       round: 2,
       level: "l2",

@@ -1,5 +1,60 @@
 # Changelog
 
+## 3.9.5 (2026-10-21)
+
+**The memory-boundary and contract-semantics release.** The prompt stops
+replaying the Agent's own progress narrative. It becomes a current-governance
+projection: objective, criteria, constraints, active contract and acceptance
+conditions, active sub-goals, machine findings, recovery facts, and a compact
+phase anchor. Full history stays in the derived state file / replay / audit.
+
+`output_summary` is still a strict core field and remains in the Vault, audit,
+replay, explain, receipts, checkpoint outcomes and backtrack failed-approach
+facts. It is no longer a default prompt input and the projection no longer
+exposes a latest-outcome `focus` or `handoff.summary` "Latest outcome" segment.
+`Recent Rounds`, `Cross-Round Outcomes`, `Failed Patterns`, `Discoveries`,
+`Retired Constraints`, `Full Rehydrated State`, and the old `Changes Since Last
+Round` narrative are removed from prompts; the state file keeps them as derived
+history. L2 renders at most three `Phase Anchors` (labels/ranges only, never
+`outcome`) and never embeds the state markdown.
+
+Committed-only gating: `prompt_requests`, `Corrections` (wrong assumptions),
+agent-reported blockers, and duplicate-declaration warnings read the committed
+previous round, not the library `last_round_result` fallback. The fallback may
+still drive semantic evolution when no committed view exists, but it cannot
+become prompt narrative.
+
+The fixed prompt header now states the authority boundary: LoopForge's current
+committed projection wins for committed/verified state; the Agent's session
+history and long-term memory are background and may contain unsubmitted,
+rejected or rolled-back work; a current explicit user instruction defines the
+task. The state-file read instruction no longer calls the file the source of
+truth. Confusion alerts no longer point at a disabled state file.
+
+Round Contract semantics are explicit: `work_item` is the bounded deliverable
+(an outcome, not an activity) and is required for new declarations; persistence
+stays optional for legacy committed contracts. `items[]` are acceptance
+conditions; `verify_with` remains item-level, one condition may use several
+commands, and one command may back several conditions. The strict boundary
+rejects missing/empty/over-long `work_item` or `scope`, over-long item
+descriptions, unknown top-level/item fields, and a top-level `verify_with`.
+LoopForge does not judge semantic fit between work_item, items and commands.
+Criteria remain the operator acceptance surface, sub-goals the Agent execution
+plan, and the contract the explicit bridge; zero `emerged_subtasks` is valid.
+
+### Breaking boundaries
+
+- `LoopProjection.focus` is removed.
+- `LoopCompileRequest.new_since_last_round` is removed.
+- `PromptAssemblyInput.fullStateMarkdown` and the `full_state` prompt section
+  are removed; L2 never embeds the state markdown.
+- `prompt.l2_pointer_enabled` is removed; `POLICY_SCHEMA_VERSION` is `"7"`.
+- New Round Contract declarations require `work_item` and `scope`; legacy
+  committed contracts without `work_item` remain readable.
+- `CANONICAL_STATE_SCHEMA_VERSION` is `2` (`changesSinceLastRound` replaced by
+  committed `corrections`).
+- No migration is provided.
+
 ## 3.9.4 (2026-10-19)
 
 **The normative-projection release.** The prompt could omit an active

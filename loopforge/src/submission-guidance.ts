@@ -327,7 +327,9 @@ const GUIDES: FieldGuide[] = [
       "deliverable this slice produces (an outcome, not an activity) and is " +
       "required for a new proposal. items are acceptance conditions; each " +
       "item binds its own verify_with commands. scope is the machine-enforced " +
-      "file boundary. Declared here, it becomes the ACTIVE contract only after " +
+      "file boundary. One contract may cover several criteria; group work by " +
+      "evidence and recovery, not by the requirement list. Declared here, it " +
+      "becomes the ACTIVE contract only after " +
       "this round commits. While it is open, omitting it continues the " +
       "contract; a different proposal is ignored (contract_premature). " +
       "DECLARATION IS STRICT: missing work_item/scope, an item with no bound " +
@@ -527,18 +529,6 @@ function firstActiveSubGoal(subGoals: ReadonlyArray<SubGoal>): SubGoal | null {
   return subGoals.find((item) => item.status !== "done" && item.status !== "canceled") ?? null;
 }
 
-/** The first criterion the next slice can still work on: `remaining` or
- *  `unknown`. `claimed` is the Agent's own completion claim (machine
- *  unverified), so it is not a natural NEXT work item. */
-export function outstandingCriterion(
-  criteria: ReadonlyArray<CriterionStatus> | undefined,
-): CriterionStatus | null {
-  return (criteria ?? []).find(
-    (criterion) =>
-      criterion.status === "remaining" || criterion.status === "unknown",
-  ) ?? null;
-}
-
 function clipContractText(text: string | undefined): string {
   const collapsed = (text ?? "").trim().replace(/\s+/g, " ");
   return collapsed.length > 200 ? collapsed.slice(0, 200) : collapsed;
@@ -588,19 +578,29 @@ export function fieldExample(
       return [{ old: "<old criterion>", new: "<new criterion>" }];
     case "round_contract": {
       if (!ctx.contractVerificationAvailable || ctx.commands.length === 0) return null;
-      const criterion = outstandingCriterion(ctx.criteria);
+      // v3.9.5 follow-up: a contract slice may cover several criteria. Show up
+      // to two real criteria so the example does not teach one-criterion rounds.
+      const criteria = (ctx.criteria ?? [])
+        .filter((criterion) =>
+          criterion.status === "remaining" || criterion.status === "unknown")
+        .slice(0, 2);
       const workItem = clipContractText(ctx.currentRequirement) ||
         "<the current requirement, one line>";
       return {
         work_item: workItem,
-        items: [{
-          description: criterion
-            ? clipContractText(criterion.text)
-            : "<machine-checkable outcome for this requirement>",
-          criterion_refs: criterion ? [criterion.id] : [],
-          subgoal_refs: [],
-          verify_with: [ctx.commands[0]],
-        }],
+        items: criteria.length > 0
+          ? criteria.map((criterion) => ({
+              description: clipContractText(criterion.text),
+              criterion_refs: [criterion.id],
+              subgoal_refs: [],
+              verify_with: [ctx.commands[0]],
+            }))
+          : [{
+              description: "<machine-checkable outcome for this requirement>",
+              criterion_refs: [],
+              subgoal_refs: [],
+              verify_with: [ctx.commands[0]],
+            }],
         scope: ["<workspace-relative file or directory>"],
       };
     }
@@ -782,6 +782,10 @@ function renderContractGuidance(ctx: SelfEvalPromptContext): string[] {
     "Declare it as-is only if the command below is its acceptance check; otherwise",
     "describe the machine-checkable outcome and bind the command that actually",
     "verifies it. items are acceptance conditions, not a task checklist.",
+    "Size the slice by evidence and recovery, not by the requirement list:",
+    "one contract may cover several criteria, and one criterion may span rounds.",
+    "Group changes that share one verification story and one recovery path;",
+    "do not create a contract per requirement or per criterion.",
     "The proposal activates only after this round commits.",
     `${proposalDecision} → proposal below:`,
     "```json",

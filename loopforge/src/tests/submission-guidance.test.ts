@@ -453,6 +453,37 @@ describe("v3.9.2 — compact trigger guidance", () => {
     assert.doesNotMatch(block, /\brci-[a-f0-9]{8}\b/);
   });
 
+  it("v3.9.5 follow-up: shows a multi-criterion slice and grouping guidance", () => {
+    const second: CriterionStatus = {
+      id: "cr-87654321",
+      text: "Lint passes",
+      status: "remaining",
+      related_subgoal_ids: [],
+    };
+    const block = renderSelfEvalBlock({
+      round: 2,
+      level: "l2",
+      activeContract: null,
+      itemStatuses: null,
+      commands: ["verify"],
+      contractVerificationAvailable: true,
+      subGoals: [],
+      verificationFlags: [],
+      recovery: false,
+      gateEnabled: false,
+      criteria: [criterion, second],
+      currentRequirement: "Ship auth",
+    });
+    assert.match(block, /Size the slice by evidence and recovery/);
+    assert.match(block, /one contract may cover several criteria/);
+    assert.equal((block.match(/"criterion_refs": \[/g) ?? []).length, 2,
+      "the example must show two acceptance conditions");
+    assert.match(block, /cr-12345678/);
+    assert.match(block, /cr-87654321/);
+    assert.match(block, /All tests pass/);
+    assert.match(block, /Lint passes/);
+  });
+
   it("makes an L0 committed files mismatch actionable without touching the gate", () => {
     const ctx: SelfEvalPromptContext = {
       round: 2,

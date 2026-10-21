@@ -60,10 +60,6 @@ export interface FieldExampleContext {
     /** The task / current work item, used as the natural first contract item. */
     currentRequirement?: string;
 }
-/** The first criterion the next slice can still work on: `remaining` or
- *  `unknown`. `claimed` is the Agent's own completion claim (machine
- *  unverified), so it is not a natural NEXT work item. */
-export declare function outstandingCriterion(criteria: ReadonlyArray<CriterionStatus> | undefined): CriterionStatus | null;
 /** A legal minimal example for a field, or null when the current facts make the
  *  field unusable (no real id/command to cite). The renderer omits nulls; it
  *  never invents an sg-/rci- reference. */

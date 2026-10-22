@@ -14,6 +14,7 @@ import { writeStateFile } from "./policy.js";
 import type {
   LoopForgeRequest,
   LoopForgeResponse,
+  OperatorAcceptance,
   PromptArtifact,
   SelfEvaluation,
   SubmissionDiagnostic,
@@ -72,6 +73,16 @@ export interface CompletedRound {
   actualEvidence: MachineObservation[];
 }
 
+export interface CompleteRecoveryInput {
+  snapshot: RoundTransactionSnapshot;
+  loopId: string;
+  /** Built after the after-phase evidence has been collected, because the
+   *  directive's skipped-file facts depend on it. */
+  buildRecovery: (
+    actualEvidence: MachineObservation[],
+  ) => import("./protocol.js").RecoveryDirective;
+}
+
 export class RoundDriver {
   private readonly store: LoopStore;
 
@@ -83,6 +94,7 @@ export class RoundDriver {
     request: LoopForgeRequest,
     loopId: string,
     round: number,
+    opts: { branchId?: string; operatorAcceptance?: OperatorAcceptance } = {},
   ): Promise<PreparedRound | null> {
     // v3.0.1: compile (CPU-bound) and before-evidence collection (external
     // process spawns) run concurrently — the git/command spawns were the
@@ -92,7 +104,7 @@ export class RoundDriver {
       this.collectEvidence(loopId, "before"),
     ]);
     if (!response) return null;
-    return this.finishPrepare(response, loopId, round, evidenceBaseline);
+    return this.finishPrepare(response, loopId, round, evidenceBaseline, opts);
   }
 
   private compile(
@@ -147,6 +159,7 @@ export class RoundDriver {
     loopId: string,
     round: number,
     evidenceBaseline: MachineObservation[],
+    opts: { branchId?: string; operatorAcceptance?: OperatorAcceptance } = {},
   ): PreparedRound {
     const artifact = response.prompt_artifact;
     const snapshot = prepareRoundTransaction(
@@ -154,6 +167,12 @@ export class RoundDriver {
       round,
       evidenceBaseline,
       artifact,
+      {
+        ...(opts.branchId ? { branchId: opts.branchId } : {}),
+        ...(opts.operatorAcceptance
+          ? { operatorAcceptance: opts.operatorAcceptance }
+          : {}),
+      },
     );
     return {
       prompt: response.prompt!,
@@ -190,6 +209,24 @@ export class RoundDriver {
       backtrackTargetDirty: input.backtrackTargetDirty,
       normalizationDiagnostics: input.normalizationDiagnostics,
       submittedFields: input.submittedFields,
+    });
+    return { outcome, actualEvidence };
+  }
+
+  /** v3.9.6: collect the abandoned round's after evidence, then commit the
+   *  rollback directive. The Agent has already decided to abandon; this path
+   *  never runs verification/enforcement on the abandoned work. */
+  async completeRecovery(input: CompleteRecoveryInput): Promise<CompletedRound> {
+    const actualEvidence = await this.collectEvidence(input.loopId, "after");
+    const recovery = input.buildRecovery(actualEvidence);
+    const outcome = new RoundTransactionCoordinator(
+      this.engine,
+      this.store,
+    ).commitRecovery({
+      snapshot: input.snapshot,
+      loopId: input.loopId,
+      recovery,
+      actualEvidence,
     });
     return { outcome, actualEvidence };
   }

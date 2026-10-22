@@ -408,7 +408,6 @@ describe("v3.9.2 — compact trigger guidance", () => {
       recovery: true,
       gateEnabled: false,
       criteria: [criterion],
-      currentRequirement: "Build the thing",
     };
     const block = renderSelfEvalBlock(ctx);
     for (const path of [
@@ -424,11 +423,10 @@ describe("v3.9.2 — compact trigger guidance", () => {
         `L0 must offer the applicable field ${path}`);
     }
     assert.match(block, /cr-12345678/);
-    assert.match(block, /The current requirement is the natural deliverable seed/);
-    assert.match(block, /No active contract/);
+    assert.match(block, /No active Round Contract/);
   });
 
-  it("renders the current requirement as the natural contract deliverable seed", () => {
+  it("uses schema placeholders instead of seeding a task-specific contract", () => {
     const ctx: SelfEvalPromptContext = {
       round: 2,
       level: "l2",
@@ -441,47 +439,17 @@ describe("v3.9.2 — compact trigger guidance", () => {
       recovery: false,
       gateEnabled: false,
       criteria: [criterion],
-      currentRequirement: "Build the thing",
     };
     const block = renderSelfEvalBlock(ctx);
-    assert.match(block, /"work_item": "Build the thing"/);
-    assert.match(block, /cr-12345678/);
+    assert.match(block, /"work_item": "<bounded deliverable this slice produces>"/);
     assert.match(block, /"verify_with": \[/);
     assert.match(block, /"verify"/);
-    assert.doesNotMatch(block, /<the next slice, one line>/);
+    assert.doesNotMatch(block, /"work_item": "All tests pass"/,
+      "the example must not seed a real criterion as the slice");
+    assert.match(block, /"criterion_refs": \[\]/,
+      "the contract example is schema-only");
     assert.doesNotMatch(block, /\bsg-[a-f0-9]{8}\b/);
     assert.doesNotMatch(block, /\brci-[a-f0-9]{8}\b/);
-  });
-
-  it("v3.9.5 follow-up: shows a multi-criterion slice and grouping guidance", () => {
-    const second: CriterionStatus = {
-      id: "cr-87654321",
-      text: "Lint passes",
-      status: "remaining",
-      related_subgoal_ids: [],
-    };
-    const block = renderSelfEvalBlock({
-      round: 2,
-      level: "l2",
-      activeContract: null,
-      itemStatuses: null,
-      commands: ["verify"],
-      contractVerificationAvailable: true,
-      subGoals: [],
-      verificationFlags: [],
-      recovery: false,
-      gateEnabled: false,
-      criteria: [criterion, second],
-      currentRequirement: "Ship auth",
-    });
-    assert.match(block, /Size the slice by evidence and recovery/);
-    assert.match(block, /one contract may cover several criteria/);
-    assert.equal((block.match(/"criterion_refs": \[/g) ?? []).length, 2,
-      "the example must show two acceptance conditions");
-    assert.match(block, /cr-12345678/);
-    assert.match(block, /cr-87654321/);
-    assert.match(block, /All tests pass/);
-    assert.match(block, /Lint passes/);
   });
 
   it("makes an L0 committed files mismatch actionable without touching the gate", () => {

@@ -1,5 +1,9 @@
 /** v2.12: Read-only end-of-loop audit — claims, gates, verdict, sequence. */
-import { criterionClaims, installTestCommandProvider } from "./_helpers.js";
+import {
+  committedBacktrackRound,
+  criterionClaims,
+  installTestCommandProvider,
+} from "./_helpers.js";
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -69,10 +73,13 @@ function committedFeedback(
     loop_lineage: {
       round,
       round_transaction: {
-        schema_version: 3,
+        schema_version: 4,
         round_id: `loop:audit-loop:round:${round}`,
         snapshot: {
-          schemaVersion: 3,
+          schemaVersion: 4,
+          kind: "evaluation" as const,
+          branchId: "loop:audit-loop:branch:root",
+          transactionId: `tx-audit-loop-${round}-1`,
           roundId: `loop:audit-loop:round:${round}`,
           loopId: "audit-loop",
           round,
@@ -339,20 +346,20 @@ describe("buildAudit", () => {
     const entries = [
       committedFeedback(
         1,
-        { success: true, output_summary: "stalled work", constraint_violations: [], should_continue: true },
-        [{ severity: "error", check: "success_with_remaining_criteria", field: "success", detail: "stalled" }],
-        "backtrack",
+        { success: true, output_summary: "clean round", constraint_violations: [], should_continue: true },
       ),
       committedFeedback(
         2,
-        { success: true, output_summary: "clean round", constraint_violations: [], should_continue: true },
+        { success: true, output_summary: "stalled work", constraint_violations: [], should_continue: true },
+        [{ severity: "error", check: "success_with_remaining_criteria", field: "success", detail: "stalled" }],
       ),
+      committedBacktrackRound(2, "audit-loop", 1),
     ];
     const audit = buildAudit("audit-loop", entries);
     // v2.14: rolled-back rounds are not part of the final history — their
     // error flags must not flip the verdict either.
     assert.equal(audit.rounds.length, 1);
-    assert.equal(audit.rounds[0].round, 2);
+    assert.equal(audit.rounds[0].round, 1);
     assert.equal(audit.verdict, "passed");
   });
 

@@ -125,8 +125,15 @@ Agent 可以声明某个条目已完成，但只有在关闭轮次的 after 阶�
 
 - **接受：**提交本轮并继续。
 - **拒绝：**不提交任何轮次，使用同一个逻辑 `roundId` 重试。
-- **回溯：**记录回滚指令，恢复到最后一个干净点，并携带 Recovery Brief 重做该轮。
+- **恢复：**Agent 可以通过顶层 `recovery: { target_round, reason }` 主动放弃当前分支。
+  LoopForge 只验证目标是否在已提交历史中、是否有可观察的 Git 恢复点，记录一条
+  rollback directive 事件，并由 Agent 自己恢复工作区；redo 会接受恢复检查。
+  LoopForge 不选择目标，也不评价理由。机器触发的 backtrack 复用同一种记录。
 - **终止：**停止循环，不把被拒绝或不安全的尝试写成普通历史。
+
+操作者在 `loopforge_start` 写入的 task、success criteria、hard constraints 是不可变的。
+Agent 可以新增 discovered constraints、报告 wrong assumptions，或 blocked 停止；
+不能修改或撤回操作者验收面。
 
 ### 契约只有在机器背书后关闭
 
@@ -136,8 +143,9 @@ Round Contract 是一组绑定证据命令的条目。条目只有在 Agent 声�
 
 ### 恢复不会改写历史
 
-被拒绝的尝试永远不会进入已提交历史。回溯会保留有效发现，记录失败方案和被证伪
-假设，在下一次提交时检查工作区是否恢复；redo 成功提交后，回滚记录会被替换。
+被拒绝的尝试永远不会进入已提交历史。恢复会保留有效发现，记录被放弃的方案和被
+证伪假设，在下一次提交时检查工作区是否恢复；rollback directive 是独立事件，
+redo 成功后仍保留在审计中，不会被普通轮次覆盖。
 
 ## 安装与连接
 

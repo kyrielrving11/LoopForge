@@ -28,16 +28,6 @@ export function makeExecutionFeedback(overrides = {}) {
         ...overrides,
     };
 }
-export function makeLoopProjection(overrides = {}) {
-    return {
-        todo: [],
-        phase: null,
-        delegation: { pending: 0, last_results: [] },
-        handoff: { summary: "", verified: [], open_risks: [] },
-        verified_subgoals: [],
-        ...overrides,
-    };
-}
 export function makeGateDecision(overrides = {}) {
     return {
         gateId: "",
@@ -53,18 +43,6 @@ export function makeGateDecision(overrides = {}) {
 /** v3.9.2: The machine boundary the agent's files_changed report is compared
  *  against. Receipt-only; never persisted, never next-prompt input. */
 export const FILES_RECONCILIATION_SCOPE = "tracked_and_non_ignored_untracked";
-export function makeMilestoneSummary(overrides = {}) {
-    return {
-        label: "",
-        round_range: { start: 0, end: 0 },
-        outcome: "",
-        carried_constraints: [],
-        resolved_constraints: [],
-        kind: "auto",
-        generated_at_round: 0,
-        ...overrides,
-    };
-}
 export function makeSelfEvaluation(overrides = {}) {
     return {
         success: false,
@@ -77,7 +55,6 @@ export function makeSelfEvaluation(overrides = {}) {
         subgoal_updates: [],
         execution_report: undefined,
         retracted_constraints: [],
-        revised_success_criteria: [],
         wrong_assumptions: [],
         worker_results: [],
         compression_checkpoint: false,
@@ -101,16 +78,6 @@ export function makeLoopObjective(overrides = {}) {
         loop_id: "",
         version: 1,
         refinement_history: [],
-        ...overrides,
-    };
-}
-export function makeRollingSummary(overrides = {}) {
-    return {
-        key_outcomes: [],
-        rounds_sampled: 0,
-        generated_at_round: 0,
-        failed_patterns: [],
-        milestones: [],
         ...overrides,
     };
 }
@@ -147,7 +114,6 @@ export function makeLoopRoundResult(overrides = {}) {
         subgoal_updates: [],
         execution_report: undefined,
         retracted_constraints: [],
-        revised_success_criteria: [],
         wrong_assumptions: [],
         worker_results: [],
         compression_checkpoint: false,
@@ -174,7 +140,6 @@ export function makeLoopCompileRequest(overrides = {}) {
         constraints_from_plan: [],
         last_round_result: null,
         force_level: "auto",
-        external_context: "",
         verification_flags: [],
         attempt: 1,
         consecutive_rejections: 0,
@@ -189,7 +154,7 @@ export function makeLoopCompileRequest(overrides = {}) {
 /** v3.9.4: schema 4 adds `coverage`. Older versions are a HARD break — a
  *  round whose artifact does not parse is not committed history, and
  *  `legacyTransactionRounds` reports the loss rather than letting it vanish. */
-export const PROMPT_ARTIFACT_SCHEMA_VERSION = 4;
+export const PROMPT_ARTIFACT_SCHEMA_VERSION = 5;
 export function makeLoopCompileResponse(overrides = {}) {
     return {
         status: AgentStatus.OK,
@@ -204,7 +169,6 @@ export function makeLoopCompileResponse(overrides = {}) {
         goal_id: "",
         goal_text_hash: "",
         loop_objective: null,
-        rolling_summary: null,
         sub_goals: [],
         constraint_metadata: [],
         plan_source: null,

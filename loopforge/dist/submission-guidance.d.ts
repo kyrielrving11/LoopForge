@@ -44,7 +44,7 @@ export interface FieldGuide {
 /** Field order used by the prompt, guidance and receipts. Core fields first,
  *  then the execution report, then contract/sub-goal state, then the
  *  cognitive/report fields, then terminal fields. Deterministic by design. */
-export declare const FIELD_ORDER: readonly ["success", "output_summary", "constraint_violations", "should_continue", "execution_report.files_changed", "execution_report.tests_reported", "execution_report.contract_item_claims", "execution_report.criterion_claims", "subgoal_updates", "emerged_subtasks", "discovered_constraints", "wrong_assumptions", "objective_refinement", "retracted_constraints", "revised_success_criteria", "round_contract", "worker_results", "prompt_requests", "compression_checkpoint", "checkpoint_label", "retroactiveClaims", "gate_ids", "outcome", "blocker", "stop_reason", "no_change_reason"];
+export declare const FIELD_ORDER: readonly ["success", "output_summary", "constraint_violations", "should_continue", "execution_report.files_changed", "execution_report.tests_reported", "execution_report.contract_item_claims", "execution_report.criterion_claims", "subgoal_updates", "emerged_subtasks", "discovered_constraints", "wrong_assumptions", "objective_refinement", "retracted_constraints", "round_contract", "worker_results", "prompt_requests", "compression_checkpoint", "checkpoint_label", "retroactiveClaims", "gate_ids", "outcome", "blocker", "stop_reason", "no_change_reason"];
 export type FieldPath = (typeof FIELD_ORDER)[number];
 export declare function fieldGuide(path: string): FieldGuide | undefined;
 export declare function fieldGuideDescription(path: string): string;
@@ -57,8 +57,6 @@ export interface FieldExampleContext {
     commands: ReadonlyArray<string>;
     contractVerificationAvailable: boolean;
     criteria?: ReadonlyArray<CriterionStatus>;
-    /** The task / current work item, used as the natural first contract item. */
-    currentRequirement?: string;
 }
 /** A legal minimal example for a field, or null when the current facts make the
  *  field unusable (no real id/command to cite). The renderer omits nulls; it
@@ -99,8 +97,6 @@ export interface SelfEvalPromptContext {
     recovery: boolean;
     gateEnabled?: boolean;
     criteria?: ReadonlyArray<CriterionStatus>;
-    /** The task / current work item; the natural first contract work_item. */
-    currentRequirement?: string;
 }
 /** Render the evaluation block appended to every prompt. */
 export declare function renderSelfEvalBlock(ctx: SelfEvalPromptContext): string;

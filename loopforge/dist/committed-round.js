@@ -5,11 +5,12 @@
  * lineage representation. Consumers receive one stable, read-only view.
  */
 import { GIT_OBSERVATION_SCHEMA_VERSION, PROMPT_ARTIFACT_SCHEMA_VERSION, makeLoopRoundResult, } from "./protocol.js";
-import { ROUND_TRANSACTION_SCHEMA_VERSION, deriveRoundObservationDelta, parseRoundTransactionSnapshot, transactionSchemaVersionOf, } from "./round-transaction.js";
+import { ROUND_TRANSACTION_SCHEMA_VERSION, deriveRoundObservationDelta, parseRoundTransactionSnapshot, rootBranchId, transactionSchemaVersionOf, } from "./round-transaction.js";
 import { claimedMetCriteria, claimedRemainingCriteria, effectiveOutcome, parseRoundContract } from "./self-eval.js";
 import { entryRound, isRecord } from "./token-utils.js";
 function committedAction(value) {
-    return value === "continue" || value === "stop" || value === "backtrack"
+    return value === "continue" || value === "stop" ||
+        value === "recovery" || value === "backtrack"
         ? value
         : null;
 }
@@ -135,6 +136,13 @@ function viewFromSnapshot(input) {
         loopId,
         round,
         roundId: snapshot.roundId,
+        transactionId: snapshot.transactionId,
+        branchId: snapshot.branchId,
+        kind: snapshot.kind,
+        origin: snapshot.kind === "rollback"
+            ? (snapshot.recovery?.origin ?? "machine")
+            : "evaluation",
+        recovery: snapshot.recovery ?? null,
         sequence: input.sequence,
         attempt: snapshot.attempt,
         promptArtifact: snapshot.promptArtifact ?? null,
@@ -162,9 +170,7 @@ function viewFromSnapshot(input) {
         retractedConstraints: strings(evaluation?.retracted_constraints),
         emergedSubtasks: strings(evaluation?.emerged_subtasks),
         subgoalUpdates: subGoalUpdates(evaluation?.subgoal_updates),
-        backtrack: action === "backtrack"
-            ? decodeBacktrackRecord(result)
-            : null,
+        backtrack: null,
     };
 }
 export function decodeCommittedRound(entry) {
@@ -181,7 +187,7 @@ export function decodeCommittedRound(entry) {
     // legacyTransactionRounds() reports the loss explicitly; it is never
     // silently decoded into a partial view.
     const snapshot = parseRoundTransactionSnapshot(transaction.snapshot);
-    if (!snapshot)
+    if (!snapshot || snapshot.kind !== "evaluation")
         return null;
     const resultValue = isRecord(transaction.result)
         ? transaction.result
@@ -194,6 +200,37 @@ export function decodeCommittedRound(entry) {
         lineage,
         snapshot,
         result: resultValue,
+        sequence: typeof entry.sequence === "number" ? entry.sequence : undefined,
+    });
+}
+/** v3.9.6: decode a committed rollback directive event. It is a typed event
+ *  in the round document, never a normal feedback round. */
+export function decodeRollbackEvent(entry) {
+    if (entry.task_type !== "rollback_directive")
+        return null;
+    const lineage = isRecord(entry.loop_lineage) ? entry.loop_lineage : null;
+    const transaction = lineage && isRecord(lineage.round_transaction)
+        ? lineage.round_transaction
+        : null;
+    if (!transaction)
+        return null;
+    const snapshot = parseRoundTransactionSnapshot(transaction.snapshot);
+    if (!snapshot || snapshot.kind !== "rollback" || !snapshot.recovery)
+        return null;
+    const resultValue = isRecord(transaction.result)
+        ? transaction.result
+        : snapshot.result;
+    if (!isRecord(resultValue))
+        return null;
+    const result = resultValue;
+    if (result.action !== "recovery" && result.action !== "backtrack")
+        return null;
+    return viewFromSnapshot({
+        source: "rollback",
+        sourceEntry: entry,
+        lineage,
+        snapshot,
+        result,
         sequence: typeof entry.sequence === "number" ? entry.sequence : undefined,
     });
 }
@@ -242,6 +279,12 @@ export function decodeMergedRound(entry) {
 export function decodeRound(entry) {
     return decodeMergedRound(entry) ?? decodeCommittedRound(entry);
 }
+/** v3.9.6: decode either an ordinary committed round or a rollback event.
+ *  The branch read model is the only caller that needs both kinds together. */
+export function decodeCommittedRecord(entry) {
+    return decodeRound(entry) ??
+        decodeRollbackEvent(entry);
+}
 /** THE committed-view → compiler-request projection.
  *
  *  The compiler once received these fields from the caller's mutable
@@ -264,7 +307,6 @@ export function roundResultFromCommittedRound(view) {
         subgoal_updates: [...(view.subgoalUpdates ?? [])],
         execution_report: view.executionReport ?? undefined,
         retracted_constraints: [...(view.retractedConstraints ?? [])],
-        revised_success_criteria: [...(evaluation?.revised_success_criteria ?? [])],
         wrong_assumptions: [...(evaluation?.wrong_assumptions ?? [])],
         worker_results: [...(evaluation?.worker_results ?? [])],
         compression_checkpoint: evaluation?.compression_checkpoint === true,
@@ -284,20 +326,7 @@ export function roundResultFromCommittedRound(view) {
  *  carries no target) keeps the recovery boundary AND the Recovery Brief
  *  correct for every backtrack depth. */
 export function pendingBacktrackRecord(entries, redoRound) {
-    for (let index = entries.length - 1; index >= 0; index--) {
-        const view = decodeRound(entries[index]);
-        if (!view || view.action !== "backtrack")
-            continue;
-        const target = view.backtrack?.target;
-        if (typeof target === "number") {
-            if (target + 1 === redoRound)
-                return view;
-            continue;
-        }
-        if (view.round === redoRound)
-            return view;
-    }
-    return null;
+    return pendingRollbackDirective(entries, redoRound);
 }
 /** Lineage sub-object of an entry (`loop_lineage`; v3.7: the legacy
  *  top-level `lineage` alias was removed), or {} when absent. */
@@ -421,30 +450,113 @@ export function entryViolations(entry) {
 export function historyRounds(views, beforeRound = Number.POSITIVE_INFINITY) {
     const byRound = new Map();
     for (const view of views) {
-        if (!view || view.action === "backtrack" || view.round >= beforeRound)
+        if (!view || (view.kind !== undefined && view.kind !== "evaluation") ||
+            view.round >= beforeRound)
             continue;
         byRound.set(view.round, view);
     }
     return [...byRound.values()].sort((a, b) => a.round - b.round);
 }
-/** v3.8.1: the ONE committed-history window every derivation reads.
- *
- * `decodeRound` (hydrated merged lineage first, then the durable feedback
- * entry) plus the rollback handling in `historyRounds` — so the compile path,
- * the projection, the live coordinator, audit and explain can no longer
- * disagree about which rounds are this branch's history, nor about how their
- * envelope was interpreted.
- *
- * `currentRound` bounds the window exactly as before (default: unbounded). It
- * is NOT a rollback fence: the redo re-commits the round numbers the abandoned
- * rounds occupied, so abandonment is temporal, not numeric, and cannot be
- * expressed as a bound here. */
-export function derivationRounds(entries, currentRound = Number.POSITIVE_INFINITY) {
-    return historyRounds(entries.map(decodeRound), currentRound);
+/** Resolve the current branch from committed branch identities. This is the
+ *  only branch-fencing rule; it replaces the session frontier and every
+ *  numeric/temporal approximation. */
+export function resolveBranch(entries) {
+    const records = entries
+        .map(decodeCommittedRecord)
+        .filter((view) => view !== null);
+    const kindOf = (view) => view.kind ?? "evaluation";
+    const first = records.find((view) => kindOf(view) === "evaluation") ?? records[0];
+    if (!first) {
+        return { loopId: "", branchId: "", rounds: [], directives: [], pendingDirective: null };
+    }
+    const loopId = first.loopId;
+    const branchOf = (view) => view.branchId ?? rootBranchId(loopId);
+    let branchId = rootBranchId(loopId);
+    let rounds = records
+        .filter((view) => kindOf(view) === "evaluation" && branchOf(view) === branchId)
+        .sort((a, b) => a.round - b.round);
+    const directives = [];
+    const seen = new Set();
+    for (;;) {
+        const candidates = records
+            .filter((view) => kindOf(view) === "rollback" &&
+            branchOf(view) === branchId &&
+            view.recovery !== null && view.recovery !== undefined)
+            .sort((a, b) => a.round - b.round ||
+            (a.transactionId ?? "").localeCompare(b.transactionId ?? ""));
+        if (candidates.length === 0)
+            break;
+        // A branch closes exactly once. If corrupt data has more, the latest one
+        // is the effective directive; the others remain visible in the raw log.
+        const directive = candidates[candidates.length - 1];
+        const directiveId = directive.transactionId ?? directive.roundId;
+        if (seen.has(directiveId))
+            break;
+        seen.add(directiveId);
+        const recovery = directive.recovery;
+        rounds = rounds.filter((view) => view.round <= recovery.target);
+        const child = recovery.transaction_id;
+        const childRounds = records
+            .filter((view) => kindOf(view) === "evaluation" && branchOf(view) === child)
+            .sort((a, b) => a.round - b.round);
+        rounds = [...rounds, ...childRounds];
+        directives.push(directive);
+        branchId = child;
+    }
+    const byRound = new Map();
+    for (const view of rounds)
+        byRound.set(view.round, view);
+    rounds = [...byRound.values()].sort((a, b) => a.round - b.round);
+    let pendingDirective = null;
+    const latest = directives[directives.length - 1];
+    if (latest && latest.recovery) {
+        const child = latest.recovery.transaction_id;
+        const hasChildRound = records.some((view) => kindOf(view) === "evaluation" && branchOf(view) === child);
+        if (!hasChildRound)
+            pendingDirective = latest;
+    }
+    return { loopId, branchId, rounds, directives, pendingDirective };
 }
-/** v3.8.1: the loop's durable round frontier — the session document's
- *  `current_round`. Null when no session document is in the entry set, so
- *  callers fail OPEN rather than inventing a bound. */
+/** v3.9.6: current-branch evaluation rounds. */
+export function branchRounds(entries) {
+    return resolveBranch(entries).rounds;
+}
+/** v3.9.6: rollback directive chain. */
+export function branchDirectives(entries) {
+    return resolveBranch(entries).directives;
+}
+/** v3.9.6: the pending directive controlling a redo round. */
+export function pendingRollbackDirective(entries, redoRound) {
+    const pending = resolveBranch(entries).pendingDirective;
+    if (!pending?.recovery)
+        return null;
+    if (redoRound !== undefined && pending.recovery.target + 1 !== redoRound) {
+        return null;
+    }
+    return pending;
+}
+/** v3.9.6: machine deadlock guard. Agent-origin directives never consume it. */
+export function hasCommittedMachineBacktrack(entries, currentRound) {
+    return branchDirectives(entries).some((view) => {
+        const recovery = view.recovery;
+        return view.origin === "machine" &&
+            recovery !== null && recovery !== undefined &&
+            recovery.target < currentRound &&
+            view.round >= currentRound;
+    });
+}
+/** v3.9.6: the latest current-branch evaluation round. */
+export function lastCommittedView(entries) {
+    const rounds = branchRounds(entries);
+    return rounds.length > 0 ? rounds[rounds.length - 1] : null;
+}
+/** v3.9.6: live history window = current branch below the round being
+ *  compiled. `currentRound` is the round being prepared/submitted. */
+export function derivationRounds(entries, currentRound = Number.POSITIVE_INFINITY) {
+    return branchRounds(entries).filter((view) => view.round < currentRound);
+}
+/** Kept for read-only callers/tests that still inspect the persisted cursor;
+ *  branch fencing no longer depends on it. */
 export function persistedFrontier(entries) {
     for (const entry of entries) {
         if (!isRecord(entry) || entry.task_type !== "session_state")
@@ -456,30 +568,14 @@ export function persistedFrontier(entries) {
     }
     return null;
 }
-/** v3.8.1: THE window for a READ-ONLY view of a loop — audit, explain, replay,
- *  the projection, the metrics replay. Same decoder and same rollback handling
- *  as `derivationRounds`, plus the bound those callers cannot compute
- *  themselves.
- *
- *  The live paths bound their window at the round being compiled, and that
- *  bound is what keeps a backtracked branch out of this branch's history. A
- *  read-only view has no compile round, so it reads the SAME frontier from the
- *  durable session document and applies it only while a committed rollback
- *  directive is still in effect — a directive stops being history the moment
- *  the redo commit replaces its round's record, which is exactly when the
- *  abandoned rounds have been re-committed and must count again.
- *
- *  With no directive in effect the window stays UNBOUNDED on purpose: after a
- *  stop, terminate or max_rounds the session's `current_round` sits ON the
- *  round it just committed, so bounding there would silently drop the loop's
- *  final round. An unobservable frontier fails open the same way — a read-only
- *  view never invents a fence, it only applies the one the runtime recorded. */
+/** v3.9.6: read-only history = current branch rounds. No session frontier,
+ *  no numeric fence, no second cursor. */
 export function readOnlyRounds(entries) {
-    const views = entries.map(decodeRound);
-    const rollbackPending = views.some((view) => view?.action === "backtrack");
-    if (!rollbackPending)
-        return historyRounds(views);
-    return historyRounds(views, persistedFrontier(entries) ?? Number.POSITIVE_INFINITY);
+    return branchRounds(entries);
+}
+/** v3.9.6: read-only rollback events = committed directive chain. */
+export function readOnlyRollbacks(entries) {
+    return branchDirectives(entries);
 }
 /** The machine-evidence set that best represents a committed round: the
  *  after-phase observations (captured post-execution), else the pre-round

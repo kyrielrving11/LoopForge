@@ -1,7 +1,7 @@
 /** Structured self-evaluation parsing and normalization — pure functions.
  * The MCP boundary validates required fields before these helpers run.
  */
-import { type CriterionRevision, type ExecutionReport, type PromptRequests, type RoundContractProposal, type RoundOutcome, type SelfEvaluation, type SubGoalUpdate, type SubmissionDiagnostic, type SubmissionDiagnosticHandling } from "./protocol.js";
+import { type ExecutionReport, type PromptRequests, type RoundContractProposal, type RoundOutcome, type SelfEvaluation, type SubGoalUpdate, type SubmissionDiagnostic, type SubmissionDiagnosticHandling } from "./protocol.js";
 /** A diagnostics sink. `buildSelfEvaluation` keeps working without one (the
  *  engine parses historical last_round_result payloads); the submission
  *  boundary always supplies one. */
@@ -50,8 +50,6 @@ export declare function claimedRemainingCriteria(report: {
         outcome: string;
     }>;
 } | undefined | null): string[];
-/** Parse CriterionRevision[] from a raw JSON array. */
-export declare function parseCriterionRevisions(raw: unknown, sink?: DiagnosticSink): CriterionRevision[];
 /** Parse SubGoalUpdate[] from a raw JSON array.
  *  v3.7.1: lenient per-entry filtering (id/status shape) with fixed caps
  *  (20 entries, id ≤ 64, note ≤ 300). Referential validity — unknown IDs

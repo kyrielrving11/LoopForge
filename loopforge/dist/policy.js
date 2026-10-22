@@ -5,12 +5,11 @@ import { resolve } from "node:path";
 import { containInWorkspace } from "./workspace.js";
 /** v3.8.1: the policy schema version. A policy file that does not declare
  *  exactly this version is REJECTED — see loadPolicy. */
-export const POLICY_SCHEMA_VERSION = "7";
+export const POLICY_SCHEMA_VERSION = "8";
 export const DEFAULT_POLICY = {
     version: POLICY_SCHEMA_VERSION,
     constraints: { retire_window: 3 },
-    summary: { window: 5, milestone_interval: 20 },
-    engine: { stall_lookback_rounds: 3, max_rounds: 200, enforcement_escalation_enabled: true, backtrack_enabled: true, backtrack_max_depth: 3, backtrack_preserve_discoveries: true, unverified_claim_streak_limit: 3 },
+    engine: { stall_lookback_rounds: 3, max_rounds: 200, enforcement_escalation_enabled: true, agent_recovery_enabled: true, backtrack_enabled: true, backtrack_max_depth: 3, backtrack_preserve_discoveries: true, unverified_claim_streak_limit: 3 },
     prompt: {
         l0_max_chars: 5000,
         l1_max_chars: 10000,
@@ -26,7 +25,6 @@ export const DEFAULT_POLICY = {
         max_objective_versions: 10,
         max_active_subgoals: 12,
     },
-    checkpoint: { outcome_max_chars: 200 },
     state_file: {
         enabled: true,
         directory: ".loopforge/state",

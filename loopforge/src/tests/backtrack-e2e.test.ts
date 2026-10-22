@@ -316,18 +316,18 @@ describe("E2E Recovery Brief window (v3.7.1)", () => {
 
     // The committed rollback decision retains the derived brief facts.
     const reader = new FileLoopStore(join(storeDir, ".loopforge"));
-    const feedback = queryLoopEntries(reader, loopId, {
+    const rollback = queryLoopEntries(reader, loopId, {
       prefix: `loop:${loopId}:r4`,
-      feedbackOnly: true,
-    });
-    assert.equal(feedback.length, 1, "round 4 holds the rollback decision");
-    const lineage = (feedback[0]?.loop_lineage ?? {}) as Record<string, unknown>;
+    }).filter((entry) => entry.task_type === "rollback_directive");
+    assert.equal(rollback.length, 1, "round 4 holds the rollback directive event");
+    const lineage = (rollback[0]?.loop_lineage ?? {}) as Record<string, unknown>;
     const tx = lineage.round_transaction as Record<string, unknown> | undefined;
     const result = (tx?.result ?? {}) as Record<string, unknown>;
     assert.equal(result.action, "backtrack");
-    assert.ok(Array.isArray(result.backtrackFailedRounds), "decision records failed rounds");
+    const recovery = result.recovery as Record<string, unknown>;
+    assert.ok(Array.isArray(recovery.failed_rounds), "decision records failed rounds");
     assert.ok(
-      (result.backtrackApproaches as string[] | undefined)?.some(
+      (recovery.approaches as string[] | undefined)?.some(
         (a) => a.includes("Round 4: reviewed src/d.ts"),
       ),
       "decision records the failed approach (from the in-flight attempt — never a rejected payload)",

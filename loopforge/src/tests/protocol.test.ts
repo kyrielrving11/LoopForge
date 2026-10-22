@@ -6,7 +6,6 @@ import {
   AgentStatus,
   makeExecutionFeedback,
   makeLoopObjective,
-  makeRollingSummary,
   makeLoopRoundResult,
   makeLoopCompileRequest,
   makeLoopCompileResponse,

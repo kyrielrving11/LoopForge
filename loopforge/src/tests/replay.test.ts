@@ -2,7 +2,11 @@ import { beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { ReplayBackend } from "../replay.js";
 import type { VaultEntry } from "../loop-store.js";
-import { committedFeedbackRound, MemoryLoopStore } from "./_helpers.js";
+import {
+  committedBacktrackRound,
+  committedFeedbackRound,
+  MemoryLoopStore,
+} from "./_helpers.js";
 
 function lineage(round: number, overrides: Partial<VaultEntry> = {}): VaultEntry {
   return {
@@ -71,10 +75,14 @@ describe("ReplayBackend", () => {
     );
   });
 
-  it("excludes rolled-back rounds", () => {
+  it("excludes rollback directives from normal rounds", () => {
     store.appendEntry(lineage(1));
-    store.appendEntry(committedFeedbackRound(1, { loopId: "test", action: "backtrack" }));
-    assert.deepEqual(replay.replay("test"), []);
+    store.appendEntry(committedFeedbackRound(1, { loopId: "test" }));
+    store.appendEntry(committedBacktrackRound(2, "test", 1));
+    assert.deepEqual(
+      replay.replay("test").map((entry) => entry.loop_lineage?.round),
+      [1],
+    );
   });
 
   it("returns a sorted factual timeline", () => {

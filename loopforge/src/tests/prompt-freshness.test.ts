@@ -185,7 +185,6 @@ describe("derivePromptFreshness", () => {
       { emerged_subtasks: ["a new sub-problem"] },
       { subgoal_updates: [{ id: "sg-00000000", status: "in_progress" }] },
       { retracted_constraints: ["an old constraint"] },
-      { revised_success_criteria: [{ old: "old", new: "new" }] },
       { wrong_assumptions: ["a falsified assumption"] },
       { worker_results: [{
         agentId: "w1",

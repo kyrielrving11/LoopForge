@@ -18,18 +18,6 @@ export interface ConstraintsPolicy {
   retire_window: number;
 }
 
-export interface SummaryPolicy {
-  window: number;
-  /** v2.1: Rounds between automatic safety-net milestones.
-   *  Default 20. Only fires when no agent_declared or criteria_milestone
-   *  has been created for this many rounds. */
-  milestone_interval: number;
-  /** v3.8.1: the milestone-history bound lives in loop-compiler.ts as
-   *  MILESTONE_HISTORY_CAP, not here. It is a fixed property of the derived
-   *  view, and making it configurable is what let the state file's phase
-   *  history depend on the prompt level that compiled. */
-}
-
 export interface EnginePolicy {
   /** v3.8.1: the window of the progress BREAKER tier — the second tier of the
    *  single progress evaluator, which fires when the stall tier (a fixed 3
@@ -42,6 +30,9 @@ export interface EnginePolicy {
    *  This gives the agent one extra chance to course-correct with human
    *  input rather than being terminated immediately. Default: true. */
   enforcement_escalation_enabled: boolean;
+  /** v3.9.6: allow the Agent to submit a top-level recovery request. This is
+   *  independent of machine recovery (`backtrack_enabled`). Default: true. */
+  agent_recovery_enabled: boolean;
   /** v2.10: When true, R4 (progress stall) and R5 (flat terminal) escalate
    *  to backtrack instead of reject. The agent is rolled back to the last
    *  clean round with lessons injected. Set to false to restore pre-v2.10
@@ -98,10 +89,6 @@ export interface EvolutionPolicy {
   max_active_subgoals: number;
 }
 
-export interface CheckpointPolicy {
-  outcome_max_chars: number;
-}
-
 /** Human-readable derived state view. JSON LoopStore documents remain truth. */
 export interface StateFilePolicy {
   enabled: boolean;
@@ -144,17 +131,15 @@ export interface GatePolicy {
 
 /** v3.8.1: the policy schema version. A policy file that does not declare
  *  exactly this version is REJECTED — see loadPolicy. */
-export const POLICY_SCHEMA_VERSION = "7";
+export const POLICY_SCHEMA_VERSION = "8";
 
 export interface LoopPolicy {
   version: string;
   constraints: ConstraintsPolicy;
-  summary: SummaryPolicy;
   engine: EnginePolicy;
   prompt: PromptPolicy;
   backend: BackendPolicy;
   evolution: EvolutionPolicy;
-  checkpoint: CheckpointPolicy;
   state_file: StateFilePolicy;
   evidence: EvidencePolicy;
   mcp: McpPolicy;
@@ -164,8 +149,7 @@ export interface LoopPolicy {
 export const DEFAULT_POLICY: LoopPolicy = {
   version: POLICY_SCHEMA_VERSION,
   constraints: { retire_window: 3 },
-  summary: { window: 5, milestone_interval: 20 },
-  engine: { stall_lookback_rounds: 3, max_rounds: 200, enforcement_escalation_enabled: true, backtrack_enabled: true, backtrack_max_depth: 3, backtrack_preserve_discoveries: true, unverified_claim_streak_limit: 3 },
+  engine: { stall_lookback_rounds: 3, max_rounds: 200, enforcement_escalation_enabled: true, agent_recovery_enabled: true, backtrack_enabled: true, backtrack_max_depth: 3, backtrack_preserve_discoveries: true, unverified_claim_streak_limit: 3 },
   prompt: {
     l0_max_chars: 5000,
     l1_max_chars: 10000,
@@ -181,7 +165,6 @@ export const DEFAULT_POLICY: LoopPolicy = {
     max_objective_versions: 10,
     max_active_subgoals: 12,
   },
-  checkpoint: { outcome_max_chars: 200 },
   state_file: {
     enabled: true,
     directory: ".loopforge/state",

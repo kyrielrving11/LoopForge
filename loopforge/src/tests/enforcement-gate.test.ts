@@ -88,11 +88,13 @@ function contradictedRecurringViolation(violation: string): VerificationResult {
 function vaultRound(
   round: number,
   gitFiles: string[] = [],
+  branchId?: string,
 ): VaultEntry {
   const beforeHead = `h${round - 1}`;
   const afterHead = gitFiles.length > 0 ? `h${round}` : beforeHead;
   return committedFeedbackRound(round, {
     loopId: "test-loop",
+    ...(branchId ? { branchId } : {}),
     files: ["src/foo.ts"],
     beforeEvidence: [{
       schemaVersion: 2,
@@ -708,13 +710,14 @@ describe("enforcement-gate — progress stall: backtrack deadlock guard", () => 
     });
     // A backtrack committed at round 2 is BELOW the current window — the
     // agent recovered, progressed, and then stalled again at rounds 3-5.
+    const branch = "tx-rollback-test-loop-2";
     const vault = [
       vaultRound(1, []),
       vaultRound(2, []),
       committedBacktrackRound(2),
-      vaultRound(3, []),
-      vaultRound(4, []),
-      vaultRound(5, []),
+      vaultRound(3, [], branch),
+      vaultRound(4, [], branch),
+      vaultRound(5, [], branch),
     ];
     const result = enforceRound(curr, trusted(), 6, vault, 1, "progress_stall");
     assert.equal(result.action, "backtrack");

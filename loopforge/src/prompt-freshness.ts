@@ -70,7 +70,6 @@ function declaredEvolution(previous: CommittedRoundView): boolean {
     (previous.emergedSubtasks?.length ?? 0) > 0 ||
     (previous.subgoalUpdates?.length ?? 0) > 0 ||
     (previous.retractedConstraints?.length ?? 0) > 0 ||
-    (evaluation?.revised_success_criteria?.length ?? 0) > 0 ||
     (evaluation?.wrong_assumptions?.length ?? 0) > 0 ||
     (evaluation?.worker_results?.length ?? 0) > 0 ||
     previous.contractProposal !== null ||

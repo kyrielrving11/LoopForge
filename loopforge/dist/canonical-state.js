@@ -8,7 +8,7 @@ import { deriveCriterionId, deriveItemId, normalizeText, STABLE_ID_RE, unique, u
 import { claimedMetCriteria, claimedRemainingCriteria } from "./self-eval.js";
 import { getPolicy } from "./policy.js";
 import { deriveConfiguredCapability } from "./policy.js";
-export const CANONICAL_STATE_SCHEMA_VERSION = 2;
+export const CANONICAL_STATE_SCHEMA_VERSION = 3;
 /** v3.7.1: Presentation view of sub-goals shared by prompts and the state
  *  file (one derivation, no second copy). Only ACTIVE items render as rows
  *  — pending/in_progress/blocked — ordered blocked → in_progress → pending
@@ -205,26 +205,6 @@ function addListWithIdentities(lines, title, values, metadata) {
  *
  *  Shared by the state-file and prompt renderers so they cannot drift apart
  *  (module contract above). Presentation only; never feeds enforcement. */
-export function buildPhaseLine(state) {
-    const lastMilestone = state.milestones.length > 0
-        ? state.milestones[state.milestones.length - 1]
-        : null;
-    // No phase boundary yet → no phase to report. Position alone ("round 3/200")
-    // is already in the prompt header, so rendering it again would be noise.
-    if (!lastMilestone)
-        return "";
-    const roundsSince = lastMilestone.round_range.end <= state.round
-        ? state.round - lastMilestone.round_range.end
-        : null;
-    const parts = [
-        `phase "${lastMilestone.label}"`,
-        `round ${state.round}/${state.maxRounds}`,
-    ];
-    if (roundsSince !== null) {
-        parts.push(`${roundsSince} round${roundsSince === 1 ? "" : "s"} since the last boundary`);
-    }
-    return parts.join(" · ");
-}
 /** v3.3/v3.4: Render the ACTIVE Round Contract as the Current Task section
  *  body — the single formatting source shared by prompts and the state
  *  file (module contract above). The original objective is NOT here: it
@@ -270,18 +250,6 @@ statuses) {
     }
     return lines.join("\n");
 }
-// ═══════════════════════════════════════════════════════════════════════════
-// v3.3.1: Shared presentation atoms
-// ═══════════════════════════════════════════════════════════════════════════
-/** Milestone heading line ("**🏁 Round 7** (Rounds 3–7)"). Shared by the
- *  L2 Phase History and the detailed L1 renderer; the L1 copy previously
- *  rendered the range as "R3–R7", a format only this heading used. */
-export function milestoneHeading(milestone) {
-    const kindIcon = milestone.kind === "agent_declared"
-        ? "🏁"
-        : milestone.kind === "criteria_milestone" ? "✅" : "📍";
-    return `**${kindIcon} ${milestone.label}** (Rounds ${milestone.round_range.start}–${milestone.round_range.end})`;
-}
 const STATE_SECTION_TIER = {
     // Current — what the next round must hold in working memory.
     "Loop Objective": "Current",
@@ -299,7 +267,6 @@ const STATE_SECTION_TIER = {
     // listed here at all: an unlisted title is not a heading, so `## Phase` was
     // absorbed into whatever section happened to precede it (its body even kept
     // a raw `## ` line) and inherited that section's tier.
-    Phase: "Current",
     // Recent — this round's boundary facts (and, in a recovery window, the
     // derived Recovery Brief injected at the top of this tier).
     "Progress Dashboard": "Recent",
@@ -309,11 +276,8 @@ const STATE_SECTION_TIER = {
     // Historical Summary — the loop's memory skeleton, kept under existing
     // milestone/window caps.
     "Goal → Criteria": "Historical Summary",
-    "Cross-Round Outcomes": "Historical Summary",
     "Recurring Flags": "Historical Summary",
-    "Failed Patterns": "Historical Summary",
     "Retired Constraints": "Historical Summary",
-    "Phase History": "Historical Summary",
 };
 const STATE_TIER_ORDER = ["Current", "Recent", "Historical Summary"];
 /** Human/Agent-readable materialized view. It is always reproducible from the
@@ -432,8 +396,6 @@ function flatStateSections(state) {
     addList(lines, "Blockers", state.blockers);
     const recurring = recurringOnly(state.recurringFlags);
     addList(lines, "Discoveries", state.discoveries);
-    addList(lines, "Cross-Round Outcomes", state.rollingOutcomes);
-    addList(lines, "Failed Patterns", state.failedPatterns);
     // v3.8.1: ONE recurring-facts section. "Recurring Issues" (the last 5
     // rounds' raw violations, no threshold) and "Lessons Learned" (the whole
     // history, count >= 2) were two windows over one fact set rendered as two
@@ -454,13 +416,6 @@ function flatStateSections(state) {
         lines.push("");
     }
     addList(lines, "Retired Constraints", state.retiredConstraints);
-    // v3.8.1: the Roadmap section is gone. Only its non-duplicated fact — the
-    // phase position — survives, as the one-line phase line the prompts render.
-    const phaseLine = buildPhaseLine(state);
-    if (phaseLine) {
-        lines.push("## Phase", "", `- ${phaseLine}`);
-        lines.push("");
-    }
     if (state.verificationFlags.length > 0) {
         lines.push("## Verification", "");
         for (const flag of state.verificationFlags) {
@@ -468,27 +423,6 @@ function flatStateSections(state) {
                 (flag.ref ? ` [ref: \`${flag.ref}\`]` : ""));
         }
         lines.push("");
-    }
-    if (state.milestones.length > 0) {
-        lines.push("## Phase History", "");
-        for (const m of state.milestones) {
-            const kindIcon = m.kind === "agent_declared"
-                ? "🏁"
-                : m.kind === "criteria_milestone" ? "✅" : "📍";
-            lines.push(`### ${kindIcon} ${m.label}`, `Rounds ${m.round_range.start}–${m.round_range.end}`, "", `**Outcome (agent report)**: ${m.outcome}`, "");
-            if (m.carried_constraints.length > 0) {
-                lines.push("**Carried Constraints**:");
-                for (const c of m.carried_constraints)
-                    lines.push(`- ${c}`);
-                lines.push("");
-            }
-            if (m.resolved_constraints.length > 0) {
-                lines.push("**Resolved During Phase**:");
-                for (const c of m.resolved_constraints)
-                    lines.push(`- ${c}`);
-                lines.push("");
-            }
-        }
     }
     if (state.subGoals.length > 0) {
         // v3.9.4: the SAME formatter the prompt uses. Rows past the display cap
@@ -499,9 +433,6 @@ function flatStateSections(state) {
         // under its own section instead of leaking into the previous one.
         lines.push("## Sub-Goal Dashboard", "");
         lines.push(...formatActiveSubGoals(state.subGoals, state.round).lines, "");
-    }
-    if (state.externalContext) {
-        lines.push("## External Context", "", state.externalContext, "");
     }
     // Split the flat markdown into titled sections for tier grouping. Every
     // builder above emits `## <Title>` headings over their content — but only
@@ -548,7 +479,6 @@ derived) {
     const objective = response.loop_objective;
     const verificationFlags = derived?.previousRound?.verificationFlags ??
         request.verification_flags ?? [];
-    const rolling = response.rolling_summary;
     // v3.9.5: only committed previous-round reports enter the projection.
     // `last_round_result` remains a library/in-flight fallback for semantic
     // evolution, but it must not create prompt/state narrative.
@@ -617,13 +547,9 @@ derived) {
         blockers,
         verificationFlags,
         discoveries,
-        rollingOutcomes: unique(rolling?.key_outcomes ?? []),
-        failedPatterns: unique(rolling?.failed_patterns ?? []),
-        milestones: rolling?.milestones ?? [],
         subGoals: response.sub_goals ?? [],
         criterionStatuses: response.criterion_statuses ?? [],
         recurringFlags: response.recurring_flags ?? [],
-        externalContext: request.external_context?.trim() ?? "",
         stateFilePath,
         progress: {
             criteriaMet: unique(claimedMetCriteria(executionReport)),

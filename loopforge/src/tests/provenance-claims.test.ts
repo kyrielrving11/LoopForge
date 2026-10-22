@@ -173,10 +173,13 @@ describe("resolveRoundFiles", () => {
     loop_lineage: {
       round: 1,
       round_transaction: {
-        schema_version: 3,
+        schema_version: 4,
         round_id: "loop:provenance-loop:round:1",
         snapshot: {
-          schemaVersion: 3,
+          schemaVersion: 4,
+          kind: "evaluation",
+          branchId: "loop:provenance-loop:branch:root",
+          transactionId: "tx-provenance-loop-1-1",
           roundId: "loop:provenance-loop:round:1",
           loopId: "provenance-loop",
           round: 1,
@@ -240,10 +243,13 @@ describe("resolveRoundFiles", () => {
       loop_lineage: {
         round: 1,
         round_transaction: {
-          schema_version: 3,
+          schema_version: 4,
           round_id: "loop:provenance-loop:round:1",
           snapshot: {
-            schemaVersion: 3,
+            schemaVersion: 4,
+            kind: "evaluation",
+            branchId: "loop:provenance-loop:branch:root",
+            transactionId: "tx-provenance-loop-1-1b",
             roundId: "loop:provenance-loop:round:1",
             loopId: "provenance-loop",
             round: 1,
@@ -291,10 +297,13 @@ describe("listVerifiedClaims", () => {
       loop_lineage: {
         round,
         round_transaction: {
-          schema_version: 3,
+          schema_version: 4,
           round_id: `loop:provenance-loop:round:${round}`,
           snapshot: {
-            schemaVersion: 3,
+            schemaVersion: 4,
+            kind: "evaluation",
+            branchId: "loop:provenance-loop:branch:root",
+            transactionId: `tx-provenance-loop-${round}-1`,
             roundId: `loop:provenance-loop:round:${round}`,
             loopId: "provenance-loop",
             round,

@@ -8,7 +8,6 @@ import {
   type ContractItemClaim,
   type ContractItemProposal,
   type CriterionClaim,
-  type CriterionRevision,
   type ExecutionReport,
   type PromptRequests,
   type RoundContractProposal,
@@ -449,48 +448,6 @@ function parseContractItemClaims(
       "only the first 20 claims are kept");
   }
   return claims;
-}
-
-/** Parse CriterionRevision[] from a raw JSON array. */
-export function parseCriterionRevisions(
-  raw: unknown,
-  sink?: DiagnosticSink,
-): CriterionRevision[] {
-  if (raw === undefined || raw === null) return [];
-  if (!Array.isArray(raw)) {
-    sink?.push("revised_success_criteria", "not_array", "dropped",
-      "expected an array of { old, new }; the value was dropped");
-    return [];
-  }
-  const valid = raw.filter((v: unknown) =>
-    typeof v === "object" && v !== null &&
-    typeof (v as Record<string, unknown>).old === "string" &&
-    typeof (v as Record<string, unknown>).new === "string");
-  const invalid = raw.length - valid.length;
-  if (invalid > 0) {
-    sink?.push("revised_success_criteria",
-      valid.length === 0 ? DIAG_ALL_ENTRIES_DROPPED : "invalid_entry", "dropped",
-      valid.length === 0
-        ? `all ${invalid} entries lacked string old/new; the value was dropped`
-        : `${invalid} entr${invalid === 1 ? "y" : "ies"} without string old/new dropped`);
-  }
-  if (valid.length > 20) {
-    sink?.push("revised_success_criteria", "too_many", "truncated",
-      "only the first 20 revisions are kept");
-  }
-  return valid.slice(0, 20).map((v: unknown, index: number) => {
-    const r = v as Record<string, unknown>;
-    for (const key of ["old", "new"] as const) {
-      if ((r[key] as string).length > 500) {
-        sink?.push(`revised_success_criteria[${index}].${key}`, "truncated",
-          "truncated", "longer than 500 chars; truncated to the limit");
-      }
-    }
-    return {
-      old: (r.old as string).slice(0, 500),
-      new: (r.new as string).slice(0, 500),
-    };
-  });
 }
 
 /** Parse SubGoalUpdate[] from a raw JSON array.
@@ -1231,8 +1188,6 @@ export function buildSelfEvaluation(
 
   const retractedConstraints = boundedStringArray(
     raw.retracted_constraints, 50, 500, sink, "retracted_constraints");
-  const revisedCriteria: CriterionRevision[] = parseCriterionRevisions(
-    raw.revised_success_criteria, sink);
   const wrongAssumptions = boundedStringArray(
     raw.wrong_assumptions, 50, 500, sink, "wrong_assumptions");
   const workerResults = parseWorkerResults(raw.worker_results, sink);
@@ -1316,7 +1271,6 @@ export function buildSelfEvaluation(
     emerged_subtasks: boundedEmergedSubtasks(raw.emerged_subtasks, sink),
     execution_report: executionReport,
     retracted_constraints: retractedConstraints,
-    revised_success_criteria: revisedCriteria,
     wrong_assumptions: wrongAssumptions,
     worker_results: workerResults,
     compression_checkpoint:

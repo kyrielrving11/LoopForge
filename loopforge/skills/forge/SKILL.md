@@ -187,8 +187,8 @@ current applicability and exact shape:
 - **Reports:** `execution_report`, `discovered_constraints`,
   `wrong_assumptions`, `worker_results`.
 - **State transitions:** `emerged_subtasks`, `subgoal_updates`,
-  `objective_refinement`, `retracted_constraints`,
-  `revised_success_criteria`.
+  `objective_refinement`, `retracted_constraints` (Agent-discovered
+  constraints only; operator criteria/hard constraints are immutable).
 - **Claims and verification proposals:** criterion claims, active contract
   item claims, and `round_contract`.
 - **Prompt and lifecycle controls:** `prompt_requests`,
@@ -365,10 +365,16 @@ moved files or committed, it cancels the verdict. If machine history cannot be
 read, no stall verdict is made. A machine-backed success round is finishing,
 even if its closing round changes no files.
 
-Backtrack records a rollback directive and restores the round counter to the
-last clean committed round. Rejected attempts are never history. The held
-post-backtrack prompt is the redo of `restorePoint + 1`; use its `roundId`.
-There is no extra recovery round.
+A machine-triggered backtrack records a rollback directive. An Agent may also
+abandon the current branch deliberately by submitting a top-level
+`recovery: { target_round, reason }` instead of an `evaluation`. Recovery is an
+action, not an evaluation: it requires none of the four core fields, and the
+reason is recorded verbatim, never judged. The target must be an earlier
+committed evaluation on the current branch with an observed Git restore point.
+LoopForge records a rollback directive event and restores the round counter to
+`target + 1`. Rejected attempts are never history. The held redo prompt is for
+`target + 1`; use its `roundId`. There is no extra recovery round. The directive
+survives the redo as an audit event.
 
 The Recovery Brief identifies the trigger, restore point, redo ID, failed
 approaches, falsified assumptions, valid discoveries, files to revert, and
@@ -397,9 +403,10 @@ it; a successor proposal is subject to the same contract lifecycle rules.
 - Non-null `prompt`: execute it and submit the next evaluation.
 - `enforcementAction: "reject"`: retry the same logical round and ID; the
   attempt increases.
-- `enforcementAction: "backtrack"`: restore the workspace, then submit the
-  first post-backtrack redo evaluation with the held prompt and round ID; the
-  runtime checks the restore boundary before that redo commits.
+- `enforcementAction: "backtrack"` (machine) or `"recovery"` (Agent): restore
+  the workspace, then submit the first post-rollback redo evaluation with the
+  held prompt and round ID; the runtime checks the restore boundary before that
+  redo commits.
 - Null `prompt`: inspect `stopReason`.
 
 Read `submission_guidance` before composing the next evaluation, and read
@@ -429,11 +436,12 @@ and `cancelled`.
 L0 is a lean same-round retry, or follows a committed failed round only when
 the runtime proves there was no machine activity and no declared evolution.
 Unknown machine activity does not qualify for L0. L1 is normal continuation;
-L2 is boundary rehydration: it carries the shared current-governance sections,
-one phase line, at most three phase anchors, and (when enabled) a pointer to the
-derived state file. It does not embed the full history. Levels control state
-density only, never a reasoning technique or the set of evaluation fields you
-may use: L0/L1/L2 offer the same applicable trigger checklist, including real
+L2 is boundary rehydration: it carries the shared current-governance sections
+and machine findings. It does not render a phase line, phase anchors, or a
+pointer to the derived state file, and does not embed the full history. Levels
+control state density only, never a reasoning technique or the set of
+evaluation fields you may use: L0/L1/L2 offer the same applicable trigger
+checklist, including real
 `cr-`/`rci-`/`sg-` ids. If this prompt is L0, it does not apply the previous
 round's `prompt_requests`; the field you submit in this round can still be
 applied to the next prompt. L2 comes from round facts such as the first round,

@@ -53,7 +53,10 @@ function input(overrides: Partial<ReceiptInput> = {}): ReceiptInput {
   });
   const pr = result();
   const snapshot = {
-    schemaVersion: 3,
+    schemaVersion: 4,
+    branchId: "loop:receipt:branch:root",
+    transactionId: "tx-test",
+    kind: "evaluation",
     roundId: "loop:receipt:round:1",
     loopId: "receipt",
     round: 1,
@@ -67,7 +70,7 @@ function input(overrides: Partial<ReceiptInput> = {}): ReceiptInput {
     updatedAt: 0,
   } as RoundTransactionSnapshot;
   const artifact: PromptArtifact = {
-    schemaVersion: 4,
+    schemaVersion: 5,
     roundId: "loop:receipt:round:2",
     round: 2,
     attempt: 1,

@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   committedRoundGitMotion,
+  decodeCommittedRecord,
   decodeCommittedRound,
   decodeMergedRound,
   derivationRounds,
@@ -64,8 +65,8 @@ describe("CommittedRoundView", () => {
     const first = decodeCommittedRound(committedFeedbackRound(1, { loopId: "view" }))!;
     const replacementEntry = committedFeedbackRound(1, { loopId: "view", outcome: "blocked" });
     const replacement = decodeCommittedRound(replacementEntry)!;
-    const rollback = decodeCommittedRound(
-      committedFeedbackRound(2, { loopId: "view", action: "backtrack" }),
+    const rollback = decodeCommittedRecord(
+      committedBacktrackRound(2, "view", 1),
     )!;
     const history = historyRounds([first, rollback, replacement]);
     assert.equal(history.length, 1);
@@ -82,18 +83,18 @@ describe("CommittedRoundView", () => {
       committedFeedbackRound(2, { loopId: "ro" }),
       committedFeedbackRound(3, { loopId: "ro" }),
       committedFeedbackRound(4, { loopId: "ro" }),
-      committedBacktrackRound(5, "ro"),
+      committedBacktrackRound(5, "ro", 2),
       sessionEntry("ro", 3),
     ];
     assert.deepEqual(
       derivationRounds(entries).map((view) => view.round),
-      [1, 2, 3, 4],
-      "precondition: the unbounded window still sees the abandoned round documents",
+      [1, 2],
+      "the live branch window excludes the abandoned rounds",
     );
     assert.deepEqual(
       readOnlyRounds(entries).map((view) => view.round),
       [1, 2],
-      "the frontier the rollback recorded is the window's bound",
+      "the read-only branch window excludes the abandoned rounds",
     );
   });
 
@@ -161,7 +162,10 @@ describe("CommittedRoundView", () => {
     const deep = committedBacktrackRound(5, "bt", 2);
     assert.equal(pendingBacktrackRecord([deep], 3)?.round, 5);
     assert.equal(pendingBacktrackRecord([deep], 4), null);
-    const shallow = committedBacktrackRound(4, "bt", 3);
+    const shallow = committedBacktrackRound(4, "bt", 3, {
+      branchId: "tx-rollback-bt-5",
+      transactionId: "tx-rollback-bt-4",
+    });
     assert.equal(pendingBacktrackRecord([deep, shallow], 4)?.round, 4);
   });
 

@@ -8,7 +8,6 @@ import {
   hashCanonicalState,
   stableStringify,
   formatRoundContract,
-  milestoneHeading,
   CANONICAL_STATE_SCHEMA_VERSION,
 } from "../canonical-state.js";
 import type { ActiveContractView } from "../round-contract.js";
@@ -147,18 +146,6 @@ describe("createCanonicalLoopState", () => {
     assert.deepEqual(state.retiredConstraints, ["old"]);
   });
 
-  it("propagates rolling summary data", () => {
-    const state = createCanonicalLoopState(request(), response({
-      rolling_summary: {
-        key_outcomes: ["[R1] accepted: fixed bug"],
-        rounds_sampled: 1,
-        generated_at_round: 2,
-        milestones: [],
-      },
-    }), "test.md");
-    assert.ok(state.rollingOutcomes.length > 0);
-  });
-
   it("propagates sub-goals", () => {
     const state = createCanonicalLoopState(request(), response({
       sub_goals: [
@@ -193,7 +180,6 @@ describe("createCanonicalLoopState", () => {
       last_round_result: null,
     }), response({
       loop_objective: null,
-      rolling_summary: null,
     }), "test.md");
     assert.ok(state.objective);
     assert.equal("estimate" in state.progress, false);
@@ -303,29 +289,6 @@ describe("renderCanonicalStateMarkdown", () => {
     assert.ok(md.includes("1 failed"));
   });
 
-  it("renders milestone phase history", () => {
-    const state = createCanonicalLoopState(request(), response({
-      rolling_summary: {
-        key_outcomes: [],
-        rounds_sampled: 1,
-        generated_at_round: 2,
-        milestones: [{
-          label: "Phase 1: Auth done",
-          round_range: { start: 1, end: 5 },
-          outcome: "Completed auth module",
-          carried_constraints: ["no deps"],
-          resolved_constraints: [],
-          kind: "agent_declared",
-          generated_at_round: 5,
-        }],
-      },
-    }), "test.md");
-    const md = renderCanonicalStateMarkdown(state);
-    assert.ok(md.includes("Phase History"));
-    assert.ok(md.includes("Phase 1: Auth done"));
-    assert.ok(md.includes("Outcome (agent report)"));
-  });
-
   it("v3.9.5: renders the authority header and committed corrections", () => {
     const previous = makeLoopRoundResult({
       round: 1,
@@ -394,20 +357,7 @@ describe("state-file tiering (v3.7.1)", () => {
         { severity: "warn", field: "x", check: "c1", detail: "flag detail" },
       ],
     }), response({
-      rolling_summary: {
-        key_outcomes: [],
-        rounds_sampled: 1,
-        generated_at_round: 2,
-        milestones: [{
-          label: "m",
-          round_range: { start: 1, end: 2 },
-          outcome: "done",
-          carried_constraints: [],
-          resolved_constraints: [],
-          kind: "auto",
-          generated_at_round: 2,
-        }],
-      },
+      constraints_retired: ["old rule"],
     }), "test.md");
   }
 
@@ -419,7 +369,7 @@ describe("state-file tiering (v3.7.1)", () => {
     const idxHistorical = md.indexOf("## Historical Summary");
     assert.ok(idxCurrent >= 0 && idxRecent > idxCurrent && idxHistorical > idxRecent,
       "tiers must render in order: Current → Recent → Historical Summary");
-    assert.ok(md.includes("**Schema**: 2"), "v3.9.5 schema marker");
+    assert.ok(md.includes("**Schema**: 3"), "v3.9.6 schema marker");
     assert.ok(md.includes("**Derived**: true"), "derived marker in the header");
     assert.ok(md.includes("**Source**: round 2 (attempt 2)"), "attempt marker");
     assert.ok(md.includes("**Authority**: committed typed rounds"));
@@ -432,7 +382,7 @@ describe("state-file tiering (v3.7.1)", () => {
     const recent = md.slice(idxRecent, idxHistorical);
     assert.ok(recent.includes("### Verification"), "Recent holds verification findings");
     const historical = md.slice(idxHistorical);
-    assert.ok(historical.includes("### Phase History"), "Historical holds milestones");
+    assert.ok(historical.includes("### Retired Constraints"), "Historical holds retired constraints");
   });
 
   it("marks the retry attempt — attempt 2 differs from attempt 1", () => {
@@ -477,21 +427,6 @@ describe("v3.3 — Roadmap and derived state", () => {
    *  the Roadmap has real forward-looking content to render. */
   const fullResponse = (): LoopCompileResponse => response({
     round: 7,
-    rolling_summary: {
-      milestones: [{
-        label: "Core Module",
-        round_range: { start: 1, end: 4 },
-        outcome: "completed core module",
-        carried_constraints: [],
-        resolved_constraints: [],
-        kind: "auto" as const,
-        generated_at_round: 4,
-      }],
-      key_outcomes: [],
-      failed_patterns: [],
-      rounds_sampled: 4,
-      generated_at_round: 4,
-    },
     criterion_statuses: [
       { id: "cr-11111111", text: "all tests pass", status: "verified" as const, met_at_round: 3, related_subgoal_ids: [] },
       { id: "cr-22222222", text: "no regressions", status: "remaining" as const, related_subgoal_ids: [] },
@@ -505,25 +440,6 @@ describe("v3.3 — Roadmap and derived state", () => {
       status_changed_at_round: 4,
       priority: 0,
     }],
-  });
-
-  it("renders the one-line Phase section", () => {
-    const state = createCanonicalLoopState(request({ round: 7 }), fullResponse(), "test.md");
-    const md = renderCanonicalStateMarkdown(state);
-    // v3.8.1: the Roadmap section is gone. Three of its four lines
-    // (criteria counts, remaining criterion IDs, sub-goal activity) were
-    // re-compositions of facts that already have their own sections; only the
-    // phase position was unique, and it is one line now.
-    assert.ok(!md.includes("## Roadmap"));
-    // v3.8.1: it must be a KNOWN title. The renderer only treats the titles in
-    // STATE_SECTION_TIER as headings, so an unlisted `## Phase` was absorbed
-    // into whichever section happened to precede it (leaving a raw level-2
-    // heading inside that section's body) and inherited that section's tier.
-    assert.ok(md.includes("### Phase"), "the phase line is its own section");
-    assert.ok(!/^## Phase$/m.test(md),
-      "a raw `## Phase` line means it was folded into the previous section");
-    assert.ok(md.includes("round 7/20"));
-    assert.ok(md.includes("3 rounds since the last boundary"));
   });
 
   it("omits Roadmap when milestones and criteria are empty", () => {
@@ -693,29 +609,3 @@ describe("Round Contract state (v3.3 rendering, v3.4 active source)", () => {
   });
 });
 
-describe("Shared presentation atoms (v3.3.1)", () => {
-
-  it("milestoneHeading renders icon, label, round range and progress", () => {
-    const base = {
-      label: "Round 7",
-      round_range: { start: 3, end: 7 },
-      outcome: "phase done",
-      carried_constraints: [],
-      resolved_constraints: [],
-      kind: "auto",
-      generated_at_round: 7,
-    };
-    assert.equal(
-      milestoneHeading({ ...base, kind: "auto" }),
-      "**📍 Round 7** (Rounds 3–7)",
-    );
-    assert.equal(
-      milestoneHeading({ ...base, kind: "agent_declared" }),
-      "**🏁 Round 7** (Rounds 3–7)",
-    );
-    assert.equal(
-      milestoneHeading({ ...base, kind: "criteria_milestone", label: "Done: X" }),
-      "**✅ Done: X** (Rounds 3–7)",
-    );
-  });
-});

@@ -23,7 +23,6 @@ export {
   makeExecutionFeedback,
   makeSelfEvaluation,
   makeLoopObjective,
-  makeRollingSummary,
   makeLoopRoundResult,
   makeLoopCompileRequest,
   makeLoopCompileResponse,
@@ -33,7 +32,6 @@ export {
   makeVerificationFlag,
   makeVerificationResult,
   makeEnforcementResult,
-  makeMilestoneSummary,
   makeSubGoal,
   makeConstraintMeta,
 } from "./protocol.js";
@@ -43,7 +41,6 @@ export type {
   SelfEvaluation,
   LoopForgeRequest,
   LoopObjective,
-  RollingSummary,
   LoopRoundResult,
   LoopCompileRequest,
   LoopCompileResponse,
@@ -55,8 +52,6 @@ export type {
   VerificationFlag,
   VerificationResult,
   EnforcementResult,
-  CriterionRevision,
-  MilestoneSummary,
   SubGoal,
   ConstraintMeta,
   PromptArtifact,
@@ -81,7 +76,6 @@ export {
 export type {
   LoopPolicy,
   ConstraintsPolicy,
-  SummaryPolicy,
   EnginePolicy,
   BackendPolicy,
   PromptPolicy,
@@ -112,7 +106,6 @@ export {
   deriveGoalId,
   getPreviousRound,
   buildSelfEvalBlock,
-  buildRollingSummary,
 } from "./loop-compiler.js";
 
 // Submission channel (v3.9.1)
@@ -147,7 +140,6 @@ export {
   createEngine,
   buildSelfEvaluation,
   parseExecutionReport,
-  parseCriterionRevisions,
   parseWorkerResults,
 } from "./engine.js";
 

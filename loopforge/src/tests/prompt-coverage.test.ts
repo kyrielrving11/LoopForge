@@ -65,7 +65,7 @@ function contract(): ActiveContractView {
 function state(overrides: Partial<CanonicalLoopState> = {}): CanonicalLoopState {
   const activeContract = contract();
   const base: CanonicalLoopState = {
-    schemaVersion: 2 as const,
+    schemaVersion: 3 as const,
     loopId: "coverage-loop",
     round: 3,
     maxRounds: 20,
@@ -93,16 +93,12 @@ function state(overrides: Partial<CanonicalLoopState> = {}): CanonicalLoopState 
       detail: "Agent files_changed doesn't match evidence: unreported: [src/a.ts]",
     }],
     discoveries: [],
-    rollingOutcomes: [],
-    failedPatterns: [],
-    milestones: [],
     subGoals: [subGoal(), subGoal({ id: "sg-22222222", description: "wire api", priority: 1 })],
     criterionStatuses: [
       { id: AUTH_ID, text: AUTH, status: "remaining", related_subgoal_ids: ["sg-11111111"] },
       { id: API_ID, text: API, status: "unknown", related_subgoal_ids: [] },
     ],
     recurringFlags: [],
-    externalContext: "",
     stateFilePath: ".loopforge/state/coverage-state.md",
     progress: { criteriaMet: [], criteriaRemaining: [], filesChanged: [], tests: null },
     roundContract: activeContract,

@@ -34,7 +34,6 @@ import { decodeCommittedRound } from "./committed-round.js";
 import { policyMetrics } from "./policy-metrics.js";
 import {
   parseExecutionReport,
-  parseCriterionRevisions,
   parseSubGoalUpdates,
   parseWorkerResults,
   parsePromptRequests,
@@ -44,7 +43,6 @@ import { parseLoopExtras } from "./loop-extras-parser.js";
 // ── Re-export self-evaluation utilities (moved to self-eval.ts) ──────────
 export {
   parseExecutionReport,
-  parseCriterionRevisions,
   parseWorkerResults,
   buildSelfEvaluation,
 } from "./self-eval.js";
@@ -336,7 +334,6 @@ export class LoopForgeEngine {
     "objective_refinement",
     "outcome",
     "blocker",
-    "revised_success_criteria",
     "worker_results",
     "prompt_requests",
     "round_contract",
@@ -817,7 +814,6 @@ export class LoopForgeEngine {
       execution_report: selfEval.execution_report ?? null,
       // P5: Self-correction
       retracted_constraints: selfEval.retracted_constraints ?? [],
-      revised_success_criteria: selfEval.revised_success_criteria ?? [],
       wrong_assumptions: selfEval.wrong_assumptions ?? [],
       // Multi-agent: Worker delegation results
       worker_results: selfEval.worker_results ?? [],
@@ -875,6 +871,54 @@ export class LoopForgeEngine {
     return fb.success;
   }
 
+  /** v3.9.6: commit a rollback directive as a typed round event. It never
+   *  occupies the `:feedback` slot, so a redo at the same round cannot
+   *  overwrite the audit fact. */
+  commitRollbackDirective(input: {
+    loopId: string;
+    round: number;
+    transactionId: string;
+    envelope: {
+      schema_version: number;
+      round_id: string;
+      snapshot: unknown;
+      result: unknown;
+    };
+  }): boolean {
+    const taskId =
+      `loop:${input.loopId}:r${input.round}:rollback:${input.transactionId}`;
+    const entry: VaultEntry = {
+      id: randomUUID(),
+      task_id: taskId,
+      task_type: "rollback_directive",
+      loop_id: input.loopId,
+      timestamp: new Date().toISOString(),
+      loop_lineage: {
+        round: input.round,
+        round_id: input.envelope.round_id,
+        round_transaction: input.envelope,
+      },
+    };
+    try {
+      this.resolveStore().appendEntry(entry);
+      this.invalidateHydrationCache(input.loopId);
+      logEvent("rollback_directive_commit", {
+        loopId: input.loopId,
+        round: input.round,
+        transactionId: input.transactionId,
+      });
+      return true;
+    } catch (error) {
+      if (this.metrics) this.metrics.vaultWriteErrors++;
+      console.warn(
+        `LoopForge: vault write failed (rollback_persist) — ${error}`,
+      );
+      logEvent("vault_write_error", { error: "rollback_persist" });
+      policyMetrics.recordVaultWriteError("rollback_persist");
+      return false;
+    }
+  }
+
   // ═══════════════════════════════════════════════════════════════════════
   // Loop Compile (public, primary)
   // ═══════════════════════════════════════════════════════════════════════
@@ -911,7 +955,6 @@ export class LoopForgeEngine {
       plan_source: parsed.plan_source,
       constraints_from_plan: parsed.constraints_from_plan,
       force_level: parsed.force_level,
-      external_context: parsed.external_context,
       max_rounds: parsed.max_rounds,
       verification_flags: parsed.verification_flags,
       attempt: parsed.attempt,
@@ -926,8 +969,6 @@ export class LoopForgeEngine {
       const executionReport = parseExecutionReport(
         rr.execution_report as Record<string, unknown> | undefined,
       );
-      // Parse P5 revised_success_criteria (shared parser)
-      const revisedCriteria = parseCriterionRevisions(rr.revised_success_criteria);
       lcr.last_round_result = makeLoopRoundResult({
         round: (rr.round as number) ?? 0,
         success: (rr.success as boolean) ?? false,
@@ -951,7 +992,6 @@ export class LoopForgeEngine {
         retracted_constraints: Array.isArray(rr.retracted_constraints)
           ? (rr.retracted_constraints as string[]).filter((v: unknown) => typeof v === "string")
           : [],
-        revised_success_criteria: revisedCriteria,
         wrong_assumptions: Array.isArray(rr.wrong_assumptions)
           ? (rr.wrong_assumptions as string[]).filter((v: unknown) => typeof v === "string")
           : [],
@@ -1058,7 +1098,6 @@ export class LoopForgeEngine {
         // v2.12: Pass the compiler's derived state through for typed
         // projections (consumed by getProjection without re-persisting).
         loop_objective: response.loop_objective,
-        rolling_summary: response.rolling_summary,
         sub_goals: response.sub_goals,
         criterion_statuses: response.criterion_statuses,
       },

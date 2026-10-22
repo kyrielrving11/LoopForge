@@ -21,10 +21,6 @@ describe("Policy — Defaults", () => {
     assert.equal(DEFAULT_POLICY.evolution.max_start_criteria, 12);
   });
 
-  it("DEFAULT_POLICY has correct summary values", () => {
-    assert.equal(DEFAULT_POLICY.summary.window, 5);
-  });
-
   it("DEFAULT_POLICY has the stall lookback window", () => {
     assert.equal(DEFAULT_POLICY.engine.stall_lookback_rounds, 3);
   });

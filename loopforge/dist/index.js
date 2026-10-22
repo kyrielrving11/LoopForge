@@ -16,20 +16,20 @@
  *   server.start();
  */
 // Protocol types
-export { Mode, AgentStatus, makeExecutionFeedback, makeSelfEvaluation, makeLoopObjective, makeRollingSummary, makeLoopRoundResult, makeLoopCompileRequest, makeLoopCompileResponse, makeSessionState, makeTaskId, makeEvidenceSnapshot, makeVerificationFlag, makeVerificationResult, makeEnforcementResult, makeMilestoneSummary, makeSubGoal, makeConstraintMeta, } from "./protocol.js";
+export { Mode, AgentStatus, makeExecutionFeedback, makeSelfEvaluation, makeLoopObjective, makeLoopRoundResult, makeLoopCompileRequest, makeLoopCompileResponse, makeSessionState, makeTaskId, makeEvidenceSnapshot, makeVerificationFlag, makeVerificationResult, makeEnforcementResult, makeSubGoal, makeConstraintMeta, } from "./protocol.js";
 // Policy
 export { getPolicy, loadPolicy, resetPolicy, DEFAULT_POLICY, writeStateFile, } from "./policy.js";
 // Durable store
 export { FileLoopStore, queryLoopEntries, LOOP_STORE_SCHEMA_VERSION, } from "./loop-store.js";
 // Loop Compiler
-export { compileLoop, decideLevel, computeGoalTextHash, deriveGoalId, getPreviousRound, buildSelfEvalBlock, buildRollingSummary, } from "./loop-compiler.js";
+export { compileLoop, decideLevel, computeGoalTextHash, deriveGoalId, getPreviousRound, buildSelfEvalBlock, } from "./loop-compiler.js";
 // Submission channel (v3.9.1)
 export { allFieldGuidePaths, deriveSubmissionGuidance, fieldGuide, fieldGuideDescription, renderSelfEvalBlock, } from "./submission-guidance.js";
 export { deriveCommittedSubmissionView, deriveSubmissionReceipt, } from "./submission-receipt.js";
 // Replay
 export { ReplayBackend } from "./replay.js";
 // Engine
-export { LoopForgeEngine, createEngine, buildSelfEvaluation, parseExecutionReport, parseCriterionRevisions, parseWorkerResults, } from "./engine.js";
+export { LoopForgeEngine, createEngine, buildSelfEvaluation, parseExecutionReport, parseWorkerResults, } from "./engine.js";
 // MCP (v1.3)
 export { McpServer } from "./mcp/server.js";
 export { SessionManager } from "./mcp/session.js";

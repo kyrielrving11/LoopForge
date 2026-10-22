@@ -23,7 +23,7 @@ export class ReplayBackend {
             feedbackOnly: true,
         });
         const committed = fbEntries.map(decodeCommittedRound)
-            .find((view) => view?.round === roundNum && view.action !== "backtrack");
+            .find((view) => view?.round === roundNum && view.kind === "evaluation");
         if (!committed)
             return null;
         const base = lineageEntries[0] ?? committed.sourceEntry;

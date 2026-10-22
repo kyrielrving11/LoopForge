@@ -72,16 +72,6 @@ describe("v3.8.1 — schema fidelity", () => {
   });
 
   it("an inline object type publishes an object, not a string", () => {
-    // These used to fall through to the `{ type: "string" }` catch-all — the
-    // projection and the reported test counts were published as strings while
-    // the runtime sends objects.
-    assert.ok(!("focus" in props("LoopProjection")),
-      "v3.9.5: the projection has no latest-outcome focus");
-
-    const todoItem = (props("LoopProjection").todo as Record<string, unknown>).items as Record<string, unknown>;
-    assert.equal(todoItem.type, "object", "todo items are objects");
-    assert.ok(Object.keys(todoItem.properties as Record<string, unknown>).includes("priority"));
-
     const reported = props("ExecutionReport").tests_reported as Record<string, unknown>;
     const reportedObject = ((reported.anyOf ?? []) as Array<Record<string, unknown>>)
       .find((branch) => branch.type === "object");
@@ -99,7 +89,7 @@ describe("v3.8.1 — schema fidelity", () => {
     // must read it rather than guess.
     const version = props("PromptArtifact").schemaVersion;
     assert.equal(version.type, "number", "the artifact schema version is a number");
-    assert.equal(version.const, 4);
+    assert.equal(version.const, 5);
   });
 });
 
@@ -137,7 +127,10 @@ describe("Generated JSON Schema — top-level", () => {
     // and PromptRequestEffect joined (57 → 63).
     // v3.9.2: FilesReconciliation joined (63 → 64).
     // v3.9.4: PromptCoverage joined (64 → 65).
-    assert.equal(names.length, 65, `expected 65, got ${names.length}: ${names.join(", ")}`);
+    // v3.9.6: LoopProjection, CriterionRevision, the external-context types,
+    // RollingSummary and MilestoneSummary were deleted; RecoveryRequest,
+    // OperatorAcceptance and RecoveryDirective joined (65 → 63).
+    assert.equal(names.length, 63, `expected 63, got ${names.length}: ${names.join(", ")}`);
     assert.ok(names.includes("PromptArtifact"));
     assert.ok(names.includes("RoundOutcome"));
     assert.ok(names.includes("RoundContractProposal"));
@@ -240,11 +233,6 @@ describe("Array properties", () => {
     assert.equal(p.lineage.type, "array");
   });
 
-  it("RollingSummary — key_outcomes is string array", () => {
-    const p = props("RollingSummary");
-    assert.equal(p.key_outcomes.type, "array");
-    assert.equal((p.key_outcomes.items as Record<string, unknown>).type, "string");
-  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

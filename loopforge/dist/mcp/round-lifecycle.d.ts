@@ -10,7 +10,7 @@
  * session ownership, queues, and leases remain in SessionManager.
  */
 import { LoopForgeEngine } from "../engine.js";
-import type { LoopForgeRequest, LoopForgeResponse, SelfEvaluation, SubmissionDiagnostic, SubmissionGuidance, SubmissionReceipt, VerificationFlag, ExternalContextProvider, LoopTerminalSink, RoundVerificationStatus } from "../protocol.js";
+import type { LoopForgeRequest, LoopForgeResponse, RecoveryRequest, SelfEvaluation, SubmissionDiagnostic, SubmissionGuidance, SubmissionReceipt, VerificationFlag, LoopTerminalSink, RoundVerificationStatus } from "../protocol.js";
 import type { MachineObservation } from "../protocol.js";
 import type { RoundTransactionSnapshot } from "../round-transaction.js";
 import type { LoopStore, VaultEntry } from "../loop-store.js";
@@ -125,7 +125,7 @@ export interface AdvanceResult {
     /** v1.13: Enforcement action for this round. accept/reject/terminate.
      *  When "reject", the prompt contains a rejection notice and the agent
      *  must redo the same round. Round counter does NOT increment. */
-    enforcementAction?: "accept" | "reject" | "terminate" | "backtrack";
+    enforcementAction?: "accept" | "reject" | "terminate" | "backtrack" | "recovery";
     /** v3.8: The round-level verification posture — `trusted` when everything
      *  claimed this round is machine-backed, `insufficient` when claims are
      *  unbacked but nothing is denied, `contradicted` when a machine fact
@@ -134,13 +134,22 @@ export interface AdvanceResult {
     /** v1.13: When enforcementAction is "reject" or "terminate", the reason
      *  why the round was rejected or the loop was terminated. */
     enforcementReason?: string;
+    /** v3.9.6: the committed rollback directive facts for a recovery
+     *  disposition. The redo prompt is the next round. */
+    recovery?: {
+        origin: "agent" | "machine";
+        target_round: number;
+        reason: string;
+        target_head?: string;
+        restore_required: boolean;
+    };
     /** v3.8.1: set when the RUNTIME refused the submission before touching any
      *  state — the same `ToolErrorCode` as `stopReason`, plus the structured
      *  details a transport maps onto its error envelope. Produced by
      *  `validateSubmission` in submission-boundary.ts, which SessionManager
      *  runs before its queue and lease heartbeat. */
     submissionError?: {
-        code: "evaluation_invalid" | "contract_invalid";
+        code: "evaluation_invalid" | "contract_invalid" | "recovery_invalid" | "recovery_disabled" | "recovery_unavailable";
         details: Record<string, unknown>;
     };
     /** v3.9.4: a prompt-projection code defect. This is NOT a submission
@@ -175,8 +184,6 @@ export interface RoundLifecycleDeps {
     ownerId: string;
     /** Session lease duration; stamped into saved session entries. */
     leaseMs: number;
-    /** Live accessor for the mutable contextProvider field on SessionManager. */
-    getContext: () => ExternalContextProvider | undefined;
 }
 export declare function buildLoopRequest(session: McpSession): LoopForgeRequest;
 export declare class RoundLifecycle {
@@ -186,7 +193,6 @@ export declare class RoundLifecycle {
     private readonly terminalSinks;
     private readonly ownerId;
     private readonly leaseMs;
-    private readonly getContext;
     constructor(deps: RoundLifecycleDeps);
     /** v3.9.1: the submission-guidance projection for a session's held round.
      *  One history window (`derivationRounds`, the compile window), no writes.
@@ -308,6 +314,11 @@ export declare class RoundLifecycle {
      *  with the same roundId replays it and recompiles the next round. */
     private stalledAfterCommit;
     private advanceUnlocked;
+    /** v3.9.6: Agent-initiated recovery. The Agent selects the target; this
+     *  method only validates it against committed facts, records the rollback
+     *  directive and compiles the redo. It never runs ordinary verification or
+     *  enforcement on the abandoned work. */
+    recover(sessionId: string, recovery: RecoveryRequest, roundId?: string): Promise<AdvanceResult>;
     /** Core cycle entry used by SessionManager.advance after the queue + lease
      *  dance: validate → extract → execute transaction → route disposition
      *  → advance to next round (continue) or return terminal result.

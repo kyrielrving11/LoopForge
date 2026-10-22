@@ -13,11 +13,9 @@
 import { createHash } from "node:crypto";
 import type { CanonicalLoopState } from "./canonical-state.js";
 import {
-  buildPhaseLine,
   formatActiveSubGoals,
   formatCriterionRows,
   hashCanonicalState,
-  milestoneHeading,
   partitionActiveConstraints,
 } from "./canonical-state.js";
 import type {
@@ -371,25 +369,6 @@ function l1Sections(
       coverageIds: [],
     });
   }
-  // v3.2: L1 also renders explicit external context supplied by the caller.
-  if (state.externalContext) {
-    sections.push({
-      id: "external_context",
-      text: section("External Context (agent-supplied)", state.externalContext),
-      mandatory: false,
-      coverageIds: [],
-    });
-  }
-  // v3.8.1: one compact phase line, not the Roadmap prose.
-  const l1Phase = buildPhaseLine(state);
-  if (l1Phase) {
-    sections.push({
-      id: "phase",
-      text: section("Phase", l1Phase),
-      mandatory: false,
-      coverageIds: [],
-    });
-  }
   // v3.8.1: the recent tail of the ONE recurring-fact derivation. It mixes
   // committed Agent violation reports with machine verification flags, so the
   // heading names findings rather than implying all of it is machine evidence.
@@ -446,40 +425,6 @@ function l2Sections(
       coverageIds: [],
     });
   }
-  // One compact phase line, not the Roadmap prose.
-  const l2Phase = buildPhaseLine(state);
-  if (l2Phase) {
-    sections.push({
-      id: "phase",
-      text: section("Phase", l2Phase),
-      mandatory: false,
-      coverageIds: [],
-    });
-  }
-  // Stage anchors only: milestone labels/ranges, never the Agent's outcome
-  // text or the carried/resolved constraint history. Those remain in the
-  // derived state file, audit and replay.
-  if (state.milestones.length > 0) {
-    const anchors = state.milestones
-      .slice(-3)
-      .map((m) => milestoneHeading(m))
-      .join("\n");
-    sections.push({
-      id: "milestones",
-      text: section("Phase Anchors", anchors),
-      mandatory: false,
-      coverageIds: [],
-    });
-  }
-  if (state.externalContext) {
-    sections.push({
-      id: "external_context",
-      text: section("External Context (agent-supplied)", state.externalContext),
-      mandatory: false,
-      coverageIds: [],
-    });
-  }
-
   return sections;
 }
 
@@ -525,7 +470,6 @@ const SECTION_PRIORITY: Readonly<Record<string, number>> = {
   corrections: 21,
   phase: 24,
   active_warnings: 25,
-  external_context: 26,
   milestones: 29,
 };
 

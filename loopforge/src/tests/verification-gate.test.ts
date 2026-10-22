@@ -990,10 +990,13 @@ describe("verification-gate — v2.12 outcome consistency", () => {
       loop_lineage: {
         round: 1,
         round_transaction: {
-          schema_version: 3,
+          schema_version: 4,
           round_id: "loop:test-loop:round:1",
           snapshot: {
-            schemaVersion: 3,
+            schemaVersion: 4,
+            kind: "evaluation" as const,
+            branchId: "loop:test-loop:branch:root",
+            transactionId: "tx-test-loop-1-1",
             roundId: "loop:test-loop:round:1",
             loopId: "test-loop",
             round: 1,

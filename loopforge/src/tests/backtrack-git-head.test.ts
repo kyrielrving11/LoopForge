@@ -49,7 +49,10 @@ function committedFeedback(
   preferAfter = true,
 ): VaultEntry {
   const snapshot = {
-    schemaVersion: 3,
+    schemaVersion: 4,
+    kind: "evaluation" as const,
+    branchId: "loop:git-loop:branch:root",
+    transactionId: `tx-git-loop-${round}-1`,
     roundId: `loop:git-loop:round:${round}`,
     loopId: "git-loop",
     round,
@@ -72,7 +75,7 @@ function committedFeedback(
     loop_lineage: {
       round,
       round_transaction: {
-        schema_version: 3,
+        schema_version: 4,
         round_id: `loop:git-loop:round:${round}`,
         snapshot,
         result: { action: "continue", verificationFlags: [] },

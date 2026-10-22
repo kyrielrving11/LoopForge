@@ -22,10 +22,6 @@ const USER_RISK = /production|prod\b|credential|secret|permission|publish|releas
 export function deriveGateId(text) {
     return "gate-" + computeGoalTextHash(text).slice(0, 12);
 }
-/** Stable todo item ID (todo- + sha256 slice 8) for the LoopProjection. */
-export function deriveTodoId(text) {
-    return "todo-" + computeGoalTextHash(text).slice(0, 8);
-}
 /** Canonical serialization — sorted scope/effects make the hash stable
  *  across field-order and whitespace differences. */
 export function canonicalizeGateAction(action) {

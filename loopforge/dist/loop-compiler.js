@@ -5,9 +5,9 @@
  */
 import { createHash } from "node:crypto";
 import { deriveConfiguredCapability, getPolicy } from "./policy.js";
-import { AgentStatus, makeLoopCompileResponse, makeLoopObjective, makeConstraintMeta, makeMilestoneSummary, makeRollingSummary, } from "./protocol.js";
+import { AgentStatus, makeLoopCompileResponse, makeLoopObjective, makeConstraintMeta, } from "./protocol.js";
 import { createCanonicalLoopState, renderCanonicalStateMarkdown, } from "./canonical-state.js";
-import { decodeRound, entryLineage, entryCriteriaMet, entryCriteriaRemaining, entryActiveConstraints, entryRetractedConstraints, pendingBacktrackRecord, roundResultFromCommittedRound, machineGitMotionSeries, derivationRounds, } from "./committed-round.js";
+import { decodeRound, entryLineage, entryCriteriaMet, entryCriteriaRemaining, pendingBacktrackRecord, roundResultFromCommittedRound, machineGitMotionSeries, derivationRounds, } from "./committed-round.js";
 import { derivePromptFreshness, UNKNOWN_PROMPT_FRESHNESS, } from "./prompt-freshness.js";
 import { NO_IN_FLIGHT_ROUND, deriveRoundFacts } from "./round-facts.js";
 import { recoveryBriefLines } from "./enforcement-gate.js";
@@ -83,7 +83,7 @@ export function getPreviousRound(loopId, round, context) {
             : typeof data.output_summary === "string" ? data.output_summary : "",
     };
 }
-function latestObjective(loopId, context,
+export function latestObjective(loopId, context,
 /** Exclusive compile-round bound. A deep-restore redo must never read the
  *  abandoned branch's objective (and its rolled-back refinements). */
 beforeRound,
@@ -133,45 +133,34 @@ function evolveObjective(request, context, previous) {
         });
     const last = previous.result;
     const history = [...(current.refinement_history ?? [])];
-    let objective = current.objective || request.task;
-    let version = current.version ?? 1;
+    const objective = current.objective || request.task;
+    const version = current.version ?? 1;
     if (last?.objective_refinement?.trim()) {
         const refinement = last.objective_refinement.trim();
-        // M5: fold each refinement exactly once per persisted objective state.
-        // A retry recompiles the same round against the same committed
-        // previous-round projection; without this guard every retry attempt
-        // re-appends the refinement and inflates the version — the objective text
-        // and the state file grew "Refinement: X" once per attempt.
-        if (!history.includes(refinement)) {
+        // v3.9.6: objective refinements are committed Agent reports. They never
+        // rewrite the operator objective or bump its version.
+        if (!history.includes(refinement))
             history.push(refinement);
-            objective = `${objective}\nRefinement: ${refinement}`;
-            version++;
-        }
     }
-    const revisions = new Map((last?.revised_success_criteria ?? []).map((item) => [item.old, item.new]));
     return makeLoopObjective({
         ...current,
         objective,
         version,
         refinement_history: history.slice(-getPolicy().evolution.max_objective_versions),
-        // v3.9.4: one normalized-exact text, one cr-* identity. `unique` was
-        // trim-only, so case/whitespace variants survived as two entries that
-        // derived to the SAME criterion id.
-        success_criteria: uniqueNormalized(current.success_criteria
-            .filter((item) => typeof item === "string")
-            .map((item) => revisions.get(item) ?? item)),
+        success_criteria: uniqueNormalized(current.success_criteria),
         hard_constraints: uniqueNormalized(current.hard_constraints),
         loop_id: request.loop_id,
     });
 }
 function evolveConstraints(request, objective, previous, windowRounds) {
-    const retired = unique(previous.result?.retracted_constraints ?? []);
-    // v3.9.4: a revised-away criterion text is no longer an objective criterion.
-    // It must not survive as a "discovered" active constraint just because the
-    // previous round's active set carried it. This is a merge-time suppression,
-    // not an alias and not a constraint retirement.
-    const revisedAway = unique((previous.result?.revised_success_criteria ?? []).map((item) => item.old));
-    const immediateRetired = new Set([...retired, ...revisedAway].map((text) => normalizeText(text)));
+    // v3.9.6: operator criteria/hard constraints are immutable. Retractions
+    // only apply to Agent-discovered constraints; the boundary is strict, and
+    // this is the compiler's defense in depth.
+    const operatorKeys = new Set([...objective.hard_constraints, ...objective.success_criteria]
+        .map((text) => normalizeText(text)));
+    const retired = unique(previous.result?.retracted_constraints ?? [])
+        .filter((text) => !operatorKeys.has(normalizeText(text)));
+    const immediateRetired = new Set(retired.map((text) => normalizeText(text)));
     const discovered = unique(previous.result?.discovered_constraints ?? [])
         .slice(0, getPolicy().evolution.max_discovered_constraints_per_round);
     // v2.14: agent-declared retractions of plan/hard/criteria constraints
@@ -190,6 +179,8 @@ function evolveConstraints(request, objective, previous, windowRounds) {
                 if (!text)
                     continue;
                 const key = normalizeText(text);
+                if (operatorKeys.has(key))
+                    continue;
                 const previousRound = lastRetractedRound.get(key);
                 if (previousRound === undefined || round.round > previousRound) {
                     lastRetractedRound.set(key, round.round);
@@ -361,158 +352,6 @@ export function criteriaMatch(a, b) {
     // v3.9.2: ONE identity rule, shared with the prompt and submission boundary.
     return criterionRefMatches(a, b);
 }
-/** Detect newly met criteria by comparing the current entry's
- *  met criterion_claims against the previous entry's.
- *  v2.11/v3.8.1: id-first (cr-XXXXXXXX), then normalized-exact text —
- *  no similarity.
- *  Returns empty array when there is no previous entry — the first
- *  entry's criteria are the baseline, not a "new" event. */
-function detectNewCriteria(current, previous) {
-    const currMet = entryCriteriaMet(current);
-    if (currMet.length === 0)
-        return [];
-    if (!previous) {
-        // First round with criteria is the baseline — not a milestone trigger.
-        return [];
-    }
-    const prevMet = entryCriteriaMet(previous);
-    if (prevMet.length === 0)
-        return currMet;
-    return currMet.filter((curr) => prevMet.every((prev) => !criteriaMatch(curr, prev)));
-}
-/** Build a single MilestoneSummary from a range of completed round entries. */
-function buildMilestoneFromEntries(phaseEntries, startRound, endRound, label, kind) {
-    const last = phaseEntries.at(-1);
-    const lastView = last ? decodeRound(last) : null;
-    const outcomeRaw = lastView
-        ? (lastView.outputSummary ?? "")
-        : last && typeof last.output_summary === "string" ? last.output_summary : "";
-    const outcomeMax = getPolicy().checkpoint.outcome_max_chars;
-    const outcome = outcomeRaw.length > outcomeMax
-        ? outcomeRaw.slice(0, outcomeMax) + "…"
-        : outcomeRaw;
-    const carried = last ? entryActiveConstraints(last) : [];
-    const resolved = unique(phaseEntries.flatMap((e) => entryRetractedConstraints(e)));
-    return makeMilestoneSummary({
-        label,
-        round_range: { start: startRound, end: endRound },
-        outcome,
-        carried_constraints: carried,
-        resolved_constraints: resolved,
-        kind,
-        generated_at_round: endRound,
-    });
-}
-/** v3.8.1: the milestone history bound. Applied identically at every prompt
- *  level and in the state file, so the milestone set is a function of
- *  committed facts rather than of which level happened to compile. (The
- *  v3.0.1 sampler chose which milestones to keep from an UNBOUNDED list and
- *  did nothing at L2 — so the state file’s phase history depended on the
- *  prompt level and had no bound of its own.) */
-const MILESTONE_HISTORY_CAP = 50;
-export function buildRollingSummary(loopId, currentRound, context, sinceRound = 0) {
-    const policy = getPolicy().summary;
-    const allEntries = loopEntries(loopId, context);
-    // ── Phase 1: Recent Window (preserves existing behavior) ──
-    const windowEntries = allEntries
-        .filter((entry) => {
-        const round = entryRound(entry);
-        return round >= sinceRound && round < currentRound;
-    })
-        .slice(-policy.window);
-    const outcomes = [];
-    for (const entry of windowEntries) {
-        const view = decodeRound(entry);
-        const data = entryLineage(entry);
-        const round = entryRound(entry);
-        const success = view ? view.success : entry.success ?? data.success;
-        const summary = view
-            ? view.outputSummary ?? ""
-            : typeof entry.output_summary === "string"
-                ? entry.output_summary
-                : typeof data.output_summary === "string" ? data.output_summary : "";
-        // v2.12: Declared outcome wins the label; the default wording stays
-        // "accepted" for zero regression on existing loop output.
-        const declared = view ? view.outcome : entry.outcome;
-        const outcomeLabel = declared === "success" || declared === "partial" ||
-            declared === "failed" || declared === "blocked"
-            ? declared
-            : success === false ? "failed" : "accepted";
-        if (summary)
-            outcomes.push(`[R${round}] ${outcomeLabel}: ${summary}`);
-    }
-    // ── Phase 2: Milestone Accumulation ──
-    // Scan all completed entries in round order. For each entry, check three
-    // trigger signals in priority order: agent_declared > criteria_milestone > auto.
-    const completedEntries = allEntries.filter((entry) => entryRound(entry) >= 1 && entryRound(entry) < currentRound);
-    const milestones = [];
-    let lastMilestoneRound = 0;
-    for (let i = 0; i < completedEntries.length; i++) {
-        const entry = completedEntries[i];
-        const rnd = entryRound(entry);
-        const lin = entryLineage(entry);
-        // Signal 1: Agent-declared checkpoint
-        const isAgentCheckpoint = lin.compression_checkpoint === true;
-        // Signal 2: New criteria met (compare with previous vault entry)
-        const prev = i > 0 ? completedEntries[i - 1] : null;
-        const newCriteria = detectNewCriteria(entry, prev);
-        if (isAgentCheckpoint || newCriteria.length > 0) {
-            const startRound = lastMilestoneRound + 1;
-            const phaseEntries = completedEntries.filter((e) => {
-                const er = entryRound(e);
-                return er >= startRound && er <= rnd;
-            });
-            const kind = isAgentCheckpoint
-                ? "agent_declared"
-                : "criteria_milestone";
-            const label = isAgentCheckpoint
-                ? (typeof lin.checkpoint_label === "string" && lin.checkpoint_label.trim()
-                    ? lin.checkpoint_label.trim()
-                    : `Round ${rnd}`)
-                : `Completed: ${newCriteria.join(", ")}`;
-            milestones.push(buildMilestoneFromEntries(phaseEntries, startRound, rnd, label, kind));
-            lastMilestoneRound = rnd;
-        }
-    }
-    // Signal 3: Safety net — auto milestone when gap exceeds milestone_interval.
-    // v3.3.1: the policy contract (milestone_interval: "only fires when no
-    // agent_declared or criteria_milestone has been created for this many
-    // rounds") includes loops that NEVER created a milestone — but the guard
-    // `lastMilestoneRound > 0` made the gap start from the (nonexistent) first
-    // milestone, so a checkpoint-less loop could run forever with an empty
-    // Phase History and no memory skeleton. With lastMilestoneRound == 0 the
-    // gap is measured from round 1 and the safety net fires from the very
-    // first interval.
-    const gapSinceLast = (currentRound - 1) - lastMilestoneRound;
-    if (gapSinceLast >= policy.milestone_interval &&
-        completedEntries.length > 0) {
-        const startRound = lastMilestoneRound + 1;
-        const endRound = currentRound - 1;
-        const phaseEntries = completedEntries.filter((e) => {
-            const er = entryRound(e);
-            return er >= startRound && er <= endRound;
-        });
-        if (phaseEntries.length > 0) {
-            milestones.push(buildMilestoneFromEntries(phaseEntries, startRound, endRound, `Rounds ${startRound}–${endRound}`, "auto"));
-        }
-    }
-    // v3.8.1: one bound, applied identically at every prompt level. The v3.0.1
-    // sampler kept head anchors + a newest tail + an even middle sample, and
-    // deliberately did nothing at L2 — so the milestone set written to the state
-    // file depended on which level happened to compile, not on committed facts.
-    // It also did not bound growth at all (it only chose WHICH milestones to
-    // keep from an unbounded list), which is why the cap has to live here.
-    const cappedMilestones = milestones.slice(-MILESTONE_HISTORY_CAP);
-    if (windowEntries.length === 0 && cappedMilestones.length === 0)
-        return null;
-    return makeRollingSummary({
-        key_outcomes: unique(outcomes),
-        rounds_sampled: windowEntries.length,
-        generated_at_round: currentRound,
-        failed_patterns: [],
-        milestones: cappedMilestones,
-    });
-}
 // ═══════════════════════════════════════════════════════════════════════════
 // Sub-Goal Structured Tracking (v2.2)
 // ═══════════════════════════════════════════════════════════════════════════
@@ -678,9 +517,6 @@ export function decideLevel(request, context) {
 export function buildSelfEvalBlock(ctx) {
     return renderSelfEvalBlock(ctx);
 }
-// v2.5: checkpoint() removed — agent_declared milestones from
-// compression_checkpoint supersede the separate CheckpointSummary.
-// See buildRollingSummary() signal 1.
 /** v3.7.1: Derived Recovery Brief for the state-file Recent tier. Present
  *  ONLY while a committed backtrack decision is the current round's record
  *  (the recovery window); the redo commit replaces that record, so the
@@ -693,21 +529,23 @@ function committedBacktrackBrief(loopId, round, context) {
     // `backtrackTarget + 1`, so an exact-round match loses both the boundary
     // and this brief.
     const view = pendingBacktrackRecord(loopEntries(loopId, context), round);
-    const record = view?.backtrack;
+    const record = view?.recovery;
     if (!record)
         return undefined;
     const lines = recoveryBriefLines({
         target: record.target,
-        triggerRule: record.triggerRule,
-        // The committed decision's own sentence — the machine's reason for the
-        // rollback, preserved as a fact (the old prose header's "Why" content).
-        ...(typeof view?.result?.enforcementReason === "string" &&
-            view.result.enforcementReason.trim()
-            ? { failureReason: view.result.enforcementReason }
+        triggerRule: record.origin === "machine"
+            ? (record.trigger_rule ?? "machine_recovery")
+            : "agent_recovery",
+        origin: record.origin,
+        reason: record.reason,
+        ...(record.origin === "machine" && record.reason.trim()
+            ? { failureReason: record.reason }
             : {}),
-        failedRounds: record.failedRounds,
+        failedRounds: record.failed_rounds,
         approaches: record.approaches,
-        wrongAssumptions: record.wrongAssumptions,
+        wrongAssumptions: record.wrong_assumptions,
+        preservedDiscoveries: record.skipped_discoveries,
         // The redo round's stable identity is a fact the old prepended prose
         // carried; keep it inside the artifact now.
         recoveryRoundId: `loop:${loopId}:round:${record.target + 1}`,
@@ -715,13 +553,13 @@ function committedBacktrackBrief(loopId, round, context) {
     // v3.9.4: the restore point's machine facts belong in the prompt, not only
     // in the prose backtrack header. Deterministic order and a visible overflow
     // count keep the fact complete without making the section unbounded.
-    if (record.targetGitHead) {
-        lines.push(`- **Restore HEAD**: \`${record.targetGitHead}\``);
+    if (record.target_head) {
+        lines.push(`- **Restore HEAD**: \`${record.target_head}\``);
     }
-    if (record.skippedFiles.length > 0) {
-        const files = [...record.skippedFiles].sort();
+    if (record.skipped_files.length > 0) {
+        const files = [...record.skipped_files].sort();
         const shown = files.slice(0, 15);
-        lines.push("- **Files changed in failed rounds**:");
+        lines.push("- **Files changed in abandoned rounds**:");
         for (const file of shown)
             lines.push(`  - \`${file}\``);
         if (files.length > shown.length) {
@@ -730,11 +568,11 @@ function committedBacktrackBrief(loopId, round, context) {
     }
     // The machine requirement the recovery checkpoint enforces. A fact, not a
     // recipe: LoopForge never says HOW to restore the workspace.
-    if (record.targetGitHead || record.skippedFiles.length > 0) {
+    if (record.target_head || record.skipped_files.length > 0) {
         lines.push(`- **Restore requirement**: the next submission's workspace is checked ` +
             `against round ${record.target}` +
-            (record.targetGitHead ? ` (HEAD \`${record.targetGitHead}\`)` : "") +
-            "; a leftover change from the failed rounds rejects the recovery checkpoint.");
+            (record.target_head ? ` (HEAD \`${record.target_head}\`)` : "") +
+            "; a leftover change from the abandoned rounds rejects the recovery checkpoint.");
     }
     return lines;
 }
@@ -753,7 +591,6 @@ export function compileLoop(request, context) {
     // committed previous round's violations are found by the committed
     // history scan at their real round, not relabelled as this round.
     previous.view ? [] : (request.last_round_result?.constraint_violations ?? []));
-    const rolling = buildRollingSummary(request.loop_id, request.round, context, 0);
     // v3.8: sub-goal lifecycle lives in subgoal-state.ts and consumes the
     // shared committed-round view — one history interpretation. The previous
     // round's report is idempotently replayed; a committed round is already in
@@ -847,7 +684,6 @@ export function compileLoop(request, context) {
         goal_id: deriveGoalId(request.loop_id, request.task, request.goal_id),
         goal_text_hash: computeGoalTextHash(request.task),
         loop_objective: objective,
-        rolling_summary: rolling,
         sub_goals: subGoals,
         criterion_statuses: criterionStatuses,
         recurring_flags: recurringFlags,
@@ -922,7 +758,6 @@ export function compileLoop(request, context) {
             recovery: recoveryBrief !== undefined,
             gateEnabled: policy.gate.enabled === true,
             criteria: criterionStatuses,
-            currentRequirement: state.currentTask,
         }),
         // v3.9.4: the SAME committed-backtrack facts the state file renders. The
         // recovery section is part of the artifact, so the delivered prompt is

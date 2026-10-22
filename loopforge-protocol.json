@@ -47,22 +47,6 @@
         "manual_fixes_needed"
       ]
     },
-    "CriterionRevision": {
-      "type": "object",
-      "properties": {
-        "old": {
-          "type": "string"
-        },
-        "new": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "old",
-        "new"
-      ],
-      "description": "P5: A revision to a success criterion — the old form and the new form.\r\nThe agent proposes this when it discovers the original criterion was\r\nwrong, unrealistic, or needs refinement."
-    },
     "SelfEvaluation": {
       "type": "object",
       "properties": {
@@ -109,12 +93,6 @@
           "type": "array",
           "items": {
             "type": "string"
-          }
-        },
-        "revised_success_criteria": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/CriterionRevision"
           }
         },
         "wrong_assumptions": {
@@ -205,6 +183,148 @@
       ],
       "description": "Structured self-evaluation submitted at the round boundary.\r\nThe agent outputs this after completing each round.\r\nEvery field is consumed by at least one downstream function.\r\n\r\nv1.4 (P0–P2): Three new optional fields enable cognitive evolution.\r\nv1.5 (P4–P5): Execution evidence, progress tracking, and self-correction."
     },
+    "RecoveryRequest": {
+      "type": "object",
+      "properties": {
+        "target_round": {
+          "type": "number"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "target_round",
+        "reason"
+      ],
+      "description": "v3.9.6: The Agent's request to abandon the current branch and restore an\r\nearlier committed point. This is an ACTION, not an evaluation: it never\r\ncarries success/output_summary/constraint_violations/should_continue and\r\nnever fabricates a SelfEvaluation. The target must be an earlier committed\r\nevaluation round in the current branch with a fully observed Git restore\r\npoint; LoopForge validates that, then records a rollback directive event.\r\nThe reason is the Agent's judgment and is recorded verbatim, never judged."
+    },
+    "OperatorAcceptance": {
+      "type": "object",
+      "properties": {
+        "task": {
+          "type": "string"
+        },
+        "success_criteria": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "hard_constraints": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "task",
+        "success_criteria",
+        "hard_constraints"
+      ],
+      "description": "v3.9.6: The operator-owned acceptance surface, written once in the root\r\nbranch's round-1 evaluation transaction. Neither the Agent nor LoopForge\r\nmay revise, replace, or retract it."
+    },
+    "RecoveryDirective": {
+      "type": "object",
+      "properties": {
+        "origin": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "agent"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "machine"
+              ]
+            }
+          ]
+        },
+        "reason": {
+          "type": "string"
+        },
+        "trigger_rule": {
+          "type": "string"
+        },
+        "target": {
+          "type": "number"
+        },
+        "target_round_id": {
+          "type": "string"
+        },
+        "target_transaction_id": {
+          "type": "string"
+        },
+        "target_head": {
+          "type": "string"
+        },
+        "target_dirty": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "skipped_files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "skipped_fingerprints": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "skipped_discoveries": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "failed_rounds": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          }
+        },
+        "approaches": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "wrong_assumptions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "transaction_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "origin",
+        "reason",
+        "target",
+        "target_round_id",
+        "target_transaction_id",
+        "target_dirty",
+        "skipped_files",
+        "skipped_fingerprints",
+        "skipped_discoveries",
+        "failed_rounds",
+        "approaches",
+        "wrong_assumptions",
+        "transaction_id"
+      ],
+      "description": "v3.9.6: A committed rollback directive. It is a typed event in the same\r\nround document as the abandoned/triggering transaction, not a normal\r\nround. `transaction_id` also names the child branch; the redo and all\r\nlater transactions on that branch carry it as `branchId`."
+    },
     "RoundOutcome": {
       "type": "string",
       "enum": [
@@ -213,161 +333,6 @@
         "failed",
         "blocked"
       ]
-    },
-    "LoopProjection": {
-      "type": "object",
-      "properties": {
-        "todo": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "properties": {
-              "id": {
-                "type": "string"
-              },
-              "item": {
-                "type": "string"
-              },
-              "reason": {
-                "type": "string"
-              },
-              "source": {
-                "type": "string",
-                "enum": [
-                  "derived"
-                ]
-              },
-              "priority": {
-                "type": "number"
-              }
-            },
-            "required": [
-              "id",
-              "item",
-              "reason",
-              "source",
-              "priority"
-            ]
-          }
-        },
-        "phase": {
-          "anyOf": [
-            {
-              "type": "object",
-              "properties": {
-                "current": {
-                  "type": "string"
-                },
-                "label": {
-                  "type": "string"
-                },
-                "boundaries": {
-                  "type": "array",
-                  "items": {
-                    "type": "object",
-                    "properties": {
-                      "label": {
-                        "type": "string"
-                      },
-                      "round": {
-                        "type": "number"
-                      }
-                    },
-                    "required": [
-                      "label",
-                      "round"
-                    ]
-                  }
-                }
-              },
-              "required": [
-                "current",
-                "label",
-                "boundaries"
-              ]
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "delegation": {
-          "type": "object",
-          "properties": {
-            "pending": {
-              "type": "number"
-            },
-            "last_results": {
-              "type": "array",
-              "items": {
-                "type": "object",
-                "properties": {
-                  "agentId": {
-                    "type": "string"
-                  },
-                  "outcome": {
-                    "type": "string"
-                  },
-                  "round": {
-                    "type": "number"
-                  },
-                  "summary": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "agentId",
-                  "outcome",
-                  "round",
-                  "summary"
-                ]
-              }
-            }
-          },
-          "required": [
-            "pending",
-            "last_results"
-          ]
-        },
-        "handoff": {
-          "type": "object",
-          "properties": {
-            "summary": {
-              "type": "string"
-            },
-            "verified": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            },
-            "open_risks": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            }
-          },
-          "required": [
-            "summary",
-            "verified",
-            "open_risks"
-          ]
-        },
-        "verified_subgoals": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/VerifiedSubGoalFact"
-          }
-        }
-      },
-      "required": [
-        "todo",
-        "delegation",
-        "handoff",
-        "verified_subgoals"
-      ],
-      "description": "v2.12: Typed cognitive state projection — runtime-derived facts shipped\r\nwith advance/status outputs. All fields are derived, zero persistence.\r\nConsumers: advance output (main agent), status (human/tooling), resume\r\nhandoff. The runtime provides current governance facts; the agent decides\r\nactions. v3.9.5: no agent-authored \"latest outcome\" focus — projection\r\nnever competes with the agent's own memory."
     },
     "GateActionDescriptor": {
       "type": "object",
@@ -993,6 +958,28 @@
                       "items": {
                         "type": "string"
                       }
+                    },
+                    "origin": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "agent"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "machine"
+                          ]
+                        }
+                      ]
+                    },
+                    "reason": {
+                      "type": "string"
+                    },
+                    "target_head": {
+                      "type": "string"
                     }
                   },
                   "required": [
@@ -1021,26 +1008,7 @@
           "type": "object",
           "properties": {
             "contract_status": {
-              "anyOf": [
-                {
-                  "type": "string",
-                  "enum": [
-                    "trusted"
-                  ]
-                },
-                {
-                  "type": "string",
-                  "enum": [
-                    "insufficient"
-                  ]
-                },
-                {
-                  "type": "string",
-                  "enum": [
-                    "contradicted"
-                  ]
-                }
-              ]
+              "$ref": "#/$defs/RoundVerificationStatus"
             },
             "evidence_status": {
               "anyOf": [
@@ -1379,6 +1347,25 @@
                 },
                 "target_head": {
                   "type": "string"
+                },
+                "origin": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "enum": [
+                        "agent"
+                      ]
+                    },
+                    {
+                      "type": "string",
+                      "enum": [
+                        "machine"
+                      ]
+                    }
+                  ]
+                },
+                "reason": {
+                  "type": "string"
                 }
               },
               "required": [
@@ -1502,79 +1489,6 @@
         "findings"
       ],
       "description": "v3.9.1: The live submission-guidance projection returned with a prepared\r\nround. It is derived from current facts only (committed rounds, policy,\r\nthe compiled state); it is never persisted and never becomes input to a\r\nlater prompt. Real ids are rendered only when the facts exist; a null\r\nexample means \"not usable at this submission point\"."
-    },
-    "MilestoneSummary": {
-      "type": "object",
-      "properties": {
-        "label": {
-          "type": "string"
-        },
-        "round_range": {
-          "type": "object",
-          "properties": {
-            "start": {
-              "type": "number"
-            },
-            "end": {
-              "type": "number"
-            }
-          },
-          "required": [
-            "start",
-            "end"
-          ]
-        },
-        "outcome": {
-          "type": "string"
-        },
-        "carried_constraints": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "resolved_constraints": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "kind": {
-          "anyOf": [
-            {
-              "type": "string",
-              "enum": [
-                "agent_declared"
-              ]
-            },
-            {
-              "type": "string",
-              "enum": [
-                "criteria_milestone"
-              ]
-            },
-            {
-              "type": "string",
-              "enum": [
-                "auto"
-              ]
-            }
-          ]
-        },
-        "generated_at_round": {
-          "type": "number"
-        }
-      },
-      "required": [
-        "label",
-        "round_range",
-        "outcome",
-        "carried_constraints",
-        "resolved_constraints",
-        "kind",
-        "generated_at_round"
-      ],
-      "description": "v2.1: Milestone summary — a phase-boundary snapshot that survives\r\nrolling-window eviction. Triggered by three signals in priority order:\r\n\r\n1. agent_declared    — compression_checkpoint === true (agent marks phase complete)\r\n2. criteria_milestone — a new met criterion_claim detected (semantic dedup)\r\n3. auto              — safety net after N rounds without a milestone\r\n\r\nBuilt from raw round data in vault entries — no new persistent storage.\r\nRendered in L2 prompts and always written to the state file."
     },
     "WorkerResult": {
       "type": "object",
@@ -1826,40 +1740,6 @@
       ],
       "description": "v3.8.1: a repeated machine fact, keyed by what it is ABOUT.\r\n\r\nOne derivation over the whole committed history replaces the three\r\nseparate views of \"what keeps going wrong\" this release removed:\r\n`Lesson` (whole history, count >= 2), `rolling_summary.recurring_issues`\r\n(the last 5 rounds' raw violation texts, no threshold at all despite the\r\nname), and the L1/L2 prompt sections built on top of each. Callers FILTER\r\nthis list — the state file renders the genuinely recurring set, the prompt\r\nrenders the recent tail."
     },
-    "RollingSummary": {
-      "type": "object",
-      "properties": {
-        "key_outcomes": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "rounds_sampled": {
-          "type": "number"
-        },
-        "generated_at_round": {
-          "type": "number"
-        },
-        "failed_patterns": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "milestones": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/MilestoneSummary"
-          }
-        }
-      },
-      "required": [
-        "key_outcomes",
-        "rounds_sampled",
-        "generated_at_round"
-      ]
-    },
     "SubGoalUpdate": {
       "type": "object",
       "properties": {
@@ -2073,12 +1953,6 @@
             "type": "string"
           }
         },
-        "revised_success_criteria": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/CriterionRevision"
-          }
-        },
         "wrong_assumptions": {
           "type": "array",
           "items": {
@@ -2193,9 +2067,6 @@
           ]
         },
         "force_level": {
-          "type": "string"
-        },
-        "external_context": {
           "type": "string"
         },
         "max_rounds": {
@@ -2362,7 +2233,7 @@
       "properties": {
         "schemaVersion": {
           "type": "number",
-          "const": 4
+          "const": 5
         },
         "roundId": {
           "type": "string"
@@ -2433,6 +2304,12 @@
         },
         "coverage": {
           "$ref": "#/$defs/PromptCoverage"
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       },
       "required": [
@@ -2501,16 +2378,6 @@
           "anyOf": [
             {
               "$ref": "#/$defs/LoopObjective"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "rolling_summary": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/RollingSummary"
             },
             {
               "type": "null"
@@ -2655,16 +2522,6 @@
             }
           ]
         },
-        "rolling_summary": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/RollingSummary"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "sub_goals": {
           "type": "array",
           "items": {
@@ -2789,33 +2646,6 @@
         "fix_instructions"
       ],
       "description": "Result of round-boundary enforcement. Decides whether to accept the round,\r\nreject it (force the agent to redo the SAME round), or terminate the loop.\r\n\r\naccept:    round passes; proceed to next round as normal.\r\nreject:    agent's self-evaluation or output is invalid; the agent receives\r\n           a rejection prompt and must redo the same round. Round counter\r\n           does NOT increment.\r\nterminate: loop has reached an unrecoverable state; stop immediately with\r\n           stopReason \"enforcement_terminated\"."
-    },
-    "ExternalContextRequest": {
-      "type": "object",
-      "properties": {
-        "loopId": {
-          "type": "string"
-        },
-        "round": {
-          "type": "number"
-        },
-        "task": {
-          "type": "string"
-        },
-        "domain": {
-          "type": "string"
-        },
-        "lastEvaluation": {
-          "$ref": "#/$defs/SelfEvaluation"
-        }
-      },
-      "required": [
-        "loopId",
-        "round",
-        "task",
-        "domain"
-      ],
-      "description": "Context supplied to an embedding-owned provider before compilation."
     },
     "LoopTerminalEvent": {
       "type": "object",
@@ -3148,7 +2978,8 @@
       "enum": [
         "trusted",
         "insufficient",
-        "contradicted"
+        "contradicted",
+        "not_applicable"
       ]
     },
     "ObservationStatus": {
@@ -3697,7 +3528,10 @@
         "invalid_argument",
         "gate_disabled",
         "loop_already_running",
-        "lease_conflict"
+        "lease_conflict",
+        "recovery_invalid",
+        "recovery_disabled",
+        "recovery_unavailable"
       ]
     },
     "ToolError": {

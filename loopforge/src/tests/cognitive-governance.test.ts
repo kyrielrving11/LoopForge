@@ -8,7 +8,6 @@ import {
   deriveStructuredGate,
   deriveGate,
   deriveGateId,
-  deriveTodoId,
   auditOrder,
   preflightStructuredGate,
 } from "../cognitive-governance.js";
@@ -84,10 +83,6 @@ describe("gate classification", () => {
     assert.equal(a.id, deriveGateId("Deploy to production"));
   });
 
-  it("todo ids are stable and prefixed", () => {
-    assert.match(deriveTodoId("audit cache layer"), /^todo-[a-f0-9]{8}$/);
-    assert.equal(deriveTodoId("audit cache layer"), deriveTodoId("audit cache layer"));
-  });
 });
 
 describe("auditOrder", () => {

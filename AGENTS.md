@@ -15,7 +15,9 @@ changes must preserve.
 - Edit `loopforge/src/protocol.ts` before changing protocol fields, then run the
   build to regenerate `loopforge-protocol.json` and `loopforge/dist/`.
 - Do not restore MCP Tasks, prompt-technique routing, automatic memory
-  discovery, PromptCraft vault writes, or Markdown lineage fallback.
+  discovery, PromptCraft vault writes, Markdown lineage fallback,
+  `LoopProjection`/todo/handoff, automatic phase milestones, external-context
+  injection, or Agent revision/retraction of operator acceptance.
 
 ## Source-of-truth invariants
 
@@ -30,20 +32,23 @@ LoopForge has one factual source and one cognitive source.
 - `derivationRounds(entries, N)` is the one history window used by compilation,
   projections, gates, audit, explain, and metrics.
 - The cognitive source is `CanonicalLoopState`, compiled from committed facts.
-- `DerivedCognitiveFacts` supplies todo, phase, delegation, and handoff (current
-  deliverable + remaining criteria + risks) to the status/advance projections.
-  It has no latest-outcome focus: Agent-authored progress narrative is not a
-  LoopForge projection.
+  It is a data projection; LoopForge does not generate plans, todos, phase
+  narratives, or handoff summaries.
+- Each committed transaction carries `transactionId` and `branchId`. A rollback
+  directive is a typed `rollback_directive` event, not a normal round; its
+  `transactionId` names the child branch. `resolveBranch` is the one branch
+  read model (`branchRounds`, `branchDirectives`, `pendingRollbackDirective`).
 - Agent conversation history and long-term memory are background, never an
-  input. The prompt carries current governance facts; full history is read on
-  demand from the derived state file, replay, audit or explain.
+  input. The prompt carries committed current-governance facts only; there is
+  no external-context injection or prompt pointer to the state file.
 - Replay, Audit, Metrics, and Explain are read-only views. They must not create
   a second history or independent derivation rule.
 
 Relationships use stable IDs, explicit references, normalized-exact text, or a
 content hash. Never reintroduce similarity matching or fuzzy identity.
-Rejected and in-flight attempts are not committed history. A backtrack is a
-rollback directive and is excluded from final history after its redo commits.
+Rejected and in-flight attempts are not committed history. A rollback directive
+is never overwritten by its redo; read-only views expose it as an event while
+`branchRounds` excludes the abandoned branch.
 
 ## Evaluation and submission boundary
 
@@ -62,6 +67,17 @@ Missing or mistyped core fields return `evaluation_invalid`. An invalid
 evaluation must not save session state, write the Vault, run verification or
 enforcement, increment rejection state, or record metrics. The same `roundId`
 can retry the corrected payload.
+
+`loopforge_next` accepts a top-level `recovery: { target_round, reason }` as a
+mutually exclusive alternative to `evaluation`. Recovery is a first-class
+action, not an evaluation: it requires no core fields, never fabricates one,
+and bypasses ordinary verification/enforcement of the abandoned work. The
+target must be an earlier committed evaluation on the current branch with an
+observed after-phase Git restore point; invalid targets return
+`recovery_invalid`/`recovery_unavailable`/`recovery_disabled` before any
+durable effect. Operator criteria and hard constraints are immutable:
+`revised_success_criteria` is retired, and `retracted_constraints` may only
+name Agent-discovered constraints.
 
 Optional fields are normalized and lenient. Three are structural exceptions —
 `subgoal_updates`, `round_contract`, and `execution_report.contract_item_claims`
@@ -135,13 +151,16 @@ SessionManager -> RoundLifecycle -> RoundDriver -> RoundCoordinator
 - Accept or stop commits the transaction and evidence.
 - Reject keeps the logical round ID, increments the attempt, and commits no
   round.
-- Backtrack commits a rollback decision, restores the round counter to the last
-  clean committed round, preserves valid discoveries, and requires workspace
-  restoration before the redo. The first post-rollback submission is a recovery
-  checkpoint: it proves the restore, and only then may the redo commit work.
-  Restoration is judged against the restore point's OWN machine snapshot — the
-  same HEAD and no dirty file the restore point did not already have — so
-  unrelated work in progress is never read as a failed restore.
+- Agent recovery or machine backtrack commits a `rollback_directive` event with
+  `origin`, `reason`/`trigger_rule`, target branch identity, skipped files and
+  preserved discoveries. It restores the round counter to `target + 1` and
+  requires workspace restoration before the redo. The first post-rollback
+  submission is a recovery checkpoint: it proves the restore, and only then may
+  the redo commit work. Restoration is judged against the restore point's OWN
+  machine snapshot — the same HEAD and no dirty file the restore point did not
+  already have — so unrelated work in progress is never read as a failed
+  restore. The directive event is never overwritten; the redo is a normal
+  evaluation on the child branch.
 - Terminate returns a terminal result without committing the rejected or
   terminating evaluation as a normal round.
 - Stop decisions prioritize an explicit blocked declaration. `completed`
@@ -153,8 +172,10 @@ SessionManager -> RoundLifecycle -> RoundDriver -> RoundCoordinator
   the lifecycle end. A violation is a code defect: it downgrades to `blocked`
   and reports, rather than throwing.
 
-Round IDs prevent lost responses and duplicate submissions. Transaction
-recovery must remain idempotent after process interruption.
+Round IDs prevent lost responses and duplicate submissions; `transactionId`
+(plus `branchId`) prevents a deep redo from replaying an abandoned commit at
+the same numeric round. Transaction recovery must remain idempotent after
+process interruption.
 
 ## Evidence and contract invariants
 
@@ -216,7 +237,7 @@ Round Contract rules:
 
 - A proposal is item-based and becomes active only after its declaring round
   commits.
-- v3.9.5: `work_item` is the bounded deliverable this slice produces (an
+- v3.9.6: `work_item` is the bounded deliverable this slice produces (an
   outcome, not an activity). New declarations must provide it, non-empty and
   <=200 chars, at the strict boundary; the persisted type stays optional so
   legacy committed contracts remain readable. `scope` must be present (empty
@@ -266,14 +287,15 @@ for audit/replay/explain/backtrack, but it is never a default prompt input,
 never a projection focus, and never machine evidence. `Recent Rounds`,
 `Cross-Round Outcomes`, `Full Rehydrated State`, agent `Discoveries`, and
 retired/failed-pattern history do not render in prompts; they remain in the
-derived state file and read models. L2 renders the shared protected sections,
-a `Phase` line, and at most three `Phase Anchors` (labels/ranges, no outcome);
-the full phase history stays in the state file. The fixed prompt header carries
-a static authority boundary: LoopForge's current committed projection wins for
-committed/verified state; Agent memory/session history is background and may
-contain unsubmitted, rejected or rolled-back work; a current user instruction
-defines the task. `state_file_content` remains a derived view; the prompt must
-never call it the source of truth. `Corrections` is committed
+derived state file and read models. There is no prompt `Phase`/`Phase Anchors`
+section and no LoopForge-generated milestone narrative; `compression_checkpoint`
+is only an Agent declaration and L2 boundary reason. The fixed prompt header
+carries a static authority boundary: LoopForge's current committed projection
+wins for committed/verified state; Agent memory/session history is background
+and may contain unsubmitted, rejected or rolled-back work; a current user
+instruction defines the task. `state_file_content` remains a derived view; the
+prompt must never call it the source of truth and must not tell the Agent to
+read it. `Corrections` is committed
 `wrong_assumptions` only; fallback `last_round_result` narrative,
 `prompt_requests`, agent-reported blockers, discoveries, progress evidence and
 remaining criteria do not become durable prompt/state projection input.

@@ -3,7 +3,7 @@
  * The compiler evolves structured state and renders one prompt artifact.
  * L0/L1/L2 control state density only; the external Agent owns reasoning.
  */
-import { type CriterionStatus, type RecurringFlag, type LoopCompileRequest, type LoopCompileResponse, type LoopObjective, type LoopRoundResult, type RollingSummary, type VerificationFlag } from "./protocol.js";
+import { type CriterionStatus, type RecurringFlag, type LoopCompileRequest, type LoopCompileResponse, type LoopObjective, type LoopRoundResult, type VerificationFlag } from "./protocol.js";
 import { type CommittedRoundView } from "./committed-round.js";
 import { type PromptFreshness } from "./prompt-freshness.js";
 import type { CriterionMachineFact } from "./round-facts.js";
@@ -35,6 +35,15 @@ export interface PreviousRoundFacts {
 export declare function computeGoalTextHash(text: string): string;
 export declare function deriveGoalId(loopId: string, task: string, explicit?: string): string;
 export declare function getPreviousRound(loopId: string, round: number, context: Record<string, unknown> | null): PreviousRound | null;
+export declare function latestObjective(loopId: string, context: Record<string, unknown> | null,
+/** Exclusive compile-round bound. A deep-restore redo must never read the
+ *  abandoned branch's objective (and its rolled-back refinements). */
+beforeRound: number,
+/** v3.9.4: a round-1 same-round retry has no earlier committed objective.
+ *  Reading the prior compile of the SAME round recovers the initial
+ *  criteria supplied to `loopforge_start`. It is never enabled for a first
+ *  attempt or for later rounds, so it cannot read an abandoned branch. */
+includeRoundOne?: boolean): LoopObjective | null;
 /** v3.8.1: THE recurring-fact derivation — one walk over the committed
  *  history, grouping repeated machine facts by what they are ABOUT.
  *
@@ -71,7 +80,6 @@ criterionFacts?: ReadonlyArray<CriterionMachineFact>): CriterionStatus[];
  *  EXACTLY equal after normalization (v3.8.1 — the similarity fallback is
  *  gone, so a paraphrase is a different criterion). */
 export declare function criteriaMatch(a: string, b: string): boolean;
-export declare function buildRollingSummary(loopId: string, currentRound: number, context: Record<string, unknown> | null, sinceRound?: number): RollingSummary | null;
 /** v2.11: Derive a stable constraint ID from its text hash (c-XXXXXXXX).
  *  Same hash strategy as SubGoal — deterministic across rounds. */
 export declare function deriveConstraintId(text: string): string;

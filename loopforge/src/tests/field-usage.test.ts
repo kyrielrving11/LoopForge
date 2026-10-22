@@ -54,13 +54,6 @@ const OPPORTUNITIES: Opportunity[] = [
     field: "objective_refinement",
   },
   {
-    name: "a success criterion was revised",
-    payload: {
-      revised_success_criteria: [{ old: "tests pass", new: "tests pass in CI" }],
-    },
-    field: "revised_success_criteria",
-  },
-  {
     name: "a checkpoint boundary was declared",
     payload: { compression_checkpoint: true, checkpoint_label: "parser complete" },
     field: "compression_checkpoint",

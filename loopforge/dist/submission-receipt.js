@@ -11,6 +11,7 @@
  *   - verification: what the machine observed/verified.
  * A saved report is never a verified fact.
  */
+import { ROUND_TRANSACTION_SCHEMA_VERSION, rootBranchId, } from "./round-transaction.js";
 import { deriveActiveRoundContract, deriveRoundContractView } from "./round-contract.js";
 import { deriveSubGoals } from "./subgoal-state.js";
 import { deriveEvidenceStatus } from "./verification-gate.js";
@@ -180,11 +181,17 @@ export function deriveSubmissionReceipt(input) {
             round: input.snapshot.round,
         }
         : null;
-    const rollback = pr.action === "backtrack"
+    const rollback = (pr.action === "backtrack" || pr.action === "recovery")
         ? {
-            restore_point: pr.backtrackTarget ?? Math.max(1, input.snapshot.round - 1),
-            preserved_discoveries: [...(pr.backtrackSkippedDiscoveries ?? [])],
-            wrong_assumptions: [...(pr.backtrackWrongAssumptions ?? [])],
+            restore_point: pr.recovery?.target ??
+                pr.backtrackTarget ?? Math.max(1, input.snapshot.round - 1),
+            preserved_discoveries: [...(pr.recovery?.skipped_discoveries ??
+                    pr.backtrackSkippedDiscoveries ?? [])],
+            wrong_assumptions: [...(pr.recovery?.wrong_assumptions ??
+                    pr.backtrackWrongAssumptions ?? [])],
+            ...(pr.recovery?.origin ? { origin: pr.recovery.origin } : {}),
+            ...(pr.recovery?.reason ? { reason: pr.recovery.reason } : {}),
+            ...(pr.recovery?.target_head ? { target_head: pr.recovery.target_head } : {}),
         }
         : null;
     const contractBefore = input.facts.contractBefore;
@@ -276,27 +283,26 @@ export function deriveCommittedSubmissionView(view, allViews) {
     };
     const pr = view.result ?? {
         action: view.action,
+        origin: view.kind === "rollback" ? (view.origin ?? "machine") : "evaluation",
+        ...(view.recovery ? { reason: view.recovery.reason, recovery: view.recovery } : {}),
         verificationFlags: view.verificationFlags,
         roundSuccess: view.success,
         gateContradicted: false,
-        verificationStatus: "trusted",
+        verificationStatus: view.kind === "rollback" ? "not_applicable" : "trusted",
         newConsecutiveRejections: 0,
         shouldPushSuccessTrajectory: false,
-        ...(view.backtrack
-            ? {
-                backtrackTarget: view.backtrack.target,
-                backtrackSkippedDiscoveries: [],
-            }
-            : {}),
     };
-    const disposition = view.action === "backtrack"
+    const disposition = view.kind === "rollback"
         ? "backtracked"
         : view.action === "stop"
             ? "stopped"
             : "accepted";
     const submittedFields = view.submittedFields;
     const snapshot = {
-        schemaVersion: 3,
+        schemaVersion: ROUND_TRANSACTION_SCHEMA_VERSION,
+        branchId: view.branchId ?? rootBranchId(view.loopId),
+        transactionId: view.transactionId ?? view.roundId,
+        kind: view.kind ?? "evaluation",
         roundId: view.roundId,
         loopId: view.loopId,
         round: view.round,

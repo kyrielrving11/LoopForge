@@ -8,15 +8,39 @@
 import type { LoopStore } from "./loop-store.js";
 import { LoopForgeEngine } from "./engine.js";
 import type { ObservationDelta } from "./evidence-provider.js";
-import type { ContractBinding, MachineObservation, PromptArtifact, SelfEvaluation, SubmissionDiagnostic } from "./protocol.js";
+import type { ContractBinding, MachineObservation, OperatorAcceptance, PromptArtifact, RecoveryDirective, SelfEvaluation, SubmissionDiagnostic } from "./protocol.js";
 import { type RoundProcessResult } from "./round-coordinator.js";
 import type { RoundCommitStore } from "./storage.js";
-/** v3.9.1: schema 3 embeds Git observation schema 2 (complete boundary
- *  fingerprints) and later adds optional diagnostics/manifest fields. */
-export declare const ROUND_TRANSACTION_SCHEMA_VERSION: 3;
+/** v3.9.6: schema 4 adds transaction/branch identity, kind, operator
+ *  acceptance and rollback directives. Schema 3 is unsupported. */
+export declare const ROUND_TRANSACTION_SCHEMA_VERSION: 4;
+/** The root branch identity for every loop. */
+export declare function rootBranchId(loopId: string): string;
+/** v3.9.6: deterministic transaction identity. The logical round identity is
+ *  still `roundId`; this id prevents a deep redo from replaying an abandoned
+ *  commit at the same numeric round. */
+export declare function deriveTransactionId(input: {
+    kind: "evaluation" | "rollback";
+    branchId: string;
+    roundId: string;
+    attempt: number;
+    promptHash?: string;
+    recovery?: Pick<RecoveryDirective, "target" | "reason" | "target_transaction_id">;
+}): string;
 export type RoundTransactionPhase = "prepared" | "prompted" | "evaluated" | "rejected" | "committed" | "terminated";
 export interface RoundTransactionSnapshot {
     schemaVersion: typeof ROUND_TRANSACTION_SCHEMA_VERSION;
+    /** v3.9.6: the transaction's branch. The root branch is
+     *  `loop:<loopId>:branch:root`; a rollback directive's transactionId names
+     *  the child branch used by its redo and all later transactions. */
+    branchId: string;
+    /** v3.9.6: stable identity of this transaction. `roundId` remains the
+     *  logical round; `transactionId` distinguishes a redo from an abandoned
+     *  commit at the same numeric round. */
+    transactionId: string;
+    /** v3.9.6: evaluations are normal work rounds; rollbacks are directives
+     *  that abandon a round without claiming work. */
+    kind: "evaluation" | "rollback";
     roundId: string;
     loopId: string;
     round: number;
@@ -25,6 +49,11 @@ export interface RoundTransactionSnapshot {
     beforeEvidence: MachineObservation[];
     afterEvidence?: MachineObservation[];
     evaluation?: SelfEvaluation;
+    /** v3.9.6: operator acceptance, written once on the root branch's round 1
+     *  evaluation transaction. Absent on every later transaction. */
+    operatorAcceptance?: OperatorAcceptance;
+    /** v3.9.6: committed rollback directive facts (rollback kind only). */
+    recovery?: RecoveryDirective;
     result?: RoundProcessResult;
     /** v3.9.1: every lossy normalization decision for this submission. Saved
      *  with the transaction; strict boundary failures never reach here. */
@@ -73,6 +102,15 @@ export interface RoundTransactionOutcome {
     /** true when a prior committed decision was replayed from the vault. */
     replayed: boolean;
 }
+/** v3.9.6: a first-class rollback directive. `snapshot` is the held
+ *  evaluation snapshot of the abandoned round; `recovery.transaction_id` is
+ *  both the directive transaction and the child branch identity. */
+export interface RecoveryTransactionInput {
+    snapshot: RoundTransactionSnapshot;
+    loopId: string;
+    recovery: RecoveryDirective;
+    actualEvidence: MachineObservation[];
+}
 /** v3.8/v3.9.1: The round's observation delta (before → after). Each entry
  *  carries raw before/after references; Git's `changedFiles` is the only
  *  file-change fact and is null when the pair cannot be compared. DERIVED,
@@ -85,7 +123,11 @@ export declare function deriveRoundObservationDelta(before: MachineObservation[]
  *  legacy documents explicitly instead of letting them vanish from history. */
 export declare function transactionSchemaVersionOf(value: unknown): number | null;
 export declare function makeRoundId(loopId: string, round: number): string;
-export declare function prepareRoundTransaction(loopId: string, round: number, beforeEvidence: MachineObservation[], promptArtifact?: PromptArtifact): RoundTransactionSnapshot;
+export declare function prepareRoundTransaction(loopId: string, round: number, beforeEvidence: MachineObservation[], promptArtifact?: PromptArtifact, opts?: {
+    branchId?: string;
+    operatorAcceptance?: OperatorAcceptance;
+    kind?: "evaluation";
+}): RoundTransactionSnapshot;
 /** Attach the next prompt attempt to a rejected logical round without changing
  * its identity or evidence baseline. Evaluation fields belong to the previous
  * attempt and are cleared before the Agent receives the retry prompt. */
@@ -99,6 +141,11 @@ export declare class RoundTransactionCoordinator {
     private readonly commitStore;
     constructor(engine: LoopForgeEngine, store?: LoopStore, commitStore?: RoundCommitStore);
     process(input: RoundTransactionInput): RoundTransactionOutcome;
+    /** v3.9.6: commit an Agent-initiated rollback directive. This path does not
+     *  run verification or enforcement: abandoning work is an action, not a
+     *  success claim. The directive is a typed event, not a `:feedback` round. */
+    commitRecovery(input: RecoveryTransactionInput): RoundTransactionOutcome;
+    private readRecoveryCommitted;
     /** Recover an already committed decision without evaluating or writing. */
     recover(snapshot: RoundTransactionSnapshot): RoundTransactionOutcome | null;
     private readCommitted;

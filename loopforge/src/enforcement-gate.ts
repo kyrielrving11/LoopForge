@@ -32,6 +32,7 @@ import type { RoundProcessResult } from "./round-coordinator.js";
 import {
   derivationRounds,
   decodeCommittedRound,
+  hasCommittedMachineBacktrack,
   machineEvidenceForRound,
   type CommittedRoundView,
 } from "./committed-round.js";
@@ -59,10 +60,7 @@ function hasCommittedBacktrack(
   vaultEntries: VaultEntry[],
   currentRound: number,
 ): boolean {
-  return vaultEntries.some((entry) => {
-    if (entryRound(entry) < currentRound) return false;
-    return committedRoundResult(entry)?.action === "backtrack";
-  });
+  return hasCommittedMachineBacktrack(vaultEntries, currentRound);
 }
 
 /** Check whether a committed round represents a clean restore point.
@@ -164,13 +162,15 @@ export function findBacktrackTargetSnapshot(
 export function recoveryBriefLines(input: {
   target: number;
   triggerRule: string;
-  /** v3.9.4: the enforcement gate's own sentence for WHY it rolled back.
-   *  This is a fact from the committed decision, not action advice — it is
-   *  the "Why This Happened" content the old prose header carried. */
+  origin?: "agent" | "machine";
+  /** Agent reason (agent origin) or machine failure reason. */
+  reason?: string;
+  /** v3.9.4: the enforcement gate's own sentence for WHY it rolled back. */
   failureReason?: string;
   failedRounds: string[] | number[];
   approaches: string[];
   wrongAssumptions: string[];
+  preservedDiscoveries?: string[];
   recoveryRoundId?: string;
   maxApproaches?: number;
   maxAssumptions?: number;
@@ -180,6 +180,12 @@ export function recoveryBriefLines(input: {
   const lines = [
     `- **Trigger**: ${input.triggerRule || "unknown"}`,
   ];
+  if (input.origin) {
+    lines.push(`- **Initiated by**: ${input.origin === "agent" ? "Agent" : "Machine"}`);
+  }
+  if (input.origin === "agent" && input.reason?.trim()) {
+    lines.push(`- **Agent reason**: ${input.reason.trim()}`);
+  }
   if (input.failureReason?.trim()) {
     lines.push(`- **Failure reason**: ${input.failureReason.trim()}`);
   }
@@ -190,21 +196,30 @@ export function recoveryBriefLines(input: {
     lines.push(`- **Recovery Round ID**: \`${input.recoveryRoundId}\``);
   }
   if (input.failedRounds.length > 0) {
-    lines.push(`- **Failed rounds**: ${input.failedRounds.join(", ")}`);
+    lines.push(
+      `- **${input.origin === "agent" ? "Abandoned" : "Failed"} rounds**: ${input.failedRounds.join(", ")}`,
+    );
   }
+  const approachLabel = input.origin === "agent" ? "Abandoned approach" : "Failed approach";
   const shown = input.approaches.slice(0, maxApproaches);
   for (const approach of shown) {
-    lines.push(`  - Failed approach: ${approach}`);
+    lines.push(`  - ${approachLabel}: ${approach}`);
   }
   if (input.approaches.length > shown.length) {
     lines.push(
-      `  - … and ${input.approaches.length - shown.length} more failed approaches`,
+      `  - … and ${input.approaches.length - shown.length} more ${approachLabel.toLowerCase()}s`,
     );
   }
   if (input.wrongAssumptions.length > 0) {
-    lines.push("- **Falsified assumptions** (do not rebuild on these):");
+    lines.push("- **Falsified assumptions (Agent reports)**:");
     for (const assumption of input.wrongAssumptions.slice(0, maxAssumptions)) {
       lines.push(`  - ${assumption}`);
+    }
+  }
+  if (input.preservedDiscoveries && input.preservedDiscoveries.length > 0) {
+    lines.push("- **Preserved discoveries (Agent reports)**:");
+    for (const discovery of input.preservedDiscoveries) {
+      lines.push(`  - ${discovery}`);
     }
   }
   return lines;

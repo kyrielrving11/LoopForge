@@ -31,7 +31,6 @@ export const FIELD_ORDER = [
     "wrong_assumptions",
     "objective_refinement",
     "retracted_constraints",
-    "revised_success_criteria",
     "round_contract",
     "worker_results",
     "prompt_requests",
@@ -207,19 +206,11 @@ const GUIDES = [
         purpose: "Existing constraints that are no longer correct or relevant.",
         when: "When a prior constraint is proven wrong or obsolete.",
         nature: "report",
-        downstream: "Retired from the active set (with the configured retirement window for plan/hard constraints).",
-        toolDescription: "Optional. Constraints the agent now believes are wrong or irrelevant, by " +
-            "c-XXXXXXXX id or exact text. Omit when none.",
-    },
-    {
-        path: "revised_success_criteria",
-        purpose: "Success criteria that need reformulation.",
-        when: "When the original criterion was incorrect or unmeasurable.",
-        nature: "report",
-        downstream: "Applied to the Loop Objective with a version bump.",
-        toolDescription: "Optional. Success criteria that need reformulation: each entry has the " +
-            "old and new wording. Keep criteria at acceptance granularity — if you " +
-            "cannot write a check for it, put the detail in sub-goals or task text.",
+        downstream: "Agent-discovered constraints only; operator criteria/hard constraints " +
+            "are immutable. Discovered retractions use the configured retirement window.",
+        toolDescription: "Optional. Agent-discovered constraints that are no longer valid, by " +
+            "c-XXXXXXXX id or exact text. Operator criteria/hard constraints cannot " +
+            "be retracted. Omit when none.",
     },
     {
         path: "round_contract",
@@ -229,17 +220,14 @@ const GUIDES = [
             "contract is open, omit it (or restate it unchanged) unless this round " +
             "closes it and declares a successor.",
         nature: "proposal",
-        decision: "No active contract: if the next slice is machine-checkable, name its " +
-            "deliverable and acceptance conditions",
+        decision: "The Agent decides the next slice; LoopForge only validates the declaration",
         downstream: "Becomes active only after this round commits; item ids rci-XXXXXXXX are " +
             "derived by the runtime.",
         toolDescription: "Proposal for the NEXT round's contract. work_item is the bounded " +
             "deliverable this slice produces (an outcome, not an activity) and is " +
             "required for a new proposal. items are acceptance conditions; each " +
             "item binds its own verify_with commands. scope is the machine-enforced " +
-            "file boundary. One contract may cover several criteria; group work by " +
-            "evidence and recovery, not by the requirement list. Declared here, it " +
-            "becomes the ACTIVE contract only after " +
+            "file boundary. Declared here, it becomes the ACTIVE contract only after " +
             "this round commits. While it is open, omitting it continues the " +
             "contract; a different proposal is ignored (contract_premature). " +
             "DECLARATION IS STRICT: missing work_item/scope, an item with no bound " +
@@ -372,6 +360,8 @@ const RETIRED_FIELDS = {
     progress_at_boundary: "removed in 3.9.0 — milestones render a round range, not a percentage",
     success_criteria_remaining: "removed in 3.8 — report criterion claims under execution_report.criterion_claims",
     next_action: "removed in 3.8 — the agent plans; LoopForge does not accept a next-action field",
+    revised_success_criteria: "removed in 3.9.6 — operator acceptance is immutable; report a conflict in " +
+        "wrong_assumptions or stop with outcome=blocked/needs_human_input",
 };
 export function fieldGuide(path) {
     return GUIDE_BY_PATH.get(path);
@@ -433,33 +423,17 @@ export function fieldExample(path, ctx) {
             return "<what you now understand better about the objective>";
         case "retracted_constraints":
             return ["<constraint text or c-XXXXXXXX id that is no longer valid>"];
-        case "revised_success_criteria":
-            return [{ old: "<old criterion>", new: "<new criterion>" }];
         case "round_contract": {
             if (!ctx.contractVerificationAvailable || ctx.commands.length === 0)
                 return null;
-            // v3.9.5 follow-up: a contract slice may cover several criteria. Show up
-            // to two real criteria so the example does not teach one-criterion rounds.
-            const criteria = (ctx.criteria ?? [])
-                .filter((criterion) => criterion.status === "remaining" || criterion.status === "unknown")
-                .slice(0, 2);
-            const workItem = clipContractText(ctx.currentRequirement) ||
-                "<the current requirement, one line>";
             return {
-                work_item: workItem,
-                items: criteria.length > 0
-                    ? criteria.map((criterion) => ({
-                        description: clipContractText(criterion.text),
-                        criterion_refs: [criterion.id],
+                work_item: "<bounded deliverable this slice produces>",
+                items: [{
+                        description: "<machine-checkable acceptance condition>",
+                        criterion_refs: [],
                         subgoal_refs: [],
                         verify_with: [ctx.commands[0]],
-                    }))
-                    : [{
-                            description: "<machine-checkable outcome for this requirement>",
-                            criterion_refs: [],
-                            subgoal_refs: [],
-                            verify_with: [ctx.commands[0]],
-                        }],
+                    }],
                 scope: ["<workspace-relative file or directory>"],
             };
         }
@@ -575,32 +549,18 @@ function renderContractGuidance(ctx) {
         ];
     }
     const commands = ctx.commands.slice(0, 3).join(", ");
-    const proposalDecision = GUIDE_BY_PATH.get("round_contract")?.decision
-        ?? "No active contract: if the next slice is machine-checkable, declare it";
-    // The current requirement — not an invented slice — is the natural
-    // deliverable seed. Real criterion ids/text and the real command are
-    // rendered; the runtime still derives rci- ids and the Agent still decides
-    // whether this is the right machine-checkable outcome.
     const example = fieldExample("round_contract", {
         activeContract: null,
         activeSubGoals: ctx.subGoals,
         commands: [...ctx.commands],
         contractVerificationAvailable: true,
         criteria: ctx.criteria,
-        currentRequirement: ctx.currentRequirement,
     });
     return [
-        "The current requirement is the natural deliverable seed — not an invented slice.",
-        "Phrase work_item as the outcome this slice produces, not the activity.",
-        "Declare it as-is only if the command below is its acceptance check; otherwise",
-        "describe the machine-checkable outcome and bind the command that actually",
-        "verifies it. items are acceptance conditions, not a task checklist.",
-        "Size the slice by evidence and recovery, not by the requirement list:",
-        "one contract may cover several criteria, and one criterion may span rounds.",
-        "Group changes that share one verification story and one recovery path;",
-        "do not create a contract per requirement or per criterion.",
+        "No active Round Contract. If this round should be machine-checked, the legal",
+        "declaration shape is below. The Agent decides the slice and the acceptance",
+        "conditions; LoopForge only validates structure, references and command bindings.",
         "The proposal activates only after this round commits.",
-        `${proposalDecision} → proposal below:`,
         "```json",
         JSON.stringify({ round_contract: example }, null, 1),
         "```",
@@ -741,7 +701,6 @@ export function renderSelfEvalBlock(ctx) {
         commands: ctx.commands,
         contractVerificationAvailable: ctx.contractVerificationAvailable,
         criteria: ctx.criteria ?? [],
-        currentRequirement: ctx.currentRequirement,
     };
     const lines = [
         "### LoopForge Evaluation (Required)",
@@ -823,7 +782,6 @@ export function deriveSubmissionGuidance(session, options) {
         commands: commandNames,
         contractVerificationAvailable: capability.contractVerificationAvailable,
         criteria,
-        currentRequirement: session.task?.trim() || activeContract?.work_item || "",
     };
     const artifact = session.roundSnapshot?.promptArtifact ??
         session.lastCompileResponse?.prompt_artifact;

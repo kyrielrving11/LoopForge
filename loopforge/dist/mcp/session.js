@@ -16,14 +16,10 @@ import { randomUUID } from "node:crypto";
 import { LoopForgeEngine } from "../engine.js";
 import { canonicalizeGateAction, deriveGate, preflightStructuredGate, } from "../cognitive-governance.js";
 import { makeGateDecision, makeLoopObjective } from "../protocol.js";
-import { buildLoopProjection } from "../loop-projection.js";
-import { deriveCognitiveFacts } from "../cognitive-facts.js";
-import { NO_IN_FLIGHT_ROUND, deriveRoundFacts } from "../round-facts.js";
-import { listVerifiedClaims } from "../evidence-claims.js";
 import { buildAudit } from "../audit.js";
 import { buildExplain } from "../explain.js";
 import { CHECK_CONTRACT_ITEMS_UNVERIFIED } from "../verification-gate.js";
-import { readOnlyRounds } from "../committed-round.js";
+import { readOnlyRollbacks, readOnlyRounds } from "../committed-round.js";
 import { deriveCommittedSubmissionView } from "../submission-receipt.js";
 import { getPolicy, validateLoopId } from "../policy.js";
 import { isRecord, unique } from "../token-utils.js";
@@ -36,7 +32,7 @@ import { policyMetrics, derivePolicyMetrics, mergePolicyMetrics, } from "../poli
 import { SessionLeaseConflictError, VaultSessionStateStore, } from "../storage.js";
 import { StorageCorruptionError } from "../loop-store.js";
 import { RoundLifecycle, buildLoopRequest, normalizeStartCriteria, } from "./round-lifecycle.js";
-import { activeContractOf, compileSessionContext, validateSubmission, } from "./submission-boundary.js";
+import { activeContractOf, validateSubmission, } from "./submission-boundary.js";
 // ── SessionManager ─────────────────────────────────────────────────────────
 export class SessionManager {
     sessions = new Map();
@@ -49,8 +45,6 @@ export class SessionManager {
     leaseRenewIntervalMs;
     leaseTimer = null;
     lifecycle;
-    /** Explicit context provider; never auto-discovered. */
-    contextProvider;
     terminalSinks = new Set();
     constructor(store, sessionStore) {
         this.loopStore = store ?? new FileLoopStore(getPolicy().backend.root_dir);
@@ -65,7 +59,6 @@ export class SessionManager {
             terminalSinks: this.terminalSinks,
             ownerId: this.ownerId,
             leaseMs: this.leaseMs,
-            getContext: () => this.contextProvider,
         });
         if (this.sessionStore?.renewLease) {
             this.leaseTimer = setInterval(() => this.renewOwnedLeases(), this.leaseRenewIntervalMs);
@@ -219,29 +212,6 @@ export class SessionManager {
                 refinement_history: [],
             });
         }
-        // Explicit context is requested by the MCP embedding; no auto-discovery.
-        if (this.contextProvider) {
-            try {
-                const ctx = {
-                    loopId,
-                    round: 1,
-                    task: input.task,
-                    domain: input.domain ?? "",
-                };
-                const rawContext = await this.contextProvider(ctx);
-                if (rawContext?.trim()) {
-                    request.external_context = rawContext.trim();
-                    logEvent("external_context_loaded", {
-                        loopId, round: 1,
-                        contextLength: request.external_context.length,
-                    });
-                }
-            }
-            catch {
-                // Provider failures are isolated from session creation.
-                logEvent("context_provider_error", { loopId, round: 1 });
-            }
-        }
         const prepared = await new RoundDriver(engine, this.loopStore).prepare(request, loopId, 1);
         const initialPrompt = prepared?.prompt ?? null;
         const initialLevel = prepared?.level ?? "l2";
@@ -316,8 +286,14 @@ export class SessionManager {
             }),
         ];
         const views = readOnlyRounds(entries);
-        const latest = views[views.length - 1];
-        return latest ? deriveCommittedSubmissionView(latest, views) : null;
+        const rollbacks = readOnlyRollbacks(entries);
+        const latestRound = views[views.length - 1];
+        const latestRollback = rollbacks[rollbacks.length - 1];
+        if (latestRollback &&
+            (!latestRound || latestRollback.round > latestRound.round)) {
+            return deriveCommittedSubmissionView(latestRollback, views);
+        }
+        return latestRound ? deriveCommittedSubmissionView(latestRound, views) : null;
     }
     get(sessionId) {
         return this.sessions.get(sessionId);
@@ -743,48 +719,6 @@ export class SessionManager {
      *  the runtime's submission boundary reads the same context (the sub-goal
      *  reference space is exactly the compiled set the prompt carried), and two
      *  copies would let the projection and the boundary disagree about it. */
-    compileContext(session) {
-        return compileSessionContext(session);
-    }
-    /** Typed cognitive state projection for an active session. Derived on
-     *  demand — zero persistence. Null when nothing meaningful exists yet. */
-    getProjection(sessionId) {
-        const session = this.sessions.get(sessionId);
-        if (!session)
-            return null;
-        const prefix = `loop:${session.loopId}:`;
-        const entries = [
-            ...queryLoopEntries(this.loopStore, session.loopId, { prefix }),
-            ...queryLoopEntries(this.loopStore, session.loopId, { prefix, feedbackOnly: true }),
-        ];
-        const compileResponse = this.compileContext(session);
-        const openGates = this.lifecycle.listOpenGateDescriptions(session.loopId);
-        // v3.8: the projection reads the WHOLE committed history. The old
-        // `beforeRound: session.currentRound` bound is only correct while the loop
-        // is running, where currentRound is always one past the last committed
-        // round; a stop / terminate / max_rounds leaves currentRound ON the round
-        // it just committed, so the bound silently dropped the loop's final round
-        // and the projection disagreed with audit and explain about it.
-        // v3.8.1: one window, one decode, one derivation. The contract facts come
-        // from the same `deriveRoundFacts` the compile path calls, so the prompt
-        // and the projection cannot tell different stories about what the machine
-        // verified.
-        const rounds = readOnlyRounds(entries);
-        const projection = buildLoopProjection(deriveCognitiveFacts({
-            compileResponse,
-            rounds,
-            facts: deriveRoundFacts({
-                rounds,
-                currentRound: (rounds[rounds.length - 1]?.round ?? 0) + 1,
-                inFlight: NO_IN_FLIGHT_ROUND,
-                subGoals: compileResponse?.sub_goals ?? [],
-                commands: getPolicy().evidence.commands ?? [],
-            }),
-            verifiedClaims: listVerifiedClaims(entries, session.loopId),
-            openGates,
-        }));
-        return projection ? { ...projection } : null;
-    }
     /** v3.8: Read-only per-round "why" view over committed facts. Never
      *  rebuilds history and never writes. */
     getExplain(loopId, round) {
@@ -937,6 +871,53 @@ export class SessionManager {
             }
         });
     }
+    /** v3.9.6: submit an Agent-initiated recovery. Shape validation happens
+     *  before the session queue/lease; target referential validation happens in
+     *  the lifecycle against committed facts. */
+    async recover(sessionId, recovery, roundId) {
+        const invalid = (detail) => ({
+            sessionId,
+            round: this.sessions.get(sessionId)?.currentRound ?? 0,
+            prompt: null,
+            submissionError: {
+                code: "recovery_invalid",
+                details: { reason_code: "invalid_shape", detail },
+            },
+        });
+        if (!isRecord(recovery))
+            return invalid("recovery must be an object");
+        const keys = Object.keys(recovery);
+        if (keys.some((key) => key !== "target_round" && key !== "reason")) {
+            return invalid("recovery accepts only target_round and reason");
+        }
+        if (!Number.isInteger(recovery.target_round)) {
+            return invalid("target_round must be an integer");
+        }
+        if (typeof recovery.reason !== "string" ||
+            recovery.reason.trim().length === 0 ||
+            recovery.reason.length > 500) {
+            return invalid("reason must be a non-empty string of at most 500 characters");
+        }
+        return this.withSessionQueue(sessionId, async () => {
+            const session = this.sessions.get(sessionId);
+            if (session?.status === "running" &&
+                !this.renewSessionLease(session.loopId)) {
+                return this.leaseConflictResult(session.loopId, this.findSessionEntry(session.loopId));
+            }
+            try {
+                return await this.lifecycle.recover(sessionId, {
+                    target_round: recovery.target_round,
+                    reason: recovery.reason,
+                }, roundId);
+            }
+            catch (error) {
+                if (error instanceof SessionLeaseConflictError) {
+                    return this.leaseConflictResult(error.loopId, this.findSessionEntry(error.loopId));
+                }
+                throw error;
+            }
+        });
+    }
     /** Replay timeline for a session — creates ReplayBackend from the stored backend. */
     replayTimeline(sessionId) {
         const session = this.sessions.get(sessionId);
@@ -955,6 +936,26 @@ export class SessionManager {
         const replay = new ReplayBackend(this.loopStore);
         const timeline = replay.timeline(loopId);
         return timeline.length > 0 ? timeline : null;
+    }
+    /** v3.9.6: committed rollback directives for the replay view. They are
+     *  events, not normal rounds; the timeline stays a normal-round projection. */
+    replayRollbacks(loopId) {
+        validateLoopId(loopId);
+        const entries = queryLoopEntries(this.loopStore, loopId, {
+            prefix: `loop:${loopId}:`,
+        });
+        return readOnlyRollbacks(entries).map((view) => ({
+            round: view.round,
+            roundId: view.roundId,
+            transactionId: view.transactionId ?? view.roundId,
+            branchId: view.branchId ?? null,
+            origin: view.origin === "agent" ? "agent" : "machine",
+            target: view.recovery?.target ?? 0,
+            reason: view.recovery?.reason ?? "",
+            targetHead: view.recovery?.target_head ?? null,
+            skippedFiles: [...(view.recovery?.skipped_files ?? [])],
+            preservedDiscoveries: [...(view.recovery?.skipped_discoveries ?? [])],
+        }));
     }
     /** v3.9.1: unsupported envelope versions for a loop, reported explicitly
      *  rather than silently dropped from replay/audit. */

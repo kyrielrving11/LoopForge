@@ -1035,20 +1035,6 @@ describe("MCP P0 lifecycle regressions", () => {
       maxRounds: 30,
     });
     const sessionId = started.sessionId;
-    let releaseProvider!: () => void;
-    let markProviderStarted!: () => void;
-    const providerStarted = new Promise<void>((resolve) => {
-      markProviderStarted = resolve;
-    });
-    const providerGate = new Promise<void>((resolve) => {
-      releaseProvider = resolve;
-    });
-    mgr.contextProvider = async () => {
-      markProviderStarted();
-      await providerGate;
-      return "";
-    };
-
     const evaluation = {
       success: false,
       output_summary: "partial",
@@ -1062,18 +1048,7 @@ describe("MCP P0 lifecycle regressions", () => {
     } as SelfEvaluation;
 
     const first = mgr.advance(sessionId, "", evaluation);
-    await providerStarted;
-    let secondSettled = false;
-    const second = mgr.advance(sessionId, "", evaluation).then((result) => {
-      secondSettled = true;
-      return result;
-    });
-    await new Promise((resolve) => setTimeout(resolve, 25));
-
-    assert.equal(secondSettled, false);
-    assert.equal(mgr.get(sessionId)?.currentRound, 2);
-    releaseProvider();
-
+    const second = mgr.advance(sessionId, "", evaluation);
     const [firstResult, secondResult] = await Promise.all([first, second]);
     assert.equal(firstResult.round, 2);
     assert.equal(secondResult.round, 3);
@@ -1086,28 +1061,13 @@ describe("MCP P0 lifecycle regressions", () => {
       loopId: "pause-during-advance-regression",
       maxRounds: 30,
     });
-    let releaseProvider!: () => void;
-    let markProviderStarted!: () => void;
-    const providerStarted = new Promise<void>((resolve) => {
-      markProviderStarted = resolve;
-    });
-    const providerGate = new Promise<void>((resolve) => {
-      releaseProvider = resolve;
-    });
-    mgr.contextProvider = async () => {
-      markProviderStarted();
-      await providerGate;
-      return "";
-    };
-
     const advancing = mgr.advance(
       started.sessionId,
       "",
       continuingEvaluation(),
     );
-    await providerStarted;
+    await Promise.resolve();
     assert.equal(mgr.pause(started.sessionId).status, "paused");
-    releaseProvider();
 
     const result = await advancing;
     assert.equal(result.stopReason, "paused");
@@ -1121,28 +1081,13 @@ describe("MCP P0 lifecycle regressions", () => {
       loopId: "stop-during-advance-regression",
       maxRounds: 30,
     });
-    let releaseProvider!: () => void;
-    let markProviderStarted!: () => void;
-    const providerStarted = new Promise<void>((resolve) => {
-      markProviderStarted = resolve;
-    });
-    const providerGate = new Promise<void>((resolve) => {
-      releaseProvider = resolve;
-    });
-    mgr.contextProvider = async () => {
-      markProviderStarted();
-      await providerGate;
-      return "";
-    };
-
     const advancing = mgr.advance(
       started.sessionId,
       "",
       continuingEvaluation(),
     );
-    await providerStarted;
+    await Promise.resolve();
     assert.equal(mgr.delete(started.sessionId), true);
-    releaseProvider();
 
     const result = await advancing;
     assert.equal(result.stopReason, "stopped");
@@ -1274,7 +1219,7 @@ describe("MCP P0 lifecycle regressions", () => {
 
     const persisted = counting.readSession("atomic-session-save")
       ?.entry?.loop_lineage?.round_snapshot as Record<string, unknown> | undefined;
-    assert.equal(persisted?.schemaVersion, 3);
+    assert.equal(persisted?.schemaVersion, 4);
     assert.equal(persisted?.roundId, started.roundId);
   });
 });
@@ -1532,20 +1477,28 @@ describe("MCP — tool contract (v3.2.1)", async () => {
       "instructions must point at the submission receipt");
   });
 
-  it("loopforge_next schema requires the evaluation parameter", () => {
-    assert.throws(() => {
+  it("loopforge_next schema accepts evaluation or recovery", () => {
+    assert.doesNotThrow(() => {
       validateToolInput("loopforge_next", {
         sessionId: "s1",
         roundId: "r1",
         output: "## Round Output",
       });
-    }, /evaluation is required/);
+    });
 
     assert.doesNotThrow(() => {
       validateToolInput("loopforge_next", {
         sessionId: "s1",
         roundId: "r1",
         evaluation: evalParam({ success: false, shouldContinue: true }),
+      });
+    });
+
+    assert.doesNotThrow(() => {
+      validateToolInput("loopforge_next", {
+        sessionId: "s1",
+        roundId: "r1",
+        recovery: { target_round: 2, reason: "abandon this branch" },
       });
     });
 
@@ -2140,13 +2093,8 @@ describe("MCP — Round Contract flow", async () => {
     });
     assert.equal(stopped.stopReason, "completed");
 
-    const projection = await mgr.getProjection(started.sessionId) as Record<string, unknown>;
-    assert.deepEqual(
-      projection.verified_subgoals,
-      [{ subgoal_id: subGoalId, contract_item_ids: [itemId], verified_at_round: 3 }],
-      "the final committed round is machine history — the projection must include it",
-    );
-    // The audit reads the same history and must agree.
+    // v3.9.6: the typed projection is removed; the audit reads the same
+    // committed history and exposes the verified contract facts.
     const audit = await mgr.getAudit("projection-stop") as {
       contracts: { verifiedItems: number };
     } | null;

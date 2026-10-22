@@ -12,8 +12,6 @@ import type { DerivedGate, GateActionDescriptor } from "./protocol.js";
 import type { VaultEntry } from "./loop-store.js";
 /** Stable gate ID from canonicalized gate text (gate- + sha256 slice 12). */
 export declare function deriveGateId(text: string): string;
-/** Stable todo item ID (todo- + sha256 slice 8) for the LoopProjection. */
-export declare function deriveTodoId(text: string): string;
 /** Canonical serialization — sorted scope/effects make the hash stable
  *  across field-order and whitespace differences. */
 export declare function canonicalizeGateAction(action: GateActionDescriptor): string;

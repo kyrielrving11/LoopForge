@@ -180,18 +180,6 @@ describe("RoundDriver", () => {
       { id: deriveSubGoalId("driver-cross-round", 1, 1, "Wire config"), status: "done" },
     ]);
 
-    // And the compiled round-2 response derives the agent_declared milestone
-    const r2 = engine.invokeLoopCompile(
-      { ...request("driver-cross-round"), round: 2 },
-      undefined,
-      { persistLineage: false },
-    );
-    const milestones = r2.response?.rolling_summary?.milestones ?? [];
-    assert.ok(
-      milestones.some((m) => m.kind === "agent_declared"),
-      `expected agent_declared milestone, got ${JSON.stringify(milestones)}`,
-    );
-    assert.equal(milestones[0].label, "Phase 1 done");
   });
 
   it("rebuilds an equivalent state file from the vault after deletion", async () => {

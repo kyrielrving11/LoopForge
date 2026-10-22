@@ -6,7 +6,11 @@
  * writes. Every fact it prints is one the runtime already derived.
  */
 
-import { observedGitHead, readOnlyRounds } from "./committed-round.js";
+import {
+  observedGitHead,
+  readOnlyRollbacks,
+  readOnlyRounds,
+} from "./committed-round.js";
 import { deriveCommittedSubmissionView } from "./submission-receipt.js";
 import type { SubmissionReceipt } from "./protocol.js";
 import { deriveActiveRoundContract, deriveRoundContractView } from "./round-contract.js";
@@ -72,6 +76,16 @@ export interface ExplainResult {
   rounds: ExplainRound[];
   /** The contract active for the NEXT round (derived), when one exists. */
   activeContract: { id: string; work_item?: string; itemCount: number } | null;
+  /** v3.9.6: committed rollback directives as events, never normal rounds. */
+  rollbacks: Array<{
+    round: number;
+    transactionId: string;
+    origin: "agent" | "machine";
+    target: number;
+    reason: string;
+    targetHead?: string;
+    skippedFiles: string[];
+  }>;
 }
 
 /** Build the explain view. Pure and read-only. */
@@ -181,6 +195,15 @@ export function buildExplain(
     activeContract: active
       ? { id: active.id, work_item: active.work_item, itemCount: active.items.length }
       : null,
+    rollbacks: readOnlyRollbacks(entries).map((view) => ({
+      round: view.round,
+      transactionId: view.transactionId ?? view.roundId,
+      origin: view.origin === "agent" ? "agent" as const : "machine" as const,
+      target: view.recovery?.target ?? 0,
+      reason: view.recovery?.reason ?? "",
+      ...(view.recovery?.target_head ? { targetHead: view.recovery.target_head } : {}),
+      skippedFiles: [...(view.recovery?.skipped_files ?? [])],
+    })),
   };
 }
 

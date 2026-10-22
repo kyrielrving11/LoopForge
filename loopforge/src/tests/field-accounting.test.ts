@@ -126,12 +126,6 @@ const CASES: FieldCase[] = [
     invalid: "not-array",
     partial: ["old constraint", 1],
   },
-  {
-    path: "revised_success_criteria",
-    valid: [{ old: "tests pass", new: "tests pass in CI" }],
-    invalid: "not-array",
-    partial: [{ old: "tests pass", new: "tests pass in CI" }, 1],
-  },
   { path: "round_contract", valid: VALID_CONTRACT, invalid: null },
   {
     path: "worker_results",

@@ -155,10 +155,19 @@ its policy. The result is an explicit round disposition:
 
 - **Accept:** commit the round and continue.
 - **Reject:** commit no round and retry the same logical `roundId`.
-- **Backtrack:** record a rollback directive, restore the last clean point, and
-  redo the round with a Recovery Brief.
+- **Recovery:** the Agent may abandon the current branch with a top-level
+  `recovery: { target_round, reason }` request. LoopForge validates the target
+  against committed history and an observed Git restore point, records a
+  rollback directive event, and lets the Agent restore the workspace; the redo
+  is checked against that point. LoopForge never chooses the target or judges
+  the reason. Machine-origin backtrack uses the same directive record.
 - **Terminate:** stop the loop without writing a rejected or unsafe attempt as
   normal history.
+
+The operator's task, success criteria, and hard constraints are written once at
+`loopforge_start` and are immutable. The Agent may add discovered constraints,
+report wrong assumptions, or stop blocked; it cannot revise or retract the
+operator acceptance surface.
 
 ### Contracts close only on machine-backed facts
 
@@ -193,11 +202,13 @@ library for custom integrations. See [`loopforge/README.md`](./loopforge/README.
    constraints.
 2. LoopForge returns a prompt and a stable `roundId`.
 3. The Agent changes the workspace and submits a structured `evaluation` with
-   `loopforge_next`.
+   `loopforge_next` — or, to abandon the current branch, a top-level
+   `recovery: { target_round, reason }` instead of an evaluation.
 4. LoopForge validates the payload, observes the workspace, verifies the claim,
-   and returns the round disposition.
+   and returns the round disposition. For recovery it validates the target and
+   records a rollback directive event instead of a work round.
 5. An accepted round enters history; the next prompt is compiled from the new
-   committed state.
+   committed state. A recovery returns the redo prompt for the restored point.
 
 The four core evaluation fields are strict: `success`, `output_summary`,
 `constraint_violations`, and `should_continue`. A malformed core payload

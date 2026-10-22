@@ -7,7 +7,7 @@
  */
 import type { LoopStore } from "./loop-store.js";
 import { type AgentLoopResult, type LoopForgeRequest, type SelfEvaluation, type SessionState } from "./protocol.js";
-export { parseExecutionReport, parseCriterionRevisions, parseWorkerResults, buildSelfEvaluation, } from "./self-eval.js";
+export { parseExecutionReport, parseWorkerResults, buildSelfEvaluation, } from "./self-eval.js";
 /** A single sub-agent delegation record (v1.9 — AgentTool mode).
  *  v3.7.1: outcome is the single fact; success is deleted. */
 export interface DelegationEntry {
@@ -108,6 +108,20 @@ export declare class LoopForgeEngine {
      *  Call this BEFORE invokeLoopCompile for the next round so that
      *  hydrateLoopContext picks up the latest success flags. */
     autoFeedback(selfEval: SelfEvaluation, loopId: string, round: number, task: string, roundTransaction?: Record<string, unknown>): boolean;
+    /** v3.9.6: commit a rollback directive as a typed round event. It never
+     *  occupies the `:feedback` slot, so a redo at the same round cannot
+     *  overwrite the audit fact. */
+    commitRollbackDirective(input: {
+        loopId: string;
+        round: number;
+        transactionId: string;
+        envelope: {
+            schema_version: number;
+            round_id: string;
+            snapshot: unknown;
+            result: unknown;
+        };
+    }): boolean;
     invokeLoopCompile(request: LoopForgeRequest, hydrateResults?: Record<string, unknown> | null, options?: {
         persistLineage?: boolean;
     }): AgentLoopResult;

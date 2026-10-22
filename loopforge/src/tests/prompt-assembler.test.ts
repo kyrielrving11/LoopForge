@@ -20,7 +20,7 @@ import * as verificationGate from "../verification-gate.js";
 
 function minimalState(overrides: Partial<CanonicalLoopState> = {}): CanonicalLoopState {
   return {
-    schemaVersion: 2 as const,
+    schemaVersion: 3 as const,
     loopId: "test-loop",
     round: 1,
     maxRounds: 20,
@@ -38,13 +38,9 @@ function minimalState(overrides: Partial<CanonicalLoopState> = {}): CanonicalLoo
     blockers: [],
     verificationFlags: [],
     discoveries: [],
-    rollingOutcomes: [],
-    failedPatterns: [],
-    milestones: [],
     subGoals: [],
     criterionStatuses: [],
     recurringFlags: [],
-    externalContext: "",
     stateFilePath: ".loopforge/state/test.md",
     capability: deriveConfiguredCapability(DEFAULT_POLICY),
     progress: {
@@ -128,14 +124,6 @@ describe("assemblePromptArtifact — L1", () => {
     assert.ok(artifact.renderedPrompt.includes("`sg-2`"), "should render sub-goal ID sg-2");
   });
 
-  it("v3.9.5: does not replay recent-round outcomes", () => {
-    const state = minimalState({
-      rollingOutcomes: ["[R1] accepted: fixed auth"],
-    });
-    const artifact = assemblePromptArtifact(input({ level: "l1", state }));
-    assert.ok(!artifact.renderedPrompt.includes("Recent Rounds"));
-    assert.ok(!artifact.renderedPrompt.includes("fixed auth"));
-  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -143,25 +131,6 @@ describe("assemblePromptArtifact — L1", () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("assemblePromptArtifact — L2", () => {
-  it("v3.9.5: renders phase anchors without milestone outcomes or history", () => {
-    const state = minimalState({
-      milestones: [{
-        label: "Phase 1",
-        round_range: { start: 1, end: 5 },
-        outcome: "completed core",
-        carried_constraints: ["no deps"],
-        resolved_constraints: [],
-        kind: "auto",
-        generated_at_round: 5,
-      }],
-    });
-    const artifact = assemblePromptArtifact(input({ level: "l2", state }));
-    assert.ok(artifact.renderedPrompt.includes("Phase Anchors"));
-    assert.ok(artifact.renderedPrompt.includes("Phase 1"));
-    assert.ok(!artifact.renderedPrompt.includes("Outcome:"));
-    assert.ok(!artifact.renderedPrompt.includes("completed core"));
-    assert.ok(!artifact.renderedPrompt.includes("no deps"));
-  });
 
   it("includes sub-goal dashboard when sub-goals exist", () => {
     const state = minimalState({
@@ -216,15 +185,6 @@ describe("assemblePromptArtifact — L2", () => {
     assert.match(artifact.renderedPrompt, /16 total · 16 active · 0 done · 0 canceled/);
   });
 
-  it("v3.9.5: does not render failed patterns in the prompt", () => {
-    const state = minimalState({
-      failedPatterns: ["repeated auth failure pattern"],
-    });
-    const artifact = assemblePromptArtifact(input({ level: "l2", state }));
-    assert.ok(!artifact.renderedPrompt.includes("Failed Patterns"));
-    assert.ok(!artifact.renderedPrompt.includes("repeated auth failure pattern"));
-  });
-
   it("keeps L2 prompts within the L2 budget", () => {
     const artifact = assemblePromptArtifact(input({ level: "l2" }));
     assert.ok(artifact.renderedPrompt.length <= DEFAULT_PROMPT_BUDGETS.l2);
@@ -232,10 +192,6 @@ describe("assemblePromptArtifact — L2", () => {
 
   it("v3.9.5: L2 always renders structured sections, never the state blob", () => {
     const state = minimalState({
-      milestones: [{
-        label: "Phase 1", round_range: { start: 1, end: 5 },
-        outcome: "done", carried_constraints: [], resolved_constraints: [], kind: "auto" as const, generated_at_round: 5,
-      }],
       subGoals: [
         { id: "sg-1", description: "Task A", status: "done" as const,
           declared_at_round: 1, status_changed_at_round: 3,
@@ -249,7 +205,8 @@ describe("assemblePromptArtifact — L2", () => {
       retiredConstraints: ["old-rule"],
     });
     const artifact = assemblePromptArtifact(input({ level: "l2", state }));
-    assert.ok(artifact.renderedPrompt.includes("Phase Anchors"));
+    assert.ok(!artifact.renderedPrompt.includes("Phase Anchors"),
+      "v3.9.6 removes LoopForge-authored phase narrative");
     assert.ok(artifact.renderedPrompt.includes("Active Sub-Goals"));
     assert.ok(!artifact.renderedPrompt.includes("Progress Dashboard"));
     assert.ok(!artifact.renderedPrompt.includes("Retired Constraints"));
@@ -291,34 +248,11 @@ describe("assemblePromptArtifact — memory boundary", () => {
     assert.ok(artifact.renderedPrompt.includes("derived"));
   });
 
-  it("renders only the latest three phase anchors, never outcomes", () => {
-    const milestones = Array.from({ length: 5 }, (_, index) => ({
-      label: `Phase ${index + 1}`,
-      round_range: { start: index + 1, end: index + 1 },
-      outcome: `outcome ${index + 1}`,
-      carried_constraints: [],
-      resolved_constraints: [],
-      kind: "auto" as const,
-      generated_at_round: index + 1,
-    }));
-    const artifact = assemblePromptArtifact(input({
-      level: "l2",
-      state: minimalState({ milestones }),
-    }));
-    assert.ok(artifact.renderedPrompt.includes("Phase 3"));
-    assert.ok(artifact.renderedPrompt.includes("Phase 4"));
-    assert.ok(artifact.renderedPrompt.includes("Phase 5"));
-    assert.ok(!artifact.renderedPrompt.includes("Phase 1"));
-    assert.ok(!artifact.renderedPrompt.includes("Phase 2"));
-    assert.ok(!artifact.renderedPrompt.includes("outcome 5"));
-  });
-
   it("renders committed Corrections but not output summaries", () => {
     const artifact = assemblePromptArtifact(input({
       level: "l1",
       state: minimalState({
         corrections: ["Corrected assumption: old belief"],
-        rollingOutcomes: ["[R1] accepted: prior summary"],
       }),
     }));
     assert.ok(artifact.renderedPrompt.includes("Corrections (committed reports)"));
@@ -331,7 +265,6 @@ describe("assemblePromptArtifact — memory boundary", () => {
       level: "l2",
       state: minimalState({
         blockers: ["reported blocker"],
-        externalContext: "external notes",
         recurringFlags: [{
           subject: "test_files_modified",
           kind: "verification_warning",
@@ -343,7 +276,6 @@ describe("assemblePromptArtifact — memory boundary", () => {
       }),
     }));
     assert.ok(artifact.renderedPrompt.includes("Blockers (reported/current)"));
-    assert.ok(artifact.renderedPrompt.includes("External Context (agent-supplied)"));
     assert.ok(artifact.renderedPrompt.includes("Recurring Findings"));
     assert.ok(artifact.renderedPrompt.includes("Corrections (committed reports)"));
   });
@@ -353,19 +285,8 @@ describe("assemblePromptArtifact — memory boundary", () => {
       level: "l2",
       state: minimalState({
         corrections: ["Corrected assumption: old belief"],
-        rollingOutcomes: ["[R1] accepted: prior summary"],
         discoveries: ["a discovery"],
         retiredConstraints: ["old rule"],
-        failedPatterns: ["pattern"],
-        milestones: [{
-          label: "Core",
-          round_range: { start: 1, end: 2 },
-          outcome: "done",
-          carried_constraints: [],
-          resolved_constraints: [],
-          kind: "auto",
-          generated_at_round: 2,
-        }],
       }),
     }));
     for (const id of [
@@ -788,46 +709,12 @@ describe("v3.2 — verification flag actions", () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 // ═══════════════════════════════════════════════════════════════════════════
-// v3.2 — external context in L1
-// ═══════════════════════════════════════════════════════════════════════════
-
-describe("v3.2 — external context in L1", () => {
-  it("renders External Context in L1 when provided", () => {
-    const artifact = assemblePromptArtifact(input({
-      level: "l1",
-      state: minimalState({ externalContext: "Repo convention: ESM only, no CommonJS." }),
-    }));
-    assert.ok(artifact.renderedPrompt.includes("External Context"));
-    assert.ok(artifact.renderedPrompt.includes("ESM only"));
-  });
-
-  it("omits External Context from L1 when empty", () => {
-    const artifact = assemblePromptArtifact(input({ level: "l1" }));
-    assert.ok(!artifact.renderedPrompt.includes("External Context"));
-  });
-
-  it("keeps L0 free of External Context", () => {
-    const artifact = assemblePromptArtifact(input({
-      level: "l0",
-      state: minimalState({ externalContext: "Repo convention: ESM only." }),
-    }));
-    assert.ok(!artifact.renderedPrompt.includes("External Context"));
-  });
-});
-
-// ═══════════════════════════════════════════════════════════════════════════
 // v3.3 — Roadmap section, machine dashboard rows, round stats
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("v3.3 — Roadmap section", () => {
   const roadmapState = (): CanonicalLoopState => minimalState({
     round: 7,
-    milestones: [{
-      label: "Core Module", round_range: { start: 1, end: 4 },
-      outcome: "completed core module", carried_constraints: [],
-      resolved_constraints: [],
-      kind: "auto" as const, generated_at_round: 4,
-    }],
     criterionStatuses: [
       { id: "cr-11111111", text: "all tests pass", status: "verified" as const, met_at_round: 3, related_subgoal_ids: [] },
       { id: "cr-22222222", text: "no regressions", status: "remaining" as const, related_subgoal_ids: [] },
@@ -838,26 +725,6 @@ describe("v3.3 — Roadmap section", () => {
     ],
   });
 
-  it("includes the one-line Phase section in structured L2 when data present", () => {
-    const artifact = assemblePromptArtifact(input({
-      level: "l2", state: roadmapState(),
-    }));
-    assert.ok(artifact.renderedPrompt.includes("### Phase"));
-    assert.ok(artifact.renderedPrompt.includes("round 7/20"));
-    assert.ok(artifact.renderedPrompt.includes("3 rounds since the last boundary"));
-    assert.ok(!artifact.renderedPrompt.includes("### Roadmap"));
-  });
-
-  it("renders the Phase line in L1 when a phase exists and omits it when none does", () => {
-    const artifact = assemblePromptArtifact(input({ level: "l1", state: roadmapState() }));
-    assert.ok(artifact.renderedPrompt.includes("### Phase"));
-
-    // No milestone → no phase to name, and the line stays out entirely
-    // (position alone is already in the prompt header).
-    const empty = assemblePromptArtifact(input({ level: "l1", state: minimalState() }));
-    assert.ok(!empty.renderedPrompt.includes("### Phase"));
-  });
-
   it("empty roadmap renders nothing (L2)", () => {
     const artifact = assemblePromptArtifact(input({
       level: "l2", state: minimalState(),
@@ -865,14 +732,6 @@ describe("v3.3 — Roadmap section", () => {
     assert.ok(!artifact.renderedPrompt.includes("Roadmap"));
   });
 
-  it("L1 names the current phase but never renders Phase Anchors", () => {
-    // The phase line may name the phase the agent declared. What must NOT
-    // appear is L2's Phase Anchors section.
-    const artifact = assemblePromptArtifact(input({ level: "l1", state: roadmapState() }));
-    assert.ok(artifact.renderedPrompt.includes("Core Module"),
-      "the phase line names the current phase");
-    assert.ok(!artifact.renderedPrompt.includes("Phase Anchors"));
-  });
 });
 
 describe("v3.3 — machine dashboard rows and round stats", () => {
@@ -920,17 +779,10 @@ describe("assemblePromptArtifact — budget determinism", () => {
     blockers: ["a blocker"],
     corrections: ["Corrected assumption: an old belief"],
     discoveries: ["a discovery"],
-    rollingOutcomes: ["[R1] accepted: something"],
-    externalContext: "external notes",
     retiredConstraints: ["an old rule"],
     recurringFlags: [
       { subject: "test_files_modified", kind: "verification_warning", ref: "", count: 3, rounds: [1, 2, 3] },
     ],
-    milestones: [{
-      label: "Core Module", round_range: { start: 1, end: 2 }, outcome: "done",
-      carried_constraints: [], resolved_constraints: [],
-      kind: "auto" as const, generated_at_round: 2,
-    }],
   });
 
   it("renders the protected set even when the budget cannot hold it", () => {
@@ -961,8 +813,7 @@ describe("assemblePromptArtifact — budget determinism", () => {
     // low-priority section into room a larger high-priority one could not
     // use.)
     const order = [
-      "blockers", "corrections", "phase", "active_warnings",
-      "external_context", "milestones",
+      "blockers", "corrections", "active_warnings",
     ];
     const rendered = order.filter((id) => artifact.sections.includes(id));
     const dropped = order.filter((id) => artifact.droppedSections.includes(id));

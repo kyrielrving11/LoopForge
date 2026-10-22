@@ -20,7 +20,7 @@ import { makeEnforcementResult } from "./protocol.js";
 import { machineProgressSeries, CHECK_SUCCESS_WITH_REMAINING_CRITERIA, CHECK_RECURRING_VIOLATION, CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED, CHECK_REQUIRED_COMMAND_FAILED, CHECK_COMMAND_EVIDENCE_MISMATCH, CHECK_OUTCOME_SUCCESS_CONTRADICTION, CHECK_VERIFICATION_ENTRYPOINT_MODIFIED, CHECK_ROUND_SCOPE_DRIFT, CHECK_CONTRACT_ITEMS_UNVERIFIED, CHECK_USER_GATE_UNRESOLVED } from "./verification-gate.js";
 import { getPolicy } from "./policy.js";
 import { isRecord, entryRound } from "./token-utils.js";
-import { derivationRounds, decodeCommittedRound, machineEvidenceForRound, } from "./committed-round.js";
+import { derivationRounds, decodeCommittedRound, hasCommittedMachineBacktrack, machineEvidenceForRound, } from "./committed-round.js";
 // ═══════════════════════════════════════════════════════════════════════════
 // Helpers
 // ═══════════════════════════════════════════════════════════════════════════
@@ -38,11 +38,7 @@ function committedRoundResult(entry) {
  *  i.e. the loop is re-walking territory the system already rolled back
  *  once. Guards against the reject↔backtrack deadlock on persistent stalls. */
 function hasCommittedBacktrack(vaultEntries, currentRound) {
-    return vaultEntries.some((entry) => {
-        if (entryRound(entry) < currentRound)
-            return false;
-        return committedRoundResult(entry)?.action === "backtrack";
-    });
+    return hasCommittedMachineBacktrack(vaultEntries, currentRound);
 }
 /** Check whether a committed round represents a clean restore point.
  *  as a safe restore point. A clean round was accepted (not rejected)
@@ -125,6 +121,12 @@ export function recoveryBriefLines(input) {
     const lines = [
         `- **Trigger**: ${input.triggerRule || "unknown"}`,
     ];
+    if (input.origin) {
+        lines.push(`- **Initiated by**: ${input.origin === "agent" ? "Agent" : "Machine"}`);
+    }
+    if (input.origin === "agent" && input.reason?.trim()) {
+        lines.push(`- **Agent reason**: ${input.reason.trim()}`);
+    }
     if (input.failureReason?.trim()) {
         lines.push(`- **Failure reason**: ${input.failureReason.trim()}`);
     }
@@ -133,19 +135,26 @@ export function recoveryBriefLines(input) {
         lines.push(`- **Recovery Round ID**: \`${input.recoveryRoundId}\``);
     }
     if (input.failedRounds.length > 0) {
-        lines.push(`- **Failed rounds**: ${input.failedRounds.join(", ")}`);
+        lines.push(`- **${input.origin === "agent" ? "Abandoned" : "Failed"} rounds**: ${input.failedRounds.join(", ")}`);
     }
+    const approachLabel = input.origin === "agent" ? "Abandoned approach" : "Failed approach";
     const shown = input.approaches.slice(0, maxApproaches);
     for (const approach of shown) {
-        lines.push(`  - Failed approach: ${approach}`);
+        lines.push(`  - ${approachLabel}: ${approach}`);
     }
     if (input.approaches.length > shown.length) {
-        lines.push(`  - … and ${input.approaches.length - shown.length} more failed approaches`);
+        lines.push(`  - … and ${input.approaches.length - shown.length} more ${approachLabel.toLowerCase()}s`);
     }
     if (input.wrongAssumptions.length > 0) {
-        lines.push("- **Falsified assumptions** (do not rebuild on these):");
+        lines.push("- **Falsified assumptions (Agent reports)**:");
         for (const assumption of input.wrongAssumptions.slice(0, maxAssumptions)) {
             lines.push(`  - ${assumption}`);
+        }
+    }
+    if (input.preservedDiscoveries && input.preservedDiscoveries.length > 0) {
+        lines.push("- **Preserved discoveries (Agent reports)**:");
+        for (const discovery of input.preservedDiscoveries) {
+            lines.push(`  - ${discovery}`);
         }
     }
     return lines;

@@ -321,39 +321,6 @@ function parseContractItemClaims(raw, sink) {
     }
     return claims;
 }
-/** Parse CriterionRevision[] from a raw JSON array. */
-export function parseCriterionRevisions(raw, sink) {
-    if (raw === undefined || raw === null)
-        return [];
-    if (!Array.isArray(raw)) {
-        sink?.push("revised_success_criteria", "not_array", "dropped", "expected an array of { old, new }; the value was dropped");
-        return [];
-    }
-    const valid = raw.filter((v) => typeof v === "object" && v !== null &&
-        typeof v.old === "string" &&
-        typeof v.new === "string");
-    const invalid = raw.length - valid.length;
-    if (invalid > 0) {
-        sink?.push("revised_success_criteria", valid.length === 0 ? DIAG_ALL_ENTRIES_DROPPED : "invalid_entry", "dropped", valid.length === 0
-            ? `all ${invalid} entries lacked string old/new; the value was dropped`
-            : `${invalid} entr${invalid === 1 ? "y" : "ies"} without string old/new dropped`);
-    }
-    if (valid.length > 20) {
-        sink?.push("revised_success_criteria", "too_many", "truncated", "only the first 20 revisions are kept");
-    }
-    return valid.slice(0, 20).map((v, index) => {
-        const r = v;
-        for (const key of ["old", "new"]) {
-            if (r[key].length > 500) {
-                sink?.push(`revised_success_criteria[${index}].${key}`, "truncated", "truncated", "longer than 500 chars; truncated to the limit");
-            }
-        }
-        return {
-            old: r.old.slice(0, 500),
-            new: r.new.slice(0, 500),
-        };
-    });
-}
 /** Parse SubGoalUpdate[] from a raw JSON array.
  *  v3.7.1: lenient per-entry filtering (id/status shape) with fixed caps
  *  (20 entries, id ≤ 64, note ≤ 300). Referential validity — unknown IDs
@@ -1001,7 +968,6 @@ export function validateContractShape(raw, context) {
 export function buildSelfEvaluation(raw, sink, facts) {
     const executionReport = parseExecutionReport(raw.execution_report, sink, facts?.knownCriterionRefs);
     const retractedConstraints = boundedStringArray(raw.retracted_constraints, 50, 500, sink, "retracted_constraints");
-    const revisedCriteria = parseCriterionRevisions(raw.revised_success_criteria, sink);
     const wrongAssumptions = boundedStringArray(raw.wrong_assumptions, 50, 500, sink, "wrong_assumptions");
     const workerResults = parseWorkerResults(raw.worker_results, sink);
     if (raw.success !== undefined && typeof raw.success !== "boolean") {
@@ -1068,7 +1034,6 @@ export function buildSelfEvaluation(raw, sink, facts) {
         emerged_subtasks: boundedEmergedSubtasks(raw.emerged_subtasks, sink),
         execution_report: executionReport,
         retracted_constraints: retractedConstraints,
-        revised_success_criteria: revisedCriteria,
         wrong_assumptions: wrongAssumptions,
         worker_results: workerResults,
         compression_checkpoint: typeof raw.compression_checkpoint === "boolean" ? raw.compression_checkpoint : false,

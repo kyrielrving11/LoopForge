@@ -5,6 +5,8 @@
  * feedback storage. The committed feedback embeds the decision so replay after
  * a process crash is idempotent.
  */
+import { createHash } from "node:crypto";
+import { queryLoopEntries } from "./loop-store.js";
 import { deriveObservationDeltas } from "./evidence-provider.js";
 import { RoundCoordinator, } from "./round-coordinator.js";
 import { logEvent } from "./observability.js";
@@ -13,9 +15,29 @@ import { GIT_OBSERVATION_SCHEMA_VERSION, PROMPT_ARTIFACT_SCHEMA_VERSION, } from 
 import { commandConfigHash, getPolicy } from "./policy.js";
 import { policyMetrics } from "./policy-metrics.js";
 import { VaultRoundCommitStore } from "./storage.js";
-/** v3.9.1: schema 3 embeds Git observation schema 2 (complete boundary
- *  fingerprints) and later adds optional diagnostics/manifest fields. */
-export const ROUND_TRANSACTION_SCHEMA_VERSION = 3;
+/** v3.9.6: schema 4 adds transaction/branch identity, kind, operator
+ *  acceptance and rollback directives. Schema 3 is unsupported. */
+export const ROUND_TRANSACTION_SCHEMA_VERSION = 4;
+/** The root branch identity for every loop. */
+export function rootBranchId(loopId) {
+    return `loop:${loopId}:branch:root`;
+}
+/** v3.9.6: deterministic transaction identity. The logical round identity is
+ *  still `roundId`; this id prevents a deep redo from replaying an abandoned
+ *  commit at the same numeric round. */
+export function deriveTransactionId(input) {
+    const payload = [
+        input.kind,
+        input.branchId,
+        input.roundId,
+        String(input.attempt),
+        input.promptHash ?? "",
+        input.kind === "rollback" && input.recovery
+            ? `${input.recovery.target}\n${input.recovery.reason}\n${input.recovery.target_transaction_id}`
+            : "",
+    ].join("\n");
+    return `tx-${createHash("sha256").update(payload).digest("hex").slice(0, 24)}`;
+}
 /** v3.8: the closed set of machine-observation statuses. */
 const OBSERVATION_STATUSES = [
     "observed", "passed", "failed", "timeout", "unavailable", "error", "aborted",
@@ -64,16 +86,31 @@ export function makeRoundId(loopId, round) {
     }
     return `loop:${loopId}:round:${round}`;
 }
-export function prepareRoundTransaction(loopId, round, beforeEvidence, promptArtifact) {
+export function prepareRoundTransaction(loopId, round, beforeEvidence, promptArtifact, opts = {}) {
     const now = Date.now();
+    const roundId = makeRoundId(loopId, round);
+    const branchId = opts.branchId ?? rootBranchId(loopId);
+    const kind = opts.kind ?? "evaluation";
     return {
         schemaVersion: ROUND_TRANSACTION_SCHEMA_VERSION,
-        roundId: makeRoundId(loopId, round),
+        branchId,
+        transactionId: deriveTransactionId({
+            kind,
+            branchId,
+            roundId,
+            attempt: 1,
+            promptHash: promptArtifact?.promptHash,
+        }),
+        kind,
+        roundId,
         loopId,
         round,
         attempt: 1,
         phase: promptArtifact ? "prompted" : "prepared",
         beforeEvidence,
+        ...(opts.operatorAcceptance
+            ? { operatorAcceptance: opts.operatorAcceptance }
+            : {}),
         createdAt: now,
         updatedAt: now,
         promptArtifact,
@@ -94,6 +131,13 @@ export function prepareRejectedAttempt(rejected, promptArtifact) {
     }
     return {
         ...rejected,
+        transactionId: deriveTransactionId({
+            kind: rejected.kind,
+            branchId: rejected.branchId,
+            roundId: rejected.roundId,
+            attempt: promptArtifact.attempt,
+            promptHash: promptArtifact.promptHash,
+        }),
         attempt: promptArtifact.attempt,
         phase: "prompted",
         afterEvidence: undefined,
@@ -120,7 +164,49 @@ function isContractBinding(value) {
 export function isProcessResult(value) {
     if (!isRecord(value))
         return false;
-    return ["continue", "stop", "reject", "terminate", "backtrack"].includes(String(value.action)) && Array.isArray(value.verificationFlags);
+    return ["continue", "stop", "reject", "terminate", "backtrack", "recovery"].includes(String(value.action)) && Array.isArray(value.verificationFlags);
+}
+function stringArray(value) {
+    return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+function isOperatorAcceptance(value) {
+    if (!isRecord(value))
+        return false;
+    return typeof value.task === "string" &&
+        stringArray(value.success_criteria) &&
+        stringArray(value.hard_constraints);
+}
+function isRecoveryDirective(value) {
+    if (!isRecord(value))
+        return false;
+    if (value.origin !== "agent" && value.origin !== "machine")
+        return false;
+    if (typeof value.reason !== "string" || typeof value.transaction_id !== "string") {
+        return false;
+    }
+    if (!Number.isInteger(value.target) || value.target < 1)
+        return false;
+    if (typeof value.target_round_id !== "string" ||
+        typeof value.target_transaction_id !== "string")
+        return false;
+    if (value.target_head !== undefined && typeof value.target_head !== "string")
+        return false;
+    if (value.trigger_rule !== undefined && typeof value.trigger_rule !== "string")
+        return false;
+    if (!stringArray(value.target_dirty) ||
+        !stringArray(value.skipped_files) ||
+        !stringArray(value.skipped_discoveries) ||
+        !stringArray(value.approaches) ||
+        !stringArray(value.wrong_assumptions))
+        return false;
+    if (!Array.isArray(value.failed_rounds) ||
+        !value.failed_rounds.every((item) => typeof item === "number"))
+        return false;
+    if (!isRecord(value.skipped_fingerprints) ||
+        !Object.values(value.skipped_fingerprints).every((fp) => typeof fp === "string")) {
+        return false;
+    }
+    return true;
 }
 function parseMachineObservations(value) {
     if (!Array.isArray(value))
@@ -169,6 +255,23 @@ export function parseRoundTransactionSnapshot(value) {
         return null;
     if (value.schemaVersion !== ROUND_TRANSACTION_SCHEMA_VERSION)
         return null;
+    if (value.kind !== "evaluation" && value.kind !== "rollback")
+        return null;
+    if (typeof value.branchId !== "string" || value.branchId.length === 0)
+        return null;
+    if (typeof value.transactionId !== "string" || value.transactionId.length === 0) {
+        return null;
+    }
+    if (value.operatorAcceptance !== undefined &&
+        !isOperatorAcceptance(value.operatorAcceptance))
+        return null;
+    if (value.kind === "rollback") {
+        if (!isRecoveryDirective(value.recovery))
+            return null;
+    }
+    else if (value.recovery !== undefined) {
+        return null;
+    }
     if (typeof value.roundId !== "string" || typeof value.loopId !== "string") {
         return null;
     }
@@ -214,9 +317,10 @@ export function parseRoundTransactionSnapshot(value) {
             return null;
         }
     }
-    // A normalized/committed round always carries its attempted manifest. Its
-    // absence is not a supported legacy shape.
-    if ((value.phase === "evaluated" || value.phase === "committed") &&
+    // A normalized/committed evaluation always carries its attempted manifest.
+    // A rollback directive is not an evaluation and has no manifest.
+    if (value.kind === "evaluation" &&
+        (value.phase === "evaluated" || value.phase === "committed") &&
         value.submittedFields === undefined) {
         return null;
     }
@@ -348,6 +452,29 @@ export class RoundTransactionCoordinator {
                 replayed: false,
             });
         }
+        if ((result.action === "recovery" || result.action === "backtrack") && result.recovery) {
+            const recovery = {
+                ...result.recovery,
+                transaction_id: deriveTransactionId({
+                    kind: "rollback",
+                    branchId: snapshot.branchId,
+                    roundId: snapshot.roundId,
+                    attempt: 1,
+                    promptHash: snapshot.promptArtifact?.promptHash,
+                    recovery: {
+                        target: result.recovery.target,
+                        reason: result.recovery.reason,
+                        target_transaction_id: result.recovery.target_transaction_id,
+                    },
+                }),
+            };
+            return this.commitRecovery({
+                snapshot,
+                loopId: snapshot.loopId,
+                recovery,
+                actualEvidence: input.actualEvidence,
+            });
+        }
         const committedSnapshot = {
             ...evaluated,
             phase: "committed",
@@ -386,9 +513,108 @@ export class RoundTransactionCoordinator {
         });
         return finish({ snapshot: committedSnapshot, result, replayed: false });
     }
+    /** v3.9.6: commit an Agent-initiated rollback directive. This path does not
+     *  run verification or enforcement: abandoning work is an action, not a
+     *  success claim. The directive is a typed event, not a `:feedback` round. */
+    commitRecovery(input) {
+        const { snapshot, recovery } = input;
+        if (snapshot.kind !== "evaluation") {
+            throw new Error(`Cannot recover from a ${snapshot.kind} transaction`);
+        }
+        const existing = this.readRecoveryCommitted(input.loopId, snapshot.round, recovery.transaction_id);
+        if (existing) {
+            policyMetrics.recordRound(input.loopId, existing.result, true);
+            return existing;
+        }
+        const committedSnapshot = {
+            ...snapshot,
+            kind: "rollback",
+            transactionId: recovery.transaction_id,
+            phase: "committed",
+            afterEvidence: input.actualEvidence,
+            // A machine recovery keeps the triggering evaluation as the record of
+            // what was abandoned. An agent recovery has no evaluation at all.
+            evaluation: recovery.origin === "machine" ? snapshot.evaluation : undefined,
+            result: undefined,
+            operatorAcceptance: undefined,
+            recovery,
+            submittedFields: recovery.origin === "machine"
+                ? (snapshot.submittedFields ?? [])
+                : [],
+            normalizationDiagnostics: recovery.origin === "machine"
+                ? (snapshot.normalizationDiagnostics ?? [])
+                : [],
+            updatedAt: Date.now(),
+        };
+        const result = {
+            action: recovery.origin === "machine" ? "backtrack" : "recovery",
+            origin: recovery.origin,
+            reason: recovery.reason,
+            recovery,
+            verificationFlags: [],
+            roundSuccess: false,
+            gateContradicted: false,
+            verificationStatus: "not_applicable",
+            newConsecutiveRejections: 0,
+            shouldPushSuccessTrajectory: false,
+        };
+        const envelope = {
+            schema_version: ROUND_TRANSACTION_SCHEMA_VERSION,
+            round_id: snapshot.roundId,
+            snapshot: committedSnapshot,
+            result,
+        };
+        if (!this.engine.commitRollbackDirective({
+            loopId: input.loopId,
+            round: snapshot.round,
+            transactionId: recovery.transaction_id,
+            envelope,
+        })) {
+            throw new Error(`Rollback directive commit failed: ${recovery.transaction_id}`);
+        }
+        const persisted = this.readRecoveryCommitted(input.loopId, snapshot.round, recovery.transaction_id);
+        if (!persisted) {
+            throw new Error(`Rollback directive read-back failed: ${recovery.transaction_id}`);
+        }
+        policyMetrics.recordRound(input.loopId, result, false);
+        logEvent("rollback_directive_committed", {
+            loopId: input.loopId,
+            round: snapshot.round,
+            transactionId: recovery.transaction_id,
+            origin: recovery.origin,
+            target: recovery.target,
+        });
+        return { snapshot: committedSnapshot, result, replayed: false };
+    }
+    readRecoveryCommitted(loopId, round, transactionId) {
+        const taskId = `loop:${loopId}:r${round}:rollback:${transactionId}`;
+        const entries = queryLoopEntries(this.store, loopId, {
+            prefix: `loop:${loopId}:r${round}:rollback:`,
+        });
+        for (const entry of entries) {
+            if (entry.task_id !== taskId || entry.task_type !== "rollback_directive") {
+                continue;
+            }
+            const lineage = isRecord(entry.loop_lineage) ? entry.loop_lineage : null;
+            const transaction = lineage && isRecord(lineage.round_transaction)
+                ? lineage.round_transaction
+                : null;
+            if (!transaction)
+                continue;
+            const snapshot = parseRoundTransactionSnapshot(transaction.snapshot);
+            const result = transaction.result;
+            if (!snapshot || snapshot.kind !== "rollback" || !isProcessResult(result)) {
+                continue;
+            }
+            return { snapshot, result, replayed: true };
+        }
+        return null;
+    }
     /** Recover an already committed decision without evaluating or writing. */
     recover(snapshot) {
-        const outcome = this.readCommitted(snapshot);
+        const outcome = snapshot.kind === "rollback"
+            ? this.readRecoveryCommitted(snapshot.loopId, snapshot.round, snapshot.transactionId)
+            : this.readCommitted(snapshot);
         if (outcome) {
             policyMetrics.recordRound(snapshot.loopId, outcome.result, true);
         }

@@ -7,9 +7,9 @@
 import type { MachineObservation } from "./protocol.js";
 import type { ObservationDelta } from "./evidence-provider.js";
 import type { VaultEntry } from "./loop-store.js";
-import type { ContractBinding, ExecutionReport, LoopRoundResult, PromptArtifact, RoundContractProposal, RoundOutcome, SelfEvaluation, SubmissionDiagnostic, SubGoalUpdate, VerificationFlag } from "./protocol.js";
+import type { ContractBinding, ExecutionReport, LoopRoundResult, PromptArtifact, RecoveryDirective, RoundContractProposal, RoundOutcome, SelfEvaluation, SubmissionDiagnostic, SubGoalUpdate, VerificationFlag } from "./protocol.js";
 import type { RoundProcessResult } from "./round-coordinator.js";
-export type CommittedAction = "continue" | "stop" | "backtrack";
+export type CommittedAction = "continue" | "stop" | "recovery" | "backtrack";
 /** v3.8.1: the rolled-back branch's facts, decoded from a committed rollback
  *  directive. One shape for the compile-side Recovery Brief, the state file's
  *  Recent tier and the rollback prompt — these were three renderers over two
@@ -30,11 +30,21 @@ export interface BacktrackRecoveryRecord {
     readonly targetGitHead?: string;
 }
 export interface CommittedRoundView {
-    readonly source: "feedback" | "merged";
+    readonly source: "feedback" | "merged" | "rollback";
     readonly sourceEntry: VaultEntry | Record<string, unknown>;
     readonly loopId: string;
     readonly round: number;
     readonly roundId: string;
+    /** v3.9.6: transaction/branch identity. Optional on hand-built/library
+     *  views; committed decoders always set them. The branch read model
+     *  normalizes a missing kind/branch to an evaluation on the root branch. */
+    readonly transactionId?: string;
+    readonly branchId?: string;
+    readonly kind?: "evaluation" | "rollback";
+    /** v3.9.6: evaluation for ordinary work; agent/machine for a directive. */
+    readonly origin?: "evaluation" | "agent" | "machine";
+    /** v3.9.6: rollback directive facts; null for ordinary evaluation rounds. */
+    readonly recovery?: RecoveryDirective | null;
     readonly sequence?: number;
     readonly attempt: number;
     readonly promptArtifact: PromptArtifact | null;
@@ -79,6 +89,9 @@ export interface CommittedRoundView {
  *  signal that the record cannot serve as recovery guidance. */
 export declare function decodeBacktrackRecord(source: unknown): BacktrackRecoveryRecord | null;
 export declare function decodeCommittedRound(entry: VaultEntry): CommittedRoundView | null;
+/** v3.9.6: decode a committed rollback directive event. It is a typed event
+ *  in the round document, never a normal feedback round. */
+export declare function decodeRollbackEvent(entry: VaultEntry): CommittedRoundView | null;
 /** Decode an in-memory lineage entry after the engine merged its committed
  * feedback. The merged entry MUST carry the embedded transaction snapshot;
  * the old raw top-level evaluation reconstruction is gone, so a partial
@@ -91,6 +104,9 @@ export declare function decodeMergedRound(entry: unknown): CommittedRoundView | 
  *  entry. Compile-side callers used to inline this chain as a private
  *  `committedView` helper. */
 export declare function decodeRound(entry: unknown): CommittedRoundView | null;
+/** v3.9.6: decode either an ordinary committed round or a rollback event.
+ *  The branch read model is the only caller that needs both kinds together. */
+export declare function decodeCommittedRecord(entry: unknown): CommittedRoundView | null;
 /** THE committed-view → compiler-request projection.
  *
  *  The compiler once received these fields from the caller's mutable
@@ -138,42 +154,42 @@ export declare function entrySubGoalUpdates(entry: unknown): SubGoalUpdate[];
  *  verification-gate so lineage-shape reads live in this module only. */
 export declare function entryViolations(entry: unknown): string[];
 export declare function historyRounds(views: Iterable<CommittedRoundView | null>, beforeRound?: number): CommittedRoundView[];
-/** v3.8.1: the ONE committed-history window every derivation reads.
- *
- * `decodeRound` (hydrated merged lineage first, then the durable feedback
- * entry) plus the rollback handling in `historyRounds` — so the compile path,
- * the projection, the live coordinator, audit and explain can no longer
- * disagree about which rounds are this branch's history, nor about how their
- * envelope was interpreted.
- *
- * `currentRound` bounds the window exactly as before (default: unbounded). It
- * is NOT a rollback fence: the redo re-commits the round numbers the abandoned
- * rounds occupied, so abandonment is temporal, not numeric, and cannot be
- * expressed as a bound here. */
+/** v3.9.6: the ONE branch read model. */
+export interface BranchView {
+    loopId: string;
+    branchId: string;
+    /** Evaluation rounds on the current branch, ascending. */
+    rounds: CommittedRoundView[];
+    /** Rollback directives on the chain, chronological. */
+    directives: CommittedRoundView[];
+    /** The last directive whose child branch has no evaluation commit yet. */
+    pendingDirective: CommittedRoundView | null;
+}
+/** Resolve the current branch from committed branch identities. This is the
+ *  only branch-fencing rule; it replaces the session frontier and every
+ *  numeric/temporal approximation. */
+export declare function resolveBranch(entries: ReadonlyArray<unknown>): BranchView;
+/** v3.9.6: current-branch evaluation rounds. */
+export declare function branchRounds(entries: ReadonlyArray<unknown>): CommittedRoundView[];
+/** v3.9.6: rollback directive chain. */
+export declare function branchDirectives(entries: ReadonlyArray<unknown>): CommittedRoundView[];
+/** v3.9.6: the pending directive controlling a redo round. */
+export declare function pendingRollbackDirective(entries: ReadonlyArray<unknown>, redoRound?: number): CommittedRoundView | null;
+/** v3.9.6: machine deadlock guard. Agent-origin directives never consume it. */
+export declare function hasCommittedMachineBacktrack(entries: ReadonlyArray<unknown>, currentRound: number): boolean;
+/** v3.9.6: the latest current-branch evaluation round. */
+export declare function lastCommittedView(entries: ReadonlyArray<unknown>): CommittedRoundView | null;
+/** v3.9.6: live history window = current branch below the round being
+ *  compiled. `currentRound` is the round being prepared/submitted. */
 export declare function derivationRounds(entries: ReadonlyArray<unknown>, currentRound?: number): CommittedRoundView[];
-/** v3.8.1: the loop's durable round frontier — the session document's
- *  `current_round`. Null when no session document is in the entry set, so
- *  callers fail OPEN rather than inventing a bound. */
+/** Kept for read-only callers/tests that still inspect the persisted cursor;
+ *  branch fencing no longer depends on it. */
 export declare function persistedFrontier(entries: ReadonlyArray<unknown>): number | null;
-/** v3.8.1: THE window for a READ-ONLY view of a loop — audit, explain, replay,
- *  the projection, the metrics replay. Same decoder and same rollback handling
- *  as `derivationRounds`, plus the bound those callers cannot compute
- *  themselves.
- *
- *  The live paths bound their window at the round being compiled, and that
- *  bound is what keeps a backtracked branch out of this branch's history. A
- *  read-only view has no compile round, so it reads the SAME frontier from the
- *  durable session document and applies it only while a committed rollback
- *  directive is still in effect — a directive stops being history the moment
- *  the redo commit replaces its round's record, which is exactly when the
- *  abandoned rounds have been re-committed and must count again.
- *
- *  With no directive in effect the window stays UNBOUNDED on purpose: after a
- *  stop, terminate or max_rounds the session's `current_round` sits ON the
- *  round it just committed, so bounding there would silently drop the loop's
- *  final round. An unobservable frontier fails open the same way — a read-only
- *  view never invents a fence, it only applies the one the runtime recorded. */
+/** v3.9.6: read-only history = current branch rounds. No session frontier,
+ *  no numeric fence, no second cursor. */
 export declare function readOnlyRounds(entries: ReadonlyArray<unknown>): CommittedRoundView[];
+/** v3.9.6: read-only rollback events = committed directive chain. */
+export declare function readOnlyRollbacks(entries: ReadonlyArray<unknown>): CommittedRoundView[];
 /** The machine-evidence set that best represents a committed round: the
  *  after-phase observations (captured post-execution), else the pre-round
  *  baseline. The derived delta is never evidence — it is a change-set view

@@ -10,6 +10,7 @@ import {
 } from "../policy-metrics.js";
 import type { VaultEntry } from "../loop-store.js";
 import { PROMPT_ARTIFACT_SCHEMA_VERSION } from "../protocol.js";
+import { committedBacktrackRound } from "./_helpers.js";
 
 function committedFeedback(
   round: number,
@@ -33,10 +34,13 @@ function committedFeedback(
     loop_lineage: {
       round,
       round_transaction: {
-        schema_version: 3,
+        schema_version: 4,
         round_id: `loop:metrics-loop:round:${round}`,
         snapshot: {
-          schemaVersion: 3,
+          schemaVersion: 4,
+          kind: "evaluation",
+          branchId: "loop:metrics-loop:branch:root",
+          transactionId: `tx-metrics-loop-${round}-1`,
           roundId: `loop:metrics-loop:round:${round}`,
           loopId: "metrics-loop",
           round,
@@ -196,13 +200,12 @@ describe("mergePolicyMetrics", () => {
 
   it("excludes rolled-back rounds from committed statistics", () => {
     const entries = [
-      committedFeedback(1, { action: "backtrack", roundSuccess: false, gateContradicted: false, verificationFlags: [] }, "l2"),
-      committedFeedback(2, { action: "continue", roundSuccess: true, gateContradicted: false, verificationFlags: [] }, "l1"),
+      committedFeedback(1, { action: "continue", roundSuccess: true, gateContradicted: false, verificationFlags: [] }, "l1"),
+      committedBacktrackRound(2, "metrics-loop", 1),
     ];
     const metrics = derivePolicyMetrics("metrics-loop", entries);
     assert.equal(metrics.committedRounds, 1);
     assert.equal(metrics.successfulRounds, 1);
-    assert.equal(metrics.levels.l2, undefined, "rolled-back round's level must not count");
     assert.equal(metrics.levels.l1, 1);
   });
 

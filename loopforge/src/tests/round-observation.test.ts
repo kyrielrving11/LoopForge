@@ -60,6 +60,9 @@ function feedbackEntry(
         round_id: `loop:${loopId}:round:${round}`,
         snapshot: {
           schemaVersion: opts.schemaVersion ?? ROUND_TRANSACTION_SCHEMA_VERSION,
+          kind: "evaluation",
+          branchId: `loop:${loopId}:branch:root`,
+          transactionId: `tx-${loopId}-${round}-1`,
           roundId: `loop:${loopId}:round:${round}`,
           loopId,
           round,

@@ -3,12 +3,12 @@
  * The canonical state is data, not Markdown. Prompt and state-file renderers
  * consume the same value so they cannot silently drift apart.
  */
-import type { ConstraintMeta, CriterionStatus, RecurringFlag, LoopCompileRequest, LoopCompileResponse, LoopRoundResult, MilestoneSummary, SubGoal, VerificationFlag } from "./protocol.js";
+import type { ConstraintMeta, CriterionStatus, RecurringFlag, LoopCompileRequest, LoopCompileResponse, LoopRoundResult, SubGoal, VerificationFlag } from "./protocol.js";
 import type { ActiveContractView } from "./round-contract.js";
 import type { ContractItemStatusView } from "./contract-items.js";
 import type { ConfiguredCapability, VerifiedSubGoalFact } from "./protocol.js";
 import type { RoundFacts } from "./round-facts.js";
-export declare const CANONICAL_STATE_SCHEMA_VERSION: 2;
+export declare const CANONICAL_STATE_SCHEMA_VERSION: 3;
 /** v3.7.1: Presentation view of sub-goals shared by prompts and the state
  *  file (one derivation, no second copy). Only ACTIVE items render as rows
  *  — pending/in_progress/blocked — ordered blocked → in_progress → pending
@@ -85,10 +85,6 @@ export interface CanonicalLoopState {
     blockers: string[];
     verificationFlags: VerificationFlag[];
     discoveries: string[];
-    rollingOutcomes: string[];
-    failedPatterns: string[];
-    /** v2.1: Phase-boundary milestone summaries that survive window eviction. */
-    milestones: MilestoneSummary[];
     /** v2.2: Structured sub-goals with compiler-managed lifecycle. */
     subGoals: SubGoal[];
     /** v3.2: Derived per-criterion status (goal → criteria → evidence view). */
@@ -97,7 +93,6 @@ export interface CanonicalLoopState {
      *  replaces the former Lessons list and the rolling summary's
      *  "recurring_issues" window; renderers filter it. */
     recurringFlags: RecurringFlag[];
-    externalContext: string;
     stateFilePath: string;
     progress: {
         criteriaMet: string[];
@@ -144,7 +139,6 @@ export declare function hashCanonicalState(state: CanonicalLoopState): string;
  *
  *  Shared by the state-file and prompt renderers so they cannot drift apart
  *  (module contract above). Presentation only; never feeds enforcement. */
-export declare function buildPhaseLine(state: CanonicalLoopState): string;
 /** v3.3/v3.4: Render the ACTIVE Round Contract as the Current Task section
  *  body — the single formatting source shared by prompts and the state
  *  file (module contract above). The original objective is NOT here: it
@@ -153,10 +147,6 @@ export declare function formatRoundContract(contract: ActiveContractView,
 /** v3.8: the derived item statuses. When given, each item renders with its
  *  machine status — the agent sees the verification debt in its own task. */
 statuses?: ContractItemStatusView | null): string;
-/** Milestone heading line ("**🏁 Round 7** (Rounds 3–7)"). Shared by the
- *  L2 Phase History and the detailed L1 renderer; the L1 copy previously
- *  rendered the range as "R3–R7", a format only this heading used. */
-export declare function milestoneHeading(milestone: MilestoneSummary): string;
 /** Options that vary per render: the retry attempt (single version of the
  *  file across attempts is impossible — the attempt IS part of the derived
  *  view) and the recovery-window Recovery Brief lines (W5, present only

@@ -13,7 +13,7 @@
  * SessionManager → RoundDriver → RoundCoordinator path.
  */
 import type { GateActionDescriptor } from "../protocol.js";
-import type { ExternalContextProvider, LoopTerminalSink, SubmissionGuidance, SubmissionReceipt } from "../protocol.js";
+import type { LoopTerminalSink, SubmissionGuidance, SubmissionReceipt } from "../protocol.js";
 import type { ActiveContractView } from "../round-contract.js";
 import type { LoopStore } from "../loop-store.js";
 import type { PolicyMetricsSnapshot } from "../policy-metrics.js";
@@ -31,8 +31,6 @@ export declare class SessionManager implements SessionRegistry {
     private readonly leaseRenewIntervalMs;
     private leaseTimer;
     private readonly lifecycle;
-    /** Explicit context provider; never auto-discovered. */
-    contextProvider?: ExternalContextProvider;
     private readonly terminalSinks;
     constructor(store?: LoopStore, sessionStore?: SessionStateStore);
     /** Stable process-local owner token used for cross-process session leases. */
@@ -108,10 +106,6 @@ export declare class SessionManager implements SessionRegistry {
      *  the runtime's submission boundary reads the same context (the sub-goal
      *  reference space is exactly the compiled set the prompt carried), and two
      *  copies would let the projection and the boundary disagree about it. */
-    private compileContext;
-    /** Typed cognitive state projection for an active session. Derived on
-     *  demand — zero persistence. Null when nothing meaningful exists yet. */
-    getProjection(sessionId: string): Record<string, unknown> | null;
     /** v3.8: Read-only per-round "why" view over committed facts. Never
      *  rebuilds history and never writes. */
     getExplain(loopId: string, round?: number): Record<string, unknown>;
@@ -162,6 +156,10 @@ export declare class SessionManager implements SessionRegistry {
      *  heartbeat, so every caller of the public API gets it and a rejected
      *  payload leaves nothing durable behind. */
     advance(sessionId: string, output: string, submission?: unknown, roundId?: string): Promise<AdvanceResult>;
+    /** v3.9.6: submit an Agent-initiated recovery. Shape validation happens
+     *  before the session queue/lease; target referential validation happens in
+     *  the lifecycle against committed facts. */
+    recover(sessionId: string, recovery: unknown, roundId?: string): Promise<AdvanceResult>;
     /** Replay timeline for a session — creates ReplayBackend from the stored backend. */
     replayTimeline(sessionId: string): Record<string, unknown>[] | null;
     /** v3.3.1: Replay a loop straight from the vault — no in-memory session
@@ -171,6 +169,9 @@ export declare class SessionManager implements SessionRegistry {
      *  made every vault loop unreplayable after restart.
      *  Returns null when the loop has no committed rounds. */
     replayByLoop(loopId: string): Record<string, unknown>[] | null;
+    /** v3.9.6: committed rollback directives for the replay view. They are
+     *  events, not normal rounds; the timeline stays a normal-round projection. */
+    replayRollbacks(loopId: string): Record<string, unknown>[];
     /** v3.9.1: unsupported envelope versions for a loop, reported explicitly
      *  rather than silently dropped from replay/audit. */
     replayLegacyRounds(loopId: string): Array<{

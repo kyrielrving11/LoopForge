@@ -45,7 +45,8 @@ import type { SubmissionDiagnostic } from "../protocol.js";
 import { deriveEmergedItems, validateSubGoalUpdates } from "../subgoal-state.js";
 import { isConfiguredCommand } from "../policy.js";
 import { scopeEntryDetail } from "../workspace.js";
-import { isRecord } from "../token-utils.js";
+import { deriveCriterionId, isRecord, normalizeText } from "../token-utils.js";
+import { deriveConstraintId, latestObjective } from "../loop-compiler.js";
 import type { AdvanceResult } from "./round-lifecycle.js";
 
 /** What `compileSessionContext` needs from a session. Structural, so both the
@@ -273,6 +274,25 @@ export function validateSubmission(
       };
     }
   }
+  const retractionErrors = immutableRetractionErrors(store, session, submission);
+  if (retractionErrors.length > 0) {
+    return {
+      ok: false,
+      stopDetail:
+        "retracted_constraints may only name Agent-discovered constraints; " +
+        "operator criteria and hard constraints are immutable. Remove them and resubmit the same roundId.",
+      submissionError: {
+        code: "evaluation_invalid",
+        details: {
+          missing: [],
+          invalid: [],
+          retraction_errors: retractionErrors,
+          diagnostics: retractionErrors.map((error) =>
+            rejectedDiagnostic(error.field, error.reason, error.detail)),
+        },
+      },
+    };
+  }
   const contractErrors = contractShapeErrors(store, session, submission, compileResponse);
   if (contractErrors.length > 0) {
     return {
@@ -298,6 +318,42 @@ export function validateSubmission(
       knownCriterionRefs: knownCriterionRefsFor(compileResponse),
     }),
   };
+}
+
+function immutableRetractionErrors(
+  store: LoopStore,
+  session: CompileContextSession | undefined,
+  submission: Record<string, unknown>,
+): Array<{ field: string; reason: string; detail: string }> {
+  if (!session || !Array.isArray(submission.retracted_constraints)) return [];
+  const prefix = `loop:${session.loopId}:`;
+  const entries = queryLoopEntries(store, session.loopId, { prefix });
+  const objective = latestObjective(
+    session.loopId,
+    { results: entries },
+    session.currentRound,
+    session.currentRound === 1,
+  );
+  if (!objective) return [];
+  const hard = new Set(objective.hard_constraints.map((text) => normalizeText(text)));
+  const criteria = new Set(objective.success_criteria.map((text) => normalizeText(text)));
+  const hardIds = new Set(objective.hard_constraints.map((text) => deriveConstraintId(text)));
+  const criterionIds = new Set(objective.success_criteria.map((text) => deriveCriterionId(text)));
+  const errors: Array<{ field: string; reason: string; detail: string }> = [];
+  for (const raw of submission.retracted_constraints) {
+    if (typeof raw !== "string") continue;
+    const key = normalizeText(raw);
+    const operatorOwned =
+      hard.has(key) || criteria.has(key) ||
+      hardIds.has(raw) || criterionIds.has(raw);
+    if (!operatorOwned) continue;
+    errors.push({
+      field: "retracted_constraints",
+      reason: "immutable_constraint",
+      detail: `${raw} belongs to the operator acceptance surface; only Agent-discovered constraints may be retracted`,
+    });
+  }
+  return errors;
 }
 
 function knownCriterionRefsFor(

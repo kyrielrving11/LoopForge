@@ -48,13 +48,15 @@ export declare function findBacktrackTargetSnapshot(restoreRound: number, vaultE
 export declare function recoveryBriefLines(input: {
     target: number;
     triggerRule: string;
-    /** v3.9.4: the enforcement gate's own sentence for WHY it rolled back.
-     *  This is a fact from the committed decision, not action advice — it is
-     *  the "Why This Happened" content the old prose header carried. */
+    origin?: "agent" | "machine";
+    /** Agent reason (agent origin) or machine failure reason. */
+    reason?: string;
+    /** v3.9.4: the enforcement gate's own sentence for WHY it rolled back. */
     failureReason?: string;
     failedRounds: string[] | number[];
     approaches: string[];
     wrongAssumptions: string[];
+    preservedDiscoveries?: string[];
     recoveryRoundId?: string;
     maxApproaches?: number;
     maxAssumptions?: number;

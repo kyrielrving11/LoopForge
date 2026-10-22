@@ -80,9 +80,33 @@ const TOOL_BASE_SCHEMAS = [
                     type: "string",
                     description: "Optional. The agent's full output from executing the current round's prompt. The structured evaluation is the authoritative report.",
                 },
+                recovery: {
+                    type: "object",
+                    description: "v3.9.6: Agent-initiated recovery. Abandon the current branch and " +
+                        "restore an earlier committed evaluation round. Mutually exclusive " +
+                        "with evaluation. The target must have an observed Git restore " +
+                        "point; LoopForge records the directive and requires the workspace " +
+                        "to be restored before the redo can commit. It never chooses a " +
+                        "target or judges the reason.",
+                    properties: {
+                        target_round: {
+                            type: "integer",
+                            minimum: 1,
+                            description: "Committed evaluation round to restore (earlier than the current round).",
+                        },
+                        reason: {
+                            type: "string",
+                            minLength: 1,
+                            maxLength: 500,
+                            description: "The Agent's reason for abandoning the branch. Recorded verbatim; never judged.",
+                        },
+                    },
+                    required: ["target_round", "reason"],
+                    additionalProperties: false,
+                },
                 evaluation: {
                     type: "object",
-                    description: "Required structured self-evaluation for this round. Free-text or embedded evaluation blocks are not accepted.",
+                    description: "Structured self-evaluation for this round. Required when recovery is absent. Free-text or embedded evaluation blocks are not accepted.",
                     required: ["success", "output_summary", "should_continue", "constraint_violations"],
                     properties: {
                         success: {
@@ -166,17 +190,6 @@ const TOOL_BASE_SCHEMAS = [
                             type: "array",
                             items: { type: "string" },
                             description: fieldGuideDescription("retracted_constraints"),
-                        },
-                        revised_success_criteria: {
-                            type: "array",
-                            description: fieldGuideDescription("revised_success_criteria"),
-                            items: {
-                                type: "object",
-                                properties: {
-                                    old: { type: "string", description: "Original criterion." },
-                                    new: { type: "string", description: "Revised criterion." },
-                                },
-                            },
                         },
                         wrong_assumptions: {
                             type: "array",
@@ -367,7 +380,7 @@ const TOOL_BASE_SCHEMAS = [
                     },
                 },
             },
-            required: ["sessionId", "roundId", "evaluation"],
+            required: ["sessionId", "roundId"],
         },
     },
     {
@@ -561,8 +574,13 @@ const ADVANCE_OUTPUT_SCHEMA = {
         stopDetail: { type: ["string", "null"], description: "Human-readable context for why the loop stopped. Provides facts without prescribing a specific agent action." },
         level: { type: ["string", "null"] },
         roundSuccess: { type: ["boolean", "null"] },
-        enforcementAction: { enum: ["accept", "reject", "terminate", "backtrack"] },
+        enforcementAction: { enum: ["accept", "reject", "terminate", "backtrack", "recovery"] },
         enforcementReason: { type: ["string", "null"] },
+        recovery: {
+            type: ["object", "null"],
+            additionalProperties: true,
+            description: "v3.9.6: committed rollback directive facts for a recovery disposition.",
+        },
         verificationStatus: { enum: ["trusted", "insufficient", "contradicted"] },
         submission_guidance: {
             type: ["object", "null"],
@@ -579,11 +597,6 @@ const ADVANCE_OUTPUT_SCHEMA = {
                 "Returned by loopforge_next only.",
         },
         warnings: { type: "array", items: { type: "string" } },
-        projection: {
-            type: "object",
-            additionalProperties: true,
-            description: "v2.12: Typed cognitive state projection (todo/phase/delegation/handoff).",
-        },
     },
     additionalProperties: true,
 };
@@ -984,9 +997,31 @@ export const TOOL_HANDLERS = {
         const sessionId = String(input.sessionId ?? "");
         const output = String(input.output ?? "");
         const rawEval = input.evaluation;
+        const rawRecovery = input.recovery;
         const roundId = input.roundId === undefined ? undefined : String(input.roundId);
         if (!sessionId) {
             return { error: "invalid_argument", errorMessage: "sessionId is required" };
+        }
+        if (rawRecovery !== undefined && rawEval !== undefined) {
+            return {
+                error: "recovery_invalid",
+                errorMessage: "evaluation and recovery are mutually exclusive",
+                sessionId,
+                roundId,
+            };
+        }
+        if (rawRecovery !== undefined) {
+            const result = await mgr.recover(sessionId, rawRecovery, roundId);
+            if (result.submissionError) {
+                return {
+                    error: result.submissionError.code,
+                    errorMessage: result.stopDetail ?? "the recovery request was rejected",
+                    details: result.submissionError.details,
+                    sessionId,
+                    roundId,
+                };
+            }
+            return { ...result };
         }
         // v3.0.1: every submission is anchored to the round it reports on. A
         // missing roundId would silently re-process a stale submission against a
@@ -1024,14 +1059,7 @@ export const TOOL_HANDLERS = {
                 roundId,
             };
         }
-        // v2.12: Typed projection — runtime facts for the main agent, attached
-        // on every accepted/continued round (not on errors).
-        let projection = null;
-        if (result.enforcementAction !== "reject" && result.enforcementAction !== "terminate" &&
-            result.stopReason !== "session_not_found" && result.stopReason !== "stalled") {
-            projection = mgr.getProjection(sessionId);
-        }
-        return projection ? { ...result, projection } : { ...result };
+        return { ...result };
     },
     async loopforge_status(mgr, input) {
         const view = input.view === "loop" || input.view === "all" ||
@@ -1113,12 +1141,12 @@ export const TOOL_HANDLERS = {
             // derivation as start/next/resume; read-only and never persisted.
             submission_guidance: mgr.getSubmissionGuidance(sessionId),
             last_submission: mgr.getLastSubmissionReceipt(sessionId),
+            last_rollback: mgr.replayRollbacks(session.loopId).at(-1) ?? null,
             // v3.8: the ONE capability fact — the static half the compile hashes
             // (what verification is possible) plus the live half rendered from the
             // last baseline. `available` is provider-registry state: reported here
             // and by `doctor`, never hashed.
             capability: deriveEvidenceCapability(getPolicy(), session.evidenceBaseline ?? []),
-            projection: mgr.getProjection(sessionId),
             metrics: {
                 vaultWriteErrors: metrics.vaultWriteErrors,
                 // v3.3.1: engine sessionStart was written but never read — surface it
@@ -1176,6 +1204,7 @@ export const TOOL_HANDLERS = {
                     sessionId,
                     loopId: session.loopId,
                     timeline,
+                    rollbacks: mgr.replayRollbacks(session.loopId),
                     legacyRounds: mgr.replayLegacyRounds(session.loopId),
                 };
             }
@@ -1204,6 +1233,7 @@ export const TOOL_HANDLERS = {
             ...(sessionId ? { sessionId } : {}),
             loopId,
             timeline,
+            rollbacks: mgr.replayRollbacks(loopId),
             legacyRounds: mgr.replayLegacyRounds(loopId),
         };
     },

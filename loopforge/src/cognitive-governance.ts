@@ -29,11 +29,6 @@ export function deriveGateId(text: string): string {
   return "gate-" + computeGoalTextHash(text).slice(0, 12);
 }
 
-/** Stable todo item ID (todo- + sha256 slice 8) for the LoopProjection. */
-export function deriveTodoId(text: string): string {
-  return "todo-" + computeGoalTextHash(text).slice(0, 8);
-}
-
 /** Canonical serialization — sorted scope/effects make the hash stable
  *  across field-order and whitespace differences. */
 export function canonicalizeGateAction(action: GateActionDescriptor): string {

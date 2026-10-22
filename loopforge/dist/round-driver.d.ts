@@ -8,7 +8,7 @@
 import type { LoopStore } from "./loop-store.js";
 import { LoopForgeEngine } from "./engine.js";
 import type { MachineObservation } from "./protocol.js";
-import type { LoopForgeRequest, LoopForgeResponse, PromptArtifact, SelfEvaluation, SubmissionDiagnostic } from "./protocol.js";
+import type { LoopForgeRequest, LoopForgeResponse, OperatorAcceptance, PromptArtifact, SelfEvaluation, SubmissionDiagnostic } from "./protocol.js";
 import type { RoundTransactionOutcome, RoundTransactionSnapshot } from "./round-transaction.js";
 export interface PreparedRound {
     prompt: string;
@@ -51,17 +51,31 @@ export interface CompletedRound {
     outcome: RoundTransactionOutcome;
     actualEvidence: MachineObservation[];
 }
+export interface CompleteRecoveryInput {
+    snapshot: RoundTransactionSnapshot;
+    loopId: string;
+    /** Built after the after-phase evidence has been collected, because the
+     *  directive's skipped-file facts depend on it. */
+    buildRecovery: (actualEvidence: MachineObservation[]) => import("./protocol.js").RecoveryDirective;
+}
 export declare class RoundDriver {
     private readonly engine;
     private readonly store;
     constructor(engine: LoopForgeEngine, store?: LoopStore);
-    prepare(request: LoopForgeRequest, loopId: string, round: number): Promise<PreparedRound | null>;
+    prepare(request: LoopForgeRequest, loopId: string, round: number, opts?: {
+        branchId?: string;
+        operatorAcceptance?: OperatorAcceptance;
+    }): Promise<PreparedRound | null>;
     private compile;
     /** Compile a fresh prompt for a zero-commit enforcement retry. The logical
      * round ID and before-evidence snapshot remain stable; only attempt changes. */
     prepareRetry(request: LoopForgeRequest, rejected: RoundTransactionSnapshot, rejectionNotice: string, consecutiveRejections: number): Promise<PreparedRound | null>;
     private finishPrepare;
     complete(input: CompleteRoundInput): Promise<CompletedRound>;
+    /** v3.9.6: collect the abandoned round's after evidence, then commit the
+     *  rollback directive. The Agent has already decided to abandon; this path
+     *  never runs verification/enforcement on the abandoned work. */
+    completeRecovery(input: CompleteRecoveryInput): Promise<CompletedRound>;
     recover(snapshot: RoundTransactionSnapshot): RoundTransactionOutcome | null;
     private collectEvidence;
 }

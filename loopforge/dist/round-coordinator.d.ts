@@ -70,7 +70,14 @@ export interface RoundProcessInput {
 /** Result of processing a round through the coordinator. */
 export interface RoundProcessResult {
     /** What the caller should do next. */
-    action: "continue" | "stop" | "reject" | "terminate" | "backtrack";
+    action: "continue" | "stop" | "reject" | "terminate" | "backtrack" | "recovery";
+    /** v3.9.6: who produced the disposition. Evaluations are ordinary work;
+     *  machine/agent recoveries are rollback directives. */
+    origin?: "evaluation" | "machine" | "agent";
+    /** v3.9.6: machine failure reason or agent recovery reason. */
+    reason?: string;
+    /** v3.9.6: committed rollback directive facts. */
+    recovery?: import("./protocol.js").RecoveryDirective;
     /** Reason for stop (set when action is "stop" or "terminate"). */
     stopReason?: StopReason;
     /** Rejection prompt (set when action is "reject"). */
@@ -96,7 +103,7 @@ export interface RoundProcessResult {
     /** Verification flags from this round (for injection into next prompt). */
     verificationFlags: VerificationFlag[];
     /** Enforcement action for observability. */
-    enforcementAction?: "accept" | "reject" | "terminate" | "backtrack";
+    enforcementAction?: "accept" | "reject" | "terminate" | "backtrack" | "recovery";
     /** Enforcement reason (set when rejected or terminated). */
     enforcementReason?: string;
     /** Whether this round was successful (from selfEval.success). */
@@ -180,6 +187,7 @@ export declare function deriveBacktrackRecoveryFacts(input: {
 }): {
     skippedFiles: string[];
     skippedFingerprints: Record<string, string>;
+    skippedDiscoveries: string[];
     failedRounds: number[];
     approaches: string[];
     wrongAssumptions: string[];

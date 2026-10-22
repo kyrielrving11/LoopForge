@@ -44,7 +44,7 @@ function makeRegistry(): SessionRegistry & {
 function makeLifecycle(
   store: LoopStore,
   registry: SessionRegistry,
-  opts: { ownerId?: string; pauseDuringContext?: boolean | (() => void) } = {},
+  opts: { ownerId?: string } = {},
 ): RoundLifecycle {
   return new RoundLifecycle({
     store,
@@ -53,19 +53,6 @@ function makeLifecycle(
     terminalSinks: new Set(),
     ownerId: opts.ownerId ?? "test-owner",
     leaseMs: 60_000,
-    getContext: () => opts.pauseDuringContext
-      ? async () => {
-          // Simulate pause()/delete() racing the context provider await:
-          // either mutate the registered session directly, or run the real
-          // pause() (which also persists the incremented round counter).
-          if (typeof opts.pauseDuringContext === "function") {
-            opts.pauseDuringContext();
-          } else {
-            for (const s of registry.values()) s.status = "paused";
-          }
-          return "";
-        }
-      : undefined,
   });
 }
 
@@ -482,13 +469,15 @@ describe("RoundLifecycle — advance", async () => {
     const start = await mgr.create({ task: "Fence test", loopId: "fence-test" });
     const sid = String(start.sessionId);
 
-    // A lifecycle whose context provider pauses the session while the
-    // provider await is in flight — the pause/delete race the fence guards.
+    // A session paused before the compile tail — the pause/delete race the
+    // commit fence guards.
     const registry = makeRegistry();
     registry.upsert(mgr.get(sid)!);
-    const racing = makeLifecycle(store, registry, { pauseDuringContext: true });
+    const racing = makeLifecycle(store, registry);
 
-    const result = await racing.advance(sid, "agent output", evalFor({ success: true }));
+    const advancing = racing.advance(sid, "agent output", evalFor({ success: true }));
+    mgr.get(sid)!.status = "paused";
+    const result = await advancing;
 
     assert.equal(result.prompt, null, "next prompt must not be compiled");
     assert.equal(result.stopReason, "paused");
@@ -503,15 +492,14 @@ describe("RoundLifecycle — advance", async () => {
     const start = await mgr.create({ task: "Pause race resume", loopId: "pause-race" });
     const sid = String(start.sessionId);
 
-    // The real race: while advance awaits the context provider, pause()
-    // runs — setting status and PERSISTING the already-incremented round
-    // counter (the commit fence then returns "paused" without compiling).
+    // pause() persists the incremented round counter before the commit
+    // fence returns "paused" without compiling.
     const registry = makeRegistry();
     registry.upsert(mgr.get(sid)!);
-    const racing = makeLifecycle(store, registry, {
-      pauseDuringContext: () => { void mgr.pause(sid); },
-    });
-    const result = await racing.advance(sid, "agent output", evalFor({ success: true }));
+    const racing = makeLifecycle(store, registry);
+    const advancing = racing.advance(sid, "agent output", evalFor({ success: true }));
+    mgr.pause(sid);
+    const result = await advancing;
     assert.equal(result.stopReason, "paused");
     assert.equal(mgr.get(sid)!.currentRound, 2, "round counter incremented before the fence");
 

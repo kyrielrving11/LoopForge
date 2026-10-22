@@ -363,7 +363,6 @@ describe("Engine — P0-P5 Cognitive Evolution (v1.7 E2E)", () => {
         manual_fixes_needed: "",
         wrong_assumptions: ["Assumed OZ v4.0 has no known issues"],
         retracted_constraints: [],
-        revised_success_criteria: [],
       },
     } as unknown as LoopForgeRequest);
     assert.equal(r2.status, AgentStatus.OK);
@@ -401,7 +400,6 @@ describe("Engine — P0-P5 Cognitive Evolution (v1.7 E2E)", () => {
         discovered_constraints: ["No external deps"],
         retracted_constraints: ["No external deps"],
         wrong_assumptions: [],
-        revised_success_criteria: [],
       },
     } as unknown as LoopForgeRequest);
     assert.equal(r2.status, AgentStatus.OK);

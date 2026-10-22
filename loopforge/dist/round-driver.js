@@ -15,7 +15,7 @@ export class RoundDriver {
         this.engine = engine;
         this.store = store ?? engine.getStore();
     }
-    async prepare(request, loopId, round) {
+    async prepare(request, loopId, round, opts = {}) {
         // v3.0.1: compile (CPU-bound) and before-evidence collection (external
         // process spawns) run concurrently — the git/command spawns were the
         // latency tail behind the old compile-first, evidence-second order.
@@ -25,7 +25,7 @@ export class RoundDriver {
         ]);
         if (!response)
             return null;
-        return this.finishPrepare(response, loopId, round, evidenceBaseline);
+        return this.finishPrepare(response, loopId, round, evidenceBaseline, opts);
     }
     compile(request, loopId, persistLineage) {
         const compiled = this.engine.invokeLoopCompile(request, undefined, { persistLineage });
@@ -61,9 +61,14 @@ export class RoundDriver {
             compileResponse: response,
         };
     }
-    finishPrepare(response, loopId, round, evidenceBaseline) {
+    finishPrepare(response, loopId, round, evidenceBaseline, opts = {}) {
         const artifact = response.prompt_artifact;
-        const snapshot = prepareRoundTransaction(loopId, round, evidenceBaseline, artifact);
+        const snapshot = prepareRoundTransaction(loopId, round, evidenceBaseline, artifact, {
+            ...(opts.branchId ? { branchId: opts.branchId } : {}),
+            ...(opts.operatorAcceptance
+                ? { operatorAcceptance: opts.operatorAcceptance }
+                : {}),
+        });
         return {
             prompt: response.prompt,
             artifact,
@@ -95,6 +100,20 @@ export class RoundDriver {
             backtrackTargetDirty: input.backtrackTargetDirty,
             normalizationDiagnostics: input.normalizationDiagnostics,
             submittedFields: input.submittedFields,
+        });
+        return { outcome, actualEvidence };
+    }
+    /** v3.9.6: collect the abandoned round's after evidence, then commit the
+     *  rollback directive. The Agent has already decided to abandon; this path
+     *  never runs verification/enforcement on the abandoned work. */
+    async completeRecovery(input) {
+        const actualEvidence = await this.collectEvidence(input.loopId, "after");
+        const recovery = input.buildRecovery(actualEvidence);
+        const outcome = new RoundTransactionCoordinator(this.engine, this.store).commitRecovery({
+            snapshot: input.snapshot,
+            loopId: input.loopId,
+            recovery,
+            actualEvidence,
         });
         return { outcome, actualEvidence };
     }

@@ -2,12 +2,13 @@
  *  verification posture, and the verification debt that reaches the handoff. */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { deriveActiveRoundContract } from "../round-contract.js";
 import {
+  NO_IN_FLIGHT_ROUND,
+  deriveRoundFacts,
   deriveVerificationDebt,
   deriveVerifiedSubGoals,
-} from "../cognitive-facts.js";
-import { deriveActiveRoundContract } from "../round-contract.js";
-import { NO_IN_FLIGHT_ROUND, deriveRoundFacts } from "../round-facts.js";
+} from "../round-facts.js";
 import { deriveContractItemStatuses } from "../contract-items.js";
 import type { ContractItemStatusView } from "../contract-items.js";
 import type { CommandObservation, RoundContractProposal, SubGoal } from "../protocol.js";
@@ -42,7 +43,10 @@ const CONTRACT: RoundContractProposal = {
 function declaringRound(): CommittedRoundView {
   return {
     source: "feedback", sourceEntry: {}, loopId: "vf-loop", round: 1,
-    roundId: "loop:vf-loop:round:1", attempt: 1, promptArtifact: null,
+    roundId: "loop:vf-loop:round:1", transactionId: "tx-vf-1",
+    branchId: "loop:vf-loop:branch:root", kind: "evaluation",
+    origin: "evaluation", recovery: null,
+    attempt: 1, promptArtifact: null,
     evaluation: null, executionReport: null, verificationFlags: [], result: null,
     action: "continue", success: false, outcome: null,
     contractProposal: CONTRACT,

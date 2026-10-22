@@ -53,7 +53,6 @@ function wholeDrop(path, diagnostics) {
         path === "wrong_assumptions" ||
         path === "gate_ids" ||
         path === "retroactiveClaims" ||
-        path === "revised_success_criteria" ||
         path === "worker_results" ||
         path === "subgoal_updates") {
         return exact.some((diagnostic) => ARRAY_WHOLE_DROP_CODES.has(diagnostic.code));

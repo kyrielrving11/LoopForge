@@ -84,6 +84,16 @@ export interface ExplainResult {
         work_item?: string;
         itemCount: number;
     } | null;
+    /** v3.9.6: committed rollback directives as events, never normal rounds. */
+    rollbacks: Array<{
+        round: number;
+        transactionId: string;
+        origin: "agent" | "machine";
+        target: number;
+        reason: string;
+        targetHead?: string;
+        skippedFiles: string[];
+    }>;
 }
 /** Build the explain view. Pure and read-only. */
 export declare function buildExplain(loopId: string, entries: VaultEntry[], round?: number): ExplainResult;

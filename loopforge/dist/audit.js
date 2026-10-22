@@ -15,7 +15,7 @@ import { eventSequence, StorageCorruptionError } from "./loop-store.js";
 import { auditOrder, deriveGate } from "./cognitive-governance.js";
 import { rederiveClaimViewWithFlags, listVerifiedClaims } from "./evidence-claims.js";
 import { isRecord, entryRound } from "./token-utils.js";
-import { legacyTransactionRounds, readOnlyRounds, } from "./committed-round.js";
+import { legacyTransactionRounds, readOnlyRollbacks, readOnlyRounds, } from "./committed-round.js";
 import { deriveRoundContractView } from "./round-contract.js";
 import { deriveCommittedSubmissionView } from "./submission-receipt.js";
 import { getPolicy } from "./policy.js";
@@ -213,6 +213,15 @@ export function buildAudit(loopId, entries, store) {
         loopId,
         verdict,
         rounds,
+        rollbacks: readOnlyRollbacks(entries).map((view) => ({
+            round: view.round,
+            transactionId: view.transactionId ?? view.roundId,
+            origin: view.origin === "agent" ? "agent" : "machine",
+            target: view.recovery?.target ?? 0,
+            reason: view.recovery?.reason ?? "",
+            ...(view.recovery?.target_head ? { targetHead: view.recovery.target_head } : {}),
+            skippedFiles: [...(view.recovery?.skipped_files ?? [])],
+        })),
         gates,
         unresolvedUserGates,
         contracts: contractsSummary,

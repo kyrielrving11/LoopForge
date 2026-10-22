@@ -1,5 +1,70 @@
 # Changelog
 
+## 3.9.6 (2026-10-22)
+
+**The Agent-authority release.** LoopForge stops generating plans, phase
+narrative, task-specific contract proposals, and non-committed prompt context.
+The Agent owns semantic judgment and action; LoopForge owns committed facts,
+machine checks, recovery mechanics and deterministic projections.
+
+### Agent-initiated recovery
+
+`loopforge_next` accepts a top-level `recovery: { target_round, reason }` as an
+alternative to `evaluation`. Recovery is an action, not an evaluation: it does
+not require the four core fields and never fabricates a `SelfEvaluation`. The
+target must be an earlier committed evaluation on the current branch with an
+observed after-phase Git restore point; LoopForge records the Agent's reason
+verbatim and never judges it.
+
+Rollback directives are committed as typed `rollback_directive` events rather
+than `:feedback` rounds, so a redo cannot overwrite the audit record. Every
+transaction now carries a deterministic `transactionId` and a `branchId`; a
+rollback directive's transaction id names the child branch. The branch read
+model (`resolveBranch`/`branchRounds`/`pendingRollbackDirective`) replaces the
+session frontier, excluding abandoned rounds and preserving the final redo
+round after a stop.
+
+### Operator acceptance is immutable
+
+`revised_success_criteria` is removed. Criteria and hard constraints written by
+`loopforge_start` cannot be revised or retracted by the Agent; a boundary
+attempt returns `evaluation_invalid` with the `immutable_constraint` detail,
+and the compiler ignores such retractions as a second line of defense. `retracted_constraints` applies only to Agent-discovered
+constraints. Objective refinements are committed reports and no longer rewrite
+the operator objective.
+
+### Removed LoopForge-authored cognition
+
+- `LoopProjection` / `todo` / `handoff` / `phase` / `delegation` are deleted.
+- `RollingSummary`, `MilestoneSummary`, automatic/criteria milestones, and the
+  prompt `Phase`/`Phase Anchors` sections are deleted. `compression_checkpoint`
+  remains only as an Agent declaration and L2 boundary reason.
+- The no-active-contract prompt no longer seeds a `round_contract` from the
+  task/criteria or gives slice-sizing advice; it shows a schema-only example,
+  real usable command names, and the structural lifecycle rules.
+- Explicit `external_context` injection is removed. The prompt is built only
+  from committed facts and the current in-flight machine inputs.
+- The typed projection was removed from `loopforge_next`/`loopforge_status`.
+- Task-specific contract proposal and decomposition advice are removed from
+  the evaluation prompt; verification repair text remains a description of the
+  machine condition that must be cleared.
+
+### Breaking boundaries
+
+- `ROUND_TRANSACTION_SCHEMA_VERSION` is `4` (`kind`, `transactionId`,
+  `branchId`, `recovery`, `operatorAcceptance`).
+- `PROMPT_ARTIFACT_SCHEMA_VERSION` is `5` (`warnings` on the artifact).
+- `CANONICAL_STATE_SCHEMA_VERSION` is `3`.
+- `POLICY_SCHEMA_VERSION` is `"8"`; `summary`/`checkpoint` sections and
+  `summary.milestone_interval` are removed; `engine.agent_recovery_enabled`
+  is added.
+- Removed protocol types/fields: `LoopProjection`, `CriterionRevision`,
+  `RollingSummary`, `MilestoneSummary`, `ExternalContextProvider`,
+  `ExternalContextRequest`, `revised_success_criteria`, `Failed patterns`,
+  phase/milestone fields.
+- No migration is provided. Schema-3 transactions, schema-4 prompt artifacts
+  and policy v7 files are unsupported and reported as legacy/loss.
+
 ## 3.9.5 (2026-10-21)
 
 **The memory-boundary and contract-semantics release.** The prompt stops

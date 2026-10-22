@@ -122,35 +122,22 @@ describe("v3.9.4 — initial criteria become the objective's anchors", () => {
     }
   });
 
-  it("retires a revised-away criterion text instead of leaving it as a constraint", () => {
+  it("keeps operator criteria immutable", () => {
     const response = compileLoop(makeLoopCompileRequest({
-      loop_id: "revised-criterion",
+      loop_id: "operator-criterion",
       round: 2,
       task: "Build auth",
       loop_objective: makeLoopObjective({
         objective: "Build auth",
         success_criteria: ["Old criterion"],
         hard_constraints: [],
-        loop_id: "revised-criterion",
+        loop_id: "operator-criterion",
       }),
       constraints_from_plan: ["Old criterion"],
-      last_round_result: makeLoopRoundResult({
-        round: 1,
-        success: false,
-        output_summary: "Scaffolded.",
-        constraint_violations: [],
-        revised_success_criteria: [{
-          old: "Old criterion",
-          new: "New criterion",
-        }],
-      }),
     }), null);
-    assert.deepEqual(response.loop_objective?.success_criteria, ["New criterion"]);
-    assert.ok(response.constraints_active.includes("New criterion"));
-    assert.ok(!response.constraints_active.includes("Old criterion"),
-      "the revised-away text must not linger as a discovered/plan constraint");
-    assert.ok(response.criterion_statuses?.some((criterion) => criterion.text === "New criterion"));
-    assert.ok(!response.criterion_statuses?.some((criterion) => criterion.text === "Old criterion"));
+    assert.deepEqual(response.loop_objective?.success_criteria, ["Old criterion"]);
+    assert.ok(response.constraints_active.includes("Old criterion"));
+    assert.ok(response.criterion_statuses?.some((criterion) => criterion.text === "Old criterion"));
   });
 
   it("maps a bad criteria argument to invalid_argument at the tool boundary", async () => {

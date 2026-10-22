@@ -21,13 +21,6 @@ export interface ExecutionFeedback {
     manual_fixes_needed: string;
 }
 export declare function makeExecutionFeedback(overrides?: Partial<ExecutionFeedback>): ExecutionFeedback;
-/** P5: A revision to a success criterion — the old form and the new form.
- *  The agent proposes this when it discovers the original criterion was
- *  wrong, unrealistic, or needs refinement. */
-export interface CriterionRevision {
-    old: string;
-    new: string;
-}
 /** Structured self-evaluation submitted at the round boundary.
  *  The agent outputs this after completing each round.
  *  Every field is consumed by at least one downstream function.
@@ -78,10 +71,6 @@ export interface SelfEvaluation {
      *  Removed from the active constraint set by the compiler.
      *  Omit or leave empty if none. */
     retracted_constraints?: string[];
-    /** P5: Success criteria that need revision. The agent discovered the
-     *  original criterion was incorrect and proposes a new formulation.
-     *  Applied to the Loop Objective by the compiler (version++). */
-    revised_success_criteria?: CriterionRevision[];
     /** P5: Assumptions the agent made in earlier rounds that turned out to
      *  be wrong. Recorded in the rolling summary as key lessons.
      *  Omit or leave empty if none. */
@@ -140,63 +129,54 @@ export interface SelfEvaluation {
      *  rounds — see round-contract.ts. Optional. */
     round_contract?: RoundContractProposal;
 }
+/** v3.9.6: The Agent's request to abandon the current branch and restore an
+ *  earlier committed point. This is an ACTION, not an evaluation: it never
+ *  carries success/output_summary/constraint_violations/should_continue and
+ *  never fabricates a SelfEvaluation. The target must be an earlier committed
+ *  evaluation round in the current branch with a fully observed Git restore
+ *  point; LoopForge validates that, then records a rollback directive event.
+ *  The reason is the Agent's judgment and is recorded verbatim, never judged. */
+export interface RecoveryRequest {
+    target_round: number;
+    reason: string;
+}
+/** v3.9.6: The operator-owned acceptance surface, written once in the root
+ *  branch's round-1 evaluation transaction. Neither the Agent nor LoopForge
+ *  may revise, replace, or retract it. */
+export interface OperatorAcceptance {
+    task: string;
+    success_criteria: string[];
+    hard_constraints: string[];
+}
+/** v3.9.6: A committed rollback directive. It is a typed event in the same
+ *  round document as the abandoned/triggering transaction, not a normal
+ *  round. `transaction_id` also names the child branch; the redo and all
+ *  later transactions on that branch carry it as `branchId`. */
+export interface RecoveryDirective {
+    origin: "agent" | "machine";
+    /** Agent reason or machine failure reason. */
+    reason: string;
+    /** Machine check id; never set for an agent request. */
+    trigger_rule?: string;
+    target: number;
+    target_round_id: string;
+    target_transaction_id: string;
+    target_head?: string;
+    target_dirty: string[];
+    skipped_files: string[];
+    skipped_fingerprints: Record<string, string>;
+    skipped_discoveries: string[];
+    failed_rounds: number[];
+    /** Committed Agent reports from abandoned rounds. */
+    approaches: string[];
+    wrong_assumptions: string[];
+    /** The directive transaction; also the child branch identity. */
+    transaction_id: string;
+}
 /** v2.12: Tri-state round outcome. Declared via SelfEvaluation.outcome;
  *  derived from `success` when absent. Shared by the dual gates, the stop
  *  mapping, and the audit view. */
 export type RoundOutcome = "success" | "partial" | "failed" | "blocked";
-/** v2.12: Typed cognitive state projection — runtime-derived facts shipped
- *  with advance/status outputs. All fields are derived, zero persistence.
- *  Consumers: advance output (main agent), status (human/tooling), resume
- *  handoff. The runtime provides current governance facts; the agent decides
- *  actions. v3.9.5: no agent-authored "latest outcome" focus — projection
- *  never competes with the agent's own memory. */
-export interface LoopProjection {
-    /** Suggested next steps, derived from the active contract, sub-goals, and
-     *  open gates/recovery requirements. Non-authoritative. v3.8: the
-     *  `agent_intent` source was deleted with `next_action` — the agent's own
-     *  plan is no longer a projection input. */
-    todo: Array<{
-        id: string;
-        item: string;
-        reason: string;
-        source: "derived";
-        priority: number;
-    }>;
-    /** Phase boundaries from milestone history. */
-    phase: {
-        current: string;
-        label: string;
-        boundaries: Array<{
-            label: string;
-            round: number;
-        }>;
-    } | null;
-    /** Record view of the main agent's reported delegation state — facts
-     *  only, never a task book for sub-agents. */
-    delegation: {
-        pending: number;
-        last_results: Array<{
-            agentId: string;
-            outcome: string;
-            round: number;
-            summary: string;
-        }>;
-    };
-    /** Handoff capsule for resume / process handover. `verified` holds
-     *  cr-IDs backed by the P0 provenance layer. */
-    handoff: {
-        summary: string;
-        verified: string[];
-        open_risks: string[];
-    };
-    /** v3.8: Sub-goals a machine-verified contract item backs. The machine's
-     *  separate statement about a `done` sub-goal — it never rewrites
-     *  `SubGoal.status`. Derived in cognitive-facts.ts, exposed here so the
-     *  projection carries the same verification view the prompt and state file
-     *  do. */
-    verified_subgoals: VerifiedSubGoalFact[];
-}
-export declare function makeLoopProjection(overrides?: Partial<LoopProjection>): LoopProjection;
 /** v2.12: Structured high-risk action descriptor (internal — audit display
  *  and gate classification). The MCP surface uses a flat gate text instead. */
 export interface GateActionDescriptor {
@@ -328,11 +308,14 @@ export interface SubmissionReceipt {
             restore_point: number;
             preserved_discoveries: string[];
             wrong_assumptions: string[];
+            origin?: "agent" | "machine";
+            reason?: string;
+            target_head?: string;
         } | null;
     };
     verification: {
         /** Contract-item posture (RoundVerificationStatus). */
-        contract_status: "trusted" | "insufficient" | "contradicted";
+        contract_status: RoundVerificationStatus;
         /** Round-level machine evidence posture. A round can have trusted
          *  contract items while a bare success claim has no machine evidence. */
         evidence_status: "verified" | "unavailable" | "absent";
@@ -401,6 +384,8 @@ export interface SubmissionGuidance {
         required: boolean;
         restore_point?: number;
         target_head?: string;
+        origin?: "agent" | "machine";
+        reason?: string;
     } | null;
     prompt: {
         level: "l0" | "l1" | "l2";
@@ -431,29 +416,6 @@ export interface SubmissionGuidance {
  *
  *  Built from raw round data in vault entries — no new persistent storage.
  *  Rendered in L2 prompts and always written to the state file. */
-export interface MilestoneSummary {
-    /** Human-readable label. Examples:
-     *  agent_declared: agent's checkpoint_label or "Round 15"
-     *  criteria_milestone: "Completed: unit tests ≥ 90%"
-     *  auto: "Rounds 1–20" */
-    label: string;
-    /** Which rounds this milestone covers (inclusive). */
-    round_range: {
-        start: number;
-        end: number;
-    };
-    /** Compressed outcome: what was accomplished in this phase. */
-    outcome: string;
-    /** Constraints that were active when this milestone was created. */
-    carried_constraints: string[];
-    /** Constraints resolved during this phase. */
-    resolved_constraints: string[];
-    /** How this milestone was created. */
-    kind: "agent_declared" | "criteria_milestone" | "auto";
-    /** The round number when this milestone was created. */
-    generated_at_round: number;
-}
-export declare function makeMilestoneSummary(overrides?: Partial<MilestoneSummary>): MilestoneSummary;
 /** A single sub-agent / Worker delegation result (v1.9 — multi-agent).
  *  v3.7.1: `outcome` is the single reported fact. `success` is deleted —
  *  entries without a valid outcome are dropped by the parser, never
@@ -538,23 +500,6 @@ export interface RecurringFlag {
     rounds: number[];
 }
 export declare function makeLoopObjective(overrides?: Partial<LoopObjective>): LoopObjective;
-export interface RollingSummary {
-    /** v1.12: Unified key outcomes — merged from what_worked + key_lessons.
-     *  Format: "[R{round}] ✓/✗ ({technique}): {summary}" */
-    key_outcomes: string[];
-    rounds_sampled: number;
-    generated_at_round: number;
-    /** v1.7: Detected failure patterns — repeated failed rounds with
-     *  the same technique and similar task text. These are surfaced as
-     *  explicit warnings in the prompt. */
-    failed_patterns?: string[];
-    /** v2.1: Phase-boundary milestone summaries that survive rolling-window
-     *  eviction. Accumulated across all rounds from three trigger signals
-     *  (agent_declared > criteria_milestone > auto). Rendered in L2 prompts
-     *  and always written to the state file. */
-    milestones?: MilestoneSummary[];
-}
-export declare function makeRollingSummary(overrides?: Partial<RollingSummary>): RollingSummary;
 /** v3.7.1: One explicit sub-goal status transition. The closed migration
  *  matrix (loop-compiler.ts, single source) governs legality:
  *  in_progress from pending|blocked; done from pending|in_progress|blocked;
@@ -631,8 +576,6 @@ export interface LoopRoundResult {
     execution_report?: ExecutionReport;
     /** P5: Constraints retracted this round. */
     retracted_constraints?: string[];
-    /** P5: Success criteria revised this round. */
-    revised_success_criteria?: CriterionRevision[];
     /** P5: Wrong assumptions identified this round. */
     wrong_assumptions?: string[];
     /** Multi-agent: Delegation results from this round.
@@ -672,8 +615,6 @@ export interface LoopCompileRequest {
     constraints_from_plan: string[];
     last_round_result: LoopRoundResult | null;
     force_level: string;
-    /** Optional context supplied explicitly by the embedding Agent. */
-    external_context?: string;
     /** Maximum rounds for this loop. Used by the state file header to show
      *  accurate progress (Round X / Y). */
     max_rounds?: number;
@@ -723,7 +664,7 @@ export interface PromptCoverage {
 /** v3.9.4: schema 4 adds `coverage`. Older versions are a HARD break — a
  *  round whose artifact does not parse is not committed history, and
  *  `legacyTransactionRounds` reports the loss rather than letting it vanish. */
-export declare const PROMPT_ARTIFACT_SCHEMA_VERSION: 4;
+export declare const PROMPT_ARTIFACT_SCHEMA_VERSION: 5;
 export interface PromptArtifact {
     schemaVersion: typeof PROMPT_ARTIFACT_SCHEMA_VERSION;
     /** Round identity: `loop:<loopId>:round:<n>`. */
@@ -757,6 +698,10 @@ export interface PromptArtifact {
     /** v3.9.4: ID-level proof that every active normative object was rendered.
      *  Required: a schema-4 artifact without it is a hard break. */
     coverage: PromptCoverage;
+    /** v3.9.6: compile diagnostics delivered with this exact prompt. Replaces
+     *  the session-only `currentWarnings` mirror, so a held prompt remains
+     *  self-contained across a restart. */
+    warnings?: string[];
 }
 export interface LoopCompileResponse {
     status: AgentStatus;
@@ -771,7 +716,6 @@ export interface LoopCompileResponse {
     goal_id: string;
     goal_text_hash: string;
     loop_objective: LoopObjective | null;
-    rolling_summary: RollingSummary | null;
     /** v2.2: Structured sub-goals tracked across rounds. Compiler-managed
      *  lifecycle with derived status. Rendered as Sub-Goal Dashboard. */
     sub_goals?: SubGoal[];
@@ -830,7 +774,6 @@ export interface LoopForgeResponse {
     /** v2.12: Compiler-derived state passed through for typed projections
      *  (zero extra persistence — derived fresh each compile). */
     loop_objective?: LoopObjective | null;
-    rolling_summary?: RollingSummary | null;
     sub_goals?: SubGoal[];
     criterion_statuses?: CriterionStatus[];
 }
@@ -881,16 +824,6 @@ export interface EnforcementResult {
     stopReason?: StopReason;
 }
 export declare function makeEnforcementResult(overrides?: Partial<EnforcementResult>): EnforcementResult;
-/** Context supplied to an embedding-owned provider before compilation. */
-export interface ExternalContextRequest {
-    loopId: string;
-    round: number;
-    task: string;
-    domain: string;
-    /** The previously accepted evaluation, when one exists. */
-    lastEvaluation?: SelfEvaluation;
-}
-export type ExternalContextProvider = (request: ExternalContextRequest) => Promise<string>;
 export interface LoopTerminalEvent {
     success: boolean;
     stopReason: StopReason;
@@ -1034,7 +967,7 @@ export type ContractItemStatus = "pending" | "insufficient" | "contradicted" | "
 /** v3.8: The round-level verification posture. `trusted` means every claim in
  *  the round is machine-backed; `insufficient` means claims are unbacked but
  *  not contradicted; `contradicted` means machine facts deny a claim. */
-export type RoundVerificationStatus = "trusted" | "insufficient" | "contradicted";
+export type RoundVerificationStatus = "trusted" | "insufficient" | "contradicted" | "not_applicable";
 /** v3.8: Machine observation status. A configured provider always produces an
  *  observation — the failure modes are recorded, not filtered away.
  *
@@ -1221,7 +1154,7 @@ export interface VerifiedSubGoalFact {
  *  `ok: true` so the agent can recover the response it missed. That recovery
  *  contract (v3.0.1) is deliberate; `round_id_mismatch` is for the places with
  *  no held prompt to return (the gate preflight). */
-export type ToolErrorCode = "evaluation_invalid" | "contract_invalid" | "policy_invalid" | "projection_incomplete" | "session_not_found" | "round_id_required" | "round_id_mismatch" | "state_unavailable" | "invalid_argument" | "gate_disabled" | "loop_already_running" | "lease_conflict";
+export type ToolErrorCode = "evaluation_invalid" | "contract_invalid" | "policy_invalid" | "projection_incomplete" | "session_not_found" | "round_id_required" | "round_id_mismatch" | "state_unavailable" | "invalid_argument" | "gate_disabled" | "loop_already_running" | "lease_conflict" | "recovery_invalid" | "recovery_disabled" | "recovery_unavailable";
 /** v3.8: The structured error inside the uniform `{ok: false}` envelope. */
 export interface ToolError {
     code: ToolErrorCode;

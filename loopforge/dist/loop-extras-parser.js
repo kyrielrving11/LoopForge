@@ -159,7 +159,6 @@ export function parseLoopExtras(extras, taskId) {
         plan_source: ctx.optionalString("plan_source"),
         constraints_from_plan: ctx.stringArray("constraints_from_plan"),
         force_level: ctx.string("force_level", "auto"),
-        external_context: ctx.string("external_context"),
         max_rounds: ctx.has("max_rounds")
             ? ctx.number("max_rounds", 0, { min: 1, truncate: true }) || undefined
             : undefined,

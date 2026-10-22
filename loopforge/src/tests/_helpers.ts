@@ -14,7 +14,10 @@ import type {
   VaultEntry,
 } from "../loop-store.js";
 import { LOOP_STORE_SCHEMA_VERSION } from "../loop-store.js";
-import { ROUND_TRANSACTION_SCHEMA_VERSION } from "../round-transaction.js";
+import {
+  ROUND_TRANSACTION_SCHEMA_VERSION,
+  rootBranchId,
+} from "../round-transaction.js";
 import { makeExecutionReport, makeSelfEvaluation } from "../protocol.js";
 import type {
   CriterionClaim,
@@ -125,6 +128,8 @@ export function committedFeedbackRound(
     /** 3.9.3: the committed round's effective success. Fixtures used to omit
      *  `roundSuccess`, making every decoded view look failed. */
     success?: boolean;
+    /** v3.9.6: the branch this evaluation belongs to. */
+    branchId?: string;
     beforeEvidence?: unknown[];
     roundEvidence?: unknown[];
     files?: string[];
@@ -169,6 +174,9 @@ export function committedFeedbackRound(
         round_id: `loop:${loopId}:round:${round}`,
         snapshot: {
           schemaVersion: ROUND_TRANSACTION_SCHEMA_VERSION,
+          kind: "evaluation",
+          branchId: opts.branchId ?? rootBranchId(loopId),
+          transactionId: `tx-${loopId}-${round}-${opts.attempt ?? 1}`,
           roundId: `loop:${loopId}:round:${round}`,
           loopId,
           round,
@@ -201,15 +209,29 @@ export function committedBacktrackRound(
   loopId = "test-loop",
   /** Restore point; defaults to the depth-1 target `round - 1`. */
   target = round - 1,
+  opts: { branchId?: string; transactionId?: string } = {},
 ): VaultEntry {
-  const evaluation = makeSelfEvaluation({
-    success: false,
-    output_summary: `Rolled back round ${round}.`,
-    constraint_violations: [],
-    should_continue: true,
-  });
+  const transactionId = opts.transactionId ?? `tx-rollback-${loopId}-${round}`;
+  const transactionIdOfTarget = `tx-${loopId}-${target}-1`;
+  const recovery = {
+    origin: "machine" as const,
+    reason: "test_restore",
+    trigger_rule: "test_restore",
+    target,
+    target_round_id: `loop:${loopId}:round:${target}`,
+    target_transaction_id: transactionIdOfTarget,
+    target_dirty: [],
+    skipped_files: [],
+    skipped_fingerprints: {},
+    skipped_discoveries: [],
+    failed_rounds: [round],
+    approaches: [],
+    wrong_assumptions: [],
+    transaction_id: transactionId,
+  };
   return {
-    task_id: `loop:${loopId}:r${round}:feedback`,
+    task_id: `loop:${loopId}:r${round}:rollback:${transactionId}`,
+    task_type: "rollback_directive",
     loop_id: loopId,
     loop_lineage: {
       round,
@@ -218,6 +240,9 @@ export function committedBacktrackRound(
         round_id: `loop:${loopId}:round:${round}`,
         snapshot: {
           schemaVersion: ROUND_TRANSACTION_SCHEMA_VERSION,
+          kind: "rollback",
+          branchId: opts.branchId ?? rootBranchId(loopId),
+          transactionId,
           roundId: `loop:${loopId}:round:${round}`,
           loopId,
           round,
@@ -225,17 +250,17 @@ export function committedBacktrackRound(
           phase: "committed",
           beforeEvidence: [],
           afterEvidence: [],
-          evaluation,
-          submittedFields: manifestFor(evaluation),
+          recovery,
           createdAt: 0,
           updatedAt: 0,
         },
         result: {
-          action: "backtrack",
+          action: "recovery",
+          origin: "machine",
+          reason: recovery.reason,
+          recovery,
           verificationFlags: [],
           roundSuccess: false,
-          backtrackTarget: target,
-          backtrackTriggerRule: "test_restore",
         },
       },
     },
@@ -281,9 +306,6 @@ export function withTransaction(
     ...(typeof entry.objective_refinement === "string"
       ? { objective_refinement: entry.objective_refinement }
       : {}),
-    ...(Array.isArray(entry.revised_success_criteria)
-      ? { revised_success_criteria: entry.revised_success_criteria }
-      : {}),
     ...(Array.isArray(entry.worker_results)
       ? { worker_results: entry.worker_results }
       : {}),
@@ -319,6 +341,9 @@ export function withTransaction(
   };
   const snapshot = {
     schemaVersion: ROUND_TRANSACTION_SCHEMA_VERSION,
+    kind: "evaluation",
+    branchId: rootBranchId(loopId),
+    transactionId: `tx-${loopId}-${round}-${Number(lineage.attempt ?? 1)}`,
     roundId: `loop:${loopId}:round:${round}`,
     loopId,
     round,
@@ -360,6 +385,8 @@ export function mergedLineageRound(
     attempt?: number;
     /** 3.9.3: the committed round's effective success. */
     success?: boolean;
+    /** v3.9.6: the branch this evaluation belongs to. */
+    branchId?: string;
     beforeEvidence?: unknown[];
     roundEvidence?: unknown[];
     files?: string[];
@@ -451,6 +478,9 @@ export function mergedLineageRound(
   };
   const snapshot = {
     schemaVersion: ROUND_TRANSACTION_SCHEMA_VERSION,
+    kind: "evaluation",
+    branchId: opts.branchId ?? rootBranchId(loopId),
+    transactionId: `tx-${loopId}-${round}-${opts.attempt ?? 1}`,
     roundId: `loop:${loopId}:round:${round}`,
     loopId,
     round,

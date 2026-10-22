@@ -113,6 +113,7 @@ export function deriveBacktrackRecoveryFacts(input) {
     // agent's report); later rounds overwrite earlier ones so the map holds the
     // LAST failed state of every file.
     const skippedFingerprints = {};
+    const skippedDiscoveries = [];
     const failedRounds = [];
     const approaches = [];
     const wrongAssumptions = [];
@@ -161,6 +162,12 @@ export function deriveBacktrackRecoveryFacts(input) {
             if (!wrongAssumptions.includes(a))
                 wrongAssumptions.push(a);
         }
+        for (const discovery of (evaluation?.discovered_constraints ?? [])
+            .filter((v) => typeof v === "string")) {
+            if (!skippedDiscoveries.includes(discovery)) {
+                skippedDiscoveries.push(discovery);
+            }
+        }
     }
     // The in-flight attempt that triggered this rollback.
     const triggerSummary = selfEval.output_summary?.trim() ?? "";
@@ -174,9 +181,16 @@ export function deriveBacktrackRecoveryFacts(input) {
                 wrongAssumptions.push(a.slice(0, 500));
         }
     }
+    for (const discovery of (selfEval.discovered_constraints ?? [])
+        .filter((v) => typeof v === "string")) {
+        if (!skippedDiscoveries.includes(discovery)) {
+            skippedDiscoveries.push(discovery);
+        }
+    }
     return {
         skippedFiles,
         skippedFingerprints,
+        skippedDiscoveries,
         failedRounds,
         approaches,
         wrongAssumptions,
@@ -368,7 +382,7 @@ export class RoundCoordinator {
             // so the walk is testable without driving a whole rollback, and the
             // prompt, the state file and the committed decision all describe one
             // event.
-            const { skippedFiles, skippedFingerprints, failedRounds, approaches, wrongAssumptions, } = deriveBacktrackRecoveryFacts({
+            const { skippedFiles, skippedFingerprints, skippedDiscoveries, failedRounds, approaches, wrongAssumptions, } = deriveBacktrackRecoveryFacts({
                 currentRound,
                 restoreRound: restorePoint.round,
                 vaultEntries,
@@ -380,6 +394,26 @@ export class RoundCoordinator {
             // point without reading unrelated work in progress as a failed restore.
             const targetSnapshot = findBacktrackTargetSnapshot(restorePoint.round, vaultEntries);
             const targetGitHead = targetSnapshot?.head ?? null;
+            const targetView = derivationRounds(vaultEntries, currentRound)
+                .find((view) => view.round === restorePoint.round) ?? null;
+            const recovery = {
+                origin: "machine",
+                reason: enforceResult.reason,
+                trigger_rule: enforceResult.check,
+                target: restorePoint.round,
+                target_round_id: targetView?.roundId ??
+                    `loop:${loopId}:round:${restorePoint.round}`,
+                target_transaction_id: targetView?.transactionId ?? targetView?.roundId ?? "",
+                ...(targetGitHead ? { target_head: targetGitHead } : {}),
+                target_dirty: targetSnapshot?.dirtyFiles ?? [],
+                skipped_files: skippedFiles,
+                skipped_fingerprints: skippedFingerprints,
+                skipped_discoveries: skippedDiscoveries,
+                failed_rounds: failedRounds,
+                approaches,
+                wrong_assumptions: wrongAssumptions,
+                transaction_id: "",
+            };
             logEvent("enforcement_backtrack", {
                 loopId,
                 round: currentRound,
@@ -390,7 +424,10 @@ export class RoundCoordinator {
             });
             return {
                 action: "backtrack",
-                verificationStatus: roundVerificationStatus(activeContractStatuses, selfEval.execution_report ?? null),
+                origin: "machine",
+                reason: enforceResult.reason,
+                recovery,
+                verificationStatus: "not_applicable",
                 backtrackTarget: restorePoint.round,
                 backtrackSkippedDiscoveries: getPolicy().engine.backtrack_preserve_discoveries
                     ? restorePoint.skippedDiscoveries

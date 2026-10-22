@@ -5,7 +5,7 @@
  * the committed enforcement result. It never rebuilds history and never
  * writes. Every fact it prints is one the runtime already derived.
  */
-import { observedGitHead, readOnlyRounds } from "./committed-round.js";
+import { observedGitHead, readOnlyRollbacks, readOnlyRounds, } from "./committed-round.js";
 import { deriveCommittedSubmissionView } from "./submission-receipt.js";
 import { deriveActiveRoundContract, deriveRoundContractView } from "./round-contract.js";
 import { getPolicy } from "./policy.js";
@@ -110,6 +110,15 @@ export function buildExplain(loopId, entries, round) {
         activeContract: active
             ? { id: active.id, work_item: active.work_item, itemCount: active.items.length }
             : null,
+        rollbacks: readOnlyRollbacks(entries).map((view) => ({
+            round: view.round,
+            transactionId: view.transactionId ?? view.roundId,
+            origin: view.origin === "agent" ? "agent" : "machine",
+            target: view.recovery?.target ?? 0,
+            reason: view.recovery?.reason ?? "",
+            ...(view.recovery?.target_head ? { targetHead: view.recovery.target_head } : {}),
+            skippedFiles: [...(view.recovery?.skipped_files ?? [])],
+        })),
     };
 }
 /** Human-readable rendering of the explain view (CLI default). */

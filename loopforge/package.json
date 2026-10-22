@@ -1,6 +1,6 @@
 {
   "name": "loopforge",
-  "version": "3.9.5",
+  "version": "3.9.6",
   "description": "External cognitive infrastructure for AI coding agents — breaks the summary cascade, provides independent verification, and enables model-directed prompt prioritization for 100+ round agent loops.",
   "type": "module",
   "main": "./dist/index.js",

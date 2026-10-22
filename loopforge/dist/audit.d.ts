@@ -88,6 +88,16 @@ export interface AuditResult {
     loopId: string;
     verdict: "passed" | "incomplete" | "contradicted";
     rounds: AuditRound[];
+    /** v3.9.6: committed rollback directives — events, never normal rounds. */
+    rollbacks: Array<{
+        round: number;
+        transactionId: string;
+        origin: "agent" | "machine";
+        target: number;
+        reason: string;
+        targetHead?: string;
+        skippedFiles: string[];
+    }>;
     gates: AuditGate[];
     unresolvedUserGates: string[];
     /** v3.8: the verification skeleton — the primary completion basis. */

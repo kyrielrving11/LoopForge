@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   buildSelfEvalBlock,
-  buildRollingSummary,
   compileLoop,
   computeGoalTextHash,
   decideLevel,
@@ -121,30 +120,6 @@ describe("cognitive-state compiler", () => {
     assert.match(deriveGoalId("loop", "Durable Task"), /^loop:/);
   });
 
-  it("derives the same rolling facts from durable feedback and hydrated lineage", () => {
-    const feedback = committedFeedbackRound(1, {
-      loopId: "round-parity",
-      files: ["src/index.ts"],
-      progress: 0.4,
-      met: ["criterion-a"],
-    });
-    const merged = mergedLineageRound(1, {
-      loopId: "round-parity",
-      files: ["src/index.ts"],
-      progress: 0.4,
-      met: ["criterion-a"],
-      outputSummary: "Committed round 1.",
-    });
-
-    const fromFeedback = buildRollingSummary("round-parity", 2, {
-      results: [feedback as unknown as Record<string, unknown>],
-    });
-    const fromMerged = buildRollingSummary("round-parity", 2, {
-      results: [merged],
-    });
-    assert.deepEqual(fromFeedback, fromMerged);
-  });
-
   it("uses L2 first, L1 for normal continuation, and L0 for a proven-empty failed retry", () => {
     const first = makeLoopCompileRequest({ loop_id: "levels", task: "Do work" });
     assert.equal(decideLevel(first, null), "l2");
@@ -240,7 +215,9 @@ describe("cognitive-state compiler", () => {
     }), null);
     assert.ok(response.constraints_active.includes("Keep rollback path"));
     assert.ok(response.constraints_retired.includes("Temporary freeze"));
-    assert.match(response.prompt, /rollback verification|Run rollback test/);
+    assert.match(response.prompt, /Verify rollback/);
+    assert.equal(response.loop_objective?.objective, "Migrate safely",
+      "objective refinements are reports, not operator-objective rewrites");
     // last_round_result remains available for objective/constraint evolution,
     // but without a committed view its report must not enter the state file.
     assert.doesNotMatch(response.state_file_content ?? "", /src\/store\.ts|10 passed/);
@@ -265,22 +242,6 @@ describe("cognitive-state compiler", () => {
     assert.match(response.prompt, /Required command failed/);
     assert.match(response.prompt, /npm test exited with code 1/);
   });
-
-  it("computes rolling outcomes without technique metadata", () => {
-    const rolling = buildRollingSummary("health", 3, {
-      results: [{
-        loop_id: "health",
-        output_summary: "Recovery now works",
-        success: true,
-        loop_lineage: { loop_id: "health", round: 2 },
-      }],
-    });
-    assert.deepEqual(rolling?.key_outcomes, ["[R2] accepted: Recovery now works"]);
-  });
-
-  // ── PromptArtifact determinism + attempt differentiation ────────────────
-  // AGENTS.md hotspot: "Prompt changes require PromptArtifact budget,
-  // hashing, and same-round retry coverage."
 
   it("produces deterministic prompt hashes for identical inputs", () => {
     const request = makeLoopCompileRequest({
@@ -330,517 +291,6 @@ describe("cognitive-state compiler", () => {
       `L0 prompt length ${response.prompt?.length} exceeds ${l0Budget} char budget`,
     );
   });
-
-  // ── v2.1: Hierarchical Summary — milestones ───────────────────────────
-
-  it("creates an agent_declared milestone when compression_checkpoint is true", () => {
-    const rolling = buildRollingSummary("agent_ms", 5, {
-      results: [
-        {
-          loop_id: "agent_ms",
-          output_summary: "Built data model layer",
-          success: true,
-          loop_lineage: {
-            loop_id: "agent_ms",
-            round: 1,
-            constraints_active: ["No data loss"],
-            checkpoint_label: "",
-          },
-          constraint_violations: [],
-        },
-        {
-          loop_id: "agent_ms",
-          output_summary: "Data migration complete with rollback",
-          success: true,
-          loop_lineage: {
-            loop_id: "agent_ms",
-            round: 2,
-            constraints_active: ["No data loss", "Keep rollback path"],
-            compression_checkpoint: true,
-            checkpoint_label: "数据层完成",
-          },
-          constraint_violations: [],
-          execution_report: {
-            files_changed: ["db/migrate.ts"],
-            tests_reported: { passed: 10, failed: 0, skipped: 0 },
-            criterion_claims: criterionClaims(["Migration verified"], []),
-          },
-          retracted_constraints: [],
-        },
-        {
-          loop_id: "agent_ms",
-          output_summary: "Started API layer",
-          success: true,
-          loop_lineage: {
-            loop_id: "agent_ms",
-            round: 3,
-            constraints_active: ["No data loss", "Keep rollback path"],
-          },
-          constraint_violations: [],
-          execution_report: {
-            files_changed: ["api/routes.ts"],
-            tests_reported: null,
-            criterion_claims: criterionClaims(["Migration verified"], ["API coverage ≥ 90%"]),
-          },
-        },
-      ],
-    });
-    assert.ok(rolling, "should produce a rolling summary");
-    assert.ok(rolling!.milestones, "should include milestones");
-    assert.equal(rolling!.milestones!.length, 1, "exactly one agent_declared milestone");
-    const m = rolling!.milestones![0];
-    assert.equal(m.kind, "agent_declared");
-    assert.equal(m.label, "数据层完成");
-    assert.equal(m.round_range.start, 1);
-    assert.equal(m.round_range.end, 2);
-    assert.equal("progress_at_boundary" in m, false);
-    assert.ok(m.carried_constraints.includes("No data loss"));
-    assert.ok(m.outcome.includes("Data migration complete"));
-  });
-
-  it("creates a criteria_milestone when new success criteria are met", () => {
-    const rolling = buildRollingSummary("crit_ms", 4, {
-      results: [
-        {
-          loop_id: "crit_ms",
-          output_summary: "Wrote unit tests for core module",
-          success: true,
-          loop_lineage: { loop_id: "crit_ms", round: 1, constraints_active: [] },
-          constraint_violations: [],
-          execution_report: {
-            files_changed: ["test/unit.ts"],
-            tests_reported: { passed: 20, failed: 0, skipped: 0 },
-            criterion_claims: criterionClaims(["Unit tests ≥ 90%"], ["Integration tests pass", "E2E coverage"]),
-          },
-          retracted_constraints: [],
-        },
-        {
-          loop_id: "crit_ms",
-          output_summary: "All integration tests passing",
-          success: true,
-          loop_lineage: { loop_id: "crit_ms", round: 2, constraints_active: [] },
-          constraint_violations: [],
-          execution_report: {
-            files_changed: ["test/integration.ts"],
-            tests_reported: { passed: 15, failed: 0, skipped: 0 },
-            criterion_claims: criterionClaims(["Unit tests ≥ 90%", "Integration tests pass"], ["E2E coverage"]),
-          },
-          retracted_constraints: [],
-        },
-        {
-          loop_id: "crit_ms",
-          output_summary: "Started E2E tests",
-          success: true,
-          loop_lineage: { loop_id: "crit_ms", round: 3, constraints_active: [] },
-          constraint_violations: [],
-          execution_report: {
-            files_changed: ["test/e2e.ts"],
-            tests_reported: null,
-            criterion_claims: criterionClaims(["Unit tests ≥ 90%", "Integration tests pass"], ["E2E coverage"]),
-          },
-        },
-      ],
-    });
-    assert.ok(rolling, "should produce a rolling summary");
-    assert.ok(rolling!.milestones, "should include milestones");
-    // Round 2 should trigger criteria_milestone ("Integration tests pass" is new vs round 1)
-    const critMs = rolling!.milestones!.filter((m) => m.kind === "criteria_milestone");
-    assert.equal(critMs.length, 1, "exactly one criteria_milestone");
-    assert.match(critMs[0].label, /Integration tests pass/);
-    assert.equal(critMs[0].round_range.start, 1);
-    assert.equal(critMs[0].round_range.end, 2);
-    assert.equal("progress_at_boundary" in critMs[0], false);
-  });
-
-  /** One committed round claiming the given criteria, for the two tests
-   *  below that pin the exact-vs-similar boundary of criterion identity. */
-  const criteriaRound = (round: number, met: string[]) => ({
-    loop_id: "dedup_ms",
-    output_summary: `round ${round}`,
-    success: true,
-    loop_lineage: { loop_id: "dedup_ms", round, constraints_active: [] },
-    constraint_violations: [],
-    execution_report: {
-      files_changed: [`test/${round}.ts`],
-      tests_reported: { passed: round * 5, failed: 0, skipped: 0 },
-      criterion_claims: criterionClaims(met, []),
-    },
-  });
-
-  const criteriaMilestones = (rolling: ReturnType<typeof buildRollingSummary>) =>
-    (rolling?.milestones ?? []).filter((m) => m.kind === "criteria_milestone");
-
-  it("treats differently-worded criteria as DISTINCT — wording is not identity", () => {
-    // v3.8.1: the former Jaccard criterion dedup is gone. Two criteria that
-    // merely read alike are two criteria, so claiming the second one is new
-    // information and earns a milestone. Guessing they were "semantically the
-    // same" is exactly the kind of text-similarity-as-fact this release
-    // removes.
-    const rolling = buildRollingSummary("dedup_ms", 4, {
-      results: [
-        criteriaRound(1, ["Unit test coverage at 90%"]),
-        criteriaRound(2, ["unit test coverage reached 90 percent"]),
-        criteriaRound(3, ["unit test coverage reached 90 percent"]),
-      ],
-    });
-    const critMs = criteriaMilestones(rolling);
-    assert.equal(critMs.length, 1,
-      `expected 1 criteria milestone, got ${critMs.length}: ${critMs.map((m) => m.label).join(", ")}`);
-    assert.ok(critMs[0].label.includes("unit test coverage reached 90 percent"));
-  });
-
-  it("treats a restated criterion as the same one — normalized-exact is identity", () => {
-    // Same criterion, re-claimed with different spacing and case. Whitespace
-    // and case fold; the criterion is not new, so no second milestone.
-    const rolling = buildRollingSummary("dedup_ms", 4, {
-      results: [
-        criteriaRound(1, ["Unit test coverage at 90%"]),
-        criteriaRound(2, ["unit   test coverage at 90%"]),
-        criteriaRound(3, ["unit test coverage at 90%"]),
-      ],
-    });
-    assert.equal(criteriaMilestones(rolling).length, 0,
-      "a restated criterion is not new progress");
-  });
-
-  it("detects genuinely different criteria between rounds", () => {
-    const rolling = buildRollingSummary("diff_ms", 3, {
-      results: [
-        {
-          loop_id: "diff_ms",
-          output_summary: "Unit tests done",
-          success: true,
-          loop_lineage: { loop_id: "diff_ms", round: 1, constraints_active: [] },
-          constraint_violations: [],
-          execution_report: {
-            files_changed: ["test/unit.ts"],
-            tests_reported: { passed: 20, failed: 0, skipped: 0 },
-            criterion_claims: criterionClaims(["Unit tests done"], ["Integration done"]),
-          },
-        },
-        {
-          loop_id: "diff_ms",
-          output_summary: "Integration done",
-          success: true,
-          loop_lineage: { loop_id: "diff_ms", round: 2, constraints_active: [] },
-          constraint_violations: [],
-          execution_report: {
-            files_changed: ["test/int.ts"],
-            tests_reported: { passed: 15, failed: 0, skipped: 0 },
-            // "Integration done" is genuinely different from "Unit tests done"
-            criterion_claims: criterionClaims(["Unit tests done", "Integration done"], []),
-          },
-        },
-      ],
-    });
-    assert.ok(rolling, "should produce a rolling summary");
-    const critMs = (rolling!.milestones ?? []).filter((m) => m.kind === "criteria_milestone");
-    assert.equal(critMs.length, 1, "should detect genuinely new criteria");
-    assert.match(critMs[0].label, /Integration done/);
-  });
-
-  /** One committed round whose checkpoint forces a distinct milestone. */
-  const checkpointRound = (loopId: string, round: number) => ({
-    loop_id: loopId,
-    output_summary: `Round ${round} done`,
-    success: true,
-    loop_lineage: {
-      loop_id: loopId,
-      round,
-      constraints_active: [],
-      compression_checkpoint: true,
-      checkpoint_label: `Phase ${round}`,
-    },
-    constraint_violations: [],
-    execution_report: {
-      files_changed: [],
-      tests_reported: null,
-      criterion_claims: criterionClaims([], []),
-    },
-  });
-
-  it("keeps every milestone while the history is under the cap", () => {
-    const entries = Array.from({ length: 15 }, (_, i) => checkpointRound("cap_ms", i + 1));
-    const rolling = buildRollingSummary("cap_ms", 16, { results: entries });
-    const ms = rolling?.milestones ?? [];
-    // v3.8.1: the fixed cap is 50. The v3.0.1 sampler truncated to 10 and
-    // moved the oldest milestones around to keep "history anchors"; the
-    // history is now simply bounded, newest kept.
-    assert.equal(ms.length, 15, `expected all 15 under the cap, got ${ms.length}`);
-    assert.equal(ms[0].label, "Phase 1");
-    assert.equal(ms[ms.length - 1].label, "Phase 15");
-  });
-
-  it("caps milestone history at MILESTONE_HISTORY_CAP, keeping the newest", () => {
-    const entries = Array.from({ length: 60 }, (_, i) => checkpointRound("cap_over", i + 1));
-    const ms = buildRollingSummary("cap_over", 61, { results: entries })?.milestones ?? [];
-    assert.equal(ms.length, 50, `expected the cap, got ${ms.length}`);
-    assert.equal(ms[0].label, "Phase 11", "the oldest are the ones dropped");
-    assert.equal(ms[ms.length - 1].label, "Phase 60", "the newest always survive");
-  });
-
-  it("the milestone history depends on the committed rounds, never on a prompt level", () => {
-    // The v3.0.1 sampler did nothing at L2, so the milestone set written to
-    // the state file depended on which level happened to compile. v3.8.1
-    // deleted the level parameter outright, so "the level cannot change this"
-    // is now structural rather than behavioural; what stays worth pinning is
-    // that the derivation is a pure function of the committed rounds.
-    const entries = Array.from({ length: 60 }, (_, i) => checkpointRound("cap_lvl", i + 1));
-    const first = buildRollingSummary("cap_lvl", 61, { results: entries })?.milestones;
-    const second = buildRollingSummary("cap_lvl", 61, { results: entries })?.milestones;
-    assert.deepEqual(first, second, "one input, one answer");
-    assert.ok((first?.length ?? 0) > 0, "the committed milestones are the only source");
-  });
-
-  it("keeps every milestone at or under the cap — nothing samples the set", () => {
-    const entries: Record<string, unknown>[] = [];
-    for (let i = 1; i <= 15; i++) {
-      entries.push({
-        loop_id: "l2_ms",
-        output_summary: `Round ${i} done`,
-        success: true,
-        loop_lineage: {
-          loop_id: "l2_ms",
-          round: i,
-          constraints_active: [],
-          compression_checkpoint: true,
-          checkpoint_label: `Phase ${i}`,
-        },
-        constraint_violations: [],
-        execution_report: {
-          files_changed: [],
-          tests_reported: null,
-          criterion_claims: criterionClaims([], []),
-        },
-      });
-    }
-    const rolling = buildRollingSummary("l2_ms", 16, { results: entries }, 0);
-    const ms = rolling!.milestones ?? [];
-    assert.equal(ms.length, 15, `expected all 15 milestones, got ${ms.length}`);
-    assert.equal(ms[0].label, "Phase 1");
-    assert.equal(ms[ms.length - 1].label, "Phase 15");
-  });
-
-  it("v3.0.1 keeps every milestone when at or under the cap", () => {
-    const entries: Record<string, unknown>[] = [];
-    for (let i = 1; i <= 8; i++) {
-      entries.push({
-        loop_id: "under_ms",
-        output_summary: `Round ${i} done`,
-        success: true,
-        loop_lineage: {
-          loop_id: "under_ms",
-          round: i,
-          constraints_active: [],
-          compression_checkpoint: true,
-          checkpoint_label: `Phase ${i}`,
-        },
-        constraint_violations: [],
-        execution_report: {
-          files_changed: [],
-          tests_reported: null,
-          criterion_claims: criterionClaims([], []),
-        },
-      });
-    }
-    const rolling = buildRollingSummary("under_ms", 9, { results: entries }, 0);
-    const ms = rolling!.milestones ?? [];
-    assert.equal(ms.length, 8, `under-cap must keep all 8 milestones, got ${ms.length}`);
-    assert.equal(ms[0].label, "Phase 1");
-    assert.equal(ms[ms.length - 1].label, "Phase 8");
-  });
-
-  it("returns empty milestones array for short tasks without checkpoints", () => {
-    const rolling = buildRollingSummary("short", 4, {
-      results: [
-        {
-          loop_id: "short",
-          output_summary: "Round 1 done",
-          success: true,
-          loop_lineage: { loop_id: "short", round: 1, constraints_active: [] },
-          constraint_violations: [],
-        },
-        {
-          loop_id: "short",
-          output_summary: "Round 2 done",
-          success: true,
-          loop_lineage: { loop_id: "short", round: 2, constraints_active: [] },
-          constraint_violations: [],
-        },
-        {
-          loop_id: "short",
-          output_summary: "Round 3 done",
-          success: true,
-          loop_lineage: { loop_id: "short", round: 3, constraints_active: [] },
-          constraint_violations: [],
-        },
-      ],
-    });
-    assert.ok(rolling, "should produce a rolling summary");
-    assert.deepEqual(rolling!.milestones ?? [], []);
-  });
-
-  it("L2 prompt includes milestones section", () => {
-    const response = compileLoop(makeLoopCompileRequest({
-      loop_id: "l2ms",
-      round: 4,
-      task: "Continue API layer",
-      force_level: "l2",
-    }), {
-      results: [
-        {
-          loop_id: "l2ms",
-          output_summary: "Core data layer complete",
-          success: true,
-          loop_lineage: {
-            loop_id: "l2ms",
-            round: 1,
-            constraints_active: ["No regression"],
-            compression_checkpoint: true,
-            checkpoint_label: "Data Layer",
-          },
-          constraint_violations: [],
-          execution_report: {
-            files_changed: ["data/store.ts"],
-            tests_reported: { passed: 5, failed: 0, skipped: 0 },
-            criterion_claims: criterionClaims([], []),
-          },
-        },
-        {
-          loop_id: "l2ms",
-          output_summary: "Started API routes",
-          success: true,
-          loop_lineage: {
-            loop_id: "l2ms",
-            round: 2,
-            constraints_active: ["No regression"],
-          },
-          constraint_violations: [],
-          execution_report: {
-            files_changed: ["api/routes.ts"],
-            tests_reported: null,
-            criterion_claims: criterionClaims([], []),
-          },
-        },
-        {
-          loop_id: "l2ms",
-          output_summary: "API middleware done",
-          success: true,
-          loop_lineage: {
-            loop_id: "l2ms",
-            round: 3,
-            constraints_active: ["No regression"],
-          },
-          constraint_violations: [],
-          execution_report: {
-            files_changed: ["api/middleware.ts"],
-            tests_reported: { passed: 8, failed: 0, skipped: 0 },
-            criterion_claims: criterionClaims([], []),
-          },
-        },
-      ],
-    });
-    assert.match(response.prompt, /Phase Anchors/);
-    assert.match(response.prompt, /Data Layer/);
-    assert.match(response.prompt, /Data Layer\*\* \(Rounds 1–1\)/);
-    // v3.9.5: L2 carries stage anchors only; full phase history is state-file.
-    assert.match(response.prompt, /Phase Anchors/);
-    assert.doesNotMatch(response.prompt, /Phase History/);
-  });
-
-  it("L1 prompt includes recent rounds but not milestones", () => {
-    const response = compileLoop(makeLoopCompileRequest({
-      loop_id: "l1ms",
-      round: 4,
-      task: "Continue work",
-      force_level: "l1",
-    }), {
-      results: [
-        {
-          loop_id: "l1ms",
-          output_summary: "Finished core module",
-          success: true,
-          loop_lineage: {
-            loop_id: "l1ms",
-            round: 1,
-            constraints_active: [],
-            compression_checkpoint: true,
-            checkpoint_label: "Core Module",
-          },
-          constraint_violations: [],
-          execution_report: {
-            files_changed: ["core.ts"],
-            tests_reported: null,
-            criterion_claims: criterionClaims([], []),
-          },
-        },
-        {
-          loop_id: "l1ms",
-          output_summary: "Round 2 work",
-          success: true,
-          loop_lineage: { loop_id: "l1ms", round: 2, constraints_active: [] },
-          constraint_violations: [],
-        },
-        {
-          loop_id: "l1ms",
-          output_summary: "Round 3 work",
-          success: true,
-          loop_lineage: { loop_id: "l1ms", round: 3, constraints_active: [] },
-          constraint_violations: [],
-        },
-      ],
-    });
-    // v3.9.5: L1 never replays recent-round narratives or L2's anchors.
-    assert.doesNotMatch(response.prompt, /Recent Rounds/);
-    assert.doesNotMatch(response.prompt, /Phase Anchors/);
-    // v3.8.1: the phase line NAMES the current phase.
-    assert.match(response.prompt, /Phase/);
-    assert.match(response.prompt, /Core Module/);
-    // It must still not re-render the milestone as an anchor entry.
-    assert.doesNotMatch(response.prompt, /round_range|Phase 1\b/);
-  });
-
-  it("L0 retry prompt contains no summary sections", () => {
-    const response = compileLoop(makeLoopCompileRequest({
-      loop_id: "l0ms",
-      round: 4,
-      attempt: 2,
-      task: "Fix the issue",
-      rejection_notice: "Required verification command failed",
-    }), {
-      results: [
-        {
-          loop_id: "l0ms",
-          output_summary: "Did some work",
-          success: true,
-          loop_lineage: { loop_id: "l0ms", round: 1, constraints_active: [] },
-          constraint_violations: [],
-        },
-        {
-          loop_id: "l0ms",
-          output_summary: "More work",
-          success: true,
-          loop_lineage: { loop_id: "l0ms", round: 2, constraints_active: [] },
-          constraint_violations: [],
-        },
-        {
-          loop_id: "l0ms",
-          output_summary: "Even more",
-          success: true,
-          loop_lineage: { loop_id: "l0ms", round: 3, constraints_active: [] },
-          constraint_violations: [],
-        },
-      ],
-    });
-    // L0 should contain NO summary sections — just task + rejection
-    assert.doesNotMatch(response.prompt, /Recent Rounds/);
-    assert.doesNotMatch(response.prompt, /Phase History/);
-    assert.doesNotMatch(response.prompt, /Cross-Round Outcomes/);
-    assert.doesNotMatch(response.prompt, /Recurring Issues/);
-    assert.match(response.prompt, /REJECTED|Required verification command failed/);
-  });
-
-  // ── v2.8: Sub-goal ID referencing ──────────────────────────────────────
 
   it("applies a done transition by exact sub-goal ID", () => {
     const sgId = deriveSubGoalId("sg-id-match", 1, 0, "Add error handling to login");
@@ -1328,17 +778,7 @@ describe("cognitive-state compiler", () => {
             success: true,
           },
         },
-        withTransaction({
-          loop_id: "recovery-loop",
-          loop_lineage: {
-            loop_id: "recovery-loop",
-            round: 4,
-            committed_action: "backtrack",
-            recompile_level: "l1",
-            constraints_active: [],
-            success: true,
-          },
-        }, "backtrack"),
+        committedBacktrackRound(4, "recovery-loop", 3),
       ],
       global_entries: [],
     };
@@ -1349,7 +789,7 @@ describe("cognitive-state compiler", () => {
     assert.equal(response.recompile_level, "l2");
   });
 
-  it("keeps plan constraints retracted for retire_window rounds, then restores them", () => {
+  it("keeps discovered constraints retracted for retire_window rounds, then restores them", () => {
     const constraint = "Never log secrets";
     const context = {
       results: [
@@ -1364,7 +804,20 @@ describe("cognitive-state compiler", () => {
             success: true,
             committed_action: "continue",
           },
+          discovered_constraints: [constraint],
           retracted_constraints: [constraint],
+        }),
+        withTransaction({
+          loop_id: "retract-loop",
+          loop_lineage: {
+            loop_id: "retract-loop",
+            round: 3,
+            recompile_level: "l1",
+            goal_id: "g",
+            constraints_active: [constraint],
+            success: true,
+            committed_action: "continue",
+          },
         }),
       ],
       global_entries: [],
@@ -1375,10 +828,9 @@ describe("cognitive-state compiler", () => {
       round: 3,
       task: "Task",
       goal_id: "g",
-      constraints_from_plan: [constraint],
     }), context as never);
     assert.ok(!r3.constraints_active.includes(constraint),
-      "retracted plan constraint must stay out during the window");
+      "retracted discovered constraint must stay out during the window");
 
     // Round 4: 4-1=3, not < 3 → the constraint returns (never auto-decay —
     // only the retraction's memory expires)
@@ -1387,7 +839,6 @@ describe("cognitive-state compiler", () => {
       round: 4,
       task: "Task",
       goal_id: "g",
-      constraints_from_plan: [constraint],
     }), context as never);
     assert.ok(r4.constraints_active.includes(constraint),
       "constraint returns after retire_window rounds");
@@ -1527,6 +978,11 @@ describe("v3.8.1 — recurring flags", () => {
     loopId: "recurring",
     round: number,
     roundId: `loop:recurring:round:${number}`,
+    transactionId: `tx-recurring-${number}`,
+    branchId: "loop:recurring:branch:root",
+    kind: "evaluation",
+    origin: "evaluation",
+    recovery: null,
     attempt: 1,
     promptArtifact: null,
     evaluation: null,
@@ -2109,61 +1565,6 @@ describe("v3.4 — ACTIVE Round Contract derivation (compileLoop)", () => {
   });
 });
 
-describe("Auto safety-net milestone — milestone-less loops (v3.3.1)", () => {
-  beforeEach(() => resetPolicy());
-
-  function quietRound(round: number): Record<string, unknown> {
-    return {
-      loop_id: "auto-net",
-      loop_lineage: { loop_id: "auto-net", round, constraints_active: [] },
-      constraint_violations: [],
-      discovered_constraints: [],
-      output_summary: `quiet round ${round}`,
-    };
-  }
-
-  it("fires from round 1 when NO milestone was ever created", () => {
-    // Regression: the safety net required lastMilestoneRound > 0, so a loop
-    // that never produced an agent_declared/criteria milestone (no
-    // checkpoints, criteria all met in round 1 or never reported met) had an
-    // empty Phase History forever — the gap was measured from a milestone
-    // that did not exist. The policy contract says the net fires when no
-    // milestone has been created for milestone_interval rounds.
-    getPolicy().summary.milestone_interval = 3;
-    const response = compileLoop(makeLoopCompileRequest({
-      loop_id: "auto-net",
-      round: 5,
-      task: "Quiet grind",
-      force_level: "l1",
-    }), {
-      results: [1, 2, 3, 4].map(quietRound),
-    });
-    const milestones = response.rolling_summary?.milestones ?? [];
-    const auto = milestones.filter((m) => m.kind === "auto");
-    assert.ok(auto.length >= 1,
-      "a milestone-less loop must receive an auto safety-net milestone");
-    assert.equal(auto[0].round_range.start, 1,
-      "the net must cover from round 1 when nothing preceded it");
-    assert.equal(auto[0].round_range.end, 4);
-  });
-
-  it("does not fire before the interval elapses", () => {
-    getPolicy().summary.milestone_interval = 3;
-    const response = compileLoop(makeLoopCompileRequest({
-      loop_id: "auto-net",
-      round: 3,
-      task: "Quiet grind",
-      force_level: "l1",
-    }), {
-      results: [1, 2].map(quietRound),
-    });
-    const milestones = response.rolling_summary?.milestones ?? [];
-    assert.equal(milestones.filter((m) => m.kind === "auto").length, 0,
-      "gap 2 < interval 3 must not fire the net yet");
-  });
-});
-
-
 describe("v3.5 — post-backtrack contract revision (compile side)", () => {
   /** Merged production-shape lineage entry (shared fixture, redo-cc loop). */
   const merged = (r: number, o: Parameters<typeof mergedLineageRound>[1] = {}) =>
@@ -2227,29 +1628,21 @@ describe("v3.5 — post-backtrack contract revision (compile side)", () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("M5 — objective refinement retry idempotency", () => {
-  it("retries do not re-append an already-folded refinement", () => {
+  it("keeps refinements as reports and never rewrites the objective on retry", () => {
     const loopId = "m5-retry";
     const refinement = "Include rollback verification";
 
-    // Round 3 attempt 1 already folded round 2's refinement into the
-    // objective base (its compile lineage is what a retry rehydrates).
     const base = makeLoopObjective({
       loop_id: loopId,
       objective: "Ship the port",
       success_criteria: ["All green"],
       hard_constraints: ["No data loss"],
     });
-    const attempt1Objective: LoopObjective = {
-      ...base,
-      objective: `${base.objective}\nRefinement: ${refinement}`,
-      version: (base.version ?? 1) + 1,
-      refinement_history: [refinement],
-    };
     const context = {
       results: [{
         loop_id: loopId,
         loop_lineage: { round: 3 },
-        loop_objective: attempt1Objective,
+        loop_objective: base,
       }],
     };
     const lastResult = makeLoopRoundResult({
@@ -2259,8 +1652,6 @@ describe("M5 — objective refinement retry idempotency", () => {
       objective_refinement: refinement,
     });
 
-    // Attempt 2 — and then attempt 3 against attempt 2's own compile output.
-    let lineage = context.results[0];
     const attempt2 = compileLoop(makeLoopCompileRequest({
       loop_id: loopId,
       round: 3,
@@ -2268,24 +1659,21 @@ describe("M5 — objective refinement retry idempotency", () => {
       last_round_result: lastResult,
     }), context);
     const o2 = attempt2.loop_objective!;
-    assert.equal(o2.objective.match(/Refinement:/g)?.length, 1,
-      "attempt 2 must not duplicate the folded refinement");
-    assert.equal(o2.version, attempt1Objective.version,
-      "attempt 2 must not inflate the objective version");
+    assert.equal(o2.objective, "Ship the port",
+      "the operator objective is immutable");
+    assert.equal(o2.version, 1, "the objective version is immutable");
+    assert.deepEqual(o2.refinement_history, [refinement]);
 
-    lineage = { ...lineage, loop_objective: o2 };
     const attempt3 = compileLoop(makeLoopCompileRequest({
       loop_id: loopId,
       round: 3,
       task: "Ship the port",
       last_round_result: lastResult,
-    }), { results: [lineage] });
+    }), { results: [{ ...context.results[0], loop_objective: o2 }] });
     const o3 = attempt3.loop_objective!;
-    assert.equal(o3.objective.match(/Refinement:/g)?.length, 1,
-      "attempt 3 must stay at a single fold");
-    assert.equal(o3.version, attempt1Objective.version,
-      "attempt 3 must not inflate the version further");
-    assert.deepEqual(o3.refinement_history, [refinement]);
+    assert.equal(o3.objective, "Ship the port");
+    assert.deepEqual(o3.refinement_history, [refinement],
+      "the report is folded once");
   });
 });
 
@@ -2636,7 +2024,7 @@ describe("3.9.3 — committed-fact prompt level", () => {
     assert.equal(response.diff_from_previous, "state_capsule");
   });
 
-  it("offers the current requirement as the natural contract work item", () => {
+  it("offers a schema-only contract example, not a task-seeded plan", () => {
     setPolicyForTest({
       ...DEFAULT_POLICY,
       evidence: {
@@ -2667,12 +2055,14 @@ describe("3.9.3 — committed-fact prompt level", () => {
         }),
       }), null);
       const prompt = response.prompt;
-      assert.match(prompt, /The current requirement is the natural deliverable seed/);
-      assert.match(prompt, /"work_item": "Build the parser"/);
-      assert.match(prompt, /"criterion_refs": \[/);
-      assert.match(prompt, /cr-[a-f0-9]{8}/);
+      assert.match(prompt, /No active Round Contract/);
+      assert.match(prompt, /<bounded deliverable this slice produces>/);
       assert.match(prompt, /"verify_with": \[/);
       assert.match(prompt, /"verify"/);
+      assert.doesNotMatch(prompt, /"work_item": "Build the parser"/,
+        "LoopForge must not turn the task into a proposal");
+      assert.doesNotMatch(prompt, /"criterion_refs": \["cr-/,
+        "the example must not seed real criteria into the plan");
       assert.doesNotMatch(prompt, /\bsg-[a-f0-9]{8}\b/);
       assert.doesNotMatch(prompt, /\brci-[a-f0-9]{8}\b/);
     } finally {

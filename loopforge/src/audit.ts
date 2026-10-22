@@ -20,6 +20,7 @@ import type { VaultEntry } from "./loop-store.js";
 import { isRecord, entryRound } from "./token-utils.js";
 import {
   legacyTransactionRounds,
+  readOnlyRollbacks,
   readOnlyRounds,
 } from "./committed-round.js";
 import { deriveRoundContractView } from "./round-contract.js";
@@ -88,6 +89,16 @@ export interface AuditResult {
   loopId: string;
   verdict: "passed" | "incomplete" | "contradicted";
   rounds: AuditRound[];
+  /** v3.9.6: committed rollback directives — events, never normal rounds. */
+  rollbacks: Array<{
+    round: number;
+    transactionId: string;
+    origin: "agent" | "machine";
+    target: number;
+    reason: string;
+    targetHead?: string;
+    skippedFiles: string[];
+  }>;
   gates: AuditGate[];
   unresolvedUserGates: string[];
   /** v3.8: the verification skeleton — the primary completion basis. */
@@ -306,6 +317,15 @@ export function buildAudit(
     loopId,
     verdict,
     rounds,
+    rollbacks: readOnlyRollbacks(entries).map((view) => ({
+      round: view.round,
+      transactionId: view.transactionId ?? view.roundId,
+      origin: view.origin === "agent" ? "agent" as const : "machine" as const,
+      target: view.recovery?.target ?? 0,
+      reason: view.recovery?.reason ?? "",
+      ...(view.recovery?.target_head ? { targetHead: view.recovery.target_head } : {}),
+      skippedFiles: [...(view.recovery?.skipped_files ?? [])],
+    })),
     gates,
     unresolvedUserGates,
     contracts: contractsSummary,

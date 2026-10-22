@@ -1117,7 +1117,6 @@ describe("MCP P0 lifecycle regressions", () => {
       maxRounds: session.maxRounds,
       selfEval: evaluation,
       consecutiveRejections: 0,
-      successTrajectory: [],
       actualEvidence: session.roundSnapshot?.beforeEvidence ?? [],
     });
     assert.equal(committed.snapshot.phase, "committed");

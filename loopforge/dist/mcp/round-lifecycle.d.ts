@@ -10,7 +10,7 @@
  * session ownership, queues, and leases remain in SessionManager.
  */
 import { LoopForgeEngine } from "../engine.js";
-import type { LoopForgeRequest, LoopForgeResponse, RecoveryRequest, SelfEvaluation, SubmissionDiagnostic, SubmissionGuidance, SubmissionReceipt, VerificationFlag, LoopTerminalSink, RoundVerificationStatus } from "../protocol.js";
+import type { LoopForgeRequest, RecoveryRequest, SelfEvaluation, SubmissionDiagnostic, SubmissionGuidance, SubmissionReceipt, VerificationFlag, LoopTerminalSink, RoundVerificationStatus } from "../protocol.js";
 import type { RoundTransactionSnapshot } from "../round-transaction.js";
 import type { LoopStore, VaultEntry } from "../loop-store.js";
 import type { SessionStateStore } from "../storage.js";
@@ -38,12 +38,6 @@ export interface McpSession {
     entrypointTrust?: Record<string, string>;
     /** Schema-versioned transaction for the prompt currently held by the agent. */
     roundSnapshot?: RoundTransactionSnapshot;
-    /** Structured warnings from the most recent compile — preferred over regex parsing. */
-    /** v3.0.1: The full compile response of the current round, cached so the
-     *  typed projection (getProjection) derives from it instead of recompiling
-     *  the whole vault. Freshness is checked via loop_id + round; rebuilt by
-     *  every compile path. Not persisted — cold sessions fall back to compiling. */
-    lastCompileResponse?: LoopForgeResponse | null;
 }
 export interface McpSessionSummary {
     sessionId: string;
@@ -178,6 +172,11 @@ export declare class RoundLifecycle {
             target_head?: string;
         } | null;
     }): SubmissionGuidance;
+    /** The operator criteria the held prompt's reference space was built from.
+     *  The held acceptance wins; committed objective lineage is the fallback for
+     *  a session whose snapshot predates the acceptance field. Null when neither
+     *  is observable — callers fail open. */
+    private objectiveCriteriaFor;
     /** v3.9.1: the before facts of the round being submitted, from the SAME
      *  history window the compile uses. Works on a replay too: rounds below the
      *  logical round exclude the round itself. */
@@ -252,8 +251,7 @@ export declare class RoundLifecycle {
     private extractEvaluation;
     /** Execute the round transaction and apply per-rule rejection tracking.
      *  MUTATES: session.roundSnapshot, session.consecutiveRejections,
-     *           session.lastRejectionCheck, session.lastSelfEval,
-     *           session.successTrajectory */
+     *           session.lastRejectionCheck */
     private executeRoundTransaction;
     /** Build a rejection result: compile a retry prompt, persist, return.
      *  MUTATES: session.roundSnapshot, session.currentPrompt, session.currentLevel */
@@ -263,8 +261,7 @@ export declare class RoundLifecycle {
      *  discoveries, compiles from the restored state, and injects the
      *  backtrack prompt at the top.
      *  MUTATES: session.currentRound, session.roundSnapshot,
-     *           session.currentPrompt, session.currentLevel,
-     *           session.consecutiveRejections, session.lastSelfEval */
+     *           session.consecutiveRejections, session.lastRejectionCheck */
     private buildBacktrackResult;
     /** Build a termination result: persist stopped status, notify sinks.
      *  MUTATES: session.status, session.currentPrompt

@@ -366,42 +366,9 @@ export class LoopForgeEngine {
       // post-backtrack recovery boundary (L2 rehydration) without a
       // second persistence format.
       lineage.committed_action = result.action;
-      // v3.7.1: Recovery Brief facts stamped onto the merged lineage entry
-      // (same derived-stamp pattern as attempt/round_evidence — in-memory
-      // only, never persisted; a fresh hydration re-derives them from the
-      // committed rollback decision). Compile-time views need them on the
-      // merged row because raw feedback documents are never exposed.
-      if (result.action === "backtrack") {
-        if (typeof result.backtrackTarget === "number") {
-          lineage.backtrackTarget = result.backtrackTarget;
-        }
-        if (typeof result.backtrackTriggerRule === "string") {
-          lineage.backtrackTriggerRule = result.backtrackTriggerRule;
-        }
-        if (Array.isArray(result.backtrackFailedRounds)) {
-          lineage.backtrackFailedRounds = result.backtrackFailedRounds;
-        }
-        if (Array.isArray(result.backtrackApproaches)) {
-          lineage.backtrackApproaches = result.backtrackApproaches;
-        }
-        if (Array.isArray(result.backtrackWrongAssumptions)) {
-          lineage.backtrackWrongAssumptions = result.backtrackWrongAssumptions;
-        }
-        // v3.8.1: the restore facts the agent-facing brief is made of. They
-        // were persisted on the committed decision but never stamped here, so
-        // the compile-side Recovery Brief could not read them off the merged
-        // row and re-derived the rollback from a second walk instead.
-        if (Array.isArray(result.backtrackSkippedFiles)) {
-          lineage.backtrackSkippedFiles = result.backtrackSkippedFiles;
-        }
-        if (result.backtrackSkippedFingerprints &&
-            typeof result.backtrackSkippedFingerprints === "object") {
-          lineage.backtrackSkippedFingerprints = result.backtrackSkippedFingerprints;
-        }
-        if (typeof result.backtrackTargetGitHead === "string") {
-          lineage.backtrackTargetGitHead = result.backtrackTargetGitHead;
-        }
-      }
+      // v3.9.6: rollback facts travel on the embedded transaction snapshot
+      // (`lineage.round_transaction.snapshot.recovery`), not as a second set
+      // of `backtrack*` stamps. One committed representation, one decoder.
     }
     if (committed) {
       // v3.9.1: the merged entry carries the SAME transaction snapshot the

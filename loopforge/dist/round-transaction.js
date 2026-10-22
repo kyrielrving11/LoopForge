@@ -413,16 +413,10 @@ export class RoundTransactionCoordinator {
             currentRound: snapshot.round,
             maxRounds: input.maxRounds,
             selfEval: input.selfEval,
-            lastSelfEval: input.lastSelfEval,
             consecutiveRejections: input.consecutiveRejections,
             lastRejectionCheck: input.lastRejectionCheck,
             evidenceDeltas: roundDeltas,
             beforeEvidence: snapshot.beforeEvidence,
-            successTrajectory: input.successTrajectory,
-            backtrackSkippedFiles: input.backtrackSkippedFiles,
-            backtrackSkippedFingerprints: input.backtrackSkippedFingerprints,
-            backtrackTargetGitHead: input.backtrackTargetGitHead,
-            backtrackTargetDirty: input.backtrackTargetDirty,
             entrypointTrust: input.entrypointTrust,
             // v3.9.4: the SAME manifest the receipt reads.
             submittedFields: input.submittedFields ?? snapshot.submittedFields,
@@ -626,13 +620,13 @@ export class RoundTransactionCoordinator {
         for (const entry of entries) {
             if (entry.task_id !== taskId)
                 continue;
-            const outcome = this.outcomeFromEntry(entry, expected.roundId, opts?.skipBacktrack === true);
+            const outcome = this.outcomeFromEntry(entry, expected.roundId, expected.transactionId, opts?.skipBacktrack === true);
             if (outcome)
                 return outcome;
         }
         return null;
     }
-    outcomeFromEntry(entry, expectedRoundId, skipBacktrack = false) {
+    outcomeFromEntry(entry, expectedRoundId, expectedTransactionId, skipBacktrack = false) {
         const lineage = isRecord(entry.loop_lineage) ? entry.loop_lineage : null;
         const transaction = lineage && isRecord(lineage.round_transaction)
             ? lineage.round_transaction
@@ -642,6 +636,12 @@ export class RoundTransactionCoordinator {
         const snapshot = parseRoundTransactionSnapshot(transaction.snapshot);
         const result = transaction.result;
         if (!snapshot || !isProcessResult(result))
+            return null;
+        // v3.9.6: the numeric round identity is NOT enough. A deep restore reuses
+        // `target + 1`, where the abandoned branch already committed a feedback
+        // round with the same roundId. Replaying it would silently discard the
+        // redo submission. The transaction id is the branch-scoped identity.
+        if (snapshot.transactionId !== expectedTransactionId)
             return null;
         // v3.2.1: a committed backtrack is a roll-back directive, not a terminal
         // decision. The restored round reuses the same roundId, so replaying it

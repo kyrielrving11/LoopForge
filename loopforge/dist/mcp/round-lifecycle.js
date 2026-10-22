@@ -24,8 +24,9 @@ import { deriveRecoveryDirective, resolveRecoveryTarget } from "../recovery.js";
 import { finalizeStopReason } from "../round-coordinator.js";
 import { getPolicy } from "../policy.js";
 import { checkRoundSequence, queryLoopEntries } from "../loop-store.js";
-import { branchRounds, derivationRounds, pendingRollbackDirective, readOnlyRounds, } from "../committed-round.js";
+import { branchDirectives, branchRounds, derivationRounds, pendingRollbackDirective, readOnlyRounds, } from "../committed-round.js";
 import { deriveSubmissionGuidance } from "../submission-guidance.js";
+import { latestObjective } from "../loop-compiler.js";
 import { logEvent } from "../observability.js";
 import { policyMetrics } from "../policy-metrics.js";
 import { normalizeText } from "../token-utils.js";
@@ -154,10 +155,25 @@ export class RoundLifecycle {
             ...queryLoopEntries(this.store, session.loopId, { prefix }),
             ...queryLoopEntries(this.store, session.loopId, { prefix, feedbackOnly: true }),
         ];
+        const criteria = this.objectiveCriteriaFor(session, entries);
         return deriveSubmissionGuidance(session, {
             rounds: derivationRounds(entries, session.currentRound),
+            ...(criteria ? { objective: { success_criteria: criteria } } : {}),
             ...extras,
         });
+    }
+    /** The operator criteria the held prompt's reference space was built from.
+     *  The held acceptance wins; committed objective lineage is the fallback for
+     *  a session whose snapshot predates the acceptance field. Null when neither
+     *  is observable — callers fail open. */
+    objectiveCriteriaFor(session, entries) {
+        const acceptance = session.roundSnapshot?.operatorAcceptance;
+        if (acceptance)
+            return acceptance.success_criteria;
+        const attempt = session.roundSnapshot?.round === session.currentRound
+            ? session.roundSnapshot.attempt
+            : 1;
+        return latestObjective(session.loopId, { results: entries }, session.currentRound, session.currentRound === 1 && attempt > 1)?.success_criteria ?? null;
     }
     /** v3.9.1: the before facts of the round being submitted, from the SAME
      *  history window the compile uses. Works on a replay too: rounds below the
@@ -176,6 +192,9 @@ export class RoundLifecycle {
                 currentRound: session.currentRound,
                 rounds,
             }),
+            // Captured before the transaction commits. A redo commit consumes the
+            // pending directive, so reading it afterwards would lose the fact.
+            recoveryDirective: pendingRollbackDirective(entries, session.currentRound)?.recovery ?? null,
         };
     }
     /** v3.9.1: derive this submission's receipt from the transaction and the
@@ -215,6 +234,15 @@ export class RoundLifecycle {
                     rounds,
                 })
                 : base.beforeSubGoals;
+        // The pre-commit capture is authoritative. The committed-directive
+        // fallback covers a replayed transaction whose pending directive was
+        // consumed by a commit this process never observed.
+        const recoveryDirective = base.recoveryDirective ??
+            (base.snapshot.kind === "rollback"
+                ? null
+                : [...branchDirectives(entries)].reverse().find((item) => item.recovery !== null && item.recovery !== undefined &&
+                    item.recovery.target + 1 === base.snapshot.round &&
+                    item.recovery.transaction_id === base.snapshot.branchId)?.recovery ?? null);
         return deriveSubmissionReceipt({
             snapshot: base.snapshot,
             selfEval: base.selfEval,
@@ -222,6 +250,7 @@ export class RoundLifecycle {
             disposition: opts.disposition,
             diagnostics: base.diagnostics,
             submittedFields: base.submittedFields,
+            recoveryDirective,
             facts: {
                 contractBefore: base.beforeContractId,
                 contractAfter: contractAfterId,
@@ -375,7 +404,6 @@ export class RoundLifecycle {
     persistPrepared(session, prepared, roundSuccess, warningsOverride) {
         session.roundSnapshot = prepared.snapshot;
         this.seedEntrypointTrust(session);
-        session.lastCompileResponse = prepared.compileResponse ?? null;
         policyMetrics.recordStrategy(session.loopId, prepared.level);
         this.save(session);
         return {
@@ -455,7 +483,7 @@ export class RoundLifecycle {
             // Backtrack committed but prompt not delivered (crash window).
             // Reset round counter to the restore target + 1 so the next
             // resume / unpause compiles from the correct restored state.
-            const restoreTarget = pr.backtrackTarget ?? (session.currentRound - 1);
+            const restoreTarget = pr.recovery?.target ?? (session.currentRound - 1);
             session.currentRound = restoreTarget + 1;
             session.consecutiveRejections = 0;
             session.lastRejectionCheck = "";
@@ -655,8 +683,7 @@ export class RoundLifecycle {
     }
     /** Execute the round transaction and apply per-rule rejection tracking.
      *  MUTATES: session.roundSnapshot, session.consecutiveRejections,
-     *           session.lastRejectionCheck, session.lastSelfEval,
-     *           session.successTrajectory */
+     *           session.lastRejectionCheck */
     async executeRoundTransaction(session, selfEval, normalizationDiagnostics, submittedFields) {
         const snapshot = session.roundSnapshot ?? prepareRoundTransaction(session.loopId, session.currentRound, []);
         const completed = await new RoundDriver(session.engine, this.store).complete({
@@ -665,10 +692,8 @@ export class RoundLifecycle {
             task: session.task,
             maxRounds: session.maxRounds,
             selfEval,
-            lastSelfEval: undefined,
             consecutiveRejections: session.consecutiveRejections,
             lastRejectionCheck: session.lastRejectionCheck,
-            successTrajectory: [],
             entrypointTrust: session.entrypointTrust,
             normalizationDiagnostics,
             submittedFields,
@@ -706,7 +731,6 @@ export class RoundLifecycle {
             };
         }
         session.roundSnapshot = preparedRetry.snapshot;
-        session.lastCompileResponse = preparedRetry.compileResponse ?? null;
         this.save(session);
         return {
             sessionId,
@@ -735,8 +759,7 @@ export class RoundLifecycle {
      *  discoveries, compiles from the restored state, and injects the
      *  backtrack prompt at the top.
      *  MUTATES: session.currentRound, session.roundSnapshot,
-     *           session.currentPrompt, session.currentLevel,
-     *           session.consecutiveRejections, session.lastSelfEval */
+     *           session.consecutiveRejections, session.lastRejectionCheck */
     async buildBacktrackResult(sessionId, session, pr, receiptBase) {
         // v3.8: LoopForge never mutates the working tree. The backtrack prompt
         // carries the restore facts (files, fingerprints, target HEAD) and the
@@ -744,7 +767,7 @@ export class RoundLifecycle {
         // executes the restore itself. The former `backtrack_auto_restore` policy
         // and its git stash/reset implementation were deleted.
         const directive = pr.recovery;
-        const restoreTarget = directive?.target ?? pr.backtrackTarget ?? (session.currentRound - 1);
+        const restoreTarget = directive?.target ?? (session.currentRound - 1);
         const newRound = restoreTarget + 1;
         const branchId = directive?.transaction_id ?? session.roundSnapshot?.branchId;
         logEvent("session_recovery", {
@@ -753,9 +776,8 @@ export class RoundLifecycle {
             fromRound: session.currentRound,
             toRound: newRound,
             origin: directive?.origin ?? "machine",
-            triggerRule: directive?.trigger_rule ?? pr.backtrackTriggerRule ?? "",
-            skippedDiscoveries: (directive?.skipped_discoveries ??
-                pr.backtrackSkippedDiscoveries ?? []).length,
+            triggerRule: directive?.trigger_rule ?? "",
+            skippedDiscoveries: (directive?.skipped_discoveries ?? []).length,
         });
         // Reset session to the restored round. Recovery facts themselves are
         // never copied into the session; the committed directive is the source.
@@ -763,8 +785,7 @@ export class RoundLifecycle {
         session.consecutiveRejections = 0;
         session.lastRejectionCheck = "";
         // Preserve discoveries from abandoned rounds so they survive compilation.
-        const preservedDiscoveries = directive?.skipped_discoveries ??
-            pr.backtrackSkippedDiscoveries ?? [];
+        const preservedDiscoveries = directive?.skipped_discoveries ?? [];
         // Compile the restored prompt — use a fresh request with the restored round
         const request = {
             task: session.task,
@@ -813,7 +834,6 @@ export class RoundLifecycle {
         // stands after the rollback, which is what lets a round that stalled on a
         // rewritten entrypoint proceed once the entrypoint is in place.
         this.seedEntrypointTrust(session);
-        session.lastCompileResponse = prepared?.compileResponse ?? null;
         this.save(session);
         return {
             sessionId,
@@ -840,10 +860,8 @@ export class RoundLifecycle {
                 verificationFlags: pr.verificationFlags,
                 recovery: {
                     required: true,
-                    restore_point: directive?.target ?? pr.backtrackTarget ?? Math.max(1, newRound - 1),
-                    ...(directive?.target_head ?? pr.backtrackTargetGitHead
-                        ? { target_head: directive?.target_head ?? pr.backtrackTargetGitHead }
-                        : {}),
+                    restore_point: directive?.target ?? Math.max(1, newRound - 1),
+                    ...(directive?.target_head ? { target_head: directive.target_head } : {}),
                     ...(directive
                         ? { origin: directive.origin, reason: directive.reason }
                         : {}),
@@ -1010,7 +1028,6 @@ export class RoundLifecycle {
         // v3.8.3: the round that just committed is history; the trust baseline
         // moves to the round being prepared now.
         this.seedEntrypointTrust(session);
-        session.lastCompileResponse = prepared.compileResponse ?? null;
         policyMetrics.recordStrategy(session.loopId, nextLevel);
         try {
             this.save(session);
@@ -1151,6 +1168,7 @@ export class RoundLifecycle {
             submittedFields: receiptSnapshot.submittedFields ?? submittedFields ?? [],
             beforeContractId: beforeFacts.contractId,
             beforeSubGoals: beforeFacts.subGoals,
+            recoveryDirective: beforeFacts.recoveryDirective,
             replayed: tx.replayed,
         };
         // v2.12: Record a user gate when an accepted round reports a high-risk
@@ -1348,6 +1366,8 @@ export class RoundLifecycle {
             submittedFields: [],
             beforeContractId: beforeFacts.contractId,
             beforeSubGoals: beforeFacts.subGoals,
+            // This receipt reports the directive itself, never a redo checkpoint.
+            recoveryDirective: null,
             replayed: completed.outcome.replayed,
         };
         return this.buildBacktrackResult(sessionId, session, pr, receiptBase);

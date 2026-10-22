@@ -9,13 +9,20 @@ import type { ReceiptInput } from "../submission-receipt.js";
 import { makeExecutionReport, makeSelfEvaluation } from "../protocol.js";
 import type {
   PromptArtifact,
+  RecoveryDirective,
   SubGoal,
   SubmissionReceipt,
 } from "../protocol.js";
 import type { RoundProcessResult } from "../round-coordinator.js";
 import type { RoundTransactionSnapshot } from "../round-transaction.js";
-import { committedFeedbackRound } from "./_helpers.js";
-import { decodeCommittedRound } from "../committed-round.js";
+import {
+  committedBacktrackRound,
+  committedFeedbackRound,
+} from "./_helpers.js";
+import {
+  decodeCommittedRound,
+  readOnlyRollbacks,
+} from "../committed-round.js";
 import { resetPolicy } from "../policy.js";
 import { afterEach } from "node:test";
 
@@ -175,9 +182,21 @@ describe("v3.9.1 — submission receipt", () => {
   it("reports only actually preserved facts on a backtrack", () => {
     const backtrack = result({
       action: "backtrack",
-      backtrackTarget: 1,
-      backtrackSkippedDiscoveries: ["a preserved finding"],
-      backtrackWrongAssumptions: ["the API was synchronous"],
+      recovery: {
+        origin: "machine",
+        reason: "test backtrack",
+        target: 1,
+        target_round_id: "loop:receipt:round:1",
+        target_transaction_id: "tx-target",
+        target_dirty: [],
+        skipped_files: [],
+        skipped_fingerprints: {},
+        skipped_discoveries: ["a preserved finding"],
+        failed_rounds: [2],
+        approaches: [],
+        wrong_assumptions: ["the API was synchronous"],
+        transaction_id: "tx-rollback",
+      },
     });
     const receipt = deriveSubmissionReceipt(input({
       pr: backtrack,
@@ -308,6 +327,102 @@ describe("v3.9.1 — submission receipt", () => {
     const entry = report(receipt, "discovered_constraints");
     assert.equal(entry?.handling, "saved");
     assert.match(entry?.detail ?? "", /retention unknown/);
+  });
+
+  it("reports the redo recovery checkpoint and its machine verification", () => {
+    const directive: RecoveryDirective = {
+      origin: "agent",
+      reason: "try another approach",
+      target: 1,
+      target_round_id: "loop:receipt:round:1",
+      target_transaction_id: "tx-target",
+      target_head: "abc123",
+      target_dirty: [],
+      skipped_files: [],
+      skipped_fingerprints: {},
+      skipped_discoveries: [],
+      failed_rounds: [2],
+      approaches: [],
+      wrong_assumptions: [],
+      transaction_id: "tx-child",
+    };
+    const verified = deriveSubmissionReceipt(input({ recoveryDirective: directive }));
+    assert.deepEqual(verified.recovery_checkpoint, {
+      restore_point: 1,
+      origin: "agent",
+      reason: "try another approach",
+      verified: true,
+    });
+
+    const failed = deriveSubmissionReceipt(input({
+      recoveryDirective: directive,
+      pr: result({
+        action: "reject",
+        verificationFlags: [{
+          severity: "error",
+          field: "recovery",
+          check: "backtrack_workspace_not_restored",
+          detail: "the workspace was never restored",
+        }],
+      }),
+      disposition: "rejected",
+    }));
+    assert.equal(failed.recovery_checkpoint?.verified, false);
+    assert.equal(deriveSubmissionReceipt(input()).recovery_checkpoint, undefined,
+      "an ordinary receipt carries no checkpoint");
+    const rollbackDirectiveReceipt = deriveSubmissionReceipt(input({
+      pr: result({ action: "backtrack" }),
+      disposition: "backtracked",
+    }));
+    assert.equal(rollbackDirectiveReceipt.recovery_checkpoint, undefined,
+      "a rollback directive's own receipt has no checkpoint");
+
+    const redoBacktrack = deriveSubmissionReceipt(input({
+      recoveryDirective: directive,
+      pr: result({
+        action: "backtrack",
+        verificationFlags: [{
+          severity: "error",
+          field: "recovery",
+          check: "backtrack_workspace_not_restored",
+          detail: "the workspace was never restored",
+        }],
+      }),
+      disposition: "backtracked",
+    }));
+    assert.equal(redoBacktrack.recovery_checkpoint?.verified, false,
+      "a redo that itself rolls back still reports the checkpoint it failed");
+  });
+
+  it("rebuilds the redo checkpoint from committed history", () => {
+    const directiveEntry = committedBacktrackRound(
+      2,
+      "receipt-recovery",
+      1,
+      { transactionId: "tx-child" },
+    );
+    const directive = readOnlyRollbacks([directiveEntry])[0];
+    assert.ok(directive);
+    const redoEntry = committedFeedbackRound(2, {
+      loopId: "receipt-recovery",
+      branchId: "tx-child",
+      success: true,
+    });
+    const redo = decodeCommittedRound(redoEntry);
+    assert.ok(redo);
+    const receipt = deriveCommittedSubmissionView(redo!, [redo!], [directive!]);
+    assert.deepEqual(receipt.recovery_checkpoint, {
+      restore_point: 1,
+      origin: "machine",
+      reason: "test_restore",
+      verified: true,
+    });
+    assert.equal(
+      deriveCommittedSubmissionView(directive!, [directive!], [directive!])
+        .recovery_checkpoint,
+      undefined,
+      "the rollback directive's own receipt has no checkpoint",
+    );
   });
 
   it("rebuilds the same shape from committed history", () => {

@@ -61,11 +61,15 @@ includeRoundOne?: boolean): LoopObjective | null;
  *  Presentation only: the result never feeds enforcement. */
 export declare function deriveRecurringFlags(committedRounds: ReadonlyArray<CommittedRoundView>): RecurringFlag[];
 /** v3.2: Derive per-criterion status — the "goal → criteria → evidence"
- *  vertical view. Each objective criterion gets: met/remaining/unknown
+ *  vertical view. Each objective criterion gets: claimed/remaining/unknown
  *  (from per-round criterion_claims, ID-first or normalized-exact matching),
  *  the round it was first reported met, and the sub-goals a contract item
  *  referencing it also names (explicit `subgoal_refs`, never a text guess).
- *  Zero persistence — re-derived from the vault every compile. */
+ *  Zero persistence — re-derived from the vault every compile.
+ *
+ *  v3.9.6: the derivation lives in `criterion-status.ts` so the submission
+ *  boundary and guidance can read the same rows without importing this module
+ *  (which would close the `loop-compiler → submission-guidance` cycle). */
 export declare function deriveCriterionStatuses(loopId: string, context: Record<string, unknown> | null, objective: LoopObjective | null, currentRound: number, lastRoundResult?: LoopRoundResult | null,
 /** v3.8.1: the criterion machine facts from the shared bundle. A criterion
  *  is `verified` / `contradicted` / `insufficient` only through an item that

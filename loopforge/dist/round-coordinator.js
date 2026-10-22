@@ -354,8 +354,6 @@ export class RoundCoordinator {
                 roundSuccess,
                 gateContradicted,
                 newConsecutiveRejections: newRejections,
-                // Don't update lastSelfEval on reject — the agent redoes the same round
-                newLastSelfEval: undefined,
                 shouldPushSuccessTrajectory: false,
             };
         }
@@ -380,7 +378,6 @@ export class RoundCoordinator {
                 roundSuccess,
                 gateContradicted,
                 newConsecutiveRejections: 0,
-                newLastSelfEval: selfEval,
                 shouldPushSuccessTrajectory: false,
             };
         }
@@ -406,7 +403,6 @@ export class RoundCoordinator {
                     roundSuccess,
                     gateContradicted,
                     newConsecutiveRejections: 0,
-                    newLastSelfEval: selfEval,
                     shouldPushSuccessTrajectory: false,
                 };
             }
@@ -460,18 +456,6 @@ export class RoundCoordinator {
                 reason: enforceResult.reason,
                 recovery,
                 verificationStatus: "not_applicable",
-                backtrackTarget: restorePoint.round,
-                backtrackSkippedDiscoveries: getPolicy().engine.backtrack_preserve_discoveries
-                    ? restorePoint.skippedDiscoveries
-                    : [],
-                backtrackSkippedFiles: skippedFiles,
-                backtrackSkippedFingerprints: skippedFingerprints,
-                backtrackTargetGitHead: targetGitHead ?? undefined,
-                backtrackTargetDirty: targetSnapshot?.dirtyFiles,
-                backtrackTriggerRule: enforceResult.check,
-                backtrackFailedRounds: failedRounds,
-                backtrackApproaches: approaches,
-                backtrackWrongAssumptions: wrongAssumptions,
                 verificationFlags,
                 enforcementAction: "backtrack",
                 enforcementReason: enforceResult.reason,
@@ -479,7 +463,6 @@ export class RoundCoordinator {
                 roundSuccess,
                 gateContradicted,
                 newConsecutiveRejections: 0, // reset — fresh start
-                newLastSelfEval: undefined,
                 shouldPushSuccessTrajectory: false,
             };
         }
@@ -539,7 +522,6 @@ export class RoundCoordinator {
                 roundSuccess,
                 gateContradicted,
                 newConsecutiveRejections: 0,
-                newLastSelfEval: selfEval,
                 shouldPushSuccessTrajectory: shouldPushSuccess(gateContradicted, verificationFlags, activeContractStatuses),
             };
         }
@@ -556,7 +538,6 @@ export class RoundCoordinator {
                 roundSuccess,
                 gateContradicted,
                 newConsecutiveRejections: 0,
-                newLastSelfEval: selfEval,
                 shouldPushSuccessTrajectory: shouldPushSuccess(gateContradicted, verificationFlags, activeContractStatuses),
             };
         }
@@ -569,7 +550,6 @@ export class RoundCoordinator {
             roundSuccess,
             gateContradicted,
             newConsecutiveRejections: 0,
-            newLastSelfEval: selfEval,
             shouldPushSuccessTrajectory: shouldPushSuccess(gateContradicted, verificationFlags, activeContractStatuses),
         };
     }

@@ -74,21 +74,9 @@ export interface RoundTransactionInput {
     task: string;
     maxRounds: number;
     selfEval: SelfEvaluation;
-    lastSelfEval?: SelfEvaluation;
     consecutiveRejections: number;
     /** L4 (v3.7.x): previous round's rejection check (own-streak basis). */
     lastRejectionCheck?: string;
-    successTrajectory: boolean[];
-    /** v2.13: Files from skipped backtrack rounds for restore check. */
-    backtrackSkippedFiles?: string[];
-    /** M3 (v3.7.x): skipped-file git fingerprints at their failed rounds. */
-    backtrackSkippedFingerprints?: Record<string, string>;
-    /** v2.12: Git HEAD of the backtrack restore point. The verification gate
-     *  checks the workspace returns to this commit before accepting work. */
-    backtrackTargetGitHead?: string;
-    /** v3.9: files already dirty at the backtrack restore point (restore
-     *  baseline — see RoundProcessResult.backtrackTargetDirty). */
-    backtrackTargetDirty?: string[];
     /** v3.8.3: trusted round-start entrypoint fingerprints (see RoundProcessInput). */
     entrypointTrust?: Record<string, string>;
     /** v3.9.1: normalization metadata carried into the evaluated snapshot. */

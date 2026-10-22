@@ -11,7 +11,7 @@
  *   - verification: what the machine observed/verified.
  * A saved report is never a verified fact.
  */
-import type { ContractItemStatus, PromptArtifact, SelfEvaluation, SubmissionDiagnostic, SubmissionReceipt, SubGoal } from "./protocol.js";
+import type { ContractItemStatus, PromptArtifact, RecoveryDirective, SelfEvaluation, SubmissionDiagnostic, SubmissionReceipt, SubGoal } from "./protocol.js";
 import type { ObservationDelta } from "./evidence-provider.js";
 import type { RoundProcessResult } from "./round-coordinator.js";
 import type { RoundTransactionSnapshot } from "./round-transaction.js";
@@ -39,10 +39,16 @@ export interface ReceiptInput {
     }>;
     /** The round delta (already derived) used by the evidence posture. */
     evidenceDeltas: ObservationDelta[];
+    /** The pending rollback directive governing this submission, captured
+     *  before a redo commit (it stops being "pending" once the child round
+     *  commits). Null/absent for ordinary submissions. */
+    recoveryDirective?: RecoveryDirective | null;
 }
 /** Build a receipt from explicitly supplied before/after facts. */
 export declare function deriveSubmissionReceipt(input: ReceiptInput): SubmissionReceipt;
 /** Rebuild the same receipt from committed history. No new persistence and
- *  no second history: `allViews` is the caller's `readOnlyRounds` window. */
-export declare function deriveCommittedSubmissionView(view: CommittedRoundView, allViews: ReadonlyArray<CommittedRoundView>): SubmissionReceipt;
+ *  no second history: `allViews` is the caller's `readOnlyRounds` window.
+ *  `rollbacks` is the `readOnlyRollbacks` window; it supplies the directive
+ *  that governed a redo after that redo has committed. */
+export declare function deriveCommittedSubmissionView(view: CommittedRoundView, allViews: ReadonlyArray<CommittedRoundView>, rollbacks?: ReadonlyArray<CommittedRoundView>): SubmissionReceipt;
 //# sourceMappingURL=submission-receipt.d.ts.map

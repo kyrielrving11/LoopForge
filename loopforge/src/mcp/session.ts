@@ -43,6 +43,8 @@ import { ReplayBackend } from "../replay.js";
 import { FileLoopStore, queryLoopEntries } from "../loop-store.js";
 import type { LoopStore, VaultEntry } from "../loop-store.js";
 import { makeRoundId, prepareRoundTransaction } from "../round-transaction.js";
+import { resolveRecoveryTarget } from "../recovery.js";
+import { pendingRollbackDirective } from "../committed-round.js";
 import { RoundDriver } from "../round-driver.js";
 import { logEvent } from "../observability.js";
 import {
@@ -71,10 +73,8 @@ import type {
 } from "./round-lifecycle.js";
 import {
   activeContractOf,
-  compileSessionContext,
   validateSubmission,
 } from "./submission-boundary.js";
-import type { CompileContextSession } from "./submission-boundary.js";
 
 // Public type surface preserved from before the v2.14 decomposition.
 export type {
@@ -322,7 +322,6 @@ export class SessionManager implements SessionRegistry {
       consecutiveRejections: 0,
       lastRejectionCheck: "",
       roundSnapshot: prepared?.snapshot ?? prepareRoundTransaction(loopId, 1, evidenceBaseline),
-      lastCompileResponse: prepared?.compileResponse ?? null,
     };
     this.sessions.set(sessionId, session);
     policyMetrics.recordStrategy(loopId, initialLevel);
@@ -386,9 +385,11 @@ export class SessionManager implements SessionRegistry {
     const latestRollback = rollbacks[rollbacks.length - 1];
     if (latestRollback &&
         (!latestRound || latestRollback.round > latestRound.round)) {
-      return deriveCommittedSubmissionView(latestRollback, views);
+      return deriveCommittedSubmissionView(latestRollback, views, rollbacks);
     }
-    return latestRound ? deriveCommittedSubmissionView(latestRound, views) : null;
+    return latestRound
+      ? deriveCommittedSubmissionView(latestRound, views, rollbacks)
+      : null;
   }
 
   /** v3.9.6: the success trajectory is a projection of committed branch
@@ -1060,6 +1061,55 @@ export class SessionManager implements SessionRegistry {
         recovery.reason.trim().length === 0 ||
         recovery.reason.length > 500) {
       return invalid("reason must be a non-empty string of at most 500 characters");
+    }
+    // v3.9.6: an invalid target is a payload defect, like an invalid
+    // evaluation. Resolve it against committed facts BEFORE the session queue
+    // and lease renewal, so a rejected request writes no session state and can
+    // be retried with the same roundId. The lifecycle re-resolves the target
+    // on the accepted path — the same predicate, never a second rule.
+    const heldSession = this.sessions.get(sessionId);
+    if (heldSession) {
+      const expectedRoundId = heldSession.roundSnapshot?.roundId
+        ?? makeRoundId(heldSession.loopId, heldSession.currentRound);
+      const held = heldSession.roundSnapshot;
+      if ((roundId === undefined || roundId === expectedRoundId) &&
+          held?.kind === "evaluation" &&
+          held.round === heldSession.currentRound) {
+        const prefix = `loop:${heldSession.loopId}:`;
+        const entries = [
+          ...queryLoopEntries(this.loopStore, heldSession.loopId, { prefix }),
+          ...queryLoopEntries(this.loopStore, heldSession.loopId, {
+            prefix,
+            feedbackOnly: true,
+          }),
+        ];
+        // A pending redo checkpoint outranks target validation: repeating the
+        // recovery returns the held restore prompt, exactly as before.
+        if (!pendingRollbackDirective(entries, heldSession.currentRound)) {
+          const resolved = resolveRecoveryTarget(
+            entries,
+            heldSession.currentRound,
+            recovery.target_round as number,
+          );
+          if (!resolved.ok) {
+            return {
+              sessionId,
+              round: heldSession.currentRound,
+              roundId: held.roundId,
+              prompt: null,
+              submissionError: {
+                code: resolved.code,
+                details: {
+                  target_round: recovery.target_round,
+                  reason_code: resolved.reason,
+                  detail: resolved.detail,
+                  current_round: heldSession.currentRound,
+                },
+              },
+            };
+          }
+        }
+      }
     }
     return this.withSessionQueue(sessionId, async () => {
       const session = this.sessions.get(sessionId);

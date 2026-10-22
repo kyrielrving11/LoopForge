@@ -157,7 +157,6 @@ describe("RoundDriver", () => {
       maxRounds: 4,
       selfEval: eval1,
       consecutiveRejections: 0,
-      successTrajectory: [],
     });
     assert.equal(c1.outcome.result.action, "continue");
 
@@ -214,8 +213,7 @@ describe("RoundDriver", () => {
           }),
         }),
         consecutiveRejections: 0,
-        successTrajectory: [],
-      });
+        });
       assert.equal(c1.outcome.result.action, "continue");
       assert.ok(existsSync(statePath), "round-1 commit writes the state file");
       const first = readFileSync(statePath, "utf8");

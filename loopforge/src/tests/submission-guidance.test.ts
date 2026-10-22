@@ -23,11 +23,11 @@ import { buildLoopRequest } from "../mcp/round-lifecycle.js";
 import type { McpSession } from "../mcp/round-lifecycle.js";
 import type {
   CriterionStatus,
-  LoopForgeResponse,
   SubGoal,
 } from "../protocol.js";
 import type { ActiveContractView } from "../round-contract.js";
-import { deriveContractItemIds } from "../token-utils.js";
+import { deriveContractItemIds, deriveCriterionId } from "../token-utils.js";
+import { deriveEmergedItems } from "../subgoal-state.js";
 import { committedFeedbackRound } from "./_helpers.js";
 import { decodeCommittedRound } from "../committed-round.js";
 import { DEFAULT_POLICY, resetPolicy, setPolicyForTest } from "../policy.js";
@@ -71,14 +71,10 @@ function sessionView(overrides: Partial<McpSession> = {}): McpSession {
     engine: {} as McpSession["engine"],
     currentRound: 2,
     maxRounds: 20,
-    successTrajectory: [],
     status: "running",
     createdAt: 0,
     consecutiveRejections: 0,
     lastRejectionCheck: "",
-    backtrackSkippedFiles: [],
-    backtrackSkippedFingerprints: {},
-    evidenceBaseline: [],
     roundSnapshot: {
       schemaVersion: 2,
       roundId: "loop:guidance-loop:round:2",
@@ -90,9 +86,6 @@ function sessionView(overrides: Partial<McpSession> = {}): McpSession {
       createdAt: 0,
       updatedAt: 0,
     },
-    currentPrompt: "prompt",
-    currentLevel: "l1",
-    currentWarnings: [],
     ...overrides,
   } as McpSession;
 }
@@ -192,33 +185,23 @@ describe("v3.9.1 — submission_guidance", () => {
 
   it("renders real active-contract item ids and real sub-goal ids", () => {
     withVerifyCommand();
+    const subGoalText = "a real sub-goal";
     const entry = committedFeedbackRound(1, {
       loopId: "guidance-loop",
       contract: CONTRACT,
       files: ["src/a.ts"],
+      emergedSubtasks: [subGoalText],
     });
     const view = decodeCommittedRound(entry);
     assert.ok(view, "committed round decodes");
     const itemIds = deriveContractItemIds(CONTRACT.items);
-    const subGoal = {
-      id: "sg-12345678",
-      description: "a real sub-goal",
-      status: "pending" as const,
-      declared_at_round: 1,
-      status_changed_at_round: 1,
-      priority: 0,
-    };
-    const guidance = deriveSubmissionGuidance(
-      sessionView({
-        lastCompileResponse: {
-          sub_goals: [subGoal],
-        } as unknown as LoopForgeResponse,
-      }),
-      { rounds: [view!] },
-    );
+    const subGoalId = deriveEmergedItems("guidance-loop", 1, [subGoalText])[0]!.id;
+    const guidance = deriveSubmissionGuidance(sessionView(), {
+      rounds: [view!],
+    });
     assert.equal(guidance.active_contract?.id.startsWith("rc-"), true);
     assert.deepEqual(guidance.active_contract?.items.map((item) => item.id), itemIds);
-    assert.deepEqual(guidance.subgoals.map((item) => item.id), ["sg-12345678"]);
+    assert.deepEqual(guidance.subgoals.map((item) => item.id), [subGoalId]);
     const claim = guidance.fields.find(
       (field) => field.path === "execution_report.contract_item_claims",
     );
@@ -226,7 +209,7 @@ describe("v3.9.1 — submission_guidance", () => {
     assert.ok(JSON.stringify(claim!.example).includes(itemIds[0]),
       "claim example cites the real item id");
     const update = guidance.fields.find((field) => field.path === "subgoal_updates");
-    assert.ok(JSON.stringify(update?.example).includes("sg-12345678"));
+    assert.ok(JSON.stringify(update?.example).includes(subGoalId));
   });
 
   it("is deterministic for the same facts", () => {
@@ -506,24 +489,23 @@ describe("v3.9.2 — compact trigger guidance", () => {
     assert.doesNotMatch(block, /cr-00000003/);
   });
 
-  it("exposes criteria in submission_guidance", () => {
-    const session = {
+  it("derives criteria from the operator objective and committed claims", () => {
+    const text = "All tests pass";
+    const id = deriveCriterionId(text);
+    const entry = committedFeedbackRound(1, {
       loopId: "guidance-criteria",
-      currentRound: 1,
-      lastCompileResponse: {
-        criterion_statuses: [criterion],
-        prompt_artifact: { level: "l1" },
-      } as unknown as LoopForgeResponse,
-    };
-    const guidance = deriveSubmissionGuidance(session, { rounds: [] });
-    assert.deepEqual(guidance.criteria, [{
-      id: "cr-12345678",
-      text: "All tests pass",
-      status: "remaining",
-    }]);
+      remaining: [text],
+    });
+    const view = decodeCommittedRound(entry);
+    assert.ok(view, "committed round decodes");
+    const guidance = deriveSubmissionGuidance(
+      { loopId: "guidance-criteria", currentRound: 2 },
+      { rounds: [view!], objective: { success_criteria: [text] } },
+    );
+    assert.deepEqual(guidance.criteria, [{ id, text, status: "remaining" }]);
     const field = guidance.fields.find(
       (entry) => entry.path === "execution_report.criterion_claims");
     assert.ok(field);
-    assert.deepEqual(field?.example, [{ criterion_id: "cr-12345678", outcome: "met" }]);
+    assert.deepEqual(field?.example, [{ criterion_id: id, outcome: "met" }]);
   });
 });

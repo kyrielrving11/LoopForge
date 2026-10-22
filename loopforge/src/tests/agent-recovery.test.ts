@@ -1,9 +1,18 @@
 /** v3.9.6 — Agent-initiated recovery: target validation, directive commit,
  *  branch fencing and the restore checkpoint. */
 
-import { describe, it } from "node:test";
+import { afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { LoopForgeEngine } from "../engine.js";
+import { SessionManager } from "../mcp/session.js";
+import { VaultSessionStateStore } from "../storage.js";
+import { queryLoopEntries } from "../loop-store.js";
+import { resetPolicy } from "../policy.js";
+import { policyMetrics, resetPolicyMetrics } from "../policy-metrics.js";
 import { MemoryLoopStore, committedFeedbackRound, deltaAfter } from "./_helpers.js";
 import type { GitObservation } from "../protocol.js";
 import type { VaultEntry } from "../loop-store.js";
@@ -14,10 +23,12 @@ import {
   rootBranchId,
 } from "../round-transaction.js";
 import {
+  decodeCommittedRound,
   pendingRollbackDirective,
   readOnlyRollbacks,
   readOnlyRounds,
 } from "../committed-round.js";
+import { deriveCommittedSubmissionView } from "../submission-receipt.js";
 import {
   deriveRecoveryDirective,
   resolveRecoveryTarget,
@@ -149,6 +160,24 @@ describe("v3.9.6 — agent recovery", () => {
     assert.deepEqual(readOnlyRounds(committed).map((view) => view.round), [1]);
     assert.equal(pendingRollbackDirective(committed, 2)?.round, 3);
 
+    // The committed directive is the redo's checkpoint fact, both live and
+    // rebuilt after the child round commits.
+    const redoEntry = committedFeedbackRound(2, {
+      loopId: LOOP,
+      branchId: events[0]!.recovery!.transaction_id,
+      success: true,
+      roundEvidence: [git("after", "target-head", [])],
+    });
+    const redo = decodeCommittedRound(redoEntry);
+    assert.ok(redo);
+    const receipt = deriveCommittedSubmissionView(redo!, [redo!], events);
+    assert.deepEqual(receipt.recovery_checkpoint, {
+      restore_point: 1,
+      origin: "agent",
+      reason: "Try the other approach",
+      verified: true,
+    });
+
     const second = coordinator.commitRecovery({
       snapshot: held,
       loopId: LOOP,
@@ -204,5 +233,211 @@ describe("v3.9.6 — agent recovery", () => {
       }),
       { ok: true },
     );
+  });
+});
+
+const GIT_ENV = {
+  ...process.env,
+  GIT_AUTHOR_NAME: "lf-recovery",
+  GIT_AUTHOR_EMAIL: "lf-recovery@example.invalid",
+  GIT_COMMITTER_NAME: "lf-recovery",
+  GIT_COMMITTER_EMAIL: "lf-recovery@example.invalid",
+};
+
+function runGit(dir: string, ...args: string[]): string {
+  return execFileSync("git", args, {
+    cwd: dir,
+    encoding: "utf8",
+    env: GIT_ENV,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+}
+
+function initRepo(dir: string): void {
+  runGit(dir, "init", "-q");
+  writeFileSync(join(dir, ".gitignore"), ".loopforge/\n");
+  writeFileSync(join(dir, "a.ts"), "export const a = 1;\n");
+  runGit(dir, "add", ".");
+  runGit(dir, "commit", "-q", "-m", "baseline");
+}
+
+function roundEvaluation(file: string): Record<string, unknown> {
+  return {
+    success: false,
+    output_summary: `Worked on ${file}.`,
+    constraint_violations: [],
+    should_continue: true,
+    execution_report: {
+      files_changed: [file],
+      tests_reported: { passed: 0, failed: 0, skipped: 0 },
+    },
+  };
+}
+
+describe("v3.9.6 — SessionManager agent recovery E2E", () => {
+  let dir = "";
+  let originalCwd = "";
+
+  beforeEach(() => {
+    resetPolicy();
+    resetPolicyMetrics();
+    originalCwd = process.cwd();
+    dir = mkdtempSync(join(tmpdir(), "loopforge-recover-e2e-"));
+    initRepo(dir);
+    process.chdir(dir);
+  });
+
+  afterEach(() => {
+    process.chdir(originalCwd);
+    try {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+    } catch {
+      // The platform temp directory owns the cleanup.
+    }
+    resetPolicy();
+    resetPolicyMetrics();
+  });
+
+  it("commits a valid target, keeps invalid targets side-effect free, and replays idempotently", async () => {
+    const store = new MemoryLoopStore();
+    const sessionStore = new VaultSessionStateStore(store);
+    const mgr = new SessionManager(store, sessionStore);
+    const readEntries = () => [
+      ...queryLoopEntries(store, "recover-e2e", {
+        prefix: "loop:recover-e2e:",
+      }),
+      ...queryLoopEntries(store, "recover-e2e", {
+        prefix: "loop:recover-e2e:",
+        feedbackOnly: true,
+      }),
+    ];
+    try {
+      const started = await mgr.create({
+        task: "Recover the branch",
+        loopId: "recover-e2e",
+        maxRounds: 10,
+      });
+      const sessionId = String(started.sessionId);
+
+      writeFileSync(join(dir, "r1.txt"), "round one\n");
+      runGit(dir, "add", ".");
+      runGit(dir, "commit", "-q", "-m", "round 1 work");
+      const round1 = await mgr.advance(
+        sessionId,
+        "",
+        roundEvaluation("r1.txt"),
+        started.roundId,
+      );
+      assert.equal(round1.round, 2);
+      assert.ok(round1.prompt, "round 2 prompt is delivered");
+
+      writeFileSync(join(dir, "r2.txt"), "round two\n");
+      runGit(dir, "add", ".");
+      runGit(dir, "commit", "-q", "-m", "round 2 work");
+      const round2 = await mgr.advance(
+        sessionId,
+        "",
+        roundEvaluation("r2.txt"),
+        round1.roundId,
+      );
+      assert.equal(round2.round, 3);
+      assert.ok(round2.prompt, "round 3 prompt is delivered");
+
+      const sessionBefore = JSON.stringify(sessionStore.load("recover-e2e"));
+      const entriesBefore = readEntries();
+      const rollbacksBefore = readOnlyRollbacks(entriesBefore).length;
+      const roundsBefore = readOnlyRounds(entriesBefore).map((view) => view.round);
+      const roundBefore = mgr.get(sessionId)?.currentRound;
+      const rejectionsBefore = mgr.get(sessionId)?.consecutiveRejections;
+      const metricsBefore = JSON.stringify(policyMetrics.snapshot("recover-e2e"));
+
+      const invalid = await mgr.recover(
+        sessionId,
+        { target_round: 99, reason: "not a real target" },
+        round2.roundId,
+      );
+      assert.equal(invalid.submissionError?.code, "recovery_invalid");
+      assert.equal(
+        invalid.submissionError?.details.reason_code,
+        "target_out_of_range",
+      );
+      assert.equal(
+        JSON.stringify(sessionStore.load("recover-e2e")),
+        sessionBefore,
+        "an invalid target must not write the session document",
+      );
+      const entriesAfterInvalid = readEntries();
+      assert.equal(readOnlyRollbacks(entriesAfterInvalid).length, rollbacksBefore);
+      assert.deepEqual(
+        readOnlyRounds(entriesAfterInvalid).map((view) => view.round),
+        roundsBefore,
+      );
+      assert.equal(mgr.get(sessionId)?.currentRound, roundBefore);
+      assert.equal(mgr.get(sessionId)?.consecutiveRejections, rejectionsBefore);
+      assert.equal(
+        JSON.stringify(policyMetrics.snapshot("recover-e2e")),
+        metricsBefore,
+      );
+
+      const redo = await mgr.recover(
+        sessionId,
+        { target_round: 1, reason: "abandon this approach" },
+        round2.roundId,
+      );
+      assert.ok(redo.prompt, "the redo prompt is delivered");
+      assert.equal(redo.round, 2, "the redo targets restore point + 1");
+      assert.equal(redo.enforcementAction, "recovery");
+      assert.equal(redo.recovery?.origin, "agent");
+      assert.equal(redo.recovery?.target_round, 1);
+      assert.equal(redo.recovery?.reason, "abandon this approach");
+
+      const committed = readEntries();
+      const rollbacks = readOnlyRollbacks(committed);
+      assert.equal(rollbacks.length, 1);
+      assert.equal(rollbacks[0]!.origin, "agent");
+      assert.equal(rollbacks[0]!.recovery?.target, 1);
+      assert.equal(rollbacks[0]!.recovery?.reason, "abandon this approach");
+      assert.deepEqual(
+        readOnlyRounds(committed).map((view) => view.round),
+        [1],
+        "the abandoned branch leaves the effective history",
+      );
+      assert.equal(pendingRollbackDirective(committed, 2)?.origin, "agent");
+
+      // A repeated recovery while the checkpoint is pending returns the held
+      // prompt and never commits a second directive.
+      const repeat = await mgr.recover(
+        sessionId,
+        { target_round: 1, reason: "repeat the request" },
+        redo.roundId,
+      );
+      assert.ok(repeat.prompt);
+      assert.equal(repeat.round, 2);
+      assert.equal(
+        readOnlyRollbacks(readEntries()).length,
+        1,
+      );
+
+      // Crash/restart: the committed directive and the redo cursor survive.
+      mgr.close();
+      const restarted = new SessionManager(store, new VaultSessionStateStore(store));
+      const resumed = await restarted.resume("recover-e2e");
+      assert.ok(resumed?.prompt, "resume returns the held redo prompt");
+      assert.equal(resumed?.round, 2);
+      const replay = await restarted.recover(
+        String(resumed!.sessionId),
+        { target_round: 1, reason: "after restart" },
+        redo.roundId,
+      );
+      assert.ok(replay.prompt);
+      assert.equal(replay.round, 2);
+      assert.equal(
+        readOnlyRollbacks(readEntries()).length,
+        1,
+      );
+      restarted.close();
+    } finally {
+      mgr.close();
+    }
   });
 });

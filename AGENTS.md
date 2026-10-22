@@ -355,7 +355,7 @@ and no declared evolution. An unobservable boundary stays L1. L2 is entered
 for factual round conditions such as first round, plan boundary, deep or
 shallow committed recovery, machine contradiction, checkpoint boundary, or
 repeated rejection; there is no round-count timer. The Recovery Brief and the
-recovery boundary share `pendingBacktrackRecord` (backtrack `target + 1 ===
+recovery boundary share `pendingRollbackDirective` (backtrack `target + 1 ===
 redoRound`), and objective/constraint evolution is bounded by the compile
 window so an abandoned branch cannot leak into the redo prompt.
 

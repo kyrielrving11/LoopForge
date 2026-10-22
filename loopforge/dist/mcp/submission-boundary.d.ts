@@ -18,44 +18,31 @@
  *  session's state, and answering `session_not_found` for it would send the
  *  agent after the wrong problem.
  *
- *  This module also owns the compile context the boundary reads, because the
- *  sub-goal reference space IS the compiled set the prompt carried — the
- *  session's own projection reads the same function, so the two cannot
- *  disagree about it.
+ *  This module derives the reference spaces the boundary reads from the same
+ *  committed history window the prompt was compiled from, so the prompt, the
+ *  boundary and `submission_guidance` cannot disagree about them.
  */
 import type { LoopStore } from "../loop-store.js";
-import type { LoopForgeResponse, OperatorAcceptance, SubGoal } from "../protocol.js";
-import { LoopForgeEngine } from "../engine.js";
+import type { OperatorAcceptance, SubGoal } from "../protocol.js";
 import type { ActiveContractView } from "../round-contract.js";
 import { normalizeSelfEvaluation } from "../self-eval.js";
 import type { SubmissionDiagnostic } from "../protocol.js";
 import type { AdvanceResult } from "./round-lifecycle.js";
-/** What `compileSessionContext` needs from a session. Structural, so both the
+/** What the submission boundary needs from a session. Structural, so both the
  *  session manager and the boundary can pass their own view of it. */
 export interface CompileContextSession {
     loopId: string;
-    task: string;
-    maxRounds: number;
     currentRound: number;
-    lastCompileResponse?: LoopForgeResponse | null;
     roundSnapshot?: {
-        roundId: string;
+        attempt?: number;
         operatorAcceptance?: OperatorAcceptance;
     } | null;
-    engine: LoopForgeEngine;
 }
-/** The compile response this round's prompt came from.
- *
- *  Cached-when-fresh (the artifact's deterministic roundId guards against
- *  stale reuse), recompiled otherwise with `persistLineage: false` so it never
- *  writes the Vault, and null when it cannot be observed. Callers fail OPEN:
- *  an unobservable reference space must not become a rejection. */
-export declare function compileSessionContext(session: CompileContextSession): LoopForgeResponse | null;
-/** The sub-goal set an agent may legitimately reference: the compiled set the
+/** The sub-goal set an agent may legitimately reference: the committed set the
  *  prompt carried, PLUS this submission's own `emerged_subtasks` — a sub-goal
  *  may be created and referenced (or transitioned) in one round. Null when it
  *  cannot be observed. */
-export declare function knownSubGoalsFor(session: CompileContextSession, emerged: string[], response?: LoopForgeResponse | null): SubGoal[] | null;
+export declare function knownSubGoalsFor(session: CompileContextSession, emerged: string[], knownSubGoals: ReadonlyArray<SubGoal> | null): SubGoal[] | null;
 /** The ACTIVE Round Contract governing a session's next round — ONE
  *  derivation, shared by the session's public view and the boundary. */
 export declare function activeContractOf(store: LoopStore, session: {

@@ -7,12 +7,12 @@ import { createHash } from "node:crypto";
 import { deriveConfiguredCapability, getPolicy } from "./policy.js";
 import { AgentStatus, makeLoopCompileResponse, makeLoopObjective, makeConstraintMeta, } from "./protocol.js";
 import { createCanonicalLoopState, renderCanonicalStateMarkdown, } from "./canonical-state.js";
-import { decodeRound, entryLineage, entryCriteriaMet, entryCriteriaRemaining, pendingBacktrackRecord, roundResultFromCommittedRound, machineGitMotionSeries, derivationRounds, } from "./committed-round.js";
+import { decodeRound, entryLineage, pendingBacktrackRecord, roundResultFromCommittedRound, machineGitMotionSeries, derivationRounds, } from "./committed-round.js";
+import { deriveCriterionStatuses as deriveCriterionStatusesFromEntries } from "./criterion-status.js";
 import { derivePromptFreshness, UNKNOWN_PROMPT_FRESHNESS, } from "./prompt-freshness.js";
 import { NO_IN_FLIGHT_ROUND, deriveRoundFacts } from "./round-facts.js";
 import { recoveryBriefLines } from "./enforcement-gate.js";
 import { deriveSubGoals, duplicateEmergedDeclarations } from "./subgoal-state.js";
-import { claimedMetCriteria, claimedRemainingCriteria } from "./self-eval.js";
 import { assemblePromptArtifact } from "./prompt-assembler.js";
 import { renderSelfEvalBlock, } from "./submission-guidance.js";
 import { decidePromptLevel, } from "./prompt-policy.js";
@@ -270,11 +270,15 @@ function deriveMachineStatus(rounds, currentRound) {
     return { windowRounds: 3, gitMotion: motionRounds > 0, motionRounds };
 }
 /** v3.2: Derive per-criterion status — the "goal → criteria → evidence"
- *  vertical view. Each objective criterion gets: met/remaining/unknown
+ *  vertical view. Each objective criterion gets: claimed/remaining/unknown
  *  (from per-round criterion_claims, ID-first or normalized-exact matching),
  *  the round it was first reported met, and the sub-goals a contract item
  *  referencing it also names (explicit `subgoal_refs`, never a text guess).
- *  Zero persistence — re-derived from the vault every compile. */
+ *  Zero persistence — re-derived from the vault every compile.
+ *
+ *  v3.9.6: the derivation lives in `criterion-status.ts` so the submission
+ *  boundary and guidance can read the same rows without importing this module
+ *  (which would close the `loop-compiler → submission-guidance` cycle). */
 export function deriveCriterionStatuses(loopId, context, objective, currentRound, lastRoundResult,
 /** v3.8.1: the criterion machine facts from the shared bundle. A criterion
  *  is `verified` / `contradicted` / `insufficient` only through an item that
@@ -282,65 +286,13 @@ export function deriveCriterionStatuses(loopId, context, objective, currentRound
  *  is derived over the WHOLE committed history, so it survives its contract
  *  closing (see `deriveCriterionFacts`). */
 criterionFacts = []) {
-    if (!objective || objective.success_criteria.length === 0)
-        return [];
-    const entries = loopEntries(loopId, context).filter((entry) => entryRound(entry) >= 1 && entryRound(entry) < currentRound);
-    // The previous round's report, resolved from the committed view (or the
-    // library fallback), is treated as the report for round currentRound - 1.
-    const lastEv = lastRoundResult?.execution_report;
-    const lastMet = claimedMetCriteria(lastEv);
-    const lastRemaining = claimedRemainingCriteria(lastEv);
-    const lastEntry = entries[entries.length - 1] ?? null;
-    const lastEntryRemaining = lastEntry ? entryCriteriaRemaining(lastEntry) : [];
-    // v3.8.1: criterion → machine status + explicit sub-goal links, from the
-    // shared `RoundFacts` bundle (whole committed history). It used to be
-    // re-derived here from the ACTIVE contract, which made both maps empty the
-    // moment the contract closed — the criterion's machine fact, and the
-    // sub-goal links carried on the same item, disappeared while the sub-goal
-    // side of the very same fact survived. One derivation, one window.
-    const factsByCriterion = new Map(criterionFacts.map((fact) => [fact.criterion_id, fact]));
-    // v3.9.4: one row per derived id. The objective is authored text; a case or
-    // whitespace variant derives the same cr-* and must not produce a second
-    // row (nor a second contract reference space).
-    const seenIds = new Set();
-    const statuses = [];
-    for (const text of objective.success_criteria) {
-        const id = deriveCriterionId(text);
-        if (seenIds.has(id))
-            continue;
-        seenIds.add(id);
-        let metAtRound = null;
-        for (const entry of entries) {
-            const rnd = entryRound(entry);
-            if (entryCriteriaMet(entry).some((met) => criteriaMatch(met, text))) {
-                metAtRound = rnd;
-                break; // first report wins — chronological scan
-            }
-        }
-        if (metAtRound === null && lastMet.some((met) => criteriaMatch(met, text))) {
-            metAtRound = currentRound - 1;
-        }
-        // v3.8: a claim reaches `claimed` at most. Only a machine fact about a
-        // contract item that references this criterion can go further.
-        const claimedStatus = metAtRound !== null
-            ? "claimed"
-            : lastRemaining.some((remaining) => criteriaMatch(remaining, text)) ||
-                lastEntryRemaining.some((remaining) => criteriaMatch(remaining, text))
-                ? "remaining"
-                : "unknown";
-        const fact = factsByCriterion.get(id);
-        const status = fact?.status ?? claimedStatus;
-        statuses.push({
-            id,
-            text,
-            status,
-            ...(metAtRound !== null ? { met_at_round: metAtRound } : {}),
-            // v3.8.1: explicit refs only — empty when no contract item links this
-            // criterion to a sub-goal.
-            related_subgoal_ids: fact?.related_subgoal_ids ?? [],
-        });
-    }
-    return statuses;
+    return deriveCriterionStatusesFromEntries({
+        entries: loopEntries(loopId, context),
+        currentRound,
+        objective,
+        lastRoundResult,
+        criterionFacts,
+    });
 }
 /** v3.8: Rank item statuses so the strongest machine fact wins when several
  *  items reference the same criterion. */

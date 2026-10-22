@@ -187,7 +187,6 @@ describe("mergePolicyMetrics", () => {
       gateContradicted: false,
       newConsecutiveRejections: 0,
       shouldPushSuccessTrajectory: true,
-      newLastSelfEval: undefined,
     } as never);
     const live = policyMetrics.snapshot("metrics-loop");
     const merged = mergePolicyMetrics(derived, live);
@@ -220,7 +219,6 @@ describe("mergePolicyMetrics", () => {
       gateContradicted: false,
       newConsecutiveRejections: 1,
       shouldPushSuccessTrajectory: false,
-      newLastSelfEval: undefined,
     } as never);
     policyMetrics.recordRound("metrics-loop", {
       action: "reject",
@@ -229,7 +227,6 @@ describe("mergePolicyMetrics", () => {
       gateContradicted: false,
       newConsecutiveRejections: 2,
       shouldPushSuccessTrajectory: false,
-      newLastSelfEval: undefined,
     } as never);
     policyMetrics.recordRound("metrics-loop", {
       action: "terminate",
@@ -238,7 +235,6 @@ describe("mergePolicyMetrics", () => {
       gateContradicted: false,
       newConsecutiveRejections: 3,
       shouldPushSuccessTrajectory: false,
-      newLastSelfEval: undefined,
     } as never);
     const live = policyMetrics.snapshot("metrics-loop");
     const merged = mergePolicyMetrics(derived, live);
@@ -259,7 +255,6 @@ describe("live collector — commit semantics (v3.3.1)", () => {
     const decision = (action: string): never => ({
       action, verificationFlags: [], roundSuccess: false, gateContradicted: false,
       newConsecutiveRejections: 1, shouldPushSuccessTrajectory: false,
-      newLastSelfEval: undefined,
     } as never);
     policyMetrics.recordRound("metrics-live-bucket", decision("terminate"));
     policyMetrics.recordRound("metrics-live-bucket", decision("backtrack"));

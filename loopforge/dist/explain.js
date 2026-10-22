@@ -12,6 +12,7 @@ import { getPolicy } from "./policy.js";
 /** Build the explain view. Pure and read-only. */
 export function buildExplain(loopId, entries, round) {
     const all = readOnlyRounds(entries);
+    const rollbacks = readOnlyRollbacks(entries);
     const commands = getPolicy().evidence.commands ?? [];
     const active = deriveActiveRoundContract(all, commands);
     const selected = round === undefined
@@ -39,7 +40,7 @@ export function buildExplain(loopId, entries, round) {
             typeof gitAfter.data.coverage === "string"
             ? gitAfter.data.coverage
             : null;
-        const submission = deriveCommittedSubmissionView(view, all);
+        const submission = deriveCommittedSubmissionView(view, all, rollbacks);
         return {
             round: view.round,
             roundId: view.roundId,
@@ -110,7 +111,7 @@ export function buildExplain(loopId, entries, round) {
         activeContract: active
             ? { id: active.id, work_item: active.work_item, itemCount: active.items.length }
             : null,
-        rollbacks: readOnlyRollbacks(entries).map((view) => ({
+        rollbacks: rollbacks.map((view) => ({
             round: view.round,
             transactionId: view.transactionId ?? view.roundId,
             origin: view.origin === "agent" ? "agent" : "machine",

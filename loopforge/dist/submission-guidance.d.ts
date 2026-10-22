@@ -12,7 +12,7 @@
 import type { ActiveContractView } from "./round-contract.js";
 import type { ContractItemStatusView } from "./contract-items.js";
 import type { CommittedRoundView } from "./committed-round.js";
-import type { CriterionStatus, LoopForgeResponse, PromptArtifact, SubGoal, SubmissionGuidance, VerificationFlag } from "./protocol.js";
+import type { CriterionStatus, PromptArtifact, SubGoal, SubmissionGuidance, VerificationFlag } from "./protocol.js";
 export type FieldNature = "report" | "claim" | "proposal" | "transition" | "control";
 export interface FieldGuide {
     /** Dotted path, e.g. `execution_report.files_changed`. */
@@ -112,14 +112,17 @@ export interface GuidanceSessionView {
         promptArtifact?: PromptArtifact;
         beforeEvidence?: unknown;
     } | null;
-    lastCompileResponse?: LoopForgeResponse | null;
-    backtrackTargetGitHead?: string;
-    backtrackSkippedFiles?: string[];
 }
 export interface GuidanceOptions {
     /** The history window the caller already uses: `derivationRounds` for a live
      *  prepare, `readOnlyRounds` for a read-only view. Never derive a second one. */
     rounds: ReadonlyArray<CommittedRoundView>;
+    /** The operator objective's success criteria, resolved by the caller from
+     *  the held acceptance or committed objective. Absent = unobservable; no
+     *  criterion rows are rendered. */
+    objective?: {
+        success_criteria: ReadonlyArray<string>;
+    } | null;
     verificationFlags?: ReadonlyArray<VerificationFlag>;
     recovery?: {
         required: boolean;

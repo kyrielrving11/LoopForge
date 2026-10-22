@@ -779,6 +779,42 @@
         "entered_history": {
           "type": "boolean"
         },
+        "recovery_checkpoint": {
+          "type": "object",
+          "properties": {
+            "restore_point": {
+              "type": "number"
+            },
+            "origin": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "agent"
+                  ]
+                },
+                {
+                  "type": "string",
+                  "enum": [
+                    "machine"
+                  ]
+                }
+              ]
+            },
+            "reason": {
+              "type": "string"
+            },
+            "verified": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "restore_point",
+            "origin",
+            "reason",
+            "verified"
+          ]
+        },
         "reports": {
           "type": "array",
           "items": {

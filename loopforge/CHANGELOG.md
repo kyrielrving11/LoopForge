@@ -25,7 +25,21 @@ session frontier, excluding abandoned rounds and preserving the final redo
 round after a stop. The redo checkpoint is fail-closed: an unobservable Git
 boundary is a `recovery_checkpoint_failed` finding, and an Agent checkpoint
 rejects the redo for the same `roundId` rather than opening a machine-origin
-backtrack.
+backtrack. Replay is keyed by `transactionId`, not only `roundId`: a redo at
+`target + 1` no longer replays the abandoned feedback commit that occupied the
+same numeric round.
+
+### Redo receipt checkpoint
+
+The first submission after a rollback (the redo) now carries
+`recovery_checkpoint: { restore_point, origin, reason, verified }` on its
+`submission_receipt`. The directive is captured before the redo commits,
+because a committed child round consumes the pending state. `verified` is the
+same machine checkpoint the gate acts on: an error-severity
+`backtrack_workspace_not_restored` finding makes it false, while a warning
+(claimed files overlap the skipped set) does not. Explain, audit and
+`last_submission` rebuild the same field from the rollback window, so a lost
+response does not lose the checkpoint fact.
 
 ### Operator acceptance is immutable
 
@@ -64,8 +78,13 @@ restore facts derive from the pending rollback directive; the held prompt and
 level derive from `roundSnapshot.promptArtifact` (warnings are stored on the
 artifact). `loopforge_stop`/`status` compute the trajectory from committed
 rounds. `task`, `consecutiveRejections`, `lastRejectionCheck` and
-`entrypointTrust` remain runtime control state; `lastCompileResponse` remains a
-process-local derived cache, never a durable source.
+`entrypointTrust` remain runtime control state. `lastCompileResponse` is
+removed: sub-goals, criteria, prompt level and the criterion reference space
+derive from the committed window and the held `operatorAcceptance` instead of
+whatever the last compile happened to cache. The process/result inputs
+`lastSelfEval`, `successTrajectory`, `newLastSelfEval` and the legacy
+`backtrack*` mirrors are deleted; rollback facts have one representation,
+`RoundProcessResult.recovery`.
 
 ### Breaking boundaries
 

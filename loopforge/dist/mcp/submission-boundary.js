@@ -18,61 +18,59 @@
  *  session's state, and answering `session_not_found` for it would send the
  *  agent after the wrong problem.
  *
- *  This module also owns the compile context the boundary reads, because the
- *  sub-goal reference space IS the compiled set the prompt carried — the
- *  session's own projection reads the same function, so the two cannot
- *  disagree about it.
+ *  This module derives the reference spaces the boundary reads from the same
+ *  committed history window the prompt was compiled from, so the prompt, the
+ *  boundary and `submission_guidance` cannot disagree about them.
  */
 import { queryLoopEntries } from "../loop-store.js";
-import { Mode } from "../protocol.js";
 import { deriveActiveRoundContract } from "../round-contract.js";
 import { derivationRounds } from "../committed-round.js";
 import { boundedEmergedSubtasks, normalizeSelfEvaluation, parseSubGoalUpdates, validateContractShape, validateCoreSelfEvaluation, validateSubGoalUpdatesShape, } from "../self-eval.js";
-import { deriveEmergedItems, validateSubGoalUpdates } from "../subgoal-state.js";
+import { deriveEmergedItems, deriveSubGoals, validateSubGoalUpdates, } from "../subgoal-state.js";
 import { isConfiguredCommand } from "../policy.js";
 import { scopeEntryDetail } from "../workspace.js";
-import { deriveCriterionId, isRecord, normalizeText } from "../token-utils.js";
+import { deriveCriterionId, isRecord, normalizeText, uniqueNormalized, } from "../token-utils.js";
 import { deriveConstraintId, latestObjective } from "../loop-compiler.js";
-/** The compile response this round's prompt came from.
- *
- *  Cached-when-fresh (the artifact's deterministic roundId guards against
- *  stale reuse), recompiled otherwise with `persistLineage: false` so it never
- *  writes the Vault, and null when it cannot be observed. Callers fail OPEN:
- *  an unobservable reference space must not become a rejection. */
-export function compileSessionContext(session) {
-    const cached = session.lastCompileResponse;
-    const expectedRoundId = session.roundSnapshot?.roundId
-        ?? `loop:${session.loopId}:round:${session.currentRound}`;
-    if (cached?.prompt_artifact && cached.prompt_artifact.roundId === expectedRoundId) {
-        return cached;
-    }
+function referenceFactsFor(store, session) {
     try {
-        const request = {
-            task: session.task,
-            mode: Mode.LOOP_COMPILE,
-            feedback: null,
-            skill_name: null,
-            task_id: null,
-            loop_id: session.loopId,
-            round: session.currentRound,
-            max_rounds: session.maxRounds,
-            verification_flags: [],
-        };
-        const compiled = session.engine.invokeLoopCompile(request, undefined, { persistLineage: false });
-        return compiled.response ?? null;
+        const prefix = `loop:${session.loopId}:`;
+        const entries = queryLoopEntries(store, session.loopId, { prefix });
+        const allEntries = [
+            ...entries,
+            ...queryLoopEntries(store, session.loopId, { prefix, feedbackOnly: true }),
+        ];
+        const subGoals = deriveSubGoals({
+            loopId: session.loopId,
+            currentRound: session.currentRound,
+            rounds: derivationRounds(allEntries, session.currentRound),
+        });
+        // v3.9.6: the held acceptance is the operator fact. Committed objective
+        // lineage is the fallback for a snapshot that predates it — never a
+        // second compile of mutable session state.
+        let criteriaTexts = session.roundSnapshot?.operatorAcceptance?.success_criteria ?? null;
+        if (criteriaTexts === null) {
+            criteriaTexts = latestObjective(session.loopId, { results: entries }, session.currentRound, session.currentRound === 1 && (session.roundSnapshot?.attempt ?? 1) > 1)?.success_criteria ?? null;
+        }
+        const criteria = criteriaTexts === null
+            ? null
+            : uniqueNormalized([...criteriaTexts]).map((text) => ({
+                id: deriveCriterionId(text),
+                text,
+            }));
+        return { subGoals, criteria };
     }
     catch {
-        return null; // projection / boundary degrades gracefully
+        return { subGoals: null, criteria: null }; // projection degrades gracefully
     }
 }
-/** The sub-goal set an agent may legitimately reference: the compiled set the
+/** The sub-goal set an agent may legitimately reference: the committed set the
  *  prompt carried, PLUS this submission's own `emerged_subtasks` — a sub-goal
  *  may be created and referenced (or transitioned) in one round. Null when it
  *  cannot be observed. */
-export function knownSubGoalsFor(session, emerged, response = compileSessionContext(session)) {
-    if (!response?.sub_goals)
+export function knownSubGoalsFor(session, emerged, knownSubGoals) {
+    if (!knownSubGoals)
         return null;
-    const known = [...response.sub_goals];
+    const known = [...knownSubGoals];
     for (const item of deriveEmergedItems(session.loopId, session.currentRound, emerged)) {
         if (!known.some((subGoal) => subGoal.id === item.id)) {
             known.push({
@@ -174,8 +172,8 @@ export function validateSubmission(store, session, submission) {
             },
         };
     }
-    const compileResponse = session ? compileSessionContext(session) : null;
-    const known = session ? knownSubGoalsFor(session, emerged, compileResponse) : null;
+    const facts = session ? referenceFactsFor(store, session) : null;
+    const known = session ? knownSubGoalsFor(session, emerged, facts?.subGoals ?? null) : null;
     const updates = parseSubGoalUpdates(submission.subgoal_updates);
     if (updates.length > 0 && known) {
         const referentialErrors = validateSubGoalUpdates(known, updates).map((error) => ({
@@ -218,7 +216,7 @@ export function validateSubmission(store, session, submission) {
             },
         };
     }
-    const contractErrors = contractShapeErrors(store, session, submission, compileResponse);
+    const contractErrors = contractShapeErrors(store, session, submission, facts?.subGoals ?? null, facts?.criteria ?? null);
     if (contractErrors.length > 0) {
         return {
             ok: false,
@@ -238,7 +236,7 @@ export function validateSubmission(store, session, submission) {
     return {
         ok: true,
         ...normalizeSelfEvaluation(submission, {
-            knownCriterionRefs: knownCriterionRefsFor(compileResponse),
+            knownCriterionRefs: facts?.criteria ?? null,
         }),
     };
 }
@@ -278,22 +276,13 @@ function immutableRetractionErrors(store, session, submission) {
     }
     return errors;
 }
-function knownCriterionRefsFor(response) {
-    return Array.isArray(response?.criterion_statuses)
-        ? response.criterion_statuses.map((criterion) => ({
-            id: criterion.id,
-            text: criterion.text,
-        }))
-        : null;
-}
-function contractShapeErrors(store, session, submission, compileResponse) {
+function contractShapeErrors(store, session, submission, subGoals, criteria) {
     const active = session ? activeContractOf(store, session) : null;
-    const knownCriteria = knownCriterionRefsFor(compileResponse);
     // v3.9.4: contract refs can only cite what the prompt actually displays.
     // Same-round emerged sub-goals are deliberately excluded; they are not in
     // the prompt and become referenceable in the NEXT round.
-    const displayedSubGoals = compileResponse?.sub_goals
-        ? new Set(compileResponse.sub_goals
+    const displayedSubGoals = subGoals
+        ? new Set(subGoals
             .filter((subGoal) => subGoal.status !== "done" && subGoal.status !== "canceled")
             .map((subGoal) => subGoal.id))
         : null;
@@ -301,8 +290,8 @@ function contractShapeErrors(store, session, submission, compileResponse) {
         activeItemIds: session
             ? new Set((active?.items ?? []).map((item) => item.id))
             : null,
-        knownCriterionIds: knownCriteria
-            ? new Set(knownCriteria.map((criterion) => criterion.id))
+        knownCriterionIds: criteria
+            ? new Set(criteria.map((criterion) => criterion.id))
             : null,
         displayedSubGoalIds: displayedSubGoals,
         isConfiguredCommand,

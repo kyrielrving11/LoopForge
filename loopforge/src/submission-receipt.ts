@@ -15,6 +15,7 @@
 import type {
   ContractItemStatus,
   PromptArtifact,
+  RecoveryDirective,
   RoundVerificationStatus,
   SelfEvaluation,
   SubmissionDiagnostic,
@@ -32,7 +33,10 @@ import type { RoundTransactionSnapshot } from "./round-transaction.js";
 import type { CommittedRoundView } from "./committed-round.js";
 import { deriveActiveRoundContract, deriveRoundContractView } from "./round-contract.js";
 import { deriveSubGoals } from "./subgoal-state.js";
-import { deriveEvidenceStatus } from "./verification-gate.js";
+import {
+  CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED,
+  deriveEvidenceStatus,
+} from "./verification-gate.js";
 import { fieldGuide } from "./submission-guidance.js";
 import { deriveFieldAccounting } from "./field-accounting.js";
 import { deriveFilesReconciliation } from "./files-reconciliation.js";
@@ -59,6 +63,10 @@ export interface ReceiptInput {
   contractItems: Array<{ item_id: string; status: ContractItemStatus }>;
   /** The round delta (already derived) used by the evidence posture. */
   evidenceDeltas: ObservationDelta[];
+  /** The pending rollback directive governing this submission, captured
+   *  before a redo commit (it stops being "pending" once the child round
+   *  commits). Null/absent for ordinary submissions. */
+  recoveryDirective?: RecoveryDirective | null;
 }
 
 const HANDLING_PRIORITY: Record<SubmissionReportHandling, number> = {
@@ -173,6 +181,22 @@ export function deriveSubmissionReceipt(input: ReceiptInput): SubmissionReceipt 
       : disposition === "backtracked"
         ? "rollback_directive"
         : "none";
+  // The redo's checkpoint is the machine restore result. A warn (e.g. the
+  // claimed files overlap the skipped set) is guidance, not a failed restore.
+  // Present whenever a pre-existing directive governed this submission. A
+  // rollback directive's own receipt passes no directive (`recover()`); a redo
+  // that itself triggers another rollback still carries the checkpoint it was
+  // judged against.
+  const recoveryCheckpoint = input.recoveryDirective
+    ? {
+        restore_point: input.recoveryDirective.target,
+        origin: input.recoveryDirective.origin,
+        reason: input.recoveryDirective.reason,
+        verified: !pr.verificationFlags.some((flag) =>
+          flag.check === CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED &&
+          flag.severity === "error"),
+      }
+    : null;
 
   // ── reports ────────────────────────────────────────────────────────────
   const accounting = deriveFieldAccounting({
@@ -244,12 +268,9 @@ export function deriveSubmissionReceipt(input: ReceiptInput): SubmissionReceipt 
     : null;
   const rollback = (pr.action === "backtrack" || pr.action === "recovery")
     ? {
-        restore_point: pr.recovery?.target ??
-          pr.backtrackTarget ?? Math.max(1, input.snapshot.round - 1),
-        preserved_discoveries: [...(pr.recovery?.skipped_discoveries ??
-          pr.backtrackSkippedDiscoveries ?? [])],
-        wrong_assumptions: [...(pr.recovery?.wrong_assumptions ??
-          pr.backtrackWrongAssumptions ?? [])],
+        restore_point: pr.recovery?.target ?? Math.max(1, input.snapshot.round - 1),
+        preserved_discoveries: [...(pr.recovery?.skipped_discoveries ?? [])],
+        wrong_assumptions: [...(pr.recovery?.wrong_assumptions ?? [])],
         ...(pr.recovery?.origin ? { origin: pr.recovery.origin } : {}),
         ...(pr.recovery?.reason ? { reason: pr.recovery.reason } : {}),
         ...(pr.recovery?.target_head ? { target_head: pr.recovery.target_head } : {}),
@@ -275,6 +296,7 @@ export function deriveSubmissionReceipt(input: ReceiptInput): SubmissionReceipt 
     disposition,
     record,
     entered_history: enteredHistory,
+    ...(recoveryCheckpoint ? { recovery_checkpoint: recoveryCheckpoint } : {}),
     reports: [...reports.values()],
     effects: {
       contract: {
@@ -318,10 +340,13 @@ export function deriveSubmissionReceipt(input: ReceiptInput): SubmissionReceipt 
 }
 
 /** Rebuild the same receipt from committed history. No new persistence and
- *  no second history: `allViews` is the caller's `readOnlyRounds` window. */
+ *  no second history: `allViews` is the caller's `readOnlyRounds` window.
+ *  `rollbacks` is the `readOnlyRollbacks` window; it supplies the directive
+ *  that governed a redo after that redo has committed. */
 export function deriveCommittedSubmissionView(
   view: CommittedRoundView,
   allViews: ReadonlyArray<CommittedRoundView>,
+  rollbacks: ReadonlyArray<CommittedRoundView> = [],
 ): SubmissionReceipt {
   const commands = getPolicy().evidence.commands ?? [];
   const beforeRounds = allViews.filter((item) => item.round < view.round);
@@ -371,6 +396,16 @@ export function deriveCommittedSubmissionView(
         ? "stopped"
         : "accepted";
   const submittedFields = view.submittedFields;
+  // A rollback directive's own receipt has no checkpoint to report; an
+  // evaluation round on the directive's child branch at `target + 1` is the
+  // redo that was judged against it.
+  const recoveryDirective = view.kind === "rollback"
+    ? null
+    : [...rollbacks].reverse().find((item) =>
+        item.recovery !== null && item.recovery !== undefined &&
+        item.recovery.target + 1 === view.round &&
+        (!view.branchId || item.recovery.transaction_id === view.branchId),
+      )?.recovery ?? null;
   const snapshot: RoundTransactionSnapshot = {
     schemaVersion: ROUND_TRANSACTION_SCHEMA_VERSION,
     branchId: view.branchId ?? rootBranchId(view.loopId),
@@ -416,5 +451,6 @@ export function deriveCommittedSubmissionView(
       status: item.status,
     })),
     evidenceDeltas: view.observationDelta,
+    recoveryDirective,
   });
 }

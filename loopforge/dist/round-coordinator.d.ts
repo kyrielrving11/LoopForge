@@ -30,8 +30,6 @@ export interface RoundProcessInput {
     maxRounds: number;
     /** The agent's self-evaluation for this round. */
     selfEval: SelfEvaluation;
-    /** The previous round's validated SelfEvaluation (null for round 1). */
-    lastSelfEval?: SelfEvaluation;
     /** How many consecutive rounds have been rejected by enforcement. */
     consecutiveRejections: number;
     /** L4 (v3.7.x): which check rejected the previous round — lets uniform
@@ -41,21 +39,6 @@ export interface RoundProcessInput {
     evidenceDeltas?: ObservationDelta[];
     /** Full round-start observations for post-backtrack restore validation. */
     beforeEvidence?: MachineObservation[];
-    /** Success values from already committed rounds. */
-    successTrajectory?: boolean[];
-    /** v2.13: Files from skipped backtrack rounds. Passed to verification
-     *  gate for post-backtrack workspace restore check. */
-    backtrackSkippedFiles?: string[];
-    /** M3 (v3.7.x): git fingerprint of each skipped file as recorded at its
-     *  failed round — machine proof of "untouched since the rollback" for
-     *  the restore check. */
-    backtrackSkippedFingerprints?: Record<string, string>;
-    /** v2.12: Git HEAD of the backtrack restore point. The verification gate
-     *  checks the workspace returns to this commit before accepting work. */
-    backtrackTargetGitHead?: string;
-    /** v3.9: files already dirty at that restore point (undefined = never
-     *  observed, so only HEAD can be judged). */
-    backtrackTargetDirty?: string[];
     /** v3.8.3: the trusted round-start fingerprint of every configured
      *  command's entrypoint files, captured when this round was prepared. Only
      *  the in-flight round has one — a round whose preparation predates the
@@ -82,24 +65,6 @@ export interface RoundProcessResult {
     stopReason?: StopReason;
     /** Rejection prompt (set when action is "reject"). */
     rejectionPrompt?: string;
-    /** v2.10: Round to restore state from (set when action is "backtrack"). */
-    backtrackTarget?: number;
-    /** v2.10: Discovered constraints from skipped rounds to preserve. */
-    backtrackSkippedDiscoveries?: string[];
-    /** v2.10: Which enforcement rule triggered the backtrack. */
-    backtrackTriggerRule?: string;
-    /** v3.7.1: Rounds rolled back (exclusive range above the restore point).
-     *  Derived from committed facts + the in-flight attempt — rejected
-     *  payloads are not durable history and never become a source. */
-    backtrackFailedRounds?: number[];
-    /** v3.7.1: One approach per failed round (committed output_summary or the
-     *  in-flight attempt's), truncated — what must NOT be repeated. */
-    backtrackApproaches?: string[];
-    /** v3.7.1: Falsified assumptions from the failed rounds. */
-    backtrackWrongAssumptions?: string[];
-    /** M3 (v3.7.x): per-file git fingerprint at the failed round — lets the
-     *  restore check prove a skipped file was never touched since the rollback. */
-    backtrackSkippedFingerprints?: Record<string, string>;
     /** Verification flags from this round (for injection into next prompt). */
     verificationFlags: VerificationFlag[];
     /** Enforcement action for observability. */
@@ -120,24 +85,9 @@ export interface RoundProcessResult {
     /** Which enforcement check fired (set when action is "reject" or "terminate").
      *  Used by callers to track per-rule rejection counters. */
     rejectionCheck?: string;
-    /** The selfEval to store as lastSelfEval for the next round
-     *  (undefined when action is "reject" — caller should NOT update). */
-    newLastSelfEval?: SelfEvaluation;
     /** Whether the caller should push roundSuccess onto the success trajectory.
      *  false when gateContradicted or when action is "reject". */
     shouldPushSuccessTrajectory: boolean;
-    /** v2.13: Git HEAD commit hash of the backtrack target round.
-     *  Set when action is "backtrack". The verification gate uses this
-     *  to check that the agent restored the workspace before working. */
-    backtrackTargetGitHead?: string;
-    /** v3.9: Files already dirty at the backtrack target round. The restore
-     *  check requires the workspace's dirty set to be a subset of this
-     *  baseline — unrelated work in progress is not a failed restore. */
-    backtrackTargetDirty?: string[];
-    /** v2.13: Files changed in skipped rounds during backtrack.
-     *  The next round's verification gate checks that these files are
-     *  not still dirty (agent must restore workspace first). */
-    backtrackSkippedFiles?: string[];
 }
 /** v3.8.3: Completion truth as a guard, not a convention.
  *

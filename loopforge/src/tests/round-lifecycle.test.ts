@@ -406,7 +406,6 @@ describe("RoundLifecycle — resume / crash window", async () => {
       maxRounds: session.maxRounds,
       selfEval: evalFor({ success: true, shouldContinue: true }),
       consecutiveRejections: 0,
-      successTrajectory: [],
     });
 
     // "New process": the old process releases its lease on close() (same-pid
@@ -438,7 +437,6 @@ describe("RoundLifecycle — resume / crash window", async () => {
       maxRounds: session.maxRounds,
       selfEval: evalFor({ success: true, shouldContinue: false }),
       consecutiveRejections: 0,
-      successTrajectory: [],
     });
 
     mgr.close();

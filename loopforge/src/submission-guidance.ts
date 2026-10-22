@@ -23,12 +23,12 @@ import {
 } from "./policy.js";
 import type { CommandEvidencePolicy } from "./policy.js";
 import { deriveRoundFacts, NO_IN_FLIGHT_ROUND } from "./round-facts.js";
+import { deriveCriterionStatuses } from "./criterion-status.js";
 import { deriveSubGoals } from "./subgoal-state.js";
 import { verificationActionFor } from "./verification-actions.js";
 import type {
   ContractItemStatus,
   CriterionStatus,
-  LoopForgeResponse,
   PromptArtifact,
   SubGoal,
   SubmissionGuidance,
@@ -955,15 +955,16 @@ export interface GuidanceSessionView {
     promptArtifact?: PromptArtifact;
     beforeEvidence?: unknown;
   } | null;
-  lastCompileResponse?: LoopForgeResponse | null;
-  backtrackTargetGitHead?: string;
-  backtrackSkippedFiles?: string[];
 }
 
 export interface GuidanceOptions {
   /** The history window the caller already uses: `derivationRounds` for a live
    *  prepare, `readOnlyRounds` for a read-only view. Never derive a second one. */
   rounds: ReadonlyArray<CommittedRoundView>;
+  /** The operator objective's success criteria, resolved by the caller from
+   *  the held acceptance or committed objective. Absent = unobservable; no
+   *  criterion rows are rendered. */
+  objective?: { success_criteria: ReadonlyArray<string> } | null;
   verificationFlags?: ReadonlyArray<VerificationFlag>;
   recovery?: {
     required: boolean;
@@ -992,17 +993,13 @@ export function deriveSubmissionGuidance(
     .filter((command) => command.enabled)
     .map((command) => command.commandId);
   const level: "l0" | "l1" | "l2" =
-    session.roundSnapshot?.promptArtifact?.level ??
-    session.lastCompileResponse?.prompt_artifact?.level ??
-    "l2";
+    session.roundSnapshot?.promptArtifact?.level ?? "l2";
 
-  const subGoals: ReadonlyArray<SubGoal> =
-    session.lastCompileResponse?.sub_goals ??
-    deriveSubGoals({
-      loopId: session.loopId,
-      currentRound: session.currentRound,
-      rounds: options.rounds,
-    });
+  const subGoals: ReadonlyArray<SubGoal> = deriveSubGoals({
+    loopId: session.loopId,
+    currentRound: session.currentRound,
+    rounds: options.rounds,
+  });
   const facts = deriveRoundFacts({
     rounds: options.rounds,
     currentRound: session.currentRound,
@@ -1012,7 +1009,14 @@ export function deriveSubmissionGuidance(
   });
   const activeContract = facts.activeContract;
   const itemStatuses = facts.itemStatuses;
-  const criteria = session.lastCompileResponse?.criterion_statuses ?? [];
+  const criteria = options.objective
+    ? deriveCriterionStatuses({
+        entries: options.rounds.map((round) => round.sourceEntry),
+        currentRound: session.currentRound,
+        objective: options.objective,
+        criterionFacts: facts.criterionFacts,
+      })
+    : [];
   const guidanceFacts: GuidanceFacts = {
     activeContract,
     itemStatuses,
@@ -1029,8 +1033,7 @@ export function deriveSubmissionGuidance(
     contractVerificationAvailable: capability.contractVerificationAvailable,
     criteria,
   };
-  const artifact = session.roundSnapshot?.promptArtifact ??
-    session.lastCompileResponse?.prompt_artifact;
+  const artifact = session.roundSnapshot?.promptArtifact;
   const roundId = session.roundSnapshot?.roundId ??
     `loop:${session.loopId}:round:${session.currentRound}`;
 
@@ -1061,13 +1064,7 @@ export function deriveSubmissionGuidance(
       text: criterion.text,
       status: criterion.status,
     })),
-    recovery: options.recovery ?? (session.backtrackTargetGitHead
-      ? {
-          required: true,
-          restore_point: Math.max(1, session.currentRound - 1),
-          target_head: session.backtrackTargetGitHead,
-        }
-      : null),
+    recovery: options.recovery ?? null,
     prompt: {
       level,
       dropped_sections: [...(artifact?.droppedSections ?? [])],

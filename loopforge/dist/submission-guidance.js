@@ -11,6 +11,7 @@
  */
 import { deriveConfiguredCapability, getPolicy, } from "./policy.js";
 import { deriveRoundFacts, NO_IN_FLIGHT_ROUND } from "./round-facts.js";
+import { deriveCriterionStatuses } from "./criterion-status.js";
 import { deriveSubGoals } from "./subgoal-state.js";
 import { verificationActionFor } from "./verification-actions.js";
 /** Field order used by the prompt, guidance and receipts. Core fields first,
@@ -746,15 +747,12 @@ export function deriveSubmissionGuidance(session, options) {
     const commandNames = capability.commands
         .filter((command) => command.enabled)
         .map((command) => command.commandId);
-    const level = session.roundSnapshot?.promptArtifact?.level ??
-        session.lastCompileResponse?.prompt_artifact?.level ??
-        "l2";
-    const subGoals = session.lastCompileResponse?.sub_goals ??
-        deriveSubGoals({
-            loopId: session.loopId,
-            currentRound: session.currentRound,
-            rounds: options.rounds,
-        });
+    const level = session.roundSnapshot?.promptArtifact?.level ?? "l2";
+    const subGoals = deriveSubGoals({
+        loopId: session.loopId,
+        currentRound: session.currentRound,
+        rounds: options.rounds,
+    });
     const facts = deriveRoundFacts({
         rounds: options.rounds,
         currentRound: session.currentRound,
@@ -764,7 +762,14 @@ export function deriveSubmissionGuidance(session, options) {
     });
     const activeContract = facts.activeContract;
     const itemStatuses = facts.itemStatuses;
-    const criteria = session.lastCompileResponse?.criterion_statuses ?? [];
+    const criteria = options.objective
+        ? deriveCriterionStatuses({
+            entries: options.rounds.map((round) => round.sourceEntry),
+            currentRound: session.currentRound,
+            objective: options.objective,
+            criterionFacts: facts.criterionFacts,
+        })
+        : [];
     const guidanceFacts = {
         activeContract,
         itemStatuses,
@@ -781,8 +786,7 @@ export function deriveSubmissionGuidance(session, options) {
         contractVerificationAvailable: capability.contractVerificationAvailable,
         criteria,
     };
-    const artifact = session.roundSnapshot?.promptArtifact ??
-        session.lastCompileResponse?.prompt_artifact;
+    const artifact = session.roundSnapshot?.promptArtifact;
     const roundId = session.roundSnapshot?.roundId ??
         `loop:${session.loopId}:round:${session.currentRound}`;
     return {
@@ -812,13 +816,7 @@ export function deriveSubmissionGuidance(session, options) {
             text: criterion.text,
             status: criterion.status,
         })),
-        recovery: options.recovery ?? (session.backtrackTargetGitHead
-            ? {
-                required: true,
-                restore_point: Math.max(1, session.currentRound - 1),
-                target_head: session.backtrackTargetGitHead,
-            }
-            : null),
+        recovery: options.recovery ?? null,
         prompt: {
             level,
             dropped_sections: [...(artifact?.droppedSections ?? [])],

@@ -60,7 +60,6 @@ describe("RoundTransactionCoordinator", () => {
       maxRounds: 3,
       selfEval: rejectedEvaluation(),
       consecutiveRejections: 0,
-      successTrajectory: [],
       actualEvidence: [],
     });
 
@@ -78,7 +77,6 @@ describe("RoundTransactionCoordinator", () => {
       maxRounds: 3,
       selfEval: continuingEvaluation(),
       consecutiveRejections: 1,
-      successTrajectory: [],
       actualEvidence: [],
     });
     assert.equal(committed.result.action, "continue");
@@ -92,7 +90,6 @@ describe("RoundTransactionCoordinator", () => {
       maxRounds: 3,
       selfEval: rejectedEvaluation(),
       consecutiveRejections: 1,
-      successTrajectory: [],
       actualEvidence: [],
     });
     assert.equal(replayed.replayed, true);
@@ -169,10 +166,22 @@ describe("backtrack commit replay", () => {
       result: {
         action: "backtrack",
         verificationStatus: "trusted",
-        backtrackTarget: 2,
-        backtrackTriggerRule: "progress_stall",
-        backtrackSkippedDiscoveries: [],
-        backtrackSkippedFiles: [],
+        recovery: {
+          origin: "machine",
+          reason: "progress_stall",
+          trigger_rule: "progress_stall",
+          target: 2,
+          target_round_id: "loop:bt-recover:round:2",
+          target_transaction_id: "tx-bt-recover-2-1",
+          target_dirty: [],
+          skipped_files: [],
+          skipped_fingerprints: {},
+          skipped_discoveries: [],
+          failed_rounds: [3, 4, 5],
+          approaches: [],
+          wrong_assumptions: [],
+          transaction_id: "tx-rollback-bt-recover-5",
+        },
         roundSuccess: false,
         gateContradicted: false,
         newConsecutiveRejections: 0,
@@ -202,7 +211,39 @@ describe("backtrack commit replay", () => {
       "recover must find the committed backtrack transaction");
     assert.equal(recovered!.replayed, true);
     assert.equal(recovered!.result.action, "backtrack");
-    assert.equal(recovered!.result.backtrackTarget, 2);
-    assert.equal(recovered!.result.backtrackTriggerRule, "progress_stall");
+    assert.equal(recovered!.result.recovery?.target, 2);
+    assert.equal(recovered!.result.recovery?.trigger_rule, "progress_stall");
+  });
+
+  it("does not replay an abandoned commit with the same roundId on another branch", () => {
+    const store = new MemoryLoopStore();
+    const engine = new LoopForgeEngine(store);
+    const coordinator = new RoundTransactionCoordinator(engine, store);
+    const root = prepareRoundTransaction("tx-branch", 2, []);
+    const committed = coordinator.process({
+      snapshot: root,
+      task: "branch identity",
+      maxRounds: 3,
+      selfEval: continuingEvaluation(),
+      consecutiveRejections: 0,
+      actualEvidence: [],
+    });
+    assert.equal(committed.result.action, "continue");
+    assert.equal(committed.replayed, false);
+
+    const child = prepareRoundTransaction("tx-branch", 2, [], undefined, {
+      branchId: "loop:tx-branch:branch:child",
+    });
+    assert.notEqual(child.transactionId, root.transactionId);
+    assert.equal(
+      coordinator.recover(child),
+      null,
+      "the redo identity is the transaction, not the numeric round",
+    );
+    assert.equal(
+      coordinator.recover(root)?.replayed,
+      true,
+      "the exact transaction still replays",
+    );
   });
 });

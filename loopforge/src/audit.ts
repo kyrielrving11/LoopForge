@@ -130,6 +130,7 @@ export function buildAudit(
   // rollback directive is in effect, so a backtracked branch is not audited as
   // this branch's history.
   const views = readOnlyRounds(entries).filter((view) => view.loopId === loopId);
+  const rollbacks = readOnlyRollbacks(entries).filter((view) => view.loopId === loopId);
   const commands = getPolicy().evidence.commands ?? [];
   // The executed contract per round, through the ONE derivation explain and
   // the live coordinator also call. Re-derived per round rather than walked
@@ -167,7 +168,7 @@ export function buildAudit(
         )
       : null;
     const executed = contractByRound.get(round);
-    const receipt = deriveCommittedSubmissionView(view, views);
+    const receipt = deriveCommittedSubmissionView(view, views, rollbacks);
     rounds.push({
       round,
       outcome,

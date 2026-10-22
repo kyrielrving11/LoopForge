@@ -88,7 +88,7 @@ describe("RoundCoordinator — happy path", () => {
   });
 
   it("returns continue for round 1 with no previous evaluation", () => {
-    const result = coordinator.processRound(minimalInput({ currentRound: 1, lastSelfEval: undefined }));
+    const result = coordinator.processRound(minimalInput({ currentRound: 1 }));
     assert.equal(result.action, "continue");
   });
 });

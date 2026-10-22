@@ -130,21 +130,9 @@ export interface RoundTransactionInput {
   task: string;
   maxRounds: number;
   selfEval: SelfEvaluation;
-  lastSelfEval?: SelfEvaluation;
   consecutiveRejections: number;
   /** L4 (v3.7.x): previous round's rejection check (own-streak basis). */
   lastRejectionCheck?: string;
-  successTrajectory: boolean[];
-  /** v2.13: Files from skipped backtrack rounds for restore check. */
-  backtrackSkippedFiles?: string[];
-  /** M3 (v3.7.x): skipped-file git fingerprints at their failed rounds. */
-  backtrackSkippedFingerprints?: Record<string, string>;
-  /** v2.12: Git HEAD of the backtrack restore point. The verification gate
-   *  checks the workspace returns to this commit before accepting work. */
-  backtrackTargetGitHead?: string;
-  /** v3.9: files already dirty at the backtrack restore point (restore
-   *  baseline — see RoundProcessResult.backtrackTargetDirty). */
-  backtrackTargetDirty?: string[];
   /** v3.8.3: trusted round-start entrypoint fingerprints (see RoundProcessInput). */
   entrypointTrust?: Record<string, string>;
   /** v3.9.1: normalization metadata carried into the evaluated snapshot. */
@@ -571,16 +559,10 @@ export class RoundTransactionCoordinator {
       currentRound: snapshot.round,
       maxRounds: input.maxRounds,
       selfEval: input.selfEval,
-      lastSelfEval: input.lastSelfEval,
       consecutiveRejections: input.consecutiveRejections,
       lastRejectionCheck: input.lastRejectionCheck,
       evidenceDeltas: roundDeltas,
       beforeEvidence: snapshot.beforeEvidence,
-      successTrajectory: input.successTrajectory,
-      backtrackSkippedFiles: input.backtrackSkippedFiles,
-      backtrackSkippedFingerprints: input.backtrackSkippedFingerprints,
-      backtrackTargetGitHead: input.backtrackTargetGitHead,
-      backtrackTargetDirty: input.backtrackTargetDirty,
       entrypointTrust: input.entrypointTrust,
       // v3.9.4: the SAME manifest the receipt reads.
       submittedFields: input.submittedFields ?? snapshot.submittedFields,
@@ -820,6 +802,7 @@ export class RoundTransactionCoordinator {
       const outcome = this.outcomeFromEntry(
         entry,
         expected.roundId,
+        expected.transactionId,
         opts?.skipBacktrack === true,
       );
       if (outcome) return outcome;
@@ -830,6 +813,7 @@ export class RoundTransactionCoordinator {
   private outcomeFromEntry(
     entry: VaultEntry,
     expectedRoundId: string,
+    expectedTransactionId: string,
     skipBacktrack = false,
   ): RoundTransactionOutcome | null {
     const lineage = isRecord(entry.loop_lineage) ? entry.loop_lineage : null;
@@ -840,6 +824,11 @@ export class RoundTransactionCoordinator {
     const snapshot = parseRoundTransactionSnapshot(transaction.snapshot);
     const result = transaction.result;
     if (!snapshot || !isProcessResult(result)) return null;
+    // v3.9.6: the numeric round identity is NOT enough. A deep restore reuses
+    // `target + 1`, where the abandoned branch already committed a feedback
+    // round with the same roundId. Replaying it would silently discard the
+    // redo submission. The transaction id is the branch-scoped identity.
+    if (snapshot.transactionId !== expectedTransactionId) return null;
     // v3.2.1: a committed backtrack is a roll-back directive, not a terminal
     // decision. The restored round reuses the same roundId, so replaying it
     // would silently discard the agent's redo submission and re-emit the

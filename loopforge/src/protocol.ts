@@ -334,6 +334,18 @@ export interface SubmissionReceipt {
    *  a committed record but NOT the submitted evaluation applied. */
   record: "committed" | "rollback_directive" | "none";
   entered_history: boolean;
+  /** v3.9.6: the restore checkpoint this submission was judged against.
+   *  Present only when a pending rollback directive governed the submission —
+   *  the redo. `verified` is the machine result: false when the round carries
+   *  an error-severity `backtrack_workspace_not_restored` finding. The
+   *  directive itself remains the committed audit record; this is the redo's
+   *  receipt projection of it, never a second ledger. */
+  recovery_checkpoint?: {
+    restore_point: number;
+    origin: "agent" | "machine";
+    reason: string;
+    verified: boolean;
+  };
   reports: Array<{
     path: string;
     handling: SubmissionReportHandling;

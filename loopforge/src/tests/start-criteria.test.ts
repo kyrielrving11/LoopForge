@@ -81,8 +81,8 @@ describe("v3.9.4 — initial criteria become the objective's anchors", () => {
       assert.ok(prompt.includes(API));
 
       const session = mgr.get(String(started.sessionId));
-      const objective = session?.lastCompileResponse?.loop_objective;
-      assert.deepEqual(objective?.success_criteria, [AUTH, API]);
+      const acceptance = session?.roundSnapshot?.operatorAcceptance;
+      assert.deepEqual(acceptance?.success_criteria, [AUTH, API]);
     } finally {
       mgr.close();
     }

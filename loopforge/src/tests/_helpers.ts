@@ -156,6 +156,8 @@ export function committedFeedbackRound(
     contract?: RoundContractProposal;
     outcome?: RoundOutcome;
     met?: string[];
+    remaining?: string[];
+    emergedSubtasks?: string[];
     action?: string;
     attempt?: number;
     /** 3.9.3: the committed round's effective success. Fixtures used to omit
@@ -185,13 +187,14 @@ export function committedFeedbackRound(
     should_continue: true,
     outcome: opts.outcome,
     round_contract: opts.contract,
+    emerged_subtasks: opts.emergedSubtasks ?? [],
     discovered_constraints: opts.discoveredConstraints ?? [],
     execution_report: opts.noExecutionReport
       ? undefined
       : makeExecutionReport({
           files_changed: opts.files ?? [],
           tests_reported: { passed: 0, failed: 0, skipped: 0 },
-          criterion_claims: criterionClaims(opts.met ?? []),
+          criterion_claims: criterionClaims(opts.met ?? [], opts.remaining ?? []),
           ...(opts.contractItemClaims
             ? { contract_item_claims: opts.contractItemClaims }
             : {}),

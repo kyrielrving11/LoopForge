@@ -22,14 +22,19 @@ transaction now carries a deterministic `transactionId` and a `branchId`; a
 rollback directive's transaction id names the child branch. The branch read
 model (`resolveBranch`/`branchRounds`/`pendingRollbackDirective`) replaces the
 session frontier, excluding abandoned rounds and preserving the final redo
-round after a stop.
+round after a stop. The redo checkpoint is fail-closed: an unobservable Git
+boundary is a `recovery_checkpoint_failed` finding, and an Agent checkpoint
+rejects the redo for the same `roundId` rather than opening a machine-origin
+backtrack.
 
 ### Operator acceptance is immutable
 
 `revised_success_criteria` is removed. Criteria and hard constraints written by
 `loopforge_start` cannot be revised or retracted by the Agent; a boundary
 attempt returns `evaluation_invalid` with the `immutable_constraint` detail,
-and the compiler ignores such retractions as a second line of defense. `retracted_constraints` applies only to Agent-discovered
+and the compiler ignores such retractions as a second line of defense. The
+acceptance surface is carried on the round-1 transaction snapshot and
+propagated with the held round; the boundary reads it directly when present. `retracted_constraints` applies only to Agent-discovered
 constraints. Objective refinements are committed reports and no longer rewrite
 the operator objective.
 

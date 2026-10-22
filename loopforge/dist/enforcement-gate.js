@@ -20,7 +20,7 @@ import { makeEnforcementResult } from "./protocol.js";
 import { machineProgressSeries, CHECK_SUCCESS_WITH_REMAINING_CRITERIA, CHECK_RECURRING_VIOLATION, CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED, CHECK_REQUIRED_COMMAND_FAILED, CHECK_COMMAND_EVIDENCE_MISMATCH, CHECK_OUTCOME_SUCCESS_CONTRADICTION, CHECK_VERIFICATION_ENTRYPOINT_MODIFIED, CHECK_ROUND_SCOPE_DRIFT, CHECK_CONTRACT_ITEMS_UNVERIFIED, CHECK_USER_GATE_UNRESOLVED } from "./verification-gate.js";
 import { getPolicy } from "./policy.js";
 import { isRecord, entryRound } from "./token-utils.js";
-import { derivationRounds, decodeCommittedRound, hasCommittedMachineBacktrack, machineEvidenceForRound, } from "./committed-round.js";
+import { derivationRounds, decodeCommittedRound, hasCommittedMachineBacktrack, machineEvidenceForRound, pendingRollbackDirective, } from "./committed-round.js";
 // ═══════════════════════════════════════════════════════════════════════════
 // Helpers
 // ═══════════════════════════════════════════════════════════════════════════
@@ -432,6 +432,18 @@ function enforceBacktrackNotRestored(flags, vaultEntries = [], currentRound = 0)
     const flag = flags.find((f) => f.check === CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED && f.severity === "error");
     if (!flag)
         return null;
+    // An Agent-initiated recovery is a checkpoint, not a machine rollback.
+    // A failed restoration rejects the redo for the same roundId; it must not
+    // silently open a machine-origin branch.
+    const pending = pendingRollbackDirective(vaultEntries, currentRound);
+    if (pending?.recovery?.origin === "agent") {
+        return makeEnforcementResult({
+            action: "reject",
+            reason: "The Agent-initiated recovery checkpoint is not satisfied: " + flag.detail,
+            check: "recovery_checkpoint_failed",
+            fix_instructions: "Restore the workspace to the target HEAD and baseline, then resubmit the same roundId.",
+        });
+    }
     if (!getPolicy().engine.backtrack_enabled)
         return null;
     // v2.14: same deadlock guard as R4/R5 — a backtrack that already fired

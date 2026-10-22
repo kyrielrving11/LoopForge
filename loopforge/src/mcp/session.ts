@@ -298,10 +298,18 @@ export class SessionManager implements SessionRegistry {
       });
     }
 
+    const operatorAcceptance = {
+      task: input.task,
+      success_criteria: startCriteria.criteria.length > 0
+        ? [...startCriteria.criteria]
+        : ["Task goal achieved with verifiable evidence"],
+      hard_constraints: unique(input.constraints ?? []),
+    };
     const prepared = await new RoundDriver(engine, this.loopStore).prepare(
       request,
       loopId,
       1,
+      { operatorAcceptance },
     );
     const initialPrompt = prepared?.prompt ?? null;
     const initialLevel = prepared?.level ?? "l2";

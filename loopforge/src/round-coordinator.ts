@@ -31,11 +31,13 @@ import type {
   VerificationResult,
 } from "./protocol.js";
 import {
+  CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED,
   CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE,
   collectOutOfScopeFiles,
   roundDriftFiles,
   verifySelfEvaluation,
 } from "./verification-gate.js";
+import { verifyRecoveryCheckpoint } from "./recovery.js";
 import { entryRound, isRecord } from "./token-utils.js";
 import { driftedEntrypoints } from "./evidence-provider.js";
 import { declaresBlocked, effectiveOutcome, effectiveSuccess } from "./self-eval.js";
@@ -423,7 +425,7 @@ export class RoundCoordinator {
     const pendingRecovery = pendingRollbackDirective(vaultEntries, currentRound)?.recovery ?? null;
 
     // ── 2. Verification gate ────────────────────────────────────────────
-    const verifyResult: VerificationResult = verifySelfEvaluation(
+    let verifyResult: VerificationResult = verifySelfEvaluation(
       selfEval,
       currentRound,
       vaultEntries,
@@ -452,6 +454,30 @@ export class RoundCoordinator {
         ? input.submittedFields.includes("execution_report.files_changed")
         : undefined,
     );
+    // v3.9.6: the recovery checkpoint is fail-closed. An unobserved Git
+    // boundary is not a pass; it becomes the same restore finding R9 acts on.
+    if (pendingRecovery &&
+        !verifyResult.flags.some((flag) =>
+          flag.check === CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED)) {
+      const checkpoint = verifyRecoveryCheckpoint({
+        directive: pendingRecovery,
+        beforeEvidence: input.beforeEvidence ?? [],
+        evidenceDeltas: evidenceDeltas ?? [],
+      });
+      if (!checkpoint.ok) {
+        verifyResult = {
+          ...verifyResult,
+          verdict: "contradicted",
+          flags: [...verifyResult.flags, {
+            severity: "error",
+            field: "recovery",
+            check: CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED,
+            detail: checkpoint.detail,
+            ref: `round:${pendingRecovery.target}`,
+          }],
+        };
+      }
+    }
     const verificationFlags = verifyResult.flags;
     const gateContradicted = verifyResult.verdict === "contradicted";
 

@@ -21,6 +21,7 @@ import type {
   ContractItemStatus,
   LoopForgeRequest,
   LoopForgeResponse,
+  OperatorAcceptance,
   PromptArtifact,
   RecoveryRequest,
   SelfEvaluation,
@@ -613,6 +614,19 @@ export class RoundLifecycle {
     }
   }
 
+  /** v3.9.6: operator acceptance and branch identity travel with the held
+   *  round snapshot; every new prepare carries them forward. */
+  private prepareOptions(
+    session: McpSession,
+    branchId?: string,
+  ): { branchId?: string; operatorAcceptance?: OperatorAcceptance } {
+    const acceptance = session.roundSnapshot?.operatorAcceptance;
+    return {
+      ...(branchId ? { branchId } : {}),
+      ...(acceptance ? { operatorAcceptance: acceptance } : {}),
+    };
+  }
+
   private persistPrepared(
     session: McpSession,
     prepared: {
@@ -739,9 +753,7 @@ export class RoundLifecycle {
       request,
       session.loopId,
       session.currentRound,
-      { ...(session.roundSnapshot?.branchId
-        ? { branchId: session.roundSnapshot.branchId }
-        : {}) },
+      this.prepareOptions(session),
     );
     if (!prepared) {
       session.status = "stalled";
@@ -789,9 +801,7 @@ export class RoundLifecycle {
       request,
       session.loopId,
       session.currentRound,
-      { ...(session.roundSnapshot?.branchId
-        ? { branchId: session.roundSnapshot.branchId }
-        : {}) },
+      this.prepareOptions(session),
     );
     if (!prepared) {
       session.status = "stopped";
@@ -887,9 +897,7 @@ export class RoundLifecycle {
       compileRequest,
       session.loopId,
       session.currentRound,
-      { ...(session.roundSnapshot?.branchId
-        ? { branchId: session.roundSnapshot.branchId }
-        : {}) },
+      this.prepareOptions(session),
     );
 
     if (!prepared) {
@@ -1143,7 +1151,7 @@ export class RoundLifecycle {
       request,
       session.loopId,
       newRound,
-      { ...(branchId ? { branchId } : {}) },
+      this.prepareOptions(session, branchId),
     );
 
     if (!prepared || !prepared.prompt) {
@@ -1357,9 +1365,7 @@ export class RoundLifecycle {
         request,
         session.loopId,
         session.currentRound,
-        { ...(session.roundSnapshot?.branchId
-          ? { branchId: session.roundSnapshot.branchId }
-          : {}) },
+        this.prepareOptions(session),
       );
     } catch (error) {
       // M4: a post-commit compile exception must not silently strand the

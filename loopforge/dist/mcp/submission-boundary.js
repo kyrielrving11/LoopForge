@@ -245,15 +245,22 @@ export function validateSubmission(store, session, submission) {
 function immutableRetractionErrors(store, session, submission) {
     if (!session || !Array.isArray(submission.retracted_constraints))
         return [];
-    const prefix = `loop:${session.loopId}:`;
-    const entries = queryLoopEntries(store, session.loopId, { prefix });
-    const objective = latestObjective(session.loopId, { results: entries }, session.currentRound, session.currentRound === 1);
-    if (!objective)
-        return [];
-    const hard = new Set(objective.hard_constraints.map((text) => normalizeText(text)));
-    const criteria = new Set(objective.success_criteria.map((text) => normalizeText(text)));
-    const hardIds = new Set(objective.hard_constraints.map((text) => deriveConstraintId(text)));
-    const criterionIds = new Set(objective.success_criteria.map((text) => deriveCriterionId(text)));
+    const acceptance = session.roundSnapshot?.operatorAcceptance ?? null;
+    let hardTexts = acceptance?.hard_constraints ?? [];
+    let criterionTexts = acceptance?.success_criteria ?? [];
+    if (!acceptance) {
+        const prefix = `loop:${session.loopId}:`;
+        const entries = queryLoopEntries(store, session.loopId, { prefix });
+        const objective = latestObjective(session.loopId, { results: entries }, session.currentRound, session.currentRound === 1);
+        if (!objective)
+            return [];
+        hardTexts = objective.hard_constraints;
+        criterionTexts = objective.success_criteria;
+    }
+    const hard = new Set(hardTexts.map((text) => normalizeText(text)));
+    const criteria = new Set(criterionTexts.map((text) => normalizeText(text)));
+    const hardIds = new Set(hardTexts.map((text) => deriveConstraintId(text)));
+    const criterionIds = new Set(criterionTexts.map((text) => deriveCriterionId(text)));
     const errors = [];
     for (const raw of submission.retracted_constraints) {
         if (typeof raw !== "string")

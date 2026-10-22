@@ -26,7 +26,12 @@
 
 import type { LoopStore, VaultEntry } from "../loop-store.js";
 import { queryLoopEntries } from "../loop-store.js";
-import type { LoopForgeRequest, LoopForgeResponse, SubGoal } from "../protocol.js";
+import type {
+  LoopForgeRequest,
+  LoopForgeResponse,
+  OperatorAcceptance,
+  SubGoal,
+} from "../protocol.js";
 import { Mode } from "../protocol.js";
 import { LoopForgeEngine } from "../engine.js";
 import type { ActiveContractView } from "../round-contract.js";
@@ -57,7 +62,10 @@ export interface CompileContextSession {
   maxRounds: number;
   currentRound: number;
   lastCompileResponse?: LoopForgeResponse | null;
-  roundSnapshot?: { roundId: string } | null;
+  roundSnapshot?: {
+    roundId: string;
+    operatorAcceptance?: OperatorAcceptance;
+  } | null;
   engine: LoopForgeEngine;
 }
 
@@ -326,19 +334,26 @@ function immutableRetractionErrors(
   submission: Record<string, unknown>,
 ): Array<{ field: string; reason: string; detail: string }> {
   if (!session || !Array.isArray(submission.retracted_constraints)) return [];
-  const prefix = `loop:${session.loopId}:`;
-  const entries = queryLoopEntries(store, session.loopId, { prefix });
-  const objective = latestObjective(
-    session.loopId,
-    { results: entries },
-    session.currentRound,
-    session.currentRound === 1,
-  );
-  if (!objective) return [];
-  const hard = new Set(objective.hard_constraints.map((text) => normalizeText(text)));
-  const criteria = new Set(objective.success_criteria.map((text) => normalizeText(text)));
-  const hardIds = new Set(objective.hard_constraints.map((text) => deriveConstraintId(text)));
-  const criterionIds = new Set(objective.success_criteria.map((text) => deriveCriterionId(text)));
+  const acceptance = session.roundSnapshot?.operatorAcceptance ?? null;
+  let hardTexts: ReadonlyArray<string> = acceptance?.hard_constraints ?? [];
+  let criterionTexts: ReadonlyArray<string> = acceptance?.success_criteria ?? [];
+  if (!acceptance) {
+    const prefix = `loop:${session.loopId}:`;
+    const entries = queryLoopEntries(store, session.loopId, { prefix });
+    const objective = latestObjective(
+      session.loopId,
+      { results: entries },
+      session.currentRound,
+      session.currentRound === 1,
+    );
+    if (!objective) return [];
+    hardTexts = objective.hard_constraints;
+    criterionTexts = objective.success_criteria;
+  }
+  const hard = new Set(hardTexts.map((text) => normalizeText(text)));
+  const criteria = new Set(criterionTexts.map((text) => normalizeText(text)));
+  const hardIds = new Set(hardTexts.map((text) => deriveConstraintId(text)));
+  const criterionIds = new Set(criterionTexts.map((text) => deriveCriterionId(text)));
   const errors: Array<{ field: string; reason: string; detail: string }> = [];
   for (const raw of submission.retracted_constraints) {
     if (typeof raw !== "string") continue;

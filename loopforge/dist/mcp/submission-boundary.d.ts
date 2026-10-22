@@ -24,7 +24,7 @@
  *  disagree about it.
  */
 import type { LoopStore } from "../loop-store.js";
-import type { LoopForgeResponse, SubGoal } from "../protocol.js";
+import type { LoopForgeResponse, OperatorAcceptance, SubGoal } from "../protocol.js";
 import { LoopForgeEngine } from "../engine.js";
 import type { ActiveContractView } from "../round-contract.js";
 import { normalizeSelfEvaluation } from "../self-eval.js";
@@ -40,6 +40,7 @@ export interface CompileContextSession {
     lastCompileResponse?: LoopForgeResponse | null;
     roundSnapshot?: {
         roundId: string;
+        operatorAcceptance?: OperatorAcceptance;
     } | null;
     engine: LoopForgeEngine;
 }

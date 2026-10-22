@@ -363,6 +363,15 @@ export class RoundLifecycle {
             session.entrypointTrust = undefined;
         }
     }
+    /** v3.9.6: operator acceptance and branch identity travel with the held
+     *  round snapshot; every new prepare carries them forward. */
+    prepareOptions(session, branchId) {
+        const acceptance = session.roundSnapshot?.operatorAcceptance;
+        return {
+            ...(branchId ? { branchId } : {}),
+            ...(acceptance ? { operatorAcceptance: acceptance } : {}),
+        };
+    }
     persistPrepared(session, prepared, roundSuccess, warningsOverride) {
         session.roundSnapshot = prepared.snapshot;
         this.seedEntrypointTrust(session);
@@ -465,9 +474,7 @@ export class RoundLifecycle {
             session.currentRound = recovered.snapshot.round + 1;
         }
         const request = buildLoopRequest(session);
-        const prepared = await new RoundDriver(session.engine, this.store).prepare(request, session.loopId, session.currentRound, { ...(session.roundSnapshot?.branchId
-                ? { branchId: session.roundSnapshot.branchId }
-                : {}) });
+        const prepared = await new RoundDriver(session.engine, this.store).prepare(request, session.loopId, session.currentRound, this.prepareOptions(session));
         if (!prepared) {
             session.status = "stalled";
             this.save(session);
@@ -502,9 +509,7 @@ export class RoundLifecycle {
             return restored;
         // Missing held prompt: compile (async) once, then persist it.
         const request = buildLoopRequest(session);
-        const prepared = await new RoundDriver(session.engine, this.store).prepare(request, session.loopId, session.currentRound, { ...(session.roundSnapshot?.branchId
-                ? { branchId: session.roundSnapshot.branchId }
-                : {}) });
+        const prepared = await new RoundDriver(session.engine, this.store).prepare(request, session.loopId, session.currentRound, this.prepareOptions(session));
         if (!prepared) {
             session.status = "stopped";
             this.save(session);
@@ -583,9 +588,7 @@ export class RoundLifecycle {
                 : 1,
             consecutive_rejections: session.consecutiveRejections,
         };
-        const prepared = await new RoundDriver(session.engine, this.store).prepare(compileRequest, session.loopId, session.currentRound, { ...(session.roundSnapshot?.branchId
-                ? { branchId: session.roundSnapshot.branchId }
-                : {}) });
+        const prepared = await new RoundDriver(session.engine, this.store).prepare(compileRequest, session.loopId, session.currentRound, this.prepareOptions(session));
         if (!prepared) {
             session.status = "stopped";
             this.save(session);
@@ -775,7 +778,7 @@ export class RoundLifecycle {
             verification_flags: pr.verificationFlags,
             constraints_from_plan: preservedDiscoveries,
         };
-        const prepared = await new RoundDriver(session.engine, this.store).prepare(request, session.loopId, newRound, { ...(branchId ? { branchId } : {}) });
+        const prepared = await new RoundDriver(session.engine, this.store).prepare(request, session.loopId, newRound, this.prepareOptions(session, branchId));
         if (!prepared || !prepared.prompt) {
             session.status = "stalled";
             this.save(session);
@@ -957,9 +960,7 @@ export class RoundLifecycle {
         const request = buildLoopRequest(session);
         let prepared;
         try {
-            prepared = await new RoundDriver(session.engine, this.store).prepare(request, session.loopId, session.currentRound, { ...(session.roundSnapshot?.branchId
-                    ? { branchId: session.roundSnapshot.branchId }
-                    : {}) });
+            prepared = await new RoundDriver(session.engine, this.store).prepare(request, session.loopId, session.currentRound, this.prepareOptions(session));
         }
         catch (error) {
             // M4: a post-commit compile exception must not silently strand the

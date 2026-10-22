@@ -34,6 +34,7 @@ import {
   decodeCommittedRound,
   hasCommittedMachineBacktrack,
   machineEvidenceForRound,
+  pendingRollbackDirective,
   type CommittedRoundView,
 } from "./committed-round.js";
 
@@ -557,6 +558,19 @@ function enforceBacktrackNotRestored(
   const flag = flags.find((f) =>
     f.check === CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED && f.severity === "error");
   if (!flag) return null;
+  // An Agent-initiated recovery is a checkpoint, not a machine rollback.
+  // A failed restoration rejects the redo for the same roundId; it must not
+  // silently open a machine-origin branch.
+  const pending = pendingRollbackDirective(vaultEntries, currentRound);
+  if (pending?.recovery?.origin === "agent") {
+    return makeEnforcementResult({
+      action: "reject",
+      reason: "The Agent-initiated recovery checkpoint is not satisfied: " + flag.detail,
+      check: "recovery_checkpoint_failed",
+      fix_instructions:
+        "Restore the workspace to the target HEAD and baseline, then resubmit the same roundId.",
+    });
+  }
   if (!getPolicy().engine.backtrack_enabled) return null;
   // v2.14: same deadlock guard as R4/R5 — a backtrack that already fired
   // for this round means a non-restoring agent would otherwise cycle

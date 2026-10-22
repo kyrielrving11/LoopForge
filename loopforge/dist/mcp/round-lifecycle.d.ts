@@ -220,6 +220,9 @@ export declare class RoundLifecycle {
      *  Best-effort: an unreadable policy or an unresolvable command must leave
      *  the round without the absolute arm, not fail the preparation. */
     private seedEntrypointTrust;
+    /** v3.9.6: operator acceptance and branch identity travel with the held
+     *  round snapshot; every new prepare carries them forward. */
+    private prepareOptions;
     private persistPrepared;
     private restoredPromptResult;
     /** Reconcile the crash window where feedback committed but session_state

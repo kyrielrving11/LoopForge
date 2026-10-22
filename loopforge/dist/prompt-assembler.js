@@ -10,7 +10,7 @@
  * alone are over it — truncation of mandatory content never happens.
  */
 import { createHash } from "node:crypto";
-import { formatActiveSubGoals, formatContractItemLine, formatCriterionRows, formatRoundContractWithIds, formatSubGoalRow, hashCanonicalState, partitionActiveConstraints, } from "./canonical-state.js";
+import { formatActiveSubGoals, formatContractItemLine, formatCriterionRows, formatRoundContractWithIds, formatSubGoalRow, constraintProvenanceLabel, hashCanonicalState, partitionActiveConstraints, } from "./canonical-state.js";
 import { PROMPT_ARTIFACT_SCHEMA_VERSION } from "./protocol.js";
 import { deriveCriterionId, deriveFindingId, deriveItemId, normalizeText, } from "./token-utils.js";
 import { getPolicy } from "./policy.js";
@@ -74,9 +74,10 @@ function identityForText(state, text) {
  *  that this round violated them. Shared by the hard and other partitions. */
 function constraintLines(state, texts) {
     return texts.map((text) => {
-        const violated = state.constraintMetadata.find((meta) => meta.text === text)
-            ?.last_violated_at_round === state.round;
+        const meta = state.constraintMetadata.find((entry) => entry.text === text);
+        const violated = meta?.last_violated_at_round === state.round;
         return `- [\`${identityForText(state, text)}\`] ${text}` +
+            constraintProvenanceLabel(meta) +
             (violated ? " (violated this round)" : "");
     }).join("\n");
 }
@@ -545,10 +546,18 @@ function matchEmphasize(targets, candidates, cap) {
     const seenIds = new Set();
     for (const target of uniqueTargets) {
         const key = normalizeText(target);
-        const hit = candidates.filter((candidate) => target === "recovery"
-            ? candidate.id === "recovery"
-            : candidate.id === target || normalizeText(candidate.text) === key);
+        const identityHit = target === "recovery"
+            ? candidates.filter((candidate) => candidate.id === "recovery")
+            : candidates.filter((candidate) => candidate.id === target);
+        const hit = identityHit.length > 0
+            ? identityHit
+            : candidates.filter((candidate) => normalizeText(candidate.text) === key);
         hitsByTarget.set(target, hit);
+        // A normalized text can describe multiple normative objects. LoopForge
+        // must not choose one on the Agent's behalf; the Agent can resubmit a
+        // stable id when it intends a specific object.
+        if (identityHit.length === 0 && hit.length > 1)
+            continue;
         for (const candidate of hit) {
             if (seenIds.has(candidate.id))
                 continue;
@@ -564,6 +573,18 @@ function matchEmphasize(targets, candidates, cap) {
         const hits = hitsByTarget.get(target) ?? [];
         if (hits.length === 0) {
             return { field: "emphasize", request: target, status: "no_match" };
+        }
+        const identityHit = target === "recovery"
+            ? candidates.some((candidate) => candidate.id === "recovery")
+            : candidates.some((candidate) => candidate.id === target);
+        if (!identityHit && hits.length > 1) {
+            return {
+                field: "emphasize",
+                request: target,
+                status: "ambiguous",
+                matched_ids: hits.map((candidate) => candidate.id),
+                matched_count: hits.length,
+            };
         }
         const applied = hits
             .map((candidate) => candidate.id)

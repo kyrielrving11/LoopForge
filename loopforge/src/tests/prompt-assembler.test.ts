@@ -410,6 +410,29 @@ describe("assemblePromptArtifact — prompt_requests L2", () => {
     assert.ok(artifact.renderedPrompt.includes("SafeERC20"));
   });
 
+  it("renders constraint provenance in normative sections and critical context", () => {
+    const state = minimalState({
+      activeConstraints: ["discovered rule", "preserved rule", "planned rule", "legacy rule"],
+      hardConstraints: [],
+      constraintMetadata: [
+        { id: "c-discover", text: "discovered rule", last_violated_at_round: 0, source: "discovered", source_round: 2 },
+        { id: "c-preserve", text: "preserved rule", last_violated_at_round: 0, source: "preserved", source_round: 3 },
+        { id: "c-plan", text: "planned rule", last_violated_at_round: 0, source: "plan", source_round: 1 },
+        { id: "c-legacy", text: "legacy rule", last_violated_at_round: 0, source: "unrecorded" },
+      ],
+    });
+    const artifact = assemblePromptArtifact(input({
+      state,
+      promptRequests: { emphasize: ["discovered rule"] },
+    }));
+    assert.ok(artifact.renderedPrompt.includes("(Agent-declared R2; report, not machine-verified)"));
+    assert.ok(artifact.renderedPrompt.includes("(Agent discovery preserved by rollback R3; report)"));
+    assert.ok(artifact.renderedPrompt.includes("(plan/carried R1)"));
+    assert.ok(artifact.renderedPrompt.includes("(origin not recorded in committed rounds)"));
+    const critical = artifact.renderedPrompt.split("🔴 Critical Context")[1] ?? "";
+    assert.ok(critical.includes("(Agent-declared R2; report, not machine-verified)"));
+  });
+
   it("v3.8.1: a merely SIMILAR emphasis target matches nothing", () => {
     // The Jaccard fallback is gone. "use SafeERC20 for external calls" is
     // close enough to have matched "…for all external calls" before; now an
@@ -1027,6 +1050,31 @@ describe("v3.9.7 — structured emphasis candidates", () => {
     }));
     assert.ok(!artifact.renderedPrompt.includes("🔴 Critical Context"));
     assert.equal(artifact.promptRequestEffects?.[0]?.status, "no_match");
+  });
+
+  it("reports ambiguous normalized text without choosing a normative object", () => {
+    const state = minimalState({
+      subGoals: [
+        { id: "sg-11111111", description: "same work", status: "pending", declared_at_round: 1, status_changed_at_round: 1, priority: 0 },
+        { id: "sg-22222222", description: "same work", status: "pending", declared_at_round: 1, status_changed_at_round: 1, priority: 1 },
+      ],
+    });
+    const artifact = assemblePromptArtifact(input({
+      state,
+      promptRequests: { emphasize: ["same work"] },
+    }));
+    const effect = artifact.promptRequestEffects?.[0];
+    assert.equal(effect?.status, "ambiguous");
+    assert.deepEqual(effect?.matched_ids, ["sg-11111111", "sg-22222222"]);
+    assert.equal(effect?.matched_count, 2);
+    assert.ok(!artifact.renderedPrompt.includes("🔴 Critical Context"));
+
+    const explicit = assemblePromptArtifact(input({
+      state,
+      promptRequests: { emphasize: ["sg-22222222"] },
+    }));
+    assert.equal(explicit.promptRequestEffects?.[0]?.status, "applied");
+    assert.ok(explicit.renderedPrompt.includes("🔴 Critical Context"));
   });
 });
 

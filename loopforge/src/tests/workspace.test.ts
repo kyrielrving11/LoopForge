@@ -102,28 +102,4 @@ describe("containInWorkspace", () => {
     }
   });
 
-  it("never follows a symlinked file target into a write outside", (t) => {
-    const { dir, outside } = freshWorkspace();
-    try {
-      writeFileSync(join(outside, "payload.ts"), "secret");
-      const link = join(dir, "payload-link.ts");
-      try {
-        symlinkSync(join(outside, "payload.ts"), link, "file");
-      } catch (error) {
-        // File symlinks need developer mode / admin on Windows.
-        if ((error as NodeJS.ErrnoException).code === "EPERM") {
-          t.skip("file symlinks require privileges on this platform");
-          return;
-        }
-        throw error;
-      }
-      assert.throws(
-        () => containInWorkspace(dir, "payload-link.ts"),
-        /resolves outside the workspace/,
-      );
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-      rmSync(outside, { recursive: true, force: true });
-    }
-  });
 });

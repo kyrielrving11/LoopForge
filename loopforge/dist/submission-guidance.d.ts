@@ -113,7 +113,6 @@ export interface GuidanceSessionView {
         beforeEvidence?: unknown;
     } | null;
     lastCompileResponse?: LoopForgeResponse | null;
-    currentLevel?: string;
     backtrackTargetGitHead?: string;
     backtrackSkippedFiles?: string[];
 }

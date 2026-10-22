@@ -98,7 +98,8 @@ describe("M4 — post-commit compile failure stalls, never skips", () => {
     assert.ok((recovered.prompt as string).length > 0);
     // L1 (live path): the replay of committed round 2 must not push its
     // success into the trajectory a second time.
-    assert.equal(mgr.get(sessionId)?.successTrajectory.length, 2,
+    const loopId = mgr.get(sessionId)!.loopId;
+    assert.equal(mgr.getSuccessTrajectory(loopId).length, 2,
       "the replayed round must not duplicate its trajectory entry");
 
     // And the loop continues normally afterwards.

@@ -583,8 +583,8 @@ describe("MCP — session persistence (save / resume)", async () => {
     assert.ok(sessionEntry !== undefined);
     const lineage = sessionEntry!.loop_lineage as Record<string, unknown>;
     assert.equal(lineage.current_round, 2);
-    const st = lineage.success_trajectory as boolean[];
-    assert.ok(st.length >= 1, "success trajectory should have at least 1 entry");
+    assert.equal("success_trajectory" in lineage, false,
+      "the trajectory is derived from committed rounds, not persisted");
   });
 
   it("advance() saves stopped status when completed", async () => {
@@ -1016,7 +1016,10 @@ describe("MCP P0 lifecycle regressions", () => {
     assert.equal(completed.stopReason, "completed");
     // v3.2: an unverified success commits the loop but never enters the
     // trajectory — success without machine observation is not progress.
-    assert.deepEqual(mgr.get(sessionId)?.successTrajectory, []);
+    assert.deepEqual(
+      mgr.getSuccessTrajectory(mgr.get(sessionId)!.loopId),
+      [],
+    );
 
     const replay = await TOOL_HANDLERS.loopforge_replay(mgr, { sessionId });
     assert.ok(Array.isArray(replay.timeline));
@@ -1025,7 +1028,7 @@ describe("MCP P0 lifecycle regressions", () => {
     const sessionEntry = queryLoopEntries(store, "terminal-replay-regression", {
       prefix: "loop:terminal-replay-regression:session",
     }).find((entry) => entry.task_type === "session_state");
-    assert.deepEqual(sessionEntry?.loop_lineage?.success_trajectory, []);
+    assert.equal(sessionEntry?.loop_lineage?.success_trajectory, undefined);
   });
 
   it("serializes concurrent advances for the same session", async () => {
@@ -1115,7 +1118,7 @@ describe("MCP P0 lifecycle regressions", () => {
       selfEval: evaluation,
       consecutiveRejections: 0,
       successTrajectory: [],
-      actualEvidence: session.evidenceBaseline ?? [],
+      actualEvidence: session.roundSnapshot?.beforeEvidence ?? [],
     });
     assert.equal(committed.snapshot.phase, "committed");
 

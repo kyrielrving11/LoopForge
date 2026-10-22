@@ -746,11 +746,9 @@ export function deriveSubmissionGuidance(session, options) {
     const commandNames = capability.commands
         .filter((command) => command.enabled)
         .map((command) => command.commandId);
-    const level = session.currentLevel === "l0" || session.currentLevel === "l1" ||
-        session.currentLevel === "l2"
-        ? session.currentLevel
-        : (session.roundSnapshot?.promptArtifact?.level ??
-            session.lastCompileResponse?.prompt_artifact?.level ?? "l2");
+    const level = session.roundSnapshot?.promptArtifact?.level ??
+        session.lastCompileResponse?.prompt_artifact?.level ??
+        "l2";
     const subGoals = session.lastCompileResponse?.sub_goals ??
         deriveSubGoals({
             loopId: session.loopId,

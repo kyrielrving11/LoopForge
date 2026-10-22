@@ -18,10 +18,15 @@ import {
   ROUND_TRANSACTION_SCHEMA_VERSION,
   rootBranchId,
 } from "../round-transaction.js";
-import { makeExecutionReport, makeSelfEvaluation } from "../protocol.js";
+import {
+  PROMPT_ARTIFACT_SCHEMA_VERSION,
+  makeExecutionReport,
+  makeSelfEvaluation,
+} from "../protocol.js";
 import type {
   CriterionClaim,
   MachineObservation,
+  PromptArtifact,
   RoundContractProposal,
   RoundOutcome,
   SelfEvaluation,
@@ -67,6 +72,34 @@ export function manifestFor(evaluation: SelfEvaluation): string[] {
   if (evaluation.round_contract) fields.push("round_contract");
   if (evaluation.outcome) fields.push("outcome");
   return fields;
+}
+
+/** v3.9.6: a held prompt artifact for session reconstruction tests. */
+export function promptArtifact(input: {
+  roundId: string;
+  round: number;
+  renderedPrompt: string;
+  level?: "l0" | "l1" | "l2";
+  attempt?: number;
+  warnings?: string[];
+}): PromptArtifact {
+  return {
+    schemaVersion: PROMPT_ARTIFACT_SCHEMA_VERSION,
+    roundId: input.roundId,
+    round: input.round,
+    attempt: input.attempt ?? 1,
+    level: input.level ?? "l1",
+    renderedPrompt: input.renderedPrompt,
+    promptHash: `hash-${input.round}`,
+    stateHash: `state-${input.round}`,
+    sections: [],
+    droppedSections: [],
+    protectedOverflow: false,
+    budget: 10_000,
+    renderedChars: input.renderedPrompt.length,
+    coverage: { active: [], rendered: [], omitted: [], complete: true },
+    warnings: [...(input.warnings ?? [])],
+  };
 }
 
 /** Test-only: wrap raw after observations as after-only deltas. A Git

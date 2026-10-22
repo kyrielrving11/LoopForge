@@ -39,7 +39,12 @@ import {
 import { entryRound, isRecord } from "./token-utils.js";
 import { driftedEntrypoints } from "./evidence-provider.js";
 import { declaresBlocked, effectiveOutcome, effectiveSuccess } from "./self-eval.js";
-import { derivationRounds, decodeCommittedRound, inFlightGitMotion } from "./committed-round.js";
+import {
+  derivationRounds,
+  decodeCommittedRound,
+  inFlightGitMotion,
+  pendingRollbackDirective,
+} from "./committed-round.js";
 import {
   enforceRound,
   buildRejectionPrompt,
@@ -387,7 +392,7 @@ export class RoundCoordinator {
   ): RoundProcessResult {
     const {
       loopId, task, currentRound, maxRounds,
-      selfEval, lastSelfEval,
+      selfEval,
       consecutiveRejections,
       evidenceDeltas,
     } = input;
@@ -407,16 +412,26 @@ export class RoundCoordinator {
         ]
       : [];
 
+    // v3.9.6: the previous evaluation is the last committed branch round,
+    // never a session copy.
+    const committedRounds = derivationRounds(vaultEntries, currentRound);
+    const previousCommitted = committedRounds.length > 0
+      ? committedRounds[committedRounds.length - 1]!.evaluation
+      : null;
+    // The pending rollback directive is the ONE source of the redo restore
+    // facts; the session never carries a copy.
+    const pendingRecovery = pendingRollbackDirective(vaultEntries, currentRound)?.recovery ?? null;
+
     // ── 2. Verification gate ────────────────────────────────────────────
     const verifyResult: VerificationResult = verifySelfEvaluation(
       selfEval,
       currentRound,
       vaultEntries,
-      lastSelfEval ?? null,
+      previousCommitted,
       evidenceDeltas ?? [],
-      input.backtrackSkippedFiles ?? [],
-      input.backtrackSkippedFingerprints ?? {},
-      input.backtrackTargetGitHead,
+      pendingRecovery?.skipped_files ?? [],
+      pendingRecovery?.skipped_fingerprints ?? {},
+      pendingRecovery?.target_head,
       // v3.7.1: gate records live under the gate: prefix — outside the round
       // entries above — and are passed separately to the gate check.
       this.store
@@ -430,7 +445,7 @@ export class RoundCoordinator {
       input.beforeEvidence ?? [],
       // v3.9: the restore point's own dirty files — the baseline the restored
       // workspace is compared against.
-      input.backtrackTargetDirty,
+      pendingRecovery?.target_dirty,
       // v3.9.4: the SAME manifest basis the receipt uses. An omitted
       // files_changed field is not silently treated as "a report exists".
       input.submittedFields
@@ -443,7 +458,6 @@ export class RoundCoordinator {
     // v3.8: the ACTIVE contract's derived item statuses for this round — the
     // same reducer the gate, compile path, audit and explain consume. Drives
     // the stop mapping (completed vs incomplete) and the success trajectory.
-    const committedRounds = derivationRounds(vaultEntries, currentRound);
     // v3.8: the shared executed-contract derivation — the same one explain and
     // audit call, so the live posture and the read-only views cannot diverge.
     const { contract: activeContract, statuses: activeContractStatuses } =
@@ -505,7 +519,7 @@ export class RoundCoordinator {
       // round never gains the stall excuse.
       inFlightGitMotion(
         evidenceDeltas ?? [],
-        input.backtrackTargetGitHead,
+        pendingRecovery?.target_head,
       ),
     );
 

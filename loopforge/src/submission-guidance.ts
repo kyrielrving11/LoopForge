@@ -956,7 +956,6 @@ export interface GuidanceSessionView {
     beforeEvidence?: unknown;
   } | null;
   lastCompileResponse?: LoopForgeResponse | null;
-  currentLevel?: string;
   backtrackTargetGitHead?: string;
   backtrackSkippedFiles?: string[];
 }
@@ -993,11 +992,9 @@ export function deriveSubmissionGuidance(
     .filter((command) => command.enabled)
     .map((command) => command.commandId);
   const level: "l0" | "l1" | "l2" =
-    session.currentLevel === "l0" || session.currentLevel === "l1" ||
-      session.currentLevel === "l2"
-      ? session.currentLevel
-      : (session.roundSnapshot?.promptArtifact?.level ??
-        session.lastCompileResponse?.prompt_artifact?.level ?? "l2");
+    session.roundSnapshot?.promptArtifact?.level ??
+    session.lastCompileResponse?.prompt_artifact?.level ??
+    "l2";
 
   const subGoals: ReadonlyArray<SubGoal> =
     session.lastCompileResponse?.sub_goals ??

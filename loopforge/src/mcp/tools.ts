@@ -1200,7 +1200,7 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
       roundId: session.roundSnapshot?.roundId ?? null,
       maxRounds: session.maxRounds,
       status: session.status,
-      successTrajectory: session.successTrajectory,
+      successTrajectory: mgr.getSuccessTrajectory(session.loopId),
       lease: mgr.getLeaseStatus(session.loopId),
       // v3.5: derived ACTIVE Round Contract (display-only — the compile and
       // verification gates derive the same value from the same committed
@@ -1215,7 +1215,10 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
       // (what verification is possible) plus the live half rendered from the
       // last baseline. `available` is provider-registry state: reported here
       // and by `doctor`, never hashed.
-      capability: deriveEvidenceCapability(getPolicy(), session.evidenceBaseline ?? []),
+      capability: deriveEvidenceCapability(
+        getPolicy(),
+        session.roundSnapshot?.beforeEvidence ?? [],
+      ),
       metrics: {
         vaultWriteErrors: metrics.vaultWriteErrors,
         // v3.3.1: engine sessionStart was written but never read — surface it
@@ -1244,7 +1247,7 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
     }
 
     const roundsCompleted = session.currentRound;
-    const successTrajectory = [...session.successTrajectory];
+    const successTrajectory = mgr.getSuccessTrajectory(session.loopId);
     mgr.delete(sessionId);
 
     return { success: true, roundsCompleted, successTrajectory };

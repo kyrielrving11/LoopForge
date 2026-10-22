@@ -11,7 +11,6 @@
  */
 import { LoopForgeEngine } from "../engine.js";
 import type { LoopForgeRequest, LoopForgeResponse, RecoveryRequest, SelfEvaluation, SubmissionDiagnostic, SubmissionGuidance, SubmissionReceipt, VerificationFlag, LoopTerminalSink, RoundVerificationStatus } from "../protocol.js";
-import type { MachineObservation } from "../protocol.js";
 import type { RoundTransactionSnapshot } from "../round-transaction.js";
 import type { LoopStore, VaultEntry } from "../loop-store.js";
 import type { SessionStateStore } from "../storage.js";
@@ -22,32 +21,12 @@ export interface McpSession {
     engine: LoopForgeEngine;
     currentRound: number;
     maxRounds: number;
-    successTrajectory: boolean[];
     status: "running" | "stopped" | "stalled" | "paused";
     createdAt: number;
-    /** Previous round's validated SelfEvaluation — used by verification gate. */
-    lastSelfEval?: SelfEvaluation;
     consecutiveRejections: number;
     /** Which enforcement check triggered the last rejection.
      *  Only same-check rejections accumulate toward the max. */
     lastRejectionCheck: string;
-    /** v2.13: Files changed in skipped rounds during the last backtrack.
-     *  The next round's verification gate checks that the agent did not
-     *  continue working on stale files without restoring the workspace.
-     *  Cleared after the first successful post-backtrack round. */
-    backtrackSkippedFiles: string[];
-    /** M3 (v3.7.x): git fingerprint of each skipped file at its failed round
-     *  — machine proof for the workspace-restore check. Cleared with
-     *  backtrackSkippedFiles after the restore round. */
-    backtrackSkippedFingerprints: Record<string, string>;
-    /** v2.12: Git HEAD of the last backtrack restore point. The verification
-     *  gate checks the workspace returns to this commit before accepting.
-     *  Cleared after the first successful post-backtrack round. */
-    backtrackTargetGitHead?: string;
-    /** v3.9: files already dirty at that restore point — the baseline the
-     *  restored workspace is compared against, so unrelated work in progress
-     *  does not read as a failed restore. Cleared with the HEAD above. */
-    backtrackTargetDirty?: string[];
     /** v3.8.3: the trusted round-start fingerprint of every enabled command's
      *  entrypoint files, captured when the CURRENT in-flight round was prepared.
      *
@@ -57,15 +36,9 @@ export interface McpSession {
      *  appears in and a re-derived baseline could launder. Absent means the
      *  round runs without that arm — never a lost round. */
     entrypointTrust?: Record<string, string>;
-    /** Evidence baseline captured immediately before the agent receives a prompt. */
-    evidenceBaseline?: MachineObservation[];
     /** Schema-versioned transaction for the prompt currently held by the agent. */
     roundSnapshot?: RoundTransactionSnapshot;
-    /** Persisted prompt prevents resume from compiling the same round twice. */
-    currentPrompt?: string | null;
-    currentLevel?: string;
     /** Structured warnings from the most recent compile — preferred over regex parsing. */
-    currentWarnings?: string[];
     /** v3.0.1: The full compile response of the current round, cached so the
      *  typed projection (getProjection) derives from it instead of recompiling
      *  the whole vault. Freshness is checked via loop_id + round; rebuilt by

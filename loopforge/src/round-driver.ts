@@ -141,11 +141,17 @@ export class RoundDriver {
     } as LoopForgeRequest;
     const response = this.compile(retryRequest, rejected.loopId, false);
     if (!response?.prompt_artifact) return null;
-    const snapshot = prepareRejectedAttempt(rejected, response.prompt_artifact);
+    // v3.9.6: warnings live on the artifact; the session no longer mirrors
+    // them, so a held prompt is self-contained across a restart.
+    const artifact: PromptArtifact = {
+      ...response.prompt_artifact,
+      warnings: [...(response.warnings ?? [])],
+    };
+    const snapshot = prepareRejectedAttempt(rejected, artifact);
     return {
       prompt: response.prompt!,
-      artifact: response.prompt_artifact,
-      level: response.prompt_artifact.level,
+      artifact,
+      level: artifact.level,
       evidenceBaseline: rejected.beforeEvidence,
       snapshot,
       stateFileContent: response.state_file_content,
@@ -161,7 +167,10 @@ export class RoundDriver {
     evidenceBaseline: MachineObservation[],
     opts: { branchId?: string; operatorAcceptance?: OperatorAcceptance } = {},
   ): PreparedRound {
-    const artifact = response.prompt_artifact;
+    const rawArtifact = response.prompt_artifact;
+    const artifact: PromptArtifact | undefined = rawArtifact
+      ? { ...rawArtifact, warnings: [...(response.warnings ?? [])] }
+      : undefined;
     const snapshot = prepareRoundTransaction(
       loopId,
       round,

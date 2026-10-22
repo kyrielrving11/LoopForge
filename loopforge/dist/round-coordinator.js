@@ -22,7 +22,7 @@ import { CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE, collectOutOfScopeFiles, roundD
 import { entryRound, isRecord } from "./token-utils.js";
 import { driftedEntrypoints } from "./evidence-provider.js";
 import { declaresBlocked, effectiveOutcome, effectiveSuccess } from "./self-eval.js";
-import { derivationRounds, decodeCommittedRound, inFlightGitMotion } from "./committed-round.js";
+import { derivationRounds, decodeCommittedRound, inFlightGitMotion, pendingRollbackDirective, } from "./committed-round.js";
 import { enforceRound, buildRejectionPrompt, findSafeRestorePoint, findBacktrackTargetSnapshot, } from "./enforcement-gate.js";
 import { logEvent } from "./observability.js";
 import { getPolicy } from "./policy.js";
@@ -212,7 +212,7 @@ export class RoundCoordinator {
      *  - Transactional feedback commit (accepted rounds only)
      *  - State file I/O (both paths, after compiling) */
     processRound(input) {
-        const { loopId, task, currentRound, maxRounds, selfEval, lastSelfEval, consecutiveRejections, evidenceDeltas, } = input;
+        const { loopId, task, currentRound, maxRounds, selfEval, consecutiveRejections, evidenceDeltas, } = input;
         const roundSuccess = selfEval.success ?? false;
         // ── 1. Query vault entries ──────────────────────────────────────────
         // Lineage entries (constraint violations, output summaries) and feedback
@@ -226,8 +226,17 @@ export class RoundCoordinator {
                 ...queryLoopEntries(this.store, loopId, { prefix, feedbackOnly: true }),
             ]
             : [];
+        // v3.9.6: the previous evaluation is the last committed branch round,
+        // never a session copy.
+        const committedRounds = derivationRounds(vaultEntries, currentRound);
+        const previousCommitted = committedRounds.length > 0
+            ? committedRounds[committedRounds.length - 1].evaluation
+            : null;
+        // The pending rollback directive is the ONE source of the redo restore
+        // facts; the session never carries a copy.
+        const pendingRecovery = pendingRollbackDirective(vaultEntries, currentRound)?.recovery ?? null;
         // ── 2. Verification gate ────────────────────────────────────────────
-        const verifyResult = verifySelfEvaluation(selfEval, currentRound, vaultEntries, lastSelfEval ?? null, evidenceDeltas ?? [], input.backtrackSkippedFiles ?? [], input.backtrackSkippedFingerprints ?? {}, input.backtrackTargetGitHead,
+        const verifyResult = verifySelfEvaluation(selfEval, currentRound, vaultEntries, previousCommitted, evidenceDeltas ?? [], pendingRecovery?.skipped_files ?? [], pendingRecovery?.skipped_fingerprints ?? {}, pendingRecovery?.target_head,
         // v3.7.1: gate records live under the gate: prefix — outside the round
         // entries above — and are passed separately to the gate check.
         this.store
@@ -240,7 +249,7 @@ export class RoundCoordinator {
         driftedEntrypoints(input.entrypointTrust), input.beforeEvidence ?? [],
         // v3.9: the restore point's own dirty files — the baseline the restored
         // workspace is compared against.
-        input.backtrackTargetDirty,
+        pendingRecovery?.target_dirty,
         // v3.9.4: the SAME manifest basis the receipt uses. An omitted
         // files_changed field is not silently treated as "a report exists".
         input.submittedFields
@@ -251,7 +260,6 @@ export class RoundCoordinator {
         // v3.8: the ACTIVE contract's derived item statuses for this round — the
         // same reducer the gate, compile path, audit and explain consume. Drives
         // the stop mapping (completed vs incomplete) and the success trajectory.
-        const committedRounds = derivationRounds(vaultEntries, currentRound);
         // v3.8: the shared executed-contract derivation — the same one explain and
         // audit call, so the live posture and the read-only views cannot diverge.
         const { contract: activeContract, statuses: activeContractStatuses } = deriveRoundContractView({
@@ -300,7 +308,7 @@ export class RoundCoordinator {
         // v3.9: what THIS round moved, from the same Git motion rule the
         // committed series uses. Unknown motion stays null — an unobservable
         // round never gains the stall excuse.
-        inFlightGitMotion(evidenceDeltas ?? [], input.backtrackTargetGitHead));
+        inFlightGitMotion(evidenceDeltas ?? [], pendingRecovery?.target_head));
         if (enforceResult.action === "reject") {
             const newRejections = consecutiveRejections + 1;
             const rejectionPrompt = buildRejectionPrompt(currentRound, task, enforceResult, verificationFlags);

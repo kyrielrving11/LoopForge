@@ -8,7 +8,12 @@
 
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { MemoryLoopStore, installTestCommandProvider, criterionClaims } from "./_helpers.js";
+import {
+  MemoryLoopStore,
+  installTestCommandProvider,
+  criterionClaims,
+  promptArtifact,
+} from "./_helpers.js";
 import { resetPolicy } from "../policy.js";
 import { LoopForgeEngine } from "../engine.js";
 import { SessionManager } from "../mcp/session.js";
@@ -62,7 +67,6 @@ function makeSessionEntry(overrides: {
   status?: McpSession["status"];
   currentRound?: number;
   sessionId?: string;
-  currentPrompt?: string | null;
   roundSnapshot?: Record<string, unknown> | null;
 }): VaultEntry {
   return {
@@ -75,17 +79,12 @@ function makeSessionEntry(overrides: {
       session_id: overrides.sessionId ?? null,
       current_round: overrides.currentRound ?? 1,
       max_rounds: 20,
-      success_trajectory: [],
       status: overrides.status ?? "running",
       created_at: Date.now(),
       consecutive_rejections: 0,
       last_rejection_check: "",
-      backtrack_skipped_files: [],
-      backtrack_target_git_head: null,
       round_snapshot: overrides.roundSnapshot ?? null,
       last_self_eval: null,
-      current_prompt: overrides.currentPrompt ?? null,
-      current_level: "",
       lease_owner: "",
       lease_expires_at: 0,
     },
@@ -133,11 +132,8 @@ describe("RoundLifecycle — reconstructSession", async () => {
       loopId: "loop-a",
       sessionId: "sess-1",
       currentRound: 3,
-      currentPrompt: "held prompt",
       roundSnapshot: JSON.parse(JSON.stringify(snapshot)) as Record<string, unknown>,
     });
-    (entry.loop_lineage as Record<string, unknown>).backtrack_skipped_files = ["a.ts"];
-    (entry.loop_lineage as Record<string, unknown>).backtrack_target_git_head = "abc123";
     (entry.loop_lineage as Record<string, unknown>).consecutive_rejections = 1;
     (entry.loop_lineage as Record<string, unknown>).last_rejection_check = "R4";
 
@@ -149,11 +145,8 @@ describe("RoundLifecycle — reconstructSession", async () => {
     assert.equal(session.status, "running");
     assert.equal(session.consecutiveRejections, 1);
     assert.equal(session.lastRejectionCheck, "R4");
-    assert.deepEqual(session.backtrackSkippedFiles, ["a.ts"]);
-    assert.equal(session.backtrackTargetGitHead, "abc123");
-    assert.equal(session.currentPrompt, "held prompt");
     // Evidence baseline comes from the persisted snapshot
-    assert.deepEqual(session.evidenceBaseline, snapshot.beforeEvidence);
+    assert.deepEqual(session.roundSnapshot?.beforeEvidence, snapshot.beforeEvidence);
     assert.equal(session.roundSnapshot?.roundId, snapshot.roundId);
   });
 
@@ -178,18 +171,23 @@ describe("RoundLifecycle — reconstructSession", async () => {
       engine,
       currentRound: 4,
       maxRounds: 20,
-      successTrajectory: [true],
       status: "running",
       createdAt: Date.now(),
       consecutiveRejections: 0,
       lastRejectionCheck: "",
-      backtrackSkippedFiles: [],
-      backtrackSkippedFingerprints: {},
-      evidenceBaseline: [],
-      roundSnapshot: prepareRoundTransaction("loop-rt", 4, []),
-      currentPrompt: "persisted prompt",
-      currentLevel: "l1",
-      currentWarnings: ["warn"],
+      roundSnapshot: prepareRoundTransaction(
+        "loop-rt",
+        4,
+        [],
+        promptArtifact({
+          roundId: "loop:loop-rt:round:4",
+          round: 4,
+          renderedPrompt: "persisted prompt",
+          level: "l1",
+          warnings: ["warn"],
+        }),
+        { branchId: "loop:loop-rt:branch:root" },
+      ),
     };
 
     lifecycle.save(original);
@@ -201,9 +199,9 @@ describe("RoundLifecycle — reconstructSession", async () => {
 
     assert.equal(recovered.loopId, "loop-rt");
     assert.equal(recovered.currentRound, 4);
-    assert.equal(recovered.currentPrompt, "persisted prompt");
-    assert.equal(recovered.currentLevel, "l1");
-    assert.deepEqual(recovered.successTrajectory, [true]);
+    assert.equal(recovered.roundSnapshot?.promptArtifact?.renderedPrompt, "persisted prompt");
+    assert.equal(recovered.roundSnapshot?.promptArtifact?.level, "l1");
+    assert.deepEqual(recovered.roundSnapshot?.promptArtifact?.warnings, ["warn"]);
   });
 
   it("survives a restart with the in-flight entrypoint trust intact", () => {
@@ -219,18 +217,12 @@ describe("RoundLifecycle — reconstructSession", async () => {
       engine,
       currentRound: 2,
       maxRounds: 20,
-      successTrajectory: [],
       status: "running",
       createdAt: Date.now(),
       consecutiveRejections: 0,
       lastRejectionCheck: "",
-      backtrackSkippedFiles: [],
-      backtrackSkippedFingerprints: {},
       entrypointTrust: trust,
-      evidenceBaseline: [],
       roundSnapshot: prepareRoundTransaction("loop-trust", 2, []),
-      currentPrompt: "held",
-      currentLevel: "l1",
     };
 
     lifecycle.save(original);
@@ -305,14 +297,10 @@ describe("RoundLifecycle — reconstructSession", async () => {
       engine,
       currentRound: 1,
       maxRounds: 20,
-      successTrajectory: [],
       status: "running",
       createdAt: Date.now(),
       consecutiveRejections: 0,
       lastRejectionCheck: "",
-      backtrackSkippedFiles: [],
-      backtrackSkippedFingerprints: {},
-      evidenceBaseline: [],
     };
 
     // Process A persists a running session — its entry carries lease_owner A
@@ -349,23 +337,32 @@ describe("RoundLifecycle — resume / crash window", async () => {
       engine: new LoopForgeEngine(store),
       currentRound: 2,
       maxRounds: 20,
-      successTrajectory: [],
       status: "running",
       createdAt: Date.now(),
       consecutiveRejections: 0,
       lastRejectionCheck: "",
-      backtrackSkippedFiles: [],
-      backtrackSkippedFingerprints: {},
-      evidenceBaseline: [],
-      roundSnapshot: prepareRoundTransaction("loop-held", 2, []),
-      currentPrompt: "HELD-PROMPT",
-      currentLevel: "l2",
+      roundSnapshot: prepareRoundTransaction(
+        "loop-held",
+        2,
+        [],
+        promptArtifact({
+          roundId: "loop:loop-held:round:2",
+          round: 2,
+          renderedPrompt: "HELD-PROMPT",
+          level: "l2",
+        }),
+        { branchId: "loop:loop-held:branch:root" },
+      ),
     };
 
     const result = await lifecycle.resume(session);
     assert.equal(result.prompt, "HELD-PROMPT");
     assert.equal(result.round, 2);
-    assert.equal(session.currentPrompt, "HELD-PROMPT", "prompt not consumed");
+    assert.equal(
+      session.roundSnapshot?.promptArtifact?.renderedPrompt,
+      "HELD-PROMPT",
+      "prompt not consumed",
+    );
   });
 
   it("resume recovers a missing round-1 prompt and persists it", async () => {
@@ -376,14 +373,10 @@ describe("RoundLifecycle — resume / crash window", async () => {
       engine: new LoopForgeEngine(store),
       currentRound: 1,
       maxRounds: 20,
-      successTrajectory: [],
       status: "running",
       createdAt: Date.now(),
       consecutiveRejections: 0,
       lastRejectionCheck: "",
-      backtrackSkippedFiles: [],
-      backtrackSkippedFingerprints: {},
-      evidenceBaseline: [],
     };
 
     const result = await lifecycle.resume(session);
@@ -393,7 +386,9 @@ describe("RoundLifecycle — resume / crash window", async () => {
     // Persisted for cross-process recovery
     const persisted = new VaultSessionStateStore(store).load("loop-legacy-resume")!;
     const lineage = persisted.loop_lineage as Record<string, unknown>;
-    assert.equal(lineage.current_prompt, result.prompt);
+    const roundSnapshot = lineage.round_snapshot as Record<string, unknown>;
+    const artifact = roundSnapshot.promptArtifact as Record<string, unknown>;
+    assert.equal(artifact.renderedPrompt, result.prompt);
   });
 
   it("crash window: committed continue-round recovered on resume", async () => {
@@ -411,7 +406,7 @@ describe("RoundLifecycle — resume / crash window", async () => {
       maxRounds: session.maxRounds,
       selfEval: evalFor({ success: true, shouldContinue: true }),
       consecutiveRejections: 0,
-      successTrajectory: session.successTrajectory,
+      successTrajectory: [],
     });
 
     // "New process": the old process releases its lease on close() (same-pid
@@ -443,7 +438,7 @@ describe("RoundLifecycle — resume / crash window", async () => {
       maxRounds: session.maxRounds,
       selfEval: evalFor({ success: true, shouldContinue: false }),
       consecutiveRejections: 0,
-      successTrajectory: session.successTrajectory,
+      successTrajectory: [],
     });
 
     mgr.close();
@@ -514,7 +509,7 @@ describe("RoundLifecycle — advance", async () => {
     assert.ok(resumed.prompt);
     // L1: pause() persisted the trajectory AFTER round 1's success was
     // pushed — the crash-window reconcile must not push it a second time.
-    assert.deepEqual(mgr2.get(sid)?.successTrajectory, [true],
+    assert.deepEqual(mgr2.getSuccessTrajectory("pause-race"), [true],
       "unpause must not duplicate round 1 in the success trajectory");
   });
 });

@@ -49,6 +49,19 @@ the operator objective.
   the evaluation prompt; verification repair text remains a description of the
   machine condition that must be cleared.
 
+### Session is a cursor, not a second history
+
+The session no longer mirrors committed facts. `successTrajectory`,
+`lastSelfEval`, `evidenceBaseline`, `currentPrompt`, `currentLevel`,
+`currentWarnings` and the `backtrack*` restore fields are removed. The success
+trajectory and previous evaluation derive from committed branch rounds; the
+restore facts derive from the pending rollback directive; the held prompt and
+level derive from `roundSnapshot.promptArtifact` (warnings are stored on the
+artifact). `loopforge_stop`/`status` compute the trajectory from committed
+rounds. `task`, `consecutiveRejections`, `lastRejectionCheck` and
+`entrypointTrust` remain runtime control state; `lastCompileResponse` remains a
+process-local derived cache, never a durable source.
+
 ### Breaking boundaries
 
 - `ROUND_TRANSACTION_SCHEMA_VERSION` is `4` (`kind`, `transactionId`,

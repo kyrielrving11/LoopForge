@@ -55,6 +55,9 @@ export declare class SessionManager implements SessionRegistry {
      *  transaction + shared read model. Rejected/terminated attempts are not in
      *  history; their receipt exists only on their own response. */
     getLastSubmissionReceipt(sessionId: string): SubmissionReceipt | null;
+    /** v3.9.6: the success trajectory is a projection of committed branch
+     *  rounds, not a session counter. */
+    getSuccessTrajectory(loopId: string): boolean[];
     get(sessionId: string): McpSession | undefined;
     getLeaseStatus(loopId: string): Record<string, unknown> | null;
     delete(sessionId: string): boolean;

@@ -188,12 +188,9 @@ export class SessionManager {
         // Populate extra fields for the first round
         const request = buildLoopRequest({
             sessionId, loopId, task: input.task, engine, currentRound: 1,
-            maxRounds, successTrajectory: [], status: "running", createdAt: Date.now(),
+            maxRounds, status: "running", createdAt: Date.now(),
             consecutiveRejections: 0,
             lastRejectionCheck: "",
-            backtrackSkippedFiles: [],
-            backtrackSkippedFingerprints: {},
-            evidenceBaseline: [],
         });
         request.domain = input.domain ?? "";
         request.plan_source = input.planSource ?? null;
@@ -218,18 +215,12 @@ export class SessionManager {
         const evidenceBaseline = prepared?.evidenceBaseline ?? [];
         const session = {
             sessionId, loopId, task: input.task, engine,
-            currentRound: 1, maxRounds, successTrajectory: [],
+            currentRound: 1, maxRounds,
             status: "running", createdAt: Date.now(),
             // v1.13: Enforcement gate state
             consecutiveRejections: 0,
             lastRejectionCheck: "",
-            backtrackSkippedFiles: [],
-            backtrackSkippedFingerprints: {},
-            evidenceBaseline,
             roundSnapshot: prepared?.snapshot ?? prepareRoundTransaction(loopId, 1, evidenceBaseline),
-            currentPrompt: initialPrompt,
-            currentLevel: initialLevel,
-            currentWarnings: [...startCriteria.warnings, ...(prepared?.warnings ?? [])],
             lastCompileResponse: prepared?.compileResponse ?? null,
         };
         this.sessions.set(sessionId, session);
@@ -294,6 +285,18 @@ export class SessionManager {
             return deriveCommittedSubmissionView(latestRollback, views);
         }
         return latestRound ? deriveCommittedSubmissionView(latestRound, views) : null;
+    }
+    /** v3.9.6: the success trajectory is a projection of committed branch
+     *  rounds, not a session counter. */
+    getSuccessTrajectory(loopId) {
+        const prefix = `loop:${loopId}:`;
+        const entries = [
+            ...queryLoopEntries(this.loopStore, loopId, { prefix }),
+            ...queryLoopEntries(this.loopStore, loopId, { prefix, feedbackOnly: true }),
+        ];
+        return readOnlyRounds(entries)
+            .filter((view) => view.result?.shouldPushSuccessTrajectory === true)
+            .map((view) => view.success);
     }
     get(sessionId) {
         return this.sessions.get(sessionId);
@@ -953,6 +956,7 @@ export class SessionManager {
             target: view.recovery?.target ?? 0,
             reason: view.recovery?.reason ?? "",
             targetHead: view.recovery?.target_head ?? null,
+            targetDirty: [...(view.recovery?.target_dirty ?? [])],
             skippedFiles: [...(view.recovery?.skipped_files ?? [])],
             preservedDiscoveries: [...(view.recovery?.skipped_discoveries ?? [])],
         }));

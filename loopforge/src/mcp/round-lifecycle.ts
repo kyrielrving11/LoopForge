@@ -60,6 +60,7 @@ import {
   branchRounds,
   derivationRounds,
   pendingRollbackDirective,
+  readOnlyRounds,
 } from "../committed-round.js";
 import { deriveSubmissionGuidance } from "../submission-guidance.js";
 import { activeContractOf } from "./submission-boundary.js";
@@ -92,33 +93,13 @@ export interface McpSession {
   engine: LoopForgeEngine;
   currentRound: number;
   maxRounds: number;
-  successTrajectory: boolean[];
   status: "running" | "stopped" | "stalled" | "paused";
   createdAt: number;
-  /** Previous round's validated SelfEvaluation — used by verification gate. */
-  lastSelfEval?: SelfEvaluation;
   // v1.13: Enforcement gate state
   consecutiveRejections: number;
   /** Which enforcement check triggered the last rejection.
    *  Only same-check rejections accumulate toward the max. */
   lastRejectionCheck: string;
-  /** v2.13: Files changed in skipped rounds during the last backtrack.
-   *  The next round's verification gate checks that the agent did not
-   *  continue working on stale files without restoring the workspace.
-   *  Cleared after the first successful post-backtrack round. */
-  backtrackSkippedFiles: string[];
-  /** M3 (v3.7.x): git fingerprint of each skipped file at its failed round
-   *  — machine proof for the workspace-restore check. Cleared with
-   *  backtrackSkippedFiles after the restore round. */
-  backtrackSkippedFingerprints: Record<string, string>;
-  /** v2.12: Git HEAD of the last backtrack restore point. The verification
-   *  gate checks the workspace returns to this commit before accepting.
-   *  Cleared after the first successful post-backtrack round. */
-  backtrackTargetGitHead?: string;
-  /** v3.9: files already dirty at that restore point — the baseline the
-   *  restored workspace is compared against, so unrelated work in progress
-   *  does not read as a failed restore. Cleared with the HEAD above. */
-  backtrackTargetDirty?: string[];
   /** v3.8.3: the trusted round-start fingerprint of every enabled command's
    *  entrypoint files, captured when the CURRENT in-flight round was prepared.
    *
@@ -128,15 +109,9 @@ export interface McpSession {
    *  appears in and a re-derived baseline could launder. Absent means the
    *  round runs without that arm — never a lost round. */
   entrypointTrust?: Record<string, string>;
-  /** Evidence baseline captured immediately before the agent receives a prompt. */
-  evidenceBaseline?: MachineObservation[];
   /** Schema-versioned transaction for the prompt currently held by the agent. */
   roundSnapshot?: RoundTransactionSnapshot;
-  /** Persisted prompt prevents resume from compiling the same round twice. */
-  currentPrompt?: string | null;
-  currentLevel?: string;
   /** Structured warnings from the most recent compile — preferred over regex parsing. */
-  currentWarnings?: string[];
   /** v3.0.1: The full compile response of the current round, cached so the
    *  typed projection (getProjection) derives from it instead of recompiling
    *  the whole vault. Freshness is checked via loop_id + round; rebuilt by
@@ -518,30 +493,17 @@ export class RoundLifecycle {
           session_id: session.sessionId,
           current_round: session.currentRound,
           max_rounds: session.maxRounds,
-          success_trajectory: session.successTrajectory,
           status: session.status,
           created_at: session.createdAt,
           // v1.13: Enforcement gate state
           consecutive_rejections: session.consecutiveRejections,
           last_rejection_check: session.lastRejectionCheck,
-          // v2.13: Backtrack skipped files for workspace restore check
-          backtrack_skipped_files: session.backtrackSkippedFiles,
-          // M3: skipped-file fingerprints at their failed rounds (restore
-          // check machine arm) — empty unless a backtrack is pending
-          backtrack_skipped_fingerprints: session.backtrackSkippedFingerprints,
           // v3.8.3: the in-flight entrypoint trust baseline. Read back
           // leniently (parseFingerprintMap) so a corrupt or absent value
           // degrades to "no absolute arm" instead of costing the round.
           entrypoint_trust: session.entrypointTrust ?? null,
-          // v2.12: Backtrack restore-point git HEAD (crash recovery)
-          backtrack_target_git_head: session.backtrackTargetGitHead ?? null,
-          // v3.9: Restore point's own dirty files (restore baseline)
-          backtrack_target_dirty: session.backtrackTargetDirty ?? null,
           // v1.19: durable round transaction state
           round_snapshot: session.roundSnapshot ?? null,
-          last_self_eval: session.lastSelfEval ?? null,
-          current_prompt: session.currentPrompt ?? null,
-          current_level: session.currentLevel ?? "",
           // v1.20: cross-process single-owner lease
           lease_owner: leaseActive ? this.ownerId : "",
           lease_expires_at: leaseActive ? Date.now() + this.leaseMs : 0,
@@ -573,9 +535,6 @@ export class RoundLifecycle {
     // only reachable through the read-only audit.
     checkRoundSequence(this.store, loopId);
     const currentRound = (lineage.current_round as number) ?? 1;
-    const successTrajectory = Array.isArray(lineage.success_trajectory)
-      ? lineage.success_trajectory.filter((value): value is boolean => typeof value === "boolean")
-      : [];
     const task = (entry.task as string) ?? "";
     const maxRounds =
       (lineage.max_rounds as number) ?? getPolicy().engine.max_rounds;
@@ -585,15 +544,6 @@ export class RoundLifecycle {
     // as failures). Every path that needs evidence re-collects asynchronously
     // through prepare()/unpause(); a missing snapshot starts with no baseline.
     const fallbackEvidence: MachineObservation[] = [];
-    const persistedEval = lineage.last_self_eval;
-    const lastSelfEval =
-      persistedEval !== null &&
-      typeof persistedEval === "object" &&
-      !Array.isArray(persistedEval) &&
-      typeof (persistedEval as Record<string, unknown>).success === "boolean" &&
-      typeof (persistedEval as Record<string, unknown>).output_summary === "string"
-        ? persistedEval as SelfEvaluation
-        : undefined;
 
     const engine = new LoopForgeEngine(this.store);
     return {
@@ -601,45 +551,19 @@ export class RoundLifecycle {
         ? lineage.session_id
         : randomUUID(),
       loopId, task, engine,
-      currentRound, maxRounds, successTrajectory,
+      currentRound, maxRounds,
       status: status as McpSession["status"],
       createdAt: (lineage.created_at as number) ?? Date.now(),
       consecutiveRejections: (lineage.consecutive_rejections as number) ?? 0,
       lastRejectionCheck: typeof lineage.last_rejection_check === "string"
         ? lineage.last_rejection_check
         : "",
-      backtrackSkippedFiles:
-        (lineage.backtrack_skipped_files as string[]) ?? [],
-      backtrackSkippedFingerprints: parseFingerprintMap(
-        lineage.backtrack_skipped_fingerprints,
-      ),
       entrypointTrust: parseFingerprintMap(lineage.entrypoint_trust),
-      backtrackTargetGitHead:
-        typeof lineage.backtrack_target_git_head === "string" &&
-        lineage.backtrack_target_git_head.length > 0
-          ? lineage.backtrack_target_git_head
-          : undefined,
-      // v3.9: absent means "baseline unknown" (a session from before this
-      // field), never an empty baseline: the restore check then falls back
-      // to HEAD equality alone rather than reading unrelated dirt as failure.
-      backtrackTargetDirty: Array.isArray(lineage.backtrack_target_dirty)
-        ? (lineage.backtrack_target_dirty as unknown[]).filter(
-            (file): file is string => typeof file === "string",
-          )
-        : undefined,
-      evidenceBaseline: roundSnapshot?.beforeEvidence ?? fallbackEvidence,
       roundSnapshot: roundSnapshot ?? prepareRoundTransaction(
         loopId,
         currentRound,
         fallbackEvidence,
       ),
-      lastSelfEval,
-      currentPrompt: typeof lineage.current_prompt === "string"
-        ? lineage.current_prompt
-        : null,
-      currentLevel: typeof lineage.current_level === "string"
-        ? lineage.current_level
-        : undefined,
     };
   }
 
@@ -668,7 +592,6 @@ export class RoundLifecycle {
       session.consecutiveRejections = pr.newConsecutiveRejections;
       if (pr.action !== "reject") session.lastRejectionCheck = "";
     }
-    if (pr.newLastSelfEval) session.lastSelfEval = pr.newLastSelfEval;
   }
 
   /** v3.8.3: capture the trusted entrypoint baseline for the round about to be
@@ -703,12 +626,8 @@ export class RoundLifecycle {
     roundSuccess: boolean | undefined,
     warningsOverride?: string[],
   ): AdvanceResult {
-    session.evidenceBaseline = prepared.baseline;
     session.roundSnapshot = prepared.snapshot;
     this.seedEntrypointTrust(session);
-    session.currentPrompt = prepared.prompt;
-    session.currentLevel = prepared.level;
-    session.currentWarnings = prepared.warnings;
     session.lastCompileResponse = prepared.compileResponse ?? null;
     policyMetrics.recordStrategy(session.loopId, prepared.level);
     this.save(session);
@@ -723,21 +642,26 @@ export class RoundLifecycle {
       // v3.8: the posture of the round that just committed — read from the
       // transaction's committed result, not recomputed here.
       verificationStatus: session.roundSnapshot?.result?.verificationStatus,
-      warnings: warningsOverride ?? session.currentWarnings ?? [],
+      warnings: warningsOverride ??
+        session.roundSnapshot?.promptArtifact?.warnings ??
+        prepared.warnings ?? [],
       submission_guidance: this.guidanceFor(session),
     };
   }
 
   private restoredPromptResult(session: McpSession): AdvanceResult | null {
-    if (!session.currentPrompt) return null;
+    const artifact = session.roundSnapshot?.promptArtifact;
+    if (!artifact) return null;
+    const expectedRoundId = makeRoundId(session.loopId, session.currentRound);
+    if (artifact.roundId !== expectedRoundId) return null;
     return {
       sessionId: session.sessionId,
       round: session.currentRound,
-      roundId: session.roundSnapshot?.roundId,
-      prompt: session.currentPrompt,
-      level: session.currentLevel ?? "l2",
+      roundId: artifact.roundId,
+      prompt: artifact.renderedPrompt,
+      level: artifact.level,
       roundSuccess: undefined,
-      warnings: (session.currentWarnings ?? []),
+      warnings: artifact.warnings ?? [],
       submission_guidance: this.guidanceFor(session),
     };
   }
@@ -757,19 +681,6 @@ export class RoundLifecycle {
     const pr = recovered.result;
     session.roundSnapshot = recovered.snapshot;
     this.applyRoundCounters(session, pr);
-    // L1 (v3.7.x): trajectory push guard must use the SAME judgement as the
-    // counter guard below (recovered.snapshot.round). Comparing against
-    // session.currentRound conflates two windows: the crash window (persisted
-    // length N-1, currentRound N — push needed) and the pause race (pause()
-    // persisted the incremented counter AND the already-pushed round N —
-    // length N, currentRound N+1 — pushing again duplicates the entry).
-    if (
-      pr.shouldPushSuccessTrajectory &&
-      session.successTrajectory.length < recovered.snapshot.round
-    ) {
-      session.successTrajectory.push(pr.roundSuccess);
-    }
-    session.currentPrompt = null;
 
     if (pr.action === "stop" || pr.action === "terminate") {
       // v3.8.3: a replayed termination carries the gate's own reason for the
@@ -806,8 +717,6 @@ export class RoundLifecycle {
       session.currentRound = restoreTarget + 1;
       session.consecutiveRejections = 0;
       session.lastRejectionCheck = "";
-      session.lastSelfEval = undefined;
-      session.currentPrompt = null;
       this.save(session);
       // Return null — caller (resume/unpause) will recompile normally
       return null;
@@ -921,7 +830,6 @@ export class RoundLifecycle {
         phase: "before",
       });
       if (asyncEvidence.length > 0) {
-        session.evidenceBaseline = asyncEvidence;
         if (!session.roundSnapshot?.beforeEvidence?.length) {
           session.roundSnapshot = prepareRoundTransaction(
             session.loopId,
@@ -1076,7 +984,7 @@ export class RoundLifecycle {
     const snapshot = session.roundSnapshot ?? prepareRoundTransaction(
       session.loopId,
       session.currentRound,
-      session.evidenceBaseline ?? [],
+      [],
     );
     const completed = await new RoundDriver(
       session.engine,
@@ -1087,14 +995,10 @@ export class RoundLifecycle {
       task: session.task,
       maxRounds: session.maxRounds,
       selfEval,
-      lastSelfEval: session.lastSelfEval,
+      lastSelfEval: undefined,
       consecutiveRejections: session.consecutiveRejections,
       lastRejectionCheck: session.lastRejectionCheck,
-      successTrajectory: session.successTrajectory,
-      backtrackSkippedFiles: session.backtrackSkippedFiles,
-      backtrackSkippedFingerprints: session.backtrackSkippedFingerprints,
-      backtrackTargetGitHead: session.backtrackTargetGitHead,
-      backtrackTargetDirty: session.backtrackTargetDirty,
+      successTrajectory: [],
       entrypointTrust: session.entrypointTrust,
       normalizationDiagnostics,
       submittedFields,
@@ -1105,14 +1009,6 @@ export class RoundLifecycle {
     const pr = outcome.result;
 
     this.applyRoundCounters(session, pr);
-    // L1 (v3.7.x): never push a REPLAYED outcome onto the trajectory. When a
-    // crash/exception window left the committed round undelivered, the replay
-    // re-executes the same round in memory — its success was already recorded
-    // by the original attempt (crash recovery re-pushes through
-    // reconcileCommittedRound instead, which uses the length-vs-round guard).
-    if (pr.shouldPushSuccessTrajectory && !completed.outcome.replayed) {
-      session.successTrajectory.push(pr.roundSuccess);
-    }
 
     return {
       pr,
@@ -1146,7 +1042,6 @@ export class RoundLifecycle {
     );
     if (!preparedRetry) {
       session.status = "stalled";
-      session.currentPrompt = null;
       this.save(session);
       return {
         sessionId,
@@ -1158,9 +1053,6 @@ export class RoundLifecycle {
       };
     }
     session.roundSnapshot = preparedRetry.snapshot;
-    session.currentPrompt = preparedRetry.prompt;
-    session.currentLevel = preparedRetry.level;
-    session.currentWarnings = preparedRetry.warnings ?? [];
     session.lastCompileResponse = preparedRetry.compileResponse ?? null;
     this.save(session);
     return {
@@ -1225,13 +1117,6 @@ export class RoundLifecycle {
     session.currentRound = newRound;
     session.consecutiveRejections = 0;
     session.lastRejectionCheck = "";
-    session.backtrackSkippedFiles = directive?.skipped_files ?? pr.backtrackSkippedFiles ?? [];
-    session.backtrackSkippedFingerprints = directive?.skipped_fingerprints ??
-      pr.backtrackSkippedFingerprints ?? {};
-    session.backtrackTargetGitHead = directive?.target_head ?? pr.backtrackTargetGitHead;
-    session.backtrackTargetDirty = directive?.target_dirty ?? pr.backtrackTargetDirty;
-    session.lastSelfEval = undefined; // force L2 recompile from vault state
-    session.currentPrompt = null;
 
     // Preserve discoveries from abandoned rounds so they survive compilation.
     const preservedDiscoveries = directive?.skipped_discoveries ??
@@ -1263,7 +1148,6 @@ export class RoundLifecycle {
 
     if (!prepared || !prepared.prompt) {
       session.status = "stalled";
-      session.currentPrompt = null;
       this.save(session);
       return {
         sessionId,
@@ -1291,16 +1175,12 @@ export class RoundLifecycle {
     // v3.9.4: the recovery facts are a protected section INSIDE the compiled
     // artifact. Never rewrite the prompt after compilation: the delivered
     // prompt must equal `prompt_artifact.renderedPrompt` and its hash.
-    session.evidenceBaseline = prepared.evidenceBaseline;
     session.roundSnapshot = prepared.snapshot;
     // v3.8.3: the rollback redo is a NEW round — `prepare` collected a fresh
     // before capture above — so its entrypoint baseline is the workspace as it
     // stands after the rollback, which is what lets a round that stalled on a
     // rewritten entrypoint proceed once the entrypoint is in place.
     this.seedEntrypointTrust(session);
-    session.currentPrompt = prepared.prompt;
-    session.currentLevel = prepared.level;
-    session.currentWarnings = prepared?.warnings ?? [];
     session.lastCompileResponse = prepared?.compileResponse ?? null;
     this.save(session);
 
@@ -1367,7 +1247,6 @@ export class RoundLifecycle {
   ): AdvanceResult {
     const reason = guardedReason ?? pr.stopReason ?? "enforcement_terminated";
     session.status = "stopped";
-    session.currentPrompt = null;
     // v3.8.3: no round is in flight once the loop stops — the in-flight trust
     // baseline goes with it, so a later resume cannot compare against a state
     // from a previous life.
@@ -1411,7 +1290,6 @@ export class RoundLifecycle {
   ): AdvanceResult {
     const reason = guardedReason ?? pr.stopReason ?? "stalled";
     session.status = reason === "stalled" ? "stalled" : "stopped";
-    session.currentPrompt = null;
     // v3.8.3: see buildTerminationResult — the in-flight trust baseline dies
     // with the in-flight round.
     session.entrypointTrust = undefined;
@@ -1457,15 +1335,6 @@ export class RoundLifecycle {
     if (!session.roundSnapshot || session.currentRound <= session.roundSnapshot.round) {
       session.currentRound++;
     }
-    session.currentPrompt = null;
-    // v2.13: Clear backtrack skipped files after advancing past the restore round
-    session.backtrackSkippedFiles = [];
-    session.backtrackSkippedFingerprints = {};
-    // v2.12: The restore-point git HEAD check only applies to the first
-    // post-backtrack round — clear it once we advance past it.
-    session.backtrackTargetGitHead = undefined;
-    session.backtrackTargetDirty = undefined;
-
     // Commit fence: pause()/delete() may run while prepare is awaited.
     if (this.registry.get(sessionId) !== session || session.status !== "running") {
       return {
@@ -1552,15 +1421,10 @@ export class RoundLifecycle {
     }
     const nextPrompt = prepared.prompt;
     const nextLevel = prepared.level;
-    const nextBaseline = prepared.evidenceBaseline ?? actualEvidence;
-    session.evidenceBaseline = nextBaseline;
     session.roundSnapshot = prepared.snapshot;
     // v3.8.3: the round that just committed is history; the trust baseline
     // moves to the round being prepared now.
     this.seedEntrypointTrust(session);
-    session.currentPrompt = nextPrompt;
-    session.currentLevel = nextLevel;
-    session.currentWarnings = prepared.warnings ?? [];
     session.lastCompileResponse = prepared.compileResponse ?? null;
     policyMetrics.recordStrategy(session.loopId, nextLevel);
     try {
@@ -1621,7 +1485,6 @@ export class RoundLifecycle {
     projectionError?: AdvanceResult["projectionError"],
   ): AdvanceResult {
     session.status = "stalled";
-    session.currentPrompt = null;
     try {
       this.save(session);
     } catch (error) {
@@ -1727,7 +1590,7 @@ export class RoundLifecycle {
     const receiptSnapshot = session.roundSnapshot ?? prepareRoundTransaction(
       session.loopId,
       session.currentRound,
-      session.evidenceBaseline ?? [],
+      [],
     );
     const receiptBase: ReceiptBase = {
       snapshot: receiptSnapshot,
@@ -1762,7 +1625,6 @@ export class RoundLifecycle {
 
     // Accepted rounds advance the before-snapshot baseline. Rejected rounds
     // retain the original baseline so their retry remains zero-commit.
-    session.evidenceBaseline = tx.actualEvidence;
 
     // v3.8.3: completion truth — the second line, at the point the disposition
     // becomes the reported stop reason. The coordinator already guards the
@@ -2004,14 +1866,26 @@ export class RoundLifecycle {
     stopReason: string,
   ): Promise<void> {
     if (this.terminalSinks.size === 0) return;
+    const prefix = `loop:${session.loopId}:`;
+    const entries = [
+      ...queryLoopEntries(this.store, session.loopId, { prefix }),
+      ...queryLoopEntries(this.store, session.loopId, { prefix, feedbackOnly: true }),
+    ];
+    const views = readOnlyRounds(entries);
+    const successTrajectory = views
+      .filter((view) => view.result?.shouldPushSuccessTrajectory === true)
+      .map((view) => view.success);
+    const lastEvaluation = views.length > 0
+      ? views[views.length - 1]!.evaluation ?? undefined
+      : undefined;
     const event: LoopTerminalEvent = {
       loopId: session.loopId,
       task: session.task,
       success: stopReason === "completed",
       stopReason: stopReason as LoopTerminalEvent["stopReason"],
       roundsCompleted: session.currentRound,
-      successTrajectory: [...session.successTrajectory],
-      lastEvaluation: session.lastSelfEval,
+      successTrajectory,
+      lastEvaluation,
     };
     await Promise.allSettled(
       [...this.terminalSinks].map((sink) => Promise.resolve(sink(event))),

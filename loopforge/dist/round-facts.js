@@ -17,6 +17,7 @@ import { isCriterionId } from "./token-utils.js";
 export const NO_IN_FLIGHT_ROUND = {
     currentReport: null,
     currentDeltas: [],
+    currentBlocked: false,
     currentOutcome: null,
 };
 export function deriveRoundFacts(input) {
@@ -27,7 +28,8 @@ export function deriveRoundFacts(input) {
         currentRound: input.currentRound,
         currentReport: input.inFlight.currentReport,
         currentDeltas: input.inFlight.currentDeltas,
-        currentOutcome: input.inFlight.currentOutcome ?? null,
+        currentBlocked: input.inFlight.currentBlocked ??
+            input.inFlight.currentOutcome === "blocked",
         commands: input.commands,
     });
     const verifiedSubGoals = deriveVerifiedSubGoals({

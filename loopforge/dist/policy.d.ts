@@ -1,12 +1,9 @@
 /** Externalized LoopForge runtime policy. */
 import type { ConfiguredCapability } from "./protocol.js";
-export interface ConstraintsPolicy {
-    retire_window: number;
-}
 export interface EnginePolicy {
-    /** v3.8.1: the window of the progress BREAKER tier — the second tier of the
-     *  single progress evaluator, which fires when the stall tier (a fixed 3
-     *  committed rounds) saw no stall. Default: 3. */
+    /** v3.9.7: the ONE progress-stall window, in contiguous committed rounds.
+     *  A stall verdict requires both this window and the in-flight round to be
+     *  `unchanged`; unknown/not_applicable never stalls. Default: 3. */
     stall_lookback_rounds: number;
     max_rounds: number;
     /** v2.7: When true, enforcement rules that would terminate (R4 2nd strike,
@@ -27,9 +24,10 @@ export interface EnginePolicy {
      *  If no clean round is found within this depth, backtrack falls through
      *  to terminate. Default: 3. */
     backtrack_max_depth: number;
-    /** v2.10: When true, discovered_constraints from skipped rounds are
-     *  preserved and merged into the restored state's active constraints.
-     *  Default: true. */
+    /** v2.10/v3.9.7: when true, discoveries from committed skipped rounds are
+     *  preserved through the committed rollback directive and merged into the
+     *  redo's active constraints. Discoveries from the rejected trigger attempt
+     *  are never included. Default: true. */
     backtrack_preserve_discoveries: boolean;
     /** v3.8: How many consecutive committed rounds may claim contract items
      *  met without any machine verification progress before the enforcement
@@ -64,7 +62,6 @@ export interface EvolutionPolicy {
      *  dropped with a warning; there is no silent truncation anywhere in the
      *  active constraint set. */
     max_start_criteria: number;
-    max_objective_versions: number;
     /** v3.7.1: Max ACTIVE sub-goals (pending/in_progress/blocked) shown in
      *  prompts and the state file. done/canceled never render as items —
      *  they survive in the vault, replay, and counts. */
@@ -107,10 +104,9 @@ export interface GatePolicy {
 }
 /** v3.8.1: the policy schema version. A policy file that does not declare
  *  exactly this version is REJECTED — see loadPolicy. */
-export declare const POLICY_SCHEMA_VERSION = "8";
+export declare const POLICY_SCHEMA_VERSION = "9";
 export interface LoopPolicy {
     version: string;
-    constraints: ConstraintsPolicy;
     engine: EnginePolicy;
     prompt: PromptPolicy;
     backend: BackendPolicy;

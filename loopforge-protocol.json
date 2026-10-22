@@ -925,6 +925,28 @@
                 "type": "string"
               }
             },
+            "constraints_retraction": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "observed"
+                  ]
+                },
+                {
+                  "type": "string",
+                  "enum": [
+                    "not_observed"
+                  ]
+                }
+              ]
+            },
+            "constraints_not_retracted": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
             "constraints_activation": {
               "anyOf": [
                 {
@@ -1043,6 +1065,8 @@
             "subgoals_updated",
             "constraints_declared",
             "constraints_retracted",
+            "constraints_retraction",
+            "constraints_not_retracted",
             "constraints_activation",
             "constraints_not_expanded"
           ]
@@ -1252,8 +1276,23 @@
               "enum": [
                 "capped"
               ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "ambiguous"
+              ]
             }
           ]
+        },
+        "matched_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "matched_count": {
+          "type": "number"
         }
       },
       "required": [
@@ -1279,6 +1318,12 @@
                 },
                 "work_item": {
                   "type": "string"
+                },
+                "scope": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
                 },
                 "declared_at_round": {
                   "type": "number"
@@ -1315,6 +1360,7 @@
               },
               "required": [
                 "id",
+                "scope",
                 "declared_at_round",
                 "items"
               ]
@@ -1442,6 +1488,9 @@
                   "enum": [
                     "l2"
                   ]
+                },
+                {
+                  "type": "null"
                 }
               ]
             },
@@ -1456,7 +1505,6 @@
             }
           },
           "required": [
-            "level",
             "dropped_sections",
             "protected_overflow"
           ]
@@ -1647,15 +1695,6 @@
         },
         "loop_id": {
           "type": "string"
-        },
-        "version": {
-          "type": "number"
-        },
-        "refinement_history": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
         }
       },
       "required": [
@@ -1933,8 +1972,23 @@
               "enum": [
                 "discovered"
               ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "preserved"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "unrecorded"
+              ]
             }
           ]
+        },
+        "source_round": {
+          "type": "number"
         }
       },
       "required": [
@@ -2225,31 +2279,9 @@
                 "type": "string"
               },
               "reason": {
-                "anyOf": [
-                  {
-                    "type": "string",
-                    "enum": [
-                      "budget"
-                    ]
-                  },
-                  {
-                    "type": "string",
-                    "enum": [
-                      "level"
-                    ]
-                  },
-                  {
-                    "type": "string",
-                    "enum": [
-                      "not_current"
-                    ]
-                  },
-                  {
-                    "type": "string",
-                    "enum": [
-                      "defect"
-                    ]
-                  }
+                "type": "string",
+                "enum": [
+                  "defect"
                 ]
               }
             },
@@ -2276,7 +2308,7 @@
       "properties": {
         "schemaVersion": {
           "type": "number",
-          "const": 5
+          "const": 6
         },
         "roundId": {
           "type": "string"
@@ -3025,6 +3057,65 @@
         "not_applicable"
       ]
     },
+    "ProgressState": {
+      "type": "string",
+      "enum": [
+        "changed",
+        "unchanged",
+        "unknown",
+        "not_applicable"
+      ]
+    },
+    "PromptFreshnessReason": {
+      "type": "string",
+      "enum": [
+        "progress_changed",
+        "progress_unchanged",
+        "progress_unknown",
+        "no_progress_provider",
+        "after_command_activity",
+        "declared_evolution",
+        "no_observable_activity",
+        "no_previous_committed_round"
+      ]
+    },
+    "PromptFreshness": {
+      "type": "object",
+      "properties": {
+        "machineProgress": {
+          "$ref": "#/$defs/ProgressState"
+        },
+        "providers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "machineActivity": {
+          "type": "boolean"
+        },
+        "declaredEvolution": {
+          "type": "boolean"
+        },
+        "observableNewInformation": {
+          "type": "boolean"
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PromptFreshnessReason"
+          }
+        }
+      },
+      "required": [
+        "machineProgress",
+        "providers",
+        "machineActivity",
+        "declaredEvolution",
+        "observableNewInformation",
+        "reasons"
+      ]
+    },
     "ObservationStatus": {
       "type": "string",
       "enum": [
@@ -3276,6 +3367,22 @@
         }
       ]
     },
+    "ProgressSnapshot": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "type": "number"
+        },
+        "fingerprint": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "fingerprint"
+      ],
+      "description": "v3.9.7: a custom provider's progress snapshot. Only the provider's own\r\nstable, content-addressed state digest belongs here; timestamps, durations\r\nand runtime bookkeeping are not progress. `progressCapable: true` plus\r\n`data.progress` (a valid snapshot or null) is persisted on every\r\nobservation from that provider, including unavailable/timeout/error, so\r\nreplay never depends on the live provider registry."
+    },
     "CustomObservation": {
       "allOf": [
         {
@@ -3291,8 +3398,31 @@
               ]
             },
             "data": {
-              "type": "object",
-              "additionalProperties": true
+              "allOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "progressCapable": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "progress": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/$defs/ProgressSnapshot"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  }
+                }
+              ]
             }
           },
           "required": [

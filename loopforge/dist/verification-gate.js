@@ -23,12 +23,13 @@ import { deriveFilesReconciliation } from "./files-reconciliation.js";
 import { isPassedAfterObservation } from "./evidence-provider.js";
 import { getPolicy } from "./policy.js";
 import { makeVerificationFlag, makeVerificationResult } from "./protocol.js";
-import { isRecord, entryRound, extractFilePathTokens } from "./token-utils.js";
-import { derivationRounds, machineGitMotionSeries, entryViolations, } from "./committed-round.js";
+import { isRecord, extractFilePathTokens, deriveConstraintId, normalizeText, } from "./token-utils.js";
+import { derivationRounds, entryViolations, } from "./committed-round.js";
 import { deriveActiveRoundContract, sameContract, } from "./round-contract.js";
 import { deriveContractItemStatuses, } from "./contract-items.js";
 import { deriveClaimView, resolveRoundFiles } from "./evidence-claims.js";
 import { claimedMetCriteria, claimedRemainingCriteria, effectiveSuccess } from "./self-eval.js";
+import { declaresBlocked } from "./round-outcome.js";
 import { deriveGate, preflightStructuredGate } from "./cognitive-governance.js";
 // ═══════════════════════════════════════════════════════════════════════════
 // v2.12: Check-name constants — single source of truth so the enforcement
@@ -240,10 +241,6 @@ export function deriveEvidenceStatus(selfEval, evidenceDeltas) {
         testsMachineBacked,
     };
 }
-/** Per-round machine progress over decoded committed history. */
-export function machineProgressSeries(vaultEntries, currentRound, lookback) {
-    return machineGitMotionSeries(derivationRounds(vaultEntries, currentRound), currentRound, lookback);
-}
 // ═══════════════════════════════════════════════════════════════════════════
 // Individual checks — each returns a VerificationFlag or null
 // ═══════════════════════════════════════════════════════════════════════════
@@ -446,18 +443,18 @@ function checkDuplicateConstraintDiscovery(selfEval, prevSelfEval, olderViolatio
     // Collect all previously-known constraints
     const known = new Set();
     for (const v of olderViolations)
-        known.add(v.toLowerCase().trim());
+        known.add(normalizeText(v));
     if (prevSelfEval) {
         for (const d of prevSelfEval.discovered_constraints ?? []) {
-            known.add(d.toLowerCase().trim());
+            known.add(normalizeText(d));
         }
         // Also treat previous violations as implicitly discovered
         for (const v of prevSelfEval.constraint_violations) {
-            known.add(v.toLowerCase().trim());
+            known.add(normalizeText(v));
         }
     }
     for (const d of discovered) {
-        if (known.has(d.toLowerCase().trim())) {
+        if (known.has(normalizeText(d))) {
             return makeVerificationFlag({
                 severity: "warn",
                 field: "discovered_constraints",
@@ -474,23 +471,30 @@ function checkRecurringViolation(selfEval, prevSelfEval, vaultEntries, currentRo
         return null;
     // Build the violation history: [round N-2, round N-1, round N]
     const violationsByRound = [];
-    // Round N-2 violations come from the vault entry for round N-1
-    // (persistLoopLineage stores the PREVIOUS round's violations on each entry)
+    // Round N-2 violations are stored on the round N-1 entry's
+    // `constraint_violations` field by persistLoopLineage. Read that entry
+    // through the branch-safe view (sourceEntry), never a raw round lookup, so
+    // an abandoned branch cannot contaminate the streak.
     if (currentRound >= 3) {
-        const entryNMinus1 = vaultEntries.find((e) => entryRound(e) === currentRound - 1);
-        if (entryNMinus1) {
-            const viols = entryViolations(entryNMinus1);
-            if (viols.length)
-                violationsByRound.push(viols.map((v) => v.toLowerCase().trim()));
+        const window = derivationRounds(vaultEntries, currentRound);
+        const nMinus2 = window.find((view) => view.round === currentRound - 2);
+        const nMinus1 = window.find((view) => view.round === currentRound - 1);
+        // Prefer the committed evaluation's own violations (MCP flow); the
+        // top-level lineage field is the legacy/hand-built carrier, consulted only
+        // through the branch-safe view.
+        const viols = nMinus2?.constraintViolations ??
+            (nMinus1 ? entryViolations(nMinus1.sourceEntry) : []);
+        if (viols.length) {
+            violationsByRound.push(viols.map((v) => normalizeText(v)));
         }
     }
     // Round N-1 violations from prevSelfEval
     if (prevSelfEval) {
         const prevViols = prevSelfEval.constraint_violations;
-        violationsByRound.push(prevViols.map((v) => v.toLowerCase().trim()));
+        violationsByRound.push(prevViols.map((v) => normalizeText(v)));
     }
     // Round N violations from current selfEval
-    violationsByRound.push(currViols.map((v) => v.toLowerCase().trim()));
+    violationsByRound.push(currViols.map((v) => normalizeText(v)));
     // Need at least 3 rounds of data
     if (violationsByRound.length < 3)
         return null;
@@ -515,12 +519,11 @@ function checkRetractFreshConstraint(selfEval, prevSelfEval, currentRound) {
         return null;
     if (!prevSelfEval)
         return null;
-    const lastRoundDiscoveries = new Set();
-    for (const d of prevSelfEval.discovered_constraints ?? []) {
-        lastRoundDiscoveries.add(d.toLowerCase().trim());
-    }
+    const discoveries = prevSelfEval.discovered_constraints ?? [];
+    const lastRoundDiscoveries = new Set(discoveries.map((discovery) => normalizeText(discovery)));
+    const discoveryIds = new Set(discoveries.map((discovery) => deriveConstraintId(discovery)));
     for (const r of retracted) {
-        if (lastRoundDiscoveries.has(r.toLowerCase().trim())) {
+        if (lastRoundDiscoveries.has(normalizeText(r)) || discoveryIds.has(r)) {
             return makeVerificationFlag({
                 severity: "warn",
                 field: "retracted_constraints",
@@ -745,10 +748,8 @@ function checkVerificationDomainIntegrity(evidenceDeltas, drift) {
                 (changed.length > 0
                     ? "At round start: " + changed.map((entry) => entry.roundStart === "absent"
                         ? `"${entry.file}" did not exist`
-                        : `"${entry.file}" was present`).join("; ") + ". "
-                    : "") +
-                "Keep the verification command stable or resubmit the same round with the " +
-                "entrypoint unchanged.",
+                        : `"${entry.file}" was present`).join("; ") + "."
+                    : ""),
             ref: snapshot.data.commandId,
         });
     }
@@ -807,8 +808,7 @@ function checkBacktrackWorkspaceRestore(selfEval, backtrackSkippedFiles, backtra
                     check: CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED,
                     detail: `File(s) from the failed rounds are byte-identical to their ` +
                         `state at the rollback: ${untouched.slice(0, 5).join(", ")}. The ` +
-                        `workspace was never restored — restore it to the restore point ` +
-                        `(git checkout/reset) before redoing the work.`,
+                        `workspace was never restored to the restore point.`,
                 });
             }
         }
@@ -942,8 +942,7 @@ function checkRoundScopeDrift(activeContract, evidenceDeltas) {
         detail: `Files changed outside the active contract's declared scope` +
             (outOfScope.length > 5
                 ? ` (${outOfScope.length} total, showing 5): ${outOfScope.slice(0, 5).join(", ")}`
-                : `: ${outOfScope.join(", ")}`) +
-            `. Revert them, or close the active contract and declare the extended scope in a new proposal.`,
+                : `: ${outOfScope.join(", ")}`),
     });
 }
 /** v3.8: Claimed-but-unverified contract items. The round COMMITS — the debt
@@ -962,7 +961,7 @@ function checkContractItemsUnverified(statuses) {
         field: "round_contract",
         check: CHECK_CONTRACT_ITEMS_UNVERIFIED,
         detail: `${statuses.insufficientCount} contract item(s) claimed met but not machine-verified: ` +
-            `${unverified.join(", ")}. Run the bound command(s) or report the item as remaining.`,
+            `${unverified.join(", ")}.`,
     });
 }
 /** A different contract proposed while the ACTIVE contract is still open. The
@@ -975,7 +974,7 @@ function checkContractPremature(activeContract, statuses, selfEval) {
         return null;
     if (statuses.closure !== "open")
         return null; // closed
-    if (selfEval.outcome === "blocked")
+    if (declaresBlocked(selfEval))
         return null; // closed
     const proposal = selfEval.round_contract;
     if (!proposal)
@@ -987,8 +986,8 @@ function checkContractPremature(activeContract, statuses, selfEval) {
         field: "round_contract",
         check: CHECK_CONTRACT_PREMATURE,
         detail: "The ACTIVE Round Contract is still open (not every item verified, not blocked) " +
-            "while a different contract was proposed — it is ignored until the active " +
-            "contract closes. Restate the active contract unchanged to continue it.",
+            "while a different contract was proposed — the proposal is ignored until the " +
+            "active contract closes.",
     });
 }
 // Main entry point

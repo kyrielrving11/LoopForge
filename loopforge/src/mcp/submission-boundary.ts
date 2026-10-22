@@ -31,7 +31,7 @@ import type {
 } from "../protocol.js";
 import type { ActiveContractView } from "../round-contract.js";
 import { deriveActiveRoundContract } from "../round-contract.js";
-import { derivationRounds } from "../committed-round.js";
+import { derivationRounds, pendingRollbackDirective } from "../committed-round.js";
 import {
   boundedEmergedSubtasks,
   normalizeSelfEvaluation,
@@ -51,11 +51,17 @@ import { isConfiguredCommand } from "../policy.js";
 import { scopeEntryDetail } from "../workspace.js";
 import {
   deriveCriterionId,
+  entryRound,
   isRecord,
-  normalizeText,
   uniqueNormalized,
 } from "../token-utils.js";
-import { deriveConstraintId, latestObjective } from "../loop-compiler.js";
+import { latestObjective } from "../loop-compiler.js";
+import {
+  deriveConstraintProvenance,
+  resolveConstraintRetractions,
+  type ConstraintProvenance,
+} from "../constraint-lifecycle.js";
+import { getPolicy } from "../policy.js";
 import type { AdvanceResult } from "./round-lifecycle.js";
 
 /** What the submission boundary needs from a session. Structural, so both the
@@ -75,6 +81,10 @@ export interface CompileContextSession {
 interface SubmissionReferenceFacts {
   subGoals: SubGoal[] | null;
   criteria: ReadonlyArray<{ id: string; text: string }> | null;
+  /** The current prompt's active constraints with derived provenance. */
+  constraints: ReadonlyArray<{ text: string; provenance: ConstraintProvenance }> | null;
+  /** Retractions already committed on the current branch. */
+  previouslyRetired: ReadonlyArray<string>;
 }
 
 function referenceFactsFor(
@@ -88,33 +98,83 @@ function referenceFactsFor(
       ...entries,
       ...queryLoopEntries(store, session.loopId, { prefix, feedbackOnly: true }),
     ];
+    const windowRounds = derivationRounds(allEntries, session.currentRound);
     const subGoals = deriveSubGoals({
       loopId: session.loopId,
       currentRound: session.currentRound,
-      rounds: derivationRounds(allEntries, session.currentRound),
+      rounds: windowRounds,
     });
     // v3.9.6: the held acceptance is the operator fact. Committed objective
     // lineage is the fallback for a snapshot that predates it — never a
     // second compile of mutable session state.
-    let criteriaTexts: ReadonlyArray<string> | null =
-      session.roundSnapshot?.operatorAcceptance?.success_criteria ?? null;
-    if (criteriaTexts === null) {
-      criteriaTexts = latestObjective(
-        session.loopId,
-        { results: entries },
-        session.currentRound,
-        session.currentRound === 1 && (session.roundSnapshot?.attempt ?? 1) > 1,
-      )?.success_criteria ?? null;
-    }
+    const objective = session.roundSnapshot?.operatorAcceptance
+      ? {
+          objective: session.roundSnapshot.operatorAcceptance.task,
+          success_criteria: session.roundSnapshot.operatorAcceptance.success_criteria,
+          hard_constraints: session.roundSnapshot.operatorAcceptance.hard_constraints,
+          created_at_round: 1,
+          loop_id: session.loopId,
+        }
+      : latestObjective(
+          session.loopId,
+          { results: entries },
+          session.currentRound,
+          session.currentRound === 1 && (session.roundSnapshot?.attempt ?? 1) > 1,
+        );
+    const criteriaTexts: ReadonlyArray<string> | null =
+      objective?.success_criteria ?? null;
     const criteria = criteriaTexts === null
       ? null
       : uniqueNormalized([...criteriaTexts]).map((text) => ({
           id: deriveCriterionId(text),
           text,
         }));
-    return { subGoals, criteria };
+
+    // The current round's compile stamped the active set it rendered. This is
+    // the same text set the prompt carried; provenance is re-derived from the
+    // committed window, never from a second ledger.
+    const currentLineage = entries.find((entry) =>
+      entryRound(entry) === session.currentRound &&
+      entry.task_type === "loop_lineage");
+    const lineage = isRecord(currentLineage?.loop_lineage)
+      ? currentLineage.loop_lineage
+      : {};
+    const rawActive = Array.isArray(lineage.constraints_active)
+      ? lineage.constraints_active.filter(
+          (item): item is string => typeof item === "string")
+      : null;
+    const pending = pendingRollbackDirective(allEntries, session.currentRound);
+    const preservedDiscoveries = pending?.recovery &&
+      getPolicy().engine.backtrack_preserve_discoveries
+      ? pending.recovery.skipped_discoveries
+      : [];
+    const roundOnePlan = session.currentRound === 1
+      ? objective?.hard_constraints ?? []
+      : [];
+    const constraints = rawActive === null
+      ? null
+      : uniqueNormalized(rawActive).map((text) => ({
+          text,
+          provenance: deriveConstraintProvenance({
+            text,
+            objective,
+            windowRounds,
+            roundOnePlan,
+            preservedDiscoveries,
+            preservedRound: pending?.round,
+          }),
+        }));
+    const previouslyRetired = uniqueNormalized(
+      windowRounds.flatMap((round) => round.retractedConstraints ?? []),
+    );
+    return { subGoals, criteria, constraints, previouslyRetired };
   } catch {
-    return { subGoals: null, criteria: null }; // projection degrades gracefully
+    return {
+      subGoals: null,
+      criteria: null,
+      constraints: null,
+      previouslyRetired: [],
+    }; // projection degrades gracefully
   }
 }
 
@@ -297,20 +357,21 @@ export function validateSubmission(
       };
     }
   }
-  const retractionErrors = immutableRetractionErrors(store, session, submission);
-  if (retractionErrors.length > 0) {
+  const retraction = resolveSubmissionRetractions(facts, submission);
+  if (retraction.errors.length > 0) {
     return {
       ok: false,
       stopDetail:
-        "retracted_constraints may only name Agent-discovered constraints; " +
-        "operator criteria and hard constraints are immutable. Remove them and resubmit the same roundId.",
+        "retracted_constraints may only name active Agent-discovered constraints; " +
+        "operator criteria/hard constraints and plan constraints are not retractable. " +
+        "Remove them and resubmit the same roundId.",
       submissionError: {
         code: "evaluation_invalid",
         details: {
           missing: [],
           invalid: [],
-          retraction_errors: retractionErrors,
-          diagnostics: retractionErrors.map((error) =>
+          retraction_errors: retraction.errors,
+          diagnostics: retraction.errors.map((error) =>
             rejectedDiagnostic(error.field, error.reason, error.detail)),
         },
       },
@@ -341,55 +402,61 @@ export function validateSubmission(
       },
     };
   }
+  const normalized = normalizeSelfEvaluation(submission, {
+    knownCriterionRefs: facts?.criteria ?? null,
+    maxDiscoveredConstraints:
+      getPolicy().evolution.max_discovered_constraints_per_round,
+  });
   return {
     ok: true,
-    ...normalizeSelfEvaluation(submission, {
-      knownCriterionRefs: facts?.criteria ?? null,
-    }),
+    evaluation: normalized.evaluation,
+    // No-op retractions are visible as diagnostics; they never reject and
+    // never appear as effective effects.
+    diagnostics: [
+      ...retraction.noopDiagnostics,
+      ...normalized.diagnostics,
+    ],
+    submittedFields: normalized.submittedFields,
   };
 }
 
-function immutableRetractionErrors(
-  store: LoopStore,
-  session: CompileContextSession | undefined,
+function resolveSubmissionRetractions(
+  facts: SubmissionReferenceFacts | null,
   submission: Record<string, unknown>,
-): Array<{ field: string; reason: string; detail: string }> {
-  if (!session || !Array.isArray(submission.retracted_constraints)) return [];
-  const acceptance = session.roundSnapshot?.operatorAcceptance ?? null;
-  let hardTexts: ReadonlyArray<string> = acceptance?.hard_constraints ?? [];
-  let criterionTexts: ReadonlyArray<string> = acceptance?.success_criteria ?? [];
-  if (!acceptance) {
-    const prefix = `loop:${session.loopId}:`;
-    const entries = queryLoopEntries(store, session.loopId, { prefix });
-    const objective = latestObjective(
-      session.loopId,
-      { results: entries },
-      session.currentRound,
-      session.currentRound === 1,
-    );
-    if (!objective) return [];
-    hardTexts = objective.hard_constraints;
-    criterionTexts = objective.success_criteria;
+): {
+  errors: Array<{ field: string; reason: string; detail: string }>;
+  noopDiagnostics: SubmissionDiagnostic[];
+} {
+  const targets = Array.isArray(submission.retracted_constraints)
+    ? submission.retracted_constraints.filter(
+        (item): item is string => typeof item === "string")
+    : [];
+  if (targets.length === 0 || !facts?.constraints) {
+    return { errors: [], noopDiagnostics: [] };
   }
-  const hard = new Set(hardTexts.map((text) => normalizeText(text)));
-  const criteria = new Set(criterionTexts.map((text) => normalizeText(text)));
-  const hardIds = new Set(hardTexts.map((text) => deriveConstraintId(text)));
-  const criterionIds = new Set(criterionTexts.map((text) => deriveCriterionId(text)));
-  const errors: Array<{ field: string; reason: string; detail: string }> = [];
-  for (const raw of submission.retracted_constraints) {
-    if (typeof raw !== "string") continue;
-    const key = normalizeText(raw);
-    const operatorOwned =
-      hard.has(key) || criteria.has(key) ||
-      hardIds.has(raw) || criterionIds.has(raw);
-    if (!operatorOwned) continue;
-    errors.push({
+  const newDiscoveries = Array.isArray(submission.discovered_constraints)
+    ? submission.discovered_constraints.filter(
+        (item): item is string => typeof item === "string")
+    : [];
+  const resolved = resolveConstraintRetractions({
+    targets,
+    active: facts.constraints,
+    newDiscoveries,
+    previouslyRetired: facts.previouslyRetired,
+  });
+  return {
+    errors: resolved.errors.map((error) => ({
       field: "retracted_constraints",
-      reason: "immutable_constraint",
-      detail: `${raw} belongs to the operator acceptance surface; only Agent-discovered constraints may be retracted`,
-    });
-  }
-  return errors;
+      reason: error.reason,
+      detail: error.detail,
+    })),
+    noopDiagnostics: resolved.noops.map((noop) => ({
+      path: "retracted_constraints",
+      code: noop.reason,
+      handling: "dropped",
+      detail: `${noop.target}: ${noop.reason.replace(/_/g, " ")}`,
+    })),
+  };
 }
 
 function contractShapeErrors(

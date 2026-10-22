@@ -112,6 +112,7 @@ export function deltasFrom(observations: MachineObservation[]): ObservationDelta
     before: null,
     after: observation,
     changedFiles: observation.kind === "git" ? [...observation.files] : null,
+    progress: observation.kind === "git" ? "unknown" : "not_applicable",
   }));
 }
 
@@ -126,6 +127,7 @@ export function deltaAfter(
     before: null,
     after: observation,
     changedFiles,
+    progress: observation.kind === "git" ? "unknown" : "not_applicable",
   };
 }
 

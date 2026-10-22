@@ -20,13 +20,13 @@ import * as verificationGate from "../verification-gate.js";
 
 function minimalState(overrides: Partial<CanonicalLoopState> = {}): CanonicalLoopState {
   return {
-    schemaVersion: 3 as const,
+    schemaVersion: 4 as const,
     loopId: "test-loop",
     round: 1,
     maxRounds: 20,
     goalId: "goal-1",
     objective: "Test the assembler",
-    objectiveVersion: 1,
+    rejectionNotice: null,
     currentTask: "Write tests for the assembler",
     successCriteria: ["all tests pass"],
     hardConstraints: ["no runtime deps"],
@@ -303,7 +303,7 @@ describe("assemblePromptArtifact — memory boundary", () => {
       state: minimalState({ stateFilePath: "" }),
       promptRequests: { confusion_points: ["what is this?"] },
     }));
-    assert.ok(artifact.renderedPrompt.includes("no state file is enabled"));
+    assert.ok(artifact.renderedPrompt.toLowerCase().includes("no state file is enabled"));
     assert.ok(!artifact.renderedPrompt.includes("the state file has full context"));
   });
 });
@@ -613,8 +613,11 @@ describe("v3.2 — verification flag actions", () => {
       }),
     }));
     assert.match(artifact.renderedPrompt, /→ Fix: Complete the remaining criteria/);
-    // The base line keeps its exact prefix.
-    assert.match(artifact.renderedPrompt, /- 🚫 \[success_with_remaining_criteria\] `field` — detail for success_with_remaining_criteria\n  → Fix:/);
+    // The base line keeps its machine prefix (and now carries the f- id).
+    assert.match(
+      artifact.renderedPrompt,
+      /🚫 \[success_with_remaining_criteria\] `field` — detail for success_with_remaining_criteria\n  → Fix:/,
+    );
   });
 
   it("appends an Action continuation to warn flags in L2", () => {
@@ -636,7 +639,7 @@ describe("v3.2 — verification flag actions", () => {
     }));
     assert.ok(!artifact.renderedPrompt.includes("→ Fix:"), "info flags must not carry a Fix continuation");
     assert.ok(!artifact.renderedPrompt.includes("→ Action:"), "info flags must not carry an Action continuation");
-    assert.ok(artifact.renderedPrompt.includes("- ℹ️ [duplicate_constraint_discovery]"));
+    assert.match(artifact.renderedPrompt, /ℹ️ \[duplicate_constraint_discovery\]/);
   });
 
   it("keeps L0 byte-identical — no continuation lines", () => {
@@ -748,7 +751,12 @@ describe("v3.3 — machine dashboard rows and round stats", () => {
         filesChanged: ["src/a.ts"],
         tests: { passed: 8, failed: 1, skipped: 0 },
       },
-      machineStatus: { windowRounds: 3, gitMotion: true, motionRounds: 2 },
+      machineStatus: {
+        windowRounds: 3,
+        machineProgress: "changed",
+        changedRounds: 2,
+        providers: ["git"],
+      },
       criterionStatuses: [
         { id: "cr-11111111", text: "all tests pass", status: "verified" as const, met_at_round: 3, related_subgoal_ids: [] },
       ],
@@ -898,4 +906,142 @@ describe("v3.9.1 — prompt request effects", () => {
     assert.deepEqual(effects.map((effect) => effect.status),
       ["level_ignored", "level_ignored"]);
   });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v3.9.7 — structured emphasis candidates (all current governance objects)
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("v3.9.7 — structured emphasis candidates", () => {
+  const flag = {
+    severity: "warn" as const,
+    field: "success",
+    check: "test_flag",
+    detail: "the machine saw detail text",
+  };
+
+  it("moves a sub-goal by its real sg- id and does not duplicate it", () => {
+    const state = minimalState({
+      subGoals: [{
+        id: "sg-12345678",
+        description: "Add login",
+        status: "pending",
+        declared_at_round: 1,
+        status_changed_at_round: 1,
+        priority: 0,
+      }],
+    });
+    const artifact = assemblePromptArtifact(input({
+      level: "l2",
+      state,
+      promptRequests: { emphasize: ["sg-12345678"] },
+    }));
+    assert.ok(artifact.renderedPrompt.includes("🔴 Critical Context"));
+    assert.equal(
+      artifact.renderedPrompt.match(/Add login/g)?.length,
+      1,
+      "the sub-goal is moved, not copied",
+    );
+    assert.ok(artifact.promptRequestEffects?.some((effect) =>
+      effect.status === "applied" && effect.matched_ids?.includes("sg-12345678")));
+  });
+
+  it("moves a finding by f- id and removes it from the Verification Gate", () => {
+    const state = minimalState({ verificationFlags: [flag] });
+    const findingId = `f-${deriveItemId(JSON.stringify([flag.check, flag.field, ""]))}`;
+    const artifact = assemblePromptArtifact(input({
+      level: "l1",
+      state,
+      promptRequests: { emphasize: [findingId] },
+    }));
+    assert.equal(
+      artifact.renderedPrompt.match(/the machine saw detail text/g)?.length,
+      1,
+      "the finding renders once, in Critical Context",
+    );
+    assert.ok(artifact.promptRequestEffects?.some((effect) =>
+      effect.status === "applied" && effect.matched_ids?.includes(findingId)));
+  });
+
+  it("moves one contract item while keeping the heading and other items", () => {
+    const state = minimalState({
+      currentTask: "stale",
+      roundContract: {
+        id: "rc-12345678",
+        declared_at_round: 1,
+        work_item: "Ship auth",
+        scope: ["src"],
+        items: [
+          {
+            id: "rci-11111111",
+            description: "login works",
+            criterion_refs: [],
+            subgoal_refs: [],
+            verify_with: ["verify"],
+          },
+          {
+            id: "rci-22222222",
+            description: "logout works",
+            criterion_refs: [],
+            subgoal_refs: [],
+            verify_with: ["verify"],
+          },
+        ],
+        config_hash_by_command: {},
+      },
+      contractItemStatuses: {
+        contractId: "rc-12345678",
+        closure: "open",
+        closed_at_round: null,
+        items: [],
+        verifiedCount: 0,
+        contradictedCount: 0,
+        insufficientCount: 0,
+      },
+    });
+    const artifact = assemblePromptArtifact(input({
+      level: "l2",
+      state,
+      promptRequests: { emphasize: ["rci-11111111"] },
+    }));
+    assert.equal(artifact.renderedPrompt.match(/login works/g)?.length, 1);
+    assert.ok(artifact.renderedPrompt.includes("logout works"));
+    assert.ok(artifact.renderedPrompt.includes("Ship auth"));
+  });
+
+  it("moves the recovery brief by its reserved id", () => {
+    const state = minimalState({ recoveryBrief: ["- **Trigger**: progress_stall"] });
+    const artifact = assemblePromptArtifact(input({
+      level: "l2",
+      state,
+      promptRequests: { emphasize: ["recovery"] },
+    }));
+    assert.equal(artifact.renderedPrompt.match(/Trigger/g)?.length, 1);
+    assert.ok(artifact.renderedPrompt.includes("Critical Context"));
+  });
+
+  it("never resurrects an unknown or historical target", () => {
+    const artifact = assemblePromptArtifact(input({
+      level: "l2",
+      promptRequests: { emphasize: ["sg-deadbeef"] },
+    }));
+    assert.ok(!artifact.renderedPrompt.includes("🔴 Critical Context"));
+    assert.equal(artifact.promptRequestEffects?.[0]?.status, "no_match");
+  });
+});
+
+describe("v3.9.7 — rejection notice is protected at every level", () => {
+  for (const level of ["l0", "l1", "l2"] as const) {
+    it(`renders the enforcement fix at ${level}`, () => {
+      const artifact = assemblePromptArtifact(input({
+        level,
+        state: minimalState({
+          rejectionNotice: "### Required Fix\n\nrestore the entrypoint",
+        }),
+        budgets: { l0: 1, l1: 1, l2: 1 },
+      }));
+      assert.ok(artifact.renderedPrompt.includes("restore the entrypoint"));
+      assert.ok(artifact.sections.includes("retry_requirements"));
+    });
+  }
 });

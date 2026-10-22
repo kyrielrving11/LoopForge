@@ -10,7 +10,9 @@ import {
 import type { VaultEntry } from "../loop-store.js";
 import { committedFeedbackRound as committedRound, testCommandProvider, criterionClaims, deltasFrom } from "./_helpers.js";
 import type { EntrypointDrift } from "../evidence-provider.js";
-import { verifySelfEvaluation as rawVerifySelfEvaluation, parseTestOutput, deriveEvidenceStatus, machineProgressSeries, CHECK_VERIFICATION_ENTRYPOINT_MODIFIED, CHECK_TEST_FILES_MODIFIED, CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE } from "../verification-gate.js";
+import { verifySelfEvaluation as rawVerifySelfEvaluation, parseTestOutput, deriveEvidenceStatus, CHECK_VERIFICATION_ENTRYPOINT_MODIFIED, CHECK_TEST_FILES_MODIFIED, CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE } from "../verification-gate.js";
+import { machineGitMotionSeries } from "../progress.js";
+import { derivationRounds } from "../committed-round.js";
 import type {
   CommandObservation,
   CommandObservationData,
@@ -323,10 +325,11 @@ describe("verification-gate — recurring violation", () => {
     const prev = se({
       constraint_violations: ["deadline", "other"],
     });
-    // Entry for round 2 (current is round 3) stores violations from round 1
-    const vault = [
-      vaultRound(2, ["deadline"]), // violations from round 1
-    ];
+    // The committed round-2 entry stores the PREVIOUS round's violations
+    // (round 1) on its top-level field, as persistLoopLineage does.
+    const entry = committedRound(2, { loopId: "test-loop" });
+    entry.constraint_violations = ["deadline"];
+    const vault = [entry];
 
     const result = verifySelfEvaluation(curr, 3, vault, prev);
     assert.equal(result.verdict, "contradicted");
@@ -1149,6 +1152,15 @@ describe("v3.2 — deriveEvidenceStatus", () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("v3.2 — machineProgressSeries", () => {
+  const machineProgressSeries = (
+    entries: VaultEntry[],
+    currentRound: number,
+    lookback: number,
+  ) => machineGitMotionSeries(
+    derivationRounds(entries, currentRound),
+    currentRound,
+    lookback,
+  );
   const feedbackRound = (
     round: number,
     changedFiles: string[],
@@ -1774,7 +1786,7 @@ describe("v3.9.2 — evidence_integrity uses the shared reconciliation", () => {
     const result = rawVerifySelfEvaluation(
       withFiles(["src/a.ts"]), 2, [], null, [{
         providerId: "git", kind: "git", before: null, after: null,
-        changedFiles: null,
+        changedFiles: null, progress: "unknown",
       }],
     );
     assert.ok(!result.flags.some((flag) => flag.check === "evidence_integrity"));

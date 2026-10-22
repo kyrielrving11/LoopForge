@@ -83,7 +83,12 @@ snapshot, not only HEAD and the dirty path set. The Agent's reason is recorded
 verbatim and rendered in the Recovery Brief as report-only data, never as a
 LoopForge instruction. Operator criteria and hard constraints are immutable:
 `revised_success_criteria` is retired, and `retracted_constraints` may only
-name Agent-discovered constraints.
+name an active Agent-discovered constraint (including a discovery preserved by
+a committed rollback directive). Resolution accepts the `c-` id or
+normalized-exact text. Operator/plan targets are `evaluation_invalid`
+(`immutable_constraint` / `not_retractable`); unknown/inactive/already-retired
+targets are inert no-ops with a diagnostic, never receipt effects. There is no
+rolling `retire_window`.
 
 Optional fields are normalized and lenient. Three are structural exceptions —
 `subgoal_updates`, `round_contract`, and `execution_report.contract_item_claims`
@@ -186,19 +191,27 @@ process interruption.
 ## Evidence and contract invariants
 
 Verification checks are pure functions of their inputs. The enforcement gate
-uses one ordered strategy table; row order is priority and a row owns its
-escalation ladder. Do not add a category field or revive numbered rule
+executes one ordered `rules` array; that array is the ONE priority order.
+`RULE_TABLE` is a per-check ladder lookup, not an execution order. A row owns
+its escalation ladder. Do not add a category field or revive numbered rule
 semantics.
 
 Agent reports are claims, never machine evidence. A success claim needs an
 independent machine observation, normally a passed after-phase command whose
 entrypoint and configuration are untampered. `no_change_reason` is an escape
-only when no verification command is configured. A stall verdict is a machine
-judgement: only an observable Git history over the lookback window can produce
-one, and only machine motion can cancel one — the submitted round's own motion
-included. File delta, HEAD movement, and a HEAD back at the rollback's restore
-point are the whole of that motion, from one shared definition, and no agent
-report can create or cancel a stall.
+only when no verification command is configured.
+
+Progress is provider-neutral and has four states: `changed`, `unchanged`,
+`unknown`, `not_applicable`. Git keeps its complete-boundary/HEAD/restore-point
+rule; a custom provider opts in with a persisted `data.progressCapable` marker
+and a versioned fingerprint snapshot; command observations never provide
+progress. Any proven change wins; a comparable unknown blocks an "unchanged"
+verdict; no applicable provider is `not_applicable`. A stall requires BOTH the
+committed lookback window and the submitted round to be `unchanged`;
+`unknown`/`not_applicable` never stall, and no Agent report can create or
+cancel a stall. Entrypoint trust, recovery restore, scope drift, files
+reconciliation, `evidenceIncomplete`, and contract-item Git checks remain
+Git-specific and are never replaced by a generic progress signal.
 
 The entrypoint check has two arms, unioned. The absolute arm compares each
 entrypoint file's current content against a trusted baseline captured from the
@@ -300,12 +313,15 @@ carries a static authority boundary: LoopForge's current committed projection
 wins for committed/verified state; Agent memory/session history is background
 and may contain unsubmitted, rejected or rolled-back work; a current user
 instruction defines the task. `state_file_content` remains a derived view; the
-prompt must never call it the source of truth and must not tell the Agent to
-read it. `Corrections` is committed
-`wrong_assumptions` only; fallback `last_round_result` narrative,
-`prompt_requests`, agent-reported blockers, discoveries, progress evidence and
-remaining criteria do not become durable prompt/state projection input.
-`emphasize` only reorders current active governance items.
+prompt may point at it as an optional history view but must label it derived
+and must never call it the source of truth. `Corrections` is committed
+`wrong_assumptions` only, rendered verbatim as an Agent report; fallback
+`last_round_result` narrative, `prompt_requests`, agent-reported blockers,
+discoveries, progress evidence and remaining criteria do not become durable
+prompt/state projection input. `emphasize` moves current governance objects
+(active constraints/criteria, contract/items, active sub-goals, current
+findings, recovery brief) by real id or normalized-exact text; closed or
+historical objects never resurrect.
 
 `submission-guidance.ts` is the single source for evaluation-field meaning,
 applicable events, legal examples and downstream effects. The tool schema,
@@ -374,10 +390,11 @@ sections carry no normative id. `partitionActiveConstraints` is the one
 criteria/hard/other split; prompt, state file, and guidance consume it.
 There is no silent active-constraint cap.
 
-`PromptArtifact` schema 4 carries `coverage`: the active ids derived from the
+`PromptArtifact` schema 6 carries `coverage`: the active ids derived from the
 same `CanonicalLoopState`, the ids the included sections declared, and any
-omission with a reason. Coverage is per-artifact output, never a decision
-input or a second fact source. A missing active id fails closed:
+omission. Every normative section is protected, so an omission is a `defect`,
+never a level/budget decision. Coverage is per-artifact output, never a
+decision input or a second fact source. A missing active id fails closed:
 `ProjectionCoverageError` is rethrown by `invokeLoopCompile` (never converted
 to `prompt: null`) and mapped to the non-retryable `projection_incomplete`
 tool code. The prompt is never rewritten after artifact creation; a backtrack
@@ -516,11 +533,20 @@ run the scripted prepack in the clean mirror.
 - Store-lock timing changes: cover a lock left by a process that died moments
   ago being reclaimed, a live owner still failing fast, the ownerless grace,
   and the lock's release staying ownership-checked.
-- Stall-detection changes: cover committed work with a clean worktree counting
-  as motion through HEAD, an unobservable Git round yielding no verdict, the
-  submitted round's own motion excusing a stalled window, a round that moved
-  nothing keeping the verdict, and the deadlock guard still terminating a
-  stalled round that a rollback already moved.
+- Stall-detection changes: cover Git unchanged/HEAD-only/restore-point motion,
+  a custom provider changed/unchanged/unknown/not_applicable, multi-provider
+  combinations, an unobservable window or submitted round yielding no verdict,
+  the submitted round's own change excusing a stalled window, a round that
+  moved nothing keeping the verdict, and the deadlock guard still terminating
+  a stalled round that a rollback already moved.
+- Provenance/retraction changes: cover operator precedence, discovery round,
+  retirement then rediscovery, abandoned-branch exclusion, preserved rollback
+  discoveries, c-id and normalized-text retraction, unknown/same-round/operator
+  /plan outcomes, and live-vs-committed receipt agreement.
+- Emphasis changes: cover every current object kind, real-id and exact-text
+  matching, unknown/closed targets, no duplication, contract whole-block vs
+  item moves, sub-goal overflow counts, finding/retry-section filtering, and
+  coverage completeness.
 - Backtrack-restore changes: cover work in progress that the restore point
   already carried being accepted, a file the failed rounds left dirty being
   rejected even behind a matching HEAD, the before-snapshot arm, and an

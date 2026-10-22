@@ -385,6 +385,20 @@ function parseMachineObservations(value: unknown): MachineObservation[] | null {
         return null;
       }
     }
+    if (item.kind === "custom" &&
+        (item.data.progressCapable !== undefined ||
+         item.data.progress !== undefined)) {
+      if (item.data.progressCapable !== true) return null;
+      const progress = item.data.progress;
+      if (progress !== null) {
+        if (!isRecord(progress) ||
+            progress.schemaVersion !== 1 ||
+            typeof progress.fingerprint !== "string" ||
+            !/^[a-f0-9]{64}$/.test(progress.fingerprint)) {
+          return null;
+        }
+      }
+    }
     observations.push(item as unknown as MachineObservation);
   }
   return observations;
@@ -480,6 +494,19 @@ export function parseRoundTransactionSnapshot(
         typeof entry.id === "string" &&
         typeof entry.reason === "string") &&
       typeof coverage.complete === "boolean";
+    const effectsValid = artifact.promptRequestEffects === undefined ||
+      (Array.isArray(artifact.promptRequestEffects) &&
+        artifact.promptRequestEffects.every((effect) =>
+          isRecord(effect) &&
+          (effect.field === "emphasize" || effect.field === "confusion_points") &&
+          typeof effect.request === "string" &&
+          ["applied", "no_match", "level_ignored", "capped", "ambiguous"]
+            .includes(String(effect.status)) &&
+          (effect.matched_ids === undefined ||
+            (Array.isArray(effect.matched_ids) &&
+              effect.matched_ids.every((id) => typeof id === "string"))) &&
+          (effect.matched_count === undefined ||
+            typeof effect.matched_count === "number")));
     if (
       artifact.schemaVersion !== PROMPT_ARTIFACT_SCHEMA_VERSION ||
       typeof artifact.roundId !== "string" ||
@@ -487,7 +514,8 @@ export function parseRoundTransactionSnapshot(
       typeof artifact.promptHash !== "string" ||
       typeof artifact.stateHash !== "string" ||
       !["l0", "l1", "l2"].includes(String(artifact.level)) ||
-      !coverageValid
+      !coverageValid ||
+      !effectsValid
     ) return null;
   }
 

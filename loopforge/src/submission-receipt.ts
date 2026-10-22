@@ -41,6 +41,7 @@ import { fieldGuide } from "./submission-guidance.js";
 import { deriveFieldAccounting } from "./field-accounting.js";
 import { deriveFilesReconciliation } from "./files-reconciliation.js";
 import { getPolicy } from "./policy.js";
+import { deriveConstraintId, normalizeText } from "./token-utils.js";
 
 export interface ReceiptFacts {
   contractBefore: string | null;
@@ -49,6 +50,8 @@ export interface ReceiptFacts {
   subGoalsAfter: ReadonlyArray<SubGoal> | null;
   /** The next compile's active constraint set, or null when not observed. */
   constraintsActiveAfter: string[] | null;
+  /** The next compile's effective retired set, or null when not observed. */
+  constraintsRetiredAfter: string[] | null;
 }
 
 export interface ReceiptInput {
@@ -254,11 +257,27 @@ export function deriveSubmissionReceipt(input: ReceiptInput): SubmissionReceipt 
     ? subGoalDiff(input.facts.subGoalsBefore, input.facts.subGoalsAfter)
     : { created: [], updated: [] };
   const declared = diffApplied ? [...(selfEval.discovered_constraints ?? [])] : [];
-  const retracted = diffApplied ? [...(selfEval.retracted_constraints ?? [])] : [];
+  const rawRetracted = diffApplied
+    ? [...(selfEval.retracted_constraints ?? [])]
+    : [];
   const activeAfter = input.facts.constraintsActiveAfter;
+  const retiredAfter = input.facts.constraintsRetiredAfter;
   const activationObserved = diffApplied && activeAfter !== null;
+  const retractionObserved = diffApplied && retiredAfter !== null;
+  // Effective retractions come from the next compile — the same resolver the
+  // compiler used. Unknown/no-op targets are listed separately, never as
+  // "retracted".
+  const retracted = retractionObserved ? [...retiredAfter!] : [];
+  const retractedKeys = new Set(retracted.map((text) => normalizeText(text)));
+  const retractedIds = new Set(retracted.map((text) => deriveConstraintId(text)));
+  const notRetracted = retractionObserved
+    ? rawRetracted.filter((item) =>
+        !retractedKeys.has(normalizeText(item)) &&
+        !retractedIds.has(item))
+    : [];
   const notExpanded = activationObserved
-    ? declared.filter((item) => !activeAfter!.includes(item))
+    ? declared.filter((item) =>
+        !activeAfter!.some((active) => normalizeText(active) === normalizeText(item)))
     : [];
   const checkpoint = diffApplied && selfEval.compression_checkpoint === true
     ? {
@@ -309,6 +328,8 @@ export function deriveSubmissionReceipt(input: ReceiptInput): SubmissionReceipt 
       subgoals_updated: subGoals.updated,
       constraints_declared: declared,
       constraints_retracted: retracted,
+      constraints_retraction: retractionObserved ? "observed" : "not_observed",
+      constraints_not_retracted: notRetracted,
       constraints_activation: activationObserved ? "observed" : "not_observed",
       constraints_active_after: activationObserved ? activeAfter : null,
       constraints_not_expanded: notExpanded,
@@ -443,6 +464,9 @@ export function deriveCommittedSubmissionView(
       // active set to. A continue round uses the next round's stamped set.
       constraintsActiveAfter: disposition === "accepted"
         ? next?.activeConstraints ?? null
+        : null,
+      constraintsRetiredAfter: disposition === "accepted"
+        ? next?.compiledRetirements ?? null
         : null,
     },
     nextArtifact: next?.promptArtifact ?? null,

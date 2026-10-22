@@ -55,8 +55,9 @@ export interface SelfEvaluation {
   /** true ONLY if all hard constraints were met and the task goal was achieved. */
   success: boolean;
   /** Specific, actionable summary of what was DONE this round.
-   *  Feeds: buildRollingSummary (key_outcomes),
-   *  computeConstraintRetirement (activity detection), vault lineage. */
+   *  Feeds: committed record, state file, audit/replay/explain, and
+   *  backtrack failed-approach facts. Never machine evidence, never a
+   *  current-prompt narrative, and never a second history. */
   output_summary: string;
   /** Constraints the agent actually violated this round.
    *  Feeds: deriveRecurringFlags (the constraint_violation kind) and
@@ -69,16 +70,17 @@ export interface SelfEvaluation {
    *  known before. Merged into the active constraint set by the compiler.
    *  Omit or leave empty if none discovered. */
   discovered_constraints?: string[];
-  /** P1: A refinement / deepening of the task objective based on this
-   *  round's discoveries. Appended to (never replaces) the original
-   *  objective. Omit if understanding is unchanged. */
+  /** A refinement / deepening of the Agent's understanding of the task.
+   *  REPORT ONLY: it never modifies the operator objective, criteria, hard
+   *  constraints, gate or objective version. It is preserved in the committed
+   *  evaluation for audit/replay; it is not a second objective history.
+   *  Omit if understanding is unchanged. */
   objective_refinement?: string;
-  /** P2: Sub-problems that surfaced during execution and may need
-   *  separate attention. Feed into the next-task suggestion.
-   *  Omit or leave empty if none emerged.
-   *  v3.7.1: this is the ONLY creation channel. A text matching the
-   *  sg-XXXXXXXX ID pattern is rejected — creation never accepts an
-   *  ID reference (that would fabricate a phantom hashed item). */
+  /** Sub-problems that surfaced during execution. This is the ONLY
+   *  sub-goal creation channel; the runtime derives stable sg- ids and tracks
+   *  their lifecycle. Omit or leave empty if none emerged.
+   *  v3.7.1: a text matching the sg-XXXXXXXX ID pattern is rejected —
+   *  creation never accepts an ID reference. */
   emerged_subtasks?: string[];
   /** v3.7.1: Explicit status transitions for EXISTING sub-goals. Each
    *  entry must reference a committed sub-goal ID (sg-XXXXXXXX) and a
@@ -95,15 +97,16 @@ export interface SelfEvaluation {
    *  Removed from the active constraint set by the compiler.
    *  Omit or leave empty if none. */
   retracted_constraints?: string[];
-  /** P5: Assumptions the agent made in earlier rounds that turned out to
-   *  be wrong. Recorded in the rolling summary as key lessons.
-   *  Omit or leave empty if none. */
+  /** Assumptions the agent made in earlier rounds that turned out to be
+   *  wrong. A committed Agent report; it surfaces as Corrections and
+   *  recovery brief facts, never as a LoopForge conclusion or machine
+   *  evidence. Omit or leave empty if none. */
   wrong_assumptions?: string[];
-  /** v1.10: Agent declares a subtask boundary. When true, the compiler
-   *  generates an agent_declared milestone. */
+  /** Agent declares a subtask boundary. When true, the next compile uses an
+   *  L2 rehydration boundary; no milestone or phase narrative is generated. */
   compression_checkpoint?: boolean;
-  /** v1.10: Human-readable label for this checkpoint (e.g. "数据模型层完成").
-   *  Used as the checkpoint heading in subsequent prompts. */
+  /** Human-readable label stored on the committed report. It does not create a
+   *  later prompt heading. */
   checkpoint_label?: string;
   /** Multi-agent: Results of sub-agent / Worker delegations this round.
    *  The main agent (or Coordinator) reports what it delegated.
@@ -263,16 +266,17 @@ export function makeGateDecision(
  *  Compiler when assembling the next prompt. Transient — each round's
  *  requests apply to that round only. */
 export interface PromptRequests {
-  /** Items to emphasize. Matched against active state by stable id or
-   *  normalized-exact text (v3.8.1 — the Jaccard arm is gone). Matching items
-   *  are pulled into a "Critical Context" section rendered before optional
-   *  sections. No content is added — only reordered. An unmatched entry is
-   *  dropped. Max entries: policy-driven (L2: 5, L1: 3). L0: ignored. */
+  /** Current-governance objects to emphasize. Candidates are derived from the
+   *  current CanonicalLoopState: active constraints, criteria, active
+   *  contract (rc-), contract items (rci-), active sub-goals (sg-), current
+   *  findings (f-), and the recovery brief (reserved id "recovery").
+   *  Matched by exact stable id or normalized-exact text; closed/historical
+   *  objects never resurrect. Matched objects move into Critical Context.
+   *  Max moved objects: policy-driven (L2: 5, L1: 3). L0: ignored. */
   emphasize?: string[];
-  /** Things the model is confused about. Rendered at the prompt top
-   *  as "Confusion Alerts" before the Objective section. Compiler
-   *  auto-matches each entry against state sections and provides
-   *  pointers. Max 3 entries, each ≤ 200 chars. L0: ignored. */
+  /** Things the model is confused about. Echoed verbatim at the prompt top as
+   *  "Confusion Alerts"; never matched against state, never used to infer a
+   *  fact or decide an action. Max 3 entries, each ≤ 200 chars. L0: ignored. */
   confusion_points?: string[];
 }
 
@@ -363,7 +367,12 @@ export interface SubmissionReceipt {
     subgoals_created: Array<{ id: string; description: string }>;
     subgoals_updated: Array<{ id: string; from: string; to: string }>;
     constraints_declared: string[];
+    /** Effective retractions only, from the next compile's retired set. */
     constraints_retracted: string[];
+    /** "observed" only when a next compile exists; never guess. */
+    constraints_retraction: "observed" | "not_observed";
+    /** Requests that resolved to no effective retraction. */
+    constraints_not_retracted: string[];
     /** "observed" only when a next compile (or the next committed round's
      *  stamped active set) exists; "not_observed" for stop/terminate/reject/
      *  backtrack. Never guess an active set from the agent's report. */
@@ -412,7 +421,11 @@ export interface SubmissionReceipt {
 export interface PromptRequestEffect {
   field: "emphasize" | "confusion_points";
   request: string;
-  status: "applied" | "no_match" | "level_ignored" | "capped";
+  status: "applied" | "no_match" | "level_ignored" | "capped" | "ambiguous";
+  /** Emphasize only: the stable ids actually moved into Critical Context. */
+  matched_ids?: string[];
+  /** Emphasize only: hits before the level cap. */
+  matched_count?: number;
 }
 
 /** v3.9.1: The live submission-guidance projection returned with a prepared
@@ -425,6 +438,8 @@ export interface SubmissionGuidance {
   active_contract: {
     id: string;
     work_item?: string;
+    /** Machine-enforced file/directory boundary of the active contract. */
+    scope: string[];
     declared_at_round: number;
     items: Array<{
       id: string;
@@ -450,7 +465,8 @@ export interface SubmissionGuidance {
     reason?: string;
   } | null;
   prompt: {
-    level: "l0" | "l1" | "l2";
+    /** null when no prompt artifact is observable; never guess a level. */
+    level: "l0" | "l1" | "l2" | null;
     dropped_sections: string[];
     protected_overflow: boolean;
   };
@@ -470,15 +486,6 @@ export interface SubmissionGuidance {
   }>;
 }
 
-/** v2.1: Milestone summary — a phase-boundary snapshot that survives
- *  rolling-window eviction. Triggered by three signals in priority order:
- *
- *  1. agent_declared    — compression_checkpoint === true (agent marks phase complete)
- *  2. criteria_milestone — a new met criterion_claim detected (semantic dedup)
- *  3. auto              — safety net after N rounds without a milestone
- *
- *  Built from raw round data in vault entries — no new persistent storage.
- *  Rendered in L2 prompts and always written to the state file. */
 /** A single sub-agent / Worker delegation result (v1.9 — multi-agent).
  *  v3.7.1: `outcome` is the single reported fact. `success` is deleted —
  *  entries without a valid outcome are dropped by the parser, never
@@ -539,17 +546,13 @@ export interface LoopForgeRequest {
 // ── Loop Compile types ──────────────────────────────────────────────────────
 
 export interface LoopObjective {
+  /** The operator objective. It is written once (round 1 / operator
+   *  acceptance) and is never rewritten by an Agent report. */
   objective: string;
   success_criteria: string[];
   hard_constraints: string[];
   created_at_round: number;
   loop_id: string;
-  /** P1: Version number for the objective, starting at 1.
-   *  Incremented each time objective_refinement is applied. */
-  version?: number;
-  /** P1: Ordered history of all objective refinements applied.
-   *  Each entry is the refinement text from a single round. */
-  refinement_history?: string[];
 }
 
 /** v3.2: Derived per-criterion status for the progress dashboard — the
@@ -615,8 +618,6 @@ export function makeLoopObjective(
     hard_constraints: [],
     created_at_round: 1,
     loop_id: "",
-    version: 1,
-    refinement_history: [],
     ...overrides,
   };
 }
@@ -689,8 +690,14 @@ export interface ConstraintMeta {
   /** Which round this constraint was last violated by the agent.
    *  0 if never violated. */
   last_violated_at_round: number;
-  /** Origin — criteria texts carry the cr-XXXXXXXX namespace (v3.3.1). */
-  source: "hard" | "plan" | "criteria" | "discovered";
+  /** Origin — criteria texts carry the cr-XXXXXXXX namespace (v3.3.1).
+   *  `discovered`/`preserved` are Agent declarations, never machine facts;
+   *  `unrecorded` means committed facts cannot establish an origin. */
+  source: "hard" | "plan" | "criteria" | "discovered" | "preserved" | "unrecorded";
+  /** First committed round of the current active provenance, when derivable.
+   *  Absent (never 0) when the origin round cannot be established from
+   *  committed facts. */
+  source_round?: number;
 }
 
 export function makeConstraintMeta(
@@ -854,10 +861,10 @@ export interface PromptCoverage {
   rendered: string[];
   omitted: Array<{
     id: string;
-    /** `defect` is added to Plan 5's three reasons because every normative
-     *  section is protected: a normative omission can only be a renderer
-     *  defect, and disguising it as level/budget would hide the bug. */
-    reason: "budget" | "level" | "not_current" | "defect";
+    /** Every normative section is protected, so a normative omission can
+     *  only be a renderer defect. Keeping a single reason prevents a defect
+     *  from being disguised as a level/budget decision. */
+    reason: "defect";
   }>;
   complete: boolean;
 }
@@ -866,10 +873,12 @@ export interface PromptCoverage {
 /** v3.8.1: the artifact schema version, next to the type it versions. The
  *  transaction envelope parser reads it, so the constant lives here rather
  *  than in the renderer. */
-/** v3.9.4: schema 4 adds `coverage`. Older versions are a HARD break — a
- *  round whose artifact does not parse is not committed history, and
- *  `legacyTransactionRounds` reports the loss rather than letting it vanish. */
-export const PROMPT_ARTIFACT_SCHEMA_VERSION = 5 as const;
+/** v3.9.4: schema 4 adds `coverage`. v3.9.7: schema 6 adds prompt-request
+ *  `matched_ids`/`matched_count` and the single `defect` coverage reason.
+ *  Older versions are a HARD break — a round whose artifact does not parse is
+ *  not committed history, and `legacyTransactionRounds` reports the loss
+ *  rather than letting it vanish. */
+export const PROMPT_ARTIFACT_SCHEMA_VERSION = 6 as const;
 
 export interface PromptArtifact {
   schemaVersion: typeof PROMPT_ARTIFACT_SCHEMA_VERSION;
@@ -1318,6 +1327,41 @@ export type RoundVerificationStatus =
  *  its own capture was aborted — a command killed mid-flight, say. A
  *  collector deadline aborts the capture AS a timeout, so the round records
  *  the runtime's measured cause, not the provider's. */
+/** v3.9.7: the four-state progress verdict shared by every consumer.
+ *  `not_applicable` = no progress-capable provider participated;
+ *  `unknown` = a progress-capable provider participated but its signal could
+ *  not be compared. Neither ever proves "no progress". */
+export type ProgressState =
+  | "changed"
+  | "unchanged"
+  | "unknown"
+  | "not_applicable";
+
+/** v3.9.7: prompt-level freshness derived over one committed round. The
+ *  prompt level is a density decision; it never changes governance facts. */
+export type PromptFreshnessReason =
+  | "progress_changed"
+  | "progress_unchanged"
+  | "progress_unknown"
+  | "no_progress_provider"
+  | "after_command_activity"
+  | "declared_evolution"
+  | "no_observable_activity"
+  | "no_previous_committed_round";
+
+export interface PromptFreshness {
+  machineProgress: ProgressState;
+  providers: string[];
+  /** An after-phase command produced a structured, attributable result. */
+  machineActivity: boolean;
+  /** The committed evaluation declared evolution the compiler consumes. */
+  declaredEvolution: boolean;
+  /** false ONLY when no-activity is proven; unknown counts as fresh. */
+  observableNewInformation: boolean;
+  /** Stable, deterministic order. */
+  reasons: PromptFreshnessReason[];
+}
+
 export type ObservationStatus =
   | "observed"
   | "passed"
@@ -1407,9 +1451,26 @@ export interface CommandObservation extends MachineObservationBase {
   data: CommandObservationData;
 }
 
+/** v3.9.7: a custom provider's progress snapshot. Only the provider's own
+ *  stable, content-addressed state digest belongs here; timestamps, durations
+ *  and runtime bookkeeping are not progress. `progressCapable: true` plus
+ *  `data.progress` (a valid snapshot or null) is persisted on every
+ *  observation from that provider, including unavailable/timeout/error, so
+ *  replay never depends on the live provider registry. */
+export interface ProgressSnapshot {
+  schemaVersion: 1;
+  /** 64 lowercase hex characters (sha256). */
+  fingerprint: string;
+}
+
 export interface CustomObservation extends MachineObservationBase {
   kind: "custom";
-  data: Record<string, unknown>;
+  data: Record<string, unknown> & {
+    /** Present only on progress-capable providers. */
+    progressCapable?: true;
+    /** null = progress-capable but this capture has no comparable snapshot. */
+    progress?: ProgressSnapshot | null;
+  };
 }
 
 export type MachineObservation =

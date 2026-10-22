@@ -4,22 +4,23 @@
  *  The answer is a fact about the committed round, never a caller's mutable
  *  projection:
  *
- *  - machine motion is the shared Git motion rule (`committedRoundGitMotion`);
+ *  - machine progress is the shared provider-neutral rule (`deriveRoundProgress`);
  *  - machine activity is an after-phase command with an attributable result;
  *  - declared evolution is a committed semantic declaration the compiler
  *    already consumes.
  *
  *  `observableNewInformation` is false ONLY when the machine PROVES no
- *  activity and the Agent declared no evolution. An unobservable boundary is
- *  `null` (unknown) and must never be read as "nothing changed": that is the
- *  epistemic error that created the L0 feedback loop.
+ *  progress and the Agent declared no evolution. An unobservable/unknown
+ *  progress signal is `unknown` and must never be read as "nothing changed":
+ *  that is the epistemic error that created the L0 feedback loop.
  *
  *  Nothing here is persisted, and nothing here is a second history source.
  */
-import { committedRoundGitMotion } from "./committed-round.js";
+import { deriveRoundProgress } from "./progress.js";
 /** No committed previous round: freshness is unknown, never "stale". */
 export const UNKNOWN_PROMPT_FRESHNESS = {
-    machineMotion: null,
+    machineProgress: "unknown",
+    providers: [],
     machineActivity: false,
     declaredEvolution: false,
     observableNewInformation: true,
@@ -52,19 +53,19 @@ function machineActivity(previous) {
         AFTER_COMMAND_ACTIVITY.has(observation.status));
 }
 export function derivePromptFreshness(previous) {
-    const gitDeltas = previous.observationDelta.filter((delta) => delta.kind === "git");
-    const machineMotion = committedRoundGitMotion(previous);
+    const progress = deriveRoundProgress(previous.observationDelta);
     const activity = machineActivity(previous);
     const declared = declaredEvolution(previous);
-    const observableNewInformation = machineMotion !== false || activity || declared;
+    const observableNewInformation = progress.state !== "unchanged" || activity || declared;
     const reasons = [];
-    if (machineMotion === true) {
-        const contentChanged = gitDeltas.some((delta) => delta.changedFiles !== null && delta.changedFiles.length > 0);
-        reasons.push(contentChanged ? "git_content_changed" : "git_head_moved");
-    }
-    else if (machineMotion === null) {
-        reasons.push(gitDeltas.length > 0 ? "git_boundary_unknown" : "no_git_provider");
-    }
+    if (progress.state === "changed")
+        reasons.push("progress_changed");
+    else if (progress.state === "unchanged")
+        reasons.push("progress_unchanged");
+    else if (progress.state === "unknown")
+        reasons.push("progress_unknown");
+    else
+        reasons.push("no_progress_provider");
     if (activity)
         reasons.push("after_command_activity");
     if (declared)
@@ -72,7 +73,8 @@ export function derivePromptFreshness(previous) {
     if (!observableNewInformation)
         reasons.push("no_observable_activity");
     return {
-        machineMotion,
+        machineProgress: progress.state,
+        providers: progress.providers,
         machineActivity: activity,
         declaredEvolution: declared,
         observableNewInformation,

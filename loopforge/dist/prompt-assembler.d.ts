@@ -12,6 +12,7 @@
 import type { CanonicalLoopState } from "./canonical-state.js";
 import type { PromptArtifact, PromptRequests } from "./protocol.js";
 import type { PromptLevel, PromptLevelReason } from "./prompt-policy.js";
+import { type CoverageKind } from "./prompt-coverage.js";
 export interface PromptBudgets {
     l0: number;
     l1: number;
@@ -36,5 +37,21 @@ export interface PromptAssemblyInput {
  *  guidance can quote the same wording without depending on a renderer.
  *  Re-exported here for the existing CHECK_* coverage test. */
 export { verificationActionFor } from "./verification-actions.js";
+/** v3.9.7: the ONE finding renderer, shared by the Verification Gate, the L0
+ *  retry section and Critical Context. The `f-` id is the stable handle the
+ *  Agent can cite; the detail is a machine fact and the action is the one
+ *  canonical short action from `verification-actions.ts`. */
+export declare function verificationFlagLine(flag: CanonicalLoopState["verificationFlags"][number], level?: "l0" | "l1" | "l2"): string;
+/** v3.9.7: ONE normative-object derivation. Coverage, section rendering and
+ *  emphasis candidates all read this list, so they cannot drift. */
+export interface NormativeObject {
+    id: string;
+    kind: CoverageKind;
+    text: string;
+    ownerSection: string;
+    render: string;
+    coverageIds: string[];
+}
+export declare function deriveNormativeObjects(state: CanonicalLoopState, level: "l0" | "l1" | "l2", recoveryBrief?: ReadonlyArray<string>): NormativeObject[];
 export declare function assemblePromptArtifact(input: PromptAssemblyInput): PromptArtifact;
 //# sourceMappingURL=prompt-assembler.d.ts.map

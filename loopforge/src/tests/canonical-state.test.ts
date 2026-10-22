@@ -223,11 +223,12 @@ describe("createCanonicalLoopState", () => {
       "test.md",
       { previousRound: { result: previous, verificationFlags: [], committed: true } },
     );
-    assert.deepEqual(committed.corrections, ["Corrected assumption: old belief"]);
+    assert.deepEqual(committed.corrections, ["old belief"]);
     assert.ok(committed.blockers.includes("committed violation"));
     assert.ok(!committed.blockers.includes("manual cleanup"),
       "manual_fixes_needed has no committed source");
-    assert.deepEqual(committed.discoveries, ["uncommitted discovery", "uncommitted subtask"]);
+    assert.deepEqual(committed.discoveries, ["uncommitted discovery"],
+      "emerged_subtasks are a plan, not a discovery");
     assert.deepEqual(committed.remainingCriteria, ["remaining criterion"]);
     assert.deepEqual(committed.progress.filesChanged, ["uncommitted.ts"]);
     assert.deepEqual(committed.progress.tests, { passed: 1, failed: 0, skipped: 0 });
@@ -303,7 +304,7 @@ describe("renderCanonicalStateMarkdown", () => {
     assert.ok(md.includes("**Authority**: committed typed rounds are the factual source"));
     assert.ok(md.includes("**Agent reports**:"));
     assert.ok(md.includes("### Corrections"));
-    assert.ok(md.includes("Corrected assumption: old belief"));
+    assert.ok(md.includes("old belief"));
     assert.ok(!md.includes("Changes Since Last Round"));
     assert.ok(md.indexOf("## Recent") < md.indexOf("### Corrections"),
       "Corrections belongs to the Recent tier");
@@ -369,7 +370,7 @@ describe("state-file tiering (v3.7.1)", () => {
     const idxHistorical = md.indexOf("## Historical Summary");
     assert.ok(idxCurrent >= 0 && idxRecent > idxCurrent && idxHistorical > idxRecent,
       "tiers must render in order: Current → Recent → Historical Summary");
-    assert.ok(md.includes("**Schema**: 3"), "v3.9.6 schema marker");
+    assert.ok(md.includes("**Schema**: 4"), "v3.9.7 schema marker");
     assert.ok(md.includes("**Derived**: true"), "derived marker in the header");
     assert.ok(md.includes("**Source**: round 2 (attempt 2)"), "attempt marker");
     assert.ok(md.includes("**Authority**: committed typed rounds"));
@@ -457,10 +458,15 @@ describe("v3.3 — Roadmap and derived state", () => {
     assert.equal(hashCanonicalState(plain1), hashCanonicalState(plain2));
 
     const derived = () => createCanonicalLoopState(req, res, "test.md", {
-      machineStatus: { windowRounds: 3, gitMotion: true, motionRounds: 2 },
+      machineStatus: {
+        windowRounds: 3,
+        machineProgress: "changed",
+        changedRounds: 2,
+        providers: ["git"],
+      },
     });
     const state = derived();
-    assert.equal(state.machineStatus?.gitMotion, true);
+    assert.equal(state.machineStatus?.machineProgress, "changed");
     assert.notEqual(hashCanonicalState(plain1), hashCanonicalState(state));
     assert.equal(hashCanonicalState(state), hashCanonicalState(derived()),
       "same derived input → same hash");

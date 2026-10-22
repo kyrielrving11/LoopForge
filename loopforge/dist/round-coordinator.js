@@ -20,10 +20,11 @@
 import { queryLoopEntries } from "./loop-store.js";
 import { CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED, CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE, collectOutOfScopeFiles, roundDriftFiles, verifySelfEvaluation, } from "./verification-gate.js";
 import { verifyRecoveryCheckpoint } from "./recovery.js";
-import { entryRound, isRecord } from "./token-utils.js";
+import { isRecord } from "./token-utils.js";
 import { driftedEntrypoints } from "./evidence-provider.js";
-import { declaresBlocked, effectiveOutcome, effectiveSuccess } from "./self-eval.js";
-import { derivationRounds, decodeCommittedRound, inFlightGitMotion, pendingRollbackDirective, } from "./committed-round.js";
+import { declaresBlocked, effectiveSuccess } from "./round-outcome.js";
+import { derivationRounds, pendingRollbackDirective, } from "./committed-round.js";
+import { deriveRoundProgress } from "./progress.js";
 import { enforceRound, buildRejectionPrompt, findSafeRestorePoint, findBacktrackTargetSnapshot, } from "./enforcement-gate.js";
 import { logEvent } from "./observability.js";
 import { getPolicy } from "./policy.js";
@@ -114,22 +115,18 @@ export function deriveBacktrackRecoveryFacts(input) {
     // agent's report); later rounds overwrite earlier ones so the map holds the
     // LAST failed state of every file.
     const skippedFingerprints = {};
-    const skippedDiscoveries = [];
+    const skippedDiscoveries = [...input.skippedDiscoveries];
     const failedRounds = [];
     const approaches = [];
     const wrongAssumptions = [];
+    const window = derivationRounds(vaultEntries, currentRound);
     for (let r = restoreRound + 1; r < currentRound; r++) {
-        // v3.2.1: match the feedback entry (execution_report lives there) — the
-        // compile-time lineage entry for the same round precedes it in the flat
-        // view and carries no evidence.
-        const entry = vaultEntries.find((e) => entryRound(e) === r && e.task_type !== "loop_lineage");
-        const view = entry ? decodeCommittedRound(entry) : null;
+        const view = window.find((candidate) => candidate.round === r) ?? null;
         const evaluation = view?.evaluation ?? null;
-        if (entry?.execution_report) {
-            const ev = entry.execution_report;
-            const reported = Array.isArray(ev.files_changed)
-                ? ev.files_changed.filter((f) => typeof f === "string")
-                : [];
+        const report = view?.executionReport ?? null;
+        if (report) {
+            const reported = (report.files_changed ?? [])
+                .filter((f) => typeof f === "string");
             // v3.9.1: the machine delta is the primary set of files the failed
             // round changed; the agent report is unioned in so an ignored file the
             // agent named is not lost from the recovery brief.
@@ -163,12 +160,6 @@ export function deriveBacktrackRecoveryFacts(input) {
             if (!wrongAssumptions.includes(a))
                 wrongAssumptions.push(a);
         }
-        for (const discovery of (evaluation?.discovered_constraints ?? [])
-            .filter((v) => typeof v === "string")) {
-            if (!skippedDiscoveries.includes(discovery)) {
-                skippedDiscoveries.push(discovery);
-            }
-        }
     }
     // The in-flight attempt that triggered this rollback.
     const triggerSummary = selfEval.output_summary?.trim() ?? "";
@@ -182,12 +173,9 @@ export function deriveBacktrackRecoveryFacts(input) {
                 wrongAssumptions.push(a.slice(0, 500));
         }
     }
-    for (const discovery of (selfEval.discovered_constraints ?? [])
-        .filter((v) => typeof v === "string")) {
-        if (!skippedDiscoveries.includes(discovery)) {
-            skippedDiscoveries.push(discovery);
-        }
-    }
+    // A discovery declared by the rejected trigger attempt is NOT committed and
+    // must never become an active constraint through the rollback. Only
+    // discoveries from committed skipped rounds are preserved.
     return {
         skippedFiles,
         skippedFingerprints,
@@ -291,7 +279,7 @@ export class RoundCoordinator {
             round: currentRound,
             report: selfEval.execution_report ?? null,
             deltas: evidenceDeltas ?? [],
-            outcome: effectiveOutcome(selfEval),
+            blocked: declaresBlocked(selfEval),
             commands: getPolicy().evidence.commands ?? [],
         });
         // v3.8.3: the legal exit from scope drift — a round that declares itself
@@ -329,10 +317,10 @@ export class RoundCoordinator {
         // The old v2.5 "heuristic partial enforcement" plumbing (extractionSucceeded
         // flag, enforcement skipEvidenceRules mode) was removed as unreachable.
         const enforceResult = enforceRound(selfEval, verifyResult, currentRound, vaultEntries, consecutiveRejections, input.lastRejectionCheck ?? "", scopeDriftWaiver,
-        // v3.9: what THIS round moved, from the same Git motion rule the
-        // committed series uses. Unknown motion stays null — an unobservable
-        // round never gains the stall excuse.
-        inFlightGitMotion(evidenceDeltas ?? [], pendingRecovery?.target_head));
+        // v3.9.7: what THIS round moved, from the same provider-neutral
+        // progress rule the committed series uses. Unknown/not_applicable never
+        // gains the stall excuse.
+        deriveRoundProgress(evidenceDeltas ?? [], pendingRecovery?.target_head));
         if (enforceResult.action === "reject") {
             const newRejections = consecutiveRejections + 1;
             const rejectionPrompt = buildRejectionPrompt(currentRound, task, enforceResult, verificationFlags);
@@ -415,6 +403,7 @@ export class RoundCoordinator {
                 restoreRound: restorePoint.round,
                 vaultEntries,
                 selfEval,
+                skippedDiscoveries: restorePoint.skippedDiscoveries,
             });
             // v2.12: Capture the restore point's machine snapshot — the commit the
             // workspace must return to and what was already dirty there — so the

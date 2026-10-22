@@ -154,6 +154,10 @@ export class LoopForgeEngine {
             goal_text_hash: response.goal_text_hash,
             recompile_level: response.recompile_level,
             constraints_active: response.constraints_active,
+            // v3.9.7: the compile's effective retirements, stamped so the receipt
+            // can prove which retractions actually took effect without re-deriving
+            // a second history.
+            constraints_retired: response.constraints_retired,
             task: request.task,
             success: true,
         };
@@ -304,8 +308,8 @@ export class LoopForgeEngine {
             if (isRecord(transaction)) {
                 lineage.round_transaction = transaction;
             }
-            // v3.5.1: compile-side display readers (Round Stats rejected attempts,
-            // the Machine (git) dashboard row) never see raw :feedback entries —
+            // v3.5.1: compile-side display readers (rejected attempts and the
+            // machine-progress dashboard row) never see raw :feedback entries —
             // only this merged view — so the machine-observed data they need is
             // stamped here. In-memory only (hydration cache; disk lineage entries
             // never carry the stamp — a fresh hydration re-derives it identically
@@ -423,9 +427,9 @@ export class LoopForgeEngine {
      *
      *  The round commit entry (`loop:<id>:r<N>:feedback`) carries the full
      *  committed decision — verification flags, round success, and the agent's
-     *  SelfEvaluation — which the compiler needs to derive milestones,
-     *  constraint decay, sub-goal accumulation, and rolling summaries. Without
-     *  this merge the cross-round features only see the 8 compile-time lineage
+     *  SelfEvaluation — which the compiler needs to derive constraint
+     *  lifecycle, sub-goal accumulation, and committed reports. Without this
+     *  merge the cross-round features only see the 8 compile-time lineage
      *  fields. */
     buildMergedEntries(fresh, fbFresh) {
         const fbByRound = new Map();
@@ -719,7 +723,7 @@ export class LoopForgeEngine {
             this.state.success_trend = this.state.success_trend.slice(-20);
         }
         // v2.5: Old binary-success circuit breaker removed. The enforcement
-        // gate now uses machine-observed Git motion for stall decisions.
+        // gate now uses provider-neutral machine progress for stall decisions.
         logEvent("round_complete", {
             loopId,
             round,

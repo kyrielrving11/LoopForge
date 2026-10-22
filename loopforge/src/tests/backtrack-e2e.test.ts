@@ -192,7 +192,7 @@ describe("E2E backtrack lifecycle", () => {
     // delivered prompt equals `prompt_artifact.renderedPrompt`.
     assert.ok(result.prompt!.includes("**Trigger**: progress_stall"),
       "brief must name the trigger rule");
-    assert.match(result.prompt!, /Failure reason\*\*: .*no machine-observed changes/,
+    assert.match(result.prompt!, /Failure reason\*\*: .*no machine-observed progress/,
       "brief must preserve the machine's reason for the rollback");
     assert.match(result.prompt!, /Restore requirement\*\*: .*checked against round/,
       "brief must state the machine-checked restore requirement");

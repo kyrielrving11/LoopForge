@@ -9,7 +9,7 @@
  * Built-in: GitEvidenceProvider — git file state capture with parallel async
  * execution (v2.0.1), plus explicitly configured shell-free command providers.
  */
-import type { CommandObservation, ConfiguredCapability, EvidenceCapability, MachineObservation, ObservedCapability } from "./protocol.js";
+import type { CommandObservation, ConfiguredCapability, EvidenceCapability, MachineObservation, ObservedCapability, ProgressState } from "./protocol.js";
 import type { CommandEvidencePolicy, LoopPolicy } from "./policy.js";
 /** Interface for evidence capture providers.
  *
@@ -31,6 +31,11 @@ export interface EvidenceProvider {
     /** Observation kind this provider produces (used for the synthetic
      *  unavailable/timeout/error observations too). */
     readonly kind: MachineObservation["kind"];
+    /** v3.9.7: a custom provider opts into progress by emitting a stable
+     *  fingerprint snapshot. The collector persists this capability on every
+     *  observation, including failures, so replay never depends on the live
+     *  registry. */
+    readonly progressCapable?: boolean;
     /** Capture an observation. Returns null when the provider is structurally
      *  unavailable (e.g. not a git repository); the collector converts that
      *  into an explicit `unavailable` observation rather than dropping it. */
@@ -210,6 +215,10 @@ export interface ObservationDelta {
     /** Git only. [] = observed no change; null = unknown.
      *  command/custom always null (no file-change concept). */
     changedFiles: string[] | null;
+    /** v3.9.7: this provider's before→after progress verdict. Git uses the
+     *  existing complete-boundary rule; a custom provider compares its
+     *  persisted progress fingerprints; command is not applicable. */
+    progress: ProgressState;
 }
 /** The Git change set for a round, with applicability kept distinct from
  *  observability: no Git provider is `not_applicable`; a Git provider whose

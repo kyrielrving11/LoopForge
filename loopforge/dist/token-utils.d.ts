@@ -39,6 +39,10 @@ export declare const STABLE_ID_RE: RegExp;
  *  cycle. `loop-compiler.ts` re-exports it, so its public surface is
  *  unchanged. */
 export declare function deriveCriterionId(text: string): string;
+/** v2.11/v3.9.7: Derive a stable constraint ID from its text hash
+ *  (c-XXXXXXXX). Moved here so the constraint lifecycle resolver can use the
+ *  one identity helper without importing the compiler. */
+export declare function deriveConstraintId(text: string): string;
 /** The cr-XXXXXXXX shape — the ONE predicate every criterion-reference reader
  *  uses (round-contract.ts kept an inline copy before v3.8.1). */
 export declare function isCriterionId(ref: string): boolean;
@@ -55,6 +59,14 @@ export declare function criterionRefMatches(ref: string, criterion: string | {
  *  subject vocabulary `RecurringFlag` groups on; JSON encoding keeps it
  *  unambiguous and deterministic. */
 export declare function findingKey(flag: {
+    check: string;
+    field: string;
+    ref?: string;
+}): string;
+/** v3.9.7: the stable, user-referenceable id of one current machine finding.
+ *  The JSON `findingKey` remains the internal grouping key; `f-` is what the
+ *  prompt renders and what `prompt_requests.emphasize` can cite. */
+export declare function deriveFindingId(flag: {
     check: string;
     field: string;
     ref?: string;

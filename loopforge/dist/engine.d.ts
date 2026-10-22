@@ -94,9 +94,9 @@ export declare class LoopForgeEngine {
      *
      *  The round commit entry (`loop:<id>:r<N>:feedback`) carries the full
      *  committed decision — verification flags, round success, and the agent's
-     *  SelfEvaluation — which the compiler needs to derive milestones,
-     *  constraint decay, sub-goal accumulation, and rolling summaries. Without
-     *  this merge the cross-round features only see the 8 compile-time lineage
+     *  SelfEvaluation — which the compiler needs to derive constraint
+     *  lifecycle, sub-goal accumulation, and committed reports. Without this
+     *  merge the cross-round features only see the 8 compile-time lineage
      *  fields. */
     private buildMergedEntries;
     hydrateLoopContext(loopId: string, round?: number): Record<string, unknown> | null;

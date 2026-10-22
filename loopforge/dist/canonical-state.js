@@ -8,7 +8,7 @@ import { deriveCriterionId, deriveItemId, normalizeText, STABLE_ID_RE, unique, u
 import { claimedMetCriteria, claimedRemainingCriteria } from "./self-eval.js";
 import { getPolicy } from "./policy.js";
 import { deriveConfiguredCapability } from "./policy.js";
-export const CANONICAL_STATE_SCHEMA_VERSION = 3;
+export const CANONICAL_STATE_SCHEMA_VERSION = 4;
 /** v3.7.1: Presentation view of sub-goals shared by prompts and the state
  *  file (one derivation, no second copy). Only ACTIVE items render as rows
  *  — pending/in_progress/blocked — ordered blocked → in_progress → pending
@@ -83,10 +83,16 @@ export function formatCriterionRows(statuses, successCriteria) {
 /** v3.9.4: the ONE active-sub-goal formatter shared by the prompt and the
  *  state file. Rows past `cap` lose their descriptions but NEVER their ids:
  *  the overflow line lists every remaining `sg-*`. */
-export function formatActiveSubGoals(subGoals, round, cap = getPolicy().evolution.max_active_subgoals) {
+export function formatActiveSubGoals(subGoals, round, cap = getPolicy().evolution.max_active_subgoals,
+/** v3.9.7: objects moved to Critical Context are removed from the rows and
+ *  the overflow line, but still count in the totals. */
+omitIds) {
     const view = activeSubGoalView([...subGoals], Number.POSITIVE_INFINITY);
-    const shown = view.active.slice(0, Math.max(0, cap));
-    const hidden = view.active.slice(shown.length);
+    const visible = omitIds
+        ? view.active.filter((subGoal) => !omitIds.has(subGoal.id))
+        : view.active;
+    const shown = visible.slice(0, Math.max(0, cap));
+    const hidden = visible.slice(shown.length);
     const lines = [];
     for (const sg of shown) {
         const statusIcon = sg.status === "in_progress" ? "🔄" :
@@ -105,7 +111,7 @@ export function formatActiveSubGoals(subGoals, round, cap = getPolicy().evolutio
     }
     lines.push(`> ${view.total} total · ${view.activeTotal} active · ` +
         `${view.done} done · ${view.canceled} canceled`);
-    return { lines, ids: view.active.map((sg) => sg.id) };
+    return { lines, ids: visible.map((sg) => sg.id) };
 }
 // unique() imported from token-utils.ts
 /** Deterministic JSON serialization used by state and prompt hashes. */
@@ -178,49 +184,65 @@ function addListWithIds(lines, title, values, prefix) {
 function addListWithIdentities(lines, title, values, metadata) {
     if (values.length === 0)
         return;
-    const idByText = new Map(metadata.map((meta) => [meta.text, meta.id]));
+    const metaByText = new Map(metadata.map((meta) => [meta.text, meta]));
     lines.push(`## ${title}`, "");
     for (const value of values) {
         const trimmed = value.trim();
         if (!trimmed)
             continue;
+        const meta = metaByText.get(trimmed);
         if (STABLE_ID_RE.test(trimmed)) {
             lines.push(`- [\`${trimmed}\`] ${trimmed}`);
         }
         else {
-            const id = idByText.get(trimmed) ?? `c-${deriveItemId(trimmed)}`;
-            lines.push(`- [\`${id}\`] ${trimmed}`);
+            const id = meta?.id ?? `c-${deriveItemId(trimmed)}`;
+            const provenance = constraintProvenanceLabel(meta);
+            lines.push(`- [\`${id}\`] ${trimmed}${provenance}`);
         }
     }
     lines.push("");
 }
-/** v3.8.1: the one-line phase position — which phase the loop is in, and how
- *  far the next boundary is.
- *
- *  This is all that survives of v3.3's "roadmap": of its four lines, three
- *  (met/remaining criteria with ids, sub-goal activity) were already rendered
- *  in full by the sections that own them. Returns "" when no milestone exists,
- *  so the caller renders no section at all — bare position is already in the
- *  prompt header.
- *
- *  Shared by the state-file and prompt renderers so they cannot drift apart
- *  (module contract above). Presentation only; never feeds enforcement. */
-/** v3.3/v3.4: Render the ACTIVE Round Contract as the Current Task section
- *  body — the single formatting source shared by prompts and the state
- *  file (module contract above). The original objective is NOT here: it
- *  lives in the Objective section. Empty arrays render no line. */
-export function formatRoundContract(contract,
+/** v3.9.7: the ONE constraint provenance label shared by the state file and
+ *  the prompt. A discovered/preserved constraint is an Agent report, never a
+ *  machine-verified fact. */
+export function constraintProvenanceLabel(meta) {
+    if (!meta)
+        return "";
+    const round = meta.source_round !== undefined && meta.source_round >= 1
+        ? ` R${meta.source_round}`
+        : "";
+    switch (meta.source) {
+        case "discovered":
+            return ` (Agent-declared${round}; report, not machine-verified)`;
+        case "preserved":
+            return ` (Agent discovery preserved by rollback${round}; report)`;
+        case "plan":
+            return ` (plan/carried${round})`;
+        case "unrecorded":
+            return " (origin not recorded in committed rounds)";
+        default:
+            return "";
+    }
+}
+export function formatRoundContractWithIds(contract,
 /** v3.8: the derived item statuses. When given, each item renders with its
  *  machine status — the agent sees the verification debt in its own task. */
-statuses) {
+statuses, options = {}) {
+    if (options.omitContract)
+        return { text: "", emittedIds: [] };
     const lines = [];
+    const emittedIds = [contract.id];
     const heading = contract.work_item?.trim();
     lines.push(`**${heading || "Round Contract"}** (${contract.id})`);
     const statusById = new Map((statuses?.items ?? []).map((item) => [item.itemId, item]));
-    if (contract.items.length > 0) {
+    const items = options.omitItemIds
+        ? contract.items.filter((item) => !options.omitItemIds.has(item.id))
+        : contract.items;
+    if (items.length > 0) {
         lines.push("- Acceptance conditions:");
     }
-    for (const item of contract.items) {
+    for (const item of items) {
+        emittedIds.push(item.id);
         const machine = statusById.get(item.id);
         const mark = machine?.status === "verified" ? "✅"
             : machine?.status === "insufficient" ? "🟠"
@@ -248,7 +270,50 @@ statuses) {
             lines.push(`  - ${entry}`);
         }
     }
+    return { text: lines.join("\n"), emittedIds };
+}
+/** Backwards-compatible text-only view used by the state file. */
+export function formatRoundContract(contract, statuses) {
+    return formatRoundContractWithIds(contract, statuses).text;
+}
+/** v3.9.7: one contract item as the prompt renders it. Critical Context uses
+ *  the same line when an item is moved, so the text cannot drift. */
+export function formatContractItemLine(item, machine) {
+    const mark = machine?.status === "verified" ? "✅"
+        : machine?.status === "insufficient" ? "🟠"
+            : machine?.status === "contradicted" ? "⛔"
+                : machine?.status === "pending" ? "⬜"
+                    : "";
+    const status = machine ? ` — ${machine.status}` : "";
+    const lines = [
+        `- ${mark ? `${mark} ` : ""}[\`${item.id}\`] ${item.description}${status}`,
+    ];
+    if (item.verify_with.length > 0) {
+        lines.push(`  - Verify via: ${item.verify_with.join(", ")}`);
+    }
+    if (item.criterion_refs.length > 0) {
+        lines.push(`  - Criteria: ${item.criterion_refs.join(", ")}`);
+    }
+    if (item.subgoal_refs.length > 0) {
+        lines.push(`  - Sub-goals: ${item.subgoal_refs.join(", ")}`);
+    }
+    if (machine?.reasons.length) {
+        lines.push(`  - Unverified because: ${machine.reasons[0]}`);
+    }
     return lines.join("\n");
+}
+/** v3.9.7: one active sub-goal row as the prompt renders it. */
+export function formatSubGoalRow(subGoal, round) {
+    const statusIcon = subGoal.status === "in_progress" ? "🔄" :
+        subGoal.status === "blocked" ? "🚫" : "⏳";
+    const stale = subGoal.status === "pending" &&
+        round - subGoal.declared_at_round >= 10 ? " ⚠️ stale" : "";
+    const detail = subGoal.status === "in_progress"
+        ? ` (since R${subGoal.status_changed_at_round})`
+        : subGoal.status === "pending"
+            ? ` (since R${subGoal.declared_at_round})`
+            : ` (blocked R${subGoal.status_changed_at_round})`;
+    return `- ${statusIcon} [\`${subGoal.id}\`] ${subGoal.description}${detail}${stale}`;
 }
 const STATE_SECTION_TIER = {
     // Current — what the next round must hold in working memory.
@@ -301,8 +366,9 @@ export function renderCanonicalStateMarkdown(state, options) {
         "",
     ];
     const sections = flatStateSections(state);
-    if (options?.recoveryBrief && options.recoveryBrief.length > 0) {
-        sections.unshift({ title: "Recovery Brief", body: options.recoveryBrief });
+    const recoveryBrief = state.recoveryBrief ?? options?.recoveryBrief;
+    if (recoveryBrief && recoveryBrief.length > 0) {
+        sections.unshift({ title: "Recovery Brief", body: recoveryBrief });
     }
     const byTier = new Map();
     for (const tier of STATE_TIER_ORDER)
@@ -354,10 +420,15 @@ function flatStateSections(state) {
         // (v3.6: the object always carries definite values — no "unavailable" arm).
         if (state.machineStatus) {
             const ms = state.machineStatus;
-            const motion = ms.gitMotion
-                ? `changes observed in ${ms.motionRounds}/${ms.windowRounds} recent committed rounds`
-                : `no git changes in the last ${ms.windowRounds} committed rounds`;
-            lines.push(`**Machine (git)**: ${motion}`);
+            const providers = ms.providers.length > 0
+                ? ` (providers: ${ms.providers.join(", ")})`
+                : "";
+            const progress = ms.machineProgress === "changed"
+                ? `changes observed in ${ms.changedRounds}/${ms.windowRounds} recent committed rounds${providers}`
+                : ms.machineProgress === "unknown"
+                    ? `not observable in the last ${ms.windowRounds} committed rounds${providers}`
+                    : `no machine-observed progress in the last ${ms.windowRounds} committed rounds${providers}`;
+            lines.push(`**Machine progress**: ${progress}`);
         }
         if (state.criterionStatuses.length > 0) {
             const metCount = state.criterionStatuses.filter((cs) => cs.status === "verified" || cs.status === "claimed").length;
@@ -488,18 +559,20 @@ derived) {
     // evolution, but an uncommitted/rejected attempt cannot become durable
     // progress, discovery, or criterion state.
     const executionReport = committed ? last?.execution_report : undefined;
+    // A wrong assumption is the Agent's report, not a LoopForge verdict that
+    // it was "corrected" or "falsified". Render it verbatim under a report
+    // heading.
     const corrections = committed
-        ? unique((last?.wrong_assumptions ?? []).map((value) => `Corrected assumption: ${value}`))
+        ? unique(last?.wrong_assumptions ?? [])
         : [];
+    // Discoveries are discovered constraints only. emerged_subtasks are the
+    // Agent's execution plan and live in the Sub-Goal Dashboard; mixing them
+    // here made a plan look like a discovery.
     const discoveries = committed
-        ? unique([
-            ...(last?.discovered_constraints ?? []),
-            ...(last?.emerged_subtasks ?? []),
-        ])
+        ? unique(last?.discovered_constraints ?? [])
         : [];
     const blockers = unique([
         ...(committed ? (last?.constraint_violations ?? []) : []),
-        request.rejection_notice,
         ...response.warnings,
     ]);
     // v3.4: The ACTIVE Round Contract (derived — loop-compiler computes it
@@ -533,7 +606,6 @@ derived) {
         maxRounds: request.max_rounds ?? getPolicy().engine.max_rounds,
         goalId: response.goal_id,
         objective: objective?.objective || request.task,
-        objectiveVersion: objective?.version ?? 1,
         currentTask: roundContract
             ? formatRoundContract(roundContract, derived?.roundFacts?.itemStatuses ?? null)
             : request.task,
@@ -543,6 +615,7 @@ derived) {
         retiredConstraints: unique(response.constraints_retired),
         constraintMetadata: response.constraint_metadata ?? [],
         corrections,
+        rejectionNotice: request.rejection_notice.trim() ? request.rejection_notice : null,
         remainingCriteria: unique(claimedRemainingCriteria(executionReport)),
         blockers,
         verificationFlags,
@@ -559,6 +632,9 @@ derived) {
         },
         // v3.3: Conditional presence — empty/absent derived data must not add
         // keys, or every state hash would change for rounds without it.
+        ...(derived?.recoveryBrief && derived.recoveryBrief.length > 0
+            ? { recoveryBrief: [...derived.recoveryBrief] }
+            : {}),
         ...(derived?.machineStatus ? { machineStatus: derived.machineStatus } : {}),
         // v3.3: Conditional presence — no contract, no key (hash stability).
         ...(roundContract ? { roundContract } : {}),

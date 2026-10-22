@@ -1,5 +1,6 @@
 /** In-process policy effectiveness metrics with no runtime dependency. */
-import { observedGitHead, readOnlyRounds } from "./committed-round.js";
+import { readOnlyRounds } from "./committed-round.js";
+import { observedGitHead } from "./git-motion.js";
 import { deriveFieldAccounting } from "./field-accounting.js";
 import { deriveFilesReconciliation } from "./files-reconciliation.js";
 import { gitDeltaState } from "./evidence-provider.js";

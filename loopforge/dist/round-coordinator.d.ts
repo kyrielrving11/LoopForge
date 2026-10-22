@@ -134,6 +134,9 @@ export declare function deriveBacktrackRecoveryFacts(input: {
     restoreRound: number;
     vaultEntries: VaultEntry[];
     selfEval: SelfEvaluation;
+    /** v3.9.7: the ONE discovery set from `findSafeRestorePoint` (committed
+     *  skipped rounds only). The rejected trigger attempt contributes none. */
+    skippedDiscoveries: ReadonlyArray<string>;
 }): {
     skippedFiles: string[];
     skippedFingerprints: Record<string, string>;

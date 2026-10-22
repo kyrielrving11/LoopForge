@@ -11,7 +11,6 @@ import {
   type ExecutionReport,
   type PromptRequests,
   type RoundContractProposal,
-  type RoundOutcome,
   type SelfEvaluation,
   type SubGoalUpdate,
   type SubmissionDiagnostic,
@@ -52,6 +51,9 @@ export interface DiagnosticSink {
  *  = an observed empty space (every reference is unknown). */
 export interface NormalizationFacts {
   knownCriterionRefs?: ReadonlyArray<{ id: string; text: string }> | null;
+  /** v3.9.7: policy cap applied at the submission boundary; the compiler's
+   *  defensive slice remains for library callers. */
+  maxDiscoveredConstraints?: number;
 }
 
 const DIAGNOSTICS_LIMIT = 100;
@@ -591,38 +593,14 @@ export function parseWorkerResults(
   });
 }
 
-/** v2.12: The effective round outcome — declared outcome wins, otherwise
- *  derived from `success`. "partial" can only be declared explicitly (never
- *  silently derived from success=false, which would quietly change the
- *  success-class enforcement surface). */
-export function effectiveOutcome(selfEval: SelfEvaluation): RoundOutcome {
-  if (selfEval.outcome === "success" || selfEval.outcome === "partial" ||
-      selfEval.outcome === "failed" || selfEval.outcome === "blocked") {
-    return selfEval.outcome;
-  }
-  return selfEval.success ? "success" : "failed";
-}
-
-/** v2.12: Whether the effective outcome is a success claim. Shared by the
- *  verification gate (success-class checks) and enforcement gate (R3). */
-export function effectiveSuccess(selfEval: SelfEvaluation): boolean {
-  return effectiveOutcome(selfEval) === "success";
-}
-
-/** v3.8.3: The ONE definition of "this round declares itself blocked".
- *
- *  A declared `outcome: "blocked"` and a `stop_reason` of `blocked` or
- *  `needs_human_input` say the same thing — the agent is stopping because it
- *  cannot continue, not because it finished. The stop decision
- *  (round-coordinator) and the scope-drift waiver (enforcement gate) both read
- *  this function, so "declared blocked" cannot mean two different things at
- *  two different boundaries. `effectiveOutcome` alone is NOT this predicate:
- *  it reads `outcome` only. */
-export function declaresBlocked(selfEval: SelfEvaluation): boolean {
-  return selfEval.outcome === "blocked" ||
-    selfEval.stop_reason === "blocked" ||
-    selfEval.stop_reason === "needs_human_input";
-}
+// v3.9.7: the outcome predicates live in round-outcome.ts so contract
+// closure, the walker, the verification gate and the coordinator share one
+// definition. Re-exported for the existing public surface.
+export {
+  effectiveOutcome,
+  effectiveSuccess,
+  declaresBlocked,
+} from "./round-outcome.js";
 
 /** Required evaluation fields are the only format boundary. Optional fields
  * are deliberately normalized by buildSelfEvaluation instead of rejecting a
@@ -1265,7 +1243,11 @@ export function buildSelfEvaluation(
     constraint_violations: constraintViolations,
     should_continue: typeof raw.should_continue === "boolean" ? raw.should_continue : true,
     discovered_constraints: boundedStringArray(
-      raw.discovered_constraints, 50, 500, sink, "discovered_constraints"),
+      raw.discovered_constraints,
+      facts?.maxDiscoveredConstraints ?? 50,
+      500,
+      sink,
+      "discovered_constraints"),
     objective_refinement: boundedString(
       raw.objective_refinement, 1000, sink, "objective_refinement") ?? "",
     emerged_subtasks: boundedEmergedSubtasks(raw.emerged_subtasks, sink),

@@ -32,12 +32,6 @@ export declare function derivePromptCoverage(input: {
     active: ReadonlyArray<ActiveNormativeId>;
     /** Ids emitted by the sections that were actually rendered. */
     rendered: Iterable<string>;
-    /** Ids declared by every constructed section, including dropped ones.
-     *  Used only to classify an omission as `budget` rather than `defect`. */
-    declared?: Iterable<string>;
-    /** Kinds for which a section was constructed at this level. Used only to
-     *  classify an omission as `level`. */
-    availableKinds?: Iterable<CoverageKind>;
 }): PromptCoverage;
 /** Fail closed. A caller that has not delivered the prompt yet must let this
  *  throw; no partial prompt/artifact may escape. */

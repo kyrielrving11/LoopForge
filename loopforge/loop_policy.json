@@ -1,8 +1,5 @@
 {
-  "version": "8",
-  "constraints": {
-    "retire_window": 3
-  },
+  "version": "9",
   "engine": {
     "stall_lookback_rounds": 3,
     "max_rounds": 200,
@@ -27,7 +24,6 @@
   "evolution": {
     "max_discovered_constraints_per_round": 5,
     "max_start_criteria": 12,
-    "max_objective_versions": 10,
     "max_active_subgoals": 12
   },
   "state_file": {

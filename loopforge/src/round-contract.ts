@@ -36,6 +36,7 @@ import {
 import { deriveContractItemStatuses } from "./contract-items.js";
 import type { ContractItemStatusView } from "./contract-items.js";
 import { getPolicy } from "./policy.js";
+import { declaresBlocked } from "./round-outcome.js";
 
 export interface ActiveContractItem extends ContractItemProposal {
   /** rci-XXXXXXXX — derived from the item's own content. */
@@ -113,8 +114,11 @@ export function deriveActiveRoundContract(
     }
     // A blocked round closes the active contract (existing semantics), and a
     // fully verified one does too. Order matters: blocked is checked first,
-    // mirroring the historical walker.
-    if (round.outcome === "blocked") {
+    // using the ONE blocked predicate (outcome OR stop_reason).
+    const blocked = round.evaluation
+      ? declaresBlocked(round.evaluation)
+      : round.outcome === "blocked";
+    if (blocked) {
       active = activate();
       continue;
     }
@@ -166,8 +170,10 @@ export function deriveRoundContractView(input: {
   round: number;
   report: ExecutionReport | null;
   deltas: ReadonlyArray<ObservationDelta>;
-  /** The round's committed/effective outcome — `blocked` closes its contract. */
-  outcome: string | null;
+  /** The round's ONE blocked declaration — a blocked round closes its
+   *  contract. Prefer the explicit boolean; `outcome` is the legacy shape. */
+  blocked?: boolean;
+  outcome?: string | null;
   commands: ReadonlyArray<CommandEvidencePolicy>;
 }): { contract: ActiveContractView | null; statuses: ContractItemStatusView } {
   const prior = input.rounds.filter((candidate) => candidate.round < input.round);
@@ -180,7 +186,7 @@ export function deriveRoundContractView(input: {
       currentRound: input.round,
       currentReport: input.report,
       currentDeltas: input.deltas,
-      currentOutcome: input.outcome,
+      currentBlocked: input.blocked ?? input.outcome === "blocked",
       commands: input.commands,
     }),
   };

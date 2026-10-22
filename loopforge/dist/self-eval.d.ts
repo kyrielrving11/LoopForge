@@ -1,7 +1,7 @@
 /** Structured self-evaluation parsing and normalization — pure functions.
  * The MCP boundary validates required fields before these helpers run.
  */
-import { type ExecutionReport, type PromptRequests, type RoundContractProposal, type RoundOutcome, type SelfEvaluation, type SubGoalUpdate, type SubmissionDiagnostic, type SubmissionDiagnosticHandling } from "./protocol.js";
+import { type ExecutionReport, type PromptRequests, type RoundContractProposal, type SelfEvaluation, type SubGoalUpdate, type SubmissionDiagnostic, type SubmissionDiagnosticHandling } from "./protocol.js";
 /** A diagnostics sink. `buildSelfEvaluation` keeps working without one (the
  *  engine parses historical last_round_result payloads); the submission
  *  boundary always supplies one. */
@@ -16,6 +16,9 @@ export interface NormalizationFacts {
         id: string;
         text: string;
     }> | null;
+    /** v3.9.7: policy cap applied at the submission boundary; the compiler's
+     *  defensive slice remains for library callers. */
+    maxDiscoveredConstraints?: number;
 }
 /** v3.8.1: the emerged-subtask intake bound — ONE constant, because the
  *  sub-goal ids are derived by ORDINAL over this list. The strict submission
@@ -62,24 +65,7 @@ export declare function parseSubGoalUpdates(raw: unknown, sink?: DiagnosticSink)
  *  absent/empty arrays are accepted unchanged, so a round without any
  *  delegation can never be rejected over worker fields. */
 export declare function parseWorkerResults(raw: unknown, sink?: DiagnosticSink): import("./protocol.js").WorkerResult[];
-/** v2.12: The effective round outcome — declared outcome wins, otherwise
- *  derived from `success`. "partial" can only be declared explicitly (never
- *  silently derived from success=false, which would quietly change the
- *  success-class enforcement surface). */
-export declare function effectiveOutcome(selfEval: SelfEvaluation): RoundOutcome;
-/** v2.12: Whether the effective outcome is a success claim. Shared by the
- *  verification gate (success-class checks) and enforcement gate (R3). */
-export declare function effectiveSuccess(selfEval: SelfEvaluation): boolean;
-/** v3.8.3: The ONE definition of "this round declares itself blocked".
- *
- *  A declared `outcome: "blocked"` and a `stop_reason` of `blocked` or
- *  `needs_human_input` say the same thing — the agent is stopping because it
- *  cannot continue, not because it finished. The stop decision
- *  (round-coordinator) and the scope-drift waiver (enforcement gate) both read
- *  this function, so "declared blocked" cannot mean two different things at
- *  two different boundaries. `effectiveOutcome` alone is NOT this predicate:
- *  it reads `outcome` only. */
-export declare function declaresBlocked(selfEval: SelfEvaluation): boolean;
+export { effectiveOutcome, effectiveSuccess, declaresBlocked, } from "./round-outcome.js";
 /** Required evaluation fields are the only format boundary. Optional fields
  * are deliberately normalized by buildSelfEvaluation instead of rejecting a
  * round for a non-authoritative reporting detail.

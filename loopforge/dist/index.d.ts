@@ -18,7 +18,7 @@
 export { Mode, AgentStatus, makeExecutionFeedback, makeSelfEvaluation, makeLoopObjective, makeLoopRoundResult, makeLoopCompileRequest, makeLoopCompileResponse, makeSessionState, makeTaskId, makeEvidenceSnapshot, makeVerificationFlag, makeVerificationResult, makeEnforcementResult, makeSubGoal, makeConstraintMeta, } from "./protocol.js";
 export type { ExecutionFeedback, SelfEvaluation, LoopForgeRequest, LoopObjective, LoopRoundResult, LoopCompileRequest, LoopCompileResponse, LoopForgeResponse, SessionState, AgentLoopResult, WorkerResult, EvidenceSnapshot, VerificationFlag, VerificationResult, EnforcementResult, SubGoal, ConstraintMeta, PromptArtifact, PromptCoverage, PromptRequestEffect, SubmissionDiagnostic, SubmissionDiagnosticHandling, SubmissionGuidance, SubmissionReceipt, SubmissionReportHandling, } from "./protocol.js";
 export { getPolicy, loadPolicy, resetPolicy, DEFAULT_POLICY, writeStateFile, } from "./policy.js";
-export type { LoopPolicy, ConstraintsPolicy, EnginePolicy, BackendPolicy, PromptPolicy, StateFilePolicy, EvidencePolicy, CommandEvidencePolicy, McpPolicy, } from "./policy.js";
+export type { LoopPolicy, EnginePolicy, BackendPolicy, PromptPolicy, StateFilePolicy, EvidencePolicy, CommandEvidencePolicy, McpPolicy, } from "./policy.js";
 export { FileLoopStore, queryLoopEntries, LOOP_STORE_SCHEMA_VERSION, } from "./loop-store.js";
 export type { LoopStore, LoopSessionDocument, LoopRoundDocument, VaultEntry, } from "./loop-store.js";
 export { compileLoop, decideLevel, computeGoalTextHash, deriveGoalId, getPreviousRound, buildSelfEvalBlock, } from "./loop-compiler.js";

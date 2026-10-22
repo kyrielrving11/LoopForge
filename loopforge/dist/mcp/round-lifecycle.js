@@ -17,7 +17,7 @@ import { captureEntrypointTrust, EvidenceCollector } from "../evidence-provider.
 import { deriveRoundObservationDelta, deriveTransactionId, makeRoundId, parseRoundTransactionSnapshot, prepareRoundTransaction, rootBranchId, } from "../round-transaction.js";
 import { deriveActiveRoundContract, deriveRoundContractView } from "../round-contract.js";
 import { deriveSubGoals } from "../subgoal-state.js";
-import { effectiveOutcome } from "../self-eval.js";
+import { declaresBlocked } from "../round-outcome.js";
 import { deriveSubmissionReceipt } from "../submission-receipt.js";
 import { RoundDriver } from "../round-driver.js";
 import { deriveRecoveryDirective, resolveRecoveryTarget } from "../recovery.js";
@@ -217,7 +217,7 @@ export class RoundLifecycle {
             round: base.snapshot.round,
             report: base.selfEval.execution_report ?? null,
             deltas: roundDeltas,
-            outcome: effectiveOutcome(base.selfEval),
+            blocked: declaresBlocked(base.selfEval),
             commands,
         });
         const contractAfterId = opts.contractAfterId !== undefined
@@ -257,6 +257,7 @@ export class RoundLifecycle {
                 subGoalsBefore: base.beforeSubGoals,
                 subGoalsAfter: afterSubGoals,
                 constraintsActiveAfter: opts.constraintsActiveAfter ?? null,
+                constraintsRetiredAfter: opts.constraintsRetiredAfter ?? null,
             },
             nextArtifact: opts.nextArtifact ?? null,
             contractItems: contractView.statuses.items.map((item) => ({
@@ -784,9 +785,10 @@ export class RoundLifecycle {
         session.currentRound = newRound;
         session.consecutiveRejections = 0;
         session.lastRejectionCheck = "";
-        // Preserve discoveries from abandoned rounds so they survive compilation.
-        const preservedDiscoveries = directive?.skipped_discoveries ?? [];
-        // Compile the restored prompt — use a fresh request with the restored round
+        // Compile the restored prompt — use a fresh request with the restored
+        // round. Preserved discoveries are read by the compiler from the committed
+        // rollback directive; they are never injected through a transient request
+        // field.
         const request = {
             task: session.task,
             mode: Mode.LOOP_COMPILE,
@@ -797,7 +799,6 @@ export class RoundLifecycle {
             round: newRound,
             max_rounds: session.maxRounds,
             verification_flags: pr.verificationFlags,
-            constraints_from_plan: preservedDiscoveries,
         };
         const prepared = await new RoundDriver(session.engine, this.store).prepare(request, session.loopId, newRound, this.prepareOptions(session, branchId));
         if (!prepared || !prepared.prompt) {
@@ -1059,6 +1060,7 @@ export class RoundLifecycle {
                 nextArtifact: prepared.artifact ?? compiled?.prompt_artifact ?? null,
                 afterSubGoals: compiled?.sub_goals ?? null,
                 constraintsActiveAfter: compiled?.constraints_active ?? null,
+                constraintsRetiredAfter: compiled?.constraints_retired ?? null,
             }),
         };
     }
@@ -1174,7 +1176,7 @@ export class RoundLifecycle {
         // v2.12: Record a user gate when an accepted round reports a high-risk
         // blocker. Record layer only — never blocks the round decision flow.
         if (tx.pr.action !== "reject" && tx.pr.action !== "terminate" &&
-            selfEval.outcome === "blocked" && typeof selfEval.blocker === "string") {
+            declaresBlocked(selfEval) && typeof selfEval.blocker === "string") {
             this.recordGateFromBlocked(session, selfEval.blocker);
         }
         // ── 4. Route disposition ─────────────────────────────────────────────

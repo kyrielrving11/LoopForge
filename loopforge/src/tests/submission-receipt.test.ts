@@ -77,7 +77,7 @@ function input(overrides: Partial<ReceiptInput> = {}): ReceiptInput {
     updatedAt: 0,
   } as RoundTransactionSnapshot;
   const artifact: PromptArtifact = {
-    schemaVersion: 5,
+    schemaVersion: 6,
     roundId: "loop:receipt:round:2",
     round: 2,
     attempt: 1,
@@ -113,6 +113,7 @@ function input(overrides: Partial<ReceiptInput> = {}): ReceiptInput {
       subGoalsBefore: [],
       subGoalsAfter: [subGoal("sg-12345678")],
       constraintsActiveAfter: ["never touch prod"],
+      constraintsRetiredAfter: null,
     },
     nextArtifact: artifact,
     contractItems: [{ item_id: "rci-12345678", status: "verified" }],
@@ -165,6 +166,7 @@ describe("v3.9.1 — submission receipt", () => {
         subGoalsBefore: [subGoal("sg-12345678")],
         subGoalsAfter: null,
         constraintsActiveAfter: null,
+        constraintsRetiredAfter: null,
       },
     }));
     assert.equal(receipt.entered_history, false);
@@ -217,6 +219,7 @@ describe("v3.9.1 — submission receipt", () => {
         subGoalsBefore: [],
         subGoalsAfter: null,
         constraintsActiveAfter: null,
+        constraintsRetiredAfter: null,
       },
     }));
     assert.equal(receipt.entered_history, false);
@@ -238,6 +241,7 @@ describe("v3.9.1 — submission receipt", () => {
         subGoalsBefore: [],
         subGoalsAfter: null,
         constraintsActiveAfter: [],
+        constraintsRetiredAfter: null,
       },
     }));
     assert.deepEqual(receipt.effects.constraints_declared, ["never touch prod"]);
@@ -461,6 +465,7 @@ describe("v3.9.2 — files reconciliation", () => {
     before: null,
     after: null,
     changedFiles,
+    progress: "unknown" as const,
   });
 
   it("compares the report with the shared Git change set", () => {

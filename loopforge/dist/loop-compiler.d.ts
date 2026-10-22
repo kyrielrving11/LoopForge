@@ -84,10 +84,7 @@ criterionFacts?: ReadonlyArray<CriterionMachineFact>): CriterionStatus[];
  *  EXACTLY equal after normalization (v3.8.1 — the similarity fallback is
  *  gone, so a paraphrase is a different criterion). */
 export declare function criteriaMatch(a: string, b: string): boolean;
-/** v2.11: Derive a stable constraint ID from its text hash (c-XXXXXXXX).
- *  Same hash strategy as SubGoal — deterministic across rounds. */
-export declare function deriveConstraintId(text: string): string;
-export { deriveCriterionId, isCriterionId } from "./token-utils.js";
+export { deriveConstraintId, deriveCriterionId, isCriterionId, } from "./token-utils.js";
 export declare function decideLevel(request: LoopCompileRequest, context: Record<string, unknown> | null): "l0" | "l1" | "l2";
 /** The prompt's evaluation block. All content (examples, contract/sub-goal
  *  guidance, flag-specific hints) comes from the one FIELD_GUIDES table in

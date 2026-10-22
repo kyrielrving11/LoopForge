@@ -8,7 +8,7 @@ import type { ActiveContractView } from "./round-contract.js";
 import type { ContractItemStatusView } from "./contract-items.js";
 import type { ConfiguredCapability, VerifiedSubGoalFact } from "./protocol.js";
 import type { RoundFacts } from "./round-facts.js";
-export declare const CANONICAL_STATE_SCHEMA_VERSION: 3;
+export declare const CANONICAL_STATE_SCHEMA_VERSION: 4;
 /** v3.7.1: Presentation view of sub-goals shared by prompts and the state
  *  file (one derivation, no second copy). Only ACTIVE items render as rows
  *  — pending/in_progress/blocked — ordered blocked → in_progress → pending
@@ -48,19 +48,21 @@ export declare function formatCriterionRows(statuses: ReadonlyArray<CriterionSta
 /** v3.9.4: the ONE active-sub-goal formatter shared by the prompt and the
  *  state file. Rows past `cap` lose their descriptions but NEVER their ids:
  *  the overflow line lists every remaining `sg-*`. */
-export declare function formatActiveSubGoals(subGoals: ReadonlyArray<SubGoal>, round: number, cap?: number): {
+export declare function formatActiveSubGoals(subGoals: ReadonlyArray<SubGoal>, round: number, cap?: number,
+/** v3.9.7: objects moved to Critical Context are removed from the rows and
+ *  the overflow line, but still count in the totals. */
+omitIds?: ReadonlySet<string>): {
     lines: string[];
     ids: string[];
 };
-/** v3.3: Machine git-motion cross-check over the last committed rounds.
- *  Display-only companion to the R4/R5 exculpatory signal. Optional:
- *  absent when no committed rounds carry git snapshots — the object, when
- *  present, always carries definite values (v3.6: the null arms were dead —
- *  the derive path returns undefined wholesale instead of null fields). */
+/** v3.3/v3.9.7: provider-neutral machine progress over the last committed
+ *  rounds. Display-only companion to the stall signal. Optional: absent for
+ *  an incomplete window or when no progress provider participated. */
 export interface MachineStatus {
     windowRounds: number;
-    gitMotion: boolean;
-    motionRounds: number;
+    machineProgress: "changed" | "unchanged" | "unknown" | "not_applicable";
+    changedRounds: number;
+    providers: string[];
 }
 export interface CanonicalLoopState {
     schemaVersion: typeof CANONICAL_STATE_SCHEMA_VERSION;
@@ -69,7 +71,6 @@ export interface CanonicalLoopState {
     maxRounds: number;
     goalId: string;
     objective: string;
-    objectiveVersion: number;
     currentTask: string;
     successCriteria: string[];
     hardConstraints: string[];
@@ -79,8 +80,14 @@ export interface CanonicalLoopState {
     constraintMetadata: ConstraintMeta[];
     /** v3.9.5: committed Agent corrections (wrong assumptions). This is a
      *  REPORT, never machine evidence; fallback last_round_result does not
-     *  enter this field. */
+     *  enter this field. LoopForge does not prefix or reframe it. */
     corrections: string[];
+    /** Current retry's enforcement notice. A protected protocol fact for the
+     *  next prompt, not a committed history field. */
+    rejectionNotice: string | null;
+    /** Committed rollback recovery brief, present only in a recovery window.
+     *  Derived from the pending directive; prompt and state file share it. */
+    recoveryBrief?: string[];
     remainingCriteria: string[];
     blockers: string[];
     verificationFlags: VerificationFlag[];
@@ -128,6 +135,10 @@ export interface CanonicalLoopState {
 /** Deterministic JSON serialization used by state and prompt hashes. */
 export declare function stableStringify(value: unknown): string;
 export declare function hashCanonicalState(state: CanonicalLoopState): string;
+/** v3.9.7: the ONE constraint provenance label shared by the state file and
+ *  the prompt. A discovered/preserved constraint is an Agent report, never a
+ *  machine-verified fact. */
+export declare function constraintProvenanceLabel(meta: ConstraintMeta | undefined): string;
 /** v3.8.1: the one-line phase position — which phase the loop is in, and how
  *  far the next boundary is.
  *
@@ -143,10 +154,28 @@ export declare function hashCanonicalState(state: CanonicalLoopState): string;
  *  body — the single formatting source shared by prompts and the state
  *  file (module contract above). The original objective is NOT here: it
  *  lives in the Objective section. Empty arrays render no line. */
-export declare function formatRoundContract(contract: ActiveContractView,
+export interface RoundContractFormatOptions {
+    /** Omit the whole contract block (the contract itself was moved). */
+    omitContract?: boolean;
+    /** Omit individual item rows (items moved to Critical Context). */
+    omitItemIds?: ReadonlySet<string>;
+}
+export interface FormattedRoundContract {
+    text: string;
+    /** IDs this rendering actually emitted (contract id + item ids). */
+    emittedIds: string[];
+}
+export declare function formatRoundContractWithIds(contract: ActiveContractView,
 /** v3.8: the derived item statuses. When given, each item renders with its
  *  machine status — the agent sees the verification debt in its own task. */
-statuses?: ContractItemStatusView | null): string;
+statuses?: ContractItemStatusView | null, options?: RoundContractFormatOptions): FormattedRoundContract;
+/** Backwards-compatible text-only view used by the state file. */
+export declare function formatRoundContract(contract: ActiveContractView, statuses?: ContractItemStatusView | null): string;
+/** v3.9.7: one contract item as the prompt renders it. Critical Context uses
+ *  the same line when an item is moved, so the text cannot drift. */
+export declare function formatContractItemLine(item: ActiveContractView["items"][number], machine?: ContractItemStatusView["items"][number] | null): string;
+/** v3.9.7: one active sub-goal row as the prompt renders it. */
+export declare function formatSubGoalRow(subGoal: SubGoal, round: number): string;
 /** Options that vary per render: the retry attempt (single version of the
  *  file across attempts is impossible — the attempt IS part of the derived
  *  view) and the recovery-window Recovery Brief lines (W5, present only
@@ -187,5 +216,8 @@ derived?: {
          *  projection only under this flag; a library fallback is in-flight. */
         committed?: boolean;
     };
+    /** v3.9.7: committed recovery brief, derived from the pending rollback
+     *  directive. Conditional — absent outside a recovery window. */
+    recoveryBrief?: string[];
 }): CanonicalLoopState;
 //# sourceMappingURL=canonical-state.d.ts.map

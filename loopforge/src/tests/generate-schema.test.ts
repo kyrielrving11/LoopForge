@@ -89,7 +89,7 @@ describe("v3.8.1 — schema fidelity", () => {
     // must read it rather than guess.
     const version = props("PromptArtifact").schemaVersion;
     assert.equal(version.type, "number", "the artifact schema version is a number");
-    assert.equal(version.const, 5);
+    assert.equal(version.const, 6);
   });
 });
 
@@ -130,7 +130,9 @@ describe("Generated JSON Schema — top-level", () => {
     // v3.9.6: LoopProjection, CriterionRevision, the external-context types,
     // RollingSummary and MilestoneSummary were deleted; RecoveryRequest,
     // OperatorAcceptance and RecoveryDirective joined (65 → 63).
-    assert.equal(names.length, 63, `expected 63, got ${names.length}: ${names.join(", ")}`);
+    // v3.9.7: ProgressState, PromptFreshnessReason, PromptFreshness and
+    // ProgressSnapshot joined (63 → 67).
+    assert.equal(names.length, 67, `expected 67, got ${names.length}: ${names.join(", ")}`);
     assert.ok(names.includes("PromptArtifact"));
     assert.ok(names.includes("RoundOutcome"));
     assert.ok(names.includes("RoundContractProposal"));

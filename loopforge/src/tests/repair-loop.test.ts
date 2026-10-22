@@ -13,10 +13,17 @@ import { committedFeedbackRound } from "./_helpers.js";
 import { verifySelfEvaluation } from "../verification-gate.js";
 import { deriveFilesReconciliation } from "../files-reconciliation.js";
 import type { ObservationDelta } from "../evidence-provider.js";
-import { findingKey } from "../token-utils.js";
+import { deriveFindingId } from "../token-utils.js";
 
 function gitDelta(changedFiles: string[] | null): ObservationDelta {
-  return { providerId: "git", kind: "git", before: null, after: null, changedFiles };
+  return {
+    providerId: "git",
+    kind: "git",
+    before: null,
+    after: null,
+    changedFiles,
+    progress: "unknown",
+  };
 }
 
 function repairContext(loopId: string, entries: unknown[]) {
@@ -64,7 +71,7 @@ describe("v3.9.4 — the machine finding is the next prompt's repair fact", () =
     assert.match(broken.prompt, /unconfirmed: \[src\/c\.ts\]/);
     assert.equal(broken.prompt_artifact?.coverage.complete, true);
     assert.ok(broken.prompt_artifact?.coverage.active.some(
-      (entry) => entry.id === findingKey(flag) && entry.kind === "finding",
+      (entry) => entry.id === deriveFindingId(flag) && entry.kind === "finding",
     ));
 
     const fixed = compileLoop(
@@ -100,7 +107,7 @@ describe("v3.9.4 — the machine finding is the next prompt's repair fact", () =
     );
     assert.ok(response.prompt.includes("[ref: `verify`]"));
     assert.ok(response.prompt_artifact?.coverage.active.some(
-      (entry) => entry.id === findingKey(flag) && entry.kind === "finding",
+      (entry) => entry.id === deriveFindingId(flag) && entry.kind === "finding",
     ));
   });
 

@@ -193,9 +193,9 @@ export function deriveRecoveryDirective(input: {
   }
   const trigger = input.triggerEvaluation;
   if (trigger) {
-    for (const discovery of arrayStrings(trigger.discovered_constraints)) {
-      addDiscovery(discovery);
-    }
+    // A discovery from the rejected trigger attempt is NOT committed and must
+    // never become an active constraint through recovery. Only discoveries
+    // from committed abandoned rounds are preserved.
     for (const assumption of arrayStrings(trigger.wrong_assumptions)) {
       if (!wrongAssumptions.includes(assumption)) {
         wrongAssumptions.push(assumption.slice(0, 500));

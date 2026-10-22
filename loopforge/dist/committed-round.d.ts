@@ -75,6 +75,8 @@ export interface CommittedRoundView {
     readonly constraintViolations?: string[];
     readonly discoveredConstraints?: string[];
     readonly activeConstraints?: string[];
+    /** Effective retirements from the compile that produced this round. */
+    readonly compiledRetirements?: string[];
     readonly retractedConstraints?: string[];
     readonly emergedSubtasks?: string[];
     readonly subgoalUpdates?: SubGoalUpdate[];
@@ -210,40 +212,4 @@ export interface LegacyRound {
     envelope: "transaction" | "prompt_artifact" | "observation";
 }
 export declare function legacyTransactionRounds(entries: unknown[]): LegacyRound[];
-/** The ONE definition of machine Git motion for a single round.
- *
- *  Motion is a non-empty file list, a HEAD that moved across the round, or a
- *  HEAD that landed on the rollback's restore point — restoring the workspace
- *  IS that round's work, and would otherwise read as a round that did
- *  nothing. A clean worktree is not the same thing as no progress:
- *  commit-per-slice workflows leave no file delta even though HEAD advanced.
- *
- *  Observability stays the caller's concern: this answers "did this round
- *  move", never "could the round be observed". The restore-point arm compares
- *  short hashes, the rule `checkBacktrackGitHeadRestore` uses; the
- *  before/after arm compares the observations themselves. */
-export declare function gitMotionSignal(input: {
-    /** The round's derived Git change set; null means unknown. */
-    changedFiles: ReadonlyArray<string> | null;
-    headBefore?: string | null;
-    headAfter?: string | null;
-    restoreTargetHead?: string | null;
-}): boolean | null;
-/** Git HEAD as a machine observation exposes it, or null when it is silent. */
-export declare function observedGitHead(observation: MachineObservation | undefined): string | null;
-/** A round's own motion, from its derived Git deltas. A Git boundary that
- *  cannot be compared yields `null` unless HEAD movement or the restore point
- *  independently proves motion. Every Git delta participates: one moving
- *  provider is motion, one undecidable provider makes the aggregate unknown,
- *  and only an all-provider observed no-change is `false`. */
-export declare function inFlightGitMotion(deltas: ReadonlyArray<ObservationDelta>, restoreTargetHead?: string): boolean | null;
-/** The committed-round form of the same motion rule. Named separately so a
- *  reader can see that prompt freshness never passes an in-flight restore
- *  head (a committed round has no pending backtrack of its own). */
-export declare function committedRoundGitMotion(view: CommittedRoundView): boolean | null;
-/** Machine-observed git motion for the most recent contiguous window.
- * A clean worktree is not the same thing as no progress: commit-per-slice
- * workflows leave no file delta even though HEAD advanced. Unknown motion in
- * any round makes the window undecidable rather than falsely empty. */
-export declare function machineGitMotionSeries(rounds: ReadonlyArray<CommittedRoundView>, currentRound: number, lookback: number): boolean[] | null;
 //# sourceMappingURL=committed-round.d.ts.map

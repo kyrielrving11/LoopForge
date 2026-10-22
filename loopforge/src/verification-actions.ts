@@ -13,7 +13,7 @@ export const VERIFICATION_ACTIONS: Readonly<Record<string, string>> = {
   success_with_remaining_criteria:
     "Complete the remaining criteria before claiming success, or set success=false and report what remains.",
   success_without_verified_evidence:
-    "Back the success claim with machine-verifiable evidence: run tests or a required verification command and report the actual output. If you genuinely performed no work, provide execution_report and declare no_change_reason.",
+    "Back the success claim with machine-observable evidence (a passed after-phase command). no_change_reason is honored only when no enabled verification command is configured.",
   outcome_success_contradiction:
     "Reconcile the declared outcome with the success flag and resubmit an honest evaluation.",
   blocked_without_blocker:
@@ -25,9 +25,9 @@ export const VERIFICATION_ACTIONS: Readonly<Record<string, string>> = {
   duplicate_constraint_discovery:
     "Update the existing constraint entry instead of duplicating it.",
   recurring_violation:
-    "Explain why this violation keeps recurring and try a different approach — do not repeat the failed strategy.",
+    "The same violation was reported in three consecutive committed rounds. The finding clears when a committed evaluation no longer reports it, or when the round declares outcome blocked with a blocker. LoopForge does not prescribe a strategy.",
   retract_fresh_constraint:
-    "Justify the retraction explicitly, or restore the constraint.",
+    "The target was discovered in the previous round. Retraction is resolved against the active Agent-discovered set; the report remains in the committed record.",
   // 3.9.3: the reported-vs-observed fix is spelled out. The committed flag
   // already carries the `unreported` / `unconfirmed` path sets; this is the
   // action that turns the receipt's mismatch into a correct next report.
@@ -44,11 +44,11 @@ export const VERIFICATION_ACTIONS: Readonly<Record<string, string>> = {
   // v3.3 — Round Contract checks (and the three v3.3 checks that predated
   // this table entry and fell back to the generic action).
   verification_entrypoint_modified:
-    "Re-run the verification command on the changed entrypoint, or revert the entrypoint change and re-run.",
+    "Restore each entrypoint file to its round-start state (remove a file created this round), or use recovery/rollback so it is part of the starting state. Re-running on a rewritten entrypoint cannot verify this round.",
   test_files_modified:
     "Re-run the verification command after the test-file changes and report the fresh output.",
   round_scope_drift:
-    "Revert the out-of-scope file changes, or close the active contract and declare the extended scope in a new proposal. Scope drift is a machine fact and is not waivable by explanation.",
+    "Revert the out-of-scope changes, or declare outcome blocked and propose a successor contract whose scope covers EVERY drifted file. Scope drift is a machine fact and is not waivable by explanation.",
   // v3.8 — item model: claimed-but-unverified debt
   contract_items_unverified:
     "Run the bound command(s) for each claimed item so they are observed passing, or report the item as remaining (or declare outcome=\"blocked\").",

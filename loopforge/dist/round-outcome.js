@@ -1,0 +1,29 @@
+/** v3.9.7: the ONE round-outcome predicates.
+ *
+ *  Kept in a neutral module so contract closure, the contract walker, the
+ *  verification gate, the coordinator and the gate record all share the same
+ *  blocked definition without an import cycle through self-eval.
+ */
+/** v2.12: The effective round outcome — declared outcome wins, otherwise
+ *  derived from `success`. "partial" can only be declared explicitly. */
+export function effectiveOutcome(selfEval) {
+    if (selfEval.outcome === "success" || selfEval.outcome === "partial" ||
+        selfEval.outcome === "failed" || selfEval.outcome === "blocked") {
+        return selfEval.outcome;
+    }
+    return selfEval.success ? "success" : "failed";
+}
+/** v2.12: Whether the effective outcome is a success claim. */
+export function effectiveSuccess(selfEval) {
+    return effectiveOutcome(selfEval) === "success";
+}
+/** v3.8.3/v3.9.7: the ONE definition of "this round declares itself blocked".
+ *  A declared `outcome: "blocked"` and a `stop_reason` of `blocked` or
+ *  `needs_human_input` say the same thing. `effectiveOutcome` alone is NOT
+ *  this predicate: it reads `outcome` only. */
+export function declaresBlocked(selfEval) {
+    return selfEval.outcome === "blocked" ||
+        selfEval.stop_reason === "blocked" ||
+        selfEval.stop_reason === "needs_human_input";
+}
+//# sourceMappingURL=round-outcome.js.map

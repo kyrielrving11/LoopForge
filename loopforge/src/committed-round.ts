@@ -106,6 +106,8 @@ export interface CommittedRoundView {
   readonly constraintViolations?: string[];
   readonly discoveredConstraints?: string[];
   readonly activeConstraints?: string[];
+  /** Effective retirements from the compile that produced this round. */
+  readonly compiledRetirements?: string[];
   readonly retractedConstraints?: string[];
   readonly emergedSubtasks?: string[];
   readonly subgoalUpdates?: SubGoalUpdate[];
@@ -283,6 +285,7 @@ function viewFromSnapshot(input: {
     constraintViolations: strings(evaluation?.constraint_violations),
     discoveredConstraints: strings(evaluation?.discovered_constraints),
     activeConstraints: strings(lineage?.constraints_active),
+    compiledRetirements: strings(lineage?.constraints_retired),
     retractedConstraints: strings(evaluation?.retracted_constraints),
     emergedSubtasks: strings(evaluation?.emerged_subtasks),
     subgoalUpdates: subGoalUpdates(evaluation?.subgoal_updates),
@@ -815,134 +818,4 @@ export function legacyTransactionRounds(entries: unknown[]): LegacyRound[] {
     }
   }
   return out.sort((a, b) => a.round - b.round);
-}
-
-/** The ONE definition of machine Git motion for a single round.
- *
- *  Motion is a non-empty file list, a HEAD that moved across the round, or a
- *  HEAD that landed on the rollback's restore point — restoring the workspace
- *  IS that round's work, and would otherwise read as a round that did
- *  nothing. A clean worktree is not the same thing as no progress:
- *  commit-per-slice workflows leave no file delta even though HEAD advanced.
- *
- *  Observability stays the caller's concern: this answers "did this round
- *  move", never "could the round be observed". The restore-point arm compares
- *  short hashes, the rule `checkBacktrackGitHeadRestore` uses; the
- *  before/after arm compares the observations themselves. */
-export function gitMotionSignal(input: {
-  /** The round's derived Git change set; null means unknown. */
-  changedFiles: ReadonlyArray<string> | null;
-  headBefore?: string | null;
-  headAfter?: string | null;
-  restoreTargetHead?: string | null;
-}): boolean | null {
-  if (input.changedFiles !== null && input.changedFiles.length > 0) return true;
-  const { headBefore, headAfter, restoreTargetHead } = input;
-  if (headAfter && headBefore && headAfter !== headBefore) return true;
-  if (headAfter && restoreTargetHead &&
-      headAfter.slice(0, 12) === restoreTargetHead.slice(0, 12)) return true;
-  if (input.changedFiles === null) return null;
-  // An observed empty change set is no motion only when both HEADs are known;
-  // otherwise a commit-only slice could still have moved HEAD.
-  if (!headBefore || !headAfter) return null;
-  return false;
-}
-
-/** Git HEAD as a machine observation exposes it, or null when it is silent. */
-export function observedGitHead(observation: MachineObservation | undefined): string | null {
-  return observation && isRecord(observation.data) &&
-      typeof observation.data.head === "string" && observation.data.head
-    ? observation.data.head
-    : null;
-}
-
-function observedGitObservation(
-  observation: MachineObservation | null | undefined,
-): MachineObservation | null {
-  return observation && observation.kind === "git" && observation.status === "observed"
-    ? observation
-    : null;
-}
-
-function observedGitIn(
-  observations: ReadonlyArray<MachineObservation>,
-): MachineObservation | null {
-  return observations.find((observation) =>
-    observation.kind === "git" && observation.status === "observed") ?? null;
-}
-
-/** A round's own motion, from its derived Git deltas. A Git boundary that
- *  cannot be compared yields `null` unless HEAD movement or the restore point
- *  independently proves motion. Every Git delta participates: one moving
- *  provider is motion, one undecidable provider makes the aggregate unknown,
- *  and only an all-provider observed no-change is `false`. */
-export function inFlightGitMotion(
-  deltas: ReadonlyArray<ObservationDelta>,
-  restoreTargetHead?: string,
-): boolean | null {
-  const gitDeltas = deltas.filter((delta) => delta.kind === "git");
-  if (gitDeltas.length === 0) return null;
-  let sawUnknown = false;
-  for (const git of gitDeltas) {
-    const before = observedGitObservation(git.before);
-    const after = observedGitObservation(git.after);
-    const signal = gitMotionSignal({
-      changedFiles: git.changedFiles,
-      headBefore: observedGitHead(before ?? undefined),
-      headAfter: observedGitHead(after ?? undefined),
-      restoreTargetHead: restoreTargetHead ?? null,
-    });
-    if (signal === true) return true;
-    if (signal === null) sawUnknown = true;
-  }
-  return sawUnknown ? null : false;
-}
-
-/** The committed-round form of the same motion rule. Named separately so a
- *  reader can see that prompt freshness never passes an in-flight restore
- *  head (a committed round has no pending backtrack of its own). */
-export function committedRoundGitMotion(view: CommittedRoundView): boolean | null {
-  return inFlightGitMotion(view.observationDelta);
-}
-
-/** Machine-observed git motion for the most recent contiguous window.
- * A clean worktree is not the same thing as no progress: commit-per-slice
- * workflows leave no file delta even though HEAD advanced. Unknown motion in
- * any round makes the window undecidable rather than falsely empty. */
-export function machineGitMotionSeries(
-  rounds: ReadonlyArray<CommittedRoundView>,
-  currentRound: number,
-  lookback: number,
-): boolean[] | null {
-  if (!Number.isInteger(lookback) || lookback < 1 || currentRound <= lookback) return null;
-  const byRound = new Map<number, CommittedRoundView>();
-  for (const round of rounds) {
-    if (round.round < 1 || round.round >= currentRound) continue;
-    byRound.set(round.round, round);
-  }
-  const recent: CommittedRoundView[] = [];
-  for (let number = currentRound - lookback; number < currentRound; number++) {
-    const round = byRound.get(number);
-    if (!round) return null;
-    if (!round.observationDelta.some((delta) => delta.kind === "git")) return null;
-    recent.push(round);
-  }
-  const motion: boolean[] = [];
-  for (const round of recent) {
-    const git = round.observationDelta.find((delta) => delta.kind === "git")!;
-    // The round's baseline: its own before observation, else the previous
-    // round's after observation. Older Git observations do not carry a HEAD
-    // field; their change set is still a valid motion signal.
-    const baseline = observedGitObservation(git.before)
-      ?? observedGitIn(byRound.get(round.round - 1)?.afterEvidence ?? []);
-    const after = observedGitObservation(git.after);
-    const signal = gitMotionSignal({
-      changedFiles: git.changedFiles,
-      headBefore: observedGitHead(baseline ?? undefined),
-      headAfter: observedGitHead(after ?? undefined),
-    });
-    if (signal === null) return null;
-    motion.push(signal);
-  }
-  return motion;
 }

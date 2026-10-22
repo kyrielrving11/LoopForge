@@ -2,7 +2,8 @@
 
 import type { RoundProcessResult } from "./round-coordinator.js";
 import type { VaultEntry } from "./loop-store.js";
-import { observedGitHead, readOnlyRounds } from "./committed-round.js";
+import { readOnlyRounds } from "./committed-round.js";
+import { observedGitHead } from "./git-motion.js";
 import { deriveFieldAccounting } from "./field-accounting.js";
 import { deriveFilesReconciliation } from "./files-reconciliation.js";
 import { gitDeltaState } from "./evidence-provider.js";

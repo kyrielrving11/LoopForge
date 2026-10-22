@@ -14,6 +14,7 @@ import { createReadStream, lstatSync, readFileSync, readlinkSync, realpathSync, 
 import { spawn, execFile, } from "node:child_process";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { GIT_OBSERVATION_SCHEMA_VERSION } from "./protocol.js";
+import { gitMotionSignal, observedGitHead, } from "./git-motion.js";
 import { containInWorkspace } from "./workspace.js";
 import { commandConfigHash, deriveConfiguredCapability, getPolicy, resolveStateDirectory } from "./policy.js";
 import { logEvent } from "./observability.js";
@@ -207,6 +208,71 @@ function syntheticObservation(providerId, kind, phase, startedAt, status, detail
         data: { detail },
     };
 }
+const PROGRESS_FINGERPRINT_RE = /^[a-f0-9]{64}$/;
+function isValidProgressSnapshot(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value))
+        return false;
+    const snapshot = value;
+    return snapshot.schemaVersion === 1 &&
+        typeof snapshot.fingerprint === "string" &&
+        PROGRESS_FINGERPRINT_RE.test(snapshot.fingerprint);
+}
+function progressErrorObservation(provider, phase, startedAt, detail) {
+    return {
+        schemaVersion: 1,
+        providerId: provider.name,
+        kind: "custom",
+        phase,
+        startedAt,
+        finishedAt: Date.now(),
+        status: "error",
+        files: [],
+        data: { detail, progressCapable: true, progress: null },
+    };
+}
+/** Persist the provider's progress capability on every observation and reject
+ *  a contract violation instead of silently reading it as "no progress". */
+function normalizeProgressObservation(provider, observation, phase, startedAt) {
+    if (!provider.progressCapable) {
+        if (observation.kind === "custom" &&
+            (observation.data.progressCapable === true ||
+                observation.data.progress !== undefined)) {
+            return {
+                schemaVersion: 1,
+                providerId: provider.name,
+                kind: "custom",
+                phase,
+                startedAt,
+                finishedAt: Date.now(),
+                status: "error",
+                files: [],
+                data: {
+                    detail: "provider emitted progress data without declaring progressCapable",
+                    progressCapable: true,
+                    progress: null,
+                },
+            };
+        }
+        return observation;
+    }
+    if (provider.kind !== "custom" || observation.kind !== "custom") {
+        return progressErrorObservation(provider, phase, startedAt, "progressCapable is only supported for custom observations");
+    }
+    if (observation.status === "observed") {
+        const snapshot = observation.data.progress;
+        if (!isValidProgressSnapshot(snapshot)) {
+            return progressErrorObservation(provider, phase, startedAt, "progress-capable provider did not emit a valid progress snapshot");
+        }
+        return {
+            ...observation,
+            data: { ...observation.data, progressCapable: true, progress: snapshot },
+        };
+    }
+    return {
+        ...observation,
+        data: { ...observation.data, progressCapable: true, progress: null },
+    };
+}
 /** Collects observations from all configured providers (always async).
  *
  * v3.8: every configured provider produces exactly one observation per
@@ -273,19 +339,21 @@ export class EvidenceCollector {
                 if (timedOut) {
                     policyMetrics.recordEvidence(provider.name, "timeout", Date.now() - startedAt, options.loopId);
                     logEvent("evidence_provider_timeout", { provider: provider.name, timeoutMs });
-                    return syntheticObservation(provider.name, provider.kind, phase, startedAt, "timeout", `provider exceeded ${timeoutMs}ms`);
+                    return normalizeProgressObservation(provider, syntheticObservation(provider.name, provider.kind, phase, startedAt, "timeout", `provider exceeded ${timeoutMs}ms`), phase, startedAt);
                 }
                 if (!observation) {
                     policyMetrics.recordEvidence(provider.name, "unavailable", Date.now() - startedAt, options.loopId);
-                    return syntheticObservation(provider.name, provider.kind, phase, startedAt, "unavailable", "provider reported no observation");
+                    const unavailable = syntheticObservation(provider.name, provider.kind, phase, startedAt, "unavailable", "provider reported no observation");
+                    return normalizeProgressObservation(provider, unavailable, phase, startedAt);
                 }
-                policyMetrics.recordEvidence(provider.name, observation.status === "timeout" ? "timeout" : "available", Date.now() - startedAt, options.loopId);
-                return observation;
+                const normalized = normalizeProgressObservation(provider, observation, phase, startedAt);
+                policyMetrics.recordEvidence(provider.name, normalized.status === "timeout" ? "timeout" : "available", Date.now() - startedAt, options.loopId);
+                return normalized;
             }
             catch (error) {
                 policyMetrics.recordEvidence(provider.name, "failure", Date.now() - startedAt, options.loopId);
                 logEvent("evidence_provider_error", { provider: provider.name, error: String(error) });
-                return syntheticObservation(provider.name, provider.kind, phase, startedAt, "error", String(error));
+                return normalizeProgressObservation(provider, syntheticObservation(provider.name, provider.kind, phase, startedAt, "error", String(error)), phase, startedAt);
             }
             finally {
                 if (timer)
@@ -998,6 +1066,59 @@ export class GitEvidenceProvider {
     }
 }
 registerEvidenceProvider("git", () => new GitEvidenceProvider());
+function customProgressCapable(observation) {
+    return observation?.kind === "custom" &&
+        observation.data.progressCapable === true;
+}
+function customProgress(observation) {
+    if (observation?.kind !== "custom")
+        return null;
+    const value = observation.data.progress;
+    if (!value || typeof value !== "object" || Array.isArray(value))
+        return null;
+    if (value.schemaVersion !== 1 || typeof value.fingerprint !== "string")
+        return null;
+    return value;
+}
+function deltaProgress(observation, beforeObservation, afterObservation, changedFiles, ambiguous) {
+    if (ambiguous)
+        return "unknown";
+    if (observation.kind === "git") {
+        if (beforeObservation?.kind !== "git" || afterObservation?.kind !== "git") {
+            return "unknown";
+        }
+        if (beforeObservation.status !== "observed" ||
+            afterObservation.status !== "observed" ||
+            changedFiles === null) {
+            return "unknown";
+        }
+        const signal = gitMotionSignal({
+            changedFiles,
+            headBefore: observedGitHead(beforeObservation),
+            headAfter: observedGitHead(afterObservation),
+        });
+        return signal === null ? "unknown" : signal ? "changed" : "unchanged";
+    }
+    if (observation.kind === "custom") {
+        const beforeCapable = customProgressCapable(beforeObservation);
+        const afterCapable = customProgressCapable(afterObservation);
+        if (!beforeCapable && !afterCapable)
+            return "not_applicable";
+        if (beforeObservation?.status !== "observed" ||
+            afterObservation?.status !== "observed" ||
+            !beforeCapable || !afterCapable) {
+            return "unknown";
+        }
+        const beforeSnapshot = customProgress(beforeObservation);
+        const afterSnapshot = customProgress(afterObservation);
+        if (!beforeSnapshot || !afterSnapshot)
+            return "unknown";
+        return beforeSnapshot.fingerprint === afterSnapshot.fingerprint
+            ? "unchanged"
+            : "changed";
+    }
+    return "not_applicable";
+}
 const DELTA_KIND_ORDER = {
     git: 0,
     command: 1,
@@ -1076,6 +1197,7 @@ export function deriveObservationDeltas(before, after) {
             before: beforeObservation,
             after: afterObservation,
             changedFiles,
+            progress: deltaProgress(observation, beforeObservation, afterObservation, changedFiles, ambiguous),
         };
     });
     return deltas.sort((left, right) => DELTA_KIND_ORDER[left.kind] - DELTA_KIND_ORDER[right.kind] ||

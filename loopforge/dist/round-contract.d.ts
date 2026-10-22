@@ -77,8 +77,10 @@ export declare function deriveRoundContractView(input: {
     round: number;
     report: ExecutionReport | null;
     deltas: ReadonlyArray<ObservationDelta>;
-    /** The round's committed/effective outcome — `blocked` closes its contract. */
-    outcome: string | null;
+    /** The round's ONE blocked declaration — a blocked round closes its
+     *  contract. Prefer the explicit boolean; `outcome` is the legacy shape. */
+    blocked?: boolean;
+    outcome?: string | null;
     commands: ReadonlyArray<CommandEvidencePolicy>;
 }): {
     contract: ActiveContractView | null;

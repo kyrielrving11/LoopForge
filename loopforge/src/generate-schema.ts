@@ -302,6 +302,12 @@ function convertTypeNode(
     if (ts.isNumericLiteral(literal)) {
       return { type: "number" };
     }
+    if (literal.kind === ts.SyntaxKind.TrueKeyword) {
+      return { type: "boolean", const: true };
+    }
+    if (literal.kind === ts.SyntaxKind.FalseKeyword) {
+      return { type: "boolean", const: false };
+    }
   }
 
   // Parenthesized type: (T)

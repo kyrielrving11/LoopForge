@@ -60,9 +60,8 @@ const GUIDES = [
         purpose: "What was actually done this round, not what was attempted.",
         when: "Every round.",
         nature: "report",
-        downstream: "Committed record, rolling summary, state file, audit/replay/explain, " +
-            "and backtrack failed-approach facts — never machine evidence or a " +
-            "current-prompt narrative.",
+        downstream: "Committed record, state file, audit/replay/explain, and backtrack " +
+            "failed-approach facts — never machine evidence or a current-prompt narrative.",
         toolDescription: "Specific, actionable summary of what was DONE this round — not what was " +
             "attempted. Do not restate the plan.",
         core: true,
@@ -173,7 +172,9 @@ const GUIDES = [
         decision: "You discovered a limit later rounds must respect",
         compact: true,
         promptRank: 20,
-        downstream: "Merged into the active constraint set by the compiler (bounded per round).",
+        downstream: "Merged into the active constraint set by the compiler; entries over " +
+            "max_discovered_constraints_per_round are diagnosed and dropped at the " +
+            "submission boundary.",
         toolDescription: "New constraints that must apply to later rounds. This is the ONLY " +
             "promotion channel for a worker-discovered constraint: a worker result " +
             "stays a report until the main agent states the constraint here.",
@@ -198,20 +199,24 @@ const GUIDES = [
         purpose: "A deeper or more accurate understanding of the objective.",
         when: "When this round changed your understanding of what the task needs.",
         nature: "report",
-        downstream: "Appended to the objective with a version bump; never replaces the original objective.",
-        toolDescription: "Optional. A refinement or deepening of the task objective based on this " +
-            "round's discoveries. Appended, never substituted for the original goal.",
+        downstream: "Report only; never modifies the operator objective, criteria, gates, " +
+            "hard constraints, or an objective version. Preserved in the committed " +
+            "evaluation and visible in the receipt/replay/audit.",
+        toolDescription: "Optional. A refinement or deepening of your understanding. Report only: " +
+            "LoopForge never rewrites the operator objective or criteria from it.",
     },
     {
         path: "retracted_constraints",
         purpose: "Existing constraints that are no longer correct or relevant.",
         when: "When a prior constraint is proven wrong or obsolete.",
         nature: "report",
-        downstream: "Agent-discovered constraints only; operator criteria/hard constraints " +
-            "are immutable. Discovered retractions use the configured retirement window.",
-        toolDescription: "Optional. Agent-discovered constraints that are no longer valid, by " +
-            "c-XXXXXXXX id or exact text. Operator criteria/hard constraints cannot " +
-            "be retracted. Omit when none.",
+        downstream: "Only active Agent-discovered constraints (including recovery-preserved " +
+            "discoveries) are retractable, by c-XXXXXXXX id or normalized-exact text. " +
+            "Operator criteria/hard constraints and plan constraints are rejected. " +
+            "Unknown/inactive targets are no-ops with a diagnostic.",
+        toolDescription: "Optional. Active Agent-discovered constraints that are no longer valid, " +
+            "by c-XXXXXXXX id or exact text. Operator criteria/hard constraints and " +
+            "plan constraints cannot be retracted. Omit when none.",
     },
     {
         path: "round_contract",
@@ -261,34 +266,35 @@ const GUIDES = [
         decision: "You know what the next prompt needs",
         compact: true,
         promptRank: 70,
-        downstream: "Matched exactly against state items; applied to the NEXT round's prompt " +
-            "only after this round commits. If that prompt is L0 it is ignored. " +
-            "Unmatched entries have no effect; an uncommitted attempt's requests " +
-            "never steer a later prompt.",
-        toolDescription: "Optional. Information needs for the NEXT prompt. emphasize entries are " +
-            "matched by stable id or normalized-exact text; a paraphrase matches " +
-            "nothing. confusion_points are echoed at the top. They are applied to the " +
-            "next round's prompt; if that prompt is L0 they are ignored. This never " +
-            "becomes long-term knowledge.",
+        downstream: "Matched exactly against current governance objects; applied to the NEXT " +
+            "round's prompt only after this round commits. If that prompt is L0 it " +
+            "is ignored. Unmatched/closed/historical entries have no effect; an " +
+            "uncommitted attempt's requests never steer a later prompt.",
+        toolDescription: "Optional. Information needs for the NEXT prompt. emphasize accepts a " +
+            "real stable id (c-/cr-/rc-/rci-/sg-/f-) or the reserved id recovery, " +
+            "or normalized-exact text; a paraphrase matches nothing. Closed or " +
+            "historical objects never resurrect. confusion_points are echoed at the " +
+            "top. They are applied to the next round's prompt; if that prompt is L0 " +
+            "they are ignored. This never becomes long-term knowledge.",
     },
     {
         path: "compression_checkpoint",
         purpose: "Mark a meaningful work boundary.",
-        when: "At a phase/subtask boundary worth a full-state milestone.",
+        when: "At a subtask boundary that warrants an L2 rehydration.",
         nature: "report",
         decision: "This round reached a real phase boundary; pair with checkpoint_label",
         compact: true,
         promptRank: 60,
-        downstream: "Creates an agent-declared milestone and forces an L2 rehydration boundary.",
-        toolDescription: "Optional. true at a subtask boundary to create a recoverable milestone " +
-            "and force a full-state checkpoint. Pair with checkpoint_label.",
+        downstream: "Forces an L2 rehydration boundary. It creates no milestone or phase narrative.",
+        toolDescription: "Optional. true at a subtask boundary to force an L2 rehydration boundary. " +
+            "Pair with checkpoint_label.",
     },
     {
         path: "checkpoint_label",
         purpose: "A human-readable label for the checkpoint.",
         when: "Only together with compression_checkpoint=true.",
         nature: "report",
-        downstream: "Milestone heading in later prompts and the state file.",
+        downstream: "Stored on the committed report; it does not create a later prompt heading.",
         toolDescription: "Optional. Short label for the checkpoint (for example " +
             "'core-model-complete'). Meaningful only when compression_checkpoint=true.",
     },
@@ -327,7 +333,7 @@ const GUIDES = [
         purpose: "A concrete description of what blocks the work.",
         when: "Required when outcome=blocked; useful with stop_reason=blocked.",
         nature: "report",
-        downstream: "Stop decision, handoff open risks, and gate classification when enabled.",
+        downstream: "Stop decision, blocked-contract closure, and gate classification when enabled.",
         toolDescription: "Optional. A flat blocker description, required when outcome=blocked. " +
             "State what cannot proceed and why; do not use it as a substitute for " +
             "`success=false`.",
@@ -747,7 +753,9 @@ export function deriveSubmissionGuidance(session, options) {
     const commandNames = capability.commands
         .filter((command) => command.enabled)
         .map((command) => command.commandId);
-    const level = session.roundSnapshot?.promptArtifact?.level ?? "l2";
+    // Never invent a prompt level. If no held artifact is observable, the
+    // level is unknown; the prompt itself is derived from current facts.
+    const level = session.roundSnapshot?.promptArtifact?.level ?? null;
     const subGoals = deriveSubGoals({
         loopId: session.loopId,
         currentRound: session.currentRound,
@@ -795,6 +803,7 @@ export function deriveSubmissionGuidance(session, options) {
             ? {
                 id: activeContract.id,
                 ...(activeContract.work_item ? { work_item: activeContract.work_item } : {}),
+                scope: [...activeContract.scope],
                 declared_at_round: activeContract.declared_at_round,
                 items: activeContract.items.map((item) => ({
                     id: item.id,

@@ -1,7 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
-  committedRoundGitMotion,
   decodeCommittedRecord,
   decodeCommittedRound,
   decodeMergedRound,
@@ -12,6 +11,7 @@ import {
   readOnlyRounds,
   roundResultFromCommittedRound,
 } from "../committed-round.js";
+import { committedRoundGitMotion } from "../progress.js";
 import type { MachineObservation } from "../protocol.js";
 import { committedBacktrackRound, committedFeedbackRound, mergedLineageRound, withTransaction } from "./_helpers.js";
 import { claimedMetCriteria } from "../self-eval.js";

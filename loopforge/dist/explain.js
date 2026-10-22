@@ -5,7 +5,8 @@
  * the committed enforcement result. It never rebuilds history and never
  * writes. Every fact it prints is one the runtime already derived.
  */
-import { observedGitHead, readOnlyRollbacks, readOnlyRounds, } from "./committed-round.js";
+import { readOnlyRollbacks, readOnlyRounds, } from "./committed-round.js";
+import { observedGitHead } from "./git-motion.js";
 import { deriveCommittedSubmissionView } from "./submission-receipt.js";
 import { deriveActiveRoundContract, deriveRoundContractView } from "./round-contract.js";
 import { getPolicy } from "./policy.js";

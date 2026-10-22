@@ -293,12 +293,12 @@ const TOOL_BASE_SCHEMAS = [
                                 emphasize: {
                                     type: "array",
                                     items: { type: "string" },
-                                    description: "Constraints, discoveries, or decisions that need emphasis in the next prompt. Each entry is matched against active state items by STABLE ID (c-/cr-/sg-XXXXXXXX) or by exact text after normalization — a paraphrase matches nothing and renders nothing. Matched items appear in a 'Critical Context' section. Max 5 entries. Pure reordering — no token overhead.",
+                                    description: "Current governance objects to emphasize in the next prompt. Match by real stable id (c-/cr-/rc-/rci-/sg-/f-XXXXXXXX), the reserved id 'recovery', or normalized-exact text — a paraphrase matches nothing. Closed/historical objects never resurrect. Matched objects move into Critical Context; cap is L1 3 / L2 5. Pure reordering — no duplicated content.",
                                 },
                                 confusion_points: {
                                     type: "array",
                                     items: { type: "string" },
-                                    description: "Things you're confused about. Rendered at the TOP of the next prompt before the objective. Max 3 entries, each ≤ 200 chars recommended. Be specific — 'I don't understand why milestone 3 is marked complete when phase 2 appears unfinished.'",
+                                    description: "Things you're confused about. Echoed at the TOP of the next prompt as your own notes, not as LoopForge findings; they are never matched against state. Max 3 entries, each ≤ 200 chars recommended.",
                                 },
                             },
                         },

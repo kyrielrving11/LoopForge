@@ -18,6 +18,7 @@
  */
 import type { VaultEntry } from "./loop-store.js";
 import type { EnforcementResult, SelfEvaluation, VerificationFlag, VerificationResult } from "./protocol.js";
+import { type RoundProgress } from "./progress.js";
 /** Scan backwards from currentRound to find the most recent clean round.
  *  Collects discovered_constraints from skipped rounds along the way.
  *  Returns null when no clean round is found within maxDepth. */
@@ -75,23 +76,20 @@ lastRejectionCheck?: string,
  *  here: neither the observations nor the active contract reach this
  *  function. See `enforceScopeDrift`. */
 scopeDriftWaiver?: boolean,
-/** v3.9: the submitted round's own Git motion — see `inFlightGitMotion`.
- *  null when no Git observation was made. */
-inFlightMotion?: boolean | null): EnforcementResult;
-/** Build a rejection prompt for the agent.
+/** v3.9.7: the submitted round's provider-neutral progress. */
+inFlightProgress?: RoundProgress): EnforcementResult;
+/** Build the protected retry notice for the agent.
  *
- *  The prompt clearly states the round was rejected, why, what the agent
- *  must fix, and that the agent must redo the SAME round (not advance).
- *
- *  v2.7: Accepts verificationFlags to render a diagnostic "Evidence Gap"
- *  section. Each error/warn flag becomes a concrete claim-vs-evidence
- *  mismatch statement so the agent knows exactly what to correct rather
- *  than retrying blindly.
+ *  v3.9.7: this is a protocol fact, not a second task narrative. It carries
+ *  the enforcement reason, the required fix and the same-round instruction.
+ *  Findings are rendered exactly once by the mandatory Verification Gate; the
+ *  original task/contract is rendered by Objective/Current Task. The notice
+ *  never promises that an explanation will re-evaluate a machine fact.
  *
  * @param currentRound      The round number that was rejected (NOT incremented).
- * @param task              The original loop task description.
+ * @param _task             Kept for the public signature; not rendered here.
  * @param enforceResult     The enforcement decision with reason and fix instructions.
- * @param verificationFlags The verification gate's findings for this round.
- *                          Used to build the Evidence Gap section. */
-export declare function buildRejectionPrompt(currentRound: number, task: string, enforceResult: EnforcementResult, verificationFlags?: VerificationFlag[]): string;
+ * @param _verificationFlags Kept for the public signature; findings render in
+ *                          the mandatory Verification Gate. */
+export declare function buildRejectionPrompt(currentRound: number, _task: string, enforceResult: EnforcementResult, _verificationFlags?: VerificationFlag[]): string;
 //# sourceMappingURL=enforcement-gate.d.ts.map

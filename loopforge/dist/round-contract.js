@@ -22,6 +22,7 @@
 import { canonicalContractText, deriveContractId, deriveContractItemIds, } from "./token-utils.js";
 import { deriveContractItemStatuses } from "./contract-items.js";
 import { getPolicy } from "./policy.js";
+import { declaresBlocked } from "./round-outcome.js";
 /** v3.8: Build the derived active contract from a committed proposal plus the
  *  binding the runtime stamped when that round committed. */
 export function activateContract(proposal, declaredAtRound, binding, loopId) {
@@ -62,8 +63,11 @@ export function deriveActiveRoundContract(rounds, commands = getPolicy().evidenc
         }
         // A blocked round closes the active contract (existing semantics), and a
         // fully verified one does too. Order matters: blocked is checked first,
-        // mirroring the historical walker.
-        if (round.outcome === "blocked") {
+        // using the ONE blocked predicate (outcome OR stop_reason).
+        const blocked = round.evaluation
+            ? declaresBlocked(round.evaluation)
+            : round.outcome === "blocked";
+        if (blocked) {
             active = activate();
             continue;
         }
@@ -119,7 +123,7 @@ export function deriveRoundContractView(input) {
             currentRound: input.round,
             currentReport: input.report,
             currentDeltas: input.deltas,
-            currentOutcome: input.outcome,
+            currentBlocked: input.blocked ?? input.outcome === "blocked",
             commands: input.commands,
         }),
     };

@@ -25,9 +25,11 @@ import type {
   VerificationResult,
 } from "./protocol.js";
 import { makeEnforcementResult } from "./protocol.js";
-import { machineProgressSeries, CHECK_SUCCESS_WITH_REMAINING_CRITERIA, CHECK_RECURRING_VIOLATION, CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED, CHECK_REQUIRED_COMMAND_FAILED, CHECK_COMMAND_EVIDENCE_MISMATCH, CHECK_OUTCOME_SUCCESS_CONTRADICTION, CHECK_VERIFICATION_ENTRYPOINT_MODIFIED, CHECK_ROUND_SCOPE_DRIFT, CHECK_CONTRACT_ITEMS_UNVERIFIED, CHECK_USER_GATE_UNRESOLVED } from "./verification-gate.js";
+import { CHECK_SUCCESS_WITH_REMAINING_CRITERIA, CHECK_RECURRING_VIOLATION, CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED, CHECK_REQUIRED_COMMAND_FAILED, CHECK_COMMAND_EVIDENCE_MISMATCH, CHECK_OUTCOME_SUCCESS_CONTRADICTION, CHECK_VERIFICATION_ENTRYPOINT_MODIFIED, CHECK_ROUND_SCOPE_DRIFT, CHECK_CONTRACT_ITEMS_UNVERIFIED, CHECK_USER_GATE_UNRESOLVED } from "./verification-gate.js";
+import { deriveProgressWindow, type RoundProgress } from "./progress.js";
+import { declaresBlocked } from "./round-outcome.js";
 import { getPolicy } from "./policy.js";
-import { isRecord, entryRound } from "./token-utils.js";
+import { isRecord } from "./token-utils.js";
 import type { RoundProcessResult } from "./round-coordinator.js";
 import {
   derivationRounds,
@@ -279,10 +281,11 @@ function enforceRecurringViolation(
     action: "reject",
     reason: flag.detail,
     fix_instructions:
-      "The same constraint violation has appeared in 3 consecutive rounds. " +
-      "You must: (a) explain WHY this violation keeps occurring, " +
-      "and (b) propose a DIFFERENT approach than what you used in the last 3 rounds. " +
-      "Do NOT retry the same strategy — it has failed 3 times.",
+      "The same constraint violation has been reported in three consecutive " +
+      "committed rounds. This is a record of your own reports. The finding " +
+      "clears when a committed evaluation no longer reports the same " +
+      "violation, or when you declare outcome blocked with a blocker. " +
+      "LoopForge does not prescribe a technique or decomposition.",
     check: "recurring_violation",
   });
 }
@@ -378,7 +381,8 @@ function enforceVerificationEntrypointTampered(
       action: "terminate",
       reason:
         "The verification command's entrypoint was changed in the round it " +
-        "verified and was not restored after the rollback.",
+        "verified and was not restored after being asked once. Backtrack is " +
+        "disabled or already committed for this round.",
       check,
     });
   }
@@ -415,8 +419,8 @@ function enforceVerificationEntrypointTampered(
  *  occurrence, which is exactly what the L4 rule forbids.
  *
  *  The streak is derived from COMMITTED round flags, so it survives restart
- *  and cannot be moved by an agent self-report. Git motion does not excuse
- *  it: churning code without verifying is exactly what this row catches. */
+ *  and cannot be moved by an agent self-report. Machine progress does not
+ *  excuse it: churning code without verifying is exactly what this row catches. */
 function enforceContractItemsUnverified(
   flags: VerificationFlag[],
   currentRound: number,
@@ -430,10 +434,9 @@ function enforceContractItemsUnverified(
   if (!current) return null;
 
   let streak = 1;
+  const window = derivationRounds(vaultEntries, currentRound);
   for (let round = currentRound - 1; round >= 1; round--) {
-    const entry = vaultEntries.find((item) =>
-      entryRound(item) === round && String(item.task_id ?? "").endsWith(":feedback"));
-    const committed = entry ? decodeCommittedRound(entry) : null;
+    const committed = window.find((view) => view.round === round);
     const carried = committed?.verificationFlags.some(
       (flag) => flag.check === CHECK_CONTRACT_ITEMS_UNVERIFIED,
     );
@@ -608,57 +611,48 @@ function enforceBacktrackNotRestored(
   });
 }
 
-// v3.7: the flatline tier is an internal diagnostic of the single progress
-// evaluator — both tiers emit the progress_stall enforcement check id.
-type StallTier = "progress_stall" | "progress_flatline";
-
 interface StallWindowVerdict {
-  tier: StallTier;
   detail: string;
   window: number;
 }
 
-/** Shared observation pipeline for the progress evaluator (stall window,
- *  flatline tier). Only observable machine history can establish a stall. */
+/** The ONE progress-stall predicate. A stall requires machine proof that both
+ *  the committed window AND the submitted round are unchanged; unknown and
+ *  not_applicable never produce a verdict. */
 function evaluateStallWindow(
-  tier: StallTier,
   currentRound: number,
   vaultEntries: VaultEntry[],
   /** v3.8.1: the round's success is machine-verified (`deriveEvidenceStatus`).
-   *  A verified round is finishing work; a motion window cannot outvote it. */
+   *  A verified round is finishing work; a progress window cannot outvote it. */
   machineBackedSuccess: boolean,
-  /** v3.9: the submitted round's own Git motion (`inFlightGitMotion`).
-   *  null = no Git observation, so no excuse. */
-  inFlightMotion: boolean | null,
+  /** The submitted round's own provider-neutral progress. */
+  inFlightProgress: RoundProgress,
 ): StallWindowVerdict | null {
-  // A round the machine verified is not churn, whatever the window says. This
-  // is the machine-backed replacement for the old self-reported `>= 0.95`
-  // near-completion guard: it lets a loop FINISH (a closing round that only
-  // runs the verification and declares success changes no files).
   if (machineBackedSuccess) return null;
-  // The round being submitted is part of the recent work: when IT shows
-  // machine motion, no window of older rounds can call the loop stalled.
-  // Without this the abandoned window that triggered a rollback judges every
-  // redo forever — the redo's work is in flight and cannot be in that window.
-  // This is the machine replacement for the removed self-reported progress
-  // injection; a round that moves nothing still reaches the verdict and its
-  // deadlock guard.
-  if (inFlightMotion === true) return null;
-  const window = tier === "progress_stall"
-    ? 3
-    : Math.max(1, getPolicy().engine.stall_lookback_rounds);
+  if (inFlightProgress.state === "changed") return null;
+  // "Unknown never stalls": a submitted round whose progress cannot be
+  // proven unchanged gets no verdict.
+  if (inFlightProgress.state !== "unchanged") return null;
+
+  const window = Math.max(1, getPolicy().engine.stall_lookback_rounds);
   if (currentRound < window) return null;
-  const machine = machineProgressSeries(vaultEntries, currentRound, window);
-  if (machine === null || machine.some((value) => value)) return null;
-  const detail = tier === "progress_stall"
-    ? `no machine-observed changes in the last ${window} rounds`
-    : `no machine-observed changes for ${window} consecutive rounds`;
-  return { tier, detail, window };
+  const progress = deriveProgressWindow(
+    derivationRounds(vaultEntries, currentRound),
+    currentRound,
+    window,
+  );
+  if (progress.state !== "unchanged") return null;
+  const providers = progress.providers.length > 0
+    ? ` (providers: ${progress.providers.join(", ")})`
+    : "";
+  return {
+    detail: `no machine-observed progress in the last ${window} committed rounds${providers}`,
+    window,
+  };
 }
 
-/** Shared progress escalation and backtrack deadlock guard (v3.7: one
- * evaluator). The flatline tier keeps its steeper ladder while
- * using the same mechanics — the tier is an internal diagnostic only. */
+/** One progress disposition ladder. The reason states the machine fact; the
+ *  fix states the legal protocol paths, never a semantic strategy. */
 function resolveStallDisposition(
   verdict: StallWindowVerdict,
   currentRound: number,
@@ -666,23 +660,17 @@ function resolveStallDisposition(
   consecutiveRejections: number,
   lastRejectionCheck: string,
 ): EnforcementResult {
-  const { tier, detail, window } = verdict;
-  const flatline = tier === "progress_flatline";
+  const { detail } = verdict;
   const escalation = getPolicy().engine.enforcement_escalation_enabled;
-  const stalledReason = flatline
-    ? `Progress has been ${detail} for ${window} consecutive rounds.`
-    : `Progress has stalled: ${detail}.`;
-
-  // v3.7: both tiers emit the single progress_stall check id — the tier
-  // survives only in the reason/fix wording (former progress_flatline id).
+  const stalledReason = `Machine-observed progress is flat: ${detail}.`;
   const check = "progress_stall";
 
   // v3.8.3: the stall escalates on its OWN streak. The persisted counter is
-  // one scalar shared by every check, so two rejections of any other kind used
-  // to turn a first-time stall straight into termination.
+  // one scalar shared by every check, so two rejections of any other kind must
+  // not turn a first-time stall straight into termination.
   const ownStreak = lastRejectionCheck === check ? consecutiveRejections : 0;
 
-  if ((flatline && ownStreak >= 1) || ownStreak >= 2) {
+  if (ownStreak >= 2) {
     return makeEnforcementResult({
       action: "terminate",
       reason: `${stalledReason} The stall persisted after escalation. Terminating loop.`,
@@ -698,7 +686,7 @@ function resolveStallDisposition(
     });
   }
 
-  const escalated = flatline ? escalation : ownStreak >= 1 && escalation;
+  const escalated = ownStreak >= 1 && escalation;
   if (escalated && getPolicy().engine.backtrack_enabled) {
     if (hasCommittedBacktrack(vaultEntries, currentRound)) {
       return makeEnforcementResult({
@@ -710,17 +698,11 @@ function resolveStallDisposition(
     return makeEnforcementResult({
       action: "backtrack",
       reason: stalledReason,
-      fix_instructions: flatline
-        ? "Progress is exactly flat. After rollback, choose a radically different approach."
-        : "After rollback, do not repeat the stalled approach; choose a different technique or task decomposition.",
-      check,
-    });
-  }
-
-  if (flatline && !escalation) {
-    return makeEnforcementResult({
-      action: "terminate",
-      reason: `${stalledReason} The agent is making zero forward motion and cannot recover.`,
+      fix_instructions:
+        "This is a machine liveness fact, not a judgment about your plan. " +
+        "The loop will restore the last clean round. After the restore you own " +
+        "the next action: continue with a new evaluation, request recovery to " +
+        "an earlier committed point, or declare blocked/stop.",
       check,
     });
   }
@@ -728,16 +710,16 @@ function resolveStallDisposition(
   return makeEnforcementResult({
     action: "reject",
     reason: stalledReason,
-    fix_instructions: (flatline
-      ? "Explain the fundamental blocker, choose a radically different approach, and set a concrete verifiable goal."
-      : "Explain the blocker, choose a different technique or task decomposition, and set a concrete verifiable goal for this retry.") +
+    fix_instructions:
+      "This is a machine liveness fact, not a judgment about your plan. " +
+      "You own the next action: submit a new evaluation, request recovery to " +
+      "an earlier committed point, or declare outcome blocked with a blocker. " +
+      "LoopForge does not prescribe a technique or decomposition." +
       (escalated ? buildEscalationNotice() : ""),
     check,
   });
 }
 
-/** The stall-tier window is consulted first. A shorter configured flatline
- * lookback retains its steeper disposition ladder. */
 function enforceProgressStall(
   _flags: VerificationFlag[],
   currentRound: number,
@@ -745,13 +727,14 @@ function enforceProgressStall(
   consecutiveRejections: number,
   machineBackedSuccess: boolean,
   lastRejectionCheck: string,
-  inFlightMotion: boolean | null,
+  inFlightProgress: RoundProgress,
 ): EnforcementResult | null {
-  const verdict =
-    evaluateStallWindow(
-      "progress_stall", currentRound, vaultEntries, machineBackedSuccess, inFlightMotion)
-    ?? evaluateStallWindow(
-      "progress_flatline", currentRound, vaultEntries, machineBackedSuccess, inFlightMotion);
+  const verdict = evaluateStallWindow(
+    currentRound,
+    vaultEntries,
+    machineBackedSuccess,
+    inFlightProgress,
+  );
   return verdict
     ? resolveStallDisposition(verdict, currentRound, vaultEntries, consecutiveRejections, lastRejectionCheck)
     : null;
@@ -798,9 +781,9 @@ function enforceMaxRejections(
           `same issue without resolution.`,
         fix_instructions:
           "You have been rejected multiple times for the same issue. " +
-          "You must address ALL items in the Evidence Gap section above. " +
-          "If you do not understand why you are being rejected, explain " +
-          "your confusion explicitly and ask for clarification." +
+          "Address every concrete finding in the mandatory Verification Gate. " +
+          "If you need human input, stop with needs_human_input; there is no " +
+          "semantic waiver for the findings." +
           buildEscalationNotice(),
         check: "max_rejections",
       });
@@ -828,52 +811,18 @@ function enforceMaxRejections(
 function buildEscalationNotice(): string {
   return [
     "",
-    "### 🆘 Escalation — Seek Human Guidance",
+    "### 🆘 Escalation — Human Decision Required",
     "",
-    "You have been rejected multiple times for the same issue. " +
-      "Before retrying, pause and ask a human for help:",
+    "This check has rejected the same round more than once. Before retrying, " +
+      "ask the human whether to continue the current scope, change the " +
+      "operator-owned scope, or stop.",
     "",
-    "1. Explain what you've tried so far and why each approach failed.",
-    "2. Ask the human for specific guidance on what to try next.",
-    "3. Incorporate their feedback before re-submitting your self-evaluation.",
+    "1. State the machine fact and the attempt already made.",
+    "2. Ask the human for a decision (continue / change scope / stop).",
+    "3. Record the decision in the next evaluation, or stop.",
     "",
-    "⚠️ If this round is rejected again, the loop will be **terminated**. " +
-      "Do NOT resubmit without meaningful changes.",
+    "⚠️ If the same check rejects again, the loop will be **terminated**.",
   ].join("\n");
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Diagnostic gap builder (v2.7)
-// ═══════════════════════════════════════════════════════════════════════════
-
-/** Build a diagnostic gap section from verification flags.
- *
- *  Translates each error/warn-level VerificationFlag into a concrete
- *  claim-vs-evidence mismatch statement. Info-level flags are excluded
- *  because they are purely informational and do not represent gaps.
- *
- *  Returns an empty string when there are no diagnostic flags to report. */
-function buildDiagnosticGap(flags: VerificationFlag[]): string {
-  const diagnosticFlags = flags.filter(
-    (f) => f.severity === "error" || f.severity === "warn",
-  );
-  if (diagnosticFlags.length === 0) return "";
-
-  const lines: string[] = [
-    "### Evidence Gap",
-    "",
-    "The enforcement gate detected mismatches between your claims and the evidence. " +
-      "Each item below shows a specific discrepancy — address every one before re-submitting.",
-    "",
-  ];
-
-  for (const flag of diagnosticFlags) {
-    const icon = flag.severity === "error" ? "🚫" : "⚠️";
-    lines.push(`- ${icon} **[${flag.check}]** \`${flag.field}\` — ${flag.detail}`);
-  }
-
-  lines.push("");
-  return lines.join("\n");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -989,11 +938,14 @@ export function enforceRound(
    *  here: neither the observations nor the active contract reach this
    *  function. See `enforceScopeDrift`. */
   scopeDriftWaiver: boolean = false,
-  /** v3.9: the submitted round's own Git motion — see `inFlightGitMotion`.
-   *  null when no Git observation was made. */
-  inFlightMotion: boolean | null = null,
+  /** v3.9.7: the submitted round's provider-neutral progress. */
+  inFlightProgress: RoundProgress = { state: "unknown", providers: [] },
 ): EnforcementResult {
   const { flags } = verifyResult;
+  // A valid blocked stop is the Agent's protocol action. Liveness/retry rows
+  // must not convert it into a same-round rejection; machine-integrity rows
+  // still apply below because their facts make the submission untrustworthy.
+  const blockedStop = declaresBlocked(selfEval) && selfEval.should_continue === false;
 
   // Run enforcement rules in priority order — the array order IS the
   // priority; the R-labels in the comments are historical (RULE_TABLE is
@@ -1023,22 +975,28 @@ export function enforceRound(
       flags, consecutiveRejections, lastRejectionCheck, scopeDriftWaiver),
     // v3.8: verification debt — contract items claimed met without machine
     // verification (fires only after the configured streak)
-    () => enforceContractItemsUnverified(
-      flags, currentRound, vaultEntries, consecutiveRejections, lastRejectionCheck),
-    // v3.7: single progress evaluator (former R4/R5 slots merged) —
+    () => blockedStop
+      ? null
+      : enforceContractItemsUnverified(
+          flags, currentRound, vaultEntries, consecutiveRejections, lastRejectionCheck),
+    // v3.9.7: one provider-neutral progress evaluator —
     // reject → backtrack → terminate with the deadlock guard
-    () => enforceProgressStall(
-      flags, currentRound, vaultEntries, consecutiveRejections,
-      verifyResult.machineBackedSuccess, lastRejectionCheck, inFlightMotion),
+    () => blockedStop
+      ? null
+      : enforceProgressStall(
+          flags, currentRound, vaultEntries, consecutiveRejections,
+          verifyResult.machineBackedSuccess, lastRejectionCheck, inFlightProgress),
     // R6: rejection-counter catch-all (evaluated only when no row above
     // fired — a clean-looking round carrying a high persisted counter)
     // v3.7.1: cited gate without an approved human decision
     () => enforceUserGateUnresolved(flags),
     // v3.8.3: the counter is shared, so this row must know that a scope-drift
     // waiver already excused the streak it carries (see enforceMaxRejections).
-    () => enforceMaxRejections(
-      consecutiveRejections,
-      scopeDriftWaiver && flags.some((f) => f.check === CHECK_ROUND_SCOPE_DRIFT)),
+    () => blockedStop
+      ? null
+      : enforceMaxRejections(
+          consecutiveRejections,
+          scopeDriftWaiver && flags.some((f) => f.check === CHECK_ROUND_SCOPE_DRIFT)),
     // v2.12: R9 — post-backtrack workspace not restored
     () => enforceBacktrackNotRestored(flags, vaultEntries, currentRound),
   ];
@@ -1098,44 +1056,36 @@ export function enforceRound(
   });
 }
 
-/** Build a rejection prompt for the agent.
+/** Build the protected retry notice for the agent.
  *
- *  The prompt clearly states the round was rejected, why, what the agent
- *  must fix, and that the agent must redo the SAME round (not advance).
- *
- *  v2.7: Accepts verificationFlags to render a diagnostic "Evidence Gap"
- *  section. Each error/warn flag becomes a concrete claim-vs-evidence
- *  mismatch statement so the agent knows exactly what to correct rather
- *  than retrying blindly.
+ *  v3.9.7: this is a protocol fact, not a second task narrative. It carries
+ *  the enforcement reason, the required fix and the same-round instruction.
+ *  Findings are rendered exactly once by the mandatory Verification Gate; the
+ *  original task/contract is rendered by Objective/Current Task. The notice
+ *  never promises that an explanation will re-evaluate a machine fact.
  *
  * @param currentRound      The round number that was rejected (NOT incremented).
- * @param task              The original loop task description.
+ * @param _task             Kept for the public signature; not rendered here.
  * @param enforceResult     The enforcement decision with reason and fix instructions.
- * @param verificationFlags The verification gate's findings for this round.
- *                          Used to build the Evidence Gap section. */
+ * @param _verificationFlags Kept for the public signature; findings render in
+ *                          the mandatory Verification Gate. */
 export function buildRejectionPrompt(
   currentRound: number,
-  task: string,
+  _task: string,
   enforceResult: EnforcementResult,
-  verificationFlags: VerificationFlag[] = [],
+  _verificationFlags: VerificationFlag[] = [],
 ): string {
   const lines: string[] = [
     "## ⛔ Round " + currentRound + " — REJECTED",
     "",
-    "Your self-evaluation for Round " + currentRound +
-    " was **rejected** by the enforcement gate.",
+    "The enforcement gate rejected this round. This is a machine/protocol",
+    "decision, not a judgment about your reasoning strategy.",
     "",
     "### Reason",
     "",
     enforceResult.reason,
     "",
   ];
-
-  // v2.7: Diagnostic gap — show the agent exactly what doesn't match.
-  const gap = buildDiagnosticGap(verificationFlags);
-  if (gap) {
-    lines.push(gap);
-  }
 
   if (enforceResult.fix_instructions) {
     lines.push("### Required Fix");
@@ -1144,22 +1094,17 @@ export function buildRejectionPrompt(
     lines.push("");
   }
 
-  lines.push("### Your Task (Round " + currentRound + " — Retry)");
-  lines.push("");
-  lines.push(task);
-  lines.push("");
-
   lines.push("### Instructions");
   lines.push("");
   lines.push(
     "1. Read and address each issue in **Required Fix** above.",
     "2. Re-execute **Round " + currentRound +
     "** — do NOT advance to the next round.",
-    "3. Submit a corrected self-evaluation via `loopforge_next`.",
-    "4. Be honest in your self-evaluation — " +
-    "claiming success when criteria are unmet will be rejected again.",
-    "5. If you believe this rejection is incorrect, " +
-    "explain why in your output_summary and the enforcement gate will re-evaluate.",
+    "3. Submit a corrected evaluation via `loopforge_next` using the latest",
+    "   `roundId` returned by LoopForge.",
+    "4. If you believe a finding is factually wrong, identify the specific",
+    "   machine fact you dispute and submit a corrected evaluation. The gate",
+    "   re-evaluates facts, not explanations.",
   );
 
   return lines.join("\n");

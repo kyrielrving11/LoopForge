@@ -374,7 +374,7 @@ describe("Engine — P0-P5 Cognitive Evolution (v1.7 E2E)", () => {
     assert.ok(!prompt.includes("Corrected assumption"));
   });
 
-  it("P5: retracted_constraints are removed from active set", () => {
+  it("P5: a same-round discovery survives a same-round retraction request", () => {
     const engine = createEngine();
     engine.invokeLoopCompile(makeRequest({
       mode: Mode.LOOP_COMPILE,
@@ -403,8 +403,9 @@ describe("Engine — P0-P5 Cognitive Evolution (v1.7 E2E)", () => {
       },
     } as unknown as LoopForgeRequest);
     assert.equal(r2.status, AgentStatus.OK);
-    // The retracted constraint was discovered then immediately retracted — it should
-    // NOT appear in the prompt at all (not in active constraints, not in state file).
+    // v3.9.7: retraction resolves against the active set at the START of the
+    // round. A constraint declared by the same submission is a NEW declaration,
+    // so the retraction is an inert same-round no-op and the discovery stays.
     const prompt = r2.response!.prompt!;
     // Check the prompt body portion (after any inlined state file) for the
     // Active Constraints block
@@ -419,8 +420,8 @@ describe("Engine — P0-P5 Cognitive Evolution (v1.7 E2E)", () => {
       const activeBlock = nextSection >= 0
         ? promptBody.slice(activeStart, nextSection)
         : promptBody.slice(activeStart);
-      assert.ok(!activeBlock.includes("No external deps"),
-        "P5: retracted constraint still in active constraints block");
+      assert.ok(activeBlock.includes("No external deps"),
+        "a same-round discovery is a new declaration and survives the request");
     }
   });
 

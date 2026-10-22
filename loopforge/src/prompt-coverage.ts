@@ -74,28 +74,17 @@ export function derivePromptCoverage(input: {
   active: ReadonlyArray<ActiveNormativeId>;
   /** Ids emitted by the sections that were actually rendered. */
   rendered: Iterable<string>;
-  /** Ids declared by every constructed section, including dropped ones.
-   *  Used only to classify an omission as `budget` rather than `defect`. */
-  declared?: Iterable<string>;
-  /** Kinds for which a section was constructed at this level. Used only to
-   *  classify an omission as `level`. */
-  availableKinds?: Iterable<CoverageKind>;
 }): PromptCoverage {
   const active = canonicalActiveIds(input.active);
   const renderedSet = new Set(input.rendered);
-  const declaredSet = new Set(input.declared ?? []);
-  const available = new Set(input.availableKinds ?? []);
 
+  // Every normative section is protected. A missing active id is therefore
+  // always a renderer defect; there is no level/budget classification that
+  // could disguise it.
   const omitted: PromptCoverage["omitted"] = [];
   for (const entry of active) {
     if (renderedSet.has(entry.id)) continue;
-    const reason: PromptCoverage["omitted"][number]["reason"] =
-      declaredSet.has(entry.id)
-        ? "budget"
-        : available.size > 0 && !available.has(entry.kind)
-          ? "level"
-          : "defect";
-    omitted.push({ id: entry.id, reason });
+    omitted.push({ id: entry.id, reason: "defect" });
   }
   omitted.sort((left, right) =>
     left.id < right.id ? -1 : left.id > right.id ? 1 : 0);

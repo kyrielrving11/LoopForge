@@ -96,8 +96,11 @@ Agent 提交 `round_contract`，它是下一轮的契约提案。`work_item` 是
 
 Agent 在 active contract 下工作。**验证门（verification gate）**检查声明一致性、
 证据完整性、计划与契约符合性，以及进度与恢复状态；它会把 Agent 的声明与 Git 快照、
-配置命令的观察结果和已提交轮次历史进行比较。实际变更超出 active contract 的声明
-范围时，会产生 `round_scope_drift`，这是不能靠解释豁免的机器事实。
+progress-capable provider 的观察、配置命令的观察结果和已提交轮次历史进行比较。
+进展是四态的（changed / unchanged / unknown / not_applicable）：只有已提交窗口和
+当前提交轮次都被证明为 unchanged 才会判定停滞；unknown/not_applicable 永不触发。
+实际变更超出 active contract 的声明范围时，会产生 `round_scope_drift`，这是不能靠
+解释豁免的机器事实。
 
 ### 事后：Closure
 
@@ -214,9 +217,10 @@ LoopForge 不是记忆数据库、RAG 系统、上下文压缩器，也不是无
 
 - 结构化 MCP 轮次协议、稳定错误码和可重试语义。
 - 从已提交类型化历史确定性重建状态。
-- 通过 Git 和显式配置命令采集机器证据。
+- 通过 Git、progress-capable custom provider 和显式配置命令采集机器证据。
 - 使用内容寻址的 `rc-` 与 `rci-` 身份管理 Round Contract。
-- 验证欠债、范围漂移、进度停滞与恢复裁决。
+- 渲染约束 provenance、按真实 ID 撤回、按当前对象强调且不重复内容。
+- 验证欠债、范围漂移、provider-neutral 进度停滞与恢复裁决。
 - 持久 session、原子写入、锁、lease、暂停、恢复和 replay。
 - L0/L1/L2 只控制 prompt 密度，不替 Agent 选择推理技术。
 

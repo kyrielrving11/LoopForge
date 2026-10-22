@@ -1,5 +1,97 @@
 # Changelog
 
+## 3.9.7 (2026-10-22)
+
+**The responsibility-boundary hardening release.** Agent semantics remain
+Agent-owned; LoopForge owns committed facts, provenance, deterministic
+projection and machine checks. The Agent can no longer accidentally turn a
+report into a second governance history: objective refinements are report-only,
+discovered constraints carry rendered provenance, retractions resolve to real
+active discoveries, and emphasis can reach every current governance object
+without duplicating it. Machine progress becomes provider-neutral while the
+Git correctness boundaries stay exactly where they are.
+
+### Semantic reports and governance
+
+- `objective_refinement` is report-only. `LoopObjective.version` and
+  `refinement_history` are removed; the report survives only in the committed
+  evaluation and receipt/replay/audit. A request objective/plan input is
+  accepted only at round 1 or when no committed objective exists.
+- `ConstraintMeta` gains `source_round`; constraints render `(Agent-declared
+  R3; report, not machine-verified)`, `(plan/carried R2)`, or
+  `(origin not recorded)`. Operator precedence is fixed; worker discoveries
+  remain reports.
+- `retracted_constraints` accepts a `c-` id or normalized-exact text and
+  resolves against the current active set. Only active Agent-discovered
+  (including recovery-preserved) constraints are retractable. Operator and
+  plan targets are rejected; unknown/inactive/already-retired targets are
+  inert diagnostics. `constraints.retire_window` is deleted; a new discovery
+  reactivates immediately.
+- The per-round discovery cap is diagnosed at the submission boundary instead
+  of silently sliced in the compiler.
+- Recovery-preserved discoveries come from the committed rollback directive,
+  never `constraints_from_plan`; discoveries from the rejected trigger attempt
+  never enter the active set.
+- `state.discoveries` contains discovered constraints only. Corrections render
+  the Agent's report verbatim, without a LoopForge "Corrected/Falsified"
+  verdict.
+
+### Prompt requests
+
+- Emphasis candidates are the current `CanonicalLoopState`: constraints,
+  criteria, contract (`rc-`), items (`rci-`), active sub-goals (`sg-`), current
+  findings (`f-`), and the recovery brief (`recovery`). Matching is exact id or
+  normalized-exact text; closed/historical objects never resurrect.
+- A contract id moves the whole block; an item id moves only that item.
+  Findings and recovery move without duplication; Current Task is re-rendered
+  from the structured contract. Effects record `applied`/`capped`/`no_match`/
+  `ambiguous`/`level_ignored` with `matched_ids` and `matched_count`.
+- Confusion points are echoed as the Agent's own notes, never matched against
+  state.
+
+### Provider-neutral progress
+
+- Git keeps its complete-boundary/HEAD/restore-point rule. A custom provider
+  opts in with a persisted `data.progressCapable` marker and a versioned
+  `data.progress` fingerprint. Command observations never provide progress.
+- One `progress.ts` produces `changed`/`unchanged`/`unknown`/`not_applicable`;
+  any proven change wins, unknown blocks "unchanged", and no applicable
+  provider is `not_applicable`. A stall requires both the window and the
+  submitted round to be `unchanged`. The flatline tier is collapsed into one
+  policy-configurable window and the `progress_stall` ladder.
+- Prompt freshness, machine-status display, replay and metrics read the same
+  derivation. Git-specific entrypoint trust, recovery restore, scope drift,
+  files reconciliation, `evidenceIncomplete` and contract-item checks are
+  unchanged.
+
+### Contract / blocked / rejection
+
+- `declaresBlocked` is the one blocked predicate for stop, waiver, contract
+  closure/walker, `contract_premature` and the blocked-gate record. A blocked
+  contract closes before a verified reading.
+- A valid blocked stop is not converted into a same-round rejection by
+  `progress_stall`, contract debt or the rejection counter; machine-integrity
+  rows still apply.
+- The rejection notice is a protected `retry_requirements` section at every
+  level. It no longer repeats the original task or the full finding list; the
+  false "explain and the gate will re-evaluate" promise is gone.
+- Strategy-prescribing texts are removed from enforcement, actions and
+  guidance; the tables state machine facts and legal protocol paths only.
+
+### Breaking boundaries
+
+- `CANONICAL_STATE_SCHEMA_VERSION` is `4`.
+- `PROMPT_ARTIFACT_SCHEMA_VERSION` is `6`.
+- `POLICY_SCHEMA_VERSION` is `"9"`: `constraints` and
+  `evolution.max_objective_versions` are removed.
+- `LoopObjective.version` / `refinement_history` and
+  `CanonicalLoopState.objectiveVersion` are removed.
+- `PromptCoverage.omitted[].reason` is `"defect"` only.
+- `PromptRequestEffect` adds `matched_ids`, `matched_count` and `ambiguous`.
+- No migration is provided. Schema-5 artifacts and policy v8 are unsupported
+  and reported as legacy/loss. Custom observations remain schema 1; an old
+  observation without progress data reads as `not_applicable`.
+
 ## 3.9.6 (2026-10-22)
 
 **The Agent-authority release.** LoopForge stops generating plans, phase

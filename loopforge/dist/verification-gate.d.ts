@@ -106,8 +106,6 @@ export interface EvidenceStatus {
  *  of letting evidence-dependent checks silently disappear when snapshots are
  *  missing — the fix for the "weakest when it matters most" gap. */
 export declare function deriveEvidenceStatus(selfEval: SelfEvaluation, evidenceDeltas: ReadonlyArray<ObservationDelta>): EvidenceStatus;
-/** Per-round machine progress over decoded committed history. */
-export declare function machineProgressSeries(vaultEntries: VaultEntry[], currentRound: number, lookback: number): boolean[] | null;
 interface ParsedTestCounts {
     passed: number;
     failed: number;

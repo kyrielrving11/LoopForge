@@ -158,7 +158,7 @@ describe("v3.8 — verified sub-goal facts", () => {
       currentRound: 2,
       currentReport: { contract_item_claims: [{ item_id: itemId(), outcome: "met" }] },
       currentDeltas: [
-        { providerId: "git", kind: "git", before: null, after: null, changedFiles: null },
+        { providerId: "git", kind: "git", before: null, after: null, changedFiles: null, progress: "unknown" },
         deltaAfter(commandObservation("passed")),
       ],
       commands: [COMMAND],

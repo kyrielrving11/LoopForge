@@ -10,9 +10,9 @@
  * alone are over it — truncation of mandatory content never happens.
  */
 import { createHash } from "node:crypto";
-import { formatActiveSubGoals, formatCriterionRows, hashCanonicalState, partitionActiveConstraints, } from "./canonical-state.js";
+import { formatActiveSubGoals, formatContractItemLine, formatCriterionRows, formatRoundContractWithIds, formatSubGoalRow, hashCanonicalState, partitionActiveConstraints, } from "./canonical-state.js";
 import { PROMPT_ARTIFACT_SCHEMA_VERSION } from "./protocol.js";
-import { deriveCriterionId, deriveItemId, findingKey, STABLE_ID_RE, normalizeText, } from "./token-utils.js";
+import { deriveCriterionId, deriveFindingId, deriveItemId, normalizeText, } from "./token-utils.js";
 import { getPolicy } from "./policy.js";
 import { verificationActionFor } from "./verification-actions.js";
 import { assertPromptCoverage, derivePromptCoverage, } from "./prompt-coverage.js";
@@ -31,23 +31,24 @@ function bullets(values, prefix = "- ") {
  *  guidance can quote the same wording without depending on a renderer.
  *  Re-exported here for the existing CHECK_* coverage test. */
 export { verificationActionFor } from "./verification-actions.js";
+/** v3.9.7: the ONE finding renderer, shared by the Verification Gate, the L0
+ *  retry section and Critical Context. The `f-` id is the stable handle the
+ *  Agent can cite; the detail is a machine fact and the action is the one
+ *  canonical short action from `verification-actions.ts`. */
+export function verificationFlagLine(flag, level) {
+    const icon = flag.severity === "error"
+        ? "🚫"
+        : flag.severity === "warn" ? "⚠️" : "ℹ️";
+    const ref = flag.ref ? ` [ref: \`${flag.ref}\`]` : "";
+    const base = `- [\`${deriveFindingId(flag)}\`] ${icon} [${flag.check}] ` +
+        `\`${flag.field}\` — ${flag.detail}${ref}`;
+    if (level === "l0" || flag.severity === "info")
+        return base;
+    const label = flag.severity === "error" ? "Fix" : "Action";
+    return `${base}\n  → ${label}: ${verificationActionFor(flag.check)}`;
+}
 function verificationText(state, level) {
-    const lines = state.verificationFlags.map((flag) => {
-        const icon = flag.severity === "error"
-            ? "🚫"
-            : flag.severity === "warn" ? "⚠️" : "ℹ️";
-        const ref = flag.ref ? ` [ref: \`${flag.ref}\`]` : "";
-        // v3.9.4: the finding names the affected field AND the concrete subject;
-        // the repair surface is a fact, not a next-action instruction.
-        const base = `- ${icon} [${flag.check}] \`${flag.field}\` — ${flag.detail}${ref}`;
-        // v3.2: error/warn flags get an actionable continuation line in L1/L2 —
-        // the verdict is translated into what to DO. L0 keeps the compact retry
-        // prompt byte-identical; info flags stay informational.
-        if (level === "l0" || flag.severity === "info")
-            return base;
-        const label = flag.severity === "error" ? "Fix" : "Action";
-        return `${base}\n  → ${label}: ${verificationActionFor(flag.check)}`;
-    });
+    const lines = state.verificationFlags.map((flag) => verificationFlagLine(flag, level));
     if (state.verificationFlags.some((flag) => flag.severity === "error")) {
         lines.push("- Gate Verdict: CONTRADICTED — resolve every error before claiming success.");
     }
@@ -79,43 +80,133 @@ function constraintLines(state, texts) {
             (violated ? " (violated this round)" : "");
     }).join("\n");
 }
-/** v3.9.4: every active normative object the current prompt MUST render. */
-function activeNormativeIds(state, recoveryBrief) {
+export function deriveNormativeObjects(state, level, recoveryBrief) {
     const out = [];
     const partition = partitionActiveConstraints(state);
     for (const text of partition.hard) {
-        out.push({ id: identityForText(state, text), kind: "constraint" });
+        out.push({
+            id: identityForText(state, text),
+            kind: "constraint",
+            text,
+            ownerSection: "hard_constraints",
+            render: constraintLines(state, [text]),
+            coverageIds: [identityForText(state, text)],
+        });
     }
     for (const text of partition.other) {
-        out.push({ id: identityForText(state, text), kind: "constraint" });
+        out.push({
+            id: identityForText(state, text),
+            kind: "constraint",
+            text,
+            ownerSection: "active_constraints",
+            render: constraintLines(state, [text]),
+            coverageIds: [identityForText(state, text)],
+        });
     }
     for (const text of partition.criteria) {
-        out.push({ id: identityForText(state, text), kind: "criterion" });
+        const id = identityForText(state, text);
+        out.push({
+            id,
+            kind: "criterion",
+            text,
+            ownerSection: "criteria",
+            render: `- [\`${id}\`] ${text}`,
+            coverageIds: [id],
+        });
     }
     if (state.roundContract) {
-        out.push({ id: state.roundContract.id, kind: "contract" });
+        const full = formatRoundContractWithIds(state.roundContract, state.contractItemStatuses ?? null);
+        out.push({
+            id: state.roundContract.id,
+            kind: "contract",
+            text: state.roundContract.work_item?.trim() || "Round Contract",
+            ownerSection: "current_task",
+            render: full.text,
+            coverageIds: full.emittedIds,
+        });
         for (const item of state.roundContract.items) {
-            out.push({ id: item.id, kind: "contract_item" });
+            const machine = state.contractItemStatuses?.items.find((entry) => entry.itemId === item.id);
+            out.push({
+                id: item.id,
+                kind: "contract_item",
+                text: item.description,
+                ownerSection: "current_task",
+                render: formatContractItemLine(item, machine ?? null),
+                coverageIds: [item.id],
+            });
         }
     }
     for (const subGoal of state.subGoals) {
-        if (subGoal.status !== "done" && subGoal.status !== "canceled") {
-            out.push({ id: subGoal.id, kind: "subgoal" });
-        }
+        if (subGoal.status === "done" || subGoal.status === "canceled")
+            continue;
+        out.push({
+            id: subGoal.id,
+            kind: "subgoal",
+            text: subGoal.description,
+            ownerSection: "sub_goals",
+            render: formatSubGoalRow(subGoal, state.round),
+            coverageIds: [subGoal.id],
+        });
     }
     for (const flag of state.verificationFlags) {
-        out.push({ id: findingKey(flag), kind: "finding" });
+        const id = deriveFindingId(flag);
+        out.push({
+            id,
+            kind: "finding",
+            text: flag.detail,
+            ownerSection: "verification",
+            render: verificationFlagLine(flag, level),
+            coverageIds: [id],
+        });
     }
-    if (recoveryBrief && recoveryBrief.length > 0) {
-        out.push({ id: "recovery", kind: "recovery" });
+    const brief = state.recoveryBrief ?? recoveryBrief;
+    if (brief && brief.length > 0) {
+        out.push({
+            id: "recovery",
+            kind: "recovery",
+            text: brief.join("\n"),
+            ownerSection: "recovery",
+            render: brief.join("\n"),
+            coverageIds: ["recovery"],
+        });
     }
-    return out;
+    return canonicalObjects(out);
+}
+/** Deduplicate by id (strongest kind) and sort deterministically. */
+function canonicalObjects(objects) {
+    const rank = {
+        recovery: 0,
+        contract: 1,
+        contract_item: 2,
+        criterion: 3,
+        constraint: 4,
+        subgoal: 5,
+        finding: 6,
+    };
+    const byId = new Map();
+    for (const object of objects) {
+        const existing = byId.get(object.id);
+        if (!existing || rank[object.kind] < rank[existing.kind]) {
+            byId.set(object.id, object);
+        }
+    }
+    return [...byId.values()].sort((left, right) => rank[left.kind] - rank[right.kind] ||
+        (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
+}
+function activeNormativeIds(state, level, recoveryBrief) {
+    return deriveNormativeObjects(state, level, recoveryBrief).map((object) => ({
+        id: object.id,
+        kind: object.kind,
+    }));
 }
 /** v3.9.4: the normative sections shared by L0/L1/L2. Levels change ONLY the
  *  density of narrative sections; they never change which active normative
  *  ids are rendered. Every section here is mandatory (protected). */
-function commonMandatorySections(state, level, recoveryBrief) {
+function commonMandatorySections(state, level, recoveryBrief, omittedIds = new Set()) {
     const partition = partitionActiveConstraints(state);
+    const hard = partition.hard.filter((text) => !omittedIds.has(identityForText(state, text)));
+    const other = partition.other.filter((text) => !omittedIds.has(identityForText(state, text)));
+    const criteriaTexts = state.successCriteria.filter((text) => !omittedIds.has(identityForText(state, text)));
     const sections = [
         {
             id: "objective",
@@ -123,23 +214,29 @@ function commonMandatorySections(state, level, recoveryBrief) {
             mandatory: true,
             coverageIds: [],
         },
-        {
+    ];
+    if (state.roundContract) {
+        const omitContract = omittedIds.has(state.roundContract.id);
+        const omitItemIds = new Set(state.roundContract.items
+            .filter((item) => omittedIds.has(item.id))
+            .map((item) => item.id));
+        const formatted = formatRoundContractWithIds(state.roundContract, state.contractItemStatuses ?? null, { omitContract, omitItemIds });
+        sections.push({
+            id: "current_task",
+            text: section("Current Task", formatted.text),
+            mandatory: true,
+            coverageIds: formatted.emittedIds,
+        });
+    }
+    else {
+        sections.push({
             id: "current_task",
             text: section("Current Task", state.currentTask),
             mandatory: true,
-            // Declare what this text actually carries. `createCanonicalLoopState`
-            // builds currentTask with `formatRoundContract`, so this is the
-            // structured source, not a text guess; an inconsistent hand-built state
-            // therefore fails closed instead of claiming an id it did not render.
-            coverageIds: state.roundContract
-                ? [
-                    state.roundContract.id,
-                    ...state.roundContract.items.map((item) => item.id),
-                ].filter((id) => state.currentTask.includes(id))
-                : [],
-        },
-    ];
-    const criteria = formatCriterionRows(state.criterionStatuses, state.successCriteria);
+            coverageIds: [],
+        });
+    }
+    const criteria = formatCriterionRows(state.criterionStatuses, criteriaTexts);
     if (criteria.lines.length > 0) {
         sections.push({
             id: "criteria",
@@ -148,24 +245,24 @@ function commonMandatorySections(state, level, recoveryBrief) {
             coverageIds: criteria.ids,
         });
     }
-    if (partition.hard.length > 0) {
+    if (hard.length > 0) {
         sections.push({
             id: "hard_constraints",
-            text: section("Active Hard Constraints", constraintLines(state, partition.hard)),
+            text: section("Active Hard Constraints", constraintLines(state, hard)),
             mandatory: true,
-            coverageIds: partition.hard.map((text) => identityForText(state, text)),
+            coverageIds: hard.map((text) => identityForText(state, text)),
         });
     }
-    if (partition.other.length > 0) {
+    if (other.length > 0) {
         sections.push({
             id: "active_constraints",
-            text: section("Active Constraints", constraintLines(state, partition.other)),
+            text: section("Active Constraints", constraintLines(state, other)),
             mandatory: true,
-            coverageIds: partition.other.map((text) => identityForText(state, text)),
+            coverageIds: other.map((text) => identityForText(state, text)),
         });
     }
     if (state.subGoals.length > 0) {
-        const subGoals = formatActiveSubGoals(state.subGoals, state.round);
+        const subGoals = formatActiveSubGoals(state.subGoals, state.round, undefined, omittedIds);
         sections.push({
             id: "sub_goals",
             text: section("Active Sub-Goals", subGoals.lines.join("\n")),
@@ -173,40 +270,51 @@ function commonMandatorySections(state, level, recoveryBrief) {
             coverageIds: subGoals.ids,
         });
     }
-    if (recoveryBrief && recoveryBrief.length > 0) {
+    const brief = state.recoveryBrief ?? recoveryBrief;
+    if (brief && brief.length > 0 && !omittedIds.has("recovery")) {
         sections.push({
             id: "recovery",
-            text: section("Recovery Brief", recoveryBrief.join("\n")),
+            text: section("Recovery Brief", brief.join("\n")),
             mandatory: true,
             coverageIds: ["recovery"],
         });
     }
-    if (state.verificationFlags.length > 0) {
+    const findings = state.verificationFlags.filter((flag) => !omittedIds.has(deriveFindingId(flag)));
+    if (findings.length > 0) {
         sections.push({
             id: "verification",
-            text: section("Verification Gate", verificationText(state, level)),
+            text: section("Verification Gate", verificationText({ ...state, verificationFlags: findings }, level)),
             mandatory: true,
-            coverageIds: state.verificationFlags.map((flag) => findingKey(flag)),
+            coverageIds: findings.map((flag) => deriveFindingId(flag)),
         });
     }
     return sections;
 }
-function l0Sections(state, recoveryBrief) {
-    const retryRequirements = [
-        ...state.blockers,
-        ...state.verificationFlags.map((flag) => flag.detail),
-    ];
-    const sections = commonMandatorySections(state, "l0", recoveryBrief);
-    if (retryRequirements.length > 0) {
-        sections.push({
-            id: "retry_requirements",
-            text: section("Retry Requirements", bullets(retryRequirements)),
-            mandatory: true,
-            // The same finding keys as the Verification Gate: either repair surface
-            // proves the finding was delivered, and both derive from the one list.
-            coverageIds: state.verificationFlags.map((flag) => findingKey(flag)),
-        });
+/** v3.9.7: the enforcement notice is a protected protocol fact, not an
+ *  optional narrative. It renders at every level and is never budget-dropped.
+ *  Findings stay in the mandatory Verification Gate; this section does not
+ *  repeat their full detail. */
+function retryRequirementsSection(state, level) {
+    const parts = [];
+    if (state.rejectionNotice)
+        parts.push(state.rejectionNotice.trim());
+    if (level === "l0" && state.blockers.length > 0) {
+        parts.push(bullets(state.blockers));
     }
+    if (parts.length === 0)
+        return null;
+    return {
+        id: "retry_requirements",
+        text: section("Retry Requirements", parts.join("\n\n")),
+        mandatory: true,
+        coverageIds: [],
+    };
+}
+function l0Sections(state, recoveryBrief, omittedIds = new Set()) {
+    const sections = commonMandatorySections(state, "l0", recoveryBrief, omittedIds);
+    const retry = retryRequirementsSection(state, "l0");
+    if (retry)
+        sections.push(retry);
     return sections;
 }
 /** v3.8.1: the committed-round window Active Warnings reports on. */
@@ -238,8 +346,11 @@ function activeWarnings(flags, currentRound) {
         return `- ${icon} ${subject} — ${flag.count}×, latest R${Math.max(...flag.rounds)}`;
     }).join("\n");
 }
-function l1Sections(state, recoveryBrief) {
-    const sections = commonMandatorySections(state, "l1", recoveryBrief);
+function l1Sections(state, recoveryBrief, omittedIds = new Set()) {
+    const sections = commonMandatorySections(state, "l1", recoveryBrief, omittedIds);
+    const retry = retryRequirementsSection(state, "l1");
+    if (retry)
+        sections.push(retry);
     if (state.corrections.length > 0) {
         sections.push({
             id: "corrections",
@@ -270,8 +381,11 @@ function l1Sections(state, recoveryBrief) {
     }
     return sections;
 }
-function l2Sections(state, recoveryBrief) {
-    const sections = commonMandatorySections(state, "l2", recoveryBrief);
+function l2Sections(state, recoveryBrief, omittedIds = new Set()) {
+    const sections = commonMandatorySections(state, "l2", recoveryBrief, omittedIds);
+    const retry = retryRequirementsSection(state, "l2");
+    if (retry)
+        sections.push(retry);
     // v3.9.5: L2 is a boundary rehydration, not a history dump. The full state
     // lives in the optional state file / replay / audit; the prompt carries the
     // current governance projection plus a small stage anchor.
@@ -304,14 +418,14 @@ function l2Sections(state, recoveryBrief) {
     }
     return sections;
 }
-function selectSections(input) {
+function selectSections(input, omittedIds = new Set()) {
     if (input.level === "l0") {
-        return l0Sections(input.state, input.recoveryBrief);
+        return l0Sections(input.state, input.recoveryBrief, omittedIds);
     }
     if (input.level === "l1") {
-        return l1Sections(input.state, input.recoveryBrief);
+        return l1Sections(input.state, input.recoveryBrief, omittedIds);
     }
-    return l2Sections(input.state, input.recoveryBrief);
+    return l2Sections(input.state, input.recoveryBrief, omittedIds);
 }
 /** v3.8.1: render order, in ONE place.
  *
@@ -343,9 +457,7 @@ const SECTION_PRIORITY = {
     // ── optional current-governance / anchor sections ───────────────────────
     blockers: 20,
     corrections: 21,
-    phase: 24,
     active_warnings: 25,
-    milestones: 29,
 };
 const DEFAULT_SECTION_PRIORITY = 50;
 /** v3.8.1: the smallest remaining room worth spending on a truncated
@@ -420,51 +532,60 @@ function renderWithinBudget(sections, fixedText, budget) {
 // ═══════════════════════════════════════════════════════════════════════════
 // v2.9: Prompt Requests — model-expressed information needs
 // ═══════════════════════════════════════════════════════════════════════════
-/** Match an emphasis target against state items.
- *  v2.11: ID-first — a target written as a stable id (`c-`/`cr-`/`sg-` + 8 hex)
- *  matches the candidate deriving to the same id.
- *  v3.8.1: the other arm is NORMALIZED-EXACT text. The Jaccard fallback is
- *  gone, so an emphasis can no longer pull in a near-miss because the two
- *  strings happened to share tokens. An unmatched target still renders
- *  nothing, keeping this a pure reorder with zero token overhead. */
+/** Match emphasis targets against the ONE current normative-object list.
+ *  v3.9.7: exact stable ids only (the candidate's real id), normalized-exact
+ *  text, and the reserved recovery id. No fuzzy match, no historical object,
+ *  no text-hash guess for `sg-`/`rci-`/`f-`. */
 function matchEmphasize(targets, candidates, cap) {
     if (targets.length === 0)
-        return { matched: [], effects: [] };
+        return { moved: [], effects: [] };
+    const uniqueTargets = [...new Set(targets)];
     const hitsByTarget = new Map();
-    const matched = [];
-    for (const candidate of candidates) {
-        const candidateText = normalizeText(candidate);
-        let hit = false;
-        for (const target of targets) {
-            const idMatch = target.match(STABLE_ID_RE);
-            const targetHit = idMatch
-                ? `${idMatch[1]}-${deriveItemId(candidate)}` === target
-                : normalizeText(target) === candidateText;
-            if (!targetHit)
+    const ordered = [];
+    const seenIds = new Set();
+    for (const target of uniqueTargets) {
+        const key = normalizeText(target);
+        const hit = candidates.filter((candidate) => target === "recovery"
+            ? candidate.id === "recovery"
+            : candidate.id === target || normalizeText(candidate.text) === key);
+        hitsByTarget.set(target, hit);
+        for (const candidate of hit) {
+            if (seenIds.has(candidate.id))
                 continue;
-            hit = true;
-            const list = hitsByTarget.get(target) ?? [];
-            list.push(candidate);
-            hitsByTarget.set(target, list);
+            seenIds.add(candidate.id);
+            ordered.push(candidate);
         }
-        if (hit)
-            matched.push(candidate);
     }
-    // Candidate order, capped — deterministic, and no score to sort by.
-    const kept = matched.slice(0, cap);
-    const keptSet = new Set(kept);
+    const moved = ordered.slice(0, Math.max(0, cap));
+    // A moved contract block renders all of its items, so an item target is
+    // applied when its id is covered by any moved object.
+    const renderedIds = new Set(moved.flatMap((object) => object.coverageIds));
     const effects = targets.map((target) => {
         const hits = hitsByTarget.get(target) ?? [];
         if (hits.length === 0) {
             return { field: "emphasize", request: target, status: "no_match" };
         }
+        const applied = hits
+            .map((candidate) => candidate.id)
+            .filter((id) => renderedIds.has(id));
+        if (applied.length === 0) {
+            return {
+                field: "emphasize",
+                request: target,
+                status: "capped",
+                matched_ids: [],
+                matched_count: hits.length,
+            };
+        }
         return {
             field: "emphasize",
             request: target,
-            status: hits.some((candidate) => keptSet.has(candidate)) ? "applied" : "capped",
+            status: "applied",
+            matched_ids: [...new Set(applied)],
+            matched_count: hits.length,
         };
     });
-    return { matched: kept, effects };
+    return { moved, effects };
 }
 /** Render the "Confusion Alerts" section that appears at the prompt top.
  *
@@ -480,12 +601,13 @@ function renderConfusionAlerts(points, fullDensity, hasStateFile) {
     if (points.length === 0)
         return "";
     const lines = [
-        "## ⚠️ Confusion Alerts",
+        "## ⚠️ Confusion Alerts (Agent request)",
         "",
-        "You flagged these as confusing in the previous round.",
+        "You reported these questions/confusions in the previous round. They are",
+        "your own notes, not LoopForge findings or machine facts.",
         hasStateFile
-            ? "Address each before proceeding — the state file has full context."
-            : "Address each before proceeding — no state file is enabled; use the live prompt, replay, or status views.",
+            ? "Full context: the state file."
+            : "No state file is enabled; use the live prompt, replay, or status views.",
         "",
     ];
     // v2.14: L2 renders up to the policy cap (was: every confusion point,
@@ -509,34 +631,34 @@ function renderConfusionAlerts(points, fullDensity, hasStateFile) {
     }
     return lines.join("\n");
 }
-/** Render the "Critical Context" section — current governance items the model
- *  emphasized. v3.9.5: only active constraints are candidates, so this can
- *  never resurrect a removed historical narrative. */
-/** v3.9.4: an emphasized item that is also an active normative constraint
- *  reports its real id here, because it is MOVED out of its source section
- *  and this is the only place it renders. Narrative items carry no id. */
-function normativeIdForText(state, text) {
-    const key = normalizeText(text);
-    const normative = state.activeConstraints.some((item) => normalizeText(item) === key) ||
-        state.successCriteria.some((item) => normalizeText(item) === key) ||
-        state.hardConstraints.some((item) => normalizeText(item) === key);
-    return normative ? identityForText(state, text) : null;
-}
-function renderCriticalContext(emphasized) {
-    if (emphasized.length === 0)
+/** Render the "Critical Context" section. The text is the exact fragment the
+ *  owning section would have rendered, so moving an object never changes its
+ *  content. A contract block brings its items; an item-only move brings the
+ *  one item line. */
+function renderCriticalContext(moved) {
+    if (moved.length === 0)
         return "";
     const lines = [
         "## 🔴 Critical Context",
         "",
-        "You flagged these as important for this round. Prioritize them.",
+        "Requested by you in the previous round (Agent request).",
         "",
     ];
-    for (const item of emphasized) {
-        lines.push(item.id
-            ? `- [\`${item.id}\`] ${item.text}`
-            : `- ${item.text}`);
+    const movedContract = moved.some((object) => object.kind === "contract");
+    for (const object of moved) {
+        // The contract block already renders every item; do not duplicate an item
+        // that was also targeted individually.
+        if (movedContract && object.kind === "contract_item")
+            continue;
+        if (object.id === "recovery") {
+            lines.push("### Recovery Brief [`recovery`]");
+            lines.push(object.render.trim());
+            lines.push("");
+            continue;
+        }
+        lines.push(object.render.trim());
+        lines.push("");
     }
-    lines.push("");
     return lines.join("\n");
 }
 export function assemblePromptArtifact(input) {
@@ -632,16 +754,15 @@ export function assemblePromptArtifact(input) {
     const confusionText = (!levelIsL0 && pr?.confusion_points?.length)
         ? renderConfusionAlerts(pr.confusion_points, levelIsL2, Boolean(stateFilePath))
         : "";
-    // Emphasize: L1/L2 only, matched against active state items
+    // Emphasize: L1/L2 only, matched against the ONE current normative-object
+    // list. Closed/historical objects are absent from the list, so they can
+    // never be resurrected.
     const policy = getPolicy().prompt;
     const emphasizeCap = levelIsL2 ? policy.max_emphasize_l2 : policy.max_emphasize_l1;
+    const normative = deriveNormativeObjects(input.state, input.level, input.recoveryBrief);
     const emphasis = (!levelIsL0 && pr?.emphasize?.length)
-        ? matchEmphasize(pr.emphasize,
-        // v3.9.5: emphasize is a pure reorder over current governance items,
-        // never a way to resurrect removed historical narrative.
-        [...input.state.activeConstraints], emphasizeCap)
-        : { matched: [], effects: [] };
-    const emphasized = emphasis.matched;
+        ? matchEmphasize(pr.emphasize, normative, emphasizeCap)
+        : { moved: [], effects: [] };
     // v3.9.1: prompt-request effects are OUTPUT facts about this render. They
     // are never read by compile/decision code.
     const promptRequestEffects = [...emphasis.effects];
@@ -672,33 +793,14 @@ export function assemblePromptArtifact(input) {
             });
         });
     }
-    // v2.14: emphasize is a pure reorder (zero token overhead) — the matched
-    // items are MOVED to the Critical Context section, not duplicated. Filter
-    // them out of the source arrays before section rendering; unmatched
-    // emphasizes are dropped (nothing to reorder → nothing rendered).
-    // v3.2.1: hard constraints and success criteria live in BOTH their own
-    // sections (Active Hard Constraints / Success Criteria) and the active
-    // constraint list (loop-compiler merges objective.hard_constraints and
-    // success_criteria into constraints_active), so they must be filtered
-    // from BOTH sources too — otherwise the emphasized item renders twice.
-    const emphasizedSet = new Set(emphasized);
-    const stateForSections = emphasizedSet.size > 0
-        ? {
-            ...input.state,
-            activeConstraints: input.state.activeConstraints.filter((item) => !emphasizedSet.has(item)),
-            hardConstraints: input.state.hardConstraints.filter((item) => !emphasizedSet.has(item)),
-            successCriteria: input.state.successCriteria.filter((item) => !emphasizedSet.has(item)),
-            blockers: input.state.blockers.filter((item) => !emphasizedSet.has(item)),
-        }
-        : input.state;
-    const sections = selectSections({ ...input, state: stateForSections });
-    // The ID attached here comes from the ORIGINAL state: emphasize moved the
-    // item out of its source section, so this is the only renderer for it.
-    const emphasizedItems = emphasized.map((text) => ({
-        text,
-        id: normativeIdForText(input.state, text),
-    }));
-    const criticalContextText = renderCriticalContext(emphasizedItems);
+    // Emphasize is a pure reorder: the matched objects are MOVED out of their
+    // owning sections, not duplicated. `commonMandatorySections` receives the
+    // omitted-id set and filters only the owning section; blockers are never
+    // filtered by text.
+    const omittedIds = new Set(emphasis.moved.flatMap((object) => object.coverageIds));
+    const sections = selectSections(input, omittedIds);
+    const criticalContextText = renderCriticalContext(emphasis.moved);
+    const criticalCoverageIds = [...new Set(emphasis.moved.flatMap((object) => object.coverageIds))];
     // v3.8.1: no presentation snapshot. The artifact records what THIS prompt
     // rendered (level, hashes, round identity, the sections it emitted) and
     // nothing about what a LATER prompt should do differently — a prompt's
@@ -714,7 +816,7 @@ export function assemblePromptArtifact(input) {
                 id: "critical_context",
                 text: criticalContextText,
                 mandatory: true,
-                coverageIds: emphasizedItems.flatMap((item) => item.id ? [item.id] : []),
+                coverageIds: criticalCoverageIds,
             },
             ...sections,
         ];
@@ -726,12 +828,7 @@ export function assemblePromptArtifact(input) {
     // v3.9.4: coverage is derived from the ORIGINAL state and the sections that
     // actually rendered. It is not text-scanned and not a second fact source.
     // An incomplete projection fails closed — no prompt or artifact escapes.
-    const active = activeNormativeIds(input.state, input.recoveryBrief);
-    const declaredIds = new Set();
-    for (const section of augmentedSections) {
-        for (const id of section.coverageIds)
-            declaredIds.add(id);
-    }
+    const active = activeNormativeIds(input.state, input.level, input.recoveryBrief);
     const renderedIds = new Set();
     for (const sectionId of selected.included) {
         const section = augmentedSections.find((entry) => entry.id === sectionId);
@@ -743,7 +840,6 @@ export function assemblePromptArtifact(input) {
     const coverage = derivePromptCoverage({
         active,
         rendered: renderedIds,
-        declared: declaredIds,
     });
     assertPromptCoverage(coverage);
     return {

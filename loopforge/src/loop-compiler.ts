@@ -33,9 +33,9 @@ import {
   pendingBacktrackRecord,
   roundResultFromCommittedRound,
   type CommittedRoundView,
-  machineGitMotionSeries,
   derivationRounds,
 } from "./committed-round.js";
+import { deriveProgressWindow } from "./progress.js";
 import { deriveCriterionStatuses as deriveCriterionStatusesFromEntries } from "./criterion-status.js";
 import {
   derivePromptFreshness,
@@ -46,6 +46,11 @@ import { NO_IN_FLIGHT_ROUND, deriveRoundFacts } from "./round-facts.js";
 import type { CriterionMachineFact } from "./round-facts.js";
 import { recoveryBriefLines } from "./enforcement-gate.js";
 import { deriveSubGoals, duplicateEmergedDeclarations } from "./subgoal-state.js";
+import {
+  deriveConstraintProvenance,
+  resolveConstraintRetractions,
+  type ConstraintProvenance,
+} from "./constraint-lifecycle.js";
 import { assemblePromptArtifact } from "./prompt-assembler.js";
 import {
   renderSelfEvalBlock,
@@ -57,6 +62,7 @@ import {
 } from "./prompt-policy.js";
 import {
   criterionRefMatches,
+  deriveConstraintId,
   deriveCriterionId,
   deriveItemId,
   isCriterionId,
@@ -204,10 +210,6 @@ export function latestObjective(
         : [],
       created_at_round: typeof value.created_at_round === "number" ? value.created_at_round : 1,
       loop_id: loopId,
-      version: typeof value.version === "number" ? value.version : 1,
-      refinement_history: Array.isArray(value.refinement_history)
-        ? value.refinement_history.filter((item): item is string => typeof item === "string")
-        : [],
     });
   }
   return null;
@@ -218,35 +220,34 @@ function evolveObjective(
   context: Record<string, unknown> | null,
   previous: PreviousRoundFacts,
 ): LoopObjective {
-  const current = request.loop_objective ??
-    latestObjective(
-      request.loop_id,
-      context,
-      request.round,
-      request.round === 1 && (request.attempt ?? 1) > 1,
-    ) ??
+  // v3.9.7: committed lineage is authoritative once it exists. A transient
+  // request may bootstrap the objective for round 1, a round-1 retry, or a
+  // library caller with no committed objective; it may not rewrite operator
+  // acceptance after a committed objective exists.
+  const committed = latestObjective(
+    request.loop_id,
+    context,
+    request.round,
+    request.round === 1 && (request.attempt ?? 1) > 1,
+  );
+  const allowRequestObjective = request.loop_objective !== null &&
+    (request.round === 1 || committed === null);
+  const current = (allowRequestObjective ? request.loop_objective : null) ??
+    committed ??
     makeLoopObjective({
       objective: request.task,
       success_criteria: ["Task goal achieved with verifiable evidence"],
-      hard_constraints: unique(request.constraints_from_plan),
+      hard_constraints: unique(
+        request.round === 1 || committed === null ? request.constraints_from_plan : [],
+      ),
       created_at_round: 1,
       loop_id: request.loop_id,
     });
-  const last = previous.result;
-  const history = [...(current.refinement_history ?? [])];
-  const objective = current.objective || request.task;
-  const version = current.version ?? 1;
-  if (last?.objective_refinement?.trim()) {
-    const refinement = last.objective_refinement.trim();
-    // v3.9.6: objective refinements are committed Agent reports. They never
-    // rewrite the operator objective or bump its version.
-    if (!history.includes(refinement)) history.push(refinement);
-  }
+  // objective_refinement is a committed Agent report. It never rewrites the
+  // operator objective, criteria, hard constraints, gate or a version.
   return makeLoopObjective({
     ...current,
-    objective,
-    version,
-    refinement_history: history.slice(-getPolicy().evolution.max_objective_versions),
+    objective: current.objective || request.task,
     success_criteria: uniqueNormalized(current.success_criteria),
     hard_constraints: uniqueNormalized(current.hard_constraints),
     loop_id: request.loop_id,
@@ -258,62 +259,72 @@ function evolveConstraints(
   objective: LoopObjective,
   previous: PreviousRoundFacts,
   windowRounds: ReadonlyArray<CommittedRoundView>,
-): { active: string[]; retired: string[] } {
-  // v3.9.6: operator criteria/hard constraints are immutable. Retractions
-  // only apply to Agent-discovered constraints; the boundary is strict, and
-  // this is the compiler's defense in depth.
-  const operatorKeys = new Set(
-    [...objective.hard_constraints, ...objective.success_criteria]
-      .map((text) => normalizeText(text)),
+  roundOnePlan: ReadonlyArray<string>,
+  preservedDiscoveries: ReadonlyArray<string>,
+  preservedRound: number | undefined,
+): {
+  active: string[];
+  retired: string[];
+  provenance: Map<string, ConstraintProvenance>;
+  /** Defensive cap drop for library callers that bypass the boundary. */
+  discoveryDropped: number;
+} {
+  // The active set at the START of the round that produced the retraction:
+  // the previous committed compile's stamped `constraints_active`.
+  const carried = uniqueNormalized(previous.view?.activeConstraints ?? []);
+  const activeTargets = carried.map((text) => ({
+    text,
+    provenance: deriveConstraintProvenance({
+      text,
+      objective,
+      windowRounds,
+      roundOnePlan,
+      preservedDiscoveries,
+      preservedRound,
+    }),
+  }));
+  const previouslyRetired = unique(
+    windowRounds.flatMap((round) => round.retractedConstraints ?? []),
   );
-  const retired = unique(previous.result?.retracted_constraints ?? [])
-    .filter((text) => !operatorKeys.has(normalizeText(text)));
-  const immediateRetired = new Set(retired.map((text) => normalizeText(text)));
-  const discovered = unique(previous.result?.discovered_constraints ?? [])
-    .slice(0, getPolicy().evolution.max_discovered_constraints_per_round);
-  // v2.14: agent-declared retractions of plan/hard/criteria constraints
-  // persist for constraints.retire_window rounds (they are re-merged from
-  // the request/objective every round, so without this the documented
-  // "Removed from the active constraint set" never held for them). The
-  // retraction rounds are derived from the SAME committed window as every
-  // other compile fact — an abandoned branch above the compile round can
-  // never suppress a constraint on the restored branch.
-  const window = getPolicy().constraints.retire_window;
-  const lastRetractedRound = new Map<string, number>();
-  if (window > 0) {
-    for (const round of windowRounds) {
-      const retractedList = round.retractedConstraints ?? [];
-      for (const text of retractedList) {
-        if (!text) continue;
-        const key = normalizeText(text);
-        if (operatorKeys.has(key)) continue;
-        const previousRound = lastRetractedRound.get(key);
-        if (previousRound === undefined || round.round > previousRound) {
-          lastRetractedRound.set(key, round.round);
-        }
-      }
-    }
-  }
-  // v3.9.4: normalized-exact dedupe. The trim-only `unique` let case/space
-  // variants coexist while deriving the SAME c-/cr- id. The silent
-  // max_active_constraints slice is gone: every merged active constraint is
-  // normative, and prompt budget pressure is reported as protectedOverflow.
-  const active = uniqueNormalized([
-    ...(previous.view?.activeConstraints ?? []),
-    ...request.constraints_from_plan,
+  const retraction = resolveConstraintRetractions({
+    targets: previous.result?.retracted_constraints ?? [],
+    active: activeTargets,
+    // The compiler does not see this submission's new discoveries; the
+    // boundary resolves the same target set and reports same-round cases.
+    newDiscoveries: [],
+    previouslyRetired,
+  });
+  const effectiveKeys = new Set(retraction.effective.map(normalizeText));
+
+  // Only round 1 accepts a plan input. After round 1 the active set is carried
+  // from committed lineage; a late request value is not a fact.
+  const base = uniqueNormalized([
+    ...carried,
+    ...roundOnePlan,
     ...objective.hard_constraints,
     ...objective.success_criteria,
-    ...discovered,
-  ]).filter((item) => {
-    const key = normalizeText(item);
-    if (immediateRetired.has(key)) return false;
-    const retractedRound = lastRetractedRound.get(key);
-    if (retractedRound !== undefined && request.round - retractedRound < window) {
-      return false;
-    }
-    return true;
-  });
-  return { active, retired };
+    ...preservedDiscoveries,
+  ]).filter((text) => !effectiveKeys.has(normalizeText(text)));
+
+  // Only the previous round's NEW discoveries are added after retraction:
+  // a new declaration in the retraction round survives the retraction.
+  const allDiscovered = unique(previous.result?.discovered_constraints ?? []);
+  const discovered = allDiscovered
+    .slice(0, getPolicy().evolution.max_discovered_constraints_per_round);
+  const discoveryDropped = allDiscovered.length - discovered.length;
+  const active = uniqueNormalized([...base, ...discovered]);
+  const provenance = new Map<string, ConstraintProvenance>();
+  for (const text of active) {
+    provenance.set(text, deriveConstraintProvenance({
+      text,
+      objective,
+      windowRounds,
+      roundOnePlan,
+      preservedDiscoveries,
+      preservedRound,
+    }));
+  }
+  return { active, retired: retraction.effective, provenance, discoveryDropped };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -380,10 +391,21 @@ function deriveMachineStatus(
   rounds: ReadonlyArray<CommittedRoundView>,
   currentRound: number,
 ): MachineStatus | undefined {
-  const series = machineGitMotionSeries(rounds, currentRound, 3);
-  if (series === null) return undefined;
-  const motionRounds = series.filter(Boolean).length;
-  return { windowRounds: 3, gitMotion: motionRounds > 0, motionRounds };
+  const window = deriveProgressWindow(
+    rounds,
+    currentRound,
+    getPolicy().engine.stall_lookback_rounds,
+  );
+  if (window.incomplete || window.state === "not_applicable") return undefined;
+  const changedRounds = window.roundStates.filter(
+    (entry) => entry.state === "changed",
+  ).length;
+  return {
+    windowRounds: window.lookback,
+    machineProgress: window.state,
+    changedRounds,
+    providers: window.providers,
+  };
 }
 
 /** v3.2: Derive per-criterion status — the "goal → criteria → evidence"
@@ -433,39 +455,19 @@ export function criteriaMatch(a: string, b: string): boolean {
 // Sub-Goal Structured Tracking (v2.2)
 // ═══════════════════════════════════════════════════════════════════════════
 
-/** v2.11: Derive a stable constraint ID from its text hash (c-XXXXXXXX).
- *  Same hash strategy as SubGoal — deterministic across rounds. */
-export function deriveConstraintId(text: string): string {
-  return "c-" + deriveItemId(text);
-}
-
-// v3.8.1: `deriveCriterionId` / `isCriterionId` moved to token-utils.ts, where
-// the other stable-id helpers live — the criterion fact derivation in
-// round-facts.ts needs them, and defining them here would make
-// round-facts ⇄ loop-compiler an import cycle. Re-exported so this module's
-// public surface ("./compiler") is unchanged.
-export { deriveCriterionId, isCriterionId } from "./token-utils.js";
+// v3.8.1/v3.9.7: the stable-id helpers live in token-utils.ts, where the
+// criterion/constraint fact derivations can use them without an import
+// cycle. Re-exported so this module's public surface is unchanged.
+export {
+  deriveConstraintId,
+  deriveCriterionId,
+  isCriterionId,
+} from "./token-utils.js";
 
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Time-Aware Constraint Management (v2.3)
 // ═══════════════════════════════════════════════════════════════════════════
-
-/** Determine the source of a constraint by matching against known sources. */
-function constraintSource(
-  text: string,
-  objective: LoopObjective,
-  constraintsFromPlan: string[],
-): "hard" | "plan" | "criteria" | "discovered" {
-  const norm = normalizeText(text);
-  // v3.9.4: criteria identity wins. A text that is both a criterion and a
-  // hard/plan constraint keeps its cr-* id everywhere; the prompt partition
-  // renders it once, in the criteria section.
-  if (objective.success_criteria.some((c) => normalizeText(c) === norm)) return "criteria";
-  if (objective.hard_constraints.some((c) => normalizeText(c) === norm)) return "hard";
-  if (constraintsFromPlan.some((c) => normalizeText(c) === norm)) return "plan";
-  return "discovered";
-}
 
 /** True when a reported violation text matches a constraint text.
  *  v2.11: ID-first — an exact `c-XXXXXXXX` match against the derived id.
@@ -483,21 +485,13 @@ function matchesConstraintText(text: string, violation: string): boolean {
 
 function findLastViolatedRound(
   text: string,
-  vaultEntries: Entry[],
+  rounds: ReadonlyArray<CommittedRoundView>,
 ): number {
   let latest = 0;
-  for (const entry of vaultEntries) {
-    const rnd = entryRound(entry);
-    if (rnd < 1) continue;
-    const view = decodeRound(entry);
-    const violations = view
-      ? view.constraintViolations ?? []
-      : Array.isArray(entry.constraint_violations)
-        ? entry.constraint_violations.filter((v: unknown) => typeof v === "string")
-        : [];
-    for (const v of violations) {
+  for (const view of rounds) {
+    for (const v of view.constraintViolations ?? []) {
       if (matchesConstraintText(text, v)) {
-        if (rnd > latest) latest = rnd;
+        if (view.round > latest) latest = view.round;
         break;
       }
     }
@@ -518,24 +512,15 @@ function findLastViolatedRound(
  */
 function manageConstraintLifecycle(
   active: string[],
-  objective: LoopObjective,
-  constraintsFromPlan: string[],
-  vaultContext: Record<string, unknown> | null,
+  provenance: ReadonlyMap<string, ConstraintProvenance>,
+  windowRounds: ReadonlyArray<CommittedRoundView>,
   currentRound: number,
   lastRoundViolations: string[] = [],
 ): { active: string[]; metadata: ConstraintMeta[] } {
-  const allEntries = loopEntries(
-    objective.loop_id || "",
-    vaultContext,
-  );
-  const completedEntries = allEntries.filter(
-    (e) => entryRound(e) >= 1 && entryRound(e) < currentRound,
-  );
-
   const metadata: ConstraintMeta[] = [];
 
   for (const text of active) {
-    const source = constraintSource(text, objective, constraintsFromPlan);
+    const source = provenance.get(text) ?? { source: "unrecorded" as const };
 
     // v3.2.1: a violation reported in THIS round (last_round_result) counts
     // as a violation at currentRound — the previous rounds' scan cannot see
@@ -553,12 +538,13 @@ function manageConstraintLifecycle(
     // and an agent echoing the active-list ID into its criterion claims
     // could never match.
     metadata.push(makeConstraintMeta({
-      id: source === "criteria" ? deriveCriterionId(text) : deriveConstraintId(text),
+      id: source.source === "criteria" ? deriveCriterionId(text) : deriveConstraintId(text),
       text,
       last_violated_at_round: violatedThisRound
         ? currentRound
-        : findLastViolatedRound(text, completedEntries),
-      source,
+        : findLastViolatedRound(text, windowRounds),
+      source: source.source,
+      ...(source.source_round !== undefined ? { source_round: source.source_round } : {}),
     }));
   }
 
@@ -718,17 +704,34 @@ export function compileLoop(
   const previous = resolvePreviousRoundFacts(request, context, windowRounds);
   const decision = levelDecision(request, prior, previous);
   const objective = evolveObjective(request, context, previous);
+  const pendingDirective = pendingBacktrackRecord(
+    loopEntries(request.loop_id, context),
+    request.round,
+  );
+  const preservedDiscoveries = pendingDirective?.recovery &&
+    getPolicy().engine.backtrack_preserve_discoveries
+    ? pendingDirective.recovery.skipped_discoveries
+    : [];
+  const preservedRound = pendingDirective?.round;
+  // Plan constraints are a round-1 operator/plan input, or a library
+  // bootstrap when no committed round exists. Once a committed view exists,
+  // the committed active set carries them and a late request is not a fact.
+  const planInput = request.round === 1 || previous.view === null
+    ? request.constraints_from_plan
+    : [];
   const constraints = evolveConstraints(
     request,
     objective,
     previous,
     windowRounds,
+    planInput,
+    preservedDiscoveries,
+    preservedRound,
   );
   const constraintLifecycle = manageConstraintLifecycle(
     constraints.active,
-    objective,
-    request.constraints_from_plan,
-    context,
+    constraints.provenance,
+    windowRounds,
     request.round,
     // "Violated this round" means the CURRENT compile round's report. A
     // committed previous round's violations are found by the committed
@@ -810,6 +813,16 @@ export function compileLoop(
         `declaration(s) repeated an earlier entry in the same round and were ` +
         `not created: ${repeatedDeclarations.join("; ")}`
       : "",
+    request.round > 1 && previous.view !== null && request.loop_objective !== null
+      ? "uncommitted_objective_ignored: a committed objective exists; the request objective is ignored"
+      : "",
+    request.round > 1 && previous.view !== null && request.constraints_from_plan.length > 0
+      ? "uncommitted_plan_ignored: a committed active set exists; request plan constraints are ignored"
+      : "",
+    constraints.discoveryDropped > 0
+      ? `discovery_cap: ${constraints.discoveryDropped} discovered constraint(s) exceeded ` +
+        `max_discovered_constraints_per_round and were not expanded`
+      : "",
   ]);
 
   // v3.8.1: the agent trust score and trend are deleted. The score was
@@ -853,6 +866,10 @@ export function compileLoop(
   const statePath = policy.state_file.enabled
     ? `${policy.state_file.directory}/${request.loop_id}-state.md`
     : "";
+  // The recovery brief is a current-round fact, computed once and shared by
+  // the state file, the prompt and the evaluation block. It never becomes
+  // prompt control state.
+  const recoveryBrief = committedBacktrackBrief(request.loop_id, request.round, context);
   const state = createCanonicalLoopState(request, response, statePath, {
     machineStatus,
     // v3.4/v3.8.1: the contract-fact bundle — the Current Task's source of
@@ -865,11 +882,8 @@ export function compileLoop(
     // v3.9.5: the committed flag is what keeps a caller fallback out of the
     // prompt/state narrative.
     previousRound: { ...previous, committed: previous.view !== null },
+    recoveryBrief,
   });
-  // The recovery brief is a current-round fact, computed once and shared by
-  // the state file and the evaluation block. It never becomes prompt control
-  // state.
-  const recoveryBrief = committedBacktrackBrief(request.loop_id, request.round, context);
   const configuredCapability = deriveConfiguredCapability(policy);
   const contractCommands = configuredCapability.commands
     .filter((command) => command.enabled)

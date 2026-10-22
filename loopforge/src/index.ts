@@ -75,7 +75,6 @@ export {
 
 export type {
   LoopPolicy,
-  ConstraintsPolicy,
   EnginePolicy,
   BackendPolicy,
   PromptPolicy,

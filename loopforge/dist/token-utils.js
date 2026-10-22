@@ -79,6 +79,12 @@ export const STABLE_ID_RE = /^(c|cr|sg|rc|rci)-[a-f0-9]{8}$/;
 export function deriveCriterionId(text) {
     return "cr-" + deriveItemId(text);
 }
+/** v2.11/v3.9.7: Derive a stable constraint ID from its text hash
+ *  (c-XXXXXXXX). Moved here so the constraint lifecycle resolver can use the
+ *  one identity helper without importing the compiler. */
+export function deriveConstraintId(text) {
+    return "c-" + deriveItemId(text);
+}
 /** The cr-XXXXXXXX shape — the ONE predicate every criterion-reference reader
  *  uses (round-contract.ts kept an inline copy before v3.8.1). */
 export function isCriterionId(ref) {
@@ -106,6 +112,12 @@ export function criterionRefMatches(ref, criterion) {
  *  unambiguous and deterministic. */
 export function findingKey(flag) {
     return JSON.stringify([flag.check, flag.field, flag.ref ?? ""]);
+}
+/** v3.9.7: the stable, user-referenceable id of one current machine finding.
+ *  The JSON `findingKey` remains the internal grouping key; `f-` is what the
+ *  prompt renders and what `prompt_requests.emphasize` can cite. */
+export function deriveFindingId(flag) {
+    return "f-" + deriveItemId(findingKey(flag));
 }
 // ── v3.8: Contract identity (content-addressed, round-independent) ──────────
 /** Normalize one contract text field for identity purposes. */

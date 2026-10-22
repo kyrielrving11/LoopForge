@@ -102,9 +102,9 @@ describe("derivePromptFreshness", () => {
       after: [gitObservation("after", { "a.ts": "m:2" }, "aaa")],
     });
     const freshness = derivePromptFreshness(view);
-    assert.equal(freshness.machineMotion, true);
+    assert.equal(freshness.machineProgress, "changed");
     assert.equal(freshness.observableNewInformation, true);
-    assert.ok(freshness.reasons.includes("git_content_changed"));
+    assert.ok(freshness.reasons.includes("progress_changed"));
   });
 
   it("treats a clean-worktree HEAD move as motion", () => {
@@ -113,9 +113,9 @@ describe("derivePromptFreshness", () => {
       after: [gitObservation("after", FINGERPRINTS_EMPTY, "bbb")],
     });
     const freshness = derivePromptFreshness(view);
-    assert.equal(freshness.machineMotion, true);
+    assert.equal(freshness.machineProgress, "changed");
     assert.equal(freshness.observableNewInformation, true);
-    assert.ok(freshness.reasons.includes("git_head_moved"));
+    assert.ok(freshness.reasons.includes("progress_changed"));
   });
 
   it("treats attributable after-phase commands as activity", () => {
@@ -136,11 +136,11 @@ describe("derivePromptFreshness", () => {
     assert.equal(freshness.machineActivity, false);
   });
 
-  it("treats a missing Git provider as unknown, not as no change", () => {
+  it("treats a missing progress provider as not applicable, not as no change", () => {
     const freshness = derivePromptFreshness(committedView({}));
-    assert.equal(freshness.machineMotion, null);
+    assert.equal(freshness.machineProgress, "not_applicable");
     assert.equal(freshness.observableNewInformation, true);
-    assert.ok(freshness.reasons.includes("no_git_provider"));
+    assert.ok(freshness.reasons.includes("no_progress_provider"));
   });
 
   it("treats an uncomparable Git boundary as unknown", () => {
@@ -148,9 +148,9 @@ describe("derivePromptFreshness", () => {
       before: [gitObservation("before", FINGERPRINTS_EMPTY, "aaa")],
       after: [gitObservation("after", FINGERPRINTS_EMPTY, "aaa", "timeout")],
     }));
-    assert.equal(freshness.machineMotion, null);
+    assert.equal(freshness.machineProgress, "unknown");
     assert.equal(freshness.observableNewInformation, true);
-    assert.ok(freshness.reasons.includes("git_boundary_unknown"));
+    assert.ok(freshness.reasons.includes("progress_unknown"));
   });
 
   it("proves staleness only for an observed no-change with no other activity", () => {
@@ -158,9 +158,9 @@ describe("derivePromptFreshness", () => {
       before: [gitObservation("before", FINGERPRINTS_EMPTY, "aaa")],
       after: [gitObservation("after", FINGERPRINTS_EMPTY, "aaa")],
     }));
-    assert.equal(freshness.machineMotion, false);
+    assert.equal(freshness.machineProgress, "unchanged");
     assert.equal(freshness.observableNewInformation, false);
-    assert.deepEqual(freshness.reasons, ["no_observable_activity"]);
+    assert.deepEqual(freshness.reasons, ["progress_unchanged", "no_observable_activity"]);
   });
 
   it("does not let an Agent-reported files_changed prove freshness", () => {
@@ -229,7 +229,7 @@ describe("derivePromptFreshness", () => {
 
   it("returns the unknown sentinel when there is no committed round", () => {
     assert.equal(UNKNOWN_PROMPT_FRESHNESS.observableNewInformation, true);
-    assert.equal(UNKNOWN_PROMPT_FRESHNESS.machineMotion, null);
+    assert.equal(UNKNOWN_PROMPT_FRESHNESS.machineProgress, "unknown");
     assert.deepEqual(UNKNOWN_PROMPT_FRESHNESS.reasons, ["no_previous_committed_round"]);
   });
 });

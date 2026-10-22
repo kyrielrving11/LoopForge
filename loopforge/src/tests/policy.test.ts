@@ -16,9 +16,11 @@ import {
 describe("Policy — Defaults", () => {
   beforeEach(() => resetPolicy());
 
-  it("DEFAULT_POLICY has correct constraint values", () => {
-    assert.equal(DEFAULT_POLICY.constraints.retire_window, 3);
+  it("DEFAULT_POLICY has the retained evolution values", () => {
+    assert.equal(DEFAULT_POLICY.version, "9");
     assert.equal(DEFAULT_POLICY.evolution.max_start_criteria, 12);
+    assert.equal("constraints" in DEFAULT_POLICY, false);
+    assert.equal("max_objective_versions" in DEFAULT_POLICY.evolution, false);
   });
 
   it("DEFAULT_POLICY has the stall lookback window", () => {
@@ -45,7 +47,8 @@ describe("Policy — Loading", () => {
   it("getPolicy returns DEFAULT_POLICY when no file found", () => {
     resetPolicy();
     const policy = getPolicy("nonexistent_policy.json");
-    assert.equal(policy.constraints.retire_window, 3);
+    assert.equal(policy.version, POLICY_SCHEMA_VERSION);
+    assert.equal("constraints" in policy, false);
   });
 
   it("getPolicy is a singleton within a session", () => {
@@ -65,7 +68,7 @@ describe("Policy — Loading", () => {
 
   it("loadPolicy returns defaults when no file declares a policy", () => {
     const policy = loadPolicy("/nonexistent/path.json");
-    assert.equal(policy.constraints.retire_window, 3);
+    assert.equal("constraints" in policy, false);
     assert.equal(policy.version, POLICY_SCHEMA_VERSION);
   });
 });

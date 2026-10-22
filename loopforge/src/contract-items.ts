@@ -18,13 +18,15 @@ import type { CommittedRoundView } from "./committed-round.js";
 import type { ObservationDelta } from "./evidence-provider.js";
 import { gitDeltaState } from "./evidence-provider.js";
 import type { CommandEvidencePolicy } from "./policy.js";
+import { declaresBlocked } from "./round-outcome.js";
 
 /** Per-round slice the reducer needs. */
 interface RoundSlice {
   round: number;
   report: ExecutionReport | null;
   deltas: ReadonlyArray<ObservationDelta>;
-  outcome: string | null;
+  /** The round's ONE blocked declaration (outcome or stop_reason). */
+  blocked: boolean;
 }
 
 export interface ItemStatusHistoryEntry {
@@ -60,11 +62,11 @@ export interface ContractItemInput {
   currentRound: number;
   currentReport: ExecutionReport | null;
   currentDeltas: ReadonlyArray<ObservationDelta>;
-  /** The in-flight round's own effective outcome. A `blocked` round CLOSES its
-   *  contract, so the closure cannot be derived from the committed slices
-   *  alone — the round being decided is not committed yet. Leave null where no
+  /** The in-flight round's own blocked declaration. A `blocked` round CLOSES
+   *  its contract, so closure cannot be derived from committed slices alone —
+   *  the round being decided is not committed yet. Leave false where no
    *  in-flight round exists (a pure committed-history replay). */
-  currentOutcome?: string | null;
+  currentBlocked?: boolean;
   commands: ReadonlyArray<CommandEvidencePolicy>;
 }
 
@@ -189,13 +191,15 @@ export function deriveContractItemStatuses(input: ContractItemInput): ContractIt
       round: round.round,
       report: round.executionReport,
       deltas: round.observationDelta,
-      outcome: round.outcome,
+      blocked: round.evaluation
+        ? declaresBlocked(round.evaluation)
+        : round.outcome === "blocked",
     })),
     {
       round: input.currentRound,
       report: input.currentReport,
       deltas: input.currentDeltas,
-      outcome: input.currentOutcome ?? null,
+      blocked: input.currentBlocked === true,
     },
   ].filter((slice) => slice.round < input.currentRound || slice.round === input.currentRound);
 
@@ -248,10 +252,13 @@ export function deriveContractItemStatuses(input: ContractItemInput): ContractIt
   const insufficientCount = items.filter((item) => item.status === "insufficient").length;
 
   const committingRound = slices[slices.length - 1];
-  const blocked = committingRound?.outcome === "blocked";
+  const blocked = committingRound?.blocked === true;
   const allVerified = items.length > 0 && verifiedCount === items.length;
+  // A blocked declaration is the Agent's protocol action and closes the
+  // contract first. Item statuses remain machine facts (verified items can
+  // still be listed), but a blocked closure can never also read as verified.
   const closure: ContractItemStatusView["closure"] =
-    allVerified ? "verified" : blocked ? "blocked" : "open";
+    blocked ? "blocked" : allVerified ? "verified" : "open";
 
   return {
     contractId: contract.id,

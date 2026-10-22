@@ -32,7 +32,13 @@ import type {
   MachineObservation,
   ObservationStatus,
   ObservedCapability,
+  ProgressSnapshot,
+  ProgressState,
 } from "./protocol.js";
+import {
+  gitMotionSignal,
+  observedGitHead,
+} from "./git-motion.js";
 import { containInWorkspace } from "./workspace.js";
 import { commandConfigHash, deriveConfiguredCapability, getPolicy, resolveStateDirectory } from "./policy.js";
 import type { CommandEvidencePolicy, LoopPolicy } from "./policy.js";
@@ -66,6 +72,11 @@ export interface EvidenceProvider {
   /** Observation kind this provider produces (used for the synthetic
    *  unavailable/timeout/error observations too). */
   readonly kind: MachineObservation["kind"];
+  /** v3.9.7: a custom provider opts into progress by emitting a stable
+   *  fingerprint snapshot. The collector persists this capability on every
+   *  observation, including failures, so replay never depends on the live
+   *  registry. */
+  readonly progressCapable?: boolean;
   /** Capture an observation. Returns null when the provider is structurally
    *  unavailable (e.g. not a git repository); the collector converts that
    *  into an explicit `unavailable` observation rather than dropping it. */
@@ -316,6 +327,97 @@ function syntheticObservation(
   } as MachineObservation;
 }
 
+const PROGRESS_FINGERPRINT_RE = /^[a-f0-9]{64}$/;
+
+function isValidProgressSnapshot(value: unknown): value is ProgressSnapshot {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const snapshot = value as Record<string, unknown>;
+  return snapshot.schemaVersion === 1 &&
+    typeof snapshot.fingerprint === "string" &&
+    PROGRESS_FINGERPRINT_RE.test(snapshot.fingerprint);
+}
+
+function progressErrorObservation(
+  provider: EvidenceProvider,
+  phase: "before" | "after",
+  startedAt: number,
+  detail: string,
+): MachineObservation {
+  return {
+    schemaVersion: 1,
+    providerId: provider.name,
+    kind: "custom",
+    phase,
+    startedAt,
+    finishedAt: Date.now(),
+    status: "error",
+    files: [],
+    data: { detail, progressCapable: true, progress: null },
+  };
+}
+
+/** Persist the provider's progress capability on every observation and reject
+ *  a contract violation instead of silently reading it as "no progress". */
+function normalizeProgressObservation(
+  provider: EvidenceProvider,
+  observation: MachineObservation,
+  phase: "before" | "after",
+  startedAt: number,
+): MachineObservation {
+  if (!provider.progressCapable) {
+    if (observation.kind === "custom" &&
+        (observation.data.progressCapable === true ||
+         observation.data.progress !== undefined)) {
+      return {
+        schemaVersion: 1,
+        providerId: provider.name,
+        kind: "custom",
+        phase,
+        startedAt,
+        finishedAt: Date.now(),
+        status: "error",
+        files: [],
+        data: {
+          detail: "provider emitted progress data without declaring progressCapable",
+          progressCapable: true,
+          progress: null,
+        },
+      };
+    }
+    return observation;
+  }
+
+  if (provider.kind !== "custom" || observation.kind !== "custom") {
+    return progressErrorObservation(
+      provider,
+      phase,
+      startedAt,
+      "progressCapable is only supported for custom observations",
+    );
+  }
+
+  if (observation.status === "observed") {
+    const snapshot = observation.data.progress;
+    if (!isValidProgressSnapshot(snapshot)) {
+      return progressErrorObservation(
+        provider,
+        phase,
+        startedAt,
+        "progress-capable provider did not emit a valid progress snapshot",
+      );
+    }
+    return {
+      ...observation,
+      data: { ...observation.data, progressCapable: true, progress: snapshot },
+    };
+  }
+
+  return {
+    ...observation,
+    data: { ...observation.data, progressCapable: true, progress: null },
+  };
+}
+
 /** Collects observations from all configured providers (always async).
  *
  * v3.8: every configured provider produces exactly one observation per
@@ -382,30 +484,47 @@ export class EvidenceCollector {
         if (timedOut) {
           policyMetrics.recordEvidence(provider.name, "timeout", Date.now() - startedAt, options.loopId);
           logEvent("evidence_provider_timeout", { provider: provider.name, timeoutMs });
-          return syntheticObservation(
-            provider.name, provider.kind, phase, startedAt, "timeout",
-            `provider exceeded ${timeoutMs}ms`,
+          return normalizeProgressObservation(
+            provider,
+            syntheticObservation(
+              provider.name, provider.kind, phase, startedAt, "timeout",
+              `provider exceeded ${timeoutMs}ms`,
+            ),
+            phase,
+            startedAt,
           );
         }
         if (!observation) {
           policyMetrics.recordEvidence(provider.name, "unavailable", Date.now() - startedAt, options.loopId);
-          return syntheticObservation(
+          const unavailable = syntheticObservation(
             provider.name, provider.kind, phase, startedAt, "unavailable",
             "provider reported no observation",
           );
+          return normalizeProgressObservation(provider, unavailable, phase, startedAt);
         }
+        const normalized = normalizeProgressObservation(
+          provider,
+          observation,
+          phase,
+          startedAt,
+        );
         policyMetrics.recordEvidence(
           provider.name,
-          observation.status === "timeout" ? "timeout" : "available",
+          normalized.status === "timeout" ? "timeout" : "available",
           Date.now() - startedAt,
           options.loopId,
         );
-        return observation;
+        return normalized;
       } catch (error) {
         policyMetrics.recordEvidence(provider.name, "failure", Date.now() - startedAt, options.loopId);
         logEvent("evidence_provider_error", { provider: provider.name, error: String(error) });
-        return syntheticObservation(
-          provider.name, provider.kind, phase, startedAt, "error", String(error),
+        return normalizeProgressObservation(
+          provider,
+          syntheticObservation(
+            provider.name, provider.kind, phase, startedAt, "error", String(error),
+          ),
+          phase,
+          startedAt,
         );
       } finally {
         if (timer) clearTimeout(timer);
@@ -1286,6 +1405,73 @@ export interface ObservationDelta {
   /** Git only. [] = observed no change; null = unknown.
    *  command/custom always null (no file-change concept). */
   changedFiles: string[] | null;
+  /** v3.9.7: this provider's before→after progress verdict. Git uses the
+   *  existing complete-boundary rule; a custom provider compares its
+   *  persisted progress fingerprints; command is not applicable. */
+  progress: ProgressState;
+}
+
+function customProgressCapable(
+  observation: MachineObservation | null,
+): boolean {
+  return observation?.kind === "custom" &&
+    observation.data.progressCapable === true;
+}
+
+function customProgress(
+  observation: MachineObservation | null,
+): ProgressSnapshot | null {
+  if (observation?.kind !== "custom") return null;
+  const value = observation.data.progress;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  if (value.schemaVersion !== 1 || typeof value.fingerprint !== "string") return null;
+  return value;
+}
+
+function deltaProgress(
+  observation: MachineObservation,
+  beforeObservation: MachineObservation | null,
+  afterObservation: MachineObservation | null,
+  changedFiles: string[] | null,
+  ambiguous: boolean,
+): ProgressState {
+  if (ambiguous) return "unknown";
+
+  if (observation.kind === "git") {
+    if (beforeObservation?.kind !== "git" || afterObservation?.kind !== "git") {
+      return "unknown";
+    }
+    if (beforeObservation.status !== "observed" ||
+        afterObservation.status !== "observed" ||
+        changedFiles === null) {
+      return "unknown";
+    }
+    const signal = gitMotionSignal({
+      changedFiles,
+      headBefore: observedGitHead(beforeObservation),
+      headAfter: observedGitHead(afterObservation),
+    });
+    return signal === null ? "unknown" : signal ? "changed" : "unchanged";
+  }
+
+  if (observation.kind === "custom") {
+    const beforeCapable = customProgressCapable(beforeObservation);
+    const afterCapable = customProgressCapable(afterObservation);
+    if (!beforeCapable && !afterCapable) return "not_applicable";
+    if (beforeObservation?.status !== "observed" ||
+        afterObservation?.status !== "observed" ||
+        !beforeCapable || !afterCapable) {
+      return "unknown";
+    }
+    const beforeSnapshot = customProgress(beforeObservation);
+    const afterSnapshot = customProgress(afterObservation);
+    if (!beforeSnapshot || !afterSnapshot) return "unknown";
+    return beforeSnapshot.fingerprint === afterSnapshot.fingerprint
+      ? "unchanged"
+      : "changed";
+  }
+
+  return "not_applicable";
 }
 
 /** The Git change set for a round, with applicability kept distinct from
@@ -1383,6 +1569,13 @@ export function deriveObservationDeltas(
       before: beforeObservation,
       after: afterObservation,
       changedFiles,
+      progress: deltaProgress(
+        observation,
+        beforeObservation,
+        afterObservation,
+        changedFiles,
+        ambiguous,
+      ),
     };
   });
 

@@ -214,7 +214,8 @@ describe("cognitive-state compiler", () => {
       }),
     }), null);
     assert.ok(response.constraints_active.includes("Keep rollback path"));
-    assert.ok(response.constraints_retired.includes("Temporary freeze"));
+    assert.ok(!response.constraints_retired.includes("Temporary freeze"),
+      "a target that was never active is a no-op, not an applied retraction");
     assert.match(response.prompt, /Verify rollback/);
     assert.equal(response.loop_objective?.objective, "Migrate safely",
       "objective refinements are reports, not operator-objective rewrites");
@@ -287,8 +288,9 @@ describe("cognitive-state compiler", () => {
     // L0 max comes from the policy — rendered prompt must be within budget
     const l0Budget = DEFAULT_POLICY.prompt.l0_max_chars;
     assert.ok(
-      (response.prompt?.length ?? 0) <= l0Budget,
-      `L0 prompt length ${response.prompt?.length} exceeds ${l0Budget} char budget`,
+      (response.prompt?.length ?? 0) <= l0Budget ||
+        response.prompt_artifact?.protectedOverflow === true,
+      `L0 prompt length ${response.prompt?.length} exceeds ${l0Budget} char budget without a protected-overflow marker`,
     );
   });
 
@@ -1306,7 +1308,7 @@ describe("v3.3 — round stats and machine status threading", () => {
     assert.doesNotMatch(response.prompt, /Round Stats/);
     // The machine git-motion row survives, in the state file — the surface a
     // human or external tool reads.
-    assert.match(response.state_file_content ?? "", /Machine \(git\)/);
+    assert.match(response.state_file_content ?? "", /Machine progress/);
     assert.match(response.state_file_content ?? "", /changes observed in 3\/3 recent committed rounds/);
   });
 
@@ -1393,7 +1395,7 @@ describe("v3.3 — round stats and machine status threading", () => {
     // v3.8.1: the per-round stats table is gone from the prompt; the machine
     // git-motion row is a state-file row.
     assert.doesNotMatch(response.prompt, /Round Stats/);
-    assert.match(response.state_file_content ?? "", /Machine \(git\)/);
+    assert.match(response.state_file_content ?? "", /Machine progress/);
     assert.match(response.state_file_content ?? "", /changes observed in 2\/3 recent committed rounds/,
       "R1+R2 moved; R3 recorded no motion");
   });
@@ -1661,8 +1663,10 @@ describe("M5 — objective refinement retry idempotency", () => {
     const o2 = attempt2.loop_objective!;
     assert.equal(o2.objective, "Ship the port",
       "the operator objective is immutable");
-    assert.equal(o2.version, 1, "the objective version is immutable");
-    assert.deepEqual(o2.refinement_history, [refinement]);
+    assert.equal("version" in o2, false,
+      "objective_refinement creates no second objective version");
+    assert.equal("refinement_history" in o2, false,
+      "objective_refinement creates no second objective history");
 
     const attempt3 = compileLoop(makeLoopCompileRequest({
       loop_id: loopId,
@@ -1672,8 +1676,7 @@ describe("M5 — objective refinement retry idempotency", () => {
     }), { results: [{ ...context.results[0], loop_objective: o2 }] });
     const o3 = attempt3.loop_objective!;
     assert.equal(o3.objective, "Ship the port");
-    assert.deepEqual(o3.refinement_history, [refinement],
-      "the report is folded once");
+    assert.equal("refinement_history" in o3, false);
   });
 });
 
@@ -1855,7 +1858,7 @@ describe("3.9.3 — committed-fact prompt level", () => {
       force_level: "l2",
     }), context);
     assert.match(response.prompt, /Corrections \(committed reports\)/);
-    assert.match(response.prompt, /Corrected assumption: old belief/);
+    assert.match(response.prompt, /old belief/);
     assert.match(response.prompt, /Confusion Alerts/);
     assert.match(response.prompt, /what does committed mean\?/);
     assert.doesNotMatch(response.prompt, /a prior summary that must not be replayed/);

@@ -10,11 +10,10 @@ import {
 } from "../round-transaction.js";
 import {
   derivationRounds,
-  gitMotionSignal,
-  inFlightGitMotion,
   legacyTransactionRounds,
-  machineGitMotionSeries,
 } from "../committed-round.js";
+import { gitMotionSignal } from "../git-motion.js";
+import { inFlightGitMotion, machineGitMotionSeries } from "../progress.js";
 import type { GitObservation, MachineObservation } from "../protocol.js";
 import type { VaultEntry } from "../loop-store.js";
 
@@ -244,8 +243,14 @@ describe("machineGitMotionSeries", () => {
         before: [gitObservation([], {}, "000000")],
         after: [gitObservation([], {}, "aaa111")],
       }),
-      feedbackEntry(2, { after: [gitObservation([], {}, "bbb222")] }),
-      feedbackEntry(3, { after: [gitObservation([], {}, "ccc333")] }),
+      feedbackEntry(2, {
+        before: [gitObservation([], {}, "aaa111")],
+        after: [gitObservation([], {}, "bbb222")],
+      }),
+      feedbackEntry(3, {
+        before: [gitObservation([], {}, "bbb222")],
+        after: [gitObservation([], {}, "ccc333")],
+      }),
     ].flatMap((entry) => derivationRounds([entry]));
     assert.deepEqual(machineGitMotionSeries(views, 4, 3), [true, true, true]);
   });

@@ -134,6 +134,13 @@ progress summaries. `output_summary` remains a committed report for audit,
 replay, explain and backtrack diagnosis; full history is read on demand from the
 derived state file or the read-only views.
 
+Machine progress is provider-neutral. Git keeps its complete-boundary/HEAD/
+restore-point rule; a configured custom provider opts in by persisting a
+versioned fingerprint snapshot (`data.progressCapable` + `data.progress`).
+Command observations are verification evidence, not progress. Stall requires
+the committed window and the submitted round to be proven unchanged; unknown
+and not-applicable never stall.
+
 Runtime behavior is controlled by `loop_policy.json`, read from the workspace
 the process was started in. Evidence commands are explicitly configured, run
 without a shell, and restricted to the workspace. The default policy keeps the

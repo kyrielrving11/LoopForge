@@ -119,9 +119,12 @@ fit; relationships are explicit `criterion_refs`/`subgoal_refs` only.
 The Agent works under the active contract. The **verification gate** checks
 claim consistency, evidence integrity, plan and contract conformance, and
 progress and recovery state. It compares the Agent's claims with Git snapshots,
-configured command observations, and committed round history. A change outside
-the active contract's declared scope produces `round_scope_drift`, a machine
-fact that cannot be waived by explanation.
+progress-capable provider observations, configured command observations, and
+committed round history. Progress is four-state — changed / unchanged / unknown
+/ not applicable — and only a proven unchanged window plus a proven unchanged
+submitted round can stall. A change outside the active contract's declared
+scope produces `round_scope_drift`, a machine fact that cannot be waived by
+explanation.
 
 ### After: Closure
 
@@ -261,9 +264,13 @@ is a regenerable human-facing view, not the source of truth.
 
 - Structured MCP round protocol with stable error codes and retry semantics.
 - Deterministic state reconstruction from committed typed history.
-- Machine evidence from Git and explicitly configured commands.
+- Machine evidence from Git, progress-capable custom providers, and explicitly
+  configured commands.
 - Content-addressed `rc-` and `rci-` identities for Round Contracts.
-- Verification debt, scope drift, progress stalls, and recovery decisions.
+- Rendered constraint provenance, real-id retractions, and current-object
+  emphasis without duplicating content.
+- Verification debt, scope drift, provider-neutral progress stalls, and
+  recovery decisions.
 - Durable sessions, atomic writes, locks, leases, pause, resume, and replay.
 - L0/L1/L2 prompt density without choosing a reasoning technique for the Agent.
 

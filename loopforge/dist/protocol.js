@@ -76,8 +76,6 @@ export function makeLoopObjective(overrides = {}) {
         hard_constraints: [],
         created_at_round: 1,
         loop_id: "",
-        version: 1,
-        refinement_history: [],
         ...overrides,
     };
 }
@@ -151,10 +149,12 @@ export function makeLoopCompileRequest(overrides = {}) {
 /** v3.8.1: the artifact schema version, next to the type it versions. The
  *  transaction envelope parser reads it, so the constant lives here rather
  *  than in the renderer. */
-/** v3.9.4: schema 4 adds `coverage`. Older versions are a HARD break — a
- *  round whose artifact does not parse is not committed history, and
- *  `legacyTransactionRounds` reports the loss rather than letting it vanish. */
-export const PROMPT_ARTIFACT_SCHEMA_VERSION = 5;
+/** v3.9.4: schema 4 adds `coverage`. v3.9.7: schema 6 adds prompt-request
+ *  `matched_ids`/`matched_count` and the single `defect` coverage reason.
+ *  Older versions are a HARD break — a round whose artifact does not parse is
+ *  not committed history, and `legacyTransactionRounds` reports the loss
+ *  rather than letting it vanish. */
+export const PROMPT_ARTIFACT_SCHEMA_VERSION = 6;
 export function makeLoopCompileResponse(overrides = {}) {
     return {
         status: AgentStatus.OK,

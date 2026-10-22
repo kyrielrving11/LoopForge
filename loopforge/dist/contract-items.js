@@ -8,6 +8,7 @@
  *  the current observations, and policy.
  */
 import { gitDeltaState } from "./evidence-provider.js";
+import { declaresBlocked } from "./round-outcome.js";
 const EMPTY_VIEW = {
     contractId: "",
     closure: "open",
@@ -114,13 +115,15 @@ export function deriveContractItemStatuses(input) {
             round: round.round,
             report: round.executionReport,
             deltas: round.observationDelta,
-            outcome: round.outcome,
+            blocked: round.evaluation
+                ? declaresBlocked(round.evaluation)
+                : round.outcome === "blocked",
         })),
         {
             round: input.currentRound,
             report: input.currentReport,
             deltas: input.currentDeltas,
-            outcome: input.currentOutcome ?? null,
+            blocked: input.currentBlocked === true,
         },
     ].filter((slice) => slice.round < input.currentRound || slice.round === input.currentRound);
     const enabledCommands = new Set(input.commands.filter((command) => command.enabled).map((command) => command.name));
@@ -162,9 +165,12 @@ export function deriveContractItemStatuses(input) {
     const contradictedCount = items.filter((item) => item.status === "contradicted").length;
     const insufficientCount = items.filter((item) => item.status === "insufficient").length;
     const committingRound = slices[slices.length - 1];
-    const blocked = committingRound?.outcome === "blocked";
+    const blocked = committingRound?.blocked === true;
     const allVerified = items.length > 0 && verifiedCount === items.length;
-    const closure = allVerified ? "verified" : blocked ? "blocked" : "open";
+    // A blocked declaration is the Agent's protocol action and closes the
+    // contract first. Item statuses remain machine facts (verified items can
+    // still be listed), but a blocked closure can never also read as verified.
+    const closure = blocked ? "blocked" : allVerified ? "verified" : "open";
     return {
         contractId: contract.id,
         closure,

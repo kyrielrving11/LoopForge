@@ -220,7 +220,8 @@ describe("enforcement-gate — R2: recurring violation", () => {
     );
     assert.equal(result.action, "reject");
     assert.ok(result.reason.includes("3 consecutive rounds"));
-    assert.ok(result.fix_instructions.includes("DIFFERENT approach"));
+    assert.ok(!result.fix_instructions.includes("DIFFERENT approach"));
+    assert.ok(result.fix_instructions.includes("does not prescribe a technique"));
   });
 });
 
@@ -303,9 +304,9 @@ describe("enforcement-gate — progress stall evaluator (v3.7: R4/R5 merged)", (
       vaultRound(2, []),
       vaultRound(3, []),
     ];
-    const result = enforceRound(curr, trusted(), 4, vault, 0);
+    const result = enforceRound(curr, trusted(), 4, vault, 0, "", false, { state: "unchanged", providers: ["git"] });
     assert.equal(result.action, "reject");
-    assert.ok(result.reason.includes("stalled"));
+    assert.ok(result.reason.includes("Machine-observed progress is flat"));
   });
 
   it("accepts when Git observes file changes in the window", () => {
@@ -341,7 +342,7 @@ describe("enforcement-gate — progress stall evaluator (v3.7: R4/R5 merged)", (
     // last clean round rather than redoing the same round with guidance.
     // v3.8.3: the stall's own streak — the check name is the one the counter
     // belongs to, not an assumption.
-    const result = enforceRound(curr, trusted(), 4, vault, 1, "progress_stall");
+    const result = enforceRound(curr, trusted(), 4, vault, 1, "progress_stall", false, { state: "unchanged", providers: ["git"] });
     assert.equal(result.action, "backtrack");
     assert.equal(result.check, "progress_stall");
   });
@@ -359,7 +360,7 @@ describe("enforcement-gate — progress stall evaluator (v3.7: R4/R5 merged)", (
       vaultRound(3, []),
     ];
     // v2.7: consecutiveRejections=2 → terminate (escalation already given)
-    const result = enforceRound(curr, trusted(), 4, vault, 2, "progress_stall");
+    const result = enforceRound(curr, trusted(), 4, vault, 2, "progress_stall", false, { state: "unchanged", providers: ["git"] });
     assert.equal(result.action, "terminate");
     assert.equal(result.check, "progress_stall");
   });
@@ -447,19 +448,21 @@ describe("buildRejectionPrompt", () => {
     assert.ok(prompt.includes("Round 5"));
     assert.ok(prompt.includes("criteria remain unmet"));
     assert.ok(prompt.includes("Complete all criteria"));
-    assert.ok(prompt.includes("Audit the ERC20 token"));
-    assert.ok(prompt.includes("Retry"));
+    assert.ok(!prompt.includes("Audit the ERC20 token"),
+      "the original task is rendered by Objective/Current Task, not repeated here");
+    assert.ok(prompt.includes("Re-execute"));
     assert.ok(prompt.includes("do NOT advance"));
   });
 
-  it("includes the task in the retry section", () => {
+  it("does not repeat the task; Objective/Current Task own it", () => {
     const enforceResult = makeEnforcementResult({
       action: "reject",
       reason: "Test reason.",
       fix_instructions: "Test fix.",
     });
     const prompt = buildRejectionPrompt(2, "Fix bugs in auth module", enforceResult);
-    assert.ok(prompt.includes("Fix bugs in auth module"));
+    assert.ok(!prompt.includes("Fix bugs in auth module"));
+    assert.ok(prompt.includes("Test fix."));
   });
 });
 
@@ -696,7 +699,7 @@ describe("enforcement-gate — progress stall: backtrack deadlock guard", () => 
       // the loop is re-walking rolled-back territory with the same stall.
       committedBacktrackRound(4),
     ];
-    const result = enforceRound(curr, trusted(), 4, vault, 1, "progress_stall");
+    const result = enforceRound(curr, trusted(), 4, vault, 1, "progress_stall", false, { state: "unchanged", providers: ["git"] });
     assert.equal(result.action, "terminate");
     assert.equal(result.check, "progress_stall");
   });
@@ -719,7 +722,7 @@ describe("enforcement-gate — progress stall: backtrack deadlock guard", () => 
       vaultRound(4, [], branch),
       vaultRound(5, [], branch),
     ];
-    const result = enforceRound(curr, trusted(), 6, vault, 1, "progress_stall");
+    const result = enforceRound(curr, trusted(), 6, vault, 1, "progress_stall", false, { state: "unchanged", providers: ["git"] });
     assert.equal(result.action, "backtrack");
     assert.equal(result.check, "progress_stall");
   });
@@ -732,22 +735,32 @@ describe("enforcement-gate — progress stall: backtrack deadlock guard", () => 
       execution_report: makeExecutionReport({ files_changed: ["src/foo.ts"] }),
     });
     const vault = [vaultRound(1, []), vaultRound(2, []), vaultRound(3, [])];
-    const result = enforceRound(curr, trusted(), 4, vault, 0, "", false, true);
+    const result = enforceRound(curr, trusted(), 4, vault, 0, "", false, {
+      state: "changed",
+      providers: ["git"],
+    });
     assert.equal(result.action, "accept");
   });
 
-  it("keeps the verdict when the submitted round moved nothing", () => {
+  it("keeps the verdict only when the submitted round is proven unchanged", () => {
     const curr = se({
       success: false,
       execution_report: makeExecutionReport({ files_changed: ["src/foo.ts"] }),
     });
     const vault = [vaultRound(1, []), vaultRound(2, []), vaultRound(3, [])];
-    // null = no Git observation: an unobservable round gains no excuse either.
-    for (const motion of [false, null]) {
-      const result = enforceRound(curr, trusted(), 4, vault, 0, "", false, motion);
-      assert.equal(result.action, "reject", `motion=${motion}`);
-      assert.equal(result.check, "progress_stall");
-    }
+    const unchanged = enforceRound(curr, trusted(), 4, vault, 0, "", false, {
+      state: "unchanged",
+      providers: ["git"],
+    });
+    assert.equal(unchanged.action, "reject");
+    assert.equal(unchanged.check, "progress_stall");
+
+    // Unknown never stalls: an unobservable submitted round gains no verdict.
+    const unknown = enforceRound(curr, trusted(), 4, vault, 0, "", false, {
+      state: "unknown",
+      providers: ["git"],
+    });
+    assert.equal(unknown.action, "accept");
   });
 
   it("still terminates a stalled redo that a rollback already moved", () => {
@@ -761,7 +774,10 @@ describe("enforcement-gate — progress stall: backtrack deadlock guard", () => 
       vaultRound(1, []), vaultRound(2, []), vaultRound(3, []),
       committedBacktrackRound(4),
     ];
-    const result = enforceRound(curr, trusted(), 4, vault, 1, "progress_stall", false, false);
+    const result = enforceRound(curr, trusted(), 4, vault, 1, "progress_stall", false, {
+      state: "unchanged",
+      providers: ["git"],
+    });
     assert.equal(result.action, "terminate");
     assert.equal(result.check, "progress_stall");
   });
@@ -954,7 +970,7 @@ describe("enforcement-gate — progress stall: continuity guard (v3.7: R4/R5 mer
       { task_id: "loop:test-loop:r4", loop_id: "test-loop", loop_lineage: { round: 4, success: true } },
       { task_id: "loop:test-loop:r5", loop_id: "test-loop", loop_lineage: { round: 5, success: true } },
     ];
-    const result = enforceRound(curr, trusted(), 6, vault, 1);
+    const result = enforceRound(curr, trusted(), 6, vault, 1, "", false, { state: "unchanged", providers: ["git"] });
     assert.equal(result.action, "accept");
   });
 
@@ -976,7 +992,7 @@ describe("enforcement-gate — progress stall: continuity guard (v3.7: R4/R5 mer
     // positive threshold), so the evaluator fires on the stall tier; the
     // flatline tier is only consulted when the stall predicate cannot hold.
     // The continuity guard must not suppress the legitimate flatline window.
-    const result = enforceRound(curr, trusted(), 6, vault, 0);
+    const result = enforceRound(curr, trusted(), 6, vault, 0, "", false, { state: "unchanged", providers: ["git"] });
     assert.equal(result.action, "reject");
     assert.equal(result.check, "progress_stall");
   });
@@ -1079,7 +1095,7 @@ describe("v3.2 — R4 machine progress fallback", () => {
 
   it("detects stall from three rounds without git changes on the heuristic path", () => {
     const entries = [feedbackRound(1, []), feedbackRound(2, []), feedbackRound(3, [])];
-    const result = enforceRound(se({ success: false }), trusted(), 4, entries, 0);
+    const result = enforceRound(se({ success: false }), trusted(), 4, entries, 0, "", false, { state: "unchanged", providers: ["git"] });
     assert.ok(result, "machine stall must fire where the rule used to self-skip");
     assert.equal(result!.action, "reject");
     assert.equal(result!.check, "progress_stall");
@@ -1173,7 +1189,7 @@ describe("v3.3 — progress stall exculpatory machine cross-check", () => {
       "a machine-verified round must be able to close the loop");
 
     // Without the machine fact the same window still stalls.
-    const stalled = enforceRound(se({ success: false }), trusted(), 4, entries, 0);
+    const stalled = enforceRound(se({ success: false }), trusted(), 4, entries, 0, "", false, { state: "unchanged", providers: ["git"] });
     assert.equal(stalled.action, "reject");
     assert.equal(stalled.check, "progress_stall");
   });
@@ -1186,7 +1202,7 @@ describe("v3.3 — progress stall exculpatory machine cross-check", () => {
       machineRound(2, 0.31, []),
       machineRound(3, 0.32, [], ["auth module completed"]),
     ];
-    const result = enforceRound(se({ success: false }), trusted(), 4, entries, 0);
+    const result = enforceRound(se({ success: false }), trusted(), 4, entries, 0, "", false, { state: "unchanged", providers: ["git"] });
     assert.equal(result!.action, "reject");
     assert.equal(result!.check, "progress_stall");
   });
@@ -1197,14 +1213,14 @@ describe("v3.3 — progress stall exculpatory machine cross-check", () => {
       machineRound(2, 0.31, []),
       machineRound(3, 0.32, []),
     ];
-    const result = enforceRound(se({ success: false }), trusted(), 4, entries, 0);
+    const result = enforceRound(se({ success: false }), trusted(), 4, entries, 0, "", false, { state: "unchanged", providers: ["git"] });
     assert.equal(result!.action, "reject");
     assert.equal(result!.check, "progress_stall");
     // v3.8.1: the machine series decides when it is observable, so the reason
     // states the machine fact directly. The old wording appended it as an
     // annotation to a self-report-derived verdict; here the verdict IS the
     // machine observation (the rising self-report does not enter it).
-    assert.match(result!.reason, /no machine-observed changes in the last 3 rounds/);
+    assert.match(result!.reason, /no machine-observed progress in the last 3 committed rounds/);
   });
 
   it("v3.6: R5 flatline is NOT excluded by a criterion completion over the breaker window", () => {
@@ -1215,7 +1231,7 @@ describe("v3.3 — progress stall exculpatory machine cross-check", () => {
       machineRound(2, 0.30, []),
       machineRound(3, 0.30, [], ["auth module completed"]),
     ];
-    const result = enforceRound(se({ success: false }), trusted(), 4, entries, 0);
+    const result = enforceRound(se({ success: false }), trusted(), 4, entries, 0, "", false, { state: "unchanged", providers: ["git"] });
     assert.equal(result!.action, "reject");
     assert.equal(result!.check, "progress_stall");
   });
@@ -1339,7 +1355,7 @@ describe("v3.8 — Round Contract item enforcement", () => {
       declaredRound(contract), priorDebt(contract, 2), priorDebt(contract, 3),
     ], 1, "contract_items_unverified");
     assert.equal(result.action, "reject");
-    const appearances = result.fix_instructions.split("Seek Human Guidance").length - 1;
+    const appearances = result.fix_instructions.split("Human Decision Required").length - 1;
     assert.equal(appearances, 1, "the escalation notice must not be duplicated");
   });
 
@@ -1589,6 +1605,7 @@ describe("v3.7 — behavior-equality compatibility matrix", () => {
           c.strikes ?? 0,
           lastCheck,
           c.driftWaiver ?? false,
+          { state: "unchanged", providers: ["git"] },
         );
         return result.action;
       };
@@ -1607,6 +1624,8 @@ describe("v3.7 — behavior-equality compatibility matrix", () => {
           c.vault ?? [],
           c.strikes ?? 0,
           lastCheck,
+          false,
+          { state: "unchanged", providers: ["git"] },
         );
         assert.equal(result.check, c.check, `${c.name}: check id`);
       }

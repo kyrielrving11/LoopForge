@@ -5,10 +5,9 @@ import { resolve } from "node:path";
 import { containInWorkspace } from "./workspace.js";
 /** v3.8.1: the policy schema version. A policy file that does not declare
  *  exactly this version is REJECTED — see loadPolicy. */
-export const POLICY_SCHEMA_VERSION = "8";
+export const POLICY_SCHEMA_VERSION = "9";
 export const DEFAULT_POLICY = {
     version: POLICY_SCHEMA_VERSION,
-    constraints: { retire_window: 3 },
     engine: { stall_lookback_rounds: 3, max_rounds: 200, enforcement_escalation_enabled: true, agent_recovery_enabled: true, backtrack_enabled: true, backtrack_max_depth: 3, backtrack_preserve_discoveries: true, unverified_claim_streak_limit: 3 },
     prompt: {
         l0_max_chars: 5000,
@@ -22,7 +21,6 @@ export const DEFAULT_POLICY = {
     evolution: {
         max_discovered_constraints_per_round: 5,
         max_start_criteria: 12,
-        max_objective_versions: 10,
         max_active_subgoals: 12,
     },
     state_file: {

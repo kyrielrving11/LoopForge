@@ -65,13 +65,13 @@ function contract(): ActiveContractView {
 function state(overrides: Partial<CanonicalLoopState> = {}): CanonicalLoopState {
   const activeContract = contract();
   const base: CanonicalLoopState = {
-    schemaVersion: 3 as const,
+    schemaVersion: 4 as const,
     loopId: "coverage-loop",
     round: 3,
     maxRounds: 20,
     goalId: "goal",
     objective: "Ship auth",
-    objectiveVersion: 1,
+    rejectionNotice: null,
     currentTask: formatRoundContract(activeContract, null),
     successCriteria: [AUTH, API],
     hardConstraints: ["no runtime deps"],
@@ -182,7 +182,6 @@ describe("v3.9.4 — PromptCoverage", () => {
         { id: "never-rendered", kind: "recovery" },
       ],
       rendered: ["cr-aaaaaaaa"],
-      declared: ["cr-aaaaaaaa"],
     });
     assert.equal(coverage.complete, false);
     assert.deepEqual(coverage.omitted, [{ id: "never-rendered", reason: "defect" }]);
@@ -195,15 +194,15 @@ describe("v3.9.4 — PromptCoverage", () => {
     );
   });
 
-  it("fails closed when the current task did not render its contract ids", () => {
-    const broken = state({ currentTask: "Ship auth" });
-    assert.throws(
-      () => artifact("l1", broken),
-      (error: unknown) =>
-        error instanceof ProjectionCoverageError &&
-        error.coverage.omitted.some((entry) =>
-          entry.id === "rc-12345678" || entry.id === "rci-12345678"),
-    );
+  it("renders contract ids from the structured contract, not the currentTask string", () => {
+    // v3.9.7: Current Task is re-rendered by the contract formatter and its
+    // emitted ids are declared directly; a hand-built stale currentTask string
+    // can no longer hide a contract id.
+    const rebuilt = state({ currentTask: "Ship auth" });
+    const a = artifact("l1", rebuilt);
+    assert.ok(a.renderedPrompt.includes("rc-12345678"));
+    assert.ok(a.renderedPrompt.includes("rci-12345678"));
+    assert.equal(a.coverage.complete, true);
   });
 
   it("renders all active ids even when the protected set overflows the budget", () => {

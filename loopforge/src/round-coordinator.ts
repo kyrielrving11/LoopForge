@@ -38,15 +38,14 @@ import {
   verifySelfEvaluation,
 } from "./verification-gate.js";
 import { verifyRecoveryCheckpoint } from "./recovery.js";
-import { entryRound, isRecord } from "./token-utils.js";
+import { isRecord } from "./token-utils.js";
 import { driftedEntrypoints } from "./evidence-provider.js";
-import { declaresBlocked, effectiveOutcome, effectiveSuccess } from "./self-eval.js";
+import { declaresBlocked, effectiveSuccess } from "./round-outcome.js";
 import {
   derivationRounds,
-  decodeCommittedRound,
-  inFlightGitMotion,
   pendingRollbackDirective,
 } from "./committed-round.js";
+import { deriveRoundProgress } from "./progress.js";
 import {
   enforceRound,
   buildRejectionPrompt,
@@ -223,6 +222,9 @@ export function deriveBacktrackRecoveryFacts(input: {
   restoreRound: number;
   vaultEntries: VaultEntry[];
   selfEval: SelfEvaluation;
+  /** v3.9.7: the ONE discovery set from `findSafeRestorePoint` (committed
+   *  skipped rounds only). The rejected trigger attempt contributes none. */
+  skippedDiscoveries: ReadonlyArray<string>;
 }): {
   skippedFiles: string[];
   skippedFingerprints: Record<string, string>;
@@ -239,24 +241,18 @@ export function deriveBacktrackRecoveryFacts(input: {
   // agent's report); later rounds overwrite earlier ones so the map holds the
   // LAST failed state of every file.
   const skippedFingerprints: Record<string, string> = {};
-  const skippedDiscoveries: string[] = [];
+  const skippedDiscoveries: string[] = [...input.skippedDiscoveries];
   const failedRounds: number[] = [];
   const approaches: string[] = [];
   const wrongAssumptions: string[] = [];
+  const window = derivationRounds(vaultEntries, currentRound);
   for (let r = restoreRound + 1; r < currentRound; r++) {
-    // v3.2.1: match the feedback entry (execution_report lives there) — the
-    // compile-time lineage entry for the same round precedes it in the flat
-    // view and carries no evidence.
-    const entry = vaultEntries.find(
-      (e) => entryRound(e) === r && e.task_type !== "loop_lineage",
-    );
-    const view = entry ? decodeCommittedRound(entry) : null;
+    const view = window.find((candidate) => candidate.round === r) ?? null;
     const evaluation = view?.evaluation ?? null;
-    if (entry?.execution_report) {
-      const ev = entry.execution_report as Record<string, unknown>;
-      const reported = Array.isArray(ev.files_changed)
-        ? ev.files_changed.filter((f: unknown): f is string => typeof f === "string")
-        : [];
+    const report = view?.executionReport ?? null;
+    if (report) {
+      const reported = (report.files_changed ?? [])
+        .filter((f): f is string => typeof f === "string");
       // v3.9.1: the machine delta is the primary set of files the failed
       // round changed; the agent report is unioned in so an ignored file the
       // agent named is not lost from the recovery brief.
@@ -289,12 +285,6 @@ export function deriveBacktrackRecoveryFacts(input: {
     for (const a of assumptions) {
       if (!wrongAssumptions.includes(a)) wrongAssumptions.push(a);
     }
-    for (const discovery of (evaluation?.discovered_constraints ?? [])
-      .filter((v: unknown): v is string => typeof v === "string")) {
-      if (!skippedDiscoveries.includes(discovery)) {
-        skippedDiscoveries.push(discovery);
-      }
-    }
   }
   // The in-flight attempt that triggered this rollback.
   const triggerSummary = selfEval.output_summary?.trim() ?? "";
@@ -306,12 +296,9 @@ export function deriveBacktrackRecoveryFacts(input: {
       if (!wrongAssumptions.includes(a)) wrongAssumptions.push(a.slice(0, 500));
     }
   }
-  for (const discovery of (selfEval.discovered_constraints ?? [])
-    .filter((v: unknown): v is string => typeof v === "string")) {
-    if (!skippedDiscoveries.includes(discovery)) {
-      skippedDiscoveries.push(discovery);
-    }
-  }
+  // A discovery declared by the rejected trigger attempt is NOT committed and
+  // must never become an active constraint through the rollback. Only
+  // discoveries from committed skipped rounds are preserved.
   return {
     skippedFiles,
     skippedFingerprints,
@@ -442,7 +429,7 @@ export class RoundCoordinator {
         round: currentRound,
         report: selfEval.execution_report ?? null,
         deltas: evidenceDeltas ?? [],
-        outcome: effectiveOutcome(selfEval),
+        blocked: declaresBlocked(selfEval),
         commands: getPolicy().evidence.commands ?? [],
       });
 
@@ -490,10 +477,10 @@ export class RoundCoordinator {
       consecutiveRejections,
       input.lastRejectionCheck ?? "",
       scopeDriftWaiver,
-      // v3.9: what THIS round moved, from the same Git motion rule the
-      // committed series uses. Unknown motion stays null — an unobservable
-      // round never gains the stall excuse.
-      inFlightGitMotion(
+      // v3.9.7: what THIS round moved, from the same provider-neutral
+      // progress rule the committed series uses. Unknown/not_applicable never
+      // gains the stall excuse.
+      deriveRoundProgress(
         evidenceDeltas ?? [],
         pendingRecovery?.target_head,
       ),
@@ -596,6 +583,7 @@ export class RoundCoordinator {
         restoreRound: restorePoint.round,
         vaultEntries,
         selfEval,
+        skippedDiscoveries: restorePoint.skippedDiscoveries,
       });
 
       // v2.12: Capture the restore point's machine snapshot — the commit the

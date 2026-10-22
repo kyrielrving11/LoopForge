@@ -61,14 +61,17 @@ export interface CriterionMachineFact {
 export interface InFlightRoundSlice {
   currentReport: ExecutionReport | null;
   currentDeltas: ReadonlyArray<ObservationDelta>;
-  /** The in-flight round's own effective outcome. A `blocked` round CLOSES its
-   *  contract, so closure cannot be derived from committed slices alone. */
+  /** The in-flight round's own blocked declaration. A `blocked` round CLOSES
+   *  its contract, so closure cannot be derived from committed slices alone. */
+  currentBlocked?: boolean;
+  /** Legacy shape accepted by library callers; `blocked` wins when present. */
   currentOutcome?: string | null;
 }
 
 export const NO_IN_FLIGHT_ROUND: InFlightRoundSlice = {
   currentReport: null,
   currentDeltas: [],
+  currentBlocked: false,
   currentOutcome: null,
 };
 
@@ -87,7 +90,8 @@ export function deriveRoundFacts(input: {
     currentRound: input.currentRound,
     currentReport: input.inFlight.currentReport,
     currentDeltas: input.inFlight.currentDeltas,
-    currentOutcome: input.inFlight.currentOutcome ?? null,
+    currentBlocked: input.inFlight.currentBlocked ??
+      input.inFlight.currentOutcome === "blocked",
     commands: input.commands,
   });
   const verifiedSubGoals = deriveVerifiedSubGoals({

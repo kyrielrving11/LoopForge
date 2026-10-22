@@ -31,7 +31,7 @@ import { deriveConfiguredCapability } from "./policy.js";
 import type { ConfiguredCapability, VerifiedSubGoalFact } from "./protocol.js";
 import type { RoundFacts } from "./round-facts.js";
 
-export const CANONICAL_STATE_SCHEMA_VERSION = 3 as const;
+export const CANONICAL_STATE_SCHEMA_VERSION = 4 as const;
 
 /** v3.7.1: Presentation view of sub-goals shared by prompts and the state
  *  file (one derivation, no second copy). Only ACTIVE items render as rows
@@ -144,10 +144,16 @@ export function formatActiveSubGoals(
   subGoals: ReadonlyArray<SubGoal>,
   round: number,
   cap: number = getPolicy().evolution.max_active_subgoals,
+  /** v3.9.7: objects moved to Critical Context are removed from the rows and
+   *  the overflow line, but still count in the totals. */
+  omitIds?: ReadonlySet<string>,
 ): { lines: string[]; ids: string[] } {
   const view = activeSubGoalView([...subGoals], Number.POSITIVE_INFINITY);
-  const shown = view.active.slice(0, Math.max(0, cap));
-  const hidden = view.active.slice(shown.length);
+  const visible = omitIds
+    ? view.active.filter((subGoal) => !omitIds.has(subGoal.id))
+    : view.active;
+  const shown = visible.slice(0, Math.max(0, cap));
+  const hidden = visible.slice(shown.length);
   const lines: string[] = [];
   for (const sg of shown) {
     const statusIcon =
@@ -171,18 +177,17 @@ export function formatActiveSubGoals(
     `> ${view.total} total · ${view.activeTotal} active · ` +
     `${view.done} done · ${view.canceled} canceled`,
   );
-  return { lines, ids: view.active.map((sg) => sg.id) };
+  return { lines, ids: visible.map((sg) => sg.id) };
 }
 
-/** v3.3: Machine git-motion cross-check over the last committed rounds.
- *  Display-only companion to the R4/R5 exculpatory signal. Optional:
- *  absent when no committed rounds carry git snapshots — the object, when
- *  present, always carries definite values (v3.6: the null arms were dead —
- *  the derive path returns undefined wholesale instead of null fields). */
+/** v3.3/v3.9.7: provider-neutral machine progress over the last committed
+ *  rounds. Display-only companion to the stall signal. Optional: absent for
+ *  an incomplete window or when no progress provider participated. */
 export interface MachineStatus {
   windowRounds: number;
-  gitMotion: boolean;
-  motionRounds: number;
+  machineProgress: "changed" | "unchanged" | "unknown" | "not_applicable";
+  changedRounds: number;
+  providers: string[];
 }
 
 export interface CanonicalLoopState {
@@ -192,7 +197,6 @@ export interface CanonicalLoopState {
   maxRounds: number;
   goalId: string;
   objective: string;
-  objectiveVersion: number;
   currentTask: string;
   successCriteria: string[];
   hardConstraints: string[];
@@ -202,8 +206,14 @@ export interface CanonicalLoopState {
   constraintMetadata: ConstraintMeta[];
   /** v3.9.5: committed Agent corrections (wrong assumptions). This is a
    *  REPORT, never machine evidence; fallback last_round_result does not
-   *  enter this field. */
+   *  enter this field. LoopForge does not prefix or reframe it. */
   corrections: string[];
+  /** Current retry's enforcement notice. A protected protocol fact for the
+   *  next prompt, not a committed history field. */
+  rejectionNotice: string | null;
+  /** Committed rollback recovery brief, present only in a recovery window.
+   *  Derived from the pending directive; prompt and state file share it. */
+  recoveryBrief?: string[];
   remainingCriteria: string[];
   blockers: string[];
   verificationFlags: VerificationFlag[];
@@ -330,19 +340,43 @@ function addListWithIdentities(
   metadata: ConstraintMeta[],
 ): void {
   if (values.length === 0) return;
-  const idByText = new Map(metadata.map((meta) => [meta.text, meta.id]));
+  const metaByText = new Map(metadata.map((meta) => [meta.text, meta]));
   lines.push(`## ${title}`, "");
   for (const value of values) {
     const trimmed = value.trim();
     if (!trimmed) continue;
+    const meta = metaByText.get(trimmed);
     if (STABLE_ID_RE.test(trimmed)) {
       lines.push(`- [\`${trimmed}\`] ${trimmed}`);
     } else {
-      const id = idByText.get(trimmed) ?? `c-${deriveItemId(trimmed)}`;
-      lines.push(`- [\`${id}\`] ${trimmed}`);
+      const id = meta?.id ?? `c-${deriveItemId(trimmed)}`;
+      const provenance = constraintProvenanceLabel(meta);
+      lines.push(`- [\`${id}\`] ${trimmed}${provenance}`);
     }
   }
   lines.push("");
+}
+
+/** v3.9.7: the ONE constraint provenance label shared by the state file and
+ *  the prompt. A discovered/preserved constraint is an Agent report, never a
+ *  machine-verified fact. */
+export function constraintProvenanceLabel(meta: ConstraintMeta | undefined): string {
+  if (!meta) return "";
+  const round = meta.source_round !== undefined && meta.source_round >= 1
+    ? ` R${meta.source_round}`
+    : "";
+  switch (meta.source) {
+    case "discovered":
+      return ` (Agent-declared${round}; report, not machine-verified)`;
+    case "preserved":
+      return ` (Agent discovery preserved by rollback${round}; report)`;
+    case "plan":
+      return ` (plan/carried${round})`;
+    case "unrecorded":
+      return " (origin not recorded in committed rounds)";
+    default:
+      return "";
+  }
 }
 
 /** v3.8.1: the one-line phase position — which phase the loop is in, and how
@@ -360,22 +394,42 @@ function addListWithIdentities(
  *  body — the single formatting source shared by prompts and the state
  *  file (module contract above). The original objective is NOT here: it
  *  lives in the Objective section. Empty arrays render no line. */
-export function formatRoundContract(
+export interface RoundContractFormatOptions {
+  /** Omit the whole contract block (the contract itself was moved). */
+  omitContract?: boolean;
+  /** Omit individual item rows (items moved to Critical Context). */
+  omitItemIds?: ReadonlySet<string>;
+}
+
+export interface FormattedRoundContract {
+  text: string;
+  /** IDs this rendering actually emitted (contract id + item ids). */
+  emittedIds: string[];
+}
+
+export function formatRoundContractWithIds(
   contract: ActiveContractView,
   /** v3.8: the derived item statuses. When given, each item renders with its
    *  machine status — the agent sees the verification debt in its own task. */
   statuses?: ContractItemStatusView | null,
-): string {
+  options: RoundContractFormatOptions = {},
+): FormattedRoundContract {
+  if (options.omitContract) return { text: "", emittedIds: [] };
   const lines: string[] = [];
+  const emittedIds: string[] = [contract.id];
   const heading = contract.work_item?.trim();
   lines.push(`**${heading || "Round Contract"}** (${contract.id})`);
   const statusById = new Map(
     (statuses?.items ?? []).map((item) => [item.itemId, item]),
   );
-  if (contract.items.length > 0) {
+  const items = options.omitItemIds
+    ? contract.items.filter((item) => !options.omitItemIds!.has(item.id))
+    : contract.items;
+  if (items.length > 0) {
     lines.push("- Acceptance conditions:");
   }
-  for (const item of contract.items) {
+  for (const item of items) {
+    emittedIds.push(item.id);
     const machine = statusById.get(item.id);
     const mark = machine?.status === "verified" ? "✅"
       : machine?.status === "insufficient" ? "🟠"
@@ -405,7 +459,60 @@ export function formatRoundContract(
       lines.push(`  - ${entry}`);
     }
   }
+  return { text: lines.join("\n"), emittedIds };
+}
+
+/** Backwards-compatible text-only view used by the state file. */
+export function formatRoundContract(
+  contract: ActiveContractView,
+  statuses?: ContractItemStatusView | null,
+): string {
+  return formatRoundContractWithIds(contract, statuses).text;
+}
+
+/** v3.9.7: one contract item as the prompt renders it. Critical Context uses
+ *  the same line when an item is moved, so the text cannot drift. */
+export function formatContractItemLine(
+  item: ActiveContractView["items"][number],
+  machine?: ContractItemStatusView["items"][number] | null,
+): string {
+  const mark = machine?.status === "verified" ? "✅"
+    : machine?.status === "insufficient" ? "🟠"
+    : machine?.status === "contradicted" ? "⛔"
+    : machine?.status === "pending" ? "⬜"
+    : "";
+  const status = machine ? ` — ${machine.status}` : "";
+  const lines = [
+    `- ${mark ? `${mark} ` : ""}[\`${item.id}\`] ${item.description}${status}`,
+  ];
+  if (item.verify_with.length > 0) {
+    lines.push(`  - Verify via: ${item.verify_with.join(", ")}`);
+  }
+  if (item.criterion_refs.length > 0) {
+    lines.push(`  - Criteria: ${item.criterion_refs.join(", ")}`);
+  }
+  if (item.subgoal_refs.length > 0) {
+    lines.push(`  - Sub-goals: ${item.subgoal_refs.join(", ")}`);
+  }
+  if (machine?.reasons.length) {
+    lines.push(`  - Unverified because: ${machine.reasons[0]}`);
+  }
   return lines.join("\n");
+}
+
+/** v3.9.7: one active sub-goal row as the prompt renders it. */
+export function formatSubGoalRow(subGoal: SubGoal, round: number): string {
+  const statusIcon =
+    subGoal.status === "in_progress" ? "🔄" :
+    subGoal.status === "blocked" ? "🚫" : "⏳";
+  const stale = subGoal.status === "pending" &&
+    round - subGoal.declared_at_round >= 10 ? " ⚠️ stale" : "";
+  const detail = subGoal.status === "in_progress"
+    ? ` (since R${subGoal.status_changed_at_round})`
+    : subGoal.status === "pending"
+    ? ` (since R${subGoal.declared_at_round})`
+    : ` (blocked R${subGoal.status_changed_at_round})`;
+  return `- ${statusIcon} [\`${subGoal.id}\`] ${subGoal.description}${detail}${stale}`;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -487,8 +594,9 @@ export function renderCanonicalStateMarkdown(
     "",
   ];
   const sections = flatStateSections(state);
-  if (options?.recoveryBrief && options.recoveryBrief.length > 0) {
-    sections.unshift({ title: "Recovery Brief", body: options.recoveryBrief });
+  const recoveryBrief = state.recoveryBrief ?? options?.recoveryBrief;
+  if (recoveryBrief && recoveryBrief.length > 0) {
+    sections.unshift({ title: "Recovery Brief", body: recoveryBrief });
   }
   const byTier = new Map<StateTier, Array<{ title: string; body: string[] }>>();
   for (const tier of STATE_TIER_ORDER) byTier.set(tier, []);
@@ -543,10 +651,15 @@ function flatStateSections(state: CanonicalLoopState): Array<{ title: string; bo
     // (v3.6: the object always carries definite values — no "unavailable" arm).
     if (state.machineStatus) {
       const ms = state.machineStatus;
-      const motion = ms.gitMotion
-        ? `changes observed in ${ms.motionRounds}/${ms.windowRounds} recent committed rounds`
-        : `no git changes in the last ${ms.windowRounds} committed rounds`;
-      lines.push(`**Machine (git)**: ${motion}`);
+      const providers = ms.providers.length > 0
+        ? ` (providers: ${ms.providers.join(", ")})`
+        : "";
+      const progress = ms.machineProgress === "changed"
+        ? `changes observed in ${ms.changedRounds}/${ms.windowRounds} recent committed rounds${providers}`
+        : ms.machineProgress === "unknown"
+          ? `not observable in the last ${ms.windowRounds} committed rounds${providers}`
+          : `no machine-observed progress in the last ${ms.windowRounds} committed rounds${providers}`;
+      lines.push(`**Machine progress**: ${progress}`);
     }
     if (state.criterionStatuses.length > 0) {
       const metCount = state.criterionStatuses.filter((cs) => cs.status === "verified" || cs.status === "claimed").length;
@@ -692,6 +805,9 @@ export function createCanonicalLoopState(
        *  projection only under this flag; a library fallback is in-flight. */
       committed?: boolean;
     };
+    /** v3.9.7: committed recovery brief, derived from the pending rollback
+     *  directive. Conditional — absent outside a recovery window. */
+    recoveryBrief?: string[];
   },
 ): CanonicalLoopState {
   const last = derived?.previousRound?.result ?? request.last_round_result;
@@ -708,24 +824,22 @@ export function createCanonicalLoopState(
   // progress, discovery, or criterion state.
   const executionReport = committed ? last?.execution_report : undefined;
 
+  // A wrong assumption is the Agent's report, not a LoopForge verdict that
+  // it was "corrected" or "falsified". Render it verbatim under a report
+  // heading.
   const corrections = committed
-    ? unique(
-        (last?.wrong_assumptions ?? []).map((value) =>
-          `Corrected assumption: ${value}`,
-        ),
-      )
+    ? unique(last?.wrong_assumptions ?? [])
     : [];
 
+  // Discoveries are discovered constraints only. emerged_subtasks are the
+  // Agent's execution plan and live in the Sub-Goal Dashboard; mixing them
+  // here made a plan look like a discovery.
   const discoveries = committed
-    ? unique([
-        ...(last?.discovered_constraints ?? []),
-        ...(last?.emerged_subtasks ?? []),
-      ])
+    ? unique(last?.discovered_constraints ?? [])
     : [];
 
   const blockers = unique([
     ...(committed ? (last?.constraint_violations ?? []) : []),
-    request.rejection_notice,
     ...response.warnings,
   ]);
 
@@ -763,7 +877,6 @@ export function createCanonicalLoopState(
     maxRounds: request.max_rounds ?? getPolicy().engine.max_rounds,
     goalId: response.goal_id,
     objective: objective?.objective || request.task,
-    objectiveVersion: objective?.version ?? 1,
     currentTask: roundContract
       ? formatRoundContract(roundContract, derived?.roundFacts?.itemStatuses ?? null)
       : request.task,
@@ -773,6 +886,7 @@ export function createCanonicalLoopState(
     retiredConstraints: unique(response.constraints_retired),
     constraintMetadata: response.constraint_metadata ?? [],
     corrections,
+    rejectionNotice: request.rejection_notice.trim() ? request.rejection_notice : null,
     remainingCriteria: unique(claimedRemainingCriteria(executionReport)),
     blockers,
     verificationFlags,
@@ -791,6 +905,9 @@ export function createCanonicalLoopState(
     },
     // v3.3: Conditional presence — empty/absent derived data must not add
     // keys, or every state hash would change for rounds without it.
+    ...(derived?.recoveryBrief && derived.recoveryBrief.length > 0
+      ? { recoveryBrief: [...derived.recoveryBrief] }
+      : {}),
     ...(derived?.machineStatus ? { machineStatus: derived.machineStatus } : {}),
     // v3.3: Conditional presence — no contract, no key (hash stability).
     ...(roundContract ? { roundContract } : {}),

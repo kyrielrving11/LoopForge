@@ -7,10 +7,10 @@
  */
 
 import {
-  observedGitHead,
   readOnlyRollbacks,
   readOnlyRounds,
 } from "./committed-round.js";
+import { observedGitHead } from "./git-motion.js";
 import { deriveCommittedSubmissionView } from "./submission-receipt.js";
 import type { SubmissionReceipt } from "./protocol.js";
 import { deriveActiveRoundContract, deriveRoundContractView } from "./round-contract.js";

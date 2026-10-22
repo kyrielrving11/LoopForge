@@ -42,11 +42,11 @@ export interface ContractItemInput {
     currentRound: number;
     currentReport: ExecutionReport | null;
     currentDeltas: ReadonlyArray<ObservationDelta>;
-    /** The in-flight round's own effective outcome. A `blocked` round CLOSES its
-     *  contract, so the closure cannot be derived from the committed slices
-     *  alone — the round being decided is not committed yet. Leave null where no
+    /** The in-flight round's own blocked declaration. A `blocked` round CLOSES
+     *  its contract, so closure cannot be derived from committed slices alone —
+     *  the round being decided is not committed yet. Leave false where no
      *  in-flight round exists (a pure committed-history replay). */
-    currentOutcome?: string | null;
+    currentBlocked?: boolean;
     commands: ReadonlyArray<CommandEvidencePolicy>;
 }
 /** v3.8: Derive every item's status plus the contract's closure. */

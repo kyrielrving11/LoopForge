@@ -207,8 +207,6 @@ export class SessionManager {
                 hard_constraints: unique(input.constraints ?? []),
                 created_at_round: 1,
                 loop_id: loopId,
-                version: 1,
-                refinement_history: [],
             });
         }
         const operatorAcceptance = {

@@ -54,18 +54,14 @@ export function canonicalActiveIds(active) {
 export function derivePromptCoverage(input) {
     const active = canonicalActiveIds(input.active);
     const renderedSet = new Set(input.rendered);
-    const declaredSet = new Set(input.declared ?? []);
-    const available = new Set(input.availableKinds ?? []);
+    // Every normative section is protected. A missing active id is therefore
+    // always a renderer defect; there is no level/budget classification that
+    // could disguise it.
     const omitted = [];
     for (const entry of active) {
         if (renderedSet.has(entry.id))
             continue;
-        const reason = declaredSet.has(entry.id)
-            ? "budget"
-            : available.size > 0 && !available.has(entry.kind)
-                ? "level"
-                : "defect";
-        omitted.push({ id: entry.id, reason });
+        omitted.push({ id: entry.id, reason: "defect" });
     }
     omitted.sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
     return {

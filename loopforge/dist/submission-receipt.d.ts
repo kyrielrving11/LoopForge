@@ -23,6 +23,8 @@ export interface ReceiptFacts {
     subGoalsAfter: ReadonlyArray<SubGoal> | null;
     /** The next compile's active constraint set, or null when not observed. */
     constraintsActiveAfter: string[] | null;
+    /** The next compile's effective retired set, or null when not observed. */
+    constraintsRetiredAfter: string[] | null;
 }
 export interface ReceiptInput {
     snapshot: RoundTransactionSnapshot;

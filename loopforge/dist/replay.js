@@ -4,7 +4,9 @@
  * Enables audit, comparison, and timeline analysis of loop rounds.
  */
 import { queryLoopEntries } from "./loop-store.js";
-import { decodeCommittedRound, legacyTransactionRounds, observedGitHead, readOnlyRounds, } from "./committed-round.js";
+import { decodeCommittedRound, legacyTransactionRounds, readOnlyRounds, } from "./committed-round.js";
+import { deriveRoundProgress } from "./progress.js";
+import { observedGitHead } from "./git-motion.js";
 // ═══════════════════════════════════════════════════════════════════════════
 // ReplayBackend
 // ═══════════════════════════════════════════════════════════════════════════
@@ -73,6 +75,7 @@ export class ReplayBackend {
             const gitDelta = view?.observationDelta.find((item) => item.kind === "git");
             const gitBefore = view?.beforeEvidence.find((item) => item.providerId === "git");
             const gitAfter = view?.afterEvidence.find((item) => item.providerId === "git");
+            const progress = view ? deriveRoundProgress(view.observationDelta) : null;
             timeline.push({
                 round,
                 recompile_level: lineage.recompile_level ?? view?.promptArtifact?.level ?? "l2",
@@ -87,6 +90,10 @@ export class ReplayBackend {
                 head_before: observedGitHead(gitBefore),
                 head_after: observedGitHead(gitAfter),
                 git_status: gitAfter?.status ?? null,
+                // v3.9.7: the shared per-round progress verdict. Window verdicts are
+                // not committed facts; this is the only progress value a round owns.
+                machine_progress: progress?.state ?? null,
+                progress_providers: progress?.providers ?? [],
                 // v3.5: the round's declared contract (proposal for the next round),
                 // when it committed one — lets replay show the contract arc.
                 ...(entry.round_contract

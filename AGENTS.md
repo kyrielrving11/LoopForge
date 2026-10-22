@@ -71,11 +71,17 @@ can retry the corrected payload.
 `loopforge_next` accepts a top-level `recovery: { target_round, reason }` as a
 mutually exclusive alternative to `evaluation`. Recovery is a first-class
 action, not an evaluation: it requires no core fields, never fabricates one,
-and bypasses ordinary verification/enforcement of the abandoned work. The
+and bypasses ordinary verification/enforcement of the abandoned work. It also
+requires the held prompt's `roundId` (`round_id_required` otherwise), and the
 target must be an earlier committed evaluation on the current branch with an
 observed after-phase Git restore point; invalid targets return
 `recovery_invalid`/`recovery_unavailable`/`recovery_disabled` before any
-durable effect. Operator criteria and hard constraints are immutable:
+durable effect. The target is a restore point, not a success claim:
+error-level verification findings on it do not disqualify it. The checkpoint
+compares the workspace's complete Git fingerprint boundary against the target
+snapshot, not only HEAD and the dirty path set. The Agent's reason is recorded
+verbatim and rendered in the Recovery Brief as report-only data, never as a
+LoopForge instruction. Operator criteria and hard constraints are immutable:
 `revised_success_criteria` is retired, and `retracted_constraints` may only
 name Agent-discovered constraints.
 

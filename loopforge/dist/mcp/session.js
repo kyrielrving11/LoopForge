@@ -888,6 +888,17 @@ export class SessionManager {
      *  before the session queue/lease; target referential validation happens in
      *  the lifecycle against committed facts. */
     async recover(sessionId, recovery, roundId) {
+        if (typeof roundId !== "string" || roundId.trim().length === 0) {
+            return {
+                sessionId,
+                round: this.sessions.get(sessionId)?.currentRound ?? 0,
+                prompt: null,
+                submissionError: {
+                    code: "round_id_required",
+                    details: { detail: "recovery requires the roundId from the held prompt" },
+                },
+            };
+        }
         const invalid = (detail) => ({
             sessionId,
             round: this.sessions.get(sessionId)?.currentRound ?? 0,
@@ -921,7 +932,7 @@ export class SessionManager {
             const expectedRoundId = heldSession.roundSnapshot?.roundId
                 ?? makeRoundId(heldSession.loopId, heldSession.currentRound);
             const held = heldSession.roundSnapshot;
-            if ((roundId === undefined || roundId === expectedRoundId) &&
+            if (roundId === expectedRoundId &&
                 held?.kind === "evaluation" &&
                 held.round === heldSession.currentRound) {
                 const prefix = `loop:${heldSession.loopId}:`;

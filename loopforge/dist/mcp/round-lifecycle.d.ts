@@ -116,7 +116,7 @@ export interface AdvanceResult {
      *  `validateSubmission` in submission-boundary.ts, which SessionManager
      *  runs before its queue and lease heartbeat. */
     submissionError?: {
-        code: "evaluation_invalid" | "contract_invalid" | "recovery_invalid" | "recovery_disabled" | "recovery_unavailable";
+        code: "evaluation_invalid" | "contract_invalid" | "round_id_required" | "recovery_invalid" | "recovery_disabled" | "recovery_unavailable";
         details: Record<string, unknown>;
     };
     /** v3.9.4: a prompt-projection code defect. This is NOT a submission

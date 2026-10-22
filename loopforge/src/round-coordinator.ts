@@ -616,6 +616,7 @@ export class RoundCoordinator {
         target_transaction_id: targetView?.transactionId ?? targetView?.roundId ?? "",
         ...(targetGitHead ? { target_head: targetGitHead } : {}),
         target_dirty: targetSnapshot?.dirtyFiles ?? [],
+        target_fingerprints: targetSnapshot?.fingerprints ?? {},
         skipped_files: skippedFiles,
         skipped_fingerprints: skippedFingerprints,
         skipped_discoveries: skippedDiscoveries,

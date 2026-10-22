@@ -12,9 +12,14 @@ machine checks, recovery mechanics and deterministic projections.
 `loopforge_next` accepts a top-level `recovery: { target_round, reason }` as an
 alternative to `evaluation`. Recovery is an action, not an evaluation: it does
 not require the four core fields and never fabricates a `SelfEvaluation`. The
-target must be an earlier committed evaluation on the current branch with an
-observed after-phase Git restore point; LoopForge records the Agent's reason
-verbatim and never judges it.
+held prompt's `roundId` is required (`round_id_required`), and the target must
+be an earlier committed evaluation on the current branch with an observed
+after-phase Git restore point. The target is a restore point, not a success
+claim: error-level verification findings on it do not disqualify it. The
+restore checkpoint compares the workspace's complete Git fingerprint boundary
+with the target's own snapshot. LoopForge records the Agent's reason verbatim
+and never judges it; the Recovery Brief renders it as report-only text, never
+as an instruction.
 
 Rollback directives are committed as typed `rollback_directive` events rather
 than `:feedback` rounds, so a redo cannot overwrite the audit record. Every
@@ -89,7 +94,7 @@ whatever the last compile happened to cache. The process/result inputs
 ### Breaking boundaries
 
 - `ROUND_TRANSACTION_SCHEMA_VERSION` is `4` (`kind`, `transactionId`,
-  `branchId`, `recovery`, `operatorAcceptance`).
+  `branchId`, `recovery` with `target_fingerprints`, `operatorAcceptance`).
 - `PROMPT_ARTIFACT_SCHEMA_VERSION` is `5` (`warnings` on the artifact).
 - `CANONICAL_STATE_SCHEMA_VERSION` is `3`.
 - `POLICY_SCHEMA_VERSION` is `"8"`; `summary`/`checkpoint` sections and

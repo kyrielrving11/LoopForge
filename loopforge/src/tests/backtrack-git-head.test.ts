@@ -105,6 +105,7 @@ describe("findBacktrackTargetSnapshot", () => {
     assert.deepEqual(findBacktrackTargetSnapshot(3, entries), {
       head: HEAD,
       dirtyFiles: ["docs/notes.md"],
+      fingerprints: {},
     });
   });
 

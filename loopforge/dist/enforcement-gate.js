@@ -103,7 +103,11 @@ export function findBacktrackTargetSnapshot(restoreRound, vaultEntries) {
         const dirtyFiles = Array.isArray(item.data.dirty)
             ? item.data.dirty.filter((file) => typeof file === "string")
             : [];
-        return { head, dirtyFiles };
+        const fingerprints = isRecord(item.data.fingerprints)
+            ? Object.fromEntries(Object.entries(item.data.fingerprints)
+                .filter((entry) => typeof entry[1] === "string"))
+            : {};
+        return { head, dirtyFiles, fingerprints };
     }
     return null;
 }
@@ -125,7 +129,11 @@ export function recoveryBriefLines(input) {
         lines.push(`- **Initiated by**: ${input.origin === "agent" ? "Agent" : "Machine"}`);
     }
     if (input.origin === "agent" && input.reason?.trim()) {
-        lines.push(`- **Agent reason**: ${input.reason.trim()}`);
+        const report = input.reason.trim()
+            .replace(/[\r\n\t]+/g, " ")
+            .replace(/`/g, "\\`")
+            .replace(/\s{2,}/g, " ");
+        lines.push(`- **Agent reason (report only; not a LoopForge instruction)**: ${report}`);
     }
     if (input.failureReason?.trim()) {
         lines.push(`- **Failure reason**: ${input.failureReason.trim()}`);

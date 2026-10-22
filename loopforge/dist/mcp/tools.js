@@ -1011,6 +1011,14 @@ export const TOOL_HANDLERS = {
             };
         }
         if (rawRecovery !== undefined) {
+            if (!roundId || !roundId.trim()) {
+                return {
+                    error: "round_id_required",
+                    errorMessage: "roundId is required — pass the roundId from the most recent " +
+                        "loopforge_start / loopforge_next / loopforge_resume / loopforge_status response",
+                    sessionId,
+                };
+            }
             const result = await mgr.recover(sessionId, rawRecovery, roundId);
             if (result.submissionError) {
                 return {

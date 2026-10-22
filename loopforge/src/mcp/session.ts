@@ -1040,6 +1040,17 @@ export class SessionManager implements SessionRegistry {
     recovery: unknown,
     roundId?: string,
   ): Promise<AdvanceResult> {
+    if (typeof roundId !== "string" || roundId.trim().length === 0) {
+      return {
+        sessionId,
+        round: this.sessions.get(sessionId)?.currentRound ?? 0,
+        prompt: null,
+        submissionError: {
+          code: "round_id_required" as const,
+          details: { detail: "recovery requires the roundId from the held prompt" },
+        },
+      };
+    }
     const invalid = (detail: string): AdvanceResult => ({
       sessionId,
       round: this.sessions.get(sessionId)?.currentRound ?? 0,
@@ -1072,7 +1083,7 @@ export class SessionManager implements SessionRegistry {
       const expectedRoundId = heldSession.roundSnapshot?.roundId
         ?? makeRoundId(heldSession.loopId, heldSession.currentRound);
       const held = heldSession.roundSnapshot;
-      if ((roundId === undefined || roundId === expectedRoundId) &&
+      if (roundId === expectedRoundId &&
           held?.kind === "evaluation" &&
           held.round === heldSession.currentRound) {
         const prefix = `loop:${heldSession.loopId}:`;

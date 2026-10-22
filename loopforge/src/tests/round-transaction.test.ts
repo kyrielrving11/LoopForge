@@ -174,6 +174,7 @@ describe("backtrack commit replay", () => {
           target_round_id: "loop:bt-recover:round:2",
           target_transaction_id: "tx-bt-recover-2-1",
           target_dirty: [],
+          target_fingerprints: {},
           skipped_files: [],
           skipped_fingerprints: {},
           skipped_discoveries: [],

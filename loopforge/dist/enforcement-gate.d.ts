@@ -35,6 +35,7 @@ export declare function findSafeRestorePoint(currentRound: number, vaultEntries:
 export interface BacktrackTargetSnapshot {
     head: string;
     dirtyFiles: string[];
+    fingerprints: Record<string, string>;
 }
 export declare function findBacktrackTargetSnapshot(restoreRound: number, vaultEntries: VaultEntry[]): BacktrackTargetSnapshot | null;
 /** v3.8.1: the ONE Recovery Brief renderer.

@@ -21,7 +21,8 @@ function observedGit(view) {
         const dirty = Array.isArray(data.dirty)
             ? data.dirty.filter((file) => typeof file === "string")
             : [];
-        return { head, dirty };
+        const fingerprints = fingerprintMap(observation);
+        return { head, dirty, fingerprints };
     }
     return null;
 }
@@ -46,14 +47,6 @@ export function resolveRecoveryTarget(entries, currentRound, targetRound) {
             detail: `round ${targetRound} is not a committed evaluation round on the current branch`,
         };
     }
-    if (view.verificationFlags.some((flag) => flag.severity === "error")) {
-        return {
-            ok: false,
-            code: "recovery_invalid",
-            reason: "unsafe_target",
-            detail: `round ${targetRound} carries an error-level verification finding`,
-        };
-    }
     const git = observedGit(view);
     if (!git) {
         return {
@@ -63,7 +56,10 @@ export function resolveRecoveryTarget(entries, currentRound, targetRound) {
             detail: `round ${targetRound} has no observed after-phase Git restore point`,
         };
     }
-    return { ok: true, target: { view, head: git.head, dirty: git.dirty } };
+    return {
+        ok: true,
+        target: { view, head: git.head, dirty: git.dirty, fingerprints: git.fingerprints },
+    };
 }
 function arrayStrings(value) {
     return Array.isArray(value)
@@ -162,6 +158,7 @@ export function deriveRecoveryDirective(input) {
         target_transaction_id: targetView.transactionId ?? targetView.roundId,
         target_head: input.target.head,
         target_dirty: [...input.target.dirty],
+        target_fingerprints: { ...input.target.fingerprints },
         skipped_files: skippedFiles,
         skipped_fingerprints: skippedFingerprints,
         skipped_discoveries: skippedDiscoveries,
@@ -193,24 +190,26 @@ export function verifyRecoveryCheckpoint(input) {
         };
     }
     const targetDirty = new Set(input.directive.target_dirty);
+    const targetFingerprints = input.directive.target_fingerprints;
+    const sameMap = (actual) => {
+        const expectedKeys = Object.keys(targetFingerprints).sort();
+        const actualKeys = Object.keys(actual).sort();
+        if (expectedKeys.length !== actualKeys.length ||
+            expectedKeys.some((key, index) => key !== actualKeys[index]))
+            return false;
+        return expectedKeys.every((key) => actual[key] === targetFingerprints[key]);
+    };
     const restored = gitDeltas.some((delta) => {
-        const before = delta.before;
         const after = delta.after;
-        for (const observation of [before, after]) {
-            if (!observation || observation.kind !== "git" ||
-                observation.status !== "observed")
-                continue;
-            const data = observation.data;
-            const head = typeof data.head === "string" ? data.head : "";
-            if (!head || head.slice(0, 12) !== targetHead.slice(0, 12))
-                continue;
-            const dirty = input.directive.target_dirty;
-            const currentDirty = Array.isArray(data.dirty) ? data.dirty : [];
-            if (currentDirty.every((file) => targetDirty.has(file)))
-                return true;
-            void dirty;
-        }
-        return false;
+        if (!after || after.kind !== "git" || after.status !== "observed")
+            return false;
+        const data = after.data;
+        const head = typeof data.head === "string" ? data.head : "";
+        if (!head || head.slice(0, 12) !== targetHead.slice(0, 12))
+            return false;
+        const currentDirty = Array.isArray(data.dirty) ? data.dirty : [];
+        return currentDirty.every((file) => targetDirty.has(file)) &&
+            sameMap(fingerprintMap(after));
     });
     if (!restored) {
         return {

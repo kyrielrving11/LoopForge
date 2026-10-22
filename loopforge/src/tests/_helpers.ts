@@ -257,6 +257,7 @@ export function committedBacktrackRound(
     target_round_id: `loop:${loopId}:round:${target}`,
     target_transaction_id: transactionIdOfTarget,
     target_dirty: [],
+    target_fingerprints: {},
     skipped_files: [],
     skipped_fingerprints: {},
     skipped_discoveries: [],

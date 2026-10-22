@@ -268,6 +268,12 @@
             "type": "string"
           }
         },
+        "target_fingerprints": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
         "skipped_files": {
           "type": "array",
           "items": {
@@ -315,6 +321,7 @@
         "target_round_id",
         "target_transaction_id",
         "target_dirty",
+        "target_fingerprints",
         "skipped_files",
         "skipped_fingerprints",
         "skipped_discoveries",

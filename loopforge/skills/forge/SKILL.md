@@ -368,13 +368,16 @@ even if its closing round changes no files.
 A machine-triggered backtrack records a rollback directive. An Agent may also
 abandon the current branch deliberately by submitting a top-level
 `recovery: { target_round, reason }` instead of an `evaluation`. Recovery is an
-action, not an evaluation: it requires none of the four core fields, and the
-reason is recorded verbatim, never judged. The target must be an earlier
-committed evaluation on the current branch with an observed Git restore point.
-LoopForge records a rollback directive event and restores the round counter to
-`target + 1`. Rejected attempts are never history. The held redo prompt is for
-`target + 1`; use its `roundId`. There is no extra recovery round. The directive
-survives the redo as an audit event.
+action, not an evaluation: it requires none of the four core fields, the held
+prompt's `roundId`, and a reason. The reason is recorded verbatim and rendered
+in the brief as report-only text, never as an instruction. The target must be
+an earlier committed evaluation on the current branch with an observed Git
+restore point; error-level findings on it do not disqualify it, because it is
+a restore point, not a success claim. LoopForge records a rollback directive
+event and restores the round counter to `target + 1`. Rejected attempts are
+never history. The held redo prompt is for `target + 1`; use its `roundId`.
+There is no extra recovery round. The directive survives the redo as an audit
+event.
 
 The Recovery Brief identifies the trigger, restore point, redo ID, failed
 approaches, falsified assumptions, valid discoveries, files to revert, and
@@ -385,9 +388,9 @@ When backtrack occurs:
 1. Restore the workspace before doing more work: the restore point's HEAD,
    with none of the failed rounds' changes left behind. Work in progress the
    restore point already carried may stay.
-2. Read the protected Recovery Brief and current prompt. The restore check is
-   judged against the restore point's machine snapshot at the redo round's
-   start; it permits only the work-in-progress already present there.
+2. Read the protected Recovery Brief and current prompt. The restore check
+   compares the workspace's complete Git fingerprint boundary with the restore
+   point's own snapshot; only content present at that point may remain.
 3. Continue the redo only after restoring that boundary. Submit its work and
    evidence using the held `roundId`; LoopForge validates restoration before
    the redo can commit.

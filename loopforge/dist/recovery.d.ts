@@ -12,6 +12,7 @@ export interface RecoveryTarget {
     view: CommittedRoundView;
     head: string;
     dirty: string[];
+    fingerprints: Record<string, string>;
 }
 export type RecoveryTargetResult = {
     ok: true;

@@ -163,6 +163,8 @@ export interface RecoveryDirective {
     target_transaction_id: string;
     target_head?: string;
     target_dirty: string[];
+    /** Complete observed Git boundary at the restore point. */
+    target_fingerprints: Record<string, string>;
     skipped_files: string[];
     skipped_fingerprints: Record<string, string>;
     skipped_discoveries: string[];

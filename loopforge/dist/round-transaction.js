@@ -191,6 +191,10 @@ function isRecoveryDirective(value) {
         return false;
     if (value.target_head !== undefined && typeof value.target_head !== "string")
         return false;
+    if (!isRecord(value.target_fingerprints) ||
+        !Object.values(value.target_fingerprints).every((fp) => typeof fp === "string")) {
+        return false;
+    }
     if (value.trigger_rule !== undefined && typeof value.trigger_rule !== "string")
         return false;
     if (!stringArray(value.target_dirty) ||

@@ -249,6 +249,7 @@ export interface AdvanceResult {
     code:
       | "evaluation_invalid"
       | "contract_invalid"
+      | "round_id_required"
       | "recovery_invalid"
       | "recovery_disabled"
       | "recovery_unavailable";
@@ -1736,7 +1737,19 @@ export class RoundLifecycle {
     }
     const expectedRoundId = session.roundSnapshot?.roundId
       ?? makeRoundId(session.loopId, session.currentRound);
-    if (roundId !== undefined && roundId !== expectedRoundId) {
+    if (typeof roundId !== "string" || roundId.trim().length === 0) {
+      return {
+        sessionId,
+        round: session.currentRound,
+        roundId: expectedRoundId,
+        prompt: null,
+        submissionError: {
+          code: "round_id_required",
+          details: { detail: "recovery requires the roundId from the held prompt" },
+        },
+      };
+    }
+    if (roundId !== expectedRoundId) {
       const restored = this.restoredPromptResult(session);
       if (restored) {
         return {

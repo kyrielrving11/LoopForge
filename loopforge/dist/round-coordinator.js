@@ -19,7 +19,7 @@
  */
 import { queryLoopEntries } from "./loop-store.js";
 import { CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE, collectOutOfScopeFiles, roundDriftFiles, verifySelfEvaluation, } from "./verification-gate.js";
-import { checkpointForRoundBoundary, deriveRecoveryDirective, } from "./recovery.js";
+import { checkpointForRoundBoundary, deriveRecoveryDirective, validateCheckpointManifest, } from "./recovery.js";
 import { driftedEntrypoints } from "./evidence-provider.js";
 import { isRecord } from "./token-utils.js";
 import { declaresBlocked, effectiveSuccess } from "./round-outcome.js";
@@ -226,17 +226,17 @@ export class RoundCoordinator {
         // verifies the restore before issuing the redo prompt; a redo submission
         // is ordinary work, so its after boundary must never be compared to the
         // restore target.
-        const verifyResult = verifySelfEvaluation(selfEval, currentRound, vaultEntries, previousCommitted, evidenceDeltas ?? [],
+        const verifyResult = verifySelfEvaluation(selfEval, currentRound, vaultEntries, previousCommitted, evidenceDeltas ?? [], 
         // v3.7.1: gate records live under the gate: prefix — outside the round
         // entries above — and are passed separately to the gate check.
         this.store
             ? queryLoopEntries(this.store, loopId, { prefix: `loop:${loopId}:gate:` })
-            : [],
+            : [], 
         // v3.8.3: the absolute arm of the entrypoint check. Derived here, not in
         // the gate, because it needs the filesystem and the in-flight trust map
         // captured when this round was prepared — the gate stays a pure function
         // of its inputs.
-        driftedEntrypoints(input.entrypointTrust),
+        driftedEntrypoints(input.entrypointTrust), 
         // v3.9.4: the SAME manifest basis the receipt uses. An omitted
         // files_changed field is not silently treated as "a report exists".
         input.submittedFields
@@ -291,7 +291,7 @@ export class RoundCoordinator {
         // transaction reaches enforcement with a fully extracted self-evaluation.
         // The old v2.5 "heuristic partial enforcement" plumbing (extractionSucceeded
         // flag, enforcement skipEvidenceRules mode) was removed as unreachable.
-        const enforceResult = enforceRound(selfEval, verifyResult, currentRound, vaultEntries, consecutiveRejections, input.lastRejectionCheck ?? "", scopeDriftWaiver,
+        const enforceResult = enforceRound(selfEval, verifyResult, currentRound, vaultEntries, consecutiveRejections, input.lastRejectionCheck ?? "", scopeDriftWaiver, 
         // v3.9.7: what THIS round moved, from the same provider-neutral
         // progress rule the committed series uses. Unknown/not_applicable never
         // gains the stall excuse.
@@ -360,8 +360,14 @@ export class RoundCoordinator {
                 });
                 if (!ref)
                     return null;
-                if (input.resolveCheckpointManifest && !input.resolveCheckpointManifest(ref)) {
-                    return null;
+                if (input.resolveCheckpointManifest) {
+                    const manifest = input.resolveCheckpointManifest(ref);
+                    // Machine target selection must prove the ref and manifest are
+                    // self-consistent BEFORE committing an immutable directive. Blob
+                    // and HEAD checks still run in the post-commit preflight.
+                    if (!manifest || !validateCheckpointManifest(ref, manifest).ok) {
+                        return null;
+                    }
                 }
                 return ref;
             };

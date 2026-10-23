@@ -14,6 +14,7 @@ import {
   criterionClaims,
   promptArtifact,
 } from "./_helpers.js";
+import { advanceWithHeld } from "./_helpers.js";
 import { resetPolicy } from "../policy.js";
 import { LoopForgeEngine } from "../engine.js";
 import { SessionManager } from "../mcp/session.js";
@@ -468,7 +469,11 @@ describe("RoundLifecycle — advance", async () => {
     registry.upsert(mgr.get(sid)!);
     const racing = makeLifecycle(store, registry);
 
-    const advancing = racing.advance(sid, "agent output", evalFor({ success: true }));
+    const held = mgr.get(sid)!.roundSnapshot!;
+    const advancing = racing.advance(
+      sid, "agent output", evalFor({ success: true }), held.roundId,
+      undefined, undefined, held.transactionId,
+    );
     mgr.get(sid)!.status = "paused";
     const result = await advancing;
 
@@ -490,7 +495,11 @@ describe("RoundLifecycle — advance", async () => {
     const registry = makeRegistry();
     registry.upsert(mgr.get(sid)!);
     const racing = makeLifecycle(store, registry);
-    const advancing = racing.advance(sid, "agent output", evalFor({ success: true }));
+    const held = mgr.get(sid)!.roundSnapshot!;
+    const advancing = racing.advance(
+      sid, "agent output", evalFor({ success: true }), held.roundId,
+      undefined, undefined, held.transactionId,
+    );
     mgr.pause(sid);
     const result = await advancing;
     assert.equal(result.stopReason, "paused");

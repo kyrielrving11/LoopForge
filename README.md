@@ -81,7 +81,7 @@ treating it as current work.
 The agent owns meaning and action: task interpretation, planning, tool use,
 implementation, and the choice to request recovery. LoopForge owns continuity
 and process guarantees: committed round history, machine observations,
-deterministic validation and disposition, and restore-point verification.
+deterministic validation and disposition, and checkpoint restore verification.
 
 LoopForge exists to help the agent's own reasoning and course corrections
 survive across rounds. It does not replace them with a fixed plan or a

@@ -21,8 +21,7 @@ import { CHECK_SUCCESS_WITH_REMAINING_CRITERIA, CHECK_RECURRING_VIOLATION, CHECK
 import { deriveProgressWindow } from "./progress.js";
 import { declaresBlocked } from "./round-outcome.js";
 import { getPolicy } from "./policy.js";
-import { isRecord } from "./token-utils.js";
-import { derivationRounds, decodeCommittedRound, hasCommittedMachineBacktrack, machineEvidenceForRound, } from "./committed-round.js";
+import { derivationRounds, decodeCommittedRound, hasCommittedMachineBacktrack, } from "./committed-round.js";
 // ═══════════════════════════════════════════════════════════════════════════
 // Helpers
 // ═══════════════════════════════════════════════════════════════════════════
@@ -58,7 +57,7 @@ function isCleanRound(round) {
 /** Scan backwards from currentRound to find the most recent clean round.
  *  Collects discovered_constraints from skipped rounds along the way.
  *  Returns null when no clean round is found within maxDepth. */
-export function findSafeRestorePoint(currentRound, vaultEntries, maxDepth,
+export function findSafeRestorePoint(currentRound, vaultEntries, maxDepth, 
 /** v3.9.7: a candidate must have a materialized restore checkpoint. */
 isEligible) {
     const completed = derivationRounds(vaultEntries, currentRound)
@@ -88,30 +87,6 @@ isEligible) {
         if (isCleanRound(round) && (isEligible?.(targetRound) ?? true)) {
             return { round: targetRound, skippedDiscoveries };
         }
-    }
-    return null;
-}
-export function findBacktrackTargetSnapshot(restoreRound, vaultEntries) {
-    const committed = derivationRounds(vaultEntries)
-        .find((view) => view.round === restoreRound);
-    if (!committed)
-        return null;
-    for (const item of machineEvidenceForRound(committed)) {
-        if (!isRecord(item) || item.providerId !== "git" ||
-            item.status !== "observed" || !isRecord(item.data))
-            continue;
-        const head = item.data.head;
-        if (typeof head !== "string" || head.length === 0)
-            continue;
-        // v3.9.1: the restore baseline is the boundary's one dirty list.
-        const dirtyFiles = Array.isArray(item.data.dirty)
-            ? item.data.dirty.filter((file) => typeof file === "string")
-            : [];
-        const fingerprints = isRecord(item.data.fingerprints)
-            ? Object.fromEntries(Object.entries(item.data.fingerprints)
-                .filter((entry) => typeof entry[1] === "string"))
-            : {};
-        return { head, dirtyFiles, fingerprints };
     }
     return null;
 }
@@ -445,10 +420,10 @@ function enforceScopeDrift(flags, consecutiveRejections, lastRejectionCheck, sco
 /** The ONE progress-stall predicate. A stall requires machine proof that both
  *  the committed window AND the submitted round are unchanged; unknown and
  *  not_applicable never produce a verdict. */
-function evaluateStallWindow(currentRound, vaultEntries,
+function evaluateStallWindow(currentRound, vaultEntries, 
 /** v3.8.1: the round's success is machine-verified (`deriveEvidenceStatus`).
  *  A verified round is finishing work; a progress window cannot outvote it. */
-machineBackedSuccess,
+machineBackedSuccess, 
 /** The submitted round's own provider-neutral progress. */
 inFlightProgress) {
     if (machineBackedSuccess)
@@ -667,19 +642,19 @@ function enforceUserGateUnresolved(flags) {
         check: CHECK_USER_GATE_UNRESOLVED,
     });
 }
-export function enforceRound(selfEval, verifyResult, currentRound, vaultEntries, consecutiveRejections = 0,
+export function enforceRound(selfEval, verifyResult, currentRound, vaultEntries, consecutiveRejections = 0, 
 /** L4 (v3.7.x): which check rejected the PREVIOUS round. The coordinator
  *  resets consecutiveRejections to 1 whenever the check changes, so the
  *  counter only ever measures one check's streak — this field names that
  *  check and lets uniform rows escalate on THEIR OWN streak instead of
  *  inheriting an unrelated history. */
-lastRejectionCheck = "",
+lastRejectionCheck = "", 
 /** v3.8.3: the coordinator has verified that this round declares itself
  *  blocked AND that its new contract proposal's scope covers every file the
  *  round changed outside the active contract's scope. Computed there, not
  *  here: neither the observations nor the active contract reach this
  *  function. See `enforceScopeDrift`. */
-scopeDriftWaiver = false,
+scopeDriftWaiver = false, 
 /** v3.9.7: the submitted round's provider-neutral progress. */
 inFlightProgress = { state: "unknown", providers: [] }) {
     const { flags } = verifyResult;
@@ -729,7 +704,6 @@ inFlightProgress = { state: "unknown", providers: [] }) {
         () => blockedStop
             ? null
             : enforceMaxRejections(consecutiveRejections, scopeDriftWaiver && flags.some((f) => f.check === CHECK_ROUND_SCOPE_DRIFT)),
-        // v2.12: R9 — post-backtrack workspace not restored
     ];
     // v3.7: uniform-ladder escalation. Rows without their own escalation
     // ladder (R1/R2/R-EVID/R-EVID-VERIFY) escalate on the session's

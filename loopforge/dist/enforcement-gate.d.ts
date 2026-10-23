@@ -22,25 +22,12 @@ import { type RoundProgress } from "./progress.js";
 /** Scan backwards from currentRound to find the most recent clean round.
  *  Collects discovered_constraints from skipped rounds along the way.
  *  Returns null when no clean round is found within maxDepth. */
-export declare function findSafeRestorePoint(currentRound: number, vaultEntries: VaultEntry[], maxDepth: number,
+export declare function findSafeRestorePoint(currentRound: number, vaultEntries: VaultEntry[], maxDepth: number, 
 /** v3.9.7: a candidate must have a materialized restore checkpoint. */
 isEligible?: (round: number) => boolean): {
     round: number;
     skippedDiscoveries: string[];
 } | null;
-/** v2.12: The restore point's machine snapshot. `head` is the commit the
- *  workspace must return to; `dirtyFiles` is what was ALREADY dirty there —
- *  the baseline a restored workspace is compared against, so unrelated work
- *  in progress is never mistaken for a failed restore. Read from the restore
- *  round's committed transaction snapshot (after evidence preferred, before
- *  evidence as fallback). Returns null when the round has no git snapshot or
- *  no committed feedback entry. */
-export interface BacktrackTargetSnapshot {
-    head: string;
-    dirtyFiles: string[];
-    fingerprints: Record<string, string>;
-}
-export declare function findBacktrackTargetSnapshot(restoreRound: number, vaultEntries: VaultEntry[]): BacktrackTargetSnapshot | null;
 /** v3.8.1: the ONE Recovery Brief renderer.
  *
  *  v3.9.4: it is the shared fact renderer for the prompt's protected
@@ -69,19 +56,19 @@ export declare function recoveryBriefLines(input: {
     maxApproaches?: number;
     maxAssumptions?: number;
 }): string[];
-export declare function enforceRound(selfEval: SelfEvaluation, verifyResult: VerificationResult, currentRound: number, vaultEntries: VaultEntry[], consecutiveRejections?: number,
+export declare function enforceRound(selfEval: SelfEvaluation, verifyResult: VerificationResult, currentRound: number, vaultEntries: VaultEntry[], consecutiveRejections?: number, 
 /** L4 (v3.7.x): which check rejected the PREVIOUS round. The coordinator
  *  resets consecutiveRejections to 1 whenever the check changes, so the
  *  counter only ever measures one check's streak — this field names that
  *  check and lets uniform rows escalate on THEIR OWN streak instead of
  *  inheriting an unrelated history. */
-lastRejectionCheck?: string,
+lastRejectionCheck?: string, 
 /** v3.8.3: the coordinator has verified that this round declares itself
  *  blocked AND that its new contract proposal's scope covers every file the
  *  round changed outside the active contract's scope. Computed there, not
  *  here: neither the observations nor the active contract reach this
  *  function. See `enforceScopeDrift`. */
-scopeDriftWaiver?: boolean,
+scopeDriftWaiver?: boolean, 
 /** v3.9.7: the submitted round's provider-neutral progress. */
 inFlightProgress?: RoundProgress): EnforcementResult;
 /** Build the protected retry notice for the agent.

@@ -41,6 +41,7 @@ import {
 import {
   checkpointForRoundBoundary,
   deriveRecoveryDirective,
+  validateCheckpointManifest,
 } from "./recovery.js";
 import { driftedEntrypoints } from "./evidence-provider.js";
 import { isRecord } from "./token-utils.js";
@@ -532,8 +533,14 @@ export class RoundCoordinator {
           redoRound,
         });
         if (!ref) return null;
-        if (input.resolveCheckpointManifest && !input.resolveCheckpointManifest(ref)) {
-          return null;
+        if (input.resolveCheckpointManifest) {
+          const manifest = input.resolveCheckpointManifest(ref);
+          // Machine target selection must prove the ref and manifest are
+          // self-consistent BEFORE committing an immutable directive. Blob
+          // and HEAD checks still run in the post-commit preflight.
+          if (!manifest || !validateCheckpointManifest(ref, manifest).ok) {
+            return null;
+          }
         }
         return ref;
       };

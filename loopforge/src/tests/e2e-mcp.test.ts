@@ -188,6 +188,7 @@ describe("E2E MCP lifecycle", () => {
     for (const expected of [
       "loopforge_start",
       "loopforge_next",
+      "loopforge_checkpoint",
       "loopforge_status",
       "loopforge_stop",
       "loopforge_pause",

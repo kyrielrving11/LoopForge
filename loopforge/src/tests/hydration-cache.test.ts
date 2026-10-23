@@ -25,6 +25,7 @@ import {
   DEFAULT_SUCCESS_CRITERION,
   installTestCommandProvider,
 } from "./_helpers.js";
+import { advanceWithHeld } from "./_helpers.js";
 import { resetPolicy } from "../policy.js";
 import { Mode, type LoopForgeRequest, type SelfEvaluation } from "../protocol.js";
 
@@ -78,7 +79,7 @@ describe("Hydration cache — equivalence and incrementality", () => {
     const warm = new LoopForgeEngine(store);
     const cold = new LoopForgeEngine(store);
 
-    await mgr.advance(sessionId, "", continuingEvaluation()); // commits round 1
+    await advanceWithHeld(mgr, sessionId, "", continuingEvaluation()); // commits round 1
     const warm2 = warm.hydrateLoopContext("hyd-eq", 2);
     const cold2 = cold.hydrateLoopContext("hyd-eq", 2);
     assert.ok(warm2 && cold2);
@@ -88,7 +89,7 @@ describe("Hydration cache — equivalence and incrementality", () => {
       "first compile: warm (full) and cold (full) must agree",
     );
 
-    await mgr.advance(sessionId, "", continuingEvaluation()); // commits round 2
+    await advanceWithHeld(mgr, sessionId, "", continuingEvaluation()); // commits round 2
     const warm3 = warm.hydrateLoopContext("hyd-eq", 3);
     const cold3 = cold.hydrateLoopContext("hyd-eq", 3);
     assert.ok(warm3 && cold3);
@@ -98,7 +99,7 @@ describe("Hydration cache — equivalence and incrementality", () => {
       "second compile: warm (incremental) and cold (full) must agree",
     );
 
-    await mgr.advance(sessionId, "", continuingEvaluation()); // commits round 3
+    await advanceWithHeld(mgr, sessionId, "", continuingEvaluation()); // commits round 3
     const warm4 = warm.hydrateLoopContext("hyd-eq", 4);
     const cold4 = cold.hydrateLoopContext("hyd-eq", 4);
     assert.ok(warm4 && cold4);
@@ -113,7 +114,7 @@ describe("Hydration cache — equivalence and incrementality", () => {
     const store = new FileLoopStore(join(tmpdir(), `loopforge-hyd-${randomUUID()}`));
     const mgr = new SessionManager(store);
     const started = await mgr.create({ task: "Fast path", loopId: "hyd-fast" });
-    await mgr.advance(started.sessionId, "", continuingEvaluation());
+    await advanceWithHeld(mgr, started.sessionId, "", continuingEvaluation());
 
     const engine = new LoopForgeEngine(store);
     engine.hydrateLoopContext("hyd-fast", 2);
@@ -134,8 +135,8 @@ describe("Hydration cache — equivalence and incrementality", () => {
     const sessionId = started.sessionId;
 
     // Round 1 → full hydration (no sinceRound). Round 2 → incremental sinceRound 2.
-    await mgr.advance(sessionId, "", continuingEvaluation());
-    await mgr.advance(sessionId, "", continuingEvaluation());
+    await advanceWithHeld(mgr, sessionId, "", continuingEvaluation());
+    await advanceWithHeld(mgr, sessionId, "", continuingEvaluation());
     assert.ok(
       store.sinceRounds.includes(undefined),
       "the first hydration must be a full read",
@@ -147,7 +148,7 @@ describe("Hydration cache — equivalence and incrementality", () => {
 
     store.sinceRounds = [];
     // Round 3 → incremental sinceRound 3 — only the just-committed document.
-    await mgr.advance(sessionId, "", continuingEvaluation());
+    await advanceWithHeld(mgr, sessionId, "", continuingEvaluation());
     assert.ok(
       store.sinceRounds.includes(3),
       `the third compile must read only rounds >= 3 (got: ${store.sinceRounds.join(", ")})`,
@@ -292,7 +293,7 @@ describe("v3.5.1 — hydration stamps attempt/roundEvidence for the compile view
     const sessionId = started.sessionId;
 
     // One rejected attempt then an accepted one → committed attempt = 2.
-    const rejected = await mgr.advance(sessionId, "", {
+    const rejected = await advanceWithHeld(mgr, sessionId, "", {
       success: true,
       output_summary: "premature success",
       constraint_violations: [],
@@ -304,7 +305,7 @@ describe("v3.5.1 — hydration stamps attempt/roundEvidence for the compile view
       },
     });
     assert.equal(rejected.enforcementAction, "reject");
-    const accepted = await mgr.advance(sessionId, "", continuingEvaluation());
+    const accepted = await advanceWithHeld(mgr, sessionId, "", continuingEvaluation());
     assert.equal(accepted.round, 2);
 
     // A fresh engine hydrates from disk and must re-derive the same stamp —
@@ -334,7 +335,7 @@ describe("v3.5.1 — hydration stamps attempt/roundEvidence for the compile view
     const store = new FileLoopStore(join(tmpdir(), `loopforge-bind-${randomUUID()}`));
     const mgr = new SessionManager(store);
     const started = await mgr.create({ task: "Binding stamp", loopId: "bind-stamp" });
-    await mgr.advance(started.sessionId, "", {
+    await advanceWithHeld(mgr, started.sessionId, "", {
       ...continuingEvaluation(),
       round_contract: {
         work_item: "Slice A",
@@ -381,11 +382,11 @@ describe("M6 — delegation journal merge boundary", () => {
     const started = await mgr.create({ task: "Journal merge", loopId: "journal-merge" });
     const sessionId = started.sessionId;
 
-    await mgr.advance(sessionId, "", continuingEvaluation()); // round 1 clean
+    await advanceWithHeld(mgr, sessionId, "", continuingEvaluation()); // round 1 clean
 
     // Round 2: ONE violation occurrence + worker_results — the engine
     // auto-records a delegation_journal row for the same round.
-    const delegating = await mgr.advance(sessionId, "", {
+    const delegating = await advanceWithHeld(mgr, sessionId, "", {
       ...continuingEvaluation(),
       constraint_violations: ["Never touch prod data"],
       worker_results: [

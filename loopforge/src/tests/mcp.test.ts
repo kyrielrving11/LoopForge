@@ -12,6 +12,7 @@ import {
   criterionClaims,
   DEFAULT_SUCCESS_CRITERION,
 } from "./_helpers.js";
+import { advanceWithHeld } from "./_helpers.js";
 import { toolNext } from "./_helpers.js";
 import { deriveCriterionId } from "../token-utils.js";
 import { queryLoopEntries } from "../loop-store.js";
@@ -573,7 +574,7 @@ describe("MCP — session persistence (save / resume)", async () => {
     const sessionId = r1.sessionId;
 
     // Advance round 1 → compiles round 2
-    const r2 = await mgr.advance(sessionId, agentOutput({
+    const r2 = await advanceWithHeld(mgr, sessionId, agentOutput({
       success: false, shouldContinue: true,
     }), evalParam({ success: false, shouldContinue: true }));
     assert.ok(r2.prompt !== null);
@@ -592,7 +593,7 @@ describe("MCP — session persistence (save / resume)", async () => {
     const r1 = await mgr.create({ task: "Test task", loopId: "complete-persist" });
     const sessionId = r1.sessionId;
 
-    await mgr.advance(sessionId, agentOutput({
+    await advanceWithHeld(mgr, sessionId, agentOutput({
       success: true, shouldContinue: false,
     }), evalParam({ success: true, shouldContinue: false }));
 
@@ -610,7 +611,7 @@ describe("MCP — session persistence (save / resume)", async () => {
     const beforeMetrics = JSON.stringify(mgr.getPolicyMetrics("stall-persist"));
     const beforeRoundDocuments = store.rounds.size;
 
-    const invalid = await mgr.advance(sessionId, agentOutputNoEval("Just some text"));
+    const invalid = await advanceWithHeld(mgr, sessionId, agentOutputNoEval("Just some text"));
     assert.equal(invalid.stopReason, "evaluation_invalid");
     assert.equal(JSON.stringify(store.listEntries("stall-persist")), beforeEntries,
       "format errors must not save session or vault state");
@@ -643,7 +644,7 @@ describe("MCP — session persistence (save / resume)", async () => {
   it("resume() recovers mid-loop state after advance", async () => {
     // Create and advance one round → simulates process dying after round 2 compile
     const r1 = await mgr.create({ task: "Test task", loopId: "resume-mid" });
-    const r2 = await mgr.advance(r1.sessionId, agentOutput({
+    const r2 = await advanceWithHeld(mgr, r1.sessionId, agentOutput({
       success: true, shouldContinue: true,
     }), evalParam({ success: true, shouldContinue: true }));
     assert.equal(r2.round, 2);
@@ -662,7 +663,7 @@ describe("MCP — session persistence (save / resume)", async () => {
   it("resume() recompiles the same prompt when the held prompt is lost", async () => {
     const loopId = "resume-recompile";
     const r1 = await mgr.create({ task: "Test task", loopId });
-    const r2 = await mgr.advance(r1.sessionId, agentOutput({
+    const r2 = await advanceWithHeld(mgr, r1.sessionId, agentOutput({
       success: false, shouldContinue: true,
     }), evalParam({ success: false, shouldContinue: true }));
     assert.equal(r2.level, "l1",
@@ -694,7 +695,7 @@ describe("MCP — session persistence (save / resume)", async () => {
 
   it("resume() returns stopped result for completed loop", async () => {
     const r1 = await mgr.create({ task: "Test task", loopId: "resume-done" });
-    await mgr.advance(r1.sessionId, agentOutput({
+    await advanceWithHeld(mgr, r1.sessionId, agentOutput({
       success: true, shouldContinue: false,
     }), evalParam({ success: true, shouldContinue: false }));
 
@@ -748,7 +749,7 @@ describe("MCP — session persistence (save / resume)", async () => {
     // Create a session and complete it so vault records status="stopped".
     const start = await mgr.create({ task: "Stopped test", loopId: "auto-resume-stopped" });
     const sid = String(start.sessionId);
-    await mgr.advance(sid, "done", {
+    await advanceWithHeld(mgr, sid, "done", {
       success: true,
       output_summary: "All done",
       constraint_violations: [],
@@ -1032,7 +1033,7 @@ describe("MCP P0 lifecycle regressions", () => {
     assert.equal(sessionEntry?.loop_lineage?.success_trajectory, undefined);
   });
 
-  it("serializes concurrent advances for the same session", async () => {
+  it("serializes concurrent advances and rejects the stale transaction", async () => {
     const started = await mgr.create({
       task: "Concurrent advance regression",
       loopId: "concurrent-advance-regression",
@@ -1051,12 +1052,34 @@ describe("MCP P0 lifecycle regressions", () => {
       },
     } as SelfEvaluation;
 
-    const first = mgr.advance(sessionId, "", evaluation);
-    const second = mgr.advance(sessionId, "", evaluation);
+    const first = advanceWithHeld(mgr, sessionId, "", evaluation);
+    const second = advanceWithHeld(mgr, sessionId, "", evaluation);
     const [firstResult, secondResult] = await Promise.all([first, second]);
     assert.equal(firstResult.round, 2);
-    assert.equal(secondResult.round, 3);
-    assert.equal(mgr.get(sessionId)?.currentRound, 3);
+    // Both calls carried the SAME held transactionId. The first commits; the
+    // second is stale and must return the new held prompt, never evaluate
+    // the same attempt twice.
+    assert.equal(secondResult.round, 2);
+    assert.equal(typeof secondResult.prompt, "string",
+      "the stale concurrent call receives the current held prompt");
+    assert.ok(
+      (secondResult.warnings ?? []).some((warning) =>
+        warning.includes("transactionId") || warning.includes("roundId")),
+      "the stale concurrent call is warned",
+    );
+    assert.equal(mgr.get(sessionId)?.currentRound, 2);
+
+    // Same CURRENT roundId, stale transaction: the transaction anchor alone
+    // must reject the old attempt.
+    const staleTx = await mgr.advance(
+      sessionId, "", evaluation, firstResult.roundId, started.transactionId,
+    );
+    assert.equal(typeof staleTx.prompt, "string");
+    assert.ok(
+      (staleTx.warnings ?? []).some((warning) => warning.includes("transactionId")),
+      "a stale transaction is warned",
+    );
+    assert.equal(mgr.get(sessionId)?.currentRound, 2);
   });
 
   it("does not revive a session paused during an in-flight advance", async () => {
@@ -1065,7 +1088,7 @@ describe("MCP P0 lifecycle regressions", () => {
       loopId: "pause-during-advance-regression",
       maxRounds: 30,
     });
-    const advancing = mgr.advance(
+    const advancing = advanceWithHeld(mgr, 
       started.sessionId,
       "",
       continuingEvaluation(),
@@ -1085,7 +1108,7 @@ describe("MCP P0 lifecycle regressions", () => {
       loopId: "stop-during-advance-regression",
       maxRounds: 30,
     });
-    const advancing = mgr.advance(
+    const advancing = advanceWithHeld(mgr, 
       started.sessionId,
       "",
       continuingEvaluation(),
@@ -1156,7 +1179,7 @@ describe("MCP P0 lifecycle regressions", () => {
         criterion_claims: criterionClaims([], [DEFAULT_SUCCESS_CRITERION]),
       },
     };
-    const rejected = await mgr.advance(
+    const rejected = await advanceWithHeld(mgr, 
       started.sessionId,
       "",
       rejectedEvaluation,
@@ -1186,7 +1209,7 @@ describe("MCP P0 lifecycle regressions", () => {
       0,
     );
 
-    const accepted = await restarted.advance(
+    const accepted = await advanceWithHeld(restarted, 
       resumed.sessionId,
       "",
       continuingEvaluation(),
@@ -1480,6 +1503,22 @@ describe("MCP — tool contract (v3.2.1)", async () => {
       "instructions must point at the submission receipt");
   });
 
+  it("loopforge_checkpoint requires the three held anchors", () => {
+    assert.doesNotThrow(() => {
+      validateToolInput("loopforge_checkpoint", {
+        sessionId: "s1",
+        roundId: "r1",
+        transactionId: "tx-1",
+      });
+    });
+    assert.throws(() => {
+      validateToolInput("loopforge_checkpoint", {
+        sessionId: "s1",
+        roundId: "r1",
+      });
+    }, /transactionId is required/);
+  });
+
   it("loopforge_next schema accepts evaluation or recovery", () => {
     assert.doesNotThrow(() => {
       validateToolInput("loopforge_next", {
@@ -1510,6 +1549,15 @@ describe("MCP — tool contract (v3.2.1)", async () => {
         },
       });
     });
+
+    assert.throws(() => {
+      validateToolInput("loopforge_next", {
+        sessionId: "s1",
+        roundId: "r1",
+        transactionId: "tx-1",
+        recovery: { target_round: 2, reason: "old shape" },
+      });
+    }, /target_checkpoint_id is required|target_round is not allowed/);
 
     assert.throws(() => {
       validateToolInput("loopforge_next", {
@@ -1931,7 +1979,7 @@ describe("MCP — Round Contract flow", async () => {
         items: [{ description: "login works", criterion_refs: [DEFAULT_CRITERION_ID], subgoal_refs: [], verify_with: ["verify"] }],
       },
     };
-    const r2 = await mgr.advance(sessionId, "Scaffolded the auth module.", evalBlock);
+    const r2 = await advanceWithHeld(mgr, sessionId, "Scaffolded the auth module.", evalBlock);
     assert.ok(r2.prompt !== null);
     assert.equal(r2.round, 2);
     assert.ok(r2.prompt.includes("**Implement login flow**"),
@@ -1946,7 +1994,7 @@ describe("MCP — Round Contract flow", async () => {
     // index.ts, so a library caller got none of it. This calls advance
     // directly, with an item binding a command that is not configured.
     const r1 = await mgr.create({ task: "Build the auth module", loopId: "boundary-runtime" });
-    const rejected = await mgr.advance(r1.sessionId, "Scaffolded.", {
+    const rejected = await advanceWithHeld(mgr, r1.sessionId, "Scaffolded.", {
       success: false,
       output_summary: "Scaffolded auth.",
       constraint_violations: [],
@@ -1978,7 +2026,7 @@ describe("MCP — Round Contract flow", async () => {
         verify_with: ["verify"],
       }],
     } as never;
-    const rejected = await mgr.advance(r1.sessionId, "Scaffolded.", invalid);
+    const rejected = await advanceWithHeld(mgr, r1.sessionId, "Scaffolded.", invalid);
     assert.equal(rejected.stopReason, "contract_invalid");
     assert.equal(rejected.submissionError?.code, "contract_invalid");
     assert.equal(rejected.prompt, null);
@@ -1998,7 +2046,7 @@ describe("MCP — Round Contract flow", async () => {
         verify_with: ["verify"],
       }],
     };
-    const accepted = await mgr.advance(r1.sessionId, "Scaffolded.", valid);
+    const accepted = await advanceWithHeld(mgr, r1.sessionId, "Scaffolded.", valid);
     assert.ok(accepted.prompt !== null, "the same round retries with work_item");
     assert.ok(accepted.prompt.includes("**Login flow is implemented**"));
   });
@@ -2007,7 +2055,7 @@ describe("MCP — Round Contract flow", async () => {
     // A malformed evaluation is a payload defect whatever the session's state;
     // answering session_not_found for it would send the agent after the wrong
     // problem. The reference spaces that need a session fail open here.
-    const rejected = await mgr.advance("no-such-session", "output", {
+    const rejected = await advanceWithHeld(mgr, "no-such-session", "output", {
       success: "yes",
       output_summary: "done",
       constraint_violations: [],
@@ -2020,7 +2068,7 @@ describe("MCP — Round Contract flow", async () => {
   it("a contract-less round stays byte-identical to pre-contract rendering", async () => {
     const r1 = await mgr.create({ task: "Plain task", loopId: "contract-none" });
     const sessionId = r1.sessionId;
-    const r2 = await mgr.advance(
+    const r2 = await advanceWithHeld(mgr, 
       sessionId,
       agentOutput({ success: false }),
       evalParam({ success: false, shouldContinue: true }),
@@ -2083,14 +2131,14 @@ describe("MCP — Round Contract flow", async () => {
 
     // v3.9.4: a sub-goal must be committed/displayed before a contract can
     // cite it. Declare it in round 1, declare the contract in round 2.
-    await mgr.advance(started.sessionId, "", {
+    await advanceWithHeld(mgr, started.sessionId, "", {
       success: false,
       output_summary: "Declared the sub-goal.",
       constraint_violations: [],
       should_continue: true,
       emerged_subtasks: ["wire the widget"],
     });
-    await mgr.advance(started.sessionId, "", {
+    await advanceWithHeld(mgr, started.sessionId, "", {
       success: false,
       output_summary: "Declared the contract.",
       constraint_violations: [],
@@ -2098,7 +2146,7 @@ describe("MCP — Round Contract flow", async () => {
       round_contract: contract,
     });
 
-    const stopped = await mgr.advance(started.sessionId, "", {
+    const stopped = await advanceWithHeld(mgr, started.sessionId, "", {
       success: true,
       output_summary: "Verified the slice.",
       constraint_violations: [],
@@ -2128,7 +2176,7 @@ describe("MCP — Round Contract flow", async () => {
     });
     const a = CONTRACT("Implement login flow");
     // Round 1 declares A → round 2's Current Task is A.
-    const r2 = await mgr.advance(
+    const r2 = await advanceWithHeld(mgr, 
       started.sessionId,
       "",
       honest([], [DEFAULT_CRITERION_ID], a),
@@ -2138,7 +2186,7 @@ describe("MCP — Round Contract flow", async () => {
       "round 2 must execute under the ACTIVE contract");
 
     // Round 2 submits a deterministic rejection (success with open criteria).
-    const rejected = await mgr.advance(started.sessionId, "", {
+    const rejected = await advanceWithHeld(mgr, started.sessionId, "", {
       success: true,
       output_summary: "premature success",
       constraint_violations: [],
@@ -2167,13 +2215,13 @@ describe("MCP — Round Contract flow", async () => {
     });
     const contract = CONTRACT("Implement login flow");
     const itemId = deriveContractItemIds(contract!.items)[0];
-    const r2 = await mgr.advance(started.sessionId, "", honest([], [DEFAULT_CRITERION_ID], contract));
+    const r2 = await advanceWithHeld(mgr, started.sessionId, "", honest([], [DEFAULT_CRITERION_ID], contract));
     assert.ok(String(r2.prompt ?? "").includes("**Implement login flow**"));
 
     // v3.8: the item closes only when its bound command was observed passing
     // (the "verify" provider is installed for this suite and passes), so the
     // contract closes and the Current Task reverts to the original task.
-    const r3 = await mgr.advance(started.sessionId, "", {
+    const r3 = await advanceWithHeld(mgr, started.sessionId, "", {
       success: false,
       output_summary: "Ran the bound verification command.",
       constraint_violations: [],
@@ -2199,11 +2247,11 @@ describe("MCP — Round Contract flow", async () => {
     });
     const a = CONTRACT("Implement login flow");
     const b = CONTRACT("Implement the admin panel");
-    const r2 = await mgr.advance(started.sessionId, "", honest([], [DEFAULT_CRITERION_ID], a));
+    const r2 = await advanceWithHeld(mgr, started.sessionId, "", honest([], [DEFAULT_CRITERION_ID], a));
     assert.ok(String(r2.prompt ?? "").includes("**Implement login flow**"));
     // Round 2 proposes B while A is still open (nothing met, not blocked) —
     // the machine keeps A as the Current Task for round 3.
-    const r3 = await mgr.advance(started.sessionId, "", honest([], [DEFAULT_CRITERION_ID], b));
+    const r3 = await advanceWithHeld(mgr, started.sessionId, "", honest([], [DEFAULT_CRITERION_ID], b));
     assert.equal(r3.round, 3);
     assert.ok(String(r3.prompt ?? "").includes("**Implement login flow**"),
       "the open ACTIVE contract must continue — B was premature");
@@ -2222,7 +2270,7 @@ describe("MCP — Round Contract flow", async () => {
       maxRounds: 4,
     });
     const a = CONTRACT("Implement login flow");
-    const r2 = await mgr.advance(started.sessionId, "", honest([], [DEFAULT_CRITERION_ID], a));
+    const r2 = await advanceWithHeld(mgr, started.sessionId, "", honest([], [DEFAULT_CRITERION_ID], a));
     assert.ok(String(r2.prompt ?? "").includes("**Implement login flow**"));
 
     // Session view: the ACTIVE contract governing the next round.

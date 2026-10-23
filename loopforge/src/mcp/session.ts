@@ -1297,15 +1297,6 @@ export class SessionManager implements SessionRegistry {
           details: { reason_code: "store_unavailable" },
         };
       }
-      if ((held.checkpoints?.length ?? 0) >= MAX_MID_CHECKPOINTS_PER_TRANSACTION) {
-        return {
-          error: "checkpoint_limit",
-          errorMessage: `This attempt already has ${MAX_MID_CHECKPOINTS_PER_TRANSACTION} mid-round checkpoints.`,
-          sessionId,
-          roundId: expectedRoundId,
-          details: { reason_code: "mid_checkpoint_cap" },
-        };
-      }
       let stateDir: string | undefined;
       try {
         stateDir = resolveStateDirectory(process.cwd(), getPolicy().backend.root_dir);
@@ -1363,7 +1354,22 @@ export class SessionManager implements SessionRegistry {
         branchId: held.branchId,
       });
       const previous = held.checkpoints ?? [];
-      if (!previous.some((item) => item.checkpointId === ref.checkpointId)) {
+      const duplicate = previous.find(
+        (item) => item.checkpointId === ref.checkpointId,
+      );
+      // The cap counts DISTINCT savepoints. Re-capturing an already visible
+      // state is idempotent and must still return the existing ref at the cap.
+      if (!duplicate &&
+          previous.length >= MAX_MID_CHECKPOINTS_PER_TRANSACTION) {
+        return {
+          error: "checkpoint_limit",
+          errorMessage: `This attempt already has ${MAX_MID_CHECKPOINTS_PER_TRANSACTION} mid-round checkpoints.`,
+          sessionId,
+          roundId: expectedRoundId,
+          details: { reason_code: "mid_checkpoint_cap" },
+        };
+      }
+      if (!duplicate) {
         held.checkpoints = [...previous, ref];
         try {
           this.lifecycle.save(session);
@@ -1385,7 +1391,7 @@ export class SessionManager implements SessionRegistry {
         round: held.round,
         role: "mid",
         redoRound: manifest.round,
-        createdAt: ref.createdAt,
+        createdAt: (duplicate ?? ref).createdAt,
         ...(manifest.head ? { head: manifest.head } : {}),
         fileCount: Object.keys(manifest.fingerprints).length,
         contentCount: manifest.contents.length,

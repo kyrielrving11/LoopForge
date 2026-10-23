@@ -1007,7 +1007,6 @@ describe("v3.8.1 — recurring flags", () => {
     submittedFields: [],
     evidenceIncomplete: true,
     constraintViolations: opts.violations ?? [],
-    backtrack: null,
   });
 
   const flag = (

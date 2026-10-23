@@ -85,10 +85,10 @@ export function getPreviousRound(loopId, round, context) {
             : typeof data.output_summary === "string" ? data.output_summary : "",
     };
 }
-export function latestObjective(loopId, context,
+export function latestObjective(loopId, context, 
 /** Exclusive compile-round bound. A deep-restore redo must never read the
  *  abandoned branch's objective (and its rolled-back refinements). */
-beforeRound,
+beforeRound, 
 /** v3.9.4: a round-1 same-round retry has no earlier committed objective.
  *  Reading the prior compile of the SAME round recovers the initial
  *  criteria supplied to `loopforge_start`. It is never enabled for a first
@@ -274,7 +274,7 @@ function deriveMachineStatus(rounds, currentRound) {
  *  v3.9.6: the derivation lives in `criterion-status.ts` so the submission
  *  boundary and guidance can read the same rows without importing this module
  *  (which would close the `loop-compiler → submission-guidance` cycle). */
-export function deriveCriterionStatuses(loopId, context, objective, currentRound, lastRoundResult,
+export function deriveCriterionStatuses(loopId, context, objective, currentRound, lastRoundResult, 
 /** v3.8.1: the criterion machine facts from the shared bundle. A criterion
  *  is `verified` / `contradicted` / `insufficient` only through an item that
  *  references it — a claim alone can never reach `verified` — and the fact
@@ -502,7 +502,7 @@ export function compileLoop(request, context) {
         ? request.constraints_from_plan
         : [];
     const constraints = evolveConstraints(request, objective, previous, windowRounds, planInput, preservedDiscoveries, preservedRound);
-    const constraintLifecycle = manageConstraintLifecycle(constraints.active, constraints.provenance, windowRounds, request.round,
+    const constraintLifecycle = manageConstraintLifecycle(constraints.active, constraints.provenance, windowRounds, request.round, 
     // "Violated this round" means the CURRENT compile round's report. A
     // committed previous round's violations are found by the committed
     // history scan at their real round, not relabelled as this round.

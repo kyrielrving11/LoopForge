@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
+  existsSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -15,6 +16,7 @@ import {
   checkpointForRoundBoundary,
   deriveRecoveryDirective,
   findCheckpointRef,
+  validateCheckpointManifest,
 } from "../recovery.js";
 import type { CheckpointRef, MachineObservation } from "../protocol.js";
 import { prepareRoundTransaction, rootBranchId } from "../round-transaction.js";
@@ -25,6 +27,18 @@ import {
   executeRestore,
   preflightRestore,
 } from "../workspace-restore.js";
+import { SessionManager } from "../mcp/session.js";
+import { TOOL_HANDLERS } from "../mcp/tools.js";
+import { VaultSessionStateStore } from "../storage.js";
+import { queryLoopEntries } from "../loop-store.js";
+import { resetPolicy } from "../policy.js";
+import { MemoryLoopStore } from "./_helpers.js";
+import { advanceWithHeld } from "./_helpers.js";
+import {
+  pendingRollbackDirective,
+  readOnlyRollbacks,
+  readOnlyRounds,
+} from "../committed-round.js";
 
 const GIT_ENV = {
   ...process.env,
@@ -111,6 +125,38 @@ describe("v3.9.7 — checkpoint selection predicates", () => {
     });
     assert.equal(missing.ok, false);
     if (!missing.ok) assert.equal(missing.reason, "target_not_visible");
+  });
+
+  it("rejects a manifest that does not match its transaction ref", () => {
+    const checkpointRef = ref();
+    const manifest = {
+      schemaVersion: 1 as const,
+      checkpointId: checkpointRef.checkpointId,
+      loopId: "test",
+      round: checkpointRef.round,
+      role: checkpointRef.role,
+      createdAt: 0,
+      dirty: ["a.ts"],
+      fingerprints: { "a.ts": "m:1" },
+      contents: ["a.ts"],
+      coverage: "tracked_and_non_ignored_untracked" as const,
+      contentHash: checkpointRef.contentHash,
+    };
+    assert.equal(validateCheckpointManifest(checkpointRef, manifest).ok, true);
+    assert.equal(
+      validateCheckpointManifest(checkpointRef, {
+        ...manifest,
+        contentHash: "b".repeat(64),
+      }).ok,
+      false,
+    );
+    assert.equal(
+      validateCheckpointManifest(checkpointRef, {
+        ...manifest,
+        round: checkpointRef.round + 1,
+      }).ok,
+      false,
+    );
   });
 
   it("maps a round boundary to the before-image of its redo round", () => {
@@ -236,5 +282,187 @@ describe("v3.9.7 — FileWorkspaceCheckpointStore + restore executor", () => {
       "an untracked file absent from the target is deleted",
     );
     assert.equal(restored.filesDeleted, 1);
+  });
+});
+
+describe("v3.9.7 — SessionManager checkpoint recovery E2E", () => {
+  let dir = "";
+  let storeRoot = "";
+  let originalCwd = "";
+
+  beforeEach(() => {
+    resetPolicy();
+    originalCwd = process.cwd();
+    dir = mkdtempSync(join(tmpdir(), "loopforge-recover-e2e-"));
+    storeRoot = mkdtempSync(join(tmpdir(), "loopforge-recover-store-"));
+    initRepo(dir);
+    process.chdir(dir);
+  });
+
+  afterEach(() => {
+    process.chdir(originalCwd);
+    for (const path of [dir, storeRoot]) {
+      try {
+        rmSync(path, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+      } catch {
+        // The platform temp directory owns cleanup.
+      }
+    }
+    resetPolicy();
+  });
+
+  it("creates a mid checkpoint, rejects a stale transaction, restores, and survives a restart", async () => {
+    const store = new MemoryLoopStore();
+    const sessionStore = new VaultSessionStateStore(store);
+    const checkpointStoreFor = (loopId: string): FileWorkspaceCheckpointStore =>
+      new FileWorkspaceCheckpointStore(join(storeRoot, loopId), loopId);
+    let mgr = new SessionManager(store, sessionStore, checkpointStoreFor);
+    const readEntries = () => [
+      ...queryLoopEntries(store, "recover-e2e", { prefix: "loop:recover-e2e:" }),
+      ...queryLoopEntries(store, "recover-e2e", {
+        prefix: "loop:recover-e2e:",
+        feedbackOnly: true,
+      }),
+    ];
+    const evaluation = (file: string) => ({
+      success: false,
+      output_summary: `worked on ${file}`,
+      constraint_violations: [],
+      should_continue: true,
+      execution_report: {
+        files_changed: [file],
+        tests_reported: { passed: 0, failed: 0, skipped: 0 },
+      },
+    });
+    try {
+      const started = await mgr.create({
+        task: "Recover through a checkpoint",
+        loopId: "recover-e2e",
+        maxRounds: 10,
+      });
+      const sessionId = String(started.sessionId);
+      assert.ok(started.transactionId, "start returns a transactionId");
+      assert.equal(started.checkpoints?.length, 1, "start holds its before-image");
+
+      const mid = await TOOL_HANDLERS.loopforge_checkpoint(mgr, {
+        sessionId,
+        roundId: started.roundId,
+        transactionId: started.transactionId,
+      });
+      assert.equal(mid.ok, true, `checkpoint tool failed: ${JSON.stringify(mid)}`);
+      assert.equal(mid.role, "mid");
+      assert.match(String(mid.checkpointId), /^ck-[a-f0-9]{24}$/);
+
+      const status = await TOOL_HANDLERS.loopforge_status(mgr, { sessionId });
+      assert.equal(status.transactionId, started.transactionId);
+      assert.equal((status.checkpoints as unknown[]).length, 2,
+        "status returns the before-image and the explicit savepoint");
+
+      writeFileSync(join(dir, "r1.txt"), "round one\n");
+      runGit(dir, "add", ".");
+      runGit(dir, "-c", "user.name=lf", "-c", "user.email=lf@example.invalid",
+        "commit", "-q", "-m", "round one");
+      const round1 = await advanceWithHeld(mgr, 
+        sessionId, "", evaluation("r1.txt"), started.roundId, started.transactionId,
+      );
+      assert.ok(round1.prompt, "round 2 prompt");
+      const round2Before = round1.checkpoints?.find((item) => item.role === "before");
+      assert.ok(round2Before, "round 2 has a before-image");
+
+      writeFileSync(join(dir, "r2.txt"), "round two\n");
+      runGit(dir, "add", ".");
+      runGit(dir, "-c", "user.name=lf", "-c", "user.email=lf@example.invalid",
+        "commit", "-q", "-m", "round two");
+      const round2 = await advanceWithHeld(mgr, 
+        sessionId, "", evaluation("r2.txt"), round1.roundId, round1.transactionId,
+      );
+      assert.ok(round2.prompt, "round 3 prompt");
+      const held = mgr.get(sessionId)!.roundSnapshot!;
+
+      const stale = await advanceWithHeld(mgr, 
+        sessionId, "", evaluation("r2.txt"), held.roundId, "tx-stale-attempt",
+      );
+      assert.ok(stale.prompt, "a stale transaction returns the held prompt");
+      assert.ok(
+        (stale.warnings ?? []).some((warning) => warning.includes("transactionId")),
+        "the stale response is warned, not evaluated",
+      );
+      assert.equal(mgr.get(sessionId)!.currentRound, 3, "no round was consumed");
+
+      const redo = await mgr.recover(
+        sessionId,
+        { target_checkpoint_id: round2Before.checkpointId, reason: "abandon this approach" },
+        held.roundId,
+        held.transactionId,
+      );
+      assert.ok(redo.prompt, "the redo prompt is delivered only after restore");
+      assert.equal(redo.round, 2);
+      assert.equal(redo.recovery?.target_checkpoint_id, round2Before.checkpointId);
+      assert.equal(redo.recovery?.redo_round, 2);
+      assert.equal(
+        redo.submission_guidance?.recovery?.pending,
+        true,
+        "guidance exposes the pending recovery facts",
+      );
+      assert.equal(existsSync(join(dir, "r2.txt")), false,
+        "the abandoned round's file was removed by the restore");
+      assert.deepEqual(readOnlyRounds(readEntries()).map((view) => view.round), [1]);
+      const directive = readOnlyRollbacks(readEntries())[0]!;
+      assert.equal(directive.origin, "agent");
+      assert.equal(pendingRollbackDirective(readEntries())?.origin, "agent");
+      assert.equal(
+        mgr.get(sessionId)!.roundSnapshot?.branchId,
+        directive.transactionId,
+        "the redo transaction lives on the directive's child branch",
+      );
+
+      const repeat = await mgr.recover(
+        sessionId,
+        { target_checkpoint_id: round2Before.checkpointId, reason: "repeat" },
+        redo.roundId,
+        redo.transactionId,
+      );
+      assert.ok(repeat.prompt, "a repeated recovery returns the held redo prompt");
+      assert.equal(readOnlyRollbacks(readEntries()).length, 1,
+        "no second directive is committed");
+
+      mgr.close();
+      mgr = new SessionManager(
+        store,
+        new VaultSessionStateStore(store),
+        checkpointStoreFor,
+      );
+      const resumed = await mgr.resume("recover-e2e");
+      assert.ok(resumed?.prompt, "resume returns the held redo prompt");
+      assert.equal(resumed?.round, 2);
+      assert.equal(resumed?.transactionId, redo.transactionId);
+      assert.equal(resumed?.submission_guidance?.recovery?.pending, true,
+        "the held redo keeps its recovery facts across a restart");
+      assert.equal(
+        mgr.get(resumed!.sessionId)!.operatorAcceptance?.task,
+        "Recover through a checkpoint",
+        "the operator acceptance cursor survives the restore and restart",
+      );
+      assert.equal(readOnlyRollbacks(readEntries()).length, 1);
+
+      // The next ordinary round must stay on the child branch, not fall back
+      // to root after the redo commits.
+      writeFileSync(join(dir, "r2b.txt"), "redo work\n");
+      runGit(dir, "add", ".");
+      runGit(dir, "-c", "user.name=lf", "-c", "user.email=lf@example.invalid",
+        "commit", "-q", "-m", "redo work");
+      const next = await advanceWithHeld(mgr, 
+        resumed!.sessionId, "", evaluation("r2b.txt"),
+        resumed!.roundId, resumed!.transactionId,
+      );
+      assert.equal(next.round, 3);
+      assert.equal(
+        mgr.get(resumed!.sessionId)!.roundSnapshot?.branchId,
+        directive.transactionId,
+        "later rounds remain on the recovery child branch",
+      );
+    } finally {
+      mgr.close();
+    }
   });
 });

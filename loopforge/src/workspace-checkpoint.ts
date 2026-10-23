@@ -42,6 +42,9 @@ export const CONTENT_HASH_RE = /^[a-f0-9]{64}$/;
  *  explicitly unavailable; the boundary is never truncated. */
 export const CHECKPOINT_MAX_PATHS = 200_000;
 export const CHECKPOINT_MAX_NEW_BYTES = 1024 * 1024 * 1024;
+/** Module constant: one capture cannot run forever. Callers may shorten it,
+ *  never extend it beyond this bound. */
+export const CHECKPOINT_MAX_CAPTURE_MS = 120_000;
 
 export class CheckpointError extends Error {
   constructor(
@@ -289,7 +292,10 @@ export class FileWorkspaceCheckpointStore implements BoundaryMaterializer {
     const result = await captureBoundary({
       cwd: input.cwd,
       ...(input.signal ? { signal: input.signal } : {}),
-      ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}),
+      timeoutMs: Math.min(
+        input.timeoutMs ?? CHECKPOINT_MAX_CAPTURE_MS,
+        CHECKPOINT_MAX_CAPTURE_MS,
+      ),
       ...(input.exclude ? { exclude: input.exclude } : {}),
       materializer: this,
       refreshIndex: true,

@@ -262,6 +262,10 @@ export declare class RoundLifecycle {
     /** v3.9.7: execution metadata attached to every held/prepared prompt. These
      *  are transport facts, never prompt governance content. */
     private transactionFacts;
+    /** v3.9.7: guidance facts for a redo whose restore is already verified.
+     *  They are derived from the still-pending committed directive, so a
+     *  restart returns the same surface as the original recovery response. */
+    private pendingRecoveryGuidance;
     private restoredPromptResult;
     /** Reconcile the crash window where feedback committed but session_state
      *  still points at the old prompt. Returns null when no commit is pending.

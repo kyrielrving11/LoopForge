@@ -40,6 +40,10 @@ import { captureBoundary, runGitCommandStatus } from "./git-boundary.js";
 import type { GitCommandStatus } from "./git-boundary.js";
 import { containInWorkspace } from "./workspace.js";
 import type { FileWorkspaceCheckpointStore } from "./workspace-checkpoint.js";
+import {
+  checkpointContentHash,
+  deriveCheckpointId,
+} from "./workspace-checkpoint.js";
 import { EvidenceCollector } from "./evidence-provider.js";
 
 export class RestoreFailure extends Error {
@@ -121,11 +125,15 @@ function safeTargetPath(path: string, context: RestoreContext): string {
       path.startsWith(".git\\")) {
     throw new RestoreFailure("unsafe_path", `refusing to restore .git path ${path}`);
   }
-  // Validate the lexical path and its realpath ancestors, but return the
+  // Validate the lexical parent and its realpath ancestors, but return the
   // LEXICAL path: the final component may be a symlink that must be replaced,
-  // not followed. `assertSafeAncestors` re-checks every parent before writes.
+  // not followed. A symlink whose link text points outside is a valid target
+  // state; writing THROUGH a symlinked parent is what must be refused.
+  const parent = path.includes("/")
+    ? path.slice(0, path.lastIndexOf("/")) || "."
+    : ".";
   try {
-    containInWorkspace(context.workspace, path);
+    containInWorkspace(context.workspace, parent);
   } catch (error) {
     throw new RestoreFailure(
       "unsafe_path",
@@ -345,6 +353,32 @@ export async function preflightRestore(input: {
   signal?: AbortSignal;
   timeoutMs?: number;
 }): Promise<RestorePreflight> {
+  if (input.manifest.schemaVersion !== 1 ||
+      input.manifest.coverage !== "tracked_and_non_ignored_untracked") {
+    throw new RestoreFailure("manifest_invalid", "unsupported checkpoint manifest schema");
+  }
+  // Recompute the content identity from the restore-relevant fields. A
+  // caller-supplied or tampered manifest must never be trusted merely because
+  // its stored hash/id look well-formed.
+  const recomputedHash = checkpointContentHash({
+    ...(input.manifest.head ? { head: input.manifest.head } : {}),
+    fingerprints: input.manifest.fingerprints,
+    contents: input.manifest.contents,
+    coverage: input.manifest.coverage,
+  });
+  const recomputedId = deriveCheckpointId({
+    loopId: input.manifest.loopId,
+    round: input.manifest.round,
+    role: input.manifest.role,
+    contentHash: recomputedHash,
+  });
+  if (recomputedHash !== input.manifest.contentHash ||
+      recomputedId !== input.manifest.checkpointId) {
+    throw new RestoreFailure(
+      "manifest_invalid",
+      "checkpoint manifest id/content hash does not match its boundary",
+    );
+  }
   const context: RestoreContext = {
     workspace: input.workspace,
     store: input.store,
@@ -372,7 +406,7 @@ export async function preflightRestore(input: {
     }
   }
   if (input.manifest.head !== undefined &&
-      !/^[a-f0-9]{7,64}$/.test(input.manifest.head)) {
+      !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(input.manifest.head)) {
     throw new RestoreFailure("target_head_invalid", "checkpoint HEAD is not a Git hash");
   }
   await verifyBlobs(input.manifest, input.store);

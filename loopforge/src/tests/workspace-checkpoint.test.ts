@@ -20,10 +20,11 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   CHECKPOINT_ID_RE,
+  CheckpointError,
   FileWorkspaceCheckpointStore,
   buildCheckpointRef,
   checkpointContentHash,
@@ -202,6 +203,24 @@ describe("workspace checkpoint capture", () => {
 
       const parsed = parseCheckpointManifest(manifest);
       assert.equal(parsed?.checkpointId, manifest.checkpointId);
+    } finally {
+      cleanup(dir);
+      cleanup(store.loopDir);
+    }
+  });
+
+  it("fails closed when the index carries assume-unchanged state", async () => {
+    const dir = tempDir("lf-checkpoint-repo-");
+    const store = storeFor();
+    try {
+      initRepo(dir);
+      git(dir, "update-index", "--assume-unchanged", "a.ts");
+      await assert.rejects(
+        () => store.capture({ round: 1, role: "before", cwd: dir }),
+        (error: unknown) =>
+          error instanceof CheckpointError &&
+          error.reasonCode === "unsupported_index",
+      );
     } finally {
       cleanup(dir);
       cleanup(store.loopDir);
@@ -408,6 +427,40 @@ describe("workspace restore symlinks", () => {
     } finally {
       cleanup(dir);
       cleanup(store.loopDir);
+    }
+  });
+
+  it("restores a symlink whose link text leaves the workspace", async () => {
+    // A symlink is a boundary VALUE, not a path to write through. Restoring
+    // `link -> ../outside` is legal; writing THROUGH a symlinked parent is not.
+    const dir = tempDir("lf-restore-repo-");
+    const store = storeFor();
+    const outsideName = `${basename(dir)}-outside.txt`;
+    const outsidePath = join(dir, "..", outsideName);
+    try {
+      initRepo(dir);
+      writeFileSync(outsidePath, "outside\n");
+      try {
+        symlinkSync(`../${outsideName}`, join(dir, "outside-link.ts"));
+      } catch {
+        return; // Windows without symlink privilege.
+      }
+      const manifest = await store.capture({ round: 1, role: "before", cwd: dir });
+      unlinkSync(join(dir, "outside-link.ts"));
+
+      const result = await executeRestore({
+        manifest,
+        workspace: dir,
+        store,
+        directiveTransactionId: "tx-outside-symlink-test",
+      });
+      assert.equal(result.status, "verified");
+      assert.equal(lstatSync(join(dir, "outside-link.ts")).isSymbolicLink(), true);
+      assert.equal(readFileSync(join(dir, "outside-link.ts"), "utf8"), "outside\n");
+    } finally {
+      cleanup(dir);
+      cleanup(store.loopDir);
+      try { rmSync(outsidePath, { force: true }); } catch { /* best effort */ }
     }
   });
 });

@@ -42,26 +42,6 @@ import { entryRound, isRecord } from "./token-utils.js";
 
 export type CommittedAction = "continue" | "stop" | "recovery" | "backtrack";
 
-/** v3.8.1: the rolled-back branch's facts, decoded from a committed rollback
- *  directive. One shape for the compile-side Recovery Brief, the state file's
- *  Recent tier and the rollback prompt — these were three renderers over two
- *  independent derivations (the committed record and an in-memory walk).
- *
- *  Note the target is a RESTORE POINT, not an upper bound: the redo re-commits
- *  the same round numbers the abandoned rounds occupied (round-lifecycle.ts
- *  sets `currentRound = backtrackTarget + 1`), so this is never a window
- *  fence. Abandonment is temporal, not numeric. */
-export interface BacktrackRecoveryRecord {
-  readonly target: number;
-  readonly triggerRule: string;
-  readonly failedRounds: number[];
-  readonly approaches: string[];
-  readonly wrongAssumptions: string[];
-  readonly skippedFiles: string[];
-  readonly skippedFingerprints: Record<string, string>;
-  readonly targetGitHead?: string;
-}
-
 export interface CommittedRoundView {
   readonly source: "feedback" | "merged" | "rollback";
   readonly sourceEntry: VaultEntry | Record<string, unknown>;
@@ -122,10 +102,6 @@ export interface CommittedRoundView {
   readonly retractedConstraints?: string[];
   readonly emergedSubtasks?: string[];
   readonly subgoalUpdates?: SubGoalUpdate[];
-  /** v3.8.1: present only on a committed rollback directive, null elsewhere.
-   *  Decoded from `result.*` on the durable feedback entry and from the
-   *  `lineage.backtrack*` stamps on a hydrated merged entry. */
-  readonly backtrack: BacktrackRecoveryRecord | null;
 }
 
 function committedAction(value: unknown): CommittedAction | null {
@@ -154,45 +130,6 @@ function strings(value: unknown): string[] {
   return Array.isArray(value)
     ? value.filter((item): item is string => typeof item === "string")
     : [];
-}
-
-function numbers(value: unknown): number[] {
-  return Array.isArray(value)
-    ? value.filter((item): item is number => typeof item === "number")
-    : [];
-}
-
-function stringMap(value: unknown): Record<string, string> {
-  if (!isRecord(value)) return {};
-  const out: Record<string, string> = {};
-  for (const [key, entry] of Object.entries(value)) {
-    if (typeof entry === "string") out[key] = entry;
-  }
-  return out;
-}
-
-/** v3.8.1: decode a rollback directive's facts from either carrier —
- *  `result.*` on a durable :feedback entry, `lineage.*` on a hydrated merged
- *  entry. Returns null when no restore point is recorded, which is also the
- *  signal that the record cannot serve as recovery guidance. */
-export function decodeBacktrackRecord(source: unknown): BacktrackRecoveryRecord | null {
-  const value = isRecord(source) ? source : {};
-  const target = typeof value.backtrackTarget === "number" ? value.backtrackTarget : null;
-  if (target === null) return null;
-  return {
-    target,
-    triggerRule: typeof value.backtrackTriggerRule === "string"
-      ? value.backtrackTriggerRule
-      : "",
-    failedRounds: numbers(value.backtrackFailedRounds),
-    approaches: strings(value.backtrackApproaches),
-    wrongAssumptions: strings(value.backtrackWrongAssumptions),
-    skippedFiles: strings(value.backtrackSkippedFiles),
-    skippedFingerprints: stringMap(value.backtrackSkippedFingerprints),
-    targetGitHead: typeof value.backtrackTargetGitHead === "string"
-      ? value.backtrackTargetGitHead
-      : undefined,
-  };
 }
 
 /** Normalize a raw subgoal_updates value into typed entries. Decode stays
@@ -304,7 +241,6 @@ function viewFromSnapshot(input: {
     retractedConstraints: strings(evaluation?.retracted_constraints),
     emergedSubtasks: strings(evaluation?.emerged_subtasks),
     subgoalUpdates: subGoalUpdates(evaluation?.subgoal_updates),
-    backtrack: null,
   };
 }
 
@@ -447,13 +383,9 @@ export function roundResultFromCommittedRound(
   });
 }
 
-/** The ONE pending-backtrack lookup for a redo round.
- *
- *  A backtrack commits at the failed round R, while the redo targets
- *  `backtrackTarget + 1`, which is lower than R for a deep restore. Matching
- *  the decoded target (with the legacy exact-round fallback when the record
- *  carries no target) keeps the recovery boundary AND the Recovery Brief
- *  correct for every backtrack depth. */
+/** The ONE pending-directive lookup for a redo round. The directive's
+ *  `target.redo_round` is the branch fence, so a deep restore and a
+ *  same-round redo match the same way. */
 export function pendingBacktrackRecord(
   entries: ReadonlyArray<unknown>,
   redoRound: number,

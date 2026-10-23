@@ -131,7 +131,6 @@ function round(
     normalizationDiagnostics: [],
     submittedFields: [],
     evidenceIncomplete: false,
-    backtrack: null,
   };
 }
 

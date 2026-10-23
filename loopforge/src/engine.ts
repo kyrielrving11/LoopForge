@@ -728,8 +728,15 @@ export class LoopForgeEngine {
     });
 
     const taskId = `loop:${loopId}:r${round}:feedback`;
-    const transactionId = typeof roundTransaction?.round_id === "string"
-      ? roundTransaction.round_id
+    // v3.9.7: identify the attempt by the SNAPSHOT transactionId, never by
+    // round_id. A redo reuses the logical roundId on a child branch; matching
+    // round_id alone would treat the abandoned branch's feedback as this
+    // commit and silently drop the redo.
+    const transactionSnapshot = isRecord(roundTransaction?.snapshot)
+      ? roundTransaction.snapshot
+      : null;
+    const transactionId = typeof transactionSnapshot?.transactionId === "string"
+      ? transactionSnapshot.transactionId
       : null;
     const transactionPersisted = (
       filter?: (entry: VaultEntry) => boolean,
@@ -743,10 +750,14 @@ export class LoopForgeEngine {
         if (filter && !filter(entry)) return false;
         const lineage = entry.loop_lineage;
         const transaction = lineage?.round_transaction;
-        return transaction !== null &&
-          typeof transaction === "object" &&
-          !Array.isArray(transaction) &&
-          (transaction as Record<string, unknown>).round_id === transactionId;
+        if (transaction === null ||
+            typeof transaction !== "object" ||
+            Array.isArray(transaction)) return false;
+        const snapshot = (transaction as Record<string, unknown>).snapshot;
+        return snapshot !== null &&
+          typeof snapshot === "object" &&
+          !Array.isArray(snapshot) &&
+          (snapshot as Record<string, unknown>).transactionId === transactionId;
       });
     };
     // v3.2.1: a committed backtrack decision is a roll-back directive, not

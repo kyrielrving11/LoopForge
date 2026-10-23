@@ -56,6 +56,27 @@ export function toolNext(
   );
 }
 
+/** v3.9.7: test-only submission helper. Tests that drive a session in order
+ *  anchor to the held transaction; tests that deliberately submit a stale
+ *  anchor still call `advance` raw. */
+export async function advanceWithHeld(
+  mgr: import("../mcp/session.js").SessionManager,
+  sessionId: string,
+  output: string,
+  evaluation?: unknown,
+  roundId?: string,
+  transactionId?: string,
+) {
+  const held = mgr.get(sessionId)?.roundSnapshot;
+  return mgr.advance(
+    sessionId,
+    output,
+    evaluation,
+    roundId ?? held?.roundId,
+    transactionId ?? held?.transactionId,
+  );
+}
+
 /** v3.9.7: a fixture that supplies observed Git before-evidence must also
  *  supply the schema-5 before-image fact. Old fixtures use this explicit
  *  unavailable fact rather than fabricating a restorable checkpoint. */

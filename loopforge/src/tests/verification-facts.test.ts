@@ -55,7 +55,6 @@ function declaringRound(): CommittedRoundView {
     beforeEvidence: [], afterEvidence: [], observationDelta: [],
     normalizationDiagnostics: [], submittedFields: [],
     evidenceIncomplete: false,
-    backtrack: null,
   };
 }
 

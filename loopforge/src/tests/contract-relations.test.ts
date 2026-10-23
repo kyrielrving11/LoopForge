@@ -12,6 +12,7 @@ import {
   installTestCommandProvider,
   DEFAULT_SUCCESS_CRITERION,
 } from "./_helpers.js";
+import { advanceWithHeld } from "./_helpers.js";
 import { resetPolicy } from "../policy.js";
 import { deriveCriterionId } from "../token-utils.js";
 import { deriveSubGoalId } from "../subgoal-state.js";
@@ -118,7 +119,7 @@ describe("v3.9.4 — a contract can cite a sub-goal only after it is committed",
         }],
       };
 
-      const sameRound = await mgr.advance(started.sessionId, "", {
+      const sameRound = await advanceWithHeld(mgr, started.sessionId, "", {
         success: false,
         output_summary: "Declared both at once.",
         constraint_violations: [],
@@ -130,7 +131,7 @@ describe("v3.9.4 — a contract can cite a sub-goal only after it is committed",
         "a sub-goal created in this submission is not displayed yet");
       assert.equal(sameRound.round, 1, "a boundary refusal does not advance the round");
 
-      const first = await mgr.advance(started.sessionId, "", {
+      const first = await advanceWithHeld(mgr, started.sessionId, "", {
         success: false,
         output_summary: "Declared the sub-goal.",
         constraint_violations: [],
@@ -140,7 +141,7 @@ describe("v3.9.4 — a contract can cite a sub-goal only after it is committed",
       assert.equal(first.submissionError, undefined);
       assert.equal(first.round, 2);
 
-      const second = await mgr.advance(started.sessionId, "", {
+      const second = await advanceWithHeld(mgr, started.sessionId, "", {
         success: false,
         output_summary: "Declared the contract.",
         constraint_violations: [],

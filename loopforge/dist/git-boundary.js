@@ -156,7 +156,7 @@ export function runGitCommandStatus(args, options) {
  *  parallel batch; HEAD is best-effort (a repository with no commit is a
  *  valid boundary with no head). Any required-command failure returns an
  *  explicit status — never an empty-but-observed boundary. */
-export async function captureGitFileStateAsync(signal, timeoutMs,
+export async function captureGitFileStateAsync(signal, timeoutMs, 
 /** Workspace root; injectable so tests can capture against a temp repo.
  *  Defaults to the process cwd, matching the evidence providers. */
 cwd = process.cwd()) {
@@ -385,7 +385,23 @@ async function fingerprintBoundary(workspace, entries, dirty, materializer, sign
             const tracked = entries.get(path);
             const shouldMaterialize = Boolean(materializer) && dirty.has(path);
             if (!shouldMaterialize) {
-                fingerprints[path] = await boundaryFingerprint(workspace, path, tracked, signal);
+                const fingerprint = await boundaryFingerprint(workspace, path, tracked, signal);
+                fingerprints[path] = fingerprint;
+                // A checkpoint cannot be complete when a boundary path is unreadable
+                // or is not a file/symlink/gitlink/dir. Evidence itself stays
+                // observed, but the materializer records why recovery is unavailable.
+                if (materializer && fingerprint.startsWith("unreadable")) {
+                    materializationError ??= {
+                        code: "unreadable_path",
+                        detail: `cannot read ${path}`,
+                    };
+                }
+                else if (materializer && fingerprint.startsWith("other:")) {
+                    materializationError ??= {
+                        code: "unsupported_file_type",
+                        detail: `${path} is not a regular file`,
+                    };
+                }
                 continue;
             }
             const abs = resolve(workspace, path);
@@ -530,6 +546,16 @@ async function prepareIndexForCheckpoint(cwd, signal, timeoutMs) {
     const unmerged = await runGitCommand(["ls-files", "-u", "-z"], { cwd, signal, timeoutMs });
     if (unmerged.length > 0) {
         throw new GitCaptureFailure("error", "unmerged index entries cannot be represented by a checkpoint");
+    }
+    // Sparse checkout / skip-worktree (`S`) and assume-unchanged (lowercase
+    // tags) make the worktree an incomplete view of the index. A checkpoint
+    // cannot represent that boundary; fail before writing recovery material.
+    const flagged = await runGitCommand(["ls-files", "-v", "-z"], { cwd, signal, timeoutMs });
+    for (const record of flagged.split("\0").filter(Boolean)) {
+        const tag = record[0] ?? "";
+        if (tag === "S" || (tag >= "a" && tag <= "z")) {
+            throw new GitCaptureFailure("error", "skip-worktree/assume-unchanged index entries cannot be represented by a checkpoint");
+        }
     }
 }
 /** Capture the full boundary, optionally materializing dirty content.

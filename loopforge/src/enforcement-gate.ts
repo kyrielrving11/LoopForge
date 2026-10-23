@@ -29,13 +29,11 @@ import { CHECK_SUCCESS_WITH_REMAINING_CRITERIA, CHECK_RECURRING_VIOLATION, CHECK
 import { deriveProgressWindow, type RoundProgress } from "./progress.js";
 import { declaresBlocked } from "./round-outcome.js";
 import { getPolicy } from "./policy.js";
-import { isRecord } from "./token-utils.js";
 import type { RoundProcessResult } from "./round-coordinator.js";
 import {
   derivationRounds,
   decodeCommittedRound,
   hasCommittedMachineBacktrack,
-  machineEvidenceForRound,
   pendingRollbackDirective,
   type CommittedRoundView,
 } from "./committed-round.js";
@@ -120,44 +118,6 @@ export function findSafeRestorePoint(
     }
   }
 
-  return null;
-}
-
-/** v2.12: The restore point's machine snapshot. `head` is the commit the
- *  workspace must return to; `dirtyFiles` is what was ALREADY dirty there —
- *  the baseline a restored workspace is compared against, so unrelated work
- *  in progress is never mistaken for a failed restore. Read from the restore
- *  round's committed transaction snapshot (after evidence preferred, before
- *  evidence as fallback). Returns null when the round has no git snapshot or
- *  no committed feedback entry. */
-export interface BacktrackTargetSnapshot {
-  head: string;
-  dirtyFiles: string[];
-  fingerprints: Record<string, string>;
-}
-
-export function findBacktrackTargetSnapshot(
-  restoreRound: number,
-  vaultEntries: VaultEntry[],
-): BacktrackTargetSnapshot | null {
-  const committed = derivationRounds(vaultEntries)
-    .find((view) => view.round === restoreRound);
-  if (!committed) return null;
-  for (const item of machineEvidenceForRound(committed)) {
-    if (!isRecord(item) || item.providerId !== "git" ||
-        item.status !== "observed" || !isRecord(item.data)) continue;
-    const head = item.data.head;
-    if (typeof head !== "string" || head.length === 0) continue;
-    // v3.9.1: the restore baseline is the boundary's one dirty list.
-    const dirtyFiles = Array.isArray(item.data.dirty)
-      ? item.data.dirty.filter((file): file is string => typeof file === "string")
-      : [];
-    const fingerprints = isRecord(item.data.fingerprints)
-      ? Object.fromEntries(Object.entries(item.data.fingerprints)
-        .filter((entry): entry is [string, string] => typeof entry[1] === "string"))
-      : {};
-    return { head, dirtyFiles, fingerprints };
-  }
   return null;
 }
 
@@ -956,7 +916,6 @@ export function enforceRound(
       : enforceMaxRejections(
           consecutiveRejections,
           scopeDriftWaiver && flags.some((f) => f.check === CHECK_ROUND_SCOPE_DRIFT)),
-    // v2.12: R9 — post-backtrack workspace not restored
   ];
 
   // v3.7: uniform-ladder escalation. Rows without their own escalation

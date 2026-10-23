@@ -52,11 +52,15 @@ function safeTargetPath(path, context) {
         path.startsWith(".git\\")) {
         throw new RestoreFailure("unsafe_path", `refusing to restore .git path ${path}`);
     }
-    // Validate the lexical path and its realpath ancestors, but return the
+    // Validate the lexical parent and its realpath ancestors, but return the
     // LEXICAL path: the final component may be a symlink that must be replaced,
-    // not followed. `assertSafeAncestors` re-checks every parent before writes.
+    // not followed. A symlink whose link text points outside is a valid target
+    // state; writing THROUGH a symlinked parent is what must be refused.
+    const parent = path.includes("/")
+        ? path.slice(0, path.lastIndexOf("/")) || "."
+        : ".";
     try {
-        containInWorkspace(context.workspace, path);
+        containInWorkspace(context.workspace, parent);
     }
     catch (error) {
         throw new RestoreFailure("unsafe_path", `path ${path} leaves the workspace: ${String(error)}`);
@@ -255,7 +259,7 @@ export async function preflightRestore(input) {
         }
     }
     if (input.manifest.head !== undefined &&
-        !/^[a-f0-9]{7,64}$/.test(input.manifest.head)) {
+        !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(input.manifest.head)) {
         throw new RestoreFailure("target_head_invalid", "checkpoint HEAD is not a Git hash");
     }
     await verifyBlobs(input.manifest, input.store);

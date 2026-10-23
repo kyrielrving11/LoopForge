@@ -20,6 +20,7 @@ import { SessionManager } from "../mcp/session.js";
 import type { McpSession } from "../mcp/session.js";
 import { verifyBacktrackPrompt } from "./_backtrack-asserts.js";
 import { installTestCommandProvider, criterionClaims } from "./_helpers.js";
+import { advanceWithHeld } from "./_helpers.js";
 import { resetPolicy } from "../policy.js";
 
 // v3.3: success claims need machine-backed evidence — the SessionManager
@@ -147,7 +148,7 @@ describe("E2E backtrack lifecycle", () => {
   // so we need rounds 1,2,3 in vault + round 4 triggering enforcement.
 
   it("step 2 — round 1 flat progress (0.3)", async () => {
-    const result = await mgr.advance(
+    const result = await advanceWithHeld(mgr, 
       sessionId,
       "Round 1 output",
       stalledEval(1, 0.3, ["src/a.ts"]),
@@ -157,7 +158,7 @@ describe("E2E backtrack lifecycle", () => {
   });
 
   it("step 3 — round 2 flat progress (0.3)", async () => {
-    const result = await mgr.advance(
+    const result = await advanceWithHeld(mgr, 
       sessionId,
       "Round 2 output",
       stalledEval(2, 0.3, ["src/b.ts"]),
@@ -167,7 +168,7 @@ describe("E2E backtrack lifecycle", () => {
   });
 
   it("step 4 — round 3 flat progress (0.3)", async () => {
-    const result = await mgr.advance(
+    const result = await advanceWithHeld(mgr, 
       sessionId,
       "Round 3 output",
       stalledEval(3, 0.3, ["src/c.ts"]),
@@ -179,7 +180,7 @@ describe("E2E backtrack lifecycle", () => {
   it("step 5 — round 4 triggers progress_stall REJECT (first occurrence)", async () => {
     const before = mgr.get(sessionId)!;
     const roundId = before.roundSnapshot?.roundId;
-    const result = await mgr.advance(
+    const result = await advanceWithHeld(mgr, 
       sessionId,
       "Round 4 output",
       stalledEval(4, 0.3, ["src/d.ts"]),
@@ -204,7 +205,7 @@ describe("E2E backtrack lifecycle", () => {
   });
 
   it("step 6 — round 4 retry triggers BACKTRACK (second consecutive stall)", async () => {
-    const result = await mgr.advance(
+    const result = await advanceWithHeld(mgr, 
       sessionId,
       "Round 4 retry output — same stalled approach",
       stalledEval(4, 0.3, ["src/d.ts"]),
@@ -353,12 +354,12 @@ describe("E2E Recovery Brief window (v3.7.1)", () => {
       [2, ["src/b.ts"]],
       [3, ["src/c.ts"]],
     ] as Array<[number, string[]]>) {
-      const result = await mgr.advance(sessionId, `Round ${round} output`, stalledEval(round, 0.3, files));
+      const result = await advanceWithHeld(mgr, sessionId, `Round ${round} output`, stalledEval(round, 0.3, files));
       assert.ok(!result.enforcementAction || result.enforcementAction === "accept");
     }
-    const first = await mgr.advance(sessionId, "Round 4 output", stalledEval(4, 0.3, ["src/d.ts"]));
+    const first = await advanceWithHeld(mgr, sessionId, "Round 4 output", stalledEval(4, 0.3, ["src/d.ts"]));
     assert.equal(first.enforcementAction, "reject", "first stall must reject");
-    const second = await mgr.advance(sessionId, "Round 4 retry — same stalled approach", stalledEval(4, 0.3, ["src/d.ts"]));
+    const second = await advanceWithHeld(mgr, sessionId, "Round 4 retry — same stalled approach", stalledEval(4, 0.3, ["src/d.ts"]));
     assert.equal(second.enforcementAction, "backtrack", "second stall must backtrack");
 
     // Prompt brief + redo round ID (loop:<loopId>:round:4 — restore 3 + 1).
@@ -414,7 +415,7 @@ describe("E2E Recovery Brief window (v3.7.1)", () => {
     const redoFile = "lf-redo-evidence.txt";
     writeFileSync(join(process.cwd(), redoFile), "redo evidence\n");
     const heldRedo = mgr.get(sessionId)!.roundSnapshot!;
-    const redo = await mgr.advance(
+    const redo = await advanceWithHeld(mgr, 
       sessionId, "Redo: root cause fixed, tests pass.",
       fixedEval(4, [redoFile]), heldRedo.roundId, heldRedo.transactionId,
     ).finally(() => {

@@ -16,6 +16,9 @@ export declare const CONTENT_HASH_RE: RegExp;
  *  explicitly unavailable; the boundary is never truncated. */
 export declare const CHECKPOINT_MAX_PATHS = 200000;
 export declare const CHECKPOINT_MAX_NEW_BYTES: number;
+/** Module constant: one capture cannot run forever. Callers may shorten it,
+ *  never extend it beyond this bound. */
+export declare const CHECKPOINT_MAX_CAPTURE_MS = 120000;
 export declare class CheckpointError extends Error {
     readonly code: "checkpoint_invalid" | "checkpoint_unavailable" | "checkpoint_failed" | "checkpoint_limit";
     readonly reasonCode: string;

@@ -27,6 +27,7 @@ import { SessionManager } from "../mcp/session.js";
 import { resetPolicy, setPolicyForTest, DEFAULT_POLICY } from "../policy.js";
 import type { SelfEvaluation } from "../protocol.js";
 import { criterionClaims } from "./_helpers.js";
+import { advanceWithHeld } from "./_helpers.js";
 
 const continuingEvaluation = (): SelfEvaluation => ({
   success: false,
@@ -67,13 +68,13 @@ describe("M4 — post-commit compile failure stalls, never skips", () => {
     const started = await mgr.create({ task: "M4 compile failure", loopId: "m4-fail" });
     const sessionId = started.sessionId;
 
-    await mgr.advance(sessionId, "", continuingEvaluation()); // commits round 1
+    await advanceWithHeld(mgr, sessionId, "", continuingEvaluation()); // commits round 1
     // Sabotage: the state directory becomes a file — the next compile's
     // writeStateFile (round-driver compile step) throws.
     rmSync(statePath, { recursive: true, force: true });
     writeFileSync(statePath, "not a directory");
 
-    const failed = await mgr.advance(sessionId, "", continuingEvaluation()); // commits round 2, then compile of round 3 throws
+    const failed = await advanceWithHeld(mgr, sessionId, "", continuingEvaluation()); // commits round 2, then compile of round 3 throws
     assert.equal(failed.stopReason, "stalled",
       "a post-commit compile exception must surface as a stalled result, " +
       "not a raw internal error");
@@ -90,7 +91,7 @@ describe("M4 — post-commit compile failure stalls, never skips", () => {
     // Resubmit the SAME roundId — the committed round replays and round 3
     // is compiled, never skipped (pre-fix this advanced to 4 without ever
     // compiling round 3).
-    const recovered = await mgr.advance(sessionId, "", continuingEvaluation(), heldRoundId);
+    const recovered = await advanceWithHeld(mgr, sessionId, "", continuingEvaluation(), heldRoundId);
     assert.equal(recovered.stopReason, undefined);
     assert.equal(recovered.round, 3,
       "the recovered submission must compile round 3 — not skip it");
@@ -103,7 +104,7 @@ describe("M4 — post-commit compile failure stalls, never skips", () => {
       "the replayed round must not duplicate its trajectory entry");
 
     // And the loop continues normally afterwards.
-    const next = await mgr.advance(sessionId, "", continuingEvaluation(), recovered.roundId);
+    const next = await advanceWithHeld(mgr, sessionId, "", continuingEvaluation(), recovered.roundId);
     assert.equal(next.round, 4, "the loop keeps advancing after the recovery");
     assert.equal(existsSync(join(work, "vault", "loops")), true);
   });
@@ -129,9 +130,9 @@ describe("M4 — post-commit compile failure stalls, never skips", () => {
     const store = new FileLoopStore(join(work, "vault"));
     const mgr = new SessionManager(store);
     const started = await mgr.create({ task: "M4 parity", loopId: "m4-parity" });
-    await mgr.advance(started.sessionId, "", continuingEvaluation());
-    await mgr.advance(started.sessionId, "", continuingEvaluation());
-    const result = await mgr.advance(started.sessionId, "", continuingEvaluation());
+    await advanceWithHeld(mgr, started.sessionId, "", continuingEvaluation());
+    await advanceWithHeld(mgr, started.sessionId, "", continuingEvaluation());
+    const result = await advanceWithHeld(mgr, started.sessionId, "", continuingEvaluation());
     assert.equal(result.round, 4, "healthy loops stay unaffected by the guard");
   });
 });

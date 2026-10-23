@@ -49,7 +49,9 @@ Keep these meanings separate:
   slice. It is not a round, a second plan ledger, or a required field.
 - A **workspace checkpoint** is the before-image of a prepared round or an
   explicit mid-round savepoint (`loopforge_checkpoint`). It is recovery
-  material, not a round, a commit, or progress.
+  material, not a round, a commit, or progress. This is different from an
+  evaluation's `compression_checkpoint`, which is only an Agent declaration /
+  L2 boundary reason.
 
 The lifecycle is:
 

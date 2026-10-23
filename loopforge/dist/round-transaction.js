@@ -834,17 +834,17 @@ export class RoundTransactionCoordinator {
         const result = transaction.result;
         if (!snapshot || !isProcessResult(result))
             return null;
-        // v3.9.6: the numeric round identity is NOT enough. A deep restore reuses
-        // `target + 1`, where the abandoned branch already committed a feedback
-        // round with the same roundId. Replaying it would silently discard the
-        // redo submission. The transaction id is the branch-scoped identity.
+        // v3.9.7: the numeric round identity is NOT enough. A deep restore reuses
+        // `target.redo_round`, where the abandoned branch already committed a
+        // feedback round with the same roundId. Replaying it would silently discard
+        // the redo submission. The transaction id is the branch-scoped identity.
         if (snapshot.transactionId !== expectedTransactionId)
             return null;
         // v3.2.1: a committed backtrack is a roll-back directive, not a terminal
         // decision. The restored round reuses the same roundId, so replaying it
         // would silently discard the agent's redo submission and re-emit the
         // backtrack prompt forever (the redo's work is never evaluated, and the
-        // R4/R9 terminate guards never run because evaluation is short-circuited).
+        // the terminate guards never run because evaluation is short-circuited).
         // Crash recovery still replays backtracks (recover() → reconcileCommittedRound
         // resets the round counter from the committed decision); only the advance
         // path skips them so the redo is evaluated normally.

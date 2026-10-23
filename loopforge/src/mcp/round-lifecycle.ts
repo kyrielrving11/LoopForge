@@ -457,6 +457,11 @@ export class RoundLifecycle {
       rounds: derivationRounds(entries, session.currentRound),
       ...(criteria ? { objective: { success_criteria: criteria } } : {}),
       ...extras,
+      // A pending directive is a current fact. Unless the caller supplied a
+      // more specific projection, expose it so status/resume agree.
+      recovery: extras.recovery !== undefined
+        ? extras.recovery
+        : this.pendingRecoveryGuidance(session),
     });
   }
 
@@ -848,6 +853,37 @@ export class RoundLifecycle {
     };
   }
 
+  /** v3.9.7: guidance facts for a redo whose restore is already verified.
+   *  They are derived from the still-pending committed directive, so a
+   *  restart returns the same surface as the original recovery response. */
+  private pendingRecoveryGuidance(session: McpSession): {
+    pending: true;
+    redo_round: number;
+    checkpoint_id: string;
+    restore_verified: boolean;
+    origin: "agent" | "machine";
+    reason: string;
+  } | null {
+    const prefix = `loop:${session.loopId}:`;
+    const entries = [
+      ...queryLoopEntries(this.store, session.loopId, { prefix }),
+      ...queryLoopEntries(this.store, session.loopId, { prefix, feedbackOnly: true }),
+    ];
+    const pending = pendingRollbackDirective(entries);
+    const directive = pending?.recovery;
+    if (!directive) return null;
+    return {
+      pending: true,
+      redo_round: directive.target.redo_round,
+      checkpoint_id: directive.target.checkpoint_id,
+      restore_verified:
+        session.roundSnapshot?.restore?.directiveTransactionId ===
+          directive.transaction_id,
+      origin: directive.origin,
+      reason: directive.reason,
+    };
+  }
+
   private restoredPromptResult(session: McpSession): AdvanceResult | null {
     const artifact = session.roundSnapshot?.promptArtifact;
     if (!artifact) return null;
@@ -862,7 +898,9 @@ export class RoundLifecycle {
       level: artifact.level,
       roundSuccess: undefined,
       warnings: artifact.warnings ?? [],
-      submission_guidance: this.guidanceFor(session),
+      submission_guidance: this.guidanceFor(session, {
+        recovery: this.pendingRecoveryGuidance(session),
+      }),
     };
   }
 
@@ -999,6 +1037,8 @@ export class RoundLifecycle {
       session.loopId,
       directive.target.redo_round,
       [],
+      undefined,
+      { branchId: directive.transaction_id },
     );
     const beforeFacts = this.beforeFactsFor(session);
     return this.buildBacktrackResult(session.sessionId, session, pr, {
@@ -1906,6 +1946,28 @@ export class RoundLifecycle {
     if (session.status !== "running" && session.status !== "stalled") {
       return { sessionId, round: session.currentRound, prompt: null, stopReason: session.status, stopDetail: `Session is ${session.status}. Use loopforge_resume to restart a paused session, or loopforge_start for a new task.` };
     }
+    // v3.9.7: every submission echoes the exact held transaction. There is no
+    // "no transactionId" bypass; a lost response is recovered through
+    // loopforge_status or loopforge_resume, which return the anchor.
+    if (typeof transactionId !== "string" || transactionId.trim().length === 0) {
+      return {
+        sessionId,
+        round: session.currentRound,
+        roundId: session.roundSnapshot?.roundId,
+        transactionId: session.roundSnapshot?.transactionId,
+        prompt: null,
+        stopReason: "transaction_id_required",
+        stopDetail:
+          "transactionId is required — use the anchor returned with the held prompt.",
+        submissionError: {
+          code: "invalid_argument",
+          details: {
+            reason_code: "transaction_id_required",
+            expected_transaction_id: session.roundSnapshot?.transactionId ?? null,
+          },
+        },
+      };
+    }
     // v3.9.7: a pending rollback directive with no verified redo snapshot
     // means the workspace is (or may be) mid-restore. Ordinary work must not
     // be evaluated against it. Resume completes the restore first.
@@ -1919,8 +1981,9 @@ export class RoundLifecycle {
     ];
     const pending = pendingRollbackDirective(pendingEntries);
     if (pending?.recovery &&
-        session.roundSnapshot?.restore?.directiveTransactionId !==
-          pending.recovery.transaction_id) {
+        (session.roundSnapshot?.restore?.directiveTransactionId !==
+          pending.recovery.transaction_id ||
+         session.roundSnapshot.round !== pending.recovery.target.redo_round)) {
       return {
         sessionId,
         round: session.currentRound,
@@ -2434,6 +2497,16 @@ export class RoundLifecycle {
     );
     return {
       ...result,
+      submission_guidance: this.guidanceFor(session, {
+        recovery: {
+          pending: true,
+          redo_round: directive.target.redo_round,
+          checkpoint_id: directive.target.checkpoint_id,
+          restore_verified: true,
+          origin: directive.origin,
+          reason: directive.reason,
+        },
+      }),
       recovery: {
         origin: directive.origin,
         reason: directive.reason,

@@ -213,8 +213,8 @@ entrypoint and configuration are untampered. `no_change_reason` is an escape
 only when no verification command is configured.
 
 Progress is provider-neutral and has four states: `changed`, `unchanged`,
-`unknown`, `not_applicable`. Git keeps its complete-boundary/HEAD/restore-point
-rule; a custom provider opts in with a persisted `data.progressCapable` marker
+`unknown`, `not_applicable`. Git keeps its complete-boundary/HEAD rule; a
+custom provider opts in with a persisted `data.progressCapable` marker
 and a versioned fingerprint snapshot; command observations never provide
 progress. Any proven change wins; a comparable unknown blocks an "unchanged"
 verdict; no applicable provider is `not_applicable`. A stall requires BOTH the
@@ -431,7 +431,10 @@ the same cognitive derivation used by canonical state.
 
 Round documents carry `sequence === round`; missing or unstamped rounds are
 corruption or recoverable gaps and must be reported. Derived state is separate
-from committed rounds and from the session document.
+from committed rounds and from the session document. Round transaction schema 5
+is the current envelope; schema 4 and earlier are reported as legacy, never
+migrated. Workspace checkpoint manifests/blobs live under the runtime state
+directory (`checkpoints/`, `objects/`), never inside the restored boundary.
 
 Writes are atomic and protected by owned locks. MCP mutations are serialized per
 session and fenced by renewable cross-process leases. Command evidence is
@@ -546,7 +549,7 @@ run the scripted prepack in the clean mirror.
 - Store-lock timing changes: cover a lock left by a process that died moments
   ago being reclaimed, a live owner still failing fast, the ownerless grace,
   and the lock's release staying ownership-checked.
-- Stall-detection changes: cover Git unchanged/HEAD-only/restore-point motion,
+- Stall-detection changes: cover Git unchanged/HEAD-only motion,
   a custom provider changed/unchanged/unknown/not_applicable, multi-provider
   combinations, an unobservable window or submitted round yielding no verdict,
   the submitted round's own change excusing a stalled window, a round that

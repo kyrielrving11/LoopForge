@@ -61,7 +61,7 @@ function fixedEval(round: number, files: string[]) {
     constraint_violations: [] as string[],
     execution_report: {
       files_changed: files,
-      tests_reported: { passed: 5, failed: 0, skipped: 0 },
+      tests_reported: { passed: 0, failed: 0, skipped: 0 },
       criterion_claims: criterionClaims(["Complete the task"], [] as string[]),
     },
   };
@@ -370,7 +370,7 @@ describe("E2E Recovery Brief window (v3.7.1)", () => {
     const heldRedo = mgr.get(sessionId)!.roundSnapshot!;
     const redo = await mgr.advance(
       sessionId, "Redo: root cause fixed, tests pass.",
-      fixedEval(4, ["src/fixed.ts"]), heldRedo.roundId, heldRedo.transactionId,
+      fixedEval(4, []), heldRedo.roundId, heldRedo.transactionId,
     );
     assert.ok(!redo.enforcementAction || redo.enforcementAction === "accept",
       `redo must be accepted, got ${redo.enforcementAction ?? "accept"}`);

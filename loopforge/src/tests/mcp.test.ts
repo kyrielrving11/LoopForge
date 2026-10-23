@@ -1537,6 +1537,7 @@ describe("MCP — tool contract (v3.2.1)", async () => {
       validateToolInput("loopforge_next", {
         sessionId: "s1",
         roundId: "r1",
+        transactionId: "tx-1",
         evaluation: {
           success: false,
           output_summary: "valid core",

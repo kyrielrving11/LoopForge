@@ -363,6 +363,7 @@ export function buildCheckpointRef(
   input: {
     transactionId: string;
     branchId: string;
+    roundId?: string;
     createdAt?: number;
   },
 ): CheckpointRef {
@@ -371,7 +372,7 @@ export function buildCheckpointRef(
     contentHash: manifest.contentHash,
     role: manifest.role,
     round: manifest.round,
-    roundId: `loop:${manifest.loopId}:round:${manifest.round}`,
+    roundId: input.roundId ?? `loop:${manifest.loopId}:round:${manifest.round}`,
     transactionId: input.transactionId,
     branchId: input.branchId,
     redoRound: manifest.round,

@@ -19,14 +19,6 @@ import {
 import { spawn } from "node:child_process";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { GIT_OBSERVATION_SCHEMA_VERSION } from "./protocol.js";
-import {
-  captureBoundary,
-  captureGitFileStateAsync,
-} from "./git-boundary.js";
-import type {
-  BoundaryCapture,
-  BoundaryMaterializer,
-} from "./git-boundary.js";
 import type {
   CommandObservation,
   ConfiguredCapability,
@@ -42,6 +34,19 @@ import {
   observedGitHead,
 } from "./git-motion.js";
 import { containInWorkspace } from "./workspace.js";
+import { captureBoundary, GitCaptureFailure } from "./git-boundary.js";
+import type { BoundaryCapture, BoundaryMaterializer } from "./git-boundary.js";
+
+// v3.9.8: the Git boundary implementation moved to git-boundary.ts so evidence
+// and workspace checkpoints share ONE scan. These re-exports keep the existing
+// test/library surface stable.
+export { captureGitFileStateAsync } from "./git-boundary.js";
+export type {
+  GitCaptureResult,
+  GitCaptureStatus,
+  GitFileState,
+  GitTrackedEntry,
+} from "./git-boundary.js";
 import { commandConfigHash, deriveConfiguredCapability, getPolicy, resolveStateDirectory } from "./policy.js";
 import type { CommandEvidencePolicy, LoopPolicy } from "./policy.js";
 import { logEvent } from "./observability.js";
@@ -61,11 +66,11 @@ export interface EvidenceCaptureContext {
   phase: "before" | "after";
   /** Workspace root override (tests capture against temp repos). */
   cwd?: string;
-  /** v3.9.7: checkpoint content sink. Only the Git provider consumes it; the
-   *  observation remains schema 2 and never carries checkpoint metadata. */
+  /** v3.9.8: when present, the Git provider materializes dirty/untracked
+   *  content in the SAME boundary scan that produces the evidence. */
   materializer?: BoundaryMaterializer;
-  /** v3.9.7: receives the complete Git boundary after a successful capture,
-   *  including `materializationError`. Evidence never consumes this sink. */
+  /** v3.9.8: receives the captured boundary (fingerprints/head/contents) so a
+   *  checkpoint can be built without re-hashing the workspace. */
   boundarySink?: (boundary: BoundaryCapture) => void;
 }
 
@@ -95,7 +100,11 @@ export interface EvidenceCollectOptions {
   timeoutMs?: number;
   loopId?: string;
   phase?: "before" | "after";
+  /** Workspace root override; command providers and the Git provider use it. */
+  cwd?: string;
+  /** v3.9.8: enables content materialization in the same Git boundary scan. */
   materializer?: BoundaryMaterializer;
+  /** v3.9.8: receives the Git boundary captured by this collection. */
   boundarySink?: (boundary: BoundaryCapture) => void;
 }
 
@@ -475,10 +484,15 @@ export class EvidenceCollector {
         const capture = Promise.resolve(provider.capture({
           signal: controller.signal,
           timeoutMs,
-          loopId: options.loopId,
+          ...(options.loopId !== undefined ? { loopId: options.loopId } : {}),
           phase,
-          ...(options.materializer ? { materializer: options.materializer } : {}),
-          ...(options.boundarySink ? { boundarySink: options.boundarySink } : {}),
+          ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
+          ...(options.materializer
+            ? { materializer: options.materializer }
+            : {}),
+          ...(options.boundarySink
+            ? { boundarySink: options.boundarySink }
+            : {}),
         }));
         const observation = timeoutMs > 0
           ? await Promise.race([
@@ -923,220 +937,8 @@ export class CommandEvidenceProvider implements EvidenceProvider {
   }
 }
 
-// ── Git File State Capture ─────────────────────────────────────────────────
-
-/** A tracked index entry. `mode` is the stage mode (100644, 100755, 120000,
- *  160000); `object` is the index blob/commit id. */
-export interface GitTrackedEntry {
-  path: string;
-  mode: string;
-  object: string;
-}
-
-/** v3.9.1: the complete workspace boundary at one instant. */
-export interface GitFileState {
-  /** Every path in the index, including paths deleted from the worktree. */
-  tracked: GitTrackedEntry[];
-  /** Non-ignored untracked paths. */
-  untracked: string[];
-  /** Dirty-since-HEAD paths, for display only. */
-  dirty: string[];
-  /** HEAD at this boundary; absent in a repository with no commit. */
-  head?: string;
-}
-
-/** An explicit capture failure. The collector records the status; null is no
- *  longer used as an ambiguous "unavailable". */
-export type GitCaptureResult =
-  | { ok: true; state: GitFileState }
-  | {
-      ok: false;
-      status: "timeout" | "unavailable" | "aborted" | "error";
-      detail: string;
-    };
-
-class GitCaptureFailure extends Error {
-  constructor(
-    readonly status: "timeout" | "unavailable" | "aborted" | "error",
-    message: string,
-  ) {
-    super(message);
-    this.name = "GitCaptureFailure";
-  }
-}
-
-const GIT_MAX_BUFFER = 64 * 1024 * 1024;
-/** Bounded file-hash concurrency. A module constant, not a policy knob. */
-const BOUNDARY_HASH_CONCURRENCY = 16;
-
-function splitNul(text: string): string[] {
-  return text.split("\0").filter((entry) => entry.length > 0);
-}
-
-function uniqueSorted(values: Iterable<string>): string[] {
-  return [...new Set(values)].sort();
-}
-
-/** Parse `git ls-files --stage -z`. A conflicted path can have several
- *  stages; stage 0 wins when present, otherwise the first entry is kept. The
- *  worktree fingerprint is what matters, so this is only used to recognise
- *  gitlinks and to carry the index object id. */
-function parseStageEntries(text: string): GitTrackedEntry[] {
-  const byPath = new Map<string, { entry: GitTrackedEntry; stage: string }>();
-  for (const record of splitNul(text)) {
-    const tab = record.indexOf("\t");
-    if (tab < 0) continue;
-    const [mode, object, stage] = record.slice(0, tab).split(" ");
-    if (!mode || !object || !stage) continue;
-    const path = record.slice(tab + 1);
-    if (!path) continue;
-    const existing = byPath.get(path);
-    if (!existing || stage === "0") {
-      byPath.set(path, { entry: { path, mode, object }, stage });
-    }
-  }
-  return [...byPath.values()]
-    .map((item) => item.entry)
-    .sort((a, b) => a.path.localeCompare(b.path));
-}
-
-/** v3.9.1: capture the complete boundary. All required git commands run in
- *  one parallel batch; HEAD is best-effort (a repository with no commit is a
- *  valid boundary with no head). Any required-command failure returns an
- *  explicit status — never an empty-but-observed boundary. */
-export async function captureGitFileStateAsync(
-  signal?: AbortSignal,
-  timeoutMs?: number,
-  /** Workspace root; injectable so tests can capture against a temp repo.
-   *  Defaults to the process cwd, matching the evidence providers. */
-  cwd = process.cwd(),
-): Promise<GitCaptureResult> {
-  const timeout = timeoutMs ?? 15000;
-
-  const runGit = (args: readonly string[]): Promise<string> => {
-    return new Promise((resolveGit, reject) => {
-      let settled = false;
-      const succeed = (stdout: string): void => {
-        if (settled) return;
-        settled = true;
-        resolveGit(stdout);
-      };
-      const fail = (error: GitCaptureFailure): void => {
-        if (settled) return;
-        settled = true;
-        reject(error);
-      };
-      // M1: core.quotePath=false — git otherwise octal-escapes every path
-      // with bytes >= 0x80. With -z, paths are NUL-delimited raw bytes; the
-      // flag is retained for the HEAD/plain outputs.
-      const child = execFile("git", ["-c", "core.quotePath=false", ...args], {
-        cwd,
-        encoding: "utf-8" as const,
-        timeout,
-        signal,
-        maxBuffer: GIT_MAX_BUFFER,
-        windowsHide: true,
-      });
-      let stdout = "";
-      let stderr = "";
-      child.stdout?.on("data", (chunk: string) => {
-        stdout += chunk;
-      });
-      child.stderr?.on("data", (chunk: string) => {
-        stderr += chunk;
-      });
-      child.on("close", (code) => {
-        if (code === 0) succeed(stdout);
-        else if (code === null) {
-          // A killed process can close without an exit code. If the error
-          // event has not settled the promise yet, the measured cause is the
-          // deadline.
-          fail(new GitCaptureFailure("timeout", `git ${args[0]} was killed`));
-        } else if (/not a git repository|not a repository/i.test(stderr)) {
-          fail(new GitCaptureFailure("unavailable", stderr.trim() || "not a git repository"));
-        } else {
-          fail(new GitCaptureFailure(
-            "error",
-            `git ${args[0]} exited ${code}${stderr ? `: ${stderr.trim().slice(0, 300)}` : ""}`,
-          ));
-        }
-      });
-      child.on("error", (error: NodeJS.ErrnoException & {
-        killed?: boolean;
-        signal?: string;
-      }) => {
-        if (signal?.aborted) {
-          fail(new GitCaptureFailure("aborted", `git ${args[0]} aborted`));
-        } else if (error.code === "ENOENT") {
-          fail(new GitCaptureFailure("unavailable", "git executable was not found"));
-        } else if (error.killed || error.signal) {
-          fail(new GitCaptureFailure("timeout", `git ${args[0]} timed out after ${timeout}ms`));
-        } else if (/not a git repository/i.test(error.message)) {
-          fail(new GitCaptureFailure("unavailable", error.message));
-        } else {
-          fail(new GitCaptureFailure("error", error.message));
-        }
-      });
-    });
-  };
-
-  try {
-    // allSettled, not all: on failure the other children must still finish
-    // before this capture returns, or Windows keeps the workspace directory
-    // locked (and every caller would leak child-process handles).
-    const settled = await Promise.allSettled([
-      runGit(["ls-files", "--stage", "-z"]),
-      runGit(["ls-files", "--others", "--exclude-standard", "-z"]),
-      runGit(["diff", "--name-only", "-z"]),
-      runGit(["diff", "--cached", "--name-only", "-z"]),
-    ]);
-    const failures = settled
-      .filter((item): item is PromiseRejectedResult => item.status === "rejected")
-      .map((item) => item.reason)
-      .filter((error): error is GitCaptureFailure => error instanceof GitCaptureFailure);
-    if (failures.length > 0) {
-      const failure = failures.find(
-        (item) => item.status === "aborted" || item.status === "timeout",
-      ) ?? failures[0];
-      throw failure;
-    }
-    const rejected = settled.find(
-      (item): item is PromiseRejectedResult => item.status === "rejected",
-    );
-    if (rejected) {
-      throw new GitCaptureFailure("error", String(rejected.reason));
-    }
-    const [stageOut, untrackedOut, unstagedOut, stagedOut] = settled.map(
-      (item) => (item as PromiseFulfilledResult<string>).value,
-    );
-    let head: string | undefined;
-    try {
-      head = (await runGit(["rev-parse", "--verify", "HEAD"])).trim() || undefined;
-    } catch (error) {
-      // A repository with no commit has no HEAD. Abort still propagates.
-      if (error instanceof GitCaptureFailure && error.status === "aborted") throw error;
-    }
-    const untracked = uniqueSorted(splitNul(untrackedOut));
-    return {
-      ok: true,
-      state: {
-        tracked: parseStageEntries(stageOut),
-        untracked,
-        dirty: uniqueSorted([
-          ...splitNul(unstagedOut),
-          ...splitNul(stagedOut),
-          ...untracked,
-        ]),
-        head,
-      },
-    };
-  } catch (error) {
-    if (error instanceof GitCaptureFailure) {
-      return { ok: false, status: error.status, detail: error.message };
-    }
-    return { ok: false, status: "error", detail: String(error) };
-  }
-}
+// The Git boundary capture/fingerprint implementation lives in
+// git-boundary.ts (shared with workspace checkpoints).
 
 // ── Built-in: GitEvidenceProvider ──────────────────────────────────────────
 
@@ -1156,121 +958,6 @@ function isInsideDirectory(file: string, workspace: string, dir: string): boolea
   const absolute = isAbsolute(file) ? file : resolve(workspace, file);
   const prefix = dir.endsWith(sep) ? dir : `${dir}${sep}`;
   return absolute === dir || absolute.startsWith(prefix);
-}
-
-function hashText(text: string): string {
-  return createHash("sha256").update(text).digest("hex");
-}
-
-/** Stream a regular file through SHA-256 without loading it into memory. */
-function hashFileStream(abs: string, signal?: AbortSignal): Promise<string> {
-  return new Promise((resolveHash, reject) => {
-    const hash = createHash("sha256");
-    const stream = createReadStream(abs, { highWaterMark: 64 * 1024 });
-    let settled = false;
-    const cleanup = (): void => {
-      if (signal) signal.removeEventListener("abort", onAbort);
-    };
-    const finish = (error?: Error): void => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      if (error) reject(error);
-      else resolveHash(hash.digest("hex"));
-    };
-    const onAbort = (): void => {
-      stream.destroy();
-      finish(new GitCaptureFailure("aborted", "boundary hashing aborted"));
-    };
-    if (signal?.aborted) {
-      onAbort();
-      return;
-    }
-    signal?.addEventListener("abort", onAbort, { once: true });
-    stream.on("data", (chunk) => hash.update(chunk));
-    stream.on("error", (error) => finish(error));
-    stream.on("end", () => finish());
-  });
-}
-
-/** Fingerprint one boundary path.
- *  - symlinks hash their LINK TEXT; the target is never read
- *  - regular files stream their content
- *  - gitlinks record the index commit (submodule contents are not covered)
- *  A per-file read/containment failure is an explicit `unreadable:<mode>`
- *  sentinel, not an omitted path. */
-async function boundaryFingerprint(
-  workspace: string,
-  path: string,
-  tracked: GitTrackedEntry | undefined,
-  signal?: AbortSignal,
-): Promise<string> {
-  const abs = resolve(workspace, path);
-  let stat;
-  try {
-    stat = lstatSync(abs);
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unreadable";
-  }
-  const mode = stat.mode;
-  if (stat.isSymbolicLink()) {
-    try {
-      // The parent must be contained; the final link target is NOT followed.
-      const parent = path.includes("/")
-        ? path.slice(0, path.lastIndexOf("/")) || "."
-        : ".";
-      containInWorkspace(workspace, parent);
-      return `link:${hashText(readlinkSync(abs))}`;
-    } catch {
-      return `unreadable:${mode}`;
-    }
-  }
-  if (stat.isDirectory()) {
-    if (tracked?.mode === "160000") return `gitlink:${tracked.object}`;
-    return `dir:${mode}`;
-  }
-  if (!stat.isFile()) return `other:${mode}`;
-  try {
-    containInWorkspace(workspace, path);
-    const digest = await hashFileStream(abs, signal);
-    return `${mode}:${digest}`;
-  } catch (error) {
-    if (error instanceof GitCaptureFailure) throw error;
-    return `unreadable:${mode}`;
-  }
-}
-
-/** Hash the complete boundary with bounded concurrency. */
-async function fingerprintBoundary(
-  workspace: string,
-  entries: ReadonlyMap<string, GitTrackedEntry>,
-  signal?: AbortSignal,
-): Promise<Record<string, string>> {
-  const paths = [...entries.keys()].sort();
-  const fingerprints: Record<string, string> = {};
-  let next = 0;
-  const worker = async (): Promise<void> => {
-    for (;;) {
-      if (signal?.aborted) {
-        throw new GitCaptureFailure("aborted", "boundary hashing aborted");
-      }
-      const index = next++;
-      if (index >= paths.length) return;
-      const path = paths[index];
-      fingerprints[path] = await boundaryFingerprint(
-        workspace,
-        path,
-        entries.get(path),
-        signal,
-      );
-    }
-  };
-  const workers = Math.min(
-    BOUNDARY_HASH_CONCURRENCY,
-    Math.max(1, paths.length),
-  );
-  await Promise.all(Array.from({ length: workers }, () => worker()));
-  return fingerprints;
 }
 
 export class GitEvidenceProvider implements EvidenceProvider {
@@ -1312,7 +999,7 @@ export class GitEvidenceProvider implements EvidenceProvider {
       const result = await captureBoundary({
         cwd: workspace,
         signal: controller.signal,
-        timeoutMs: context?.timeoutMs,
+        ...(context?.timeoutMs !== undefined ? { timeoutMs: context.timeoutMs } : {}),
         exclude: isRuntimeState,
         ...(context?.materializer ? { materializer: context.materializer } : {}),
       });
@@ -1337,13 +1024,7 @@ export class GitEvidenceProvider implements EvidenceProvider {
         );
       }
       const boundary = result.boundary;
-      // The sink is a checkpoint concern. A sink defect must never invalidate
-      // the observation: the boundary/fingerprints above are already complete.
-      try {
-        context?.boundarySink?.(boundary);
-      } catch {
-        // A checkpoint capture failure is reported by the sink's own caller.
-      }
+      context?.boundarySink?.(boundary);
       return {
         schemaVersion: GIT_OBSERVATION_SCHEMA_VERSION,
         providerId: "git",
@@ -1354,20 +1035,19 @@ export class GitEvidenceProvider implements EvidenceProvider {
         status: "observed",
         // `files` is the dirty display list; the complete boundary lives in
         // data.fingerprints and the round delta is derived from it.
-        files: boundary.dirty,
+        files: [...boundary.dirty],
         data: {
-          dirty: boundary.dirty,
+          dirty: [...boundary.dirty],
           fingerprints: boundary.fingerprints,
-          head: boundary.head,
+          ...(boundary.head ? { head: boundary.head } : {}),
           coverage: "tracked_and_non_ignored_untracked",
         },
       };
     } catch (error) {
       const status = timedOut
         ? "timeout" as const
-        : error instanceof Error && "status" in error &&
-            typeof (error as { status?: unknown }).status === "string"
-          ? (error as { status: "timeout" | "unavailable" | "aborted" | "error" }).status
+        : error instanceof GitCaptureFailure
+          ? error.status
           : "error";
       return syntheticObservation(
         this.name,

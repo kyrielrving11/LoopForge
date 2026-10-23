@@ -1,4 +1,4 @@
-/** v3.9.7: deterministic workspace restore.
+/** v3.9.8: deterministic workspace restore.
  *
  * This module is the ONLY place LoopForge mutates the working tree. It runs
  * only after a typed rollback directive has been committed, restores the
@@ -682,6 +682,7 @@ export async function executeRestore(input: {
   let baselineBoundary: BoundaryCapture | undefined;
   const baseline = await EvidenceCollector.fromPolicy().collectAsync({
     phase: "before",
+    cwd: input.workspace,
     materializer: input.store,
     boundarySink: (boundary) => { baselineBoundary = boundary; },
   });

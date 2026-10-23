@@ -535,7 +535,7 @@ function checkRetractFreshConstraint(selfEval, prevSelfEval, currentRound) {
 }
 /** v1.18: Cross-validate agent-reported files_changed against git evidence
  *  from the configured evidence providers (MachineObservation array). */
-function checkEvidenceIntegrity(selfEval, evidenceDeltas, 
+function checkEvidenceIntegrity(selfEval, evidenceDeltas,
 /** v3.9.4: whether the raw submission named
  *  `execution_report.files_changed`. The receipt uses the SAME manifest, so
  *  the two projections can never disagree about an omitted report. */
@@ -936,16 +936,16 @@ function checkUserGateUnresolved(selfEval, gateEntries) {
             `loopforge_gate_resolve before claiming the action is done.`,
     });
 }
-export function verifySelfEvaluation(selfEval, currentRound, vaultEntries, prevSelfEval = null, evidenceDeltas = [], 
+export function verifySelfEvaluation(selfEval, currentRound, vaultEntries, prevSelfEval = null, evidenceDeltas = [],
 /** v3.7.1: gate records (task_type gate_opened / gate_decision) live
  *  outside the round prefix — the caller passes them in explicitly. */
 /** v3.7.1: gate records (task_type gate_opened / gate_decision) live
  *  outside the round prefix — the caller passes them in explicitly. */
-gateEntries = [], 
+gateEntries = [],
 /** v3.8.3: entrypoint files that no longer match the trusted round-start
  *  baseline. Derived by the caller (it needs the in-flight trust map and
  *  filesystem access); this function stays a pure function of its inputs. */
-entrypointDrift = [], 
+entrypointDrift = [],
 /** v3.9.4: whether the raw submission attempted
  *  `execution_report.files_changed` (from the persisted submittedFields
  *  manifest). Undefined falls back to "an execution report exists". */

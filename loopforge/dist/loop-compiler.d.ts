@@ -35,10 +35,10 @@ export interface PreviousRoundFacts {
 export declare function computeGoalTextHash(text: string): string;
 export declare function deriveGoalId(loopId: string, task: string, explicit?: string): string;
 export declare function getPreviousRound(loopId: string, round: number, context: Record<string, unknown> | null): PreviousRound | null;
-export declare function latestObjective(loopId: string, context: Record<string, unknown> | null, 
+export declare function latestObjective(loopId: string, context: Record<string, unknown> | null,
 /** Exclusive compile-round bound. A deep-restore redo must never read the
  *  abandoned branch's objective (and its rolled-back refinements). */
-beforeRound: number, 
+beforeRound: number,
 /** v3.9.4: a round-1 same-round retry has no earlier committed objective.
  *  Reading the prior compile of the SAME round recovers the initial
  *  criteria supplied to `loopforge_start`. It is never enabled for a first
@@ -70,7 +70,7 @@ export declare function deriveRecurringFlags(committedRounds: ReadonlyArray<Comm
  *  v3.9.6: the derivation lives in `criterion-status.ts` so the submission
  *  boundary and guidance can read the same rows without importing this module
  *  (which would close the `loop-compiler → submission-guidance` cycle). */
-export declare function deriveCriterionStatuses(loopId: string, context: Record<string, unknown> | null, objective: LoopObjective | null, currentRound: number, lastRoundResult?: LoopRoundResult | null, 
+export declare function deriveCriterionStatuses(loopId: string, context: Record<string, unknown> | null, objective: LoopObjective | null, currentRound: number, lastRoundResult?: LoopRoundResult | null,
 /** v3.8.1: the criterion machine facts from the shared bundle. A criterion
  *  is `verified` / `contradicted` / `insufficient` only through an item that
  *  references it — a claim alone can never reach `verified` — and the fact

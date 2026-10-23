@@ -267,7 +267,9 @@ function isRecoveryDirective(value) {
         return false;
     if (value.origin !== "agent" && value.origin !== "machine")
         return false;
-    if (typeof value.reason !== "string" || typeof value.transaction_id !== "string") {
+    if (typeof value.reason !== "string" ||
+        typeof value.transaction_id !== "string" ||
+        value.transaction_id.length === 0) {
         return false;
     }
     if (!isRecoveryTarget(value.target))

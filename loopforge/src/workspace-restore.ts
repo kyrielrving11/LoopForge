@@ -30,7 +30,7 @@ import {
   symlinkSync,
   unlinkSync,
 } from "node:fs";
-import { relative, resolve, sep } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import type {
   MachineObservation,
   WorkspaceCheckpointManifest,
@@ -120,6 +120,15 @@ function isRuntimePath(
 function safeTargetPath(path: string, context: RestoreContext): string {
   if (!path || path.includes("\0")) {
     throw new RestoreFailure("unsafe_path", "path is empty or contains NUL");
+  }
+  // Git paths are workspace-relative and use forward slashes. Reject the
+  // Windows separator and drive-relative/absolute forms instead of letting
+  // path.resolve reinterpret them after the parent check.
+  if (path.includes("\\") || isAbsolute(path) || /^[A-Za-z]:/.test(path)) {
+    throw new RestoreFailure("unsafe_path", `path ${path} is not a workspace-relative Git path`);
+  }
+  if (path.split("/").some((part) => part === "..")) {
+    throw new RestoreFailure("unsafe_path", `path ${path} contains a parent traversal`);
   }
   if (path === ".git" || path.startsWith(".git/") || path === ".git\\" ||
       path.startsWith(".git\\")) {
@@ -740,6 +749,7 @@ export async function executeRestore(input: {
       ...(input.signal ? { signal: input.signal } : {}),
       ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}),
       ...(input.exclude ? { exclude: input.exclude } : {}),
+      materializer: input.store,
     });
     if (!direct.ok) {
       throw new RestoreFailure(
@@ -748,6 +758,10 @@ export async function executeRestore(input: {
       );
     }
     verificationBoundary = direct.boundary;
+    // Even with the Git evidence provider disabled, the internal boundary is
+    // the same pass that verified HEAD/content; let the redo carry its own
+    // before-image from it.
+    baselineBoundary = direct.boundary;
   }
   const same = sameBoundary(manifest, verificationBoundary);
   if (!same.ok) {

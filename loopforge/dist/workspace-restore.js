@@ -12,9 +12,10 @@
  */
 import { createHash } from "node:crypto";
 import { chmodSync, closeSync, copyFileSync, createReadStream, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, rmdirSync, symlinkSync, unlinkSync, } from "node:fs";
-import { relative, resolve, sep } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { captureBoundary, runGitCommandStatus } from "./git-boundary.js";
 import { containInWorkspace } from "./workspace.js";
+import { checkpointContentHash, deriveCheckpointId, } from "./workspace-checkpoint.js";
 import { EvidenceCollector } from "./evidence-provider.js";
 export class RestoreFailure extends Error {
     reasonCode;
@@ -47,6 +48,15 @@ function isRuntimePath(abs, workspace, stateDir, exclude) {
 function safeTargetPath(path, context) {
     if (!path || path.includes("\0")) {
         throw new RestoreFailure("unsafe_path", "path is empty or contains NUL");
+    }
+    // Git paths are workspace-relative and use forward slashes. Reject the
+    // Windows separator and drive-relative/absolute forms instead of letting
+    // path.resolve reinterpret them after the parent check.
+    if (path.includes("\\") || isAbsolute(path) || /^[A-Za-z]:/.test(path)) {
+        throw new RestoreFailure("unsafe_path", `path ${path} is not a workspace-relative Git path`);
+    }
+    if (path.split("/").some((part) => part === "..")) {
+        throw new RestoreFailure("unsafe_path", `path ${path} contains a parent traversal`);
     }
     if (path === ".git" || path.startsWith(".git/") || path === ".git\\" ||
         path.startsWith(".git\\")) {
@@ -235,6 +245,29 @@ async function headRelation(targetHead, currentHead, context) {
 }
 /** Read-only restore preflight. Throws RestoreFailure with a stable reason. */
 export async function preflightRestore(input) {
+    if (input.manifest.schemaVersion !== 1 ||
+        input.manifest.coverage !== "tracked_and_non_ignored_untracked") {
+        throw new RestoreFailure("manifest_invalid", "unsupported checkpoint manifest schema");
+    }
+    // Recompute the content identity from the restore-relevant fields. A
+    // caller-supplied or tampered manifest must never be trusted merely because
+    // its stored hash/id look well-formed.
+    const recomputedHash = checkpointContentHash({
+        ...(input.manifest.head ? { head: input.manifest.head } : {}),
+        fingerprints: input.manifest.fingerprints,
+        contents: input.manifest.contents,
+        coverage: input.manifest.coverage,
+    });
+    const recomputedId = deriveCheckpointId({
+        loopId: input.manifest.loopId,
+        round: input.manifest.round,
+        role: input.manifest.role,
+        contentHash: recomputedHash,
+    });
+    if (recomputedHash !== input.manifest.contentHash ||
+        recomputedId !== input.manifest.checkpointId) {
+        throw new RestoreFailure("manifest_invalid", "checkpoint manifest id/content hash does not match its boundary");
+    }
     const context = {
         workspace: input.workspace,
         store: input.store,
@@ -538,11 +571,16 @@ export async function executeRestore(input) {
             ...(input.signal ? { signal: input.signal } : {}),
             ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}),
             ...(input.exclude ? { exclude: input.exclude } : {}),
+            materializer: input.store,
         });
         if (!direct.ok) {
             throw new RestoreFailure("restore_unobservable", `post-restore Git boundary is unavailable: ${direct.detail}`);
         }
         verificationBoundary = direct.boundary;
+        // Even with the Git evidence provider disabled, the internal boundary is
+        // the same pass that verified HEAD/content; let the redo carry its own
+        // before-image from it.
+        baselineBoundary = direct.boundary;
     }
     const same = sameBoundary(manifest, verificationBoundary);
     if (!same.ok) {

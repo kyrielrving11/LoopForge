@@ -32,6 +32,10 @@ export interface EvidenceCaptureContext {
     /** v3.9.8: receives the captured boundary (fingerprints/head/contents) so a
      *  checkpoint can be built without re-hashing the workspace. */
     boundarySink?: (boundary: BoundaryCapture) => void;
+    /** v3.9.8: hard cap on the boundary path count; only meaningful together
+     *  with a materializer. A larger boundary yields an explicit error instead
+     *  of a truncated map. */
+    maxPaths?: number;
 }
 export type EvidenceCaptureResult = MachineObservation | null | Promise<MachineObservation | null>;
 export interface EvidenceProvider {
@@ -60,6 +64,8 @@ export interface EvidenceCollectOptions {
     materializer?: BoundaryMaterializer;
     /** v3.9.8: receives the Git boundary captured by this collection. */
     boundarySink?: (boundary: BoundaryCapture) => void;
+    /** v3.9.8: boundary path cap for a checkpoint-bearing capture. */
+    maxPaths?: number;
 }
 export type EvidenceProviderFactory = () => EvidenceProvider;
 /** Register a provider factory used by policy-driven collectors. */

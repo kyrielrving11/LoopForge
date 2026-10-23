@@ -328,6 +328,13 @@ export class FileWorkspaceCheckpointStore implements BoundaryMaterializer {
     role: CheckpointRole,
     boundary: BoundaryCapture,
   ): WorkspaceCheckpointManifest {
+    if (Object.keys(boundary.fingerprints).length > CHECKPOINT_MAX_PATHS) {
+      throw new CheckpointError(
+        "checkpoint_limit",
+        "too_many_paths",
+        `boundary has more than ${CHECKPOINT_MAX_PATHS} paths`,
+      );
+    }
     const contentHash = checkpointContentHash({
       ...(boundary.head ? { head: boundary.head } : {}),
       fingerprints: boundary.fingerprints,

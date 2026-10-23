@@ -220,9 +220,9 @@ progress. Any proven change wins; a comparable unknown blocks an "unchanged"
 verdict; no applicable provider is `not_applicable`. A stall requires BOTH the
 committed lookback window and the submitted round to be `unchanged`;
 `unknown`/`not_applicable` never stall, and no Agent report can create or
-cancel a stall. Entrypoint trust, recovery restore, scope drift, files
-reconciliation, `evidenceIncomplete`, and contract-item Git checks remain
-Git-specific and are never replaced by a generic progress signal.
+cancel a stall. Entrypoint trust, scope drift, files reconciliation,
+`evidenceIncomplete`, and contract-item Git checks remain Git-specific and are
+never replaced by a generic progress signal.
 
 The entrypoint check has two arms, unioned. The absolute arm compares each
 entrypoint file's current content against a trusted baseline captured from the
@@ -302,7 +302,7 @@ Round Contract rules:
   drifted file: that waives the rejection, never the fact, and the flag still
   lands on the committed round. The coverage set is derived, never read from a
   flag's truncated detail. The waiver removes the drift rejection only;
-  contract debt, machine stalls, and unrestored workspaces still apply, and a
+  contract debt, machine stalls, and a pending restore still apply, and a
   waived round does not reach the rejection-counter catch-all.
 
 The live coordinator, explain, and audit share one contract derivation, and
@@ -540,7 +540,7 @@ run the scripted prepack in the clean mirror.
 - Scope-drift waiver changes: cover a covering blocked proposal being accepted,
   a non-covering one still being rejected, the waiver holding at a counter that
   would otherwise terminate, and the independent rows (contract debt, stall,
-  unrestored workspace) still applying.
+  pending restore) still applying.
 - Entrypoint-trust changes: cover a modified entrypoint, one created during the
   round (including a gitignored one git cannot see), restoration making the
   same round pass, backtrack on repeated non-restoration, a corrupt or absent

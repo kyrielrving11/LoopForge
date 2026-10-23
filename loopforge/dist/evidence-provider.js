@@ -335,6 +335,9 @@ export class EvidenceCollector {
                     ...(options.boundarySink
                         ? { boundarySink: options.boundarySink }
                         : {}),
+                    ...(options.maxPaths !== undefined
+                        ? { maxPaths: options.maxPaths }
+                        : {}),
                 }));
                 const observation = timeoutMs > 0
                     ? await Promise.race([
@@ -748,6 +751,7 @@ export class GitEvidenceProvider {
                 ...(context?.timeoutMs !== undefined ? { timeoutMs: context.timeoutMs } : {}),
                 exclude: isRuntimeState,
                 ...(context?.materializer ? { materializer: context.materializer } : {}),
+                ...(context?.maxPaths !== undefined ? { maxPaths: context.maxPaths } : {}),
             });
             if (timedOut) {
                 return syntheticObservation(this.name, this.kind, phase, startedAt, "timeout", `boundary capture exceeded ${budget}ms`);

@@ -34,6 +34,7 @@ import type {
 } from "./round-transaction.js";
 import {
   buildCheckpointRef,
+  CHECKPOINT_MAX_PATHS,
   FileWorkspaceCheckpointStore,
 } from "./workspace-checkpoint.js";
 
@@ -132,6 +133,7 @@ export class RoundDriver {
           ? {
               materializer: this.checkpointStore,
               boundarySink: (captured) => { boundary = captured; },
+              maxPaths: CHECKPOINT_MAX_PATHS,
             }
           : undefined),
       ]);
@@ -229,6 +231,13 @@ export class RoundDriver {
     if (boundary?.materializationError) {
       beforeCheckpointError = {
         ...boundary.materializationError,
+        at: Date.now(),
+      };
+    } else if (boundary &&
+        Object.keys(boundary.fingerprints).length > CHECKPOINT_MAX_PATHS) {
+      beforeCheckpointError = {
+        code: "too_many_paths",
+        detail: `boundary has more than ${CHECKPOINT_MAX_PATHS} paths`,
         at: Date.now(),
       };
     } else if (boundary && this.checkpointStore) {
@@ -347,6 +356,7 @@ export class RoundDriver {
     opts?: {
       materializer?: import("./git-boundary.js").BoundaryMaterializer;
       boundarySink?: (boundary: BoundaryCapture) => void;
+      maxPaths?: number;
     },
   ): Promise<MachineObservation[]> {
     return EvidenceCollector.fromPolicy().collectAsync({
@@ -354,6 +364,7 @@ export class RoundDriver {
       phase,
       ...(opts?.materializer ? { materializer: opts.materializer } : {}),
       ...(opts?.boundarySink ? { boundarySink: opts.boundarySink } : {}),
+      ...(opts?.maxPaths !== undefined ? { maxPaths: opts.maxPaths } : {}),
     });
   }
 }

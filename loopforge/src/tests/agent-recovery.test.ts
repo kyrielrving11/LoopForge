@@ -461,6 +461,38 @@ describe("v3.9.7 — SessionManager checkpoint recovery E2E", () => {
         directive.transactionId,
         "later rounds remain on the recovery child branch",
       );
+
+      // A second, deeper recovery selects a committed child-branch
+      // before-image. The new directive fences the parent at redo_round 2,
+      // so the effective history drops the redo commit itself.
+      const round2View = readOnlyRounds(readEntries()).find((view) => view.round === 2);
+      assert.ok(round2View?.beforeCheckpoint);
+      const deep = await mgr.recover(
+        resumed!.sessionId,
+        {
+          target_checkpoint_id: round2View!.beforeCheckpoint!.checkpointId,
+          reason: "go deeper",
+        },
+        next.roundId,
+        next.transactionId,
+      );
+      assert.ok(deep.prompt, "deep recovery returns a redo prompt");
+      assert.equal(deep.round, 2);
+      assert.equal(deep.recovery?.redo_round, 2);
+      assert.equal(deep.recovery?.target_checkpoint_id,
+        round2View!.beforeCheckpoint!.checkpointId);
+      assert.deepEqual(
+        readOnlyRounds(readEntries()).map((view) => view.round),
+        [1],
+        "the second directive fences the child branch before its redo round",
+      );
+      assert.equal(readOnlyRollbacks(readEntries()).length, 2);
+      const secondDirective = readOnlyRollbacks(readEntries()).at(-1)!;
+      assert.equal(
+        mgr.get(resumed!.sessionId)!.roundSnapshot?.branchId,
+        secondDirective.transactionId,
+        "the deep redo starts on the second directive's child branch",
+      );
     } finally {
       mgr.close();
     }

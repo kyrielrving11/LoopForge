@@ -9,6 +9,7 @@ import {
   normalizeStartCriteria,
 } from "../mcp/round-lifecycle.js";
 import { MemoryLoopStore, DEFAULT_SUCCESS_CRITERION } from "./_helpers.js";
+import { toolNext } from "./_helpers.js";
 import { resetPolicy, getPolicy } from "../policy.js";
 import { deriveCriterionId } from "../token-utils.js";
 import { compileLoop } from "../loop-compiler.js";
@@ -97,7 +98,7 @@ describe("v3.9.4 — initial criteria become the objective's anchors", () => {
       });
       const sessionId = String(started.sessionId);
       const roundId = String(started.roundId);
-      const rejected = await TOOL_HANDLERS.loopforge_next(mgr, {
+      const rejected = await toolNext(mgr, {
         sessionId,
         roundId,
         evaluation: {

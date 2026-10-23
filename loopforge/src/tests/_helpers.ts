@@ -40,6 +40,22 @@ import { POLICY_SCHEMA_VERSION } from "../policy.js";
 export const DEFAULT_SUCCESS_CRITERION =
   "Task goal achieved with verifiable evidence";
 
+/** v3.9.7: tool-handler wrapper that supplies the held transaction anchor for
+ *  tests that drive the handler directly. The transport schema still requires
+ *  the field; only the repeated fixture plumbing is centralized here. */
+export function toolNext(
+  mgr: import("../mcp/session.js").SessionManager,
+  input: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const held = mgr.get(String(input.sessionId ?? ""))?.roundSnapshot;
+  return import("../mcp/tools.js").then(({ TOOL_HANDLERS }) =>
+    TOOL_HANDLERS.loopforge_next(mgr, {
+      ...input,
+      transactionId: input.transactionId ?? held?.transactionId,
+    }),
+  );
+}
+
 /** v3.9.7: a fixture that supplies observed Git before-evidence must also
  *  supply the schema-5 before-image fact. Old fixtures use this explicit
  *  unavailable fact rather than fabricating a restorable checkpoint. */

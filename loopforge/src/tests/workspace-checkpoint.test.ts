@@ -373,6 +373,46 @@ describe("workspace restore", () => {
     }
   });
 
+  it("fails closed on a short target HEAD", async () => {
+    const dir = tempDir("lf-restore-repo-");
+    const store = storeFor();
+    try {
+      initRepo(dir);
+      const contentHash = checkpointContentHash({
+        head: "abc1234",
+        fingerprints: {},
+        contents: [],
+        coverage: "tracked_and_non_ignored_untracked",
+      });
+      const manifest: WorkspaceCheckpointManifest = {
+        schemaVersion: 1,
+        checkpointId: deriveCheckpointId({
+          loopId: LOOP_ID,
+          round: 1,
+          role: "before",
+          contentHash,
+        }),
+        loopId: LOOP_ID,
+        round: 1,
+        role: "before",
+        createdAt: 1,
+        head: "abc1234",
+        dirty: [],
+        fingerprints: {},
+        contents: [],
+        coverage: "tracked_and_non_ignored_untracked",
+        contentHash,
+      };
+      await assert.rejects(
+        () => preflightRestore({ manifest, workspace: dir, store }),
+        (error: unknown) => (error as { reasonCode?: string }).reasonCode === "target_head_invalid",
+      );
+    } finally {
+      cleanup(dir);
+      cleanup(store.loopDir);
+    }
+  });
+
   it("fails closed on a divergent target HEAD", async () => {
     const dir = tempDir("lf-restore-repo-");
     const store = storeFor();

@@ -373,7 +373,7 @@ describe("E2E Recovery Brief window (v3.7.1)", () => {
       fixedEval(4, []), heldRedo.roundId, heldRedo.transactionId,
     );
     assert.ok(!redo.enforcementAction || redo.enforcementAction === "accept",
-      `redo must be accepted, got ${redo.enforcementAction ?? "accept"}`);
+      `redo must be accepted, got ${redo.enforcementAction ?? "accept"} (reason: ${redo.enforcementReason ?? "none"})`);
     assert.equal(redo.round, 5);
 
     // The redo consumed the pending recovery; the directive remains history.

@@ -58,7 +58,7 @@ function isCleanRound(round) {
 /** Scan backwards from currentRound to find the most recent clean round.
  *  Collects discovered_constraints from skipped rounds along the way.
  *  Returns null when no clean round is found within maxDepth. */
-export function findSafeRestorePoint(currentRound, vaultEntries, maxDepth, 
+export function findSafeRestorePoint(currentRound, vaultEntries, maxDepth,
 /** v3.9.7: a candidate must have a materialized restore checkpoint. */
 isEligible) {
     const completed = derivationRounds(vaultEntries, currentRound)
@@ -445,10 +445,10 @@ function enforceScopeDrift(flags, consecutiveRejections, lastRejectionCheck, sco
 /** The ONE progress-stall predicate. A stall requires machine proof that both
  *  the committed window AND the submitted round are unchanged; unknown and
  *  not_applicable never produce a verdict. */
-function evaluateStallWindow(currentRound, vaultEntries, 
+function evaluateStallWindow(currentRound, vaultEntries,
 /** v3.8.1: the round's success is machine-verified (`deriveEvidenceStatus`).
  *  A verified round is finishing work; a progress window cannot outvote it. */
-machineBackedSuccess, 
+machineBackedSuccess,
 /** The submitted round's own provider-neutral progress. */
 inFlightProgress) {
     if (machineBackedSuccess)
@@ -667,19 +667,19 @@ function enforceUserGateUnresolved(flags) {
         check: CHECK_USER_GATE_UNRESOLVED,
     });
 }
-export function enforceRound(selfEval, verifyResult, currentRound, vaultEntries, consecutiveRejections = 0, 
+export function enforceRound(selfEval, verifyResult, currentRound, vaultEntries, consecutiveRejections = 0,
 /** L4 (v3.7.x): which check rejected the PREVIOUS round. The coordinator
  *  resets consecutiveRejections to 1 whenever the check changes, so the
  *  counter only ever measures one check's streak — this field names that
  *  check and lets uniform rows escalate on THEIR OWN streak instead of
  *  inheriting an unrelated history. */
-lastRejectionCheck = "", 
+lastRejectionCheck = "",
 /** v3.8.3: the coordinator has verified that this round declares itself
  *  blocked AND that its new contract proposal's scope covers every file the
  *  round changed outside the active contract's scope. Computed there, not
  *  here: neither the observations nor the active contract reach this
  *  function. See `enforceScopeDrift`. */
-scopeDriftWaiver = false, 
+scopeDriftWaiver = false,
 /** v3.9.7: the submitted round's provider-neutral progress. */
 inFlightProgress = { state: "unknown", providers: [] }) {
     const { flags } = verifyResult;

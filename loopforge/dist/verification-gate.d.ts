@@ -62,7 +62,7 @@ export declare const CHECK_CONTRACT_PREMATURE = "contract_premature";
  *  checked ONLY when policy.gate.enabled — citations are meaningless when
  *  the gate layer is off. Error → enforcement rejects the round. */
 export declare const CHECK_USER_GATE_UNRESOLVED = "user_gate_unresolved";
-export type VerificationDomain = 
+export type VerificationDomain =
 /** The declaration is self-consistent (and consistent with committed facts). */
 "evaluation_consistency"
 /** Machine evidence and the agent's claims about it. */
@@ -129,16 +129,16 @@ export declare function parseTestOutput(stdout: string): ParsedTestCounts | null
  *  Empty when there is nothing to compare: no active contract, no declared
  *  scope, or no git observation (cannot observe → fail open). */
 export declare function roundDriftFiles(activeContract: ActiveContractView | null, evidenceDeltas: ReadonlyArray<ObservationDelta>): string[] | null;
-export declare function verifySelfEvaluation(selfEval: SelfEvaluation, currentRound: number, vaultEntries: VaultEntry[], prevSelfEval?: SelfEvaluation | null, evidenceDeltas?: ReadonlyArray<ObservationDelta>, 
+export declare function verifySelfEvaluation(selfEval: SelfEvaluation, currentRound: number, vaultEntries: VaultEntry[], prevSelfEval?: SelfEvaluation | null, evidenceDeltas?: ReadonlyArray<ObservationDelta>,
 /** v3.7.1: gate records (task_type gate_opened / gate_decision) live
  *  outside the round prefix — the caller passes them in explicitly. */
 /** v3.7.1: gate records (task_type gate_opened / gate_decision) live
  *  outside the round prefix — the caller passes them in explicitly. */
-gateEntries?: VaultEntry[], 
+gateEntries?: VaultEntry[],
 /** v3.8.3: entrypoint files that no longer match the trusted round-start
  *  baseline. Derived by the caller (it needs the in-flight trust map and
  *  filesystem access); this function stays a pure function of its inputs. */
-entrypointDrift?: EntrypointDrift[], 
+entrypointDrift?: EntrypointDrift[],
 /** v3.9.4: whether the raw submission attempted
  *  `execution_report.files_changed` (from the persisted submittedFields
  *  manifest). Undefined falls back to "an execution report exists". */

@@ -16,7 +16,7 @@
  *   server.start();
  */
 export { Mode, AgentStatus, makeExecutionFeedback, makeSelfEvaluation, makeLoopObjective, makeLoopRoundResult, makeLoopCompileRequest, makeLoopCompileResponse, makeSessionState, makeTaskId, makeEvidenceSnapshot, makeVerificationFlag, makeVerificationResult, makeEnforcementResult, makeSubGoal, makeConstraintMeta, } from "./protocol.js";
-export type { ExecutionFeedback, SelfEvaluation, LoopForgeRequest, LoopObjective, LoopRoundResult, LoopCompileRequest, LoopCompileResponse, LoopForgeResponse, SessionState, AgentLoopResult, WorkerResult, EvidenceSnapshot, VerificationFlag, VerificationResult, EnforcementResult, SubGoal, ConstraintMeta, PromptArtifact, PromptCoverage, PromptRequestEffect, SubmissionDiagnostic, SubmissionDiagnosticHandling, SubmissionGuidance, SubmissionReceipt, SubmissionReportHandling, } from "./protocol.js";
+export type { ExecutionFeedback, SelfEvaluation, LoopForgeRequest, LoopObjective, LoopRoundResult, LoopCompileRequest, LoopCompileResponse, LoopForgeResponse, SessionState, AgentLoopResult, WorkerResult, EvidenceSnapshot, VerificationFlag, VerificationResult, EnforcementResult, SubGoal, ConstraintMeta, PromptArtifact, PromptCoverage, PromptRequestEffect, SubmissionDiagnostic, SubmissionDiagnosticHandling, SubmissionGuidance, SubmissionReceipt, SubmissionReportHandling, CheckpointRef, CheckpointRole, WorkspaceCheckpointManifest, RecoveryTarget, } from "./protocol.js";
 export { getPolicy, loadPolicy, resetPolicy, DEFAULT_POLICY, writeStateFile, } from "./policy.js";
 export type { LoopPolicy, EnginePolicy, BackendPolicy, PromptPolicy, StateFilePolicy, EvidencePolicy, CommandEvidencePolicy, McpPolicy, } from "./policy.js";
 export { FileLoopStore, queryLoopEntries, LOOP_STORE_SCHEMA_VERSION, } from "./loop-store.js";
@@ -41,4 +41,9 @@ export { PolicyMetricsCollector, policyMetrics, getPolicyMetrics, resetPolicyMet
 export type { PolicyMetricsSnapshot } from "./policy-metrics.js";
 export { ROUND_TRANSACTION_SCHEMA_VERSION, RoundTransactionCoordinator, makeRoundId, prepareRoundTransaction, parseRoundTransactionSnapshot, } from "./round-transaction.js";
 export type { RoundTransactionPhase, RoundTransactionSnapshot, RoundTransactionInput, RoundTransactionOutcome, } from "./round-transaction.js";
+export { FileWorkspaceCheckpointStore, buildCheckpointRef, checkpointContentHash, deriveCheckpointId, parseCheckpointManifest, CHECKPOINT_SCHEMA_VERSION, } from "./workspace-checkpoint.js";
+export { executeRestore, preflightRestore, } from "./workspace-restore.js";
+export type { RestorePreflight, RestoreResult, } from "./workspace-restore.js";
+export { captureBoundary } from "./git-boundary.js";
+export type { BoundaryCapture, BoundaryMaterializer, GitCaptureResult, GitFileState, GitTrackedEntry, } from "./git-boundary.js";
 //# sourceMappingURL=index.d.ts.map

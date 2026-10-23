@@ -40,4 +40,8 @@ export { logEvent, } from "./observability.js";
 export { PolicyMetricsCollector, policyMetrics, getPolicyMetrics, resetPolicyMetrics, } from "./policy-metrics.js";
 // Unified round transaction (v1.19)
 export { ROUND_TRANSACTION_SCHEMA_VERSION, RoundTransactionCoordinator, makeRoundId, prepareRoundTransaction, parseRoundTransactionSnapshot, } from "./round-transaction.js";
+// Workspace checkpoints and restore (v3.9.8)
+export { FileWorkspaceCheckpointStore, buildCheckpointRef, checkpointContentHash, deriveCheckpointId, parseCheckpointManifest, CHECKPOINT_SCHEMA_VERSION, } from "./workspace-checkpoint.js";
+export { executeRestore, preflightRestore, } from "./workspace-restore.js";
+export { captureBoundary } from "./git-boundary.js";
 //# sourceMappingURL=index.js.map

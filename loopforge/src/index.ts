@@ -62,6 +62,10 @@ export type {
   SubmissionGuidance,
   SubmissionReceipt,
   SubmissionReportHandling,
+  CheckpointRef,
+  CheckpointRole,
+  WorkspaceCheckpointManifest,
+  RecoveryTarget,
 } from "./protocol.js";
 
 // Policy
@@ -201,3 +205,29 @@ export type {
   RoundTransactionInput,
   RoundTransactionOutcome,
 } from "./round-transaction.js";
+
+// Workspace checkpoints and restore (v3.9.8)
+export {
+  FileWorkspaceCheckpointStore,
+  buildCheckpointRef,
+  checkpointContentHash,
+  deriveCheckpointId,
+  parseCheckpointManifest,
+  CHECKPOINT_SCHEMA_VERSION,
+} from "./workspace-checkpoint.js";
+export {
+  executeRestore,
+  preflightRestore,
+} from "./workspace-restore.js";
+export type {
+  RestorePreflight,
+  RestoreResult,
+} from "./workspace-restore.js";
+export { captureBoundary } from "./git-boundary.js";
+export type {
+  BoundaryCapture,
+  BoundaryMaterializer,
+  GitCaptureResult,
+  GitFileState,
+  GitTrackedEntry,
+} from "./git-boundary.js";

@@ -189,6 +189,9 @@ export declare class RoundLifecycle {
     private readonly leaseMs;
     private readonly checkpointStoreFor;
     constructor(deps: RoundLifecycleDeps);
+    /** v3.9.7: the one RoundDriver construction site. Every prepare must carry
+     *  the per-loop checkpoint store, or no round can produce a before-image. */
+    private driver;
     /** v3.9.1: the submission-guidance projection for a session's held round.
      *  One history window (`derivationRounds`, the compile window), no writes.
      *  Findings from a rejected/retried attempt are supplied by the caller. */

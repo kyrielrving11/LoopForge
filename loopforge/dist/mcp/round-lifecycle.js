@@ -165,6 +165,11 @@ export class RoundLifecycle {
         this.ownerId = deps.ownerId;
         this.leaseMs = deps.leaseMs;
     }
+    /** v3.9.7: the one RoundDriver construction site. Every prepare must carry
+     *  the per-loop checkpoint store, or no round can produce a before-image. */
+    driver(engine, loopId) {
+        return new RoundDriver(engine, this.store, this.checkpointStoreFor?.(loopId));
+    }
     /** v3.9.1: the submission-guidance projection for a session's held round.
      *  One history window (`derivationRounds`, the compile window), no writes.
      *  Findings from a rejected/retried attempt are supplied by the caller. */
@@ -521,7 +526,7 @@ export class RoundLifecycle {
     async reconcileCommittedRound(session) {
         if (!session.roundSnapshot)
             return null;
-        const recovered = new RoundDriver(session.engine, this.store).recover(session.roundSnapshot);
+        const recovered = this.driver(session.engine, session.loopId).recover(session.roundSnapshot);
         if (!recovered)
             return null;
         const pr = recovered.result;
@@ -575,7 +580,7 @@ export class RoundLifecycle {
             session.currentRound = recovered.snapshot.round + 1;
         }
         const request = buildLoopRequest(session);
-        const prepared = await new RoundDriver(session.engine, this.store).prepare(request, session.loopId, session.currentRound, this.prepareOptions(session));
+        const prepared = await this.driver(session.engine, session.loopId).prepare(request, session.loopId, session.currentRound, this.prepareOptions(session));
         if (!prepared) {
             session.status = "stalled";
             this.save(session);
@@ -668,7 +673,7 @@ export class RoundLifecycle {
             return restored;
         // Missing held prompt: compile (async) once, then persist it.
         const request = buildLoopRequest(session);
-        const prepared = await new RoundDriver(session.engine, this.store).prepare(request, session.loopId, session.currentRound, this.prepareOptions(session));
+        const prepared = await this.driver(session.engine, session.loopId).prepare(request, session.loopId, session.currentRound, this.prepareOptions(session));
         if (!prepared) {
             session.status = "stopped";
             this.save(session);
@@ -750,7 +755,7 @@ export class RoundLifecycle {
                 : 1,
             consecutive_rejections: session.consecutiveRejections,
         };
-        const prepared = await new RoundDriver(session.engine, this.store).prepare(compileRequest, session.loopId, session.currentRound, this.prepareOptions(session));
+        const prepared = await this.driver(session.engine, session.loopId).prepare(compileRequest, session.loopId, session.currentRound, this.prepareOptions(session));
         if (!prepared) {
             session.status = "stopped";
             this.save(session);
@@ -820,7 +825,7 @@ export class RoundLifecycle {
      *           session.lastRejectionCheck */
     async executeRoundTransaction(session, selfEval, normalizationDiagnostics, submittedFields) {
         const snapshot = session.roundSnapshot ?? prepareRoundTransaction(session.loopId, session.currentRound, []);
-        const completed = await new RoundDriver(session.engine, this.store).complete({
+        const completed = await this.driver(session.engine, session.loopId).complete({
             snapshot,
             loopId: session.loopId,
             task: session.task,
@@ -851,7 +856,7 @@ export class RoundLifecycle {
         // committed history: write them explicitly on the retry request.
         const retryRequest = buildLoopRequest(session);
         retryRequest.verification_flags = verificationFlags;
-        const preparedRetry = await new RoundDriver(session.engine, this.store).prepareRetry(retryRequest, session.roundSnapshot, pr.rejectionPrompt ?? "", session.consecutiveRejections);
+        const preparedRetry = await this.driver(session.engine, session.loopId).prepareRetry(retryRequest, session.roundSnapshot, pr.rejectionPrompt ?? "", session.consecutiveRejections);
         if (!preparedRetry) {
             session.status = "stalled";
             this.save(session);
@@ -1229,7 +1234,7 @@ export class RoundLifecycle {
         const request = buildLoopRequest(session);
         let prepared;
         try {
-            prepared = await new RoundDriver(session.engine, this.store).prepare(request, session.loopId, session.currentRound, this.prepareOptions(session));
+            prepared = await this.driver(session.engine, session.loopId).prepare(request, session.loopId, session.currentRound, this.prepareOptions(session));
         }
         catch (error) {
             // M4: a post-commit compile exception must not silently strand the

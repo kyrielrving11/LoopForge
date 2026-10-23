@@ -156,7 +156,7 @@ export function runGitCommandStatus(args, options) {
  *  parallel batch; HEAD is best-effort (a repository with no commit is a
  *  valid boundary with no head). Any required-command failure returns an
  *  explicit status — never an empty-but-observed boundary. */
-export async function captureGitFileStateAsync(signal, timeoutMs,
+export async function captureGitFileStateAsync(signal, timeoutMs, 
 /** Workspace root; injectable so tests can capture against a temp repo.
  *  Defaults to the process cwd, matching the evidence providers. */
 cwd = process.cwd()) {

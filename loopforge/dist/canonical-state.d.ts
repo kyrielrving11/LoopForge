@@ -48,7 +48,7 @@ export declare function formatCriterionRows(statuses: ReadonlyArray<CriterionSta
 /** v3.9.4: the ONE active-sub-goal formatter shared by the prompt and the
  *  state file. Rows past `cap` lose their descriptions but NEVER their ids:
  *  the overflow line lists every remaining `sg-*`. */
-export declare function formatActiveSubGoals(subGoals: ReadonlyArray<SubGoal>, round: number, cap?: number,
+export declare function formatActiveSubGoals(subGoals: ReadonlyArray<SubGoal>, round: number, cap?: number, 
 /** v3.9.7: objects moved to Critical Context are removed from the rows and
  *  the overflow line, but still count in the totals. */
 omitIds?: ReadonlySet<string>): {
@@ -165,7 +165,7 @@ export interface FormattedRoundContract {
     /** IDs this rendering actually emitted (contract id + item ids). */
     emittedIds: string[];
 }
-export declare function formatRoundContractWithIds(contract: ActiveContractView,
+export declare function formatRoundContractWithIds(contract: ActiveContractView, 
 /** v3.8: the derived item statuses. When given, each item renders with its
  *  machine status — the agent sees the verification debt in its own task. */
 statuses?: ContractItemStatusView | null, options?: RoundContractFormatOptions): FormattedRoundContract;
@@ -191,7 +191,7 @@ export interface StateFileRenderOptions {
  *  criterion list, round stats, the FULL recurring-flag history and the phase
  *  history. The prompt carries only what the next round needs. */
 export declare function renderCanonicalStateMarkdown(state: CanonicalLoopState, options?: StateFileRenderOptions): string;
-export declare function createCanonicalLoopState(request: LoopCompileRequest, response: LoopCompileResponse, stateFilePath: string,
+export declare function createCanonicalLoopState(request: LoopCompileRequest, response: LoopCompileResponse, stateFilePath: string, 
 /** v3.3: Display-only derived data. Optional 4th param — callers that
  *  predate v3.3 stay on 3-arg calls. */
 derived?: {

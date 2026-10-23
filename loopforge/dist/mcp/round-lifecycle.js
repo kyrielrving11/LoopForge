@@ -768,7 +768,7 @@ export class RoundLifecycle {
             baseline: prepared.evidenceBaseline,
             snapshot: prepared.snapshot,
             warnings: prepared?.warnings ?? [],
-        }, undefined,
+        }, undefined, 
         // Historical contract: unpause returns an empty warnings array even
         // though the session carries the compiled warnings.
         []);
@@ -1142,7 +1142,7 @@ export class RoundLifecycle {
      *  `enforcement_terminated`, so the specific reason reached observability
      *  and the client as a generic one — the fact was computed and then thrown
      *  away. Pass it through, falling back only when the gate named nothing. */
-    buildTerminationResult(sessionId, session, pr,
+    buildTerminationResult(sessionId, session, pr, 
     /** v3.8.3: see buildStopResult. */
     guardedReason, receiptBase) {
         const reason = guardedReason ?? pr.stopReason ?? "enforcement_terminated";
@@ -1178,7 +1178,7 @@ export class RoundLifecycle {
     }
     /** Build a stop result: persist stopped/stalled status, notify sinks.
      *  MUTATES: session.status, session.currentPrompt */
-    buildStopResult(sessionId, session, pr,
+    buildStopResult(sessionId, session, pr, 
     /** v3.8.3: the reason AFTER the completion-truth guard (advanceUnlocked).
      *  Absent on the replay paths, which then read `pr.stopReason` directly. */
     guardedReason, receiptBase) {

@@ -83,7 +83,7 @@ export function formatCriterionRows(statuses, successCriteria) {
 /** v3.9.4: the ONE active-sub-goal formatter shared by the prompt and the
  *  state file. Rows past `cap` lose their descriptions but NEVER their ids:
  *  the overflow line lists every remaining `sg-*`. */
-export function formatActiveSubGoals(subGoals, round, cap = getPolicy().evolution.max_active_subgoals,
+export function formatActiveSubGoals(subGoals, round, cap = getPolicy().evolution.max_active_subgoals, 
 /** v3.9.7: objects moved to Critical Context are removed from the rows and
  *  the overflow line, but still count in the totals. */
 omitIds) {
@@ -224,7 +224,7 @@ export function constraintProvenanceLabel(meta) {
             return "";
     }
 }
-export function formatRoundContractWithIds(contract,
+export function formatRoundContractWithIds(contract, 
 /** v3.8: the derived item statuses. When given, each item renders with its
  *  machine status — the agent sees the verification debt in its own task. */
 statuses, options = {}) {
@@ -542,7 +542,7 @@ function flatStateSections(state) {
     }
     return sections;
 }
-export function createCanonicalLoopState(request, response, stateFilePath,
+export function createCanonicalLoopState(request, response, stateFilePath, 
 /** v3.3: Display-only derived data. Optional 4th param — callers that
  *  predate v3.3 stay on 3-arg calls. */
 derived) {

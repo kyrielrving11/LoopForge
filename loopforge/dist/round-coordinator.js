@@ -226,7 +226,7 @@ export class RoundCoordinator {
         // verifies the restore before issuing the redo prompt; a redo submission
         // is ordinary work, so its after boundary must never be compared to the
         // restore target.
-        const verifyResult = verifySelfEvaluation(selfEval, currentRound, vaultEntries, previousCommitted, evidenceDeltas ?? [], [], {}, undefined, 
+        const verifyResult = verifySelfEvaluation(selfEval, currentRound, vaultEntries, previousCommitted, evidenceDeltas ?? [], 
         // v3.7.1: gate records live under the gate: prefix — outside the round
         // entries above — and are passed separately to the gate check.
         this.store
@@ -236,7 +236,7 @@ export class RoundCoordinator {
         // the gate, because it needs the filesystem and the in-flight trust map
         // captured when this round was prepared — the gate stays a pure function
         // of its inputs.
-        driftedEntrypoints(input.entrypointTrust), input.beforeEvidence ?? [], undefined, 
+        driftedEntrypoints(input.entrypointTrust), 
         // v3.9.4: the SAME manifest basis the receipt uses. An omitted
         // files_changed field is not silently treated as "a report exists".
         input.submittedFields

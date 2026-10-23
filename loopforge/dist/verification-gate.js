@@ -67,7 +67,6 @@ export const CHECK_VERIFICATION_ENTRYPOINT_MODIFIED = "verification_entrypoint_m
 /** v3.3: Test files changed in the same round a verification command passed.
  *  Warn-only — the command result stays usable. */
 export const CHECK_TEST_FILES_MODIFIED = "test_files_modified";
-export const CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED = "backtrack_workspace_not_restored";
 export const CHECK_CRITERIA_CLAIMS_UNVERIFIED = "criteria_claims_unverified";
 // v3.3 — Round Contract checks. v3.4: split by target. The submission's own
 // round_contract is a PROPOSAL for the NEXT round and is checked only
@@ -127,7 +126,6 @@ export const CHECK_DOMAIN = {
     // v3.7.1: cited-gate authorization conformance (opt-in blocking layer).
     [CHECK_USER_GATE_UNRESOLVED]: "plan_contract",
     // ── progress_recovery ─────────────────────────────────────────────────────
-    [CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED]: "progress_recovery",
 };
 // ═══════════════════════════════════════════════════════════════════════════
 // Helpers
@@ -772,131 +770,6 @@ function checkVerificationDomainIntegrity(evidenceDeltas, drift) {
     }
     return null;
 }
-/** v2.13: After a backtrack, check that the agent restored the workspace
- *  before working. Two arms:
- *
- *  1. Machine arm (M3, error): a skipped file whose CURRENT git fingerprint
- *     still equals the fingerprint recorded at its failed round was never
- *     touched since the rollback — the workspace was provably not restored.
- *     Restored or re-modified files change fingerprint and can never be
- *     misjudged by this arm.
- *
- *  2. Claims arm (warn only): the agent's files_changed overlaps the skipped
- *     list. A self-report alone cannot distinguish a restored-then-redone
- *     file from a never-restored one — a legitimate multi-file redo would
- *     otherwise be falsely terminated — so overlap is guidance, not a
- *     verdict. (The old error tier for >= 3 overlapping files was removed
- *     for exactly this reason: it fired on honest redos.) */
-function checkBacktrackWorkspaceRestore(selfEval, backtrackSkippedFiles, backtrackSkippedFingerprints = {}, evidenceDeltas = []) {
-    // Machine arm — untouched-since-rollback proof, independent of claims.
-    const failedEntries = Object.entries(backtrackSkippedFingerprints);
-    if (failedEntries.length > 0) {
-        const afterGit = evidenceDeltas.find((delta) => delta.kind === "git")?.after;
-        const currentFingerprints = afterGit && afterGit.kind === "git" &&
-            isRecord(afterGit.data.fingerprints)
-            ? afterGit.data.fingerprints
-            : null;
-        if (currentFingerprints) {
-            const untouched = failedEntries
-                .filter(([file, failedFp]) => currentFingerprints[file] === failedFp)
-                .map(([file]) => file)
-                .sort();
-            if (untouched.length > 0) {
-                return makeVerificationFlag({
-                    severity: "error",
-                    field: "workspace",
-                    check: CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED,
-                    detail: `File(s) from the failed rounds are byte-identical to their ` +
-                        `state at the rollback: ${untouched.slice(0, 5).join(", ")}. The ` +
-                        `workspace was never restored to the restore point.`,
-                });
-            }
-        }
-    }
-    const ev = selfEval.execution_report;
-    if (!ev || (ev.files_changed ?? []).length === 0)
-        return null;
-    // Claims arm — overlap as guidance only.
-    const overlap = (ev.files_changed ?? []).filter((f) => backtrackSkippedFiles.some((sf) => sf === f || f.endsWith(sf) || sf.endsWith(f)));
-    if (overlap.length === 0)
-        return null;
-    return makeVerificationFlag({
-        severity: "warn",
-        field: "files_changed",
-        check: CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED,
-        detail: `Agent modified files that overlap with skipped rounds: ` +
-            `${overlap.join(", ")}. Verify the workspace was restored.`,
-    });
-}
-/** v2.12: After a backtrack, the workspace must return to the restore point:
- *  the same git HEAD that round committed, carrying no dirty file the restore
- *  point did not already have. Compares HEAD's first 12 characters (short
- *  hash), matching how git itself disambiguates.
- *
- *  The dirty-set comparison is against the restore point's OWN baseline, not
- *  an empty tree: unrelated work in progress in the same workspace is no
- *  evidence of a failed restore, while a file the failed rounds left behind
- *  is — it is dirty now and was not dirty then. An absent baseline means the
- *  restore point's dirt was never observed, so only HEAD can be judged.
- *
- *  A redo prepared before the agent restores the workspace has a stale before
- *  snapshot, so its first submission is a recovery checkpoint; once the
- *  restore is proven, later work may move HEAD freely. */
-function checkBacktrackGitHeadRestore(evidenceDeltas, backtrackTargetGitHead, beforeEvidence = [], 
-/** The restore point's own dirty files — undefined when never observed. */
-backtrackTargetDirty) {
-    if (!backtrackTargetGitHead)
-        return null;
-    const short = (hash) => hash.slice(0, 12);
-    const readGit = (observations) => {
-        const snapshot = observations.find((item) => item.providerId === "git" && item.status === "observed" && isRecord(item.data) &&
-            typeof item.data.head === "string");
-        if (!snapshot || !isRecord(snapshot.data))
-            return null;
-        const data = snapshot.data;
-        // v3.9.1: the workspace's dirty set is one explicit list. "Tracked /
-        // staged / untracked" were dirty-since-HEAD categories, not the complete
-        // boundary, and are gone.
-        const dirty = Array.isArray(data.dirty)
-            ? data.dirty.filter((file) => typeof file === "string")
-            : [];
-        return { head: data.head, dirty };
-    };
-    const foreignDirty = (dirty) => Array.isArray(backtrackTargetDirty)
-        ? dirty.filter((file) => !backtrackTargetDirty.includes(file))
-        : [];
-    const restored = (git) => git !== null && git.head.length > 0 &&
-        short(git.head) === short(backtrackTargetGitHead) &&
-        foreignDirty(git.dirty).length === 0;
-    // When restoration happened before the redo was prepared, the before
-    // snapshot already proves it. The redo may then commit new work.
-    if (restored(readGit(beforeEvidence)))
-        return null;
-    const afterGit = readGit(afterObservations(evidenceDeltas));
-    if (!afterGit)
-        return null; // git unavailable → cannot verify → skip (fail-open)
-    if (restored(afterGit))
-        return null;
-    // Normal lifecycle: prepare captured the pre-restore workspace. The first
-    // submission must prove restoration before a later submission can commit.
-    const headBack = afterGit.head.length > 0 &&
-        short(afterGit.head) === short(backtrackTargetGitHead);
-    const left = foreignDirty(afterGit.dirty);
-    return makeVerificationFlag({
-        severity: "error",
-        field: "workspace",
-        check: CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED,
-        detail: headBack
-            ? `Workspace HEAD is back at the backtrack restore commit ` +
-                `(${short(backtrackTargetGitHead)}) but these files were not there at ` +
-                `the restore point and are still changed: ${left.slice(0, 5).join(", ")}` +
-                `${left.length > 5 ? ` (+${left.length - 5} more)` : ""}. Revert them ` +
-                `before redoing the work.`
-            : `Workspace HEAD (${short(afterGit.head)}) does not match the backtrack ` +
-                `restore commit (${short(backtrackTargetGitHead)}). Submit one recovery ` +
-                `evaluation at the restore point before redoing work.`,
-    });
-}
 // ═══════════════════════════════════════════════════════════════════════════
 // v3.8 — Round Contract checks (all silent when no contract is declared)
 //
@@ -1064,26 +937,15 @@ function checkUserGateUnresolved(selfEval, gateEntries) {
     });
 }
 export function verifySelfEvaluation(selfEval, currentRound, vaultEntries, prevSelfEval = null, evidenceDeltas = [], 
-/** v2.13: Files from skipped backtrack rounds. If the agent's
- *  files_changed overlaps significantly with these, the workspace
- *  was not properly restored before working. */
-backtrackSkippedFiles = [], 
-/** M3 (v3.7.x): skipped-file git fingerprints at their failed rounds —
- *  machine proof of "untouched since the rollback" for the restore check. */
-backtrackSkippedFingerprints = {}, 
-/** v2.12: Git HEAD commit of the backtrack restore point. When set, the
- *  current git snapshot must sit at this commit — otherwise the workspace
- *  was not restored and the round cannot be accepted. */
-backtrackTargetGitHead, 
+/** v3.7.1: gate records (task_type gate_opened / gate_decision) live
+ *  outside the round prefix — the caller passes them in explicitly. */
 /** v3.7.1: gate records (task_type gate_opened / gate_decision) live
  *  outside the round prefix — the caller passes them in explicitly. */
 gateEntries = [], 
 /** v3.8.3: entrypoint files that no longer match the trusted round-start
  *  baseline. Derived by the caller (it needs the in-flight trust map and
  *  filesystem access); this function stays a pure function of its inputs. */
-entrypointDrift = [], beforeEvidence = [], 
-/** v3.9: the restore point's own dirty files (undefined = never observed). */
-backtrackTargetDirty, 
+entrypointDrift = [], 
 /** v3.9.4: whether the raw submission attempted
  *  `execution_report.files_changed` (from the persisted submittedFields
  *  manifest). Undefined falls back to "an execution report exists". */
@@ -1148,10 +1010,8 @@ filesReported) {
         // v3.3: Verification domain integrity — command entrypoint / test files
         // changed in the same round the command ran
         () => checkVerificationDomainIntegrity(evidenceDeltas, entrypointDrift),
-        // v2.13: Post-backtrack workspace restore check
-        () => checkBacktrackWorkspaceRestore(selfEval, backtrackSkippedFiles, backtrackSkippedFingerprints, evidenceDeltas),
-        // v2.12: Post-backtrack git HEAD restore check
-        () => checkBacktrackGitHeadRestore(evidenceDeltas, backtrackTargetGitHead, beforeEvidence, backtrackTargetDirty),
+        // v3.9.7: restore verification happens before the redo prompt, not on
+        // the redo submission.
         // v3.8: Round Contract checks over the derived item model. Declaration
         // quality is enforced structurally (contract_invalid) before the round
         // advances, so the gate only reports execution state: scope drift,

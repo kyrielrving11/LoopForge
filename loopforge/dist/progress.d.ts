@@ -36,14 +36,14 @@ export interface ProgressWindow {
 /** Aggregate one round's per-provider deltas. Any proven change wins; a
  *  comparable unknown blocks an "unchanged" verdict; no applicable provider
  *  is not_applicable. */
-export declare function deriveRoundProgress(deltas: ReadonlyArray<ObservationDelta>, restoreTargetHead?: string): RoundProgress;
+export declare function deriveRoundProgress(deltas: ReadonlyArray<ObservationDelta>): RoundProgress;
 /** The committed window verdict. A full contiguous window is required for a
  *  definite verdict; any missing/legacy round is `unknown`, never "no
  *  progress". */
 export declare function deriveProgressWindow(rounds: ReadonlyArray<CommittedRoundView>, currentRound: number, lookback: number): ProgressWindow;
 /** Git-only compatibility helpers for callers/tests that need the raw
  *  boolean series. They are thin wrappers over the same Git rule. */
-export declare function inFlightGitMotion(deltas: ReadonlyArray<ObservationDelta>, restoreTargetHead?: string): boolean | null;
+export declare function inFlightGitMotion(deltas: ReadonlyArray<ObservationDelta>): boolean | null;
 export declare function committedRoundGitMotion(view: CommittedRoundView): boolean | null;
 export declare function machineGitMotionSeries(rounds: ReadonlyArray<CommittedRoundView>, currentRound: number, lookback: number): boolean[] | null;
 //# sourceMappingURL=progress.d.ts.map

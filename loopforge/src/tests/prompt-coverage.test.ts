@@ -329,8 +329,8 @@ describe("v3.9.4 — PromptCoverage", () => {
       selfEvaluationBlock: "",
       recoveryBrief: [
         "- **Trigger**: progress_stall",
-        "- **Restored to round**: 2 (the redo is round 3)",
-        "- **Restore HEAD**: `abcdef1234567890`",
+        "- **Restored checkpoint**: `ck-0123456789abcdef01234567` (machine-verified by LoopForge)",
+        "- **Redo round**: 3",
         "- **Files changed in failed rounds**:",
         "  - `src/a.ts`",
       ],
@@ -338,7 +338,7 @@ describe("v3.9.4 — PromptCoverage", () => {
     assert.equal(current.coverage.complete, true);
     assert.ok(current.coverage.active.some((entry) => entry.kind === "recovery"));
     assert.ok(current.renderedPrompt.includes("Recovery Brief"));
-    assert.ok(current.renderedPrompt.includes("Restore HEAD"));
+    assert.ok(current.renderedPrompt.includes("Restored checkpoint"));
     assert.ok(current.renderedPrompt.includes("src/a.ts"));
   });
 });

@@ -287,7 +287,7 @@ export function deriveSubmissionReceipt(input: ReceiptInput): SubmissionReceipt 
     ? {
         redo_round: pr.recovery?.target.redo_round ??
           Math.max(1, input.snapshot.round),
-        checkpoint_id: pr.recovery?.target.checkpoint_id ?? "",
+        target_checkpoint_id: pr.recovery?.target.checkpoint_id ?? "",
         preserved_discoveries: [...(pr.recovery?.skipped_discoveries ?? [])],
         wrong_assumptions: [...(pr.recovery?.wrong_assumptions ?? [])],
         ...(pr.recovery?.origin ? { origin: pr.recovery.origin } : {}),

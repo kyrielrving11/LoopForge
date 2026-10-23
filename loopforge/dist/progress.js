@@ -12,24 +12,21 @@
  */
 import { gitMotionSignal, observedGitHead, observedGitObservation, } from "./git-motion.js";
 export { gitMotionSignal, observedGitHead } from "./git-motion.js";
-function gitDeltaProgress(delta, restoreTargetHead) {
+function gitDeltaProgress(delta) {
     const after = observedGitObservation(delta.after);
     if (!after)
         return null;
     const before = observedGitObservation(delta.before);
-    // No before baseline is still enough for the restore-point arm: landing on
-    // the rollback's restore commit is motion even when the baseline is absent.
     return gitMotionSignal({
         changedFiles: delta.changedFiles,
         headBefore: observedGitHead(before ?? undefined),
         headAfter: observedGitHead(after),
-        restoreTargetHead: restoreTargetHead ?? null,
     });
 }
 /** Aggregate one round's per-provider deltas. Any proven change wins; a
  *  comparable unknown blocks an "unchanged" verdict; no applicable provider
  *  is not_applicable. */
-export function deriveRoundProgress(deltas, restoreTargetHead) {
+export function deriveRoundProgress(deltas) {
     const providers = [];
     let changed = false;
     let unknown = false;
@@ -39,7 +36,7 @@ export function deriveRoundProgress(deltas, restoreTargetHead) {
         if (delta.kind === "git") {
             applicable = true;
             providers.push(delta.providerId);
-            const signal = gitDeltaProgress(delta, restoreTargetHead);
+            const signal = gitDeltaProgress(delta);
             if (signal === true)
                 changed = true;
             else if (signal === null) {
@@ -158,13 +155,13 @@ export function deriveProgressWindow(rounds, currentRound, lookback) {
 }
 /** Git-only compatibility helpers for callers/tests that need the raw
  *  boolean series. They are thin wrappers over the same Git rule. */
-export function inFlightGitMotion(deltas, restoreTargetHead) {
+export function inFlightGitMotion(deltas) {
     const gitDeltas = deltas.filter((delta) => delta.kind === "git");
     if (gitDeltas.length === 0)
         return null;
     let sawUnknown = false;
     for (const delta of gitDeltas) {
-        const signal = gitDeltaProgress(delta, restoreTargetHead);
+        const signal = gitDeltaProgress(delta);
         if (signal === true)
             return true;
         if (signal === null)

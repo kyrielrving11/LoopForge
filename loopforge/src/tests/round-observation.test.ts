@@ -16,6 +16,7 @@ import { gitMotionSignal } from "../git-motion.js";
 import { inFlightGitMotion, machineGitMotionSeries } from "../progress.js";
 import type { GitObservation, MachineObservation } from "../protocol.js";
 import type { VaultEntry } from "../loop-store.js";
+import { fixtureBeforeCheckpointError } from "./_helpers.js";
 
 function gitObservation(
   files: string[],
@@ -68,6 +69,9 @@ function feedbackEntry(
           attempt: 1,
           phase: "committed",
           beforeEvidence: opts.before ?? [],
+          ...(opts.schemaVersion === undefined
+            ? fixtureBeforeCheckpointError(opts.before ?? [])
+            : {}),
           ...(opts.after ? { afterEvidence: opts.after } : {}),
           evaluation: {
             success: true,

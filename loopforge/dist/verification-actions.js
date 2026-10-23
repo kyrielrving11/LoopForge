@@ -24,7 +24,6 @@ export const VERIFICATION_ACTIONS = {
     evidence_integrity: "Report only the net boundary change: add every machine-observed path you omitted, remove every path the machine did not observe, and include deletions.",
     required_command_failed: "Re-run the required verification command and report its actual output before claiming success.",
     command_evidence_mismatch: "Report the true command output and reconcile the mismatch.",
-    backtrack_workspace_not_restored: "Restore the skipped-round files and the expected git HEAD, then resubmit.",
     criteria_claims_unverified: "Provide evidence for each claimed success criterion.",
     // v3.3 — Round Contract checks (and the three v3.3 checks that predated
     // this table entry and fell back to the generic action).

@@ -215,7 +215,7 @@ describe("backtrack commit replay", () => {
       "recover must find the committed backtrack transaction");
     assert.equal(recovered!.replayed, true);
     assert.equal(recovered!.result.action, "backtrack");
-    assert.equal(recovered!.result.recovery?.target, 2);
+    assert.equal(recovered!.result.recovery?.target.redo_round, 3);
     assert.equal(recovered!.result.recovery?.trigger_rule, "progress_stall");
   });
 

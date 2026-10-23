@@ -950,119 +950,6 @@ describe("enforcement-gate — v3.3 R-EVID-VERIFY: entrypoint tampering", () => 
 // requires the recent data points to cover the most recent rounds; rounds
 // without evidence are unknown motion, not zero motion.
 // ═══════════════════════════════════════════════════════════════════════════
-
-describe("enforcement-gate — progress stall: continuity guard (v3.7: R4/R5 merged)", () => {
-  it("does not fire on a discontinuous window when recent rounds have no progress data", () => {
-    const curr = se({
-      success: false,
-      execution_report: makeExecutionReport({
-        files_changed: ["src/foo.ts"],
-      }),
-    });
-    const vault = [
-      vaultRound(1, []),
-      vaultRound(2, []),
-      vaultRound(3, []),
-      // Rounds 4-5 committed without execution_report — unknown motion,
-      // not zero motion. The stall window is discontinuous (both tiers
-      // return null); the pre-v3.7 flatline slot looked at rounds 1-3 and
-      // terminated/backtracked anyway — the continuity guard must win.
-      { task_id: "loop:test-loop:r4", loop_id: "test-loop", loop_lineage: { round: 4, success: true } },
-      { task_id: "loop:test-loop:r5", loop_id: "test-loop", loop_lineage: { round: 5, success: true } },
-    ];
-    const result = enforceRound(curr, trusted(), 6, vault, 1, "", false, { state: "unchanged", providers: ["git"] });
-    assert.equal(result.action, "accept");
-  });
-
-  it("still fires on a continuous flatline window (stall predicate covers it)", () => {
-    const curr = se({
-      success: false,
-      execution_report: makeExecutionReport({
-        files_changed: ["src/foo.ts"],
-      }),
-    });
-    const vault = [
-      vaultRound(1, []),
-      vaultRound(2, []),
-      vaultRound(3, []),
-      vaultRound(4, []),
-      vaultRound(5, []),
-    ];
-    // A continuous flatline satisfies the stall predicate (delta 0 < the
-    // positive threshold), so the evaluator fires on the stall tier; the
-    // flatline tier is only consulted when the stall predicate cannot hold.
-    // The continuity guard must not suppress the legitimate flatline window.
-    const result = enforceRound(curr, trusted(), 6, vault, 0, "", false, { state: "unchanged", providers: ["git"] });
-    assert.equal(result.action, "reject");
-    assert.equal(result.check, "progress_stall");
-  });
-});
-
-// R9 deadlock guard (v2.14): a non-restoring agent must not cycle
-// R9-backtrack forever — backtracks do not increment the rejection counter.
-// ═══════════════════════════════════════════════════════════════════════════
-
-describe("enforcement-gate — R9: workspace restore guard", () => {
-  function unrestoredVerify(): VerificationResult {
-    return makeVerificationResult({
-      verdict: "contradicted",
-      flags: [
-        makeVerificationFlag({
-          severity: "error",
-          field: "workspace",
-          check: "backtrack_workspace_not_restored",
-          detail: "Workspace HEAD (abc123) does not match the backtrack restore commit (def456)",
-        }),
-      ],
-    });
-  }
-
-  const committedBacktrackEntry = (round: number): VaultEntry =>
-    committedBacktrackRound(round);
-
-  it("backtracks when no prior backtrack committed for this round", () => {
-    const curr = se({
-      execution_report: makeExecutionReport({
-        files_changed: ["src/foo.ts"],
-        tests_reported: { passed: 1, failed: 0, skipped: 0 },
-      }),
-    });
-    const result = enforceRound(curr, unrestoredVerify(), 3, [], 0);
-    assert.equal(result.action, "backtrack");
-    assert.equal(result.check, "backtrack_workspace_not_restored");
-  });
-
-  it("terminates when the workspace was never restored after a prior backtrack", () => {
-    const curr = se({
-      execution_report: makeExecutionReport({
-        files_changed: ["src/foo.ts"],
-        tests_reported: { passed: 1, failed: 0, skipped: 0 },
-      }),
-    });
-    const vault = [committedBacktrackEntry(3)];
-    const result = enforceRound(curr, unrestoredVerify(), 3, vault, 0);
-    assert.equal(result.action, "terminate");
-    assert.equal(result.check, "backtrack_workspace_not_restored");
-  });
-
-  it("R9 fix_instructions state the requirement, not a recipe", () => {
-    const result = enforceRound(
-      se({ execution_report: makeExecutionReport({ files_changed: ["src/a.ts"] }) }),
-      unrestoredVerify(),
-      3,
-      [],
-      0,
-    );
-    assert.equal(result.action, "backtrack");
-    for (const command of ["git stash", "git reset", "git checkout", "git clean"]) {
-      assert.ok(!(result.fix_instructions ?? "").includes(command));
-    }
-    assert.match(result.fix_instructions ?? "", /must be reverted/);
-  });
-});
-
-
-// ═══════════════════════════════════════════════════════════════════════════
 // v3.2 — R4/R5 machine progress fallback (heuristic path)
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -1554,16 +1441,6 @@ describe("v3.7 — behavior-equality compatibility matrix", () => {
       vault: stallVault(), round: 4, strikes: 1,
       policy: (p) => { p.engine.backtrack_enabled = false; },
       expected: "reject", check: "progress_stall" },
-
-    // ── backtrack_workspace_not_restored ─────────────────────────────────────
-    { name: "workspace not restored backtracks once",
-      flags: [flag("error", "backtrack_workspace_not_restored")], round: 4, expected: "backtrack", check: "backtrack_workspace_not_restored" },
-    { name: "workspace not restored after a committed backtrack terminates",
-      flags: [flag("error", "backtrack_workspace_not_restored")], vault: [committedBacktrackRound(4)], round: 4, expected: "terminate" },
-    { name: "workspace-not-restored row is inactive when backtrack disabled",
-      flags: [flag("error", "backtrack_workspace_not_restored")], round: 4,
-      policy: (p) => { p.engine.backtrack_enabled = false; },
-      expected: "accept" },
 
     // ── user_gate_unresolved (uniform ladder, own-streak from L4) ───────────
     { name: "user gate first strike rejects",

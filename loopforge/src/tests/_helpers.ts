@@ -43,7 +43,7 @@ export const DEFAULT_SUCCESS_CRITERION =
 /** v3.9.7: a fixture that supplies observed Git before-evidence must also
  *  supply the schema-5 before-image fact. Old fixtures use this explicit
  *  unavailable fact rather than fabricating a restorable checkpoint. */
-function fixtureBeforeCheckpointError(observations: unknown): {
+export function fixtureBeforeCheckpointError(observations: unknown): {
   beforeCheckpointError?: { code: string; detail: string; at: number };
 } {
   const observedGit = Array.isArray(observations) && observations.some((item) =>
@@ -194,6 +194,11 @@ export function committedFeedbackRound(
     contractBinding?: unknown;
     /** v3.8: committed item claims (replaces the legacy `met` list). */
     contractItemClaims?: Array<{ item_id: string; outcome: "met" | "remaining" }>;
+    restore?: {
+      directiveTransactionId: string;
+      redoRound: number;
+      verifiedAt: number;
+    };
   } = {},
 ): VaultEntry {
   const loopId = opts.loopId ?? "cc";
@@ -238,6 +243,7 @@ export function committedFeedbackRound(
           beforeEvidence: opts.beforeEvidence ?? [],
           afterEvidence: opts.roundEvidence,
           ...fixtureBeforeCheckpointError(opts.beforeEvidence ?? []),
+          ...(opts.restore ? { restore: opts.restore } : {}),
           ...(opts.contractBinding !== undefined ? { contractBinding: opts.contractBinding } : {}),
           createdAt: 0,
           updatedAt: 0,

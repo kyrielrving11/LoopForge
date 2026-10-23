@@ -230,7 +230,7 @@ describe("v3.9.1 — submission receipt", () => {
     assert.equal(report(receipt, "wrong_assumptions")?.handling, "saved");
     assert.equal(report(receipt, "discovered_constraints")?.handling, "not_applied");
     assert.equal(receipt.effects.rollback?.redo_round, 2);
-    assert.equal(receipt.effects.rollback?.checkpoint_id, "ck-aaaaaaaaaaaaaaaaaaaaaaaa");
+    assert.equal(receipt.effects.rollback?.target_checkpoint_id, "ck-aaaaaaaaaaaaaaaaaaaaaaaa");
     assert.deepEqual(receipt.effects.rollback?.preserved_discoveries,
       ["a preserved finding"]);
     assert.deepEqual(receipt.effects.subgoals_created, []);
@@ -430,15 +430,21 @@ describe("v3.9.1 — submission receipt", () => {
       loopId: "receipt-recovery",
       branchId: "tx-child",
       success: true,
+      restore: {
+        directiveTransactionId: "tx-child",
+        redoRound: 2,
+        verifiedAt: 1,
+      },
     });
     const redo = decodeCommittedRound(redoEntry);
     assert.ok(redo);
     const receipt = deriveCommittedSubmissionView(redo!, [redo!], [directive!]);
     assert.deepEqual(receipt.recovery_checkpoint, {
-      restore_point: 1,
+      checkpoint_id: directive!.recovery!.target.checkpoint_id,
+      redo_round: 2,
       origin: "machine",
       reason: "test_restore",
-      verified: true,
+      restore_verified: true,
     });
     assert.equal(
       deriveCommittedSubmissionView(directive!, [directive!], [directive!])

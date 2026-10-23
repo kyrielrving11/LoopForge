@@ -826,10 +826,10 @@ describe("verification-gate — v2.12 outcome consistency", () => {
       loop_lineage: {
         round: 1,
         round_transaction: {
-          schema_version: 4,
+          schema_version: 5,
           round_id: "loop:test-loop:round:1",
           snapshot: {
-            schemaVersion: 4,
+            schemaVersion: 5,
             kind: "evaluation" as const,
             branchId: "loop:test-loop:branch:root",
             transactionId: "tx-test-loop-1-1",
@@ -1356,13 +1356,13 @@ describe("Round Contract checks (v3.8 item model)", () => {
 });
 
 describe("verification-gate — v3.7 CHECK_DOMAIN membership", () => {
-  it("maps every surviving CHECK_* constant into one of the four domains", () => {
+  it("maps every surviving CHECK_* constant into a domain", () => {
     const exports = verificationGate as unknown as Record<string, unknown>;
     const constants = Object.keys(exports)
       .filter((key) => key.startsWith("CHECK_") && typeof exports[key] === "string");
-    // v3.8: the drift checks were deleted and the four contract checks were
-    // replaced by the item-model checks (25 → 20).
-    assert.equal(constants.length, 20, "the surviving check set is 20");
+    // v3.9.7: the post-backtrack restore check (R9) was deleted; restoration
+    // is verified before the redo prompt, not on the redo submission.
+    assert.equal(constants.length, 19, "the surviving check set is 19");
     const domains = new Set<string>();
     for (const key of constants) {
       const id = exports[key] as string;
@@ -1372,22 +1372,19 @@ describe("verification-gate — v3.7 CHECK_DOMAIN membership", () => {
     }
     assert.deepEqual(
       [...domains].sort(),
-      ["evaluation_consistency", "evidence_integrity", "plan_contract", "progress_recovery"],
-      "all four domains are populated",
+      ["evaluation_consistency", "evidence_integrity", "plan_contract"],
+      "the three populated domains",
     );
   });
 
   it("has no orphan domain entries and the expected domain sizes", () => {
     const counts: Record<string, number> = {};
     for (const domain of Object.values(CHECK_DOMAIN)) counts[domain] = (counts[domain] ?? 0) + 1;
-    // v3.8: 20 checks after the drift and legacy contract checks were
-    // replaced by the item-model checks.
-    assert.equal(Object.keys(CHECK_DOMAIN).length, 20, "CHECK_DOMAIN covers exactly the 20 checks");
+    assert.equal(Object.keys(CHECK_DOMAIN).length, 19, "CHECK_DOMAIN covers exactly the 19 checks");
     assert.deepEqual(counts, {
       evaluation_consistency: 8,
       evidence_integrity: 7,
       plan_contract: 4,
-      progress_recovery: 1,
     });
   });
 });

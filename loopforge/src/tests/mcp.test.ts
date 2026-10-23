@@ -1221,7 +1221,7 @@ describe("MCP P0 lifecycle regressions", () => {
 
     const persisted = counting.readSession("atomic-session-save")
       ?.entry?.loop_lineage?.round_snapshot as Record<string, unknown> | undefined;
-    assert.equal(persisted?.schemaVersion, 4);
+    assert.equal(persisted?.schemaVersion, 5);
     assert.equal(persisted?.roundId, started.roundId);
   });
 });

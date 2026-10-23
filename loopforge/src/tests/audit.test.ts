@@ -73,10 +73,10 @@ function committedFeedback(
     loop_lineage: {
       round,
       round_transaction: {
-        schema_version: 4,
+        schema_version: 5,
         round_id: `loop:audit-loop:round:${round}`,
         snapshot: {
-          schemaVersion: 4,
+          schemaVersion: 5,
           kind: "evaluation" as const,
           branchId: "loop:audit-loop:branch:root",
           transactionId: `tx-audit-loop-${round}-1`,

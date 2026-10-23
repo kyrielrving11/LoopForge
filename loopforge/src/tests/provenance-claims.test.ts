@@ -173,10 +173,10 @@ describe("resolveRoundFiles", () => {
     loop_lineage: {
       round: 1,
       round_transaction: {
-        schema_version: 4,
+        schema_version: 5,
         round_id: "loop:provenance-loop:round:1",
         snapshot: {
-          schemaVersion: 4,
+          schemaVersion: 5,
           kind: "evaluation",
           branchId: "loop:provenance-loop:branch:root",
           transactionId: "tx-provenance-loop-1-1",
@@ -201,6 +201,11 @@ describe("resolveRoundFiles", () => {
               coverage: "tracked_and_non_ignored_untracked",
             },
           }],
+          beforeCheckpointError: {
+            code: "fixture_unavailable",
+            detail: "test fixture",
+            at: 0,
+          },
           afterEvidence: [{
             schemaVersion: 2,
             providerId: "git",
@@ -243,10 +248,10 @@ describe("resolveRoundFiles", () => {
       loop_lineage: {
         round: 1,
         round_transaction: {
-          schema_version: 4,
+          schema_version: 5,
           round_id: "loop:provenance-loop:round:1",
           snapshot: {
-            schemaVersion: 4,
+            schemaVersion: 5,
             kind: "evaluation",
             branchId: "loop:provenance-loop:branch:root",
             transactionId: "tx-provenance-loop-1-1b",
@@ -297,10 +302,10 @@ describe("listVerifiedClaims", () => {
       loop_lineage: {
         round,
         round_transaction: {
-          schema_version: 4,
+          schema_version: 5,
           round_id: `loop:provenance-loop:round:${round}`,
           snapshot: {
-            schemaVersion: 4,
+            schemaVersion: 5,
             kind: "evaluation",
             branchId: "loop:provenance-loop:branch:root",
             transactionId: `tx-provenance-loop-${round}-1`,

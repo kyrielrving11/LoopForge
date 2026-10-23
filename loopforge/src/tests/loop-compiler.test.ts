@@ -2110,8 +2110,10 @@ describe("3.9.3 — committed-fact prompt level", () => {
 
     assert.equal(response.recompile_level, "l2");
     assert.equal(response.diff_from_previous, "recovery_boundary");
-    assert.ok((response.state_file_content ?? "").includes("Restored to round**: 2"),
-      "the Recovery Brief must use the decoded backtrack target");
+    assert.ok((response.state_file_content ?? "").includes("Redo round**: 3"),
+      "the Recovery Brief must use the directive's redo round");
+    assert.ok((response.state_file_content ?? "").includes("Restored checkpoint"),
+      "the Recovery Brief names the verified checkpoint");
     assert.ok(!response.prompt.includes("ABANDONED branch"),
       "the abandoned branch's objective must not leak into the redo prompt");
   });

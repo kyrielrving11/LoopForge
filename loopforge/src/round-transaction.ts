@@ -265,6 +265,18 @@ export function prepareRoundTransaction(
   const roundId = makeRoundId(loopId, round);
   const branchId = opts.branchId ?? rootBranchId(loopId);
   const kind = opts.kind ?? "evaluation";
+  const observedGit = beforeEvidence.some((observation) =>
+    observation.kind === "git" && observation.status === "observed");
+  // A direct library caller may have no checkpoint store attached. The
+  // schema-5 invariant still records the explicit machine fact.
+  const beforeCheckpointError = opts.beforeCheckpointError ??
+    (observedGit && !opts.beforeCheckpoint
+      ? {
+          code: "store_unavailable",
+          detail: "no workspace checkpoint store was attached to this prepare",
+          at: now,
+        }
+      : undefined);
   return {
     schemaVersion: ROUND_TRANSACTION_SCHEMA_VERSION,
     branchId,
@@ -283,9 +295,7 @@ export function prepareRoundTransaction(
     phase: promptArtifact ? "prompted" : "prepared",
     beforeEvidence,
     ...(opts.beforeCheckpoint ? { beforeCheckpoint: opts.beforeCheckpoint } : {}),
-    ...(opts.beforeCheckpointError
-      ? { beforeCheckpointError: opts.beforeCheckpointError }
-      : {}),
+    ...(beforeCheckpointError ? { beforeCheckpointError } : {}),
     ...(opts.operatorAcceptance
       ? { operatorAcceptance: opts.operatorAcceptance }
       : {}),

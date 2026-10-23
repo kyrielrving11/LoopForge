@@ -49,7 +49,7 @@ function committedFeedback(
   preferAfter = true,
 ): VaultEntry {
   const snapshot = {
-    schemaVersion: 4,
+    schemaVersion: 5,
     kind: "evaluation" as const,
     branchId: "loop:git-loop:branch:root",
     transactionId: `tx-git-loop-${round}-1`,
@@ -59,6 +59,15 @@ function committedFeedback(
     attempt: 1,
     phase: "committed" as const,
     beforeEvidence: preferAfter ? [] : snapshots,
+    ...(preferAfter
+      ? {}
+      : {
+          beforeCheckpointError: {
+            code: "fixture_unavailable",
+            detail: "test fixture",
+            at: 0,
+          },
+        }),
     afterEvidence: preferAfter ? snapshots : [],
     submittedFields: [
       "success", "output_summary", "constraint_violations", "should_continue",
@@ -75,7 +84,7 @@ function committedFeedback(
     loop_lineage: {
       round,
       round_transaction: {
-        schema_version: 4,
+        schema_version: 5,
         round_id: `loop:git-loop:round:${round}`,
         snapshot,
         result: { action: "continue", verificationFlags: [] },

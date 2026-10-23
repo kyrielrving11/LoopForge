@@ -10,7 +10,7 @@ import {
 } from "../policy-metrics.js";
 import type { VaultEntry } from "../loop-store.js";
 import { PROMPT_ARTIFACT_SCHEMA_VERSION } from "../protocol.js";
-import { committedBacktrackRound } from "./_helpers.js";
+import { committedBacktrackRound, fixtureBeforeCheckpointError } from "./_helpers.js";
 
 function committedFeedback(
   round: number,
@@ -34,10 +34,10 @@ function committedFeedback(
     loop_lineage: {
       round,
       round_transaction: {
-        schema_version: 4,
+        schema_version: 5,
         round_id: `loop:metrics-loop:round:${round}`,
         snapshot: {
-          schemaVersion: 4,
+          schemaVersion: 5,
           kind: "evaluation",
           branchId: "loop:metrics-loop:branch:root",
           transactionId: `tx-metrics-loop-${round}-1`,
@@ -47,6 +47,7 @@ function committedFeedback(
           attempt: 1,
           phase: "committed",
           beforeEvidence: beforeEvidence ?? [],
+          ...fixtureBeforeCheckpointError(beforeEvidence ?? []),
           afterEvidence: afterEvidence ?? [],
           result,
           ...(evaluation ? { evaluation } : {}),

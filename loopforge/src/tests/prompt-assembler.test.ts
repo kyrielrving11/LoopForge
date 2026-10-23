@@ -714,10 +714,9 @@ describe("v3.2 — verification flag actions", () => {
       .map((key) => exports[key] as string);
     // v3.7 note: CHECK_DOMAIN (the domain map) is also a CHECK_-prefixed
     // export but is not a check id — filtered above by the string check.
-    // v3.8: 20 — the drift checks and the legacy contract checks were
-    // replaced by the item-model checks.
-    assert.ok(checks.length === 20,
-      `expected the 20 surviving CHECK_* constants, got ${checks.length}`);
+    // v3.9.7: 19 — R9 (post-backtrack restore) was deleted.
+    assert.ok(checks.length === 19,
+      `expected the 19 surviving CHECK_* constants, got ${checks.length}`);
     for (const check of checks) {
       const action = verificationActionFor(check);
       assert.ok(

@@ -213,10 +213,10 @@ describe("Hydration cache — backtrack redo replace (v3.3.1)", () => {
     // v3.8: a realistic committed envelope — the engine's merge decodes it
     // through the shared read model, which requires the schema-2 snapshot.
     const transaction = (action: "backtrack" | "continue", round = 1) => ({
-      schema_version: 4,
+      schema_version: 5,
       round_id: `loop:${loopId}:round:${round}`,
       snapshot: {
-        schemaVersion: 4,
+        schemaVersion: 5,
         kind: "evaluation",
         branchId: `loop:${loopId}:branch:root`,
         transactionId: `tx-${loopId}-${round}-1`,

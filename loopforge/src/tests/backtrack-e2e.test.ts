@@ -19,6 +19,7 @@ import { SessionManager } from "../mcp/session.js";
 import type { McpSession } from "../mcp/session.js";
 import { verifyBacktrackPrompt } from "./_backtrack-asserts.js";
 import { installTestCommandProvider, criterionClaims } from "./_helpers.js";
+import { resetPolicy } from "../policy.js";
 
 // v3.3: success claims need machine-backed evidence — the SessionManager
 // collects via the real collector, so a passing command provider keeps
@@ -73,6 +74,10 @@ describe("E2E backtrack lifecycle", () => {
   let loopId: string;
 
   before(() => {
+    // v3.9.7: this suite drives the real collector; a policy left behind by
+    // another test file would remove the Git provider and with it every
+    // checkpoint. Start from the shipped defaults.
+    resetPolicy();
     storeDir = join(tmpdir(), `loopforge-backtrack-${randomUUID()}`);
     mgr = createSessionManager(storeDir);
   });
@@ -274,6 +279,7 @@ describe("E2E Recovery Brief window (v3.7.1)", () => {
   let statePath = "";
 
   before(() => {
+    resetPolicy();
     storeDir = join(tmpdir(), `loopforge-recovery-brief-${randomUUID()}`);
     mgr = createSessionManager(storeDir);
   });

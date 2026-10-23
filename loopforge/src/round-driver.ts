@@ -269,6 +269,9 @@ export class RoundDriver {
         transactionId: snapshot.transactionId,
         branchId: snapshot.branchId,
       });
+      // prepareRoundTransaction records `store_unavailable` when no ref was
+      // supplied at construction; the ref above supersedes that placeholder.
+      delete snapshot.beforeCheckpointError;
     }
     if (opts.restore) snapshot.restore = opts.restore;
     return {

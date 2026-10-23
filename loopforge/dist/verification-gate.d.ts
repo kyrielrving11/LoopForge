@@ -19,7 +19,6 @@
  * framed as declaration / execution / closure stages in their doc comments.
  */
 import type { VaultEntry } from "./loop-store.js";
-import type { MachineObservation } from "./protocol.js";
 import type { GitDeltaState, ObservationDelta } from "./evidence-provider.js";
 import type { EntrypointDrift } from "./evidence-provider.js";
 import type { SelfEvaluation, VerificationResult } from "./protocol.js";
@@ -45,7 +44,6 @@ export declare const CHECK_VERIFICATION_ENTRYPOINT_MODIFIED = "verification_entr
 /** v3.3: Test files changed in the same round a verification command passed.
  *  Warn-only — the command result stays usable. */
 export declare const CHECK_TEST_FILES_MODIFIED = "test_files_modified";
-export declare const CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED = "backtrack_workspace_not_restored";
 export declare const CHECK_CRITERIA_CLAIMS_UNVERIFIED = "criteria_claims_unverified";
 /** v3.8: Contract items claimed met but not machine-verified this round.
  *  The round commits; the debt is surfaced and the enforcement gate's
@@ -132,26 +130,15 @@ export declare function parseTestOutput(stdout: string): ParsedTestCounts | null
  *  scope, or no git observation (cannot observe → fail open). */
 export declare function roundDriftFiles(activeContract: ActiveContractView | null, evidenceDeltas: ReadonlyArray<ObservationDelta>): string[] | null;
 export declare function verifySelfEvaluation(selfEval: SelfEvaluation, currentRound: number, vaultEntries: VaultEntry[], prevSelfEval?: SelfEvaluation | null, evidenceDeltas?: ReadonlyArray<ObservationDelta>, 
-/** v2.13: Files from skipped backtrack rounds. If the agent's
- *  files_changed overlaps significantly with these, the workspace
- *  was not properly restored before working. */
-backtrackSkippedFiles?: string[], 
-/** M3 (v3.7.x): skipped-file git fingerprints at their failed rounds —
- *  machine proof of "untouched since the rollback" for the restore check. */
-backtrackSkippedFingerprints?: Record<string, string>, 
-/** v2.12: Git HEAD commit of the backtrack restore point. When set, the
- *  current git snapshot must sit at this commit — otherwise the workspace
- *  was not restored and the round cannot be accepted. */
-backtrackTargetGitHead?: string, 
+/** v3.7.1: gate records (task_type gate_opened / gate_decision) live
+ *  outside the round prefix — the caller passes them in explicitly. */
 /** v3.7.1: gate records (task_type gate_opened / gate_decision) live
  *  outside the round prefix — the caller passes them in explicitly. */
 gateEntries?: VaultEntry[], 
 /** v3.8.3: entrypoint files that no longer match the trusted round-start
  *  baseline. Derived by the caller (it needs the in-flight trust map and
  *  filesystem access); this function stays a pure function of its inputs. */
-entrypointDrift?: EntrypointDrift[], beforeEvidence?: MachineObservation[], 
-/** v3.9: the restore point's own dirty files (undefined = never observed). */
-backtrackTargetDirty?: string[], 
+entrypointDrift?: EntrypointDrift[], 
 /** v3.9.4: whether the raw submission attempted
  *  `execution_report.files_changed` (from the persisted submittedFields
  *  manifest). Undefined falls back to "an execution report exists". */

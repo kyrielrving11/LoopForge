@@ -101,10 +101,10 @@ describe("loopforge CLI", () => {
         loop_lineage: {
           round: 1,
           round_transaction: {
-            schema_version: 4,
+            schema_version: 5,
             round_id: "loop:inspect-me:round:1",
             snapshot: {
-              schemaVersion: 4,
+              schemaVersion: 5,
               kind: "evaluation",
               branchId: "loop:inspect-me:branch:root",
               transactionId: "tx-inspect-me-1-1",
@@ -167,10 +167,10 @@ describe("loopforge CLI", () => {
         loop_lineage: {
           round: 1,
           round_transaction: {
-            schema_version: 4,
+            schema_version: 5,
             round_id: "loop:explain-me:round:1",
             snapshot: {
-              schemaVersion: 4,
+              schemaVersion: 5,
               kind: "evaluation",
               branchId: "loop:explain-me:branch:root",
               transactionId: "tx-explain-me-1-1",

@@ -444,7 +444,7 @@ export interface SubmissionReceipt {
     checkpoint: { label: string; round: number } | null;
     rollback: {
       redo_round: number;
-      checkpoint_id: string;
+      target_checkpoint_id: string;
       preserved_discoveries: string[];
       wrong_assumptions: string[];
       origin?: "agent" | "machine";

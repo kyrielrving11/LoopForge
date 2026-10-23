@@ -154,15 +154,59 @@ export interface SelfEvaluation {
   round_contract?: RoundContractProposal;
 }
 
-/** v3.9.6: The Agent's request to abandon the current branch and restore an
- *  earlier committed point. This is an ACTION, not an evaluation: it never
+/** v3.9.7: the kind of recovery material a checkpoint represents. `before` is
+ *  the automatic transaction before-image; `mid` is an Agent-created savepoint
+ *  during a round. Both are evidence/recovery material, never progress. */
+export type CheckpointRole = "before" | "mid";
+
+/** v3.9.7: a checkpoint reference held by a typed transaction snapshot. This
+ *  reference is the authority for ownership, current-branch visibility and the
+ *  redo round. The manifest alone is content-addressed recovery material and
+ *  can never become a recovery point by itself. */
+export interface CheckpointRef {
+  checkpointId: string;
+  contentHash: string;
+  role: CheckpointRole;
+  /** Logical round whose snapshot carries this reference. */
+  round: number;
+  roundId: string;
+  /** Transaction that currently owns this reference (retry may re-bind it). */
+  transactionId: string;
+  branchId: string;
+  /** First round of the child branch if this checkpoint is restored. For
+   *  before/mid checkpoints this equals `round`. */
+  redoRound: number;
+  createdAt: number;
+}
+
+/** v3.9.7: the restore-relevant content manifest. `fingerprints` is exactly
+ *  the Git observation boundary; `contents` names the dirty regular files and
+ *  symlinks whose bytes are stored as content-addressed blobs. */
+export interface WorkspaceCheckpointManifest {
+  schemaVersion: 1;
+  checkpointId: string;
+  loopId: string;
+  round: number;
+  role: CheckpointRole;
+  createdAt: number;
+  head?: string;
+  dirty: string[];
+  fingerprints: Record<string, string>;
+  contents: string[];
+  coverage: "tracked_and_non_ignored_untracked";
+  contentHash: string;
+}
+
+/** v3.9.7: The Agent's request to abandon the current branch and restore a
+ *  checkpoint it selected. This is an ACTION, not an evaluation: it never
  *  carries success/output_summary/constraint_violations/should_continue and
- *  never fabricates a SelfEvaluation. The target must be an earlier committed
- *  evaluation round in the current branch with a fully observed Git restore
- *  point; LoopForge validates that, then records a rollback directive event.
- *  The reason is the Agent's judgment and is recorded verbatim, never judged. */
+ *  never fabricates a SelfEvaluation. The checkpoint must be visible in the
+ *  current held transaction or a committed evaluation transaction on the
+ *  current branch. LoopForge records the directive, executes and verifies the
+ *  restore, and only then issues the redo prompt. The reason is the Agent's
+ *  judgment, recorded verbatim and never judged. */
 export interface RecoveryRequest {
-  target_round: number;
+  target_checkpoint_id: string;
   reason: string;
 }
 
@@ -175,25 +219,40 @@ export interface OperatorAcceptance {
   hard_constraints: string[];
 }
 
-/** v3.9.6: A committed rollback directive. It is a typed event in the same
+/** v3.9.7: the committed recovery target. It references a checkpoint by id and
+ *  content hash; the manifest is the one copy of the boundary. `redo_round`
+ *  is the branch fence: parent rounds with `round < redo_round` are retained,
+ *  and the child branch starts at `redo_round`. */
+export interface RecoveryTarget {
+  checkpoint_id: string;
+  content_hash: string;
+  role: CheckpointRole;
+  /** Round that owns the checkpoint reference. */
+  round: number;
+  round_id: string;
+  /** Transaction that owns the checkpoint reference. */
+  transaction_id: string;
+  /** First round of the child branch. */
+  redo_round: number;
+}
+
+/** v3.9.7: A committed rollback directive. It is a typed event in the same
  *  round document as the abandoned/triggering transaction, not a normal
  *  round. `transaction_id` also names the child branch; the redo and all
- *  later transactions on that branch carry it as `branchId`. */
+ *  later transactions on that branch carry it as `branchId`.
+ *
+ *  The directive deliberately does NOT duplicate the target's HEAD or
+ *  fingerprints: the checkpoint manifest is the one copy, bound by
+ *  `target.content_hash`. `skipped_files` is a report fact derived from the
+ *  target manifest vs. the abandoned boundaries; it is never a restore gate. */
 export interface RecoveryDirective {
   origin: "agent" | "machine";
   /** Agent reason or machine failure reason. */
   reason: string;
   /** Machine check id; never set for an agent request. */
   trigger_rule?: string;
-  target: number;
-  target_round_id: string;
-  target_transaction_id: string;
-  target_head?: string;
-  target_dirty: string[];
-  /** Complete observed Git boundary at the restore point. */
-  target_fingerprints: Record<string, string>;
+  target: RecoveryTarget;
   skipped_files: string[];
-  skipped_fingerprints: Record<string, string>;
   skipped_discoveries: string[];
   failed_rounds: number[];
   /** Committed Agent reports from abandoned rounds. */
@@ -347,10 +406,13 @@ export interface SubmissionReceipt {
    *  directive itself remains the committed audit record; this is the redo's
    *  receipt projection of it, never a second ledger. */
   recovery_checkpoint?: {
-    restore_point: number;
+    checkpoint_id: string;
+    redo_round: number;
     origin: "agent" | "machine";
     reason: string;
-    verified: boolean;
+    /** Machine result: the redo snapshot carries a restore marker produced by
+     *  the verified restore. The directive remains the committed audit record. */
+    restore_verified: boolean;
   };
   reports: Array<{
     path: string;
@@ -381,12 +443,12 @@ export interface SubmissionReceipt {
     constraints_not_expanded: string[];
     checkpoint: { label: string; round: number } | null;
     rollback: {
-      restore_point: number;
+      redo_round: number;
+      checkpoint_id: string;
       preserved_discoveries: string[];
       wrong_assumptions: string[];
       origin?: "agent" | "machine";
       reason?: string;
-      target_head?: string;
     } | null;
   };
   verification: {
@@ -458,9 +520,12 @@ export interface SubmissionGuidance {
     status: CriterionStatus["status"];
   }>;
   recovery: {
-    required: boolean;
-    restore_point?: number;
-    target_head?: string;
+    /** The directive is pending until the redo round commits. */
+    pending: boolean;
+    redo_round: number;
+    checkpoint_id: string;
+    /** True after the executor verified the restored boundary. */
+    restore_verified: boolean;
     origin?: "agent" | "machine";
     reason?: string;
   } | null;
@@ -1590,7 +1655,13 @@ export type ToolErrorCode =
   | "lease_conflict"
   | "recovery_invalid"
   | "recovery_disabled"
-  | "recovery_unavailable";
+  | "recovery_unavailable"
+  | "checkpoint_invalid"
+  | "checkpoint_unavailable"
+  | "checkpoint_failed"
+  | "checkpoint_limit"
+  | "restore_failed"
+  | "restore_pending";
 
 /** v3.8: The structured error inside the uniform `{ok: false}` envelope. */
 export interface ToolError {

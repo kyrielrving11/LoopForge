@@ -46,6 +46,7 @@ function declaringRound(): CommittedRoundView {
     roundId: "loop:vf-loop:round:1", transactionId: "tx-vf-1",
     branchId: "loop:vf-loop:branch:root", kind: "evaluation",
     origin: "evaluation", recovery: null,
+    beforeCheckpoint: null, checkpoints: [], restore: null, operatorAcceptance: null,
     attempt: 1, promptArtifact: null,
     evaluation: null, executionReport: null, verificationFlags: [], result: null,
     action: "continue", success: false, outcome: null,

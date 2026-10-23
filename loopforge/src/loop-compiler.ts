@@ -644,7 +644,9 @@ function committedBacktrackBrief(
   const record = view?.recovery;
   if (!record) return undefined;
   const lines = recoveryBriefLines({
-    target: record.target,
+    redoRound: record.target.redo_round,
+    checkpointId: record.target.checkpoint_id,
+    restoreVerified: true,
     triggerRule: record.origin === "machine"
       ? (record.trigger_rule ?? "machine_recovery")
       : "agent_recovery",
@@ -659,32 +661,16 @@ function committedBacktrackBrief(
     preservedDiscoveries: record.skipped_discoveries,
     // The redo round's stable identity is a fact the old prepended prose
     // carried; keep it inside the artifact now.
-    recoveryRoundId: `loop:${loopId}:round:${record.target + 1}`,
+    recoveryRoundId: `loop:${loopId}:round:${record.target.redo_round}`,
   });
-  // v3.9.4: the restore point's machine facts belong in the prompt, not only
-  // in the prose backtrack header. Deterministic order and a visible overflow
-  // count keep the fact complete without making the section unbounded.
-  if (record.target_head) {
-    lines.push(`- **Restore HEAD**: \`${record.target_head}\``);
-  }
   if (record.skipped_files.length > 0) {
     const files = [...record.skipped_files].sort();
     const shown = files.slice(0, 15);
-    lines.push("- **Files changed in abandoned rounds**:");
+    lines.push("- **Files changed since the checkpoint**:");
     for (const file of shown) lines.push(`  - \`${file}\``);
     if (files.length > shown.length) {
       lines.push(`  - … and ${files.length - shown.length} more files`);
     }
-  }
-  // The machine requirement the recovery checkpoint enforces. A fact, not a
-  // recipe: LoopForge never says HOW to restore the workspace.
-  if (record.target_head || record.skipped_files.length > 0) {
-    lines.push(
-      `- **Restore requirement**: the next submission's workspace is checked ` +
-      `against round ${record.target}` +
-      (record.target_head ? ` (HEAD \`${record.target_head}\`)` : "") +
-      "; a leftover change from the abandoned rounds rejects the recovery checkpoint.",
-    );
   }
   return lines;
 }

@@ -11,6 +11,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { resolve, sep } from "node:path";
 import { LoopForgeEngine } from "../engine.js";
 import { deriveGate } from "../cognitive-governance.js";
 import {
@@ -18,6 +19,7 @@ import {
   makeLoopCompileRequest,
 } from "../protocol.js";
 import type {
+  CheckpointRef,
   ContractItemStatus,
   LoopForgeRequest,
   LoopForgeResponse,
@@ -35,6 +37,7 @@ import type {
   LoopTerminalSink,
   RoundVerificationStatus,
   StopReason,
+  WorkspaceCheckpointManifest,
 } from "../protocol.js";
 import { captureEntrypointTrust, EvidenceCollector } from "../evidence-provider.js";
 import type { MachineObservation } from "../protocol.js";
@@ -52,7 +55,21 @@ import { declaresBlocked } from "../round-outcome.js";
 import { deriveSubmissionReceipt } from "../submission-receipt.js";
 import type { RoundTransactionSnapshot } from "../round-transaction.js";
 import { RoundDriver } from "../round-driver.js";
-import { deriveRecoveryDirective, resolveRecoveryTarget } from "../recovery.js";
+import {
+  deriveRecoveryDirective,
+  findCheckpointRef,
+  validateCheckpointManifest,
+} from "../recovery.js";
+import {
+  executeRestore,
+  preflightRestore,
+  RestoreFailure,
+} from "../workspace-restore.js";
+import {
+  buildCheckpointRef,
+  FileWorkspaceCheckpointStore,
+} from "../workspace-checkpoint.js";
+import { resolveStateDirectory } from "../policy.js";
 import { finalizeStopReason } from "../round-coordinator.js";
 import type { RoundProcessResult } from "../round-coordinator.js";
 import type { PreparedRound } from "../round-driver.js";
@@ -64,6 +81,7 @@ import {
   derivationRounds,
   pendingRollbackDirective,
   readOnlyRounds,
+  resolveBranch,
 } from "../committed-round.js";
 import { deriveSubmissionGuidance } from "../submission-guidance.js";
 import { latestObjective } from "../loop-compiler.js";
@@ -72,7 +90,7 @@ import type { LoopStore, VaultEntry } from "../loop-store.js";
 import { logEvent } from "../observability.js";
 import { policyMetrics } from "../policy-metrics.js";
 import type { SessionStateStore } from "../storage.js";
-import { normalizeText } from "../token-utils.js";
+import { isRecord, normalizeText } from "../token-utils.js";
 import { ProjectionCoverageError } from "../prompt-coverage.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -88,6 +106,20 @@ function parseFingerprintMap(value: unknown): Record<string, string> {
     if (typeof fp === "string") out[file] = fp;
   }
   return out;
+}
+
+/** Parse the session's operator-acceptance cursor leniently. A corrupt copy
+ *  degrades to the committed root transaction; it never invents criteria. */
+function parseOperatorAcceptance(value: unknown): OperatorAcceptance | undefined {
+  if (!isRecord(value)) return undefined;
+  if (typeof value.task !== "string" ||
+      !Array.isArray(value.success_criteria) ||
+      !value.success_criteria.every((item) => typeof item === "string") ||
+      !Array.isArray(value.hard_constraints) ||
+      !value.hard_constraints.every((item) => typeof item === "string")) {
+    return undefined;
+  }
+  return value as unknown as OperatorAcceptance;
 }
 
 export interface McpSession {
@@ -113,6 +145,10 @@ export interface McpSession {
    *  appears in and a re-derived baseline could launder. Absent means the
    *  round runs without that arm — never a lost round. */
   entrypointTrust?: Record<string, string>;
+  /** v3.9.7: operator-owned immutable acceptance, carried as a session cursor
+   *  so a recovery that clears the held snapshot cannot lose it. The root
+   *  committed round-1 transaction remains the authority. */
+  operatorAcceptance?: OperatorAcceptance;
   /** Schema-versioned transaction for the prompt currently held by the agent. */
   roundSnapshot?: RoundTransactionSnapshot;
 }
@@ -210,6 +246,13 @@ export interface AdvanceResult {
   round: number;
   /** Stable logical identity; unchanged when enforcement retries the round. */
   roundId?: string;
+  /** v3.9.7: the held transaction attempt. Required for next/checkpoint/
+   *  recovery so a stale response can never be applied to a later attempt. */
+  transactionId?: string;
+  /** v3.9.7: the held transaction's before-image + mid savepoints. */
+  checkpoints?: CheckpointRef[];
+  /** v3.9.7: explicit fact when the automatic before-image failed. */
+  beforeCheckpointError?: { code: string; detail: string };
   prompt: string | null;
   stopReason?: string;
   /** v2.0.1: Human-readable context for why the loop stopped.
@@ -231,14 +274,23 @@ export interface AdvanceResult {
   /** v1.13: When enforcementAction is "reject" or "terminate", the reason
    *  why the round was rejected or the loop was terminated. */
   enforcementReason?: string;
-  /** v3.9.6: the committed rollback directive facts for a recovery
-   *  disposition. The redo prompt is the next round. */
+  /** v3.9.7: the committed rollback directive facts and the verified restore
+   *  that produced the redo prompt. The Agent does not restore the workspace;
+   *  LoopForge already did. */
   recovery?: {
     origin: "agent" | "machine";
-    target_round: number;
     reason: string;
-    target_head?: string;
-    restore_required: boolean;
+    target_checkpoint_id: string;
+    redo_round: number;
+    restore: {
+      status: "verified";
+      head?: string;
+      previous_head?: string;
+      safety_ref?: string;
+      files_written: number;
+      files_deleted: number;
+      verified_at: number;
+    };
   };
   /** v3.8.1: set when the RUNTIME refused the submission before touching any
    *  state — the same `ToolErrorCode` as `stopReason`, plus the structured
@@ -250,9 +302,16 @@ export interface AdvanceResult {
       | "evaluation_invalid"
       | "contract_invalid"
       | "round_id_required"
+      | "round_id_mismatch"
       | "recovery_invalid"
       | "recovery_disabled"
-      | "recovery_unavailable";
+      | "recovery_unavailable"
+      | "checkpoint_invalid"
+      | "checkpoint_unavailable"
+      | "checkpoint_failed"
+      | "checkpoint_limit"
+      | "restore_failed"
+      | "restore_pending";
     details: Record<string, unknown>;
   };
   /** v3.9.4: a prompt-projection code defect. This is NOT a submission
@@ -305,6 +364,9 @@ export interface RoundLifecycleDeps {
   ownerId: string;
   /** Session lease duration; stamped into saved session entries. */
   leaseMs: number;
+  /** v3.9.7: per-loop checkpoint store. Absent disables automatic
+   *  before-images (the round still runs with an explicit error fact). */
+  checkpointStoreFor?: (loopId: string) => FileWorkspaceCheckpointStore | undefined;
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -342,8 +404,12 @@ export class RoundLifecycle {
   private readonly terminalSinks: Set<LoopTerminalSink>;
   private readonly ownerId: string;
   private readonly leaseMs: number;
+  private readonly checkpointStoreFor:
+    | ((loopId: string) => FileWorkspaceCheckpointStore | undefined)
+    | undefined;
 
   constructor(deps: RoundLifecycleDeps) {
+    this.checkpointStoreFor = deps.checkpointStoreFor;
     this.store = deps.store;
     this.sessionStore = deps.sessionStore;
     this.registry = deps.registry;
@@ -360,9 +426,12 @@ export class RoundLifecycle {
     extras: {
       verificationFlags?: ReadonlyArray<VerificationFlag>;
       recovery?: {
-        required: boolean;
-        restore_point?: number;
-        target_head?: string;
+        pending: boolean;
+        redo_round: number;
+        checkpoint_id: string;
+        restore_verified: boolean;
+        origin?: "agent" | "machine";
+        reason?: string;
       } | null;
     } = {},
   ): SubmissionGuidance {
@@ -387,7 +456,8 @@ export class RoundLifecycle {
     session: McpSession,
     entries: ReadonlyArray<VaultEntry>,
   ): ReadonlyArray<string> | null {
-    const acceptance = session.roundSnapshot?.operatorAcceptance;
+    const acceptance =
+      session.operatorAcceptance ?? session.roundSnapshot?.operatorAcceptance;
     if (acceptance) return acceptance.success_criteria;
     const attempt = session.roundSnapshot?.round === session.currentRound
       ? session.roundSnapshot.attempt
@@ -495,7 +565,7 @@ export class RoundLifecycle {
         ? null
         : [...branchDirectives(entries)].reverse().find((item) =>
             item.recovery !== null && item.recovery !== undefined &&
-            item.recovery.target + 1 === base.snapshot.round &&
+            item.recovery.target.redo_round === base.snapshot.round &&
             item.recovery.transaction_id === base.snapshot.branchId,
           )?.recovery ?? null);
     return deriveSubmissionReceipt({
@@ -548,6 +618,9 @@ export class RoundLifecycle {
           // leniently (parseFingerprintMap) so a corrupt or absent value
           // degrades to "no absolute arm" instead of costing the round.
           entrypoint_trust: session.entrypointTrust ?? null,
+          // v3.9.7: the operator-owned immutable acceptance cursor. The root
+          // committed round-1 transaction remains the authority.
+          operator_acceptance: session.operatorAcceptance ?? null,
           // v1.19: durable round transaction state
           round_snapshot: session.roundSnapshot ?? null,
           // v1.20: cross-process single-owner lease
@@ -569,7 +642,11 @@ export class RoundLifecycle {
   ): McpSession | null {
     const lineage = (entry.loop_lineage ?? {}) as Record<string, unknown>;
     const status = (lineage.status as string) ?? "running";
-    if (status !== "running" && !(allowPaused && status === "paused")) {
+    // v3.9.7: a persisted `stalled` recovery state MUST be resumable. It is
+    // how a committed directive with an unfinished restore survives a
+    // process restart; refusing it would strand the loop forever.
+    if (status !== "running" && status !== "stalled" &&
+        !(allowPaused && status === "paused")) {
       return null;
     }
 
@@ -584,12 +661,38 @@ export class RoundLifecycle {
     const task = (entry.task as string) ?? "";
     const maxRounds =
       (lineage.max_rounds as number) ?? getPolicy().engine.max_rounds;
-    const roundSnapshot = parseRoundTransactionSnapshot(lineage.round_snapshot);
+    const parsedSnapshot = parseRoundTransactionSnapshot(lineage.round_snapshot);
     // v3.7: the synchronous evidence fallback was removed (async providers
     // could never be collected synchronously — they were skipped and logged
     // as failures). Every path that needs evidence re-collects asynchronously
     // through prepare()/unpause(); a missing snapshot starts with no baseline.
     const fallbackEvidence: MachineObservation[] = [];
+    const entries = [
+      ...queryLoopEntries(this.store, loopId, { prefix: `loop:${loopId}:` }),
+      ...queryLoopEntries(this.store, loopId, { prefix: `loop:${loopId}:`, feedbackOnly: true }),
+    ];
+    const branch = resolveBranch(entries);
+    const pending = pendingRollbackDirective(entries);
+    // The session cursor is the primary copy; the held snapshot and the
+    // visible root transaction are fallbacks. Losing the operator surface
+    // during a restore/restart would be unrecoverable.
+    const operatorAcceptance =
+      parseOperatorAcceptance(lineage.operator_acceptance) ??
+      parsedSnapshot?.operatorAcceptance ??
+      branch.rounds.find((view) => view.operatorAcceptance !== null)?.operatorAcceptance ??
+      undefined;
+    const effectiveBranchId =
+      parsedSnapshot?.branchId ?? branch.branchId ?? rootBranchId(loopId);
+    // When a rollback directive is pending, do NOT synthesize an empty
+    // beforeEvidence snapshot: it would be mistaken for a held evaluation.
+    // Resume must run the pending restore first.
+    const roundSnapshot = parsedSnapshot ?? (pending ? undefined : prepareRoundTransaction(
+      loopId,
+      currentRound,
+      fallbackEvidence,
+      undefined,
+      { branchId: effectiveBranchId },
+    ));
 
     const engine = new LoopForgeEngine(this.store);
     return {
@@ -605,11 +708,8 @@ export class RoundLifecycle {
         ? lineage.last_rejection_check
         : "",
       entrypointTrust: parseFingerprintMap(lineage.entrypoint_trust),
-      roundSnapshot: roundSnapshot ?? prepareRoundTransaction(
-        loopId,
-        currentRound,
-        fallbackEvidence,
-      ),
+      ...(operatorAcceptance ? { operatorAcceptance } : {}),
+      roundSnapshot,
     };
   }
 
@@ -659,15 +759,18 @@ export class RoundLifecycle {
     }
   }
 
-  /** v3.9.6: operator acceptance and branch identity travel with the held
-   *  round snapshot; every new prepare carries them forward. */
+  /** v3.9.7: operator acceptance and branch identity travel with the session
+   *  cursor (not only the held snapshot). Every prepare carries them forward;
+   *  a recovery that clears the held snapshot must not reset the branch to
+   *  root or lose the operator's acceptance surface. */
   private prepareOptions(
     session: McpSession,
     branchId?: string,
   ): { branchId?: string; operatorAcceptance?: OperatorAcceptance } {
-    const acceptance = session.roundSnapshot?.operatorAcceptance;
+    const acceptance = session.operatorAcceptance ?? session.roundSnapshot?.operatorAcceptance;
+    const effectiveBranchId = branchId ?? session.roundSnapshot?.branchId;
     return {
-      ...(branchId ? { branchId } : {}),
+      ...(effectiveBranchId ? { branchId: effectiveBranchId } : {}),
       ...(acceptance ? { operatorAcceptance: acceptance } : {}),
     };
   }
@@ -694,6 +797,7 @@ export class RoundLifecycle {
       sessionId: session.sessionId,
       round: session.currentRound,
       roundId: session.roundSnapshot.roundId,
+      ...this.transactionFacts(session),
       prompt: prepared.prompt,
       level: prepared.level,
       roundSuccess,
@@ -707,6 +811,31 @@ export class RoundLifecycle {
     };
   }
 
+  /** v3.9.7: execution metadata attached to every held/prepared prompt. These
+   *  are transport facts, never prompt governance content. */
+  private transactionFacts(
+    session: McpSession,
+  ): Pick<AdvanceResult, "transactionId" | "checkpoints" | "beforeCheckpointError"> {
+    const snapshot = session.roundSnapshot;
+    if (!snapshot) return {};
+    const checkpoints = [
+      ...(snapshot.beforeCheckpoint ? [snapshot.beforeCheckpoint] : []),
+      ...(snapshot.checkpoints ?? []),
+    ];
+    return {
+      transactionId: snapshot.transactionId,
+      ...(checkpoints.length > 0 ? { checkpoints } : {}),
+      ...(snapshot.beforeCheckpointError
+        ? {
+            beforeCheckpointError: {
+              code: snapshot.beforeCheckpointError.code,
+              detail: snapshot.beforeCheckpointError.detail,
+            },
+          }
+        : {}),
+    };
+  }
+
   private restoredPromptResult(session: McpSession): AdvanceResult | null {
     const artifact = session.roundSnapshot?.promptArtifact;
     if (!artifact) return null;
@@ -716,6 +845,7 @@ export class RoundLifecycle {
       sessionId: session.sessionId,
       round: session.currentRound,
       roundId: artifact.roundId,
+      ...this.transactionFacts(session),
       prompt: artifact.renderedPrompt,
       level: artifact.level,
       roundSuccess: undefined,
@@ -767,16 +897,15 @@ export class RoundLifecycle {
       };
     }
 
-    if (pr.action === "backtrack") {
-      // Backtrack committed but prompt not delivered (crash window).
-      // Reset round counter to the restore target + 1 so the next
-      // resume / unpause compiles from the correct restored state.
-      const restoreTarget = pr.recovery?.target ?? (session.currentRound - 1);
-      session.currentRound = restoreTarget + 1;
+    if (pr.action === "backtrack" || pr.action === "recovery") {
+      // Backtrack/directive committed but the redo prompt was not delivered
+      // (crash window). The pending-directive-first path in resume/unpause
+      // performs the restore; here we only align the cursor.
+      session.currentRound = pr.recovery?.target.redo_round ?? session.currentRound;
       session.consecutiveRejections = 0;
       session.lastRejectionCheck = "";
       this.save(session);
-      // Return null — caller (resume/unpause) will recompile normally
+      // Return null — caller (resume/unpause) will restore/recompile.
       return null;
     }
 
@@ -823,6 +952,68 @@ export class RoundLifecycle {
     );
   }
 
+  /** v3.9.7: a committed directive with no verified redo snapshot must be
+   *  completed BEFORE any ordinary compile/held-prompt path. The restore and
+   *  redo prepare are idempotent; a verified held redo prompt is returned
+   *  without re-checking the workspace (the Agent may already have worked). */
+  private async completePendingRecovery(
+    session: McpSession,
+  ): Promise<AdvanceResult | null> {
+    const prefix = `loop:${session.loopId}:`;
+    const entries: VaultEntry[] = [
+      ...queryLoopEntries(this.store, session.loopId, { prefix }),
+      ...queryLoopEntries(this.store, session.loopId, { prefix, feedbackOnly: true }),
+    ];
+    const pending = pendingRollbackDirective(entries);
+    if (!pending?.recovery) return null;
+    const directive = pending.recovery;
+    const verified =
+      session.roundSnapshot?.restore?.directiveTransactionId ===
+        directive.transaction_id &&
+      session.roundSnapshot.round === directive.target.redo_round;
+    if (verified) {
+      return this.restoredPromptResult(session);
+    }
+    session.currentRound = directive.target.redo_round;
+    session.roundSnapshot = undefined;
+    session.status = "running";
+    const pr: RoundProcessResult = {
+      action: directive.origin === "agent" ? "recovery" : "backtrack",
+      origin: directive.origin,
+      reason: directive.reason,
+      recovery: directive,
+      verificationFlags: [],
+      roundSuccess: false,
+      gateContradicted: false,
+      verificationStatus: "not_applicable",
+      newConsecutiveRejections: 0,
+      shouldPushSuccessTrajectory: false,
+    };
+    const snapshot = prepareRoundTransaction(
+      session.loopId,
+      directive.target.redo_round,
+      [],
+    );
+    const beforeFacts = this.beforeFactsFor(session);
+    return this.buildBacktrackResult(session.sessionId, session, pr, {
+      snapshot,
+      selfEval: {
+        success: false,
+        output_summary: "",
+        constraint_violations: [],
+        should_continue: true,
+      },
+      pr,
+      actualEvidence: [],
+      diagnostics: [],
+      submittedFields: [],
+      beforeContractId: beforeFacts.contractId,
+      beforeSubGoals: beforeFacts.subGoals,
+      recoveryDirective: directive,
+      replayed: true,
+    });
+  }
+
   /** Resume tail: the session has been reconstructed and registered. Reconcile
    *  a committed-but-undelivered round, restore the held prompt, or recover a
    *  missing prompt from current round state. v3.7: async — compilation runs
@@ -830,6 +1021,9 @@ export class RoundLifecycle {
    *  removed); a failed compile now degrades to the same stalled terminal
    *  result unpause returns instead of persisting a null prompt. */
   async resume(session: McpSession): Promise<AdvanceResult> {
+    const pendingRecovery = await this.completePendingRecovery(session);
+    if (pendingRecovery) return pendingRecovery;
+
     const reconciled = await this.reconcileCommittedRound(session);
     if (reconciled) return reconciled;
 
@@ -876,6 +1070,8 @@ export class RoundLifecycle {
    *  status "running". Refresh async evidence, reconcile a committed round,
    *  restore the held prompt, or compile the next prompt. */
   async unpause(session: McpSession): Promise<AdvanceResult> {
+    const pendingRecovery = await this.completePendingRecovery(session);
+    if (pendingRecovery) return pendingRecovery;
     // Replace the sync-fallback evidence baseline with async evidence
     // so resumed sessions don't silently drop async provider data.
     try {
@@ -1497,6 +1693,7 @@ export class RoundLifecycle {
       sessionId,
       round: session.currentRound,
       roundId: session.roundSnapshot.roundId,
+      ...this.transactionFacts(session),
       prompt: nextPrompt,
       level: nextLevel,
       roundSuccess,
@@ -1553,12 +1750,46 @@ export class RoundLifecycle {
     roundId?: string,
     normalizationDiagnostics?: SubmissionDiagnostic[],
     submittedFields?: string[],
+    transactionId?: string,
   ): Promise<AdvanceResult> {
     // ── 1. Validate session ──────────────────────────────────────────────
     const session = this.registry.get(sessionId);
     if (!session) return { sessionId, round: 0, prompt: null, stopReason: "session_not_found", stopDetail: "No session exists with this ID. It may have expired, been deleted, or never existed." };
     if (session.status !== "running" && session.status !== "stalled") {
       return { sessionId, round: session.currentRound, prompt: null, stopReason: session.status, stopDetail: `Session is ${session.status}. Use loopforge_resume to restart a paused session, or loopforge_start for a new task.` };
+    }
+    // v3.9.7: a pending rollback directive with no verified redo snapshot
+    // means the workspace is (or may be) mid-restore. Ordinary work must not
+    // be evaluated against it. Resume completes the restore first.
+    const pendingPrefix = `loop:${session.loopId}:`;
+    const pendingEntries = [
+      ...queryLoopEntries(this.store, session.loopId, { prefix: pendingPrefix }),
+      ...queryLoopEntries(this.store, session.loopId, {
+        prefix: pendingPrefix,
+        feedbackOnly: true,
+      }),
+    ];
+    const pending = pendingRollbackDirective(pendingEntries);
+    if (pending?.recovery &&
+        session.roundSnapshot?.restore?.directiveTransactionId !==
+          pending.recovery.transaction_id) {
+      return {
+        sessionId,
+        round: session.currentRound,
+        roundId: session.roundSnapshot?.roundId,
+        prompt: null,
+        stopReason: "stalled",
+        submissionError: {
+          code: "restore_pending",
+          details: {
+            loopId: session.loopId,
+            directive_transaction_id: pending.recovery.transaction_id,
+            redo_round: pending.recovery.target.redo_round,
+            detail:
+              "A pending restore must be completed by loopforge_resume before work can be submitted.",
+          },
+        },
+      };
     }
     // A stalled compiler preparation is retryable against the same held
     // round. Format errors never set this status; they return before advance.
@@ -1599,6 +1830,40 @@ export class RoundLifecycle {
         prompt: null,
         stopReason: "stale_round_id",
         stopDetail: `Submitted roundId ${roundId} does not match the current round ${expectedRoundId}, and no prompt is currently held. Call loopforge_status or loopforge_resume to re-anchor.`,
+      };
+    }
+
+    // v3.9.7: transaction identity. roundId anchors the logical round; the
+    // transactionId anchors the exact attempt. A stale response from a
+    // rejected/abandoned attempt at the SAME round must not be applied to the
+    // retry. Mismatch returns the held prompt, never evaluates.
+    if (transactionId !== undefined && session.roundSnapshot &&
+        transactionId !== session.roundSnapshot.transactionId) {
+      const restored = this.restoredPromptResult(session);
+      if (restored) {
+        return {
+          ...restored,
+          warnings: [
+            ...(restored.warnings ?? []),
+            `Submitted transactionId ${transactionId} does not match the current attempt (${session.roundSnapshot.transactionId}) — the held prompt is returned. Resubmit with the transactionId returned alongside it.`,
+          ],
+        };
+      }
+      return {
+        sessionId,
+        round: session.currentRound,
+        roundId: expectedRoundId,
+        prompt: null,
+        stopReason: "round_id_mismatch",
+        submissionError: {
+          code: "round_id_mismatch",
+          details: {
+            reason_code: "transaction_id_mismatch",
+            submitted: transactionId,
+            expected: session.roundSnapshot.transactionId,
+            detail: "Use the roundId and transactionId returned alongside the held prompt.",
+          },
+        },
       };
     }
 
@@ -1903,6 +2168,7 @@ export class RoundLifecycle {
     roundId?: string,
     normalizationDiagnostics?: SubmissionDiagnostic[],
     submittedFields?: string[],
+    transactionId?: string,
   ): Promise<AdvanceResult> {
     return this.advanceUnlocked(
       sessionId,
@@ -1911,6 +2177,7 @@ export class RoundLifecycle {
       roundId,
       normalizationDiagnostics,
       submittedFields,
+      transactionId,
     );
   }
 

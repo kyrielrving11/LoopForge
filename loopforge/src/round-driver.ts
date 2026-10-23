@@ -10,6 +10,10 @@ import type { LoopStore } from "./loop-store.js";
 import { LoopForgeEngine } from "./engine.js";
 import { EvidenceCollector } from "./evidence-provider.js";
 import type { MachineObservation } from "./protocol.js";
+import type {
+  WorkspaceCheckpointManifest,
+} from "./protocol.js";
+import type { BoundaryCapture } from "./git-boundary.js";
 import { writeStateFile } from "./policy.js";
 import type {
   LoopForgeRequest,
@@ -28,6 +32,18 @@ import type {
   RoundTransactionOutcome,
   RoundTransactionSnapshot,
 } from "./round-transaction.js";
+import {
+  buildCheckpointRef,
+  FileWorkspaceCheckpointStore,
+} from "./workspace-checkpoint.js";
+
+/** A pre-collected before baseline, used by the post-restore redo path. The
+ *  boundary is the same pass's Git boundary, so the redo's own before-image
+ *  is exactly the verified restored state. */
+export interface PreparedBaseline {
+  observations: MachineObservation[];
+  boundary?: BoundaryCapture;
+}
 
 export interface PreparedRound {
   prompt: string;
@@ -76,7 +92,11 @@ export interface CompleteRecoveryInput {
 export class RoundDriver {
   private readonly store: LoopStore;
 
-  constructor(private readonly engine: LoopForgeEngine, store?: LoopStore) {
+  constructor(
+    private readonly engine: LoopForgeEngine,
+    store?: LoopStore,
+    private readonly checkpointStore?: FileWorkspaceCheckpointStore,
+  ) {
     this.store = store ?? engine.getStore();
   }
 
@@ -84,17 +104,49 @@ export class RoundDriver {
     request: LoopForgeRequest,
     loopId: string,
     round: number,
-    opts: { branchId?: string; operatorAcceptance?: OperatorAcceptance } = {},
+    opts: {
+      branchId?: string;
+      operatorAcceptance?: OperatorAcceptance;
+      /** Post-restore baseline: compile only, do not capture again. */
+      baseline?: PreparedBaseline;
+      /** Set on the redo transaction after a verified restore. */
+      restore?: RoundTransactionSnapshot["restore"];
+    } = {},
   ): Promise<PreparedRound | null> {
-    // v3.0.1: compile (CPU-bound) and before-evidence collection (external
-    // process spawns) run concurrently — the git/command spawns were the
-    // latency tail behind the old compile-first, evidence-second order.
-    const [response, evidenceBaseline] = await Promise.all([
-      Promise.resolve().then(() => this.compile(request, loopId, true)),
-      this.collectEvidence(loopId, "before"),
-    ]);
+    let boundary: BoundaryCapture | undefined;
+    let response: LoopForgeResponse | null;
+    let evidenceBaseline: MachineObservation[];
+    if (opts.baseline) {
+      response = this.compile(request, loopId, true);
+      evidenceBaseline = opts.baseline.observations;
+      boundary = opts.baseline.boundary;
+    } else {
+      // v3.0.1: compile (CPU-bound) and before-evidence collection (external
+      // process spawns) run concurrently — the git/command spawns were the
+      // latency tail behind the old compile-first, evidence-second order.
+      // v3.9.7: the Git provider materializes the checkpoint before-image in
+      // the SAME boundary pass; no second hash.
+      const [compiled, evidence] = await Promise.all([
+        Promise.resolve().then(() => this.compile(request, loopId, true)),
+        this.collectEvidence(loopId, "before", this.checkpointStore
+          ? {
+              materializer: this.checkpointStore,
+              boundarySink: (captured) => { boundary = captured; },
+            }
+          : undefined),
+      ]);
+      response = compiled;
+      evidenceBaseline = evidence;
+    }
     if (!response) return null;
-    return this.finishPrepare(response, loopId, round, evidenceBaseline, opts);
+    return this.finishPrepare(
+      response,
+      loopId,
+      round,
+      evidenceBaseline,
+      opts,
+      boundary,
+    );
   }
 
   private compile(
@@ -155,12 +207,50 @@ export class RoundDriver {
     loopId: string,
     round: number,
     evidenceBaseline: MachineObservation[],
-    opts: { branchId?: string; operatorAcceptance?: OperatorAcceptance } = {},
+    opts: {
+      branchId?: string;
+      operatorAcceptance?: OperatorAcceptance;
+      baseline?: PreparedBaseline;
+      restore?: RoundTransactionSnapshot["restore"];
+    } = {},
+    boundary?: BoundaryCapture,
   ): PreparedRound {
     const rawArtifact = response.prompt_artifact;
     const artifact: PromptArtifact | undefined = rawArtifact
       ? { ...rawArtifact, warnings: [...(response.warnings ?? [])] }
       : undefined;
+    const observedGitBefore = evidenceBaseline.some(
+      (observation) => observation.kind === "git" && observation.status === "observed",
+    );
+    let beforeCheckpointError:
+      | { code: string; detail: string; at: number }
+      | undefined;
+    let manifest: WorkspaceCheckpointManifest | undefined;
+    if (boundary?.materializationError) {
+      beforeCheckpointError = {
+        ...boundary.materializationError,
+        at: Date.now(),
+      };
+    } else if (boundary && this.checkpointStore) {
+      try {
+        manifest = this.checkpointStore.persistManifest(round, "before", boundary);
+      } catch (error) {
+        beforeCheckpointError = {
+          code: "checkpoint_write_failed",
+          detail: String(error),
+          at: Date.now(),
+        };
+      }
+    } else if (observedGitBefore) {
+      // A Git-observed transaction owes a before-image or an explicit error.
+      beforeCheckpointError = {
+        code: this.checkpointStore ? "boundary_unavailable" : "store_unavailable",
+        detail: this.checkpointStore
+          ? "the before-phase Git boundary was not materialized"
+          : "no workspace checkpoint store is configured",
+        at: Date.now(),
+      };
+    }
     const snapshot = prepareRoundTransaction(
       loopId,
       round,
@@ -171,8 +261,16 @@ export class RoundDriver {
         ...(opts.operatorAcceptance
           ? { operatorAcceptance: opts.operatorAcceptance }
           : {}),
+        ...(beforeCheckpointError ? { beforeCheckpointError } : {}),
       },
     );
+    if (manifest) {
+      snapshot.beforeCheckpoint = buildCheckpointRef(manifest, {
+        transactionId: snapshot.transactionId,
+        branchId: snapshot.branchId,
+      });
+    }
+    if (opts.restore) snapshot.restore = opts.restore;
     return {
       prompt: response.prompt!,
       artifact,
@@ -202,6 +300,15 @@ export class RoundDriver {
       entrypointTrust: input.entrypointTrust,
       normalizationDiagnostics: input.normalizationDiagnostics,
       submittedFields: input.submittedFields,
+      ...(input.snapshot.beforeCheckpoint
+        ? { beforeCheckpoint: input.snapshot.beforeCheckpoint }
+        : {}),
+      ...(this.checkpointStore
+        ? {
+            resolveCheckpointManifest: (ref: import("./protocol.js").CheckpointRef) =>
+              this.checkpointStore!.readManifest(ref.checkpointId),
+          }
+        : {}),
     });
     return { outcome, actualEvidence };
   }
@@ -234,7 +341,16 @@ export class RoundDriver {
   private collectEvidence(
     loopId: string,
     phase: "before" | "after",
+    opts?: {
+      materializer?: import("./git-boundary.js").BoundaryMaterializer;
+      boundarySink?: (boundary: BoundaryCapture) => void;
+    },
   ): Promise<MachineObservation[]> {
-    return EvidenceCollector.fromPolicy().collectAsync({ loopId, phase });
+    return EvidenceCollector.fromPolicy().collectAsync({
+      loopId,
+      phase,
+      ...(opts?.materializer ? { materializer: opts.materializer } : {}),
+      ...(opts?.boundarySink ? { boundarySink: opts.boundarySink } : {}),
+    });
   }
 }

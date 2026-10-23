@@ -4,7 +4,7 @@
  * duplicated MemoryLoopStore implementation.
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type {
@@ -39,6 +39,21 @@ import { POLICY_SCHEMA_VERSION } from "../policy.js";
 /** The compiler's default objective criterion when the task declares none. */
 export const DEFAULT_SUCCESS_CRITERION =
   "Task goal achieved with verifiable evidence";
+
+/** v3.9.7: a fixture that supplies observed Git before-evidence must also
+ *  supply the schema-5 before-image fact. Old fixtures use this explicit
+ *  unavailable fact rather than fabricating a restorable checkpoint. */
+function fixtureBeforeCheckpointError(observations: unknown): {
+  beforeCheckpointError?: { code: string; detail: string; at: number };
+} {
+  const observedGit = Array.isArray(observations) && observations.some((item) =>
+    item && typeof item === "object" &&
+    (item as { kind?: unknown }).kind === "git" &&
+    (item as { status?: unknown }).status === "observed");
+  return observedGit
+    ? { beforeCheckpointError: { code: "fixture_unavailable", detail: "test fixture", at: 0 } }
+    : {};
+}
 
 /** v3.8: Build the criterion claims an evaluation submits. */
 export function criterionClaims(met: string[] = [], remaining: string[] = []): CriterionClaim[] {
@@ -222,6 +237,7 @@ export function committedFeedbackRound(
           phase: "committed",
           beforeEvidence: opts.beforeEvidence ?? [],
           afterEvidence: opts.roundEvidence,
+          ...fixtureBeforeCheckpointError(opts.beforeEvidence ?? []),
           ...(opts.contractBinding !== undefined ? { contractBinding: opts.contractBinding } : {}),
           createdAt: 0,
           updatedAt: 0,
@@ -250,18 +266,21 @@ export function committedBacktrackRound(
   opts: { branchId?: string; transactionId?: string } = {},
 ): VaultEntry {
   const transactionId = opts.transactionId ?? `tx-rollback-${loopId}-${round}`;
-  const transactionIdOfTarget = `tx-${loopId}-${target}-1`;
+  const redoRound = target + 1;
   const recovery = {
     origin: "machine" as const,
     reason: "test_restore",
     trigger_rule: "test_restore",
-    target,
-    target_round_id: `loop:${loopId}:round:${target}`,
-    target_transaction_id: transactionIdOfTarget,
-    target_dirty: [],
-    target_fingerprints: {},
+    target: {
+      checkpoint_id: `ck-${createHash("sha256").update(`${loopId}:${redoRound}`).digest("hex").slice(0, 24)}`,
+      content_hash: createHash("sha256").update(`${loopId}:${redoRound}:content`).digest("hex"),
+      role: "before" as const,
+      round: redoRound,
+      round_id: `loop:${loopId}:round:${redoRound}`,
+      transaction_id: `tx-${loopId}-${redoRound}-1`,
+      redo_round: redoRound,
+    },
     skipped_files: [],
-    skipped_fingerprints: {},
     skipped_discoveries: [],
     failed_rounds: [round],
     approaches: [],
@@ -390,6 +409,7 @@ export function withTransaction(
     phase: "committed",
     beforeEvidence: evidence.beforeEvidence ?? [],
     afterEvidence: evidence.afterEvidence ?? [],
+    ...fixtureBeforeCheckpointError(evidence.beforeEvidence ?? []),
     evaluation,
     submittedFields: manifestFor(evaluation),
     result,
@@ -527,6 +547,7 @@ export function mergedLineageRound(
     phase: "committed",
     beforeEvidence: opts.beforeEvidence ?? [],
     afterEvidence: opts.roundEvidence ?? [],
+    ...fixtureBeforeCheckpointError(opts.beforeEvidence ?? []),
     evaluation,
     submittedFields: manifestFor(evaluation),
     result,

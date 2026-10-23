@@ -587,7 +587,9 @@ export class FileLoopStore implements LoopStore {
     this.atomicWrite(join(dir, "rounds", `${round}.json`), persisted);
   }
 
-  private loopDir(loopId: string): string {
+  /** The loop's durable directory. Public so the checkpoint store can place
+   *  content-addressed recovery material under the SAME runtime state root. */
+  loopDir(loopId: string): string {
     const hash = createHash("sha256").update(loopId).digest("hex");
     return join(this.root, "loops", hash);
   }

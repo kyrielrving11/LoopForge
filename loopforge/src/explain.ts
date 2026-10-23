@@ -81,9 +81,9 @@ export interface ExplainResult {
     round: number;
     transactionId: string;
     origin: "agent" | "machine";
-    target: number;
+    redoRound: number;
+    targetCheckpointId: string;
     reason: string;
-    targetHead?: string;
     skippedFiles: string[];
   }>;
 }
@@ -200,9 +200,9 @@ export function buildExplain(
       round: view.round,
       transactionId: view.transactionId ?? view.roundId,
       origin: view.origin === "agent" ? "agent" as const : "machine" as const,
-      target: view.recovery?.target ?? 0,
+      redoRound: view.recovery?.target.redo_round ?? 0,
+      targetCheckpointId: view.recovery?.target.checkpoint_id ?? "",
       reason: view.recovery?.reason ?? "",
-      ...(view.recovery?.target_head ? { targetHead: view.recovery.target_head } : {}),
       skippedFiles: [...(view.recovery?.skipped_files ?? [])],
     })),
   };

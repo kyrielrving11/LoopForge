@@ -87,6 +87,8 @@ export function findSafeRestorePoint(
   currentRound: number,
   vaultEntries: VaultEntry[],
   maxDepth: number,
+  /** v3.9.7: a candidate must have a materialized restore checkpoint. */
+  isEligible?: (round: number) => boolean,
 ): { round: number; skippedDiscoveries: string[] } | null {
   const completed = derivationRounds(vaultEntries, currentRound)
     .sort((a, b) => b.round - a.round);
@@ -113,7 +115,7 @@ export function findSafeRestorePoint(
       }
     }
 
-    if (isCleanRound(round)) {
+    if (isCleanRound(round) && (isEligible?.(targetRound) ?? true)) {
       return { round: targetRound, skippedDiscoveries };
     }
   }
@@ -168,7 +170,11 @@ export function findBacktrackTargetSnapshot(
  *  The facts are supplied by the caller from `decodeBacktrackRecord` on the
  *  committed decision. */
 export function recoveryBriefLines(input: {
-  target: number;
+  /** v3.9.7: the first round of the child branch. The workspace was restored
+   *  to the selected checkpoint BEFORE this prompt was compiled. */
+  redoRound: number;
+  checkpointId?: string;
+  restoreVerified?: boolean;
   triggerRule: string;
   origin?: "agent" | "machine";
   /** Agent reason (agent origin) or machine failure reason. */
@@ -202,7 +208,14 @@ export function recoveryBriefLines(input: {
     lines.push(`- **Failure reason**: ${input.failureReason.trim()}`);
   }
   lines.push(
-    `- **Restored to round**: ${input.target} (the redo is round ${input.target + 1})`,
+    input.checkpointId
+      ? `- **Restored checkpoint**: \`${input.checkpointId}\` (${
+          input.restoreVerified === false
+            ? "restore NOT verified"
+            : "machine-verified by LoopForge"
+        })`
+      : "- **Restored state**: the committed restore point",
+    `- **Redo round**: ${input.redoRound}`,
   );
   if (input.recoveryRoundId) {
     lines.push(`- **Recovery Round ID**: \`${input.recoveryRoundId}\``);

@@ -60,7 +60,7 @@ function input(overrides: Partial<ReceiptInput> = {}): ReceiptInput {
   });
   const pr = result();
   const snapshot = {
-    schemaVersion: 4,
+    schemaVersion: 5 as const,
     branchId: "loop:receipt:branch:root",
     transactionId: "tx-test",
     kind: "evaluation",
@@ -187,13 +187,16 @@ describe("v3.9.1 — submission receipt", () => {
       recovery: {
         origin: "machine",
         reason: "test backtrack",
-        target: 1,
-        target_round_id: "loop:receipt:round:1",
-        target_transaction_id: "tx-target",
-        target_dirty: [],
-      target_fingerprints: {},
+        target: {
+          checkpoint_id: "ck-aaaaaaaaaaaaaaaaaaaaaaaa",
+          content_hash: "a".repeat(64),
+          role: "before",
+          round: 2,
+          round_id: "loop:receipt:round:2",
+          transaction_id: "tx-target",
+          redo_round: 2,
+        },
         skipped_files: [],
-        skipped_fingerprints: {},
         skipped_discoveries: ["a preserved finding"],
         failed_rounds: [2],
         approaches: [],
@@ -226,7 +229,8 @@ describe("v3.9.1 — submission receipt", () => {
     assert.equal(receipt.record, "rollback_directive");
     assert.equal(report(receipt, "wrong_assumptions")?.handling, "saved");
     assert.equal(report(receipt, "discovered_constraints")?.handling, "not_applied");
-    assert.equal(receipt.effects.rollback?.restore_point, 1);
+    assert.equal(receipt.effects.rollback?.redo_round, 2);
+    assert.equal(receipt.effects.rollback?.checkpoint_id, "ck-aaaaaaaaaaaaaaaaaaaaaaaa");
     assert.deepEqual(receipt.effects.rollback?.preserved_discoveries,
       ["a preserved finding"]);
     assert.deepEqual(receipt.effects.subgoals_created, []);
@@ -338,26 +342,39 @@ describe("v3.9.1 — submission receipt", () => {
     const directive: RecoveryDirective = {
       origin: "agent",
       reason: "try another approach",
-      target: 1,
-      target_round_id: "loop:receipt:round:1",
-      target_transaction_id: "tx-target",
-      target_head: "abc123",
-      target_dirty: [],
-      target_fingerprints: {},
+      target: {
+        checkpoint_id: "ck-bbbbbbbbbbbbbbbbbbbbbbbb",
+        content_hash: "b".repeat(64),
+        role: "before",
+        round: 2,
+        round_id: "loop:receipt:round:2",
+        transaction_id: "tx-target",
+        redo_round: 2,
+      },
       skipped_files: [],
-      skipped_fingerprints: {},
       skipped_discoveries: [],
       failed_rounds: [2],
       approaches: [],
       wrong_assumptions: [],
       transaction_id: "tx-child",
     };
-    const verified = deriveSubmissionReceipt(input({ recoveryDirective: directive }));
+    const verified = deriveSubmissionReceipt(input({
+      recoveryDirective: directive,
+      snapshot: {
+        ...input().snapshot,
+        restore: {
+          directiveTransactionId: "tx-child",
+          redoRound: 2,
+          verifiedAt: 1,
+        },
+      },
+    }));
     assert.deepEqual(verified.recovery_checkpoint, {
-      restore_point: 1,
+      checkpoint_id: "ck-bbbbbbbbbbbbbbbbbbbbbbbb",
+      redo_round: 2,
       origin: "agent",
       reason: "try another approach",
-      verified: true,
+      restore_verified: true,
     });
 
     const failed = deriveSubmissionReceipt(input({
@@ -373,7 +390,7 @@ describe("v3.9.1 — submission receipt", () => {
       }),
       disposition: "rejected",
     }));
-    assert.equal(failed.recovery_checkpoint?.verified, false);
+    assert.equal(failed.recovery_checkpoint?.restore_verified, false);
     assert.equal(deriveSubmissionReceipt(input()).recovery_checkpoint, undefined,
       "an ordinary receipt carries no checkpoint");
     const rollbackDirectiveReceipt = deriveSubmissionReceipt(input({
@@ -396,7 +413,7 @@ describe("v3.9.1 — submission receipt", () => {
       }),
       disposition: "backtracked",
     }));
-    assert.equal(redoBacktrack.recovery_checkpoint?.verified, false,
+    assert.equal(redoBacktrack.recovery_checkpoint?.restore_verified, false,
       "a redo that itself rolls back still reports the checkpoint it failed");
   });
 

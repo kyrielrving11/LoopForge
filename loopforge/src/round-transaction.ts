@@ -13,14 +13,17 @@ import { LoopForgeEngine } from "./engine.js";
 import { deriveObservationDeltas } from "./evidence-provider.js";
 import type { ObservationDelta } from "./evidence-provider.js";
 import type {
+  CheckpointRef,
   ContractBinding,
   MachineObservation,
   OperatorAcceptance,
   PromptArtifact,
   RecoveryDirective,
+  RecoveryTarget,
   RoundContractProposal,
   SelfEvaluation,
   SubmissionDiagnostic,
+  WorkspaceCheckpointManifest,
 } from "./protocol.js";
 import {
   RoundCoordinator,
@@ -37,9 +40,13 @@ import { policyMetrics } from "./policy-metrics.js";
 import { VaultRoundCommitStore } from "./storage.js";
 import type { RoundCommitStore } from "./storage.js";
 
-/** v3.9.6: schema 4 adds transaction/branch identity, kind, operator
- *  acceptance and rollback directives. Schema 3 is unsupported. */
-export const ROUND_TRANSACTION_SCHEMA_VERSION = 4 as const;
+/** v3.9.7: schema 5 adds the transaction before-image, explicit mid-round
+ *  checkpoints and the redo restore marker. Schema 4 is unsupported and is
+ *  reported by `legacyTransactionRounds`; there is no compatibility migration. */
+export const ROUND_TRANSACTION_SCHEMA_VERSION = 5 as const;
+
+/** Maximum distinct mid-round checkpoints one transaction may reference. */
+export const MAX_MID_CHECKPOINTS_PER_TRANSACTION = 32;
 
 /** The root branch identity for every loop. */
 export function rootBranchId(loopId: string): string {
@@ -55,7 +62,7 @@ export function deriveTransactionId(input: {
   roundId: string;
   attempt: number;
   promptHash?: string;
-  recovery?: Pick<RecoveryDirective, "target" | "reason" | "target_transaction_id">;
+  recovery?: { target: RecoveryTarget; reason: string };
 }): string {
   const payload = [
     input.kind,
@@ -64,7 +71,13 @@ export function deriveTransactionId(input: {
     String(input.attempt),
     input.promptHash ?? "",
     input.kind === "rollback" && input.recovery
-      ? `${input.recovery.target}\n${input.recovery.reason}\n${input.recovery.target_transaction_id}`
+      ? [
+          input.recovery.target.checkpoint_id,
+          input.recovery.target.content_hash,
+          String(input.recovery.target.redo_round),
+          input.recovery.reason,
+          input.recovery.target.transaction_id,
+        ].join("\n")
       : "",
   ].join("\n");
   return `tx-${createHash("sha256").update(payload).digest("hex").slice(0, 24)}`;
@@ -116,6 +129,26 @@ export interface RoundTransactionSnapshot {
   /** v3.9.1: the known evaluation paths present in the raw submission. The
    *  receipt uses this manifest; unknown paths live in diagnostics only. */
   submittedFields?: string[];
+  /** v3.9.7: the automatic transaction before-image. Required when the
+   *  before-phase Git boundary was observed and materialized. */
+  beforeCheckpoint?: CheckpointRef;
+  /** v3.9.7: explicit machine fact when the automatic before-image failed.
+   *  The round may continue; it is simply not a recovery target. */
+  beforeCheckpointError?: {
+    code: string;
+    detail: string;
+    at: number;
+  };
+  /** v3.9.7: Agent-created mid-round savepoints, creation order, capped. */
+  checkpoints?: CheckpointRef[];
+  /** v3.9.7: only on the redo transaction. Proves this round's before state
+   *  was produced by a verified restore of the named directive. The target
+   *  checkpoint id/hash live only in the directive. */
+  restore?: {
+    directiveTransactionId: string;
+    redoRound: number;
+    verifiedAt: number;
+  };
   /** v3.8: the contract binding resolved at commit time (see ContractBinding).
    *  Absent when the committing round declared no contract. */
   contractBinding?: ContractBinding;
@@ -139,6 +172,11 @@ export interface RoundTransactionInput {
   normalizationDiagnostics?: SubmissionDiagnostic[];
   submittedFields?: string[];
   actualEvidence: MachineObservation[];
+  /** The in-flight transaction's before-image, for machine backtrack target
+   *  mapping. Never a cognitive input. */
+  beforeCheckpoint?: CheckpointRef;
+  /** Reads a checkpoint manifest from the store (machine backtrack only). */
+  resolveCheckpointManifest?: (ref: CheckpointRef) => WorkspaceCheckpointManifest | null;
 }
 
 export interface RoundTransactionOutcome {
@@ -219,6 +257,8 @@ export function prepareRoundTransaction(
     branchId?: string;
     operatorAcceptance?: OperatorAcceptance;
     kind?: "evaluation";
+    beforeCheckpoint?: CheckpointRef;
+    beforeCheckpointError?: { code: string; detail: string; at: number };
   } = {},
 ): RoundTransactionSnapshot {
   const now = Date.now();
@@ -242,6 +282,10 @@ export function prepareRoundTransaction(
     attempt: 1,
     phase: promptArtifact ? "prompted" : "prepared",
     beforeEvidence,
+    ...(opts.beforeCheckpoint ? { beforeCheckpoint: opts.beforeCheckpoint } : {}),
+    ...(opts.beforeCheckpointError
+      ? { beforeCheckpointError: opts.beforeCheckpointError }
+      : {}),
     ...(opts.operatorAcceptance
       ? { operatorAcceptance: opts.operatorAcceptance }
       : {}),
@@ -271,20 +315,33 @@ export function prepareRejectedAttempt(
       `Retry prompt attempt mismatch: ${promptArtifact.attempt} !== ${rejected.attempt + 1}`,
     );
   }
+  const transactionId = deriveTransactionId({
+    kind: rejected.kind,
+    branchId: rejected.branchId,
+    roundId: rejected.roundId,
+    attempt: promptArtifact.attempt,
+    promptHash: promptArtifact.promptHash,
+  });
+  // The round-start before-image is the SAME workspace state across attempts;
+  // only its owning transaction identity changes. Mid-round savepoints belong
+  // to the rejected attempt and are not carried into the retry.
+  const beforeCheckpoint = rejected.beforeCheckpoint
+    ? { ...rejected.beforeCheckpoint, transactionId }
+    : undefined;
   return {
     ...rejected,
-    transactionId: deriveTransactionId({
-      kind: rejected.kind,
-      branchId: rejected.branchId,
-      roundId: rejected.roundId,
-      attempt: promptArtifact.attempt,
-      promptHash: promptArtifact.promptHash,
-    }),
+    transactionId,
+    ...(beforeCheckpoint ? { beforeCheckpoint } : {}),
+    ...(rejected.beforeCheckpointError
+      ? { beforeCheckpointError: rejected.beforeCheckpointError }
+      : {}),
+    ...(rejected.restore ? { restore: rejected.restore } : {}),
     attempt: promptArtifact.attempt,
     phase: "prompted",
     afterEvidence: undefined,
     evaluation: undefined,
     result: undefined,
+    checkpoints: undefined,
     // The rejected attempt's diagnostics were returned in its receipt; the
     // retry has not submitted a new payload yet.
     normalizationDiagnostics: undefined,
@@ -321,33 +378,78 @@ function isOperatorAcceptance(value: unknown): value is OperatorAcceptance {
     stringArray(value.hard_constraints);
 }
 
+function isCheckpointRole(value: unknown): value is "before" | "mid" {
+  return value === "before" || value === "mid";
+}
+
+const CHECKPOINT_ID_RE = /^ck-[a-f0-9]{24}$/;
+const CONTENT_HASH_RE = /^[a-f0-9]{64}$/;
+
+function isCheckpointRef(value: unknown): value is CheckpointRef {
+  if (!isRecord(value)) return false;
+  if (typeof value.checkpointId !== "string" ||
+      !CHECKPOINT_ID_RE.test(value.checkpointId)) return false;
+  if (typeof value.contentHash !== "string" ||
+      !CONTENT_HASH_RE.test(value.contentHash)) return false;
+  if (!isCheckpointRole(value.role)) return false;
+  if (!Number.isInteger(value.round) || (value.round as number) < 1) return false;
+  if (typeof value.roundId !== "string" || value.roundId.length === 0) return false;
+  if (typeof value.transactionId !== "string" || value.transactionId.length === 0) return false;
+  if (typeof value.branchId !== "string" || value.branchId.length === 0) return false;
+  if (!Number.isInteger(value.redoRound) || (value.redoRound as number) < 1) return false;
+  if (typeof value.createdAt !== "number") return false;
+  return true;
+}
+
+function isRecoveryTarget(value: unknown): value is RecoveryTarget {
+  if (!isRecord(value)) return false;
+  if (typeof value.checkpoint_id !== "string" ||
+      !CHECKPOINT_ID_RE.test(value.checkpoint_id)) return false;
+  if (typeof value.content_hash !== "string" ||
+      !CONTENT_HASH_RE.test(value.content_hash)) return false;
+  if (!isCheckpointRole(value.role)) return false;
+  if (!Number.isInteger(value.round) || (value.round as number) < 1) return false;
+  if (typeof value.round_id !== "string" || value.round_id.length === 0) return false;
+  if (typeof value.transaction_id !== "string" || value.transaction_id.length === 0) return false;
+  if (!Number.isInteger(value.redo_round) || (value.redo_round as number) < 1) return false;
+  return true;
+}
+
 function isRecoveryDirective(value: unknown): value is RecoveryDirective {
   if (!isRecord(value)) return false;
   if (value.origin !== "agent" && value.origin !== "machine") return false;
   if (typeof value.reason !== "string" || typeof value.transaction_id !== "string") {
     return false;
   }
-  if (!Number.isInteger(value.target) || (value.target as number) < 1) return false;
-  if (typeof value.target_round_id !== "string" ||
-      typeof value.target_transaction_id !== "string") return false;
-  if (value.target_head !== undefined && typeof value.target_head !== "string") return false;
-  if (!isRecord(value.target_fingerprints) ||
-      !Object.values(value.target_fingerprints).every((fp) => typeof fp === "string")) {
-    return false;
-  }
+  if (!isRecoveryTarget(value.target)) return false;
   if (value.trigger_rule !== undefined && typeof value.trigger_rule !== "string") return false;
-  if (!stringArray(value.target_dirty) ||
-      !stringArray(value.skipped_files) ||
+  if (!stringArray(value.skipped_files) ||
       !stringArray(value.skipped_discoveries) ||
       !stringArray(value.approaches) ||
       !stringArray(value.wrong_assumptions)) return false;
   if (!Array.isArray(value.failed_rounds) ||
-      !value.failed_rounds.every((item) => typeof item === "number")) return false;
-  if (!isRecord(value.skipped_fingerprints) ||
-      !Object.values(value.skipped_fingerprints).every((fp) => typeof fp === "string")) {
-    return false;
-  }
+      !value.failed_rounds.every((item) => Number.isInteger(item))) return false;
   return true;
+}
+
+function isBeforeCheckpointError(
+  value: unknown,
+): value is { code: string; detail: string; at: number } {
+  if (!isRecord(value)) return false;
+  return typeof value.code === "string" &&
+    typeof value.detail === "string" &&
+    typeof value.at === "number";
+}
+
+function isRestoreMarker(
+  value: unknown,
+): value is { directiveTransactionId: string; redoRound: number; verifiedAt: number } {
+  if (!isRecord(value)) return false;
+  return typeof value.directiveTransactionId === "string" &&
+    value.directiveTransactionId.length > 0 &&
+    Number.isInteger(value.redoRound) &&
+    (value.redoRound as number) >= 1 &&
+    typeof value.verifiedAt === "number";
 }
 
 function parseMachineObservations(value: unknown): MachineObservation[] | null {
@@ -437,6 +539,61 @@ export function parseRoundTransactionSnapshot(
     ? undefined
     : parseMachineObservations(value.afterEvidence);
   if (value.afterEvidence !== undefined && !afterEvidence) return null;
+  const snapshotRound = value.round as number;
+  const snapshotRoundId = value.roundId as string;
+  const snapshotTransactionId = value.transactionId as string;
+  const snapshotBranchId = value.branchId as string;
+  if (value.kind === "rollback") {
+    // A rollback directive may carry the abandoned transaction's evidence,
+    // but never that transaction's savepoints or restore marker. The
+    // directive's `target` is the only checkpoint reference.
+    if (value.beforeCheckpoint !== undefined ||
+        value.beforeCheckpointError !== undefined ||
+        value.checkpoints !== undefined ||
+        value.restore !== undefined) return null;
+  } else {
+    if (value.beforeCheckpoint !== undefined) {
+      if (!isCheckpointRef(value.beforeCheckpoint)) return null;
+      const ref = value.beforeCheckpoint;
+      if (ref.role !== "before" ||
+          ref.round !== snapshotRound ||
+          ref.roundId !== snapshotRoundId ||
+          ref.transactionId !== snapshotTransactionId ||
+          ref.branchId !== snapshotBranchId ||
+          ref.redoRound !== snapshotRound) return null;
+    }
+    if (value.beforeCheckpointError !== undefined &&
+        !isBeforeCheckpointError(value.beforeCheckpointError)) return null;
+    if ((value.beforeCheckpoint === undefined) ===
+        (value.beforeCheckpointError === undefined)) {
+      const observedGitBefore = beforeEvidence.some(
+        (observation) => observation.kind === "git" && observation.status === "observed",
+      );
+      // A Git-observed transaction owes a before-image or an explicit error.
+      if (observedGitBefore) return null;
+    }
+    if (value.checkpoints !== undefined) {
+      if (!Array.isArray(value.checkpoints) ||
+          value.checkpoints.length > MAX_MID_CHECKPOINTS_PER_TRANSACTION) return null;
+      const seen = new Set<string>();
+      for (const item of value.checkpoints) {
+        if (!isCheckpointRef(item)) return null;
+        if (item.role !== "mid" ||
+            item.round !== snapshotRound ||
+            item.roundId !== snapshotRoundId ||
+            item.transactionId !== snapshotTransactionId ||
+            item.branchId !== snapshotBranchId ||
+            item.redoRound !== snapshotRound) return null;
+        if (seen.has(item.checkpointId)) return null;
+        seen.add(item.checkpointId);
+      }
+    }
+    if (value.restore !== undefined) {
+      if (!isRestoreMarker(value.restore)) return null;
+      if (value.restore.redoRound !== snapshotRound) return null;
+      if (value.restore.directiveTransactionId !== snapshotBranchId) return null;
+    }
+  }
   if (value.result !== undefined && !isProcessResult(value.result)) return null;
   if (value.contractBinding !== undefined && !isContractBinding(value.contractBinding)) return null;
   if (value.normalizationDiagnostics !== undefined) {
@@ -598,6 +755,11 @@ export class RoundTransactionCoordinator {
       entrypointTrust: input.entrypointTrust,
       // v3.9.4: the SAME manifest the receipt reads.
       submittedFields: input.submittedFields ?? snapshot.submittedFields,
+      ...(input.beforeCheckpoint ? { beforeCheckpoint: input.beforeCheckpoint } : {}),
+      afterEvidence: input.actualEvidence,
+      ...(input.resolveCheckpointManifest
+        ? { resolveCheckpointManifest: input.resolveCheckpointManifest }
+        : {}),
     });
 
     const evaluated: RoundTransactionSnapshot = {
@@ -639,7 +801,6 @@ export class RoundTransactionCoordinator {
           recovery: {
             target: result.recovery.target,
             reason: result.recovery.reason,
-            target_transaction_id: result.recovery.target_transaction_id,
           },
         }),
       };
@@ -730,6 +891,13 @@ export class RoundTransactionCoordinator {
       evaluation: recovery.origin === "machine" ? snapshot.evaluation : undefined,
       result: undefined,
       operatorAcceptance: undefined,
+      // The abandoned transaction's savepoints/restore marker belong to that
+      // attempt, not to the child branch. The directive target is the only
+      // recovery point recorded by this event.
+      beforeCheckpoint: undefined,
+      beforeCheckpointError: undefined,
+      checkpoints: undefined,
+      restore: undefined,
       recovery,
       submittedFields: recovery.origin === "machine"
         ? (snapshot.submittedFields ?? [])

@@ -974,9 +974,12 @@ export interface GuidanceOptions {
   objective?: { success_criteria: ReadonlyArray<string> } | null;
   verificationFlags?: ReadonlyArray<VerificationFlag>;
   recovery?: {
-    required: boolean;
-    restore_point?: number;
-    target_head?: string;
+    pending: boolean;
+    redo_round: number;
+    checkpoint_id: string;
+    restore_verified: boolean;
+    origin?: "agent" | "machine";
+    reason?: string;
   } | null;
 }
 

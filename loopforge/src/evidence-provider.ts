@@ -12,19 +12,21 @@
 
 import { createHash } from "node:crypto";
 import {
-  createReadStream,
-  lstatSync,
   readFileSync,
-  readlinkSync,
   realpathSync,
   statSync,
 } from "node:fs";
-import {
-  spawn,
-  execFile,
-} from "node:child_process";
+import { spawn } from "node:child_process";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { GIT_OBSERVATION_SCHEMA_VERSION } from "./protocol.js";
+import {
+  captureBoundary,
+  captureGitFileStateAsync,
+} from "./git-boundary.js";
+import type {
+  BoundaryCapture,
+  BoundaryMaterializer,
+} from "./git-boundary.js";
 import type {
   CommandObservation,
   ConfiguredCapability,
@@ -59,6 +61,12 @@ export interface EvidenceCaptureContext {
   phase: "before" | "after";
   /** Workspace root override (tests capture against temp repos). */
   cwd?: string;
+  /** v3.9.7: checkpoint content sink. Only the Git provider consumes it; the
+   *  observation remains schema 2 and never carries checkpoint metadata. */
+  materializer?: BoundaryMaterializer;
+  /** v3.9.7: receives the complete Git boundary after a successful capture,
+   *  including `materializationError`. Evidence never consumes this sink. */
+  boundarySink?: (boundary: BoundaryCapture) => void;
 }
 
 export type EvidenceCaptureResult =
@@ -87,6 +95,8 @@ export interface EvidenceCollectOptions {
   timeoutMs?: number;
   loopId?: string;
   phase?: "before" | "after";
+  materializer?: BoundaryMaterializer;
+  boundarySink?: (boundary: BoundaryCapture) => void;
 }
 
 export type EvidenceProviderFactory = () => EvidenceProvider;
@@ -467,6 +477,8 @@ export class EvidenceCollector {
           timeoutMs,
           loopId: options.loopId,
           phase,
+          ...(options.materializer ? { materializer: options.materializer } : {}),
+          ...(options.boundarySink ? { boundarySink: options.boundarySink } : {}),
         }));
         const observation = timeoutMs > 0
           ? await Promise.race([
@@ -1297,11 +1309,13 @@ export class GitEvidenceProvider implements EvidenceProvider {
       : undefined;
 
     try {
-      const result = await captureGitFileStateAsync(
-        controller.signal,
-        context?.timeoutMs,
-        workspace,
-      );
+      const result = await captureBoundary({
+        cwd: workspace,
+        signal: controller.signal,
+        timeoutMs: context?.timeoutMs,
+        exclude: isRuntimeState,
+        ...(context?.materializer ? { materializer: context.materializer } : {}),
+      });
       if (timedOut) {
         return syntheticObservation(
           this.name,
@@ -1322,65 +1336,47 @@ export class GitEvidenceProvider implements EvidenceProvider {
           result.detail,
         );
       }
-      const tracked = result.state.tracked.filter((entry) => !isRuntimeState(entry.path));
-      const untracked = result.state.untracked.filter((file) => !isRuntimeState(file));
-      const dirty = result.state.dirty.filter((file) => !isRuntimeState(file));
-      const boundary = new Map<string, GitTrackedEntry>();
-      for (const entry of tracked) boundary.set(entry.path, entry);
-      for (const file of untracked) {
-        if (!boundary.has(file)) {
-          boundary.set(file, { path: file, mode: "", object: "" });
-        }
-      }
+      const boundary = result.boundary;
+      // The sink is a checkpoint concern. A sink defect must never invalidate
+      // the observation: the boundary/fingerprints above are already complete.
       try {
-        const fingerprints = await fingerprintBoundary(
-          workspace,
-          boundary,
-          controller.signal,
-        );
-        if (timedOut) {
-          return syntheticObservation(
-            this.name,
-            this.kind,
-            phase,
-            startedAt,
-            "timeout",
-            `boundary capture exceeded ${budget}ms`,
-          );
-        }
-        return {
-          schemaVersion: GIT_OBSERVATION_SCHEMA_VERSION,
-          providerId: "git",
-          kind: "git",
-          phase,
-          startedAt,
-          finishedAt: Date.now(),
-          status: "observed",
-          // `files` is the dirty display list; the complete boundary lives in
-          // data.fingerprints and the round delta is derived from it.
-          files: dirty,
-          data: {
-            dirty,
-            fingerprints,
-            head: result.state.head,
-            coverage: "tracked_and_non_ignored_untracked",
-          },
-        };
-      } catch (error) {
-        const status = timedOut
-          ? "timeout" as const
-          : error instanceof GitCaptureFailure
-            ? error.status
-            : "error";
-        return syntheticObservation(
-          this.name,
-          this.kind,
-          phase,
-          startedAt,
-          status,
-          String(error instanceof Error ? error.message : error),
-        );
+        context?.boundarySink?.(boundary);
+      } catch {
+        // A checkpoint capture failure is reported by the sink's own caller.
       }
+      return {
+        schemaVersion: GIT_OBSERVATION_SCHEMA_VERSION,
+        providerId: "git",
+        kind: "git",
+        phase,
+        startedAt,
+        finishedAt: Date.now(),
+        status: "observed",
+        // `files` is the dirty display list; the complete boundary lives in
+        // data.fingerprints and the round delta is derived from it.
+        files: boundary.dirty,
+        data: {
+          dirty: boundary.dirty,
+          fingerprints: boundary.fingerprints,
+          head: boundary.head,
+          coverage: "tracked_and_non_ignored_untracked",
+        },
+      };
+    } catch (error) {
+      const status = timedOut
+        ? "timeout" as const
+        : error instanceof Error && "status" in error &&
+            typeof (error as { status?: unknown }).status === "string"
+          ? (error as { status: "timeout" | "unavailable" | "aborted" | "error" }).status
+          : "error";
+      return syntheticObservation(
+        this.name,
+        this.kind,
+        phase,
+        startedAt,
+        status,
+        String(error instanceof Error ? error.message : error),
+      );
     } finally {
       if (timer) clearTimeout(timer);
       external?.removeEventListener("abort", onExternalAbort);

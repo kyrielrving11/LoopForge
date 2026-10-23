@@ -14,9 +14,11 @@ import {
 } from "./protocol.js";
 import type { VaultEntry } from "./loop-store.js";
 import type {
+  CheckpointRef,
   ContractBinding,
   ExecutionReport,
   LoopRoundResult,
+  OperatorAcceptance,
   PromptArtifact,
   RecoveryDirective,
   RoundContractProposal,
@@ -76,6 +78,15 @@ export interface CommittedRoundView {
   readonly origin?: "evaluation" | "agent" | "machine";
   /** v3.9.6: rollback directive facts; null for ordinary evaluation rounds. */
   readonly recovery?: RecoveryDirective | null;
+  /** v3.9.7: the transaction's automatic before-image, if one was captured. */
+  readonly beforeCheckpoint: CheckpointRef | null;
+  /** v3.9.7: Agent-created mid-round savepoints on this transaction. */
+  readonly checkpoints: CheckpointRef[];
+  /** v3.9.7: present only on a redo transaction that completed a verified
+   *  restore. The directive remains the target's one source. */
+  readonly restore: RoundTransactionSnapshot["restore"] | null;
+  /** Operator-owned immutable acceptance, when this transaction carries it. */
+  readonly operatorAcceptance: OperatorAcceptance | null;
   readonly sequence?: number;
   readonly attempt: number;
   readonly promptArtifact: PromptArtifact | null;
@@ -261,6 +272,10 @@ function viewFromSnapshot(input: {
       ? (snapshot.recovery?.origin ?? "machine")
       : "evaluation",
     recovery: snapshot.recovery ?? null,
+    beforeCheckpoint: snapshot.beforeCheckpoint ?? null,
+    checkpoints: snapshot.checkpoints ?? [],
+    restore: snapshot.restore ?? null,
+    operatorAcceptance: snapshot.operatorAcceptance ?? null,
     sequence: input.sequence,
     attempt: snapshot.attempt,
     promptArtifact: snapshot.promptArtifact ?? null,
@@ -624,7 +639,9 @@ export function resolveBranch(entries: ReadonlyArray<unknown>): BranchView {
     if (seen.has(directiveId)) break;
     seen.add(directiveId);
     const recovery = directive.recovery!;
-    rounds = rounds.filter((view) => view.round <= recovery.target);
+    // v3.9.7: the fence is the explicit redo round, not a nominal target
+    // round. A before/mid checkpoint's redo round is its owning round.
+    rounds = rounds.filter((view) => view.round < recovery.target.redo_round);
     const child = recovery.transaction_id;
     const childRounds = records
       .filter((view) => kindOf(view) === "evaluation" && branchOf(view) === child)
@@ -672,7 +689,7 @@ export function pendingRollbackDirective(
 ): CommittedRoundView | null {
   const pending = resolveBranch(entries).pendingDirective;
   if (!pending?.recovery) return null;
-  if (redoRound !== undefined && pending.recovery.target + 1 !== redoRound) {
+  if (redoRound !== undefined && pending.recovery.target.redo_round !== redoRound) {
     return null;
   }
   return pending;
@@ -687,7 +704,7 @@ export function hasCommittedMachineBacktrack(
     const recovery = view.recovery;
     return view.origin === "machine" &&
       recovery !== null && recovery !== undefined &&
-      recovery.target < currentRound &&
+      recovery.target.redo_round <= currentRound &&
       view.round >= currentRound;
   });
 }

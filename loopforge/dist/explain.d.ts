@@ -89,9 +89,9 @@ export interface ExplainResult {
         round: number;
         transactionId: string;
         origin: "agent" | "machine";
-        target: number;
+        redoRound: number;
+        targetCheckpointId: string;
         reason: string;
-        targetHead?: string;
         skippedFiles: string[];
     }>;
 }

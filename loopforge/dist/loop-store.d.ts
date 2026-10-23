@@ -145,7 +145,9 @@ export declare class FileLoopStore implements LoopStore {
     appendEntry(entry: VaultEntry): void;
     appendEntries(entries: VaultEntry[]): number;
     private writeEntry;
-    private loopDir;
+    /** The loop's durable directory. Public so the checkpoint store can place
+     *  content-addressed recovery material under the SAME runtime state root. */
+    loopDir(loopId: string): string;
     /** Read a JSON document, distinguishing missing from corrupt.
      *  ENOENT → null (missing); parse failure → StorageCorruptionError
      *  (corrupted) — the runtime never silently repairs storage. */

@@ -164,14 +164,9 @@ describe("v3.8 — round observation delta", () => {
 });
 
 describe("gitMotionSignal — the one motion definition", () => {
-  it("counts a non-empty change set, a moved HEAD, and a HEAD at the restore point", () => {
+  it("counts a non-empty change set and a moved HEAD", () => {
     assert.equal(gitMotionSignal({ changedFiles: ["a.ts"] }), true);
     assert.equal(gitMotionSignal({ changedFiles: [], headBefore: "aaa", headAfter: "bbb" }), true);
-    assert.equal(
-      gitMotionSignal({ changedFiles: [], headAfter: "abcdef1234567890", restoreTargetHead: "abcdef123456ffff" }),
-      true,
-      "short-hash rule, matching the restore check",
-    );
   });
 
   it("returns false only when both HEADs are known and no file changed", () => {
@@ -227,12 +222,13 @@ describe("inFlightGitMotion", () => {
     );
   });
 
-  it("counts a round that lands on the rollback's restore point as motion", () => {
+  it("does not count a restore as round motion", () => {
     const deltas = deriveRoundObservationDelta(
       [],
       [gitObservation([], {}, "abcdef123456")],
     );
-    assert.equal(inFlightGitMotion(deltas, "abcdef123456"), true);
+    assert.equal(inFlightGitMotion(deltas), null,
+      "a before-less boundary is unknown, and a restore adds no motion arm");
   });
 });
 

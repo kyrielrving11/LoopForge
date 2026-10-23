@@ -14,7 +14,7 @@
 import { ROUND_TRANSACTION_SCHEMA_VERSION, rootBranchId, } from "./round-transaction.js";
 import { deriveActiveRoundContract, deriveRoundContractView } from "./round-contract.js";
 import { deriveSubGoals } from "./subgoal-state.js";
-import { CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED, deriveEvidenceStatus, } from "./verification-gate.js";
+import { deriveEvidenceStatus, } from "./verification-gate.js";
 import { fieldGuide } from "./submission-guidance.js";
 import { deriveFieldAccounting } from "./field-accounting.js";
 import { deriveFilesReconciliation } from "./files-reconciliation.js";
@@ -124,11 +124,12 @@ export function deriveSubmissionReceipt(input) {
     // judged against.
     const recoveryCheckpoint = input.recoveryDirective
         ? {
-            restore_point: input.recoveryDirective.target,
+            checkpoint_id: input.recoveryDirective.target.checkpoint_id,
+            redo_round: input.recoveryDirective.target.redo_round,
             origin: input.recoveryDirective.origin,
             reason: input.recoveryDirective.reason,
-            verified: !pr.verificationFlags.some((flag) => flag.check === CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED &&
-                flag.severity === "error"),
+            restore_verified: input.snapshot.restore?.directiveTransactionId ===
+                input.recoveryDirective.transaction_id,
         }
         : null;
     // ── reports ────────────────────────────────────────────────────────────
@@ -213,12 +214,13 @@ export function deriveSubmissionReceipt(input) {
         : null;
     const rollback = (pr.action === "backtrack" || pr.action === "recovery")
         ? {
-            restore_point: pr.recovery?.target ?? Math.max(1, input.snapshot.round - 1),
+            redo_round: pr.recovery?.target.redo_round ??
+                Math.max(1, input.snapshot.round),
+            checkpoint_id: pr.recovery?.target.checkpoint_id ?? "",
             preserved_discoveries: [...(pr.recovery?.skipped_discoveries ?? [])],
             wrong_assumptions: [...(pr.recovery?.wrong_assumptions ?? [])],
             ...(pr.recovery?.origin ? { origin: pr.recovery.origin } : {}),
             ...(pr.recovery?.reason ? { reason: pr.recovery.reason } : {}),
-            ...(pr.recovery?.target_head ? { target_head: pr.recovery.target_head } : {}),
         }
         : null;
     const contractBefore = input.facts.contractBefore;
@@ -331,12 +333,12 @@ export function deriveCommittedSubmissionView(view, allViews, rollbacks = []) {
             : "accepted";
     const submittedFields = view.submittedFields;
     // A rollback directive's own receipt has no checkpoint to report; an
-    // evaluation round on the directive's child branch at `target + 1` is the
-    // redo that was judged against it.
+    // evaluation round on the directive's child branch at `redo_round` is the
+    // redo that was restored for.
     const recoveryDirective = view.kind === "rollback"
         ? null
         : [...rollbacks].reverse().find((item) => item.recovery !== null && item.recovery !== undefined &&
-            item.recovery.target + 1 === view.round &&
+            item.recovery.target.redo_round === view.round &&
             (!view.branchId || item.recovery.transaction_id === view.branchId))?.recovery ?? null;
     const snapshot = {
         schemaVersion: ROUND_TRANSACTION_SCHEMA_VERSION,
@@ -350,6 +352,9 @@ export function deriveCommittedSubmissionView(view, allViews, rollbacks = []) {
         phase: "committed",
         beforeEvidence: view.beforeEvidence,
         afterEvidence: view.afterEvidence,
+        ...(view.beforeCheckpoint ? { beforeCheckpoint: view.beforeCheckpoint } : {}),
+        ...(view.checkpoints.length > 0 ? { checkpoints: view.checkpoints } : {}),
+        ...(view.restore ? { restore: view.restore } : {}),
         evaluation: view.evaluation ?? undefined,
         result: view.result ?? undefined,
         ...(view.normalizationDiagnostics.length > 0

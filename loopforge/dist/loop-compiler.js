@@ -85,10 +85,10 @@ export function getPreviousRound(loopId, round, context) {
             : typeof data.output_summary === "string" ? data.output_summary : "",
     };
 }
-export function latestObjective(loopId, context,
+export function latestObjective(loopId, context, 
 /** Exclusive compile-round bound. A deep-restore redo must never read the
  *  abandoned branch's objective (and its rolled-back refinements). */
-beforeRound,
+beforeRound, 
 /** v3.9.4: a round-1 same-round retry has no earlier committed objective.
  *  Reading the prior compile of the SAME round recovers the initial
  *  criteria supplied to `loopforge_start`. It is never enabled for a first
@@ -274,7 +274,7 @@ function deriveMachineStatus(rounds, currentRound) {
  *  v3.9.6: the derivation lives in `criterion-status.ts` so the submission
  *  boundary and guidance can read the same rows without importing this module
  *  (which would close the `loop-compiler → submission-guidance` cycle). */
-export function deriveCriterionStatuses(loopId, context, objective, currentRound, lastRoundResult,
+export function deriveCriterionStatuses(loopId, context, objective, currentRound, lastRoundResult, 
 /** v3.8.1: the criterion machine facts from the shared bundle. A criterion
  *  is `verified` / `contradicted` / `insufficient` only through an item that
  *  references it — a claim alone can never reach `verified` — and the fact
@@ -449,7 +449,9 @@ function committedBacktrackBrief(loopId, round, context) {
     if (!record)
         return undefined;
     const lines = recoveryBriefLines({
-        target: record.target,
+        redoRound: record.target.redo_round,
+        checkpointId: record.target.checkpoint_id,
+        restoreVerified: true,
         triggerRule: record.origin === "machine"
             ? (record.trigger_rule ?? "machine_recovery")
             : "agent_recovery",
@@ -464,31 +466,17 @@ function committedBacktrackBrief(loopId, round, context) {
         preservedDiscoveries: record.skipped_discoveries,
         // The redo round's stable identity is a fact the old prepended prose
         // carried; keep it inside the artifact now.
-        recoveryRoundId: `loop:${loopId}:round:${record.target + 1}`,
+        recoveryRoundId: `loop:${loopId}:round:${record.target.redo_round}`,
     });
-    // v3.9.4: the restore point's machine facts belong in the prompt, not only
-    // in the prose backtrack header. Deterministic order and a visible overflow
-    // count keep the fact complete without making the section unbounded.
-    if (record.target_head) {
-        lines.push(`- **Restore HEAD**: \`${record.target_head}\``);
-    }
     if (record.skipped_files.length > 0) {
         const files = [...record.skipped_files].sort();
         const shown = files.slice(0, 15);
-        lines.push("- **Files changed in abandoned rounds**:");
+        lines.push("- **Files changed since the checkpoint**:");
         for (const file of shown)
             lines.push(`  - \`${file}\``);
         if (files.length > shown.length) {
             lines.push(`  - … and ${files.length - shown.length} more files`);
         }
-    }
-    // The machine requirement the recovery checkpoint enforces. A fact, not a
-    // recipe: LoopForge never says HOW to restore the workspace.
-    if (record.target_head || record.skipped_files.length > 0) {
-        lines.push(`- **Restore requirement**: the next submission's workspace is checked ` +
-            `against round ${record.target}` +
-            (record.target_head ? ` (HEAD \`${record.target_head}\`)` : "") +
-            "; a leftover change from the abandoned rounds rejects the recovery checkpoint.");
     }
     return lines;
 }
@@ -514,7 +502,7 @@ export function compileLoop(request, context) {
         ? request.constraints_from_plan
         : [];
     const constraints = evolveConstraints(request, objective, previous, windowRounds, planInput, preservedDiscoveries, preservedRound);
-    const constraintLifecycle = manageConstraintLifecycle(constraints.active, constraints.provenance, windowRounds, request.round,
+    const constraintLifecycle = manageConstraintLifecycle(constraints.active, constraints.provenance, windowRounds, request.round, 
     // "Violated this round" means the CURRENT compile round's report. A
     // committed previous round's violations are found by the committed
     // history scan at their real round, not relabelled as this round.

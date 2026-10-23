@@ -472,6 +472,8 @@ export class FileLoopStore {
         };
         this.atomicWrite(join(dir, "rounds", `${round}.json`), persisted);
     }
+    /** The loop's durable directory. Public so the checkpoint store can place
+     *  content-addressed recovery material under the SAME runtime state root. */
     loopDir(loopId) {
         const hash = createHash("sha256").update(loopId).digest("hex");
         return join(this.root, "loops", hash);

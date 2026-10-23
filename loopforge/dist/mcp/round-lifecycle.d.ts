@@ -10,8 +10,9 @@
  * session ownership, queues, and leases remain in SessionManager.
  */
 import { LoopForgeEngine } from "../engine.js";
-import type { LoopForgeRequest, RecoveryRequest, SelfEvaluation, SubmissionDiagnostic, SubmissionGuidance, SubmissionReceipt, VerificationFlag, LoopTerminalSink, RoundVerificationStatus } from "../protocol.js";
+import type { CheckpointRef, LoopForgeRequest, OperatorAcceptance, RecoveryRequest, SelfEvaluation, SubmissionDiagnostic, SubmissionGuidance, SubmissionReceipt, VerificationFlag, LoopTerminalSink, RoundVerificationStatus } from "../protocol.js";
 import type { RoundTransactionSnapshot } from "../round-transaction.js";
+import { FileWorkspaceCheckpointStore } from "../workspace-checkpoint.js";
 import type { LoopStore, VaultEntry } from "../loop-store.js";
 import type { SessionStateStore } from "../storage.js";
 export interface McpSession {
@@ -36,6 +37,10 @@ export interface McpSession {
      *  appears in and a re-derived baseline could launder. Absent means the
      *  round runs without that arm — never a lost round. */
     entrypointTrust?: Record<string, string>;
+    /** v3.9.7: operator-owned immutable acceptance, carried as a session cursor
+     *  so a recovery that clears the held snapshot cannot lose it. The root
+     *  committed round-1 transaction remains the authority. */
+    operatorAcceptance?: OperatorAcceptance;
     /** Schema-versioned transaction for the prompt currently held by the agent. */
     roundSnapshot?: RoundTransactionSnapshot;
 }
@@ -80,6 +85,16 @@ export interface AdvanceResult {
     round: number;
     /** Stable logical identity; unchanged when enforcement retries the round. */
     roundId?: string;
+    /** v3.9.7: the held transaction attempt. Required for next/checkpoint/
+     *  recovery so a stale response can never be applied to a later attempt. */
+    transactionId?: string;
+    /** v3.9.7: the held transaction's before-image + mid savepoints. */
+    checkpoints?: CheckpointRef[];
+    /** v3.9.7: explicit fact when the automatic before-image failed. */
+    beforeCheckpointError?: {
+        code: string;
+        detail: string;
+    };
     prompt: string | null;
     stopReason?: string;
     /** v2.0.1: Human-readable context for why the loop stopped.
@@ -101,14 +116,23 @@ export interface AdvanceResult {
     /** v1.13: When enforcementAction is "reject" or "terminate", the reason
      *  why the round was rejected or the loop was terminated. */
     enforcementReason?: string;
-    /** v3.9.6: the committed rollback directive facts for a recovery
-     *  disposition. The redo prompt is the next round. */
+    /** v3.9.7: the committed rollback directive facts and the verified restore
+     *  that produced the redo prompt. The Agent does not restore the workspace;
+     *  LoopForge already did. */
     recovery?: {
         origin: "agent" | "machine";
-        target_round: number;
         reason: string;
-        target_head?: string;
-        restore_required: boolean;
+        target_checkpoint_id: string;
+        redo_round: number;
+        restore: {
+            status: "verified";
+            head?: string;
+            previous_head?: string;
+            safety_ref?: string;
+            files_written: number;
+            files_deleted: number;
+            verified_at: number;
+        };
     };
     /** v3.8.1: set when the RUNTIME refused the submission before touching any
      *  state — the same `ToolErrorCode` as `stopReason`, plus the structured
@@ -116,7 +140,7 @@ export interface AdvanceResult {
      *  `validateSubmission` in submission-boundary.ts, which SessionManager
      *  runs before its queue and lease heartbeat. */
     submissionError?: {
-        code: "evaluation_invalid" | "contract_invalid" | "round_id_required" | "recovery_invalid" | "recovery_disabled" | "recovery_unavailable";
+        code: "evaluation_invalid" | "contract_invalid" | "invalid_argument" | "round_id_required" | "round_id_mismatch" | "recovery_invalid" | "recovery_disabled" | "recovery_unavailable" | "checkpoint_invalid" | "checkpoint_unavailable" | "checkpoint_failed" | "checkpoint_limit" | "restore_failed" | "restore_pending";
         details: Record<string, unknown>;
     };
     /** v3.9.4: a prompt-projection code defect. This is NOT a submission
@@ -151,6 +175,9 @@ export interface RoundLifecycleDeps {
     ownerId: string;
     /** Session lease duration; stamped into saved session entries. */
     leaseMs: number;
+    /** v3.9.7: per-loop checkpoint store. Absent disables automatic
+     *  before-images (the round still runs with an explicit error fact). */
+    checkpointStoreFor?: (loopId: string) => FileWorkspaceCheckpointStore | undefined;
 }
 export declare function buildLoopRequest(session: McpSession): LoopForgeRequest;
 export declare class RoundLifecycle {
@@ -160,6 +187,7 @@ export declare class RoundLifecycle {
     private readonly terminalSinks;
     private readonly ownerId;
     private readonly leaseMs;
+    private readonly checkpointStoreFor;
     constructor(deps: RoundLifecycleDeps);
     /** v3.9.1: the submission-guidance projection for a session's held round.
      *  One history window (`derivationRounds`, the compile window), no writes.
@@ -167,9 +195,12 @@ export declare class RoundLifecycle {
     guidanceFor(session: McpSession, extras?: {
         verificationFlags?: ReadonlyArray<VerificationFlag>;
         recovery?: {
-            required: boolean;
-            restore_point?: number;
-            target_head?: string;
+            pending: boolean;
+            redo_round: number;
+            checkpoint_id: string;
+            restore_verified: boolean;
+            origin?: "agent" | "machine";
+            reason?: string;
         } | null;
     }): SubmissionGuidance;
     /** The operator criteria the held prompt's reference space was built from.
@@ -219,16 +250,26 @@ export declare class RoundLifecycle {
      *  Best-effort: an unreadable policy or an unresolvable command must leave
      *  the round without the absolute arm, not fail the preparation. */
     private seedEntrypointTrust;
-    /** v3.9.6: operator acceptance and branch identity travel with the held
-     *  round snapshot; every new prepare carries them forward. */
+    /** v3.9.7: operator acceptance and branch identity travel with the session
+     *  cursor (not only the held snapshot). Every prepare carries them forward;
+     *  a recovery that clears the held snapshot must not reset the branch to
+     *  root or lose the operator's acceptance surface. */
     private prepareOptions;
     private persistPrepared;
+    /** v3.9.7: execution metadata attached to every held/prepared prompt. These
+     *  are transport facts, never prompt governance content. */
+    private transactionFacts;
     private restoredPromptResult;
     /** Reconcile the crash window where feedback committed but session_state
      *  still points at the old prompt. Returns null when no commit is pending.
      *  v3.7: async — the continue-after-crash branch compiles through
      *  RoundDriver.prepare (the sync prepareSync fallback was removed). */
     private reconcileCommittedRound;
+    /** v3.9.7: a committed directive with no verified redo snapshot must be
+     *  completed BEFORE any ordinary compile/held-prompt path. The restore and
+     *  redo prepare are idempotent; a verified held redo prompt is returned
+     *  without re-checking the workspace (the Agent may already have worked). */
+    private completePendingRecovery;
     /** Resume tail: the session has been reconstructed and registered. Reconcile
      *  a committed-but-undelivered round, restore the held prompt, or recover a
      *  missing prompt from current round state. v3.7: async — compilation runs
@@ -256,12 +297,19 @@ export declare class RoundLifecycle {
     /** Build a rejection result: compile a retry prompt, persist, return.
      *  MUTATES: session.roundSnapshot, session.currentPrompt, session.currentLevel */
     private buildRejectionResult;
-    /** v2.10: Build a backtrack result — roll back to last clean round.
-     *  Resets the round counter to the restore target + 1, merges preserved
-     *  discoveries, compiles from the restored state, and injects the
-     *  backtrack prompt at the top.
-     *  MUTATES: session.currentRound, session.roundSnapshot,
-     *           session.consecutiveRejections, session.lastRejectionCheck */
+    /** v3.9.7: the workspace/state-dir facts shared by restore preflight and
+     *  execution. The state directory is never part of the restored boundary. */
+    private restoreContext;
+    /** Execute the committed directive's restore, verify it, then compile the
+     *  redo from the SAME baseline. The directive is never rewritten. */
+    private runRestoreAndPrepare;
+    /** Failed restore: the directive remains pending, no prompt exists, and the
+     *  session is resumable. */
+    private restoreFailedResult;
+    /** v2.10: Build a backtrack result. The directive is already committed;
+     *  LoopForge executes and verifies the restore, then compiles the redo from
+     *  the verified baseline. A failed restore leaves the directive pending and
+     *  the session stalled — no redo prompt is ever issued unverified. */
     private buildBacktrackResult;
     /** Build a termination result: persist stopped status, notify sinks.
      *  MUTATES: session.status, session.currentPrompt
@@ -291,7 +339,9 @@ export declare class RoundLifecycle {
      *  method only validates it against committed facts, records the rollback
      *  directive and compiles the redo. It never runs ordinary verification or
      *  enforcement on the abandoned work. */
-    recover(sessionId: string, recovery: RecoveryRequest, roundId?: string): Promise<AdvanceResult>;
+    recover(sessionId: string, recovery: RecoveryRequest, roundId?: string, transactionId?: string): Promise<AdvanceResult>;
+    /** Execute the committed directive's restore and return the redo prompt. */
+    private restoreAndPrepareRedo;
     /** Core cycle entry used by SessionManager.advance after the queue + lease
      *  dance: validate → extract → execute transaction → route disposition
      *  → advance to next round (continue) or return terminal result.
@@ -299,7 +349,7 @@ export declare class RoundLifecycle {
      *    on (from the last start/next/resume response). Anchors the submission;
      *    a stale or duplicate submission returns the held prompt instead of
      *    being processed. Optional — when absent the anchor check is skipped. */
-    advance(sessionId: string, output: string, preExtractedEval?: SelfEvaluation, roundId?: string, normalizationDiagnostics?: SubmissionDiagnostic[], submittedFields?: string[]): Promise<AdvanceResult>;
+    advance(sessionId: string, output: string, preExtractedEval?: SelfEvaluation, roundId?: string, normalizationDiagnostics?: SubmissionDiagnostic[], submittedFields?: string[], transactionId?: string): Promise<AdvanceResult>;
     /** Write back loop knowledge to long-term memory.
      *  Uses shared base builder from policy.ts. Called when a loop terminates. */
     notifyTerminal(session: McpSession, stopReason: string): Promise<void>;

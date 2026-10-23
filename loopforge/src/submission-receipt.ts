@@ -33,10 +33,7 @@ import type { RoundTransactionSnapshot } from "./round-transaction.js";
 import type { CommittedRoundView } from "./committed-round.js";
 import { deriveActiveRoundContract, deriveRoundContractView } from "./round-contract.js";
 import { deriveSubGoals } from "./subgoal-state.js";
-import {
-  CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED,
-  deriveEvidenceStatus,
-} from "./verification-gate.js";
+import { deriveEvidenceStatus } from "./verification-gate.js";
 import { fieldGuide } from "./submission-guidance.js";
 import { deriveFieldAccounting } from "./field-accounting.js";
 import { deriveFilesReconciliation } from "./files-reconciliation.js";

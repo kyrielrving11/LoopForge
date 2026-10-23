@@ -127,12 +127,7 @@ describe("v3.9.4 — the machine finding is the next prompt's repair fact", () =
       null,
       deltas,
       [],
-      {},
-      undefined,
       [],
-      [],
-      [],
-      undefined,
       false, // the submittedFields manifest did not name files_changed
     );
     const flag = result.flags.find((entry) => entry.check === "evidence_integrity");

@@ -143,6 +143,10 @@ function viewFromSnapshot(input) {
             ? (snapshot.recovery?.origin ?? "machine")
             : "evaluation",
         recovery: snapshot.recovery ?? null,
+        beforeCheckpoint: snapshot.beforeCheckpoint ?? null,
+        checkpoints: snapshot.checkpoints ?? [],
+        restore: snapshot.restore ?? null,
+        operatorAcceptance: snapshot.operatorAcceptance ?? null,
         sequence: input.sequence,
         attempt: snapshot.attempt,
         promptArtifact: snapshot.promptArtifact ?? null,
@@ -495,7 +499,9 @@ export function resolveBranch(entries) {
             break;
         seen.add(directiveId);
         const recovery = directive.recovery;
-        rounds = rounds.filter((view) => view.round <= recovery.target);
+        // v3.9.7: the fence is the explicit redo round, not a nominal target
+        // round. A before/mid checkpoint's redo round is its owning round.
+        rounds = rounds.filter((view) => view.round < recovery.target.redo_round);
         const child = recovery.transaction_id;
         const childRounds = records
             .filter((view) => kindOf(view) === "evaluation" && branchOf(view) === child)
@@ -531,7 +537,7 @@ export function pendingRollbackDirective(entries, redoRound) {
     const pending = resolveBranch(entries).pendingDirective;
     if (!pending?.recovery)
         return null;
-    if (redoRound !== undefined && pending.recovery.target + 1 !== redoRound) {
+    if (redoRound !== undefined && pending.recovery.target.redo_round !== redoRound) {
         return null;
     }
     return pending;
@@ -542,7 +548,7 @@ export function hasCommittedMachineBacktrack(entries, currentRound) {
         const recovery = view.recovery;
         return view.origin === "machine" &&
             recovery !== null && recovery !== undefined &&
-            recovery.target < currentRound &&
+            recovery.target.redo_round <= currentRound &&
             view.round >= currentRound;
     });
 }

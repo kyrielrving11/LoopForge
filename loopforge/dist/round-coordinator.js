@@ -18,14 +18,14 @@
  * side-effect free and accepted decisions can be replayed idempotently.
  */
 import { queryLoopEntries } from "./loop-store.js";
-import { CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED, CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE, collectOutOfScopeFiles, roundDriftFiles, verifySelfEvaluation, } from "./verification-gate.js";
-import { verifyRecoveryCheckpoint } from "./recovery.js";
-import { isRecord } from "./token-utils.js";
+import { CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE, collectOutOfScopeFiles, roundDriftFiles, verifySelfEvaluation, } from "./verification-gate.js";
+import { checkpointForRoundBoundary, deriveRecoveryDirective, } from "./recovery.js";
 import { driftedEntrypoints } from "./evidence-provider.js";
+import { isRecord } from "./token-utils.js";
 import { declaresBlocked, effectiveSuccess } from "./round-outcome.js";
-import { derivationRounds, pendingRollbackDirective, } from "./committed-round.js";
+import { derivationRounds } from "./committed-round.js";
 import { deriveRoundProgress } from "./progress.js";
-import { enforceRound, buildRejectionPrompt, findSafeRestorePoint, findBacktrackTargetSnapshot, } from "./enforcement-gate.js";
+import { enforceRound, buildRejectionPrompt, findSafeRestorePoint, } from "./enforcement-gate.js";
 import { logEvent } from "./observability.js";
 import { getPolicy } from "./policy.js";
 import { deriveRoundContractView } from "./round-contract.js";
@@ -221,52 +221,27 @@ export class RoundCoordinator {
         const previousCommitted = committedRounds.length > 0
             ? committedRounds[committedRounds.length - 1].evaluation
             : null;
-        // The pending rollback directive is the ONE source of the redo restore
-        // facts; the session never carries a copy.
-        const pendingRecovery = pendingRollbackDirective(vaultEntries, currentRound)?.recovery ?? null;
         // ── 2. Verification gate ────────────────────────────────────────────
-        let verifyResult = verifySelfEvaluation(selfEval, currentRound, vaultEntries, previousCommitted, evidenceDeltas ?? [], pendingRecovery?.skipped_files ?? [], pendingRecovery?.skipped_fingerprints ?? {}, pendingRecovery?.target_head,
+        // v3.9.7: the old post-backtrack restore checks/R9 are gone. LoopForge
+        // verifies the restore before issuing the redo prompt; a redo submission
+        // is ordinary work, so its after boundary must never be compared to the
+        // restore target.
+        const verifyResult = verifySelfEvaluation(selfEval, currentRound, vaultEntries, previousCommitted, evidenceDeltas ?? [], [], {}, undefined, 
         // v3.7.1: gate records live under the gate: prefix — outside the round
         // entries above — and are passed separately to the gate check.
         this.store
             ? queryLoopEntries(this.store, loopId, { prefix: `loop:${loopId}:gate:` })
-            : [],
+            : [], 
         // v3.8.3: the absolute arm of the entrypoint check. Derived here, not in
         // the gate, because it needs the filesystem and the in-flight trust map
         // captured when this round was prepared — the gate stays a pure function
         // of its inputs.
-        driftedEntrypoints(input.entrypointTrust), input.beforeEvidence ?? [],
-        // v3.9: the restore point's own dirty files — the baseline the restored
-        // workspace is compared against.
-        pendingRecovery?.target_dirty,
+        driftedEntrypoints(input.entrypointTrust), input.beforeEvidence ?? [], undefined, 
         // v3.9.4: the SAME manifest basis the receipt uses. An omitted
         // files_changed field is not silently treated as "a report exists".
         input.submittedFields
             ? input.submittedFields.includes("execution_report.files_changed")
             : undefined);
-        // v3.9.6: the recovery checkpoint is fail-closed. An unobserved Git
-        // boundary is not a pass; it becomes the same restore finding R9 acts on.
-        if (pendingRecovery &&
-            !verifyResult.flags.some((flag) => flag.check === CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED)) {
-            const checkpoint = verifyRecoveryCheckpoint({
-                directive: pendingRecovery,
-                beforeEvidence: input.beforeEvidence ?? [],
-                evidenceDeltas: evidenceDeltas ?? [],
-            });
-            if (!checkpoint.ok) {
-                verifyResult = {
-                    ...verifyResult,
-                    verdict: "contradicted",
-                    flags: [...verifyResult.flags, {
-                            severity: "error",
-                            field: "recovery",
-                            check: CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED,
-                            detail: checkpoint.detail,
-                            ref: `round:${pendingRecovery.target}`,
-                        }],
-                };
-            }
-        }
         const verificationFlags = verifyResult.flags;
         const gateContradicted = verifyResult.verdict === "contradicted";
         // v3.8: the ACTIVE contract's derived item statuses for this round — the
@@ -316,11 +291,11 @@ export class RoundCoordinator {
         // transaction reaches enforcement with a fully extracted self-evaluation.
         // The old v2.5 "heuristic partial enforcement" plumbing (extractionSucceeded
         // flag, enforcement skipEvidenceRules mode) was removed as unreachable.
-        const enforceResult = enforceRound(selfEval, verifyResult, currentRound, vaultEntries, consecutiveRejections, input.lastRejectionCheck ?? "", scopeDriftWaiver,
+        const enforceResult = enforceRound(selfEval, verifyResult, currentRound, vaultEntries, consecutiveRejections, input.lastRejectionCheck ?? "", scopeDriftWaiver, 
         // v3.9.7: what THIS round moved, from the same provider-neutral
         // progress rule the committed series uses. Unknown/not_applicable never
         // gains the stall excuse.
-        deriveRoundProgress(evidenceDeltas ?? [], pendingRecovery?.target_head));
+        deriveRoundProgress(evidenceDeltas ?? []));
         if (enforceResult.action === "reject") {
             const newRejections = consecutiveRejections + 1;
             const rejectionPrompt = buildRejectionPrompt(currentRound, task, enforceResult, verificationFlags);
@@ -369,12 +344,30 @@ export class RoundCoordinator {
                 shouldPushSuccessTrajectory: false,
             };
         }
-        // ── v2.10: Backtrack ──────────────────────────────────────────────────
+        // ── v2.10 / v3.9.7: Backtrack ─────────────────────────────────────────
         if (enforceResult.action === "backtrack") {
             const maxDepth = getPolicy().engine.backtrack_max_depth;
-            const restorePoint = findSafeRestorePoint(currentRound, vaultEntries, maxDepth);
+            // The state after round T is the before-image of round T+1. A candidate
+            // is eligible only when that image was materialized and its manifest is
+            // readable; there is no verification-only fallback.
+            const resolveRef = (restoreRound) => {
+                const redoRound = restoreRound + 1;
+                const ref = checkpointForRoundBoundary({
+                    entries: vaultEntries,
+                    heldRound: currentRound,
+                    heldBeforeCheckpoint: input.beforeCheckpoint,
+                    redoRound,
+                });
+                if (!ref)
+                    return null;
+                if (input.resolveCheckpointManifest && !input.resolveCheckpointManifest(ref)) {
+                    return null;
+                }
+                return ref;
+            };
+            const restorePoint = findSafeRestorePoint(currentRound, vaultEntries, maxDepth, (restoreRound) => resolveRef(restoreRound) !== null);
             if (!restorePoint) {
-                // No clean round found within maxDepth — fall through to terminate
+                // No clean round with a materialized restore point within maxDepth.
                 logEvent("session_end", {
                     loopId,
                     stopReason: "enforcement_terminated",
@@ -386,7 +379,7 @@ export class RoundCoordinator {
                     stopReason: "enforcement_terminated",
                     verificationFlags,
                     enforcementAction: "terminate",
-                    enforcementReason: `${enforceResult.reason} (backtrack failed: no clean restore point within ${maxDepth} rounds)`,
+                    enforcementReason: `${enforceResult.reason} (backtrack failed: no materialized restore point within ${maxDepth} rounds)`,
                     rejectionCheck: enforceResult.check,
                     roundSuccess,
                     gateContradicted,
@@ -394,51 +387,53 @@ export class RoundCoordinator {
                     shouldPushSuccessTrajectory: false,
                 };
             }
-            // v2.13/v3.8.1: the rolled-back branch's facts — one named derivation,
-            // so the walk is testable without driving a whole rollback, and the
-            // prompt, the state file and the committed decision all describe one
-            // event.
-            const { skippedFiles, skippedFingerprints, skippedDiscoveries, failedRounds, approaches, wrongAssumptions, } = deriveBacktrackRecoveryFacts({
-                currentRound,
-                restoreRound: restorePoint.round,
-                vaultEntries,
-                selfEval,
-                skippedDiscoveries: restorePoint.skippedDiscoveries,
-            });
-            // v2.12: Capture the restore point's machine snapshot — the commit the
-            // workspace must return to and what was already dirty there — so the
-            // next round's verification can confirm the workspace returned to this
-            // point without reading unrelated work in progress as a failed restore.
-            const targetSnapshot = findBacktrackTargetSnapshot(restorePoint.round, vaultEntries);
-            const targetGitHead = targetSnapshot?.head ?? null;
-            const targetView = derivationRounds(vaultEntries, currentRound)
-                .find((view) => view.round === restorePoint.round) ?? null;
-            const recovery = {
+            const targetRef = resolveRef(restorePoint.round);
+            const targetManifest = targetRef && input.resolveCheckpointManifest
+                ? input.resolveCheckpointManifest(targetRef)
+                : null;
+            if (!targetRef || !targetManifest) {
+                logEvent("session_end", {
+                    loopId,
+                    stopReason: "enforcement_terminated",
+                    round: currentRound,
+                });
+                return {
+                    action: "terminate",
+                    verificationStatus: roundVerificationStatus(activeContractStatuses, selfEval.execution_report ?? null),
+                    stopReason: "enforcement_terminated",
+                    verificationFlags,
+                    enforcementAction: "terminate",
+                    enforcementReason: `${enforceResult.reason} (backtrack failed: restore point manifest unavailable)`,
+                    rejectionCheck: enforceResult.check,
+                    roundSuccess,
+                    gateContradicted,
+                    newConsecutiveRejections: 0,
+                    shouldPushSuccessTrajectory: false,
+                };
+            }
+            const abandonedRounds = derivationRounds(vaultEntries, currentRound)
+                .filter((view) => view.round >= targetRef.redoRound);
+            const recovery = deriveRecoveryDirective({
                 origin: "machine",
                 reason: enforceResult.reason,
-                trigger_rule: enforceResult.check,
-                target: restorePoint.round,
-                target_round_id: targetView?.roundId ??
-                    `loop:${loopId}:round:${restorePoint.round}`,
-                target_transaction_id: targetView?.transactionId ?? targetView?.roundId ?? "",
-                ...(targetGitHead ? { target_head: targetGitHead } : {}),
-                target_dirty: targetSnapshot?.dirtyFiles ?? [],
-                target_fingerprints: targetSnapshot?.fingerprints ?? {},
-                skipped_files: skippedFiles,
-                skipped_fingerprints: skippedFingerprints,
-                skipped_discoveries: skippedDiscoveries,
-                failed_rounds: failedRounds,
-                approaches,
-                wrong_assumptions: wrongAssumptions,
-                transaction_id: "",
-            };
+                ...(enforceResult.check ? { triggerRule: enforceResult.check } : {}),
+                // The transaction layer fills the directive transaction id, which
+                // depends on the prompt hash/branch identity.
+                transactionId: "",
+                targetRef,
+                targetManifest,
+                abandonedRounds,
+                currentAfterEvidence: input.afterEvidence ?? [],
+                triggerEvaluation: selfEval,
+                triggerRound: currentRound,
+            });
             logEvent("enforcement_backtrack", {
                 loopId,
                 round: currentRound,
                 reason: enforceResult.reason.slice(0, 120),
                 check: enforceResult.check ?? "",
-                backtrackTarget: restorePoint.round,
-                skippedDiscoveries: restorePoint.skippedDiscoveries.length,
+                backtrackTarget: targetRef.redoRound,
+                skippedDiscoveries: recovery.skipped_discoveries.length,
             });
             return {
                 action: "backtrack",

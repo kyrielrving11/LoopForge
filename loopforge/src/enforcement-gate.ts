@@ -25,7 +25,7 @@ import type {
   VerificationResult,
 } from "./protocol.js";
 import { makeEnforcementResult } from "./protocol.js";
-import { CHECK_SUCCESS_WITH_REMAINING_CRITERIA, CHECK_RECURRING_VIOLATION, CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED, CHECK_REQUIRED_COMMAND_FAILED, CHECK_COMMAND_EVIDENCE_MISMATCH, CHECK_OUTCOME_SUCCESS_CONTRADICTION, CHECK_VERIFICATION_ENTRYPOINT_MODIFIED, CHECK_ROUND_SCOPE_DRIFT, CHECK_CONTRACT_ITEMS_UNVERIFIED, CHECK_USER_GATE_UNRESOLVED } from "./verification-gate.js";
+import { CHECK_SUCCESS_WITH_REMAINING_CRITERIA, CHECK_RECURRING_VIOLATION, CHECK_REQUIRED_COMMAND_FAILED, CHECK_COMMAND_EVIDENCE_MISMATCH, CHECK_OUTCOME_SUCCESS_CONTRADICTION, CHECK_VERIFICATION_ENTRYPOINT_MODIFIED, CHECK_ROUND_SCOPE_DRIFT, CHECK_CONTRACT_ITEMS_UNVERIFIED, CHECK_USER_GATE_UNRESOLVED } from "./verification-gate.js";
 import { deriveProgressWindow, type RoundProgress } from "./progress.js";
 import { declaresBlocked } from "./round-outcome.js";
 import { getPolicy } from "./policy.js";
@@ -571,59 +571,6 @@ function enforceScopeDrift(
   });
 }
 
-/** R9 (v2.12): Post-backtrack workspace not restored. The verification gate
- *  produced backtrack_workspace_not_restored (error): either skipped-round
- *  files are still dirty, or the working tree is not at the restore point's
- *  git HEAD. The agent must restore the workspace, not redo the round. */
-function enforceBacktrackNotRestored(
-  flags: VerificationFlag[],
-  vaultEntries: VaultEntry[] = [],
-  currentRound = 0,
-): EnforcementResult | null {
-  const flag = flags.find((f) =>
-    f.check === CHECK_BACKTRACK_WORKSPACE_NOT_RESTORED && f.severity === "error");
-  if (!flag) return null;
-  // An Agent-initiated recovery is a checkpoint, not a machine rollback.
-  // A failed restoration rejects the redo for the same roundId; it must not
-  // silently open a machine-origin branch.
-  const pending = pendingRollbackDirective(vaultEntries, currentRound);
-  if (pending?.recovery?.origin === "agent") {
-    return makeEnforcementResult({
-      action: "reject",
-      reason: "The Agent-initiated recovery checkpoint is not satisfied: " + flag.detail,
-      check: "recovery_checkpoint_failed",
-      fix_instructions:
-        "Restore the workspace to the target HEAD and baseline, then resubmit the same roundId.",
-    });
-  }
-  if (!getPolicy().engine.backtrack_enabled) return null;
-  // v2.14: same deadlock guard as R4/R5 — a backtrack that already fired
-  // for this round means a non-restoring agent would otherwise cycle
-  // R9-backtrack forever (backtracks do not increment the rejection
-  // counter). One rollback chance, then terminate.
-  if (currentRound > 0 && hasCommittedBacktrack(vaultEntries, currentRound)) {
-    return makeEnforcementResult({
-      action: "terminate",
-      reason:
-        "The workspace is still not restored after the previous backtrack: " +
-        flag.detail,
-      check: "backtrack_workspace_not_restored",
-    });
-  }
-  return makeEnforcementResult({
-    action: "backtrack",
-    reason:
-      "The workspace was not restored after backtrack: " + flag.detail,
-    // v3.8: the requirement, not the recipe — LoopForge never mutates the
-    // working tree and does not prescribe how the agent restores it.
-    fix_instructions:
-      "Return the working directory to the clean round's state before " +
-      "submitting the next round: the skipped-round files must be reverted " +
-      "and HEAD must be back at the restore point the backtrack prompt named.",
-    check: "backtrack_workspace_not_restored",
-  });
-}
-
 interface StallWindowVerdict {
   detail: string;
   window: number;
@@ -882,7 +829,6 @@ const RULE_TABLE: readonly RuleRow[] = [
   { checks: ["contract_items_unverified"], ladder: "internal" },
   { checks: ["progress_stall"], ladder: "internal" },
   { checks: ["max_rejections"], ladder: "counter" },
-  { checks: ["backtrack_workspace_not_restored"], ladder: "internal" },
   // v3.7.1: cited gates without an approved human decision
   { checks: ["user_gate_unresolved"], ladder: "uniform", terminalAfter: 2, noticeOnRepeat: true },
 ];
@@ -1011,7 +957,6 @@ export function enforceRound(
           consecutiveRejections,
           scopeDriftWaiver && flags.some((f) => f.check === CHECK_ROUND_SCOPE_DRIFT)),
     // v2.12: R9 — post-backtrack workspace not restored
-    () => enforceBacktrackNotRestored(flags, vaultEntries, currentRound),
   ];
 
   // v3.7: uniform-ladder escalation. Rows without their own escalation

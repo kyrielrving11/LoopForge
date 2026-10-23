@@ -537,7 +537,7 @@ function checkRetractFreshConstraint(selfEval, prevSelfEval, currentRound) {
 }
 /** v1.18: Cross-validate agent-reported files_changed against git evidence
  *  from the configured evidence providers (MachineObservation array). */
-function checkEvidenceIntegrity(selfEval, evidenceDeltas,
+function checkEvidenceIntegrity(selfEval, evidenceDeltas, 
 /** v3.9.4: whether the raw submission named
  *  `execution_report.files_changed`. The receipt uses the SAME manifest, so
  *  the two projections can never disagree about an omitted report. */
@@ -842,7 +842,7 @@ function checkBacktrackWorkspaceRestore(selfEval, backtrackSkippedFiles, backtra
  *  A redo prepared before the agent restores the workspace has a stale before
  *  snapshot, so its first submission is a recovery checkpoint; once the
  *  restore is proven, later work may move HEAD freely. */
-function checkBacktrackGitHeadRestore(evidenceDeltas, backtrackTargetGitHead, beforeEvidence = [],
+function checkBacktrackGitHeadRestore(evidenceDeltas, backtrackTargetGitHead, beforeEvidence = [], 
 /** The restore point's own dirty files — undefined when never observed. */
 backtrackTargetDirty) {
     if (!backtrackTargetGitHead)
@@ -1063,27 +1063,27 @@ function checkUserGateUnresolved(selfEval, gateEntries) {
             `loopforge_gate_resolve before claiming the action is done.`,
     });
 }
-export function verifySelfEvaluation(selfEval, currentRound, vaultEntries, prevSelfEval = null, evidenceDeltas = [],
+export function verifySelfEvaluation(selfEval, currentRound, vaultEntries, prevSelfEval = null, evidenceDeltas = [], 
 /** v2.13: Files from skipped backtrack rounds. If the agent's
  *  files_changed overlaps significantly with these, the workspace
  *  was not properly restored before working. */
-backtrackSkippedFiles = [],
+backtrackSkippedFiles = [], 
 /** M3 (v3.7.x): skipped-file git fingerprints at their failed rounds —
  *  machine proof of "untouched since the rollback" for the restore check. */
-backtrackSkippedFingerprints = {},
+backtrackSkippedFingerprints = {}, 
 /** v2.12: Git HEAD commit of the backtrack restore point. When set, the
  *  current git snapshot must sit at this commit — otherwise the workspace
  *  was not restored and the round cannot be accepted. */
-backtrackTargetGitHead,
+backtrackTargetGitHead, 
 /** v3.7.1: gate records (task_type gate_opened / gate_decision) live
  *  outside the round prefix — the caller passes them in explicitly. */
-gateEntries = [],
+gateEntries = [], 
 /** v3.8.3: entrypoint files that no longer match the trusted round-start
  *  baseline. Derived by the caller (it needs the in-flight trust map and
  *  filesystem access); this function stays a pure function of its inputs. */
-entrypointDrift = [], beforeEvidence = [],
+entrypointDrift = [], beforeEvidence = [], 
 /** v3.9: the restore point's own dirty files (undefined = never observed). */
-backtrackTargetDirty,
+backtrackTargetDirty, 
 /** v3.9.4: whether the raw submission attempted
  *  `execution_report.files_changed` (from the persisted submittedFields
  *  manifest). Undefined falls back to "an execution report exists". */

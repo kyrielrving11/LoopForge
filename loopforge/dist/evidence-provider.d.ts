@@ -10,6 +10,9 @@
  * execution (v2.0.1), plus explicitly configured shell-free command providers.
  */
 import type { CommandObservation, ConfiguredCapability, EvidenceCapability, MachineObservation, ObservedCapability, ProgressState } from "./protocol.js";
+import type { BoundaryCapture, BoundaryMaterializer } from "./git-boundary.js";
+export { captureGitFileStateAsync } from "./git-boundary.js";
+export type { GitCaptureResult, GitCaptureStatus, GitFileState, GitTrackedEntry, } from "./git-boundary.js";
 import type { CommandEvidencePolicy, LoopPolicy } from "./policy.js";
 /** Interface for evidence capture providers.
  *
@@ -23,6 +26,12 @@ export interface EvidenceCaptureContext {
     phase: "before" | "after";
     /** Workspace root override (tests capture against temp repos). */
     cwd?: string;
+    /** v3.9.8: when present, the Git provider materializes dirty/untracked
+     *  content in the SAME boundary scan that produces the evidence. */
+    materializer?: BoundaryMaterializer;
+    /** v3.9.8: receives the captured boundary (fingerprints/head/contents) so a
+     *  checkpoint can be built without re-hashing the workspace. */
+    boundarySink?: (boundary: BoundaryCapture) => void;
 }
 export type EvidenceCaptureResult = MachineObservation | null | Promise<MachineObservation | null>;
 export interface EvidenceProvider {
@@ -45,6 +54,12 @@ export interface EvidenceCollectOptions {
     timeoutMs?: number;
     loopId?: string;
     phase?: "before" | "after";
+    /** Workspace root override; command providers and the Git provider use it. */
+    cwd?: string;
+    /** v3.9.8: enables content materialization in the same Git boundary scan. */
+    materializer?: BoundaryMaterializer;
+    /** v3.9.8: receives the Git boundary captured by this collection. */
+    boundarySink?: (boundary: BoundaryCapture) => void;
 }
 export type EvidenceProviderFactory = () => EvidenceProvider;
 /** Register a provider factory used by policy-driven collectors. */
@@ -161,42 +176,6 @@ export declare class CommandEvidenceProvider implements EvidenceProvider {
     capture(context?: EvidenceCaptureContext): Promise<CommandObservation | null>;
     private observation;
 }
-/** A tracked index entry. `mode` is the stage mode (100644, 100755, 120000,
- *  160000); `object` is the index blob/commit id. */
-export interface GitTrackedEntry {
-    path: string;
-    mode: string;
-    object: string;
-}
-/** v3.9.1: the complete workspace boundary at one instant. */
-export interface GitFileState {
-    /** Every path in the index, including paths deleted from the worktree. */
-    tracked: GitTrackedEntry[];
-    /** Non-ignored untracked paths. */
-    untracked: string[];
-    /** Dirty-since-HEAD paths, for display only. */
-    dirty: string[];
-    /** HEAD at this boundary; absent in a repository with no commit. */
-    head?: string;
-}
-/** An explicit capture failure. The collector records the status; null is no
- *  longer used as an ambiguous "unavailable". */
-export type GitCaptureResult = {
-    ok: true;
-    state: GitFileState;
-} | {
-    ok: false;
-    status: "timeout" | "unavailable" | "aborted" | "error";
-    detail: string;
-};
-/** v3.9.1: capture the complete boundary. All required git commands run in
- *  one parallel batch; HEAD is best-effort (a repository with no commit is a
- *  valid boundary with no head). Any required-command failure returns an
- *  explicit status — never an empty-but-observed boundary. */
-export declare function captureGitFileStateAsync(signal?: AbortSignal, timeoutMs?: number,
-/** Workspace root; injectable so tests can capture against a temp repo.
- *  Defaults to the process cwd, matching the evidence providers. */
-cwd?: string): Promise<GitCaptureResult>;
 export declare class GitEvidenceProvider implements EvidenceProvider {
     readonly name = "git";
     readonly kind: "git";

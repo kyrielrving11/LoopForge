@@ -25,9 +25,12 @@ import { getPolicy, validateLoopId } from "../policy.js";
 import { isRecord, unique } from "../token-utils.js";
 import { ReplayBackend } from "../replay.js";
 import { FileLoopStore, queryLoopEntries } from "../loop-store.js";
-import { makeRoundId, prepareRoundTransaction } from "../round-transaction.js";
-import { resolveRecoveryTarget } from "../recovery.js";
+import { makeRoundId, MAX_MID_CHECKPOINTS_PER_TRANSACTION, prepareRoundTransaction, } from "../round-transaction.js";
+import { findCheckpointRef } from "../recovery.js";
 import { pendingRollbackDirective } from "../committed-round.js";
+import { buildCheckpointRef, CheckpointError, FileWorkspaceCheckpointStore, } from "../workspace-checkpoint.js";
+import { resolveStateDirectory } from "../policy.js";
+import { resolve, sep } from "node:path";
 import { RoundDriver } from "../round-driver.js";
 import { logEvent } from "../observability.js";
 import { policyMetrics, derivePolicyMetrics, mergePolicyMetrics, } from "../policy-metrics.js";
@@ -48,9 +51,22 @@ export class SessionManager {
     leaseTimer = null;
     lifecycle;
     terminalSinks = new Set();
-    constructor(store, sessionStore) {
+    checkpointStoreFor;
+    constructor(store, sessionStore, checkpointStoreFor) {
         this.loopStore = store ?? new FileLoopStore(getPolicy().backend.root_dir);
         this.sessionStore = sessionStore ?? new VaultSessionStateStore(this.loopStore);
+        const stores = new Map();
+        const fileStore = this.loopStore instanceof FileLoopStore ? this.loopStore : undefined;
+        this.checkpointStoreFor = checkpointStoreFor ?? (fileStore
+            ? (loopId) => {
+                let storeForLoop = stores.get(loopId);
+                if (!storeForLoop) {
+                    storeForLoop = new FileWorkspaceCheckpointStore(fileStore.loopDir(loopId), loopId);
+                    stores.set(loopId, storeForLoop);
+                }
+                return storeForLoop;
+            }
+            : undefined);
         const mcpPolicy = getPolicy().mcp;
         this.leaseMs = Math.max(1, mcpPolicy.session_lease_ms);
         this.leaseRenewIntervalMs = Math.max(1, Math.min(mcpPolicy.session_lease_renew_interval_ms, this.leaseMs));
@@ -61,6 +77,9 @@ export class SessionManager {
             terminalSinks: this.terminalSinks,
             ownerId: this.ownerId,
             leaseMs: this.leaseMs,
+            ...(this.checkpointStoreFor
+                ? { checkpointStoreFor: this.checkpointStoreFor }
+                : {}),
         });
         if (this.sessionStore?.renewLease) {
             this.leaseTimer = setInterval(() => this.renewOwnedLeases(), this.leaseRenewIntervalMs);
@@ -216,7 +235,7 @@ export class SessionManager {
                 : ["Task goal achieved with verifiable evidence"],
             hard_constraints: unique(input.constraints ?? []),
         };
-        const prepared = await new RoundDriver(engine, this.loopStore).prepare(request, loopId, 1, { operatorAcceptance });
+        const prepared = await new RoundDriver(engine, this.loopStore, this.checkpointStoreFor?.(loopId)).prepare(request, loopId, 1, { operatorAcceptance });
         const initialPrompt = prepared?.prompt ?? null;
         const initialLevel = prepared?.level ?? "l2";
         const evidenceBaseline = prepared?.evidenceBaseline ?? [];
@@ -227,6 +246,7 @@ export class SessionManager {
             // v1.13: Enforcement gate state
             consecutiveRejections: 0,
             lastRejectionCheck: "",
+            operatorAcceptance,
             roundSnapshot: prepared?.snapshot ?? prepareRoundTransaction(loopId, 1, evidenceBaseline),
         };
         this.sessions.set(sessionId, session);
@@ -250,10 +270,23 @@ export class SessionManager {
             task: input.task.slice(0, 80),
             maxRounds,
         });
+        const snapshot = session.roundSnapshot;
         return {
             sessionId,
             round: 1,
-            roundId: session.roundSnapshot?.roundId,
+            roundId: snapshot?.roundId,
+            ...(snapshot?.transactionId ? { transactionId: snapshot.transactionId } : {}),
+            ...(snapshot?.beforeCheckpoint
+                ? { checkpoints: [snapshot.beforeCheckpoint] }
+                : {}),
+            ...(snapshot?.beforeCheckpointError
+                ? {
+                    beforeCheckpointError: {
+                        code: snapshot.beforeCheckpointError.code,
+                        detail: snapshot.beforeCheckpointError.detail,
+                    },
+                }
+                : {}),
             prompt: initialPrompt,
             level: initialLevel,
             roundSuccess: false,
@@ -380,14 +413,16 @@ export class SessionManager {
             return null;
         const persistedLineage = (persistedEntry.loop_lineage ?? {});
         const persistedStatus = persistedLineage.status ?? "running";
-        const sessionEntry = persistedStatus === "running"
+        // v3.9.7: stalled is a RESUMABLE recovery state. It is how a committed
+        // directive with an unfinished restore survives a restart.
+        const sessionEntry = persistedStatus === "running" || persistedStatus === "stalled"
             ? this.claimSessionEntry(loopId)
             : persistedEntry;
         if (!sessionEntry)
             return this.leaseConflictResult(loopId, persistedEntry);
         const session = this.lifecycle.reconstructSession(sessionEntry);
         if (!session) {
-            // was not "running" — return stopped/stalled status
+            // was not "running"/"stalled" — return stopped/paused status
             const lineage = (sessionEntry.loop_lineage ?? {});
             const currentRound = lineage.current_round ?? 1;
             const status = lineage.status ?? "stopped";
@@ -399,6 +434,10 @@ export class SessionManager {
                 stopDetail: `Loop is not running (status: ${status}). It may have already completed or been stopped.`,
             };
         }
+        // Resume is a recovery attempt: set running so the lease is renewed while
+        // the (possibly long) restore executes. A failure saves stalled again.
+        if (session.status === "stalled")
+            session.status = "running";
         this.sessions.set(session.sessionId, session);
         return this.lifecycle.resume(session);
     }
@@ -446,7 +485,7 @@ export class SessionManager {
                 continue;
             const lineage = (entry.loop_lineage ?? {});
             const status = lineage.status ?? "running";
-            if (status !== "running" && status !== "paused")
+            if (status !== "running" && status !== "paused" && status !== "stalled")
                 continue;
             const claimedEntry = this.claimSessionEntry(lid);
             if (!claimedEntry)
@@ -850,7 +889,7 @@ export class SessionManager {
      *  The whole boundary now runs HERE, before the queue and before the lease
      *  heartbeat, so every caller of the public API gets it and a rejected
      *  payload leaves nothing durable behind. */
-    async advance(sessionId, output, submission, roundId) {
+    async advance(sessionId, output, submission, roundId, transactionId) {
         // Judged before the session is even resolved: a malformed evaluation is a
         // payload defect whatever the session's state. See submission-boundary.ts.
         const boundary = validateSubmission(this.loopStore, this.sessions.get(sessionId), submission);
@@ -872,7 +911,7 @@ export class SessionManager {
                 return this.leaseConflictResult(session.loopId, this.findSessionEntry(session.loopId));
             }
             try {
-                return await this.lifecycle.advance(sessionId, output, boundary.evaluation, roundId, boundary.diagnostics, boundary.submittedFields);
+                return await this.lifecycle.advance(sessionId, output, boundary.evaluation, roundId, boundary.diagnostics, boundary.submittedFields, transactionId);
             }
             catch (error) {
                 if (error instanceof SessionLeaseConflictError) {
@@ -882,10 +921,10 @@ export class SessionManager {
             }
         });
     }
-    /** v3.9.6: submit an Agent-initiated recovery. Shape validation happens
+    /** v3.9.7: submit an Agent-initiated recovery. Shape validation happens
      *  before the session queue/lease; target referential validation happens in
      *  the lifecycle against committed facts. */
-    async recover(sessionId, recovery, roundId) {
+    async recover(sessionId, recovery, roundId, transactionId) {
         if (typeof roundId !== "string" || roundId.trim().length === 0) {
             return {
                 sessionId,
@@ -909,22 +948,22 @@ export class SessionManager {
         if (!isRecord(recovery))
             return invalid("recovery must be an object");
         const keys = Object.keys(recovery);
-        if (keys.some((key) => key !== "target_round" && key !== "reason")) {
-            return invalid("recovery accepts only target_round and reason");
+        if (keys.some((key) => key !== "target_checkpoint_id" && key !== "reason")) {
+            return invalid("recovery accepts only target_checkpoint_id and reason");
         }
-        if (!Number.isInteger(recovery.target_round)) {
-            return invalid("target_round must be an integer");
+        if (typeof recovery.target_checkpoint_id !== "string" ||
+            recovery.target_checkpoint_id.trim().length === 0) {
+            return invalid("target_checkpoint_id must be a non-empty string");
         }
         if (typeof recovery.reason !== "string" ||
             recovery.reason.trim().length === 0 ||
             recovery.reason.length > 500) {
             return invalid("reason must be a non-empty string of at most 500 characters");
         }
-        // v3.9.6: an invalid target is a payload defect, like an invalid
-        // evaluation. Resolve it against committed facts BEFORE the session queue
-        // and lease renewal, so a rejected request writes no session state and can
-        // be retried with the same roundId. The lifecycle re-resolves the target
-        // on the accepted path — the same predicate, never a second rule.
+        // Cheap referential validation before the queue/lease: an id that is not
+        // visible on the current branch is a payload defect and must not write
+        // session state. Deep manifest/blob/HEAD validation happens in the
+        // lifecycle after the lease and before the directive commit.
         const heldSession = this.sessions.get(sessionId);
         if (heldSession) {
             const expectedRoundId = heldSession.roundSnapshot?.roundId
@@ -941,10 +980,14 @@ export class SessionManager {
                         feedbackOnly: true,
                     }),
                 ];
-                // A pending redo checkpoint outranks target validation: repeating the
-                // recovery returns the held restore prompt, exactly as before.
-                if (!pendingRollbackDirective(entries, heldSession.currentRound)) {
-                    const resolved = resolveRecoveryTarget(entries, heldSession.currentRound, recovery.target_round);
+                // A pending directive outranks target validation; the lifecycle
+                // retries the same restore and never commits a second directive.
+                if (!pendingRollbackDirective(entries)) {
+                    const resolved = findCheckpointRef({
+                        entries,
+                        held,
+                        checkpointId: recovery.target_checkpoint_id,
+                    });
                     if (!resolved.ok) {
                         return {
                             sessionId,
@@ -954,7 +997,7 @@ export class SessionManager {
                             submissionError: {
                                 code: resolved.code,
                                 details: {
-                                    target_round: recovery.target_round,
+                                    target_checkpoint_id: recovery.target_checkpoint_id,
                                     reason_code: resolved.reason,
                                     detail: resolved.detail,
                                     current_round: heldSession.currentRound,
@@ -973,9 +1016,9 @@ export class SessionManager {
             }
             try {
                 return await this.lifecycle.recover(sessionId, {
-                    target_round: recovery.target_round,
+                    target_checkpoint_id: recovery.target_checkpoint_id,
                     reason: recovery.reason,
-                }, roundId);
+                }, roundId, transactionId);
             }
             catch (error) {
                 if (error instanceof SessionLeaseConflictError) {
@@ -983,6 +1026,182 @@ export class SessionManager {
                 }
                 throw error;
             }
+        });
+    }
+    /** v3.9.7: Agent-created mid-round savepoint. It does not touch the round
+     *  counter, progress, or any governance projection. The capture runs under
+     *  the session queue/lease but outside the store lock; the session save is
+     *  the only store mutation. */
+    async checkpoint(sessionId, roundId, transactionId) {
+        const session = this.sessions.get(sessionId);
+        if (!session) {
+            return {
+                error: "session_not_found",
+                errorMessage: "No session exists with this ID.",
+                sessionId,
+            };
+        }
+        if (session.status !== "running") {
+            return {
+                error: "checkpoint_invalid",
+                errorMessage: `Session is ${session.status}; a checkpoint requires a running held evaluation.`,
+                sessionId,
+                roundId: session.roundSnapshot?.roundId,
+                details: { reason_code: "session_not_running" },
+            };
+        }
+        return this.withSessionQueue(sessionId, async () => {
+            if (!this.renewSessionLease(session.loopId)) {
+                const conflict = this.leaseConflictResult(session.loopId, this.findSessionEntry(session.loopId));
+                return {
+                    error: conflict.stopReason ?? "lease_conflict",
+                    errorMessage: conflict.stopDetail ?? "Another process owns this loop.",
+                    sessionId,
+                    roundId: conflict.roundId,
+                    details: { reason_code: "lease_conflict" },
+                };
+            }
+            const held = session.roundSnapshot;
+            const expectedRoundId = held?.roundId ?? makeRoundId(session.loopId, session.currentRound);
+            if (!held || held.kind !== "evaluation" || held.round !== session.currentRound ||
+                typeof roundId !== "string" || roundId !== expectedRoundId ||
+                typeof transactionId !== "string" || transactionId !== held.transactionId) {
+                return {
+                    error: "checkpoint_invalid",
+                    errorMessage: "checkpoint requires the roundId and transactionId from the currently held prompt.",
+                    sessionId,
+                    roundId: expectedRoundId,
+                    details: {
+                        reason_code: "identity_mismatch",
+                        expected_round_id: expectedRoundId,
+                        expected_transaction_id: held?.transactionId ?? null,
+                    },
+                };
+            }
+            const prefix = `loop:${session.loopId}:`;
+            const entries = [
+                ...queryLoopEntries(this.loopStore, session.loopId, { prefix }),
+                ...queryLoopEntries(this.loopStore, session.loopId, {
+                    prefix,
+                    feedbackOnly: true,
+                }),
+            ];
+            if (pendingRollbackDirective(entries)) {
+                return {
+                    error: "restore_pending",
+                    errorMessage: "A pending restore must be completed by loopforge_resume before creating a checkpoint.",
+                    sessionId,
+                    roundId: expectedRoundId,
+                    details: { reason_code: "restore_pending" },
+                };
+            }
+            const store = this.checkpointStoreFor?.(session.loopId);
+            if (!store) {
+                return {
+                    error: "checkpoint_unavailable",
+                    errorMessage: "No workspace checkpoint store is configured for this loop.",
+                    sessionId,
+                    roundId: expectedRoundId,
+                    details: { reason_code: "store_unavailable" },
+                };
+            }
+            if ((held.checkpoints?.length ?? 0) >= MAX_MID_CHECKPOINTS_PER_TRANSACTION) {
+                return {
+                    error: "checkpoint_limit",
+                    errorMessage: `This attempt already has ${MAX_MID_CHECKPOINTS_PER_TRANSACTION} mid-round checkpoints.`,
+                    sessionId,
+                    roundId: expectedRoundId,
+                    details: { reason_code: "mid_checkpoint_cap" },
+                };
+            }
+            let stateDir;
+            try {
+                stateDir = resolveStateDirectory(process.cwd(), getPolicy().backend.root_dir);
+            }
+            catch {
+                stateDir = undefined;
+            }
+            const exclude = stateDir
+                ? (path) => {
+                    const abs = resolve(path);
+                    const prefixAbs = stateDir.endsWith(sep) ? stateDir : `${stateDir}${sep}`;
+                    return abs === stateDir || abs.startsWith(prefixAbs);
+                }
+                : undefined;
+            let manifest;
+            try {
+                manifest = await store.capture({
+                    round: held.round,
+                    role: "mid",
+                    cwd: process.cwd(),
+                    ...(exclude ? { exclude } : {}),
+                    timeoutMs: Math.max(60_000, getPolicy().evidence.timeout_ms),
+                });
+            }
+            catch (error) {
+                if (error instanceof CheckpointError) {
+                    return {
+                        error: error.code,
+                        errorMessage: error.message,
+                        sessionId,
+                        roundId: expectedRoundId,
+                        details: { reason_code: error.reasonCode },
+                    };
+                }
+                return {
+                    error: "checkpoint_failed",
+                    errorMessage: String(error),
+                    sessionId,
+                    roundId: expectedRoundId,
+                    details: { reason_code: "capture_error" },
+                };
+            }
+            // The capture yielded to the event loop; a concurrent advance/pause may
+            // have invalidated the held transaction. Never attach an orphan
+            // checkpoint to a different attempt.
+            if (this.sessions.get(sessionId) !== session ||
+                session.roundSnapshot?.transactionId !== held.transactionId) {
+                return {
+                    error: "checkpoint_invalid",
+                    errorMessage: "The held attempt changed while the checkpoint was captured.",
+                    sessionId,
+                    details: { reason_code: "identity_changed" },
+                };
+            }
+            const ref = buildCheckpointRef(manifest, {
+                transactionId: held.transactionId,
+                branchId: held.branchId,
+            });
+            const previous = held.checkpoints ?? [];
+            if (!previous.some((item) => item.checkpointId === ref.checkpointId)) {
+                held.checkpoints = [...previous, ref];
+                try {
+                    this.lifecycle.save(session);
+                }
+                catch (error) {
+                    held.checkpoints = previous;
+                    return {
+                        error: "checkpoint_failed",
+                        errorMessage: `The checkpoint manifest was written but the session could not be saved: ${String(error)}. Retry returns the same id.`,
+                        sessionId,
+                        roundId: expectedRoundId,
+                        details: { reason_code: "session_save_failed" },
+                    };
+                }
+            }
+            return {
+                checkpointId: manifest.checkpointId,
+                transactionId: held.transactionId,
+                roundId: held.roundId,
+                round: held.round,
+                role: "mid",
+                redoRound: manifest.round,
+                createdAt: ref.createdAt,
+                ...(manifest.head ? { head: manifest.head } : {}),
+                fileCount: Object.keys(manifest.fingerprints).length,
+                contentCount: manifest.contents.length,
+                contentHash: manifest.contentHash,
+            };
         });
     }
     /** Replay timeline for a session — creates ReplayBackend from the stored backend. */
@@ -1017,10 +1236,9 @@ export class SessionManager {
             transactionId: view.transactionId ?? view.roundId,
             branchId: view.branchId ?? null,
             origin: view.origin === "agent" ? "agent" : "machine",
-            target: view.recovery?.target ?? 0,
+            redoRound: view.recovery?.target.redo_round ?? 0,
+            targetCheckpointId: view.recovery?.target.checkpoint_id ?? "",
             reason: view.recovery?.reason ?? "",
-            targetHead: view.recovery?.target_head ?? null,
-            targetDirty: [...(view.recovery?.target_dirty ?? [])],
             skippedFiles: [...(view.recovery?.skipped_files ?? [])],
             preservedDiscoveries: [...(view.recovery?.skipped_discoveries ?? [])],
         }));

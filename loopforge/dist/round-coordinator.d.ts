@@ -20,7 +20,7 @@
 import type { LoopStore, VaultEntry } from "./loop-store.js";
 import type { MachineObservation } from "./protocol.js";
 import type { ObservationDelta } from "./evidence-provider.js";
-import type { SelfEvaluation, RoundVerificationStatus, StopReason, VerificationFlag } from "./protocol.js";
+import type { CheckpointRef, SelfEvaluation, RoundVerificationStatus, StopReason, VerificationFlag, WorkspaceCheckpointManifest } from "./protocol.js";
 import { type ContractItemStatusView } from "./contract-items.js";
 /** Input to a single round processing step. */
 export interface RoundProcessInput {
@@ -39,6 +39,16 @@ export interface RoundProcessInput {
     evidenceDeltas?: ObservationDelta[];
     /** Full round-start observations for post-backtrack restore validation. */
     beforeEvidence?: MachineObservation[];
+    /** The current in-flight transaction's automatic before-image (machine
+     *  backtrack target mapping only; never a cognitive input). */
+    beforeCheckpoint?: CheckpointRef;
+    /** This submission's after observations, used to derive abandoned-file
+     *  report facts. */
+    afterEvidence?: MachineObservation[];
+    /** Reads the target checkpoint manifest for machine backtrack target
+     *  eligibility and skipped-file derivation. Provided by the transaction
+     *  layer's checkpoint store. */
+    resolveCheckpointManifest?: (ref: CheckpointRef) => WorkspaceCheckpointManifest | null;
     /** v3.8.3: the trusted round-start fingerprint of every configured
      *  command's entrypoint files, captured when this round was prepared. Only
      *  the in-flight round has one — a round whose preparation predates the

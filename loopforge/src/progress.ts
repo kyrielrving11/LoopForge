@@ -42,18 +42,14 @@ export interface ProgressWindow {
 
 function gitDeltaProgress(
   delta: ObservationDelta,
-  restoreTargetHead?: string,
 ): boolean | null {
   const after = observedGitObservation(delta.after);
   if (!after) return null;
   const before = observedGitObservation(delta.before);
-  // No before baseline is still enough for the restore-point arm: landing on
-  // the rollback's restore commit is motion even when the baseline is absent.
   return gitMotionSignal({
     changedFiles: delta.changedFiles,
     headBefore: observedGitHead(before ?? undefined),
     headAfter: observedGitHead(after),
-    restoreTargetHead: restoreTargetHead ?? null,
   });
 }
 
@@ -62,7 +58,6 @@ function gitDeltaProgress(
  *  is not_applicable. */
 export function deriveRoundProgress(
   deltas: ReadonlyArray<ObservationDelta>,
-  restoreTargetHead?: string,
 ): RoundProgress {
   const providers: string[] = [];
   let changed = false;
@@ -74,7 +69,7 @@ export function deriveRoundProgress(
     if (delta.kind === "git") {
       applicable = true;
       providers.push(delta.providerId);
-      const signal = gitDeltaProgress(delta, restoreTargetHead);
+      const signal = gitDeltaProgress(delta);
       if (signal === true) changed = true;
       else if (signal === null) {
         unknown = true;
@@ -196,13 +191,12 @@ export function deriveProgressWindow(
  *  boolean series. They are thin wrappers over the same Git rule. */
 export function inFlightGitMotion(
   deltas: ReadonlyArray<ObservationDelta>,
-  restoreTargetHead?: string,
 ): boolean | null {
   const gitDeltas = deltas.filter((delta) => delta.kind === "git");
   if (gitDeltas.length === 0) return null;
   let sawUnknown = false;
   for (const delta of gitDeltas) {
-    const signal = gitDeltaProgress(delta, restoreTargetHead);
+    const signal = gitDeltaProgress(delta);
     if (signal === true) return true;
     if (signal === null) sawUnknown = true;
   }

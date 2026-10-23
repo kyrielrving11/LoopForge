@@ -16,6 +16,7 @@ import type { GateActionDescriptor } from "../protocol.js";
 import type { LoopTerminalSink, SubmissionGuidance, SubmissionReceipt } from "../protocol.js";
 import type { ActiveContractView } from "../round-contract.js";
 import type { LoopStore } from "../loop-store.js";
+import { FileWorkspaceCheckpointStore } from "../workspace-checkpoint.js";
 import type { PolicyMetricsSnapshot } from "../policy-metrics.js";
 import type { SessionStateStore } from "../storage.js";
 import type { McpSession, McpSessionSummary, StartInput, AdvanceResult, SessionRegistry } from "./round-lifecycle.js";
@@ -32,7 +33,8 @@ export declare class SessionManager implements SessionRegistry {
     private leaseTimer;
     private readonly lifecycle;
     private readonly terminalSinks;
-    constructor(store?: LoopStore, sessionStore?: SessionStateStore);
+    private readonly checkpointStoreFor;
+    constructor(store?: LoopStore, sessionStore?: SessionStateStore, checkpointStoreFor?: (loopId: string) => FileWorkspaceCheckpointStore | undefined);
     /** Stable process-local owner token used for cross-process session leases. */
     getOwnerId(): string;
     addTerminalSink(sink: LoopTerminalSink): () => void;
@@ -158,11 +160,16 @@ export declare class SessionManager implements SessionRegistry {
      *  The whole boundary now runs HERE, before the queue and before the lease
      *  heartbeat, so every caller of the public API gets it and a rejected
      *  payload leaves nothing durable behind. */
-    advance(sessionId: string, output: string, submission?: unknown, roundId?: string): Promise<AdvanceResult>;
-    /** v3.9.6: submit an Agent-initiated recovery. Shape validation happens
+    advance(sessionId: string, output: string, submission?: unknown, roundId?: string, transactionId?: string): Promise<AdvanceResult>;
+    /** v3.9.7: submit an Agent-initiated recovery. Shape validation happens
      *  before the session queue/lease; target referential validation happens in
      *  the lifecycle against committed facts. */
-    recover(sessionId: string, recovery: unknown, roundId?: string): Promise<AdvanceResult>;
+    recover(sessionId: string, recovery: unknown, roundId?: string, transactionId?: string): Promise<AdvanceResult>;
+    /** v3.9.7: Agent-created mid-round savepoint. It does not touch the round
+     *  counter, progress, or any governance projection. The capture runs under
+     *  the session queue/lease but outside the store lock; the session save is
+     *  the only store mutation. */
+    checkpoint(sessionId: string, roundId?: string, transactionId?: string): Promise<Record<string, unknown>>;
     /** Replay timeline for a session — creates ReplayBackend from the stored backend. */
     replayTimeline(sessionId: string): Record<string, unknown>[] | null;
     /** v3.3.1: Replay a loop straight from the vault — no in-memory session

@@ -8,24 +8,46 @@
 import { EvidenceCollector } from "./evidence-provider.js";
 import { writeStateFile } from "./policy.js";
 import { prepareRejectedAttempt, prepareRoundTransaction, RoundTransactionCoordinator, } from "./round-transaction.js";
+import { buildCheckpointRef, } from "./workspace-checkpoint.js";
 export class RoundDriver {
     engine;
+    checkpointStore;
     store;
-    constructor(engine, store) {
+    constructor(engine, store, checkpointStore) {
         this.engine = engine;
+        this.checkpointStore = checkpointStore;
         this.store = store ?? engine.getStore();
     }
     async prepare(request, loopId, round, opts = {}) {
-        // v3.0.1: compile (CPU-bound) and before-evidence collection (external
-        // process spawns) run concurrently — the git/command spawns were the
-        // latency tail behind the old compile-first, evidence-second order.
-        const [response, evidenceBaseline] = await Promise.all([
-            Promise.resolve().then(() => this.compile(request, loopId, true)),
-            this.collectEvidence(loopId, "before"),
-        ]);
+        let boundary;
+        let response;
+        let evidenceBaseline;
+        if (opts.baseline) {
+            response = this.compile(request, loopId, true);
+            evidenceBaseline = opts.baseline.observations;
+            boundary = opts.baseline.boundary;
+        }
+        else {
+            // v3.0.1: compile (CPU-bound) and before-evidence collection (external
+            // process spawns) run concurrently — the git/command spawns were the
+            // latency tail behind the old compile-first, evidence-second order.
+            // v3.9.7: the Git provider materializes the checkpoint before-image in
+            // the SAME boundary pass; no second hash.
+            const [compiled, evidence] = await Promise.all([
+                Promise.resolve().then(() => this.compile(request, loopId, true)),
+                this.collectEvidence(loopId, "before", this.checkpointStore
+                    ? {
+                        materializer: this.checkpointStore,
+                        boundarySink: (captured) => { boundary = captured; },
+                    }
+                    : undefined),
+            ]);
+            response = compiled;
+            evidenceBaseline = evidence;
+        }
         if (!response)
             return null;
-        return this.finishPrepare(response, loopId, round, evidenceBaseline, opts);
+        return this.finishPrepare(response, loopId, round, evidenceBaseline, opts, boundary);
     }
     compile(request, loopId, persistLineage) {
         const compiled = this.engine.invokeLoopCompile(request, undefined, { persistLineage });
@@ -67,17 +89,57 @@ export class RoundDriver {
             compileResponse: response,
         };
     }
-    finishPrepare(response, loopId, round, evidenceBaseline, opts = {}) {
+    finishPrepare(response, loopId, round, evidenceBaseline, opts = {}, boundary) {
         const rawArtifact = response.prompt_artifact;
         const artifact = rawArtifact
             ? { ...rawArtifact, warnings: [...(response.warnings ?? [])] }
             : undefined;
+        const observedGitBefore = evidenceBaseline.some((observation) => observation.kind === "git" && observation.status === "observed");
+        let beforeCheckpointError;
+        let manifest;
+        if (boundary?.materializationError) {
+            beforeCheckpointError = {
+                ...boundary.materializationError,
+                at: Date.now(),
+            };
+        }
+        else if (boundary && this.checkpointStore) {
+            try {
+                manifest = this.checkpointStore.persistManifest(round, "before", boundary);
+            }
+            catch (error) {
+                beforeCheckpointError = {
+                    code: "checkpoint_write_failed",
+                    detail: String(error),
+                    at: Date.now(),
+                };
+            }
+        }
+        else if (observedGitBefore) {
+            // A Git-observed transaction owes a before-image or an explicit error.
+            beforeCheckpointError = {
+                code: this.checkpointStore ? "boundary_unavailable" : "store_unavailable",
+                detail: this.checkpointStore
+                    ? "the before-phase Git boundary was not materialized"
+                    : "no workspace checkpoint store is configured",
+                at: Date.now(),
+            };
+        }
         const snapshot = prepareRoundTransaction(loopId, round, evidenceBaseline, artifact, {
             ...(opts.branchId ? { branchId: opts.branchId } : {}),
             ...(opts.operatorAcceptance
                 ? { operatorAcceptance: opts.operatorAcceptance }
                 : {}),
+            ...(beforeCheckpointError ? { beforeCheckpointError } : {}),
         });
+        if (manifest) {
+            snapshot.beforeCheckpoint = buildCheckpointRef(manifest, {
+                transactionId: snapshot.transactionId,
+                branchId: snapshot.branchId,
+            });
+        }
+        if (opts.restore)
+            snapshot.restore = opts.restore;
         return {
             prompt: response.prompt,
             artifact,
@@ -103,6 +165,14 @@ export class RoundDriver {
             entrypointTrust: input.entrypointTrust,
             normalizationDiagnostics: input.normalizationDiagnostics,
             submittedFields: input.submittedFields,
+            ...(input.snapshot.beforeCheckpoint
+                ? { beforeCheckpoint: input.snapshot.beforeCheckpoint }
+                : {}),
+            ...(this.checkpointStore
+                ? {
+                    resolveCheckpointManifest: (ref) => this.checkpointStore.readManifest(ref.checkpointId),
+                }
+                : {}),
         });
         return { outcome, actualEvidence };
     }
@@ -123,8 +193,13 @@ export class RoundDriver {
     recover(snapshot) {
         return new RoundTransactionCoordinator(this.engine, this.store).recover(snapshot);
     }
-    collectEvidence(loopId, phase) {
-        return EvidenceCollector.fromPolicy().collectAsync({ loopId, phase });
+    collectEvidence(loopId, phase, opts) {
+        return EvidenceCollector.fromPolicy().collectAsync({
+            loopId,
+            phase,
+            ...(opts?.materializer ? { materializer: opts.materializer } : {}),
+            ...(opts?.boundarySink ? { boundarySink: opts.boundarySink } : {}),
+        });
     }
 }
 //# sourceMappingURL=round-driver.js.map

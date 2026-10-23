@@ -8,12 +8,15 @@
 import type { LoopStore } from "./loop-store.js";
 import { LoopForgeEngine } from "./engine.js";
 import type { ObservationDelta } from "./evidence-provider.js";
-import type { ContractBinding, MachineObservation, OperatorAcceptance, PromptArtifact, RecoveryDirective, SelfEvaluation, SubmissionDiagnostic } from "./protocol.js";
+import type { CheckpointRef, ContractBinding, MachineObservation, OperatorAcceptance, PromptArtifact, RecoveryDirective, RecoveryTarget, SelfEvaluation, SubmissionDiagnostic, WorkspaceCheckpointManifest } from "./protocol.js";
 import { type RoundProcessResult } from "./round-coordinator.js";
 import type { RoundCommitStore } from "./storage.js";
-/** v3.9.6: schema 4 adds transaction/branch identity, kind, operator
- *  acceptance and rollback directives. Schema 3 is unsupported. */
-export declare const ROUND_TRANSACTION_SCHEMA_VERSION: 4;
+/** v3.9.7: schema 5 adds the transaction before-image, explicit mid-round
+ *  checkpoints and the redo restore marker. Schema 4 is unsupported and is
+ *  reported by `legacyTransactionRounds`; there is no compatibility migration. */
+export declare const ROUND_TRANSACTION_SCHEMA_VERSION: 5;
+/** Maximum distinct mid-round checkpoints one transaction may reference. */
+export declare const MAX_MID_CHECKPOINTS_PER_TRANSACTION = 32;
 /** The root branch identity for every loop. */
 export declare function rootBranchId(loopId: string): string;
 /** v3.9.6: deterministic transaction identity. The logical round identity is
@@ -25,7 +28,10 @@ export declare function deriveTransactionId(input: {
     roundId: string;
     attempt: number;
     promptHash?: string;
-    recovery?: Pick<RecoveryDirective, "target" | "reason" | "target_transaction_id">;
+    recovery?: {
+        target: RecoveryTarget;
+        reason: string;
+    };
 }): string;
 export type RoundTransactionPhase = "prepared" | "prompted" | "evaluated" | "rejected" | "committed" | "terminated";
 export interface RoundTransactionSnapshot {
@@ -61,6 +67,26 @@ export interface RoundTransactionSnapshot {
     /** v3.9.1: the known evaluation paths present in the raw submission. The
      *  receipt uses this manifest; unknown paths live in diagnostics only. */
     submittedFields?: string[];
+    /** v3.9.7: the automatic transaction before-image. Required when the
+     *  before-phase Git boundary was observed and materialized. */
+    beforeCheckpoint?: CheckpointRef;
+    /** v3.9.7: explicit machine fact when the automatic before-image failed.
+     *  The round may continue; it is simply not a recovery target. */
+    beforeCheckpointError?: {
+        code: string;
+        detail: string;
+        at: number;
+    };
+    /** v3.9.7: Agent-created mid-round savepoints, creation order, capped. */
+    checkpoints?: CheckpointRef[];
+    /** v3.9.7: only on the redo transaction. Proves this round's before state
+     *  was produced by a verified restore of the named directive. The target
+     *  checkpoint id/hash live only in the directive. */
+    restore?: {
+        directiveTransactionId: string;
+        redoRound: number;
+        verifiedAt: number;
+    };
     /** v3.8: the contract binding resolved at commit time (see ContractBinding).
      *  Absent when the committing round declared no contract. */
     contractBinding?: ContractBinding;
@@ -83,6 +109,11 @@ export interface RoundTransactionInput {
     normalizationDiagnostics?: SubmissionDiagnostic[];
     submittedFields?: string[];
     actualEvidence: MachineObservation[];
+    /** The in-flight transaction's before-image, for machine backtrack target
+     *  mapping. Never a cognitive input. */
+    beforeCheckpoint?: CheckpointRef;
+    /** Reads a checkpoint manifest from the store (machine backtrack only). */
+    resolveCheckpointManifest?: (ref: CheckpointRef) => WorkspaceCheckpointManifest | null;
 }
 export interface RoundTransactionOutcome {
     snapshot: RoundTransactionSnapshot;
@@ -115,6 +146,12 @@ export declare function prepareRoundTransaction(loopId: string, round: number, b
     branchId?: string;
     operatorAcceptance?: OperatorAcceptance;
     kind?: "evaluation";
+    beforeCheckpoint?: CheckpointRef;
+    beforeCheckpointError?: {
+        code: string;
+        detail: string;
+        at: number;
+    };
 }): RoundTransactionSnapshot;
 /** Attach the next prompt attempt to a rejected logical round without changing
  * its identity or evidence baseline. Evaluation fields belong to the previous

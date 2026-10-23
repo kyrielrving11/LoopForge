@@ -7,8 +7,9 @@
 import type { MachineObservation } from "./protocol.js";
 import type { ObservationDelta } from "./evidence-provider.js";
 import type { VaultEntry } from "./loop-store.js";
-import type { ContractBinding, ExecutionReport, LoopRoundResult, PromptArtifact, RecoveryDirective, RoundContractProposal, RoundOutcome, SelfEvaluation, SubmissionDiagnostic, SubGoalUpdate, VerificationFlag } from "./protocol.js";
+import type { CheckpointRef, ContractBinding, ExecutionReport, LoopRoundResult, OperatorAcceptance, PromptArtifact, RecoveryDirective, RoundContractProposal, RoundOutcome, SelfEvaluation, SubmissionDiagnostic, SubGoalUpdate, VerificationFlag } from "./protocol.js";
 import type { RoundProcessResult } from "./round-coordinator.js";
+import type { RoundTransactionSnapshot } from "./round-transaction.js";
 export type CommittedAction = "continue" | "stop" | "recovery" | "backtrack";
 /** v3.8.1: the rolled-back branch's facts, decoded from a committed rollback
  *  directive. One shape for the compile-side Recovery Brief, the state file's
@@ -45,6 +46,15 @@ export interface CommittedRoundView {
     readonly origin?: "evaluation" | "agent" | "machine";
     /** v3.9.6: rollback directive facts; null for ordinary evaluation rounds. */
     readonly recovery?: RecoveryDirective | null;
+    /** v3.9.7: the transaction's automatic before-image, if one was captured. */
+    readonly beforeCheckpoint: CheckpointRef | null;
+    /** v3.9.7: Agent-created mid-round savepoints on this transaction. */
+    readonly checkpoints: CheckpointRef[];
+    /** v3.9.7: present only on a redo transaction that completed a verified
+     *  restore. The directive remains the target's one source. */
+    readonly restore: RoundTransactionSnapshot["restore"] | null;
+    /** Operator-owned immutable acceptance, when this transaction carries it. */
+    readonly operatorAcceptance: OperatorAcceptance | null;
     readonly sequence?: number;
     readonly attempt: number;
     readonly promptArtifact: PromptArtifact | null;

@@ -116,9 +116,9 @@ export function buildExplain(loopId, entries, round) {
             round: view.round,
             transactionId: view.transactionId ?? view.roundId,
             origin: view.origin === "agent" ? "agent" : "machine",
-            target: view.recovery?.target ?? 0,
+            redoRound: view.recovery?.target.redo_round ?? 0,
+            targetCheckpointId: view.recovery?.target.checkpoint_id ?? "",
             reason: view.recovery?.reason ?? "",
-            ...(view.recovery?.target_head ? { targetHead: view.recovery.target_head } : {}),
             skippedFiles: [...(view.recovery?.skipped_files ?? [])],
         })),
     };

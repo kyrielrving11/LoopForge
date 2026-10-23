@@ -132,9 +132,6 @@ function verifySelfEvaluation(
   vaultEntries: VaultEntry[] = [],
   prevSelfEval: SelfEvaluation | null = null,
   evidenceSnapshots: MachineObservation[] = [cmdSnap("passed")],
-  backtrackSkippedFiles: string[] = [],
-  backtrackSkippedFingerprints: Record<string, string> = {},
-  backtrackTargetGitHead?: string,
   gateEntries: VaultEntry[] = [],
   /** v3.8.3: the trusted entrypoint baseline drift the coordinator derives. */
   entrypointDrift: EntrypointDrift[] = [],
@@ -145,9 +142,6 @@ function verifySelfEvaluation(
     vaultEntries,
     prevSelfEval,
     deltasFrom(evidenceSnapshots),
-    backtrackSkippedFiles,
-    backtrackSkippedFingerprints,
-    backtrackTargetGitHead,
     gateEntries,
     entrypointDrift,
   );
@@ -738,167 +732,6 @@ describe("verification-gate — command evidence integrity", () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// v2.13: Backtrack workspace restore check
-// ═══════════════════════════════════════════════════════════════════════════
-
-describe("verification-gate — backtrack workspace restore", () => {
-  function se(overrides: Partial<SelfEvaluation> = {}): SelfEvaluation {
-    return makeSelfEvaluation({
-      success: false,
-      output_summary: "Worked on feature",
-      should_continue: true,
-      execution_report: makeExecutionReport({
-        files_changed: ["src/new-feature.ts"],
-      }),
-      ...overrides,
-    });
-  }
-
-  it("no flag when backtrackSkippedFiles is empty", () => {
-    const result = verifySelfEvaluation(
-      se({ execution_report: makeExecutionReport({
-        files_changed: ["src/auth.ts"],
-      })}),
-      3, [], null, [], [],
-    );
-    const flag = result.flags.find(
-      (f) => f.check === "backtrack_workspace_not_restored",
-    );
-    assert.equal(flag, undefined,
-      "should not flag when no backtrack skipped files");
-  });
-
-  it("no flag when files_changed has no overlap with skipped files", () => {
-    const result = verifySelfEvaluation(
-      se({ execution_report: makeExecutionReport({
-        files_changed: ["src/auth.ts"],
-      })}),
-      3, [], null, [],
-      ["src/old-feature.ts", "tests/old.test.ts"],
-    );
-    const flag = result.flags.find(
-      (f) => f.check === "backtrack_workspace_not_restored",
-    );
-    assert.equal(flag, undefined,
-      "should not flag when agent works on different files");
-  });
-
-  it("warns when files_changed has minor overlap with skipped files", () => {
-    const result = verifySelfEvaluation(
-      se({ execution_report: makeExecutionReport({
-        files_changed: ["src/auth.ts", "src/new.ts"],
-      })}),
-      3, [], null, [],
-      ["src/auth.ts", "lib/old.go"],
-    );
-    const flag = result.flags.find(
-      (f) => f.check === "backtrack_workspace_not_restored",
-    );
-    assert.ok(flag, "should flag minor overlap");
-    assert.equal(flag.severity, "warn",
-      "minor overlap (1-2 files) should be a warning");
-  });
-
-  it("warns (not errors) on significant self-reported overlap (M3)", () => {
-    // A restored-then-redone file is indistinguishable from a never-restored
-    // one by self-report alone — a legitimate multi-file redo must never be
-    // terminated on this signal, so overlap stays guidance.
-    const result = verifySelfEvaluation(
-      se({ execution_report: makeExecutionReport({
-        files_changed: ["src/a.ts", "src/b.ts", "src/c.ts"],
-      })}),
-      3, [], null, [],
-      ["src/a.ts", "src/b.ts", "src/c.ts", "lib/x.go"],
-    );
-    const flag = result.flags.find(
-      (f) => f.check === "backtrack_workspace_not_restored",
-    );
-    assert.ok(flag, "should flag significant overlap");
-    assert.equal(flag.severity, "warn",
-      "self-reported overlap alone can no longer produce an error");
-  });
-
-  it("M3: errors only when a skipped file is byte-identical to its failed state", () => {
-    // Machine arm: the current git fingerprint still matches the fingerprint
-    // recorded at the failed round → the file was never touched since the
-    // rollback → the workspace was not restored.
-    const git: GitObservation = {
-      schemaVersion: 2,
-      providerId: "git",
-      kind: "git",
-      phase: "after",
-      startedAt: 0,
-      finishedAt: 0,
-      status: "observed",
-      files: ["src/a.ts"],
-      data: {
-        dirty: ["src/a.ts"],
-        fingerprints: { "src/a.ts": "m:same", "lib/other.ts": "m:other" },
-        coverage: "tracked_and_non_ignored_untracked",
-      },
-    };
-    const result = verifySelfEvaluation(
-      se({ execution_report: makeExecutionReport({
-        files_changed: ["src/a.ts"],
-      })}),
-      3, [], null, [git],
-      ["src/a.ts", "lib/other.ts"],
-      { "src/a.ts": "m:same", "lib/other.ts": "m:changed" },
-    );
-    const flag = result.flags.find(
-      (f) => f.check === "backtrack_workspace_not_restored",
-    );
-    assert.ok(flag, "untouched failed-round files must error");
-    assert.equal(flag!.severity, "error");
-  });
-
-  it("M3: a restored-and-redone file does not error", () => {
-    // The agent restored the workspace, then legitimately re-modified the
-    // file during the redo — the fingerprint moved on, so no machine
-    // contradiction exists even though the claimed file overlaps.
-    const git: GitObservation = {
-      schemaVersion: 2,
-      providerId: "git",
-      kind: "git",
-      phase: "after",
-      startedAt: 0,
-      finishedAt: 0,
-      status: "observed",
-      files: ["src/a.ts"],
-      data: {
-        dirty: ["src/a.ts"],
-        fingerprints: { "src/a.ts": "m:redone" },
-        coverage: "tracked_and_non_ignored_untracked",
-      },
-    };
-    const result = verifySelfEvaluation(
-      se({ execution_report: makeExecutionReport({
-        files_changed: ["src/a.ts"],
-      })}),
-      3, [], null, [git],
-      ["src/a.ts"],
-      { "src/a.ts": "m:failed-state" },
-    );
-    assert.ok(!result.flags.some((f) =>
-      f.check === "backtrack_workspace_not_restored" && f.severity === "error"),
-    "a legitimate redo must not raise the restore error");
-  });
-
-  it("no flag when execution_report is absent", () => {
-    const result = verifySelfEvaluation(
-      se({ execution_report: undefined }),
-      3, [], null, [],
-      ["src/auth.ts"],
-    );
-    const flag = result.flags.find(
-      (f) => f.check === "backtrack_workspace_not_restored",
-    );
-    assert.equal(flag, undefined,
-      "should not flag when no execution evidence");
-  });
-});
-
-// ═══════════════════════════════════════════════════════════════════════════
 // v2.12: Tri-state outcome consistency + retroactive claims
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -1248,7 +1081,7 @@ describe("v3.3 — verification domain integrity", () => {
     // The trusted round-start baseline is the fact that answers it.
     const cmd = cmdSnap("passed", { entrypointFiles: ["verify.js"] });
     const result = verifySelfEvaluation(
-      se(), 2, [], null, [cmd], [], {}, undefined, [],
+      se(), 2, [], null, [cmd], [],
       [{ file: "verify.js", roundStart: "present" }],
     );
     const flag = result.flags.find((f) => f.check === CHECK_VERIFICATION_ENTRYPOINT_MODIFIED);
@@ -1261,7 +1094,7 @@ describe("v3.3 — verification domain integrity", () => {
     // an instruction the agent can act on for a file the round created.
     const cmd = cmdSnap("passed", { entrypointFiles: ["verify.js"] });
     const result = verifySelfEvaluation(
-      se(), 2, [], null, [cmd], [], {}, undefined, [],
+      se(), 2, [], null, [cmd], [],
       [{ file: "verify.js", roundStart: "absent" }],
     );
     const flag = result.flags.find((f) => f.check === CHECK_VERIFICATION_ENTRYPOINT_MODIFIED);
@@ -1625,7 +1458,7 @@ describe("verification-gate — v3.7.1 user_gate_unresolved", () => {
   it("errors with not_user_gate for agent-classified gates", () => {
     setPolicyForTest({ ...DEFAULT_POLICY, gate: { enabled: true } });
     const result = verifySelfEvaluation(
-      se({ gate_ids: [GATE_ID] }), 2, [], null, [cmdSnap("passed")], [], {}, undefined,
+      se({ gate_ids: [GATE_ID] }), 2, [], null, [cmdSnap("passed")],
       [openedGate(GATE_ID, agentActionJson)]);
     const flag = flagFor(result);
     assert.ok(flag, "an agent gate cannot satisfy a user citation");
@@ -1635,7 +1468,7 @@ describe("verification-gate — v3.7.1 user_gate_unresolved", () => {
   it("errors with not_approved when no approved decision exists", () => {
     setPolicyForTest({ ...DEFAULT_POLICY, gate: { enabled: true } });
     const result = verifySelfEvaluation(
-      se({ gate_ids: [GATE_ID] }), 2, [], null, [cmdSnap("passed")], [], {}, undefined, [
+      se({ gate_ids: [GATE_ID] }), 2, [], null, [cmdSnap("passed")], [
         openedGate(GATE_ID, userActionJson),
         decision(GATE_ID, false),
       ]);
@@ -1647,7 +1480,7 @@ describe("verification-gate — v3.7.1 user_gate_unresolved", () => {
   it("stays silent when the cited user gate has an approved decision", () => {
     setPolicyForTest({ ...DEFAULT_POLICY, gate: { enabled: true } });
     const result = verifySelfEvaluation(
-      se({ gate_ids: [GATE_ID] }), 2, [], null, [cmdSnap("passed")], [], {}, undefined, [
+      se({ gate_ids: [GATE_ID] }), 2, [], null, [cmdSnap("passed")], [
         openedGate(GATE_ID, userActionJson),
         decision(GATE_ID, true),
       ]);
@@ -1658,7 +1491,7 @@ describe("verification-gate — v3.7.1 user_gate_unresolved", () => {
     setPolicyForTest({ ...DEFAULT_POLICY, gate: { enabled: true } });
     const legacyId = "gate-222222222222";
     const result = verifySelfEvaluation(
-      se({ gate_ids: [legacyId] }), 2, [], null, [cmdSnap("passed")], [], {}, undefined, [
+      se({ gate_ids: [legacyId] }), 2, [], null, [cmdSnap("passed")], [
         openedGate(legacyId, "publish the release to production"),
         decision(legacyId, true),
       ]);

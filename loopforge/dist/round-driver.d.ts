@@ -8,8 +8,17 @@
 import type { LoopStore } from "./loop-store.js";
 import { LoopForgeEngine } from "./engine.js";
 import type { MachineObservation } from "./protocol.js";
+import type { BoundaryCapture } from "./git-boundary.js";
 import type { LoopForgeRequest, LoopForgeResponse, OperatorAcceptance, PromptArtifact, SelfEvaluation, SubmissionDiagnostic } from "./protocol.js";
 import type { RoundTransactionOutcome, RoundTransactionSnapshot } from "./round-transaction.js";
+import { FileWorkspaceCheckpointStore } from "./workspace-checkpoint.js";
+/** A pre-collected before baseline, used by the post-restore redo path. The
+ *  boundary is the same pass's Git boundary, so the redo's own before-image
+ *  is exactly the verified restored state. */
+export interface PreparedBaseline {
+    observations: MachineObservation[];
+    boundary?: BoundaryCapture;
+}
 export interface PreparedRound {
     prompt: string;
     artifact?: PromptArtifact;
@@ -50,11 +59,16 @@ export interface CompleteRecoveryInput {
 }
 export declare class RoundDriver {
     private readonly engine;
+    private readonly checkpointStore?;
     private readonly store;
-    constructor(engine: LoopForgeEngine, store?: LoopStore);
+    constructor(engine: LoopForgeEngine, store?: LoopStore, checkpointStore?: FileWorkspaceCheckpointStore | undefined);
     prepare(request: LoopForgeRequest, loopId: string, round: number, opts?: {
         branchId?: string;
         operatorAcceptance?: OperatorAcceptance;
+        /** Post-restore baseline: compile only, do not capture again. */
+        baseline?: PreparedBaseline;
+        /** Set on the redo transaction after a verified restore. */
+        restore?: RoundTransactionSnapshot["restore"];
     }): Promise<PreparedRound | null>;
     private compile;
     /** Compile a fresh prompt for a zero-commit enforcement retry. The logical

@@ -10,7 +10,7 @@
 
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -366,12 +366,17 @@ describe("E2E Recovery Brief window (v3.7.1)", () => {
     assert.equal(resumedEvent.targetCheckpointId, targetCheckpoint,
       "the target checkpoint survives a restart");
 
-    // Redo with the same held identity is evaluated and accepted.
+    // Redo with the same held identity is evaluated and accepted. The redo is
+    // ordinary work: it must move the machine boundary, not just re-submit.
+    const redoFile = "lf-redo-evidence.txt";
+    writeFileSync(join(process.cwd(), redoFile), "redo evidence\n");
     const heldRedo = mgr.get(sessionId)!.roundSnapshot!;
     const redo = await mgr.advance(
       sessionId, "Redo: root cause fixed, tests pass.",
-      fixedEval(4, []), heldRedo.roundId, heldRedo.transactionId,
-    );
+      fixedEval(4, [redoFile]), heldRedo.roundId, heldRedo.transactionId,
+    ).finally(() => {
+      try { rmSync(join(process.cwd(), redoFile), { force: true }); } catch { /* best effort */ }
+    });
     assert.ok(!redo.enforcementAction || redo.enforcementAction === "accept",
       `redo must be accepted, got ${redo.enforcementAction ?? "accept"} (reason: ${redo.enforcementReason ?? "none"})`);
     assert.equal(redo.round, 5);

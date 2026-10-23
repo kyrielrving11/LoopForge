@@ -11,6 +11,7 @@
 import type {
   ContractItemClaim,
   ContractItemStatus,
+  ContractTransition,
   ExecutionReport,
 } from "./protocol.js";
 import type { ActiveContractView, ActiveContractItem } from "./round-contract.js";
@@ -27,6 +28,8 @@ interface RoundSlice {
   deltas: ReadonlyArray<ObservationDelta>;
   /** The round's ONE blocked declaration (outcome or stop_reason). */
   blocked: boolean;
+  /** v3.9.9: the round's explicit contract redirect, if it declared one. */
+  transition: ContractTransition | null;
 }
 
 export interface ItemStatusHistoryEntry {
@@ -47,7 +50,10 @@ export interface ItemStatusRecord {
 
 export interface ContractItemStatusView {
   contractId: string;
-  closure: "open" | "verified" | "blocked";
+  /** Priority: blocked > superseded > verified > open. `superseded` outranks
+   *  `verified` because the Agent explicitly abandoned the slice — even a
+   *  round that verified every old item still closes it as superseded. */
+  closure: "open" | "verified" | "blocked" | "superseded";
   closed_at_round: number | null;
   items: ItemStatusRecord[];
   verifiedCount: number;
@@ -67,6 +73,9 @@ export interface ContractItemInput {
    *  the round being decided is not committed yet. Leave false where no
    *  in-flight round exists (a pure committed-history replay). */
   currentBlocked?: boolean;
+  /** v3.9.9: the in-flight (or decoded committed) round's transition. It
+   *  closes the contract as `superseded` only when its target matches. */
+  currentTransition?: ContractTransition | null;
   commands: ReadonlyArray<CommandEvidencePolicy>;
 }
 
@@ -194,12 +203,14 @@ export function deriveContractItemStatuses(input: ContractItemInput): ContractIt
       blocked: round.evaluation
         ? declaresBlocked(round.evaluation)
         : round.outcome === "blocked",
+      transition: round.contractTransition,
     })),
     {
       round: input.currentRound,
       report: input.currentReport,
       deltas: input.currentDeltas,
       blocked: input.currentBlocked === true,
+      transition: input.currentTransition ?? null,
     },
   ].filter((slice) => slice.round < input.currentRound || slice.round === input.currentRound);
 
@@ -254,11 +265,20 @@ export function deriveContractItemStatuses(input: ContractItemInput): ContractIt
   const committingRound = slices[slices.length - 1];
   const blocked = committingRound?.blocked === true;
   const allVerified = items.length > 0 && verifiedCount === items.length;
+  // v3.9.9 closure priority: blocked > superseded > verified > open.
   // A blocked declaration is the Agent's protocol action and closes the
-  // contract first. Item statuses remain machine facts (verified items can
-  // still be listed), but a blocked closure can never also read as verified.
+  // contract first. A transition supersedes only when its target is THIS
+  // contract; an inert/abnormal target is ignored rather than closing a
+  // contract the Agent never named.
+  const superseded = !blocked &&
+    committingRound?.transition !== null &&
+    committingRound?.transition !== undefined &&
+    committingRound.transition.contract_id === contract.id;
   const closure: ContractItemStatusView["closure"] =
-    blocked ? "blocked" : allVerified ? "verified" : "open";
+    blocked ? "blocked"
+      : superseded ? "superseded"
+      : allVerified ? "verified"
+      : "open";
 
   return {
     contractId: contract.id,

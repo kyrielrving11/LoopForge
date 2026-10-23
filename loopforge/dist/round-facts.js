@@ -12,12 +12,13 @@
  * one derivation" is a property of the types rather than a convention.
  */
 import { deriveContractItemStatuses } from "./contract-items.js";
-import { deriveActiveRoundContract, deriveRoundContractView } from "./round-contract.js";
+import { committedRoundFacts, deriveActiveRoundContract, deriveRoundContractView, } from "./round-contract.js";
 import { isCriterionId } from "./token-utils.js";
 export const NO_IN_FLIGHT_ROUND = {
     currentReport: null,
     currentDeltas: [],
     currentBlocked: false,
+    currentTransition: null,
     currentOutcome: null,
 };
 export function deriveRoundFacts(input) {
@@ -30,6 +31,7 @@ export function deriveRoundFacts(input) {
         currentDeltas: input.inFlight.currentDeltas,
         currentBlocked: input.inFlight.currentBlocked ??
             input.inFlight.currentOutcome === "blocked",
+        currentTransition: input.inFlight.currentTransition ?? null,
         commands: input.commands,
     });
     const verifiedSubGoals = deriveVerifiedSubGoals({
@@ -90,9 +92,7 @@ function deriveCriterionFacts(input) {
         const { contract, statuses } = deriveRoundContractView({
             rounds: input.rounds,
             round: round.round,
-            report: round.executionReport,
-            deltas: round.observationDelta,
-            outcome: round.outcome,
+            current: committedRoundFacts(round),
             commands: input.commands,
         });
         if (!contract)
@@ -171,9 +171,7 @@ export function deriveVerifiedSubGoals(input) {
         const { contract, statuses } = deriveRoundContractView({
             rounds: input.rounds,
             round: round.round,
-            report: round.executionReport,
-            deltas: round.observationDelta,
-            outcome: round.outcome,
+            current: committedRoundFacts(round),
             commands: input.commands,
         });
         if (!contract)

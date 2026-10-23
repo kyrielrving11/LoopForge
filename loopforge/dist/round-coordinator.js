@@ -18,13 +18,13 @@
  * side-effect free and accepted decisions can be replayed idempotently.
  */
 import { queryLoopEntries } from "./loop-store.js";
-import { CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE, collectOutOfScopeFiles, roundDriftFiles, verifySelfEvaluation, } from "./verification-gate.js";
+import { CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE, verifySelfEvaluation, } from "./verification-gate.js";
 import { checkpointForRoundBoundary, deriveRecoveryDirective, validateCheckpointManifest, } from "./recovery.js";
 import { driftedEntrypoints } from "./evidence-provider.js";
 import { isRecord } from "./token-utils.js";
 import { declaresBlocked, effectiveSuccess } from "./round-outcome.js";
 import { derivationRounds } from "./committed-round.js";
-import { deriveRoundProgress } from "./progress.js";
+import { deriveRoundProgress, STALL_PROGRESS_COVERAGE, } from "./progress.js";
 import { enforceRound, buildRejectionPrompt, findSafeRestorePoint, } from "./enforcement-gate.js";
 import { logEvent } from "./observability.js";
 import { getPolicy } from "./policy.js";
@@ -38,6 +38,9 @@ import { roundVerificationStatus, } from "./contract-items.js";
  *  accepted-but-unverified round is not evidence of progress. */
 function shouldPushSuccess(gateContradicted, verificationFlags, contractStatuses) {
     if (gateContradicted)
+        return false;
+    // v3.9.9: a redirect round abandons a slice; it is never success evidence.
+    if (contractStatuses?.closure === "superseded")
         return false;
     // v3.8: an unverified contract item (or a claimed-but-unbacked success)
     // keeps the round out of the success trajectory — an accepted-but-unverified
@@ -70,27 +73,46 @@ function shouldPushSuccess(gateContradicted, verificationFlags, contractStatuses
 export function finalizeStopReason(
 /** `undefined` when the disposition named no terminal reason at all (the
  *  callers fall back to their own default) — there is nothing to guard. */
-reason, selfEval, contractStatuses) {
+reason, selfEval, contractStatuses,
+/** v3.9.9: the current round's transition. A committed redirect can never
+ *  produce `completed` even if the old items were all verified. */
+transition) {
     if (reason !== "completed")
         return { reason, flags: [] };
     const declared = declaresBlocked(selfEval);
     const blockedContract = contractStatuses?.closure === "blocked";
-    if (!declared && !blockedContract)
-        return { reason, flags: [] };
-    return {
-        reason: "blocked",
-        flags: [{
-                severity: "warn",
-                field: declared ? "outcome" : "round_contract",
-                check: "completion_truth_downgraded",
-                detail: declared
-                    ? "The round declared a blocked outcome but the stop decision produced " +
-                        "`completed`; the declaration wins and the stop reason was downgraded " +
-                        "to `blocked`."
-                    : "The active contract closed on a blocked outcome but the stop decision " +
-                        "produced `completed`; the stop reason was downgraded to `blocked`.",
-            }],
-    };
+    if (declared || blockedContract) {
+        return {
+            reason: "blocked",
+            flags: [{
+                    severity: "warn",
+                    field: declared ? "outcome" : "round_contract",
+                    check: "completion_truth_downgraded",
+                    detail: declared
+                        ? "The round declared a blocked outcome but the stop decision produced " +
+                            "`completed`; the declaration wins and the stop reason was downgraded " +
+                            "to `blocked`."
+                        : "The active contract closed on a blocked outcome but the stop decision " +
+                            "produced `completed`; the stop reason was downgraded to `blocked`.",
+                }],
+        };
+    }
+    const superseded = contractStatuses?.closure === "superseded" ||
+        Boolean(transition);
+    if (superseded) {
+        return {
+            reason: "incomplete",
+            flags: [{
+                    severity: "warn",
+                    field: "contract_transition",
+                    check: "completion_truth_downgraded",
+                    detail: "The round superseded its active contract, so the old slice is not " +
+                        "verified and the round cannot be `completed`; the stop reason was " +
+                        "downgraded to `incomplete`.",
+                }],
+        };
+    }
+    return { reason, flags: [] };
 }
 // ── RoundCoordinator ───────────────────────────────────────────────────────
 /** v3.8.1: The rolled-back branch's facts — the ONE derivation of which rounds
@@ -252,32 +274,14 @@ export class RoundCoordinator {
         const { contract: activeContract, statuses: activeContractStatuses } = deriveRoundContractView({
             rounds: committedRounds,
             round: currentRound,
-            report: selfEval.execution_report ?? null,
-            deltas: evidenceDeltas ?? [],
-            blocked: declaresBlocked(selfEval),
+            current: {
+                report: selfEval.execution_report ?? null,
+                deltas: evidenceDeltas ?? [],
+                blocked: declaresBlocked(selfEval),
+                transition: selfEval.contract_transition ?? null,
+            },
             commands: getPolicy().evidence.commands ?? [],
         });
-        // v3.8.3: the legal exit from scope drift — a round that declares itself
-        // blocked may switch contracts, but only by declaring a proposal whose
-        // scope covers EVERY file it changed out of scope. Computed here because
-        // this is the only place where the round's git delta, the active
-        // contract's scope and the submitted proposal are all in reach; the
-        // enforcement gate receives the verdict, not the inputs.
-        //
-        // `selfEval.round_contract` is already the parsed proposal (buildSelfEvaluation
-        // runs parseRoundContract), so the coverage test reads the same object the
-        // commit path will read back.
-        //
-        // The coverage requirement is what keeps this from being a universal
-        // escape: without it "declare blocked" would dissolve a machine fact
-        // without declaring anything. The drift FLAG is untouched — it still lands
-        // on the committed round, so audit/explain keep reporting it.
-        const driftedFiles = roundDriftFiles(activeContract, evidenceDeltas ?? []);
-        const proposal = selfEval.round_contract;
-        const scopeDriftWaiver = driftedFiles !== null && driftedFiles.length > 0 &&
-            declaresBlocked(selfEval) &&
-            proposal !== undefined &&
-            collectOutOfScopeFiles(driftedFiles, proposal.scope).length === 0;
         if (gateContradicted) {
             logEvent("gate_contradicted", {
                 loopId,
@@ -291,11 +295,11 @@ export class RoundCoordinator {
         // transaction reaches enforcement with a fully extracted self-evaluation.
         // The old v2.5 "heuristic partial enforcement" plumbing (extractionSucceeded
         // flag, enforcement skipEvidenceRules mode) was removed as unreachable.
-        const enforceResult = enforceRound(selfEval, verifyResult, currentRound, vaultEntries, consecutiveRejections, input.lastRejectionCheck ?? "", scopeDriftWaiver,
-        // v3.9.7: what THIS round moved, from the same provider-neutral
-        // progress rule the committed series uses. Unknown/not_applicable never
-        // gains the stall excuse.
-        deriveRoundProgress(evidenceDeltas ?? []));
+        const enforceResult = enforceRound(selfEval, verifyResult, currentRound, vaultEntries, consecutiveRejections, input.lastRejectionCheck ?? "",
+        // v3.9.9: what THIS round moved, under the SAME Git workspace selector
+        // the committed window uses. Unknown/not_applicable never gains the
+        // stall excuse, and no other provider's fact can change this verdict.
+        deriveRoundProgress(evidenceDeltas ?? [], STALL_PROGRESS_COVERAGE));
         if (enforceResult.action === "reject") {
             const newRejections = consecutiveRejections + 1;
             const rejectionPrompt = buildRejectionPrompt(currentRound, task, enforceResult, verificationFlags);
@@ -502,7 +506,7 @@ export class RoundCoordinator {
             // is written into the committed round document below, so it must be
             // truthful at the moment it becomes a fact, not only when it is
             // returned to the client.
-            const finalized = finalizeStopReason(reason, selfEval, activeContractStatuses);
+            const finalized = finalizeStopReason(reason, selfEval, activeContractStatuses, selfEval.contract_transition ?? null);
             return {
                 action: "stop",
                 verificationStatus: roundVerificationStatus(activeContractStatuses, selfEval.execution_report ?? null),

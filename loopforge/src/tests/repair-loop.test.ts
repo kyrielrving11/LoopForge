@@ -22,7 +22,7 @@ function gitDelta(changedFiles: string[] | null): ObservationDelta {
     before: null,
     after: null,
     changedFiles,
-    progress: "unknown",
+    progress: null,
   };
 }
 

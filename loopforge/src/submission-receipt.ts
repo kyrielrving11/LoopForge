@@ -31,7 +31,11 @@ import {
 } from "./round-transaction.js";
 import type { RoundTransactionSnapshot } from "./round-transaction.js";
 import type { CommittedRoundView } from "./committed-round.js";
-import { deriveActiveRoundContract, deriveRoundContractView } from "./round-contract.js";
+import {
+  committedRoundFacts,
+  deriveActiveRoundContract,
+  deriveRoundContractView,
+} from "./round-contract.js";
 import { deriveSubGoals } from "./subgoal-state.js";
 import { deriveEvidenceStatus } from "./verification-gate.js";
 import { fieldGuide } from "./submission-guidance.js";
@@ -129,11 +133,22 @@ function baseReportHandling(
       };
     }
   }
-  if (path === "round_contract" && hasCheck(input.pr, "contract_premature")) {
-    return {
-      handling: "saved_not_expanded",
-      detail: "the active contract is still open; the different proposal was ignored",
-    };
+  if (path === "round_contract") {
+    const transition = input.selfEval.contract_transition;
+    if (transition && transition.contract_id === input.facts.contractBefore) {
+      // v3.9.9: in a transition round the successor is the EFFECTIVE next
+      // slice, not an ignored premature proposal.
+      return {
+        handling: "saved",
+        detail: "the successor contract activates next round (the old one closes as superseded)",
+      };
+    }
+    if (hasCheck(input.pr, "contract_premature")) {
+      return {
+        handling: "saved_not_expanded",
+        detail: "the active contract is still open; the different proposal was ignored",
+      };
+    }
   }
   if (path === "no_change_reason") {
     const commands = getPolicy().evidence.commands ?? [];
@@ -296,6 +311,12 @@ export function deriveSubmissionReceipt(input: ReceiptInput): SubmissionReceipt 
     : null;
   const contractBefore = input.facts.contractBefore;
   const contractAfter = input.facts.contractAfter;
+  // v3.9.9: the receipt's `superseded` fact comes from the COMMITTED
+  // transition and its target, never from inferring a successor out of a
+  // `contract_premature` flag.
+  const transition = selfEval.contract_transition ?? null;
+  const transitionApplied = diffApplied && transition !== null &&
+    contractBefore !== null && transition.contract_id === contractBefore;
 
   // ── verification ───────────────────────────────────────────────────────
   const evidence = deriveEvidenceStatus(selfEval, input.evidenceDeltas);
@@ -322,6 +343,14 @@ export function deriveSubmissionReceipt(input: ReceiptInput): SubmissionReceipt 
         after_id: contractAfter,
         activated: diffApplied && contractAfter !== null && contractBefore !== contractAfter,
         closed: diffApplied && contractBefore !== null && contractBefore !== contractAfter,
+        ...(transitionApplied
+          ? {
+              superseded: true,
+              ...(transition?.reason
+                ? { transition_reason: transition.reason }
+                : {}),
+            }
+          : {}),
       },
       subgoals_created: subGoals.created,
       subgoals_updated: subGoals.updated,
@@ -387,9 +416,7 @@ export function deriveCommittedSubmissionView(
   const contractView = deriveRoundContractView({
     rounds: allViews,
     round: view.round,
-    report: view.executionReport,
-    deltas: view.observationDelta,
-    outcome: view.outcome,
+    current: committedRoundFacts(view),
     commands,
   });
   const selfEval = view.evaluation ?? {

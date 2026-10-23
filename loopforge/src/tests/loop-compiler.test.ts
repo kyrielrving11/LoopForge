@@ -999,6 +999,7 @@ describe("v3.8.1 — recurring flags", () => {
     success: false,
     outcome: null,
     contractProposal: null,
+    contractTransition: null,
     contractBinding: null,
     beforeEvidence: [],
     afterEvidence: [],

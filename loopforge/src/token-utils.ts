@@ -171,12 +171,14 @@ export interface ContractIdentityItem {
  *  legacy-readable type); the item list is the acceptance surface. */
 export function canonicalContractText(contract: {
   work_item?: string;
-  scope: string[];
+  /** v3.9.9: scope is optional and report-only. Omission and `[]` both mean
+   *  "no declared intent", so they keep the same content identity. */
+  scope?: string[];
   items: ContractIdentityItem[];
 }): string {
   const canonical = {
     work_item: normalizeText(contract.work_item ?? ""),
-    scope: contract.scope.map(normalizeText),
+    scope: (contract.scope ?? []).map(normalizeText),
     items: contract.items.map((item) => ({
       description: normalizeText(item.description),
       criterion_refs: item.criterion_refs.map(normalizeText),

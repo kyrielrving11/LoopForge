@@ -19,12 +19,17 @@ import type { ObservationDelta } from "./evidence-provider.js";
 import type { CommandEvidencePolicy } from "./policy.js";
 import type {
   ContractItemStatus,
+  ContractTransition,
   ExecutionReport,
   SubGoal,
   VerifiedSubGoalFact,
 } from "./protocol.js";
 import type { ActiveContractView } from "./round-contract.js";
-import { deriveActiveRoundContract, deriveRoundContractView } from "./round-contract.js";
+import {
+  committedRoundFacts,
+  deriveActiveRoundContract,
+  deriveRoundContractView,
+} from "./round-contract.js";
 import { isCriterionId } from "./token-utils.js";
 
 export interface RoundFacts {
@@ -64,6 +69,8 @@ export interface InFlightRoundSlice {
   /** The in-flight round's own blocked declaration. A `blocked` round CLOSES
    *  its contract, so closure cannot be derived from committed slices alone. */
   currentBlocked?: boolean;
+  /** v3.9.9: the in-flight round's explicit contract redirect. */
+  currentTransition?: ContractTransition | null;
   /** Legacy shape accepted by library callers; `blocked` wins when present. */
   currentOutcome?: string | null;
 }
@@ -72,6 +79,7 @@ export const NO_IN_FLIGHT_ROUND: InFlightRoundSlice = {
   currentReport: null,
   currentDeltas: [],
   currentBlocked: false,
+  currentTransition: null,
   currentOutcome: null,
 };
 
@@ -92,6 +100,7 @@ export function deriveRoundFacts(input: {
     currentDeltas: input.inFlight.currentDeltas,
     currentBlocked: input.inFlight.currentBlocked ??
       input.inFlight.currentOutcome === "blocked",
+    currentTransition: input.inFlight.currentTransition ?? null,
     commands: input.commands,
   });
   const verifiedSubGoals = deriveVerifiedSubGoals({
@@ -163,9 +172,7 @@ function deriveCriterionFacts(input: {
     const { contract, statuses } = deriveRoundContractView({
       rounds: input.rounds,
       round: round.round,
-      report: round.executionReport,
-      deltas: round.observationDelta,
-      outcome: round.outcome,
+      current: committedRoundFacts(round),
       commands: input.commands,
     });
     if (!contract) continue;
@@ -253,9 +260,7 @@ export function deriveVerifiedSubGoals(input: {
     const { contract, statuses } = deriveRoundContractView({
       rounds: input.rounds,
       round: round.round,
-      report: round.executionReport,
-      deltas: round.observationDelta,
-      outcome: round.outcome,
+      current: committedRoundFacts(round),
       commands: input.commands,
     });
     if (!contract) continue;

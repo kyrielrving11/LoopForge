@@ -526,7 +526,7 @@ describe("Round Contract state (v3.3 rendering, v3.4 active source)", () => {
     assert.ok(state.currentTask.includes("- [`rci-11111111`] login works"));
     assert.ok(state.currentTask.includes("- Verify via: run-tests"));
     assert.ok(state.currentTask.includes("- Criteria: cr-auth-login"));
-    assert.ok(state.currentTask.includes("- Allowed scope:"));
+    assert.ok(state.currentTask.includes("- Declared scope (Agent report; not enforced):"));
     assert.ok(state.currentTask.includes("  - src/auth"));
     assert.ok(!state.currentTask.includes("Fix bugs in auth module"),
       "the original task is NOT the Current Task on a contract round");
@@ -611,7 +611,7 @@ describe("Round Contract state (v3.3 rendering, v3.4 active source)", () => {
     assert.match(text, /Criteria: cr-11111111/);
     assert.match(text, /Sub-goals: sg-11111111/);
     assert.match(text, /Unverified because: command/);
-    assert.match(text, /Allowed scope:\n  - src\/auth/);
+    assert.match(text, /Declared scope \(Agent report; not enforced\):\n  - src\/auth/);
   });
 });
 

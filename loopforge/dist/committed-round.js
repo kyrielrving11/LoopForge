@@ -4,9 +4,10 @@
  * place that interprets their transaction envelope or the compiler's merged
  * lineage representation. Consumers receive one stable, read-only view.
  */
-import { GIT_OBSERVATION_SCHEMA_VERSION, PROMPT_ARTIFACT_SCHEMA_VERSION, makeLoopRoundResult, } from "./protocol.js";
+import { observationVersionIssue } from "./evidence-provider.js";
+import { PROMPT_ARTIFACT_SCHEMA_VERSION, makeLoopRoundResult, } from "./protocol.js";
 import { ROUND_TRANSACTION_SCHEMA_VERSION, deriveRoundObservationDelta, parseRoundTransactionSnapshot, rootBranchId, transactionSchemaVersionOf, } from "./round-transaction.js";
-import { claimedMetCriteria, claimedRemainingCriteria, effectiveOutcome, parseRoundContract } from "./self-eval.js";
+import { claimedMetCriteria, claimedRemainingCriteria, effectiveOutcome, parseContractTransition, parseRoundContract, } from "./self-eval.js";
 import { entryRound, isRecord } from "./token-utils.js";
 function committedAction(value) {
     return value === "continue" || value === "stop" ||
@@ -120,6 +121,9 @@ function viewFromSnapshot(input) {
         outcome,
         contractProposal: evaluation?.round_contract
             ? parseRoundContract(evaluation.round_contract) ?? null
+            : null,
+        contractTransition: evaluation
+            ? parseContractTransition(evaluation.contract_transition) ?? null
             : null,
         contractBinding: snapshot.contractBinding ?? null,
         beforeEvidence,
@@ -590,16 +594,16 @@ export function legacyTransactionRounds(entries) {
             ...(Array.isArray(snapshot.afterEvidence) ? snapshot.afterEvidence : []),
         ];
         for (const item of observations) {
-            if (!isRecord(item) || typeof item.kind !== "string") {
+            if (!isRecord(item)) {
                 out.push({ round, schemaVersion: -1, envelope: "observation" });
                 break;
             }
-            const expected = item.kind === "git" ? GIT_OBSERVATION_SCHEMA_VERSION : 1;
-            const observationVersion = item.schemaVersion;
-            if (typeof observationVersion !== "number" || observationVersion !== expected) {
+            // v3.9.9: the SAME version judgment the transaction parser uses.
+            const issue = observationVersionIssue(item.kind, item.schemaVersion, item.data, item.status);
+            if (issue) {
                 out.push({
                     round,
-                    schemaVersion: typeof observationVersion === "number" ? observationVersion : -1,
+                    schemaVersion: issue.schemaVersion,
                     envelope: "observation",
                 });
                 break;

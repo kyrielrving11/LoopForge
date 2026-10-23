@@ -34,7 +34,8 @@ export { LoopForgeEngine, createEngine, buildSelfEvaluation, parseExecutionRepor
 export { McpServer } from "./mcp/server.js";
 export { SessionManager } from "./mcp/session.js";
 // EvidenceProvider (v1.18 / v3.8: machine observations)
-export { EvidenceCollector, GitEvidenceProvider, CommandEvidenceProvider, registerEvidenceProvider, unregisterEvidenceProvider, isProviderRegistered, isPassedAfterObservation, deriveObservationDeltas, gitDeltaState, } from "./evidence-provider.js";
+export { EvidenceCollector, GitEvidenceProvider, CommandEvidenceProvider, registerEvidenceProvider, unregisterEvidenceProvider, isProviderRegistered, isPassedAfterObservation, deriveObservationDeltas, gitDeltaState, isValidProgressSnapshot, observationVersionIssue, expectedObservationSchemaVersion, coverageKey, } from "./evidence-provider.js";
+export { deriveProgressWindow, deriveRoundProgress, GIT_WORKSPACE_COVERAGE, STALL_PROGRESS_COVERAGE, } from "./progress.js";
 // Structured tracing and policy effectiveness metrics (v1.20)
 export { logEvent, } from "./observability.js";
 export { PolicyMetricsCollector, policyMetrics, getPolicyMetrics, resetPolicyMetrics, } from "./policy-metrics.js";

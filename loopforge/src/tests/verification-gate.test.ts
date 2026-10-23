@@ -11,7 +11,10 @@ import type { VaultEntry } from "../loop-store.js";
 import { committedFeedbackRound as committedRound, testCommandProvider, criterionClaims, deltasFrom } from "./_helpers.js";
 import type { EntrypointDrift } from "../evidence-provider.js";
 import { verifySelfEvaluation as rawVerifySelfEvaluation, parseTestOutput, deriveEvidenceStatus, CHECK_VERIFICATION_ENTRYPOINT_MODIFIED, CHECK_TEST_FILES_MODIFIED, CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE } from "../verification-gate.js";
-import { machineGitMotionSeries } from "../progress.js";
+import {
+  deriveProgressWindow,
+  STALL_PROGRESS_COVERAGE,
+} from "../progress.js";
 import { derivationRounds } from "../committed-round.js";
 import type {
   CommandObservation,
@@ -994,10 +997,11 @@ describe("v3.2 — machineProgressSeries", () => {
     entries: VaultEntry[],
     currentRound: number,
     lookback: number,
-  ) => machineGitMotionSeries(
+  ) => deriveProgressWindow(
     derivationRounds(entries, currentRound),
     currentRound,
     lookback,
+    STALL_PROGRESS_COVERAGE,
   );
   const feedbackRound = (
     round: number,
@@ -1030,7 +1034,7 @@ describe("v3.2 — machineProgressSeries", () => {
   };
 
   it("reports per-round git observations for the lookback window", () => {
-    const series = machineProgressSeries(
+    const window = machineProgressSeries(
       [
         feedbackRound(1, ["a.ts"], "h0", "h1"),
         feedbackRound(2, [], "h1", "h1"),
@@ -1039,25 +1043,29 @@ describe("v3.2 — machineProgressSeries", () => {
       4,
       3,
     );
-    assert.deepEqual(series, [true, false, true]);
+    assert.equal(window.state, "changed");
+    assert.deepEqual(
+      window.roundStates.map((entry) => entry.state),
+      ["changed", "unchanged", "changed"],
+    );
   });
 
-  it("returns null when fewer than lookback rounds carry git snapshots", () => {
-    const series = machineProgressSeries(
+  it("is unknown when fewer than lookback rounds carry git snapshots", () => {
+    const window = machineProgressSeries(
       [feedbackRound(1, [], "h0", "h1"), feedbackRound(2, [], "h1", "h1")],
       4,
       3,
     );
-    assert.equal(series, null);
+    assert.equal(window.state, "unknown");
   });
 
-  it("returns null when the recent rounds are not contiguous (unknown motion)", () => {
-    const series = machineProgressSeries(
+  it("is unknown when the recent rounds are not contiguous", () => {
+    const window = machineProgressSeries(
       [feedbackRound(1, [], "h0", "h1"), feedbackRound(3, [], "h1", "h1")],
       4,
       2,
     );
-    assert.equal(series, null);
+    assert.equal(window.state, "unknown");
   });
 });
 
@@ -1283,7 +1291,7 @@ describe("Round Contract checks (v3.8 item model)", () => {
     assert.ok(!result.flags.some((f) => f.check === CHECK_CONTRACT_ITEMS_UNVERIFIED));
   });
 
-  it("round_scope_drift: files outside the active contract's scope → warn", () => {
+  it("round_scope_drift: files outside the declared scope → info report only", () => {
     const contract = itemContract();
     const result = verifySelfEvaluation(
       se({ success: false, execution_report: makeExecutionReport({ files_changed: ["src/other.ts"] }) }),
@@ -1292,8 +1300,12 @@ describe("Round Contract checks (v3.8 item model)", () => {
       null,
       [gitSnap(["src/other.ts"])],
     );
-    assert.ok(result.flags.some((f) =>
-      f.check === CHECK_ROUND_SCOPE_DRIFT && f.severity === "warn"));
+    const flag = result.flags.find((f) => f.check === CHECK_ROUND_SCOPE_DRIFT);
+    assert.ok(flag);
+    assert.equal(flag!.severity, "info");
+    assert.match(flag!.detail, /report only; this does not block the round/);
+    assert.equal(result.verdict, "trusted",
+      "an info fact does not even make the round suspect");
   });
 
   it("round_scope_drift: silent when the active contract declares no scope", () => {
@@ -1621,7 +1633,7 @@ describe("v3.9.2 — evidence_integrity uses the shared reconciliation", () => {
     const result = rawVerifySelfEvaluation(
       withFiles(["src/a.ts"]), 2, [], null, [{
         providerId: "git", kind: "git", before: null, after: null,
-        changedFiles: null, progress: "unknown",
+        changedFiles: null, progress: null,
       }],
     );
     assert.ok(!result.flags.some((flag) => flag.check === "evidence_integrity"));

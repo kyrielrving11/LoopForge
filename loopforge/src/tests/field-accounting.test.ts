@@ -128,6 +128,15 @@ const CASES: FieldCase[] = [
   },
   { path: "round_contract", valid: VALID_CONTRACT, invalid: null },
   {
+    path: "contract_transition",
+    valid: {
+      kind: "supersede",
+      contract_id: "rc-12345678",
+      reason: "the active slice is not the right route",
+    },
+    invalid: null,
+  },
+  {
     path: "worker_results",
     valid: [VALID_WORKER],
     invalid: "not-array",

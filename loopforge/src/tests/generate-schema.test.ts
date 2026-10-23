@@ -134,7 +134,8 @@ describe("Generated JSON Schema — top-level", () => {
     // ProgressSnapshot joined (63 → 67).
     // v3.9.8: CheckpointRole, WorkspaceCheckpointManifest, CheckpointRef and
     // RecoveryTarget joined (67 → 71).
-    assert.equal(names.length, 71, `expected 71, got ${names.length}: ${names.join(", ")}`);
+    // v3.9.9: ContractTransition and ProgressCoverage joined (71 → 73).
+    assert.equal(names.length, 73, `expected 73, got ${names.length}: ${names.join(", ")}`);
     assert.ok(names.includes("PromptArtifact"));
     assert.ok(names.includes("RoundOutcome"));
     assert.ok(names.includes("RoundContractProposal"));

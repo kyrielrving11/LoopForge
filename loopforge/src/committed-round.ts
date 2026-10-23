@@ -7,8 +7,8 @@
 
 import type { MachineObservation } from "./protocol.js";
 import type { ObservationDelta } from "./evidence-provider.js";
+import { observationVersionIssue } from "./evidence-provider.js";
 import {
-  GIT_OBSERVATION_SCHEMA_VERSION,
   PROMPT_ARTIFACT_SCHEMA_VERSION,
   makeLoopRoundResult,
 } from "./protocol.js";
@@ -16,6 +16,7 @@ import type { VaultEntry } from "./loop-store.js";
 import type {
   CheckpointRef,
   ContractBinding,
+  ContractTransition,
   ExecutionReport,
   LoopRoundResult,
   OperatorAcceptance,
@@ -37,7 +38,13 @@ import {
   transactionSchemaVersionOf,
 } from "./round-transaction.js";
 import type { RoundTransactionSnapshot } from "./round-transaction.js";
-import { claimedMetCriteria, claimedRemainingCriteria, effectiveOutcome, parseRoundContract } from "./self-eval.js";
+import {
+  claimedMetCriteria,
+  claimedRemainingCriteria,
+  effectiveOutcome,
+  parseContractTransition,
+  parseRoundContract,
+} from "./self-eval.js";
 import { entryRound, isRecord } from "./token-utils.js";
 
 export type CommittedAction = "continue" | "stop" | "recovery" | "backtrack";
@@ -78,6 +85,10 @@ export interface CommittedRoundView {
   readonly success: boolean;
   readonly outcome: RoundOutcome | null;
   readonly contractProposal: RoundContractProposal | null;
+  /** v3.9.9: this round's explicit contract redirection, if it declared one.
+   *  Read from the committed evaluation; a target the reducer cannot match is
+   *  inert, never a reason to close a contract. */
+  readonly contractTransition: ContractTransition | null;
   /** v3.8: the machine binding stamped when the declaring round committed. */
   readonly contractBinding: ContractBinding | null;
   readonly beforeEvidence: MachineObservation[];
@@ -225,6 +236,9 @@ function viewFromSnapshot(input: {
     outcome,
     contractProposal: evaluation?.round_contract
       ? parseRoundContract(evaluation.round_contract) ?? null
+      : null,
+    contractTransition: evaluation
+      ? parseContractTransition(evaluation.contract_transition) ?? null
       : null,
     contractBinding: snapshot.contractBinding ?? null,
     beforeEvidence,
@@ -750,16 +764,17 @@ export function legacyTransactionRounds(entries: unknown[]): LegacyRound[] {
       ...(Array.isArray(snapshot.afterEvidence) ? snapshot.afterEvidence : []),
     ];
     for (const item of observations) {
-      if (!isRecord(item) || typeof item.kind !== "string") {
+      if (!isRecord(item)) {
         out.push({ round, schemaVersion: -1, envelope: "observation" });
         break;
       }
-      const expected = item.kind === "git" ? GIT_OBSERVATION_SCHEMA_VERSION : 1;
-      const observationVersion = item.schemaVersion;
-      if (typeof observationVersion !== "number" || observationVersion !== expected) {
+      // v3.9.9: the SAME version judgment the transaction parser uses.
+      const issue = observationVersionIssue(
+        item.kind, item.schemaVersion, item.data, item.status);
+      if (issue) {
         out.push({
           round,
-          schemaVersion: typeof observationVersion === "number" ? observationVersion : -1,
+          schemaVersion: issue.schemaVersion,
           envelope: "observation",
         });
         break;

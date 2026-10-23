@@ -809,10 +809,14 @@ function checkRoundScopeDrift(activeContract, evidenceDeltas) {
     if (outOfScope === null || outOfScope.length === 0)
         return null;
     return makeVerificationFlag({
-        severity: "warn",
+        // v3.9.9: report only. `scope` is the Agent's declared intent, not a
+        // permission, so drift is an INFO fact — it never rejects, terminates,
+        // backtracks, stalls, or counts toward a rejection streak.
+        severity: "info",
         field: "round_contract",
         check: CHECK_ROUND_SCOPE_DRIFT,
-        detail: `Files changed outside the active contract's declared scope` +
+        detail: `Files changed outside the active contract's declared scope (report ` +
+            `only; this does not block the round)` +
             (outOfScope.length > 5
                 ? ` (${outOfScope.length} total, showing 5): ${outOfScope.slice(0, 5).join(", ")}`
                 : `: ${outOfScope.join(", ")}`),
@@ -821,9 +825,20 @@ function checkRoundScopeDrift(activeContract, evidenceDeltas) {
 /** v3.8: Claimed-but-unverified contract items. The round COMMITS — the debt
  *  is surfaced (prompt, state file, handoff) and the enforcement gate's
  *  verification-debt row handles a persistent pattern. */
-function checkContractItemsUnverified(statuses) {
+function checkContractItemsUnverified(statuses, currentReport) {
     if (statuses.insufficientCount === 0)
         return null;
+    // v3.9.9: an honest abandonment retires the old debt finding. A superseded
+    // contract whose round does NOT claim any of its items `met` is the Agent
+    // saying "this slice was wrong" — not a completion claim to police. If the
+    // round still claims an old item `met`, the debt finding stands: a redirect
+    // cannot wash away an unverified completion claim.
+    if (statuses.closure === "superseded") {
+        const itemIds = new Set(statuses.items.map((item) => item.itemId));
+        const claimsMet = (currentReport?.contract_item_claims ?? []).some((claim) => claim.outcome === "met" && itemIds.has(claim.item_id));
+        if (!claimsMet)
+            return null;
+    }
     // v3.9.4: EVERY insufficient item is named. The previous 3-item cap hid the
     // rest of the debt from the one repair surface the agent reads.
     const unverified = statuses.items
@@ -974,6 +989,10 @@ filesReported) {
         currentRound,
         currentReport: selfEval.execution_report ?? null,
         currentDeltas: evidenceDeltas,
+        currentBlocked: declaresBlocked(selfEval),
+        // v3.9.9: without this, debt/premature checks cannot see a superseded
+        // closure and would report the old contract as merely open.
+        currentTransition: selfEval.contract_transition ?? null,
         commands: getPolicy().evidence.commands ?? [],
     });
     // v2.12: Derived claim provenance — which reported criteria completions
@@ -1017,7 +1036,7 @@ filesReported) {
         // advances, so the gate only reports execution state: scope drift,
         // claimed-but-unverified items, and an ignored replacement proposal.
         () => checkRoundScopeDrift(activeContract, evidenceDeltas),
-        () => checkContractItemsUnverified(contractStatuses),
+        () => checkContractItemsUnverified(contractStatuses, selfEval.execution_report ?? null),
         () => checkContractPremature(activeContract, contractStatuses, selfEval),
         // v3.7.1: opt-in gate-layer blocking (skipped when disabled)
         () => checkUserGateUnresolved(selfEval, gateEntries),

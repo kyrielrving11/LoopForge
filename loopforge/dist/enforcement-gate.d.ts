@@ -63,12 +63,6 @@ export declare function enforceRound(selfEval: SelfEvaluation, verifyResult: Ver
  *  check and lets uniform rows escalate on THEIR OWN streak instead of
  *  inheriting an unrelated history. */
 lastRejectionCheck?: string,
-/** v3.8.3: the coordinator has verified that this round declares itself
- *  blocked AND that its new contract proposal's scope covers every file the
- *  round changed outside the active contract's scope. Computed there, not
- *  here: neither the observations nor the active contract reach this
- *  function. See `enforceScopeDrift`. */
-scopeDriftWaiver?: boolean,
 /** v3.9.7: the submitted round's provider-neutral progress. */
 inFlightProgress?: RoundProgress): EnforcementResult;
 /** Build the protected retry notice for the agent.

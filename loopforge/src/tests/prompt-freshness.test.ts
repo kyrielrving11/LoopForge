@@ -38,6 +38,38 @@ function gitObservation(
   } as MachineObservation;
 }
 
+const CUSTOM_COVERAGE = {
+  domain: "repository",
+  object: "tracker-state",
+  scope: "whole",
+  version: 1,
+} as const;
+
+function customObservation(
+  phase: "before" | "after",
+  fingerprint: string,
+  status: "observed" | "timeout" | "error" = "observed",
+): MachineObservation {
+  return {
+    schemaVersion: 1,
+    providerId: "tracker",
+    kind: "custom",
+    phase,
+    startedAt: 0,
+    finishedAt: 0,
+    status,
+    files: [],
+    data: {
+      progress: {
+        schemaVersion: 2,
+        coverage: CUSTOM_COVERAGE,
+        complete: status === "observed",
+        fingerprint: status === "observed" ? fingerprint.repeat(64) : null,
+      },
+    },
+  } as MachineObservation;
+}
+
 function commandObservation(
   status: "passed" | "failed" | "timeout" | "aborted" | "error" | "unavailable",
 ): MachineObservation {
@@ -161,6 +193,51 @@ describe("derivePromptFreshness", () => {
     assert.equal(freshness.machineProgress, "unchanged");
     assert.equal(freshness.observableNewInformation, false);
     assert.deepEqual(freshness.reasons, ["progress_unchanged", "no_observable_activity"]);
+  });
+
+  it("does not let a custom provider's changed or unknown decide L0/L1", () => {
+    // v3.9.9: freshness consumes the SAME Git workspace coverage as stall.
+    const customPairs: Array<[MachineObservation, MachineObservation]> = [
+      [customObservation("before", "a"), customObservation("after", "b")],
+      [
+        customObservation("before", "a", "timeout"),
+        customObservation("after", "a", "timeout"),
+      ],
+    ];
+    for (const [before, after] of customPairs) {
+      const freshness = derivePromptFreshness(committedView({
+        before: [gitObservation("before", FINGERPRINTS_EMPTY, "aaa"), before],
+        after: [gitObservation("after", FINGERPRINTS_EMPTY, "aaa"), after],
+      }));
+      assert.equal(freshness.machineProgress, "unchanged",
+        "the Git selector ignores the custom fact");
+      assert.equal(freshness.observableNewInformation, false,
+        "a custom provider must not pin the loop at L1");
+    }
+  });
+
+  it("stays fresh when the custom fact is unobservable but Git is unchanged", () => {
+    const freshness = derivePromptFreshness(committedView({
+      before: [gitObservation("before", FINGERPRINTS_EMPTY, "aaa")],
+      after: [gitObservation("after", FINGERPRINTS_EMPTY, "aaa")],
+    }));
+    assert.equal(freshness.observableNewInformation, false);
+  });
+
+  it("Git unknown remains fresh even when a custom provider reports no change", () => {
+    const freshness = derivePromptFreshness(committedView({
+      before: [
+        gitObservation("before", FINGERPRINTS_EMPTY, "aaa"),
+        customObservation("before", "a"),
+      ],
+      after: [
+        gitObservation("after", FINGERPRINTS_EMPTY, "aaa", "timeout"),
+        customObservation("after", "a"),
+      ],
+    }));
+    assert.equal(freshness.machineProgress, "unknown");
+    assert.equal(freshness.observableNewInformation, true,
+      "an unobservable Git boundary is never L0");
   });
 
   it("does not let an Agent-reported files_changed prove freshness", () => {

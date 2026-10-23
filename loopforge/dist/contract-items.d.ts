@@ -7,7 +7,7 @@
  *  it is a pure function of the committed round views, the current report,
  *  the current observations, and policy.
  */
-import type { ContractItemStatus, ExecutionReport } from "./protocol.js";
+import type { ContractItemStatus, ContractTransition, ExecutionReport } from "./protocol.js";
 import type { ActiveContractView } from "./round-contract.js";
 import type { CommittedRoundView } from "./committed-round.js";
 import type { ObservationDelta } from "./evidence-provider.js";
@@ -28,7 +28,10 @@ export interface ItemStatusRecord {
 }
 export interface ContractItemStatusView {
     contractId: string;
-    closure: "open" | "verified" | "blocked";
+    /** Priority: blocked > superseded > verified > open. `superseded` outranks
+     *  `verified` because the Agent explicitly abandoned the slice — even a
+     *  round that verified every old item still closes it as superseded. */
+    closure: "open" | "verified" | "blocked" | "superseded";
     closed_at_round: number | null;
     items: ItemStatusRecord[];
     verifiedCount: number;
@@ -47,6 +50,9 @@ export interface ContractItemInput {
      *  the round being decided is not committed yet. Leave false where no
      *  in-flight round exists (a pure committed-history replay). */
     currentBlocked?: boolean;
+    /** v3.9.9: the in-flight (or decoded committed) round's transition. It
+     *  closes the contract as `superseded` only when its target matches. */
+    currentTransition?: ContractTransition | null;
     commands: ReadonlyArray<CommandEvidencePolicy>;
 }
 /** v3.8: Derive every item's status plus the contract's closure. */

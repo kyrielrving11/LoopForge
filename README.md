@@ -59,7 +59,10 @@ Contract: a deliverable, acceptance conditions, and commands to check them.
 LoopForge validates the structure and command bindings. An item is verified
 when the agent claims it is met and its bound commands pass in the closing
 round. Whether the proposed deliverable or test is semantically appropriate
-remains the agent's and operator's judgment.
+remains the agent's and operator's judgment. The agent's declared `scope` is a
+report-only intent, not a permission, and an active slice can be explicitly
+redirected with `contract_transition`; the old contract then closes as
+`superseded` and stays visible in the audit record.
 
 ## Recovery with the agent in control
 

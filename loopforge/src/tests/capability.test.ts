@@ -146,9 +146,12 @@ describe("v3.8 — ObservedCapability and warnings", () => {
     const bare = policy({ providers: [], commands: [] });
     const configured = deriveConfiguredCapability(bare);
     const warnings = capabilityWarnings(configured, bare);
-    assert.equal(warnings.length, 2);
+    assert.equal(warnings.length, 3);
     assert.ok(warnings.some((warning) => warning.includes("No evidence provider")));
     assert.ok(warnings.some((warning) => warning.includes("No enabled verification command")));
+    assert.ok(warnings.some((warning) =>
+      warning.includes("stall rule has no workspace evidence basis")),
+      "v3.9.9: the missing Git provider is stated as a stall-coverage fact");
   });
 
   it("v3.8.2: warns when a configured command's true entrypoint is unobservable", () => {
@@ -284,7 +287,7 @@ describe("v3.8 — EvidenceCapability (the prepared round's single fact)", () =>
     const empty = policy({ providers: [], commands: [] });
     const configured = deriveConfiguredCapability(empty);
     const bare = deriveEvidenceCapability(empty);
-    assert.equal(bare.warnings.length, 2);
+    assert.equal(bare.warnings.length, 3);
     assert.deepEqual(bare.warnings, capabilityWarnings(
       configured,
       empty,

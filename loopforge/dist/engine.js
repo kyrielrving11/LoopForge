@@ -271,6 +271,7 @@ export class LoopForgeEngine {
         "worker_results",
         "prompt_requests",
         "round_contract",
+        "contract_transition",
     ];
     /** Merge the committed round decision (feedback entry) into the compile-time
      *  lineage entry so the compiler and projections see the full per-round

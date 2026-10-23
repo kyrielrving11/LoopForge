@@ -124,6 +124,7 @@ function round(
     success: false,
     outcome: opts.outcome ?? null,
     contractProposal: contract ?? null,
+    contractTransition: null,
     contractBinding: contract ? bindingFor(contract, loopId) : null,
     beforeEvidence: [],
     afterEvidence: opts.observations ?? [],

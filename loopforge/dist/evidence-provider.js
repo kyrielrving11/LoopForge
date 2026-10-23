@@ -14,8 +14,9 @@ import { readFileSync, realpathSync, statSync, } from "node:fs";
 import { spawn } from "node:child_process";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { GIT_OBSERVATION_SCHEMA_VERSION } from "./protocol.js";
-import { gitMotionSignal, observedGitHead, } from "./git-motion.js";
+import { GIT_WORKSPACE_COVERAGE, gitMotionSignal, observedGitHead, } from "./git-motion.js";
 import { containInWorkspace } from "./workspace.js";
+import { isRecord } from "./token-utils.js";
 import { captureBoundary, GitCaptureFailure } from "./git-boundary.js";
 // v3.9.8: the Git boundary implementation moved to git-boundary.ts so evidence
 // and workspace checkpoints share ONE scan. These re-exports keep the existing
@@ -124,6 +125,18 @@ export function capabilityWarnings(configured, policy, observed) {
             "cannot be machine-verified; contract closure will require an explicit " +
             "blocked outcome.");
     }
+    // v3.9.9: the stall rule selects Git workspace coverage explicitly. Without
+    // the Git provider configured there is no workspace evidence basis for a
+    // stall verdict — other providers' facts remain visible but cannot affect
+    // that rule. This is a fact statement, not a blocker.
+    const providerNames = Array.isArray(policy.evidence.providers)
+        ? policy.evidence.providers
+        : [];
+    if (!providerNames.includes("git")) {
+        warnings.push("The Git workspace evidence provider is not configured — the stall rule " +
+            "has no workspace evidence basis this loop. Progress facts from other " +
+            "providers are recorded and displayed but cannot affect stall decisions.");
+    }
     // v3.8.2: a configured command whose harness is named in package.json. The
     // entrypoint set for `npm test` is ["package.json"], so the test files the
     // script actually runs are never in it: editing one is a warning, not a
@@ -197,12 +210,18 @@ function unregisteredProvider(name) {
 }
 /** v3.8: Build the observation a failed capture resolves to. The status names
  *  the machine fact; `detail` explains it for the audit trail. */
+/** v3.9.9: THE per-kind base observation schema table. Custom observations
+ *  keep base 1; only their nested progress snapshot moved to inner 2. */
+export function expectedObservationSchemaVersion(kind) {
+    return kind === "git" ? GIT_OBSERVATION_SCHEMA_VERSION : 1;
+}
 function syntheticObservation(providerId, kind, phase, startedAt, status, detail) {
     return {
         // v3.9.1: a failed Git capture still carries the current Git observation
         // schema so the committed snapshot can be parsed; its non-observed status
-        // is what tells consumers the boundary is unavailable.
-        schemaVersion: kind === "git" ? GIT_OBSERVATION_SCHEMA_VERSION : 1,
+        // is what tells consumers the boundary is unavailable. Every synthetic
+        // observation goes through the ONE per-kind table.
+        schemaVersion: expectedObservationSchemaVersion(kind),
         providerId,
         kind,
         phase,
@@ -214,17 +233,64 @@ function syntheticObservation(providerId, kind, phase, startedAt, status, detail
     };
 }
 const PROGRESS_FINGERPRINT_RE = /^[a-f0-9]{64}$/;
-function isValidProgressSnapshot(value) {
+const COVERAGE_FIELD_MAX_CHARS = 200;
+/** v3.9.9: one coverage descriptor's four fields are non-empty, length-bounded
+ *  and already trimmed. "Trimmed" is part of identity: `" workspace"` and
+ *  `"workspace"` are different declared ranges, so a snapshot that relies on
+ *  implicit trimming is rejected instead of silently normalized. */
+function isValidProgressCoverage(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value))
+        return false;
+    const coverage = value;
+    for (const field of ["domain", "object", "scope"]) {
+        const text = coverage[field];
+        if (typeof text !== "string" || text.length === 0 ||
+            text.trim() !== text || text.length > COVERAGE_FIELD_MAX_CHARS) {
+            return false;
+        }
+    }
+    return typeof coverage.version === "number" &&
+        Number.isInteger(coverage.version) && coverage.version >= 1;
+}
+/** v3.9.9: THE nested progress-snapshot shape check, shared by the collector
+ *  and the persisted-transaction parser. Version 2 requires the coverage
+ *  descriptor and the completeness assertion; `fingerprint` is 64 lowercase
+ *  hex when the capture was observed and may be null only when it failed. */
+export function isValidProgressSnapshot(value, status) {
     if (!value || typeof value !== "object" || Array.isArray(value))
         return false;
     const snapshot = value;
-    return snapshot.schemaVersion === 1 &&
-        typeof snapshot.fingerprint === "string" &&
+    if (snapshot.schemaVersion !== 2)
+        return false;
+    if (!isValidProgressCoverage(snapshot.coverage))
+        return false;
+    if (typeof snapshot.complete !== "boolean")
+        return false;
+    if (snapshot.fingerprint === null)
+        return status !== "observed";
+    return typeof snapshot.fingerprint === "string" &&
         PROGRESS_FINGERPRINT_RE.test(snapshot.fingerprint);
+}
+/** The explicit unknown every failed/undeclared capture still records. */
+function failureProgressSnapshot(coverage) {
+    if (!coverage)
+        return null;
+    return {
+        schemaVersion: 2,
+        coverage: { ...coverage },
+        complete: false,
+        fingerprint: null,
+    };
+}
+function sameCoverage(left, right) {
+    return left.domain === right.domain &&
+        left.object === right.object &&
+        left.scope === right.scope &&
+        left.version === right.version;
 }
 function progressErrorObservation(provider, phase, startedAt, detail) {
     return {
-        schemaVersion: 1,
+        schemaVersion: expectedObservationSchemaVersion("custom"),
         providerId: provider.name,
         kind: "custom",
         phase,
@@ -232,51 +298,125 @@ function progressErrorObservation(provider, phase, startedAt, detail) {
         finishedAt: Date.now(),
         status: "error",
         files: [],
-        data: { detail, progressCapable: true, progress: null },
+        data: {
+            detail,
+            ...(provider.progressCoverage
+                ? { progress: failureProgressSnapshot(provider.progressCoverage) }
+                : {}),
+        },
     };
 }
-/** Persist the provider's progress capability on every observation and reject
- *  a contract violation instead of silently reading it as "no progress". */
+/** v3.9.9: validate and persist the provider's DECLARED coverage on every
+ *  observation. A provider without a declaration cannot smuggle progress data
+ *  in; a provider with one must supply a comparable observed snapshot or the
+ *  observation becomes an explicit `error`, and every failed capture carries
+ *  the declared coverage with a null fingerprint so "unknown" never
+ *  disappears. No capability/policy marker is ever written. */
 function normalizeProgressObservation(provider, observation, phase, startedAt) {
-    if (!provider.progressCapable) {
-        if (observation.kind === "custom" &&
-            (observation.data.progressCapable === true ||
-                observation.data.progress !== undefined)) {
-            return {
-                schemaVersion: 1,
-                providerId: provider.name,
-                kind: "custom",
-                phase,
-                startedAt,
-                finishedAt: Date.now(),
-                status: "error",
-                files: [],
-                data: {
-                    detail: "provider emitted progress data without declaring progressCapable",
-                    progressCapable: true,
-                    progress: null,
-                },
-            };
+    const declared = provider.progressCoverage;
+    if (declared && !isValidProgressCoverage(declared)) {
+        return progressErrorObservation(provider, phase, startedAt, "provider declared a malformed progressCoverage");
+    }
+    if (declared && provider.kind !== "custom") {
+        return progressErrorObservation(provider, phase, startedAt, "progressCoverage is only supported for custom observations");
+    }
+    if (observation.kind !== "custom") {
+        if (declared) {
+            return progressErrorObservation(provider, phase, startedAt, "progressCoverage is only supported for custom observations");
         }
         return observation;
     }
-    if (provider.kind !== "custom" || observation.kind !== "custom") {
-        return progressErrorObservation(provider, phase, startedAt, "progressCapable is only supported for custom observations");
+    // The SAME per-kind/nested version judgment the transaction parser and the
+    // legacy reporter use. A live provider emitting a retired marker or an
+    // unsupported envelope becomes an explicit error observation here instead
+    // of writing a round this runtime cannot read back.
+    const versionIssue = observationVersionIssue(observation.kind, observation.schemaVersion, observation.data, observation.status);
+    if (versionIssue) {
+        return progressErrorObservation(provider, phase, startedAt, versionIssue.reason === "progress_capable"
+            ? "the retired progressCapable field is not accepted; declare progressCoverage instead"
+            : `custom observation envelope is not supported (${versionIssue.reason})`);
+    }
+    if (!declared) {
+        if (Object.hasOwn(observation.data, "progress")) {
+            return progressErrorObservation(provider, phase, startedAt, "provider emitted progress data without declaring progressCoverage");
+        }
+        return observation;
     }
     if (observation.status === "observed") {
         const snapshot = observation.data.progress;
-        if (!isValidProgressSnapshot(snapshot)) {
-            return progressErrorObservation(provider, phase, startedAt, "progress-capable provider did not emit a valid progress snapshot");
+        if (!isValidProgressSnapshot(snapshot, "observed")) {
+            return progressErrorObservation(provider, phase, startedAt, "progress provider did not emit a valid observed snapshot (inner schema 2)");
         }
+        if (!sameCoverage(snapshot.coverage, declared)) {
+            return progressErrorObservation(provider, phase, startedAt, "progress snapshot coverage does not match the provider's declared progressCoverage");
+        }
+        const { progressCapable: _retired, ...data } = observation.data;
         return {
             ...observation,
-            data: { ...observation.data, progressCapable: true, progress: snapshot },
+            data: { ...data, progress: snapshot },
         };
     }
+    const { progressCapable: _retired, ...data } = observation.data;
     return {
         ...observation,
-        data: { ...observation.data, progressCapable: true, progress: null },
+        data: { ...data, progress: failureProgressSnapshot(declared) },
     };
+}
+export function observationVersionIssue(kind, schemaVersion, data, status) {
+    if (kind !== "git" && kind !== "command" && kind !== "custom") {
+        return {
+            envelope: "observation",
+            schemaVersion: typeof schemaVersion === "number" ? schemaVersion : -1,
+            reason: "schema",
+        };
+    }
+    if (!isRecord(data)) {
+        return {
+            envelope: "observation",
+            schemaVersion: typeof schemaVersion === "number" ? schemaVersion : -1,
+            reason: "malformed",
+        };
+    }
+    const expected = expectedObservationSchemaVersion(kind);
+    if (schemaVersion !== expected) {
+        return {
+            envelope: "observation",
+            schemaVersion: typeof schemaVersion === "number" ? schemaVersion : -1,
+            reason: "schema",
+        };
+    }
+    if (kind !== "custom")
+        return null;
+    if (Object.hasOwn(data, "progressCapable")) {
+        return {
+            envelope: "observation",
+            schemaVersion: expected,
+            reason: "progress_capable",
+        };
+    }
+    if (!Object.hasOwn(data, "progress"))
+        return null;
+    const progress = data.progress;
+    if (progress === null || progress === undefined) {
+        if (status === "observed") {
+            return {
+                envelope: "observation",
+                schemaVersion: expected,
+                reason: "progress",
+            };
+        }
+        return null;
+    }
+    if (!isValidProgressSnapshot(progress, status)) {
+        return {
+            envelope: "observation",
+            schemaVersion: isRecord(progress) && typeof progress.schemaVersion === "number"
+                ? progress.schemaVersion
+                : -1,
+            reason: "progress",
+        };
+    }
+    return null;
 }
 /** Collects observations from all configured providers (always async).
  *
@@ -663,7 +803,7 @@ export class CommandEvidenceProvider {
     observation(phase, status, exitCode, signal, stdout, stderr, truncated, durationMs, entrypointFiles, failureDetail, stdoutSha256, stderrSha256) {
         const finishedAt = Date.now();
         return {
-            schemaVersion: 1,
+            schemaVersion: expectedObservationSchemaVersion("command"),
             providerId: this.name,
             kind: "command",
             phase,
@@ -762,7 +902,7 @@ export class GitEvidenceProvider {
             const boundary = result.boundary;
             context?.boundarySink?.(boundary);
             return {
-                schemaVersion: GIT_OBSERVATION_SCHEMA_VERSION,
+                schemaVersion: expectedObservationSchemaVersion("git"),
                 providerId: "git",
                 kind: "git",
                 phase,
@@ -796,58 +936,145 @@ export class GitEvidenceProvider {
     }
 }
 registerEvidenceProvider("git", () => new GitEvidenceProvider());
-function customProgressCapable(observation) {
-    return observation?.kind === "custom" &&
-        observation.data.progressCapable === true;
-}
-function customProgress(observation) {
+function customProgressSnapshot(observation) {
     if (observation?.kind !== "custom")
         return null;
     const value = observation.data.progress;
-    if (!value || typeof value !== "object" || Array.isArray(value))
-        return null;
-    if (value.schemaVersion !== 1 || typeof value.fingerprint !== "string")
-        return null;
-    return value;
+    return isValidProgressSnapshot(value, observation.status) ? value : null;
 }
-function deltaProgress(observation, beforeObservation, afterObservation, changedFiles, ambiguous) {
-    if (ambiguous)
-        return "unknown";
+/** The Git fact descriptor is derived from the PERSISTED observation, not from
+ *  a code constant: the scope is the boundary coverage the observation
+ *  declared and the version is its schema version, so a historical
+ *  observation with different evidence semantics naturally stops matching the
+ *  rule instead of being retroactively rewritten by future code. */
+function gitProgressCoverage(observation) {
+    if (observation?.kind === "git") {
+        const scope = typeof observation.data.coverage === "string" &&
+            observation.data.coverage.length > 0
+            ? observation.data.coverage
+            : GIT_WORKSPACE_COVERAGE.scope;
+        const version = Number.isInteger(observation.schemaVersion) &&
+            observation.schemaVersion >= 1
+            ? observation.schemaVersion
+            : GIT_WORKSPACE_COVERAGE.version;
+        return {
+            domain: GIT_WORKSPACE_COVERAGE.domain,
+            object: GIT_WORKSPACE_COVERAGE.object,
+            scope,
+            version,
+        };
+    }
+    return { ...GIT_WORKSPACE_COVERAGE };
+}
+function deltaProgressFact(observation, beforeObservation, afterObservation, changedFiles, ambiguous) {
     if (observation.kind === "git") {
-        if (beforeObservation?.kind !== "git" || afterObservation?.kind !== "git") {
-            return "unknown";
-        }
-        if (beforeObservation.status !== "observed" ||
-            afterObservation.status !== "observed" ||
-            changedFiles === null) {
-            return "unknown";
+        const coverage = gitProgressCoverage(afterObservation ?? beforeObservation);
+        const observable = !ambiguous &&
+            beforeObservation?.kind === "git" &&
+            afterObservation?.kind === "git" &&
+            beforeObservation.status === "observed" &&
+            afterObservation.status === "observed" &&
+            changedFiles !== null;
+        if (!observable) {
+            return {
+                kind: "git",
+                coverage,
+                state: "unknown",
+                complete: false,
+                detail: "the Git boundary pair is not comparable",
+            };
         }
         const signal = gitMotionSignal({
             changedFiles,
             headBefore: observedGitHead(beforeObservation),
             headAfter: observedGitHead(afterObservation),
         });
-        return signal === null ? "unknown" : signal ? "changed" : "unchanged";
-    }
-    if (observation.kind === "custom") {
-        const beforeCapable = customProgressCapable(beforeObservation);
-        const afterCapable = customProgressCapable(afterObservation);
-        if (!beforeCapable && !afterCapable)
-            return "not_applicable";
-        if (beforeObservation?.status !== "observed" ||
-            afterObservation?.status !== "observed" ||
-            !beforeCapable || !afterCapable) {
-            return "unknown";
+        if (signal === null) {
+            return {
+                kind: "git",
+                coverage,
+                state: "unknown",
+                complete: true,
+                detail: "the Git change set is known but HEAD movement is not comparable",
+            };
         }
-        const beforeSnapshot = customProgress(beforeObservation);
-        const afterSnapshot = customProgress(afterObservation);
-        if (!beforeSnapshot || !afterSnapshot)
-            return "unknown";
-        return beforeSnapshot.fingerprint === afterSnapshot.fingerprint
-            ? "unchanged"
-            : "changed";
+        return {
+            kind: "git",
+            coverage,
+            state: signal ? "changed" : "unchanged",
+            complete: true,
+        };
     }
-    return "not_applicable";
+    if (observation.kind !== "custom")
+        return null;
+    const beforeSnapshot = customProgressSnapshot(beforeObservation);
+    const afterSnapshot = customProgressSnapshot(afterObservation);
+    // No progress data on either side: this provider declared no coverage.
+    if (!beforeSnapshot && !afterSnapshot)
+        return null;
+    const coverage = (afterSnapshot ?? beforeSnapshot).coverage;
+    const complete = (afterSnapshot ?? beforeSnapshot).complete;
+    if (ambiguous) {
+        return {
+            kind: "custom",
+            coverage,
+            state: "unknown",
+            complete,
+            detail: "duplicate observations make the progress fact ambiguous",
+        };
+    }
+    if (!beforeSnapshot || !afterSnapshot) {
+        return {
+            kind: "custom",
+            coverage,
+            state: "unknown",
+            complete: false,
+            detail: "a progress snapshot is missing on one side of the round",
+        };
+    }
+    if (beforeObservation?.status !== "observed" ||
+        afterObservation?.status !== "observed") {
+        return {
+            kind: "custom",
+            coverage,
+            state: "unknown",
+            complete,
+            detail: "at least one side was not observed",
+        };
+    }
+    if (!sameCoverage(beforeSnapshot.coverage, afterSnapshot.coverage)) {
+        return {
+            kind: "custom",
+            coverage,
+            state: "unknown",
+            complete,
+            detail: `coverage changed across the round (` +
+                `${coverageKey(beforeSnapshot.coverage)} -> ${coverageKey(afterSnapshot.coverage)})`,
+        };
+    }
+    if (beforeSnapshot.complete !== true || afterSnapshot.complete !== true ||
+        beforeSnapshot.fingerprint === null || afterSnapshot.fingerprint === null) {
+        return {
+            kind: "custom",
+            coverage,
+            state: "unknown",
+            complete: false,
+            detail: "a progress snapshot is incomplete or has no fingerprint",
+        };
+    }
+    return {
+        kind: "custom",
+        coverage,
+        state: beforeSnapshot.fingerprint === afterSnapshot.fingerprint
+            ? "unchanged"
+            : "changed",
+        complete: true,
+    };
+}
+/** Stable display key for a coverage descriptor — derived only, never
+ *  persisted, never used as an identity substitute for exact comparison. */
+export function coverageKey(coverage) {
+    return `${coverage.domain}/${coverage.object}/${coverage.scope}@${coverage.version}`;
 }
 const DELTA_KIND_ORDER = {
     git: 0,
@@ -927,7 +1154,7 @@ export function deriveObservationDeltas(before, after) {
             before: beforeObservation,
             after: afterObservation,
             changedFiles,
-            progress: deltaProgress(observation, beforeObservation, afterObservation, changedFiles, ambiguous),
+            progress: deltaProgressFact(observation, beforeObservation, afterObservation, changedFiles, ambiguous),
         };
     });
     return deltas.sort((left, right) => DELTA_KIND_ORDER[left.kind] - DELTA_KIND_ORDER[right.kind] ||

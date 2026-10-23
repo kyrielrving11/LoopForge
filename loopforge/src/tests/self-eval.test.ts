@@ -418,7 +418,6 @@ describe("validateContractShape", () => {
     knownCriterionIds: null,
     displayedSubGoalIds: null,
     isConfiguredCommand: known,
-    checkScopeEntry: () => null,
     ...overrides,
   });
   const check = (
@@ -452,7 +451,7 @@ describe("validateContractShape", () => {
     const long = check({ round_contract: { work_item: "x".repeat(201), scope: [], items: [item()] } });
     assert.equal(long[0]?.reason, "work_item_too_long");
     const noScope = check({ round_contract: { work_item: "Slice", items: [item()] } });
-    assert.equal(noScope[0]?.reason, "missing_scope");
+    assert.deepEqual(noScope, [], "v3.9.9: scope is optional and report-only");
     assert.deepEqual(
       check({ round_contract: { work_item: "x".repeat(200), scope: [], items: [item()] } }),
       [],
@@ -516,7 +515,7 @@ describe("validateContractShape", () => {
     assert.equal(unknown[0]?.reason, "unknown_command");
   });
 
-  it("enforces the item and scope count limits at the boundary", () => {
+  it("enforces the item and ref count limits at the boundary", () => {
     // Limits used to be enforced only by silently truncating in the lenient
     // parser — a declaration over the cap simply lost its tail.
     const tooMany = check({
@@ -527,10 +526,6 @@ describe("validateContractShape", () => {
       },
     });
     assert.equal(tooMany[0]?.reason, "too_many_items");
-    const tooWide = check({
-      round_contract: { work_item: "Slice", scope: Array.from({ length: 51 }, (_, i) => `src/${i}`), items: [item()] },
-    });
-    assert.equal(tooWide[0]?.reason, "too_many_scope_entries");
     const tooManyRefs = check({
       round_contract: {
         work_item: "Slice",
@@ -541,17 +536,38 @@ describe("validateContractShape", () => {
     assert.equal(tooManyRefs[0]?.reason, "too_many_verify_with");
   });
 
-  it("rejects a scope that is not a string array or leaves the workspace", () => {
-    const notArray = check({ round_contract: { work_item: "Slice", scope: "src/a", items: [item()] } });
-    assert.equal(notArray[0]?.reason, "invalid_scope");
-    const notString = check({ round_contract: { work_item: "Slice", scope: ["src/a", 7], items: [item()] } });
-    assert.equal(notString[0]?.reason, "invalid_scope_entry");
-    const escapes = check(
-      { round_contract: { work_item: "Slice", scope: ["../outside"], items: [item()] } },
-      { checkScopeEntry: (entry) => (entry === "../outside" ? "leaves the workspace" : null) },
+  it("treats scope as optional, lenient, report-only intent", () => {
+    // v3.9.9: a scope is no longer a trust boundary. A non-array, non-string
+    // entries, a path outside the workspace, or an omitted scope must never
+    // reject the declaration.
+    assert.deepEqual(
+      check({ round_contract: { work_item: "Slice", scope: "src/a", items: [item()] } }),
+      [],
     );
-    assert.equal(escapes[0]?.reason, "scope_outside_workspace");
-    assert.match(escapes[0]?.detail ?? "", /leaves the workspace/);
+    assert.deepEqual(
+      check({ round_contract: { work_item: "Slice", scope: ["src/a", 7], items: [item()] } }),
+      [],
+    );
+    assert.deepEqual(
+      check({ round_contract: { work_item: "Slice", scope: ["../outside"], items: [item()] } }),
+      [],
+    );
+    assert.deepEqual(
+      check({ round_contract: { work_item: "Slice", items: [item()] } }),
+      [],
+      "omitting scope is legal",
+    );
+    const diagnostics: Array<{ path: string; code: string }> = [];
+    const proposal = parseRoundContract({
+      work_item: "Slice",
+      scope: ["src/a", 7, "", "  "],
+      items: [item()],
+    }, {
+      push: (path, code) => diagnostics.push({ path, code }),
+    });
+    assert.deepEqual(proposal?.scope, ["src/a"], "invalid entries are dropped");
+    assert.ok(diagnostics.some((entry) =>
+      entry.path === "round_contract.scope[]" && entry.code === "invalid_entry"));
   });
 
   it("rejects non-string criterion refs instead of dropping them", () => {

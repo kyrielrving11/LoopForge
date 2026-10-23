@@ -244,9 +244,12 @@ export class RoundLifecycle {
         const contractView = deriveRoundContractView({
             rounds,
             round: base.snapshot.round,
-            report: base.selfEval.execution_report ?? null,
-            deltas: roundDeltas,
-            blocked: declaresBlocked(base.selfEval),
+            current: {
+                report: base.selfEval.execution_report ?? null,
+                deltas: roundDeltas,
+                blocked: declaresBlocked(base.selfEval),
+                transition: base.selfEval.contract_transition ?? null,
+            },
             commands,
         });
         const contractAfterId = opts.contractAfterId !== undefined
@@ -392,10 +395,19 @@ export class RoundLifecycle {
             currentRound, maxRounds,
             status: status,
             createdAt: lineage.created_at ?? Date.now(),
-            consecutiveRejections: lineage.consecutive_rejections ?? 0,
-            lastRejectionCheck: typeof lineage.last_rejection_check === "string"
-                ? lineage.last_rejection_check
-                : "",
+            // v3.9.9: a retired check's persisted counter is not a current problem.
+            ...(() => {
+                const check = typeof lineage.last_rejection_check === "string"
+                    ? lineage.last_rejection_check
+                    : "";
+                if (check === "round_scope_drift") {
+                    return { consecutiveRejections: 0, lastRejectionCheck: "" };
+                }
+                return {
+                    consecutiveRejections: lineage.consecutive_rejections ?? 0,
+                    lastRejectionCheck: check,
+                };
+            })(),
             entrypointTrust: parseFingerprintMap(lineage.entrypoint_trust),
             ...(operatorAcceptance ? { operatorAcceptance } : {}),
             roundSnapshot,
@@ -416,6 +428,14 @@ export class RoundLifecycle {
      *  `newConsecutiveRejections` comes from the enforcement gate and already
      *  counts the round; it is only honoured when the check is unchanged. */
     applyRoundCounters(session, pr) {
+        // v3.9.9: scope drift is no longer an enforcement row. A session restored
+        // from an older runtime may still carry that check's rejection streak;
+        // draining it here keeps the deleted check from reaching the
+        // max_rejections catch-all as unresolved persistence.
+        if (session.lastRejectionCheck === "round_scope_drift") {
+            session.lastRejectionCheck = "";
+            session.consecutiveRejections = 0;
+        }
         if (pr.action === "reject" && pr.rejectionCheck) {
             session.consecutiveRejections =
                 pr.rejectionCheck === session.lastRejectionCheck
@@ -1567,7 +1587,7 @@ export class RoundLifecycle {
         // this guards what the client and the terminal notification see. A
         // violation can only be a code defect: it degrades to the honest reason
         // and leaves an observability record instead of throwing mid-lifecycle.
-        const finalized = finalizeStopReason(tx.pr.stopReason, selfEval);
+        const finalized = finalizeStopReason(tx.pr.stopReason, selfEval, undefined, selfEval.contract_transition ?? null);
         if (finalized.reason !== tx.pr.stopReason) {
             logEvent("completion_truth_downgraded", {
                 loopId: session.loopId,

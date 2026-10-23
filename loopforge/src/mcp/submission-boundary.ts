@@ -37,6 +37,7 @@ import {
   normalizeSelfEvaluation,
   parseSubGoalUpdates,
   validateContractShape,
+  validateContractTransition,
   validateCoreSelfEvaluation,
   validateSubGoalUpdatesShape,
 } from "../self-eval.js";
@@ -48,8 +49,8 @@ import {
   validateSubGoalUpdates,
 } from "../subgoal-state.js";
 import { isConfiguredCommand } from "../policy.js";
-import { scopeEntryDetail } from "../workspace.js";
 import {
+  canonicalContractItemText,
   deriveCriterionId,
   entryRound,
   isRecord,
@@ -478,7 +479,7 @@ function contractShapeErrors(
           .map((subGoal) => subGoal.id),
       )
     : null;
-  return validateContractShape(submission, {
+  const shapeErrors = validateContractShape(submission, {
     activeItemIds: session
       ? new Set((active?.items ?? []).map((item) => item.id))
       : null,
@@ -487,6 +488,16 @@ function contractShapeErrors(
       : null,
     displayedSubGoalIds: displayedSubGoals,
     isConfiguredCommand,
-    checkScopeEntry: scopeEntryDetail,
   });
+  // v3.9.9: the transition is a STRUCTURAL boundary like the contract itself.
+  // Target identity and "successor content actually changed" are checked only
+  // when the active contract was observable; structure stays strict either way.
+  const transitionErrors = validateContractTransition(submission, {
+    observed: session !== undefined,
+    activeContractId: active?.id ?? null,
+    activeItemIdentities: active
+      ? new Set(active.items.map((item) => canonicalContractItemText(item)))
+      : null,
+  });
+  return [...shapeErrors, ...transitionErrors];
 }

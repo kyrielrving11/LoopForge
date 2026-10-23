@@ -25,8 +25,12 @@ import type {
   VerificationResult,
 } from "./protocol.js";
 import { makeEnforcementResult } from "./protocol.js";
-import { CHECK_SUCCESS_WITH_REMAINING_CRITERIA, CHECK_RECURRING_VIOLATION, CHECK_REQUIRED_COMMAND_FAILED, CHECK_COMMAND_EVIDENCE_MISMATCH, CHECK_OUTCOME_SUCCESS_CONTRADICTION, CHECK_VERIFICATION_ENTRYPOINT_MODIFIED, CHECK_ROUND_SCOPE_DRIFT, CHECK_CONTRACT_ITEMS_UNVERIFIED, CHECK_USER_GATE_UNRESOLVED } from "./verification-gate.js";
-import { deriveProgressWindow, type RoundProgress } from "./progress.js";
+import { CHECK_SUCCESS_WITH_REMAINING_CRITERIA, CHECK_RECURRING_VIOLATION, CHECK_REQUIRED_COMMAND_FAILED, CHECK_COMMAND_EVIDENCE_MISMATCH, CHECK_OUTCOME_SUCCESS_CONTRADICTION, CHECK_VERIFICATION_ENTRYPOINT_MODIFIED, CHECK_CONTRACT_ITEMS_UNVERIFIED, CHECK_USER_GATE_UNRESOLVED } from "./verification-gate.js";
+import {
+  deriveProgressWindow,
+  STALL_PROGRESS_COVERAGE,
+  type RoundProgress,
+} from "./progress.js";
 import { declaresBlocked } from "./round-outcome.js";
 import { getPolicy } from "./policy.js";
 import type { RoundProcessResult } from "./round-coordinator.js";
@@ -452,85 +456,6 @@ function enforceContractItemsUnverified(
   });
 }
 
-/** R-C2 (v3.3): Round Contract scope drift. The gate produced
- *  round_scope_drift (warn): files changed outside the contract's declared
- *  scope. v3.8: scope drift is a MACHINE fact and is no longer waivable by an
- *  agent explanation (the drift_clarification channel was deleted) — the
- *  agent must revert the out-of-scope changes or close the active contract
- *  and declare an extended scope.
- *
- *  v3.8.3: that second route is now actually reachable. The v3.7 wording
- *  ("extend the scope in your re-declared round_contract") was structurally
- *  dead — a replacement proposal is IGNORED while the active contract is open
- *  — so the fix text was rewritten to the only legal route (blocked + the
- *  extended scope as the next proposal) without the matching escape being
- *  implemented. `scopeDriftWaiver` is that missing half: the coordinator has
- *  verified that the round declares blocked AND that its proposal covers every
- *  drifted file. What is waived is the REJECTION, never the fact. */
-function enforceScopeDrift(
-  flags: VerificationFlag[],
-  consecutiveRejections: number,
-  lastRejectionCheck: string,
-  scopeDriftWaiver: boolean,
-): EnforcementResult | null {
-  const flag = flags.find((f) => f.check === CHECK_ROUND_SCOPE_DRIFT);
-  if (!flag) return null;
-
-  // v3.8.3: the legal exit. A round that declares itself blocked may switch
-  // contracts, but only by declaring a proposal that covers every file it
-  // changed out of scope — the coverage test is the coordinator's, because
-  // only there are the git files and the active contract both in reach.
-  //
-  // Checked ABOVE the terminate arm on purpose: the counter accumulates while
-  // the agent tries to get the declaration right, so an escape that only
-  // works at streak 0 or 1 is not an escape — it is a race the agent loses.
-  // The flag is NOT suppressed; it stays on the committed round, so
-  // audit/explain still report the drift as a machine fact. */
-  if (scopeDriftWaiver) return null;
-
-  const ownStreak = lastRejectionCheck === CHECK_ROUND_SCOPE_DRIFT
-    ? consecutiveRejections
-    : 0;
-  if (ownStreak >= 2) {
-    return makeEnforcementResult({
-      action: "terminate",
-      reason:
-        `Repeated scope drift — the agent keeps changing files outside its ` +
-        `declared contract scope.`,
-      check: "round_scope_drift",
-    });
-  }
-  const escalation = getPolicy().engine.enforcement_escalation_enabled &&
-    ownStreak >= 1
-    ? buildEscalationNotice()
-    : "";
-  return makeEnforcementResult({
-    action: "reject",
-    reason: flag.detail,
-    // L3 (v3.7.x): option (b) previously told the agent to "extend the scope
-    // in your re-declared round_contract" — structurally unreachable: while a
-    // contract is ACTIVE, a replacement proposal is ignored as premature, so
-    // the guidance dead-ended into repeated rejects/termination. The only
-    // legal scope change is to CLOSE the active contract first: resubmit with
-    // outcome="blocked" (blocker naming the too-narrow scope) and the
-    // extended scope as the NEXT round's contract in the same submission.
-    // v3.8.3: that route now works, and its one condition is stated here —
-    // the new scope must cover EVERY drifted file, not just the listed ones
-    // (the detail above truncates its list).
-    fix_instructions:
-      "Files changed outside the contract's declared scope. You must either: " +
-      "(a) revert the out-of-scope changes, or (b) legally extend the scope: " +
-      "a replacement contract is IGNORED while the current one is active, so " +
-      "resubmit this work with outcome: \"blocked\" (blocker naming the " +
-      "too-narrow scope) plus a round_contract whose scope covers EVERY file " +
-      "listed above (and any other file this round changed outside the current " +
-      "scope). Scope drift is a machine fact — no explanation waives " +
-      "it. Repeated scope drift terminates the loop." +
-      escalation,
-    check: "round_scope_drift",
-  });
-}
-
 interface StallWindowVerdict {
   detail: string;
   window: number;
@@ -560,13 +485,18 @@ function evaluateStallWindow(
     derivationRounds(vaultEntries, currentRound),
     currentRound,
     window,
+    STALL_PROGRESS_COVERAGE,
   );
   if (progress.state !== "unchanged") return null;
+  // The verdict is about the Git workspace coverage ONLY. A custom provider's
+  // fact — changed, unchanged or unknown — is never part of this sentence.
   const providers = progress.providers.length > 0
     ? ` (providers: ${progress.providers.join(", ")})`
     : "";
   return {
-    detail: `no machine-observed progress in the last ${window} committed rounds${providers}`,
+    detail:
+      `no machine-observed progress within the Git workspace coverage in the ` +
+      `last ${window} committed rounds${providers}`,
     window,
   };
 }
@@ -669,16 +599,7 @@ function enforceProgressStall(
  *  (terminate at ≥2 rejections). */
 function enforceMaxRejections(
   consecutiveRejections: number,
-  driftWaived: boolean,
 ): EnforcementResult | null {
-  // v3.8.3: this row is the catch-all for a round that LOOKS clean while the
-  // persisted counter says otherwise. A round waived past scope drift is not
-  // that shape: it declares blocked and its new proposal covers every file it
-  // drifted into, so the counter it carries is the drift streak it just
-  // resolved — not unresolved persistence. Without this, the legal exit would
-  // still dead-end here at a counter of 2 or more.
-  if (driftWaived) return null;
-
   const escalation = getPolicy().engine.enforcement_escalation_enabled;
 
   if (escalation) {
@@ -782,7 +703,8 @@ const RULE_TABLE: readonly RuleRow[] = [
   // purpose), so the second occurrence rolls the work back instead of killing
   // the loop. See enforceVerificationEntrypointTampered.
   { checks: ["verification_entrypoint_modified"], ladder: "internal" },
-  { checks: ["round_scope_drift"], ladder: "internal" },
+  // v3.9.9: round_scope_drift is REPORT-ONLY. It has no enforcement row, no
+  // waiver, no rejection counter, and no stall/backtrack interaction.
   // v3.8.1: "internal" — the handler owns this row's ladder (it must terminate
   // as `incomplete`, with its own reason). Declaring it uniform as well ran the
   // escalation notice twice and left the uniform terminate branch dead.
@@ -851,16 +773,21 @@ export function enforceRound(
    *  check and lets uniform rows escalate on THEIR OWN streak instead of
    *  inheriting an unrelated history. */
   lastRejectionCheck: string = "",
-  /** v3.8.3: the coordinator has verified that this round declares itself
-   *  blocked AND that its new contract proposal's scope covers every file the
-   *  round changed outside the active contract's scope. Computed there, not
-   *  here: neither the observations nor the active contract reach this
-   *  function. See `enforceScopeDrift`. */
-  scopeDriftWaiver: boolean = false,
   /** v3.9.7: the submitted round's provider-neutral progress. */
-  inFlightProgress: RoundProgress = { state: "unknown", providers: [] },
+  inFlightProgress: RoundProgress = {
+    state: "unknown",
+    providers: [],
+    coverages: [],
+  },
 ): EnforcementResult {
   const { flags } = verifyResult;
+  // v3.9.9: `round_scope_drift` is a retired enforcement check. A session
+  // restored from an older runtime may still name it; it is not a current
+  // check, and its persisted count must not reach the max_rejections
+  // catch-all as unresolved persistence.
+  const retiredScopeCheck = lastRejectionCheck === "round_scope_drift";
+  const effectiveRejections = retiredScopeCheck ? 0 : consecutiveRejections;
+  const effectiveLastCheck = retiredScopeCheck ? "" : lastRejectionCheck;
   // A valid blocked stop is the Agent's protocol action. Liveness/retry rows
   // must not convert it into a same-round rejection; machine-integrity rows
   // still apply below because their facts make the submission untrustworthy.
@@ -878,7 +805,7 @@ export function enforceRound(
     // v3.3: R-EVID-VERIFY — the verification command entrypoint changed in
     // the same round it ran.
     () => enforceVerificationEntrypointTampered(
-      flags, vaultEntries, currentRound, consecutiveRejections, lastRejectionCheck),
+      flags, vaultEntries, currentRound, effectiveRejections, effectiveLastCheck),
     // v3.5: contract completion claimed without its verification_plan
     // commands passing — runs before R-C1: the completion-truth question
     // outranks boundary nuance.
@@ -889,33 +816,29 @@ export function enforceRound(
     // success_without_verified_evidence, which is now a warn: report coverage
     // no longer decides acceptance, and the machine-evidence warn still keeps
     // an unbacked success out of the trajectory.
-    // v3.3: R-C2 — files changed outside the contract's declared scope
-    () => enforceScopeDrift(
-      flags, consecutiveRejections, lastRejectionCheck, scopeDriftWaiver),
+    // v3.9.9: scope drift is an INFO fact only; it never appears here.
     // v3.8: verification debt — contract items claimed met without machine
     // verification (fires only after the configured streak)
     () => blockedStop
       ? null
       : enforceContractItemsUnverified(
-          flags, currentRound, vaultEntries, consecutiveRejections, lastRejectionCheck),
+          flags, currentRound, vaultEntries, effectiveRejections, effectiveLastCheck),
     // v3.9.7: one provider-neutral progress evaluator —
     // reject → backtrack → terminate with the deadlock guard
     () => blockedStop
       ? null
       : enforceProgressStall(
-          flags, currentRound, vaultEntries, consecutiveRejections,
-          verifyResult.machineBackedSuccess, lastRejectionCheck, inFlightProgress),
+          flags, currentRound, vaultEntries, effectiveRejections,
+          verifyResult.machineBackedSuccess, effectiveLastCheck, inFlightProgress),
     // R6: rejection-counter catch-all (evaluated only when no row above
     // fired — a clean-looking round carrying a high persisted counter)
     // v3.7.1: cited gate without an approved human decision
     () => enforceUserGateUnresolved(flags),
-    // v3.8.3: the counter is shared, so this row must know that a scope-drift
-    // waiver already excused the streak it carries (see enforceMaxRejections).
+    // v3.9.9: round_scope_drift is not a rejection source, so this catch-all
+    // has no drift-waiver special case anymore.
     () => blockedStop
       ? null
-      : enforceMaxRejections(
-          consecutiveRejections,
-          scopeDriftWaiver && flags.some((f) => f.check === CHECK_ROUND_SCOPE_DRIFT)),
+      : enforceMaxRejections(effectiveRejections),
   ];
 
   // v3.7: uniform-ladder escalation. Rows without their own escalation
@@ -941,8 +864,8 @@ export function enforceRound(
       // occurrence into termination. The user_gate row is the sharp case:
       // its recovery is human approval, so a gate cited after unrelated
       // rejections must reject with instructions, not kill the loop.
-      const ownStreak = lastRejectionCheck === result.check
-        ? consecutiveRejections
+      const ownStreak = effectiveLastCheck === result.check
+        ? effectiveRejections
         : 0;
       if (ownStreak >= (row.terminalAfter ?? 2)) {
         return makeEnforcementResult({

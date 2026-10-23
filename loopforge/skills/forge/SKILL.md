@@ -136,12 +136,13 @@ one evidence story, and one recovery path belong in the same round.
 activity — and is required. `items[]` are acceptance conditions inside that
 slice; bind each item to its own configured evidence commands with
 `verify_with`. One condition may use several commands and one command may back
-several conditions. Limit `scope` to files or directories that slice may touch;
-it is a machine-enforced boundary, not the deliverable. `criterion_refs` must
+several conditions. `scope` is an OPTIONAL, report-only declaration of the
+files or directories you intend this slice to touch; it is not enforced and
+changes outside it are reported as an info fact only. `criterion_refs` must
 cite real `cr-*` ids rendered in the current prompt; `subgoal_refs` may cite
 only active `sg-*` ids shown in it. A sub-goal declared in this same submission
 becomes referenceable next round. Free text, unknown ids, duplicate
-refs, duplicate normalized items, unknown fields, and missing work_item/scope
+refs, duplicate normalized items, unknown fields, and a missing work_item
 are rejected as `contract_invalid`. The proposal becomes active only after its
 declaring round commits.
 While it is open, you do **not** need to restate it: omitting `round_contract`
@@ -150,6 +151,38 @@ continues the active contract. A different proposal is ignored as
 follows, declare the successor in this same submission. If the slice is
 blocked, report `outcome: "blocked"` with a concrete `blocker` instead of
 silently replacing the active contract.
+
+If investigation shows the ACTIVE slice is the wrong route, do not misreport
+it as blocked and do not quietly propose another contract. Submit an explicit
+redirection in the same evaluation:
+
+```json
+{
+  "contract_transition": {
+    "kind": "supersede",
+    "contract_id": "<the active rc-XXXXXXXX id rendered in this prompt>",
+    "reason": "why the active slice is no longer the right route"
+  },
+  "round_contract": {
+    "work_item": "<the successor deliverable>",
+    "items": [{
+      "description": "<a different acceptance condition>",
+      "criterion_refs": [],
+      "subgoal_refs": [],
+      "verify_with": ["verify"]
+    }]
+  }
+}
+```
+
+The successor is required, its acceptance items must differ from the active
+contract's, and `should_continue` must stay true. The old contract closes as
+`superseded` — not `verified`, not `blocked` — its item statuses stay in the
+audit record, the workspace is not restored, and the redirect round cannot be
+reported as `completed`. The successor activates next round. A stale or
+mismatched `contract_id`, a missing successor, unchanged items, a blocked
+outcome, or `should_continue=false` returns `contract_invalid`; fix the payload
+and resubmit the same roundId.
 
 This is a planning aid, not a second gate. LoopForge learns the plan only from
 committed evaluation fields, contract proposals, observations, and changes. If
@@ -298,17 +331,20 @@ Item status is machine-derived:
 - `verified`: the Agent claims `met`, every bound command passes in the closing
   round's after phase, and the declaration binding remains intact.
 
-The contract closes only when every item is `verified` or a round reports
-`outcome: "blocked"`. Repeated unbacked claims create bounded verification
-debt. The same-check streak escalates at
-`engine.unverified_claim_streak_limit` (default 3) instead of retrying forever.
+The contract closes when every item is `verified`, a round reports
+`outcome: "blocked"`, or an explicit `contract_transition` supersedes it.
+Closure priority is `blocked > superseded > verified > open`: a redirect round
+abandons the old slice even if that round happened to verify all its items.
+Repeated unbacked claims create bounded verification debt. The same-check
+streak escalates at `engine.unverified_claim_streak_limit` (default 3) instead
+of retrying forever. An honest supersede with no `met` claim retires the old
+debt finding; a supersede that still claims an old item `met` does not.
 
 Sub-goals may evolve during execution. LoopForge does not use fuzzy intent or
-similarity to judge drift. The enforced boundary is contract `scope`: work
-outside it is `round_scope_drift`, a machine fact no explanation waives. Revert
-the out-of-scope change, or close the contract as blocked and declare the
-expanded scope in a new proposal whose `scope` covers **every** file this round
-changed outside the current one, a partial expansion is still drift.
+similarity to judge drift. `scope` is the Agent's declared intent, not a
+permission: work outside it is `round_scope_drift`, an INFO fact that never
+rejects, terminates, backtracks, or stalls. Use it as an audit signal, or
+redirect the contract explicitly when the slice itself is wrong.
 
 ## Evidence commands
 
@@ -319,7 +355,7 @@ server was started in:
 
 ```json
 {
-  "version": "7",
+  "version": "9",
   "evidence": {
     "commands": [{
       "name": "verify",
@@ -365,11 +401,13 @@ uncommitted script is abandoned together with the rest of that work.
 ## Backtrack and recovery
 
 A progress stall requires observable Git history over the lookback window.
-Committed work counts as motion through the Git HEAD change, even when the
-closing worktree is clean, and the round you are submitting counts too: if it
-moved files or committed, it cancels the verdict. If machine history cannot be
-read, no stall verdict is made. A machine-backed success round is finishing,
-even if its closing round changes no files.
+Only the Git workspace coverage participates: a custom evidence provider's
+changed/unknown facts are recorded and displayed but cannot prevent a stall or
+keep the prompt at L1. Committed work counts as motion through the Git HEAD
+change, even when the closing worktree is clean, and the round you are
+submitting counts too: if it moved files or committed, it cancels the verdict.
+If machine history cannot be read, no stall verdict is made. A machine-backed
+success round is finishing, even if its closing round changes no files.
 
 A machine-triggered backtrack records a rollback directive. An Agent may also
 abandon the current branch deliberately by submitting a top-level

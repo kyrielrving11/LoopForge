@@ -8,7 +8,7 @@
 import { readOnlyRollbacks, readOnlyRounds, } from "./committed-round.js";
 import { observedGitHead } from "./git-motion.js";
 import { deriveCommittedSubmissionView } from "./submission-receipt.js";
-import { deriveActiveRoundContract, deriveRoundContractView } from "./round-contract.js";
+import { committedRoundFacts, deriveActiveRoundContract, deriveRoundContractView, } from "./round-contract.js";
 import { getPolicy } from "./policy.js";
 /** Build the explain view. Pure and read-only. */
 export function buildExplain(loopId, entries, round) {
@@ -29,9 +29,7 @@ export function buildExplain(loopId, entries, round) {
         const { contract, statuses } = deriveRoundContractView({
             rounds: all,
             round: view.round,
-            report: view.executionReport,
-            deltas: view.observationDelta,
-            outcome: view.outcome,
+            current: committedRoundFacts(view),
             commands,
         });
         const gitBefore = view.beforeEvidence.find((item) => item.providerId === "git");
@@ -75,6 +73,15 @@ export function buildExplain(loopId, entries, round) {
                 changedFiles: delta.changedFiles === null ? null : [...delta.changedFiles],
                 beforeStatus: delta.before?.status ?? null,
                 afterStatus: delta.after?.status ?? null,
+                progress: delta.progress
+                    ? {
+                        kind: delta.progress.kind,
+                        coverage: { ...delta.progress.coverage },
+                        state: delta.progress.state,
+                        complete: delta.progress.complete,
+                        ...(delta.progress.detail ? { detail: delta.progress.detail } : {}),
+                    }
+                    : null,
             })),
             files_changed: gitDelta?.changedFiles ?? null,
             git_change_state: gitDelta === undefined
@@ -102,6 +109,15 @@ export function buildExplain(loopId, entries, round) {
                         status: item.status,
                         reasons: item.reasons,
                     })),
+                }
+                : null,
+            contractTransition: view.contractTransition
+                ? {
+                    kind: view.contractTransition.kind,
+                    contract_id: view.contractTransition.contract_id,
+                    ...(view.contractTransition.reason !== undefined
+                        ? { reason: view.contractTransition.reason }
+                        : {}),
                 }
                 : null,
         };
@@ -153,6 +169,13 @@ export function renderExplain(result) {
             for (const item of round.contract.items) {
                 lines.push(`    ${item.itemId}: ${item.status}${item.reasons.length > 0 ? ` — ${item.reasons[0]}` : ""}`);
             }
+        }
+        if (round.contractTransition) {
+            lines.push(`  contract transition: ${round.contractTransition.kind} ` +
+                `${round.contractTransition.contract_id}` +
+                (round.contractTransition.reason
+                    ? ` — ${round.contractTransition.reason.slice(0, 160)} (report only)`
+                    : " (report only)"));
         }
     }
     return lines.join("\n");

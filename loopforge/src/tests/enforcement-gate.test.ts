@@ -304,7 +304,7 @@ describe("enforcement-gate — progress stall evaluator (v3.7: R4/R5 merged)", (
       vaultRound(2, []),
       vaultRound(3, []),
     ];
-    const result = enforceRound(curr, trusted(), 4, vault, 0, "", false, { state: "unchanged", providers: ["git"] });
+    const result = enforceRound(curr, trusted(), 4, vault, 0, "", { state: "unchanged", providers: ["git"], coverages: [] });
     assert.equal(result.action, "reject");
     assert.ok(result.reason.includes("Machine-observed progress is flat"));
   });
@@ -342,7 +342,7 @@ describe("enforcement-gate — progress stall evaluator (v3.7: R4/R5 merged)", (
     // last clean round rather than redoing the same round with guidance.
     // v3.8.3: the stall's own streak — the check name is the one the counter
     // belongs to, not an assumption.
-    const result = enforceRound(curr, trusted(), 4, vault, 1, "progress_stall", false, { state: "unchanged", providers: ["git"] });
+    const result = enforceRound(curr, trusted(), 4, vault, 1, "progress_stall", { state: "unchanged", providers: ["git"], coverages: [] });
     assert.equal(result.action, "backtrack");
     assert.equal(result.check, "progress_stall");
   });
@@ -360,7 +360,7 @@ describe("enforcement-gate — progress stall evaluator (v3.7: R4/R5 merged)", (
       vaultRound(3, []),
     ];
     // v2.7: consecutiveRejections=2 → terminate (escalation already given)
-    const result = enforceRound(curr, trusted(), 4, vault, 2, "progress_stall", false, { state: "unchanged", providers: ["git"] });
+    const result = enforceRound(curr, trusted(), 4, vault, 2, "progress_stall", { state: "unchanged", providers: ["git"], coverages: [] });
     assert.equal(result.action, "terminate");
     assert.equal(result.check, "progress_stall");
   });
@@ -699,7 +699,7 @@ describe("enforcement-gate — progress stall: backtrack deadlock guard", () => 
       // the loop is re-walking rolled-back territory with the same stall.
       committedBacktrackRound(4),
     ];
-    const result = enforceRound(curr, trusted(), 4, vault, 1, "progress_stall", false, { state: "unchanged", providers: ["git"] });
+    const result = enforceRound(curr, trusted(), 4, vault, 1, "progress_stall", { state: "unchanged", providers: ["git"], coverages: [] });
     assert.equal(result.action, "terminate");
     assert.equal(result.check, "progress_stall");
   });
@@ -722,7 +722,7 @@ describe("enforcement-gate — progress stall: backtrack deadlock guard", () => 
       vaultRound(4, [], branch),
       vaultRound(5, [], branch),
     ];
-    const result = enforceRound(curr, trusted(), 6, vault, 1, "progress_stall", false, { state: "unchanged", providers: ["git"] });
+    const result = enforceRound(curr, trusted(), 6, vault, 1, "progress_stall", { state: "unchanged", providers: ["git"], coverages: [] });
     assert.equal(result.action, "backtrack");
     assert.equal(result.check, "progress_stall");
   });
@@ -735,9 +735,10 @@ describe("enforcement-gate — progress stall: backtrack deadlock guard", () => 
       execution_report: makeExecutionReport({ files_changed: ["src/foo.ts"] }),
     });
     const vault = [vaultRound(1, []), vaultRound(2, []), vaultRound(3, [])];
-    const result = enforceRound(curr, trusted(), 4, vault, 0, "", false, {
+    const result = enforceRound(curr, trusted(), 4, vault, 0, "", {
       state: "changed",
       providers: ["git"],
+      coverages: [],
     });
     assert.equal(result.action, "accept");
   });
@@ -748,17 +749,19 @@ describe("enforcement-gate — progress stall: backtrack deadlock guard", () => 
       execution_report: makeExecutionReport({ files_changed: ["src/foo.ts"] }),
     });
     const vault = [vaultRound(1, []), vaultRound(2, []), vaultRound(3, [])];
-    const unchanged = enforceRound(curr, trusted(), 4, vault, 0, "", false, {
+    const unchanged = enforceRound(curr, trusted(), 4, vault, 0, "", {
       state: "unchanged",
       providers: ["git"],
+      coverages: [],
     });
     assert.equal(unchanged.action, "reject");
     assert.equal(unchanged.check, "progress_stall");
 
     // Unknown never stalls: an unobservable submitted round gains no verdict.
-    const unknown = enforceRound(curr, trusted(), 4, vault, 0, "", false, {
+    const unknown = enforceRound(curr, trusted(), 4, vault, 0, "", {
       state: "unknown",
       providers: ["git"],
+      coverages: [],
     });
     assert.equal(unknown.action, "accept");
   });
@@ -774,9 +777,10 @@ describe("enforcement-gate — progress stall: backtrack deadlock guard", () => 
       vaultRound(1, []), vaultRound(2, []), vaultRound(3, []),
       committedBacktrackRound(4),
     ];
-    const result = enforceRound(curr, trusted(), 4, vault, 1, "progress_stall", false, {
+    const result = enforceRound(curr, trusted(), 4, vault, 1, "progress_stall", {
       state: "unchanged",
       providers: ["git"],
+      coverages: [],
     });
     assert.equal(result.action, "terminate");
     assert.equal(result.check, "progress_stall");
@@ -982,7 +986,7 @@ describe("v3.2 — R4 machine progress fallback", () => {
 
   it("detects stall from three rounds without git changes on the heuristic path", () => {
     const entries = [feedbackRound(1, []), feedbackRound(2, []), feedbackRound(3, [])];
-    const result = enforceRound(se({ success: false }), trusted(), 4, entries, 0, "", false, { state: "unchanged", providers: ["git"] });
+    const result = enforceRound(se({ success: false }), trusted(), 4, entries, 0, "", { state: "unchanged", providers: ["git"], coverages: [] });
     assert.ok(result, "machine stall must fire where the rule used to self-skip");
     assert.equal(result!.action, "reject");
     assert.equal(result!.check, "progress_stall");
@@ -1076,7 +1080,7 @@ describe("v3.3 — progress stall exculpatory machine cross-check", () => {
       "a machine-verified round must be able to close the loop");
 
     // Without the machine fact the same window still stalls.
-    const stalled = enforceRound(se({ success: false }), trusted(), 4, entries, 0, "", false, { state: "unchanged", providers: ["git"] });
+    const stalled = enforceRound(se({ success: false }), trusted(), 4, entries, 0, "", { state: "unchanged", providers: ["git"], coverages: [] });
     assert.equal(stalled.action, "reject");
     assert.equal(stalled.check, "progress_stall");
   });
@@ -1089,7 +1093,7 @@ describe("v3.3 — progress stall exculpatory machine cross-check", () => {
       machineRound(2, 0.31, []),
       machineRound(3, 0.32, [], ["auth module completed"]),
     ];
-    const result = enforceRound(se({ success: false }), trusted(), 4, entries, 0, "", false, { state: "unchanged", providers: ["git"] });
+    const result = enforceRound(se({ success: false }), trusted(), 4, entries, 0, "", { state: "unchanged", providers: ["git"], coverages: [] });
     assert.equal(result!.action, "reject");
     assert.equal(result!.check, "progress_stall");
   });
@@ -1100,14 +1104,17 @@ describe("v3.3 — progress stall exculpatory machine cross-check", () => {
       machineRound(2, 0.31, []),
       machineRound(3, 0.32, []),
     ];
-    const result = enforceRound(se({ success: false }), trusted(), 4, entries, 0, "", false, { state: "unchanged", providers: ["git"] });
+    const result = enforceRound(se({ success: false }), trusted(), 4, entries, 0, "", { state: "unchanged", providers: ["git"], coverages: [] });
     assert.equal(result!.action, "reject");
     assert.equal(result!.check, "progress_stall");
     // v3.8.1: the machine series decides when it is observable, so the reason
     // states the machine fact directly. The old wording appended it as an
     // annotation to a self-report-derived verdict; here the verdict IS the
     // machine observation (the rising self-report does not enter it).
-    assert.match(result!.reason, /no machine-observed progress in the last 3 committed rounds/);
+    assert.match(
+      result!.reason,
+      /no machine-observed progress within the Git workspace coverage in the last 3 committed rounds/,
+    );
   });
 
   it("v3.6: R5 flatline is NOT excluded by a criterion completion over the breaker window", () => {
@@ -1118,7 +1125,7 @@ describe("v3.3 — progress stall exculpatory machine cross-check", () => {
       machineRound(2, 0.30, []),
       machineRound(3, 0.30, [], ["auth module completed"]),
     ];
-    const result = enforceRound(se({ success: false }), trusted(), 4, entries, 0, "", false, { state: "unchanged", providers: ["git"] });
+    const result = enforceRound(se({ success: false }), trusted(), 4, entries, 0, "", { state: "unchanged", providers: ["git"], coverages: [] });
     assert.equal(result!.action, "reject");
     assert.equal(result!.check, "progress_stall");
   });
@@ -1246,17 +1253,18 @@ describe("v3.8 — Round Contract item enforcement", () => {
     assert.equal(appearances, 1, "the escalation notice must not be duplicated");
   });
 
-  it("scope drift rejects even without an explanation (v3.8: machine fact)", () => {
+  it("scope drift never rejects (v3.9.9: report-only fact)", () => {
     const result = enforceRound(se({ success: false }), scopeDriftFlag(), 3, [], 0);
-    assert.equal(result.action, "reject");
-    assert.equal(result.check, "round_scope_drift");
+    assert.equal(result.action, "accept");
   });
 
-  it("repeated scope drift terminates", () => {
+  it("a retired scope-drift streak neither rejects nor reaches the catch-all", () => {
+    // A session restored from an older runtime can still carry this check and
+    // its count. The gate treats it as "no current check", so the
+    // max_rejections catch-all does not fire.
     const result = enforceRound(
       se({ success: false }), scopeDriftFlag(), 3, [], 2, "round_scope_drift");
-    assert.equal(result.action, "terminate");
-    assert.equal(result.check, "round_scope_drift");
+    assert.equal(result.action, "accept");
   });
 });
 
@@ -1325,9 +1333,6 @@ describe("v3.7 — behavior-equality compatibility matrix", () => {
      *  same-issue streak shape the coordinator maintains. */
     lastCheck?: string;
     policy?: (p: LoopPolicy) => void;
-    /** v3.8.3: the coordinator's scope-drift waiver verdict (blocked round +
-     *  a proposal whose scope covers every drifted file). */
-    driftWaiver?: boolean;
     expected: "accept" | "reject" | "terminate" | "backtrack";
     check?: string;
   };
@@ -1383,32 +1388,16 @@ describe("v3.7 — behavior-equality compatibility matrix", () => {
       flags: [flag("info", "success_without_verified_evidence")],
       expected: "accept" },
 
-    // ── round_scope_drift (v3.8: machine fact, no clarification waiver) ─────
-    { name: "scope drift rejects",
-      selfEval: okEval(), flags: [flag("warn", "round_scope_drift")], expected: "reject", check: "round_scope_drift" },
-    { name: "scope drift third strike terminates",
-      selfEval: okEval(),
-      flags: [flag("warn", "round_scope_drift")], strikes: 2, expected: "terminate" },
-    // v3.8.3: the legal exit. The coordinator has already verified that the
-    // round declares blocked AND that its proposal's scope covers every
-    // drifted file — what arrives here is that verdict, not a hint.
-    { name: "scope drift waived by a covering blocked contract is accepted",
+    // ── round_scope_drift (v3.9.9: report-only) ─────────────────────────────
+    // The flag remains an audit fact but has NO enforcement row: it never
+    // rejects, terminates, backtracks, or counts toward a rejection streak.
+    { name: "scope drift info flag is accepted",
+      selfEval: okEval(), flags: [flag("info", "round_scope_drift")], expected: "accept" },
+    { name: "a legacy warn-level scope drift flag is still not enforced",
+      selfEval: okEval(), flags: [flag("warn", "round_scope_drift")], expected: "accept" },
+    { name: "scope drift with a blocked declaration is accepted",
       selfEval: se({ outcome: "blocked", should_continue: false }),
-      flags: [flag("warn", "round_scope_drift")], driftWaiver: true, expected: "accept" },
-    { name: "the waiver holds after the streak would have terminated",
-      selfEval: se({ outcome: "blocked", should_continue: false }),
-      flags: [flag("warn", "round_scope_drift")], strikes: 2,
-      driftWaiver: true, expected: "accept" },
-    { name: "an identical round without the waiver still rejects",
-      selfEval: se({ outcome: "blocked", should_continue: false }),
-      flags: [flag("warn", "round_scope_drift")], expected: "reject", check: "round_scope_drift" },
-    // v3.8.3: a first-time occurrence is no longer converted into termination
-    // by a streak another check earned.
-    { name: "first scope drift after two foreign rejections still rejects",
-      selfEval: okEval(),
-      flags: [flag("warn", "round_scope_drift")], strikes: 2,
-      lastCheck: "success_without_verified_evidence",
-      expected: "reject", check: "round_scope_drift" },
+      flags: [flag("info", "round_scope_drift")], expected: "accept" },
     { name: "first stall after two foreign rejections rejects rather than terminating",
       selfEval: se({ execution_report: makeExecutionReport({ files_changed: ["src/foo.ts"]}) }),
       vault: stallVault(), round: 4, strikes: 2,
@@ -1481,8 +1470,7 @@ describe("v3.7 — behavior-equality compatibility matrix", () => {
           c.vault ?? [],
           c.strikes ?? 0,
           lastCheck,
-          c.driftWaiver ?? false,
-          { state: "unchanged", providers: ["git"] },
+          { state: "unchanged", providers: ["git"], coverages: [] },
         );
         return result.action;
       };
@@ -1501,8 +1489,7 @@ describe("v3.7 — behavior-equality compatibility matrix", () => {
           c.vault ?? [],
           c.strikes ?? 0,
           lastCheck,
-          false,
-          { state: "unchanged", providers: ["git"] },
+          { state: "unchanged", providers: ["git"], coverages: [] },
         );
         assert.equal(result.check, c.check, `${c.name}: check id`);
       }

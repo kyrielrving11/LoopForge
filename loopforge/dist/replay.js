@@ -75,7 +75,18 @@ export class ReplayBackend {
             const gitDelta = view?.observationDelta.find((item) => item.kind === "git");
             const gitBefore = view?.beforeEvidence.find((item) => item.providerId === "git");
             const gitAfter = view?.afterEvidence.find((item) => item.providerId === "git");
-            const progress = view ? deriveRoundProgress(view.observationDelta) : null;
+            // v3.9.9: replay is a display surface, so it selects every fact. The
+            // per-fact list below makes the coverage of each fact visible.
+            const progress = view ? deriveRoundProgress(view.observationDelta, "any") : null;
+            const progressFacts = (view?.observationDelta ?? [])
+                .filter((delta) => delta.progress !== null)
+                .map((delta) => ({
+                kind: delta.progress.kind,
+                providerId: delta.providerId,
+                coverage: delta.progress.coverage,
+                state: delta.progress.state,
+                complete: delta.progress.complete,
+            }));
             timeline.push({
                 round,
                 recompile_level: lineage.recompile_level ?? view?.promptArtifact?.level ?? "l2",
@@ -94,6 +105,8 @@ export class ReplayBackend {
                 // not committed facts; this is the only progress value a round owns.
                 machine_progress: progress?.state ?? null,
                 progress_providers: progress?.providers ?? [],
+                progress_coverages: progress?.coverages ?? [],
+                progress_facts: progressFacts,
                 // v3.5: the round's declared contract (proposal for the next round),
                 // when it committed one — lets replay show the contract arc.
                 ...(entry.round_contract
@@ -101,6 +114,8 @@ export class ReplayBackend {
                     : view?.contractProposal
                         ? { proposal: view.contractProposal }
                         : {}),
+                // v3.9.9: the committed redirect, report-only.
+                contract_transition: view?.contractTransition ?? null,
             });
         }
         // Unsupported envelope versions are NOT history. Keep them visible in the

@@ -16,7 +16,7 @@
  *
  *  Nothing here is persisted, and nothing here is a second history source.
  */
-import { deriveRoundProgress } from "./progress.js";
+import { deriveRoundProgress, STALL_PROGRESS_COVERAGE, } from "./progress.js";
 /** No committed previous round: freshness is unknown, never "stale". */
 export const UNKNOWN_PROMPT_FRESHNESS = {
     machineProgress: "unknown",
@@ -53,7 +53,10 @@ function machineActivity(previous) {
         AFTER_COMMAND_ACTIVITY.has(observation.status));
 }
 export function derivePromptFreshness(previous) {
-    const progress = deriveRoundProgress(previous.observationDelta);
+    // v3.9.9: freshness is a LoopForge density decision. It consumes the SAME
+    // Git workspace coverage the stall rule uses — never `"any"`. A custom
+    // provider's changed/unknown must not pin the loop at L1 forever.
+    const progress = deriveRoundProgress(previous.observationDelta, STALL_PROGRESS_COVERAGE);
     const activity = machineActivity(previous);
     const declared = declaredEvolution(previous);
     const observableNewInformation = progress.state !== "unchanged" || activity || declared;

@@ -265,7 +265,8 @@ statuses, options = {}) {
         }
     }
     if (contract.scope.length > 0) {
-        lines.push("- Allowed scope:");
+        // v3.9.9: scope is the Agent's declared intent, not a permission.
+        lines.push("- Declared scope (Agent report; not enforced):");
         for (const entry of contract.scope) {
             lines.push(`  - ${entry}`);
         }

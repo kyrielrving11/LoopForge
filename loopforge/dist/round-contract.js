@@ -19,7 +19,7 @@
  *  independent of `work_item`/`scope`, which stay slice-level labels. This is
  *  the opposite of a SubGoal, whose id includes its declaration round.
  */
-import { canonicalContractText, deriveContractId, deriveContractItemIds, } from "./token-utils.js";
+import { canonicalContractItemText, canonicalContractText, deriveContractId, deriveContractItemIds, } from "./token-utils.js";
 import { deriveContractItemStatuses } from "./contract-items.js";
 import { getPolicy } from "./policy.js";
 import { declaresBlocked } from "./round-outcome.js";
@@ -31,7 +31,7 @@ export function activateContract(proposal, declaredAtRound, binding, loopId) {
         id: deriveContractId(loopId, proposal),
         declared_at_round: declaredAtRound,
         work_item: proposal.work_item,
-        scope: [...proposal.scope],
+        scope: [...(proposal.scope ?? [])],
         items: proposal.items.map((item, index) => ({
             description: item.description,
             criterion_refs: [...item.criterion_refs],
@@ -48,6 +48,38 @@ export function activateContract(proposal, declaredAtRound, binding, loopId) {
 export function sameContract(left, right) {
     return canonicalContractText(left) === canonicalContractText(right);
 }
+export const NO_CURRENT_ROUND_FACTS = {
+    report: null,
+    deltas: [],
+    blocked: false,
+    transition: null,
+};
+/** Read a committed view's current-round facts. Read views (audit/explain/
+ *  receipt/round-facts) use this instead of hand-building `outcome`-only
+ *  blocked flags. */
+export function committedRoundFacts(view) {
+    return {
+        report: view.executionReport,
+        deltas: view.observationDelta,
+        blocked: view.evaluation
+            ? declaresBlocked(view.evaluation)
+            : view.outcome === "blocked",
+        transition: view.contractTransition,
+    };
+}
+/** The successor's acceptance CONTENT must actually change. A new work_item
+ *  or scope label alone is not a new slice. */
+function acceptanceItemsDiffer(proposal, active) {
+    const next = new Set(proposal.items.map((item) => canonicalContractItemText(item)));
+    const current = new Set(active.items.map((item) => canonicalContractItemText(item)));
+    if (next.size !== current.size)
+        return true;
+    for (const identity of next) {
+        if (!current.has(identity))
+            return true;
+    }
+    return false;
+}
 /** v3.8: The active contract after replaying committed rounds in order. */
 export function deriveActiveRoundContract(rounds, commands = getPolicy().evidence.commands ?? []) {
     let active = null;
@@ -61,26 +93,32 @@ export function deriveActiveRoundContract(rounds, commands = getPolicy().evidenc
             active = activate();
             continue;
         }
-        // A blocked round closes the active contract (existing semantics), and a
-        // fully verified one does too. Order matters: blocked is checked first,
-        // using the ONE blocked predicate (outcome OR stop_reason).
-        const blocked = round.evaluation
-            ? declaresBlocked(round.evaluation)
-            : round.outcome === "blocked";
-        if (blocked) {
+        // The round's item closure under the same reducer every other consumer
+        // uses. The current slice is this committed round's own facts, so a
+        // blocked/superseded closure is attributed to the round that caused it.
+        const statuses = deriveContractItemStatuses({
+            contract: active,
+            rounds: rounds.slice(0, index),
+            currentRound: round.round,
+            currentReport: round.executionReport,
+            currentDeltas: round.observationDelta,
+            currentBlocked: round.evaluation
+                ? declaresBlocked(round.evaluation)
+                : round.outcome === "blocked",
+            currentTransition: round.contractTransition,
+            commands,
+        });
+        if (statuses.closure === "blocked" || statuses.closure === "verified") {
             active = activate();
             continue;
         }
-        const statuses = deriveContractItemStatuses({
-            contract: active,
-            rounds: rounds.slice(0, index + 1),
-            currentRound: round.round + 1,
-            currentReport: null,
-            currentDeltas: [],
-            commands,
-        });
-        if (statuses.closure === "verified") {
-            active = activate();
+        if (statuses.closure === "superseded") {
+            // The reducer already matched the transition target to THIS contract.
+            // Activate only a real successor with different acceptance content;
+            // abnormal data keeps the original active contract rather than losing it.
+            if (proposal && acceptanceItemsDiffer(proposal, active)) {
+                active = activate();
+            }
             continue;
         }
         // Otherwise the active contract stays; a different proposal is ignored.
@@ -121,9 +159,10 @@ export function deriveRoundContractView(input) {
             contract,
             rounds: prior,
             currentRound: input.round,
-            currentReport: input.report,
-            currentDeltas: input.deltas,
-            currentBlocked: input.blocked ?? input.outcome === "blocked",
+            currentReport: input.current.report,
+            currentDeltas: input.current.deltas,
+            currentBlocked: input.current.blocked,
+            currentTransition: input.current.transition,
             commands: input.commands,
         }),
     };

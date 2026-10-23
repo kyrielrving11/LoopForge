@@ -341,6 +341,7 @@ export class LoopForgeEngine {
     "worker_results",
     "prompt_requests",
     "round_contract",
+    "contract_transition",
   ] as const;
 
   /** Merge the committed round decision (feedback entry) into the compile-time

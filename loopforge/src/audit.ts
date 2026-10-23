@@ -23,7 +23,10 @@ import {
   readOnlyRollbacks,
   readOnlyRounds,
 } from "./committed-round.js";
-import { deriveRoundContractView } from "./round-contract.js";
+import {
+  committedRoundFacts,
+  deriveRoundContractView,
+} from "./round-contract.js";
 import { deriveCommittedSubmissionView } from "./submission-receipt.js";
 import type { ContractItemStatus, SubmissionDiagnostic } from "./protocol.js";
 import type { SubmissionReceipt } from "./protocol.js";
@@ -69,7 +72,7 @@ export interface AuditContract {
   declared_at_round: number;
   first_active_round: number;
   last_active_round: number;
-  closure: "open" | "verified" | "blocked";
+  closure: "open" | "verified" | "blocked" | "superseded";
   closed_at_round: number | null;
   /** Item statuses as of the last round the contract was execution-relevant. */
   items: Array<{ itemId: string; description: string; status: ContractItemStatus }>;
@@ -79,6 +82,8 @@ export interface AuditContractSummary {
   contracts: AuditContract[];
   /** Contracts whose final closure is still `open`. */
   open: number;
+  /** v3.9.9: contracts the Agent explicitly abandoned via a transition. */
+  superseded: number;
   verifiedItems: number;
   insufficientItems: number;
   contradictedItems: number;
@@ -141,9 +146,7 @@ export function buildAudit(
     contractByRound.set(view.round, deriveRoundContractView({
       rounds: views,
       round: view.round,
-      report: view.executionReport,
-      deltas: view.observationDelta,
-      outcome: view.outcome,
+      current: committedRoundFacts(view),
       commands,
     }));
   }
@@ -237,6 +240,7 @@ export function buildAudit(
   const contractsSummary: AuditContractSummary = {
     contracts,
     open: contracts.filter((contract) => contract.closure === "open").length,
+    superseded: contracts.filter((contract) => contract.closure === "superseded").length,
     verifiedItems: flatItems.filter((item) => item.status === "verified").length,
     insufficientItems: flatItems.filter((item) => item.status === "insufficient").length,
     contradictedItems: flatItems.filter((item) => item.status === "contradicted").length,
@@ -305,11 +309,19 @@ export function buildAudit(
   // v3.8: the contract item axis decides completion. A contradicted item is a
   // machine denial; an open contract is unfinished verification; the claim
   // axis only speaks when no contract item exists to speak for it.
+  // v3.9.9: the FINAL round's executed contract closure is the terminal
+  // truth. A loop that ended right after abandoning its slice (superseded) or
+  // declaring blocked did not pass, even when no contract is still open.
+  const lastView = views.length > 0 ? views[views.length - 1] : undefined;
+  const terminalClosure = lastView
+    ? contractByRound.get(lastView.round)?.statuses.closure
+    : undefined;
   let verdict: AuditResult["verdict"] = "passed";
   if (rounds.some((round) => round.checks.some((check) => check.verdict === "failed")) ||
       contractsSummary.contradictedItems > 0) {
     verdict = "contradicted";
   } else if (unresolvedUserGates.length > 0 || contractsSummary.open > 0 ||
+      terminalClosure === "superseded" || terminalClosure === "blocked" ||
       (declared > 0 && evidenced === 0)) {
     verdict = "incomplete";
   }

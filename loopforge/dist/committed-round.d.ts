@@ -7,7 +7,7 @@
 import type { MachineObservation } from "./protocol.js";
 import type { ObservationDelta } from "./evidence-provider.js";
 import type { VaultEntry } from "./loop-store.js";
-import type { CheckpointRef, ContractBinding, ExecutionReport, LoopRoundResult, OperatorAcceptance, PromptArtifact, RecoveryDirective, RoundContractProposal, RoundOutcome, SelfEvaluation, SubmissionDiagnostic, SubGoalUpdate, VerificationFlag } from "./protocol.js";
+import type { CheckpointRef, ContractBinding, ContractTransition, ExecutionReport, LoopRoundResult, OperatorAcceptance, PromptArtifact, RecoveryDirective, RoundContractProposal, RoundOutcome, SelfEvaluation, SubmissionDiagnostic, SubGoalUpdate, VerificationFlag } from "./protocol.js";
 import type { RoundProcessResult } from "./round-coordinator.js";
 import type { RoundTransactionSnapshot } from "./round-transaction.js";
 export type CommittedAction = "continue" | "stop" | "recovery" | "backtrack";
@@ -47,6 +47,10 @@ export interface CommittedRoundView {
     readonly success: boolean;
     readonly outcome: RoundOutcome | null;
     readonly contractProposal: RoundContractProposal | null;
+    /** v3.9.9: this round's explicit contract redirection, if it declared one.
+     *  Read from the committed evaluation; a target the reducer cannot match is
+     *  inert, never a reason to close a contract. */
+    readonly contractTransition: ContractTransition | null;
     /** v3.8: the machine binding stamped when the declaring round committed. */
     readonly contractBinding: ContractBinding | null;
     readonly beforeEvidence: MachineObservation[];

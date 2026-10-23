@@ -15,7 +15,7 @@ import type { CommittedRoundView } from "./committed-round.js";
 import type { ContractItemStatusView } from "./contract-items.js";
 import type { ObservationDelta } from "./evidence-provider.js";
 import type { CommandEvidencePolicy } from "./policy.js";
-import type { ContractItemStatus, ExecutionReport, SubGoal, VerifiedSubGoalFact } from "./protocol.js";
+import type { ContractItemStatus, ContractTransition, ExecutionReport, SubGoal, VerifiedSubGoalFact } from "./protocol.js";
 import type { ActiveContractView } from "./round-contract.js";
 export interface RoundFacts {
     /** The contract the NEXT round executes under — derived from committed
@@ -52,6 +52,8 @@ export interface InFlightRoundSlice {
     /** The in-flight round's own blocked declaration. A `blocked` round CLOSES
      *  its contract, so closure cannot be derived from committed slices alone. */
     currentBlocked?: boolean;
+    /** v3.9.9: the in-flight round's explicit contract redirect. */
+    currentTransition?: ContractTransition | null;
     /** Legacy shape accepted by library callers; `blocked` wins when present. */
     currentOutcome?: string | null;
 }

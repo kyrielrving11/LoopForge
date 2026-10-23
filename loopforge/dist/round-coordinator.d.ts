@@ -20,7 +20,7 @@
 import type { LoopStore, VaultEntry } from "./loop-store.js";
 import type { MachineObservation } from "./protocol.js";
 import type { ObservationDelta } from "./evidence-provider.js";
-import type { CheckpointRef, SelfEvaluation, RoundVerificationStatus, StopReason, VerificationFlag, WorkspaceCheckpointManifest } from "./protocol.js";
+import type { CheckpointRef, ContractTransition, SelfEvaluation, RoundVerificationStatus, StopReason, VerificationFlag, WorkspaceCheckpointManifest } from "./protocol.js";
 import { type ContractItemStatusView } from "./contract-items.js";
 /** Input to a single round processing step. */
 export interface RoundProcessInput {
@@ -122,7 +122,10 @@ export interface RoundProcessResult {
 export declare function finalizeStopReason(
 /** `undefined` when the disposition named no terminal reason at all (the
  *  callers fall back to their own default) — there is nothing to guard. */
-reason: StopReason | undefined, selfEval: SelfEvaluation, contractStatuses?: ContractItemStatusView | null): {
+reason: StopReason | undefined, selfEval: SelfEvaluation, contractStatuses?: ContractItemStatusView | null,
+/** v3.9.9: the current round's transition. A committed redirect can never
+ *  produce `completed` even if the old items were all verified. */
+transition?: ContractTransition | null): {
     reason: StopReason | undefined;
     flags: VerificationFlag[];
 };

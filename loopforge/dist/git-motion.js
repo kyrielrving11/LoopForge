@@ -6,6 +6,19 @@
  *  fingerprints and HEAD movement. A restore is NOT round progress: it happens
  *  before the redo prompt and belongs to no round delta.
  */
+import { GIT_OBSERVATION_SCHEMA_VERSION } from "./protocol.js";
+/** v3.9.9: the Git workspace evidence coverage a rule must select explicitly.
+ *  The descriptor is a FACT about the persisted Git observation (domain
+ *  "workspace", object "git-motion", the observed boundary scope, the Git
+ *  observation schema version) — not a policy key and not a provider vote.
+ *  Rules match it exactly; a provider that merely mimics the strings cannot
+ *  participate because selection is also kind-gated to `kind: "git"`. */
+export const GIT_WORKSPACE_COVERAGE = {
+    domain: "workspace",
+    object: "git-motion",
+    scope: "tracked_and_non_ignored_untracked",
+    version: GIT_OBSERVATION_SCHEMA_VERSION,
+};
 /** The ONE definition of machine Git motion for a single round.
  *
  *  Motion is a non-empty file list or a HEAD that moved across the round. A

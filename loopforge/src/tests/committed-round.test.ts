@@ -11,7 +11,10 @@ import {
   readOnlyRounds,
   roundResultFromCommittedRound,
 } from "../committed-round.js";
-import { committedRoundGitMotion } from "../progress.js";
+import {
+  deriveRoundProgress,
+  STALL_PROGRESS_COVERAGE,
+} from "../progress.js";
 import type { MachineObservation } from "../protocol.js";
 import { committedBacktrackRound, committedFeedbackRound, mergedLineageRound, withTransaction } from "./_helpers.js";
 import { claimedMetCriteria } from "../self-eval.js";
@@ -210,7 +213,10 @@ describe("CommittedRoundView", () => {
       ],
     }));
     assert.ok(view);
-    assert.equal(committedRoundGitMotion(view), true,
-      "the second Git provider's HEAD move is motion even when the first is still");
+    assert.equal(
+      deriveRoundProgress(view.observationDelta, STALL_PROGRESS_COVERAGE).state,
+      "changed",
+      "the second Git provider's HEAD move is motion even when the first is still",
+    );
   });
 });

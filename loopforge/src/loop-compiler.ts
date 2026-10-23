@@ -35,7 +35,10 @@ import {
   type CommittedRoundView,
   derivationRounds,
 } from "./committed-round.js";
-import { deriveProgressWindow } from "./progress.js";
+import {
+  deriveProgressWindow,
+  STALL_PROGRESS_COVERAGE,
+} from "./progress.js";
 import { deriveCriterionStatuses as deriveCriterionStatusesFromEntries } from "./criterion-status.js";
 import {
   derivePromptFreshness,
@@ -391,10 +394,12 @@ function deriveMachineStatus(
   rounds: ReadonlyArray<CommittedRoundView>,
   currentRound: number,
 ): MachineStatus | undefined {
+  // v3.9.9: the dashboard shows the SAME fact the stall rule consumes.
   const window = deriveProgressWindow(
     rounds,
     currentRound,
     getPolicy().engine.stall_lookback_rounds,
+    STALL_PROGRESS_COVERAGE,
   );
   if (window.incomplete || window.state === "not_applicable") return undefined;
   const changedRounds = window.roundStates.filter(

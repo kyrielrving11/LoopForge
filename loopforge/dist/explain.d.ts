@@ -43,6 +43,20 @@ export interface ExplainRound {
         changedFiles: string[] | null;
         beforeStatus: string | null;
         afterStatus: string | null;
+        /** v3.9.9: the provider's derived progress fact for this delta, with its
+         *  coverage. This is the same fact the rules select; it is not re-judged. */
+        progress: {
+            kind: "git" | "custom";
+            coverage: {
+                domain: string;
+                object: string;
+                scope: string;
+                version: number;
+            };
+            state: "changed" | "unchanged" | "unknown";
+            complete: boolean;
+            detail?: string;
+        } | null;
     }>;
     /** v3.9.1: the Git boundary facts, from the same shared derivation. */
     files_changed: string[] | null;
@@ -72,6 +86,12 @@ export interface ExplainRound {
             status: string;
             reasons: string[];
         }>;
+    } | null;
+    /** v3.9.9: this round's explicit contract redirect, report-only. */
+    contractTransition: {
+        kind: "supersede";
+        contract_id: string;
+        reason?: string;
     } | null;
 }
 export interface ExplainResult {

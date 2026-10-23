@@ -101,13 +101,15 @@ normalized-exact text. Operator/plan targets are `evaluation_invalid`
 targets are inert no-ops with a diagnostic, never receipt effects. There is no
 rolling `retire_window`.
 
-Optional fields are normalized and lenient. Three are structural exceptions —
-`subgoal_updates`, `round_contract`, and `execution_report.contract_item_claims`
-— validated BEFORE advance against the same derived set the agent was shown,
-and rejected rather than normalized (`contract_invalid` for contract shape,
-limits, command bindings, workspace containment, references, or duplicate item
-IDs). Everything else — `criterion_claims`, worker results, `gate_ids` — is
-advisory, and malformed entries are dropped.
+Optional fields are normalized and lenient. Four are structural exceptions —
+`subgoal_updates`, `round_contract`, `contract_transition`, and
+`execution_report.contract_item_claims` — validated BEFORE advance against the
+same derived set the agent was shown, and rejected rather than normalized
+(`contract_invalid` for contract shape, limits, command bindings, references,
+duplicate item IDs, or transition target/successor conflicts). Everything else —
+`criterion_claims`, worker results, `gate_ids` — is advisory, and malformed
+entries are dropped. `scope` is deliberately NOT structural: it is optional,
+report-only intent, normalized leniently and never rejected.
 
 No optional value is dropped silently. `normalizeSelfEvaluation` returns a
 stable diagnostic list (field path, reason code, handling, correction) and the
@@ -188,8 +190,9 @@ SessionManager -> RoundLifecycle -> RoundDriver -> RoundCoordinator
 - Stop decisions prioritize an explicit blocked declaration. `completed`
   requires effective success and a verified contract, or no active contract.
   A blocked or contradicted contract cannot produce `completed`.
-- One definition of "this round declares itself blocked" serves the stop
-  decision and the scope-drift waiver both.
+- One definition of "this round declares itself blocked" serves every stop
+  decision and the contract-closure reducer. Scope drift has no waiver and no
+  enforcement path.
 - The completion-truth guard runs before the transaction commits and again at
   the lifecycle end. A violation is a code defect: it downgrades to `blocked`
   and reports, rather than throwing.
@@ -212,17 +215,26 @@ independent machine observation, normally a passed after-phase command whose
 entrypoint and configuration are untampered. `no_change_reason` is an escape
 only when no verification command is configured.
 
-Progress is provider-neutral and has four states: `changed`, `unchanged`,
-`unknown`, `not_applicable`. Git keeps its complete-boundary/HEAD rule; a
-custom provider opts in with a persisted `data.progressCapable` marker
-and a versioned fingerprint snapshot; command observations never provide
-progress. Any proven change wins; a comparable unknown blocks an "unchanged"
-verdict; no applicable provider is `not_applicable`. A stall requires BOTH the
-committed lookback window and the submitted round to be `unchanged`;
-`unknown`/`not_applicable` never stall, and no Agent report can create or
-cancel a stall. Entrypoint trust, scope drift, files reconciliation,
-`evidenceIncomplete`, and contract-item Git checks remain Git-specific and are
-never replaced by a generic progress signal.
+Progress is a set of reported FACTS, each with an explicit coverage range
+(`ProgressCoverage { domain, object, scope, version }`). There is no global
+provider vote: a rule passes an explicit `(kind, coverage)` selector and only
+exactly matching facts participate. Git keeps its complete-boundary/HEAD rule;
+a custom provider declares `progressCoverage` and persists a nested
+`ProgressSnapshot` (inner schema 2) with the declared coverage, a completeness
+flag and a 64-hex fingerprint; failures carry the same coverage with
+`complete:false` and a null fingerprint. Command observations never provide
+progress. Any selected `changed` wins; a selected `unknown` blocks an
+"unchanged" verdict; a required coverage with no fact while another required
+coverage has one is `unknown`; no matching fact at all is `not_applicable`.
+`"any"` is display-only and MUST NOT drive a governance or prompt-density rule.
+A stall requires BOTH the committed lookback window and the submitted round to
+be `unchanged` under the fixed Git workspace coverage
+(`STALL_PROGRESS_COVERAGE`); `unknown`/`not_applicable` never stall, and no
+Agent report can create or cancel a stall. Prompt freshness uses the SAME Git
+selector, so a custom provider cannot pin the loop at L1. Entrypoint trust,
+files reconciliation, `evidenceIncomplete`, and contract-item Git checks remain
+Git-specific and are never replaced by a generic progress signal. Scope drift
+remains a Git-specific INFO report only.
 
 The entrypoint check has two arms, unioned. The absolute arm compares each
 entrypoint file's current content against a trusted baseline captured from the
@@ -270,15 +282,18 @@ Round Contract rules:
 - v3.9.6: `work_item` is the bounded deliverable this slice produces (an
   outcome, not an activity). New declarations must provide it, non-empty and
   <=200 chars, at the strict boundary; the persisted type stays optional so
-  legacy committed contracts remain readable. `scope` must be present (empty
-  is allowed).
+  legacy committed contracts remain readable.
+- v3.9.9: `scope` is optional, report-only Agent intent. It takes part in
+  contract content identity (a restated route is a new declaration), but it
+  grants no permission, is never containment-checked, and never rejects a
+  contract. Drift is an `info` fact only.
 - `items[]` are acceptance conditions, not a task checklist. Each item binds
   its own `verify_with` commands; one condition may use several commands and
   one command may back several conditions. `verify_with` never moves to the
   contract/work_item level. There is no work_item-level claim: the contract is
   verified only when every item is verified (or a blocked round closes it).
 - LoopForge validates structure, configured/enabled/after-capable command
-  bindings, scope containment and references. It never judges whether a
+  bindings and references. It never judges whether a
   `work_item` sounds like a deliverable, whether an item matches a command
   semantically, or whether a command is the "right" acceptance test. That is
   Agent/operator semantic judgment.
@@ -291,19 +306,31 @@ Round Contract rules:
 - Item states are `pending`, `insufficient`, `contradicted`, or `verified`.
 - `verified` requires a `met` claim and every bound command passing in the
   closing round with the declaration's binding intact.
-- A contract closes only when every item is verified or a round reports
-  `outcome: "blocked"`.
+- Closure priority is `blocked > superseded > verified > open`. A contract
+  closes when every item is verified, a round reports `outcome: "blocked"`, or
+  the Agent submits an explicit `contract_transition` whose target is THAT
+  contract. A superseded contract keeps every item status for audit, activates
+  its successor next round, never restores the workspace, and its round cannot
+  be `completed`.
+- `contract_transition` is legal only while an active contract exists; it
+  requires `contract_id` (the exact active `rc-*` id), the successor
+  `round_contract` in the same evaluation, changed acceptance items, no blocked
+  declaration, and `should_continue=true`. A stale/other target, missing
+  successor, blocked conflict, stop conflict, invalid kind, over-long reason,
+  unknown field, or unchanged items is `contract_invalid`. The successor takes
+  effect next round; this round's item claims may only cite the old contract.
 - A different proposal while the active contract is open is ignored and
-  surfaced as `contract_premature`.
+  surfaced as `contract_premature` — unless a valid transition targets the
+  active contract, in which case it is the effective successor.
 - A claimed-but-unbacked item is recorded as verification debt, escalated
-  after a bounded run of rounds and counted on the same check's streak only.
-- Scope drift is a machine fact with no clarification waiver. Its one legal
-  exit is a blocked round that declares a successor contract covering EVERY
-  drifted file: that waives the rejection, never the fact, and the flag still
-  lands on the committed round. The coverage set is derived, never read from a
-  flag's truncated detail. The waiver removes the drift rejection only;
-  contract debt, machine stalls, and a pending restore still apply, and a
-  waived round does not reach the rejection-counter catch-all.
+  after a bounded run of rounds and counted on the same check's streak only. A
+  superseded contract with NO `met` claim on its items produces no debt
+  finding (honest abandonment); a round that still claims an old item `met`
+  keeps the finding and the streak.
+- `round_scope_drift` is an `info` report-only fact. It never rejects,
+  terminates, backtracks, stalls, or reaches the rejection counter. A persisted
+  `round_scope_drift` rejection streak from an older runtime is drained, so it
+  cannot trigger the `max_rejections` catch-all.
 
 The live coordinator, explain, and audit share one contract derivation, and
 verified sub-goal facts read the whole committed history so they survive
@@ -433,8 +460,13 @@ Round documents carry `sequence === round`; missing or unstamped rounds are
 corruption or recoverable gaps and must be reported. Derived state is separate
 from committed rounds and from the session document. Round transaction schema 5
 is the current envelope; schema 4 and earlier are reported as legacy, never
-migrated. Workspace checkpoint manifests/blobs live under the runtime state
-directory (`checkpoints/`, `objects/`), never inside the restored boundary.
+migrated. Observation versions are per kind: Git 2, command 1, custom base 1
+with the nested progress snapshot at inner 2. A custom round without progress
+remains readable; inner-1 snapshots and the retired `progressCapable` marker
+are reported as observation legacy. One `observationVersionIssue` judgment is
+shared by the collector, the transaction parser and the legacy reporter.
+Workspace checkpoint manifests/blobs live under the runtime state directory
+(`checkpoints/`, `objects/`), never inside the restored boundary.
 
 Writes are atomic and protected by owned locks. MCP mutations are serialized per
 session and fenced by renewable cross-process leases. Command evidence is
@@ -496,10 +528,13 @@ run the scripted prepack in the clean mirror.
   Phase Anchors without outcomes, authority-header presence at L0/L1/L2,
   state-file-derived wording, no dangling state-file pointer, and that
   emphasize cannot resurrect removed history.
-- Contract-semantics changes: cover required work_item/scope at the strict
-  boundary, optional legacy reads, item-level verify_with, unknown fields,
-  length boundaries, semantic non-validation, and prompt/state hierarchy
-  rendering with rc-/rci- coverage.
+- Contract-semantics changes: cover required work_item, optional/report-only
+  scope (lenient normalization, no containment rejection), item-level
+  verify_with, unknown fields, length boundaries, semantic non-validation,
+  `contract_transition` target/successor/stop/blocked/item-change validation,
+  closure priority `blocked > superseded > verified > open`, successor
+  activation next round, and prompt/state hierarchy rendering with rc-/rci-
+  coverage.
 - Prompt-coverage changes: cover the identical L0/L1/L2 active id set, every
   active id in the delivered prompt, sub-goal id overflow, emphasize moves
   into Critical Context, contract closure, recovery facts, and the
@@ -537,10 +572,11 @@ run the scripted prepack in the clean mirror.
   `contract_invalid` retry.
 - Stop-reason changes: cover explicit blocked plus success and contradicted
   item plus success; `completed` must remain machine-true only.
-- Scope-drift waiver changes: cover a covering blocked proposal being accepted,
-  a non-covering one still being rejected, the waiver holding at a counter that
-  would otherwise terminate, and the independent rows (contract debt, stall,
-  pending restore) still applying.
+- Scope-drift changes: cover the info-only severity (never reject, terminate,
+  backtrack, stall, or count toward a rejection streak), lenient optional scope
+  parsing/diagnostics, declared-intent rendering, and a retired
+  `round_scope_drift` streak not reaching the `max_rejections` catch-all after
+  an upgrade.
 - Entrypoint-trust changes: cover a modified entrypoint, one created during the
   round (including a gitignored one git cannot see), restoration making the
   same round pass, backtrack on repeated non-restoration, a corrupt or absent
@@ -549,12 +585,15 @@ run the scripted prepack in the clean mirror.
 - Store-lock timing changes: cover a lock left by a process that died moments
   ago being reclaimed, a live owner still failing fast, the ownerless grace,
   and the lock's release staying ownership-checked.
-- Stall-detection changes: cover Git unchanged/HEAD-only motion,
-  a custom provider changed/unchanged/unknown/not_applicable, multi-provider
-  combinations, an unobservable window or submitted round yielding no verdict,
-  the submitted round's own change excusing a stalled window, a round that
-  moved nothing keeping the verdict, and the deadlock guard still terminating
-  a stalled round that a rollback already moved.
+- Stall-detection changes: cover Git unchanged/HEAD-only motion, coverage
+  changes/version changes/missing sides/incomplete snapshots as `unknown`, a
+  custom provider changed/unchanged/unknown never affecting the Git-only
+  selector, a forged Git coverage on a custom provider remaining ineligible,
+  multi-selector ALL semantics, an unobservable window or submitted round
+  yielding no verdict, the submitted round's own change excusing a stalled
+  window, a round that moved nothing keeping the verdict, and the deadlock
+  guard still terminating a stalled round that a rollback already moved.
+  Prompt freshness must share the same Git selector.
 - Provenance/retraction changes: cover operator precedence, discovery round,
   retirement then rediscovery, abandoned-branch exclusion, preserved rollback
   discoveries, c-id and normalized-text retraction, unknown/same-round/operator
@@ -579,7 +618,9 @@ run the scripted prepack in the clean mirror.
   absence of any second retained ledger.
 - Observation-delta changes: cover before-only/after-only, missing before,
   non-observed statuses, malformed fingerprints, duplicate keys, non-Git
-  providers, clean-worktree commits, and unknown vs observed-no-change.
+  providers, clean-worktree commits, unknown vs observed-no-change, custom
+  base schema 1 + progress inner schema 2, legacy inner-1/progressCapable
+  reporting, and synthetic observations using the same per-kind version table.
 - Guidance/receipt changes: cover no fabricated ids, real contract/sub-goal
   ids, rejected/terminated `not_applied`, backtrack only-preserved facts,
   lost-response replay, and report-vs-verification separation.

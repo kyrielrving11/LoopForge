@@ -382,16 +382,40 @@ const TOOL_BASE_SCHEMAS = [
                   maxItems: 50,
                   items: { type: "string" as const },
                   description:
-                    "Required (may be empty). Files/directories this round may " +
-                    "touch (workspace-relative; './' and trailing slashes " +
-                    "accepted; must stay inside the workspace). This is a " +
-                    "machine-enforced file boundary, not the deliverable. " +
-                    "Out-of-scope git changes trigger round_scope_drift, which " +
-                    "is a machine fact and is not waivable by explanation. Max " +
+                    "Optional, report-only. The files/directories you intend " +
+                    "this slice to touch. Omission and [] both mean no declared " +
+                    "intent. It is NOT enforced: out-of-scope changes are " +
+                    "reported as an info fact and never reject the round. Max " +
                     "50 items.",
                 },
               },
-              required: ["work_item", "items", "scope"],
+              required: ["work_item", "items"],
+              additionalProperties: false,
+            },
+            contract_transition: {
+              type: "object" as const,
+              description: fieldGuideDescription("contract_transition"),
+              properties: {
+                kind: {
+                  type: "string" as const,
+                  const: "supersede",
+                  description: "Only \"supersede\" is supported.",
+                },
+                contract_id: {
+                  type: "string" as const,
+                  pattern: "^rc-[a-f0-9]{8}$",
+                  description:
+                    "The rc-XXXXXXXX id of the ACTIVE contract rendered in " +
+                    "this prompt. A stale/other id is rejected.",
+                },
+                reason: {
+                  type: "string" as const,
+                  maxLength: 500,
+                  description:
+                    "Optional Agent report, recorded verbatim for audit only.",
+                },
+              },
+              required: ["kind", "contract_id"],
               additionalProperties: false,
             },
           },

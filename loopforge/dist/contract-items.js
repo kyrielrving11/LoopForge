@@ -118,12 +118,14 @@ export function deriveContractItemStatuses(input) {
             blocked: round.evaluation
                 ? declaresBlocked(round.evaluation)
                 : round.outcome === "blocked",
+            transition: round.contractTransition,
         })),
         {
             round: input.currentRound,
             report: input.currentReport,
             deltas: input.currentDeltas,
             blocked: input.currentBlocked === true,
+            transition: input.currentTransition ?? null,
         },
     ].filter((slice) => slice.round < input.currentRound || slice.round === input.currentRound);
     const enabledCommands = new Set(input.commands.filter((command) => command.enabled).map((command) => command.name));
@@ -167,10 +169,19 @@ export function deriveContractItemStatuses(input) {
     const committingRound = slices[slices.length - 1];
     const blocked = committingRound?.blocked === true;
     const allVerified = items.length > 0 && verifiedCount === items.length;
+    // v3.9.9 closure priority: blocked > superseded > verified > open.
     // A blocked declaration is the Agent's protocol action and closes the
-    // contract first. Item statuses remain machine facts (verified items can
-    // still be listed), but a blocked closure can never also read as verified.
-    const closure = blocked ? "blocked" : allVerified ? "verified" : "open";
+    // contract first. A transition supersedes only when its target is THIS
+    // contract; an inert/abnormal target is ignored rather than closing a
+    // contract the Agent never named.
+    const superseded = !blocked &&
+        committingRound?.transition !== null &&
+        committingRound?.transition !== undefined &&
+        committingRound.transition.contract_id === contract.id;
+    const closure = blocked ? "blocked"
+        : superseded ? "superseded"
+            : allVerified ? "verified"
+                : "open";
     return {
         contractId: contract.id,
         closure,

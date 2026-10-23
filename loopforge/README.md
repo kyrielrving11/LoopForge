@@ -72,10 +72,24 @@ observations remain unknown; they are not treated as a pass or an empty diff.
 
 An Agent may propose a Round Contract for a bounded deliverable. Its acceptance
 items bind to configured verification commands. LoopForge validates the
-structure, references, bindings, and file boundary. An item becomes verified
-when the Agent claims it is met and all bound commands pass in the closing
-round with the declared binding intact. LoopForge does not judge whether the
-deliverable or its tests are semantically appropriate.
+structure, references, and bindings; the Agent's optional `scope` is a
+report-only intent statement (drift is an info fact, not a rejection). An item
+becomes verified when the Agent claims it is met and all bound commands pass in
+the closing round with the declared binding intact. LoopForge does not judge
+whether the deliverable or its tests are semantically appropriate.
+
+If the active slice is no longer the right route, the Agent can submit an
+explicit `contract_transition` (kind `supersede`, the exact active `rc-*` id,
+and a successor `round_contract` whose acceptance items actually change). The
+old contract closes as `superseded`; its item statuses remain in audit/explain,
+the workspace is not restored, and the redirect round cannot be `completed`.
+A stale target, missing successor, blocked declaration, stop, or unchanged
+items is `contract_invalid`.
+
+Progress is reported as facts with an explicit coverage range. Rules select the
+exact coverage they consume: the stall rule and prompt freshness use the fixed
+Git workspace coverage, so a custom provider's facts are visible in replay and
+explain but cannot affect those decisions.
 
 ## Recovery and durable history
 

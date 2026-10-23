@@ -19,7 +19,7 @@
  *  independent of `work_item`/`scope`, which stay slice-level labels. This is
  *  the opposite of a SubGoal, whose id includes its declaration round.
  */
-import type { ContractItemProposal, ExecutionReport, RoundContractProposal } from "./protocol.js";
+import type { ContractItemProposal, ContractTransition, ExecutionReport, RoundContractProposal } from "./protocol.js";
 import type { ObservationDelta } from "./evidence-provider.js";
 import type { CommittedRoundView } from "./committed-round.js";
 import type { CommandEvidencePolicy } from "./policy.js";
@@ -53,6 +53,23 @@ export declare function activateContract(proposal: RoundContractProposal, declar
  *  contract. Never compare by id (8 hex = 32 bits; a collision must not merge
  *  two different contracts). */
 export declare function sameContract(left: RoundContractProposal, right: RoundContractProposal): boolean;
+/** v3.9.9: the ONE current-round fact bundle for contract derivations. Every
+ *  caller passes report/deltas/blocked/transition together, so a consumer can
+ *  no longer forget `stop_reason: "blocked"` or the transition while another
+ *  consumer sees them. */
+export interface CurrentRoundFacts {
+    report: ExecutionReport | null;
+    deltas: ReadonlyArray<ObservationDelta>;
+    /** The round's ONE blocked declaration (outcome OR stop_reason). */
+    blocked: boolean;
+    /** The round's explicit contract redirect, if it declared one. */
+    transition: ContractTransition | null;
+}
+export declare const NO_CURRENT_ROUND_FACTS: CurrentRoundFacts;
+/** Read a committed view's current-round facts. Read views (audit/explain/
+ *  receipt/round-facts) use this instead of hand-building `outcome`-only
+ *  blocked flags. */
+export declare function committedRoundFacts(view: CommittedRoundView): CurrentRoundFacts;
 /** v3.8: The active contract after replaying committed rounds in order. */
 export declare function deriveActiveRoundContract(rounds: ReadonlyArray<CommittedRoundView>, commands?: ReadonlyArray<CommandEvidencePolicy>): ActiveContractView | null;
 /** v3.8: Every criterion id referenced by the contract's items. */
@@ -75,12 +92,8 @@ export declare function deriveRoundContractView(input: {
     /** Committed rounds (rollback-excluded), ascending. */
     rounds: ReadonlyArray<CommittedRoundView>;
     round: number;
-    report: ExecutionReport | null;
-    deltas: ReadonlyArray<ObservationDelta>;
-    /** The round's ONE blocked declaration — a blocked round closes its
-     *  contract. Prefer the explicit boolean; `outcome` is the legacy shape. */
-    blocked?: boolean;
-    outcome?: string | null;
+    /** The single bundle for the round being evaluated. */
+    current: CurrentRoundFacts;
     commands: ReadonlyArray<CommandEvidencePolicy>;
 }): {
     contract: ActiveContractView | null;

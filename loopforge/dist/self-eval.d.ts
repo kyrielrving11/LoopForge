@@ -1,7 +1,7 @@
 /** Structured self-evaluation parsing and normalization — pure functions.
  * The MCP boundary validates required fields before these helpers run.
  */
-import { type ExecutionReport, type PromptRequests, type RoundContractProposal, type SelfEvaluation, type SubGoalUpdate, type SubmissionDiagnostic, type SubmissionDiagnosticHandling } from "./protocol.js";
+import { type ContractTransition, type ExecutionReport, type PromptRequests, type RoundContractProposal, type SelfEvaluation, type SubGoalUpdate, type SubmissionDiagnostic, type SubmissionDiagnosticHandling } from "./protocol.js";
 /** A diagnostics sink. `buildSelfEvaluation` keeps working without one (the
  *  engine parses historical last_round_result payloads); the submission
  *  boundary always supplies one. */
@@ -110,6 +110,24 @@ export interface ContractValidationError {
     reason: string;
     detail: string;
 }
+export declare const CONTRACT_TRANSITION_REASON_MAX = 500;
+/** v3.9.9: LENIENT contract-transition parser. Historical/externally written
+ *  data produces a diagnostic and is dropped; it never closes a contract and
+ *  never throws. The strict submission boundary is the only commit check. */
+export declare function parseContractTransition(raw: unknown, sink?: DiagnosticSink): ContractTransition | undefined;
+/** v3.9.9: the facts the strict transition boundary needs, derived from the
+ *  SAME active contract the prompt rendered. `observed: false` means the
+ *  session's committed facts could not be read — structure stays strict, but
+ *  the active-contract-dependent checks fail open. */
+export interface ContractTransitionValidationContext {
+    observed: boolean;
+    activeContractId: string | null;
+    /** Normalized content identity of every ACTIVE item. */
+    activeItemIdentities: ReadonlySet<string> | null;
+}
+/** v3.9.9: strict transition boundary. Every failure is `contract_invalid` and
+ *  the same roundId may retry with a corrected payload. */
+export declare function validateContractTransition(raw: Record<string, unknown>, context: ContractTransitionValidationContext): ContractValidationError[];
 /** v3.8: Everything the strict contract boundary needs to judge a declaration
  *  against the SAME derived state the agent saw in its prompt. Injected rather
  *  than imported so the validator stays a pure, unit-testable function. */
@@ -127,9 +145,6 @@ export interface ContractValidationContext {
     displayedSubGoalIds: ReadonlySet<string> | null;
     /** Configured AND enabled AND after-capable evidence command. */
     isConfiguredCommand: (name: string) => boolean;
-    /** Returns a detail string when a declared scope entry leaves the
-     *  workspace, or null when it is contained. */
-    checkScopeEntry: (entry: string) => string | null;
 }
 /** v3.8: Strict STRUCTURAL boundary for the Round Contract declaration and
  *  the contract item claims — the same pre-advance contract as
@@ -139,9 +154,10 @@ export interface ContractValidationContext {
  *
  *  Declaration strictness: items must exist and stay within CONTRACT_LIMITS;
  *  every item must bind at least one configured, enabled, after-capable
- *  command; scope entries must stay inside the workspace; criterion and
- *  sub-goal references must be well-formed, and sub-goal references must name
- *  a sub-goal that actually exists. The limits are enforced HERE rather than
+ *  command; criterion and sub-goal references must be well-formed, and
+ *  sub-goal references must name a sub-goal that actually exists. `scope` is
+ *  deliberately NOT part of this boundary (v3.9.9): it is optional,
+ *  report-only intent and is normalized leniently. The limits are enforced HERE rather than
  *  by silently truncating in the lenient parser — a declaration is a
  *  boundary, not a suggestion.
  *

@@ -31,7 +31,6 @@ function context(
     knownCriterionIds: new Set([CRITERION_ID]),
     displayedSubGoalIds: new Set([SUBGOAL_ID]),
     isConfiguredCommand: (name) => name === "verify",
-    checkScopeEntry: () => null,
     ...overrides,
   };
 }

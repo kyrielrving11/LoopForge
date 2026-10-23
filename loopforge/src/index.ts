@@ -57,6 +57,9 @@ export type {
   PromptArtifact,
   PromptCoverage,
   PromptRequestEffect,
+  ContractTransition,
+  ProgressCoverage,
+  ProgressSnapshot,
   SubmissionDiagnostic,
   SubmissionDiagnosticHandling,
   SubmissionGuidance,
@@ -165,6 +168,10 @@ export {
   isPassedAfterObservation,
   deriveObservationDeltas,
   gitDeltaState,
+  isValidProgressSnapshot,
+  observationVersionIssue,
+  expectedObservationSchemaVersion,
+  coverageKey,
 } from "./evidence-provider.js";
 export type {
   EvidenceProvider,
@@ -173,8 +180,22 @@ export type {
   EvidenceCollectOptions,
   EvidenceProviderFactory,
   ObservationDelta,
+  ObservationProgress,
+  ObservationVersionIssue,
   GitDeltaState,
 } from "./evidence-provider.js";
+export {
+  deriveProgressWindow,
+  deriveRoundProgress,
+  GIT_WORKSPACE_COVERAGE,
+  STALL_PROGRESS_COVERAGE,
+} from "./progress.js";
+export type {
+  ProgressCoverageSelector,
+  ProgressSelector,
+  ProgressWindow,
+  RoundProgress,
+} from "./progress.js";
 
 // Structured tracing and policy effectiveness metrics (v1.20)
 export {

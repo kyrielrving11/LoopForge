@@ -7,6 +7,7 @@ import {
   makeSelfEvaluation,
   type ContractItemClaim,
   type ContractItemProposal,
+  type ContractTransition,
   type CriterionClaim,
   type ExecutionReport,
   type PromptRequests,
@@ -731,57 +732,208 @@ export interface ContractValidationError {
 }
 
 const SUBGOAL_ID_RE = /^sg-[a-f0-9]{8}$/;
+const CONTRACT_ID_RE = /^rc-[a-f0-9]{8}$/;
+export const CONTRACT_TRANSITION_REASON_MAX = 500;
 
-/** v3.8: `scope` is the round's declared file boundary, so containment is a
- *  trust boundary like every other workspace path — a declaration that names
- *  `/etc` or `../outside` is rejected, not silently normalized into a string
- *  the drift check can never match. */
-function validateContractScope(
-  scope: unknown,
-  checkScopeEntry: (entry: string) => string | null,
-  errors: ContractValidationError[],
-): void {
-  if (scope === undefined) {
-    errors.push({
-      field: "round_contract",
-      reason: "missing_scope",
-      detail: "scope is required (use [] for no scope constraint)",
-    });
-    return;
+/** v3.9.9: LENIENT contract-transition parser. Historical/externally written
+ *  data produces a diagnostic and is dropped; it never closes a contract and
+ *  never throws. The strict submission boundary is the only commit check. */
+export function parseContractTransition(
+  raw: unknown,
+  sink?: DiagnosticSink,
+): ContractTransition | undefined {
+  if (raw === undefined) return undefined;
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    sink?.push("contract_transition", "invalid_entry", "dropped",
+      "expected a contract-transition object; the value was dropped");
+    return undefined;
   }
-  if (!Array.isArray(scope)) {
-    errors.push({
-      field: "round_contract",
-      reason: "invalid_scope",
-      detail: "scope must be an array of workspace-relative paths",
-    });
-    return;
-  }
-  if (scope.length > CONTRACT_LIMITS.scope) {
-    errors.push({
-      field: "round_contract",
-      reason: "too_many_scope_entries",
-      detail: `scope may list at most ${CONTRACT_LIMITS.scope} entries (got ${scope.length})`,
-    });
-  }
-  scope.forEach((entry, index) => {
-    if (typeof entry !== "string" || entry.trim().length === 0) {
-      errors.push({
-        field: "round_contract",
-        reason: "invalid_scope_entry",
-        detail: `scope entry ${index} must be a non-empty string`,
-      });
-      return;
+  const obj = raw as Record<string, unknown>;
+  for (const key of Object.keys(obj)) {
+    if (!["kind", "contract_id", "reason"].includes(key)) {
+      sink?.push(`contract_transition.${key}`, "unknown_field", "dropped",
+        "not a declared contract-transition field; it was dropped");
     }
-    const detail = checkScopeEntry(entry.trim());
-    if (detail) {
+  }
+  if (obj.kind !== "supersede") {
+    // An exact-path diagnostic: the whole transition was dropped, so field
+    // accounting can explain the attempted-but-not-retained path.
+    sink?.push("contract_transition", "invalid_enum", "dropped",
+      "only kind \"supersede\" is supported; the transition was dropped");
+    return undefined;
+  }
+  if (typeof obj.contract_id !== "string" ||
+      !CONTRACT_ID_RE.test(obj.contract_id.trim())) {
+    sink?.push("contract_transition", "invalid_id", "dropped",
+      "contract_id must be an rc-XXXXXXXX id; the transition was dropped");
+    return undefined;
+  }
+  const contractId = obj.contract_id.trim();
+  let reason: string | undefined;
+  if (obj.reason !== undefined) {
+    if (typeof obj.reason !== "string") {
+      sink?.push("contract_transition.reason", "invalid_value", "dropped",
+        "expected a string; the reason was dropped");
+    } else if (obj.reason.length > CONTRACT_TRANSITION_REASON_MAX) {
+      sink?.push("contract_transition.reason", "truncated", "truncated",
+        `longer than ${CONTRACT_TRANSITION_REASON_MAX} chars; truncated to the limit`);
+      reason = obj.reason.slice(0, CONTRACT_TRANSITION_REASON_MAX);
+    } else {
+      reason = obj.reason;
+    }
+  }
+  return {
+    kind: "supersede",
+    contract_id: contractId,
+    ...(reason !== undefined ? { reason } : {}),
+  };
+}
+
+/** v3.9.9: the facts the strict transition boundary needs, derived from the
+ *  SAME active contract the prompt rendered. `observed: false` means the
+ *  session's committed facts could not be read — structure stays strict, but
+ *  the active-contract-dependent checks fail open. */
+export interface ContractTransitionValidationContext {
+  observed: boolean;
+  activeContractId: string | null;
+  /** Normalized content identity of every ACTIVE item. */
+  activeItemIdentities: ReadonlySet<string> | null;
+}
+
+function declaresBlockedRaw(raw: Record<string, unknown>): boolean {
+  return raw.outcome === "blocked" ||
+    raw.stop_reason === "blocked" ||
+    raw.stop_reason === "needs_human_input";
+}
+
+/** v3.9.9: strict transition boundary. Every failure is `contract_invalid` and
+ *  the same roundId may retry with a corrected payload. */
+export function validateContractTransition(
+  raw: Record<string, unknown>,
+  context: ContractTransitionValidationContext,
+): ContractValidationError[] {
+  const transition = raw.contract_transition;
+  if (transition === undefined) return [];
+  const errors: ContractValidationError[] = [];
+  if (transition === null || typeof transition !== "object" ||
+      Array.isArray(transition)) {
+    errors.push({
+      field: "contract_transition",
+      reason: "not_object",
+      detail: "contract_transition must be an object",
+    });
+    return errors;
+  }
+  const obj = transition as Record<string, unknown>;
+  for (const key of Object.keys(obj)) {
+    if (!["kind", "contract_id", "reason"].includes(key)) {
       errors.push({
-        field: "round_contract",
-        reason: "scope_outside_workspace",
-        detail: `scope entry ${index} "${entry.trim()}" ${detail}`,
+        field: "contract_transition",
+        reason: "unknown_field",
+        detail: `contract_transition has unknown field "${key}"`,
       });
     }
-  });
+  }
+  if (obj.kind !== "supersede") {
+    errors.push({
+      field: "contract_transition",
+      reason: "invalid_kind",
+      detail: "contract_transition.kind must be \"supersede\"",
+    });
+  }
+  const contractId = typeof obj.contract_id === "string"
+    ? obj.contract_id.trim()
+    : "";
+  if (!CONTRACT_ID_RE.test(contractId)) {
+    errors.push({
+      field: "contract_transition",
+      reason: "invalid_contract_id",
+      detail: "contract_transition.contract_id must be an rc-XXXXXXXX id",
+    });
+  }
+  if (obj.reason !== undefined &&
+      (typeof obj.reason !== "string" ||
+       obj.reason.length > CONTRACT_TRANSITION_REASON_MAX)) {
+    errors.push({
+      field: "contract_transition",
+      reason: "invalid_reason",
+      detail:
+        `contract_transition.reason must be a string of at most ` +
+        `${CONTRACT_TRANSITION_REASON_MAX} chars`,
+    });
+  }
+
+  // A transition is always a redirect to a successor, never a bare note.
+  const successor = raw.round_contract;
+  if (successor === undefined || successor === null ||
+      typeof successor !== "object" || Array.isArray(successor)) {
+    errors.push({
+      field: "contract_transition",
+      reason: "transition_without_successor",
+      detail:
+        "contract_transition must be submitted together with the successor round_contract",
+    });
+  }
+  if (declaresBlockedRaw(raw)) {
+    errors.push({
+      field: "contract_transition",
+      reason: "transition_conflicts_with_blocked",
+      detail:
+        "a contract transition cannot be combined with a blocked outcome/stop_reason",
+    });
+  }
+  if (raw.should_continue === false) {
+    errors.push({
+      field: "contract_transition",
+      reason: "transition_on_stop",
+      detail:
+        "a contract transition activates a successor next round; it cannot be submitted with should_continue=false",
+    });
+  }
+
+  if (!context.observed) return errors;
+  if (context.activeContractId === null) {
+    errors.push({
+      field: "contract_transition",
+      reason: "no_active_contract",
+      detail: "there is no active contract to supersede",
+    });
+  } else if (contractId !== context.activeContractId) {
+    errors.push({
+      field: "contract_transition",
+      reason: "transition_target_mismatch",
+      detail:
+        `contract_transition.contract_id must equal the active contract ` +
+        `(${context.activeContractId})`,
+    });
+  }
+
+  // "Substantive change" means the ACCEPTANCE CONTENT changed. A new
+  // work_item/scope label alone is not a new slice.
+  if (context.activeItemIdentities && successor &&
+      typeof successor === "object" && !Array.isArray(successor)) {
+    const rawItems = (successor as Record<string, unknown>).items;
+    if (Array.isArray(rawItems)) {
+      const identities = new Set<string>();
+      for (const item of rawItems) {
+        const identity = rawContractItemIdentity(item);
+        if (identity !== null) identities.add(identity);
+      }
+      if (identities.size > 0 &&
+          identities.size === context.activeItemIdentities.size &&
+          [...identities].every((identity) =>
+            context.activeItemIdentities!.has(identity))) {
+        errors.push({
+          field: "contract_transition",
+          reason: "transition_without_change",
+          detail:
+            "the successor's acceptance items are identical to the active " +
+            "contract's; changing only work_item/scope is not a new slice",
+        });
+      }
+    }
+  }
+  return errors;
 }
 
 function validateContractItem(
@@ -979,9 +1131,6 @@ export interface ContractValidationContext {
   displayedSubGoalIds: ReadonlySet<string> | null;
   /** Configured AND enabled AND after-capable evidence command. */
   isConfiguredCommand: (name: string) => boolean;
-  /** Returns a detail string when a declared scope entry leaves the
-   *  workspace, or null when it is contained. */
-  checkScopeEntry: (entry: string) => string | null;
 }
 
 /** v3.8: Strict STRUCTURAL boundary for the Round Contract declaration and
@@ -992,9 +1141,10 @@ export interface ContractValidationContext {
  *
  *  Declaration strictness: items must exist and stay within CONTRACT_LIMITS;
  *  every item must bind at least one configured, enabled, after-capable
- *  command; scope entries must stay inside the workspace; criterion and
- *  sub-goal references must be well-formed, and sub-goal references must name
- *  a sub-goal that actually exists. The limits are enforced HERE rather than
+ *  command; criterion and sub-goal references must be well-formed, and
+ *  sub-goal references must name a sub-goal that actually exists. `scope` is
+ *  deliberately NOT part of this boundary (v3.9.9): it is optional,
+ *  report-only intent and is normalized leniently. The limits are enforced HERE rather than
  *  by silently truncating in the lenient parser — a declaration is a
  *  boundary, not a suggestion.
  *
@@ -1049,7 +1199,10 @@ export function validateContractShape(
           detail: `work_item may be at most ${CONTRACT_LIMITS.workItem} chars`,
         });
       }
-      validateContractScope(obj.scope, context.checkScopeEntry, errors);
+      // v3.9.9: `scope` is optional, report-only intent. It is normalized
+      // leniently by parseRoundContract (trim, cap, drop non-strings) and no
+      // longer participates in this strict boundary — no required key, no
+      // workspace containment, no whole-contract rejection.
       const items = obj.items;
       if (!Array.isArray(items) || items.length === 0) {
         errors.push({
@@ -1278,6 +1431,7 @@ export function buildSelfEvaluation(
     no_change_reason: noChangeReason || undefined,
     prompt_requests: parsePromptRequests(raw.prompt_requests, sink),
     round_contract: parseRoundContract(raw.round_contract, sink),
+    contract_transition: parseContractTransition(raw.contract_transition, sink),
   });
 }
 

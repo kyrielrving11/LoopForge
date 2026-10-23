@@ -66,7 +66,7 @@ export interface AuditContract {
     declared_at_round: number;
     first_active_round: number;
     last_active_round: number;
-    closure: "open" | "verified" | "blocked";
+    closure: "open" | "verified" | "blocked" | "superseded";
     closed_at_round: number | null;
     /** Item statuses as of the last round the contract was execution-relevant. */
     items: Array<{
@@ -79,6 +79,8 @@ export interface AuditContractSummary {
     contracts: AuditContract[];
     /** Contracts whose final closure is still `open`. */
     open: number;
+    /** v3.9.9: contracts the Agent explicitly abandoned via a transition. */
+    superseded: number;
     verifiedItems: number;
     insufficientItems: number;
     contradictedItems: number;

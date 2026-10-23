@@ -85,6 +85,55 @@ describe("ReplayBackend", () => {
     );
   });
 
+  it("v3.9.9: exposes per-provider progress facts and committed transitions", () => {
+    const git = (phase: "before" | "after", head: string) => ({
+      schemaVersion: 2,
+      providerId: "git",
+      kind: "git" as const,
+      phase,
+      startedAt: 0,
+      finishedAt: 0,
+      status: "observed" as const,
+      files: [],
+      data: {
+        dirty: [],
+        fingerprints: {},
+        head,
+        coverage: "tracked_and_non_ignored_untracked" as const,
+      },
+    });
+    store.appendEntry(lineage(1));
+    store.appendEntry(committedFeedbackRound(1, {
+      loopId: "test",
+      beforeEvidence: [git("before", "aaa")],
+      roundEvidence: [git("after", "bbb")],
+      contractTransition: {
+        kind: "supersede",
+        contract_id: "rc-12345678",
+        reason: "route changed",
+      },
+    }));
+    const [row] = replay.timeline("test");
+    assert.equal(row?.machine_progress, "changed");
+    assert.deepEqual(row?.progress_facts, [{
+      kind: "git",
+      providerId: "git",
+      coverage: {
+        domain: "workspace",
+        object: "git-motion",
+        scope: "tracked_and_non_ignored_untracked",
+        version: 2,
+      },
+      state: "changed",
+      complete: true,
+    }]);
+    assert.deepEqual(row?.contract_transition, {
+      kind: "supersede",
+      contract_id: "rc-12345678",
+      reason: "route changed",
+    });
+  });
+
   it("returns a sorted factual timeline", () => {
     appendRound(store, 3);
     appendRound(store, 1);

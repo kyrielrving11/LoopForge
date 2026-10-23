@@ -488,7 +488,7 @@ describe("v3.9.2 — files reconciliation", () => {
     before: null,
     after: null,
     changedFiles,
-    progress: "unknown" as const,
+    progress: null,
   });
 
   it("compares the report with the shared Git change set", () => {

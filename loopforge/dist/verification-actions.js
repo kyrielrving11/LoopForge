@@ -29,7 +29,7 @@ export const VERIFICATION_ACTIONS = {
     // this table entry and fell back to the generic action).
     verification_entrypoint_modified: "Restore each entrypoint file to its round-start state (remove a file created this round), or use recovery/rollback so it is part of the starting state. Re-running on a rewritten entrypoint cannot verify this round.",
     test_files_modified: "Re-run the verification command after the test-file changes and report the fresh output.",
-    round_scope_drift: "Revert the out-of-scope changes, or declare outcome blocked and propose a successor contract whose scope covers EVERY drifted file. Scope drift is a machine fact and is not waivable by explanation.",
+    round_scope_drift: "Report only — drift does not block the round. If the active slice is no longer the right route, use contract_transition with the successor contract; otherwise treat this as an audit signal and continue.",
     // v3.8 — item model: claimed-but-unverified debt
     contract_items_unverified: "Run the bound command(s) for each claimed item so they are observed passing, or report the item as remaining (or declare outcome=\"blocked\").",
     contract_premature: "The ACTIVE contract is still open — restate it unchanged to continue it; a different contract is ignored until every item is verified or the round reports blocked.",

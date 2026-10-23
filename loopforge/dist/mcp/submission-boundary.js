@@ -25,11 +25,10 @@
 import { queryLoopEntries } from "../loop-store.js";
 import { deriveActiveRoundContract } from "../round-contract.js";
 import { derivationRounds, pendingRollbackDirective } from "../committed-round.js";
-import { boundedEmergedSubtasks, normalizeSelfEvaluation, parseSubGoalUpdates, validateContractShape, validateCoreSelfEvaluation, validateSubGoalUpdatesShape, } from "../self-eval.js";
+import { boundedEmergedSubtasks, normalizeSelfEvaluation, parseSubGoalUpdates, validateContractShape, validateContractTransition, validateCoreSelfEvaluation, validateSubGoalUpdatesShape, } from "../self-eval.js";
 import { deriveEmergedItems, deriveSubGoals, validateSubGoalUpdates, } from "../subgoal-state.js";
 import { isConfiguredCommand } from "../policy.js";
-import { scopeEntryDetail } from "../workspace.js";
-import { deriveCriterionId, entryRound, isRecord, uniqueNormalized, } from "../token-utils.js";
+import { canonicalContractItemText, deriveCriterionId, entryRound, isRecord, uniqueNormalized, } from "../token-utils.js";
 import { latestObjective } from "../loop-compiler.js";
 import { deriveConstraintProvenance, resolveConstraintRetractions, } from "../constraint-lifecycle.js";
 import { getPolicy } from "../policy.js";
@@ -337,7 +336,7 @@ function contractShapeErrors(store, session, submission, subGoals, criteria) {
             .filter((subGoal) => subGoal.status !== "done" && subGoal.status !== "canceled")
             .map((subGoal) => subGoal.id))
         : null;
-    return validateContractShape(submission, {
+    const shapeErrors = validateContractShape(submission, {
         activeItemIds: session
             ? new Set((active?.items ?? []).map((item) => item.id))
             : null,
@@ -346,7 +345,17 @@ function contractShapeErrors(store, session, submission, subGoals, criteria) {
             : null,
         displayedSubGoalIds: displayedSubGoals,
         isConfiguredCommand,
-        checkScopeEntry: scopeEntryDetail,
     });
+    // v3.9.9: the transition is a STRUCTURAL boundary like the contract itself.
+    // Target identity and "successor content actually changed" are checked only
+    // when the active contract was observable; structure stays strict either way.
+    const transitionErrors = validateContractTransition(submission, {
+        observed: session !== undefined,
+        activeContractId: active?.id ?? null,
+        activeItemIdentities: active
+            ? new Set(active.items.map((item) => canonicalContractItemText(item)))
+            : null,
+    });
+    return [...shapeErrors, ...transitionErrors];
 }
 //# sourceMappingURL=submission-boundary.js.map

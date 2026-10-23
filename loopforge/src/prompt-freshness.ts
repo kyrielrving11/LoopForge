@@ -19,7 +19,10 @@
 
 import type { PromptFreshness, PromptFreshnessReason } from "./protocol.js";
 import type { CommittedRoundView } from "./committed-round.js";
-import { deriveRoundProgress } from "./progress.js";
+import {
+  deriveRoundProgress,
+  STALL_PROGRESS_COVERAGE,
+} from "./progress.js";
 
 export type { PromptFreshness, PromptFreshnessReason } from "./protocol.js";
 
@@ -70,7 +73,13 @@ function machineActivity(previous: CommittedRoundView): boolean {
 export function derivePromptFreshness(
   previous: CommittedRoundView,
 ): PromptFreshness {
-  const progress = deriveRoundProgress(previous.observationDelta);
+  // v3.9.9: freshness is a LoopForge density decision. It consumes the SAME
+  // Git workspace coverage the stall rule uses — never `"any"`. A custom
+  // provider's changed/unknown must not pin the loop at L1 forever.
+  const progress = deriveRoundProgress(
+    previous.observationDelta,
+    STALL_PROGRESS_COVERAGE,
+  );
   const activity = machineActivity(previous);
   const declared = declaredEvolution(previous);
   const observableNewInformation =

@@ -10,7 +10,7 @@ import { createHash } from "node:crypto";
 import { queryLoopEntries } from "./loop-store.js";
 import type { LoopStore, VaultEntry } from "./loop-store.js";
 import { LoopForgeEngine } from "./engine.js";
-import { deriveObservationDeltas } from "./evidence-provider.js";
+import { deriveObservationDeltas, observationVersionIssue } from "./evidence-provider.js";
 import type { ObservationDelta } from "./evidence-provider.js";
 import type {
   CheckpointRef,
@@ -31,10 +31,7 @@ import {
 } from "./round-coordinator.js";
 import { logEvent } from "./observability.js";
 import { deriveContractId, deriveContractItemIds, isRecord } from "./token-utils.js";
-import {
-  GIT_OBSERVATION_SCHEMA_VERSION,
-  PROMPT_ARTIFACT_SCHEMA_VERSION,
-} from "./protocol.js";
+import { PROMPT_ARTIFACT_SCHEMA_VERSION } from "./protocol.js";
 import { commandConfigHash, getPolicy } from "./policy.js";
 import { policyMetrics } from "./policy-metrics.js";
 import { VaultRoundCommitStore } from "./storage.js";
@@ -481,13 +478,14 @@ function parseMachineObservations(value: unknown): MachineObservation[] | null {
       !isRecord(item.data)
     ) return null;
     // v3.9.1: Git observations moved to schema 2 (complete boundary
-    // fingerprints); command/custom observations remain schema 1. A
-    // mismatched Git observation is a hard break, reported by
-    // legacyTransactionRounds as an "observation" envelope loss.
-    const expectedVersion = item.kind === "git"
-      ? GIT_OBSERVATION_SCHEMA_VERSION
-      : 1;
-    if (item.schemaVersion !== expectedVersion) return null;
+    // fingerprints); command/custom observations remain schema 1. v3.9.9: the
+    // nested custom progress snapshot is inner schema 2. ONE judgment is
+    // shared with legacyTransactionRounds, so the parser can never reject a
+    // round the reporter does not report (or the reverse).
+    if (observationVersionIssue(
+      item.kind, item.schemaVersion, item.data, item.status)) {
+      return null;
+    }
     if (item.kind === "git" && item.status === "observed") {
       const data = item.data;
       if (!Array.isArray(data.dirty) ||
@@ -497,20 +495,6 @@ function parseMachineObservations(value: unknown): MachineObservation[] | null {
           (data.head !== undefined && typeof data.head !== "string") ||
           data.coverage !== "tracked_and_non_ignored_untracked") {
         return null;
-      }
-    }
-    if (item.kind === "custom" &&
-        (item.data.progressCapable !== undefined ||
-         item.data.progress !== undefined)) {
-      if (item.data.progressCapable !== true) return null;
-      const progress = item.data.progress;
-      if (progress !== null) {
-        if (!isRecord(progress) ||
-            progress.schemaVersion !== 1 ||
-            typeof progress.fingerprint !== "string" ||
-            !/^[a-f0-9]{64}$/.test(progress.fingerprint)) {
-          return null;
-        }
       }
     }
     observations.push(item as unknown as MachineObservation);

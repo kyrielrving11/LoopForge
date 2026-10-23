@@ -33,6 +33,7 @@ export const FIELD_ORDER = [
     "objective_refinement",
     "retracted_constraints",
     "round_contract",
+    "contract_transition",
     "worker_results",
     "prompt_requests",
     "compression_checkpoint",
@@ -224,22 +225,45 @@ const GUIDES = [
             "conditions.",
         when: "When no contract is active and a contract command is available; while a " +
             "contract is open, omit it (or restate it unchanged) unless this round " +
-            "closes it and declares a successor.",
+            "closes it and declares a successor — including a `contract_transition` " +
+            "redirect, which REQUIRES the successor here.",
         nature: "proposal",
         decision: "The Agent decides the next slice; LoopForge only validates the declaration",
         downstream: "Becomes active only after this round commits; item ids rci-XXXXXXXX are " +
-            "derived by the runtime.",
+            "derived by the runtime. `scope` is a report-only intent statement and " +
+            "never rejects or blocks a round.",
         toolDescription: "Proposal for the NEXT round's contract. work_item is the bounded " +
             "deliverable this slice produces (an outcome, not an activity) and is " +
             "required for a new proposal. items are acceptance conditions; each " +
-            "item binds its own verify_with commands. scope is the machine-enforced " +
-            "file boundary. Declared here, it becomes the ACTIVE contract only after " +
-            "this round commits. While it is open, omitting it continues the " +
-            "contract; a different proposal is ignored (contract_premature). " +
-            "DECLARATION IS STRICT: missing work_item/scope, an item with no bound " +
-            "command, an unknown/disabled command, a scope entry outside the " +
-            "workspace, a malformed reference, an unknown field, or a count over the " +
-            "limits returns contract_invalid.",
+            "item binds its own verify_with commands. scope is an OPTIONAL, " +
+            "report-only declaration of intended files — it is not enforced. " +
+            "Declared here, it becomes the ACTIVE contract only after this round " +
+            "commits. While it is open, omitting it continues the contract; a " +
+            "different proposal is ignored (contract_premature) unless submitted " +
+            "with contract_transition. DECLARATION IS STRICT: a missing work_item, " +
+            "an item with no bound command, an unknown/disabled command, a " +
+            "malformed reference, an unknown field, or a count over the limits " +
+            "returns contract_invalid.",
+    },
+    {
+        path: "contract_transition",
+        purpose: "Explicitly redirect the ACTIVE Round Contract to a different acceptance " +
+            "slice.",
+        when: "Only while an active contract is open and its slice is no longer the " +
+            "right route. Submit the successor round_contract in the SAME evaluation.",
+        nature: "transition",
+        downstream: "The old contract closes as `superseded` (not verified, not blocked); " +
+            "its item statuses remain visible in audit/explain/receipt. The successor " +
+            "activates next round. The workspace is not restored and the transition " +
+            "round cannot be `completed`.",
+        toolDescription: "Explicit redirection of the ACTIVE contract. kind must be \"supersede\". " +
+            "contract_id must be the rc-XXXXXXXX id rendered for the active contract " +
+            "in this prompt. The successor round_contract is REQUIRED in the same " +
+            "evaluation, and its acceptance items must differ from the active " +
+            "contract's (changing only work_item/scope is not a new slice). Not " +
+            "allowed with a blocked outcome/stop_reason or should_continue=false. " +
+            "The old contract closes as superseded; its unverified items stay in the " +
+            "audit record.",
     },
     {
         path: "worker_results",
@@ -441,7 +465,15 @@ export function fieldExample(path, ctx) {
                         subgoal_refs: [],
                         verify_with: [ctx.commands[0]],
                     }],
-                scope: ["<workspace-relative file or directory>"],
+            };
+        }
+        case "contract_transition": {
+            if (!ctx.activeContract)
+                return null;
+            return {
+                kind: "supersede",
+                contract_id: ctx.activeContract.id,
+                reason: "<why the active slice is no longer the right route>",
             };
         }
         case "worker_results":
@@ -499,6 +531,9 @@ export function isFieldApplicable(path, facts) {
             return facts.activeContract === null &&
                 facts.contractVerificationAvailable &&
                 facts.commands.length > 0;
+        case "contract_transition":
+            // A transition has a target only while a contract is active.
+            return facts.activeContract !== null;
         case "gate_ids":
             return facts.gateEnabled;
         case "no_change_reason":
@@ -546,7 +581,7 @@ function renderContractGuidance(ctx) {
         }
         const claimDecision = GUIDE_BY_PATH.get("execution_report.contract_item_claims")?.decision
             ?? "Claim completed items of the active contract with their real rci- ids";
-        lines.push(`${claimDecision} via \`execution_report.contract_item_claims\`.`, "A claim alone leaves an item insufficient; its bound command must be observed", "passing. Omit `round_contract` to continue this contract; a different proposal", "is ignored (contract_premature). If this round closes the contract and another", "slice follows, declare the successor proposal here.");
+        lines.push(`${claimDecision} via \`execution_report.contract_item_claims\`.`, "A claim alone leaves an item insufficient; its bound command must be observed", "passing. Omit `round_contract` to continue this contract; a different proposal", "is ignored (contract_premature). If this round closes the contract and another", "slice follows, declare the successor proposal here.", "`scope` is your declared intent — a report, not permission. It is not enforced.", "If this slice is no longer the right route, submit `contract_transition`", `(kind "supersede", contract_id "${contract.id}") WITH the successor`, "`round_contract` in the same evaluation; its acceptance items must differ.", "Do not report blocked to change course. The old contract closes as", "`superseded`, its unverified items remain in the audit record, the", "workspace is not restored, and this round cannot be completed.");
         return lines;
     }
     if (!ctx.contractVerificationAvailable || ctx.commands.length === 0) {

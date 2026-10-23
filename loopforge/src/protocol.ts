@@ -152,6 +152,13 @@ export interface SelfEvaluation {
    *  round commits; it is then derived at compile time from committed
    *  rounds — see round-contract.ts. Optional. */
   round_contract?: RoundContractProposal;
+  /** v3.9.9: an explicit contract redirection transaction. The Agent states
+   *  that the ACTIVE contract it saw is no longer the right slice and submits
+   *  its successor in the SAME evaluation. The old contract closes as
+   *  `superseded`; its unverified items remain visible in audit/explain. This
+   *  is a redirect, not a blocked declaration and not a rollback: the
+   *  workspace is untouched and the round cannot be `completed`. */
+  contract_transition?: ContractTransition;
 }
 
 /** v3.9.7: the kind of recovery material a checkpoint represents. `before` is
@@ -424,6 +431,12 @@ export interface SubmissionReceipt {
       after_id: string | null;
       activated: boolean;
       closed: boolean;
+      /** v3.9.9: the ACTIVE contract closed by this round's explicit
+       *  `contract_transition` (report-only fact, derived from the committed
+       *  transition — never inferred from `contract_premature`). */
+      superseded?: boolean;
+      /** v3.9.9: the Agent's transition reason, verbatim (report-only). */
+      transition_reason?: string;
     };
     subgoals_created: Array<{ id: string; description: string }>;
     subgoals_updated: Array<{ id: string; from: string; to: string }>;
@@ -499,7 +512,8 @@ export interface SubmissionGuidance {
   active_contract: {
     id: string;
     work_item?: string;
-    /** Machine-enforced file/directory boundary of the active contract. */
+    /** v3.9.9: the Agent's declared intent boundary. Report-only — it is not
+     *  enforced and never rejects a round. */
     scope: string[];
     declared_at_round: number;
     items: Array<{
@@ -1347,10 +1361,27 @@ export interface RoundContractProposal {
   /** The bounded deliverable this slice produces. Required for NEW
    *  declarations, optional when reading legacy committed history. */
   work_item?: string;
-  /** Files/directories the round may touch. Empty = no scope constraint.
-   *  This is a machine-enforced file boundary, not the deliverable. */
-  scope: string[];
+  /** v3.9.9: the Agent's declared intended file boundary — an optional,
+   *  report-only intent statement. Omission and `[]` both mean "no declared
+   *  intent". It takes part in contract content identity (a restated route is
+   *  a new declaration), but it grants no permission and never rejects a
+   *  round: drift is reported as an info fact only. Required for legacy reads
+   *  of pre-3.9.9 proposals; new declarations may omit it. */
+  scope?: string[];
   items: ContractItemProposal[];
+}
+
+/** v3.9.9: an explicit, one-way redirection of the ACTIVE Round Contract.
+ *  The target id binds the transition to the exact contract the Agent saw, so
+ *  a stale prompt cannot close a different contract. A legal transition
+ *  always carries the successor proposal in the same evaluation. */
+export interface ContractTransition {
+  kind: "supersede";
+  /** Must equal the active contract id (`rc-XXXXXXXX`) rendered in this
+   *  round's prompt. */
+  contract_id: string;
+  /** Agent report, audit only, ≤ 500 chars. */
+  reason?: string;
 }
 
 /** v3.8: The machine's record of what a contract bound at its declaration
@@ -1515,24 +1546,47 @@ export interface CommandObservation extends MachineObservationBase {
   data: CommandObservationData;
 }
 
-/** v3.9.7: a custom provider's progress snapshot. Only the provider's own
+/** v3.9.9: the normalized identity of the evidence range a progress fact
+ *  covers. `domain/object/scope` is a logical identity, not a file path:
+ *  matching is exact — no wildcards, no normalization, no subset inference —
+ *  and `version` must be equal because a different version means the
+ *  provider's fingerprint semantics changed. */
+export interface ProgressCoverage {
+  /** Evidence domain, e.g. "workspace". */
+  domain: string;
+  /** Object/rule inside the domain, e.g. "git-motion". */
+  object: string;
+  /** Normalized coverage identity, e.g. "tracked_and_non_ignored_untracked". */
+  scope: string;
+  /** The provider's own evidence semantics version. */
+  version: number;
+}
+
+/** v3.9.9: a custom provider's progress snapshot. Only the provider's own
  *  stable, content-addressed state digest belongs here; timestamps, durations
- *  and runtime bookkeeping are not progress. `progressCapable: true` plus
- *  `data.progress` (a valid snapshot or null) is persisted on every
- *  observation from that provider, including unavailable/timeout/error, so
- *  replay never depends on the live provider registry. */
+ *  and runtime bookkeeping are not progress. Version 2 adds the coverage
+ *  descriptor and the provider's completeness assertion, and allows a null
+ *  fingerprint on a failed capture (the collector fills the declared coverage
+ *  so "unknown" never disappears). */
 export interface ProgressSnapshot {
-  schemaVersion: 1;
-  /** 64 lowercase hex characters (sha256). */
-  fingerprint: string;
+  /** Shape version of the nested snapshot. The custom observation base schema
+   *  stays 1 — only this nested boundary changed. */
+  schemaVersion: 2;
+  coverage: ProgressCoverage;
+  /** The provider's assertion that this capture covers the whole declared
+   *  range. Display/diagnosis only; `state` remains the authority. */
+  complete: boolean;
+  /** 64 lowercase hex characters (sha256) when observed; null only when the
+   *  capture failed. */
+  fingerprint: string | null;
 }
 
 export interface CustomObservation extends MachineObservationBase {
   kind: "custom";
   data: Record<string, unknown> & {
-    /** Present only on progress-capable providers. */
-    progressCapable?: true;
-    /** null = progress-capable but this capture has no comparable snapshot. */
+    /** Present only when the provider declared `progressCoverage`. A failed
+     *  capture carries the same coverage with `complete:false` and a null
+     *  fingerprint; it is never silently omitted. */
     progress?: ProgressSnapshot | null;
   };
 }

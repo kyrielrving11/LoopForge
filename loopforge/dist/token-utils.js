@@ -134,7 +134,7 @@ export function normalizeText(text) {
 export function canonicalContractText(contract) {
     const canonical = {
         work_item: normalizeText(contract.work_item ?? ""),
-        scope: contract.scope.map(normalizeText),
+        scope: (contract.scope ?? []).map(normalizeText),
         items: contract.items.map((item) => ({
             description: normalizeText(item.description),
             criterion_refs: item.criterion_refs.map(normalizeText),

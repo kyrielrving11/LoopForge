@@ -13,7 +13,11 @@ import {
 import { observedGitHead } from "./git-motion.js";
 import { deriveCommittedSubmissionView } from "./submission-receipt.js";
 import type { SubmissionReceipt } from "./protocol.js";
-import { deriveActiveRoundContract, deriveRoundContractView } from "./round-contract.js";
+import {
+  committedRoundFacts,
+  deriveActiveRoundContract,
+  deriveRoundContractView,
+} from "./round-contract.js";
 import { getPolicy } from "./policy.js";
 import type { VaultEntry } from "./loop-store.js";
 
@@ -47,6 +51,20 @@ export interface ExplainRound {
     changedFiles: string[] | null;
     beforeStatus: string | null;
     afterStatus: string | null;
+    /** v3.9.9: the provider's derived progress fact for this delta, with its
+     *  coverage. This is the same fact the rules select; it is not re-judged. */
+    progress: {
+      kind: "git" | "custom";
+      coverage: {
+        domain: string;
+        object: string;
+        scope: string;
+        version: number;
+      };
+      state: "changed" | "unchanged" | "unknown";
+      complete: boolean;
+      detail?: string;
+    } | null;
   }>;
   /** v3.9.1: the Git boundary facts, from the same shared derivation. */
   files_changed: string[] | null;
@@ -67,6 +85,12 @@ export interface ExplainRound {
     declared_at_round: number;
     closure: string;
     items: Array<{ itemId: string; status: string; reasons: string[] }>;
+  } | null;
+  /** v3.9.9: this round's explicit contract redirect, report-only. */
+  contractTransition: {
+    kind: "supersede";
+    contract_id: string;
+    reason?: string;
   } | null;
 }
 
@@ -112,9 +136,7 @@ export function buildExplain(
     const { contract, statuses } = deriveRoundContractView({
       rounds: all,
       round: view.round,
-      report: view.executionReport,
-      deltas: view.observationDelta,
-      outcome: view.outcome,
+      current: committedRoundFacts(view),
       commands,
     });
     const gitBefore = view.beforeEvidence.find((item) => item.providerId === "git");
@@ -158,6 +180,15 @@ export function buildExplain(
         changedFiles: delta.changedFiles === null ? null : [...delta.changedFiles],
         beforeStatus: delta.before?.status ?? null,
         afterStatus: delta.after?.status ?? null,
+        progress: delta.progress
+          ? {
+              kind: delta.progress.kind,
+              coverage: { ...delta.progress.coverage },
+              state: delta.progress.state,
+              complete: delta.progress.complete,
+              ...(delta.progress.detail ? { detail: delta.progress.detail } : {}),
+            }
+          : null,
       })),
       files_changed: gitDelta?.changedFiles ?? null,
       git_change_state: gitDelta === undefined
@@ -185,6 +216,15 @@ export function buildExplain(
               status: item.status,
               reasons: item.reasons,
             })),
+          }
+        : null,
+      contractTransition: view.contractTransition
+        ? {
+            kind: view.contractTransition.kind,
+            contract_id: view.contractTransition.contract_id,
+            ...(view.contractTransition.reason !== undefined
+              ? { reason: view.contractTransition.reason }
+              : {}),
           }
         : null,
     };
@@ -240,6 +280,15 @@ export function renderExplain(result: ExplainResult): string {
       for (const item of round.contract.items) {
         lines.push(`    ${item.itemId}: ${item.status}${item.reasons.length > 0 ? ` — ${item.reasons[0]}` : ""}`);
       }
+    }
+    if (round.contractTransition) {
+      lines.push(
+        `  contract transition: ${round.contractTransition.kind} ` +
+        `${round.contractTransition.contract_id}` +
+        (round.contractTransition.reason
+          ? ` — ${round.contractTransition.reason.slice(0, 160)} (report only)`
+          : " (report only)"),
+      );
     }
   }
   return lines.join("\n");

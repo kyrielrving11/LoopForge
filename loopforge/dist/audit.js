@@ -16,7 +16,7 @@ import { auditOrder, deriveGate } from "./cognitive-governance.js";
 import { rederiveClaimViewWithFlags, listVerifiedClaims } from "./evidence-claims.js";
 import { isRecord, entryRound } from "./token-utils.js";
 import { legacyTransactionRounds, readOnlyRollbacks, readOnlyRounds, } from "./committed-round.js";
-import { deriveRoundContractView } from "./round-contract.js";
+import { committedRoundFacts, deriveRoundContractView, } from "./round-contract.js";
 import { deriveCommittedSubmissionView } from "./submission-receipt.js";
 import { getPolicy } from "./policy.js";
 /** Build the audit from committed vault entries. Pure, read-only.
@@ -41,9 +41,7 @@ export function buildAudit(loopId, entries, store) {
         contractByRound.set(view.round, deriveRoundContractView({
             rounds: views,
             round: view.round,
-            report: view.executionReport,
-            deltas: view.observationDelta,
-            outcome: view.outcome,
+            current: committedRoundFacts(view),
             commands,
         }));
     }
@@ -132,6 +130,7 @@ export function buildAudit(loopId, entries, store) {
     const contractsSummary = {
         contracts,
         open: contracts.filter((contract) => contract.closure === "open").length,
+        superseded: contracts.filter((contract) => contract.closure === "superseded").length,
         verifiedItems: flatItems.filter((item) => item.status === "verified").length,
         insufficientItems: flatItems.filter((item) => item.status === "insufficient").length,
         contradictedItems: flatItems.filter((item) => item.status === "contradicted").length,
@@ -201,12 +200,20 @@ export function buildAudit(loopId, entries, store) {
     // v3.8: the contract item axis decides completion. A contradicted item is a
     // machine denial; an open contract is unfinished verification; the claim
     // axis only speaks when no contract item exists to speak for it.
+    // v3.9.9: the FINAL round's executed contract closure is the terminal
+    // truth. A loop that ended right after abandoning its slice (superseded) or
+    // declaring blocked did not pass, even when no contract is still open.
+    const lastView = views.length > 0 ? views[views.length - 1] : undefined;
+    const terminalClosure = lastView
+        ? contractByRound.get(lastView.round)?.statuses.closure
+        : undefined;
     let verdict = "passed";
     if (rounds.some((round) => round.checks.some((check) => check.verdict === "failed")) ||
         contractsSummary.contradictedItems > 0) {
         verdict = "contradicted";
     }
     else if (unresolvedUserGates.length > 0 || contractsSummary.open > 0 ||
+        terminalClosure === "superseded" || terminalClosure === "blocked" ||
         (declared > 0 && evidenced === 0)) {
         verdict = "incomplete";
     }

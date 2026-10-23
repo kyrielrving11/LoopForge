@@ -24,6 +24,7 @@ import {
   makeSelfEvaluation,
 } from "../protocol.js";
 import type {
+  ContractTransition,
   CriterionClaim,
   MachineObservation,
   PromptArtifact,
@@ -32,7 +33,12 @@ import type {
   SelfEvaluation,
   VerificationFlag,
 } from "../protocol.js";
-import type { GitDeltaState, ObservationDelta } from "../evidence-provider.js";
+import type {
+  GitDeltaState,
+  ObservationDelta,
+  ObservationProgress,
+} from "../evidence-provider.js";
+import { GIT_WORKSPACE_COVERAGE } from "../git-motion.js";
 import { getPolicy } from "../policy.js";
 import { POLICY_SCHEMA_VERSION } from "../policy.js";
 
@@ -122,6 +128,7 @@ export function manifestFor(evaluation: SelfEvaluation): string[] {
   if ((evaluation.retracted_constraints ?? []).length > 0) fields.push("retracted_constraints");
   if ((evaluation.wrong_assumptions ?? []).length > 0) fields.push("wrong_assumptions");
   if (evaluation.round_contract) fields.push("round_contract");
+  if (evaluation.contract_transition) fields.push("contract_transition");
   if (evaluation.outcome) fields.push("outcome");
   return fields;
 }
@@ -154,6 +161,35 @@ export function promptArtifact(input: {
   };
 }
 
+/** Test-only: the progress fact an after-only fixture delta carries. A
+ *  one-sided pair is never a comparable verdict, so Git always yields an
+ *  `unknown` fact and a custom provider yields one only when it persisted a
+ *  snapshot. */
+function fixtureProgress(
+  observation: MachineObservation,
+): ObservationProgress | null {
+  if (observation.kind === "git") {
+    return {
+      kind: "git",
+      coverage: { ...GIT_WORKSPACE_COVERAGE },
+      state: "unknown",
+      complete: false,
+      detail: "test fixture has no before boundary",
+    };
+  }
+  if (observation.kind === "custom") {
+    const snapshot = observation.data.progress;
+    if (!snapshot) return null;
+    return {
+      kind: "custom",
+      coverage: { ...snapshot.coverage },
+      state: "unknown",
+      complete: snapshot.complete,
+    };
+  }
+  return null;
+}
+
 /** Test-only: wrap raw after observations as after-only deltas. A Git
  *  observation's own `files` is its test-authored change set; command/custom
  *  deltas carry no file-change concept. */
@@ -164,7 +200,7 @@ export function deltasFrom(observations: MachineObservation[]): ObservationDelta
     before: null,
     after: observation,
     changedFiles: observation.kind === "git" ? [...observation.files] : null,
-    progress: observation.kind === "git" ? "unknown" : "not_applicable",
+    progress: fixtureProgress(observation),
   }));
 }
 
@@ -179,7 +215,7 @@ export function deltaAfter(
     before: null,
     after: observation,
     changedFiles,
-    progress: observation.kind === "git" ? "unknown" : "not_applicable",
+    progress: fixtureProgress(observation),
   };
 }
 
@@ -231,6 +267,8 @@ export function committedFeedbackRound(
     contractBinding?: unknown;
     /** v3.8: committed item claims (replaces the legacy `met` list). */
     contractItemClaims?: Array<{ item_id: string; outcome: "met" | "remaining" }>;
+    /** v3.9.9: a committed contract redirect. */
+    contractTransition?: ContractTransition;
     restore?: {
       directiveTransactionId: string;
       redoRound: number;
@@ -246,6 +284,7 @@ export function committedFeedbackRound(
     should_continue: true,
     outcome: opts.outcome,
     round_contract: opts.contract,
+    contract_transition: opts.contractTransition,
     emerged_subtasks: opts.emergedSubtasks ?? [],
     discovered_constraints: opts.discoveredConstraints ?? [],
     execution_report: opts.noExecutionReport
@@ -428,6 +467,9 @@ export function withTransaction(
     ...(entry.round_contract !== undefined
       ? { round_contract: entry.round_contract }
       : {}),
+    ...(entry.contract_transition !== undefined
+      ? { contract_transition: entry.contract_transition }
+      : {}),
   } as unknown as SelfEvaluation;
   const result = {
     action,
@@ -503,6 +545,8 @@ export function mergedLineageRound(
     /** v3.9.1: committed constraint violations and verification flags. */
     constraintViolations?: string[];
     verificationFlags?: VerificationFlag[];
+    /** v3.9.9: a committed contract redirect. */
+    contractTransition?: ContractTransition;
   } = {},
 ): Record<string, unknown> {
   const loopId = opts.loopId ?? "me";
@@ -560,6 +604,7 @@ export function mergedLineageRound(
     should_continue: true,
     outcome: opts.outcome,
     round_contract: opts.contract,
+    contract_transition: opts.contractTransition,
     execution_report: makeExecutionReport({
       files_changed: opts.files ?? [],
       tests_reported: { passed: 0, failed: 0, skipped: 0 },

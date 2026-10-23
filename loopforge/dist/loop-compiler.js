@@ -8,7 +8,7 @@ import { deriveConfiguredCapability, getPolicy } from "./policy.js";
 import { AgentStatus, makeLoopCompileResponse, makeLoopObjective, makeConstraintMeta, } from "./protocol.js";
 import { createCanonicalLoopState, renderCanonicalStateMarkdown, } from "./canonical-state.js";
 import { entryLineage, pendingBacktrackRecord, roundResultFromCommittedRound, derivationRounds, } from "./committed-round.js";
-import { deriveProgressWindow } from "./progress.js";
+import { deriveProgressWindow, STALL_PROGRESS_COVERAGE, } from "./progress.js";
 import { deriveCriterionStatuses as deriveCriterionStatusesFromEntries } from "./criterion-status.js";
 import { derivePromptFreshness, UNKNOWN_PROMPT_FRESHNESS, } from "./prompt-freshness.js";
 import { NO_IN_FLIGHT_ROUND, deriveRoundFacts } from "./round-facts.js";
@@ -253,7 +253,8 @@ export function deriveRecurringFlags(committedRounds) {
  *  — the dashboard then shows no machine row. Display-only companion to the
  *  R4/R5 exculpatory signal. */
 function deriveMachineStatus(rounds, currentRound) {
-    const window = deriveProgressWindow(rounds, currentRound, getPolicy().engine.stall_lookback_rounds);
+    // v3.9.9: the dashboard shows the SAME fact the stall rule consumes.
+    const window = deriveProgressWindow(rounds, currentRound, getPolicy().engine.stall_lookback_rounds, STALL_PROGRESS_COVERAGE);
     if (window.incomplete || window.state === "not_applicable")
         return undefined;
     const changedRounds = window.roundStates.filter((entry) => entry.state === "changed").length;

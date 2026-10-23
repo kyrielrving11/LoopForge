@@ -91,7 +91,9 @@ export interface ContractIdentityItem {
  *  legacy-readable type); the item list is the acceptance surface. */
 export declare function canonicalContractText(contract: {
     work_item?: string;
-    scope: string[];
+    /** v3.9.9: scope is optional and report-only. Omission and `[]` both mean
+     *  "no declared intent", so they keep the same content identity. */
+    scope?: string[];
     items: ContractIdentityItem[];
 }): string;
 /** v3.8: rc-XXXXXXXX — loopId + canonical content. */

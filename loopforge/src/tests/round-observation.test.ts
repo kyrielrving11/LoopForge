@@ -13,8 +13,17 @@ import {
   legacyTransactionRounds,
 } from "../committed-round.js";
 import { gitMotionSignal } from "../git-motion.js";
-import { inFlightGitMotion, machineGitMotionSeries } from "../progress.js";
-import type { GitObservation, MachineObservation } from "../protocol.js";
+import {
+  deriveProgressWindow,
+  deriveRoundProgress,
+  STALL_PROGRESS_COVERAGE,
+} from "../progress.js";
+import type {
+  CustomObservation,
+  GitObservation,
+  MachineObservation,
+  ProgressCoverage,
+} from "../protocol.js";
 import type { VaultEntry } from "../loop-store.js";
 import { fixtureBeforeCheckpointError } from "./_helpers.js";
 
@@ -39,6 +48,30 @@ function gitObservation(
       coverage: "tracked_and_non_ignored_untracked",
     },
   };
+}
+
+const COVERAGE: ProgressCoverage = {
+  domain: "repository",
+  object: "tracker-state",
+  scope: "whole",
+  version: 1,
+};
+
+function customObservation(
+  data: Record<string, unknown>,
+  phase: "before" | "after" = "after",
+): CustomObservation {
+  return {
+    schemaVersion: 1,
+    providerId: "tracker",
+    kind: "custom",
+    phase,
+    startedAt: 0,
+    finishedAt: 0,
+    status: "observed",
+    files: [],
+    data,
+  } as CustomObservation;
 }
 
 function feedbackEntry(
@@ -201,28 +234,40 @@ describe("gitMotionSignal — the one motion definition", () => {
   });
 });
 
-describe("inFlightGitMotion", () => {
+describe("Git progress facts under the explicit selector", () => {
   it("reads the round's own before/after deltas", () => {
     assert.equal(
-      inFlightGitMotion(deriveRoundObservationDelta(
-        [gitObservation([], {}, "aaa")],
-        [gitObservation([], {}, "bbb")],
-      )),
-      true,
+      deriveRoundProgress(
+        deriveRoundObservationDelta(
+          [gitObservation([], {}, "aaa")],
+          [gitObservation([], {}, "bbb")],
+        ),
+        STALL_PROGRESS_COVERAGE,
+      ).state,
+      "changed",
     );
     const noBaseline = deriveRoundObservationDelta([], [gitObservation(["a.ts"])]);
-    assert.equal(inFlightGitMotion(noBaseline), null,
-      "no baseline and no HEAD evidence is unknown, not motion");
+    assert.equal(
+      deriveRoundProgress(noBaseline, STALL_PROGRESS_COVERAGE).state,
+      "unknown",
+      "no baseline and no HEAD evidence is unknown, not motion",
+    );
   });
 
-  it("returns null when Git never observed the round", () => {
-    assert.equal(inFlightGitMotion([]), null);
+  it("is not_applicable when Git never observed the round", () => {
     assert.equal(
-      inFlightGitMotion(deriveRoundObservationDelta(
-        [gitObservation([])],
-        [{ ...gitObservation([]), status: "timeout" }],
-      )),
-      null,
+      deriveRoundProgress([], STALL_PROGRESS_COVERAGE).state,
+      "not_applicable",
+    );
+    assert.equal(
+      deriveRoundProgress(
+        deriveRoundObservationDelta(
+          [gitObservation([])],
+          [{ ...gitObservation([]), status: "timeout" }],
+        ),
+        STALL_PROGRESS_COVERAGE,
+      ).state,
+      "unknown",
     );
   });
 
@@ -231,12 +276,15 @@ describe("inFlightGitMotion", () => {
       [],
       [gitObservation([], {}, "abcdef123456")],
     );
-    assert.equal(inFlightGitMotion(deltas), null,
-      "a before-less boundary is unknown, and a restore adds no motion arm");
+    assert.equal(
+      deriveRoundProgress(deltas, STALL_PROGRESS_COVERAGE).state,
+      "unknown",
+      "a before-less boundary is unknown, and a restore adds no motion arm",
+    );
   });
 });
 
-describe("machineGitMotionSeries", () => {
+describe("progress window under the Git selector", () => {
   it("counts clean committed slices as motion when HEAD advances", () => {
     const views = [
       feedbackEntry(1, {
@@ -252,7 +300,13 @@ describe("machineGitMotionSeries", () => {
         after: [gitObservation([], {}, "ccc333")],
       }),
     ].flatMap((entry) => derivationRounds([entry]));
-    assert.deepEqual(machineGitMotionSeries(views, 4, 3), [true, true, true]);
+    const window = deriveProgressWindow(
+      views, 4, 3, STALL_PROGRESS_COVERAGE);
+    assert.equal(window.state, "changed");
+    assert.deepEqual(
+      window.roundStates.map((entry) => entry.state),
+      ["changed", "changed", "changed"],
+    );
   });
 
   it("treats failed Git captures as unknown and never derives a file delta", () => {
@@ -267,7 +321,11 @@ describe("machineGitMotionSeries", () => {
       ]);
       assert.equal(views[0].observationDelta[0].changedFiles, null,
         "an unobservable after boundary must not manufacture a delta");
-      assert.equal(machineGitMotionSeries(views, 4, 3), null, status);
+      assert.equal(
+        deriveProgressWindow(views, 4, 3, STALL_PROGRESS_COVERAGE).state,
+        "unknown",
+        status,
+      );
     }
   });
 
@@ -280,7 +338,10 @@ describe("machineGitMotionSeries", () => {
       feedbackEntry(2, { after: [gitObservation([], {}, "same")] }),
       feedbackEntry(3, { after: [gitObservation([], {}, "same")] }),
     ]);
-    assert.equal(machineGitMotionSeries(views, 4, 3), null);
+    assert.equal(
+      deriveProgressWindow(views, 4, 3, STALL_PROGRESS_COVERAGE).state,
+      "unknown",
+    );
   });
 });
 
@@ -375,6 +436,71 @@ describe("v3.9.1 — transaction schema 3", () => {
     ]);
     assert.deepEqual(derivationRounds(entries).map((view) => view.round), [1]);
   });
+
+  it("v3.9.9: keeps a custom observation without progress readable", () => {
+    const entry = feedbackEntry(1, {
+      after: [customObservation({})],
+    });
+    assert.deepEqual(legacyTransactionRounds([entry]), []);
+    assert.deepEqual(
+      derivationRounds([entry]).map((view) => view.round), [1],
+      "custom base schema stays 1, so history without progress survives",
+    );
+  });
+
+  it("v3.9.9: reports the retired progressCapable marker as observation legacy", () => {
+    const entry = feedbackEntry(1, {
+      after: [customObservation({
+        progressCapable: true,
+        progress: {
+          schemaVersion: 2,
+          coverage: COVERAGE,
+          complete: true,
+          fingerprint: "a".repeat(64),
+        },
+      })],
+    });
+    assert.deepEqual(legacyTransactionRounds([entry]), [
+      { round: 1, schemaVersion: 1, envelope: "observation" },
+    ]);
+    assert.deepEqual(derivationRounds([entry]), []);
+  });
+
+  it("v3.9.9: reports an inner schema-1 progress snapshot as legacy", () => {
+    const entry = feedbackEntry(1, {
+      after: [customObservation({
+        progress: { schemaVersion: 1, fingerprint: "a".repeat(64) },
+      })],
+    });
+    assert.deepEqual(legacyTransactionRounds([entry]), [
+      { round: 1, schemaVersion: 1, envelope: "observation" },
+    ]);
+    assert.deepEqual(derivationRounds([entry]), []);
+  });
+
+  it("v3.9.9: reads an inner schema-2 snapshot under custom base schema 1", () => {
+    const entry = feedbackEntry(1, {
+      before: [customObservation({
+        progress: {
+          schemaVersion: 2,
+          coverage: COVERAGE,
+          complete: true,
+          fingerprint: "a".repeat(64),
+        },
+      }, "before")],
+      after: [customObservation({
+        progress: {
+          schemaVersion: 2,
+          coverage: COVERAGE,
+          complete: true,
+          fingerprint: "b".repeat(64),
+        },
+      })],
+    });
+    assert.deepEqual(legacyTransactionRounds([entry]), []);
+    const view = derivationRounds([entry])[0];
+    assert.equal(view.observationDelta[0].progress?.state, "changed");
+  });
 });
 
 describe("v3.8 — read-model observation fields", () => {
@@ -417,6 +543,12 @@ describe("v3.8 — read-model observation fields", () => {
         after: [gitObservation(["c.ts"], { "c.ts": "m:1" }, "h2")],
       }),
     ]);
-    assert.deepEqual(machineGitMotionSeries(rounds, 4, 3), [true, false, true]);
+    const window = deriveProgressWindow(
+      rounds, 4, 3, STALL_PROGRESS_COVERAGE);
+    assert.equal(window.state, "changed");
+    assert.deepEqual(
+      window.roundStates.map((entry) => entry.state),
+      ["changed", "unchanged", "changed"],
+    );
   });
 });

@@ -51,6 +51,7 @@ function declaringRound(): CommittedRoundView {
     evaluation: null, executionReport: null, verificationFlags: [], result: null,
     action: "continue", success: false, outcome: null,
     contractProposal: CONTRACT,
+    contractTransition: null,
     contractBinding: { rc_id: "rc-aaaaaaaa", item_ids: [], config_hash_by_command: {} },
     beforeEvidence: [], afterEvidence: [], observationDelta: [],
     normalizationDiagnostics: [], submittedFields: [],
@@ -158,7 +159,7 @@ describe("v3.8 — verified sub-goal facts", () => {
       currentRound: 2,
       currentReport: { contract_item_claims: [{ item_id: itemId(), outcome: "met" }] },
       currentDeltas: [
-        { providerId: "git", kind: "git", before: null, after: null, changedFiles: null, progress: "unknown" },
+        { providerId: "git", kind: "git", before: null, after: null, changedFiles: null, progress: null },
         deltaAfter(commandObservation("passed")),
       ],
       commands: [COMMAND],

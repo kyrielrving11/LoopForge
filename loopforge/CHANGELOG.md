@@ -1,5 +1,75 @@
 # Changelog
 
+## 3.9.9 (2026-10-23)
+
+**The evidence-coverage and contract-redirection release.** Machine progress
+becomes a set of reported facts with an explicit coverage range; a rule selects
+the exact facts it consumes. The Agent can redirect an active Round Contract
+through a typed transaction instead of misreporting it as blocked. `scope`
+remains a useful intent signal but stops being a machine permission.
+
+### Progress facts and coverage
+
+- `ProgressCoverage { domain, object, scope, version }` identifies the evidence
+  range a provider observed. Matching is exact and kind-gated — no wildcards,
+  path normalization, or subset inference.
+- `ObservationDelta.progress` is now a typed fact
+  (`{ kind, coverage, state, complete, detail? }`) or `null`. `state` is the
+  only authority; `complete` is a display/diagnostic assertion.
+- `deriveRoundProgress(deltas, selector)` and
+  `deriveProgressWindow(rounds, currentRound, lookback, selector)` require an
+  explicit selector. Array selectors are ALL-style: a missing required
+  coverage is `unknown` when another has a fact, never `unchanged`. `"any"` is
+  display-only.
+- Stall, the submitted round, prompt freshness, and the machine-status
+  dashboard all use the fixed Git workspace coverage
+  (`GIT_WORKSPACE_COVERAGE`). A custom provider's changed/unknown/unchanged can
+  no longer prevent a stall or pin the loop at L1; replay/explain show every
+  fact.
+- Custom providers declare `progressCoverage` instead of `progressCapable`.
+  Every capture carries a nested `ProgressSnapshot` (inner schema 2) with the
+  declared coverage, a completeness flag and a 64-hex fingerprint; failures
+  carry the same coverage with `complete:false` and a null fingerprint, so an
+  unobservable capture remains an explicit `unknown`.
+- Custom observation base schema stays 1. Only the nested progress snapshot
+  moved to inner schema 2; rounds without progress stay readable, while old
+  inner-1 snapshots and the retired `progressCapable` marker are reported as
+  observation legacy. Transaction envelope remains 5.
+- Capability warnings state when no Git provider is configured: the stall rule
+  then has no workspace evidence basis. This is a fact, not a block.
+
+### Contract redirection
+
+- New `contract_transition { kind: "supersede", contract_id, reason? }`.
+  `contract_id` must equal the active `rc-*` id rendered in the current
+  prompt, and the successor `round_contract` is required in the same
+  evaluation.
+- Strict boundary rejects: no active contract, stale/other target, missing
+  successor, blocked outcome/stop_reason, `should_continue=false`, invalid
+  kind, over-long reason, unknown fields, and a successor whose acceptance
+  items are unchanged (work_item/scope-only edits do not count).
+- Closure priority is `blocked > superseded > verified > open`. A redirect
+  round closes the old contract as `superseded`, keeps every item status for
+  audit, activates its successor next round, never restores the workspace, and
+  cannot be `completed`. Audit's final verdict is `incomplete` when the last
+  executed contract ended superseded or blocked.
+- Verification debt is retired only by an honest abandonment: a superseded
+  contract with no `met` claim on its items produces no debt finding; a round
+  that still claims an old item `met` keeps the finding and its streak.
+- Explain and replay expose the transition; the receipt derives
+  `effects.contract.superseded` / `transition_reason` from the committed
+  transition, never from a `contract_premature` inference.
+
+### Scope is report-only
+
+- `RoundContractProposal.scope` is optional. It no longer requires workspace
+  containment, never rejects a declaration, and is normalized leniently with
+  diagnostics.
+- `round_scope_drift` is now an `info` fact: it never rejects, terminates,
+  backtracks, stalls, or reaches the rejection counter. A persisted
+  `round_scope_drift` streak from an older runtime is drained on load.
+- Prompts render `Declared scope (Agent report; not enforced)`.
+
 ## 3.9.8 (2026-10-23)
 
 **The workspace-checkpoint release.** Rounds remain the cognitive and audit

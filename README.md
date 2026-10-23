@@ -1,193 +1,95 @@
 # LoopForge
 
-**A cognitive state runtime for long-running AI coding tasks.**
+**Durable round infrastructure for coding agents.**
 
-LoopForge runs outside the coding Agent and governs the boundary between
-rounds. It records committed facts, collects independent machine evidence,
-decides whether the current round may commit, and compiles the next prompt
-from persistent state.
+Coding agents can reason and change code. Work that spans multiple turns also
+needs continuity: which results were accepted, what the configured checks
+observed, and where work can safely resume. LoopForge provides that continuity
+around the agent's work.
 
-**Version:** the `version` field in [`loopforge/package.json`](./loopforge/package.json) is the single source of truth. Node.js >= 18. Zero runtime dependencies.
+LoopForge records accepted rounds, preserves machine observations, and prepares
+the next prompt from committed state. The agent remains in control of the task:
+it interprets the request, chooses an approach, changes the workspace, and
+decides when to request recovery. LoopForge makes committed outcomes durable
+and checks the boundaries around them.
 
-> [中文文档](./README.zh-CN.md)
+[中文说明](./README.zh-CN.md) · [Package and integration guide](./loopforge/README.md)
 
-## Why LoopForge?
+## Why LoopForge
 
-Most Coding Agents look impressive on tasks that finish within five rounds,
-but often break down on real software projects that run for more than twenty:
+An agent conversation is not a reliable transaction log. It can contain work
+that was never submitted, a rejected attempt, or changes later abandoned. A
+summary of that conversation can blur the difference between committed work
+and what remains uncertain.
 
-1. **Summary cascade:** Long tasks inevitably hit context limits. Asking an
-   LLM to summarize its own history is a game of broken telephone. Memory gets
-   less reliable each round, and the original objective and hard constraints
-   may be almost entirely forgotten after fifteen rounds.
-2. **Fake success and test escape:** Under pressure, a probabilistic model may
-   edit a test script, weaken an assertion, or simply claim that all tests
-   passed without machine evidence.
-3. **Irreversible workspace pollution:** Without version-control discipline, an
-   Agent that reaches a dead-end architecture keeps patching the contaminated
-   workspace until its context is exhausted.
-4. **Strategic scope drift:** Without a round contract, the model can lose
-   focus during exploration and refactor low-level modules unrelated to the
-   current objective.
+LoopForge gives each round a durable outcome. Accepted work becomes typed,
+committed history; rejected attempts do not. Machine observations are kept with
+the round so later decisions can distinguish an agent's report from what the
+configured checks observed. The next prompt is derived from committed facts,
+not from a separate progress narrative maintained alongside them.
 
-**LoopForge does not perform prompt-technique tricks. It acts as a cold external
-system kernel: immutable event sourcing protects memory, machine exit codes
-check claims, and structured contracts constrain the modification scope. This
-gives a Coding Agent engineering stability across dozens of rounds.**
-
-## Core idea
-
-LoopForge deliberately keeps two sources separate:
-
-- **Committed facts:** typed round documents in the Vault. Rejected and
-  in-flight attempts are not history. One factual source.
-- **Canonical State:** cognitive state compiled from committed facts. Prompts,
-  status views, and the optional state file are derived views. One cognitive
-  source.
-
-The Agent still owns planning, code changes, tool use, and the choice of
-reasoning approach. LoopForge owns the round boundary and the checks around it.
-
-### Memory boundary
-
-LoopForge is not the Agent's memory. The prompt carries the current governance
-projection: objective, criteria, constraints, the active contract and its
-acceptance conditions, active sub-goals, machine findings and recovery facts.
-Agent-authored progress summaries (`output_summary`) remain committed reports
-for audit, replay, explain and backtrack diagnosis, but they are not replayed
-into every prompt. Full history lives in the derived state file and the
-read-only views; it is read on demand, not pushed every round.
-
-The fixed prompt header states the precedence rule: for committed rounds,
-active governance and machine verification, LoopForge's current projection
-wins; the Agent's session history and long-term memory are background and may
-contain unsubmitted, rejected or rolled-back work. A current explicit user
-instruction defines the task.
+## How it works
 
 ```text
-Agent executes work
-  -> submits a structured evaluation (claim)
-  -> LoopForge collects machine evidence
-  -> verification gate
-  -> enforcement gate
-  -> accept / reject / backtrack / terminate
-  -> committed facts
-  -> Canonical State
-  -> next prompt
+LoopForge prepares current committed context
+                    |
+                    v
+Agent chooses and performs the work
+                    |
+                    v
+Agent submits a result or requests recovery
+                    |
+                    v
+LoopForge records observations and applies round rules
+                    |
+          commit, reject, or restore
+                    |
+                    v
+Next prompt from the resulting committed state
 ```
 
-This is the difference from a summary loop:
+An agent report describes what the agent believes happened. It is not proof by
+itself. LoopForge compares reports with available observations, such as Git
+workspace changes and explicitly configured verification commands. If an
+observation is unavailable, LoopForge preserves that uncertainty instead of
+treating it as a pass or as an empty change set.
 
-```text
-Traditional: prompt -> summary -> next prompt -> another summary
-LoopForge:   committed rounds -> Canonical State -> next prompt
-```
+For work that benefits from a bounded slice, the agent can propose a Round
+Contract: a deliverable, acceptance conditions, and commands to check them.
+LoopForge validates the structure and command bindings. An item is verified
+when the agent claims it is met and its bound commands pass in the closing
+round. Whether the proposed deliverable or test is semantically appropriate
+remains the agent's and operator's judgment.
 
-## The contract mental model
+## Recovery with the agent in control
 
-LoopForge does not treat the Agent's output as fact merely because its format
-is valid or its tone is confident. An evaluation comes from the participant
-who performed the work, so it starts as a claim. A Round Contract turns that
-claim into a three-stage process:
+The agent may recognize that its current direction is wrong and request
+recovery to an earlier committed round. LoopForge does not diagnose the
+mistake or choose the destination. It checks that the target is valid, records
+the rollback as a durable event, and verifies the workspace against the target
+snapshot before redo work can be committed.
 
-```text
-Before: declare the next round's contract
-During: execute under the active contract
-After:  close items with independent machine evidence
-```
+LoopForge can also trigger a backtrack when a machine rule requires it. Both
+paths remain visible in history. Redo continues on a child branch, preserving
+the abandoned work for audit without treating it as current work.
 
-### Before: Declaration
+## The responsibility boundary
 
-The Agent submits `round_contract` as a proposal for the next round.
-`work_item` names the bounded deliverable this slice produces (an outcome, not
-an activity) and is required for a new proposal. `items[]` are acceptance
-conditions inside that slice; each item binds its own `verify_with` commands,
-and one command may back several conditions. `scope` is the machine-enforced
-file boundary, not the deliverable. The submission boundary checks structure,
-item limits, command bindings, scope containment, unknown fields, and
-criterion/sub-goal references. A proposal becomes active only after its
-declaring round commits. While the active contract is open, a different
-proposal is ignored; restating it unchanged continues the current contract.
+The agent owns meaning and action: task interpretation, planning, tool use,
+implementation, and the choice to request recovery. LoopForge owns continuity
+and process guarantees: committed round history, machine observations,
+deterministic validation and disposition, and restore-point verification.
 
-Criteria are the operator's acceptance surface, sub-goals are the Agent's
-execution plan, and the Round Contract is the current slice connecting them.
-LoopForge does not auto-decompose one layer into another or judge semantic
-fit; relationships are explicit `criterion_refs`/`subgoal_refs` only.
+LoopForge exists to help the agent's own reasoning and course corrections
+survive across rounds. It does not replace them with a fixed plan or a
+harness-authored account of progress.
 
-### During: Execution
+LoopForge does not execute the coding task, guarantee that a task is correct or
+complete, or manage the agent's private conversation memory. Its prompt carries
+current committed governance facts. The optional state file is a derived view,
+not another source of truth.
 
-The Agent works under the active contract. The **verification gate** checks
-claim consistency, evidence integrity, plan and contract conformance, and
-progress and recovery state. It compares the Agent's claims with Git snapshots,
-progress-capable provider observations, configured command observations, and
-committed round history. Progress is four-state — changed / unchanged / unknown
-/ not applicable — and only a proven unchanged window plus a proven unchanged
-submitted round can stall. A change outside the active contract's declared
-scope produces `round_scope_drift`, a machine fact that cannot be waived by
-explanation.
-
-### After: Closure
-
-The Agent may claim that an item is complete, but the item becomes `verified`
-only when every bound command passes in the closing round's after phase and the
-command configuration and entrypoint remain trustworthy. An unsupported claim
-is `insufficient`; a failed observation is `contradicted`. The contract closes
-only when every item is `verified` or the Agent reports `outcome: "blocked"`.
-
-The **enforcement gate** applies the consequences of these checks through an
-ordered policy: accept, reject, backtrack, or terminate. Repeated failure of
-the same check escalates instead of becoming an infinite retry loop. Agent
-output can explain intent and claim completion, but it cannot create evidence,
-mark an item `verified`, cancel a machine contradiction, or complete a contract
-by itself.
-
-Sub-goals may evolve during execution: `emerged_subtasks` can add work and
-`subgoal_updates` explicitly changes the state of an existing sub-goal.
-LoopForge does not use fuzzy intent or similarity to judge sub-goal drift. The
-machine-enforced boundary is the contract scope: if newly discovered work
-requires files outside the active scope, close the current contract first,
-then submit a new proposal with the expanded scope.
-
-## What makes it different
-
-### Round dispositions
-
-After strict payload validation, LoopForge collects before and after
-observations, runs the verification gate, and lets the enforcement gate apply
-its policy. The result is an explicit round disposition:
-
-- **Accept:** commit the round and continue.
-- **Reject:** commit no round and retry the same logical `roundId`.
-- **Recovery:** the Agent may abandon the current branch with a top-level
-  `recovery: { target_round, reason }` request. LoopForge validates the target
-  against committed history and an observed Git restore point, records a
-  rollback directive event, and lets the Agent restore the workspace; the redo
-  is checked against that point. LoopForge never chooses the target or judges
-  the reason. Machine-origin backtrack uses the same directive record.
-- **Terminate:** stop the loop without writing a rejected or unsafe attempt as
-  normal history.
-
-The operator's task, success criteria, and hard constraints are written once at
-`loopforge_start` and are immutable. The Agent may add discovered constraints,
-report wrong assumptions, or stop blocked; it cannot revise or retract the
-operator acceptance surface.
-
-### Contracts close only on machine-backed facts
-
-A Round Contract is a bounded deliverable (`work_item`) plus acceptance
-conditions (`items`) bound to evidence commands. An item becomes `verified` only
-when the Agent claims it is met and every bound command is observed passing in
-the closing round. Claimed but unbacked work is recorded as `insufficient`,
-creating bounded verification debt instead of silently passing.
-
-### Recovery does not rewrite history
-
-Rejected attempts never enter committed history. Backtrack preserves valid
-discoveries, records failed approaches and falsified assumptions, checks that
-the workspace was restored on the next submission, and lets a successful redo
-replace the rollback record.
-
-## Install and connect
+## Install
 
 ```bash
 npm install -g loopforge
@@ -195,84 +97,10 @@ loopforge init --client claude
 claude mcp add loopforge -- npx loopforge mcp
 ```
 
-The MCP service is the primary integration. It supports Claude Code, Codex CLI,
-and other MCP-compatible clients. The package also provides a TypeScript
-library for custom integrations. See [`loopforge/README.md`](./loopforge/README.md).
-
-## One round in practice
-
-1. The user calls `loopforge` and declares the task, success criteria, and hard
-   constraints.
-2. LoopForge returns a prompt and a stable `roundId`.
-3. The Agent changes the workspace and submits a structured `evaluation` with
-   `loopforge_next` — or, to abandon the current branch, a top-level
-   `recovery: { target_round, reason }` instead of an evaluation.
-4. LoopForge validates the payload, observes the workspace, verifies the claim,
-   and returns the round disposition. For recovery it validates the target and
-   records a rollback directive event instead of a work round.
-5. An accepted round enters history; the next prompt is compiled from the new
-   committed state. A recovery returns the redo prompt for the restored point.
-
-The four core evaluation fields are strict: `success`, `output_summary`,
-`constraint_violations`, and `should_continue`. A malformed core payload
-returns `evaluation_invalid`, can be retried for the same round, and does not
-modify the session, Vault, gates, rejection counter, or metrics. Round Contract
-declarations and `contract_item_claims` are also strict structural boundaries.
-
-## Architecture
-
-```text
-External Agent
-       |
-       v
-Submission boundary
-  strict structure, same-round retry
-       |
-       v
-Round lifecycle
-  observations -> verification -> enforcement
-       |
-       +--> reject / terminate: no committed round
-       |
-       +--> accept / stop / backtrack: commit transaction decision
-                                      |
-                                      v
-                           CommittedRoundView
-                         one history decoder/window
-                         /          |          \
-                    Replay       Audit      Canonical State
-                  what happened  evidence   cognitive facts
-                                                   |
-                                          prompt / status / state file
-                                                   |
-                                                   v
-                                            next Agent round
-```
-
-All history consumers use the same `CommittedRoundView` and derivation
-window. Replay answers what happened, Audit checks fact completeness and
-evidence, and Explain answers why a round was decided as it was. None of them
-is a second persistence source.
-
-## Scope boundaries
-
-LoopForge is not a memory database, RAG system, context compressor, or
-unattended Agent. It does not execute the Agent's work. The optional state file
-is a regenerable human-facing view, not the source of truth.
-
-## Core capabilities
-
-- Structured MCP round protocol with stable error codes and retry semantics.
-- Deterministic state reconstruction from committed typed history.
-- Machine evidence from Git, progress-capable custom providers, and explicitly
-  configured commands.
-- Content-addressed `rc-` and `rci-` identities for Round Contracts.
-- Rendered constraint provenance, real-id retractions, and current-object
-  emphasis without duplicating content.
-- Verification debt, scope drift, provider-neutral progress stalls, and
-  recovery decisions.
-- Durable sessions, atomic writes, locks, leases, pause, resume, and replay.
-- L0/L1/L2 prompt density without choosing a reasoning technique for the Agent.
+LoopForge requires Node.js 18 or newer and has zero runtime dependencies. For
+supported clients, CLI options, MCP tools, and the TypeScript API, see the
+[package and integration guide](./loopforge/README.md). The package version is
+defined by [`loopforge/package.json`](./loopforge/package.json).
 
 ## License
 

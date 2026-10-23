@@ -1,156 +1,58 @@
 # LoopForge
 
-**面向长程 AI 编程任务的认知状态运行时。**
+**为编码 Agent 提供持久化的轮次运行保障。**
 
-LoopForge 运行在编码 Agent 外部，负责轮次之间的边界：记录已提交事实，
-采集独立的机器证据，决定本轮是否可以提交，并从持久化状态编译下一轮
-prompt。
+编码 Agent 能够推理并修改代码。跨越多轮的工作还需要持续性：哪些结果已经接受、配置的检查观察到了什么，以及工作可以从哪里可靠地继续。LoopForge 为 Agent 的工作提供这层连续性。
 
-**版本：**以 [`loopforge/package.json`](./loopforge/package.json) 的 `version` 字段为唯一来源。Node.js >= 18。零运行时依赖。
+LoopForge 记录被接受的轮次，保存机器观察，并依据已提交状态准备下一轮 prompt。任务仍由 Agent 主导：它理解需求、选择方案、修改工作区，也决定何时请求恢复。LoopForge 让已提交结果持久可查，并检查轮次边界。
 
-> [English](./README.md)
+[English](./README.md) · [安装与集成手册](./loopforge/README.md)
 
-## 为什么需要 LoopForge？
+## 为什么需要 LoopForge
 
-大多数 Coding Agent 在 5 轮以内的小任务中表现惊艳，但在超过 20 轮的真实大型软件工程中极易崩溃：
+Agent 的对话不是可靠的事务记录。里面可能混有尚未提交的工作、被拒绝的尝试，或后来已经放弃的修改。仅依赖对话摘要，容易模糊哪些工作已经提交、哪些仍不确定。
 
-1. **摘要级联崩溃（Summary Cascade）**：长任务必然面临上下文截断。靠 LLM 自行总结历史就像“传话游戏”，越往后记忆越失真，核心约束与初始目标在 15 轮后往往被遗忘殆尽。
-2. **假象成功与测试逃逸（Fake Success）**：当遇到攻坚难题时，概率模型存在篡改测试脚本、注释断言或仅在自述中声称“所有测试均已通过”的自欺欺人倾向。
-3. **不可逆工作区污染（Workspace Pollution）**：缺乏版本控制的 Agent 一旦走入架构死胡同，就会在受污染的代码库中反复打补丁，陷入死锁直至上下文耗尽。
-4. **范围战略游离（Scope Drift）**：缺乏轮次契约约束，模型极易在探索过程中发生注意力漂移，盲目重构与当前目标无关的底层模块。
+LoopForge 为每轮工作记录持久结果。被接受的工作成为类型化的已提交历史，被拒绝的尝试不会进入历史。机器观察与轮次一起保存，后续处理可以区分 Agent 的报告和配置检查实际观察到的内容。下一轮 prompt 从已提交事实派生，不需要在旁边再维护一套进度叙述。
 
-**LoopForge 不做上层的 Prompt 技巧杂技，而是充当一层冰冷的外部系统内核：用不可变事件溯源保护记忆、用物理机器退出码核验声明、用结构化契约约束修改范围，让 Coding Agent 真正具备跨越数十轮长程任务的工程稳定性。**
-
-## 核心理念
-
-LoopForge 刻意分开两种来源：
-
-- **已提交事实：** Vault 中的类型化轮次文档。被拒绝和进行中的尝试不属于历史。一个事实源。
-- **Canonical State：** 从已提交事实编译出的认知状态。Prompt、状态查询和可选 state file 都是派生视图。一个认知源。
-
-Agent 仍然负责规划、改代码、使用工具和选择推理方式。LoopForge 负责轮次边界以及边界周围的检查。
-
-### 记忆边界
-
-LoopForge 不是 Agent 的记忆系统。Prompt 只携带当前治理投影：目标、criteria、
-约束、活动契约及其验收条件、活动 sub-goals、机器发现和恢复事实。Agent 写的
-`output_summary` 仍作为已提交报告保留给 audit、replay、explain 和 backtrack
-诊断，但不会被每轮重新注入 prompt。完整历史保存在派生的 state file 和只读视图里，
-按需读取，而不是每轮推送。
-
-Prompt 固定头部写明优先级：已提交轮次、活动治理和机器验证以 LoopForge 当前投影为准；
-Agent 的会话历史和长期记忆只是背景，可能包含未提交、被拒绝或已回退的工作。用户当前
-明确指令决定任务目标。
-
-### 三层分解
-
-- **Criteria（`cr-*`）：** 操作者的验收面，回答“什么算完成”。
-- **Subgoals（`sg-*`）：** Agent 的动态执行计划，回答“打算怎么做、当前在做哪块”。
-- **Round Contract（`rc-*`/`rci-*`）：** 本轮的交付切片及其验收条件；`work_item`
-  是交付物，`items` 是验收条件，`verify_with` 绑定每个条件的命令。
-
-三者通过显式 `criterion_refs`/`subgoal_refs` 连接；LoopForge 不做语义相似匹配，
-不自动拆解，也不强制创建 subgoal。`emerged_subtasks` 为 0 是合法结果。
+## 它如何工作
 
 ```text
-Agent 执行工作
-  -> 提交结构化 evaluation（声明）
-  -> LoopForge 采集机器证据
-  -> 验证门
-  -> 执行门
-  -> 接受 / 拒绝 / 回溯 / 终止
-  -> 已提交事实
-  -> Canonical State
-  -> 下一轮 prompt
+LoopForge 准备当前已提交上下文
+              |
+              v
+Agent 选择并执行工作
+              |
+              v
+Agent 提交结果，或请求恢复
+              |
+              v
+LoopForge 记录观察并应用轮次规则
+              |
+       提交、拒绝或恢复
+              |
+              v
+从新的已提交状态准备下一轮 prompt
 ```
 
-这和“摘要循环”的区别是：
+Agent 报告描述它认为发生了什么，但报告本身不是证明。LoopForge 将报告与可用观察对照，例如 Git 工作区变化和明确配置的验证命令。观察不可用时，LoopForge 保留未知状态，不会将它当成通过或空变更。
 
-```text
-传统做法：prompt -> 摘要 -> 下一轮 prompt -> 再次摘要
-LoopForge：已提交轮次 -> Canonical State -> 下一轮 prompt
-```
+对于适合有界分片的工作，Agent 可以提出 Round Contract：一个交付物、验收条件，以及用于检查这些条件的命令。LoopForge 校验契约结构和命令绑定。只有 Agent 声明条目满足，且关闭轮次中的绑定命令通过，条目才会标记为已验证。交付物或测试在语义上是否合适，仍由 Agent 和操作者判断。
 
-## 契约心智模型
+## 由 Agent 主导的恢复
 
-LoopForge 不会因为 Agent 的输出格式正确、语气自信，就把它当成事实。
-evaluation 来自执行工作的参与者，因此首先只被视为声明（claim）。Round Contract
-把声明变成一个三阶段过程：
+Agent 可能意识到当前方向不合适，并请求恢复到较早的已提交轮次。LoopForge 不替它诊断错误，也不替它选择恢复目标。LoopForge 检查目标是否有效，持久记录回滚事件，并在 redo 工作提交前验证工作区是否符合目标快照。
 
-```text
-事前：声明下一轮契约
-事中：在活动契约下执行
-事后：用独立机器证据关闭条目
-```
+如果机器规则要求回退，LoopForge 也可以触发 backtrack。两种路径都会保留在历史中。Redo 在子分支上继续，被放弃的工作仍可审计，但不会被当作当前工作。
 
-### 事前：Declaration
+## Agent 与 LoopForge 的职责边界
 
-Agent 提交 `round_contract`，它是下一轮的契约提案。`work_item` 是本轮交付物
-（结果，而不是活动），新提案必须提供；`items[]` 是验收条件，每个 item 绑定自己的
-`verify_with` 命令；`scope` 是机器强制的文件边界，不是交付物。提交边界检查结构、
-条目数量、命令绑定、scope 包含关系、未知字段以及 criterion / sub-goal 引用。
-只有声明它的轮次成功提交后，提案才会成为 active contract。活动契约未关闭时，不同的
-新提案会被忽略；原样重申则表示继续当前契约。
+Agent 掌握语义和行动：理解任务、制定计划、使用工具、实现方案，以及决定是否请求恢复。LoopForge 负责连续性和流程保障：保存已提交轮次、记录机器观察、确定性地校验并处置提交，以及验证恢复点。
 
-### 事中：Execution
+LoopForge 的作用是让 Agent 自己的推理和方向修正能够跨轮次延续，而不是用固定计划或由 harness 编写的进度叙事取代它们。
 
-Agent 在 active contract 下工作。**验证门（verification gate）**检查声明一致性、
-证据完整性、计划与契约符合性，以及进度与恢复状态；它会把 Agent 的声明与 Git 快照、
-progress-capable provider 的观察、配置命令的观察结果和已提交轮次历史进行比较。
-进展是四态的（changed / unchanged / unknown / not_applicable）：只有已提交窗口和
-当前提交轮次都被证明为 unchanged 才会判定停滞；unknown/not_applicable 永不触发。
-实际变更超出 active contract 的声明范围时，会产生 `round_scope_drift`，这是不能靠
-解释豁免的机器事实。
+LoopForge 不执行编码任务，不保证任务正确或完成，也不管理 Agent 的私有对话记忆。它提供的 prompt 携带当前已提交的治理事实。可选 state file 是派生视图，不是另一套事实来源。
 
-### 事后：Closure
-
-Agent 可以声明某个条目已完成，但只有在关闭轮次的 after 阶段所有绑定命令都通过，且
-命令配置和入口仍可信时，条目才会变成 `verified`。没有证据支持的声明是
-`insufficient`；失败的观察是 `contradicted`。只有所有条目都 verified，或 Agent 报告
-`outcome: "blocked"`，契约才会关闭。
-
-**执行门（enforcement gate）**通过有序策略表执行这些检查的后果：接受、拒绝、回溯
-或终止。同一个检查反复失败时会升级，而不会变成无限重试循环。Agent 的输出可以解释
-意图、声明完成，但不能自行创造证据、把条目标为 `verified`、取消机器矛盾，或单独完成
-契约。
-
-子目标允许在执行过程中演化：`emerged_subtasks` 可以新增工作，`subgoal_updates`
-显式改变已有子目标的状态。LoopForge 不使用模糊意图或相似度来判定子目标漂移。真正
-受机器约束的是契约边界：如果新发现的工作需要修改 active scope 之外的文件，应先关闭
-当前契约，再提交一个包含扩展范围的新契约提案。
-
-## 它的特色
-
-### 轮次处置
-
-通过严格的载荷校验后，LoopForge 采集 before/after 观察，运行验证门，再由执行门
-应用裁决策略。结果是明确的轮次处置：
-
-- **接受：**提交本轮并继续。
-- **拒绝：**不提交任何轮次，使用同一个逻辑 `roundId` 重试。
-- **恢复：**Agent 可以通过顶层 `recovery: { target_round, reason }` 主动放弃当前分支。
-  LoopForge 只验证目标是否在已提交历史中、是否有可观察的 Git 恢复点，记录一条
-  rollback directive 事件，并由 Agent 自己恢复工作区；redo 会接受恢复检查。
-  LoopForge 不选择目标，也不评价理由。机器触发的 backtrack 复用同一种记录。
-- **终止：**停止循环，不把被拒绝或不安全的尝试写成普通历史。
-
-操作者在 `loopforge_start` 写入的 task、success criteria、hard constraints 是不可变的。
-Agent 可以新增 discovered constraints、报告 wrong assumptions，或 blocked 停止；
-不能修改或撤回操作者验收面。
-
-### 契约只有在机器背书后关闭
-
-Round Contract 是一组绑定证据命令的条目。条目只有在 Agent 声明完成，且关闭
-轮次中所有绑定命令都被观察到通过时，才会变成 `verified`。声明但没有机器背书
-的工作会记录为 `insufficient`，形成有上限的验证欠债，而不是被静默放行。
-
-### 恢复不会改写历史
-
-被拒绝的尝试永远不会进入已提交历史。恢复会保留有效发现，记录被放弃的方案和被
-证伪假设，在下一次提交时检查工作区是否恢复；rollback directive 是独立事件，
-redo 成功后仍保留在审计中，不会被普通轮次覆盖。
-
-## 安装与连接
+## 安装
 
 ```bash
 npm install -g loopforge
@@ -158,72 +60,8 @@ loopforge init --client claude
 claude mcp add loopforge -- npx loopforge mcp
 ```
 
-MCP 服务是主要集成方式，支持 Claude Code、Codex CLI 以及其他兼容 MCP 的客户端。
-包也提供 TypeScript 库用于自定义集成，详见 [`loopforge/README.md`](./loopforge/README.md)。
+LoopForge 要求 Node.js 18 或更高版本，且没有运行时依赖。支持的客户端、CLI 参数、MCP 工具和 TypeScript API 见[安装与集成手册](./loopforge/README.md)。项目版本定义于 [`loopforge/package.json`](./loopforge/package.json)。
 
-## 一轮如何运行
-
-1. 用户调用 `loopforge`，声明任务、成功标准以及硬约束。
-2. LoopForge 返回 prompt 和稳定的 `roundId`。
-3. Agent 修改工作区，并通过 `loopforge_next` 提交结构化 `evaluation`。
-4. LoopForge 校验载荷、观察工作区、验证声明，并返回轮次处置结果。
-5. 被接受的轮次进入历史；下一轮 prompt 从新的已提交状态编译。
-
-四个核心 evaluation 字段严格校验：`success`、`output_summary`、
-`constraint_violations` 和 `should_continue`。核心载荷格式错误会返回
-`evaluation_invalid`，允许同一轮重试，且不会修改 session、Vault、门、拒绝计数或
-指标。Round Contract 声明和 `contract_item_claims` 也属于严格结构边界。
-
-## 架构
-
-```text
-外部 Agent
-       |
-       v
-提交边界
-  严格结构，同轮重试
-       |
-       v
-轮次生命周期
-  观察 -> 验证 -> 裁决
-       |
-       +--> 拒绝 / 终止：不提交轮次
-       |
-       +--> 接受 / 停止 / 回溯：提交交易决定
-                                      |
-                                      v
-                           CommittedRoundView
-                         唯一历史解码器与窗口
-                         /          |          \
-                    Replay       Audit      Canonical State
-                  发生了什么     证据审计     认知事实
-                                                   |
-                                          prompt / status / state file
-                                                   |
-                                                   v
-                                            Agent 下一轮
-```
-
-所有历史消费者都使用同一个 `CommittedRoundView` 和派生窗口。Replay 回答“发生了
-什么”，Audit 检查事实完整性和证据，Explain 回答某轮为什么这样判定。它们都不是
-第二套持久化真相。
-
-## 边界
-
-LoopForge 不是记忆数据库、RAG 系统、上下文压缩器，也不是无人值守 Agent。它不会
-执行 Agent 的工作。可选 state file 是可以重新生成的面向人的视图，不是真实来源。
-
-## 核心能力
-
-- 结构化 MCP 轮次协议、稳定错误码和可重试语义。
-- 从已提交类型化历史确定性重建状态。
-- 通过 Git、progress-capable custom provider 和显式配置命令采集机器证据。
-- 使用内容寻址的 `rc-` 与 `rci-` 身份管理 Round Contract。
-- 渲染约束 provenance、按真实 ID 撤回、按当前对象强调且不重复内容。
-- 验证欠债、范围漂移、provider-neutral 进度停滞与恢复裁决。
-- 持久 session、原子写入、锁、lease、暂停、恢复和 replay。
-- L0/L1/L2 只控制 prompt 密度，不替 Agent 选择推理技术。
-
-## License
+## 许可证
 
 MIT

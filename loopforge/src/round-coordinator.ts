@@ -43,6 +43,7 @@ import {
   deriveRecoveryDirective,
 } from "./recovery.js";
 import { driftedEntrypoints } from "./evidence-provider.js";
+import { isRecord } from "./token-utils.js";
 import { declaresBlocked, effectiveSuccess } from "./round-outcome.js";
 import { derivationRounds } from "./committed-round.js";
 import { deriveRoundProgress } from "./progress.js";

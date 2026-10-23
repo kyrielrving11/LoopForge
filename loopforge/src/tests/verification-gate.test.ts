@@ -854,6 +854,11 @@ describe("verification-gate — v2.12 outcome consistency", () => {
                 coverage: "tracked_and_non_ignored_untracked",
               },
             }],
+            beforeCheckpointError: {
+              code: "fixture_unavailable",
+              detail: "test fixture",
+              at: 0,
+            },
             afterEvidence: [{
               schemaVersion: 2,
               providerId: "git",

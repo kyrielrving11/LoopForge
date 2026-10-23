@@ -190,8 +190,10 @@ describe("E2E backtrack lifecycle", () => {
     );
     assert.ok(result.prompt!.includes("Recovery Brief"),
       "the protected recovery section is part of the compiled prompt");
-    assert.match(result.prompt!, /Restored to round\*\*: \d+/,
-      "prompt must reference the restore point");
+    assert.match(result.prompt!, /Restored checkpoint\*\*: `ck-[a-f0-9]{24}`/,
+      "prompt must name the machine-restored checkpoint");
+    assert.match(result.prompt!, /Redo round\*\*: \d+/,
+      "prompt must name the first redo round");
     // v3.7.1: the Recovery Brief carries the derived facts — trigger and the
     // failed (in-flight) approach. v3.9.4: it is inside the artifact, so the
     // delivered prompt equals `prompt_artifact.renderedPrompt`.
@@ -199,8 +201,8 @@ describe("E2E backtrack lifecycle", () => {
       "brief must name the trigger rule");
     assert.match(result.prompt!, /Failure reason\*\*: .*no machine-observed progress/,
       "brief must preserve the machine's reason for the rollback");
-    assert.match(result.prompt!, /Restore requirement\*\*: .*checked against round/,
-      "brief must state the machine-checked restore requirement");
+    assert.match(result.prompt!, /Restored checkpoint\*\*: .*machine-verified by LoopForge/,
+      "brief must state that LoopForge verified the restore");
     assert.ok(result.prompt!.includes(`Failed approach: Round 4: reviewed src/d.ts, no new progress.`),
       "brief must record the failed approach");
     assert.equal(
@@ -353,25 +355,22 @@ describe("E2E Recovery Brief window (v3.7.1)", () => {
     // rollback directive, not in the session. A restart must read the same
     // event.
     const beforeEvent = mgr.replayRollbacks(loopId).at(-1)!;
-    assert.ok(beforeEvent.targetHead, "the directive records the restore HEAD");
-    assert.ok(Array.isArray(beforeEvent.targetDirty),
-      "the directive records the restore point's own dirty files");
-    const baseline = beforeEvent.targetDirty;
+    assert.equal(typeof beforeEvent.targetCheckpointId, "string",
+      "the directive records the target checkpoint id");
+    assert.equal(beforeEvent.redoRound, 4, "the directive records the redo round");
+    const targetCheckpoint = beforeEvent.targetCheckpointId;
     mgr.close();
     mgr = createSessionManager(storeDir);
     assert.ok(mgr.autoResumeAll() >= 1, "the loop resumes after a restart");
     const resumedEvent = mgr.replayRollbacks(loopId).at(-1)!;
-    assert.equal(resumedEvent.targetHead, beforeEvent.targetHead,
-      "the restore HEAD survives a restart");
-    assert.deepEqual(resumedEvent.targetDirty, baseline,
-      "the restore baseline survives a restart");
+    assert.equal(resumedEvent.targetCheckpointId, targetCheckpoint,
+      "the target checkpoint survives a restart");
 
-    // Redo with the same roundId is evaluated and accepted.
-    const restoredRoundId = mgr.get(sessionId)!.roundSnapshot?.roundId;
-    assert.ok(restoredRoundId, "session holds the restored roundId");
+    // Redo with the same held identity is evaluated and accepted.
+    const heldRedo = mgr.get(sessionId)!.roundSnapshot!;
     const redo = await mgr.advance(
       sessionId, "Redo: root cause fixed, tests pass.",
-      fixedEval(4, ["src/fixed.ts"]), restoredRoundId,
+      fixedEval(4, ["src/fixed.ts"]), heldRedo.roundId, heldRedo.transactionId,
     );
     assert.ok(!redo.enforcementAction || redo.enforcementAction === "accept",
       `redo must be accepted, got ${redo.enforcementAction ?? "accept"}`);

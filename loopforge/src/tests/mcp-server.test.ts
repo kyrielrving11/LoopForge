@@ -132,6 +132,7 @@ describe("MCP stdio input boundary", () => {
         arguments: {
           sessionId: "session",
           roundId: "loop:test:round:1",
+          transactionId: "tx-test-1",
           evaluation: {
             success: "yes",
             output_summary: "done",

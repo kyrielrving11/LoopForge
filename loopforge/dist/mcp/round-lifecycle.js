@@ -875,6 +875,7 @@ export class RoundLifecycle {
             sessionId,
             round: session.currentRound,
             roundId: session.roundSnapshot.roundId,
+            ...this.transactionFacts(session),
             prompt: preparedRetry.prompt,
             level: preparedRetry.level,
             enforcementAction: "reject",

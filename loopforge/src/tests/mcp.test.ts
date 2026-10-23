@@ -1485,6 +1485,7 @@ describe("MCP — tool contract (v3.2.1)", async () => {
       validateToolInput("loopforge_next", {
         sessionId: "s1",
         roundId: "r1",
+        transactionId: "tx-1",
         output: "## Round Output",
       });
     });
@@ -1493,6 +1494,7 @@ describe("MCP — tool contract (v3.2.1)", async () => {
       validateToolInput("loopforge_next", {
         sessionId: "s1",
         roundId: "r1",
+        transactionId: "tx-1",
         evaluation: evalParam({ success: false, shouldContinue: true }),
       });
     });
@@ -1501,7 +1503,11 @@ describe("MCP — tool contract (v3.2.1)", async () => {
       validateToolInput("loopforge_next", {
         sessionId: "s1",
         roundId: "r1",
-        recovery: { target_round: 2, reason: "abandon this branch" },
+        transactionId: "tx-1",
+        recovery: {
+          target_checkpoint_id: `ck-${"a".repeat(24)}`,
+          reason: "abandon this branch",
+        },
       });
     });
 
@@ -1884,7 +1890,7 @@ describe("MCP — Round Contract flow", async () => {
     };
     assert.doesNotThrow(() => {
       validateToolInput("loopforge_next", {
-        sessionId: "s", roundId: "r", evaluation: input,
+        sessionId: "s", roundId: "r", transactionId: "tx-r", evaluation: input,
       });
     }, "a well-formed round_contract must pass loopforge_next schema validation");
   });

@@ -31,7 +31,7 @@ import { SessionManager } from "../mcp/session.js";
 import { TOOL_HANDLERS } from "../mcp/tools.js";
 import { VaultSessionStateStore } from "../storage.js";
 import { queryLoopEntries } from "../loop-store.js";
-import { resetPolicy } from "../policy.js";
+import { getPolicy, resetPolicy, setPolicyForTest } from "../policy.js";
 import { MemoryLoopStore } from "./_helpers.js";
 import { advanceWithHeld } from "./_helpers.js";
 import {
@@ -492,6 +492,63 @@ describe("v3.9.7 — SessionManager checkpoint recovery E2E", () => {
         mgr.get(resumed!.sessionId)!.roundSnapshot?.branchId,
         secondDirective.transactionId,
         "the deep redo starts on the second directive's child branch",
+      );
+    } finally {
+      mgr.close();
+    }
+  });
+
+  it("fails closed when the runtime state directory escapes the workspace", async () => {
+    const store = new MemoryLoopStore();
+    const sessionStore = new VaultSessionStateStore(store);
+    const checkpointStoreFor = (loopId: string): FileWorkspaceCheckpointStore =>
+      new FileWorkspaceCheckpointStore(join(storeRoot, loopId), loopId);
+    const mgr = new SessionManager(store, sessionStore, checkpointStoreFor);
+    try {
+      const started = await mgr.create({
+        task: "Reject unsafe checkpoint boundaries",
+        loopId: "state-dir-fail-closed",
+        maxRounds: 5,
+      });
+      const sessionId = String(started.sessionId);
+      const before = started.checkpoints?.find((item) => item.role === "before");
+      assert.ok(before, "the held transaction has a valid recovery target");
+
+      setPolicyForTest({
+        ...getPolicy(),
+        backend: { root_dir: "../outside-state" },
+      });
+      const checkpoint = await mgr.checkpoint(
+        sessionId,
+        started.roundId,
+        started.transactionId,
+      );
+      assert.equal(checkpoint.error, "checkpoint_unavailable");
+      assert.equal(
+        (checkpoint.details as Record<string, unknown>).reason_code,
+        "state_directory_invalid",
+      );
+
+      const recovery = await mgr.recover(
+        sessionId,
+        { target_checkpoint_id: before.checkpointId, reason: "retry from known state" },
+        started.roundId,
+        started.transactionId,
+      );
+      assert.equal(recovery.prompt, null);
+      assert.equal(recovery.submissionError?.code, "recovery_unavailable");
+      assert.equal(
+        recovery.submissionError?.details.reason_code,
+        "state_directory_invalid",
+      );
+      assert.equal(
+        readOnlyRollbacks([
+          ...queryLoopEntries(store, "state-dir-fail-closed", {
+            prefix: "loop:state-dir-fail-closed:",
+          }),
+        ]).length,
+        0,
+        "invalid restore boundaries do not commit a rollback directive",
       );
     } finally {
       mgr.close();

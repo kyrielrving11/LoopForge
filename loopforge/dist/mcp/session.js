@@ -1109,23 +1109,27 @@ export class SessionManager {
             try {
                 stateDir = resolveStateDirectory(process.cwd(), getPolicy().backend.root_dir);
             }
-            catch {
-                stateDir = undefined;
+            catch (error) {
+                return {
+                    error: "checkpoint_unavailable",
+                    errorMessage: `The runtime state directory could not be resolved: ${String(error)}`,
+                    sessionId,
+                    roundId: expectedRoundId,
+                    details: { reason_code: "state_directory_invalid" },
+                };
             }
-            const exclude = stateDir
-                ? (path) => {
-                    const abs = resolve(path);
-                    const prefixAbs = stateDir.endsWith(sep) ? stateDir : `${stateDir}${sep}`;
-                    return abs === stateDir || abs.startsWith(prefixAbs);
-                }
-                : undefined;
+            const exclude = (path) => {
+                const abs = resolve(path);
+                const prefixAbs = stateDir.endsWith(sep) ? stateDir : `${stateDir}${sep}`;
+                return abs === stateDir || abs.startsWith(prefixAbs);
+            };
             let manifest;
             try {
                 manifest = await store.capture({
                     round: held.round,
                     role: "mid",
                     cwd: process.cwd(),
-                    ...(exclude ? { exclude } : {}),
+                    exclude,
                     timeoutMs: Math.max(60_000, getPolicy().evidence.timeout_ms),
                 });
             }

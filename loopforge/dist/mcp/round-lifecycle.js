@@ -932,17 +932,15 @@ export class RoundLifecycle {
         try {
             stateDir = resolveStateDirectory(workspace, getPolicy().backend.root_dir);
         }
-        catch {
-            stateDir = undefined;
+        catch (error) {
+            throw new RestoreFailure("state_directory_invalid", `The runtime state directory could not be resolved: ${String(error)}`);
         }
         const exclude = (path) => {
-            if (!stateDir)
-                return false;
             const absolute = resolve(workspace, path);
             const rel = relative(stateDir, absolute);
             return rel === "" || (!rel.startsWith(`..${sep}`) && rel !== "..");
         };
-        return { workspace, ...(stateDir ? { stateDir } : {}), exclude };
+        return { workspace, stateDir, exclude };
     }
     /** Execute the committed directive's restore, verify it, then compile the
      *  redo from the SAME baseline. The directive is never rewritten. */
@@ -980,14 +978,14 @@ export class RoundLifecycle {
         session.currentRound = redoRound;
         session.roundSnapshot = undefined;
         session.status = "running";
-        const context = this.restoreContext();
         let restore;
         try {
+            const context = this.restoreContext();
             await preflightRestore({
                 manifest: validated.manifest,
                 workspace: context.workspace,
                 store,
-                ...(context.stateDir ? { stateDir: context.stateDir } : {}),
+                stateDir: context.stateDir,
                 exclude: context.exclude,
             });
             restore = await executeRestore({
@@ -995,7 +993,7 @@ export class RoundLifecycle {
                 workspace: context.workspace,
                 store,
                 directiveTransactionId: directive.transaction_id,
-                ...(context.stateDir ? { stateDir: context.stateDir } : {}),
+                stateDir: context.stateDir,
                 exclude: context.exclude,
             });
         }
@@ -1791,8 +1789,8 @@ export class RoundLifecycle {
         }
         // Deep preflight BEFORE the directive: an invalid target must leave no
         // directive and no session cursor change.
-        const context = this.restoreContext();
         try {
+            const context = this.restoreContext();
             await preflightRestore({
                 manifest: validated.manifest,
                 workspace: context.workspace,

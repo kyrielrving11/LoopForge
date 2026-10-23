@@ -10,7 +10,8 @@
 
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -51,6 +52,32 @@ function createSessionManager(storeDir: string): SessionManager {
   );
 }
 
+/** v3.9.7: the restore executor mutates its workspace. These E2E suites must
+ *  run against a disposable Git repo, never the checkout that is executing the
+ *  tests. */
+function initWorkspace(): string {
+  const dir = mkdtempSync(join(tmpdir(), "loopforge-backtrack-ws-"));
+  const git = (...args: string[]): void => {
+    execFileSync("git", args, {
+      cwd: dir,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: "lf-e2e",
+        GIT_AUTHOR_EMAIL: "lf-e2e@example.invalid",
+        GIT_COMMITTER_NAME: "lf-e2e",
+        GIT_COMMITTER_EMAIL: "lf-e2e@example.invalid",
+      },
+    });
+  };
+  git("init", "-q");
+  writeFileSync(join(dir, ".gitignore"), ".loopforge/\n");
+  writeFileSync(join(dir, "baseline.txt"), "baseline\n");
+  git("add", ".");
+  git("commit", "-q", "-m", "baseline");
+  return dir;
+}
+
 /** v3.2.1 regression: a genuine fix submitted after backtrack — must be
  *  evaluated, never replayed as the old backtrack decision. */
 function fixedEval(round: number, files: string[]) {
@@ -72,19 +99,27 @@ describe("E2E backtrack lifecycle", () => {
   let mgr: SessionManager;
   let sessionId: string;
   let loopId: string;
+  let workspaceDir: string;
+  let originalCwd: string;
 
   before(() => {
     // v3.9.7: this suite drives the real collector; a policy left behind by
     // another test file would remove the Git provider and with it every
     // checkpoint. Start from the shipped defaults.
     resetPolicy();
+    originalCwd = process.cwd();
+    workspaceDir = initWorkspace();
+    process.chdir(workspaceDir);
     storeDir = join(tmpdir(), `loopforge-backtrack-${randomUUID()}`);
     mgr = createSessionManager(storeDir);
   });
 
   after(() => {
     mgr.close();
-    try { rmSync(storeDir, { recursive: true }); } catch { /* best effort */ }
+    process.chdir(originalCwd);
+    for (const dir of [storeDir, workspaceDir]) {
+      try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
   });
 
   // ── Step 1: Start ──────────────────────────────────────────────────────
@@ -279,16 +314,24 @@ describe("E2E Recovery Brief window (v3.7.1)", () => {
   let mgr: SessionManager;
   let loopId = "";
   let statePath = "";
+  let workspaceDir: string;
+  let originalCwd: string;
 
   before(() => {
     resetPolicy();
+    originalCwd = process.cwd();
+    workspaceDir = initWorkspace();
+    process.chdir(workspaceDir);
     storeDir = join(tmpdir(), `loopforge-recovery-brief-${randomUUID()}`);
     mgr = createSessionManager(storeDir);
   });
 
   after(() => {
     mgr.close();
-    try { rmSync(storeDir, { recursive: true }); } catch { /* best effort */ }
+    process.chdir(originalCwd);
+    for (const dir of [storeDir, workspaceDir]) {
+      try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
     try { rmSync(statePath, { force: true }); } catch { /* best effort */ }
   });
 

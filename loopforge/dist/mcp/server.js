@@ -20,6 +20,8 @@ const RETRYABLE_ERROR_CODES = new Set([
     "round_id_required",
     "round_id_mismatch",
     "invalid_argument",
+    "checkpoint_failed",
+    "restore_failed",
 ]);
 /** v3.8: The uniform tool result envelope. A handler returns the stable code in
  *  `error` and the human sentence in `errorMessage` (absent → the code is also
@@ -73,10 +75,13 @@ export const SERVER_INSTRUCTIONS = [
     "loopforge_start for a new one. ",
     // v3.9.1: the guidance projection carries the current facts (real ids,
     // usable commands, applicable fields); do not restate a second copy here.
-    "Before each agent-process boundary, call loopforge_next with the roundId from ",
-    "the most recent response and one honest evaluation: the four core fields ",
-    "(success, output_summary, constraint_violations, should_continue) plus only ",
-    "the optional fields whose event actually occurred. ",
+    "Before each agent-process boundary, call loopforge_next with the roundId AND ",
+    "transactionId from the most recent response and one honest evaluation: the four ",
+    "core fields (success, output_summary, constraint_violations, should_continue) ",
+    "plus only the optional fields whose event actually occurred. ",
+    "Call loopforge_checkpoint with the same three anchors to create an explicit ",
+    "mid-round savepoint; it adds no round and no progress. Recovery targets a ",
+    "checkpoint id (ck-...), never a round number. ",
     "Each prepared response carries `submission_guidance`: active contract item ids ",
     "and statuses, active sub-goal ids, usable after-capable commands, recovery ",
     "facts, and the fields applicable at this submission point. Read it before ",

@@ -7,13 +7,14 @@
  */
 import type { SessionManager } from "./session.js";
 type JsonSchema = Record<string, unknown>;
-/** Declared structured-output contracts for every tool. The MCP server
- *  validates each handler's output against these before returning it —
- *  a mismatch is a contract bug, surfaced as a JSON-RPC error instead of
- *  silently shipping an output that violates the declared schema. */
 export declare const TOOL_OUTPUT_SCHEMAS: Record<string, JsonSchema>;
 /** MCP tool contracts include strict input and structured output schemas. */
 export declare const TOOL_SCHEMAS: ({
+    inputSchema: JsonSchema;
+    outputSchema: JsonSchema;
+    name: string;
+    description: string;
+} | {
     inputSchema: JsonSchema;
     outputSchema: JsonSchema;
     name: string;

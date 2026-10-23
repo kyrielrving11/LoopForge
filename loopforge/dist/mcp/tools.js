@@ -76,23 +76,27 @@ const TOOL_BASE_SCHEMAS = [
                     type: "string",
                     description: "The roundId from the most recent loopforge_start / loopforge_next / loopforge_resume / loopforge_status response. Anchors this submission to the exact round it reports on: a submission whose roundId no longer matches the current round (the round already committed) is not processed — the current held prompt is returned instead, so lost responses can be recovered without skipping or double-committing a round.",
                 },
+                transactionId: {
+                    type: "string",
+                    description: "v3.9.7: The transactionId returned with the SAME held prompt (start / next / resume / status / checkpoint). A redo or retry can reuse a numeric roundId with a different transaction; this anchor prevents an old response from being evaluated against the current attempt. On a lost response, call loopforge_status or loopforge_resume to retrieve it.",
+                },
                 output: {
                     type: "string",
                     description: "Optional. The agent's full output from executing the current round's prompt. The structured evaluation is the authoritative report.",
                 },
                 recovery: {
                     type: "object",
-                    description: "v3.9.6: Agent-initiated recovery. Abandon the current branch and " +
-                        "restore an earlier committed evaluation round. Mutually exclusive " +
-                        "with evaluation. The target must have an observed Git restore " +
-                        "point; LoopForge records the directive and requires the workspace " +
-                        "to be restored before the redo can commit. It never chooses a " +
-                        "target or judges the reason.",
+                    description: "v3.9.7: Agent-initiated recovery. Abandon the current branch and " +
+                        "restore a visible workspace checkpoint (the held before-image, a " +
+                        "mid-round savepoint, or a committed round's before-image). " +
+                        "Mutually exclusive with evaluation. LoopForge records the directive, " +
+                        "executes the restore, verifies the full Git boundary, then issues " +
+                        "the redo prompt. It never chooses a target or judges the reason.",
                     properties: {
-                        target_round: {
-                            type: "integer",
-                            minimum: 1,
-                            description: "Committed evaluation round to restore (earlier than the current round).",
+                        target_checkpoint_id: {
+                            type: "string",
+                            pattern: "^ck-[a-f0-9]{24}$",
+                            description: "Checkpoint id (ck-<24 hex>) from the held prompt, a loopforge_checkpoint result, or a committed round's before-image.",
                         },
                         reason: {
                             type: "string",
@@ -101,7 +105,7 @@ const TOOL_BASE_SCHEMAS = [
                             description: "The Agent's reason for abandoning the branch. Recorded verbatim; never judged.",
                         },
                     },
-                    required: ["target_round", "reason"],
+                    required: ["target_checkpoint_id", "reason"],
                     additionalProperties: false,
                 },
                 evaluation: {
@@ -380,7 +384,35 @@ const TOOL_BASE_SCHEMAS = [
                     },
                 },
             },
-            required: ["sessionId", "roundId"],
+            required: ["sessionId", "roundId", "transactionId"],
+        },
+    },
+    {
+        name: "loopforge_checkpoint",
+        description: "v3.9.7: Create an explicit mid-round workspace checkpoint (savepoint). " +
+            "The call itself is the Agent's decision that this state is worth " +
+            "restoring to. It creates no round, no commit and no progress; the " +
+            "checkpoint becomes a visible recovery target only through the held " +
+            "transaction's ref list. Requires the same sessionId/roundId/" +
+            "transactionId anchors as loopforge_next.",
+        inputSchema: {
+            type: "object",
+            properties: {
+                sessionId: {
+                    type: "string",
+                    description: "Session ID returned by loopforge_start.",
+                },
+                roundId: {
+                    type: "string",
+                    description: "The held roundId.",
+                },
+                transactionId: {
+                    type: "string",
+                    description: "The held transactionId.",
+                },
+            },
+            required: ["sessionId", "roundId", "transactionId"],
+            additionalProperties: false,
         },
     },
     {
@@ -574,12 +606,23 @@ const ADVANCE_OUTPUT_SCHEMA = {
         stopDetail: { type: ["string", "null"], description: "Human-readable context for why the loop stopped. Provides facts without prescribing a specific agent action." },
         level: { type: ["string", "null"] },
         roundSuccess: { type: ["boolean", "null"] },
+        transactionId: { type: ["string", "null"], description: "v3.9.7: the held transaction identity to echo on the next submission." },
+        checkpoints: {
+            type: ["array", "null"],
+            items: { type: "object", additionalProperties: true },
+            description: "v3.9.7: the held transaction's checkpoint refs (before-image + explicit mid savepoints).",
+        },
+        beforeCheckpointError: {
+            type: ["object", "null"],
+            additionalProperties: true,
+            description: "v3.9.7: explicit machine fact when the automatic before-image could not be captured.",
+        },
         enforcementAction: { enum: ["accept", "reject", "terminate", "backtrack", "recovery"] },
         enforcementReason: { type: ["string", "null"] },
         recovery: {
             type: ["object", "null"],
             additionalProperties: true,
-            description: "v3.9.6: committed rollback directive facts for a recovery disposition.",
+            description: "v3.9.7: committed rollback directive facts and the verified restore that produced the redo prompt.",
         },
         verificationStatus: { enum: ["trusted", "insufficient", "contradicted"] },
         submission_guidance: {
@@ -604,10 +647,31 @@ const ADVANCE_OUTPUT_SCHEMA = {
  *  validates each handler's output against these before returning it —
  *  a mismatch is a contract bug, surfaced as a JSON-RPC error instead of
  *  silently shipping an output that violates the declared schema. */
+const CHECKPOINT_OUTPUT_SCHEMA = {
+    type: "object",
+    properties: {
+        ok: { type: "boolean" },
+        error: { type: "object", additionalProperties: true },
+        sessionId: { type: "string" },
+        checkpointId: { type: "string" },
+        transactionId: { type: "string" },
+        roundId: { type: "string" },
+        round: { type: "number" },
+        role: { const: "mid" },
+        redoRound: { type: "number" },
+        createdAt: { type: "number" },
+        head: { type: ["string", "null"] },
+        fileCount: { type: "number" },
+        contentCount: { type: "number" },
+        contentHash: { type: "string" },
+    },
+    additionalProperties: true,
+};
 export const TOOL_OUTPUT_SCHEMAS = {
     loopforge_start: ADVANCE_OUTPUT_SCHEMA,
     loopforge_next: ADVANCE_OUTPUT_SCHEMA,
     loopforge_resume: ADVANCE_OUTPUT_SCHEMA,
+    loopforge_checkpoint: CHECKPOINT_OUTPUT_SCHEMA,
     loopforge_status: {
         type: "object",
         properties: {
@@ -617,6 +681,9 @@ export const TOOL_OUTPUT_SCHEMAS = {
             loopId: { type: "string" },
             round: { type: "number" },
             roundId: { type: ["string", "null"] },
+            transactionId: { type: ["string", "null"] },
+            checkpoints: { type: ["array", "null"], items: { type: "object", additionalProperties: true } },
+            beforeCheckpointError: { type: ["object", "null"], additionalProperties: true },
             maxRounds: { type: "number" },
             status: { enum: ["running", "stopped", "stalled", "paused"] },
             successTrajectory: { type: "array", items: { type: "boolean" } },
@@ -999,8 +1066,20 @@ export const TOOL_HANDLERS = {
         const rawEval = input.evaluation;
         const rawRecovery = input.recovery;
         const roundId = input.roundId === undefined ? undefined : String(input.roundId);
+        const transactionId = input.transactionId === undefined
+            ? undefined
+            : String(input.transactionId);
         if (!sessionId) {
             return { error: "invalid_argument", errorMessage: "sessionId is required" };
+        }
+        if (!transactionId || !transactionId.trim()) {
+            return {
+                error: "invalid_argument",
+                errorMessage: "transactionId is required — pass the transactionId returned " +
+                    "with the held prompt (loopforge_status or loopforge_resume returns it)",
+                sessionId,
+                roundId,
+            };
         }
         if (rawRecovery !== undefined && rawEval !== undefined) {
             return {
@@ -1019,7 +1098,7 @@ export const TOOL_HANDLERS = {
                     sessionId,
                 };
             }
-            const result = await mgr.recover(sessionId, rawRecovery, roundId);
+            const result = await mgr.recover(sessionId, rawRecovery, roundId, transactionId);
             if (result.submissionError) {
                 return {
                     error: result.submissionError.code,
@@ -1050,7 +1129,7 @@ export const TOOL_HANDLERS = {
         // tool envelope, so a non-MCP caller gets exactly the same strictness.
         let result;
         try {
-            result = await mgr.advance(sessionId, output, rawEval, roundId);
+            result = await mgr.advance(sessionId, output, rawEval, roundId, transactionId);
         }
         catch (error) {
             const projectionFailure = projectionErrorResult(error);
@@ -1068,6 +1147,34 @@ export const TOOL_HANDLERS = {
             };
         }
         return { ...result };
+    },
+    async loopforge_checkpoint(mgr, input) {
+        const sessionId = String(input.sessionId ?? "");
+        const roundId = input.roundId === undefined ? "" : String(input.roundId);
+        const transactionId = input.transactionId === undefined
+            ? ""
+            : String(input.transactionId);
+        if (!sessionId) {
+            return { error: "invalid_argument", errorMessage: "sessionId is required" };
+        }
+        if (!roundId.trim() || !transactionId.trim()) {
+            return {
+                error: "checkpoint_invalid",
+                errorMessage: "roundId and transactionId are required — use the anchors from the held prompt",
+                sessionId,
+            };
+        }
+        const result = await mgr.checkpoint(sessionId, roundId, transactionId);
+        if (result.error) {
+            return {
+                error: String(result.error),
+                errorMessage: String(result.errorMessage ?? "the checkpoint was rejected"),
+                details: result.details,
+                sessionId,
+                roundId,
+            };
+        }
+        return { ok: true, ...result };
     },
     async loopforge_status(mgr, input) {
         const view = input.view === "loop" || input.view === "all" ||
@@ -1137,6 +1244,16 @@ export const TOOL_HANDLERS = {
             loopId: session.loopId,
             round: session.currentRound,
             roundId: session.roundSnapshot?.roundId ?? null,
+            transactionId: session.roundSnapshot?.transactionId ?? null,
+            checkpoints: session.roundSnapshot
+                ? [
+                    ...(session.roundSnapshot.beforeCheckpoint
+                        ? [session.roundSnapshot.beforeCheckpoint]
+                        : []),
+                    ...(session.roundSnapshot.checkpoints ?? []),
+                ]
+                : [],
+            beforeCheckpointError: session.roundSnapshot?.beforeCheckpointError ?? null,
             maxRounds: session.maxRounds,
             status: session.status,
             successTrajectory: mgr.getSuccessTrajectory(session.loopId),

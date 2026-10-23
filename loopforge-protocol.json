@@ -11,7 +11,7 @@
         "loop_compile",
         "feedback"
       ],
-      "description": "LoopForge-loop_compile — TypeScript protocol definitions.\r\n\r\nAll types exchanged between the Main Agent and LoopForge flow through\r\nthese interfaces. This is the contract layer — no implementation logic.\r\n\r\nv3.3: 41 types — 2 enums + 35 interfaces + 4 type aliases."
+      "description": "LoopForge-loop_compile — TypeScript protocol definitions.\n\nAll types exchanged between the Main Agent and LoopForge flow through\nthese interfaces. This is the contract layer — no implementation logic.\n\nv3.3: 41 types — 2 enums + 35 interfaces + 4 type aliases."
     },
     "AgentStatus": {
       "type": "string",
@@ -181,23 +181,141 @@
         "constraint_violations",
         "should_continue"
       ],
-      "description": "Structured self-evaluation submitted at the round boundary.\r\nThe agent outputs this after completing each round.\r\nEvery field is consumed by at least one downstream function.\r\n\r\nv1.4 (P0–P2): Three new optional fields enable cognitive evolution.\r\nv1.5 (P4–P5): Execution evidence, progress tracking, and self-correction."
+      "description": "Structured self-evaluation submitted at the round boundary.\nThe agent outputs this after completing each round.\nEvery field is consumed by at least one downstream function.\n\nv1.4 (P0–P2): Three new optional fields enable cognitive evolution.\nv1.5 (P4–P5): Execution evidence, progress tracking, and self-correction."
+    },
+    "CheckpointRole": {
+      "type": "string",
+      "enum": [
+        "before",
+        "mid"
+      ]
+    },
+    "CheckpointRef": {
+      "type": "object",
+      "properties": {
+        "checkpointId": {
+          "type": "string"
+        },
+        "contentHash": {
+          "type": "string"
+        },
+        "role": {
+          "$ref": "#/$defs/CheckpointRole"
+        },
+        "round": {
+          "type": "number"
+        },
+        "roundId": {
+          "type": "string"
+        },
+        "transactionId": {
+          "type": "string"
+        },
+        "branchId": {
+          "type": "string"
+        },
+        "redoRound": {
+          "type": "number"
+        },
+        "createdAt": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "checkpointId",
+        "contentHash",
+        "role",
+        "round",
+        "roundId",
+        "transactionId",
+        "branchId",
+        "redoRound",
+        "createdAt"
+      ],
+      "description": "v3.9.7: a checkpoint reference held by a typed transaction snapshot. This\nreference is the authority for ownership, current-branch visibility and the\nredo round. The manifest alone is content-addressed recovery material and\ncan never become a recovery point by itself."
+    },
+    "WorkspaceCheckpointManifest": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "type": "number"
+        },
+        "checkpointId": {
+          "type": "string"
+        },
+        "loopId": {
+          "type": "string"
+        },
+        "round": {
+          "type": "number"
+        },
+        "role": {
+          "$ref": "#/$defs/CheckpointRole"
+        },
+        "createdAt": {
+          "type": "number"
+        },
+        "head": {
+          "type": "string"
+        },
+        "dirty": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "fingerprints": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "contents": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "coverage": {
+          "type": "string",
+          "enum": [
+            "tracked_and_non_ignored_untracked"
+          ]
+        },
+        "contentHash": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "checkpointId",
+        "loopId",
+        "round",
+        "role",
+        "createdAt",
+        "dirty",
+        "fingerprints",
+        "contents",
+        "coverage",
+        "contentHash"
+      ],
+      "description": "v3.9.7: the restore-relevant content manifest. `fingerprints` is exactly\nthe Git observation boundary; `contents` names the dirty regular files and\nsymlinks whose bytes are stored as content-addressed blobs."
     },
     "RecoveryRequest": {
       "type": "object",
       "properties": {
-        "target_round": {
-          "type": "number"
+        "target_checkpoint_id": {
+          "type": "string"
         },
         "reason": {
           "type": "string"
         }
       },
       "required": [
-        "target_round",
+        "target_checkpoint_id",
         "reason"
       ],
-      "description": "v3.9.6: The Agent's request to abandon the current branch and restore an\r\nearlier committed point. This is an ACTION, not an evaluation: it never\r\ncarries success/output_summary/constraint_violations/should_continue and\r\nnever fabricates a SelfEvaluation. The target must be an earlier committed\r\nevaluation round in the current branch with a fully observed Git restore\r\npoint; LoopForge validates that, then records a rollback directive event.\r\nThe reason is the Agent's judgment and is recorded verbatim, never judged."
+      "description": "v3.9.7: The Agent's request to abandon the current branch and restore a\ncheckpoint it selected. This is an ACTION, not an evaluation: it never\ncarries success/output_summary/constraint_violations/should_continue and\nnever fabricates a SelfEvaluation. The checkpoint must be visible in the\ncurrent held transaction or a committed evaluation transaction on the\ncurrent branch. LoopForge records the directive, executes and verifies the\nrestore, and only then issues the redo prompt. The reason is the Agent's\njudgment, recorded verbatim and never judged."
     },
     "OperatorAcceptance": {
       "type": "object",
@@ -223,7 +341,43 @@
         "success_criteria",
         "hard_constraints"
       ],
-      "description": "v3.9.6: The operator-owned acceptance surface, written once in the root\r\nbranch's round-1 evaluation transaction. Neither the Agent nor LoopForge\r\nmay revise, replace, or retract it."
+      "description": "v3.9.6: The operator-owned acceptance surface, written once in the root\nbranch's round-1 evaluation transaction. Neither the Agent nor LoopForge\nmay revise, replace, or retract it."
+    },
+    "RecoveryTarget": {
+      "type": "object",
+      "properties": {
+        "checkpoint_id": {
+          "type": "string"
+        },
+        "content_hash": {
+          "type": "string"
+        },
+        "role": {
+          "$ref": "#/$defs/CheckpointRole"
+        },
+        "round": {
+          "type": "number"
+        },
+        "round_id": {
+          "type": "string"
+        },
+        "transaction_id": {
+          "type": "string"
+        },
+        "redo_round": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "checkpoint_id",
+        "content_hash",
+        "role",
+        "round",
+        "round_id",
+        "transaction_id",
+        "redo_round"
+      ],
+      "description": "v3.9.7: the committed recovery target. It references a checkpoint by id and\ncontent hash; the manifest is the one copy of the boundary. `redo_round`\nis the branch fence: parent rounds with `round < redo_round` are retained,\nand the child branch starts at `redo_round`."
     },
     "RecoveryDirective": {
       "type": "object",
@@ -251,38 +405,11 @@
           "type": "string"
         },
         "target": {
-          "type": "number"
-        },
-        "target_round_id": {
-          "type": "string"
-        },
-        "target_transaction_id": {
-          "type": "string"
-        },
-        "target_head": {
-          "type": "string"
-        },
-        "target_dirty": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "target_fingerprints": {
-          "type": "object",
-          "additionalProperties": {
-            "type": "string"
-          }
+          "$ref": "#/$defs/RecoveryTarget"
         },
         "skipped_files": {
           "type": "array",
           "items": {
-            "type": "string"
-          }
-        },
-        "skipped_fingerprints": {
-          "type": "object",
-          "additionalProperties": {
             "type": "string"
           }
         },
@@ -318,19 +445,14 @@
         "origin",
         "reason",
         "target",
-        "target_round_id",
-        "target_transaction_id",
-        "target_dirty",
-        "target_fingerprints",
         "skipped_files",
-        "skipped_fingerprints",
         "skipped_discoveries",
         "failed_rounds",
         "approaches",
         "wrong_assumptions",
         "transaction_id"
       ],
-      "description": "v3.9.6: A committed rollback directive. It is a typed event in the same\r\nround document as the abandoned/triggering transaction, not a normal\r\nround. `transaction_id` also names the child branch; the redo and all\r\nlater transactions on that branch carry it as `branchId`."
+      "description": "v3.9.7: A committed rollback directive. It is a typed event in the same\nround document as the abandoned/triggering transaction, not a normal\nround. `transaction_id` also names the child branch; the redo and all\nlater transactions on that branch carry it as `branchId`.\n\nThe directive deliberately does NOT duplicate the target's HEAD or\nfingerprints: the checkpoint manifest is the one copy, bound by\n`target.content_hash`. `skipped_files` is a report fact derived from the\ntarget manifest vs. the abandoned boundaries; it is never a restore gate."
     },
     "RoundOutcome": {
       "type": "string",
@@ -472,7 +594,7 @@
         "reversibility",
         "authorization"
       ],
-      "description": "v2.12: Structured high-risk action descriptor (internal — audit display\r\nand gate classification). The MCP surface uses a flat gate text instead."
+      "description": "v2.12: Structured high-risk action descriptor (internal — audit display\nand gate classification). The MCP surface uses a flat gate text instead."
     },
     "DerivedGate": {
       "type": "object",
@@ -524,7 +646,7 @@
       "required": [
         "kind"
       ],
-      "description": "v2.12: Classified gate — user gates need human authorization, agent\r\ngates are resolved by the agent submitting verifiable evidence."
+      "description": "v2.12: Classified gate — user gates need human authorization, agent\ngates are resolved by the agent submitting verifiable evidence."
     },
     "GateDecision": {
       "type": "object",
@@ -576,7 +698,7 @@
         "decidedAt",
         "actionHash"
       ],
-      "description": "v2.12: A persisted user decision for a gate. The actionHash binds the\r\napproval to the exact canonicalized action — an edited action changes\r\nthe hash, so stale approvals fail the gateId match automatically."
+      "description": "v2.12: A persisted user decision for a gate. The actionHash binds the\napproval to the exact canonicalized action — an edited action changes\nthe hash, so stale approvals fail the gateId match automatically."
     },
     "PromptRequests": {
       "type": "object",
@@ -594,7 +716,7 @@
           }
         }
       },
-      "description": "v2.9: Model-expressed information needs for the next round.\r\nSubmitted via SelfEvaluation.prompt_requests, consumed by the\r\nCompiler when assembling the next prompt. Transient — each round's\r\nrequests apply to that round only."
+      "description": "v2.9: Model-expressed information needs for the next round.\nSubmitted via SelfEvaluation.prompt_requests, consumed by the\nCompiler when assembling the next prompt. Transient — each round's\nrequests apply to that round only."
     },
     "SubmissionDiagnosticHandling": {
       "type": "string",
@@ -789,7 +911,10 @@
         "recovery_checkpoint": {
           "type": "object",
           "properties": {
-            "restore_point": {
+            "checkpoint_id": {
+              "type": "string"
+            },
+            "redo_round": {
               "type": "number"
             },
             "origin": {
@@ -811,15 +936,16 @@
             "reason": {
               "type": "string"
             },
-            "verified": {
+            "restore_verified": {
               "type": "boolean"
             }
           },
           "required": [
-            "restore_point",
+            "checkpoint_id",
+            "redo_round",
             "origin",
             "reason",
-            "verified"
+            "restore_verified"
           ]
         },
         "reports": {
@@ -1009,8 +1135,11 @@
                 {
                   "type": "object",
                   "properties": {
-                    "restore_point": {
+                    "redo_round": {
                       "type": "number"
+                    },
+                    "target_checkpoint_id": {
+                      "type": "string"
                     },
                     "preserved_discoveries": {
                       "type": "array",
@@ -1042,13 +1171,11 @@
                     },
                     "reason": {
                       "type": "string"
-                    },
-                    "target_head": {
-                      "type": "string"
                     }
                   },
                   "required": [
-                    "restore_point",
+                    "redo_round",
+                    "target_checkpoint_id",
                     "preserved_discoveries",
                     "wrong_assumptions"
                   ]
@@ -1227,7 +1354,7 @@
         "files_reconciliation",
         "diagnostics"
       ],
-      "description": "v3.9.1: The machine's report of what one submission DID. It is derived\r\nfrom the transaction + the shared read model; it is never a second ledger."
+      "description": "v3.9.1: The machine's report of what one submission DID. It is derived\nfrom the transaction + the shared read model; it is never a second ledger."
     },
     "PromptRequestEffect": {
       "type": "object",
@@ -1300,7 +1427,7 @@
         "request",
         "status"
       ],
-      "description": "v3.9.1: What a prompt request actually did in the rendered prompt. This is\r\nan OUTPUT fact about the current render; it is never an instruction for a\r\nlater prompt."
+      "description": "v3.9.1: What a prompt request actually did in the rendered prompt. This is\nan OUTPUT fact about the current render; it is never an instruction for a\nlater prompt."
     },
     "SubmissionGuidance": {
       "type": "object",
@@ -1428,14 +1555,17 @@
             {
               "type": "object",
               "properties": {
-                "required": {
+                "pending": {
                   "type": "boolean"
                 },
-                "restore_point": {
+                "redo_round": {
                   "type": "number"
                 },
-                "target_head": {
+                "checkpoint_id": {
                   "type": "string"
+                },
+                "restore_verified": {
+                  "type": "boolean"
                 },
                 "origin": {
                   "anyOf": [
@@ -1458,7 +1588,10 @@
                 }
               },
               "required": [
-                "required"
+                "pending",
+                "redo_round",
+                "checkpoint_id",
+                "restore_verified"
               ]
             },
             {
@@ -1579,7 +1712,7 @@
         "fields",
         "findings"
       ],
-      "description": "v3.9.1: The live submission-guidance projection returned with a prepared\r\nround. It is derived from current facts only (committed rounds, policy,\r\nthe compiled state); it is never persisted and never becomes input to a\r\nlater prompt. Real ids are rendered only when the facts exist; a null\r\nexample means \"not usable at this submission point\"."
+      "description": "v3.9.1: The live submission-guidance projection returned with a prepared\nround. It is derived from current facts only (committed rounds, policy,\nthe compiled state); it is never persisted and never becomes input to a\nlater prompt. Real ids are rendered only when the facts exist; a null\nexample means \"not usable at this submission point\"."
     },
     "WorkerResult": {
       "type": "object",
@@ -1631,7 +1764,7 @@
         "resultSummary",
         "outcome"
       ],
-      "description": "A single sub-agent / Worker delegation result (v1.9 — multi-agent).\r\nv3.7.1: `outcome` is the single reported fact. `success` is deleted —\r\nentries without a valid outcome are dropped by the parser, never\r\nderived. The whole array is optional and informational: it buys no\r\nmachine verdict and an absent/empty array (no delegation this round)\r\nis always accepted."
+      "description": "A single sub-agent / Worker delegation result (v1.9 — multi-agent).\nv3.7.1: `outcome` is the single reported fact. `success` is deleted —\nentries without a valid outcome are dropped by the parser, never\nderived. The whole array is optional and informational: it buys no\nmachine verdict and an absent/empty array (no delegation this round)\nis always accepted."
     },
     "LoopForgeRequest": {
       "type": "object",
@@ -1770,7 +1903,7 @@
         "status",
         "related_subgoal_ids"
       ],
-      "description": "v3.2: Derived per-criterion status for the progress dashboard — the\r\n\"goal → criteria → evidence\" vertical view. Zero persistence: derived\r\nfrom committed rounds each round.\r\n\r\nv3.8 states: `claimed` (the agent claims it met), `remaining` (declared\r\noutstanding), `verified` (a verified contract item references it),\r\n`contradicted` / `insufficient` (machine evidence denies / cannot back\r\nthe claim), `unknown` (never mentioned)."
+      "description": "v3.2: Derived per-criterion status for the progress dashboard — the\n\"goal → criteria → evidence\" vertical view. Zero persistence: derived\nfrom committed rounds each round.\n\nv3.8 states: `claimed` (the agent claims it met), `remaining` (declared\noutstanding), `verified` (a verified contract item references it),\n`contradicted` / `insufficient` (machine evidence denies / cannot back\nthe claim), `unknown` (never mentioned)."
     },
     "RecurringFlag": {
       "type": "object",
@@ -1820,7 +1953,7 @@
         "count",
         "rounds"
       ],
-      "description": "v3.8.1: a repeated machine fact, keyed by what it is ABOUT.\r\n\r\nOne derivation over the whole committed history replaces the three\r\nseparate views of \"what keeps going wrong\" this release removed:\r\n`Lesson` (whole history, count >= 2), `rolling_summary.recurring_issues`\r\n(the last 5 rounds' raw violation texts, no threshold at all despite the\r\nname), and the L1/L2 prompt sections built on top of each. Callers FILTER\r\nthis list — the state file renders the genuinely recurring set, the prompt\r\nrenders the recent tail."
+      "description": "v3.8.1: a repeated machine fact, keyed by what it is ABOUT.\n\nOne derivation over the whole committed history replaces the three\nseparate views of \"what keeps going wrong\" this release removed:\n`Lesson` (whole history, count >= 2), `rolling_summary.recurring_issues`\n(the last 5 rounds' raw violation texts, no threshold at all despite the\nname), and the L1/L2 prompt sections built on top of each. Callers FILTER\nthis list — the state file renders the genuinely recurring set, the prompt\nrenders the recent tail."
     },
     "SubGoalUpdate": {
       "type": "object",
@@ -1864,7 +1997,7 @@
         "id",
         "status"
       ],
-      "description": "v3.7.1: One explicit sub-goal status transition. The closed migration\r\nmatrix (loop-compiler.ts, single source) governs legality:\r\nin_progress from pending|blocked; done from pending|in_progress|blocked;\r\nblocked|canceled from pending|in_progress; blocked → canceled. done and\r\ncanceled are terminal — re-opening requires a NEW emerged_subtasks item."
+      "description": "v3.7.1: One explicit sub-goal status transition. The closed migration\nmatrix (loop-compiler.ts, single source) governs legality:\nin_progress from pending|blocked; done from pending|in_progress|blocked;\nblocked|canceled from pending|in_progress; blocked → canceled. done and\ncanceled are terminal — re-opening requires a NEW emerged_subtasks item."
     },
     "SubGoal": {
       "type": "object",
@@ -1933,7 +2066,7 @@
         "status_changed_at_round",
         "priority"
       ],
-      "description": "v2.2: A structured sub-goal tracked by the compiler across rounds.\r\nDeclared by the agent via emerged_subtasks (creation) and\r\nsubgoal_updates (explicit transitions); statuses are compiler-derived\r\nfrom committed round facts. Never creates sub-loops — the agent still\r\nowns execution; the compiler only tracks state."
+      "description": "v2.2: A structured sub-goal tracked by the compiler across rounds.\nDeclared by the agent via emerged_subtasks (creation) and\nsubgoal_updates (explicit transitions); statuses are compiler-derived\nfrom committed round facts. Never creates sub-loops — the agent still\nowns execution; the compiler only tracks state."
     },
     "ConstraintMeta": {
       "type": "object",
@@ -1997,7 +2130,7 @@
         "last_violated_at_round",
         "source"
       ],
-      "description": "v2.3: Per-constraint lifecycle metadata for the active constraint set.\r\nReconstructed each round from vault entries — no new persistence.\r\nv3.7: the time-aware decay arm (status inactive / discovered_at_round)\r\nwas removed — active constraints never auto-demote."
+      "description": "v2.3: Per-constraint lifecycle metadata for the active constraint set.\nReconstructed each round from vault entries — no new persistence.\nv3.7: the time-aware decay arm (status inactive / discovered_at_round)\nwas removed — active constraints never auto-demote."
     },
     "LoopRoundResult": {
       "type": "object",
@@ -2301,7 +2434,7 @@
         "omitted",
         "complete"
       ],
-      "description": "v3.9.4: ID-level proof that the current prompt rendered every active\r\nnormative object. This is an OUTPUT fact about one render — never an\r\ninstruction for a later prompt and never an input to fact derivation.\r\n\r\n`active` is the required set derived from the same `CanonicalLoopState`\r\nthe renderer consumed; `rendered` is the union of the IDs the included\r\nsections declared; `omitted = active - rendered`. `complete` is false only\r\nwhen a normative ID was lost; prompt preparation then fails closed.\r\n\r\nOrdering is deterministic: `active` by (kind rank, id), `rendered` sorted\r\nunique, `omitted` by id."
+      "description": "v3.9.4: ID-level proof that the current prompt rendered every active\nnormative object. This is an OUTPUT fact about one render — never an\ninstruction for a later prompt and never an input to fact derivation.\n\n`active` is the required set derived from the same `CanonicalLoopState`\nthe renderer consumed; `rendered` is the union of the IDs the included\nsections declared; `omitted = active - rendered`. `complete` is false only\nwhen a normative ID was lost; prompt preparation then fails closed.\n\nOrdering is deterministic: `active` by (kind rank, id), `rendered` sorted\nunique, `omitted` by id."
     },
     "PromptArtifact": {
       "type": "object",
@@ -2555,7 +2688,7 @@
         "invalidated",
         "discovered"
       ],
-      "description": "Aggregated evidence snapshot for the state file Evidence section.\r\nFour categories give the agent a clear picture of what's been confirmed,\r\nwhat remains, what was wrong, and what's newly discovered — all derived\r\nfrom accumulated SelfEvaluation data across rounds."
+      "description": "Aggregated evidence snapshot for the state file Evidence section.\nFour categories give the agent a clear picture of what's been confirmed,\nwhat remains, what was wrong, and what's newly discovered — all derived\nfrom accumulated SelfEvaluation data across rounds."
     },
     "LoopForgeResponse": {
       "type": "object",
@@ -2720,7 +2853,7 @@
         "reason",
         "fix_instructions"
       ],
-      "description": "Result of round-boundary enforcement. Decides whether to accept the round,\r\nreject it (force the agent to redo the SAME round), or terminate the loop.\r\n\r\naccept:    round passes; proceed to next round as normal.\r\nreject:    agent's self-evaluation or output is invalid; the agent receives\r\n           a rejection prompt and must redo the same round. Round counter\r\n           does NOT increment.\r\nterminate: loop has reached an unrecoverable state; stop immediately with\r\n           stopReason \"enforcement_terminated\"."
+      "description": "Result of round-boundary enforcement. Decides whether to accept the round,\nreject it (force the agent to redo the SAME round), or terminate the loop.\n\naccept:    round passes; proceed to next round as normal.\nreject:    agent's self-evaluation or output is invalid; the agent receives\n           a rejection prompt and must redo the same round. Round counter\n           does NOT increment.\nterminate: loop has reached an unrecoverable state; stop immediately with\n           stopReason \"enforcement_terminated\"."
     },
     "LoopTerminalEvent": {
       "type": "object",
@@ -2803,7 +2936,7 @@
         "check",
         "detail"
       ],
-      "description": "A single flag raised during self-evaluation verification.\r\nEach flag identifies a specific inconsistency between the agent's\r\nself-reported data and the loop's cross-round lineage."
+      "description": "A single flag raised during self-evaluation verification.\nEach flag identifies a specific inconsistency between the agent's\nself-reported data and the loop's cross-round lineage."
     },
     "VerificationResult": {
       "type": "object",
@@ -2845,7 +2978,7 @@
         "flags",
         "machineBackedSuccess"
       ],
-      "description": "Result of cross-round self-evaluation verification.\r\n\r\nVerdict semantics:\r\n- trusted:   all checks passed; flags are informational only.\r\n- suspect:   one or more warn-level flags; flags become warnings in the\r\n             next prompt so the agent can clarify.\r\n- contradicted: one or more error-level flags; the quality score for this\r\n                round is excluded from the quality trend (NOT modified).\r\n                Flags become hard constraints — the agent must respond."
+      "description": "Result of cross-round self-evaluation verification.\n\nVerdict semantics:\n- trusted:   all checks passed; flags are informational only.\n- suspect:   one or more warn-level flags; flags become warnings in the\n             next prompt so the agent can clarify.\n- contradicted: one or more error-level flags; the quality score for this\n                round is excluded from the quality trend (NOT modified).\n                Flags become hard constraints — the agent must respond."
     },
     "ExecutionReport": {
       "type": "object",
@@ -2895,7 +3028,7 @@
           }
         }
       },
-      "description": "v3.8: The agent's self-report for a round — renamed from ExecutionReport\r\nbecause these fields are claims, not evidence. The whole object is\r\noptional; a mistyped optional field is dropped with a warning and never\r\nrejects the round."
+      "description": "v3.8: The agent's self-report for a round — renamed from ExecutionReport\nbecause these fields are claims, not evidence. The whole object is\noptional; a mistyped optional field is dropped with a warning and never\nrejects the round."
     },
     "CriterionClaim": {
       "type": "object",
@@ -2924,7 +3057,7 @@
         "criterion_id",
         "outcome"
       ],
-      "description": "v3.8: An advisory claim about an objective criterion. Lenient by design —\r\nthe criterion layer is advisory; the contract item layer is the machine\r\nverification skeleton."
+      "description": "v3.8: An advisory claim about an objective criterion. Lenient by design —\nthe criterion layer is advisory; the contract item layer is the machine\nverification skeleton."
     },
     "ContractItemClaim": {
       "type": "object",
@@ -2953,7 +3086,7 @@
         "item_id",
         "outcome"
       ],
-      "description": "v3.8: A claim about an ACTIVE contract item, cited by the derived\r\nrci-XXXXXXXX id the prompt rendered."
+      "description": "v3.8: A claim about an ACTIVE contract item, cited by the derived\nrci-XXXXXXXX id the prompt rendered."
     },
     "ContractItemProposal": {
       "type": "object",
@@ -2986,7 +3119,7 @@
         "subgoal_refs",
         "verify_with"
       ],
-      "description": "v3.8/v3.9.5: One acceptance condition inside a Round Contract slice.\r\n`description` states what must be true, not an activity. `verify_with`\r\nmust name configured, enabled, after-capable evidence commands — the\r\ndeclaration is strict. A command may back several conditions, and one\r\ncondition may bind several commands.\r\n\r\n`subgoal_refs` lives HERE, not on the contract: a machine-verified item\r\nbacks exactly the sub-goals it names, so \"item A verifies SubGoal 1, item B\r\nverifies SubGoal 2\" is expressible and `VerifiedSubGoalFact` attribution is\r\nper-item instead of \"every verified item backs every sub-goal\"."
+      "description": "v3.8/v3.9.5: One acceptance condition inside a Round Contract slice.\n`description` states what must be true, not an activity. `verify_with`\nmust name configured, enabled, after-capable evidence commands — the\ndeclaration is strict. A command may back several conditions, and one\ncondition may bind several commands.\n\n`subgoal_refs` lives HERE, not on the contract: a machine-verified item\nbacks exactly the sub-goals it names, so \"item A verifies SubGoal 1, item B\nverifies SubGoal 2\" is expressible and `VerifiedSubGoalFact` attribution is\nper-item instead of \"every verified item backs every sub-goal\"."
     },
     "RoundContractProposal": {
       "type": "object",
@@ -3011,7 +3144,7 @@
         "scope",
         "items"
       ],
-      "description": "v3.9.5: A Round Contract proposal for the NEXT round. It becomes ACTIVE\r\nonly after the declaring round commits. Identity (rc-/rci-) is derived\r\nfrom CONTENT ONLY — restating an unchanged contract keeps the same\r\nidentity, unlike a SubGoal whose id includes its declaration round.\r\n\r\n`work_item` is the bounded deliverable this slice produces (an outcome,\r\nnot an activity). New declarations must provide it; it stays optional in\r\nthis persisted type because committed history may contain legacy\r\ncontracts without a label. `items[]` are the acceptance conditions;\r\n`verify_with` remains item-level."
+      "description": "v3.9.5: A Round Contract proposal for the NEXT round. It becomes ACTIVE\nonly after the declaring round commits. Identity (rc-/rci-) is derived\nfrom CONTENT ONLY — restating an unchanged contract keeps the same\nidentity, unlike a SubGoal whose id includes its declaration round.\n\n`work_item` is the bounded deliverable this slice produces (an outcome,\nnot an activity). New declarations must provide it; it stays optional in\nthis persisted type because committed history may contain legacy\ncontracts without a label. `items[]` are the acceptance conditions;\n`verify_with` remains item-level."
     },
     "ContractBinding": {
       "type": "object",
@@ -3037,7 +3170,7 @@
         "item_ids",
         "config_hash_by_command"
       ],
-      "description": "v3.8: The machine's record of what a contract bound at its declaration\r\nround. Stamped by the runtime when the declaring round COMMITS (policy is\r\nnot part of the Vault, so the command configuration in force at\r\ndeclaration could not otherwise be recovered). It is machine-recomputed,\r\nnever agent-supplied, and adds no second truth."
+      "description": "v3.8: The machine's record of what a contract bound at its declaration\nround. Stamped by the runtime when the declaring round COMMITS (policy is\nnot part of the Vault, so the command configuration in force at\ndeclaration could not otherwise be recovered). It is machine-recomputed,\nnever agent-supplied, and adds no second truth."
     },
     "ContractItemStatus": {
       "type": "string",
@@ -3208,7 +3341,7 @@
         "status",
         "files"
       ],
-      "description": "v3.8: Common machine-observation fields. Observations are the factual\r\nrecord of what the machine saw; they are persisted with the round and are\r\nthe only input that can create a `verified` fact."
+      "description": "v3.8: Common machine-observation fields. Observations are the factual\nrecord of what the machine saw; they are persisted with the round and are\nthe only input that can create a `verified` fact."
     },
     "GitObservationData": {
       "type": "object",
@@ -3381,7 +3514,7 @@
         "schemaVersion",
         "fingerprint"
       ],
-      "description": "v3.9.7: a custom provider's progress snapshot. Only the provider's own\r\nstable, content-addressed state digest belongs here; timestamps, durations\r\nand runtime bookkeeping are not progress. `progressCapable: true` plus\r\n`data.progress` (a valid snapshot or null) is persisted on every\r\nobservation from that provider, including unavailable/timeout/error, so\r\nreplay never depends on the live provider registry."
+      "description": "v3.9.7: a custom provider's progress snapshot. Only the provider's own\nstable, content-addressed state digest belongs here; timestamps, durations\nand runtime bookkeeping are not progress. `progressCapable: true` plus\n`data.progress` (a valid snapshot or null) is persisted on every\nobservation from that provider, including unavailable/timeout/error, so\nreplay never depends on the live provider registry."
     },
     "CustomObservation": {
       "allOf": [
@@ -3522,7 +3655,7 @@
         "observationConfigured",
         "contractVerificationAvailable"
       ],
-      "description": "v3.8: Static, policy-derived verification capability. A pure function of\r\npolicy — no probing, no filesystem, no provider registry — so it can be\r\nhashed into stateHash and reproduced by replay/audit from committed facts.\r\nProvider REGISTRATION is code state and is deliberately excluded; it is\r\nreported as an unhashed readiness diagnostic instead."
+      "description": "v3.8: Static, policy-derived verification capability. A pure function of\npolicy — no probing, no filesystem, no provider registry — so it can be\nhashed into stateHash and reproduced by replay/audit from committed facts.\nProvider REGISTRATION is code state and is deliberately excluded; it is\nreported as an unhashed readiness diagnostic instead."
     },
     "ObservedCapability": {
       "type": "object",
@@ -3572,7 +3705,7 @@
         "providers",
         "commands"
       ],
-      "description": "v3.8: Live observation capability. Rendered only — never hashed, never\r\npersisted independently of the observations it is derived from."
+      "description": "v3.8: Live observation capability. Rendered only — never hashed, never\npersisted independently of the observations it is derived from."
     },
     "EvidenceCapability": {
       "type": "object",
@@ -3662,7 +3795,7 @@
         "contractVerificationAvailable",
         "warnings"
       ],
-      "description": "v3.8: The single capability fact a prepared round returns — the union of\r\nthe two halves, split so that only the POLICY half is hashable.\r\n\r\n`ConfiguredCapability` is a pure function of policy and feeds\r\n`stateHash`/`promptHash`; `ObservedCapability` carries live statuses and is\r\nrendered only. `provider.available` is provider-REGISTRY state (code, not\r\npolicy) and therefore never enters the hash either — it is reported here and\r\nby `doctor`. Every surface that speaks about capability (MCP start / next /\r\nstatus, the warning list) calls this one function, so they cannot drift\r\napart — and none of them carries a second copy of the fact."
+      "description": "v3.8: The single capability fact a prepared round returns — the union of\nthe two halves, split so that only the POLICY half is hashable.\n\n`ConfiguredCapability` is a pure function of policy and feeds\n`stateHash`/`promptHash`; `ObservedCapability` carries live statuses and is\nrendered only. `provider.available` is provider-REGISTRY state (code, not\npolicy) and therefore never enters the hash either — it is reported here and\nby `doctor`. Every surface that speaks about capability (MCP start / next /\nstatus, the warning list) calls this one function, so they cannot drift\napart — and none of them carries a second copy of the fact."
     },
     "VerifiedSubGoalFact": {
       "type": "object",
@@ -3685,7 +3818,7 @@
         "contract_item_ids",
         "verified_at_round"
       ],
-      "description": "v3.8: A machine-verified sub-goal fact. DERIVED in cognitive-facts.ts,\r\nnever persisted: it exists only while a committed contract item references\r\nthe sub-goal AND that item is verified. It never writes SubGoal.status —\r\n`done` stays the agent's declaration."
+      "description": "v3.8: A machine-verified sub-goal fact. DERIVED in cognitive-facts.ts,\nnever persisted: it exists only while a committed contract item references\nthe sub-goal AND that item is verified. It never writes SubGoal.status —\n`done` stays the agent's declaration."
     },
     "ToolErrorCode": {
       "type": "string",
@@ -3704,7 +3837,13 @@
         "lease_conflict",
         "recovery_invalid",
         "recovery_disabled",
-        "recovery_unavailable"
+        "recovery_unavailable",
+        "checkpoint_invalid",
+        "checkpoint_unavailable",
+        "checkpoint_failed",
+        "checkpoint_limit",
+        "restore_failed",
+        "restore_pending"
       ]
     },
     "ToolError": {

@@ -132,7 +132,9 @@ describe("Generated JSON Schema — top-level", () => {
     // OperatorAcceptance and RecoveryDirective joined (65 → 63).
     // v3.9.7: ProgressState, PromptFreshnessReason, PromptFreshness and
     // ProgressSnapshot joined (63 → 67).
-    assert.equal(names.length, 67, `expected 67, got ${names.length}: ${names.join(", ")}`);
+    // v3.9.8: CheckpointRole, WorkspaceCheckpointManifest, CheckpointRef and
+    // RecoveryTarget joined (67 → 71).
+    assert.equal(names.length, 71, `expected 71, got ${names.length}: ${names.join(", ")}`);
     assert.ok(names.includes("PromptArtifact"));
     assert.ok(names.includes("RoundOutcome"));
     assert.ok(names.includes("RoundContractProposal"));

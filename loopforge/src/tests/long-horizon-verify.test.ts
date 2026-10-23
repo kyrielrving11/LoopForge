@@ -45,6 +45,8 @@ class McpClient {
   private proc: ChildProcess; private rl: Interface;
   private pending = new Map<number, { resolve: (v: JsonRpcResponse) => void; reject: (e: Error) => void }>();
   private nextId = 1; private stderr = ""; private workCounter = 0;
+  /** v3.9.7: the held transaction anchor; every next/resume result refreshes it. */
+  private transactionId = "";
   private readonly storeDir: string;
 
   constructor(storeDir: string) {
@@ -89,9 +91,19 @@ class McpClient {
   }
 
   async tool(name: string, args: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
-    if (name === "loopforge_next") this.materialize(args.evaluation);
+    if (name === "loopforge_next") {
+      this.materialize(args.evaluation);
+      args = { ...args, transactionId: args.transactionId ?? this.transactionId };
+    }
     const r = await this.call("tools/call", { name, arguments: args });
-    if (r.structuredContent && typeof r.structuredContent === "object") return r.structuredContent as Record<string, unknown>;
+    const direct = r.structuredContent && typeof r.structuredContent === "object"
+      ? r.structuredContent as Record<string, unknown>
+      : null;
+    if (direct && name !== "tools/list") {
+      const tx = direct.transactionId;
+      if (typeof tx === "string" && tx.length > 0) this.transactionId = tx;
+    }
+    if (direct) return direct;
     if (r.content && Array.isArray(r.content)) {
       let prompt: string | undefined;
       for (const item of r.content) {
@@ -99,7 +111,10 @@ class McpClient {
         if (typeof t === "string") {
           try {
             const parsed = JSON.parse(t) as Record<string, unknown>;
-            return prompt && parsed.prompt === undefined ? { ...parsed, prompt } : parsed;
+            const next = prompt && parsed.prompt === undefined ? { ...parsed, prompt } : parsed;
+            const tx = next.transactionId;
+            if (typeof tx === "string" && tx.length > 0) this.transactionId = tx;
+            return next;
           } catch {
             prompt ??= t;
           }

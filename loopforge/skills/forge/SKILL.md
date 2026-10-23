@@ -47,25 +47,27 @@ Keep these meanings separate:
   history. A payload error is rejected before lifecycle state changes.
 - A **Round Contract** is an Agent proposal for a future machine-checkable
   slice. It is not a round, a second plan ledger, or a required field.
-- A **recovery checkpoint** is the restore check on the first submission after
-  backtrack. It is part of that post-backtrack submission, not an extra
-  development round.
+- A **workspace checkpoint** is the before-image of a prepared round or an
+  explicit mid-round savepoint (`loopforge_checkpoint`). It is recovery
+  material, not a round, a commit, or progress.
 
 The lifecycle is:
 
 ```text
-prepared prompt -> Agent executes work -> loopforge_next(roundId, evaluation)
+prepared prompt -> Agent executes work -> loopforge_next(roundId, transactionId, evaluation)
                                             |-- payload error: no state change;
                                             |   correct and retry same roundId
                                             |-- enforcement reject: same round;
-                                            |   attempt increases; no commit
+                                            |   attempt increases; no commit;
+                                            |   use the NEW transactionId
                                             |-- accept/continue: commit round;
                                             |   prepare next round
                                             |-- stop: commit final round/evidence
                                             |-- terminate: terminal result;
                                             |   no normal round commit
-                                            |-- backtrack: restore workspace;
-                                                submit redo on held roundId
+                                            |-- backtrack/recovery: LoopForge
+                                                restores + verifies, then
+                                                issues the redo prompt
 ```
 
 LoopForge owns the boundary, persistence, evidence collection, and disposition.
@@ -85,9 +87,12 @@ Call `loopforge_start` with:
 - `constraints`: hard boundaries that must survive every round;
 - optional `maxRounds`, `domain`, `loopId`, and `planSource`.
 
-Keep the returned `sessionId`, `roundId`, prompt, and level. Pass the latest
-`roundId` to every `loopforge_next`; it anchors the submission to the exact
-round being reported.
+Keep the returned `sessionId`, `roundId`, `transactionId`, prompt, and level.
+Pass all three identities to every `loopforge_next`; `roundId` anchors the
+logical round and `transactionId` anchors the exact attempt. A rejection keeps
+the round but rebinds the transaction, so always use the ids in the current
+response. Call `loopforge_checkpoint` with the same three anchors when an
+intermediate workspace state is worth restoring to.
 
 ## What is a round?
 
@@ -350,11 +355,10 @@ git can see them. A changed entrypoint makes the observation untrustworthy:
 restore it to its round-start content. Do not author the verification script
 inside the round you expect it to verify. That round cannot be closed by it.
 
-To keep a script that must survive a rollback, it has to be part of the
-committed workspace rather than an uncommitted change: the post-backtrack
-restore check rejects a skipped file that is still byte-identical to its state
-at the rollback, so a script left sitting in the working tree blocks the redo.
-Prepare it before the round that depends on it.
+To keep a script that must survive a rollback, make it part of the committed
+workspace before the round that depends on it. Restoring to an earlier
+checkpoint discards work the target boundary did not already carry, so an
+uncommitted script is abandoned together with the rest of that work.
 
 ## Backtrack and recovery
 
@@ -367,34 +371,33 @@ even if its closing round changes no files.
 
 A machine-triggered backtrack records a rollback directive. An Agent may also
 abandon the current branch deliberately by submitting a top-level
-`recovery: { target_round, reason }` instead of an `evaluation`. Recovery is an
-action, not an evaluation: it requires none of the four core fields, the held
-prompt's `roundId`, and a reason. The reason is recorded verbatim and rendered
-in the brief as report-only text, never as an instruction. The target must be
-an earlier committed evaluation on the current branch with an observed Git
-restore point; error-level findings on it do not disqualify it, because it is
-a restore point, not a success claim. LoopForge records a rollback directive
-event and restores the round counter to `target + 1`. Rejected attempts are
-never history. The held redo prompt is for `target + 1`; use its `roundId`.
-There is no extra recovery round. The directive survives the redo as an audit
-event.
+`recovery: { target_checkpoint_id, reason }` instead of an `evaluation`.
+Recovery is an action, not an evaluation: it requires none of the four core
+fields, the held prompt's `roundId` and `transactionId`, and a reason. The
+reason is recorded verbatim and rendered in the brief as report-only text,
+never as an instruction. The target must resolve to a checkpoint ref visible
+through the held transaction or a committed evaluation transaction on the
+current branch; error-level findings on its round do not disqualify it, because
+it is recovery material, not a success claim. LoopForge commits the rollback
+directive, executes the restore itself, verifies the complete Git fingerprint
+boundary and recorded HEAD, then issues the redo prompt. A failed restore
+leaves the directive pending, sets the session to `stalled`, and `resume`
+retries the SAME directive. The directive survives the redo as an audit event.
 
-The Recovery Brief identifies the trigger, restore point, redo ID, failed
-approaches, falsified assumptions, valid discoveries, files to revert, and
-target HEAD. It states restoration facts, not a prescribed command.
+The Recovery Brief identifies the trigger, the restored checkpoint id, the redo
+round, failed approaches, falsified assumptions, valid discoveries, and the
+files discarded by the restore. It states what LoopForge did, not a command for
+the Agent to run.
 
 When backtrack occurs:
 
-1. Restore the workspace before doing more work: the restore point's HEAD,
-   with none of the failed rounds' changes left behind. Work in progress the
-   restore point already carried may stay.
-2. Read the protected Recovery Brief and current prompt. The restore check
-   compares the workspace's complete Git fingerprint boundary with the restore
-   point's own snapshot; only content present at that point may remain.
-3. Continue the redo only after restoring that boundary. Submit its work and
-   evidence using the held `roundId`; LoopForge validates restoration before
-   the redo can commit.
-4. Do not repeat a failed approach without addressing its cause. Carry valid
+1. Read the protected Recovery Brief and the current prompt. Do not restore the
+   workspace yourself: LoopForge already did, and re-running git reset/stash/
+   checkout would move outside the verified target.
+2. The redo prompt is already compiled from the verified post-restore
+   baseline. Submit its work and evidence using the held `roundId` and
+   `transactionId`.
+3. Do not repeat a failed approach without addressing its cause. Carry valid
    discoveries into the redo evaluation.
 
 If the rolled-back work used an active contract, follow the Recovery Brief and
@@ -404,12 +407,13 @@ it; a successor proposal is subject to the same contract lifecycle rules.
 ## Interpret results
 
 - Non-null `prompt`: execute it and submit the next evaluation.
-- `enforcementAction: "reject"`: retry the same logical round and ID; the
-  attempt increases.
-- `enforcementAction: "backtrack"` (machine) or `"recovery"` (Agent): restore
-  the workspace, then submit the first post-rollback redo evaluation with the
-  held prompt and round ID; the runtime checks the restore boundary before that
-  redo commits.
+- `enforcementAction: "reject"`: retry the same logical round and ID with the
+  refreshed `transactionId`; the attempt increases.
+- `enforcementAction: "backtrack"` (machine) or `"recovery"` (Agent): LoopForge
+  already restored and verified the workspace. Execute the held redo prompt and
+  submit with its `roundId` and `transactionId`. If the response instead is
+  `stalled` with `restore_failed`, call `loopforge_resume` to retry the same
+  pending directive.
 - Null `prompt`: inspect `stopReason`.
 
 Read `submission_guidance` before composing the next evaluation, and read

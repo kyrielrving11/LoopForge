@@ -1,5 +1,50 @@
 # Changelog
 
+## 3.9.8 (2026-10-23)
+
+**The workspace-checkpoint release.** Rounds remain the cognitive and audit
+unit; transactions remain the execution unit; workspace checkpoints become the
+recovery and machine-evidence unit. LoopForge no longer asks the Agent to
+restore its own workspace. The Agent selects a checkpoint, LoopForge commits a
+typed rollback directive, executes the restore, verifies the complete Git
+boundary, and only then issues the redo prompt.
+
+### Checkpoints and restore
+
+- Every prepared evaluation transaction records an automatic before-image
+  (`beforeCheckpoint`) or an explicit `beforeCheckpointError`; a round still
+  proceeds when no checkpoint store or Git boundary is available.
+- `loopforge_checkpoint` creates explicit mid-round savepoints. They add no
+  round, commit or progress and are capped per transaction.
+- Checkpoints are content-addressed: the manifest holds the exact fingerprint
+  map and only dirty/untracked regular-file and symlink content is stored as
+  blobs. Visibility, ownership and `redoRound` come from the transaction's
+  `CheckpointRef`, never from a manifest alone.
+- `loopforge_next` recovery now takes `target_checkpoint_id`. The directive
+  binds the target by checkpoint id and content hash; `redoRound` is the only
+  branch fence.
+- LoopForge executes the restore (`git reset --hard` for the recorded HEAD plus
+  exact file writes/deletes), then verifies HEAD and the full fingerprint map
+  against the manifest before compiling the redo.
+- A failed restore keeps the directive pending, persists `stalled`, and is
+  retried by `loopforge_resume`; no redo prompt is issued without verification.
+- Machine backtrack targets the before-image of round T+1 and uses the same
+  restore protocol. R9 and the old skipped-file/HEAD redo checks are deleted;
+  a restore is not round progress.
+
+### Transaction and session identity
+
+- Round transaction schema 4 → 5. Schema 4 is reported as legacy, not migrated.
+- `transactionId` joins `roundId` as a required submission anchor for
+  `loopforge_next` and `loopforge_checkpoint`; recovery requires both.
+- Retry rebinds the transaction id while preserving the logical round, the
+  before-image/error fact and a verified restore marker.
+- Branch identity propagates through redo, resume, unpause and later rounds.
+- `stalled` sessions are reconstructible and resumable; pending directives are
+  processed before committed-decision replay.
+- `operatorAcceptance` is carried as a session cursor so a restore that clears
+  the held snapshot cannot lose the operator's acceptance surface.
+
 ## 3.9.7 (2026-10-22)
 
 **The responsibility-boundary hardening release.** Agent semantics remain

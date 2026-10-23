@@ -38,6 +38,11 @@ LoopForge has one factual source and one cognitive source.
   directive is a typed `rollback_directive` event, not a normal round; its
   `transactionId` names the child branch. `resolveBranch` is the one branch
   read model (`branchRounds`, `branchDirectives`, `pendingRollbackDirective`).
+- A workspace checkpoint is recovery material, not history. Its authority is the
+  `CheckpointRef` inside a transaction snapshot; the content-addressed manifest
+  and blobs hold only what HEAD cannot reproduce. `redoRound` in that ref is the
+  one branch fence. Checkpoints never feed Canonical State, prompts, acceptance,
+  progress or stall.
 - Agent conversation history and long-term memory are background, never an
   input. The prompt carries committed current-governance facts only; there is
   no external-context injection or prompt pointer to the state file.
@@ -68,20 +73,26 @@ evaluation must not save session state, write the Vault, run verification or
 enforcement, increment rejection state, or record metrics. The same `roundId`
 can retry the corrected payload.
 
-`loopforge_next` accepts a top-level `recovery: { target_round, reason }` as a
-mutually exclusive alternative to `evaluation`. Recovery is a first-class
+`loopforge_next` accepts a top-level `recovery: { target_checkpoint_id, reason }`
+as a mutually exclusive alternative to `evaluation`. Recovery is a first-class
 action, not an evaluation: it requires no core fields, never fabricates one,
 and bypasses ordinary verification/enforcement of the abandoned work. It also
-requires the held prompt's `roundId` (`round_id_required` otherwise), and the
-target must be an earlier committed evaluation on the current branch with an
-observed after-phase Git restore point; invalid targets return
+requires the held prompt's `roundId` and `transactionId`
+(`round_id_required`/`transaction_id_required` otherwise), and the target must
+resolve to a checkpoint ref visible through the held transaction or a committed
+evaluation transaction on the current branch; invalid targets return
 `recovery_invalid`/`recovery_unavailable`/`recovery_disabled` before any
-durable effect. The target is a restore point, not a success claim:
-error-level verification findings on it do not disqualify it. The checkpoint
-compares the workspace's complete Git fingerprint boundary against the target
-snapshot, not only HEAD and the dirty path set. The Agent's reason is recorded
-verbatim and rendered in the Recovery Brief as report-only data, never as a
-LoopForge instruction. Operator criteria and hard constraints are immutable:
+durable effect. The checkpoint manifest records the complete Git fingerprint
+boundary; LoopForge executes and verifies the restore, then issues the redo
+prompt. The target is a recovery point, not a success claim: error-level
+verification findings on its round do not disqualify it. The Agent's reason is
+recorded verbatim and rendered in the Recovery Brief as report-only data, never
+as a LoopForge instruction. `loopforge_checkpoint` creates an explicit mid-round
+savepoint with the same three anchors; it adds no round, commit or progress.
+The transaction snapshot's `CheckpointRef` is the ONE authority for a
+checkpoint's visibility, ownership and redo round; a manifest alone is never a
+restore point. Checkpoints never enter `CanonicalLoopState`, prompt governance,
+acceptance, progress or stall. Operator criteria and hard constraints are immutable:
 `revised_success_criteria` is retired, and `retracted_constraints` may only
 name an active Agent-discovered constraint (including a discovery preserved by
 a committed rollback directive). Resolution accepts the `c-` id or
@@ -163,15 +174,15 @@ SessionManager -> RoundLifecycle -> RoundDriver -> RoundCoordinator
 - Reject keeps the logical round ID, increments the attempt, and commits no
   round.
 - Agent recovery or machine backtrack commits a `rollback_directive` event with
-  `origin`, `reason`/`trigger_rule`, target branch identity, skipped files and
-  preserved discoveries. It restores the round counter to `target + 1` and
-  requires workspace restoration before the redo. The first post-rollback
-  submission is a recovery checkpoint: it proves the restore, and only then may
-  the redo commit work. Restoration is judged against the restore point's OWN
-  machine snapshot — the same HEAD and no dirty file the restore point did not
-  already have — so unrelated work in progress is never read as a failed
-  restore. The directive event is never overwritten; the redo is a normal
-  evaluation on the child branch.
+  `origin`, `reason`/`trigger_rule`, a checkpoint target (id + content hash +
+  redo round), skipped files and preserved discoveries. It sets the session
+  cursor to `target.redo_round`, then LoopForge executes and verifies the
+  restore against the checkpoint manifest's complete Git boundary and the
+  recorded HEAD. Only after verification does it compile the redo prompt; a
+  failed restore persists `stalled` with no prompt and `resume` retries the
+  SAME directive. The directive event is never overwritten; the redo is a
+  normal evaluation on the child branch. A restore is not round progress and
+  never satisfies a redo-time verification check.
 - Terminate returns a terminal result without committing the rejected or
   terminating evaluation as a normal round.
 - Stop decisions prioritize an explicit blocked declaration. `completed`
@@ -377,9 +388,9 @@ and no declared evolution. An unobservable boundary stays L1. L2 is entered
 for factual round conditions such as first round, plan boundary, deep or
 shallow committed recovery, machine contradiction, checkpoint boundary, or
 repeated rejection; there is no round-count timer. The Recovery Brief and the
-recovery boundary share `pendingRollbackDirective` (backtrack `target + 1 ===
-redoRound`), and objective/constraint evolution is bounded by the compile
-window so an abandoned branch cannot leak into the redo prompt.
+recovery boundary share `pendingRollbackDirective` (matched by
+`target.redo_round`), and objective/constraint evolution is bounded by the
+compile window so an abandoned branch cannot leak into the redo prompt.
 
 Every level renders the same protected normative entry set: the active
 criteria, every active constraint (hard and other), the active contract and
@@ -443,10 +454,12 @@ runtime boundary and sets `process.cwd()` before any runtime object is
 constructed.
 
 The MCP server is synchronous JSON-RPC over stdio. Public tools are
-`start`, `next`, `status`, `stop`, `pause`, `resume`, `replay`, `gate_check`,
-and `gate_resolve`; gate tools are hidden and return `gate_disabled` unless
-`policy.gate.enabled` is true. Tool responses use the uniform `{ok}` envelope
-with a stable error `code` and separate human `message`.
+`start`, `next`, `checkpoint`, `status`, `stop`, `pause`, `resume`, `replay`,
+`gate_check`, and `gate_resolve`; gate tools are hidden and return
+`gate_disabled` unless `policy.gate.enabled` is true. `next` and `checkpoint`
+require `sessionId`, `roundId` and `transactionId`; recovery additionally names
+`target_checkpoint_id`. Tool responses use the uniform `{ok}` envelope with a
+stable error `code` and separate human `message`.
 
 The policy schema version is a boundary: unknown keys or a mismatched version
 are `policy_invalid`, and the version moves whenever the key surface changes.
@@ -547,10 +560,13 @@ run the scripted prepack in the clean mirror.
   matching, unknown/closed targets, no duplication, contract whole-block vs
   item moves, sub-goal overflow counts, finding/retry-section filtering, and
   coverage completeness.
-- Backtrack-restore changes: cover work in progress that the restore point
-  already carried being accepted, a file the failed rounds left dirty being
-  rejected even behind a matching HEAD, the before-snapshot arm, and an
-  absent restore-point baseline degrading to HEAD equality.
+- Checkpoint/restore changes: cover content-addressed capture (dirty tracked,
+  untracked, deleted, symlink, executable, non-ASCII), clean-tracked content
+  not stored, manifest/id/hash stability and tamper failure, path traversal and
+  `.git`/state-dir refusal, HEAD equal/ancestor/descendant/diverged, exclusive
+  file writes, post-restore exact boundary equality, directive persistence,
+  stalled-after-failed-restore, restart/resume retry, and the redo's verified
+  `restore` marker. A restore must never count as round progress.
 - Diagnostics changes: cover unknown/retired fields, wrong types, caps,
   truncation, deterministic order, the strict-error vocabulary, unchanged
   state after a same-round retry, and the attempted→retained invariant for

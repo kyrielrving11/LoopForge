@@ -79,13 +79,16 @@ deliverable or its tests are semantically appropriate.
 
 ## Recovery and durable history
 
-The Agent may request recovery to an earlier committed evaluation on the
-current branch. LoopForge validates that target and its observed Git restore
-point, records a rollback directive, and checks the workspace against the
-restore point before redo work can commit. LoopForge does not choose the target
-or interpret the Agent's reason. Machine-triggered backtracks are also recorded
-as directives. Redo uses a child branch; abandoned work remains auditable and
-is excluded from the active branch history.
+The Agent may request recovery to a workspace checkpoint: the automatic
+before-image of a prepared round or an explicit mid-round savepoint created with
+`loopforge_checkpoint`. LoopForge resolves the checkpoint through the current
+branch's transaction refs, records a rollback directive, then executes and
+verifies the restore itself against the manifest's complete Git boundary and
+recorded HEAD. Only after verification does it issue the redo prompt; a failed
+restore leaves the directive pending and the session resumable. LoopForge does
+not choose the target or interpret the Agent's reason. Machine-triggered
+backtracks use the same restore protocol. Redo uses a child branch; abandoned
+work remains auditable and is excluded from the active branch history.
 
 Committed typed round documents in the Vault are the factual source.
 `CommittedRoundView` is the shared history read model, and `CanonicalLoopState`

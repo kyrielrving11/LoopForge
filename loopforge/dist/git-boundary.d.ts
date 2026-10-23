@@ -67,7 +67,7 @@ export declare function runGitCommandStatus(args: readonly string[], options: Gi
  *  parallel batch; HEAD is best-effort (a repository with no commit is a
  *  valid boundary with no head). Any required-command failure returns an
  *  explicit status — never an empty-but-observed boundary. */
-export declare function captureGitFileStateAsync(signal?: AbortSignal, timeoutMs?: number, 
+export declare function captureGitFileStateAsync(signal?: AbortSignal, timeoutMs?: number,
 /** Workspace root; injectable so tests can capture against a temp repo.
  *  Defaults to the process cwd, matching the evidence providers. */
 cwd?: string): Promise<GitCaptureResult>;

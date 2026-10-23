@@ -64,14 +64,17 @@ remains the agent's and operator's judgment.
 ## Recovery with the agent in control
 
 The agent may recognize that its current direction is wrong and request
-recovery to an earlier committed round. LoopForge does not diagnose the
-mistake or choose the destination. It checks that the target is valid, records
-the rollback as a durable event, and verifies the workspace against the target
-snapshot before redo work can be committed.
+recovery to a workspace checkpoint — the automatic before-image of a prepared
+round or an explicit `loopforge_checkpoint` savepoint. LoopForge does not
+diagnose the mistake or choose the destination. It resolves the checkpoint
+through the branch's transaction refs, records the rollback as a durable event,
+then restores the files and HEAD itself and verifies the complete Git boundary
+before issuing the redo prompt.
 
 LoopForge can also trigger a backtrack when a machine rule requires it. Both
-paths remain visible in history. Redo continues on a child branch, preserving
-the abandoned work for audit without treating it as current work.
+paths use the same restore protocol and remain visible in history. Redo
+continues on a child branch, preserving the abandoned work for audit without
+treating it as current work.
 
 ## The responsibility boundary
 

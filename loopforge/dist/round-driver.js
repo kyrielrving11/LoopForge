@@ -190,6 +190,7 @@ export class RoundDriver {
             snapshot: input.snapshot,
             task: input.task,
             maxRounds: input.maxRounds,
+            ...(input.history ? { history: input.history } : {}),
             selfEval: input.selfEval,
             consecutiveRejections: input.consecutiveRejections,
             lastRejectionCheck: input.lastRejectionCheck,

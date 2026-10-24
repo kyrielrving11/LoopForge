@@ -9,7 +9,8 @@ import type { LoopStore } from "./loop-store.js";
 import { LoopForgeEngine } from "./engine.js";
 import type { MachineObservation } from "./protocol.js";
 import type { BoundaryCapture } from "./git-boundary.js";
-import { type LoopCompileRequest, type LoopCompileResponse, type OperatorAcceptance, type PromptArtifact, type SelfEvaluation, type SubmissionDiagnostic } from "./protocol.js";
+import type { LoopCompileRequest, LoopCompileResponse, OperatorAcceptance, PromptArtifact, SelfEvaluation, SubmissionDiagnostic } from "./protocol.js";
+import type { CommittedHistory } from "./history.js";
 import type { RoundTransactionOutcome, RoundTransactionSnapshot } from "./round-transaction.js";
 import { FileWorkspaceCheckpointStore } from "./workspace-checkpoint.js";
 /** A pre-collected before baseline, used by the post-restore redo path. The
@@ -36,6 +37,8 @@ export interface CompleteRoundInput {
     loopId: string;
     task: string;
     maxRounds: number;
+    /** v4.0.1: the pre-commit history the advance path already loaded. */
+    history?: CommittedHistory;
     selfEval: SelfEvaluation;
     consecutiveRejections: number;
     /** L4 (v3.7.x): previous round's rejection check (own-streak basis). */

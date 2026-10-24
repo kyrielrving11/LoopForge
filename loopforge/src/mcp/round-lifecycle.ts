@@ -80,6 +80,7 @@ import { branchRounds } from "../committed-round.js";
 import {
   historyWindow,
   loadCommittedHistory,
+  type CommittedHistory,
 } from "../history.js";
 import { deriveSubmissionGuidance } from "../submission-guidance.js";
 import { latestObjective } from "../loop-compiler.js";
@@ -496,12 +497,15 @@ export class RoundLifecycle {
   /** v3.9.1: the before facts of the round being submitted, from the SAME
    *  history window the compile uses. Works on a replay too: rounds below the
    *  logical round exclude the round itself. */
-  private beforeFactsFor(session: McpSession): {
+  private beforeFactsFor(
+    session: McpSession,
+    loaded?: CommittedHistory,
+  ): {
     contractId: string | null;
     subGoals: SubGoal[];
     recoveryDirective: RecoveryDirective | null;
   } {
-    const history = loadCommittedHistory(this.store, session.loopId);
+    const history = loaded ?? loadCommittedHistory(this.store, session.loopId);
     const rounds = historyWindow(history, session.currentRound);
     const pending = history.pendingDirective?.recovery?.target.redo_round ===
         session.currentRound
@@ -1251,6 +1255,7 @@ export class RoundLifecycle {
     selfEval: SelfEvaluation,
     normalizationDiagnostics?: SubmissionDiagnostic[],
     submittedFields?: string[],
+    history?: CommittedHistory,
   ): Promise<{
     pr: RoundProcessResult;
     verificationFlags: VerificationFlag[];
@@ -1266,6 +1271,7 @@ export class RoundLifecycle {
       loopId: session.loopId,
       task: session.task,
       maxRounds: session.maxRounds,
+      ...(history ? { history } : {}),
       selfEval,
       consecutiveRejections: session.consecutiveRejections,
       lastRejectionCheck: session.lastRejectionCheck,
@@ -1919,7 +1925,10 @@ export class RoundLifecycle {
     // v3.9.7: a pending rollback directive with no verified redo snapshot
     // means the workspace is (or may be) mid-restore. Ordinary work must not
     // be evaluated against it. Resume completes the restore first.
-    const pending = loadCommittedHistory(this.store, session.loopId).pendingDirective;
+    // v4.0.1: this is the ONE pre-commit history read of the advance path; the
+    // before facts and the evaluation coordinator share it.
+    const history = loadCommittedHistory(this.store, session.loopId);
+    const pending = history.pendingDirective;
     if (pending?.recovery &&
         (session.roundSnapshot?.restore?.directiveTransactionId !==
           pending.recovery.transaction_id ||
@@ -1964,12 +1973,13 @@ export class RoundLifecycle {
     // ── 3. Execute round transaction ─────────────────────────────────────
     // Capture the before facts from the shared compile window BEFORE the
     // transaction commits (a replay sees the same window: rounds < R).
-    const beforeFacts = this.beforeFactsFor(session);
+    const beforeFacts = this.beforeFactsFor(session, history);
     const tx = await this.executeRoundTransaction(
       session,
       selfEval,
       normalizationDiagnostics,
       submittedFields,
+      history,
     );
     const receiptSnapshot = session.roundSnapshot;
     if (!receiptSnapshot) {

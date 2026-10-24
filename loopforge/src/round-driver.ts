@@ -16,16 +16,16 @@ import type {
 import type { BoundaryCapture } from "./git-boundary.js";
 import { writeStateFile } from "./policy.js";
 import { CompileFailureError } from "./errors.js";
-import {
-  operatorAcceptanceFromObjective,
-  type CompiledRoundFacts,
-  type LoopCompileRequest,
-  type LoopCompileResponse,
-  type OperatorAcceptance,
-  type PromptArtifact,
-  type SelfEvaluation,
-  type SubmissionDiagnostic,
+import type {
+  CompiledRoundFacts,
+  LoopCompileRequest,
+  LoopCompileResponse,
+  OperatorAcceptance,
+  PromptArtifact,
+  SelfEvaluation,
+  SubmissionDiagnostic,
 } from "./protocol.js";
+import type { CommittedHistory } from "./history.js";
 import {
   prepareRejectedAttempt,
   prepareRoundTransaction,
@@ -67,6 +67,8 @@ export interface CompleteRoundInput {
   loopId: string;
   task: string;
   maxRounds: number;
+  /** v4.0.1: the pre-commit history the advance path already loaded. */
+  history?: CommittedHistory;
   selfEval: SelfEvaluation;
   consecutiveRejections: number;
   /** L4 (v3.7.x): previous round's rejection check (own-streak basis). */
@@ -343,6 +345,7 @@ export class RoundDriver {
       snapshot: input.snapshot,
       task: input.task,
       maxRounds: input.maxRounds,
+      ...(input.history ? { history: input.history } : {}),
       selfEval: input.selfEval,
       consecutiveRejections: input.consecutiveRejections,
       lastRejectionCheck: input.lastRejectionCheck,

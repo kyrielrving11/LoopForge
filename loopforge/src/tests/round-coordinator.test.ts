@@ -5,6 +5,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { finalizeStopReason, RoundCoordinator } from "../round-coordinator.js";
 import type { RoundProcessInput } from "../round-coordinator.js";
+import { emptyCommittedHistory } from "../history.js";
 import { makeSelfEvaluation, makeExecutionReport } from "../protocol.js";
 import type { SelfEvaluation } from "../protocol.js";
 import type { CommandObservation } from "../protocol.js";
@@ -76,6 +77,22 @@ function minimalInput(overrides: Partial<RoundProcessInput> = {}): RoundProcessI
 // ═══════════════════════════════════════════════════════════════════════════
 // Happy path
 // ═══════════════════════════════════════════════════════════════════════════
+
+describe("v4.0.1 — one pre-commit history read", () => {
+  it("uses the history supplied by the advance path instead of re-reading", () => {
+    const store = new MemoryLoopStore();
+    store.listEntries = () => {
+      throw new Error("the coordinator must not re-read history");
+    };
+    const coordinator = new RoundCoordinator(store);
+    const result = coordinator.processRound(minimalInput({
+      currentRound: 1,
+      history: emptyCommittedHistory("test-loop"),
+    }));
+    assert.notEqual(result.action, "reject");
+    assert.notEqual(result.action, "terminate");
+  });
+});
 
 describe("RoundCoordinator — happy path", () => {
   const coordinator = new RoundCoordinator();

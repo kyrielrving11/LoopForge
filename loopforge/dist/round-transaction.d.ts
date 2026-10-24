@@ -103,6 +103,9 @@ export interface RoundTransactionInput {
     snapshot: RoundTransactionSnapshot;
     task: string;
     maxRounds: number;
+    /** v4.0.1: the pre-commit history loaded by the advance path. Absent for
+     *  direct callers, which let the round coordinator load it. */
+    history?: import("./history.js").CommittedHistory;
     selfEval: SelfEvaluation;
     consecutiveRejections: number;
     /** L4 (v3.7.x): previous round's rejection check (own-streak basis). */

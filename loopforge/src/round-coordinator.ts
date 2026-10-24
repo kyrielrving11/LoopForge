@@ -23,6 +23,7 @@ import {
   emptyCommittedHistory,
   historyWindow,
   loadCommittedHistory,
+  type CommittedHistory,
 } from "./history.js";
 import type { MachineObservation } from "./protocol.js";
 import type { ObservationDelta } from "./evidence-provider.js";
@@ -75,6 +76,9 @@ export interface RoundProcessInput {
   task: string;
   currentRound: number;
   maxRounds: number;
+  /** v4.0.1: the pre-commit history loaded once by the advance path. When
+   *  absent, this coordinator loads it itself (direct/library callers). */
+  history?: CommittedHistory;
   /** The agent's self-evaluation for this round. */
   selfEval: SelfEvaluation;
   /** How many consecutive rounds have been rejected by enforcement. */
@@ -381,10 +385,12 @@ export class RoundCoordinator {
 
     // ── 1. Load committed history once ──────────────────────────────────
     // The verification gate and the contract reducer read the same flat entry
-    // view and the same committed window; one store read serves both.
-    const history = this.store
+    // view and the same committed window; one store read serves both. The
+    // advance path passes the history it already loaded for its own
+    // pre-commit facts.
+    const history = input.history ?? (this.store
       ? loadCommittedHistory(this.store, loopId)
-      : emptyCommittedHistory(loopId);
+      : emptyCommittedHistory(loopId));
     const vaultEntries: VaultEntry[] = history.entries;
 
     // v3.9.6: the previous evaluation is the last committed branch round,

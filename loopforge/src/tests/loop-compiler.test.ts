@@ -1621,6 +1621,36 @@ describe("v4.0.1 — operator acceptance integrity", () => {
     assert.equal(response.compiled?.task, "Test task");
   });
 
+  it("a deep redo to round 1 keeps the directive's operator acceptance", () => {
+    const loopId = "acceptance-deep-redo";
+    const directive = committedBacktrackRound(3, loopId, 0);
+    const snapshot = ((directive.loop_lineage as Record<string, unknown>)
+      .round_transaction as Record<string, unknown>).snapshot as Record<string, unknown>;
+    const deepAcceptance = {
+      task: "Deep redo task",
+      success_criteria: ["Keep the operator criterion"],
+      hard_constraints: ["No new dependencies"],
+    };
+    snapshot.operatorAcceptance = deepAcceptance;
+
+    const response = compileLoop(
+      makeLoopCompileRequest({
+        loop_id: loopId,
+        round: 1,
+        task: "Deep redo task",
+      }),
+      { results: [directive] },
+      { operatorAcceptance: deepAcceptance },
+    );
+
+    assert.deepEqual(response.operatorAcceptance, deepAcceptance);
+    assert.deepEqual(
+      response.loop_objective?.success_criteria,
+      ["Keep the operator criterion"],
+    );
+    assert.match(response.prompt, /Keep the operator criterion/);
+  });
+
   it("fails closed when a caller copy disagrees with committed history", () => {
     const loopId = "acceptance-conflict";
     assert.throws(

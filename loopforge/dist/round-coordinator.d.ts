@@ -18,6 +18,7 @@
  * side-effect free and accepted decisions can be replayed idempotently.
  */
 import type { LoopStore, VaultEntry } from "./loop-store.js";
+import { type CommittedHistory } from "./history.js";
 import type { MachineObservation } from "./protocol.js";
 import type { ObservationDelta } from "./evidence-provider.js";
 import type { CheckpointRef, ContractTransition, SelfEvaluation, RoundVerificationStatus, StopReason, VerificationFlag, WorkspaceCheckpointManifest } from "./protocol.js";
@@ -28,6 +29,9 @@ export interface RoundProcessInput {
     task: string;
     currentRound: number;
     maxRounds: number;
+    /** v4.0.1: the pre-commit history loaded once by the advance path. When
+     *  absent, this coordinator loads it itself (direct/library callers). */
+    history?: CommittedHistory;
     /** The agent's self-evaluation for this round. */
     selfEval: SelfEvaluation;
     /** How many consecutive rounds have been rejected by enforcement. */

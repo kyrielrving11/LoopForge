@@ -605,6 +605,7 @@ export class RoundTransactionCoordinator {
             task: input.task,
             currentRound: snapshot.round,
             maxRounds: input.maxRounds,
+            ...(input.history ? { history: input.history } : {}),
             selfEval: input.selfEval,
             consecutiveRejections: input.consecutiveRejections,
             lastRejectionCheck: input.lastRejectionCheck,

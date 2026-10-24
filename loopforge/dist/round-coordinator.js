@@ -227,10 +227,12 @@ export class RoundCoordinator {
         const roundSuccess = selfEval.success ?? false;
         // ── 1. Load committed history once ──────────────────────────────────
         // The verification gate and the contract reducer read the same flat entry
-        // view and the same committed window; one store read serves both.
-        const history = this.store
+        // view and the same committed window; one store read serves both. The
+        // advance path passes the history it already loaded for its own
+        // pre-commit facts.
+        const history = input.history ?? (this.store
             ? loadCommittedHistory(this.store, loopId)
-            : emptyCommittedHistory(loopId);
+            : emptyCommittedHistory(loopId));
         const vaultEntries = history.entries;
         // v3.9.6: the previous evaluation is the last committed branch round,
         // never a session copy.

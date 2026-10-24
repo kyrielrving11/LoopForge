@@ -341,20 +341,23 @@ describe("v3.9.7 — SessionManager checkpoint recovery E2E", () => {
         maxRounds: 10,
       });
       const sessionId = String(started.sessionId);
-      assert.ok(started.transactionId, "start returns a transactionId");
+      assert.ok(started.submissionHandle?.transactionId, "start returns a submissionHandle");
       assert.equal(started.checkpoints?.length, 1, "start holds its before-image");
 
       const mid = await TOOL_HANDLERS.loopforge_checkpoint(mgr, {
-        sessionId,
-        roundId: started.roundId,
-        transactionId: started.transactionId,
+        submissionHandle: started.submissionHandle,
       });
       assert.equal(mid.ok, true, `checkpoint tool failed: ${JSON.stringify(mid)}`);
+      assert.deepEqual(mid.submissionHandle, started.submissionHandle,
+        "a checkpoint leaves the handle unchanged");
       assert.equal(mid.role, "mid");
       assert.match(String(mid.checkpointId), /^ck-[a-f0-9]{24}$/);
 
       const status = await TOOL_HANDLERS.loopforge_status(mgr, { sessionId });
-      assert.equal(status.transactionId, started.transactionId);
+      assert.equal(
+        (status.submissionHandle as { transactionId?: string } | null)?.transactionId,
+        started.submissionHandle?.transactionId,
+      );
       assert.equal((status.checkpoints as unknown[]).length, 2,
         "status returns the before-image and the explicit savepoint");
 
@@ -362,8 +365,8 @@ describe("v3.9.7 — SessionManager checkpoint recovery E2E", () => {
       runGit(dir, "add", ".");
       runGit(dir, "-c", "user.name=lf", "-c", "user.email=lf@example.invalid",
         "commit", "-q", "-m", "round one");
-      const round1 = await advanceWithHeld(mgr, 
-        sessionId, "", evaluation("r1.txt"), started.roundId, started.transactionId,
+      const round1 = await advanceWithHeld(
+        mgr, sessionId, "", evaluation("r1.txt"), started.submissionHandle ?? undefined,
       );
       assert.ok(round1.prompt, "round 2 prompt");
       const round2Before = round1.checkpoints?.find((item) => item.role === "before");
@@ -373,27 +376,26 @@ describe("v3.9.7 — SessionManager checkpoint recovery E2E", () => {
       runGit(dir, "add", ".");
       runGit(dir, "-c", "user.name=lf", "-c", "user.email=lf@example.invalid",
         "commit", "-q", "-m", "round two");
-      const round2 = await advanceWithHeld(mgr, 
-        sessionId, "", evaluation("r2.txt"), round1.roundId, round1.transactionId,
+      const round2 = await advanceWithHeld(
+        mgr, sessionId, "", evaluation("r2.txt"), round1.submissionHandle ?? undefined,
       );
       assert.ok(round2.prompt, "round 3 prompt");
-      const held = mgr.get(sessionId)!.roundSnapshot!;
+      const heldHandle = mgr.getSubmissionHandle(sessionId)!;
 
-      const stale = await advanceWithHeld(mgr, 
-        sessionId, "", evaluation("r2.txt"), held.roundId, "tx-stale-attempt",
+      const stale = await advanceWithHeld(mgr,
+        sessionId, "", evaluation("r2.txt"),
+        { ...heldHandle, transactionId: "tx-stale-attempt" },
       );
       assert.ok(stale.prompt, "a stale transaction returns the held prompt");
       assert.ok(
-        (stale.warnings ?? []).some((warning) => warning.includes("transactionId")),
+        (stale.warnings ?? []).some((warning) => warning.includes("submissionHandle")),
         "the stale response is warned, not evaluated",
       );
       assert.equal(mgr.get(sessionId)!.currentRound, 3, "no round was consumed");
 
       const redo = await mgr.recover(
-        sessionId,
+        heldHandle,
         { target_checkpoint_id: round2Before.checkpointId, reason: "abandon this approach" },
-        held.roundId,
-        held.transactionId,
       );
       assert.ok(redo.prompt, "the redo prompt is delivered only after restore");
       assert.equal(redo.round, 2);
@@ -417,10 +419,8 @@ describe("v3.9.7 — SessionManager checkpoint recovery E2E", () => {
       );
 
       const repeat = await mgr.recover(
-        sessionId,
+        redo.submissionHandle ?? undefined,
         { target_checkpoint_id: round2Before.checkpointId, reason: "repeat" },
-        redo.roundId,
-        redo.transactionId,
       );
       assert.ok(repeat.prompt, "a repeated recovery returns the held redo prompt");
       assert.equal(readOnlyRollbacks(readEntries()).length, 1,
@@ -435,7 +435,7 @@ describe("v3.9.7 — SessionManager checkpoint recovery E2E", () => {
       const resumed = await mgr.resume("recover-e2e");
       assert.ok(resumed?.prompt, "resume returns the held redo prompt");
       assert.equal(resumed?.round, 2);
-      assert.equal(resumed?.transactionId, redo.transactionId);
+      assert.equal(resumed?.submissionHandle?.transactionId, redo.submissionHandle?.transactionId);
       assert.equal(resumed?.submission_guidance?.recovery?.pending, true,
         "the held redo keeps its recovery facts across a restart");
       assert.equal(
@@ -451,9 +451,9 @@ describe("v3.9.7 — SessionManager checkpoint recovery E2E", () => {
       runGit(dir, "add", ".");
       runGit(dir, "-c", "user.name=lf", "-c", "user.email=lf@example.invalid",
         "commit", "-q", "-m", "redo work");
-      const next = await advanceWithHeld(mgr, 
-        resumed!.sessionId, "", evaluation("r2b.txt"),
-        resumed!.roundId, resumed!.transactionId,
+      const next = await advanceWithHeld(
+        mgr, resumed!.sessionId, "", evaluation("r2b.txt"),
+        resumed!.submissionHandle ?? undefined,
       );
       assert.equal(next.round, 3);
       assert.equal(
@@ -468,13 +468,11 @@ describe("v3.9.7 — SessionManager checkpoint recovery E2E", () => {
       const round2View = readOnlyRounds(readEntries()).find((view) => view.round === 2);
       assert.ok(round2View?.beforeCheckpoint);
       const deep = await mgr.recover(
-        resumed!.sessionId,
+        next.submissionHandle ?? undefined,
         {
           target_checkpoint_id: round2View!.beforeCheckpoint!.checkpointId,
           reason: "go deeper",
         },
-        next.roundId,
-        next.transactionId,
       );
       assert.ok(deep.prompt, "deep recovery returns a redo prompt");
       assert.equal(deep.round, 2);
@@ -518,11 +516,7 @@ describe("v3.9.7 — SessionManager checkpoint recovery E2E", () => {
         ...getPolicy(),
         backend: { root_dir: "../outside-state" },
       });
-      const checkpoint = await mgr.checkpoint(
-        sessionId,
-        started.roundId,
-        started.transactionId,
-      );
+      const checkpoint = await mgr.checkpoint(started.submissionHandle ?? undefined);
       assert.equal(checkpoint.error, "checkpoint_unavailable");
       assert.equal(
         (checkpoint.details as Record<string, unknown>).reason_code,
@@ -530,10 +524,8 @@ describe("v3.9.7 — SessionManager checkpoint recovery E2E", () => {
       );
 
       const recovery = await mgr.recover(
-        sessionId,
+        started.submissionHandle ?? undefined,
         { target_checkpoint_id: before.checkpointId, reason: "retry from known state" },
-        started.roundId,
-        started.transactionId,
       );
       assert.equal(recovery.prompt, null);
       assert.equal(recovery.submissionError?.code, "recovery_unavailable");

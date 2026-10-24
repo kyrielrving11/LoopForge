@@ -25,7 +25,7 @@ import { getPolicy, validateLoopId } from "../policy.js";
 import { isRecord, unique } from "../token-utils.js";
 import { ReplayBackend } from "../replay.js";
 import { FileLoopStore, queryLoopEntries } from "../loop-store.js";
-import { makeRoundId, MAX_MID_CHECKPOINTS_PER_TRANSACTION, prepareRoundTransaction, } from "../round-transaction.js";
+import { MAX_MID_CHECKPOINTS_PER_TRANSACTION, prepareRoundTransaction, } from "../round-transaction.js";
 import { findCheckpointRef } from "../recovery.js";
 import { pendingRollbackDirective } from "../committed-round.js";
 import { buildCheckpointRef, CheckpointError, FileWorkspaceCheckpointStore, } from "../workspace-checkpoint.js";
@@ -38,6 +38,7 @@ import { SessionLeaseConflictError, VaultSessionStateStore, } from "../storage.j
 import { StorageCorruptionError } from "../loop-store.js";
 import { RoundLifecycle, buildLoopRequest, normalizeStartCriteria, } from "./round-lifecycle.js";
 import { activeContractOf, validateSubmission, } from "./submission-boundary.js";
+import { makeSubmissionHandle, parseSubmissionHandle, staleHandleWarning, validateSubmissionHandle, } from "./submission-handle.js";
 // ── SessionManager ─────────────────────────────────────────────────────────
 export class SessionManager {
     sessions = new Map();
@@ -271,11 +272,11 @@ export class SessionManager {
             maxRounds,
         });
         const snapshot = session.roundSnapshot;
+        const handle = makeSubmissionHandle(session);
         return {
             sessionId,
             round: 1,
-            roundId: snapshot?.roundId,
-            ...(snapshot?.transactionId ? { transactionId: snapshot.transactionId } : {}),
+            ...(handle ? { submissionHandle: handle } : {}),
             ...(snapshot?.beforeCheckpoint
                 ? { checkpoints: [snapshot.beforeCheckpoint] }
                 : {}),
@@ -299,6 +300,11 @@ export class SessionManager {
     getSubmissionGuidance(sessionId) {
         const session = this.sessions.get(sessionId);
         return session ? this.lifecycle.guidanceFor(session) : null;
+    }
+    /** v4.0.0: the current held handle, derived on demand. A read-only
+     *  projection; never persisted. */
+    getSubmissionHandle(sessionId) {
+        return makeSubmissionHandle(this.sessions.get(sessionId));
     }
     /** v3.9.1: the most recent committed round's receipt, rebuilt from the
      *  transaction + shared read model. Rejected/terminated attempts are not in
@@ -575,32 +581,36 @@ export class SessionManager {
      *  loop + round + actionHash; agent_allowed records nothing and returns
      *  the evidence suggestion instead. No action is executed and no round
      *  advances from this call. */
-    checkGate(sessionId, roundId, action) {
-        const session = this.sessions.get(sessionId);
+    checkGate(handle, action) {
+        const parsed = parseSubmissionHandle(handle);
+        if (!parsed) {
+            const detail = "submissionHandle must be an object with exactly sessionId, roundId, " +
+                "and transactionId as non-empty strings.";
+            return {
+                error: "submission_handle_required",
+                errorMessage: `${detail} Copy it from the latest LoopForge response; if lost, call loopforge_status or loopforge_resume.`,
+                details: { reason_code: "shape", detail },
+            };
+        }
+        const session = this.sessions.get(parsed.sessionId);
         if (!session) {
             return {
                 error: "session_not_found",
-                errorMessage: `session not found: ${sessionId}`,
-                sessionId,
+                errorMessage: `session not found: ${parsed.sessionId}`,
+                sessionId: parsed.sessionId,
             };
         }
-        const expectedRoundId = session.roundSnapshot?.roundId
-            ?? makeRoundId(session.loopId, session.currentRound);
-        if (expectedRoundId !== roundId) {
-            return {
-                error: "round_id_mismatch",
-                errorMessage: "roundId does not match the current round — re-run loopforge_gate_check " +
-                    "with the roundId from the latest response",
-                sessionId,
-                roundId,
-            };
-        }
+        const check = validateSubmissionHandle(parsed, session);
+        if (!check.ok)
+            return this.checkpointMismatchResult(check, session);
+        // Only a handle that exactly names the held attempt may open a gate
+        // record. A stale handle must not append gate_opened.
         const verdict = preflightStructuredGate(action);
         if (verdict.kind === "user") {
             this.recordOpenedGate(session.loopId, session.currentRound, verdict, canonicalizeGateAction(action));
         }
         return {
-            sessionId,
+            submissionHandle: check.handle,
             gateId: verdict.gateId,
             risk: verdict.risk,
             decision: verdict.decision,
@@ -865,53 +875,186 @@ export class SessionManager {
             policy_metrics: this.getPolicyMetrics(loopId),
         };
     }
+    /** v4.0.0: the stable result for a missing/malformed handle. */
+    handleRequiredResult() {
+        const detail = "submissionHandle must be an object with exactly sessionId, roundId, " +
+            "and transactionId as non-empty strings.";
+        return {
+            sessionId: "",
+            round: 0,
+            prompt: null,
+            stopReason: "submission_handle_required",
+            stopDetail: `${detail} Copy it from the latest LoopForge response; if lost, ` +
+                "call loopforge_status or loopforge_resume.",
+            submissionError: {
+                code: "submission_handle_required",
+                details: { reason_code: "shape", detail },
+            },
+        };
+    }
+    sessionNotFoundResult(sessionId) {
+        return {
+            sessionId,
+            round: 0,
+            prompt: null,
+            stopReason: "session_not_found",
+            stopDetail: "No session exists with this ID. It may have expired, been deleted, " +
+                "or never existed.",
+            submissionError: {
+                code: "session_not_found",
+                details: { sessionId },
+            },
+        };
+    }
+    sessionStateResult(session) {
+        const handle = makeSubmissionHandle(session);
+        return {
+            sessionId: session.sessionId,
+            round: session.currentRound,
+            ...(handle ? { submissionHandle: handle } : {}),
+            prompt: null,
+            stopReason: session.status,
+            stopDetail: `Session is ${session.status}. Use loopforge_resume to restart a ` +
+                "paused session, or loopforge_start for a new task.",
+        };
+    }
+    /** v4.0.0: one stored-prompt re-delivery for next/recover. A held prompt is
+     *  returned with the current handle and a warning; without one, the stable
+     *  mismatch error carries the current handle when it exists. */
+    handleMismatchResult(check, session) {
+        if (check.reason !== "no_held_prompt") {
+            const held = this.lifecycle.heldPromptResult(session, staleHandleWarning());
+            if (held)
+                return held;
+        }
+        return {
+            sessionId: session.sessionId,
+            round: session.currentRound,
+            ...(check.current ? { submissionHandle: check.current } : {}),
+            prompt: null,
+            stopReason: "submission_handle_mismatch",
+            stopDetail: check.detail,
+            submissionError: {
+                code: "submission_handle_mismatch",
+                details: {
+                    reason_code: check.reason,
+                    ...(check.mismatched.length > 0 ? { mismatched: [...check.mismatched] } : {}),
+                },
+            },
+        };
+    }
+    /** v4.0.0: the checkpoint variant: never re-deliver a prompt, never create a
+     *  checkpoint. The current handle rides the error for re-anchoring. */
+    checkpointMismatchResult(check, session) {
+        return {
+            error: "submission_handle_mismatch",
+            errorMessage: check.detail,
+            sessionId: session.sessionId,
+            ...(check.current ? { submissionHandle: check.current } : {}),
+            details: {
+                reason_code: check.reason,
+                ...(check.mismatched.length > 0 ? { mismatched: [...check.mismatched] } : {}),
+            },
+        };
+    }
+    /** v3.9.7: a pending rollback directive whose restore is not yet verified.
+     *  Read-only; used before the queue/lease so a stale handle cannot mask the
+     *  "call resume" recovery UX. */
+    restorePendingResult(session) {
+        const prefix = `loop:${session.loopId}:`;
+        const entries = [
+            ...queryLoopEntries(this.loopStore, session.loopId, { prefix }),
+            ...queryLoopEntries(this.loopStore, session.loopId, {
+                prefix,
+                feedbackOnly: true,
+            }),
+        ];
+        const pending = pendingRollbackDirective(entries);
+        if (!pending?.recovery)
+            return null;
+        if (session.roundSnapshot?.restore?.directiveTransactionId ===
+            pending.recovery.transaction_id &&
+            session.roundSnapshot?.round === pending.recovery.target.redo_round) {
+            return null;
+        }
+        const handle = makeSubmissionHandle(session);
+        return {
+            sessionId: session.sessionId,
+            round: session.currentRound,
+            ...(handle ? { submissionHandle: handle } : {}),
+            prompt: null,
+            stopReason: "stalled",
+            submissionError: {
+                code: "restore_pending",
+                details: {
+                    loopId: session.loopId,
+                    directive_transaction_id: pending.recovery.transaction_id,
+                    redo_round: pending.recovery.target.redo_round,
+                    detail: "A pending restore must be completed by loopforge_resume before work can be submitted.",
+                },
+            },
+        };
+    }
     /** Core cycle: extract self-eval → record feedback → check stop → compile next.
-     *  The lease + per-session queue wrap the RoundLifecycle state machine.
-     *  @param preExtractedEval Structured SelfEvaluation supplied by the caller.
-     *    An absent value is returned as evaluation_invalid without mutating state.
-     *  @param roundId v3.0.1: The roundId of the round this submission reports on
-     *    (from the last start/next/resume response). Anchors the submission so a
-     *    stale or duplicate submission is not processed against a later round.
-     *    Optional for library callers — when absent the anchor check is skipped. */
-    /** \`submission\` is the RAW evaluation payload, not a built one.
      *
-     *  v3.8.1: this method used to carry a partial copy of the submission
-     *  boundary (an object check plus core-field validation) while the MCP tool
-     *  handler carried the rest — one rule, three copies, across two layers.
-     *  The boundary now lives entirely in the runtime
-     *  (`RoundLifecycle.submissionBoundary`), so every caller — this manager, a
-     *  library user, a future CLI command — gets the same strictness. */
-    /** \`submission\` is the RAW evaluation payload, not a built one.
-     *
-     *  v3.8.1: this method used to carry a partial copy of the submission
-     *  boundary (an object check plus core-field validation) while the MCP tool
-     *  handler carried the rest — one rule, three copies, across two layers.
-     *  The whole boundary now runs HERE, before the queue and before the lease
-     *  heartbeat, so every caller of the public API gets it and a rejected
-     *  payload leaves nothing durable behind. */
-    async advance(sessionId, output, submission, roundId, transactionId) {
-        // Judged before the session is even resolved: a malformed evaluation is a
-        // payload defect whatever the session's state. See submission-boundary.ts.
-        const boundary = validateSubmission(this.loopStore, this.sessions.get(sessionId), submission);
+     *  v4.0.0: the caller supplies the ONE `submissionHandle`; identity is
+     *  checked before the payload boundary and before the queue/lease heartbeat.
+     *  `submission` is the RAW evaluation payload. The whole payload boundary
+     *  still runs here, so every public caller gets the same strictness. */
+    async advance(handle, output, submission) {
+        const parsed = parseSubmissionHandle(handle);
+        if (!parsed)
+            return this.handleRequiredResult();
+        const session = this.sessions.get(parsed.sessionId);
+        if (!session)
+            return this.sessionNotFoundResult(parsed.sessionId);
+        if (session.status !== "running" && session.status !== "stalled") {
+            return this.sessionStateResult(session);
+        }
+        const pending = this.restorePendingResult(session);
+        if (pending)
+            return pending;
+        const check = validateSubmissionHandle(parsed, session);
+        if (!check.ok)
+            return this.handleMismatchResult(check, session);
+        // Identity is established for the attempt named by the handle. Only now
+        // does the payload boundary judge the submission against that attempt's
+        // reference space.
+        const boundary = validateSubmission(this.loopStore, session, submission);
         if (!boundary.ok) {
+            const current = makeSubmissionHandle(session);
             return {
-                sessionId,
-                round: this.sessions.get(sessionId)?.currentRound ?? 0,
-                ...(roundId !== undefined ? { roundId } : {}),
+                sessionId: session.sessionId,
+                round: session.currentRound,
+                ...(current ? { submissionHandle: current } : {}),
                 prompt: null,
                 stopReason: boundary.submissionError.code,
                 stopDetail: boundary.stopDetail,
                 submissionError: boundary.submissionError,
             };
         }
-        return this.withSessionQueue(sessionId, async () => {
-            const session = this.sessions.get(sessionId);
-            if (session?.status === "running" &&
-                !this.renewSessionLease(session.loopId)) {
-                return this.leaseConflictResult(session.loopId, this.findSessionEntry(session.loopId));
+        return this.withSessionQueue(session.sessionId, async () => {
+            const current = this.sessions.get(session.sessionId);
+            if (!current)
+                return this.sessionNotFoundResult(session.sessionId);
+            if (current.status !== "running" && current.status !== "stalled") {
+                return this.sessionStateResult(current);
+            }
+            const pendingInside = this.restorePendingResult(current);
+            if (pendingInside)
+                return pendingInside;
+            // The authoritative re-check. It runs AFTER the queue is acquired but
+            // BEFORE the lease heartbeat, so a concurrent commit cannot make this
+            // call renew a lease for a handle it is about to reject.
+            const inside = validateSubmissionHandle(parsed, current);
+            if (!inside.ok)
+                return this.handleMismatchResult(inside, current);
+            if (current.status === "running" &&
+                !this.renewSessionLease(current.loopId)) {
+                return this.leaseConflictResult(current.loopId, this.findSessionEntry(current.loopId));
             }
             try {
-                return await this.lifecycle.advance(sessionId, output, boundary.evaluation, roundId, boundary.diagnostics, boundary.submittedFields, transactionId);
+                return await this.lifecycle.advance(current.sessionId, output, boundary.evaluation, boundary.diagnostics, boundary.submittedFields);
             }
             catch (error) {
                 if (error instanceof SessionLeaseConflictError) {
@@ -921,24 +1064,32 @@ export class SessionManager {
             }
         });
     }
-    /** v3.9.7: submit an Agent-initiated recovery. Shape validation happens
-     *  before the session queue/lease; target referential validation happens in
-     *  the lifecycle against committed facts. */
-    async recover(sessionId, recovery, roundId, transactionId) {
-        if (typeof roundId !== "string" || roundId.trim().length === 0) {
-            return {
-                sessionId,
-                round: this.sessions.get(sessionId)?.currentRound ?? 0,
-                prompt: null,
-                submissionError: {
-                    code: "round_id_required",
-                    details: { detail: "recovery requires the roundId from the held prompt" },
-                },
-            };
+    /** v3.9.7: submit an Agent-initiated recovery. v4.0.0: the handle is the
+     *  only anchor; shape and target visibility are checked before the
+     *  queue/lease, and the exact handle is re-checked before lease renewal. */
+    async recover(handle, recovery) {
+        const parsed = parseSubmissionHandle(handle);
+        if (!parsed)
+            return this.handleRequiredResult();
+        const session = this.sessions.get(parsed.sessionId);
+        if (!session)
+            return this.sessionNotFoundResult(parsed.sessionId);
+        if (session.status !== "running" && session.status !== "stalled") {
+            return this.sessionStateResult(session);
+        }
+        const pending = this.restorePendingResult(session);
+        if (pending)
+            return pending;
+        const check = validateSubmissionHandle(parsed, session);
+        if (!check.ok)
+            return this.handleMismatchResult(check, session);
+        if (!getPolicy().engine.agent_recovery_enabled) {
+            return this.recoveryDisabledResult(check.handle, session);
         }
         const invalid = (detail) => ({
-            sessionId,
-            round: this.sessions.get(sessionId)?.currentRound ?? 0,
+            sessionId: session.sessionId,
+            round: session.currentRound,
+            submissionHandle: check.handle,
             prompt: null,
             submissionError: {
                 code: "recovery_invalid",
@@ -960,65 +1111,70 @@ export class SessionManager {
             recovery.reason.length > 500) {
             return invalid("reason must be a non-empty string of at most 500 characters");
         }
-        // Cheap referential validation before the queue/lease: an id that is not
-        // visible on the current branch is a payload defect and must not write
-        // session state. Deep manifest/blob/HEAD validation happens in the
-        // lifecycle after the lease and before the directive commit.
-        const heldSession = this.sessions.get(sessionId);
-        if (heldSession) {
-            const expectedRoundId = heldSession.roundSnapshot?.roundId
-                ?? makeRoundId(heldSession.loopId, heldSession.currentRound);
-            const held = heldSession.roundSnapshot;
-            if (roundId === expectedRoundId &&
-                held?.kind === "evaluation" &&
-                held.round === heldSession.currentRound) {
-                const prefix = `loop:${heldSession.loopId}:`;
-                const entries = [
-                    ...queryLoopEntries(this.loopStore, heldSession.loopId, { prefix }),
-                    ...queryLoopEntries(this.loopStore, heldSession.loopId, {
-                        prefix,
-                        feedbackOnly: true,
-                    }),
-                ];
-                // A pending directive outranks target validation; the lifecycle
-                // retries the same restore and never commits a second directive.
-                if (!pendingRollbackDirective(entries)) {
-                    const resolved = findCheckpointRef({
-                        entries,
-                        held,
-                        checkpointId: recovery.target_checkpoint_id,
-                    });
-                    if (!resolved.ok) {
-                        return {
-                            sessionId,
-                            round: heldSession.currentRound,
-                            roundId: held.roundId,
-                            prompt: null,
-                            submissionError: {
-                                code: resolved.code,
-                                details: {
-                                    target_checkpoint_id: recovery.target_checkpoint_id,
-                                    reason_code: resolved.reason,
-                                    detail: resolved.detail,
-                                    current_round: heldSession.currentRound,
-                                },
-                            },
-                        };
-                    }
-                }
+        const targetCheckpointId = recovery.target_checkpoint_id;
+        const reason = recovery.reason;
+        // Read-only visibility check against the exact held snapshot. An invalid
+        // target must not cause a lease renewal or a directive.
+        const prefix = `loop:${session.loopId}:`;
+        const entries = [
+            ...queryLoopEntries(this.loopStore, session.loopId, { prefix }),
+            ...queryLoopEntries(this.loopStore, session.loopId, {
+                prefix,
+                feedbackOnly: true,
+            }),
+        ];
+        // A pending directive outranks target validation; the lifecycle retries
+        // the same restore and never commits a second directive.
+        if (!pendingRollbackDirective(entries)) {
+            const resolved = findCheckpointRef({
+                entries,
+                held: check.snapshot,
+                checkpointId: targetCheckpointId,
+            });
+            if (!resolved.ok) {
+                return {
+                    sessionId: session.sessionId,
+                    round: session.currentRound,
+                    submissionHandle: check.handle,
+                    prompt: null,
+                    submissionError: {
+                        code: resolved.code,
+                        details: {
+                            target_checkpoint_id: targetCheckpointId,
+                            reason_code: resolved.reason,
+                            detail: resolved.detail,
+                            current_round: session.currentRound,
+                        },
+                    },
+                };
             }
         }
-        return this.withSessionQueue(sessionId, async () => {
-            const session = this.sessions.get(sessionId);
-            if (session?.status === "running" &&
-                !this.renewSessionLease(session.loopId)) {
-                return this.leaseConflictResult(session.loopId, this.findSessionEntry(session.loopId));
+        const validatedRecovery = {
+            target_checkpoint_id: targetCheckpointId,
+            reason,
+        };
+        return this.withSessionQueue(session.sessionId, async () => {
+            const current = this.sessions.get(session.sessionId);
+            if (!current)
+                return this.sessionNotFoundResult(session.sessionId);
+            if (current.status !== "running" && current.status !== "stalled") {
+                return this.sessionStateResult(current);
+            }
+            const pendingInside = this.restorePendingResult(current);
+            if (pendingInside)
+                return pendingInside;
+            const inside = validateSubmissionHandle(parsed, current);
+            if (!inside.ok)
+                return this.handleMismatchResult(inside, current);
+            if (!getPolicy().engine.agent_recovery_enabled) {
+                return this.recoveryDisabledResult(inside.handle, current);
+            }
+            if (current.status === "running" &&
+                !this.renewSessionLease(current.loopId)) {
+                return this.leaseConflictResult(current.loopId, this.findSessionEntry(current.loopId));
             }
             try {
-                return await this.lifecycle.recover(sessionId, {
-                    target_checkpoint_id: recovery.target_checkpoint_id,
-                    reason: recovery.reason,
-                }, roundId, transactionId);
+                return await this.lifecycle.recover(current.sessionId, validatedRecovery);
             }
             catch (error) {
                 if (error instanceof SessionLeaseConflictError) {
@@ -1028,80 +1184,104 @@ export class SessionManager {
             }
         });
     }
-    /** v3.9.7: Agent-created mid-round savepoint. It does not touch the round
-     *  counter, progress, or any governance projection. The capture runs under
-     *  the session queue/lease but outside the store lock; the session save is
-     *  the only store mutation. */
-    async checkpoint(sessionId, roundId, transactionId) {
-        const session = this.sessions.get(sessionId);
+    recoveryDisabledResult(handle, session) {
+        return {
+            sessionId: session.sessionId,
+            round: session.currentRound,
+            submissionHandle: handle,
+            prompt: null,
+            submissionError: {
+                code: "recovery_disabled",
+                details: { policy: "engine.agent_recovery_enabled" },
+            },
+        };
+    }
+    /** v3.9.7: Agent-created mid-round savepoint. v4.0.0: handle identity is
+     *  checked before the queue and again before lease renewal; capture/save
+     *  happen only after both. A checkpoint never changes the handle. */
+    async checkpoint(handle) {
+        const parsed = parseSubmissionHandle(handle);
+        if (!parsed) {
+            const detail = "submissionHandle must be an object with exactly sessionId, roundId, " +
+                "and transactionId as non-empty strings.";
+            return {
+                error: "submission_handle_required",
+                errorMessage: `${detail} Copy it from the latest LoopForge response; if lost, call loopforge_status or loopforge_resume.`,
+                details: { reason_code: "shape", detail },
+            };
+        }
+        const session = this.sessions.get(parsed.sessionId);
         if (!session) {
             return {
                 error: "session_not_found",
                 errorMessage: "No session exists with this ID.",
-                sessionId,
+                sessionId: parsed.sessionId,
             };
         }
         if (session.status !== "running") {
+            const current = makeSubmissionHandle(session);
             return {
                 error: "checkpoint_invalid",
                 errorMessage: `Session is ${session.status}; a checkpoint requires a running held evaluation.`,
-                sessionId,
-                roundId: session.roundSnapshot?.roundId,
+                sessionId: session.sessionId,
+                ...(current ? { submissionHandle: current } : {}),
                 details: { reason_code: "session_not_running" },
             };
         }
-        return this.withSessionQueue(sessionId, async () => {
-            if (!this.renewSessionLease(session.loopId)) {
-                const conflict = this.leaseConflictResult(session.loopId, this.findSessionEntry(session.loopId));
+        const check = validateSubmissionHandle(parsed, session);
+        if (!check.ok)
+            return this.checkpointMismatchResult(check, session);
+        return this.withSessionQueue(session.sessionId, async () => {
+            const current = this.sessions.get(session.sessionId);
+            if (!current) {
                 return {
-                    error: conflict.stopReason ?? "lease_conflict",
-                    errorMessage: conflict.stopDetail ?? "Another process owns this loop.",
-                    sessionId,
-                    roundId: conflict.roundId,
-                    details: { reason_code: "lease_conflict" },
+                    error: "session_not_found",
+                    errorMessage: "No session exists with this ID.",
+                    sessionId: session.sessionId,
                 };
             }
-            const held = session.roundSnapshot;
-            const expectedRoundId = held?.roundId ?? makeRoundId(session.loopId, session.currentRound);
-            if (!held || held.kind !== "evaluation" || held.round !== session.currentRound ||
-                typeof roundId !== "string" || roundId !== expectedRoundId ||
-                typeof transactionId !== "string" || transactionId !== held.transactionId) {
+            if (current.status !== "running") {
+                const currentHandle = makeSubmissionHandle(current);
                 return {
                     error: "checkpoint_invalid",
-                    errorMessage: "checkpoint requires the roundId and transactionId from the currently held prompt.",
-                    sessionId,
-                    roundId: expectedRoundId,
-                    details: {
-                        reason_code: "identity_mismatch",
-                        expected_round_id: expectedRoundId,
-                        expected_transaction_id: held?.transactionId ?? null,
-                    },
+                    errorMessage: `Session is ${current.status}; a checkpoint requires a running held evaluation.`,
+                    sessionId: current.sessionId,
+                    ...(currentHandle ? { submissionHandle: currentHandle } : {}),
+                    details: { reason_code: "session_not_running" },
                 };
             }
-            const prefix = `loop:${session.loopId}:`;
-            const entries = [
-                ...queryLoopEntries(this.loopStore, session.loopId, { prefix }),
-                ...queryLoopEntries(this.loopStore, session.loopId, {
-                    prefix,
-                    feedbackOnly: true,
-                }),
-            ];
-            if (pendingRollbackDirective(entries)) {
+            // Authoritative re-check: after the queue is acquired, before the lease
+            // heartbeat. A checkpoint must never capture or save for a stale handle.
+            const inside = validateSubmissionHandle(parsed, current);
+            if (!inside.ok)
+                return this.checkpointMismatchResult(inside, current);
+            const pending = this.restorePendingResult(current);
+            if (pending) {
                 return {
                     error: "restore_pending",
                     errorMessage: "A pending restore must be completed by loopforge_resume before creating a checkpoint.",
-                    sessionId,
-                    roundId: expectedRoundId,
+                    sessionId: current.sessionId,
+                    submissionHandle: inside.handle,
                     details: { reason_code: "restore_pending" },
                 };
             }
-            const store = this.checkpointStoreFor?.(session.loopId);
+            if (!this.renewSessionLease(current.loopId)) {
+                const conflict = this.leaseConflictResult(current.loopId, this.findSessionEntry(current.loopId));
+                return {
+                    error: conflict.stopReason ?? "lease_conflict",
+                    errorMessage: conflict.stopDetail ?? "Another process owns this loop.",
+                    sessionId: current.sessionId,
+                    details: { reason_code: "lease_conflict" },
+                };
+            }
+            const held = inside.snapshot;
+            const store = this.checkpointStoreFor?.(current.loopId);
             if (!store) {
                 return {
                     error: "checkpoint_unavailable",
                     errorMessage: "No workspace checkpoint store is configured for this loop.",
-                    sessionId,
-                    roundId: expectedRoundId,
+                    sessionId: current.sessionId,
+                    submissionHandle: inside.handle,
                     details: { reason_code: "store_unavailable" },
                 };
             }
@@ -1113,8 +1293,8 @@ export class SessionManager {
                 return {
                     error: "checkpoint_unavailable",
                     errorMessage: `The runtime state directory could not be resolved: ${String(error)}`,
-                    sessionId,
-                    roundId: expectedRoundId,
+                    sessionId: current.sessionId,
+                    submissionHandle: inside.handle,
                     details: { reason_code: "state_directory_invalid" },
                 };
             }
@@ -1138,28 +1318,29 @@ export class SessionManager {
                     return {
                         error: error.code,
                         errorMessage: error.message,
-                        sessionId,
-                        roundId: expectedRoundId,
+                        sessionId: current.sessionId,
+                        submissionHandle: inside.handle,
                         details: { reason_code: error.reasonCode },
                     };
                 }
                 return {
                     error: "checkpoint_failed",
                     errorMessage: String(error),
-                    sessionId,
-                    roundId: expectedRoundId,
+                    sessionId: current.sessionId,
+                    submissionHandle: inside.handle,
                     details: { reason_code: "capture_error" },
                 };
             }
             // The capture yielded to the event loop; a concurrent advance/pause may
             // have invalidated the held transaction. Never attach an orphan
             // checkpoint to a different attempt.
-            if (this.sessions.get(sessionId) !== session ||
-                session.roundSnapshot?.transactionId !== held.transactionId) {
+            const after = validateSubmissionHandle(parsed, this.sessions.get(session.sessionId) ?? current);
+            if (!after.ok) {
                 return {
                     error: "checkpoint_invalid",
                     errorMessage: "The held attempt changed while the checkpoint was captured.",
-                    sessionId,
+                    sessionId: current.sessionId,
+                    ...(after.current ? { submissionHandle: after.current } : {}),
                     details: { reason_code: "identity_changed" },
                 };
             }
@@ -1176,31 +1357,31 @@ export class SessionManager {
                 return {
                     error: "checkpoint_limit",
                     errorMessage: `This attempt already has ${MAX_MID_CHECKPOINTS_PER_TRANSACTION} mid-round checkpoints.`,
-                    sessionId,
-                    roundId: expectedRoundId,
+                    sessionId: current.sessionId,
+                    submissionHandle: after.handle,
                     details: { reason_code: "mid_checkpoint_cap" },
                 };
             }
             if (!duplicate) {
                 held.checkpoints = [...previous, ref];
                 try {
-                    this.lifecycle.save(session);
+                    this.lifecycle.save(current);
                 }
                 catch (error) {
                     held.checkpoints = previous;
                     return {
                         error: "checkpoint_failed",
                         errorMessage: `The checkpoint manifest was written but the session could not be saved: ${String(error)}. Retry returns the same id.`,
-                        sessionId,
-                        roundId: expectedRoundId,
+                        sessionId: current.sessionId,
+                        submissionHandle: after.handle,
                         details: { reason_code: "session_save_failed" },
                     };
                 }
             }
             return {
+                sessionId: current.sessionId,
+                submissionHandle: after.handle,
                 checkpointId: manifest.checkpointId,
-                transactionId: held.transactionId,
-                roundId: held.roundId,
                 round: held.round,
                 role: "mid",
                 redoRound: manifest.round,

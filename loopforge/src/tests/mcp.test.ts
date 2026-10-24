@@ -148,7 +148,7 @@ describe("MCP — durable gate resolution", async () => {
     const { id: gateId } = deriveGate(action);
     const advanced = await toolNext(first, {
       sessionId,
-      roundId: String(started.roundId),
+      submissionHandle: started.submissionHandle,
       output: "The release needs explicit production authorization.",
       evaluation: {
         success: false,
@@ -205,7 +205,7 @@ describe("MCP — multi-round lifecycle", async () => {
     // Round 1 → 2 (ascending success trajectory avoids breaker)
     const r1 = await toolNext(mgr, {
       sessionId,
-      roundId: String(start.roundId),
+      submissionHandle: start.submissionHandle,
       output: agentOutput({ success: false, violations: ["missed check"], shouldContinue: true }),
       evaluation: evalParam({ success: false, violations: ["missed check"], shouldContinue: true }),
     });
@@ -216,7 +216,7 @@ describe("MCP — multi-round lifecycle", async () => {
     // Round 2 → 3 (roundSuccess true)
     const r2 = await toolNext(mgr, {
       sessionId,
-      roundId: String(r1.roundId),
+      submissionHandle: r1.submissionHandle,
       output: agentOutput({ success: true, shouldContinue: true }),
       evaluation: evalParam({ success: true, shouldContinue: true }),
     });
@@ -226,7 +226,7 @@ describe("MCP — multi-round lifecycle", async () => {
     // Round 3 → stop (should_continue: false)
     const r3 = await toolNext(mgr, {
       sessionId,
-      roundId: String(r2.roundId),
+      submissionHandle: r2.submissionHandle,
       output: agentOutput({ success: true, shouldContinue: false }),
       evaluation: evalParam({ success: true, shouldContinue: false }),
     });
@@ -241,7 +241,7 @@ describe("MCP — multi-round lifecycle", async () => {
 
     const result = await toolNext(mgr, {
       sessionId,
-      roundId: String(start.roundId),
+      submissionHandle: start.submissionHandle,
       output: agentOutputNoEval(),
     });
 
@@ -254,7 +254,7 @@ describe("MCP — multi-round lifecycle", async () => {
     const entriesBefore = store.listEntries().length;
     const result = await toolNext(mgr, {
       sessionId: start.sessionId,
-      roundId: start.roundId,
+      submissionHandle: start.submissionHandle,
       evaluation: {
         success: "false",
         output_summary: "invalid core types",
@@ -275,14 +275,14 @@ describe("MCP — multi-round lifecycle", async () => {
     assert.equal(store.listEntries().length, entriesBefore,
       "invalid evaluation must not append any vault/session entry");
     assert.equal(status?.consecutiveRejections, 0, "no rejection state");
-    assert.equal(status?.roundSnapshot?.roundId, start.roundId, "round not consumed");
+    assert.equal(status?.roundSnapshot?.roundId, (start.submissionHandle as { roundId?: string } | null)?.roundId, "round not consumed");
   });
 
   it("normalizes malformed optional fields instead of rejecting the round", async () => {
     const start = await TOOL_HANDLERS.loopforge_start(mgr, { task: "Optional validation" });
     const result = await toolNext(mgr, {
       sessionId: start.sessionId,
-      roundId: start.roundId,
+      submissionHandle: start.submissionHandle,
       evaluation: {
         success: false,
         output_summary: "core report is valid",
@@ -306,19 +306,19 @@ describe("MCP — multi-round lifecycle", async () => {
     // 3 rounds of honest success=false (task not done, still making progress).
     // The old binary-success circuit breaker would have killed the loop here.
     // The new progress-based enforcement correctly lets it continue.
-    let roundId = String(start.roundId);
+    let submissionHandle = start.submissionHandle;
     for (let i = 0; i < 2; i++) {
       const advanced = await toolNext(mgr, {
         sessionId,
-        roundId,
+        submissionHandle,
         output: agentOutput({ success: false, shouldContinue: true }),
         evaluation: evalParam({ success: false, shouldContinue: true }),
       });
-      roundId = String(advanced.roundId);
+      submissionHandle = advanced.submissionHandle;
     }
     const r3 = await toolNext(mgr, {
       sessionId,
-      roundId,
+      submissionHandle,
       output: agentOutput({ success: false, shouldContinue: true }),
       evaluation: evalParam({ success: false, shouldContinue: true }),
     });
@@ -339,7 +339,7 @@ describe("MCP — multi-round lifecycle", async () => {
     // Round 1 → 2 (use ascending successes to avoid breaker)
     const r1 = await toolNext(mgr, {
       sessionId,
-      roundId: String(start.roundId),
+      submissionHandle: start.submissionHandle,
       output: agentOutput({ success: false, violations: ["x"], shouldContinue: true }),
       evaluation: evalParam({ success: false, violations: ["x"], shouldContinue: true }),
     });
@@ -348,7 +348,7 @@ describe("MCP — multi-round lifecycle", async () => {
     // Round 2 → stop (maxRounds reached)
     const r2 = await toolNext(mgr, {
       sessionId,
-      roundId: String(r1.roundId),
+      submissionHandle: r1.submissionHandle,
       output: agentOutput({ success: true, shouldContinue: true }),
       evaluation: evalParam({ success: true, shouldContinue: true }),
     });
@@ -365,7 +365,7 @@ describe("MCP — multi-round lifecycle", async () => {
 
     const r1 = await toolNext(mgr, {
       sessionId,
-      roundId: String(start.roundId),
+      submissionHandle: start.submissionHandle,
       evaluation: evalParam({ success: true, shouldContinue: true }),
     });
     assert.equal(r1.stopReason, undefined, "should advance without output");
@@ -379,7 +379,7 @@ describe("MCP — multi-round lifecycle", async () => {
 
     const r1 = await toolNext(mgr, {
       sessionId,
-      roundId: String(start.roundId),
+      submissionHandle: start.submissionHandle,
       output: "Some raw output text without eval block",
       evaluation: evalParam({ success: false, violations: ["v1"], shouldContinue: true }),
     });
@@ -393,7 +393,7 @@ describe("MCP — multi-round lifecycle", async () => {
 
     const r1 = await toolNext(mgr, {
       sessionId,
-      roundId: String(start.roundId),
+      submissionHandle: start.submissionHandle,
       evaluation: evalParam({ success: true, shouldContinue: false }),
     });
     assert.equal(r1.prompt, null);
@@ -406,7 +406,7 @@ describe("MCP — multi-round lifecycle", async () => {
 
     const result = await toolNext(mgr, {
       sessionId,
-      roundId: String(start.roundId),
+      submissionHandle: start.submissionHandle,
       output: agentOutputNoEval("Just some text without any eval"),
     });
     assert.equal(result.error, "evaluation_invalid");
@@ -419,7 +419,7 @@ describe("MCP — multi-round lifecycle", async () => {
     // Round 1 → 2 with discovered constraints
     const r1 = await toolNext(mgr, {
       sessionId,
-      roundId: String(start.roundId),
+      submissionHandle: start.submissionHandle,
       evaluation: {
         success: false,
         output_summary: "Found 2 reentrancy bugs, fixed 1.",
@@ -438,7 +438,7 @@ describe("MCP — multi-round lifecycle", async () => {
     // Round 2 → stop (v1.17: must include execution_report for success=true)
     const r2 = await toolNext(mgr, {
       sessionId,
-      roundId: String(r1.roundId),
+      submissionHandle: r1.submissionHandle,
       evaluation: {
         success: true,
         output_summary: "All reentrancy bugs fixed. 24/24 tests pass.",
@@ -455,13 +455,13 @@ describe("MCP — multi-round lifecycle", async () => {
     assert.equal(r2.stopReason, "completed");
   });
 
-  it("a rejected format submission can be corrected with the same roundId", async () => {
+  it("a rejected format submission can be corrected with the same submissionHandle", async () => {
     const start = await TOOL_HANDLERS.loopforge_start(mgr, { task: "Test format recovery" });
     const sessionId = String(start.sessionId);
 
     const invalid = await toolNext(mgr, {
       sessionId,
-      roundId: String(start.roundId),
+      submissionHandle: start.submissionHandle,
       output: agentOutputNoEval("Round output without an eval block."),
     });
     assert.equal(invalid.error, "evaluation_invalid");
@@ -469,7 +469,7 @@ describe("MCP — multi-round lifecycle", async () => {
     // Corrected submission against the SAME session and round.
     const recovered = await toolNext(mgr, {
       sessionId,
-      roundId: String(start.roundId),
+      submissionHandle: start.submissionHandle,
       evaluation: evalParam({ success: false, shouldContinue: true }),
     });
     assert.notEqual(recovered.stopReason, "stalled",
@@ -503,14 +503,14 @@ describe("MCP — multi-round lifecycle", async () => {
     // Rounds 1–2 commit (recurring detection needs a 3-round window).
     let last = await toolNext(mgr, {
       sessionId,
-      roundId: String(start.roundId),
+      submissionHandle: start.submissionHandle,
       evaluation: violationEval(1, "Did round-one work"),
     });
     assert.ok(!last.enforcementAction || last.enforcementAction === "accept",
       "round 1 must advance");
     last = await toolNext(mgr, {
       sessionId,
-      roundId: String(last.roundId),
+      submissionHandle: last.submissionHandle,
       evaluation: violationEval(2, "Did round-two work"),
     });
     assert.ok(!last.enforcementAction || last.enforcementAction === "accept",
@@ -519,7 +519,7 @@ describe("MCP — multi-round lifecycle", async () => {
     // Submission 3: same violation again → R2 fires (first occurrence).
     last = await toolNext(mgr, {
       sessionId,
-      roundId: String(last.roundId),
+      submissionHandle: last.submissionHandle,
       evaluation: violationEval(3, "Repeated the same violating work"),
     });
     assert.equal(last.enforcementAction, "reject",
@@ -527,7 +527,7 @@ describe("MCP — multi-round lifecycle", async () => {
     // Submission 4: second consecutive same-check rejection.
     last = await toolNext(mgr, {
       sessionId,
-      roundId: String(last.roundId),
+      submissionHandle: last.submissionHandle,
       evaluation: violationEval(4, "Repeated the same violating work again"),
     });
     assert.equal(last.enforcementAction, "reject",
@@ -535,7 +535,7 @@ describe("MCP — multi-round lifecycle", async () => {
     // Submission 5: third consecutive same-check rejection → terminate.
     last = await toolNext(mgr, {
       sessionId,
-      roundId: String(last.roundId),
+      submissionHandle: last.submissionHandle,
       evaluation: violationEval(5, "Still repeating the same violating work"),
     });
     assert.equal(last.enforcementAction, "terminate",
@@ -794,7 +794,7 @@ describe("MCP — status / list / stop / replay", async () => {
     // Advance once to populate roundSuccess and trajectory
     await toolNext(mgr, {
       sessionId,
-      roundId: String(start.roundId),
+      submissionHandle: start.submissionHandle,
       output: agentOutput({ success: false, shouldContinue: true }),
       evaluation: evalParam({ success: false, shouldContinue: true }),
     });
@@ -823,7 +823,7 @@ describe("MCP — status / list / stop / replay", async () => {
     // Advance once
     await toolNext(mgr, {
       sessionId,
-      roundId: String(start.roundId),
+      submissionHandle: start.submissionHandle,
       output: agentOutput({ success: false, shouldContinue: true }),
       evaluation: evalParam({ success: false, shouldContinue: true }),
     });
@@ -845,7 +845,7 @@ describe("MCP — status / list / stop / replay", async () => {
     // Advance once to create lineage data
     await toolNext(mgr, {
       sessionId,
-      roundId: String(start.roundId),
+      submissionHandle: start.submissionHandle,
       output: agentOutput({ success: true, shouldContinue: true }),
       evaluation: evalParam({ success: true, shouldContinue: true }),
     });
@@ -947,7 +947,8 @@ describe("MCP — resume / list-vault / health", async () => {
     const sessionId = String(start.sessionId);
 
     const status = await TOOL_HANDLERS.loopforge_status(mgr, { sessionId });
-    assert.equal(typeof status.roundId, "string");
+    const handle = status.submissionHandle as { roundId?: unknown } | null;
+    assert.equal(typeof handle?.roundId, "string");
   });
 });
 
@@ -993,7 +994,7 @@ describe("MCP P0 lifecycle regressions", () => {
 
     const next = await toolNext(restarted, {
       sessionId: resumedId,
-      roundId: String(resumed.roundId),
+      submissionHandle: resumed.submissionHandle,
       evaluation: evalParam({ success: false, shouldContinue: false }),
     });
     assert.equal(next.stopReason, "failed");
@@ -1012,7 +1013,7 @@ describe("MCP P0 lifecycle regressions", () => {
 
     const completed = await toolNext(mgr, {
       sessionId,
-      roundId: String(started.roundId),
+      submissionHandle: started.submissionHandle,
       evaluation: evalParam({ success: true, shouldContinue: false }),
     });
     assert.equal(completed.stopReason, "completed");
@@ -1056,27 +1057,30 @@ describe("MCP P0 lifecycle regressions", () => {
     const second = advanceWithHeld(mgr, sessionId, "", evaluation);
     const [firstResult, secondResult] = await Promise.all([first, second]);
     assert.equal(firstResult.round, 2);
-    // Both calls carried the SAME held transactionId. The first commits; the
-    // second is stale and must return the new held prompt, never evaluate
-    // the same attempt twice.
+    // Both calls carried the SAME held handle. The first commits; the second
+    // is stale and must return the new held prompt, never evaluate the same
+    // attempt twice.
     assert.equal(secondResult.round, 2);
     assert.equal(typeof secondResult.prompt, "string",
       "the stale concurrent call receives the current held prompt");
     assert.ok(
       (secondResult.warnings ?? []).some((warning) =>
-        warning.includes("transactionId") || warning.includes("roundId")),
+        warning.includes("submissionHandle")),
       "the stale concurrent call is warned",
     );
     assert.equal(mgr.get(sessionId)?.currentRound, 2);
 
-    // Same CURRENT roundId, stale transaction: the transaction anchor alone
-    // must reject the old attempt.
+    // Same logical round, stale transaction: the exact attempt still must be
+    // rejected.
+    const currentHandle = mgr.getSubmissionHandle(sessionId)!;
     const staleTx = await mgr.advance(
-      sessionId, "", evaluation, firstResult.roundId, started.transactionId,
+      { ...currentHandle, transactionId: started.submissionHandle?.transactionId ?? "tx-old" },
+      "",
+      evaluation,
     );
     assert.equal(typeof staleTx.prompt, "string");
     assert.ok(
-      (staleTx.warnings ?? []).some((warning) => warning.includes("transactionId")),
+      (staleTx.warnings ?? []).some((warning) => warning.includes("submissionHandle")),
       "a stale transaction is warned",
     );
     assert.equal(mgr.get(sessionId)?.currentRound, 2);
@@ -1152,7 +1156,7 @@ describe("MCP P0 lifecycle regressions", () => {
     assert.equal(resumed.sessionId, started.sessionId);
     assert.equal(resumed.round, 2);
     assert.notEqual(resumed.prompt, started.prompt);
-    assert.notEqual(resumed.roundId, started.roundId);
+    assert.notEqual(resumed.submissionHandle?.roundId, started.submissionHandle?.roundId);
     assert.equal(
       queryLoopEntries(store, "crash-recovery-transaction", {
         prefix: "loop:crash-recovery-transaction:r1",
@@ -1185,7 +1189,7 @@ describe("MCP P0 lifecycle regressions", () => {
       rejectedEvaluation,
     );
     assert.equal(rejected.enforcementAction, "reject");
-    assert.equal(rejected.roundId, started.roundId);
+    assert.equal(rejected.submissionHandle?.roundId, started.submissionHandle?.roundId);
     assert.equal(rejected.level, "l0");
     assert.match(rejected.prompt ?? "", /Attempt: 2/);
     assert.match(rejected.prompt ?? "", /Retry Requirements/);
@@ -1199,7 +1203,7 @@ describe("MCP P0 lifecycle regressions", () => {
     assert.ok(resumed);
     assert.equal(resumed.sessionId, started.sessionId);
     assert.equal(resumed.prompt, rejected.prompt);
-    assert.equal(resumed.roundId, started.roundId);
+    assert.equal(resumed.submissionHandle?.roundId, started.submissionHandle?.roundId);
     assert.equal(resumed.level, "l0");
     assert.equal(
       queryLoopEntries(store, "rejected-round-recovery", {
@@ -1215,7 +1219,7 @@ describe("MCP P0 lifecycle regressions", () => {
       continuingEvaluation(),
     );
     assert.equal(accepted.round, 2);
-    assert.notEqual(accepted.roundId, started.roundId);
+    assert.notEqual(accepted.submissionHandle?.roundId, started.submissionHandle?.roundId);
     const lineageAfter = queryLoopEntries(store, "rejected-round-recovery", {
       prefix: "loop:rejected-round-recovery:r1",
     }).filter((entry) => entry.task_id === "loop:rejected-round-recovery:r1").length;
@@ -1246,7 +1250,7 @@ describe("MCP P0 lifecycle regressions", () => {
     const persisted = counting.readSession("atomic-session-save")
       ?.entry?.loop_lineage?.round_snapshot as Record<string, unknown> | undefined;
     assert.equal(persisted?.schemaVersion, 5);
-    assert.equal(persisted?.roundId, started.roundId);
+    assert.equal(persisted?.roundId, started.submissionHandle?.roundId);
   });
 });
 
@@ -1331,34 +1335,29 @@ describe("MCP — input and output contract enforcement", () => {
     // The first session remains intact and advanceable
     const advanced = await toolNext(mgr, {
       sessionId: String(first.sessionId),
-      roundId: String(first.roundId),
+      submissionHandle: first.submissionHandle,
       evaluation: evalParam({ success: true }),
     });
     assert.ok(!("error" in advanced));
   });
 
-  it("rejects loopforge_next without a roundId", async () => {
-    const start = await TOOL_HANDLERS.loopforge_start(mgr, { task: "RoundId required" });
-    const sessionId = String(start.sessionId);
-
-    const result = await toolNext(mgr, {
-      sessionId,
+  it("rejects loopforge_next without a submissionHandle", async () => {
+    const result = await TOOL_HANDLERS.loopforge_next(mgr, {
       evaluation: evalParam({ success: true }),
     });
-    assert.ok("error" in result, "missing roundId must be rejected");
-    assert.equal(result.error, "round_id_required");
-    assert.ok((result.errorMessage as string).includes("roundId"));
+    assert.ok("error" in result, "a missing submissionHandle must be rejected");
+    assert.equal(result.error, "submission_handle_required");
+    assert.ok((result.errorMessage as string).includes("submissionHandle"));
   });
 
-  it("returns the held prompt with a warning when a stale roundId is submitted", async () => {
-    const start = await TOOL_HANDLERS.loopforge_start(mgr, { task: "Stale roundId test" });
+  it("returns the held prompt with a warning when a stale submissionHandle is submitted", async () => {
+    const start = await TOOL_HANDLERS.loopforge_start(mgr, { task: "Stale handle test" });
     const sessionId = String(start.sessionId);
-    const roundOneId = String(start.roundId);
 
     // Round 1 commits → session advances to round 2 and holds its prompt
     const advanced = await toolNext(mgr, {
       sessionId,
-      roundId: roundOneId,
+      submissionHandle: start.submissionHandle,
       evaluation: evalParam({ success: true, shouldContinue: true }),
     });
     assert.equal(advanced.round, 2);
@@ -1368,14 +1367,14 @@ describe("MCP — input and output contract enforcement", () => {
     // round 2 — the held round-2 prompt is returned instead, with a warning.
     const duplicate = await toolNext(mgr, {
       sessionId,
-      roundId: roundOneId,
+      submissionHandle: start.submissionHandle,
       evaluation: evalParam({ success: true, shouldContinue: true }),
     });
     assert.equal(duplicate.round, 2, "round must not advance on a stale submission");
-    assert.equal(duplicate.roundId, advanced.roundId);
+    assert.deepEqual(duplicate.submissionHandle, advanced.submissionHandle);
     assert.equal(duplicate.prompt, advanced.prompt, "the held prompt is returned so the lost response is recovered");
-    assert.ok((duplicate.warnings as string[]).some((w) => w.includes("does not match")),
-      `expected a stale-roundId warning, got: ${JSON.stringify(duplicate.warnings)}`);
+    assert.ok((duplicate.warnings as string[]).some((w) => w.includes("submissionHandle")),
+      `expected a stale-handle warning, got: ${JSON.stringify(duplicate.warnings)}`);
 
     // Zero commit: round 2 has no feedback entry, session still on round 2
     assert.equal(mgr.get(sessionId)?.currentRound, 2);
@@ -1385,10 +1384,10 @@ describe("MCP — input and output contract enforcement", () => {
     });
     assert.equal(feedback.length, 0, "a stale submission must not commit a round");
 
-    // The loop still advances normally with the correct roundId
+    // The loop still advances normally with the correct handle
     const final = await toolNext(mgr, {
       sessionId,
-      roundId: String(advanced.roundId),
+      submissionHandle: advanced.submissionHandle,
       evaluation: evalParam({ success: true, shouldContinue: false }),
     });
     assert.equal(final.stopReason, "completed");
@@ -1448,7 +1447,7 @@ describe("MCP — v3.2 unverified success trajectory", () => {
     // no command provider) → the round commits, the trajectory stays empty.
     const advanced = await toolNext(mgr, {
       sessionId,
-      roundId: String(start.roundId),
+      submissionHandle: start.submissionHandle,
       output: agentOutput({ success: true, shouldContinue: true }),
       evaluation: evalParam({ success: true, shouldContinue: true }),
     });
@@ -1460,7 +1459,7 @@ describe("MCP — v3.2 unverified success trajectory", () => {
     // A non-success round does.
     const second = await toolNext(mgr, {
       sessionId,
-      roundId: String(advanced.roundId),
+      submissionHandle: advanced.submissionHandle,
       output: agentOutput({ success: false, shouldContinue: true }),
       evaluation: evalParam({ success: false, shouldContinue: true }),
     });
@@ -1495,54 +1494,54 @@ describe("MCP — tool contract (v3.2.1)", async () => {
       assert.ok(!SERVER_INSTRUCTIONS.includes(removed),
         `instructions must not ask for the removed field "${removed}"`);
     }
-    assert.ok(SERVER_INSTRUCTIONS.includes("execution_report"),
-      "instructions must name the report the runtime reads");
+    assert.ok(!SERVER_INSTRUCTIONS.includes("execution_report is expected"),
+      "instructions must not pressure the agent to fabricate a report");
+    assert.ok(SERVER_INSTRUCTIONS.includes("submissionHandle"),
+      "instructions must name the one held-round anchor");
     assert.ok(SERVER_INSTRUCTIONS.includes("submission_guidance"),
       "instructions must point at the current-fact submission guidance");
     assert.ok(SERVER_INSTRUCTIONS.includes("submission_receipt"),
       "instructions must point at the submission receipt");
   });
 
-  it("loopforge_checkpoint requires the three held anchors", () => {
+  it("loopforge_checkpoint requires the held submissionHandle", () => {
     assert.doesNotThrow(() => {
+      validateToolInput("loopforge_checkpoint", {
+        submissionHandle: { sessionId: "s1", roundId: "r1", transactionId: "tx-1" },
+      });
+    });
+    assert.throws(() => {
+      validateToolInput("loopforge_checkpoint", {
+        submissionHandle: { sessionId: "s1", roundId: "r1" },
+      });
+    }, /transactionId is required/);
+    assert.throws(() => {
       validateToolInput("loopforge_checkpoint", {
         sessionId: "s1",
         roundId: "r1",
         transactionId: "tx-1",
       });
-    });
-    assert.throws(() => {
-      validateToolInput("loopforge_checkpoint", {
-        sessionId: "s1",
-        roundId: "r1",
-      });
-    }, /transactionId is required/);
+    }, /submissionHandle is required|is not allowed/);
   });
 
   it("loopforge_next schema accepts evaluation or recovery", () => {
     assert.doesNotThrow(() => {
       validateToolInput("loopforge_next", {
-        sessionId: "s1",
-        roundId: "r1",
-        transactionId: "tx-1",
+        submissionHandle: { sessionId: "s1", roundId: "r1", transactionId: "tx-1" },
         output: "## Round Output",
       });
     });
 
     assert.doesNotThrow(() => {
       validateToolInput("loopforge_next", {
-        sessionId: "s1",
-        roundId: "r1",
-        transactionId: "tx-1",
+        submissionHandle: { sessionId: "s1", roundId: "r1", transactionId: "tx-1" },
         evaluation: evalParam({ success: false, shouldContinue: true }),
       });
     });
 
     assert.doesNotThrow(() => {
       validateToolInput("loopforge_next", {
-        sessionId: "s1",
-        roundId: "r1",
-        transactionId: "tx-1",
+        submissionHandle: { sessionId: "s1", roundId: "r1", transactionId: "tx-1" },
         recovery: {
           target_checkpoint_id: `ck-${"a".repeat(24)}`,
           reason: "abandon this branch",
@@ -1552,17 +1551,14 @@ describe("MCP — tool contract (v3.2.1)", async () => {
 
     assert.throws(() => {
       validateToolInput("loopforge_next", {
-        sessionId: "s1",
-        roundId: "r1",
-        transactionId: "tx-1",
+        submissionHandle: { sessionId: "s1", roundId: "r1", transactionId: "tx-1" },
         recovery: { target_round: 2, reason: "old shape" },
       });
     }, /target_checkpoint_id is required|target_round is not allowed/);
 
     assert.throws(() => {
       validateToolInput("loopforge_next", {
-        sessionId: "s1",
-        roundId: "r1",
+        submissionHandle: { sessionId: "s1", roundId: "r1" },
         output: "missing transaction anchor",
       });
     }, /transactionId is required/);
@@ -1572,6 +1568,13 @@ describe("MCP — tool contract (v3.2.1)", async () => {
         sessionId: "s1",
         roundId: "r1",
         transactionId: "tx-1",
+        output: "old scattered anchors",
+      });
+    }, /submissionHandle is required|is not allowed/);
+
+    assert.throws(() => {
+      validateToolInput("loopforge_next", {
+        submissionHandle: { sessionId: "s1", roundId: "r1", transactionId: "tx-1" },
         evaluation: {
           success: "false",
           output_summary: "invalid core",
@@ -1583,9 +1586,7 @@ describe("MCP — tool contract (v3.2.1)", async () => {
 
     assert.doesNotThrow(() => {
       validateToolInput("loopforge_next", {
-        sessionId: "s1",
-        roundId: "r1",
-        transactionId: "tx-1",
+        submissionHandle: { sessionId: "s1", roundId: "r1", transactionId: "tx-1" },
         evaluation: {
           success: false,
           output_summary: "valid core",
@@ -1597,10 +1598,10 @@ describe("MCP — tool contract (v3.2.1)", async () => {
       });
     }, "optional evaluation fields must reach runtime normalization");
 
-    // sessionId + roundId remain required.
+    // submissionHandle remains required.
     assert.throws(() => {
       validateToolInput("loopforge_next", { output: "no anchors" });
-    }, /required/);
+    }, /submissionHandle is required/);
   });
 });
 
@@ -1635,7 +1636,7 @@ describe("MCP — sub-goal persistence (v3.2.1)", async () => {
 
     await toolNext(mgr, {
       sessionId,
-      roundId: String(start.roundId),
+      submissionHandle: start.submissionHandle,
       evaluation: {
         success: false,
         output_summary: "Finished the first step, hit a wall, dropped a step.",
@@ -1673,7 +1674,7 @@ describe("MCP — sub-goal persistence (v3.2.1)", async () => {
     const entriesBefore = store.listEntries().length;
     const result = await toolNext(mgr, {
       sessionId: start.sessionId,
-      roundId: start.roundId,
+      submissionHandle: start.submissionHandle,
       evaluation: {
         success: false,
         output_summary: "claimed a transition on a phantom goal",
@@ -1691,16 +1692,16 @@ describe("MCP — sub-goal persistence (v3.2.1)", async () => {
     const details = result.details as { subgoal_errors: Array<{ reason: string; detail: string }> };
     assert.equal(details.subgoal_errors[0]?.reason, "unknown_id");
     // evaluation_invalid guarantee: nothing persisted, no rejection state,
-    // the same roundId stays open for a corrected retry.
+    // the same submissionHandle stays open for a corrected retry.
     assert.equal(store.listEntries().length, entriesBefore, "no vault/session writes");
     const session = mgr.get(String(start.sessionId));
     assert.equal(session?.currentRound, 1);
     assert.equal(session?.consecutiveRejections, 0, "no rejection counters touched");
-    assert.equal(session?.roundSnapshot?.roundId, start.roundId, "round not consumed");
-    // A corrected submission on the same roundId is accepted.
+    assert.equal(session?.roundSnapshot?.roundId, (start.submissionHandle as { roundId?: string } | null)?.roundId, "round not consumed");
+    // A corrected submission on the same submissionHandle is accepted.
     const retry = await toolNext(mgr, {
       sessionId: start.sessionId,
-      roundId: start.roundId,
+      submissionHandle: start.submissionHandle,
       evaluation: {
         success: false,
         output_summary: "fixed the payload",
@@ -1720,7 +1721,7 @@ describe("MCP — sub-goal persistence (v3.2.1)", async () => {
     const start = await TOOL_HANDLERS.loopforge_start(mgr, { task: "Audit ERC20", maxRounds: 20 });
     const result = await toolNext(mgr, {
       sessionId: start.sessionId,
-      roundId: start.roundId,
+      submissionHandle: start.submissionHandle,
       evaluation: {
         success: false,
         output_summary: "created by ID literal",
@@ -1741,7 +1742,7 @@ describe("MCP — sub-goal persistence (v3.2.1)", async () => {
     const sgId = deriveSubGoalId(started!.loopId, started!.currentRound, 0, "harden the withdraw path");
     const result = await toolNext(mgr, {
       sessionId: start.sessionId,
-      roundId: start.roundId,
+      submissionHandle: start.submissionHandle,
       evaluation: {
         success: false,
         output_summary: "emerged and started hardening the withdraw path",
@@ -1782,7 +1783,7 @@ describe("MCP — sub-goal persistence (v3.2.1)", async () => {
     );
     const result = await toolNext(mgr, {
       sessionId: start.sessionId,
-      roundId: start.roundId,
+      submissionHandle: start.submissionHandle,
       evaluation: {
         success: false,
         output_summary: "emerged more items than the intake carries",
@@ -1809,7 +1810,7 @@ describe("MCP — sub-goal persistence (v3.2.1)", async () => {
     const sgId = deriveSubGoalId(loopId, started!.currentRound, 0, "harden the withdraw path");
     const result = await toolNext(mgr, {
       sessionId: start.sessionId,
-      roundId: start.roundId,
+      submissionHandle: start.submissionHandle,
       evaluation: {
         success: false,
         output_summary: "reported a numeric note on a legal transition",
@@ -1838,12 +1839,10 @@ describe("MCP — sub-goal persistence (v3.2.1)", async () => {
     try {
       const start = await TOOL_HANDLERS.loopforge_start(mgr, { task: "Audit ERC20", maxRounds: 20 });
       const sessionId = String(start.sessionId);
-      const roundId = String(start.roundId);
 
       // Structured preflight: high-risk action → user_required + record.
       const pre = await TOOL_HANDLERS.loopforge_gate_check(mgr, {
-        sessionId,
-        roundId,
+        submissionHandle: start.submissionHandle,
         action: {
           description: "Deploy the release to production",
           scope: ["prod-api"],
@@ -1866,7 +1865,6 @@ describe("MCP — sub-goal persistence (v3.2.1)", async () => {
       // Citing the unapproved gate → user_gate_unresolved reject.
       const blocked = await toolNext(mgr, {
         sessionId,
-        roundId,
         evaluation: {
           success: false,
           output_summary: "Deployed but no human approved it yet.",
@@ -1898,7 +1896,6 @@ describe("MCP — sub-goal persistence (v3.2.1)", async () => {
       assert.equal(resolved.error, undefined);
       const accepted = await toolNext(mgr, {
         sessionId,
-        roundId,
         evaluation: {
           success: false,
           output_summary: "Deployed with an approved gate.",
@@ -1948,7 +1945,8 @@ describe("MCP — Round Contract flow", async () => {
     };
     assert.doesNotThrow(() => {
       validateToolInput("loopforge_next", {
-        sessionId: "s", roundId: "r", transactionId: "tx-r", evaluation: input,
+        submissionHandle: { sessionId: "s", roundId: "r", transactionId: "tx-r" },
+        evaluation: input,
       });
     }, "a well-formed round_contract must pass loopforge_next schema validation");
   });
@@ -2051,11 +2049,29 @@ describe("MCP — Round Contract flow", async () => {
     assert.ok(accepted.prompt.includes("**Login flow is implemented**"));
   });
 
-  it("v3.8.1: a payload defect is reported before the session is resolved", async () => {
-    // A malformed evaluation is a payload defect whatever the session's state;
-    // answering session_not_found for it would send the agent after the wrong
-    // problem. The reference spaces that need a session fail open here.
-    const rejected = await advanceWithHeld(mgr, "no-such-session", "output", {
+  it("v4.0.0: handle identity is checked before the payload boundary", async () => {
+    // A stale/unknown handle names an attempt, not a payload problem. It must
+    // not be judged against the current prompt's reference space.
+    const unknown = await mgr.advance(
+      {
+        sessionId: "no-such-session",
+        roundId: "loop:no-such-session:round:1",
+        transactionId: "tx-unknown",
+      },
+      "output",
+      {
+        success: "yes",
+        output_summary: "done",
+        constraint_violations: [],
+        should_continue: true,
+      },
+    );
+    assert.equal(unknown.submissionError?.code, "session_not_found");
+
+    // A matching handle still gets the full payload boundary, and the invalid
+    // attempt carries the same handle for a corrected retry.
+    const started = await mgr.create({ task: "Payload-first handle", loopId: "payload-first" });
+    const rejected = await mgr.advance(started.submissionHandle, "output", {
       success: "yes",
       output_summary: "done",
       constraint_violations: [],
@@ -2063,6 +2079,7 @@ describe("MCP — Round Contract flow", async () => {
     });
     assert.equal(rejected.stopReason, "evaluation_invalid");
     assert.equal(rejected.submissionError?.code, "evaluation_invalid");
+    assert.deepEqual(rejected.submissionHandle, started.submissionHandle);
   });
 
   it("a contract-less round stays byte-identical to pre-contract rendering", async () => {
@@ -2310,11 +2327,10 @@ describe("MCP — audit & vault replay (v3.3.1)", async () => {
   async function commitTwoRounds(): Promise<string> {
     const start = await TOOL_HANDLERS.loopforge_start(mgr, { task: "Audit ERC20", maxRounds: 20 });
     const sessionId = String(start.sessionId);
-    let roundId = String(start.roundId);
+    let submissionHandle = start.submissionHandle;
     for (let i = 1; i <= 2; i++) {
       const advanced = await toolNext(mgr, {
         sessionId,
-        roundId,
         evaluation: {
           success: false,
           output_summary: `Round ${i} progress`,
@@ -2327,7 +2343,7 @@ describe("MCP — audit & vault replay (v3.3.1)", async () => {
           },
         },
       });
-      roundId = String(advanced.roundId);
+      submissionHandle = advanced.submissionHandle;
     }
     const started = mgr.get(sessionId);
     return started!.loopId;

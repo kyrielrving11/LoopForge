@@ -13,7 +13,7 @@
  * SessionManager → RoundDriver → RoundCoordinator path.
  */
 import type { GateActionDescriptor } from "../protocol.js";
-import type { LoopTerminalSink, SubmissionGuidance, SubmissionReceipt } from "../protocol.js";
+import type { LoopTerminalSink, SubmissionGuidance, SubmissionHandle, SubmissionReceipt } from "../protocol.js";
 import type { ActiveContractView } from "../round-contract.js";
 import type { LoopStore } from "../loop-store.js";
 import { FileWorkspaceCheckpointStore } from "../workspace-checkpoint.js";
@@ -53,6 +53,9 @@ export declare class SessionManager implements SessionRegistry {
     /** v3.9.1: current-fact submission guidance for the session's held round.
      *  Read-only projection; null when the session is unknown. */
     getSubmissionGuidance(sessionId: string): SubmissionGuidance | null;
+    /** v4.0.0: the current held handle, derived on demand. A read-only
+     *  projection; never persisted. */
+    getSubmissionHandle(sessionId: string): SubmissionHandle | null;
     /** v3.9.1: the most recent committed round's receipt, rebuilt from the
      *  transaction + shared read model. Rejected/terminated attempts are not in
      *  history; their receipt exists only on their own response. */
@@ -100,7 +103,7 @@ export declare class SessionManager implements SessionRegistry {
      *  loop + round + actionHash; agent_allowed records nothing and returns
      *  the evidence suggestion instead. No action is executed and no round
      *  advances from this call. */
-    checkGate(sessionId: string, roundId: string, action: GateActionDescriptor): Record<string, unknown>;
+    checkGate(handle: unknown, action: GateActionDescriptor): Record<string, unknown>;
     /** Record a user decision for a recorded gate. The gateId embeds the
      *  canonicalized action hash — if the action changed, the match fails and
      *  the old approval expires automatically. */
@@ -136,40 +139,37 @@ export declare class SessionManager implements SessionRegistry {
      *  `strategy_stability` was a literal `true`. What remains is counted
      *  directly from committed round flags. */
     getHealth(loopId: string): Record<string, unknown> | null;
+    /** v4.0.0: the stable result for a missing/malformed handle. */
+    private handleRequiredResult;
+    private sessionNotFoundResult;
+    private sessionStateResult;
+    /** v4.0.0: one stored-prompt re-delivery for next/recover. A held prompt is
+     *  returned with the current handle and a warning; without one, the stable
+     *  mismatch error carries the current handle when it exists. */
+    private handleMismatchResult;
+    /** v4.0.0: the checkpoint variant: never re-deliver a prompt, never create a
+     *  checkpoint. The current handle rides the error for re-anchoring. */
+    private checkpointMismatchResult;
+    /** v3.9.7: a pending rollback directive whose restore is not yet verified.
+     *  Read-only; used before the queue/lease so a stale handle cannot mask the
+     *  "call resume" recovery UX. */
+    private restorePendingResult;
     /** Core cycle: extract self-eval → record feedback → check stop → compile next.
-     *  The lease + per-session queue wrap the RoundLifecycle state machine.
-     *  @param preExtractedEval Structured SelfEvaluation supplied by the caller.
-     *    An absent value is returned as evaluation_invalid without mutating state.
-     *  @param roundId v3.0.1: The roundId of the round this submission reports on
-     *    (from the last start/next/resume response). Anchors the submission so a
-     *    stale or duplicate submission is not processed against a later round.
-     *    Optional for library callers — when absent the anchor check is skipped. */
-    /** \`submission\` is the RAW evaluation payload, not a built one.
      *
-     *  v3.8.1: this method used to carry a partial copy of the submission
-     *  boundary (an object check plus core-field validation) while the MCP tool
-     *  handler carried the rest — one rule, three copies, across two layers.
-     *  The boundary now lives entirely in the runtime
-     *  (`RoundLifecycle.submissionBoundary`), so every caller — this manager, a
-     *  library user, a future CLI command — gets the same strictness. */
-    /** \`submission\` is the RAW evaluation payload, not a built one.
-     *
-     *  v3.8.1: this method used to carry a partial copy of the submission
-     *  boundary (an object check plus core-field validation) while the MCP tool
-     *  handler carried the rest — one rule, three copies, across two layers.
-     *  The whole boundary now runs HERE, before the queue and before the lease
-     *  heartbeat, so every caller of the public API gets it and a rejected
-     *  payload leaves nothing durable behind. */
-    advance(sessionId: string, output: string, submission?: unknown, roundId?: string, transactionId?: string): Promise<AdvanceResult>;
-    /** v3.9.7: submit an Agent-initiated recovery. Shape validation happens
-     *  before the session queue/lease; target referential validation happens in
-     *  the lifecycle against committed facts. */
-    recover(sessionId: string, recovery: unknown, roundId?: string, transactionId?: string): Promise<AdvanceResult>;
-    /** v3.9.7: Agent-created mid-round savepoint. It does not touch the round
-     *  counter, progress, or any governance projection. The capture runs under
-     *  the session queue/lease but outside the store lock; the session save is
-     *  the only store mutation. */
-    checkpoint(sessionId: string, roundId?: string, transactionId?: string): Promise<Record<string, unknown>>;
+     *  v4.0.0: the caller supplies the ONE `submissionHandle`; identity is
+     *  checked before the payload boundary and before the queue/lease heartbeat.
+     *  `submission` is the RAW evaluation payload. The whole payload boundary
+     *  still runs here, so every public caller gets the same strictness. */
+    advance(handle: unknown, output: string, submission?: unknown): Promise<AdvanceResult>;
+    /** v3.9.7: submit an Agent-initiated recovery. v4.0.0: the handle is the
+     *  only anchor; shape and target visibility are checked before the
+     *  queue/lease, and the exact handle is re-checked before lease renewal. */
+    recover(handle: unknown, recovery: unknown): Promise<AdvanceResult>;
+    private recoveryDisabledResult;
+    /** v3.9.7: Agent-created mid-round savepoint. v4.0.0: handle identity is
+     *  checked before the queue and again before lease renewal; capture/save
+     *  happen only after both. A checkpoint never changes the handle. */
+    checkpoint(handle: unknown): Promise<Record<string, unknown>>;
     /** Replay timeline for a session — creates ReplayBackend from the stored backend. */
     replayTimeline(sessionId: string): Record<string, unknown>[] | null;
     /** v3.3.1: Replay a loop straight from the vault — no in-memory session

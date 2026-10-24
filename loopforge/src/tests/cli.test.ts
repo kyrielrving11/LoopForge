@@ -12,6 +12,10 @@ const cli = resolve("dist/cli.js");
 
 // Single version source: package.json. The CLI must agree with it.
 const pkgVersion = JSON.parse(readFileSync(resolve("package.json"), "utf8")).version as string;
+const lockVersion = JSON.parse(readFileSync(resolve("package-lock.json"), "utf8")) as {
+  version?: string;
+  packages?: Record<string, { version?: string }>;
+};
 
 function temporaryDirectory(): string {
   return mkdtempSync(join(tmpdir(), "loopforge-cli-"));
@@ -34,6 +38,11 @@ describe("loopforge CLI", () => {
     assert.match(help.stdout, /loopforge inspect/);
     assert.match(help.stdout, /loopforge explain/);
     assert.equal(run(["--version"]).stdout.trim(), pkgVersion);
+  });
+
+  it("keeps package.json and package-lock.json versions in sync", () => {
+    assert.equal(lockVersion.version, pkgVersion);
+    assert.equal(lockVersion.packages?.[""]?.version, pkgVersion);
   });
 
   it("returns machine-readable doctor results", () => {
@@ -307,15 +316,54 @@ describe("loopforge CLI", () => {
     }
   });
 
-  it("installs only the Forge skill for a generic client", () => {
+  it("installs the Forge skill directory with its references for a generic client", () => {
     const root = temporaryDirectory();
     try {
       const target = join(root, "skills");
+      const workspace = join(root, "workspace");
       mkdirSync(target);
-      const result = run(["init", "--client", "generic", "--target", target]);
+      mkdirSync(workspace);
+      const result = run([
+        "init", "--client", "generic", "--target", target, "--workspace", workspace,
+      ]);
       assert.equal(result.status, 0, result.stderr);
       assert.match(result.stdout, /Installed:/);
       assert.match(result.stdout, /"loopforge"/);
+      const skillDir = join(target, "forge");
+      assert.ok(existsSync(join(skillDir, "SKILL.md")));
+      assert.ok(existsSync(join(skillDir, "references", "evidence-and-contracts.md")));
+      assert.ok(existsSync(join(skillDir, "references", "recovery-and-views.md")));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves an existing Forge skill untouched unless --force is used", () => {
+    const root = temporaryDirectory();
+    try {
+      const target = join(root, "skills");
+      const workspace = join(root, "workspace");
+      mkdirSync(target);
+      mkdirSync(workspace);
+      run(["init", "--client", "generic", "--target", target, "--workspace", workspace]);
+      const marker = join(target, "forge", "references", "local-notes.md");
+      writeFileSync(marker, "user notes\n");
+      const second = run([
+        "init", "--client", "generic", "--target", target, "--workspace", workspace,
+      ]);
+      assert.equal(second.status, 0, second.stderr);
+      assert.match(second.stdout, /Already present:/);
+      assert.match(second.stdout, /--force/);
+      assert.ok(existsSync(marker), "default init must not overwrite user files");
+
+      const forced = run([
+        "init", "--client", "generic", "--target", target,
+        "--workspace", workspace, "--force",
+      ]);
+      assert.equal(forced.status, 0, forced.stderr);
+      assert.match(forced.stdout, /Installed:/);
+      assert.equal(existsSync(marker), false, "--force syncs the package-owned tree");
+      assert.ok(existsSync(join(target, "forge", "references", "evidence-and-contracts.md")));
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -343,7 +391,7 @@ describe("loopforge CLI", () => {
       assert.equal(raw.evidence.providers[0], "git");
       // The output names all three locations, so "where did it go?" is
       // answered without reading the source.
-      assert.match(result.stdout, /(Installed|Already present):.*SKILL\.md/);
+      assert.match(result.stdout, /(Installed|Already present):.*forge/);
       assert.match(result.stdout, /Workspace: /);
       assert.match(result.stdout, /loopforge mcp/);
     } finally {
@@ -363,6 +411,7 @@ describe("loopforge CLI", () => {
       assert.equal(result.status, 0, result.stderr);
       // The skill goes where --target says...
       assert.ok(existsSync(join(skillsRoot, "forge", "SKILL.md")));
+      assert.ok(existsSync(join(skillsRoot, "forge", "references", "recovery-and-views.md")));
       // ...and the policy goes where --workspace says, NOT under --target.
       assert.ok(existsSync(join(workspaceRoot, "loop_policy.json")));
       assert.equal(existsSync(join(skillsRoot, "loop_policy.json")), false);

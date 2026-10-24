@@ -90,22 +90,21 @@ describe("v3.9.7 — failed restore stays pending and resumes", () => {
       const started = await mgr.create({ task: "Recover after a failed restore", loopId, maxRounds: 20 });
       const sessionId = String(started.sessionId);
       let held = mgr.get(sessionId)!.roundSnapshot!;
+      let heldHandle = mgr.getSubmissionHandle(sessionId)!;
 
       // Three flat committed rounds build the stall window.
       for (let round = 1; round <= 3; round++) {
-        const result = await mgr.advance(
-          sessionId, "", flatEvaluation(), held.roundId, held.transactionId,
-        );
+        const result = await mgr.advance(heldHandle, "", flatEvaluation());
         assert.ok(result.prompt, `round ${round} must advance`);
         held = mgr.get(sessionId)!.roundSnapshot!;
+        heldHandle = mgr.getSubmissionHandle(sessionId)!;
       }
 
       // First round-4 submission: progress-stall reject.
-      const rejected = await mgr.advance(
-        sessionId, "", flatEvaluation(), held.roundId, held.transactionId,
-      );
+      const rejected = await mgr.advance(heldHandle, "", flatEvaluation());
       assert.equal(rejected.enforcementAction, "reject");
       held = mgr.get(sessionId)!.roundSnapshot!;
+      heldHandle = mgr.getSubmissionHandle(sessionId)!;
       const targetRef = held.beforeCheckpoint!;
       assert.ok(targetRef, "round 4 has a before-image");
 
@@ -121,9 +120,7 @@ describe("v3.9.7 — failed restore stays pending and resumes", () => {
 
       // Second round-4 submission: machine backtrack. The directive commits,
       // but the post-commit preflight cannot read the target content.
-      const failed = await mgr.advance(
-        sessionId, "", flatEvaluation(), held.roundId, held.transactionId,
-      );
+      const failed = await mgr.advance(heldHandle, "", flatEvaluation());
       assert.equal(failed.enforcementAction, "backtrack");
       assert.equal(failed.prompt, null, "no redo prompt is issued without a verified restore");
       assert.equal(failed.stopReason, "stalled");

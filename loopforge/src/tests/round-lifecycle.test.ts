@@ -469,10 +469,8 @@ describe("RoundLifecycle — advance", async () => {
     registry.upsert(mgr.get(sid)!);
     const racing = makeLifecycle(store, registry);
 
-    const held = mgr.get(sid)!.roundSnapshot!;
     const advancing = racing.advance(
-      sid, "agent output", evalFor({ success: true }), held.roundId,
-      undefined, undefined, held.transactionId,
+      sid, "agent output", evalFor({ success: true }),
     );
     mgr.get(sid)!.status = "paused";
     const result = await advancing;
@@ -495,10 +493,8 @@ describe("RoundLifecycle — advance", async () => {
     const registry = makeRegistry();
     registry.upsert(mgr.get(sid)!);
     const racing = makeLifecycle(store, registry);
-    const held = mgr.get(sid)!.roundSnapshot!;
     const advancing = racing.advance(
-      sid, "agent output", evalFor({ success: true }), held.roundId,
-      undefined, undefined, held.transactionId,
+      sid, "agent output", evalFor({ success: true }),
     );
     mgr.pause(sid);
     const result = await advancing;

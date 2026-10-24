@@ -7,16 +7,15 @@
  *  future CLI command, or any direct `mgr.advance()` got NONE of it. The
  *  handler now only maps the result onto its tool envelope.
  *
- *  The placement is also what makes the ordering invariants hold. AGENTS.md:
- *  an invalid evaluation is handled BEFORE `RoundLifecycle.advance()` and
- *  "must not save session state, write the Vault, run verification or
- *  enforcement gates, increment rejection state, or record metrics". So it
- *  runs before the session queue and before the lease heartbeat — renewing a
- *  lease writes the session document, which would be a durable effect of a
- *  payload that was never accepted. It is judged before the session is even
- *  resolved, because a malformed evaluation is a payload defect whatever the
- *  session's state, and answering `session_not_found` for it would send the
- *  agent after the wrong problem.
+ *  The placement is also what makes the ordering invariants hold. v4.0.0:
+ *  `SessionManager` validates the `submissionHandle` (shape, session, exact
+ *  held snapshot) BEFORE this boundary and before its queue/lease heartbeat.
+ *  A stale handle short-circuits; only a matching handle's payload is judged
+ *  here. AGENTS.md's durable-effect invariant is unchanged: an invalid
+ *  evaluation must not save session state, write the Vault, run verification
+ *  or enforcement gates, increment rejection state, or record metrics. The
+ *  whole boundary still runs before the session queue and before the lease
+ *  heartbeat.
  *
  *  This module derives the reference spaces the boundary reads from the same
  *  committed history window the prompt was compiled from, so the prompt, the

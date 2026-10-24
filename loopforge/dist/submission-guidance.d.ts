@@ -108,7 +108,6 @@ export interface GuidanceSessionView {
     /** The task / current work item, when the caller can observe it. */
     task?: string;
     roundSnapshot?: {
-        roundId: string;
         promptArtifact?: PromptArtifact;
         beforeEvidence?: unknown;
     } | null;

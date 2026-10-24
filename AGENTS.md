@@ -58,8 +58,8 @@ is never overwritten by its redo; read-only views expose it as an event while
 ## Evaluation and submission boundary
 
 The runtime submission boundary is in `loopforge/src/mcp/submission-boundary.ts`
-and is applied by `SessionManager.advance`, before session resolution,
-queueing, or lease renewal.
+and is applied by `SessionManager.advance` after the submission-handle identity
+check, before the payload boundary, queueing, or lease renewal.
 
 The four strict core evaluation fields are:
 
@@ -70,15 +70,32 @@ The four strict core evaluation fields are:
 
 Missing or mistyped core fields return `evaluation_invalid`. An invalid
 evaluation must not save session state, write the Vault, run verification or
-enforcement, increment rejection state, or record metrics. The same `roundId`
-can retry the corrected payload.
+enforcement, increment rejection state, or record metrics. The same
+`submissionHandle` can retry the corrected payload.
+
+v4.0.0: held-round submissions carry ONE derived `submissionHandle`
+(`{sessionId, roundId, transactionId}`) instead of three top-level anchors. It
+is a transport projection: never persisted in the session document, a round
+transaction, a prompt artifact, guidance, or a receipt; only the response
+projects it. `SessionManager` validates its exact shape and fields against the
+held snapshot before the payload boundary, the queue, and the lease heartbeat,
+and re-checks inside the queue before lease renewal. A stale handle never
+submits work: `next`/`recover` return the held prompt with the current handle
+and a warning when one exists, otherwise `submission_handle_mismatch`;
+`checkpoint`/`gate_check` return the stable error without creating a
+checkpoint/gate_opened. A rejection rebinds the attempt and returns a new
+handle; an invalid evaluation keeps the same handle; a checkpoint never changes
+it; terminal results carry no handle. The handle is not a security token and
+must never appear inside the prompt: `transactionId` is derived from
+`promptHash`, so embedding it would be circular.
 
 `loopforge_next` accepts a top-level `recovery: { target_checkpoint_id, reason }`
 as a mutually exclusive alternative to `evaluation`. Recovery is a first-class
 action, not an evaluation: it requires no core fields, never fabricates one,
 and bypasses ordinary verification/enforcement of the abandoned work. It also
-requires the held prompt's `roundId` and `transactionId`
-(`round_id_required`/`transaction_id_required` otherwise), and the target must
+requires the current `submissionHandle`
+(`submission_handle_required` when missing/malformed,
+`submission_handle_mismatch` when stale), and the target must
 resolve to a checkpoint ref visible through the held transaction or a committed
 evaluation transaction on the current branch; invalid targets return
 `recovery_invalid`/`recovery_unavailable`/`recovery_disabled` before any
@@ -88,7 +105,8 @@ prompt. The target is a recovery point, not a success claim: error-level
 verification findings on its round do not disqualify it. The Agent's reason is
 recorded verbatim and rendered in the Recovery Brief as report-only data, never
 as a LoopForge instruction. `loopforge_checkpoint` creates an explicit mid-round
-savepoint with the same three anchors; it adds no round, commit or progress.
+savepoint with the same `submissionHandle`; it adds no round, commit or progress
+and leaves the handle unchanged.
 The transaction snapshot's `CheckpointRef` is the ONE authority for a
 checkpoint's visibility, ownership and redo round; a manifest alone is never a
 restore point. Checkpoints never enter `CanonicalLoopState`, prompt governance,
@@ -197,10 +215,13 @@ SessionManager -> RoundLifecycle -> RoundDriver -> RoundCoordinator
   the lifecycle end. A violation is a code defect: it downgrades to `blocked`
   and reports, rather than throwing.
 
-Round IDs prevent lost responses and duplicate submissions; `transactionId`
-(plus `branchId`) prevents a deep redo from replaying an abandoned commit at
-the same numeric round. Transaction recovery must remain idempotent after
-process interruption.
+The derived `submissionHandle` bundles the logical round, the exact transaction
+attempt and the session identity. Exact comparison against the held snapshot
+prevents lost responses and duplicate submissions; `transactionId` (plus
+`branchId`) prevents a deep redo from replaying an abandoned commit at the same
+numeric round. Transaction recovery must remain idempotent after process
+interruption. A post-commit compile failure has no held prompt and is recovered
+with `loopforge_resume`; an old handle never re-submits the committed round.
 
 ## Evidence and contract invariants
 
@@ -491,10 +512,11 @@ constructed.
 The MCP server is synchronous JSON-RPC over stdio. Public tools are
 `start`, `next`, `checkpoint`, `status`, `stop`, `pause`, `resume`, `replay`,
 `gate_check`, and `gate_resolve`; gate tools are hidden and return
-`gate_disabled` unless `policy.gate.enabled` is true. `next` and `checkpoint`
-require `sessionId`, `roundId` and `transactionId`; recovery additionally names
-`target_checkpoint_id`. Tool responses use the uniform `{ok}` envelope with a
-stable error `code` and separate human `message`.
+`gate_disabled` unless `policy.gate.enabled` is true. `next`, `checkpoint` and
+`gate_check` require the current `submissionHandle`; session-only tools keep
+`sessionId`; recovery additionally names `target_checkpoint_id`. Tool responses
+use the uniform `{ok}` envelope with a stable error `code` and separate human
+`message`.
 
 The policy schema version is a boundary: unknown keys or a mismatched version
 are `policy_invalid`, and the version moves whenever the key surface changes.
@@ -522,7 +544,8 @@ run the scripted prepack in the clean mirror.
 
 - Prompt changes: cover budgets, hashing, density levels, same-round retry,
   protected overflow, deterministic truncation, rendered-vs-dropped priority,
-  and identical-input determinism.
+  identical-input determinism, and the footer's `submissionHandle` wording
+  (never a real handle value).
 - Memory-boundary changes: cover no `output_summary`/recent-round/full-state
   prompt narrative, committed-only Corrections/blockers/prompt_requests,
   Phase Anchors without outcomes, authority-header presence at L0/L1/L2,
@@ -558,7 +581,8 @@ run the scripted prepack in the clean mirror.
 - Protocol or evaluation changes: cover schema, handlers, lifecycle, malformed
   input, same-round retry, and unchanged state.
 - Transaction changes: cover reject, backtrack, replay, concurrent next,
-  pause, stop, and restart.
+  pause, stop, restart, stale-handle zero side effects, and post-commit compile
+  failure through `resume`.
 - Evidence changes: cover timeout, abort, unavailable provider, output caps,
   workspace boundaries, and contradictions.
 - Files-reconciliation changes: cover match/mismatch/unknown/not_applicable,
@@ -566,7 +590,14 @@ run the scripted prepack in the clean mirror.
   deltas, exact-path semantics, gate/receipt/metrics agreement, and live vs
   committed rebuilds.
 - MCP changes: cover primitive JSON arguments, strict core arguments,
-  structured output, uniform envelopes, stable error codes, and stdio.
+  structured output, uniform envelopes, stable error codes, stdio, and the
+  closed `submissionHandle` input/output schema.
+- Submission-handle changes: cover the held predicate (phase/round/attempt/
+  artifact), exact comparison with no normalization, derivation without
+  persistence, stale next/recover returning the held prompt + current handle,
+  stale checkpoint/gate writing nothing, rejection rotating the handle,
+  checkpoint preserving it, terminal results carrying none, concurrent calls,
+  restart/resume stability, and old-anchor schema rejection.
 - Contract changes: cover identity stability, item statuses, verified-fact
   survival after closure, coordinator/explain/audit agreement, and
   `contract_invalid` retry.
@@ -622,8 +653,9 @@ run the scripted prepack in the clean mirror.
   base schema 1 + progress inner schema 2, legacy inner-1/progressCapable
   reporting, and synthetic observations using the same per-kind version table.
 - Guidance/receipt changes: cover no fabricated ids, real contract/sub-goal
-  ids, rejected/terminated `not_applied`, backtrack only-preserved facts,
-  lost-response replay, and report-vs-verification separation.
+  ids, no `round_id`/handle anchor in `submission_guidance`, rejected/
+  terminated `not_applied`, backtrack only-preserved facts, lost-response
+  replay, and report-vs-verification separation.
 - Boundary-observation changes: cover a committed change, amend/HEAD move,
   deletion, rename, pre-existing dirt unchanged/changed, non-ASCII path,
   gitignored coverage, non-repository, timeout and no silent omission.

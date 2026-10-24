@@ -162,6 +162,24 @@ export interface CheckpointRef {
     redoRound: number;
     createdAt: number;
 }
+/** v4.0.0: the ONE transport projection of the held round attempt.
+ *
+ *  It bundles the three identities a held-round call needs — the owning
+ *  session, the logical round, and the exact transaction attempt — so a client
+ *  copies one object instead of three independent strings. It is DERIVED from
+ *  the persisted session snapshot on every response; it is never persisted in
+ *  the session document, a round transaction, a prompt artifact, guidance, or
+ *  a receipt.
+ *
+ *  It is not a security token and grants no authority: the session lease plus
+ *  an exact comparison against the held snapshot remain the only authority. A
+ *  stale handle never submits work; the caller must re-anchor through
+ *  `loopforge_status` or `loopforge_resume`. */
+export interface SubmissionHandle {
+    sessionId: string;
+    roundId: string;
+    transactionId: string;
+}
 /** v3.9.7: the restore-relevant content manifest. `fingerprints` is exactly
  *  the Git observation boundary; `contents` names the dirty regular files and
  *  symlinks whose bytes are stored as content-addressed blobs. */
@@ -452,7 +470,6 @@ export interface PromptRequestEffect {
  *  later prompt. Real ids are rendered only when the facts exist; a null
  *  example means "not usable at this submission point". */
 export interface SubmissionGuidance {
-    round_id: string;
     active_contract: {
         id: string;
         work_item?: string;
@@ -1310,24 +1327,24 @@ export interface VerifiedSubGoalFact {
  *  as the code.
  *
  *  - `evaluation_invalid` / `contract_invalid` / `policy_invalid` — a payload
- *    or configuration defect; the same roundId may be retried.
+ *    or configuration defect; the same submissionHandle may be retried.
  *  - `projection_incomplete` — a code defect in the prompt projection: an
  *    active normative ID was not rendered, so no prompt is delivered. Not
  *    retryable by the agent.
- *  - `round_id_required` / `round_id_mismatch` — the anchor is missing or no
- *    longer names the current round.
+ *  - `submission_handle_required` — the handle is missing or structurally
+ *    malformed. The same call may be retried after obtaining the current
+ *    handle from `loopforge_status` or `loopforge_resume`.
+ *  - `submission_handle_mismatch` — the handle no longer names the held
+ *    attempt. A `next`/`recover` submission returns the held prompt with a
+ *    warning and `ok: true` when one exists so the agent can recover the
+ *    response it missed; with no held prompt, or for `checkpoint`/
+ *    `gate_check`, it is this stable error.
  *  - `session_not_found` / `state_unavailable` — the named session or read
  *    model is not there.
  *  - `invalid_argument` — the request itself is malformed at the tool boundary.
  *  - `gate_disabled` / `loop_already_running` / `lease_conflict` — a state
- *    condition, not a defect.
- *
- *  Note: a `loopforge_next` submission whose roundId no longer matches is NOT
- *  `round_id_mismatch` — it returns the held prompt with a warning and
- *  `ok: true` so the agent can recover the response it missed. That recovery
- *  contract (v3.0.1) is deliberate; `round_id_mismatch` is for the places with
- *  no held prompt to return (the gate preflight). */
-export type ToolErrorCode = "evaluation_invalid" | "contract_invalid" | "policy_invalid" | "projection_incomplete" | "session_not_found" | "round_id_required" | "round_id_mismatch" | "state_unavailable" | "invalid_argument" | "gate_disabled" | "loop_already_running" | "lease_conflict" | "recovery_invalid" | "recovery_disabled" | "recovery_unavailable" | "checkpoint_invalid" | "checkpoint_unavailable" | "checkpoint_failed" | "checkpoint_limit" | "restore_failed" | "restore_pending";
+ *    condition, not a defect. */
+export type ToolErrorCode = "evaluation_invalid" | "contract_invalid" | "policy_invalid" | "projection_incomplete" | "session_not_found" | "submission_handle_required" | "submission_handle_mismatch" | "state_unavailable" | "invalid_argument" | "gate_disabled" | "loop_already_running" | "lease_conflict" | "recovery_invalid" | "recovery_disabled" | "recovery_unavailable" | "checkpoint_invalid" | "checkpoint_unavailable" | "checkpoint_failed" | "checkpoint_limit" | "restore_failed" | "restore_pending";
 /** v3.8: The structured error inside the uniform `{ok: false}` envelope. */
 export interface ToolError {
     code: ToolErrorCode;
@@ -1336,7 +1353,9 @@ export interface ToolError {
     /** Whether the fix is a corrected payload the agent may resend. */
     retryable: boolean;
     sessionId?: string;
-    roundId?: string;
+    /** v4.0.0: the current held handle, when one exists, so the caller can
+     *  re-anchor without reconstructing it. */
+    submissionHandle?: SubmissionHandle;
     details?: Record<string, unknown>;
 }
 export declare function makeTaskId(taskDescription: string): string;

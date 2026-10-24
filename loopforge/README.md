@@ -37,17 +37,23 @@ readiness and configured evidence capabilities without running evidence
 commands. `inspect` reads stored state, and `explain` shows why a committed
 round received its disposition.
 
-`--target` selects where the client skill is installed. `--workspace` selects
-the runtime boundary for policy, storage, evidence commands, and workspace
-checks. If omitted, the current directory is used.
+`--target` selects where the Forge skill directory is installed. `--workspace`
+selects the runtime boundary for policy, storage, evidence commands, and
+workspace checks. If omitted, the current directory is used. A normal `init`
+leaves an existing Forge skill untouched; `--force` replaces the package-owned
+skill tree (including its `references/` files).
 
 ## MCP workflow
 
 The core loop is `loopforge_start` followed by `loopforge_next` for each held
-round. Use the `roundId` from the latest response when submitting. A submission
-is either an evaluation or an Agent-requested recovery, never both. Invalid
-core fields can be corrected for the same round without committing that
-attempt.
+round. Every response that holds a round returns a `submissionHandle`; pass that
+object unchanged to `loopforge_next`, `loopforge_checkpoint`, and
+`loopforge_gate_check`. Never edit or reconstruct it. A rejection keeps the
+logical round but returns a new handle; an invalid evaluation keeps the same
+handle. A stale handle never submits work: fetch the current prompt and handle
+with `loopforge_status` or `loopforge_resume`. A submission is either an
+evaluation or an Agent-requested recovery, never both. Invalid core fields can
+be corrected for the same round without committing that attempt.
 
 The four required evaluation fields are `success`, `output_summary`,
 `constraint_violations`, and `should_continue`. They are the Agent's report,

@@ -63,6 +63,7 @@ export type {
   SubmissionDiagnostic,
   SubmissionDiagnosticHandling,
   SubmissionGuidance,
+  SubmissionHandle,
   SubmissionReceipt,
   SubmissionReportHandling,
   CheckpointRef,

@@ -1,5 +1,81 @@
 # Changelog
 
+## 4.0.0 (2026-10-24)
+
+**The submission-handle release.** Held-round identity becomes ONE derived
+transport object, validated exactly against the held snapshot before any
+payload judgment, queueing, lease heartbeat, save, Vault write, gate record, or
+terminal notification. The Forge skill becomes a lean core manual plus
+on-demand references. This is a breaking release with no migration path.
+
+### Breaking: one submission handle
+
+- `loopforge_next`, `loopforge_checkpoint`, and `loopforge_gate_check` now take
+  a single `submissionHandle` (`{sessionId, roundId, transactionId}`) instead
+  of separate top-level anchors. The object is closed; old scattered anchors
+  are rejected by the tool schema.
+- `submissionHandle` is a projection derived from the persisted held snapshot.
+  It is never persisted in the session document, a round transaction, a prompt
+  artifact, guidance, or a receipt, and it is never embedded in the prompt
+  (`transactionId` is derived from `promptHash`, so embedding would be
+  circular).
+- Held-prompt responses (`start`, `next`, `resume`, `status view=session`,
+  `checkpoint`) return `submissionHandle` and no longer return top-level
+  `roundId`/`transactionId`. `sessionId` remains for session-only tools.
+- `submission_guidance.round_id` is removed: the guidance no longer carries a
+  second anchor representation.
+- `ToolError` replaces `roundId` with `submissionHandle`.
+  `round_id_required`/`round_id_mismatch` become
+  `submission_handle_required`/`submission_handle_mismatch`.
+- The public `SessionManager.advance`/`recover`/`checkpoint`/`checkGate`
+  signatures take the raw handle; `AdvanceResult` no longer exposes
+  `roundId`/`transactionId`.
+
+### Identity and zero side effects
+
+- A stale handle never submits work. `next`/`recover` return the exact held
+  prompt with the current handle and a warning when one exists; otherwise they
+  return `submission_handle_mismatch`. `checkpoint`/`gate_check` return the
+  stable mismatch without creating a checkpoint or `gate_opened`.
+- Handle validation runs before the payload boundary and again inside the
+  session queue before `renewSessionLease`. A stale handle cannot renew a
+  lease, save a session, write the Vault, increment rejection state, record
+  metrics, notify a terminal sink, or flip a stalled session to running.
+- `restoredPromptResult` becomes `heldPromptResult`: the held predicate now
+  requires a prompted evaluation whose snapshot and prompt artifact agree on
+  round, attempt, and non-empty rendered prompt.
+- A rejection rebinds the attempt and returns a new handle; an invalid
+  evaluation keeps the same handle; a checkpoint leaves it unchanged; terminal
+  results carry none.
+- A post-commit compile failure has no held prompt and is recovered with
+  `loopforge_resume`; an old handle never re-submits the committed round.
+
+### Forge skill and onboarding
+
+- `SKILL.md` is now the lean core workflow, with detailed
+  `references/evidence-and-contracts.md` and
+  `references/recovery-and-views.md` read on demand. Field applicability,
+  legal shapes, real ids, and usable commands remain runtime
+  `submission_guidance` facts; the references do not duplicate them.
+- `loopforge init` installs the whole Forge skill directory. A normal install
+  leaves an existing skill untouched; `--force` replaces the package-owned
+  tree, removing stale reference files. After upgrading, run
+  `loopforge init --client <client> --force`.
+- The MCP `initialize` instructions stop restating field semantics and no
+  longer say “execution_report is expected”; they point at `submission_guidance`
+  and the one handle.
+
+### Consistency and maintenance
+
+- The real-field-usage experiment harness uses the handle API (it had already
+  been missing the required transaction anchor since 3.9.7).
+- Command evidence is unchanged: no `result_format`, no policy/command
+  observation schema change, and existing command contract bindings remain
+  valid.
+- The transaction envelope (5), policy schema (9), prompt artifact (6), and
+  command observation (1) versions are unchanged. Old Vault history remains
+  readable; legacy reports are preserved.
+
 ## 3.9.9 (2026-10-23)
 
 **The evidence-coverage and contract-redirection release.** Machine progress

@@ -7,16 +7,15 @@
  *  future CLI command, or any direct `mgr.advance()` got NONE of it. The
  *  handler now only maps the result onto its tool envelope.
  *
- *  The placement is also what makes the ordering invariants hold. AGENTS.md:
- *  an invalid evaluation is handled BEFORE `RoundLifecycle.advance()` and
- *  "must not save session state, write the Vault, run verification or
- *  enforcement gates, increment rejection state, or record metrics". So it
- *  runs before the session queue and before the lease heartbeat — renewing a
- *  lease writes the session document, which would be a durable effect of a
- *  payload that was never accepted. It is judged before the session is even
- *  resolved, because a malformed evaluation is a payload defect whatever the
- *  session's state, and answering `session_not_found` for it would send the
- *  agent after the wrong problem.
+ *  The placement is also what makes the ordering invariants hold. v4.0.0:
+ *  `SessionManager` validates the `submissionHandle` (shape, session, exact
+ *  held snapshot) BEFORE this boundary and before its queue/lease heartbeat.
+ *  A stale handle short-circuits; only a matching handle's payload is judged
+ *  here. AGENTS.md's durable-effect invariant is unchanged: an invalid
+ *  evaluation must not save session state, write the Vault, run verification
+ *  or enforcement gates, increment rejection state, or record metrics. The
+ *  whole boundary still runs before the session queue and before the lease
+ *  heartbeat.
  *
  *  This module derives the reference spaces the boundary reads from the same
  *  committed history window the prompt was compiled from, so the prompt, the
@@ -247,7 +246,7 @@ function rejectedDiagnostic(
 }
 
 const EVALUATION_REQUIRED =
-  "A structured evaluation object is required. Resubmit the same roundId " +
+  "A structured evaluation object is required. Resubmit the same submissionHandle " +
   "with success, output_summary, constraint_violations, and should_continue.";
 
 /** THE submission boundary. Five checks, in this order, all of them before
@@ -316,7 +315,7 @@ export function validateSubmission(
   if (subgoalShapeErrors.length > 0) {
     return {
       ok: false,
-      stopDetail: "subgoal_updates is malformed. Fix the entries and resubmit the same roundId.",
+      stopDetail: "subgoal_updates is malformed. Fix the entries and resubmit the same submissionHandle.",
       submissionError: {
         code: "evaluation_invalid",
         details: {
@@ -344,7 +343,7 @@ export function validateSubmission(
         stopDetail:
           "subgoal_updates references a sub-goal this loop does not have, a " +
           "terminal one, or an illegal transition. Fix the entries and " +
-          "resubmit the same roundId.",
+          "resubmit the same submissionHandle.",
         submissionError: {
           code: "evaluation_invalid",
           details: {
@@ -365,7 +364,7 @@ export function validateSubmission(
       stopDetail:
         "retracted_constraints may only name active Agent-discovered constraints; " +
         "operator criteria/hard constraints and plan constraints are not retractable. " +
-        "Remove them and resubmit the same roundId.",
+        "Remove them and resubmit the same submissionHandle.",
       submissionError: {
         code: "evaluation_invalid",
         details: {
@@ -390,7 +389,7 @@ export function validateSubmission(
       ok: false,
       stopDetail:
         "The Round Contract declaration or its item claims are malformed. " +
-        "Fix them and resubmit the same roundId.",
+        "Fix them and resubmit the same submissionHandle.",
       submissionError: {
         code: "contract_invalid",
         details: {

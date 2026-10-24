@@ -15,7 +15,7 @@ import { LoopForgeEngine } from "../engine.js";
 import { deriveGate } from "../cognitive-governance.js";
 import { Mode, makeLoopCompileRequest, } from "../protocol.js";
 import { captureEntrypointTrust, EvidenceCollector } from "../evidence-provider.js";
-import { deriveRoundObservationDelta, deriveTransactionId, makeRoundId, parseRoundTransactionSnapshot, prepareRoundTransaction, rootBranchId, } from "../round-transaction.js";
+import { deriveRoundObservationDelta, deriveTransactionId, parseRoundTransactionSnapshot, prepareRoundTransaction, rootBranchId, } from "../round-transaction.js";
 import { deriveActiveRoundContract, deriveRoundContractView } from "../round-contract.js";
 import { deriveSubGoals } from "../subgoal-state.js";
 import { declaresBlocked } from "../round-outcome.js";
@@ -30,6 +30,7 @@ import { checkRoundSequence, queryLoopEntries } from "../loop-store.js";
 import { branchDirectives, branchRounds, derivationRounds, pendingRollbackDirective, readOnlyRounds, resolveBranch, } from "../committed-round.js";
 import { deriveSubmissionGuidance } from "../submission-guidance.js";
 import { latestObjective } from "../loop-compiler.js";
+import { heldPromptSnapshot, makeSubmissionHandle, } from "./submission-handle.js";
 import { logEvent } from "../observability.js";
 import { policyMetrics } from "../policy-metrics.js";
 import { isRecord, normalizeText } from "../token-utils.js";
@@ -488,7 +489,7 @@ export class RoundLifecycle {
         return {
             sessionId: session.sessionId,
             round: session.currentRound,
-            roundId: session.roundSnapshot.roundId,
+            ...this.heldHandle(session),
             ...this.transactionFacts(session),
             prompt: prepared.prompt,
             level: prepared.level,
@@ -503,7 +504,9 @@ export class RoundLifecycle {
         };
     }
     /** v3.9.7: execution metadata attached to every held/prepared prompt. These
-     *  are transport facts, never prompt governance content. */
+     *  are transport facts, never prompt governance content. v4.0.0: the anchor
+     *  itself is the separate `submissionHandle`; this bundle owns only the
+     *  checkpoint facts. */
     transactionFacts(session) {
         const snapshot = session.roundSnapshot;
         if (!snapshot)
@@ -513,7 +516,6 @@ export class RoundLifecycle {
             ...(snapshot.checkpoints ?? []),
         ];
         return {
-            transactionId: snapshot.transactionId,
             ...(checkpoints.length > 0 ? { checkpoints } : {}),
             ...(snapshot.beforeCheckpointError
                 ? {
@@ -524,6 +526,11 @@ export class RoundLifecycle {
                 }
                 : {}),
         };
+    }
+    /** v4.0.0: the transport handle for the current held snapshot, or absent. */
+    heldHandle(session) {
+        const handle = makeSubmissionHandle(session);
+        return handle ? { submissionHandle: handle } : {};
     }
     /** v3.9.7: guidance facts for a redo whose restore is already verified.
      *  They are derived from the still-pending committed directive, so a
@@ -548,22 +555,32 @@ export class RoundLifecycle {
             reason: directive.reason,
         };
     }
-    restoredPromptResult(session) {
-        const artifact = session.roundSnapshot?.promptArtifact;
-        if (!artifact)
+    /** v4.0.0: return the exact stored prompt plus the CURRENT handle. This is
+     *  the ONE path that re-delivers a prompt without compiling. It fails closed
+     *  unless the full held predicate holds (phase, round, attempt, rendered
+     *  prompt), so a committed/terminated/retrying snapshot can never masquerade
+     *  as held. The warning is appended without mutating the artifact. Public so
+     *  SessionManager can use it on its pre-queue stale-handle path. */
+    heldPromptResult(session, warning) {
+        const snapshot = heldPromptSnapshot(session);
+        const artifact = snapshot?.promptArtifact;
+        if (!snapshot || !artifact)
             return null;
-        const expectedRoundId = makeRoundId(session.loopId, session.currentRound);
-        if (artifact.roundId !== expectedRoundId)
+        const handle = makeSubmissionHandle(session);
+        if (!handle)
             return null;
+        const warnings = [...(artifact.warnings ?? [])];
+        if (warning && !warnings.includes(warning))
+            warnings.push(warning);
         return {
             sessionId: session.sessionId,
             round: session.currentRound,
-            roundId: artifact.roundId,
+            submissionHandle: handle,
             ...this.transactionFacts(session),
             prompt: artifact.renderedPrompt,
             level: artifact.level,
             roundSuccess: undefined,
-            warnings: artifact.warnings ?? [],
+            warnings,
             submission_guidance: this.guidanceFor(session, {
                 recovery: this.pendingRecoveryGuidance(session),
             }),
@@ -595,7 +612,6 @@ export class RoundLifecycle {
             return {
                 sessionId: session.sessionId,
                 round: session.currentRound,
-                roundId: recovered.snapshot.roundId,
                 prompt: null,
                 stopReason: reason,
                 stopDetail: reason === "completed"
@@ -668,7 +684,7 @@ export class RoundLifecycle {
             directive.transaction_id &&
             session.roundSnapshot.round === directive.target.redo_round;
         if (verified) {
-            return this.restoredPromptResult(session);
+            return this.heldPromptResult(session);
         }
         session.currentRound = directive.target.redo_round;
         session.roundSnapshot = undefined;
@@ -718,7 +734,7 @@ export class RoundLifecycle {
         const reconciled = await this.reconcileCommittedRound(session);
         if (reconciled)
             return reconciled;
-        const restored = this.restoredPromptResult(session);
+        const restored = this.heldPromptResult(session);
         if (restored)
             return restored;
         // Missing held prompt: compile (async) once, then persist it.
@@ -770,7 +786,7 @@ export class RoundLifecycle {
         const reconciled = await this.reconcileCommittedRound(session);
         if (reconciled)
             return reconciled;
-        const restored = this.restoredPromptResult(session);
+        const restored = this.heldPromptResult(session);
         if (restored) {
             this.save(session);
             return restored;
@@ -913,7 +929,6 @@ export class RoundLifecycle {
             return {
                 sessionId,
                 round: session.currentRound,
-                roundId: session.roundSnapshot?.roundId,
                 prompt: null,
                 stopReason: "stalled",
                 stopDetail: "RoundDriver.prepareRetry returned null — the retry prompt could not be compiled.",
@@ -924,7 +939,7 @@ export class RoundLifecycle {
         return {
             sessionId,
             round: session.currentRound,
-            roundId: session.roundSnapshot.roundId,
+            ...this.heldHandle(session),
             ...this.transactionFacts(session),
             prompt: preparedRetry.prompt,
             level: preparedRetry.level,
@@ -1072,7 +1087,6 @@ export class RoundLifecycle {
         return {
             sessionId: session.sessionId,
             round: redoRound,
-            roundId: makeRoundId(session.loopId, redoRound),
             prompt: null,
             stopReason: "stalled",
             stopDetail: `Workspace restore failed (${reasonCode}). The rollback directive remains pending; ` +
@@ -1137,7 +1151,7 @@ export class RoundLifecycle {
         return {
             sessionId,
             round: newRound,
-            roundId: session.roundSnapshot.roundId,
+            ...this.heldHandle(session),
             ...this.transactionFacts(session),
             prompt: prepared.prompt,
             level: prepared.level,
@@ -1208,7 +1222,6 @@ export class RoundLifecycle {
         return {
             sessionId,
             round: session.currentRound,
-            roundId: session.roundSnapshot?.roundId,
             prompt: null,
             stopReason: reason,
             stopDetail: pr.enforcementReason ?? "The enforcement gate terminated the loop.",
@@ -1240,7 +1253,6 @@ export class RoundLifecycle {
         logEvent("session_end", { sessionId, loopId: session.loopId, stopReason: reason, round: session.currentRound });
         return {
             sessionId, round: session.currentRound,
-            roundId: session.roundSnapshot?.roundId,
             prompt: null, stopReason: reason,
             stopDetail: pr.stopReason === "max_rounds"
                 ? "The configured maximum number of rounds has been reached."
@@ -1302,8 +1314,8 @@ export class RoundLifecycle {
                 return this.stalledAfterCommit(sessionId, session, roundSuccess, error.message, { code: "projection_incomplete", details: { coverage: error.coverage } });
             }
             return this.stalledAfterCommit(sessionId, session, roundSuccess, `RoundDriver.prepare threw after the round committed: ${String(error).slice(0, 300)}. ` +
-                `The session is stalled with the committed round still held — resume or ` +
-                `resubmit the same roundId to recompile the next prompt.`);
+                `The session is stalled with the committed round still held — call ` +
+                `loopforge_resume to reconcile it and compile the next prompt.`);
         }
         if (!prepared) {
             // M4: align with the sibling paths (resume / unpause / reject /
@@ -1311,8 +1323,8 @@ export class RoundLifecycle {
             // stalled session — previously this silently returned prompt:null
             // without a stopReason while the session kept running.
             return this.stalledAfterCommit(sessionId, session, roundSuccess, "RoundDriver.prepare returned null after the round committed — the " +
-                "next prompt could not be compiled. Resume or resubmit the same " +
-                "roundId to retry.");
+                "next prompt could not be compiled. Call loopforge_resume to retry " +
+                "the reconciliation and compile the next prompt.");
         }
         // Commit fence after the async prepare: pause()/delete() may have run
         // while the compile/evidence collection was in flight. Do not install a
@@ -1353,7 +1365,7 @@ export class RoundLifecycle {
         return {
             sessionId,
             round: session.currentRound,
-            roundId: session.roundSnapshot.roundId,
+            ...this.heldHandle(session),
             ...this.transactionFacts(session),
             prompt: nextPrompt,
             level: nextLevel,
@@ -1370,10 +1382,10 @@ export class RoundLifecycle {
         };
     }
     /** M4: mark a session stalled after its round committed but the next
-     *  prompt could not be prepared/persisted — mirrors the crash-recovery
-     *  siblings (reconcileCommittedRound / resume / reject paths). The
-     *  committed round stays held (roundSnapshot untouched) so a resubmission
-     *  with the same roundId replays it and recompiles the next round. */
+     *  prompt could not be prepared/persisted. v4.0.0: the committed snapshot is
+     *  NOT a held prompt, so this result carries no handle; the Agent must call
+     *  `loopforge_resume`, which reconciles the commit and compiles the next
+     *  prompt. Re-submitting an old handle can never resurrect the old round. */
     stalledAfterCommit(sessionId, session, roundSuccess, detail, projectionError) {
         session.status = "stalled";
         try {
@@ -1389,7 +1401,6 @@ export class RoundLifecycle {
         return {
             sessionId,
             round: session.currentRound,
-            roundId: session.roundSnapshot?.roundId,
             prompt: null,
             stopReason: "stalled",
             stopDetail: detail,
@@ -1397,34 +1408,17 @@ export class RoundLifecycle {
             ...(projectionError ? { projectionError } : {}),
         };
     }
-    async advanceUnlocked(sessionId, output, preExtractedEval, roundId, normalizationDiagnostics, submittedFields, transactionId) {
+    async advanceUnlocked(sessionId, output, preExtractedEval, normalizationDiagnostics, submittedFields) {
         // ── 1. Validate session ──────────────────────────────────────────────
+        // The handle identity (including the exact transaction attempt) was
+        // already validated by SessionManager before its queue and lease
+        // heartbeat. This lifecycle owns the round state machine, not a second
+        // anchor rule.
         const session = this.registry.get(sessionId);
         if (!session)
             return { sessionId, round: 0, prompt: null, stopReason: "session_not_found", stopDetail: "No session exists with this ID. It may have expired, been deleted, or never existed." };
         if (session.status !== "running" && session.status !== "stalled") {
             return { sessionId, round: session.currentRound, prompt: null, stopReason: session.status, stopDetail: `Session is ${session.status}. Use loopforge_resume to restart a paused session, or loopforge_start for a new task.` };
-        }
-        // v3.9.7: every submission echoes the exact held transaction. There is no
-        // "no transactionId" bypass; a lost response is recovered through
-        // loopforge_status or loopforge_resume, which return the anchor.
-        if (typeof transactionId !== "string" || transactionId.trim().length === 0) {
-            return {
-                sessionId,
-                round: session.currentRound,
-                roundId: session.roundSnapshot?.roundId,
-                transactionId: session.roundSnapshot?.transactionId,
-                prompt: null,
-                stopReason: "transaction_id_required",
-                stopDetail: "transactionId is required — use the anchor returned with the held prompt.",
-                submissionError: {
-                    code: "invalid_argument",
-                    details: {
-                        reason_code: "transaction_id_required",
-                        expected_transaction_id: session.roundSnapshot?.transactionId ?? null,
-                    },
-                },
-            };
         }
         // v3.9.7: a pending rollback directive with no verified redo snapshot
         // means the workspace is (or may be) mid-restore. Ordinary work must not
@@ -1445,7 +1439,6 @@ export class RoundLifecycle {
             return {
                 sessionId,
                 round: session.currentRound,
-                roundId: session.roundSnapshot?.roundId,
                 prompt: null,
                 stopReason: "stalled",
                 submissionError: {
@@ -1464,85 +1457,16 @@ export class RoundLifecycle {
         if (session.status === "stalled") {
             session.status = "running";
         }
-        // ── 1.5 Anchor the submission to the round it reports on ─────────────
-        // v3.0.1: a submission whose roundId no longer matches the current round
-        // is stale — the round it reported on already committed (lost response,
-        // duplicate call). Never process it against the current round; return the
-        // held prompt so the agent recovers the response it missed. The reject
-        // path keeps the same roundId (prepareRejectedAttempt), so retries of a
-        // rejected round match normally.
-        const expectedRoundId = session.roundSnapshot?.roundId
-            ?? makeRoundId(session.loopId, session.currentRound);
-        if (roundId !== undefined && roundId !== expectedRoundId) {
-            logEvent("stale_round_id", {
-                sessionId,
-                loopId: session.loopId,
-                submitted: roundId,
-                expected: expectedRoundId,
-            });
-            const restored = this.restoredPromptResult(session);
-            if (restored) {
-                return {
-                    ...restored,
-                    warnings: [
-                        ...(restored.warnings ?? []),
-                        `Submitted roundId ${roundId} does not match the current round (${expectedRoundId}) — the round it reported on has already committed. Reusing the held prompt for round ${session.currentRound}; resubmit with its roundId when the work is done.`,
-                    ],
-                };
-            }
-            return {
-                sessionId,
-                round: session.currentRound,
-                roundId: expectedRoundId,
-                prompt: null,
-                stopReason: "stale_round_id",
-                stopDetail: `Submitted roundId ${roundId} does not match the current round ${expectedRoundId}, and no prompt is currently held. Call loopforge_status or loopforge_resume to re-anchor.`,
-            };
-        }
-        // v3.9.7: transaction identity. roundId anchors the logical round; the
-        // transactionId anchors the exact attempt. A stale response from a
-        // rejected/abandoned attempt at the SAME round must not be applied to the
-        // retry. Mismatch returns the held prompt, never evaluates.
-        if (transactionId !== undefined && session.roundSnapshot &&
-            transactionId !== session.roundSnapshot.transactionId) {
-            const restored = this.restoredPromptResult(session);
-            if (restored) {
-                return {
-                    ...restored,
-                    warnings: [
-                        ...(restored.warnings ?? []),
-                        `Submitted transactionId ${transactionId} does not match the current attempt (${session.roundSnapshot.transactionId}) — the held prompt is returned. Resubmit with the transactionId returned alongside it.`,
-                    ],
-                };
-            }
-            return {
-                sessionId,
-                round: session.currentRound,
-                roundId: expectedRoundId,
-                prompt: null,
-                stopReason: "round_id_mismatch",
-                submissionError: {
-                    code: "round_id_mismatch",
-                    details: {
-                        reason_code: "transaction_id_mismatch",
-                        submitted: transactionId,
-                        expected: session.roundSnapshot.transactionId,
-                        detail: "Use the roundId and transactionId returned alongside the held prompt.",
-                    },
-                },
-            };
-        }
         // ── 2. Extract self-evaluation ───────────────────────────────────────
         const extracted = this.extractEvaluation(output, preExtractedEval);
         if (!extracted) {
             return {
                 sessionId,
                 round: session.currentRound,
-                roundId: session.roundSnapshot?.roundId
-                    ?? makeRoundId(session.loopId, session.currentRound),
+                ...this.heldHandle(session),
                 prompt: null,
                 stopReason: "evaluation_invalid",
-                stopDetail: "A structured evaluation object is required. Resubmit the same roundId with success, output_summary, constraint_violations, and should_continue.",
+                stopDetail: "A structured evaluation object is required. Resubmit the same submissionHandle with success, output_summary, constraint_violations, and should_continue.",
             };
         }
         const selfEval = extracted;
@@ -1609,7 +1533,7 @@ export class RoundLifecycle {
      *  method only validates it against committed facts, records the rollback
      *  directive and compiles the redo. It never runs ordinary verification or
      *  enforcement on the abandoned work. */
-    async recover(sessionId, recovery, roundId, transactionId) {
+    async recover(sessionId, recovery) {
         const session = this.registry.get(sessionId);
         if (!session) {
             return {
@@ -1640,88 +1564,9 @@ export class RoundLifecycle {
                 },
             };
         }
-        const expectedRoundId = session.roundSnapshot?.roundId
-            ?? makeRoundId(session.loopId, session.currentRound);
-        if (typeof roundId !== "string" || roundId.trim().length === 0) {
-            return {
-                sessionId,
-                round: session.currentRound,
-                roundId: expectedRoundId,
-                prompt: null,
-                submissionError: {
-                    code: "round_id_required",
-                    details: { detail: "recovery requires the roundId from the held prompt" },
-                },
-            };
-        }
-        if (roundId !== expectedRoundId) {
-            const restored = this.restoredPromptResult(session);
-            if (restored) {
-                return {
-                    ...restored,
-                    warnings: [
-                        ...(restored.warnings ?? []),
-                        `Submitted roundId ${roundId} does not match the current round (${expectedRoundId}); the held prompt is returned.`,
-                    ],
-                };
-            }
-            return {
-                sessionId,
-                round: session.currentRound,
-                roundId: expectedRoundId,
-                prompt: null,
-                stopReason: "round_id_mismatch",
-                stopDetail: `Submitted roundId ${roundId} does not match the current round ${expectedRoundId}.`,
-            };
-        }
+        // The handle identity (including the exact transaction attempt) was
+        // validated by SessionManager before its queue and lease heartbeat.
         const held = session.roundSnapshot;
-        if (held) {
-            if (typeof transactionId !== "string" || transactionId.trim().length === 0) {
-                return {
-                    sessionId,
-                    round: session.currentRound,
-                    roundId: held.roundId,
-                    transactionId: held.transactionId,
-                    prompt: null,
-                    stopReason: "transaction_id_required",
-                    submissionError: {
-                        code: "invalid_argument",
-                        details: {
-                            reason_code: "transaction_id_required",
-                            expected_transaction_id: held.transactionId,
-                        },
-                    },
-                };
-            }
-            if (transactionId !== held.transactionId) {
-                const restored = this.restoredPromptResult(session);
-                if (restored) {
-                    return {
-                        ...restored,
-                        transactionId: held.transactionId,
-                        warnings: [
-                            ...(restored.warnings ?? []),
-                            `Submitted transactionId ${transactionId} does not match the held transaction (${held.transactionId}); the held prompt is returned.`,
-                        ],
-                    };
-                }
-                return {
-                    sessionId,
-                    round: session.currentRound,
-                    roundId: held.roundId,
-                    transactionId: held.transactionId,
-                    prompt: null,
-                    stopReason: "round_id_mismatch",
-                    submissionError: {
-                        code: "round_id_mismatch",
-                        details: {
-                            reason_code: "stale_transaction_id",
-                            expected_transaction_id: held.transactionId,
-                        },
-                    },
-                };
-            }
-        }
         // Pending directive first: one directive is the record, so a repeated
         // request never reads a new target and never commits a second directive.
         const pending = await this.completePendingRecovery(session);
@@ -1755,7 +1600,7 @@ export class RoundLifecycle {
             return {
                 sessionId,
                 round: session.currentRound,
-                roundId: held.roundId,
+                ...this.heldHandle(session),
                 ...this.transactionFacts(session),
                 prompt: null,
                 submissionError: {
@@ -1775,7 +1620,7 @@ export class RoundLifecycle {
             return {
                 sessionId,
                 round: session.currentRound,
-                roundId: held.roundId,
+                ...this.heldHandle(session),
                 ...this.transactionFacts(session),
                 prompt: null,
                 submissionError: {
@@ -1794,7 +1639,7 @@ export class RoundLifecycle {
             return {
                 sessionId,
                 round: session.currentRound,
-                roundId: held.roundId,
+                ...this.heldHandle(session),
                 ...this.transactionFacts(session),
                 prompt: null,
                 submissionError: {
@@ -1823,7 +1668,7 @@ export class RoundLifecycle {
             return {
                 sessionId,
                 round: session.currentRound,
-                roundId: held.roundId,
+                ...this.heldHandle(session),
                 ...this.transactionFacts(session),
                 prompt: null,
                 submissionError: {
@@ -1931,12 +1776,11 @@ export class RoundLifecycle {
     /** Core cycle entry used by SessionManager.advance after the queue + lease
      *  dance: validate → extract → execute transaction → route disposition
      *  → advance to next round (continue) or return terminal result.
-     *  @param roundId v3.0.1: the roundId of the round this submission reports
-     *    on (from the last start/next/resume response). Anchors the submission;
-     *    a stale or duplicate submission returns the held prompt instead of
-     *    being processed. Optional — when absent the anchor check is skipped. */
-    async advance(sessionId, output, preExtractedEval, roundId, normalizationDiagnostics, submittedFields, transactionId) {
-        return this.advanceUnlocked(sessionId, output, preExtractedEval, roundId, normalizationDiagnostics, submittedFields, transactionId);
+     *  v4.0.0: the submission identity (the exact held transaction) is validated
+     *  by SessionManager before its queue and lease heartbeat. This entry point
+     *  owns the round state machine and does not re-check anchors. */
+    async advance(sessionId, output, preExtractedEval, normalizationDiagnostics, submittedFields) {
+        return this.advanceUnlocked(sessionId, output, preExtractedEval, normalizationDiagnostics, submittedFields);
     }
     /** Write back loop knowledge to long-term memory.
      *  Uses shared base builder from policy.ts. Called when a loop terminates. */

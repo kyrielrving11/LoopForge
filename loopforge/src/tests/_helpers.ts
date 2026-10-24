@@ -31,6 +31,7 @@ import type {
   RoundContractProposal,
   RoundOutcome,
   SelfEvaluation,
+  SubmissionHandle,
   VerificationFlag,
 } from "../protocol.js";
 import type {
@@ -46,40 +47,41 @@ import { POLICY_SCHEMA_VERSION } from "../policy.js";
 export const DEFAULT_SUCCESS_CRITERION =
   "Task goal achieved with verifiable evidence";
 
-/** v3.9.7: tool-handler wrapper that supplies the held transaction anchor for
- *  tests that drive the handler directly. The transport schema still requires
- *  the field; only the repeated fixture plumbing is centralized here. */
+/** v4.0.0: tool-handler wrapper that supplies the current held handle for
+ *  tests that drive the handler directly. A test that deliberately submits a
+ *  stale handle passes `input.submissionHandle` explicitly. */
 export function toolNext(
   mgr: import("../mcp/session.js").SessionManager,
   input: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
-  const held = mgr.get(String(input.sessionId ?? ""))?.roundSnapshot;
+  const sessionId = String(
+    input.sessionId ??
+      (input.submissionHandle as { sessionId?: unknown } | undefined)?.sessionId ??
+      "",
+  );
+  const handle = input.submissionHandle ?? mgr.getSubmissionHandle(sessionId);
   return import("../mcp/tools.js").then(({ TOOL_HANDLERS }) =>
     TOOL_HANDLERS.loopforge_next(mgr, {
       ...input,
-      transactionId: input.transactionId ?? held?.transactionId,
+      ...(handle ? { submissionHandle: handle } : {}),
     }),
   );
 }
 
-/** v3.9.7: test-only submission helper. Tests that drive a session in order
- *  anchor to the held transaction; tests that deliberately submit a stale
- *  anchor still call `advance` raw. */
+/** v4.0.0: test-only submission helper. Tests that drive a session in order
+ *  use the current handle; tests that deliberately submit a stale handle call
+ *  `mgr.advance(handle, ...)` raw. */
 export async function advanceWithHeld(
   mgr: import("../mcp/session.js").SessionManager,
   sessionId: string,
   output: string,
   evaluation?: unknown,
-  roundId?: string,
-  transactionId?: string,
+  submissionHandle?: SubmissionHandle,
 ) {
-  const held = mgr.get(sessionId)?.roundSnapshot;
   return mgr.advance(
-    sessionId,
+    submissionHandle ?? mgr.getSubmissionHandle(sessionId),
     output,
     evaluation,
-    roundId ?? held?.roundId,
-    transactionId ?? held?.transactionId,
   );
 }
 

@@ -830,10 +830,7 @@ export function deriveSubmissionGuidance(session, options) {
         criteria,
     };
     const artifact = session.roundSnapshot?.promptArtifact;
-    const roundId = session.roundSnapshot?.roundId ??
-        `loop:${session.loopId}:round:${session.currentRound}`;
     return {
-        round_id: roundId,
         active_contract: activeContract
             ? {
                 id: activeContract.id,

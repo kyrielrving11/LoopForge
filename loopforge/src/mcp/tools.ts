@@ -20,6 +20,40 @@ import { SessionLeaseConflictError } from "../storage.js";
 // Tool schemas (MCP JSON Schema format)
 // ═══════════════════════════════════════════════════════════════════════════
 
+/** v4.0.0: the ONE held-round anchor. The object is closed so a client cannot
+ *  smuggle separate anchor fields alongside it. */
+const SUBMISSION_HANDLE_SCHEMA = {
+  type: "object" as const,
+  description:
+    "The submissionHandle object returned with the held prompt. Copy it " +
+    "verbatim; never edit, reconstruct, or derive it. A stale handle never " +
+    "submits work — fetch the current one with loopforge_status or " +
+    "loopforge_resume.",
+  properties: {
+    sessionId: {
+      type: "string" as const,
+      description: "The owning session identity.",
+    },
+    roundId: {
+      type: "string" as const,
+      description: "The stable logical round identity.",
+    },
+    transactionId: {
+      type: "string" as const,
+      description: "The exact held transaction attempt.",
+    },
+  },
+  required: ["sessionId", "roundId", "transactionId"],
+  additionalProperties: false,
+};
+
+/** Output form: absent/null on terminal or non-held results, exact shape when
+ *  present. */
+const SUBMISSION_HANDLE_OUTPUT_SCHEMA = {
+  ...SUBMISSION_HANDLE_SCHEMA,
+  type: ["object", "null"] as const,
+};
+
 const TOOL_BASE_SCHEMAS = [
   {
     name: "loopforge_start",
@@ -75,18 +109,7 @@ const TOOL_BASE_SCHEMAS = [
     inputSchema: {
       type: "object" as const,
       properties: {
-        sessionId: {
-          type: "string" as const,
-          description: "Session ID returned by loopforge_start.",
-        },
-        roundId: {
-          type: "string" as const,
-          description: "The roundId from the most recent loopforge_start / loopforge_next / loopforge_resume / loopforge_status response. Anchors this submission to the exact round it reports on: a submission whose roundId no longer matches the current round (the round already committed) is not processed — the current held prompt is returned instead, so lost responses can be recovered without skipping or double-committing a round.",
-        },
-        transactionId: {
-          type: "string" as const,
-          description: "v3.9.7: The transactionId returned with the SAME held prompt (start / next / resume / status / checkpoint). A redo or retry can reuse a numeric roundId with a different transaction; this anchor prevents an old response from being evaluated against the current attempt. On a lost response, call loopforge_status or loopforge_resume to retrieve it.",
-        },
+        submissionHandle: SUBMISSION_HANDLE_SCHEMA,
         output: {
           type: "string" as const,
           description: "Optional. The agent's full output from executing the current round's prompt. The structured evaluation is the authoritative report.",
@@ -421,7 +444,7 @@ const TOOL_BASE_SCHEMAS = [
           },
         },
       },
-      required: ["sessionId", "roundId", "transactionId"],
+      required: ["submissionHandle"],
     },
   },
   {
@@ -431,25 +454,14 @@ const TOOL_BASE_SCHEMAS = [
       "The call itself is the Agent's decision that this state is worth " +
       "restoring to. It creates no round, no commit and no progress; the " +
       "checkpoint becomes a visible recovery target only through the held " +
-      "transaction's ref list. Requires the same sessionId/roundId/" +
-      "transactionId anchors as loopforge_next.",
+      "transaction's ref list. Requires the same submissionHandle as " +
+      "loopforge_next; the handle is unchanged after a successful checkpoint.",
     inputSchema: {
       type: "object" as const,
       properties: {
-        sessionId: {
-          type: "string" as const,
-          description: "Session ID returned by loopforge_start.",
-        },
-        roundId: {
-          type: "string" as const,
-          description: "The held roundId.",
-        },
-        transactionId: {
-          type: "string" as const,
-          description: "The held transactionId.",
-        },
+        submissionHandle: SUBMISSION_HANDLE_SCHEMA,
       },
-      required: ["sessionId", "roundId", "transactionId"],
+      required: ["submissionHandle"],
       additionalProperties: false,
     },
   },
@@ -563,8 +575,7 @@ const TOOL_BASE_SCHEMAS = [
     inputSchema: {
       type: "object" as const,
       properties: {
-        sessionId: { type: "string" as const, description: "Session ID." },
-        roundId: { type: "string" as const, description: "RoundId from the latest response." },
+        submissionHandle: SUBMISSION_HANDLE_SCHEMA,
         action: {
           type: "object" as const,
           description: "The action the agent plans to perform.",
@@ -601,7 +612,7 @@ const TOOL_BASE_SCHEMAS = [
           required: ["description", "scope", "effects", "reversibility", "authorization"],
         },
       },
-      required: ["sessionId", "roundId", "action"],
+      required: ["submissionHandle", "action"],
     },
   },
   {
@@ -644,17 +655,16 @@ const ADVANCE_OUTPUT_SCHEMA: JsonSchema = {
   type: "object",
   properties: {
     ok: { type: "boolean", description: "v3.8: uniform result envelope — false means the error object describes a rejected call." },
-    error: { type: "object", additionalProperties: true, description: "v3.8 ToolError: { code, message, retryable, sessionId?, roundId?, details? }" },
+    error: { type: "object", additionalProperties: true, description: "v3.8 ToolError: { code, message, retryable, sessionId?, submissionHandle?, details? }" },
     details: { type: "object", additionalProperties: true },
     sessionId: { type: "string" },
     round: { type: "number" },
-    roundId: { type: ["string", "null"] },
+    submissionHandle: SUBMISSION_HANDLE_OUTPUT_SCHEMA,
     prompt: { type: ["string", "null"] },
     stopReason: { type: ["string", "null"] },
     stopDetail: { type: ["string", "null"], description: "Human-readable context for why the loop stopped. Provides facts without prescribing a specific agent action." },
     level: { type: ["string", "null"] },
     roundSuccess: { type: ["boolean", "null"] },
-    transactionId: { type: ["string", "null"], description: "v3.9.7: the held transaction identity to echo on the next submission." },
     checkpoints: {
       type: ["array", "null"],
       items: { type: "object", additionalProperties: true },
@@ -703,11 +713,10 @@ const CHECKPOINT_OUTPUT_SCHEMA: JsonSchema = {
   type: "object",
   properties: {
     ok: { type: "boolean" },
-    error: { type: "object", additionalProperties: true },
+    error: { type: "object", additionalProperties: true, description: "v3.8 ToolError: { code, message, retryable, sessionId?, submissionHandle?, details? }" },
     sessionId: { type: "string" },
+    submissionHandle: SUBMISSION_HANDLE_SCHEMA,
     checkpointId: { type: "string" },
-    transactionId: { type: "string" },
-    roundId: { type: "string" },
     round: { type: "number" },
     role: { const: "mid" },
     redoRound: { type: "number" },
@@ -729,12 +738,11 @@ export const TOOL_OUTPUT_SCHEMAS: Record<string, JsonSchema> = {
     type: "object",
     properties: {
       ok: { type: "boolean", description: "v3.8: uniform result envelope — false means the error object describes a rejected call." },
-      error: { type: "object", additionalProperties: true, description: "v3.8 ToolError: { code, message, retryable, sessionId?, roundId?, details? }" },
+      error: { type: "object", additionalProperties: true, description: "v3.8 ToolError: { code, message, retryable, sessionId?, submissionHandle?, details? }" },
       sessionId: { type: "string" },
       loopId: { type: "string" },
       round: { type: "number" },
-      roundId: { type: ["string", "null"] },
-      transactionId: { type: ["string", "null"] },
+      submissionHandle: SUBMISSION_HANDLE_OUTPUT_SCHEMA,
       checkpoints: { type: ["array", "null"], items: { type: "object", additionalProperties: true } },
       beforeCheckpointError: { type: ["object", "null"], additionalProperties: true },
       maxRounds: { type: "number" },
@@ -757,7 +765,7 @@ export const TOOL_OUTPUT_SCHEMAS: Record<string, JsonSchema> = {
     type: "object",
     properties: {
       ok: { type: "boolean", description: "v3.8: uniform result envelope — false means the error object describes a rejected call." },
-      error: { type: "object", additionalProperties: true, description: "v3.8 ToolError: { code, message, retryable, sessionId?, roundId?, details? }" },
+      error: { type: "object", additionalProperties: true, description: "v3.8 ToolError: { code, message, retryable, sessionId?, submissionHandle?, details? }" },
       success: { type: "boolean" },
       roundsCompleted: { type: "number" },
       successTrajectory: { type: "array", items: { type: "boolean" } },
@@ -768,7 +776,7 @@ export const TOOL_OUTPUT_SCHEMAS: Record<string, JsonSchema> = {
     type: "object",
     properties: {
       ok: { type: "boolean", description: "v3.8: uniform result envelope — false means the error object describes a rejected call." },
-      error: { type: "object", additionalProperties: true, description: "v3.8 ToolError: { code, message, retryable, sessionId?, roundId?, details? }" },
+      error: { type: "object", additionalProperties: true, description: "v3.8 ToolError: { code, message, retryable, sessionId?, submissionHandle?, details? }" },
       sessionId: { type: "string" },
       round: { type: "number" },
       status: { type: "string" },
@@ -779,7 +787,7 @@ export const TOOL_OUTPUT_SCHEMAS: Record<string, JsonSchema> = {
     type: "object",
     properties: {
       ok: { type: "boolean", description: "v3.8: uniform result envelope — false means the error object describes a rejected call." },
-      error: { type: "object", additionalProperties: true, description: "v3.8 ToolError: { code, message, retryable, sessionId?, roundId?, details? }" },
+      error: { type: "object", additionalProperties: true, description: "v3.8 ToolError: { code, message, retryable, sessionId?, submissionHandle?, details? }" },
       sessionId: { type: "string" },
       loopId: { type: "string" },
       timeline: { type: "array", items: { type: "object", additionalProperties: true } },
@@ -797,8 +805,8 @@ export const TOOL_OUTPUT_SCHEMAS: Record<string, JsonSchema> = {
     type: "object",
     properties: {
       ok: { type: "boolean", description: "v3.8: uniform result envelope — false means the error object describes a rejected call." },
-      error: { type: "object", additionalProperties: true, description: "v3.8 ToolError: { code, message, retryable, sessionId?, roundId?, details? }" },
-      sessionId: { type: "string" },
+      error: { type: "object", additionalProperties: true, description: "v3.8 ToolError: { code, message, retryable, sessionId?, submissionHandle?, details? }" },
+      submissionHandle: SUBMISSION_HANDLE_SCHEMA,
       gateId: { type: "string" },
       risk: { type: "string", enum: ["low", "high", "unknown"] },
       decision: { type: "string", enum: ["agent_allowed", "user_required"] },
@@ -814,7 +822,7 @@ export const TOOL_OUTPUT_SCHEMAS: Record<string, JsonSchema> = {
     type: "object",
     properties: {
       ok: { type: "boolean", description: "v3.8: uniform result envelope — false means the error object describes a rejected call." },
-      error: { type: "object", additionalProperties: true, description: "v3.8 ToolError: { code, message, retryable, sessionId?, roundId?, details? }" },
+      error: { type: "object", additionalProperties: true, description: "v3.8 ToolError: { code, message, retryable, sessionId?, submissionHandle?, details? }" },
       sessionId: { type: "string" },
       loopId: { type: "string" },
       gateId: { type: "string" },
@@ -998,7 +1006,7 @@ export function validateToolDispatchInput(
     : {};
   validateSchema(input, {
     ...contract.inputSchema,
-    required: ["sessionId", "roundId"],
+    required: ["submissionHandle"],
     properties: { ...properties, evaluation: {} },
   }, "arguments");
 
@@ -1146,77 +1154,27 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
   },
 
   async loopforge_next(mgr, input): Promise<Record<string, unknown>> {
-    const sessionId = String(input.sessionId ?? "");
     const output = String(input.output ?? "");
     const rawEval = input.evaluation as Record<string, unknown> | undefined;
     const rawRecovery = input.recovery as Record<string, unknown> | undefined;
-    const roundId = input.roundId === undefined ? undefined : String(input.roundId);
-    const transactionId = input.transactionId === undefined
-      ? undefined
-      : String(input.transactionId);
+    const handle = input.submissionHandle;
 
-    if (!sessionId) {
-      return { error: "invalid_argument", errorMessage: "sessionId is required" };
-    }
-    if (!transactionId || !transactionId.trim()) {
-      return {
-        error: "invalid_argument",
-        errorMessage: "transactionId is required — pass the transactionId returned " +
-          "with the held prompt (loopforge_status or loopforge_resume returns it)",
-        sessionId,
-        roundId,
-      };
-    }
     if (rawRecovery !== undefined && rawEval !== undefined) {
       return {
         error: "recovery_invalid",
         errorMessage: "evaluation and recovery are mutually exclusive",
-        sessionId,
-        roundId,
-      };
-    }
-    if (rawRecovery !== undefined) {
-      if (!roundId || !roundId.trim()) {
-        return {
-          error: "round_id_required",
-          errorMessage: "roundId is required — pass the roundId from the most recent " +
-            "loopforge_start / loopforge_next / loopforge_resume / loopforge_status response",
-          sessionId,
-        };
-      }
-      const result = await mgr.recover(sessionId, rawRecovery, roundId, transactionId);
-      if (result.submissionError) {
-        return {
-          error: result.submissionError.code,
-          errorMessage: result.stopDetail ?? "the recovery request was rejected",
-          details: result.submissionError.details,
-          sessionId,
-          roundId,
-        };
-      }
-      return { ...result };
-    }
-    // v3.0.1: every submission is anchored to the round it reports on. A
-    // missing roundId would silently re-process a stale submission against a
-    // later round — reject it here so the contract is enforced even when the
-    // handler is invoked directly (bypassing schema validation).
-    if (!roundId || !roundId.trim()) {
-      return {
-        error: "round_id_required",
-        errorMessage: "roundId is required — pass the roundId from the most recent " +
-          "loopforge_start / loopforge_next / loopforge_resume / loopforge_status response",
       };
     }
 
-    // v3.8.1: the submission boundary belongs to the RUNTIME, not to this
-    // transport. `mgr.advance` applies all of it — object shape, core fields,
-    // subgoal_updates structure and references, and the strict Round Contract
-    // declaration/claims boundary — before touching any state, and reports a
-    // refusal through `submissionError`. This handler only maps that onto the
-    // tool envelope, so a non-MCP caller gets exactly the same strictness.
+    // v4.0.0: the handle is the only identity. The runtime validates its
+    // shape, resolves the session, checks the exact held attempt, then runs
+    // the payload boundary — all before its queue/lease heartbeat. This
+    // handler only maps the refusal onto the tool envelope.
     let result: Awaited<ReturnType<SessionManager["advance"]>>;
     try {
-      result = await mgr.advance(sessionId, output, rawEval, roundId, transactionId);
+      result = rawRecovery !== undefined
+        ? await mgr.recover(handle, rawRecovery)
+        : await mgr.advance(handle, output, rawEval);
     } catch (error) {
       const projectionFailure = projectionErrorResult(error);
       if (projectionFailure) return projectionFailure;
@@ -1226,10 +1184,13 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
     if (result.submissionError) {
       return {
         error: result.submissionError.code,
-        errorMessage: result.stopDetail ?? "the submission was rejected",
+        errorMessage: result.stopDetail ??
+          (rawRecovery !== undefined
+            ? "the recovery request was rejected"
+            : "the submission was rejected"),
         details: result.submissionError.details,
-        sessionId,
-        roundId,
+        ...(result.sessionId ? { sessionId: result.sessionId } : {}),
+        ...(result.submissionHandle ? { submissionHandle: result.submissionHandle } : {}),
       };
     }
 
@@ -1237,29 +1198,16 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
   },
 
   async loopforge_checkpoint(mgr, input): Promise<Record<string, unknown>> {
-    const sessionId = String(input.sessionId ?? "");
-    const roundId = input.roundId === undefined ? "" : String(input.roundId);
-    const transactionId = input.transactionId === undefined
-      ? ""
-      : String(input.transactionId);
-    if (!sessionId) {
-      return { error: "invalid_argument", errorMessage: "sessionId is required" };
-    }
-    if (!roundId.trim() || !transactionId.trim()) {
-      return {
-        error: "checkpoint_invalid",
-        errorMessage: "roundId and transactionId are required — use the anchors from the held prompt",
-        sessionId,
-      };
-    }
-    const result = await mgr.checkpoint(sessionId, roundId, transactionId);
+    const result = await mgr.checkpoint(input.submissionHandle);
     if (result.error) {
       return {
         error: String(result.error),
         errorMessage: String(result.errorMessage ?? "the checkpoint was rejected"),
         details: result.details,
-        sessionId,
-        roundId,
+        ...(typeof result.sessionId === "string" ? { sessionId: result.sessionId } : {}),
+        ...(isRecord(result.submissionHandle)
+          ? { submissionHandle: result.submissionHandle }
+          : {}),
       };
     }
     return { ok: true, ...result };
@@ -1339,8 +1287,7 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
       sessionId: session.sessionId,
       loopId: session.loopId,
       round: session.currentRound,
-      roundId: session.roundSnapshot?.roundId ?? null,
-      transactionId: session.roundSnapshot?.transactionId ?? null,
+      submissionHandle: mgr.getSubmissionHandle(sessionId),
       checkpoints: session.roundSnapshot
         ? [
             ...(session.roundSnapshot.beforeCheckpoint
@@ -1510,21 +1457,9 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
   async loopforge_gate_check(mgr, input): Promise<Record<string, unknown>> {
     // v3.7.1: hidden when disabled — direct calls get a stable error.
     if (!getPolicy().gate.enabled) return { error: "gate_disabled" };
-    const sessionId = String(input.sessionId ?? "");
-    const roundId = String(input.roundId ?? "");
     const action = input.action as Record<string, unknown> | undefined;
-    if (!sessionId) {
-      return { error: "invalid_argument", errorMessage: "sessionId is required" };
-    }
-    if (!roundId) {
-      return {
-        error: "round_id_required",
-        errorMessage: "roundId is required — pass the roundId from the latest response",
-        sessionId,
-      };
-    }
     if (!action || !isRecord(action)) {
-      return { error: "invalid_argument", errorMessage: "action is required", sessionId, roundId };
+      return { error: "invalid_argument", errorMessage: "action is required" };
     }
     const descriptor: import("../protocol.js").GateActionDescriptor = {
       description: String(action.description ?? ""),
@@ -1550,11 +1485,9 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
       return {
         error: "invalid_argument",
         errorMessage: "action.description is required",
-        sessionId,
-        roundId,
       };
     }
-    return mgr.checkGate(sessionId, roundId, descriptor);
+    return mgr.checkGate(input.submissionHandle, descriptor);
   },
 
   async loopforge_gate_resolve(mgr, input): Promise<Record<string, unknown>> {

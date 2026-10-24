@@ -360,7 +360,7 @@ describe("assemblePromptArtifact — metadata", () => {
   it("includes how-to-complete footer", () => {
     const artifact = assemblePromptArtifact(input());
     assert.ok(artifact.renderedPrompt.includes("How to Complete This Round"));
-    assert.ok(artifact.renderedPrompt.includes("`transactionId` from the latest LoopForge response"));
+    assert.ok(artifact.renderedPrompt.includes("`submissionHandle` object returned"));
     assert.ok(artifact.renderedPrompt.includes("loopforge_checkpoint"));
     assert.ok(!artifact.renderedPrompt.includes("progress_estimate`"));
     assert.ok(!artifact.renderedPrompt.includes("Evaluation Rules"));
@@ -834,9 +834,19 @@ describe("assemblePromptArtifact — budget determinism", () => {
   });
 
   it("drops optional sections lowest-priority-first", () => {
+    const state = loadedState();
+    // Make the lowest-priority optional section large enough to create a real
+    // cut point: blockers/corrections can fit while this one cannot.
+    state.recurringFlags = Array.from({ length: 8 }, (_, index) => ({
+      subject: `recurring finding ${index} ${"x".repeat(180)}`,
+      kind: "verification_warning" as const,
+      ref: "",
+      count: 3,
+      rounds: [1, 2, 3],
+    }));
     const artifact = assemblePromptArtifact(input({
-      level: "l2", state: loadedState(),
-      budgets: { l2: 2200 },
+      level: "l2", state,
+      budgets: { l2: 2500 },
     }));
     // The invariant is about the CUT POINT, not about any single section:
     // every optional section that rendered must outrank every one that was

@@ -21,7 +21,7 @@ Usage:
   loopforge inspect LOOP_ID [--round N] [--prompt] [--json]
   loopforge explain LOOP_ID [--round N] [--json]
 
-  --target    where the client skill is installed
+  --target    where the Forge skill directory is installed
   --workspace the runtime workspace: loop_policy.json, .loopforge/, and every
               evidence command resolve against it (default: the current directory)
 `;
@@ -355,14 +355,19 @@ function init(args) {
     const target = option(args, "--target");
     const workspace = option(args, "--workspace") ?? process.cwd();
     const result = initializeClient({ client, force, target });
-    process.stdout.write(`${result.installed ? "Installed" : "Already present"}: ${result.skillPath}\n`);
+    process.stdout.write(result.installed
+        ? `Installed: ${result.skillDir} (${result.files.length} file(s))\n`
+        : `Already present: ${result.skillDir}\n`);
+    if (!result.installed) {
+        process.stdout.write("Existing Forge skill left untouched; use --force to update the full skill tree.\n");
+    }
     process.stdout.write("Register MCP with:\n");
     print(result.registration, typeof result.registration !== "string");
     const policyResult = writeDefaultPolicy(workspace, force);
     process.stdout.write(`${policyResult.created ? "Created" : "Already present"}: ${policyResult.path}\n`);
-    // State the three locations plainly: which skill file was installed, where
-    // the policy the runtime will actually read lives, and the command that
-    // starts the server against that workspace.
+    // State the three locations plainly: which skill directory was installed,
+    // where the policy the runtime will actually read lives, and the command
+    // that starts the server against that workspace.
     process.stdout.write(`Workspace: ${resolve(workspace)}\n`);
     process.stdout.write("Start the server with:\n" +
         `  loopforge mcp${workspace === process.cwd() ? "" : ` --workspace ${resolve(workspace)}`}\n`);

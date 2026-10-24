@@ -414,10 +414,9 @@ describe("E2E Recovery Brief window (v3.7.1)", () => {
     // ordinary work: it must move the machine boundary, not just re-submit.
     const redoFile = "lf-redo-evidence.txt";
     writeFileSync(join(process.cwd(), redoFile), "redo evidence\n");
-    const heldRedo = mgr.get(sessionId)!.roundSnapshot!;
-    const redo = await advanceWithHeld(mgr, 
+    const redo = await advanceWithHeld(mgr,
       sessionId, "Redo: root cause fixed, tests pass.",
-      fixedEval(4, [redoFile]), heldRedo.roundId, heldRedo.transactionId,
+      fixedEval(4, [redoFile]),
     ).finally(() => {
       try { rmSync(join(process.cwd(), redoFile), { force: true }); } catch { /* best effort */ }
     });

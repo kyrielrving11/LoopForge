@@ -237,6 +237,26 @@
       ],
       "description": "v3.9.7: a checkpoint reference held by a typed transaction snapshot. This\nreference is the authority for ownership, current-branch visibility and the\nredo round. The manifest alone is content-addressed recovery material and\ncan never become a recovery point by itself."
     },
+    "SubmissionHandle": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string"
+        },
+        "roundId": {
+          "type": "string"
+        },
+        "transactionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sessionId",
+        "roundId",
+        "transactionId"
+      ],
+      "description": "v4.0.0: the ONE transport projection of the held round attempt.\n\nIt bundles the three identities a held-round call needs — the owning\nsession, the logical round, and the exact transaction attempt — so a client\ncopies one object instead of three independent strings. It is DERIVED from\nthe persisted session snapshot on every response; it is never persisted in\nthe session document, a round transaction, a prompt artifact, guidance, or\na receipt.\n\nIt is not a security token and grants no authority: the session lease plus\nan exact comparison against the held snapshot remain the only authority. A\nstale handle never submits work; the caller must re-anchor through\n`loopforge_status` or `loopforge_resume`."
+    },
     "WorkspaceCheckpointManifest": {
       "type": "object",
       "properties": {
@@ -1441,9 +1461,6 @@
     "SubmissionGuidance": {
       "type": "object",
       "properties": {
-        "round_id": {
-          "type": "string"
-        },
         "active_contract": {
           "anyOf": [
             {
@@ -1712,7 +1729,6 @@
         }
       },
       "required": [
-        "round_id",
         "contract_commands",
         "contract_verification_available",
         "subgoals",
@@ -3888,8 +3904,8 @@
         "policy_invalid",
         "projection_incomplete",
         "session_not_found",
-        "round_id_required",
-        "round_id_mismatch",
+        "submission_handle_required",
+        "submission_handle_mismatch",
         "state_unavailable",
         "invalid_argument",
         "gate_disabled",
@@ -3921,8 +3937,8 @@
         "sessionId": {
           "type": "string"
         },
-        "roundId": {
-          "type": "string"
+        "submissionHandle": {
+          "$ref": "#/$defs/SubmissionHandle"
         },
         "details": {
           "type": "object",

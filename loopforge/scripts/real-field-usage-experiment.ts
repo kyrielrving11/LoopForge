@@ -140,13 +140,13 @@ try {
     constraints: ["Use only evidence present in the prompt or workspace.", "Do not fabricate optional fields."],
   }));
   let sessionId = String(started.sessionId ?? "");
-  let roundId = String(started.roundId ?? "");
+  let submissionHandle = started.submissionHandle;
   let current = started;
   trace.push({ round: 0, start_keys: Object.keys(started), start_prompt_length: typeof started.prompt === "string" ? started.prompt.length : -1, start_response: started });
-  if (!sessionId || !roundId) {
-    trace.push({ round: 0, start_response: started, error: "loopforge_start did not return sessionId and roundId" });
+  if (!sessionId || !submissionHandle) {
+    trace.push({ round: 0, start_response: started, error: "loopforge_start did not return sessionId and submissionHandle" });
   }
-  for (let round = 1; round <= 8 && sessionId && roundId; round += 1) {
+  for (let round = 1; round <= 8 && sessionId && submissionHandle; round += 1) {
     const modelResult = modelJson(String(current.prompt ?? ""));
     const evaluation = modelResult.value;
     const submittedFields = fields(evaluation);
@@ -154,7 +154,7 @@ try {
       trace.push({ round, level: current.level, model_response: "unparseable_or_unavailable", diagnostic: modelResult.diagnostic, submitted_fields: [] });
       break;
     }
-    const next = extract(await client.call("loopforge_next", { sessionId, roundId, evaluation }));
+    const next = extract(await client.call("loopforge_next", { submissionHandle, evaluation }));
     const receipt = next.submission_receipt;
     trace.push({
       round,
@@ -168,7 +168,7 @@ try {
     });
     if (next.stopReason || next.status === "completed" || next.status === "stopped") break;
     current = next;
-    roundId = String(next.roundId ?? "");
+    submissionHandle = next.submissionHandle;
   }
   const output = join(root, `real-field-usage-${loopId}.json`);
   writeFileSync(output, JSON.stringify({ loopId, workspace, trace }, null, 2));

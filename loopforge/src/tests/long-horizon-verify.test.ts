@@ -45,8 +45,8 @@ class McpClient {
   private proc: ChildProcess; private rl: Interface;
   private pending = new Map<number, { resolve: (v: JsonRpcResponse) => void; reject: (e: Error) => void }>();
   private nextId = 1; private stderr = ""; private workCounter = 0;
-  /** v3.9.7: the held transaction anchor; every next/resume result refreshes it. */
-  private transactionId = "";
+  /** v4.0.0: the held submission handle; every next/resume result refreshes it. */
+  private submissionHandle: unknown = undefined;
   private readonly storeDir: string;
 
   constructor(storeDir: string) {
@@ -93,15 +93,14 @@ class McpClient {
   async tool(name: string, args: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
     if (name === "loopforge_next") {
       this.materialize(args.evaluation);
-      args = { ...args, transactionId: args.transactionId ?? this.transactionId };
+      args = { ...args, submissionHandle: args.submissionHandle ?? this.submissionHandle };
     }
     const r = await this.call("tools/call", { name, arguments: args });
     const direct = r.structuredContent && typeof r.structuredContent === "object"
       ? r.structuredContent as Record<string, unknown>
       : null;
-    if (direct && name !== "tools/list") {
-      const tx = direct.transactionId;
-      if (typeof tx === "string" && tx.length > 0) this.transactionId = tx;
+    if (direct && name !== "tools/list" && direct.submissionHandle !== undefined) {
+      this.submissionHandle = direct.submissionHandle;
     }
     if (direct) return direct;
     if (r.content && Array.isArray(r.content)) {
@@ -112,8 +111,7 @@ class McpClient {
           try {
             const parsed = JSON.parse(t) as Record<string, unknown>;
             const next = prompt && parsed.prompt === undefined ? { ...parsed, prompt } : parsed;
-            const tx = next.transactionId;
-            if (typeof tx === "string" && tx.length > 0) this.transactionId = tx;
+            if (next.submissionHandle !== undefined) this.submissionHandle = next.submissionHandle;
             return next;
           } catch {
             prompt ??= t;
@@ -131,7 +129,7 @@ const TASK = "Build a TypeScript string utility library called strkit with TDD. 
 const CONSTRAINTS = ["Use ESM modules only — no CommonJS", "All exported functions must have tests", "Do not introduce runtime dependencies beyond Node.js stdlib"];
 
 describe("Long-Horizon Verification", () => {
-  let client: McpClient; let storeDir: string; let sessionId: string; let loopId: string; let roundId: string;
+  let client: McpClient; let storeDir: string; let sessionId: string; let loopId: string; let submissionHandle: unknown;
   const LL: string[] = [];
 
   before(() => {
@@ -174,7 +172,7 @@ describe("Long-Horizon Verification", () => {
     assert.equal(String(r.level ?? "").toLowerCase(), "l2");
     assert.ok(String(r.prompt ?? "").length > 100);
     sessionId = String(r.sessionId);
-    roundId = String(r.roundId);
+    submissionHandle = r.submissionHandle;
     loopId = String((await client.tool("loopforge_status", { sessionId })).loopId ?? "");
     assert.ok(loopId.length > 0);
     LL.push("R1:L2");
@@ -183,7 +181,7 @@ describe("Long-Horizon Verification", () => {
   // ── R2 L1 — core functions, discover ESM constraint ─────────────────────
 
   it("R2 L1 — isPalindrome + capitalize, discovers ESM constraint", async () => {
-    const r = await client.tool("loopforge_next", { sessionId, roundId, evaluation: {
+    const r = await client.tool("loopforge_next", { submissionHandle, evaluation: {
       success: false, should_continue: true, constraint_violations: [],
       output_summary: "Implemented isPalindrome and capitalize. Discovered the package needs type:module for ESM.",
       discovered_constraints: ["the package must declare type:module for ESM resolution"],
@@ -194,7 +192,7 @@ describe("Long-Horizon Verification", () => {
       execution_report: { files_changed: ["src/strkit.ts"], tests_reported: { passed: 0, failed: 0, skipped: 0 }, criterion_claims: criterionClaims(["isPalindrome", "capitalize"], ["Write tests", "Implement truncate + toCamelCase"])},
     }});
     assert.ok(!r.error); assert.equal(String(r.level ?? "").toLowerCase(), "l1"); assert.equal(r.round, 2);
-    roundId = String(r.roundId);
+    submissionHandle = r.submissionHandle;
     LL.push("R2:L1");
   });
 
@@ -203,7 +201,7 @@ describe("Long-Horizon Verification", () => {
   // R2's eval declared compression_checkpoint → R3's prompt is L2.
 
   it("R3 L2 — checkpoint_boundary: boundary prompt with checkpoint label", async () => {
-    const r = await client.tool("loopforge_next", { sessionId, roundId, evaluation: {
+    const r = await client.tool("loopforge_next", { submissionHandle, evaluation: {
       success: false, should_continue: true, constraint_violations: [],
       output_summary: "Wrote tests for isPalindrome and capitalize. isPalindrome passes (3/3), capitalize fails on empty string. Declaring checkpoint.",
       discovered_constraints: ["All functions must handle empty string input gracefully"],
@@ -219,14 +217,14 @@ describe("Long-Horizon Verification", () => {
     assert.ok(p.includes("core-functions-complete") || p.toLowerCase().includes("checkpoint"), `R3 missing checkpoint: ${p.slice(0, 200)}`);
     assert.ok(p.length > 200, `L2 prompt too small: ${p.length}`);
     assert.strictEqual(r.roundSuccess, false);
-    roundId = String(r.roundId);
+    submissionHandle = r.submissionHandle;
     LL.push("R3:L2");
   });
 
   // ── R4 L1 — fix tests, normal continuation after checkpoint ────────────
 
   it("R4 L1 — fixes tests, discovers return-type constraint", async () => {
-    const r = await client.tool("loopforge_next", { sessionId, roundId, evaluation: {
+    const r = await client.tool("loopforge_next", { submissionHandle, evaluation: {
       success: false, should_continue: true, constraint_violations: [],
       output_summary: "Fixed capitalize empty-string. All tests pass (6/6). Return types must be consistent.",
       discovered_constraints: ["Function return types must be consistent — always return string"],
@@ -235,28 +233,28 @@ describe("Long-Horizon Verification", () => {
     assert.ok(!r.error);
     assert.equal(String(r.level ?? "").toLowerCase(), "l1");
     assert.equal(r.round, 4);
-    roundId = String(r.roundId);
+    submissionHandle = r.submissionHandle;
     LL.push("R4:L1");
   });
 
   // ── R5 L1 — truncate ────────────────────────────────────────────────────
 
   it("R5 L1 — truncate implemented, steady progress", async () => {
-    const r = await client.tool("loopforge_next", { sessionId, roundId, evaluation: {
+    const r = await client.tool("loopforge_next", { submissionHandle, evaluation: {
       success: false, should_continue: true, constraint_violations: [],
       output_summary: "Implemented truncate with tests (9/9 pass). Unicode edge cases handled.",
       discovered_constraints: ["truncate must handle unicode multi-byte characters"],
       execution_report: { files_changed: ["src/strkit.ts", "src/strkit.test.ts"], tests_reported: { passed: 9, failed: 0, skipped: 0 }, criterion_claims: criterionClaims(["truncate done"], ["Implement toCamelCase", "Write toCamelCase tests"])},
     }});
     assert.ok(!r.error); assert.equal(String(r.level ?? "").toLowerCase(), "l1"); assert.equal(r.round, 5);
-    roundId = String(r.roundId);
+    submissionHandle = r.submissionHandle;
     LL.push("R5:L1");
   });
 
   // ── R6 L1 — toCamelCase, retract wrong assumption ───────────────────────
 
   it("R6 L1 — toCamelCase done, retracts R3 wrong assumption", async () => {
-    const r = await client.tool("loopforge_next", { sessionId, roundId, evaluation: {
+    const r = await client.tool("loopforge_next", { submissionHandle, evaluation: {
       success: false, should_continue: true, constraint_violations: [],
       output_summary: "Implemented toCamelCase (13/13 pass). R3 empty-string constraint was wrong — each function handles edges naturally.",
       retracted_constraints: ["All functions must handle empty string input gracefully"],
@@ -264,27 +262,27 @@ describe("Long-Horizon Verification", () => {
       execution_report: { files_changed: ["src/strkit.ts", "src/strkit.test.ts"], tests_reported: { passed: 13, failed: 0, skipped: 0 }, criterion_claims: criterionClaims(["All four functions done"], ["Integration tests", "Verify no runtime deps"])},
     }});
     assert.ok(!r.error); assert.equal(String(r.level ?? "").toLowerCase(), "l1"); assert.equal(r.round, 6);
-    roundId = String(r.roundId);
+    submissionHandle = r.submissionHandle;
     LL.push("R6:L1");
   });
 
   // ── R7 L1 — objective refinement ─────────────────────────────────────────
 
   it("R7 L1 — objective refined, pipeline subtask emerged", async () => {
-    const r = await client.tool("loopforge_next", { sessionId, roundId, evaluation: {
+    const r = await client.tool("loopforge_next", { submissionHandle, evaluation: {
       success: false, should_continue: true, constraint_violations: [],
       output_summary: "Integration tests pass (13/13). Refined objective: add validateAndTransform pipeline.",
       objective_refinement: "The library should provide validateAndTransform(input, fns[]) pipeline utility",
       emerged_subtasks: ["Implement validateAndTransform pipeline", "Add pipeline integration tests"],
       execution_report: { files_changed: ["src/strkit.ts"], tests_reported: { passed: 13, failed: 0, skipped: 0 }, criterion_claims: criterionClaims(["Core functions done"], ["Implement pipeline", "Verify no runtime deps", "Final polish"])},
     }});
-    assert.ok(!r.error); assert.equal(r.round, 7); roundId = String(r.roundId); LL.push(`R7:${String(r.level ?? "").toUpperCase() || '?'}`);
+    assert.ok(!r.error); assert.equal(r.round, 7); submissionHandle = r.submissionHandle; LL.push(`R7:${String(r.level ?? "").toUpperCase() || '?'}`);
   });
 
   // ── R8 REJECT(L0) — false success claim ─────────────────────────────────
 
   it("R8 REJECT(L0) — enforcement catches success=true with remaining criteria", async () => {
-    const r = await client.tool("loopforge_next", { sessionId, roundId, evaluation: {
+    const r = await client.tool("loopforge_next", { submissionHandle, evaluation: {
       success: true, should_continue: true, constraint_violations: [],
       output_summary: "Implemented validateAndTransform. Everything works!",
       execution_report: { files_changed: ["src/pipeline.ts"], tests_reported: { passed: 15, failed: 0, skipped: 0 }, criterion_claims: criterionClaims([], [DEFAULT_SUCCESS_CRITERION])},
@@ -293,7 +291,7 @@ describe("Long-Horizon Verification", () => {
     assert.equal(r.enforcementAction, "reject");
     assert.ok(String(r.enforcementReason ?? "").length > 0);
     assert.equal(String(r.level ?? "").toLowerCase(), "l0", "Rejection prompt should be L0");
-    roundId = String(r.roundId);
+    submissionHandle = r.submissionHandle;
     LL.push("R8:REJECT(L0)");
   });
 
@@ -305,7 +303,7 @@ describe("Long-Horizon Verification", () => {
   // about the round, and a clean continuation has none of them.
 
   it("R8-retry L1 — retry accepted, normal continuation for round 8", async () => {
-    const r = await client.tool("loopforge_next", { sessionId, roundId, evaluation: {
+    const r = await client.tool("loopforge_next", { submissionHandle, evaluation: {
       success: false, should_continue: true, constraint_violations: [],
       output_summary: "Reverted false claim. Implemented pipeline with full tests. Verified no runtime deps. 17/17 pass.",
       discovered_constraints: ["validateAndTransform pipeline pattern confirmed correct"],
@@ -316,7 +314,7 @@ describe("Long-Horizon Verification", () => {
     const lv = String(r.level ?? "").toLowerCase();
     assert.equal(lv, "l1", `R8b expected L1 (clean continuation), got '${lv}'`);
     assert.ok(String(r.prompt ?? "").length > 200);
-    roundId = String(r.roundId);
+    submissionHandle = r.submissionHandle;
     LL.push("R8b:L1");
   });
 
@@ -329,7 +327,7 @@ describe("Long-Horizon Verification", () => {
   // negative feedback loop this release removes.
 
   it("R9 L1 — machine activity keeps a failed round at normal density", async () => {
-    const r = await client.tool("loopforge_next", { sessionId, roundId, evaluation: {
+    const r = await client.tool("loopforge_next", { submissionHandle, evaluation: {
       success: false, should_continue: true, constraint_violations: [],
       output_summary: "Ran linter, added JSDoc, updated README. All 17 tests pass. Ready to ship.",
       execution_report: { files_changed: ["src/strkit.ts", "src/pipeline.ts", "README.md"], tests_reported: { passed: 17, failed: 0, skipped: 0 }, criterion_claims: criterionClaims(["Final polish"], [])},
@@ -337,14 +335,14 @@ describe("Long-Horizon Verification", () => {
     assert.ok(!r.error);
     assert.equal(String(r.level ?? "").toLowerCase(), "l1",
       "observed file/command activity must not be mistaken for no new information");
-    roundId = String(r.roundId);
+    submissionHandle = r.submissionHandle;
     LL.push("R9:L1");
   });
 
   // ── R10 COMPLETE ─────────────────────────────────────────────────────────
 
   it("R10 COMPLETE — should_continue=false, loop stops", async () => {
-    const r = await client.tool("loopforge_next", { sessionId, roundId, evaluation: {
+    const r = await client.tool("loopforge_next", { submissionHandle, evaluation: {
       success: true, should_continue: false, constraint_violations: [],
       output_summary: "All functions implemented, tested (17/17), documented. No runtime deps. ESM confirmed. Task complete.",
       execution_report: { files_changed: [], tests_reported: { passed: 17, failed: 0, skipped: 0 }, criterion_claims: criterionClaims(["All functions", "Pipeline", "No runtime deps", "Final polish"])},
@@ -352,7 +350,7 @@ describe("Long-Horizon Verification", () => {
     assert.ok(!r.error);
     assert.equal(String(r.stopReason ?? ""), "completed");
     assert.equal(r.prompt, null);
-    roundId = String(r.roundId);
+    submissionHandle = r.submissionHandle;
     LL.push("R10:STOP");
   });
 

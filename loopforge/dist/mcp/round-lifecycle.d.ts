@@ -10,7 +10,7 @@
  * session ownership, queues, and leases remain in SessionManager.
  */
 import { LoopForgeEngine } from "../engine.js";
-import type { CheckpointRef, LoopForgeRequest, OperatorAcceptance, RecoveryRequest, SelfEvaluation, SubmissionDiagnostic, SubmissionGuidance, SubmissionReceipt, VerificationFlag, LoopTerminalSink, RoundVerificationStatus } from "../protocol.js";
+import type { CheckpointRef, LoopForgeRequest, OperatorAcceptance, RecoveryRequest, SelfEvaluation, SubmissionDiagnostic, SubmissionGuidance, SubmissionHandle, SubmissionReceipt, VerificationFlag, LoopTerminalSink, RoundVerificationStatus } from "../protocol.js";
 import type { RoundTransactionSnapshot } from "../round-transaction.js";
 import { FileWorkspaceCheckpointStore } from "../workspace-checkpoint.js";
 import type { LoopStore, VaultEntry } from "../loop-store.js";
@@ -83,11 +83,9 @@ export declare function normalizeStartCriteria(raw: unknown): {
 export interface AdvanceResult {
     sessionId: string;
     round: number;
-    /** Stable logical identity; unchanged when enforcement retries the round. */
-    roundId?: string;
-    /** v3.9.7: the held transaction attempt. Required for next/checkpoint/
-     *  recovery so a stale response can never be applied to a later attempt. */
-    transactionId?: string;
+    /** v4.0.0: the ONE transport anchor for the held attempt. Derived from the
+     *  persisted snapshot; never persisted itself. Absent on terminal results. */
+    submissionHandle?: SubmissionHandle;
     /** v3.9.7: the held transaction's before-image + mid savepoints. */
     checkpoints?: CheckpointRef[];
     /** v3.9.7: explicit fact when the automatic before-image failed. */
@@ -140,7 +138,7 @@ export interface AdvanceResult {
      *  `validateSubmission` in submission-boundary.ts, which SessionManager
      *  runs before its queue and lease heartbeat. */
     submissionError?: {
-        code: "evaluation_invalid" | "contract_invalid" | "invalid_argument" | "round_id_required" | "round_id_mismatch" | "recovery_invalid" | "recovery_disabled" | "recovery_unavailable" | "checkpoint_invalid" | "checkpoint_unavailable" | "checkpoint_failed" | "checkpoint_limit" | "restore_failed" | "restore_pending";
+        code: "evaluation_invalid" | "contract_invalid" | "invalid_argument" | "session_not_found" | "submission_handle_required" | "submission_handle_mismatch" | "recovery_invalid" | "recovery_disabled" | "recovery_unavailable" | "checkpoint_invalid" | "checkpoint_unavailable" | "checkpoint_failed" | "checkpoint_limit" | "restore_failed" | "restore_pending";
         details: Record<string, unknown>;
     };
     /** v3.9.4: a prompt-projection code defect. This is NOT a submission
@@ -260,13 +258,23 @@ export declare class RoundLifecycle {
     private prepareOptions;
     private persistPrepared;
     /** v3.9.7: execution metadata attached to every held/prepared prompt. These
-     *  are transport facts, never prompt governance content. */
+     *  are transport facts, never prompt governance content. v4.0.0: the anchor
+     *  itself is the separate `submissionHandle`; this bundle owns only the
+     *  checkpoint facts. */
     private transactionFacts;
+    /** v4.0.0: the transport handle for the current held snapshot, or absent. */
+    private heldHandle;
     /** v3.9.7: guidance facts for a redo whose restore is already verified.
      *  They are derived from the still-pending committed directive, so a
      *  restart returns the same surface as the original recovery response. */
     private pendingRecoveryGuidance;
-    private restoredPromptResult;
+    /** v4.0.0: return the exact stored prompt plus the CURRENT handle. This is
+     *  the ONE path that re-delivers a prompt without compiling. It fails closed
+     *  unless the full held predicate holds (phase, round, attempt, rendered
+     *  prompt), so a committed/terminated/retrying snapshot can never masquerade
+     *  as held. The warning is appended without mutating the artifact. Public so
+     *  SessionManager can use it on its pre-queue stale-handle path. */
+    heldPromptResult(session: McpSession, warning?: string): AdvanceResult | null;
     /** Reconcile the crash window where feedback committed but session_state
      *  still points at the old prompt. Returns null when no commit is pending.
      *  v3.7: async — the continue-after-crash branch compiles through
@@ -336,27 +344,26 @@ export declare class RoundLifecycle {
      *           session.evidenceBaseline, session.roundSnapshot */
     private advanceToNextRound;
     /** M4: mark a session stalled after its round committed but the next
-     *  prompt could not be prepared/persisted — mirrors the crash-recovery
-     *  siblings (reconcileCommittedRound / resume / reject paths). The
-     *  committed round stays held (roundSnapshot untouched) so a resubmission
-     *  with the same roundId replays it and recompiles the next round. */
+     *  prompt could not be prepared/persisted. v4.0.0: the committed snapshot is
+     *  NOT a held prompt, so this result carries no handle; the Agent must call
+     *  `loopforge_resume`, which reconciles the commit and compiles the next
+     *  prompt. Re-submitting an old handle can never resurrect the old round. */
     private stalledAfterCommit;
     private advanceUnlocked;
     /** v3.9.6: Agent-initiated recovery. The Agent selects the target; this
      *  method only validates it against committed facts, records the rollback
      *  directive and compiles the redo. It never runs ordinary verification or
      *  enforcement on the abandoned work. */
-    recover(sessionId: string, recovery: RecoveryRequest, roundId?: string, transactionId?: string): Promise<AdvanceResult>;
+    recover(sessionId: string, recovery: RecoveryRequest): Promise<AdvanceResult>;
     /** Execute the committed directive's restore and return the redo prompt. */
     private restoreAndPrepareRedo;
     /** Core cycle entry used by SessionManager.advance after the queue + lease
      *  dance: validate → extract → execute transaction → route disposition
      *  → advance to next round (continue) or return terminal result.
-     *  @param roundId v3.0.1: the roundId of the round this submission reports
-     *    on (from the last start/next/resume response). Anchors the submission;
-     *    a stale or duplicate submission returns the held prompt instead of
-     *    being processed. Optional — when absent the anchor check is skipped. */
-    advance(sessionId: string, output: string, preExtractedEval?: SelfEvaluation, roundId?: string, normalizationDiagnostics?: SubmissionDiagnostic[], submittedFields?: string[], transactionId?: string): Promise<AdvanceResult>;
+     *  v4.0.0: the submission identity (the exact held transaction) is validated
+     *  by SessionManager before its queue and lease heartbeat. This entry point
+     *  owns the round state machine and does not re-check anchors. */
+    advance(sessionId: string, output: string, preExtractedEval?: SelfEvaluation, normalizationDiagnostics?: SubmissionDiagnostic[], submittedFields?: string[]): Promise<AdvanceResult>;
     /** Write back loop knowledge to long-term memory.
      *  Uses shared base builder from policy.ts. Called when a loop terminates. */
     notifyTerminal(session: McpSession, stopReason: string): Promise<void>;

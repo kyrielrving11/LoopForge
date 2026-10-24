@@ -205,10 +205,8 @@ describe("E2E MCP lifecycle", () => {
 
   let sessionId: string;
   let loopId: string;
-  /** v3.0.1: the roundId of the current round — threaded through every next call. */
-  let roundId: string;
-  /** v3.9.7: the exact held transaction anchor. */
-  let transactionId: string;
+  /** v4.0.0: the ONE held-round anchor, threaded through every next call. */
+  let submissionHandle: unknown;
 
   it("round 1 — loopforge_start compiles the first prompt (L2)", async () => {
     const result = await client.tool("loopforge_start", {
@@ -227,7 +225,7 @@ describe("E2E MCP lifecycle", () => {
     assert.equal(result.round, 1);
     assert.equal(String(result.level).toUpperCase(), "L2");
     assert.ok(typeof result.prompt === "string" && result.prompt.length > 100);
-    assert.ok(typeof result.roundId === "string");
+    assert.ok(result.submissionHandle && typeof result.submissionHandle === "object");
     // v3.9.1: every prepared response carries current-fact guidance.
     const guidance = result.submission_guidance as Record<string, unknown> | undefined;
     assert.ok(guidance, "start returns submission_guidance");
@@ -235,8 +233,7 @@ describe("E2E MCP lifecycle", () => {
     assert.equal(guidance.active_contract, null, "round 1 has no active contract");
     // Assign module-level variables BEFORE any assertion that could throw.
     sessionId = String(result.sessionId);
-    roundId = String(result.roundId);
-    transactionId = String(result.transactionId);
+    submissionHandle = result.submissionHandle;
     // Extract loopId from the status query, which has a stable loopId field.
     const status = await client.tool("loopforge_status", { sessionId });
     loopId = String(status.loopId ?? "");
@@ -247,9 +244,7 @@ describe("E2E MCP lifecycle", () => {
 
   it("round 2 — loopforge_next accepts honest work and advances", async () => {
     const result = await client.tool("loopforge_next", {
-      sessionId,
-      roundId,
-      transactionId,
+      submissionHandle,
       evaluation: {
         success: false,
         output_summary:
@@ -300,9 +295,8 @@ describe("E2E MCP lifecycle", () => {
     if (result.enforcementAction) {
       assert.notEqual(result.enforcementAction, "reject");
     }
-    // Move the anchor to round 2 — the accepted submission advanced the loop.
-    roundId = String(result.roundId);
-    transactionId = String(result.transactionId);
+    // Move the anchor to the next held round.
+    submissionHandle = result.submissionHandle;
   });
 
   // ── Round 2 (attempt 2): Constraint violation → rejected ────────────────────
@@ -312,9 +306,7 @@ describe("E2E MCP lifecycle", () => {
     // success criteria unmet — this triggers rejection via the combined
     // verification checks.
     const result = await client.tool("loopforge_next", {
-      sessionId,
-      roundId,
-      transactionId,
+      submissionHandle,
       evaluation: {
         success: true,
         output_summary: "Changed internal function signature.",
@@ -343,18 +335,19 @@ describe("E2E MCP lifecycle", () => {
     assert.ok(reports.length > 0);
     assert.ok(reports.every((report) => report.handling === "not_applied"),
       "a rejected attempt is never shown as applied");
-    // Rejection keeps the logical round — the roundId anchor stays put.
-    assert.equal(result.roundId, roundId);
-    transactionId = String(result.transactionId);
+    // Rejection keeps the logical round but rebinds the attempt.
+    assert.equal(
+      (result.submissionHandle as { roundId?: string } | undefined)?.roundId,
+      (submissionHandle as { roundId?: string } | undefined)?.roundId,
+    );
+    submissionHandle = result.submissionHandle;
   });
 
   // ── Round 2 (attempt 3): Redo with honest evaluation → accepted ─────────────
 
   it("retry — redo rejected work honestly and get accepted", async () => {
     const result = await client.tool("loopforge_next", {
-      sessionId,
-      roundId,
-      transactionId,
+      submissionHandle,
       evaluation: {
         success: false,
         output_summary:
@@ -380,8 +373,7 @@ describe("E2E MCP lifecycle", () => {
       assert.notEqual(result.enforcementAction, "reject");
     }
     // The accepted retry advanced the loop — re-anchor.
-    roundId = String(result.roundId);
-    transactionId = String(result.transactionId);
+    submissionHandle = result.submissionHandle;
   });
 
   // ── Pause and resume ────────────────────────────────────────────────────────
@@ -400,17 +392,14 @@ describe("E2E MCP lifecycle", () => {
     assert.ok(!result.error, `unexpected error: ${String(result.error)}`);
     assert.ok(typeof result.prompt === "string" && result.prompt.length > 20);
     // Resume returns the anchor for the round it hands over.
-    roundId = String(result.roundId);
-    transactionId = String(result.transactionId);
+    submissionHandle = result.submissionHandle;
   });
 
   // ── Final round: Task complete ──────────────────────────────────────────────
 
   it("final round — completed when should_continue=false", async () => {
     const result = await client.tool("loopforge_next", {
-      sessionId,
-      roundId,
-      transactionId,
+      submissionHandle,
       evaluation: {
         success: true,
         output_summary:

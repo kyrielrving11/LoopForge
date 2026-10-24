@@ -1,7 +1,9 @@
 /** Process-level tests for the JSON-RPC stdio boundary. */
 
 import { spawn } from "node:child_process";
-import { resolve } from "node:path";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
@@ -16,9 +18,9 @@ interface RpcResponse {
   error?: { code?: number };
 }
 
-function spawnRpcServer() {
+function spawnRpcServer(cwd = process.cwd()) {
   const child = spawn(process.execPath, [resolve("dist/cli.js"), "mcp"], {
-    cwd: process.cwd(),
+    cwd,
     stdio: ["pipe", "pipe", "pipe"],
   });
   child.stdout.setEncoding("utf8");
@@ -118,7 +120,8 @@ describe("MCP stdio input boundary", () => {
   });
 
   it("returns retryable evaluation errors while rejecting other invalid arguments", async () => {
-    const rpc = spawnRpcServer();
+    const workspace = mkdtempSync(join(tmpdir(), "loopforge-rpc-"));
+    const rpc = spawnRpcServer(workspace);
     try {
       const initialized = await rpc.request("initialize", {
         protocolVersion: "2025-06-18",
@@ -127,12 +130,20 @@ describe("MCP stdio input boundary", () => {
         (initialized.result as Record<string, unknown>).protocolVersion,
         "2025-06-18",
       );
+      const started = await rpc.request("tools/call", {
+        name: "loopforge_start",
+        arguments: { task: "stdio evaluation boundary" },
+      });
+      const startResult = started.result as Record<string, unknown>;
+      const startContent = startResult.content as Array<{ text: string }>;
+      const startMeta = JSON.parse(startContent[1]!.text) as Record<string, unknown>;
+      const submissionHandle = startMeta.submissionHandle;
+      assert.ok(submissionHandle, "start returns the held submissionHandle");
+
       const wrongType = await rpc.request("tools/call", {
         name: "loopforge_next",
         arguments: {
-          sessionId: "session",
-          roundId: "loop:test:round:1",
-          transactionId: "tx-test-1",
+          submissionHandle,
           evaluation: {
             success: "yes",
             output_summary: "done",
@@ -149,7 +160,7 @@ describe("MCP stdio input boundary", () => {
       assert.equal(evaluationError.ok, false);
       const toolError = evaluationError.error as Record<string, unknown>;
       assert.equal(toolError.code, "evaluation_invalid");
-      assert.equal(toolError.retryable, true, "a payload defect is retryable with the same roundId");
+      assert.equal(toolError.retryable, true, "a payload defect is retryable with the same handle");
       assert.deepEqual(
         ((toolError.details as Record<string, unknown>).invalid as Array<Record<string, unknown>>)
           .map((item) => item.field),
@@ -165,11 +176,10 @@ describe("MCP stdio input boundary", () => {
         -32602,
       );
 
-      // v3.0.1: every submission must be anchored to a roundId.
-      const missingRoundId = await rpc.request("tools/call", {
+      // v4.0.0: every submission must carry the one submissionHandle.
+      const missingHandle = await rpc.request("tools/call", {
         name: "loopforge_next",
         arguments: {
-          sessionId: "session",
           evaluation: {
             success: true,
             output_summary: "done",
@@ -179,11 +189,12 @@ describe("MCP stdio input boundary", () => {
         },
       });
       assert.equal(
-        (missingRoundId.error as Record<string, unknown>).code,
+        (missingHandle.error as Record<string, unknown>).code,
         -32602,
       );
     } finally {
       await rpc.close();
+      rmSync(workspace, { recursive: true, force: true });
     }
   });
 
@@ -247,8 +258,11 @@ describe("MCP stdio input boundary", () => {
       const hidden = await rpc.request("tools/call", {
         name: "loopforge_gate_check",
         arguments: {
-          sessionId: "session",
-          roundId: "loop:test:round:1",
+          submissionHandle: {
+            sessionId: "session",
+            roundId: "loop:test:round:1",
+            transactionId: "tx-test-1",
+          },
           action: {
             description: "Deploy", scope: [], effects: [], reversibility: "unknown",
             authorization: "unknown",

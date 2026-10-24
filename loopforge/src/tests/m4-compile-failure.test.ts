@@ -68,7 +68,8 @@ describe("M4 — post-commit compile failure stalls, never skips", () => {
     const started = await mgr.create({ task: "M4 compile failure", loopId: "m4-fail" });
     const sessionId = started.sessionId;
 
-    await advanceWithHeld(mgr, sessionId, "", continuingEvaluation()); // commits round 1
+    const round2 = await advanceWithHeld(mgr, sessionId, "", continuingEvaluation()); // commits round 1
+    assert.ok(round2.submissionHandle, "round 2 holds a handle");
     // Sabotage: the state directory becomes a file — the next compile's
     // writeStateFile (round-driver compile step) throws.
     rmSync(statePath, { recursive: true, force: true });
@@ -80,23 +81,29 @@ describe("M4 — post-commit compile failure stalls, never skips", () => {
       "not a raw internal error");
     assert.equal(failed.prompt, null);
     assert.equal(failed.round, 3, "the counter must sit at the round that failed to compile");
-    const heldRoundId = failed.roundId;
-    assert.ok(typeof heldRoundId === "string" && heldRoundId.includes("round:2"),
-      "the stalled result must still anchor the committed round 2");
+    assert.equal(failed.submissionHandle, undefined,
+      "a committed-but-uncompiled round is not a held prompt and carries no handle");
+
+    // v4.0.0: the old round-2 handle must not resurrect the committed round.
+    const stale = await mgr.advance(round2.submissionHandle, "", continuingEvaluation());
+    assert.equal(stale.submissionError?.code, "submission_handle_mismatch");
+    assert.equal(stale.prompt, null);
+    assert.equal(stale.round, 3, "the stale attempt does not advance the counter");
 
     // Clear the fault: restore the directory.
     rmSync(statePath, { force: true });
     mkdirSync(statePath, { recursive: true });
 
-    // Resubmit the SAME roundId — the committed round replays and round 3
-    // is compiled, never skipped (pre-fix this advanced to 4 without ever
-    // compiling round 3).
-    const recovered = await advanceWithHeld(mgr, sessionId, "", continuingEvaluation(), heldRoundId);
-    assert.equal(recovered.stopReason, undefined);
-    assert.equal(recovered.round, 3,
-      "the recovered submission must compile round 3 — not skip it");
-    assert.equal(typeof recovered.prompt, "string");
-    assert.ok((recovered.prompt as string).length > 0);
+    // Resume reconciles the committed round and compiles round 3 — never
+    // skipping it (pre-fix a resubmission advanced to 4 without compiling 3).
+    const recovered = await mgr.resume("m4-fail");
+    assert.ok(recovered, "resume reconstructs the stalled session");
+    assert.equal(recovered!.stopReason, undefined);
+    assert.equal(recovered!.round, 3,
+      "resume must compile round 3 — not skip it");
+    assert.equal(typeof recovered!.prompt, "string");
+    assert.ok((recovered!.prompt as string).length > 0);
+    assert.ok(recovered!.submissionHandle, "the resumed attempt carries a handle");
     // L1 (live path): the replay of committed round 2 must not push its
     // success into the trajectory a second time.
     const loopId = mgr.get(sessionId)!.loopId;
@@ -104,7 +111,9 @@ describe("M4 — post-commit compile failure stalls, never skips", () => {
       "the replayed round must not duplicate its trajectory entry");
 
     // And the loop continues normally afterwards.
-    const next = await advanceWithHeld(mgr, sessionId, "", continuingEvaluation(), recovered.roundId);
+    const next = await advanceWithHeld(
+      mgr, sessionId, "", continuingEvaluation(), recovered!.submissionHandle ?? undefined,
+    );
     assert.equal(next.round, 4, "the loop keeps advancing after the recovery");
     assert.equal(existsSync(join(work, "vault", "loops")), true);
   });
@@ -117,7 +126,7 @@ describe("M4 — post-commit compile failure stalls, never skips", () => {
     // Reachable shape: compile the loop in a workspace whose vault cannot
     // serve a compile is hard to stage cleanly, so this asserts the parity
     // contract at the status level: a stalled session is retryable through
-    // advance with the same roundId.
+    // loopforge_resume (the committed round has no held handle).
     const work = join(tmpdir(), `lf-m4b-${randomUUID()}`);
     mkdirSync(work, { recursive: true });
     process.chdir(work);

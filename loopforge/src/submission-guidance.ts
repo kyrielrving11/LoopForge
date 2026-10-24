@@ -1003,7 +1003,6 @@ export interface GuidanceSessionView {
   /** The task / current work item, when the caller can observe it. */
   task?: string;
   roundSnapshot?: {
-    roundId: string;
     promptArtifact?: PromptArtifact;
     beforeEvidence?: unknown;
   } | null;
@@ -1091,11 +1090,8 @@ export function deriveSubmissionGuidance(
     criteria,
   };
   const artifact = session.roundSnapshot?.promptArtifact;
-  const roundId = session.roundSnapshot?.roundId ??
-    `loop:${session.loopId}:round:${session.currentRound}`;
 
   return {
-    round_id: roundId,
     active_contract: activeContract
       ? {
           id: activeContract.id,

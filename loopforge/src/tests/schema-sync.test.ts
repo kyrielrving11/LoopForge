@@ -62,6 +62,25 @@ describe("MCP schema ↔ protocol schema sync", () => {
     );
   });
 
+  it("submissionHandle schema matches the protocol SubmissionHandle", () => {
+    const tool = TOOL_SCHEMAS.find((t) => t.name === "loopforge_next");
+    assert.ok(tool, "loopforge_next tool schema must exist");
+    const input = tool.inputSchema as SchemaNode;
+    const handle = (input.properties as SchemaNode).submissionHandle as SchemaNode;
+    const defs = schema.$defs as SchemaNode;
+    const protocol = defs.SubmissionHandle as SchemaNode;
+    assert.ok(handle, "the tool schema must expose submissionHandle");
+    assert.ok(protocol, "the protocol schema must define SubmissionHandle");
+    assert.deepEqual(
+      Object.keys(handle.properties as SchemaNode).sort(),
+      Object.keys(protocol.properties as SchemaNode).sort(),
+    );
+    assert.deepEqual(
+      [...(handle.required as string[])].sort(),
+      [...(protocol.required as string[])].sort(),
+    );
+  });
+
   it("exposes subgoal_updates (v3.7.1 regression guard)", () => {
     const evalProps = evaluationProps();
     assert.ok(

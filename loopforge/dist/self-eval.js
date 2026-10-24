@@ -472,7 +472,7 @@ export function validateCoreSelfEvaluation(raw) {
  *  (subgoal_updates / emerged_subtasks). Runs in the same pre-advance
  *  evaluation_invalid boundary as the four core fields: an error here is a
  *  payload defect, never a work-quality rejection — no session state, no
- *  gates, no rejection counters, retry with the same roundId.
+ *  gates, no rejection counters, retry with the same submissionHandle.
  *
  *  Shape-only (no vault): entry shape, id pattern, status enum, caps, and
  *  the sg-XXXXXXXX creation prohibition on emerged_subtasks. Referential
@@ -603,7 +603,7 @@ function declaresBlockedRaw(raw) {
         raw.stop_reason === "needs_human_input";
 }
 /** v3.9.9: strict transition boundary. Every failure is `contract_invalid` and
- *  the same roundId may retry with a corrected payload. */
+ *  the same submissionHandle may retry with a corrected payload. */
 export function validateContractTransition(raw, context) {
     const transition = raw.contract_transition;
     if (transition === undefined)
@@ -898,7 +898,7 @@ function rawContractItemIdentity(item) {
  *  the contract item claims — the same pre-advance contract as
  *  subgoal_updates: an error here is a payload defect, never a work-quality
  *  rejection (no session state, no gates, no rejection counters, retry with
- *  the same roundId as `contract_invalid`).
+ *  the same submissionHandle as `contract_invalid`).
  *
  *  Declaration strictness: items must exist and stay within CONTRACT_LIMITS;
  *  every item must bind at least one configured, enabled, after-capable

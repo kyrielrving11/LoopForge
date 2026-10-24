@@ -147,10 +147,10 @@ export declare class FileLoopStore implements LoopStore {
     /** The loop's durable directory. Public so the checkpoint store can place
      *  content-addressed recovery material under the SAME runtime state root. */
     loopDir(loopId: string): string;
-    /** Read a JSON document, distinguishing missing from corrupt.
-     *  ENOENT → null (missing); parse failure → StorageCorruptionError
-     *  (corrupted) — the runtime never silently repairs storage. */
+    /** Read a JSON document, distinguishing missing from corrupt or JSON null.
+     *  ENOENT → sentinel (missing); parse failure → StorageCorruptionError. */
     private readJson;
+    private readMetadata;
     private atomicWrite;
 }
 //# sourceMappingURL=loop-store.d.ts.map

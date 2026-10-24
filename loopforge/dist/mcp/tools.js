@@ -48,6 +48,22 @@ const SUBMISSION_HANDLE_OUTPUT_SCHEMA = {
     ...SUBMISSION_HANDLE_SCHEMA,
     type: ["object", "null"],
 };
+/** The closed argument set for `loopforge_start`.
+ *
+ *  The handler's unknown-argument guard reads this list; `schema-sync.test`
+ *  asserts that the advertised tool schema exposes exactly the same keys. A
+ *  field removed from the protocol (for example `domain` in 4.0.1) must not
+ *  survive in only one of them: the schema says what clients may send, and
+ *  the guard makes a stale caller fail loudly instead of silently dropping
+ *  the field. */
+export const START_INPUT_KEYS = [
+    "task",
+    "loopId",
+    "maxRounds",
+    "planSource",
+    "constraints",
+    "criteria",
+];
 const TOOL_BASE_SCHEMAS = [
     {
         name: "loopforge_start",
@@ -61,7 +77,9 @@ const TOOL_BASE_SCHEMAS = [
                 },
                 loopId: {
                     type: "string",
-                    description: "Optional loop ID. Generated automatically if not provided.",
+                    description: "Optional durable loop ID. Generated when omitted and returned " +
+                        "with the first prompt. Keep it: loopforge_resume and every " +
+                        "loopforge_status view use loopId after a restart.",
                 },
                 maxRounds: {
                     type: "integer",
@@ -420,11 +438,13 @@ const TOOL_BASE_SCHEMAS = [
             properties: {
                 sessionId: {
                     type: "string",
-                    description: "Session ID returned by loopforge_start (views session/audit).",
+                    description: "Live session ID returned by loopforge_start or loopforge_resume. " +
+                        "Resolvable only in the current process; after a restart use loopId.",
                 },
                 loopId: {
                     type: "string",
-                    description: "Loop ID (views loop/audit).",
+                    description: "Durable loop ID. Required for views loop/audit/explain; also " +
+                        "accepted for view=session, which resolves it to the live session.",
                 },
                 view: {
                     type: "string",
@@ -493,7 +513,12 @@ const TOOL_BASE_SCHEMAS = [
     },
     {
         name: "loopforge_resume",
-        description: "Resume a loop from vault state. Works for both: (a) running sessions that were interrupted by a process restart, and (b) paused sessions (via loopforge_pause). Returns the compiled prompt for the next round, or null with a stopReason if the loop is already complete.",
+        description: "Resume a loop from vault state. Requires the durable loopId returned by " +
+            "loopforge_start (not sessionId) — this is the recovery path after a " +
+            "process restart. Works for both: (a) running sessions that were " +
+            "interrupted by a process restart, and (b) paused sessions (via " +
+            "loopforge_pause). Returns the compiled prompt for the next round, or " +
+            "null with a stopReason if the loop is already complete.",
         inputSchema: {
             type: "object",
             properties: {
@@ -595,6 +620,11 @@ const ADVANCE_OUTPUT_SCHEMA = {
         error: { type: "object", additionalProperties: true, description: "v3.8 ToolError: { code, message, retryable, sessionId?, submissionHandle?, details? }" },
         details: { type: "object", additionalProperties: true },
         sessionId: { type: "string" },
+        loopId: {
+            type: "string",
+            description: "Durable loop identity. Returned with every held prompt so a restarted " +
+                "agent can call loopforge_resume without reconstructing IDs.",
+        },
         round: { type: "number" },
         submissionHandle: SUBMISSION_HANDLE_OUTPUT_SCHEMA,
         prompt: { type: ["string", "null"] },
@@ -981,6 +1011,26 @@ function stateErrorResult(error) {
 }
 export const TOOL_HANDLERS = {
     async loopforge_start(mgr, input) {
+        // A removed or misspelled start argument must not disappear silently: the
+        // schema is permissive about extra top-level keys, and the handler used to
+        // rebuild StartInput from a whitelist. Without this guard a stale manual
+        // (for example one still naming `domain`) produces a successful start with
+        // part of the caller's intent ignored.
+        const unknownStartArgs = Object.keys(input).filter((key) => !START_INPUT_KEYS.includes(key));
+        if (unknownStartArgs.length > 0) {
+            const retired = unknownStartArgs.includes("domain")
+                ? " `domain` was removed in 4.0.1."
+                : "";
+            return {
+                error: "invalid_argument",
+                errorMessage: `unknown loopforge_start argument(s): ${unknownStartArgs.join(", ")}.` +
+                    `${retired} Accepted: ${START_INPUT_KEYS.join(", ")}.`,
+                details: {
+                    unknown: unknownStartArgs,
+                    accepted: [...START_INPUT_KEYS],
+                },
+            };
+        }
         const startInput = {
             task: String(input.task ?? ""),
             loopId: input.loopId,
@@ -1109,6 +1159,9 @@ export const TOOL_HANDLERS = {
                 return stateFailure;
             throw error;
         }
+        const loopId = result.sessionId
+            ? mgr.get(result.sessionId)?.loopId
+            : undefined;
         if (result.submissionError) {
             return {
                 error: result.submissionError.code,
@@ -1118,10 +1171,11 @@ export const TOOL_HANDLERS = {
                         : "the submission was rejected"),
                 details: result.submissionError.details,
                 ...(result.sessionId ? { sessionId: result.sessionId } : {}),
+                ...(loopId ? { loopId } : {}),
                 ...(result.submissionHandle ? { submissionHandle: result.submissionHandle } : {}),
             };
         }
-        return { ...result };
+        return { ...result, ...(loopId ? { loopId } : {}) };
     },
     async loopforge_checkpoint(mgr, input) {
         const result = await mgr.checkpoint(input.submissionHandle);
@@ -1186,18 +1240,31 @@ export const TOOL_HANDLERS = {
                 errorMessage: `no health data for loop "${loopId}"`,
             };
         }
-        if (!sessionId) {
+        if (!sessionId && !loopId) {
             return {
                 error: "invalid_argument",
-                errorMessage: "sessionId is required for view=session",
+                errorMessage: "sessionId or loopId is required for view=session",
             };
         }
-        const session = mgr.get(sessionId);
+        // sessionId is a live-process key; loopId is the durable identity. Prefer
+        // a live sessionId, then fall back to loopId so a model that kept only the
+        // durable key can still read session state in the same process. A stale
+        // sessionId after a restart resolves through loopId when both are present.
+        const session = (sessionId ? mgr.get(sessionId) : undefined) ??
+            (loopId ? mgr.getByLoopId(loopId) : undefined);
         if (!session) {
             return {
                 error: "session_not_found",
-                errorMessage: `session not found: ${sessionId} (process restarted?) — pass loopId for view=audit/loop, or loopforge_resume`,
-                sessionId,
+                errorMessage: sessionId
+                    ? `session not found: ${sessionId} (process restarted?) — call ` +
+                        `loopforge_status with view="all", then loopforge_resume with its loopId`
+                    : `no live session for loop "${loopId}" — call loopforge_resume with this loopId`,
+                ...(sessionId ? { sessionId } : {}),
+                ...(loopId ? { loopId } : {}),
+                details: {
+                    next: "loopforge_resume",
+                    ...(loopId ? { loopId } : {}),
+                },
             };
         }
         const policyMetricsView = mgr.getPolicyMetrics(session.loopId);
@@ -1358,9 +1425,10 @@ export const TOOL_HANDLERS = {
             return {
                 error: "state_unavailable",
                 errorMessage: `no saved session found for loop "${loopId}"`,
+                loopId,
             };
         }
-        return { ...result };
+        return { ...result, loopId };
     },
     async loopforge_gate_check(mgr, input) {
         // v3.7.1: hidden when disabled — direct calls get a stable error.

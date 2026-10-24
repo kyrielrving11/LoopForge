@@ -25,6 +25,7 @@ import type { RoundTransactionSnapshot } from "./round-transaction.js";
 import { parseRoundTransactionSnapshot } from "./round-transaction.js";
 import { validateLoopId } from "./policy.js";
 import { isRecord } from "./token-utils.js";
+import { transactionIdentityIssue } from "./transaction-identity.js";
 
 // ── Store lock timing ──────────────────────────────────────────────────────
 //
@@ -84,6 +85,7 @@ export interface VaultEntry {
 }
 
 export const LOOP_STORE_SCHEMA_VERSION = 1 as const;
+const MISSING_JSON = Symbol("missing_json");
 
 /** v2.12: Storage corruption taxonomy. Only sequence gaps/duplicates are
  *  recoverable (manual file deletion etc.); structural corruption is not. */
@@ -360,14 +362,64 @@ export class FileLoopStore implements LoopStore {
     for (const name of readdirSync(loops)) {
       const dir = join(loops, name);
       const metadata = this.readJson(join(dir, "metadata.json"));
+      if (metadata !== MISSING_JSON &&
+          (!isRecord(metadata) ||
+           metadata.schemaVersion !== LOOP_STORE_SCHEMA_VERSION ||
+           typeof metadata.loopId !== "string" ||
+           metadata.loopId.length === 0)) {
+        throw new StorageCorruptionError(
+          "invalid_format",
+          `Loop directory ${name}: metadata.json has an unexpected document shape`,
+        );
+      }
       if (isRecord(metadata) && typeof metadata.loopId === "string") {
+        try {
+          validateLoopId(metadata.loopId);
+        } catch (error) {
+          throw new StorageCorruptionError(
+            "invalid_format",
+            `Loop directory ${name}: metadata.json has an invalid loopId: ${(error as Error).message}`,
+          );
+        }
+        const expectedName = createHash("sha256").update(metadata.loopId).digest("hex");
+        if (name !== expectedName) {
+          throw new StorageCorruptionError(
+            "invalid_format",
+            `Loop directory ${name}: metadata.json loopId does not match its directory`,
+          );
+        }
         result.push(metadata.loopId);
         continue;
       }
       // v2.14: orphaned loop dirs (sessions written before metadata
       // stamping) recover their loopId from the session document itself.
       const session = this.readJson(join(dir, "session.json"));
+      if (session !== MISSING_JSON &&
+          (!isRecord(session) ||
+           session.schemaVersion !== LOOP_STORE_SCHEMA_VERSION ||
+           typeof session.loopId !== "string" ||
+           !isRecord(session.entry))) {
+        throw new StorageCorruptionError(
+          "invalid_format",
+          `Loop directory ${name}: session.json has an unexpected document shape`,
+        );
+      }
       if (isRecord(session) && typeof session.loopId === "string") {
+        try {
+          validateLoopId(session.loopId);
+        } catch (error) {
+          throw new StorageCorruptionError(
+            "invalid_format",
+            `Loop directory ${name}: session.json has an invalid loopId: ${(error as Error).message}`,
+          );
+        }
+        const expectedName = createHash("sha256").update(session.loopId).digest("hex");
+        if (name !== expectedName) {
+          throw new StorageCorruptionError(
+            "invalid_format",
+            `Loop directory ${name}: session.json loopId does not match its directory`,
+          );
+        }
         result.push(session.loopId);
       }
     }
@@ -376,11 +428,12 @@ export class FileLoopStore implements LoopStore {
 
   readSession(loopId: string): LoopSessionDocument | null {
     validateLoopId(loopId);
+    this.readMetadata(loopId);
     const value = this.readJson(join(this.loopDir(loopId), "session.json"));
-    // readJson returns null only for a missing file; an existing document
+    // readJson returns MISSING_JSON only for a missing file; an existing document
     // with an unexpected shape is structural corruption, never silently
     // treated as "missing" (which would let a later write overwrite it).
-    if (value === null) return null;
+    if (value === MISSING_JSON) return null;
     if (!isRecord(value) || value.schemaVersion !== LOOP_STORE_SCHEMA_VERSION ||
         value.loopId !== loopId || !isRecord(value.entry)) {
       throw new StorageCorruptionError(
@@ -393,6 +446,7 @@ export class FileLoopStore implements LoopStore {
 
   writeSession(loopId: string, document: LoopSessionDocument): void {
     validateLoopId(loopId);
+    this.readSession(loopId);
     const dir = this.loopDir(loopId);
     // v2.14: stamp metadata alongside the session document — a session with
     // no committed rounds yet (created, then crashed before round 1) must
@@ -407,13 +461,16 @@ export class FileLoopStore implements LoopStore {
   readRound(loopId: string, round: number): LoopRoundDocument | null {
     validateLoopId(loopId);
     if (!Number.isInteger(round) || round < 1) return null;
+    this.readMetadata(loopId);
     const value = this.readJson(join(this.loopDir(loopId), "rounds", `${round}.json`));
-    // readJson returns null only for a missing file; an existing document
+    // readJson returns MISSING_JSON only for a missing file; an existing document
     // with an unexpected shape is structural corruption — surfacing it
     // (rather than returning null) prevents silent overwrite by writeEntry.
-    if (value === null) return null;
+    if (value === MISSING_JSON) return null;
     if (!isRecord(value) || value.schemaVersion !== LOOP_STORE_SCHEMA_VERSION ||
-        value.loopId !== loopId || value.round !== round) {
+        value.loopId !== loopId || value.round !== round ||
+        typeof value.updatedAt !== "string" ||
+        (value.sequence !== undefined && !Number.isInteger(value.sequence))) {
       throw new StorageCorruptionError(
         "invalid_format",
         `Loop ${loopId}: round ${round} document has an unexpected shape`,
@@ -427,10 +484,47 @@ export class FileLoopStore implements LoopStore {
         `Loop ${loopId}: round ${round} document carries sequence ${value.sequence}`,
       );
     }
-    const events = Array.isArray(value.events)
-      ? value.events.filter(isRecord) as VaultEntry[]
-      : [];
-    const feedback = isRecord(value.feedback) ? value.feedback as VaultEntry : undefined;
+    if (!Array.isArray(value.events) ||
+        !value.events.every(isRecord) ||
+        (value.feedback !== undefined && !isRecord(value.feedback))) {
+      throw new StorageCorruptionError(
+        "invalid_format",
+        `Loop ${loopId}: round ${round} document has invalid feedback/events shape`,
+      );
+    }
+    const events = value.events as VaultEntry[];
+    const feedback = value.feedback as VaultEntry | undefined;
+    if (feedback && (feedback.task_type !== "feedback" ||
+        feedback.task_id !== `loop:${loopId}:r${round}:feedback` ||
+        feedback.loop_id !== loopId)) {
+      throw new StorageCorruptionError(
+        "invalid_format",
+        `Loop ${loopId}: round ${round} feedback slot has an unexpected identity`,
+      );
+    }
+    for (const entry of [feedback, ...events]) {
+      if (!entry) continue;
+      const taskId = String(entry.task_id ?? "");
+      const committedTransaction = entry.task_type === "feedback" ||
+        entry.task_type === "rollback_directive" ||
+        taskId === `loop:${loopId}:r${round}:feedback` ||
+        taskId.startsWith(`loop:${loopId}:r${round}:rollback:`);
+      if (committedTransaction &&
+          !isRecord(entry.loop_lineage?.round_transaction)) {
+        throw new StorageCorruptionError(
+          "invalid_format",
+          `Loop ${loopId}: round ${round} has a committed entry without a transaction envelope`,
+        );
+      }
+      if (!isRecord(entry.loop_lineage?.round_transaction)) continue;
+      const issue = transactionIdentityIssue(entry, { loopId, round });
+      if (issue) {
+        throw new StorageCorruptionError(
+          "invalid_format",
+          `Loop ${loopId}: round ${round} contains an invalid transaction identity: ${issue}`,
+        );
+      }
+    }
     // v3.9.1: the feedback entry is the one persisted copy of the
     // transaction. `value.transaction` exists only in documents written by
     // older builds and is deliberately not read (no compatibility layer).
@@ -458,11 +552,22 @@ export class FileLoopStore implements LoopStore {
     const result: Array<{ round: number; sequence?: number }> = [];
     for (const file of readdirSync(roundsDir).filter((name) => /^\d+\.json$/.test(name))) {
       const round = Number(file.slice(0, -5));
-      const value = this.readJson(join(roundsDir, file));
-      if (!isRecord(value) || value.loopId !== loopId || value.round !== round) continue;
+      if (!Number.isInteger(round) || round < 1 || file !== `${round}.json`) {
+        throw new StorageCorruptionError(
+          "invalid_format",
+          `Loop ${loopId}: invalid round document filename ${file}`,
+        );
+      }
+      const document = this.readRound(loopId, round);
+      if (!document) {
+        throw new StorageCorruptionError(
+          "invalid_format",
+          `Loop ${loopId}: round ${round} document disappeared while listing`,
+        );
+      }
       result.push({
         round,
-        sequence: typeof value.sequence === "number" ? value.sequence : undefined,
+        sequence: document.sequence,
       });
     }
     return result.sort((a, b) => a.round - b.round);
@@ -511,11 +616,12 @@ export class FileLoopStore implements LoopStore {
     validateLoopId(loopId);
     const now = new Date().toISOString();
     const dir = this.loopDir(loopId);
-    this.atomicWrite(join(dir, "metadata.json"), {
-      schemaVersion: LOOP_STORE_SCHEMA_VERSION,
-      loopId,
-    });
     if (entry.task_type === "session_state" || entry.task_id === `loop:${loopId}:session`) {
+      this.readSession(loopId);
+      this.atomicWrite(join(dir, "metadata.json"), {
+        schemaVersion: LOOP_STORE_SCHEMA_VERSION,
+        loopId,
+      });
       this.atomicWrite(join(dir, "session.json"), {
         schemaVersion: LOOP_STORE_SCHEMA_VERSION,
         loopId,
@@ -526,6 +632,34 @@ export class FileLoopStore implements LoopStore {
     }
     const round = roundFromEntry(entry);
     if (!round) throw new Error(`Loop entry has no round: ${entry.task_id ?? "unknown"}`);
+    const incomingTransaction = entry.loop_lineage?.round_transaction;
+    if (incomingTransaction !== undefined &&
+        (!isRecord(incomingTransaction) ||
+         parseRoundTransactionSnapshot(incomingTransaction.snapshot) === null)) {
+      throw new Error(
+        "LoopStore refuses an unreadable round transaction; only a complete committed snapshot may be written",
+      );
+    }
+    const taskId = String(entry.task_id ?? "");
+    const committedTransaction = entry.task_type === "feedback" ||
+      entry.task_type === "rollback_directive" ||
+      taskId === `loop:${loopId}:r${round}:feedback` ||
+      taskId.startsWith(`loop:${loopId}:r${round}:rollback:`);
+    if (committedTransaction && !isRecord(incomingTransaction)) {
+      throw new StorageCorruptionError(
+        "invalid_format",
+        `Loop ${loopId}: committed round entry has no transaction envelope`,
+      );
+    }
+    if (isRecord(entry.loop_lineage?.round_transaction)) {
+      const issue = transactionIdentityIssue(entry, { loopId, round });
+      if (issue) {
+        throw new StorageCorruptionError(
+          "invalid_format",
+          `Loop ${loopId}: round ${round} transaction identity is invalid: ${issue}`,
+        );
+      }
+    }
     // v2.12: monotonic write-time check — a stamped loop may not skip its
     // predecessor. v3.7: the legacy-import (allowGap) bypass was removed
     // with migrateLegacyVault; the load-time scan in checkRoundSequence
@@ -548,19 +682,39 @@ export class FileLoopStore implements LoopStore {
       events: [],
     };
     if (current.sequence === undefined) current.sequence = round;
-    const taskId = String(entry.task_id ?? "");
     if (entry.task_type === "loop_lineage" ||
         taskId === `loop:${loopId}:r${round}`) {
       throw new Error(
         "LoopStore no longer accepts compile-lineage entries; a round is written only by its committed :feedback transaction",
       );
     }
-    if (taskId.endsWith(":feedback")) current.feedback = entry;
+    if (taskId === `loop:${loopId}:r${round}:feedback` &&
+        entry.task_type === "feedback") current.feedback = entry;
+    else if (taskId.endsWith(":feedback")) {
+      throw new StorageCorruptionError(
+        "invalid_format",
+        `Loop ${loopId}: round ${round} feedback task identity is invalid`,
+      );
+    }
     else {
       current.events = [
         ...current.events.filter((event) => event.task_id !== entry.task_id),
         entry,
       ];
+    }
+    const transactionEntries = [current.feedback, entry].filter(
+      (candidate): candidate is VaultEntry =>
+        candidate !== undefined &&
+        isRecord(candidate.loop_lineage?.round_transaction),
+    );
+    for (const transactionEntry of transactionEntries) {
+      const issue = transactionIdentityIssue(transactionEntry, { loopId, round });
+      if (issue) {
+        throw new StorageCorruptionError(
+          "invalid_format",
+          `Loop ${loopId}: round ${round} transaction identity is invalid: ${issue}`,
+        );
+      }
     }
     const transactionRaw = current.feedback?.loop_lineage?.round_transaction ??
       entry.loop_lineage?.round_transaction;
@@ -584,6 +738,10 @@ export class FileLoopStore implements LoopStore {
       ...(current.feedback ? { feedback: current.feedback } : {}),
       events: current.events,
     };
+    this.atomicWrite(join(dir, "metadata.json"), {
+      schemaVersion: LOOP_STORE_SCHEMA_VERSION,
+      loopId,
+    });
     this.atomicWrite(join(dir, "rounds", `${round}.json`), persisted);
   }
 
@@ -594,19 +752,32 @@ export class FileLoopStore implements LoopStore {
     return join(this.root, "loops", hash);
   }
 
-  /** Read a JSON document, distinguishing missing from corrupt.
-   *  ENOENT → null (missing); parse failure → StorageCorruptionError
-   *  (corrupted) — the runtime never silently repairs storage. */
-  private readJson(path: string): unknown {
+  /** Read a JSON document, distinguishing missing from corrupt or JSON null.
+   *  ENOENT → sentinel (missing); parse failure → StorageCorruptionError. */
+  private readJson(path: string): unknown | typeof MISSING_JSON {
     try {
       return JSON.parse(readFileSync(path, "utf8"));
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return MISSING_JSON;
       throw new StorageCorruptionError(
         "invalid_json",
         `Corrupt JSON at ${path}: ${(error as Error).message}`,
       );
     }
+  }
+
+  private readMetadata(loopId: string): Record<string, unknown> | null {
+    const value = this.readJson(join(this.loopDir(loopId), "metadata.json"));
+    if (value === MISSING_JSON) return null;
+    if (!isRecord(value) ||
+        value.schemaVersion !== LOOP_STORE_SCHEMA_VERSION ||
+        value.loopId !== loopId) {
+      throw new StorageCorruptionError(
+        "invalid_format",
+        `Loop ${loopId}: metadata.json has an unexpected document shape or identity`,
+      );
+    }
+    return value;
   }
 
   private atomicWrite(path: string, value: unknown): void {

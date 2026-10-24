@@ -6,7 +6,12 @@ import { LoopForgeEngine } from "../engine.js";
 import { SessionManager } from "../mcp/session.js";
 import { makeLoopCompileRequest } from "../protocol.js";
 import { resetPolicy } from "../policy.js";
-import { MemoryLoopStore, advanceWithHeld } from "./_helpers.js";
+import { LoopExistsError } from "../errors.js";
+import {
+  MemoryLoopStore,
+  advanceWithHeld,
+  committedBacktrackRound,
+} from "./_helpers.js";
 
 const TASK = "Implement the parser";
 
@@ -110,5 +115,20 @@ describe("v4.0.1 — committed-only history", () => {
     );
     assert.ok(!taskTypes.includes("loop_lineage"));
     assert.ok(!taskTypes.includes("delegation_journal"));
+  });
+
+  it("treats a directive-only loop as committed history for start and audit", async () => {
+    const loopId = "directive-only";
+    const store = new MemoryLoopStore();
+    store.appendEntry(committedBacktrackRound(2, loopId, 0));
+    const manager = new SessionManager(store);
+
+    assert.ok(manager.getAudit(loopId), "the committed directive is auditable");
+    await assert.rejects(
+      manager.create({ task: TASK, loopId }),
+      LoopExistsError,
+      "a rollback directive reserves its loop identity",
+    );
+    manager.close();
   });
 });

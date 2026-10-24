@@ -75,8 +75,10 @@ of what to do next.
 
 ## Start
 
-Call `loopforge_status` with `view: "all"` before starting. Reuse an existing
-session for the same objective instead of opening a second loop.
+Call `loopforge_status` with `view: "all"` before starting. If a loop already
+covers this objective, do not open a second one: take its `loopId` and call
+`loopforge_resume` (this works after a process restart). Start a new loop only
+when no existing loop covers the objective.
 
 Call `loopforge_start` with:
 
@@ -84,15 +86,32 @@ Call `loopforge_start` with:
 - `criteria`: the initial success criteria, each becoming a stable `cr-*`
   anchor rendered in every prompt (omit to keep the default criterion);
 - `constraints`: hard boundaries that must survive every round;
-- optional `maxRounds`, `domain`, `loopId`, and `planSource`.
+- optional `maxRounds`, `loopId`, and `planSource`; the live
+  `loopforge_start` tool schema is the authoritative argument list.
 
-Keep the returned `sessionId` and `submissionHandle`. The handle bundles the
-session, the logical round, and the exact held attempt. Pass it **unchanged** to
-every `loopforge_next`, `loopforge_checkpoint`, and `loopforge_gate_check`. A
-rejection keeps the round but rebinds the attempt and returns a new handle; an
-invalid evaluation keeps the same handle. An old handle never submits work.
+Keep the returned `loopId` and `submissionHandle`. The `loopId` is the durable
+loop identity: it survives restarts and is what `loopforge_resume` and the
+per-loop `loopforge_status` views use. `sessionId` names the live session
+only; use it for live controls (`loopforge_stop`, `loopforge_pause`). The
+handle bundles the session, the logical round, and the exact held attempt.
+Pass it **unchanged** to every `loopforge_next`, `loopforge_checkpoint`, and
+`loopforge_gate_check`. A rejection keeps the round but rebinds the attempt and
+returns a new handle; an invalid evaluation keeps the same handle. An old
+handle never submits work.
 If the response was lost, call `loopforge_status` or `loopforge_resume` to fetch
 the current handle; never edit or reconstruct it.
+
+| ID | Lifetime | Use |
+| --- | --- | --- |
+| `loopId` | Durable Vault identity; survives a restart | `loopforge_resume`, `loopforge_status` views session/loop/audit/explain, duplicate-loop checks |
+| `sessionId` | Live session key in the current process; `loopforge_resume` rebuilds it | `loopforge_stop`, `loopforge_pause` |
+| `submissionHandle` | The exact held attempt; changes after a rejection | `loopforge_next`, `loopforge_checkpoint`, `loopforge_gate_check` |
+
+If a call returns `session_not_found`, the process restarted: call
+`loopforge_status` with `view: "all"`, take the matching `loopId`, and call
+`loopforge_resume`. Do not start a new loop for the same objective. If
+`loopforge_resume` returns `legacy_history`, the loop is read-only; start a new
+loop with a new `loopId`.
 
 ## What is a round?
 

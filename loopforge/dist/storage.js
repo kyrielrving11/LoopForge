@@ -2,6 +2,7 @@
 import { randomUUID } from "node:crypto";
 import { LoopExistsError } from "./errors.js";
 import { LOOP_STORE_SCHEMA_VERSION } from "./loop-store.js";
+import { transactionIdentityIssue } from "./transaction-identity.js";
 function isLeaseOwnerAlive(ownerId, leaseExpiresAt) {
     const match = ownerId.match(/^(\d+):/);
     if (!match)
@@ -220,6 +221,9 @@ export class VaultRoundCommitStore {
                 round_transaction: envelope,
             },
         };
+        const issue = transactionIdentityIssue(entry, { loopId, round });
+        if (issue)
+            throw new Error(`Refusing invalid feedback transaction: ${issue}`);
         this.store.appendEntry(entry);
         return entry;
     }
@@ -236,6 +240,13 @@ export class VaultRoundCommitStore {
                 round_transaction: envelope,
             },
         };
+        const issue = transactionIdentityIssue(entry, {
+            loopId,
+            round,
+            transactionId,
+        });
+        if (issue)
+            throw new Error(`Refusing invalid rollback transaction: ${issue}`);
         this.store.appendEntry(entry);
         return entry;
     }

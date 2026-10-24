@@ -6,6 +6,15 @@
  * Each handler receives SessionManager + parsed input, returns the output object.
  */
 import type { SessionManager } from "./session.js";
+/** The closed argument set for `loopforge_start`.
+ *
+ *  The handler's unknown-argument guard reads this list; `schema-sync.test`
+ *  asserts that the advertised tool schema exposes exactly the same keys. A
+ *  field removed from the protocol (for example `domain` in 4.0.1) must not
+ *  survive in only one of them: the schema says what clients may send, and
+ *  the guard makes a stale caller fail loudly instead of silently dropping
+ *  the field. */
+export declare const START_INPUT_KEYS: readonly ["task", "loopId", "maxRounds", "planSource", "constraints", "criteria"];
 type JsonSchema = Record<string, unknown>;
 export declare const TOOL_OUTPUT_SCHEMAS: Record<string, JsonSchema>;
 /** MCP tool contracts include strict input and structured output schemas. */

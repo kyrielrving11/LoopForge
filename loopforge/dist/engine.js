@@ -34,15 +34,14 @@ export class LoopForgeEngine {
     // Loop Compile (public, primary)
     // ═══════════════════════════════════════════════════════════════════════
     invokeLoopCompile(request, options = {}) {
-        let context = null;
-        if (request.loop_id &&
-            (request.round > 1 || (request.round === 1 && (request.attempt ?? 1) > 1))) {
-            context = {
-                results: loadCommittedHistory(this.resolveStore(), request.loop_id).entries,
-            };
-        }
         try {
-            return compileLoop(request, context, options);
+            let context = null;
+            let history;
+            if (request.loop_id) {
+                history = loadCommittedHistory(this.resolveStore(), request.loop_id);
+                context = { results: history.entries };
+            }
+            return compileLoop(request, context, options, history);
         }
         catch (exc) {
             // Projection-coverage and operator-acceptance integrity defects are
@@ -50,7 +49,8 @@ export class LoopForgeEngine {
             // boundary surfaces their stable codes.
             const code = exc?.code;
             if (code === "projection_incomplete" ||
-                code === "operator_acceptance_conflict") {
+                code === "operator_acceptance_conflict" ||
+                code === "legacy_history") {
                 throw exc;
             }
             return makeLoopCompileResponse({

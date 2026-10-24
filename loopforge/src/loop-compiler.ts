@@ -36,8 +36,9 @@ import {
   buildCommittedHistory,
   historyWindow,
   operatorAcceptanceKey,
+  type CommittedHistory,
 } from "./history.js";
-import { OperatorAcceptanceConflictError } from "./errors.js";
+import { LegacyHistoryError, OperatorAcceptanceConflictError } from "./errors.js";
 import {
   deriveProgressWindow,
 } from "./progress.js";
@@ -626,13 +627,20 @@ export function compileLoop(
   request: LoopCompileRequest,
   context: Record<string, unknown> | null,
   options: { operatorAcceptance?: OperatorAcceptance } = {},
+  committedHistory?: CommittedHistory,
 ): LoopCompileResponse {
   const operatorAcceptance = options.operatorAcceptance ?? null;
   // ONE history window and ONE previous-round fact bundle for the whole
   // compile. Every consumer below reads these values; none re-derives the
   // window with a private rule.
   const entries = contextEntries(context);
-  const history = buildCommittedHistory(entries);
+  const history = committedHistory ?? buildCommittedHistory(entries);
+  if (history.legacyRounds.length > 0) {
+    throw new LegacyHistoryError(
+      request.loop_id,
+      history.legacyRounds.map((round) => round.round),
+    );
+  }
   // The operator surface is immutable. A caller-supplied copy that disagrees
   // with a committed copy is an integrity conflict — never a silent override.
   const committedAcceptance = history.views.find(

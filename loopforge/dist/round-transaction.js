@@ -14,6 +14,7 @@ import { PROMPT_ARTIFACT_SCHEMA_VERSION } from "./protocol.js";
 import { commandConfigHash, getPolicy } from "./policy.js";
 import { policyMetrics } from "./policy-metrics.js";
 import { VaultRoundCommitStore } from "./storage.js";
+import { transactionIdentityIssue } from "./transaction-identity.js";
 /** v3.9.7: schema 5 adds the transaction before-image, explicit mid-round
  *  checkpoints and the redo restore marker. Schema 4 is unsupported and is
  *  reported by `legacyTransactionRounds`; there is no compatibility migration. */
@@ -821,6 +822,13 @@ export class RoundTransactionCoordinator {
         if (!snapshot || snapshot.kind !== "rollback" || !isProcessResult(result)) {
             return null;
         }
+        if (transactionIdentityIssue(entry, {
+            loopId,
+            round,
+            schemaVersion: ROUND_TRANSACTION_SCHEMA_VERSION,
+            transactionId,
+        }))
+            return null;
         return { snapshot, result, replayed: true };
     }
     /** Recover an already committed decision without evaluating or writing. */
@@ -839,18 +847,25 @@ export class RoundTransactionCoordinator {
         for (const entry of entries) {
             if (entry.task_id !== taskId)
                 continue;
-            const outcome = this.outcomeFromEntry(entry, expected.roundId, expected.transactionId, opts?.skipBacktrack === true);
+            const outcome = this.outcomeFromEntry(entry, expected, opts?.skipBacktrack === true);
             if (outcome)
                 return outcome;
         }
         return null;
     }
-    outcomeFromEntry(entry, expectedRoundId, expectedTransactionId, skipBacktrack = false) {
+    outcomeFromEntry(entry, expected, skipBacktrack = false) {
         const lineage = isRecord(entry.loop_lineage) ? entry.loop_lineage : null;
         const transaction = lineage && isRecord(lineage.round_transaction)
             ? lineage.round_transaction
             : null;
-        if (!transaction || transaction.round_id !== expectedRoundId)
+        if (!transaction || transaction.round_id !== expected.roundId)
+            return null;
+        if (transactionIdentityIssue(entry, {
+            loopId: expected.loopId,
+            round: expected.round,
+            schemaVersion: ROUND_TRANSACTION_SCHEMA_VERSION,
+            transactionId: expected.transactionId,
+        }))
             return null;
         const snapshot = parseRoundTransactionSnapshot(transaction.snapshot);
         const result = transaction.result;
@@ -860,7 +875,7 @@ export class RoundTransactionCoordinator {
         // `target.redo_round`, where the abandoned branch already committed a
         // feedback round with the same roundId. Replaying it would silently discard
         // the redo submission. The transaction id is the branch-scoped identity.
-        if (snapshot.transactionId !== expectedTransactionId)
+        if (snapshot.transactionId !== expected.transactionId)
             return null;
         // v3.2.1: a committed backtrack is a roll-back directive, not a terminal
         // decision. The restored round reuses the same roundId, so replaying it

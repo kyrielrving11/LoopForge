@@ -14,7 +14,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { TOOL_SCHEMAS } from "../mcp/tools.js";
+import { START_INPUT_KEYS, TOOL_SCHEMAS } from "../mcp/tools.js";
 
 // In npm scripts, process.cwd() is the package root (loopforge/).
 // The generated schema is written to the repo root (../loopforge-protocol.json).
@@ -78,6 +78,18 @@ describe("MCP schema ↔ protocol schema sync", () => {
     assert.deepEqual(
       [...(handle.required as string[])].sort(),
       [...(protocol.required as string[])].sort(),
+    );
+  });
+
+  it("start schema exposes exactly the accepted start arguments", () => {
+    const tool = TOOL_SCHEMAS.find((t) => t.name === "loopforge_start");
+    assert.ok(tool, "loopforge_start tool schema must exist");
+    const input = tool.inputSchema as SchemaNode;
+    const properties = input.properties as SchemaNode;
+    assert.deepEqual(
+      Object.keys(properties).sort(),
+      [...START_INPUT_KEYS].sort(),
+      "the advertised start arguments and the handler guard must be one list",
     );
   });
 

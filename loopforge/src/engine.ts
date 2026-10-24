@@ -16,7 +16,7 @@ import {
   type OperatorAcceptance,
 } from "./protocol.js";
 import { compileLoop } from "./loop-compiler.js";
-import { loadCommittedHistory } from "./history.js";
+import { loadCommittedHistory, type CommittedHistory } from "./history.js";
 import { parseExecutionReport, parseWorkerResults } from "./self-eval.js";
 
 // ── Re-export self-evaluation utilities (moved to self-eval.ts) ──────────
@@ -58,25 +58,22 @@ export class LoopForgeEngine {
     request: LoopCompileRequest,
     options: { operatorAcceptance?: OperatorAcceptance } = {},
   ): LoopCompileResponse {
-    let context: Record<string, unknown> | null = null;
-    if (
-      request.loop_id &&
-      (request.round > 1 || (request.round === 1 && (request.attempt ?? 1) > 1))
-    ) {
-      context = {
-        results: loadCommittedHistory(this.resolveStore(), request.loop_id).entries,
-      };
-    }
-
     try {
-      return compileLoop(request, context, options);
+      let context: Record<string, unknown> | null = null;
+      let history: CommittedHistory | undefined;
+      if (request.loop_id) {
+        history = loadCommittedHistory(this.resolveStore(), request.loop_id);
+        context = { results: history.entries };
+      }
+      return compileLoop(request, context, options, history);
     } catch (exc) {
       // Projection-coverage and operator-acceptance integrity defects are
       // FAIL CLOSED signals, not compile failures. Rethrow so the MCP
       // boundary surfaces their stable codes.
       const code = (exc as { code?: unknown } | null)?.code;
       if (code === "projection_incomplete" ||
-          code === "operator_acceptance_conflict") {
+          code === "operator_acceptance_conflict" ||
+          code === "legacy_history") {
         throw exc;
       }
       return makeLoopCompileResponse({

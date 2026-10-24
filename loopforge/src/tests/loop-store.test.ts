@@ -99,8 +99,21 @@ describe("FileLoopStore", () => {
         ...entry(
           loopId,
           `loop:${loopId}:r1:feedback`,
-          "loop_feedback",
-          { round: 1, round_transaction: { snapshot } },
+          "feedback",
+          {
+            round: 1,
+            round_id: snapshot.roundId,
+            round_transaction: {
+              schema_version: snapshot.schemaVersion,
+              round_id: snapshot.roundId,
+              snapshot,
+              result: {
+                action: "continue",
+                verificationFlags: [],
+                roundSuccess: true,
+              },
+            },
+          },
         ),
         success: true,
       });
@@ -230,6 +243,43 @@ describe("FileLoopStore", () => {
     }
   });
 
+  it("does not treat malformed metadata as a missing loop directory", () => {
+    const dir = temporaryDirectory();
+    try {
+      const store = new FileLoopStore(dir);
+      const loopId = "malformed-metadata";
+      store.writeSession(loopId, {
+        schemaVersion: 1,
+        loopId,
+        updatedAt: new Date().toISOString(),
+        entry: entry(loopId, `loop:${loopId}:session`, "session_state"),
+      });
+      const metadataPath = allFiles(dir).find((p) => p.endsWith("metadata.json"));
+      assert.ok(metadataPath, "metadata.json should exist");
+      writeFileSync(metadataPath, "null", "utf8");
+
+      assert.throws(
+        () => store.listLoopIds(),
+        (error: unknown) =>
+          error instanceof StorageCorruptionError && error.kind === "invalid_format",
+      );
+      assert.throws(
+        () => store.writeSession(loopId, {
+          schemaVersion: 1,
+          loopId,
+          updatedAt: new Date().toISOString(),
+          entry: entry(loopId, `loop:${loopId}:session`, "session_state"),
+        }),
+        (error: unknown) =>
+          error instanceof StorageCorruptionError && error.kind === "invalid_format",
+      );
+      assert.equal(readFileSync(metadataPath, "utf8"), "null",
+        "a direct write must not replace corrupt metadata");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("refuses an unreadable transaction envelope instead of persisting it", () => {
     const dir = temporaryDirectory();
     try {
@@ -245,6 +295,29 @@ describe("FileLoopStore", () => {
       );
       assert.equal(store.readRound(loopId, 1), null,
         "the rejected write leaves no round document");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a committed transaction whose snapshot belongs to another loop", () => {
+    const dir = temporaryDirectory();
+    try {
+      const store = new FileLoopStore(dir);
+      const feedback = committedFeedbackRound(1, { loopId: "identity-target" });
+      const transaction = feedback.loop_lineage!.round_transaction as Record<string, unknown>;
+      const snapshot = transaction.snapshot as Record<string, unknown>;
+      snapshot.loopId = "identity-source";
+      snapshot.roundId = "loop:identity-source:round:1";
+      transaction.round_id = snapshot.roundId;
+
+      assert.throws(
+        () => store.appendEntry(feedback),
+        (error: unknown) =>
+          error instanceof StorageCorruptionError && error.kind === "invalid_format",
+      );
+      assert.equal(store.readRound("identity-target", 1), null,
+        "an invalid transaction must not create a round document");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

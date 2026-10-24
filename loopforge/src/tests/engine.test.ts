@@ -5,13 +5,21 @@ import {
   LoopForgeEngine,
   createEngine,
 } from "../engine.js";
+import { compileLoop } from "../loop-compiler.js";
+import { LegacyHistoryError } from "../errors.js";
 import {
   AgentStatus,
   makeLoopCompileRequest,
   type LoopCompileRequest,
 } from "../protocol.js";
 import { resetPolicy } from "../policy.js";
-import { installTestCommandProvider, criterionClaims } from "./_helpers.js";
+import {
+  installTestCommandProvider,
+  criterionClaims,
+  committedBacktrackRound,
+  committedFeedbackRound,
+  MemoryLoopStore,
+} from "./_helpers.js";
 import { deriveItemId } from "../token-utils.js";
 
 function makeRequest(overrides: Partial<LoopCompileRequest> = {}): LoopCompileRequest {
@@ -110,6 +118,43 @@ describe("Engine — Loop Compile mode", () => {
     // Compiles at L2 when no prior lineage found
     const result = engine.invokeLoopCompile(req);
     assert.equal(result.status, AgentStatus.OK);
+  });
+
+  it("includes a committed recovery brief when a redo targets round 1", () => {
+    const store = new MemoryLoopStore();
+    store.appendEntry(committedBacktrackRound(2, "round-one-redo", 0));
+    const engine = new LoopForgeEngine(store);
+    const response = engine.invokeLoopCompile(makeLoopCompileRequest({
+      loop_id: "round-one-redo",
+      round: 1,
+      task: "Test task",
+    }));
+
+    assert.equal(response.status, AgentStatus.OK);
+    assert.ok(response.prompt.includes("### Recovery Brief"));
+    assert.ok(response.prompt.includes("test_restore"));
+  });
+
+  it("fails closed on legacy history through engine and direct compile APIs", () => {
+    const legacy = committedFeedbackRound(1, { loopId: "legacy-compile" });
+    const transaction = legacy.loop_lineage!.round_transaction as Record<string, unknown>;
+    (transaction.snapshot as Record<string, unknown>).schemaVersion = 5;
+    const request = makeLoopCompileRequest({
+      loop_id: "legacy-compile",
+      round: 1,
+      task: "Test task",
+    });
+    const store = new MemoryLoopStore();
+    store.appendEntry(legacy);
+
+    assert.throws(
+      () => new LoopForgeEngine(store).invokeLoopCompile(request),
+      LegacyHistoryError,
+    );
+    assert.throws(
+      () => compileLoop(request, { results: [legacy] }),
+      LegacyHistoryError,
+    );
   });
 });
 

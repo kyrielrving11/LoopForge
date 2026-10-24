@@ -16,6 +16,7 @@ import {
 } from "../loop-store.js";
 import type { VaultEntry } from "../loop-store.js";
 import { committedFeedbackRound } from "./_helpers.js";
+import { SessionManager } from "../mcp/session.js";
 
 function temporaryDirectory(): string {
   return mkdtempSync(join(tmpdir(), "loopforge-seq-"));
@@ -31,10 +32,12 @@ function entry(
   round: number,
   taskType: "loop_lineage" | "feedback",
 ): VaultEntry {
-  const suffix = taskType === "feedback" ? ":feedback" : "";
+  if (taskType === "feedback") {
+    return committedFeedbackRound(round, { loopId });
+  }
   return {
-    id: `loop:${loopId}:r${round}${suffix}`,
-    task_id: `loop:${loopId}:r${round}${suffix}`,
+    id: `loop:${loopId}:r${round}`,
+    task_id: `loop:${loopId}:r${round}`,
     task_type: taskType,
     loop_id: loopId,
     timestamp: new Date().toISOString(),
@@ -215,6 +218,94 @@ describe("loop-store sequence integrity", () => {
           assert.equal(error.recoverable, false);
           return true;
         },
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to start over a structurally malformed round document", async () => {
+    const dir = temporaryDirectory();
+    try {
+      const store = new FileLoopStore(dir);
+      const loopId = "malformed-start";
+      const rounds = roundsDir(store, loopId);
+      mkdirSync(rounds, { recursive: true });
+      writeFileSync(
+        join(rounds, "1.json"),
+        JSON.stringify({
+          schemaVersion: 1,
+          loopId,
+          round: 1,
+          sequence: 1,
+          updatedAt: new Date().toISOString(),
+          events: "not-an-array",
+        }),
+        "utf8",
+      );
+      const manager = new SessionManager(store);
+
+      await assert.rejects(
+        manager.create({ task: "Do not overwrite", loopId }),
+        (error: unknown) =>
+          error instanceof StorageCorruptionError && error.kind === "invalid_format",
+      );
+      manager.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not treat JSON null as a missing round document", async () => {
+    const dir = temporaryDirectory();
+    try {
+      const store = new FileLoopStore(dir);
+      const loopId = "null-round";
+      const rounds = roundsDir(store, loopId);
+      mkdirSync(rounds, { recursive: true });
+      writeFileSync(join(rounds, "1.json"), "null", "utf8");
+      const manager = new SessionManager(store);
+
+      await assert.rejects(
+        manager.create({ task: "Do not overwrite", loopId }),
+        (error: unknown) =>
+          error instanceof StorageCorruptionError && error.kind === "invalid_format",
+      );
+      manager.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a feedback slot whose entry identity disagrees with its document", () => {
+    const dir = temporaryDirectory();
+    try {
+      const store = new FileLoopStore(dir);
+      const loopId = "wrong-feedback-slot";
+      const rounds = roundsDir(store, loopId);
+      mkdirSync(rounds, { recursive: true });
+      writeFileSync(
+        join(rounds, "1.json"),
+        JSON.stringify({
+          schemaVersion: 1,
+          loopId,
+          round: 1,
+          sequence: 1,
+          updatedAt: new Date().toISOString(),
+          feedback: {
+            task_id: "loop:another-loop:r1:feedback",
+            task_type: "note",
+            loop_id: loopId,
+          },
+          events: [],
+        }),
+        "utf8",
+      );
+
+      assert.throws(
+        () => store.readRound(loopId, 1),
+        (error: unknown) =>
+          error instanceof StorageCorruptionError && error.kind === "invalid_format",
       );
     } finally {
       rmSync(dir, { recursive: true, force: true });

@@ -102,11 +102,28 @@ describe("MCP — loopforge_start", async () => {
 
     assert.equal(typeof result.sessionId, "string");
     assert.ok((result.sessionId as string).length > 0);
+    assert.equal(typeof result.loopId, "string");
+    assert.ok((result.loopId as string).length > 0);
     assert.equal(result.round, 1);
     assert.equal(typeof result.prompt, "string");
     assert.ok((result.prompt as string).length > 0);
     assert.ok((result.prompt as string).includes("LoopForge"));
     assert.equal(typeof result.level, "string");
+  });
+
+  it("returns the durable loopId with start and next prompts", async () => {
+    const start = await TOOL_HANDLERS.loopforge_start(mgr, {
+      task: "Keep the durable ID",
+      loopId: "durable-id-test",
+    });
+    assert.equal(start.loopId, "durable-id-test");
+
+    const next = await toolNext(mgr, {
+      sessionId: String(start.sessionId),
+      submissionHandle: start.submissionHandle,
+      evaluation: evalParam({ success: false, shouldContinue: true }),
+    });
+    assert.equal(next.loopId, "durable-id-test");
   });
 
   it("reports a cross-process lease conflict without mislabeling it as policy_invalid", async () => {
@@ -806,6 +823,40 @@ describe("MCP — status / list / stop / replay", async () => {
     assert.ok((status.successTrajectory as boolean[]).length >= 1);
   });
 
+  it("status view=session resolves the durable loopId to the live session", async () => {
+    const start = await TOOL_HANDLERS.loopforge_start(mgr, {
+      task: "Status by durable ID",
+      loopId: "status-by-loop-id",
+    });
+
+    const status = await TOOL_HANDLERS.loopforge_status(mgr, {
+      loopId: "status-by-loop-id",
+    });
+    assert.equal(status.error, undefined);
+    assert.equal(status.loopId, "status-by-loop-id");
+    assert.equal(status.sessionId, start.sessionId);
+    assert.equal(status.round, 1);
+  });
+
+  it("status view=session reports a restart hint when only loopId is known", async () => {
+    await TOOL_HANDLERS.loopforge_start(mgr, {
+      task: "Status after restart",
+      loopId: "status-after-restart",
+    });
+    mgr.close();
+
+    const restarted = new SessionManager(store);
+    const status = await TOOL_HANDLERS.loopforge_status(restarted, {
+      loopId: "status-after-restart",
+    });
+    assert.equal(status.error, "session_not_found");
+    assert.match(String(status.errorMessage), /loopforge_resume/);
+    assert.deepEqual(status.details, {
+      next: "loopforge_resume",
+      loopId: "status-after-restart",
+    });
+  });
+
   it("list returns multiple sessions", async () => {
     await TOOL_HANDLERS.loopforge_start(mgr, { task: "Task A" });
     await TOOL_HANDLERS.loopforge_start(mgr, { task: "Task B" });
@@ -885,6 +936,7 @@ describe("MCP — resume / list-vault / health", async () => {
     });
     assert.ok("prompt" in result, `expected prompt, got: ${JSON.stringify(result)}`);
     assert.ok(result.prompt !== null);
+    assert.equal(result.loopId, "resume-hdl-test");
   });
 
   it("loopforge_resume returns error for unknown loop", async () => {
@@ -1267,6 +1319,25 @@ describe("MCP — input and output contract enforcement", () => {
     installTestCommandProvider();
     store = new MemoryLoopStore();
     mgr = new SessionManager(store);
+  });
+
+  it("rejects a removed or unknown start argument instead of dropping it", async () => {
+    const result = await TOOL_HANDLERS.loopforge_start(mgr, {
+      task: "Reject stale start arguments",
+      domain: "coding",
+    });
+    assert.equal(result.error, "invalid_argument");
+    assert.match(String(result.errorMessage), /domain/);
+    assert.match(String(result.errorMessage), /removed in 4\.0\.1/);
+    assert.equal(mgr.list().length, 0, "a rejected start creates no session");
+
+    const unknown = await TOOL_HANDLERS.loopforge_start(mgr, {
+      task: "Reject any unknown argument",
+      bogus: true,
+    });
+    assert.equal(unknown.error, "invalid_argument");
+    assert.match(String(unknown.errorMessage), /bogus/);
+    assert.equal(mgr.list().length, 0);
   });
 
   it("rejects maxRounds that is not a positive integer", async () => {

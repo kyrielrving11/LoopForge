@@ -9,7 +9,7 @@ import { AgentStatus, makeLoopCompileResponse, operatorAcceptanceFromObjective, 
 import { createCanonicalLoopState, renderCanonicalStateMarkdown, } from "./canonical-state.js";
 import { pendingBacktrackRecord, roundResultFromCommittedRound, } from "./committed-round.js";
 import { buildCommittedHistory, historyWindow, operatorAcceptanceKey, } from "./history.js";
-import { OperatorAcceptanceConflictError } from "./errors.js";
+import { LegacyHistoryError, OperatorAcceptanceConflictError } from "./errors.js";
 import { deriveProgressWindow, } from "./progress.js";
 import { deriveCriterionStatuses as deriveCriterionStatusesFromViews } from "./criterion-status.js";
 import { derivePromptFreshness, UNKNOWN_PROMPT_FRESHNESS, } from "./prompt-freshness.js";
@@ -431,13 +431,16 @@ function committedBacktrackBrief(loopId, round, context) {
     }
     return lines;
 }
-export function compileLoop(request, context, options = {}) {
+export function compileLoop(request, context, options = {}, committedHistory) {
     const operatorAcceptance = options.operatorAcceptance ?? null;
     // ONE history window and ONE previous-round fact bundle for the whole
     // compile. Every consumer below reads these values; none re-derives the
     // window with a private rule.
     const entries = contextEntries(context);
-    const history = buildCommittedHistory(entries);
+    const history = committedHistory ?? buildCommittedHistory(entries);
+    if (history.legacyRounds.length > 0) {
+        throw new LegacyHistoryError(request.loop_id, history.legacyRounds.map((round) => round.round));
+    }
     // The operator surface is immutable. A caller-supplied copy that disagrees
     // with a committed copy is an integrity conflict — never a silent override.
     const committedAcceptance = history.views.find((view) => view.operatorAcceptance !== null)?.operatorAcceptance ?? null;

@@ -81,6 +81,10 @@ export declare function normalizeStartCriteria(raw: unknown): {
 };
 export interface AdvanceResult {
     sessionId: string;
+    /** Durable loop identity, returned with the held prompt so a restarted
+     *  agent can call `loopforge_resume` without reconstructing IDs. Absent on
+     *  results that have no session (for example a missing-handle refusal). */
+    loopId?: string;
     round: number;
     /** v4.0.0: the ONE transport anchor for the held attempt. Derived from the
      *  persisted snapshot; never persisted itself. Absent on terminal results. */

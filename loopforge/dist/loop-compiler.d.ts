@@ -5,6 +5,7 @@
  */
 import { type CriterionStatus, type RecurringFlag, type LoopCompileRequest, type LoopCompileResponse, type LoopObjective, type LoopRoundResult, type OperatorAcceptance, type VerificationFlag } from "./protocol.js";
 import { type CommittedRoundView } from "./committed-round.js";
+import { type CommittedHistory } from "./history.js";
 import { type PromptFreshness } from "./prompt-freshness.js";
 import type { CriterionMachineFact } from "./round-facts.js";
 import { type SelfEvalPromptContext } from "./submission-guidance.js";
@@ -85,5 +86,5 @@ export declare function decideLevel(request: LoopCompileRequest, context: Record
 export declare function buildSelfEvalBlock(ctx: SelfEvalPromptContext): string;
 export declare function compileLoop(request: LoopCompileRequest, context: Record<string, unknown> | null, options?: {
     operatorAcceptance?: OperatorAcceptance;
-}): LoopCompileResponse;
+}, committedHistory?: CommittedHistory): LoopCompileResponse;
 //# sourceMappingURL=loop-compiler.d.ts.map

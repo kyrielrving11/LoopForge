@@ -130,6 +130,12 @@ describe("CommittedRoundView", () => {
     assert.equal(decodeCommittedRound(entry), null);
   });
 
+  it("does not decode a transaction stored under another loop identity", () => {
+    const entry = committedFeedbackRound(1, { loopId: "view" });
+    entry.loop_id = "another-loop";
+    assert.equal(decodeCommittedRound(entry), null);
+  });
+
   it("projects a committed view to the compiler's previous-round shape", () => {
     const view = decodeCommittedRound(committedFeedbackRound(2, {
       loopId: "parity",

@@ -9,6 +9,7 @@ import { PROMPT_ARTIFACT_SCHEMA_VERSION, makeLoopRoundResult, } from "./protocol
 import { ROUND_TRANSACTION_SCHEMA_VERSION, deriveRoundObservationDelta, parseRoundTransactionSnapshot, rootBranchId, transactionSchemaVersionOf, } from "./round-transaction.js";
 import { effectiveOutcome, parseContractTransition, parseRoundContract, } from "./self-eval.js";
 import { entryRound, isRecord } from "./token-utils.js";
+import { transactionIdentityIssue } from "./transaction-identity.js";
 function committedAction(value) {
     return value === "continue" || value === "stop" ||
         value === "recovery" || value === "backtrack"
@@ -163,6 +164,9 @@ export function decodeCommittedRound(entry) {
     const snapshot = parseRoundTransactionSnapshot(transaction.snapshot);
     if (!snapshot || snapshot.kind !== "evaluation")
         return null;
+    const identityIssue = transactionIdentityIssue(entry);
+    if (identityIssue)
+        return null;
     const resultValue = isRecord(transaction.result)
         ? transaction.result
         : snapshot.result;
@@ -190,6 +194,9 @@ export function decodeRollbackEvent(entry) {
         return null;
     const snapshot = parseRoundTransactionSnapshot(transaction.snapshot);
     if (!snapshot || snapshot.kind !== "rollback" || !snapshot.recovery)
+        return null;
+    const identityIssue = transactionIdentityIssue(entry);
+    if (identityIssue)
         return null;
     const resultValue = isRecord(transaction.result)
         ? transaction.result

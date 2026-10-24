@@ -83,8 +83,13 @@ const SUPPORTED_PROTOCOL_VERSIONS = new Set([
 const LATEST_PROTOCOL_VERSION = "2025-06-18";
 export const SERVER_INSTRUCTIONS = [
   "Use LoopForge directly for long-running work. Start by calling loopforge_status ",
-  "with view=all to list loops, then loopforge_status for a matching session or ",
-  "loopforge_start for a new one. ",
+  "with view=all to list loops. If one covers the objective, keep its loopId and ",
+  "call loopforge_resume (works after a restart); use loopforge_start only for a ",
+  "new objective. loopId is the durable identity; sessionId names the live session ",
+  "and is only for live controls. ",
+  "A session_not_found result means the process restarted: call loopforge_status ",
+  "with view=all, then loopforge_resume with the loopId; never start a second loop ",
+  "for the same objective. ",
   // v3.9.1: the guidance projection carries the current facts (real ids,
   // usable commands, applicable fields); do not restate a second copy here.
   "Before each agent-process boundary, call loopforge_next with the ",

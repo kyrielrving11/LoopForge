@@ -84,6 +84,7 @@ function feedbackEntry(
   const loopId = "obs-loop";
   return {
     task_id: `loop:${loopId}:r${round}:feedback`,
+    task_type: "feedback",
     loop_id: loopId,
     loop_lineage: {
       round,

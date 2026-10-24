@@ -177,6 +177,19 @@ describe("schema 6 structural invariants", () => {
 });
 
 describe("RoundTransactionCoordinator", () => {
+  it("refuses to persist a directive under a different loop or transaction identity", () => {
+    const store = new MemoryLoopStore();
+    const source = committedBacktrackRound(2, "identity-source", 0);
+    const envelope = source.loop_lineage!.round_transaction as never;
+    const adapter = new VaultRoundCommitStore(store);
+
+    assert.throws(
+      () => adapter.appendRollbackDirective("identity-target", 2, "tx-other", envelope),
+      /Refusing invalid rollback transaction/,
+    );
+    assert.equal(store.rounds.size, 0);
+  });
+
   it("keeps one stable round ID across rejected attempts", () => {
     assert.equal(makeRoundId("stable", 2), makeRoundId("stable", 2));
     assert.notEqual(makeRoundId("stable", 2), makeRoundId("stable", 3));
@@ -332,7 +345,7 @@ describe("backtrack commit replay", () => {
 
     // Write the committed transaction to the store
     new VaultRoundCommitStore(store).appendFeedback("bt-recover", 5, {
-      schema_version: 3,
+      schema_version: committed.schemaVersion,
       round_id: committed.roundId,
       snapshot: committed,
       result: committed.result!,

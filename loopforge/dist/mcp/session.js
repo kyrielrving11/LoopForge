@@ -120,10 +120,10 @@ export class SessionManager {
      *  document from a failed start is NOT history and must remain retryable;
      *  only a committed feedback envelope counts. */
     hasCommittedRounds(loopId) {
-        return this.loopStore.listRoundSequences(loopId).some(({ round }) => {
-            const doc = this.loopStore.readRound(loopId, round);
-            return doc?.feedback !== undefined;
-        });
+        const history = loadCommittedHistory(this.loopStore, loopId);
+        return history.rounds.length > 0 ||
+            history.directives.length > 0 ||
+            history.legacyRounds.length > 0;
     }
     claimSessionEntry(loopId) {
         if (this.sessionStore?.acquireLease) {
@@ -288,6 +288,7 @@ export class SessionManager {
         const handle = makeSubmissionHandle(session);
         return {
             sessionId,
+            loopId,
             round: 1,
             ...(handle ? { submissionHandle: handle } : {}),
             ...(snapshot?.beforeCheckpoint
@@ -348,6 +349,18 @@ export class SessionManager {
     }
     get(sessionId) {
         return this.sessions.get(sessionId);
+    }
+    /** Resolve a live session by its durable loop identity. `create` rejects a
+     *  second live session for the same loop, so the scan is unambiguous. A
+     *  persisted-only loop has no live session: call `resume` to rebuild it. */
+    getByLoopId(loopId) {
+        if (!loopId)
+            return undefined;
+        for (const session of this.sessions.values()) {
+            if (session.loopId === loopId)
+                return session;
+        }
+        return undefined;
     }
     getLeaseStatus(loopId) {
         const entry = this.findSessionEntry(loopId);
@@ -841,7 +854,8 @@ export class SessionManager {
         // the external auditor solemnly passing a loop that never ran (or a
         // mistyped loopId). Legacy-only loops still get a report so the gap is
         // explicit, never silently empty.
-        if (history.rounds.length === 0 && history.legacyRounds.length === 0) {
+        if (history.rounds.length === 0 && history.directives.length === 0 &&
+            history.legacyRounds.length === 0) {
             return null;
         }
         const audit = buildAudit(loopId, history.entries, this.loopStore);

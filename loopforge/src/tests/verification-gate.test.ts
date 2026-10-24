@@ -835,6 +835,7 @@ describe("verification-gate — v2.12 outcome consistency", () => {
     const vault = [{
       ...vaultRound(1),
       task_id: "loop:test-loop:r1:feedback",
+      task_type: "feedback",
       loop_lineage: {
         round: 1,
         round_transaction: {

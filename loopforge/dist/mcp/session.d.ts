@@ -68,6 +68,10 @@ export declare class SessionManager implements SessionRegistry {
      *  rounds, not a session counter. */
     getSuccessTrajectory(loopId: string): boolean[];
     get(sessionId: string): McpSession | undefined;
+    /** Resolve a live session by its durable loop identity. `create` rejects a
+     *  second live session for the same loop, so the scan is unambiguous. A
+     *  persisted-only loop has no live session: call `resume` to rebuild it. */
+    getByLoopId(loopId: string): McpSession | undefined;
     getLeaseStatus(loopId: string): Record<string, unknown> | null;
     delete(sessionId: string): boolean;
     /** v1.18: Pause a running session. The session state is persisted to

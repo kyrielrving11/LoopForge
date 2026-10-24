@@ -1,0 +1,1 @@
+{"version":3,"file":"transaction-identity.d.ts","sourceRoot":"","sources":["../src/transaction-identity.ts"],"names":[],"mappings":"AAEA,MAAM,WAAW,8BAA8B;IAC7C,MAAM,EAAE,MAAM,CAAC;IACf,KAAK,EAAE,MAAM,CAAC;IACd,aAAa,CAAC,EAAE,MAAM,CAAC;IACvB,aAAa,CAAC,EAAE,MAAM,CAAC;CACxB;AAED,gFAAgF;AAChF,wBAAgB,wBAAwB,CACtC,KAAK,EAAE,OAAO,EACd,QAAQ,CAAC,EAAE,8BAA8B,GACxC,MAAM,GAAG,IAAI,CAkEf"}

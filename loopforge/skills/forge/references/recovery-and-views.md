@@ -96,7 +96,7 @@ Use these to inspect, never to advance:
 
 - `loopforge_status` `view: "session"`: live session status, current round,
   success trajectory, checkpoints, capability, current guidance, and the latest
-  committed receipt.
+  committed receipt. Accepts the live `sessionId` or the durable `loopId`.
 - `loopforge_status` `view: "loop"`: committed health counts.
 - `loopforge_status` `view: "all"`: every persisted loop summary.
 - `loopforge_status` `view: "audit"`: end-of-loop verification completeness.

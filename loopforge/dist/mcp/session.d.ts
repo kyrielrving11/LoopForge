@@ -96,6 +96,8 @@ export declare class SessionManager implements SessionRegistry {
      *  user_required actions are recorded — agent_allowed needs no human
      *  authorization and opens no record. */
     private recordOpenedGate;
+    private gateInvalidResult;
+    private gateLeaseConflictResult;
     /** v3.7.1: structured gate preflight. The agent submits a
      *  GateActionDescriptor; the runtime classifies it (conservative:
      *  anything not provably safe is user_required with reason codes). A
@@ -103,7 +105,7 @@ export declare class SessionManager implements SessionRegistry {
      *  loop + round + actionHash; agent_allowed records nothing and returns
      *  the evidence suggestion instead. No action is executed and no round
      *  advances from this call. */
-    checkGate(handle: unknown, action: GateActionDescriptor): Record<string, unknown>;
+    checkGate(handle: unknown, action: GateActionDescriptor): Promise<Record<string, unknown>>;
     /** Record a user decision for a recorded gate. The gateId embeds the
      *  canonicalized action hash — if the action changed, the match fails and
      *  the old approval expires automatically. */

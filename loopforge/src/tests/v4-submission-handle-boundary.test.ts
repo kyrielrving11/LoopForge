@@ -22,6 +22,7 @@ import {
 class CountingSessionStore extends VaultSessionStateStore {
   saves = 0;
   renews = 0;
+  renewResult: boolean | undefined;
 
   override save(entry: VaultEntry, options?: SessionSaveOptions): void {
     this.saves += 1;
@@ -35,6 +36,7 @@ class CountingSessionStore extends VaultSessionStateStore {
     now?: number,
   ): boolean {
     this.renews += 1;
+    if (this.renewResult === false) return false;
     return super.renewLease(loopId, ownerId, leaseMs, now);
   }
 }
@@ -140,6 +142,68 @@ describe("v4.0.0 submission-handle boundary", () => {
       openedBefore,
       "a stale handle must not open a gate",
     );
+  });
+
+  it("a paused session cannot open a gate with its formerly held handle", async () => {
+    setPolicyForTest({ ...DEFAULT_POLICY, gate: { enabled: true } });
+    const started = await mgr.create({ task: "Paused gate", loopId: "paused-gate" });
+    const handle = started.submissionHandle!;
+    assert.equal(mgr.pause(started.sessionId).status, "paused");
+    sessionStore.saves = 0;
+    sessionStore.renews = 0;
+    const openedBefore = store.listEntries().filter((entry) =>
+      entry.task_type === "gate_opened").length;
+
+    const result = await mgr.checkGate(handle, {
+      description: "Deploy the release to production",
+      scope: ["prod"],
+      effects: ["production"],
+      reversibility: "irreversible",
+      authorization: "user_required",
+    });
+
+    assert.equal(result.error, "gate_invalid");
+    assert.equal(sessionStore.saves, 0);
+    assert.equal(sessionStore.renews, 0);
+    assert.equal(
+      store.listEntries().filter((entry) => entry.task_type === "gate_opened").length,
+      openedBefore,
+    );
+  });
+
+  it("a gate check whose process no longer owns the lease writes no gate", async () => {
+    setPolicyForTest({ ...DEFAULT_POLICY, gate: { enabled: true } });
+    const started = await mgr.create({ task: "Fenced gate", loopId: "fenced-gate" });
+    const handle = started.submissionHandle!;
+    sessionStore.renews = 0;
+    sessionStore.renewResult = false;
+    const openedBefore = store.listEntries().filter((entry) =>
+      entry.task_type === "gate_opened").length;
+
+    const result = await mgr.checkGate(handle, {
+      description: "Deploy the release to production",
+      scope: ["prod"],
+      effects: ["production"],
+      reversibility: "irreversible",
+      authorization: "user_required",
+    });
+
+    assert.equal(result.error, "lease_conflict");
+    assert.equal(sessionStore.renews, 1);
+    assert.equal(
+      store.listEntries().filter((entry) => entry.task_type === "gate_opened").length,
+      openedBefore,
+    );
+
+    const readOnlyResult = await mgr.checkGate(handle, {
+      description: "Format a local source file",
+      scope: ["src/example.ts"],
+      effects: ["workspace_write"],
+      reversibility: "reversible",
+      authorization: "agent_allowed",
+    });
+    assert.equal(readOnlyResult.error, "lease_conflict");
+    assert.equal(sessionStore.renews, 2);
   });
 
   it("returns no top-level round/transaction anchors and persists no handle", async () => {

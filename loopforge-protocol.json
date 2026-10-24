@@ -3909,6 +3909,7 @@
         "state_unavailable",
         "invalid_argument",
         "gate_disabled",
+        "gate_invalid",
         "loop_already_running",
         "lease_conflict",
         "recovery_invalid",

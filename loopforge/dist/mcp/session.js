@@ -574,6 +574,25 @@ export class SessionManager {
             },
         });
     }
+    gateInvalidResult(session) {
+        const handle = makeSubmissionHandle(session);
+        return {
+            error: "gate_invalid",
+            errorMessage: `Session is ${session.status}; a gate check requires a running held evaluation.`,
+            sessionId: session.sessionId,
+            ...(handle ? { submissionHandle: handle } : {}),
+            details: { reason_code: "session_not_running" },
+        };
+    }
+    gateLeaseConflictResult(session) {
+        const conflict = this.leaseConflictResult(session.loopId, this.findSessionEntry(session.loopId));
+        return {
+            error: "lease_conflict",
+            errorMessage: conflict.stopDetail ?? "Another process owns this loop.",
+            sessionId: session.sessionId,
+            details: { reason_code: "lease_conflict" },
+        };
+    }
     /** v3.7.1: structured gate preflight. The agent submits a
      *  GateActionDescriptor; the runtime classifies it (conservative:
      *  anything not provably safe is user_required with reason codes). A
@@ -581,7 +600,7 @@ export class SessionManager {
      *  loop + round + actionHash; agent_allowed records nothing and returns
      *  the evidence suggestion instead. No action is executed and no round
      *  advances from this call. */
-    checkGate(handle, action) {
+    async checkGate(handle, action) {
         const parsed = parseSubmissionHandle(handle);
         if (!parsed) {
             const detail = "submissionHandle must be an object with exactly sessionId, roundId, " +
@@ -600,34 +619,52 @@ export class SessionManager {
                 sessionId: parsed.sessionId,
             };
         }
+        if (session.status !== "running") {
+            return this.gateInvalidResult(session);
+        }
         const check = validateSubmissionHandle(parsed, session);
         if (!check.ok)
             return this.checkpointMismatchResult(check, session);
-        // Only a handle that exactly names the held attempt may open a gate
-        // record. A stale handle must not append gate_opened.
-        const verdict = preflightStructuredGate(action);
-        if (verdict.kind === "user") {
-            this.recordOpenedGate(session.loopId, session.currentRound, verdict, canonicalizeGateAction(action));
-        }
-        return {
-            submissionHandle: check.handle,
-            gateId: verdict.gateId,
-            risk: verdict.risk,
-            decision: verdict.decision,
-            reasonCodes: verdict.reasonCodes,
-            ...(verdict.kind === "user"
-                ? {
-                    blockedScope: verdict.blockedScope,
-                    allowedBeforeApproval: verdict.allowedBeforeApproval,
-                    requiredEvidence: [],
-                    approvalQuestion: verdict.approvalQuestion,
-                }
-                : {
-                    blockedScope: [],
-                    allowedBeforeApproval: [],
-                    requiredEvidence: verdict.requiredEvidence,
-                }),
-        };
+        return this.withSessionQueue(session.sessionId, async () => {
+            const current = this.sessions.get(session.sessionId);
+            if (!current)
+                return { ...this.sessionNotFoundResult(session.sessionId) };
+            if (current.status !== "running") {
+                return this.gateInvalidResult(current);
+            }
+            // The authoritative re-check is inside the queue. A gate record must
+            // never be opened for a handle that lost the held attempt while this
+            // call was waiting behind another session mutation.
+            const inside = validateSubmissionHandle(parsed, current);
+            if (!inside.ok)
+                return this.checkpointMismatchResult(inside, current);
+            if (!this.renewSessionLease(current.loopId)) {
+                return this.gateLeaseConflictResult(current);
+            }
+            const verdict = preflightStructuredGate(action);
+            if (verdict.kind === "user") {
+                this.recordOpenedGate(current.loopId, current.currentRound, verdict, canonicalizeGateAction(action));
+            }
+            return {
+                submissionHandle: inside.handle,
+                gateId: verdict.gateId,
+                risk: verdict.risk,
+                decision: verdict.decision,
+                reasonCodes: verdict.reasonCodes,
+                ...(verdict.kind === "user"
+                    ? {
+                        blockedScope: verdict.blockedScope,
+                        allowedBeforeApproval: verdict.allowedBeforeApproval,
+                        requiredEvidence: [],
+                        approvalQuestion: verdict.approvalQuestion,
+                    }
+                    : {
+                        blockedScope: [],
+                        allowedBeforeApproval: [],
+                        requiredEvidence: verdict.requiredEvidence,
+                    }),
+            };
+        });
     }
     /** Record a user decision for a recorded gate. The gateId embeds the
      *  canonicalized action hash — if the action changed, the match fails and

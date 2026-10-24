@@ -1342,9 +1342,10 @@ export interface VerifiedSubGoalFact {
  *  - `session_not_found` / `state_unavailable` — the named session or read
  *    model is not there.
  *  - `invalid_argument` — the request itself is malformed at the tool boundary.
- *  - `gate_disabled` / `loop_already_running` / `lease_conflict` — a state
+ *  - `gate_disabled` / `gate_invalid` / `loop_already_running` /
+ *    `lease_conflict` — a state
  *    condition, not a defect. */
-export type ToolErrorCode = "evaluation_invalid" | "contract_invalid" | "policy_invalid" | "projection_incomplete" | "session_not_found" | "submission_handle_required" | "submission_handle_mismatch" | "state_unavailable" | "invalid_argument" | "gate_disabled" | "loop_already_running" | "lease_conflict" | "recovery_invalid" | "recovery_disabled" | "recovery_unavailable" | "checkpoint_invalid" | "checkpoint_unavailable" | "checkpoint_failed" | "checkpoint_limit" | "restore_failed" | "restore_pending";
+export type ToolErrorCode = "evaluation_invalid" | "contract_invalid" | "policy_invalid" | "projection_incomplete" | "session_not_found" | "submission_handle_required" | "submission_handle_mismatch" | "state_unavailable" | "invalid_argument" | "gate_disabled" | "gate_invalid" | "loop_already_running" | "lease_conflict" | "recovery_invalid" | "recovery_disabled" | "recovery_unavailable" | "checkpoint_invalid" | "checkpoint_unavailable" | "checkpoint_failed" | "checkpoint_limit" | "restore_failed" | "restore_pending";
 /** v3.8: The structured error inside the uniform `{ok: false}` envelope. */
 export interface ToolError {
     code: ToolErrorCode;

@@ -1109,7 +1109,7 @@ export type LoopTerminalSink = (event: LoopTerminalEvent) => Promise<void> | voi
 
 /** A single flag raised during self-evaluation verification.
  *  Each flag identifies a specific inconsistency between the agent's
- *  self-reported data and the loop's cross-round lineage. */
+ *  self-reported data and the committed round history. */
 export interface VerificationFlag {
   /** info | warn | error — determines how aggressively the compiler reacts. */
   severity: "info" | "warn" | "error";

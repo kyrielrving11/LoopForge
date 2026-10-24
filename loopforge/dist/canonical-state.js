@@ -493,9 +493,8 @@ derived) {
     const objective = response.loop_objective;
     const verificationFlags = derived?.previousRound?.verificationFlags ??
         request.verification_flags ?? [];
-    // v3.9.5: only committed previous-round reports enter the projection.
-    // `last_round_result` remains a library/in-flight fallback for semantic
-    // evolution, but it must not create prompt/state narrative.
+    // v3.9.5: only committed previous-round reports enter the projection. The
+    // compiler no longer has an uncommitted fallback at all.
     const committed = derived?.previousRound?.committed === true;
     // Keep the report projection behind the same boundary as corrections and
     // blockers.  The fallback result may still be consumed by compiler

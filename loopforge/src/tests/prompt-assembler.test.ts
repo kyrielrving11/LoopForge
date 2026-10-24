@@ -368,7 +368,7 @@ describe("assemblePromptArtifact — metadata", () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// v2.9: prompt_requests rendering
+// v3.2 — verification flag actions
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("v3.2 — verification flag actions", () => {

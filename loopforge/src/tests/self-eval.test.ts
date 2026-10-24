@@ -564,6 +564,23 @@ describe("v3.9.1 — normalization diagnostics", () => {
     assert.ok(!result.submittedFields.includes("progress_estimate"));
   });
 
+  it("v4.0.1: diagnoses the removed prompt channels", () => {
+    const result = normalizeSelfEvaluation({
+      ...base,
+      prompt_requests: { emphasize: ["x"] },
+      objective_refinement: "a newer understanding",
+    });
+    assert.equal("prompt_requests" in result.evaluation, false);
+    assert.equal("objective_refinement" in result.evaluation, false);
+    assert.ok(!result.submittedFields.includes("prompt_requests"));
+    assert.ok(!result.submittedFields.includes("objective_refinement"));
+    const details = new Map(
+      result.diagnostics.map((item) => [item.path, item.detail]),
+    );
+    assert.match(details.get("prompt_requests") ?? "", /removed in 4\.0\.1/);
+    assert.match(details.get("objective_refinement") ?? "", /removed in 4\.0\.1/);
+  });
+
   it("diagnoses wrong types, caps, truncation and invalid enums", () => {
     const result = normalizeSelfEvaluation({
       ...base,

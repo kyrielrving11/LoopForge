@@ -565,10 +565,15 @@ export class FileLoopStore implements LoopStore {
     const transactionRaw = current.feedback?.loop_lineage?.round_transaction ??
       entry.loop_lineage?.round_transaction;
     // Validate the envelope on write, but do NOT persist a second copy: the
-    // feedback entry above already carries the one factual transaction.
-    parseRoundTransactionSnapshot(
-      isRecord(transactionRaw) ? transactionRaw.snapshot : undefined,
-    );
+    // feedback entry above already carries the one factual transaction. A
+    // commit this runtime cannot parse must never reach the Vault.
+    if (transactionRaw !== undefined &&
+        (!isRecord(transactionRaw) ||
+         parseRoundTransactionSnapshot(transactionRaw.snapshot) === null)) {
+      throw new Error(
+        "LoopStore refuses an unreadable round transaction; only a complete committed snapshot may be written",
+      );
+    }
     current.updatedAt = now;
     const persisted: LoopRoundDocument = {
       schemaVersion: current.schemaVersion,

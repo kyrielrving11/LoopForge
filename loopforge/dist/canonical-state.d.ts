@@ -76,8 +76,8 @@ export interface CanonicalLoopState {
     /** v2.3: Per-constraint lifecycle metadata. */
     constraintMetadata: ConstraintMeta[];
     /** v3.9.5: committed Agent corrections (wrong assumptions). This is a
-     *  REPORT, never machine evidence; fallback last_round_result does not
-     *  enter this field. LoopForge does not prefix or reframe it. */
+     *  REPORT, never machine evidence, and only the committed round feeds it.
+     *  LoopForge does not prefix or reframe it. */
     corrections: string[];
     /** Current retry's enforcement notice. A protected protocol fact for the
      *  next prompt, not a committed history field. */

@@ -229,4 +229,24 @@ describe("FileLoopStore", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("refuses an unreadable transaction envelope instead of persisting it", () => {
+    const dir = temporaryDirectory();
+    try {
+      const store = new FileLoopStore(dir);
+      const loopId = "unreadable-commit";
+      const feedback = committedFeedbackRound(1, { loopId });
+      const transaction = (feedback.loop_lineage as Record<string, unknown>)
+        .round_transaction as Record<string, unknown>;
+      (transaction.snapshot as Record<string, unknown>).schemaVersion = 1;
+      assert.throws(
+        () => store.appendEntry(feedback),
+        /unreadable round transaction/,
+      );
+      assert.equal(store.readRound(loopId, 1), null,
+        "the rejected write leaves no round document");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

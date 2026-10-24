@@ -2656,7 +2656,7 @@
         "check",
         "detail"
       ],
-      "description": "A single flag raised during self-evaluation verification.\r\nEach flag identifies a specific inconsistency between the agent's\r\nself-reported data and the loop's cross-round lineage."
+      "description": "A single flag raised during self-evaluation verification.\r\nEach flag identifies a specific inconsistency between the agent's\r\nself-reported data and the committed round history."
     },
     "VerificationResult": {
       "type": "object",

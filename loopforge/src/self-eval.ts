@@ -34,9 +34,9 @@ import {
 
 // ── Diagnostics ───────────────────────────────────────────────────────────
 
-/** A diagnostics sink. `buildSelfEvaluation` keeps working without one (the
- *  engine parses historical last_round_result payloads); the submission
- *  boundary always supplies one. */
+/** A diagnostics sink. `buildSelfEvaluation` keeps working without one; the
+ *  submission boundary always supplies one so dropped/normalized payload
+ *  fields stay visible on the receipt. */
 export interface DiagnosticSink {
   push(
     path: string,

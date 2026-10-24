@@ -504,10 +504,10 @@ function parseMachineObservations(value: unknown): MachineObservation[] | null {
       !isRecord(item.data)
     ) return null;
     // v3.9.1: Git observations moved to schema 2 (complete boundary
-    // fingerprints); command/custom observations remain schema 1. v3.9.9: the
-    // nested custom progress snapshot is inner schema 2. ONE judgment is
-    // shared with legacyTransactionRounds, so the parser can never reject a
-    // round the reporter does not report (or the reverse).
+    // fingerprints); command/custom observations remain schema 1. Custom
+    // observation data is opaque — it never carries a progress fact. ONE
+    // judgment is shared with legacyTransactionRounds, so the parser can never
+    // reject a round the reporter does not report (or the reverse).
     if (observationVersionIssue(
       item.kind, item.schemaVersion, item.data, item.status)) {
       return null;

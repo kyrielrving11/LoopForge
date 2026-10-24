@@ -3,10 +3,12 @@ import assert from "node:assert/strict";
 import { LoopForgeEngine } from "../engine.js";
 import {
   makeRoundId,
+  prepareRejectedAttempt,
   prepareRoundTransaction,
   parseRoundTransactionSnapshot,
   RoundTransactionCoordinator,
 } from "../round-transaction.js";
+import { PROMPT_ARTIFACT_SCHEMA_VERSION } from "../protocol.js";
 import type { RoundTransactionSnapshot } from "../round-transaction.js";
 import type { SelfEvaluation } from "../protocol.js";
 import { queryLoopEntries } from "../loop-store.js";
@@ -104,6 +106,54 @@ describe("schema 6 structural invariants", () => {
       null,
       "a committed evaluation must carry the immutable operator surface",
     );
+  });
+
+  it("a retry stamps the retry compile facts and the same acceptance", () => {
+    const loopId = "retry-compiled";
+    const rejected: RoundTransactionSnapshot = {
+      ...prepare(loopId, 1, []),
+      phase: "rejected",
+    };
+    const artifact = {
+      schemaVersion: PROMPT_ARTIFACT_SCHEMA_VERSION,
+      roundId: rejected.roundId,
+      round: rejected.round,
+      attempt: rejected.attempt + 1,
+      level: "l0" as const,
+      renderedPrompt: "retry prompt",
+      promptHash: "retry-hash",
+      stateHash: "retry-state",
+      sections: [],
+      droppedSections: [],
+      protectedOverflow: false,
+      budget: 0,
+      renderedChars: 12,
+      coverage: { active: [], rendered: [], omitted: [], complete: true },
+    };
+    const retryCompiled = {
+      task: "Retry task",
+      goalId: "retry-goal",
+      constraintsActive: ["retry constraint"],
+      constraintsRetired: ["old constraint"],
+    };
+    const retryAcceptance = {
+      task: "Operator task",
+      success_criteria: ["ship it"],
+      hard_constraints: ["no deps"],
+    };
+    const next = prepareRejectedAttempt(
+      rejected,
+      artifact,
+      retryCompiled,
+      retryAcceptance,
+    );
+    assert.equal(next.phase, "prompted");
+    assert.equal(next.attempt, 2);
+    assert.deepEqual(next.compiled, retryCompiled,
+      "the retry transaction carries the retry compile facts");
+    assert.deepEqual(next.operatorAcceptance, retryAcceptance);
+    assert.equal(next.evaluation, undefined);
+    assert.equal(next.result, undefined);
   });
 
   it("requires acceptance and forbids compile facts on a rollback directive", () => {

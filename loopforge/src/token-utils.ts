@@ -135,8 +135,8 @@ export function findingKey(flag: {
 }
 
 /** v3.9.7: the stable, user-referenceable id of one current machine finding.
- *  The JSON `findingKey` remains the internal grouping key; `f-` is what the
- *  prompt renders and what `prompt_requests.emphasize` can cite. */
+ *  The JSON `findingKey` remains the internal grouping key; `f-` is the id the
+ *  prompt renders for the Agent. */
 export function deriveFindingId(flag: {
   check: string;
   field: string;

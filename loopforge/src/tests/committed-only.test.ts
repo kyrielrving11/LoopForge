@@ -99,5 +99,16 @@ describe("v4.0.1 — committed-only history", () => {
       "the feedback carries the complete transaction snapshot",
     );
     assert.deepEqual(document?.events, []);
+
+    // Written shapes: one session document (not in the flat entry log) and
+    // one :feedback entry. No compile lineage and no delegation journal.
+    const taskTypes = store.entries.map((entry) => String(entry.task_type ?? ""));
+    assert.deepEqual(taskTypes, ["feedback"]);
+    assert.equal(
+      store.entries[0]?.task_id,
+      "loop:one-feedback:r1:feedback",
+    );
+    assert.ok(!taskTypes.includes("loop_lineage"));
+    assert.ok(!taskTypes.includes("delegation_journal"));
   });
 });

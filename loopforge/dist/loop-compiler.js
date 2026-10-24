@@ -135,7 +135,7 @@ function evolveConstraints(request, objective, previous, windowRounds, roundOneP
     });
     const effectiveKeys = new Set(retraction.effective.map(normalizeText));
     // Only round 1 accepts a plan input. After round 1 the active set is carried
-    // from committed lineage; a late request value is not a fact.
+    // from committed compile facts; a late request value is not a fact.
     const base = uniqueNormalized([
         ...carried,
         ...roundOnePlan,
@@ -434,8 +434,8 @@ function committedBacktrackBrief(loopId, round, context) {
 export function compileLoop(request, context, options = {}) {
     const operatorAcceptance = options.operatorAcceptance ?? null;
     // ONE history window and ONE previous-round fact bundle for the whole
-    // compile. Every consumer below reads these values; none re-reads the
-    // caller's mutable last_round_result.
+    // compile. Every consumer below reads these values; none re-derives the
+    // window with a private rule.
     const entries = contextEntries(context);
     const history = buildCommittedHistory(entries);
     // The operator surface is immutable. A caller-supplied copy that disagrees
@@ -474,14 +474,14 @@ export function compileLoop(request, context, options = {}) {
         currentRound: request.round,
         rounds: windowRounds,
     });
-    // v3.4/v3.8/v3.8.1: the ACTIVE Round Contract, its per-item statuses and the
-    // verified sub-goal facts for this compile — ONE `deriveRoundFacts` call,
-    // the same bundle the projection consumes. Derived from committed rounds, so
-    // rejection retries, resume, unpause and backtrack compiles (which carry no
-    // last_round_result) keep showing the same contract, and a verified or
-    // blocked contract stops being shown. A verified item stays proven after its
-    // contract closes because the bundle reads the whole history, not the active
-    // contract. The compile path has no in-flight observations of its own.
+    // v3.4/v3.8/v3.8.1: the ACTIVE Round Contract and its per-item statuses for
+    // this compile — ONE `deriveRoundFacts` call, the same bundle the projection
+    // consumes. Derived from committed rounds, so rejection retries, resume,
+    // unpause and backtrack compiles keep showing the same contract, and a
+    // verified or blocked contract stops being shown. A verified item stays
+    // proven after its contract closes because the bundle reads the whole
+    // history, not the active contract. The compile path has no in-flight
+    // observations of its own.
     const roundFacts = deriveRoundFacts({
         rounds: windowRounds,
         currentRound: request.round,

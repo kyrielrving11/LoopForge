@@ -50,7 +50,16 @@ export function makeExecutionFeedback(
  *  Every field is consumed by at least one downstream function.
  *
  *  v1.4 (P0–P2): Three new optional fields enable cognitive evolution.
- *  v1.5 (P4–P5): Execution evidence, progress tracking, and self-correction. */
+ *  v1.5 (P4–P5): Execution evidence, progress tracking, and self-correction.
+ *
+ *  Optional fields are normalized leniently and never dropped silently: the
+ *  normalizer returns stable diagnostics for every correction, and a committed
+ *  transaction persists them with the submitted-field manifest. Four fields
+ *  are structural exceptions validated BEFORE the round advances —
+ *  `subgoal_updates`, `round_contract`, `contract_transition`, and
+ *  `execution_report.contract_item_claims` — because each references the exact
+ *  derived set the Agent was shown. `scope` is deliberately not structural:
+ *  optional, report-only intent, normalized leniently and never rejected. */
 export interface SelfEvaluation {
   /** true ONLY if all hard constraints were met and the task goal was achieved. */
   success: boolean;
@@ -1374,7 +1383,12 @@ export interface ContractItemProposal {
  *  not an activity). New declarations must provide it; it stays optional in
  *  this persisted type because committed history may contain legacy
  *  contracts without a label. `items[]` are the acceptance conditions;
- *  `verify_with` remains item-level. */
+ *  `verify_with` remains item-level.
+ *
+ *  The runtime validates structure, command bindings and references. It never
+ *  judges whether `work_item` sounds like a deliverable, whether an item
+ *  matches a command semantically, or whether a command is the right
+ *  acceptance test; that is Agent/operator semantic judgment. */
 export interface RoundContractProposal {
   /** The bounded deliverable this slice produces. Required for NEW
    *  declarations, optional when reading legacy committed history. */

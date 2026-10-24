@@ -184,7 +184,7 @@
         "constraint_violations",
         "should_continue"
       ],
-      "description": "Structured self-evaluation submitted at the round boundary.\nThe agent outputs this after completing each round.\nEvery field is consumed by at least one downstream function.\n\nv1.4 (P0–P2): Three new optional fields enable cognitive evolution.\nv1.5 (P4–P5): Execution evidence, progress tracking, and self-correction."
+      "description": "Structured self-evaluation submitted at the round boundary.\nThe agent outputs this after completing each round.\nEvery field is consumed by at least one downstream function.\n\nv1.4 (P0–P2): Three new optional fields enable cognitive evolution.\nv1.5 (P4–P5): Execution evidence, progress tracking, and self-correction.\n\nOptional fields are normalized leniently and never dropped silently: the\nnormalizer returns stable diagnostics for every correction, and a committed\ntransaction persists them with the submitted-field manifest. Four fields\nare structural exceptions validated BEFORE the round advances —\n`subgoal_updates`, `round_contract`, `contract_transition`, and\n`execution_report.contract_item_claims` — because each references the exact\nderived set the Agent was shown. `scope` is deliberately not structural:\noptional, report-only intent, normalized leniently and never rejected."
     },
     "CheckpointRole": {
       "type": "string",
@@ -3168,7 +3168,7 @@
       "required": [
         "items"
       ],
-      "description": "v3.9.5: A Round Contract proposal for the NEXT round. It becomes ACTIVE\nonly after the declaring round commits. Identity (rc-/rci-) is derived\nfrom CONTENT ONLY — restating an unchanged contract keeps the same\nidentity, unlike a SubGoal whose id includes its declaration round.\n\n`work_item` is the bounded deliverable this slice produces (an outcome,\nnot an activity). New declarations must provide it; it stays optional in\nthis persisted type because committed history may contain legacy\ncontracts without a label. `items[]` are the acceptance conditions;\n`verify_with` remains item-level."
+      "description": "v3.9.5: A Round Contract proposal for the NEXT round. It becomes ACTIVE\nonly after the declaring round commits. Identity (rc-/rci-) is derived\nfrom CONTENT ONLY — restating an unchanged contract keeps the same\nidentity, unlike a SubGoal whose id includes its declaration round.\n\n`work_item` is the bounded deliverable this slice produces (an outcome,\nnot an activity). New declarations must provide it; it stays optional in\nthis persisted type because committed history may contain legacy\ncontracts without a label. `items[]` are the acceptance conditions;\n`verify_with` remains item-level.\n\nThe runtime validates structure, command bindings and references. It never\njudges whether `work_item` sounds like a deliverable, whether an item\nmatches a command semantically, or whether a command is the right\nacceptance test; that is Agent/operator semantic judgment."
     },
     "ContractTransition": {
       "type": "object",

@@ -45,7 +45,6 @@ function rawFor(path: FieldPath, value: unknown): Record<string, unknown> {
 const VALID_ITEM = {
   description: "works",
   criterion_refs: [],
-  subgoal_refs: [],
   verify_with: ["verify"],
 };
 const VALID_CONTRACT = {
@@ -119,7 +118,6 @@ const CASES: FieldCase[] = [
     invalid: "not-array",
     partial: ["the API was synchronous", 1],
   },
-  { path: "objective_refinement", valid: "add rollback", invalid: 42 },
   {
     path: "retracted_constraints",
     valid: ["old constraint"],
@@ -141,11 +139,6 @@ const CASES: FieldCase[] = [
     valid: [VALID_WORKER],
     invalid: "not-array",
     partial: [VALID_WORKER, 1],
-  },
-  {
-    path: "prompt_requests",
-    valid: { emphasize: ["exact constraint text"] },
-    invalid: {},
   },
   { path: "compression_checkpoint", valid: true, invalid: "yes" },
   { path: "checkpoint_label", valid: "parser complete", invalid: 42 },
@@ -212,7 +205,6 @@ describe("field accounting — empty and null semantics", () => {
       { discovered_constraints: [] },
       { wrong_assumptions: [] },
       { execution_report: { files_changed: [] } },
-      { objective_refinement: "" },
       { checkpoint_label: "" },
     ]) {
       const { normalized, accounting } = account(raw);
@@ -234,11 +226,10 @@ describe("field accounting — empty and null semantics", () => {
     assert.ok(!absent.normalized.submittedFields.includes("execution_report.tests_reported"));
   });
 
-  it("drops an empty blocker / no_change_reason / prompt_requests", () => {
+  it("drops an empty blocker / no_change_reason", () => {
     for (const [path, raw] of [
       ["blocker", { blocker: "" }],
       ["no_change_reason", { no_change_reason: "" }],
-      ["prompt_requests", { prompt_requests: {} }],
     ] as const) {
       const { normalized, accounting } = account(raw);
       assert.ok(normalized.submittedFields.includes(path));

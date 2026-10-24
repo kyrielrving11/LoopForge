@@ -1151,7 +1151,7 @@ describe("v3.8 — Round Contract item enforcement", () => {
   const itemContract = (overrides: Record<string, unknown> = {}) => ({
     work_item: "Slice A",
     scope: ["src/auth"],
-    items: [{ description: "login works", criterion_refs: [], subgoal_refs: [], verify_with: ["verify"] }],
+    items: [{ description: "login works", criterion_refs: [], verify_with: ["verify"] }],
     ...overrides,
   });
 

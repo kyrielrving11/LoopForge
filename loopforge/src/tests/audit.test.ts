@@ -23,7 +23,6 @@ const CONTRACT = {
   items: [{
     description: "works",
     criterion_refs: [],
-    subgoal_refs: [],
     verify_with: ["verify"],
   }],
 };
@@ -73,10 +72,10 @@ function committedFeedback(
     loop_lineage: {
       round,
       round_transaction: {
-        schema_version: 5,
+        schema_version: 6,
         round_id: `loop:audit-loop:round:${round}`,
         snapshot: {
-          schemaVersion: 5,
+          schemaVersion: 6,
           kind: "evaluation" as const,
           branchId: "loop:audit-loop:branch:root",
           transactionId: `tx-audit-loop-${round}-1`,
@@ -87,6 +86,17 @@ function committedFeedback(
           phase: "committed",
           beforeEvidence: [],
           afterEvidence,
+          operatorAcceptance: {
+            task: "Audit task",
+            success_criteria: [],
+            hard_constraints: [],
+          },
+          compiled: {
+            task: "Audit task",
+            goalId: "audit-loop:audit-task",
+            constraintsActive: [],
+            constraintsRetired: [],
+          },
           evaluation,
           submittedFields: [
             "success", "output_summary", "constraint_violations", "should_continue",

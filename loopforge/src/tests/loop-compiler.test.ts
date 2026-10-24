@@ -30,6 +30,7 @@ import {
 import type { MachineObservation, VerificationFlag } from "../protocol.js";
 import type { ActiveContractView } from "../round-contract.js";
 import type { SelfEvalPromptContext } from "../submission-guidance.js";
+import { OperatorAcceptanceConflictError } from "../errors.js";
 
 /** Minimal prompt context for the evaluation-block tests. */
 function evalCtx(
@@ -60,7 +61,6 @@ function testContract(overrides: Partial<ActiveContractView> = {}): ActiveContra
       id: "rci-12345678",
       description: "verification command passes",
       criterion_refs: [],
-      subgoal_refs: [],
       verify_with: ["verify"],
     }],
     config_hash_by_command: {},
@@ -185,44 +185,6 @@ describe("cognitive-state compiler", () => {
     assert.match(response.prompt, /Preserve user data/);
   });
 
-  it("evolves discoveries, objective refinements, retractions, and evidence", () => {
-    const response = compileLoop(makeLoopCompileRequest({
-      loop_id: "evolution",
-      round: 2,
-      task: "Finish migration",
-      force_level: "l2",
-      loop_objective: makeLoopObjective({
-        loop_id: "evolution",
-        objective: "Migrate safely",
-        success_criteria: ["All tests pass"],
-        hard_constraints: ["No data loss"],
-      }),
-      last_round_result: makeLoopRoundResult({
-        round: 1,
-        success: false,
-        output_summary: "Migrated schema",
-        discovered_constraints: ["Keep rollback path"],
-        objective_refinement: "Include rollback verification",
-        retracted_constraints: ["Temporary freeze"],
-        wrong_assumptions: ["Migration was reversible"],
-        emerged_subtasks: ["Verify rollback"],
-        execution_report: {
-          files_changed: ["src/store.ts"],
-          tests_reported: { passed: 10, failed: 1, skipped: 0 },
-          criterion_claims: criterionClaims([], ["All tests pass"]),
-        },
-      }),
-    }), null);
-    assert.ok(response.constraints_active.includes("Keep rollback path"));
-    assert.ok(!response.constraints_retired.includes("Temporary freeze"),
-      "a target that was never active is a no-op, not an applied retraction");
-    assert.match(response.prompt, /Verify rollback/);
-    assert.equal(response.loop_objective?.objective, "Migrate safely",
-      "objective refinements are reports, not operator-objective rewrites");
-    // last_round_result remains available for objective/constraint evolution,
-    // but without a committed view its report must not enter the state file.
-    assert.doesNotMatch(response.state_file_content ?? "", /src\/store\.ts|10 passed/);
-  });
 
   it("keeps mandatory verification findings in an L0 retry", () => {
     const response = compileLoop(makeLoopCompileRequest({
@@ -328,38 +290,6 @@ describe("cognitive-state compiler", () => {
     assert.equal(doneSubs[0].description, "Add error handling to login");
   });
 
-  it("does not apply an update for an unknown sub-goal ID at compile time", () => {
-    const vault = {
-      results: [{
-        loop_id: "sg-unknown",
-        loop_lineage: {
-          loop_id: "sg-unknown",
-          round: 1,
-          goal_id: deriveGoalId("sg-unknown", "Refactor database"),
-          task: "Refactor database",
-          constraints_active: [],
-          recompile_level: "l2",
-        },
-        emerged_subtasks: ["Write unit tests for queries"],
-        success: true,
-        output_summary: "Started refactor",
-      }],
-    };
-    const response = compileLoop(makeLoopCompileRequest({
-      loop_id: "sg-unknown",
-      round: 2,
-      task: "Refactor database",
-      force_level: "l2",
-      last_round_result: makeLoopRoundResult({
-        round: 1,
-        success: true,
-        output_summary: "Tests written",
-        subgoal_updates: [{ id: "sg-00000000", status: "done" }],
-      }),
-    }), vault);
-    const doneSubs = response.sub_goals?.filter(sg => sg.status === "done") ?? [];
-    assert.equal(doneSubs.length, 0, "an unknown ID is a no-op for derivation (rejected pre-advance)");
-  });
 
   it("reaches in_progress only through an explicit update", () => {
     const sgId = deriveSubGoalId("sg-inprogress", 1, 0, "Add rate limiting");
@@ -392,49 +322,6 @@ describe("cognitive-state compiler", () => {
       "in_progress is produced only by an explicit agent declaration");
   });
 
-  it("keeps older committed transitions when a later round declares nothing (no regression)", () => {
-    const sgId = deriveSubGoalId("sg-persist", 1, 0, "Add error handling to login");
-    const vault = {
-      results: [
-        withTransaction({
-          loop_id: "sg-persist",
-          loop_lineage: {
-            loop_id: "sg-persist", round: 1, goal_id: deriveGoalId("sg-persist", "Fix auth"),
-            task: "Fix auth", constraints_active: [], recompile_level: "l2",
-            committed_action: "continue",
-          },
-          emerged_subtasks: ["Add error handling to login"],
-          success: true,
-          output_summary: "Started",
-        }),
-        withTransaction({
-          loop_id: "sg-persist",
-          loop_lineage: {
-            loop_id: "sg-persist", round: 2, goal_id: deriveGoalId("sg-persist", "Fix auth"),
-            task: "Fix auth", constraints_active: [], recompile_level: "l2",
-            committed_action: "continue",
-          },
-          subgoal_updates: [{ id: sgId, status: "done" }],
-          success: true,
-          output_summary: "Done auth",
-        }),
-      ],
-    };
-    const response = compileLoop(makeLoopCompileRequest({
-      loop_id: "sg-persist",
-      round: 3,
-      task: "Fix auth",
-      force_level: "l2",
-      last_round_result: makeLoopRoundResult({
-        round: 2,
-        success: true,
-        output_summary: "Done auth",
-      }),
-    }), vault);
-    const doneSubs = response.sub_goals?.filter(sg => sg.status === "done") ?? [];
-    assert.equal(doneSubs.length, 1,
-      "a done transition from round 2 must survive a round-3 compile with no new declarations");
-  });
 
   it("v3.7.1: validateSubGoalUpdates enforces the closed matrix and terminality", () => {
     const sg = (id: string, status: SubGoal["status"]): SubGoal => ({
@@ -486,91 +373,7 @@ describe("cognitive-state compiler", () => {
 
   // ── v2.8: L2 pointer mode ─────────────────────────────────────────────
 
-  it("v3.9.5: L2 never embeds the full state blob, but still writes the state file", () => {
-    const response = compileLoop(makeLoopCompileRequest({
-      loop_id: "p2-pointer",
-      round: 2,
-      task: "Refactor database layer",
-      force_level: "l2",
-      loop_objective: makeLoopObjective({
-        loop_id: "p2-pointer",
-        objective: "Refactor database layer",
-        success_criteria: ["All tests pass"],
-      }),
-      last_round_result: makeLoopRoundResult({
-        round: 1,
-        success: false,
-        output_summary: "Started refactor",
-        execution_report: {
-          files_changed: ["src/db.ts"],
-          tests_reported: { passed: 8, failed: 2, skipped: 0 },
-          criterion_claims: criterionClaims([], ["All tests pass"]),
-        },
-      }),
-    }), null);
-    assert.ok(!(response.prompt ?? "").includes("Full Rehydrated State"),
-      "L2 prompt must not embed the full state blob");
-    assert.ok(!(response.prompt ?? "").includes("Progress Dashboard"),
-      "the L2 prompt carries no re-composed dashboard");
-    assert.ok(!(response.prompt ?? "").includes("Started refactor"),
-      "a fallback output summary is not prompt narrative");
-    assert.ok(response.state_file_content,
-      "state_file_content should still be present");
-    assert.ok(response.state_file_content.includes("LoopForge State"),
-      "state file should contain full state");
-  });
 
-  // ═════════════════════════════════════════════════════════════════════════
-  // v2.11: Constraint & Criterion ID System
-  // ═════════════════════════════════════════════════════════════════════════
-
-  it("populates constraint IDs in constraint_metadata", () => {
-    const response = compileLoop(makeLoopCompileRequest({
-      loop_id: "id-cm",
-      round: 2,
-      task: "Implement auth",
-      loop_objective: makeLoopObjective({
-        objective: "Build auth system",
-        success_criteria: ["Login endpoint works"],
-        hard_constraints: ["No plaintext passwords"],
-        loop_id: "id-cm",
-      }),
-      constraints_from_plan: ["Use bcrypt for hashing"],
-      last_round_result: makeLoopRoundResult({
-        round: 1,
-        success: true,
-        output_summary: "Set up project",
-        discovered_constraints: ["Rate limit login attempts"],
-      }),
-    }), null);
-
-    const meta = response.constraint_metadata ?? [];
-    assert.ok(meta.length >= 4, `Expected >= 4 constraints, got ${meta.length}`);
-
-    // v3.3.1: identity follows the text's SOURCE — hard/plan/discovered
-    // constraints live in the c-XXXXXXXX namespace, success criteria in the
-    // cr-XXXXXXXX namespace (their own section and the verification gate's
-    // criteriaMatch are ID-first on cr-). One text, one ID — the merged
-    // active list must render the criterion under the same identity as its
-    // own section instead of re-deriving a c- variant.
-    const identityOf = (m: { text: string }): string =>
-      m.text === "Login endpoint works" ? "cr" : "c";
-    for (const m of meta) {
-      assert.ok(m.id, `ConstraintMeta missing id for "${m.text}"`);
-      const prefix = identityOf(m);
-      assert.match(m.id, new RegExp(`^${prefix}-[a-f0-9]{8}$`),
-        `ID "${m.id}" should match ${prefix}-XXXXXXXX pattern for "${m.text}"`);
-    }
-
-    // Same text → same ID (deterministic)
-    const hardIds = meta.filter(m => m.text === "No plaintext passwords");
-    assert.equal(hardIds.length, 1);
-    assert.ok(hardIds[0].id);
-    const criteriaIds = meta.filter(m => m.text === "Login endpoint works");
-    assert.equal(criteriaIds.length, 1);
-    assert.match(criteriaIds[0].id, /^cr-[a-f0-9]{8}$/,
-      "a success-criterion text must carry its cr- identity in the metadata");
-  });
 
   it("derives different constraint IDs for different texts", () => {
     const response = compileLoop(makeLoopCompileRequest({
@@ -657,107 +460,8 @@ describe("cognitive-state compiler", () => {
     assert.ok(block.includes("including deletions"));
   });
 
-  it("older vault entries without IDs still match via Jaccard fallback", () => {
-    // Simulate old vault entries with text-only constraint violations
-    const response = compileLoop(makeLoopCompileRequest({
-      loop_id: "id-fallback",
-      round: 3,
-      task: "Implement auth",
-      loop_objective: makeLoopObjective({
-        objective: "Build auth system",
-        success_criteria: ["Login endpoint works"],
-        hard_constraints: ["No plaintext passwords"],
-        loop_id: "id-fallback",
-      }),
-      last_round_result: makeLoopRoundResult({
-        round: 2,
-        success: false,
-        output_summary: "Worked on login",
-        // Agent uses text (not ID) for violation — backward compat
-        constraint_violations: ["No plaintext passwords"],
-      }),
-    }), null);
 
-    // The compiler should match the text-based violation to the hard constraint
-    // via Jaccard fallback. Verify the response is valid.
-    assert.equal(response.status, "ok");
-  });
 
-  it("ID-first matching correctly identifies constraint violations by ID", () => {
-    // Round 1: set up constraints
-    const r1 = compileLoop(makeLoopCompileRequest({
-      loop_id: "id-match",
-      round: 1,
-      task: "Implement auth",
-      loop_objective: makeLoopObjective({
-        objective: "Build auth system",
-        success_criteria: ["Login endpoint works"],
-        hard_constraints: ["No plaintext passwords"],
-        loop_id: "id-match",
-      }),
-    }), null);
-
-    // Get the constraint ID from metadata
-    const meta = r1.constraint_metadata ?? [];
-    const hardId = meta.find(m => m.text === "No plaintext passwords")?.id;
-    assert.ok(hardId, "Should have an ID for the hard constraint");
-
-    // Round 2: agent violates using the ID
-    const r2 = compileLoop(makeLoopCompileRequest({
-      loop_id: "id-match",
-      round: 2,
-      task: "Implement auth",
-      loop_objective: makeLoopObjective({
-        objective: "Build auth system",
-        success_criteria: ["Login endpoint works"],
-        hard_constraints: ["No plaintext passwords"],
-        loop_id: "id-match",
-      }),
-      last_round_result: makeLoopRoundResult({
-        round: 1,
-        success: false,
-        output_summary: "Worked on login",
-        constraint_violations: [hardId!], // Use the ID!
-      }),
-    }), null);
-
-    // Should compile successfully — the ID was matched to the constraint
-    assert.equal(r2.status, "ok");
-    // The constraint should still be present in metadata
-    const meta2 = r2.constraint_metadata ?? [];
-    const hardMeta = meta2.find(m => m.text === "No plaintext passwords");
-    assert.ok(hardMeta, "Hard constraint should still be in metadata");
-    // Note: last_violated_at_round requires vault context for cross-round
-    // scanning, which is null in unit tests. The matching is verified
-    // end-to-end in the MCP lifecycle tests.
-  });
-
-  it("criterion ID-based dedup distinguishes similar criteria", () => {
-    // Two similar criteria with different IDs should both appear as new
-    const response = compileLoop(makeLoopCompileRequest({
-      loop_id: "id-crit-dedup",
-      round: 3,
-      task: "Feature work",
-      loop_objective: makeLoopObjective({
-        objective: "Build feature",
-        success_criteria: ["API returns valid JSON", "API returns valid XML"],
-        loop_id: "id-crit-dedup",
-      }),
-      last_round_result: makeLoopRoundResult({
-        round: 2,
-        success: true,
-        output_summary: "API work done",
-        execution_report: {
-          files_changed: ["api.ts"],
-          tests_reported: null,
-          // Both criteria met — use IDs for precise matching
-          criterion_claims: criterionClaims(["cr-" + computeGoalTextHash("API returns valid JSON").slice(0, 8)], []),
-        },
-      }),
-    }), null);
-
-    assert.equal(response.status, "ok");
-  });
 
   it("forces L2 rehydration after a backtrack (recovery boundary)", () => {
     const goalId = deriveGoalId("recovery-loop", "Recover the vault", "g1");
@@ -859,22 +563,17 @@ describe("v3.2 — criterion status derivation", () => {
   it("derives claimed / remaining / unknown with claimed rounds and linked sub-goals", () => {
     const statuses = deriveCriterionStatuses("cs-test", {
       results: [
-        {
-          loop_id: "cs-test",
+        committedFeedbackRound(1, {
+          loopId: "cs-test",
           success: true,
-          loop_lineage: { loop_id: "cs-test", round: 1, constraints_active: [] },
-          execution_report: {
-            criterion_claims: criterionClaims([], ["Parser complete", "Tests ≥90%"]),
-          },
-        },
-        {
-          loop_id: "cs-test",
+          remaining: ["Parser complete", "Tests ≥90%"],
+        }),
+        committedFeedbackRound(2, {
+          loopId: "cs-test",
           success: true,
-          loop_lineage: { loop_id: "cs-test", round: 2, constraints_active: [] },
-          execution_report: {
-            criterion_claims: criterionClaims(["Parser complete"], ["Tests ≥90%"]),
-          },
-        },
+          met: ["Parser complete"],
+          remaining: ["Tests ≥90%"],
+        }),
       ],
     }, makeLoopObjective({
       objective: "Build a parser",
@@ -885,10 +584,6 @@ describe("v3.2 — criterion status derivation", () => {
     const parser = statuses.find((s) => s.text === "Parser complete")!;
     assert.equal(parser.status, "claimed");
     assert.equal(parser.met_at_round, 2, "first met report wins");
-    // v3.8.1: no contract here, so nothing links — and identical wording alone
-    // never links. See the explicit-refs test below.
-    assert.deepEqual(parser.related_subgoal_ids, [],
-      "text alone does not link a criterion to a sub-goal");
 
     const tests = statuses.find((s) => s.text === "Tests ≥90%")!;
     assert.equal(tests.status, "remaining");
@@ -899,69 +594,7 @@ describe("v3.2 — criterion status derivation", () => {
     assert.match(deps.id, /^cr-/);
   });
 
-  it("links a criterion to sub-goals only through an item's explicit refs", () => {
-    // v3.8.1: `related_subgoal_ids` comes from the shared criterion facts,
-    // which read `ContractItemProposal.subgoal_refs` on an item that
-    // references the criterion (see round-facts.ts). Identical wording alone
-    // links nothing — the Jaccard guess at "which sub-goal is this criterion
-    // about" is gone.
-    const parserCriterionId = deriveCriterionId("Parser complete");
-    const statuses = deriveCriterionStatuses("cs-refs", {
-      results: [{
-        loop_id: "cs-refs",
-        success: true,
-        loop_lineage: { loop_id: "cs-refs", round: 1, constraints_active: [] },
-        execution_report: {
-          criterion_claims: criterionClaims([], ["Parser complete"]),
-        },
-      }],
-    }, makeLoopObjective({
-      objective: "Build a parser",
-      success_criteria: ["Parser complete", "Tests ≥90%"],
-    }), 2, null, [
-      // The fact an item that references the criterion AND names the sub-goal
-      // produces.
-      { criterion_id: parserCriterionId, related_subgoal_ids: ["sg-1"] },
-      // An item with no subgoal_refs links nothing.
-      { criterion_id: deriveCriterionId("Tests ≥90%"), related_subgoal_ids: [] },
-    ]);
 
-    const parser = statuses.find((s) => s.text === "Parser complete")!;
-    assert.deepEqual(parser.related_subgoal_ids, ["sg-1"],
-      "an item that references the criterion AND names the sub-goal links them");
-    const tests = statuses.find((s) => s.text === "Tests ≥90%")!;
-    assert.deepEqual(tests.related_subgoal_ids, [],
-      "an item with no subgoal_refs links nothing");
-  });
-
-  it("renders the Goal → Criteria view in the L2 prompt and the state file", () => {
-    const response = compileLoop(makeLoopCompileRequest({
-      loop_id: "gc-prompt",
-      round: 2,
-      task: "Build a parser",
-      force_level: "l2",
-      loop_objective: makeLoopObjective({
-        objective: "Build a parser",
-        success_criteria: ["Parser complete", "Tests ≥90%"],
-      }),
-      last_round_result: makeLoopRoundResult({
-        round: 1,
-        success: true,
-        execution_report: {
-          files_changed: ["src/parser.ts"],
-          tests_reported: { passed: 10, failed: 0, skipped: 0 },
-          criterion_claims: criterionClaims(["Parser complete"], ["Tests ≥90%"]),
-        },
-      }),
-    }), null);
-    // v3.8.1: the Goal → Criteria dashboard is gone from the prompt. The
-    // criterion list survives in the state file, where a human or external
-    // tool reads it — the prompt no longer duplicates it.
-    assert.doesNotMatch(response.prompt, /Goal → Criteria/);
-    assert.match(response.state_file_content ?? "", /## Goal → Criteria/);
-    assert.match(response.state_file_content ?? "", /Parser complete/);
-    assert.match(response.state_file_content ?? "", /Tests ≥90%/);
-  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -975,7 +608,7 @@ describe("v3.8.1 — recurring flags", () => {
     number: number,
     opts: { violations?: string[]; flags?: VerificationFlag[] } = {},
   ): CommittedRoundView => ({
-    source: "merged",
+    source: "feedback",
     sourceEntry: {},
     loopId: "recurring",
     round: number,
@@ -989,6 +622,7 @@ describe("v3.8.1 — recurring flags", () => {
     checkpoints: [],
     restore: null,
     operatorAcceptance: null,
+    compiled: null,
     attempt: 1,
     promptArtifact: null,
     evaluation: null,
@@ -1195,65 +829,7 @@ describe("manageConstraintLifecycle — current-round violations (v3.2.1)", () =
     );
   });
 
-  it("keeps a quiet discovered constraint active (v3.7: decay removed)", () => {
-    // Round 1 discovers the constraint; rounds 2–17 never mention it again.
-    // Pre-v3.7 constraint_inactive_rounds (15) would have demoted it to
-    // inactive; the time-aware decay was removed — discovered constraints
-    // stay in the active set until the agent retracts them.
-    // The active set propagates via previous round's constraints_active —
-    // fixture mirrors the real lineage chain.
-    const discoveredText = "Rate limit login attempts";
-    const results = [
-      withTransaction({
-        loop_id: "id-re",
-        loop_lineage: {
-          loop_id: "id-re", round: 1,
-          constraints_active: [discoveredText],
-          committed_action: "continue",
-        },
-        success: true,
-        constraint_violations: [] as string[],
-        discovered_constraints: [discoveredText],
-      }),
-      withTransaction({
-        loop_id: "id-re",
-        loop_lineage: {
-          loop_id: "id-re", round: 17,
-          constraints_active: [discoveredText],
-          committed_action: "continue",
-        },
-        success: true,
-        constraint_violations: [] as string[],
-        discovered_constraints: [] as string[],
-      }),
-    ];
-    const base = makeLoopCompileRequest({
-      loop_id: "id-re",
-      round: 18,
-      task: "Continue auth work",
-      loop_objective: makeLoopObjective({
-        objective: "Build auth system",
-        success_criteria: ["Login endpoint works"],
-        loop_id: "id-re",
-      }),
-      constraints_from_plan: [] as string[],
-    });
 
-    const quiet = compileLoop({ ...base, last_round_result: makeLoopRoundResult({
-      round: 17,
-      success: true,
-      output_summary: "Quiet rounds",
-      constraint_violations: [],
-    }) }, { results });
-    assert.ok(
-      (quiet.constraints_active ?? []).includes(discoveredText),
-      "a quiet discovered constraint must stay active (no decay)",
-    );
-    const meta = (quiet.constraint_metadata ?? []).find((m) => m.text === discoveredText);
-    assert.ok(meta, "constraint must still carry metadata");
-    assert.equal(meta!.source, "discovered");
-    assert.equal(meta!.last_violated_at_round, 0, "never violated");
-  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1466,14 +1042,14 @@ describe("v3.4 — ACTIVE Round Contract derivation (compileLoop)", () => {
     work_item: "Slice A",
     scope: ["src/a"],
     items: [
-      { description: "a one", criterion_refs: ["cr-a-1"], subgoal_refs: [], verify_with: ["verify"] },
-      { description: "a two", criterion_refs: ["cr-a-2"], subgoal_refs: [], verify_with: ["verify"] },
+      { description: "a one", criterion_refs: ["cr-a-1"], verify_with: ["verify"] },
+      { description: "a two", criterion_refs: ["cr-a-2"], verify_with: ["verify"] },
     ],
   };
   const B = {
     work_item: "Slice B",
     scope: ["src/b"],
-    items: [{ description: "b one", criterion_refs: ["cr-b-1"], subgoal_refs: [], verify_with: ["verify"] }],
+    items: [{ description: "b one", criterion_refs: ["cr-b-1"], verify_with: ["verify"] }],
   };
   const TASK = "Build the whole thing";
   const compileAt = (
@@ -1578,12 +1154,12 @@ describe("v3.5 — post-backtrack contract revision (compile side)", () => {
   const A = {
     work_item: "Stalled slice",
     scope: ["src/a"],
-    items: [{ description: "a one", criterion_refs: ["cr-a-1"], subgoal_refs: [], verify_with: ["verify"] }],
+    items: [{ description: "a one", criterion_refs: ["cr-a-1"], verify_with: ["verify"] }],
   };
   const B = {
     work_item: "Revised slice",
     scope: ["src/b"],
-    items: [{ description: "b one", criterion_refs: ["cr-b-1"], subgoal_refs: [], verify_with: ["verify"] }],
+    items: [{ description: "b one", criterion_refs: ["cr-b-1"], verify_with: ["verify"] }],
   };
 
   it("a blocked redo eval after backtrack rounds activates the revised contract", () => {
@@ -1630,61 +1206,6 @@ describe("v3.5 — post-backtrack contract revision (compile side)", () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// M5 regression: objective_refinement folds exactly once per persisted state
-// ═══════════════════════════════════════════════════════════════════════════
-
-describe("M5 — objective refinement retry idempotency", () => {
-  it("keeps refinements as reports and never rewrites the objective on retry", () => {
-    const loopId = "m5-retry";
-    const refinement = "Include rollback verification";
-
-    const base = makeLoopObjective({
-      loop_id: loopId,
-      objective: "Ship the port",
-      success_criteria: ["All green"],
-      hard_constraints: ["No data loss"],
-    });
-    const context = {
-      results: [{
-        loop_id: loopId,
-        loop_lineage: { round: 3 },
-        loop_objective: base,
-      }],
-    };
-    const lastResult = makeLoopRoundResult({
-      round: 2,
-      success: false,
-      output_summary: "reworked the schema",
-      objective_refinement: refinement,
-    });
-
-    const attempt2 = compileLoop(makeLoopCompileRequest({
-      loop_id: loopId,
-      round: 3,
-      task: "Ship the port",
-      last_round_result: lastResult,
-    }), context);
-    const o2 = attempt2.loop_objective!;
-    assert.equal(o2.objective, "Ship the port",
-      "the operator objective is immutable");
-    assert.equal("version" in o2, false,
-      "objective_refinement creates no second objective version");
-    assert.equal("refinement_history" in o2, false,
-      "objective_refinement creates no second objective history");
-
-    const attempt3 = compileLoop(makeLoopCompileRequest({
-      loop_id: loopId,
-      round: 3,
-      task: "Ship the port",
-      last_round_result: lastResult,
-    }), { results: [{ ...context.results[0], loop_objective: o2 }] });
-    const o3 = attempt3.loop_objective!;
-    assert.equal(o3.objective, "Ship the port");
-    assert.equal("refinement_history" in o3, false);
-  });
-});
-
-// ═══════════════════════════════════════════════════════════════════════════
 // L7 regression: state_file.enabled=false must disable every knob that
 // depends on the file — L2 pointer mode and L1 collapse both point prompts
 // at the file for content, so with the file disabled they would silently
@@ -1721,7 +1242,6 @@ describe("L7 — state file disabled cross-knob guard", () => {
       round: 2,
       task: "Continue the migration",
       force_level: "l2",
-      last_round_result: makeLoopRoundResult({ round: 1, success: true }),
     }), { results: [baselineRound1("l7-l2")] });
     assert.equal(response.state_file_content, undefined,
       "no state file content is produced when the file is disabled");
@@ -1742,11 +1262,6 @@ describe("L7 — state file disabled cross-knob guard", () => {
       round: 2,
       task: "Continue work",
       force_level: "l1",
-      last_round_result: makeLoopRoundResult({
-        round: 1,
-        success: true,
-        discovered_constraints: ["No external deps"],
-      }),
     }), { results: [baselineRound1("l7-l1")] });
     const p = response.prompt;
     // Collapse would have demoted the three unchanged constraints behind a
@@ -1846,13 +1361,12 @@ describe("3.9.3 — committed-fact prompt level", () => {
     ...entry,
   }, "continue", noMotionEvidence());
 
-  it("v3.9.5: committed corrections and prompt_requests reach the next prompt", () => {
+  it("v3.9.5: committed corrections reach the next prompt", () => {
     const loopId = "committed-reports";
     const context = {
       results: [committed(loopId, 2, {
         output_summary: "a prior summary that must not be replayed",
         wrong_assumptions: ["old belief"],
-        prompt_requests: { confusion_points: ["what does committed mean?"] },
       })],
     };
     const response = compileLoop(makeLoopCompileRequest({
@@ -1863,8 +1377,6 @@ describe("3.9.3 — committed-fact prompt level", () => {
     }), context);
     assert.match(response.prompt, /Corrections \(committed reports\)/);
     assert.match(response.prompt, /old belief/);
-    assert.match(response.prompt, /Confusion Alerts/);
-    assert.match(response.prompt, /what does committed mean\?/);
     assert.doesNotMatch(response.prompt, /a prior summary that must not be replayed/);
   });
 
@@ -1892,45 +1404,18 @@ describe("3.9.3 — committed-fact prompt level", () => {
     }
   });
 
-  it("ignores a caller last_round_result when committed history exists", () => {
-    const loopId = "det";
-    const context = {
-      results: [committed(loopId, 2)],
-    };
-    const base = makeLoopCompileRequest({
-      loop_id: loopId,
-      round: 3,
-      task: "Do work",
-    });
-    const without = compileLoop(base, context);
-    const withLegacy = compileLoop({
-      ...base,
-      last_round_result: makeLoopRoundResult({
-        round: 2,
-        success: true,
-        output_summary: "a stale caller projection",
-        discovered_constraints: ["stale constraint"],
-      }),
-    }, context);
-
-    assert.equal(withLegacy.recompile_level, without.recompile_level);
-    assert.equal(withLegacy.diff_from_previous, without.diff_from_previous);
-    assert.equal(
-      withLegacy.prompt_artifact?.promptHash,
-      without.prompt_artifact?.promptHash,
-    );
-    assert.equal(
-      withLegacy.prompt_artifact?.stateHash,
-      without.prompt_artifact?.stateHash,
-    );
-    assert.deepEqual(withLegacy.warnings, without.warnings);
-    assert.equal(withLegacy.state_file_content, without.state_file_content);
-    assert.ok(!without.prompt.includes("stale constraint"),
-      "the caller projection must not leak into the prompt");
-  });
 
   it("stays L0 only when the committed round proves no activity", () => {
     const loopId = "stale";
+    const previous = committed(loopId, 2);
+    const transaction = (previous.loop_lineage as Record<string, unknown>)
+      .round_transaction as Record<string, unknown>;
+    const snapshot = transaction.snapshot as Record<string, unknown>;
+    snapshot.operatorAcceptance = {
+      task: "Do work",
+      success_criteria: ["Ship it"],
+      hard_constraints: [],
+    };
     const response = compileLoop(makeLoopCompileRequest({
       loop_id: loopId,
       round: 3,
@@ -1940,11 +1425,9 @@ describe("3.9.3 — committed-fact prompt level", () => {
         objective: "Do work",
         success_criteria: ["Ship it"],
       }),
-    }), { results: [committed(loopId, 2)] });
+    }), { results: [previous] });
 
     assert.equal(response.recompile_level, "l0");
-    assert.equal(response.diff_from_previous,
-      "failed_without_observable_new_information");
     const prompt = response.prompt;
     for (const path of [
       "execution_report.criterion_claims",
@@ -1953,7 +1436,6 @@ describe("3.9.3 — committed-fact prompt level", () => {
       "emerged_subtasks",
       "worker_results",
       "compression_checkpoint",
-      "prompt_requests",
     ]) {
       assert.match(prompt, new RegExp("`" + path.replace(/\./g, "\.") + "`"),
         `L0 must still offer ${path}`);
@@ -2028,7 +1510,6 @@ describe("3.9.3 — committed-fact prompt level", () => {
       task: "Do work",
     }), context);
     assert.equal(response.recompile_level, "l1");
-    assert.equal(response.diff_from_previous, "state_capsule");
   });
 
   it("offers a schema-only contract example, not a task-seeded plan", () => {
@@ -2109,12 +1590,52 @@ describe("3.9.3 — committed-fact prompt level", () => {
     }), context);
 
     assert.equal(response.recompile_level, "l2");
-    assert.equal(response.diff_from_previous, "recovery_boundary");
     assert.ok((response.state_file_content ?? "").includes("Redo round**: 3"),
       "the Recovery Brief must use the directive's redo round");
     assert.ok((response.state_file_content ?? "").includes("Restored checkpoint"),
       "the Recovery Brief names the verified checkpoint");
     assert.ok(!response.prompt.includes("ABANDONED branch"),
       "the abandoned branch's objective must not leak into the redo prompt");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v4.0.1 — one immutable operator surface
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("v4.0.1 — operator acceptance integrity", () => {
+  const acceptance = {
+    task: "Test task",
+    success_criteria: [] as string[],
+    hard_constraints: [] as string[],
+  };
+
+  it("returns the committed acceptance byte-identically", () => {
+    const loopId = "acceptance-match";
+    const response = compileLoop(
+      makeLoopCompileRequest({ loop_id: loopId, round: 2, task: "Test task" }),
+      { results: [committedFeedbackRound(1, { loopId })] },
+      { operatorAcceptance: acceptance },
+    );
+    assert.deepEqual(response.operatorAcceptance, acceptance);
+    assert.equal(response.compiled?.task, "Test task");
+  });
+
+  it("fails closed when a caller copy disagrees with committed history", () => {
+    const loopId = "acceptance-conflict";
+    assert.throws(
+      () => compileLoop(
+        makeLoopCompileRequest({ loop_id: loopId, round: 2, task: "Test task" }),
+        { results: [committedFeedbackRound(1, { loopId })] },
+        {
+          operatorAcceptance: {
+            task: "A different operator surface",
+            success_criteria: ["different"],
+            hard_constraints: [],
+          },
+        },
+      ),
+      (error: unknown) => error instanceof OperatorAcceptanceConflictError,
+    );
   });
 });

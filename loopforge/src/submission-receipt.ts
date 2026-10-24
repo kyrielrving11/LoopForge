@@ -124,15 +124,6 @@ function baseReportHandling(
       detail: "the gate layer is disabled; the citation has no runtime effect",
     };
   }
-  if (path === "prompt_requests") {
-    const nextLevel = input.nextArtifact?.level;
-    if (!input.nextArtifact || nextLevel === "l0") {
-      return {
-        handling: "saved_not_expanded",
-        detail: "no next prompt consumed it (or the next prompt is L0)",
-      };
-    }
-  }
   if (path === "round_contract") {
     const transition = input.selfEval.contract_transition;
     if (transition && transition.contract_id === input.facts.contractBefore) {
@@ -381,7 +372,6 @@ export function deriveSubmissionReceipt(input: ReceiptInput): SubmissionReceipt 
       ? {
           level: input.nextArtifact.level,
           dropped_sections: [...input.nextArtifact.droppedSections],
-          prompt_request_effects: [...(input.nextArtifact.promptRequestEffects ?? [])],
         }
       : null,
     diagnostics: input.diagnostics,
@@ -468,6 +458,8 @@ export function deriveCommittedSubmissionView(
     ...(view.beforeCheckpoint ? { beforeCheckpoint: view.beforeCheckpoint } : {}),
     ...(view.checkpoints.length > 0 ? { checkpoints: view.checkpoints } : {}),
     ...(view.restore ? { restore: view.restore } : {}),
+    ...(view.operatorAcceptance ? { operatorAcceptance: view.operatorAcceptance } : {}),
+    ...(view.compiled ? { compiled: view.compiled } : {}),
     evaluation: view.evaluation ?? undefined,
     result: view.result ?? undefined,
     ...(view.normalizationDiagnostics.length > 0

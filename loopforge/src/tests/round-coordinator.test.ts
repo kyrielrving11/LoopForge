@@ -124,7 +124,7 @@ describe("RoundCoordinator — stop conditions", () => {
     const contract = {
       work_item: "Slice A",
       scope: ["src/auth"],
-      items: [{ description: "login works", criterion_refs: [], subgoal_refs: [], verify_with: ["verify"] }],
+      items: [{ description: "login works", criterion_refs: [], verify_with: ["verify"] }],
     };
     const itemId = deriveContractItemIds(contract.items)[0];
     const store = new MemoryLoopStore();
@@ -212,7 +212,7 @@ describe("RoundCoordinator — stop conditions", () => {
     const contract = {
       work_item: "Slice A",
       scope: ["src/auth"],
-      items: [{ description: "login works", criterion_refs: [], verify_with: ["verify"], subgoal_refs: [] }],
+      items: [{ description: "login works", criterion_refs: [], verify_with: ["verify"] }],
     };
     const itemId = deriveContractItemIds(contract.items)[0];
     const store = new MemoryLoopStore();

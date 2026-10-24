@@ -60,7 +60,7 @@ function input(overrides: Partial<ReceiptInput> = {}): ReceiptInput {
   });
   const pr = result();
   const snapshot = {
-    schemaVersion: 5 as const,
+    schemaVersion: 6 as const,
     branchId: "loop:receipt:branch:root",
     transactionId: "tx-test",
     kind: "evaluation",
@@ -71,13 +71,24 @@ function input(overrides: Partial<ReceiptInput> = {}): ReceiptInput {
     phase: "committed",
     beforeEvidence: [],
     afterEvidence: [],
+    operatorAcceptance: {
+      task: "Receipt task",
+      success_criteria: ["Task goal achieved with verifiable evidence"],
+      hard_constraints: [],
+    },
+    compiled: {
+      task: "Receipt task",
+      goalId: "receipt:test",
+      constraintsActive: ["never touch prod"],
+      constraintsRetired: [],
+    },
     evaluation: selfEval,
     result: pr,
     createdAt: 0,
     updatedAt: 0,
   } as RoundTransactionSnapshot;
   const artifact: PromptArtifact = {
-    schemaVersion: 6,
+    schemaVersion: 7,
     roundId: "loop:receipt:round:2",
     round: 2,
     attempt: 1,
@@ -90,11 +101,6 @@ function input(overrides: Partial<ReceiptInput> = {}): ReceiptInput {
     protectedOverflow: false,
     budget: 0,
     renderedChars: 0,
-    promptRequestEffects: [{
-      field: "emphasize",
-      request: "never touch prod",
-      status: "applied",
-    }],
     coverage: { active: [], rendered: [], omitted: [], complete: true },
   };
   return {
@@ -147,7 +153,6 @@ describe("v3.9.1 — submission receipt", () => {
     assert.equal(receipt.verification.evidence_status, "absent");
     assert.deepEqual(receipt.verification.contract_items.map((item) => item.status),
       ["verified"]);
-    assert.equal(receipt.prompt?.prompt_request_effects[0]?.status, "applied");
   });
 
   it("marks every field not_applied on a reject and never shows an effect", () => {

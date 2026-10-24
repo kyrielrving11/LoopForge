@@ -146,7 +146,6 @@ export interface LoopRoundDocument {
    *  continuity checked) from legacy loops (no stamp → exempt). */
   sequence?: number;
   updatedAt: string;
-  lineage?: VaultEntry;
   feedback?: VaultEntry;
   /** DERIVED ON READ from feedback.loop_lineage.round_transaction; never
    *  persisted. The factual copy lives in the feedback entry (one copy). */
@@ -445,7 +444,6 @@ export class FileLoopStore implements LoopStore {
       round,
       sequence: typeof value.sequence === "number" ? value.sequence : undefined,
       updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : "",
-      lineage: isRecord(value.lineage) ? value.lineage as VaultEntry : undefined,
       feedback,
       transaction: transaction ?? undefined,
       promptArtifact: transaction?.promptArtifact,
@@ -489,12 +487,6 @@ export class FileLoopStore implements LoopStore {
         if (opts?.sinceRound !== undefined && round < opts.sinceRound) continue;
         const doc = this.readRound(id, round);
         if (!doc) continue;
-        if (doc.lineage) {
-          result.push({
-            ...doc.lineage,
-            full_prompt: doc.promptArtifact?.renderedPrompt ?? doc.lineage.full_prompt,
-          });
-        }
         if (doc.feedback) result.push(doc.feedback);
         result.push(...doc.events);
       }
@@ -557,10 +549,14 @@ export class FileLoopStore implements LoopStore {
     };
     if (current.sequence === undefined) current.sequence = round;
     const taskId = String(entry.task_id ?? "");
+    if (entry.task_type === "loop_lineage" ||
+        taskId === `loop:${loopId}:r${round}`) {
+      throw new Error(
+        "LoopStore no longer accepts compile-lineage entries; a round is written only by its committed :feedback transaction",
+      );
+    }
     if (taskId.endsWith(":feedback")) current.feedback = entry;
-    else if (entry.task_type === "loop_lineage" || taskId === `loop:${loopId}:r${round}`) {
-      current.lineage = entry;
-    } else {
+    else {
       current.events = [
         ...current.events.filter((event) => event.task_id !== entry.task_id),
         entry,
@@ -580,7 +576,6 @@ export class FileLoopStore implements LoopStore {
       round: current.round,
       ...(current.sequence !== undefined ? { sequence: current.sequence } : {}),
       updatedAt: now,
-      ...(current.lineage ? { lineage: current.lineage } : {}),
       ...(current.feedback ? { feedback: current.feedback } : {}),
       events: current.events,
     };

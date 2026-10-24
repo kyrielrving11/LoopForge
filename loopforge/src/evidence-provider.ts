@@ -27,7 +27,6 @@ import type {
   ObservationStatus,
   ObservedCapability,
   ProgressCoverage,
-  ProgressSnapshot,
 } from "./protocol.js";
 import {
   GIT_WORKSPACE_COVERAGE,
@@ -91,13 +90,6 @@ export interface EvidenceProvider {
   /** Observation kind this provider produces (used for the synthetic
    *  unavailable/timeout/error observations too). */
   readonly kind: MachineObservation["kind"];
-  /** v3.9.9: the evidence range this provider observes, when it can report
-   *  progress. This is a FACT DESCRIPTION, not a policy flag: a provider never
-   *  gains a vote — a rule must explicitly select this exact coverage (and the
-   *  observation kind) before any fact can affect it. When present, every
-   *  custom observation this provider emits carries `data.progress`, including
-   *  failures (same coverage, `complete:false`, null fingerprint). */
-  readonly progressCoverage?: ProgressCoverage;
   /** Capture an observation. Returns null when the provider is structurally
    *  unavailable (e.g. not a git repository); the collector converts that
    *  into an explicit `unavailable` observation rather than dropping it. */
@@ -379,212 +371,20 @@ function syntheticObservation(
   } as MachineObservation;
 }
 
-const PROGRESS_FINGERPRINT_RE = /^[a-f0-9]{64}$/;
-const COVERAGE_FIELD_MAX_CHARS = 200;
-
-/** v3.9.9: one coverage descriptor's four fields are non-empty, length-bounded
- *  and already trimmed. "Trimmed" is part of identity: `" workspace"` and
- *  `"workspace"` are different declared ranges, so a snapshot that relies on
- *  implicit trimming is rejected instead of silently normalized. */
-function isValidProgressCoverage(value: unknown): value is ProgressCoverage {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const coverage = value as Record<string, unknown>;
-  for (const field of ["domain", "object", "scope"] as const) {
-    const text = coverage[field];
-    if (typeof text !== "string" || text.length === 0 ||
-        text.trim() !== text || text.length > COVERAGE_FIELD_MAX_CHARS) {
-      return false;
-    }
-  }
-  return typeof coverage.version === "number" &&
-    Number.isInteger(coverage.version) && coverage.version >= 1;
-}
-
-/** v3.9.9: THE nested progress-snapshot shape check, shared by the collector
- *  and the persisted-transaction parser. Version 2 requires the coverage
- *  descriptor and the completeness assertion; `fingerprint` is 64 lowercase
- *  hex when the capture was observed and may be null only when it failed. */
-export function isValidProgressSnapshot(
-  value: unknown,
-  status: ObservationStatus,
-): value is ProgressSnapshot {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const snapshot = value as Record<string, unknown>;
-  if (snapshot.schemaVersion !== 2) return false;
-  if (!isValidProgressCoverage(snapshot.coverage)) return false;
-  if (typeof snapshot.complete !== "boolean") return false;
-  if (snapshot.fingerprint === null) return status !== "observed";
-  return typeof snapshot.fingerprint === "string" &&
-    PROGRESS_FINGERPRINT_RE.test(snapshot.fingerprint);
-}
-
-/** The explicit unknown every failed/undeclared capture still records. */
-function failureProgressSnapshot(
-  coverage: ProgressCoverage | undefined,
-): ProgressSnapshot | null {
-  if (!coverage) return null;
-  return {
-    schemaVersion: 2,
-    coverage: { ...coverage },
-    complete: false,
-    fingerprint: null,
-  };
-}
-
-function sameCoverage(
-  left: ProgressCoverage,
-  right: ProgressCoverage,
-): boolean {
-  return left.domain === right.domain &&
-    left.object === right.object &&
-    left.scope === right.scope &&
-    left.version === right.version;
-}
-
-function progressErrorObservation(
-  provider: EvidenceProvider,
-  phase: "before" | "after",
-  startedAt: number,
-  detail: string,
-): MachineObservation {
-  return {
-    schemaVersion: expectedObservationSchemaVersion("custom"),
-    providerId: provider.name,
-    kind: "custom",
-    phase,
-    startedAt,
-    finishedAt: Date.now(),
-    status: "error",
-    files: [],
-    data: {
-      detail,
-      ...(provider.progressCoverage
-        ? { progress: failureProgressSnapshot(provider.progressCoverage) }
-        : {}),
-    },
-  };
-}
-
-/** v3.9.9: validate and persist the provider's DECLARED coverage on every
- *  observation. A provider without a declaration cannot smuggle progress data
- *  in; a provider with one must supply a comparable observed snapshot or the
- *  observation becomes an explicit `error`, and every failed capture carries
- *  the declared coverage with a null fingerprint so "unknown" never
- *  disappears. No capability/policy marker is ever written. */
-function normalizeProgressObservation(
-  provider: EvidenceProvider,
-  observation: MachineObservation,
-  phase: "before" | "after",
-  startedAt: number,
-): MachineObservation {
-  const declared = provider.progressCoverage;
-  if (declared && !isValidProgressCoverage(declared)) {
-    return progressErrorObservation(
-      provider,
-      phase,
-      startedAt,
-      "provider declared a malformed progressCoverage",
-    );
-  }
-  if (declared && provider.kind !== "custom") {
-    return progressErrorObservation(
-      provider,
-      phase,
-      startedAt,
-      "progressCoverage is only supported for custom observations",
-    );
-  }
-  if (observation.kind !== "custom") {
-    if (declared) {
-      return progressErrorObservation(
-        provider,
-        phase,
-        startedAt,
-        "progressCoverage is only supported for custom observations",
-      );
-    }
-    return observation;
-  }
-  // The SAME per-kind/nested version judgment the transaction parser and the
-  // legacy reporter use. A live provider emitting a retired marker or an
-  // unsupported envelope becomes an explicit error observation here instead
-  // of writing a round this runtime cannot read back.
-  const versionIssue = observationVersionIssue(
-    observation.kind, observation.schemaVersion, observation.data,
-    observation.status);
-  if (versionIssue) {
-    return progressErrorObservation(
-      provider,
-      phase,
-      startedAt,
-      versionIssue.reason === "progress_capable"
-        ? "the retired progressCapable field is not accepted; declare progressCoverage instead"
-        : `custom observation envelope is not supported (${versionIssue.reason})`,
-    );
-  }
-  if (!declared) {
-    if (Object.hasOwn(observation.data, "progress")) {
-      return progressErrorObservation(
-        provider,
-        phase,
-        startedAt,
-        "provider emitted progress data without declaring progressCoverage",
-      );
-    }
-    return observation;
-  }
-
-  if (observation.status === "observed") {
-    const snapshot = observation.data.progress;
-    if (!isValidProgressSnapshot(snapshot, "observed")) {
-      return progressErrorObservation(
-        provider,
-        phase,
-        startedAt,
-        "progress provider did not emit a valid observed snapshot (inner schema 2)",
-      );
-    }
-    if (!sameCoverage(snapshot.coverage, declared)) {
-      return progressErrorObservation(
-        provider,
-        phase,
-        startedAt,
-        "progress snapshot coverage does not match the provider's declared progressCoverage",
-      );
-    }
-    const { progressCapable: _retired, ...data } =
-      observation.data as Record<string, unknown>;
-    return {
-      ...observation,
-      data: { ...data, progress: snapshot },
-    };
-  }
-
-  const { progressCapable: _retired, ...data } =
-    observation.data as Record<string, unknown>;
-  return {
-    ...observation,
-    data: { ...data, progress: failureProgressSnapshot(declared) },
-  };
-}
-
-/** v3.9.9: ONE observation-version judgment shared by the collector's parser
- *  (`parseMachineObservations`) and the legacy report (`legacyTransactionRounds`).
- *  Custom observations keep base schema 1; only the NESTED progress snapshot
- *  moved to inner schema 2. A historical custom round without progress stays
- *  readable; one carrying the retired marker or an inner-1 snapshot is
- *  reported as observation legacy instead of vanishing. */
+/** v4.0.1: the base observation-envelope judgment shared by the collector's
+ *  parser and the legacy report. Custom `data` is opaque provider display
+ *  data; an old `progress` key is ignored rather than rejected. */
 export interface ObservationVersionIssue {
   envelope: "observation";
   schemaVersion: number;
-  reason: "schema" | "progress" | "progress_capable" | "malformed";
+  reason: "schema" | "malformed";
 }
 
 export function observationVersionIssue(
   kind: unknown,
   schemaVersion: unknown,
   data: unknown,
-  status?: unknown,
+  _status?: unknown,
 ): ObservationVersionIssue | null {
   if (kind !== "git" && kind !== "command" && kind !== "custom") {
     return {
@@ -606,35 +406,6 @@ export function observationVersionIssue(
       envelope: "observation",
       schemaVersion: typeof schemaVersion === "number" ? schemaVersion : -1,
       reason: "schema",
-    };
-  }
-  if (kind !== "custom") return null;
-  if (Object.hasOwn(data, "progressCapable")) {
-    return {
-      envelope: "observation",
-      schemaVersion: expected,
-      reason: "progress_capable",
-    };
-  }
-  if (!Object.hasOwn(data, "progress")) return null;
-  const progress = data.progress;
-  if (progress === null || progress === undefined) {
-    if (status === "observed") {
-      return {
-        envelope: "observation",
-        schemaVersion: expected,
-        reason: "progress",
-      };
-    }
-    return null;
-  }
-  if (!isValidProgressSnapshot(progress, status as ObservationStatus)) {
-    return {
-      envelope: "observation",
-      schemaVersion: isRecord(progress) && typeof progress.schemaVersion === "number"
-        ? progress.schemaVersion
-        : -1,
-      reason: "progress",
     };
   }
   return null;
@@ -716,15 +487,10 @@ export class EvidenceCollector {
         if (timedOut) {
           policyMetrics.recordEvidence(provider.name, "timeout", Date.now() - startedAt, options.loopId);
           logEvent("evidence_provider_timeout", { provider: provider.name, timeoutMs });
-          return normalizeProgressObservation(
-            provider,
-            syntheticObservation(
+          return syntheticObservation(
               provider.name, provider.kind, phase, startedAt, "timeout",
               `provider exceeded ${timeoutMs}ms`,
-            ),
-            phase,
-            startedAt,
-          );
+            );
         }
         if (!observation) {
           policyMetrics.recordEvidence(provider.name, "unavailable", Date.now() - startedAt, options.loopId);
@@ -732,14 +498,9 @@ export class EvidenceCollector {
             provider.name, provider.kind, phase, startedAt, "unavailable",
             "provider reported no observation",
           );
-          return normalizeProgressObservation(provider, unavailable, phase, startedAt);
+          return unavailable;
         }
-        const normalized = normalizeProgressObservation(
-          provider,
-          observation,
-          phase,
-          startedAt,
-        );
+        const normalized = observation;
         policyMetrics.recordEvidence(
           provider.name,
           normalized.status === "timeout" ? "timeout" : "available",
@@ -750,14 +511,9 @@ export class EvidenceCollector {
       } catch (error) {
         policyMetrics.recordEvidence(provider.name, "failure", Date.now() - startedAt, options.loopId);
         logEvent("evidence_provider_error", { provider: provider.name, error: String(error) });
-        return normalizeProgressObservation(
-          provider,
-          syntheticObservation(
+        return syntheticObservation(
             provider.name, provider.kind, phase, startedAt, "error", String(error),
-          ),
-          phase,
-          startedAt,
-        );
+          );
       } finally {
         if (timer) clearTimeout(timer);
       }
@@ -1275,12 +1031,11 @@ registerEvidenceProvider("git", () => new GitEvidenceProvider());
 
 // ── Utility ────────────────────────────────────────────────────────────────
 
-/** v3.9.9: ONE provider's before→after progress FACT. It reports what the
- *  provider observed — never a vote and never a policy. `null` means the
- *  provider produced no progress fact at all (command observations, or a
- *  custom provider that declared no coverage). */
+/** v4.0.1: the Git workspace progress fact. It reports what the machine
+ *  observed — never a vote and never a policy. `null` means the provider
+ *  produced no progress fact (command/custom observations). */
 export interface ObservationProgress {
-  kind: "git" | "custom";
+  kind: "git";
   coverage: ProgressCoverage;
   /** The only authority. */
   state: "changed" | "unchanged" | "unknown";
@@ -1306,14 +1061,6 @@ export interface ObservationDelta {
    *  provider reports no progress at all. Consumers select the facts they
    *  need by (kind, coverage) — nothing aggregates globally anymore. */
   progress: ObservationProgress | null;
-}
-
-function customProgressSnapshot(
-  observation: MachineObservation | null,
-): ProgressSnapshot | null {
-  if (observation?.kind !== "custom") return null;
-  const value = observation.data.progress;
-  return isValidProgressSnapshot(value, observation.status) ? value : null;
 }
 
 /** The Git fact descriptor is derived from the PERSISTED observation, not from
@@ -1389,70 +1136,9 @@ function deltaProgressFact(
     };
   }
 
-  if (observation.kind !== "custom") return null;
-  const beforeSnapshot = customProgressSnapshot(beforeObservation);
-  const afterSnapshot = customProgressSnapshot(afterObservation);
-  // No progress data on either side: this provider declared no coverage.
-  if (!beforeSnapshot && !afterSnapshot) return null;
-  const coverage = (afterSnapshot ?? beforeSnapshot)!.coverage;
-  const complete = (afterSnapshot ?? beforeSnapshot)!.complete;
-  if (ambiguous) {
-    return {
-      kind: "custom",
-      coverage,
-      state: "unknown",
-      complete,
-      detail: "duplicate observations make the progress fact ambiguous",
-    };
-  }
-  if (!beforeSnapshot || !afterSnapshot) {
-    return {
-      kind: "custom",
-      coverage,
-      state: "unknown",
-      complete: false,
-      detail: "a progress snapshot is missing on one side of the round",
-    };
-  }
-  if (beforeObservation?.status !== "observed" ||
-      afterObservation?.status !== "observed") {
-    return {
-      kind: "custom",
-      coverage,
-      state: "unknown",
-      complete,
-      detail: "at least one side was not observed",
-    };
-  }
-  if (!sameCoverage(beforeSnapshot.coverage, afterSnapshot.coverage)) {
-    return {
-      kind: "custom",
-      coverage,
-      state: "unknown",
-      complete,
-      detail:
-        `coverage changed across the round (` +
-        `${coverageKey(beforeSnapshot.coverage)} -> ${coverageKey(afterSnapshot.coverage)})`,
-    };
-  }
-  if (beforeSnapshot.complete !== true || afterSnapshot.complete !== true ||
-      beforeSnapshot.fingerprint === null || afterSnapshot.fingerprint === null) {
-    return {
-      kind: "custom",
-      coverage,
-      state: "unknown",
-      complete: false,
-      detail: "a progress snapshot is incomplete or has no fingerprint",
-    };
-  }
-  return {
-    kind: "custom",
-    coverage,
-    state: beforeSnapshot.fingerprint === afterSnapshot.fingerprint
-      ? "unchanged"
-      : "changed",
-    complete: true,
-  };
+  // Custom observations are reports. They carry no progress fact, so they can
+  // never influence stall or prompt freshness.
+  return null;
 }
 
 /** Stable display key for a coverage descriptor — derived only, never

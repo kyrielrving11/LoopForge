@@ -158,7 +158,6 @@ export function normalizeText(text: string): string {
 export interface ContractIdentityItem {
   description: string;
   criterion_refs: string[];
-  subgoal_refs: string[];
   verify_with: string[];
 }
 
@@ -182,7 +181,6 @@ export function canonicalContractText(contract: {
     items: contract.items.map((item) => ({
       description: normalizeText(item.description),
       criterion_refs: item.criterion_refs.map(normalizeText),
-      subgoal_refs: item.subgoal_refs.map(normalizeText),
       verify_with: item.verify_with.map(normalizeText),
     })),
   };
@@ -207,7 +205,6 @@ export function deriveContractItemId(
   const canonical = JSON.stringify({
     description: normalizeText(item.description),
     criterion_refs: item.criterion_refs.map(normalizeText),
-    subgoal_refs: item.subgoal_refs.map(normalizeText),
     verify_with: item.verify_with.map(normalizeText),
     duplicate_ordinal: duplicateOrdinal,
   });
@@ -222,7 +219,6 @@ export function canonicalContractItemText(item: ContractIdentityItem): string {
   return JSON.stringify({
     description: normalizeText(item.description),
     criterion_refs: item.criterion_refs.map(normalizeText),
-    subgoal_refs: item.subgoal_refs.map(normalizeText),
     verify_with: item.verify_with.map(normalizeText),
   });
 }

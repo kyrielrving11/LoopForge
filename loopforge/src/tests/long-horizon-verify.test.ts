@@ -167,7 +167,7 @@ describe("Long-Horizon Verification", () => {
   // ── R1 L2 (first_round) ──────────────────────────────────────────────────
 
   it("R1 L2 — first_round: initial full-state prompt", async () => {
-    const r = await client.tool("loopforge_start", { task: TASK, maxRounds: 12, domain: "typescript", constraints: CONSTRAINTS });
+    const r = await client.tool("loopforge_start", { task: TASK, maxRounds: 12, constraints: CONSTRAINTS });
     assert.ok(!r.error); assert.equal(r.round, 1);
     assert.equal(String(r.level ?? "").toLowerCase(), "l2");
     assert.ok(String(r.prompt ?? "").length > 100);
@@ -272,7 +272,6 @@ describe("Long-Horizon Verification", () => {
     const r = await client.tool("loopforge_next", { submissionHandle, evaluation: {
       success: false, should_continue: true, constraint_violations: [],
       output_summary: "Integration tests pass (13/13). Refined objective: add validateAndTransform pipeline.",
-      objective_refinement: "The library should provide validateAndTransform(input, fns[]) pipeline utility",
       emerged_subtasks: ["Implement validateAndTransform pipeline", "Add pipeline integration tests"],
       execution_report: { files_changed: ["src/strkit.ts"], tests_reported: { passed: 13, failed: 0, skipped: 0 }, criterion_claims: criterionClaims(["Core functions done"], ["Implement pipeline", "Verify no runtime deps", "Final polish"])},
     }});

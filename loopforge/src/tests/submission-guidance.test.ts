@@ -38,7 +38,6 @@ const CONTRACT = {
   items: [{
     description: "the verification command passes",
     criterion_refs: [],
-    subgoal_refs: [],
     verify_with: ["verify"],
   }],
 };
@@ -221,12 +220,11 @@ describe("v3.9.1 — submission_guidance", () => {
 });
 
 describe("3.9.3 — MCP requests carry current-round context only", () => {
-  it("buildLoopRequest no longer forwards last_round_result", () => {
+  it("buildLoopRequest carries current-round context only", () => {
     const request = buildLoopRequest(sessionView());
-    assert.equal(request.last_round_result, undefined,
-      "previous-round facts come from the committed Vault read model");
     assert.equal(request.attempt, 1);
     assert.equal(request.consecutive_rejections, 0);
+    assert.equal(request.loop_id, "guidance-loop");
   });
 
   it("restores the held attempt only while the snapshot belongs to the current round", () => {
@@ -255,7 +253,6 @@ describe("v3.9.2 — compact trigger guidance", () => {
     id: "cr-12345678",
     text: "All tests pass",
     status: "remaining",
-    related_subgoal_ids: [],
   };
   const activeContract: ActiveContractView = {
     id: "rc-12345678",
@@ -267,8 +264,7 @@ describe("v3.9.2 — compact trigger guidance", () => {
       id: "rci-12345678",
       description: "works",
       criterion_refs: [],
-      subgoal_refs: [],
-      verify_with: ["verify"],
+        verify_with: ["verify"],
     }],
   };
   const activeSubGoal: SubGoal = {
@@ -325,7 +321,6 @@ describe("v3.9.2 — compact trigger guidance", () => {
       "emerged_subtasks",
       "worker_results",
       "compression_checkpoint",
-      "prompt_requests",
     ]);
     assert.ok(compact.length <= 7, "the compact checklist is structurally max seven");
     assert.equal(isFieldPrompted("round_contract", facts()), false,
@@ -334,8 +329,6 @@ describe("v3.9.2 — compact trigger guidance", () => {
       "the dedicated sub-goal renderer owns this field");
     assert.equal(isFieldPrompted("execution_report.contract_item_claims", facts({ activeContract })), false,
       "the dedicated contract-item renderer owns this field");
-    assert.equal(isFieldPrompted("prompt_requests", facts()), true,
-      "L0 can still submit next-prompt needs; only the receiving L0 ignores them");
   });
 
   it("uses a real criterion id and text, never the old placeholder", () => {
@@ -400,7 +393,6 @@ describe("v3.9.2 — compact trigger guidance", () => {
       "emerged_subtasks",
       "worker_results",
       "compression_checkpoint",
-      "prompt_requests",
     ]) {
       assert.match(block, new RegExp(`\`${path.replace(/\./g, "\\.")}\``),
         `L0 must offer the applicable field ${path}`);

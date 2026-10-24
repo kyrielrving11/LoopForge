@@ -55,7 +55,6 @@ function contract(): ActiveContractView {
       id: "rci-12345678",
       description: "login works",
       criterion_refs: [AUTH_ID],
-      subgoal_refs: ["sg-11111111"],
       verify_with: ["verify"],
     }],
     config_hash_by_command: {},
@@ -65,7 +64,7 @@ function contract(): ActiveContractView {
 function state(overrides: Partial<CanonicalLoopState> = {}): CanonicalLoopState {
   const activeContract = contract();
   const base: CanonicalLoopState = {
-    schemaVersion: 4 as const,
+    schemaVersion: 5 as const,
     loopId: "coverage-loop",
     round: 3,
     maxRounds: 20,
@@ -95,8 +94,8 @@ function state(overrides: Partial<CanonicalLoopState> = {}): CanonicalLoopState 
     discoveries: [],
     subGoals: [subGoal(), subGoal({ id: "sg-22222222", description: "wire api", priority: 1 })],
     criterionStatuses: [
-      { id: AUTH_ID, text: AUTH, status: "remaining", related_subgoal_ids: ["sg-11111111"] },
-      { id: API_ID, text: API, status: "unknown", related_subgoal_ids: [] },
+      { id: AUTH_ID, text: AUTH, status: "remaining" },
+      { id: API_ID, text: API, status: "unknown" },
     ],
     recurringFlags: [],
     stateFilePath: ".loopforge/state/coverage-state.md",
@@ -143,7 +142,6 @@ describe("v3.9.4 — PromptCoverage", () => {
       id: `rci-${(index + 1).toString(16).padStart(8, "0")}`,
       description: `condition ${index}`,
       criterion_refs: [],
-      subgoal_refs: [],
       verify_with: ["verify", "lint"],
     }));
     const active: ActiveContractView = {
@@ -233,20 +231,6 @@ describe("v3.9.4 — PromptCoverage", () => {
     }
   });
 
-  it("proves an emphasized criterion is still rendered by Critical Context", () => {
-    const current = assemblePromptArtifact({
-      state: state(),
-      level: "l1",
-      reasons: [],
-      attempt: 1,
-      selfEvaluationBlock: "",
-      promptRequests: { emphasize: [AUTH] },
-    });
-    assert.equal(current.coverage.complete, true);
-    assert.ok(current.renderedPrompt.includes("Critical Context"));
-    assert.ok(current.renderedPrompt.includes(`\`${AUTH_ID}\``),
-      "the moved criterion keeps its real id");
-  });
 
   it("keeps every active sub-goal id when rows are capped", () => {
     const subGoals = Array.from({ length: 15 }, (_, index) => subGoal({
@@ -293,7 +277,6 @@ describe("v3.9.4 — PromptCoverage", () => {
         id: `rci-${String(index).padStart(8, "0")}`,
         description: `item ${index}`,
         criterion_refs: [AUTH_ID],
-        subgoal_refs: [],
         verify_with: ["verify"],
       })),
     };

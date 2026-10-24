@@ -34,10 +34,10 @@ function committedFeedback(
     loop_lineage: {
       round,
       round_transaction: {
-        schema_version: 5,
+        schema_version: 6,
         round_id: `loop:metrics-loop:round:${round}`,
         snapshot: {
-          schemaVersion: 5,
+          schemaVersion: 6,
           kind: "evaluation",
           branchId: "loop:metrics-loop:branch:root",
           transactionId: `tx-metrics-loop-${round}-1`,
@@ -49,6 +49,17 @@ function committedFeedback(
           beforeEvidence: beforeEvidence ?? [],
           ...fixtureBeforeCheckpointError(beforeEvidence ?? []),
           afterEvidence: afterEvidence ?? [],
+          operatorAcceptance: {
+            task: "Metrics task",
+            success_criteria: [],
+            hard_constraints: [],
+          },
+          compiled: {
+            task: "Metrics task",
+            goalId: "metrics-loop:metrics-task",
+            constraintsActive: [],
+            constraintsRetired: [],
+          },
           result,
           ...(evaluation ? { evaluation } : {}),
           ...(normalizationDiagnostics ? { normalizationDiagnostics } : {}),

@@ -17,7 +17,7 @@ describe("Policy — Defaults", () => {
   beforeEach(() => resetPolicy());
 
   it("DEFAULT_POLICY has the retained evolution values", () => {
-    assert.equal(DEFAULT_POLICY.version, "9");
+    assert.equal(DEFAULT_POLICY.version, POLICY_SCHEMA_VERSION);
     assert.equal(DEFAULT_POLICY.evolution.max_start_criteria, 12);
     assert.equal("constraints" in DEFAULT_POLICY, false);
     assert.equal("max_objective_versions" in DEFAULT_POLICY.evolution, false);

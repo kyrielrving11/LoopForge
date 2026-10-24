@@ -212,7 +212,6 @@ describe("E2E MCP lifecycle", () => {
     const result = await client.tool("loopforge_start", {
       task: "Audit src/verification-gate.ts for correctness bugs. Fix confirmed issues. Preserve the public API.",
       maxRounds: 10,
-      domain: "typescript",
       constraints: [
         "Do not change the public API",
         "Do not introduce runtime dependencies",

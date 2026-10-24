@@ -1137,7 +1137,7 @@ describe("MCP P0 lifecycle regressions", () => {
 
     // Commit the round but deliberately skip SessionManager's state update,
     // simulating a process death between feedback commit and session save.
-    const transaction = new RoundTransactionCoordinator(session.engine, store);
+    const transaction = new RoundTransactionCoordinator(store);
     const evaluation = continuingEvaluation();
     const committed = transaction.process({
       snapshot: session.roundSnapshot,
@@ -1249,7 +1249,7 @@ describe("MCP P0 lifecycle regressions", () => {
 
     const persisted = counting.readSession("atomic-session-save")
       ?.entry?.loop_lineage?.round_snapshot as Record<string, unknown> | undefined;
-    assert.equal(persisted?.schemaVersion, 5);
+    assert.equal(persisted?.schemaVersion, 6);
     assert.equal(persisted?.roundId, started.submissionHandle?.roundId);
   });
 });
@@ -1329,8 +1329,8 @@ describe("MCP — input and output contract enforcement", () => {
       loopId: "dup-guard",
     });
     assert.ok("error" in second, "second create must be rejected");
-    assert.equal(second.error, "loop_already_running");
-    assert.ok((second.errorMessage as string).includes("already exists"));
+    assert.equal(second.error, "loop_exists");
+    assert.ok((second.errorMessage as string).includes("already running"));
 
     // The first session remains intact and advanceable
     const advanced = await toolNext(mgr, {
@@ -1661,12 +1661,16 @@ describe("MCP — sub-goal persistence (v3.2.1)", async () => {
       feedbackOnly: true,
     });
     assert.equal(feedback.length, 1, "round 1 must have one feedback entry");
-    assert.deepEqual(feedback[0].subgoal_updates, [
+    const committed = (feedback[0].loop_lineage as Record<string, unknown>)
+      .round_transaction as Record<string, unknown>;
+    const evaluation = (committed.snapshot as Record<string, unknown>)
+      .evaluation as Record<string, unknown>;
+    assert.deepEqual(evaluation.subgoal_updates, [
       { id: doneId, status: "done" },
       { id: blockedId, status: "blocked" },
       { id: canceledId, status: "canceled" },
-    ], "subgoal_updates must persist on the feedback entry (compiler replays it)");
-    assert.deepEqual(feedback[0].emerged_subtasks, ["first step", "blocked step", "dropped step", "next step"]);
+    ], "subgoal_updates must persist in the committed transaction (compiler replays it)");
+    assert.deepEqual(evaluation.emerged_subtasks, ["first step", "blocked step", "dropped step", "next step"]);
   });
 
   it("rejects an unknown sub-goal ID pre-advance without consuming the round", async () => {
@@ -1830,7 +1834,11 @@ describe("MCP — sub-goal persistence (v3.2.1)", async () => {
       prefix: `loop:${loopId}:r1`,
       feedbackOnly: true,
     });
-    assert.deepEqual(feedback[0]?.subgoal_updates, [{ id: sgId, status: "in_progress" }],
+    const committed = (feedback[0]?.loop_lineage as Record<string, unknown> | undefined)
+      ?.round_transaction as Record<string, unknown> | undefined;
+    const evaluation = (committed?.snapshot as Record<string, unknown> | undefined)
+      ?.evaluation as Record<string, unknown> | undefined;
+    assert.deepEqual(evaluation?.subgoal_updates, [{ id: sgId, status: "in_progress" }],
       "the unvalidated note is dropped, not persisted");
   });
 
@@ -1941,7 +1949,7 @@ describe("MCP — Round Contract flow", async () => {
     input.round_contract = {
       work_item: "Implement auth",
       scope: ["src/auth"],
-      items: [{ description: "login works", criterion_refs: [DEFAULT_CRITERION_ID], subgoal_refs: [], verify_with: ["run-tests"] }],
+      items: [{ description: "login works", criterion_refs: [DEFAULT_CRITERION_ID], verify_with: ["run-tests"] }],
     };
     assert.doesNotThrow(() => {
       validateToolInput("loopforge_next", {
@@ -1974,7 +1982,7 @@ describe("MCP — Round Contract flow", async () => {
         // the strict boundary now runs on EVERY advance (not just through the
         // MCP handler), so an item binding an unconfigured command really is
         // rejected — this fixture has to name a command that exists.
-        items: [{ description: "login works", criterion_refs: [DEFAULT_CRITERION_ID], subgoal_refs: [], verify_with: ["verify"] }],
+        items: [{ description: "login works", criterion_refs: [DEFAULT_CRITERION_ID], verify_with: ["verify"] }],
       },
     };
     const r2 = await advanceWithHeld(mgr, sessionId, "Scaffolded the auth module.", evalBlock);
@@ -2000,7 +2008,7 @@ describe("MCP — Round Contract flow", async () => {
       round_contract: {
         work_item: "Implement login flow",
         scope: ["src/auth"],
-        items: [{ description: "login works", criterion_refs: [], subgoal_refs: [], verify_with: ["not-configured"] }],
+        items: [{ description: "login works", criterion_refs: [], verify_with: ["not-configured"] }],
       },
     });
     assert.equal(rejected.stopReason, "contract_invalid");
@@ -2020,7 +2028,6 @@ describe("MCP — Round Contract flow", async () => {
       items: [{
         description: "login works",
         criterion_refs: [DEFAULT_CRITERION_ID],
-        subgoal_refs: [],
         verify_with: ["verify"],
       }],
     } as never;
@@ -2040,7 +2047,6 @@ describe("MCP — Round Contract flow", async () => {
       items: [{
         description: "login works",
         criterion_refs: [DEFAULT_CRITERION_ID],
-        subgoal_refs: [],
         verify_with: ["verify"],
       }],
     };
@@ -2104,7 +2110,7 @@ describe("MCP — Round Contract flow", async () => {
     work_item: workItem,
     scope: ["src/auth"],
     // "verify" is the command installTestCommandProvider configures.
-    items: [{ description: "login works", criterion_refs: [DEFAULT_CRITERION_ID], subgoal_refs: [], verify_with: ["verify"] }],
+    items: [{ description: "login works", criterion_refs: [DEFAULT_CRITERION_ID], verify_with: ["verify"] }],
   });
 
   /** Partial honest eval: success=false + a declared proposal (or none). */
@@ -2140,8 +2146,7 @@ describe("MCP — Round Contract flow", async () => {
       items: [{
         description: "widget works",
         criterion_refs: [],
-        subgoal_refs: [subGoalId],
-        verify_with: ["verify"],
+          verify_with: ["verify"],
       }],
     };
     const itemId = deriveContractItemIds(contract.items)[0];
@@ -2397,7 +2402,7 @@ describe("MCP — audit & vault replay (v3.3.1)", async () => {
     assert.ok(Array.isArray(timeline) && timeline.length >= 2,
       `vault replay must return the committed timeline (got ${String(timeline?.length)})`);
     const missing = await TOOL_HANDLERS.loopforge_replay(restarted, { loopId: "no-such-loop" });
-    assert.equal(missing.error, "state_unavailable");
+    assert.equal(missing.error, "state_unavailable", JSON.stringify(missing));
     assert.ok(String(missing.errorMessage ?? "").includes("no committed rounds"));
   });
 });

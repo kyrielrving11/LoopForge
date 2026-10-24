@@ -9,6 +9,7 @@ import { deriveConfiguredCapability, getPolicy } from "./policy.js";
 import {
   AgentStatus,
   makeLoopCompileResponse,
+  operatorAcceptanceFromObjective,
   makeLoopObjective,
   makeConstraintMeta,
   type ConstraintMeta,
@@ -18,6 +19,7 @@ import {
   type LoopCompileResponse,
   type LoopObjective,
   type LoopRoundResult,
+  type OperatorAcceptance,
   type VerificationFlag,
 } from "./protocol.js";
 import {
@@ -26,20 +28,20 @@ import {
 } from "./canonical-state.js";
 import type { MachineStatus } from "./canonical-state.js";
 import {
-  decodeRound,
-  entryLineage,
-  entryActiveConstraints,
-  entryRetractedConstraints,
   pendingBacktrackRecord,
   roundResultFromCommittedRound,
   type CommittedRoundView,
-  derivationRounds,
 } from "./committed-round.js";
 import {
+  buildCommittedHistory,
+  historyWindow,
+  operatorAcceptanceKey,
+} from "./history.js";
+import { OperatorAcceptanceConflictError } from "./errors.js";
+import {
   deriveProgressWindow,
-  STALL_PROGRESS_COVERAGE,
 } from "./progress.js";
-import { deriveCriterionStatuses as deriveCriterionStatusesFromEntries } from "./criterion-status.js";
+import { deriveCriterionStatuses as deriveCriterionStatusesFromViews } from "./criterion-status.js";
 import {
   derivePromptFreshness,
   UNKNOWN_PROMPT_FRESHNESS,
@@ -80,7 +82,6 @@ type Entry = Record<string, unknown>;
 export interface PreviousRound {
   round: number;
   goal_id: string;
-  goal_text_hash: string;
   success: boolean;
   task: string;
   constraints_active: string[];
@@ -90,10 +91,9 @@ export interface PreviousRound {
 /** ONE bundle of previous-round facts for a compile.
  *
  *  Every consumer (level policy, canonical state, evaluation block) reads
- *  this bundle instead of re-reading the caller's mutable projection. The
- *  committed view wins whenever it exists; `request.last_round_result` is
- *  only the in-flight/library fallback for callers with no committed round
- *  in the context. */
+ *  this bundle instead of re-reading the caller's mutable projection. It is
+ *  derived exclusively from the committed view; the typed request contributes
+ *  only this attempt's verification findings. */
 export interface PreviousRoundFacts {
   view: CommittedRoundView | null;
   result: LoopRoundResult | null;
@@ -107,38 +107,6 @@ function contextEntries(context: Record<string, unknown> | null): Entry[] {
   if (!context || !Array.isArray(context.results)) return [];
   return context.results.filter(
     (value): value is Entry => value !== null && typeof value === "object" && !Array.isArray(value),
-  );
-}
-
-function loopEntries(loopId: string, context: Record<string, unknown> | null): Entry[] {
-  return contextEntries(context)
-    .filter((entry) => entry.loop_id === loopId || entryLineage(entry).loop_id === loopId)
-    .sort((a, b) => entryRound(a) - entryRound(b));
-}
-
-/** v3.3.1: The canonical entry for a round — its compile-time lineage entry
- *  (task_type "loop_lineage"; engine hydration merges the committed
- *  decision into it, so one round = one merged lineage entry in the
- *  compiler's view). Event/journal entries (delegation journals, gate
- *  records) share lineage.round with the round but carry none of its
- *  compile-time fields; round-level consumers that matched on the round
- *  number alone could hit them first (they sort after the lineage entry of
- *  the same round), producing an empty goal_id / task / constraints_active
- *  and forcing spurious L2 recovery. A direct :feedback entry is accepted
- *  when the caller supplies a raw committed view instead of hydration. */
-function roundCanonicalEntry(entries: Entry[], round: number): Entry | null {
-  const candidates = entries.filter((entry) => entryRound(entry) === round);
-  return (
-    candidates.find((entry) => entry.task_type === "loop_lineage") ??
-    candidates.find((entry) => String(entry.task_id ?? "").endsWith(":feedback")) ??
-    // Untyped compiler inputs are treated as round views, not events. Known event
-    // types (delegation journals, gate records) are excluded explicitly so
-    // they can never shadow a round again.
-    candidates.find((entry) => {
-      const type = String(entry.task_type ?? "");
-      return type === "" || (!type.startsWith("delegation") && !type.endsWith("journal"));
-    }) ??
-    null
   );
 }
 
@@ -159,59 +127,42 @@ export function getPreviousRound(
   round: number,
   context: Record<string, unknown> | null,
 ): PreviousRound | null {
-  const entry = roundCanonicalEntry(loopEntries(loopId, context), round);
-  if (!entry) return null;
-  const data = entryLineage(entry);
+  const history = buildCommittedHistory(contextEntries(context));
+  return previousRoundFromWindow(historyWindow(history, Number.POSITIVE_INFINITY), round);
+}
+
+function previousRoundFromWindow(
+  window: ReadonlyArray<CommittedRoundView>,
+  round: number,
+): PreviousRound | null {
+  const view = window.find((candidate) => candidate.round === round);
+  if (!view) return null;
   return {
     round,
-    goal_id: typeof data.goal_id === "string" ? data.goal_id : "",
-    goal_text_hash: typeof data.goal_text_hash === "string" ? data.goal_text_hash : "",
-    success: typeof entry.success === "boolean"
-      ? entry.success
-      : typeof data.success === "boolean" ? data.success : false,
-    task: typeof data.task === "string"
-      ? data.task
-      : typeof entry.task === "string" ? entry.task : "",
-    constraints_active: Array.isArray(data.constraints_active)
-      ? data.constraints_active.filter((value): value is string => typeof value === "string")
-      : [],
-    output_summary: typeof entry.output_summary === "string"
-      ? entry.output_summary
-      : typeof data.output_summary === "string" ? data.output_summary : "",
+    goal_id: view.compiled?.goalId ?? "",
+    success: view.success,
+    task: view.compiled?.task ?? "",
+    constraints_active: [...(view.activeConstraints ?? [])],
+    output_summary: view.evaluation?.output_summary ?? "",
   };
 }
 
+/** The operator objective from the immutable acceptance carried by a committed
+ *  evaluation or rollback directive. Acceptance is byte-identical across
+ *  copies (enforced by the history loader), so it does not need a round or
+ *  branch window. */
 export function latestObjective(
   loopId: string,
   context: Record<string, unknown> | null,
-  /** Exclusive compile-round bound. A deep-restore redo must never read the
-   *  abandoned branch's objective (and its rolled-back refinements). */
-  beforeRound: number,
-  /** v3.9.4: a round-1 same-round retry has no earlier committed objective.
-   *  Reading the prior compile of the SAME round recovers the initial
-   *  criteria supplied to `loopforge_start`. It is never enabled for a first
-   *  attempt or for later rounds, so it cannot read an abandoned branch. */
-  includeRoundOne = false,
 ): LoopObjective | null {
-  const candidates = loopEntries(loopId, context)
-    .filter((entry) => {
-      const round = entryRound(entry);
-      return round >= 1 && (round < beforeRound || (includeRoundOne && round === 1));
-    })
-    .reverse();
-  for (const entry of candidates) {
-    const raw = entry.loop_objective;
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
-    const value = raw as Entry;
+  const history = buildCommittedHistory(contextEntries(context));
+  for (const view of history.views) {
+    if (!view.operatorAcceptance) continue;
     return makeLoopObjective({
-      objective: typeof value.objective === "string" ? value.objective : "",
-      success_criteria: Array.isArray(value.success_criteria)
-        ? value.success_criteria.filter((item): item is string => typeof item === "string")
-        : [],
-      hard_constraints: Array.isArray(value.hard_constraints)
-        ? value.hard_constraints.filter((item): item is string => typeof item === "string")
-        : [],
-      created_at_round: typeof value.created_at_round === "number" ? value.created_at_round : 1,
+      objective: view.operatorAcceptance.task,
+      success_criteria: [...view.operatorAcceptance.success_criteria],
+      hard_constraints: [...view.operatorAcceptance.hard_constraints],
+      created_at_round: 1,
       loop_id: loopId,
     });
   }
@@ -221,21 +172,26 @@ export function latestObjective(
 function evolveObjective(
   request: LoopCompileRequest,
   context: Record<string, unknown> | null,
-  previous: PreviousRoundFacts,
+  operatorAcceptance: OperatorAcceptance | null,
 ): LoopObjective {
-  // v3.9.7: committed lineage is authoritative once it exists. A transient
-  // request may bootstrap the objective for round 1, a round-1 retry, or a
-  // library caller with no committed objective; it may not rewrite operator
-  // acceptance after a committed objective exists.
-  const committed = latestObjective(
-    request.loop_id,
-    context,
-    request.round,
-    request.round === 1 && (request.attempt ?? 1) > 1,
-  );
+  // v3.9.7: committed acceptance is authoritative once it exists. A transient
+  // request may bootstrap the objective for round 1 or a library caller with
+  // no committed objective; it may not rewrite operator acceptance after a
+  // committed objective exists.
+  const committed = latestObjective(request.loop_id, context);
   const allowRequestObjective = request.loop_objective !== null &&
     (request.round === 1 || committed === null);
-  const current = (allowRequestObjective ? request.loop_objective : null) ??
+  const accepted = operatorAcceptance
+    ? makeLoopObjective({
+        objective: operatorAcceptance.task,
+        success_criteria: [...operatorAcceptance.success_criteria],
+        hard_constraints: [...operatorAcceptance.hard_constraints],
+        created_at_round: 1,
+        loop_id: request.loop_id,
+      })
+    : null;
+  const current = accepted ??
+    (allowRequestObjective ? request.loop_objective : null) ??
     committed ??
     makeLoopObjective({
       objective: request.task,
@@ -246,8 +202,8 @@ function evolveObjective(
       created_at_round: 1,
       loop_id: request.loop_id,
     });
-  // objective_refinement is a committed Agent report. It never rewrites the
-  // operator objective, criteria, hard constraints, gate or a version.
+  // The operator objective is the committed acceptance; no Agent report
+  // rewrites it.
   return makeLoopObjective({
     ...current,
     objective: current.objective || request.task,
@@ -399,7 +355,6 @@ function deriveMachineStatus(
     rounds,
     currentRound,
     getPolicy().engine.stall_lookback_rounds,
-    STALL_PROGRESS_COVERAGE,
   );
   if (window.incomplete || window.state === "not_applicable") return undefined;
   const changedRounds = window.roundStates.filter(
@@ -414,11 +369,10 @@ function deriveMachineStatus(
 }
 
 /** v3.2: Derive per-criterion status — the "goal → criteria → evidence"
- *  vertical view. Each objective criterion gets: claimed/remaining/unknown
- *  (from per-round criterion_claims, ID-first or normalized-exact matching),
- *  the round it was first reported met, and the sub-goals a contract item
- *  referencing it also names (explicit `subgoal_refs`, never a text guess).
- *  Zero persistence — re-derived from the vault every compile.
+ *  vertical view. Each objective criterion gets claimed/remaining/unknown
+ *  (from per-round criterion_claims, ID-first or normalized-exact matching)
+ *  and the round it was first reported met. Zero persistence — re-derived
+ *  from committed rounds every compile.
  *
  *  v3.9.6: the derivation lives in `criterion-status.ts` so the submission
  *  boundary and guidance can read the same rows without importing this module
@@ -436,11 +390,11 @@ export function deriveCriterionStatuses(
    *  closing (see `deriveCriterionFacts`). */
   criterionFacts: ReadonlyArray<CriterionMachineFact> = [],
 ): CriterionStatus[] {
-  return deriveCriterionStatusesFromEntries({
-    entries: loopEntries(loopId, context),
+  const history = buildCommittedHistory(contextEntries(context));
+  return deriveCriterionStatusesFromViews({
+    rounds: historyWindow(history, currentRound),
     currentRound,
     objective,
-    lastRoundResult,
     criterionFacts,
   });
 }
@@ -519,21 +473,11 @@ function manageConstraintLifecycle(
   active: string[],
   provenance: ReadonlyMap<string, ConstraintProvenance>,
   windowRounds: ReadonlyArray<CommittedRoundView>,
-  currentRound: number,
-  lastRoundViolations: string[] = [],
 ): { active: string[]; metadata: ConstraintMeta[] } {
   const metadata: ConstraintMeta[] = [];
 
   for (const text of active) {
     const source = provenance.get(text) ?? { source: "unrecorded" as const };
-
-    // v3.2.1: a violation reported in THIS round (last_round_result) counts
-    // as a violation at currentRound — the previous rounds' scan cannot see
-    // it (this round is not committed yet). This makes the L1 collapse
-    // render "(violated this round)" (diffConstraints compares
-    // last_violated_at_round === round).
-    const violatedThisRound = lastRoundViolations.some((v) =>
-      matchesConstraintText(text, v));
 
     // v3.3.1: one text, one identity — a success-criterion text that also
     // lives in the merged active set belongs to the cr-XXXXXXXX namespace
@@ -545,9 +489,7 @@ function manageConstraintLifecycle(
     metadata.push(makeConstraintMeta({
       id: source.source === "criteria" ? deriveCriterionId(text) : deriveConstraintId(text),
       text,
-      last_violated_at_round: violatedThisRound
-        ? currentRound
-        : findLastViolatedRound(text, windowRounds),
+      last_violated_at_round: findLastViolatedRound(text, windowRounds),
       source: source.source,
       ...(source.source_round !== undefined ? { source_round: source.source_round } : {}),
     }));
@@ -558,27 +500,21 @@ function manageConstraintLifecycle(
 
 /** Resolve the ONE previous-round fact bundle for a compile.
  *
- *  The committed view wins whenever a round is committed. `last_round_result`
- *  is only the caller's in-flight projection for engine/library callers with
- *  no committed round in the context. In-flight attempt findings are
- *  authoritative even when empty: a retry must never inherit the previous
- *  committed round's flags. */
+ *  It is built from the committed window only. A retry's verification findings
+ *  are authoritative even when empty: the retry must never inherit the
+ *  previous committed round's flags. */
 function resolvePreviousRoundFacts(
   request: LoopCompileRequest,
-  context: Record<string, unknown> | null,
-  windowRounds?: ReadonlyArray<CommittedRoundView>,
+  entries: ReadonlyArray<Entry>,
+  windowRounds: ReadonlyArray<CommittedRoundView>,
 ): PreviousRoundFacts {
-  const rounds = windowRounds ??
-    derivationRounds(loopEntries(request.loop_id, context), request.round);
-  const view = rounds.find((round) => round.round === request.round - 1) ?? null;
+  const view = windowRounds.find((round) => round.round === request.round - 1) ?? null;
   const recoveryBoundary =
-    pendingBacktrackRecord(loopEntries(request.loop_id, context), request.round) !== null;
+    pendingBacktrackRecord(entries, request.round) !== null;
   const inFlight = (request.attempt ?? 1) > 1 || recoveryBoundary;
   return {
     view,
-    result: view
-      ? roundResultFromCommittedRound(view)
-      : request.last_round_result,
+    result: view ? roundResultFromCommittedRound(view) : null,
     verificationFlags: inFlight
       ? (request.verification_flags ?? [])
       : (view?.verificationFlags ?? request.verification_flags ?? []),
@@ -619,8 +555,14 @@ export function decideLevel(
   request: LoopCompileRequest,
   context: Record<string, unknown> | null,
 ): "l0" | "l1" | "l2" {
-  const prior = getPreviousRound(request.loop_id, request.round - 1, context);
-  return levelDecision(request, prior, resolvePreviousRoundFacts(request, context)).level;
+  const entries = contextEntries(context);
+  const window = historyWindow(buildCommittedHistory(entries), request.round);
+  const prior = previousRoundFromWindow(window, request.round - 1);
+  return levelDecision(
+    request,
+    prior,
+    resolvePreviousRoundFacts(request, entries, window),
+  ).level;
 }
 
 /** The prompt's evaluation block. All content (examples, contract/sub-goal
@@ -645,7 +587,7 @@ function committedBacktrackBrief(
   // restore commits at the failed round while its redo targets
   // `backtrackTarget + 1`, so an exact-round match loses both the boundary
   // and this brief.
-  const view = pendingBacktrackRecord(loopEntries(loopId, context), round);
+  const view = pendingBacktrackRecord(contextEntries(context), round);
   const record = view?.recovery;
   if (!record) return undefined;
   const lines = recoveryBriefLines({
@@ -683,22 +625,30 @@ function committedBacktrackBrief(
 export function compileLoop(
   request: LoopCompileRequest,
   context: Record<string, unknown> | null,
+  options: { operatorAcceptance?: OperatorAcceptance } = {},
 ): LoopCompileResponse {
+  const operatorAcceptance = options.operatorAcceptance ?? null;
   // ONE history window and ONE previous-round fact bundle for the whole
   // compile. Every consumer below reads these values; none re-reads the
   // caller's mutable last_round_result.
-  const windowRounds = derivationRounds(
-    loopEntries(request.loop_id, context),
-    request.round,
-  );
-  const prior = getPreviousRound(request.loop_id, request.round - 1, context);
-  const previous = resolvePreviousRoundFacts(request, context, windowRounds);
+  const entries = contextEntries(context);
+  const history = buildCommittedHistory(entries);
+  // The operator surface is immutable. A caller-supplied copy that disagrees
+  // with a committed copy is an integrity conflict — never a silent override.
+  const committedAcceptance = history.views.find(
+    (view) => view.operatorAcceptance !== null,
+  )?.operatorAcceptance ?? null;
+  if (operatorAcceptance && committedAcceptance &&
+      operatorAcceptanceKey(operatorAcceptance) !==
+        operatorAcceptanceKey(committedAcceptance)) {
+    throw new OperatorAcceptanceConflictError(request.loop_id);
+  }
+  const windowRounds = historyWindow(history, request.round);
+  const prior = previousRoundFromWindow(windowRounds, request.round - 1);
+  const previous = resolvePreviousRoundFacts(request, entries, windowRounds);
   const decision = levelDecision(request, prior, previous);
-  const objective = evolveObjective(request, context, previous);
-  const pendingDirective = pendingBacktrackRecord(
-    loopEntries(request.loop_id, context),
-    request.round,
-  );
+  const objective = evolveObjective(request, context, operatorAcceptance);
+  const pendingDirective = pendingBacktrackRecord(entries, request.round);
   const preservedDiscoveries = pendingDirective?.recovery &&
     getPolicy().engine.backtrack_preserve_discoveries
     ? pendingDirective.recovery.skipped_discoveries
@@ -723,11 +673,6 @@ export function compileLoop(
     constraints.active,
     constraints.provenance,
     windowRounds,
-    request.round,
-    // "Violated this round" means the CURRENT compile round's report. A
-    // committed previous round's violations are found by the committed
-    // history scan at their real round, not relabelled as this round.
-    previous.view ? [] : (request.last_round_result?.constraint_violations ?? []),
   );
   // v3.8: sub-goal lifecycle lives in subgoal-state.ts and consumes the
   // shared committed-round view — one history interpretation. The previous
@@ -737,13 +682,6 @@ export function compileLoop(
     loopId: request.loop_id,
     currentRound: request.round,
     rounds: windowRounds,
-    currentReport: previous.result
-      ? {
-          round: previous.result.round || (request.round - 1),
-          emergedSubtasks: previous.result.emerged_subtasks ?? [],
-          subgoalUpdates: previous.result.subgoal_updates ?? [],
-        }
-      : null,
   });
   // v3.4/v3.8/v3.8.1: the ACTIVE Round Contract, its per-item statuses and the
   // verified sub-goal facts for this compile — ONE `deriveRoundFacts` call,
@@ -757,11 +695,8 @@ export function compileLoop(
     rounds: windowRounds,
     currentRound: request.round,
     inFlight: NO_IN_FLIGHT_ROUND,
-    subGoals,
     commands: getPolicy().evidence.commands ?? [],
   });
-  // `roundFacts.verifiedSubGoals` is not read here — it reaches the state file
-  // and the projection through the bundle itself.
   const { activeContract } = roundFacts;
   // v3.9.4: the criterion reference space is the ACTIVE criterion set, not
   // every text the objective ever carried. A retracted criterion must not be
@@ -833,15 +768,12 @@ export function compileLoop(
   const response = makeLoopCompileResponse({
     status: AgentStatus.OK,
     recompile_level: decision.level,
-    diff_from_previous: decision.reasons.join(","),
-    lineage: [`${request.loop_id}:r${request.round}`],
     constraints_active: constraintLifecycle.active,
     constraints_retired: constraints.retired,
     constraint_metadata: constraintLifecycle.metadata,
     loop_id: request.loop_id,
     round: request.round,
     goal_id: deriveGoalId(request.loop_id, request.task, request.goal_id),
-    goal_text_hash: computeGoalTextHash(request.task),
     loop_objective: objective,
     sub_goals: subGoals,
     criterion_statuses: criterionStatuses,
@@ -924,12 +856,17 @@ export function compileLoop(
     // recovery section is part of the artifact, so the delivered prompt is
     // exactly `artifact.renderedPrompt` (no post-compile prepend).
     recoveryBrief,
-    // v3.9.5: prompt requests are committed facts. A library fallback
-    // `last_round_result` is in-flight and must not steer the next prompt.
-    promptRequests: previous.view?.evaluation?.prompt_requests,
   });
   response.prompt = artifact.renderedPrompt;
   response.prompt_artifact = artifact;
   response.state_file_content = policy.state_file.enabled ? markdown : undefined;
+  response.operatorAcceptance = operatorAcceptance ?? committedAcceptance ??
+    operatorAcceptanceFromObjective(objective);
+  response.compiled = {
+    task: request.task,
+    goalId: response.goal_id,
+    constraintsActive: [...constraintLifecycle.active],
+    constraintsRetired: [...constraints.retired],
+  };
   return response;
 }

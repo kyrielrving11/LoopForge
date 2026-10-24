@@ -5,15 +5,16 @@ import { join } from "node:path";
 import { LoopForgeEngine } from "../engine.js";
 import { RoundDriver } from "../round-driver.js";
 import {
-  Mode,
   makeExecutionReport,
+  makeLoopCompileRequest,
   makeSelfEvaluation,
 } from "../protocol.js";
-import type { LoopForgeRequest } from "../protocol.js";
+import type { LoopCompileRequest } from "../protocol.js";
 import { deriveSubGoalId } from "../subgoal-state.js";
 import { MemoryLoopStore, installTestCommandProvider, criterionClaims } from "./_helpers.js";
 import { queryLoopEntries } from "../loop-store.js";
 import { deriveEvidenceCapability } from "../evidence-provider.js";
+import { loadCommittedHistory } from "../history.js";
 import { getPolicy } from "../policy.js";
 
 // v3.3: success claims need machine-backed evidence — the RoundDriver
@@ -21,17 +22,13 @@ import { getPolicy } from "../policy.js";
 // keeps R8 / success_unverified silent in these flows.
 installTestCommandProvider();
 
-function request(loopId: string): LoopForgeRequest {
-  return {
+function request(loopId: string): LoopCompileRequest {
+  return makeLoopCompileRequest({
     task: "Implement a durable transaction boundary",
-    mode: Mode.LOOP_COMPILE,
-    feedback: null,
-    skill_name: null,
-    task_id: null,
     loop_id: loopId,
     round: 1,
     max_rounds: 4,
-  };
+  });
 }
 
 describe("RoundDriver", () => {
@@ -79,7 +76,7 @@ describe("RoundDriver", () => {
       "a configured provider and an enabled command need no warning");
   });
 
-  it("compiles a new L0 artifact for a rejected attempt without a lineage commit", async () => {
+  it("compiles a new L0 artifact for a rejected attempt without a commit", async () => {
     const store = new MemoryLoopStore();
     const driver = new RoundDriver(
       new LoopForgeEngine(store),
@@ -111,9 +108,9 @@ describe("RoundDriver", () => {
     assert.equal(retry.level, "l0");
     assert.match(retry.prompt, /missing required evidence/);
     assert.equal(
-      queryLoopEntries(store, "driver-retry", { prefix: "loop:driver-retry:r1" })
-        .filter((entry) => entry.task_id === "loop:driver-retry:r1").length,
-      1,
+      queryLoopEntries(store, "driver-retry", { prefix: "loop:driver-retry:r1" }).length,
+      0,
+      "a compile or retry writes no Vault history",
     );
   });
 
@@ -160,21 +157,16 @@ describe("RoundDriver", () => {
     });
     assert.equal(c1.outcome.result.action, "continue");
 
-    // The round-2 compile context must carry the committed round's truth
-    const context = engine.hydrateLoopContext("driver-cross-round") as
-      | Record<string, unknown>
-      | null;
-    assert.ok(context);
-    const results = context.results as Array<Record<string, unknown>>;
-    assert.equal(results.length, 1);
-    const entry = results[0];
-    const lin = entry.loop_lineage as Record<string, unknown>;
-    assert.equal(entry.output_summary, "Implemented the parser.");
-    assert.equal(lin.compression_checkpoint, true);
-    assert.equal(lin.checkpoint_label, "Phase 1 done");
-    assert.deepEqual(lin.execution_report, eval1.execution_report);
-    assert.deepEqual(entry.discovered_constraints, ["Never log secrets"]);
-    assert.deepEqual(entry.subgoal_updates, [
+    // The round-2 compile context must carry the committed round's truth.
+    const history = loadCommittedHistory(engine.getStore(), "driver-cross-round");
+    assert.equal(history.rounds.length, 1);
+    const view = history.rounds[0]!;
+    assert.equal(view.evaluation?.output_summary, "Implemented the parser.");
+    assert.equal(view.evaluation?.compression_checkpoint, true);
+    assert.equal(view.evaluation?.checkpoint_label, "Phase 1 done");
+    assert.deepEqual(view.executionReport, eval1.execution_report);
+    assert.deepEqual(view.evaluation?.discovered_constraints, ["Never log secrets"]);
+    assert.deepEqual(view.evaluation?.subgoal_updates, [
       { id: deriveSubGoalId("driver-cross-round", 1, 0, "Add error handling"), status: "done" },
       { id: deriveSubGoalId("driver-cross-round", 1, 1, "Wire config"), status: "done" },
     ]);

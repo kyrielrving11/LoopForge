@@ -22,15 +22,14 @@
  *  boundary and `submission_guidance` cannot disagree about them.
  */
 
-import type { LoopStore, VaultEntry } from "../loop-store.js";
-import { queryLoopEntries } from "../loop-store.js";
+import type { LoopStore } from "../loop-store.js";
 import type {
   OperatorAcceptance,
   SubGoal,
 } from "../protocol.js";
 import type { ActiveContractView } from "../round-contract.js";
 import { deriveActiveRoundContract } from "../round-contract.js";
-import { derivationRounds, pendingRollbackDirective } from "../committed-round.js";
+import { historyWindow, loadCommittedHistory } from "../history.js";
 import {
   boundedEmergedSubtasks,
   normalizeSelfEvaluation,
@@ -51,7 +50,6 @@ import { isConfiguredCommand } from "../policy.js";
 import {
   canonicalContractItemText,
   deriveCriterionId,
-  entryRound,
   isRecord,
   uniqueNormalized,
 } from "../token-utils.js";
@@ -72,6 +70,7 @@ export interface CompileContextSession {
   roundSnapshot?: {
     attempt?: number;
     operatorAcceptance?: OperatorAcceptance;
+    compiled?: { constraintsActive: string[]; constraintsRetired: string[] };
   } | null;
 }
 
@@ -92,13 +91,9 @@ function referenceFactsFor(
   session: CompileContextSession,
 ): SubmissionReferenceFacts {
   try {
-    const prefix = `loop:${session.loopId}:`;
-    const entries = queryLoopEntries(store, session.loopId, { prefix });
-    const allEntries = [
-      ...entries,
-      ...queryLoopEntries(store, session.loopId, { prefix, feedbackOnly: true }),
-    ];
-    const windowRounds = derivationRounds(allEntries, session.currentRound);
+    const history = loadCommittedHistory(store, session.loopId);
+    const entries = history.entries;
+    const windowRounds = historyWindow(history, session.currentRound);
     const subGoals = deriveSubGoals({
       loopId: session.loopId,
       currentRound: session.currentRound,
@@ -118,8 +113,6 @@ function referenceFactsFor(
       : latestObjective(
           session.loopId,
           { results: entries },
-          session.currentRound,
-          session.currentRound === 1 && (session.roundSnapshot?.attempt ?? 1) > 1,
         );
     const criteriaTexts: ReadonlyArray<string> | null =
       objective?.success_criteria ?? null;
@@ -130,20 +123,14 @@ function referenceFactsFor(
           text,
         }));
 
-    // The current round's compile stamped the active set it rendered. This is
-    // the same text set the prompt carried; provenance is re-derived from the
-    // committed window, never from a second ledger.
-    const currentLineage = entries.find((entry) =>
-      entryRound(entry) === session.currentRound &&
-      entry.task_type === "loop_lineage");
-    const lineage = isRecord(currentLineage?.loop_lineage)
-      ? currentLineage.loop_lineage
-      : {};
-    const rawActive = Array.isArray(lineage.constraints_active)
-      ? lineage.constraints_active.filter(
-          (item): item is string => typeof item === "string")
+    // The held prompt's compile stamped the exact active set it rendered.
+    // This is the same text set the prompt carried; provenance is re-derived
+    // from the committed window, never from a second ledger.
+    const rawActive = session.roundSnapshot?.compiled?.constraintsActive ?? null;
+    const pending = history.pendingDirective?.recovery?.target.redo_round ===
+        session.currentRound
+      ? history.pendingDirective
       : null;
-    const pending = pendingRollbackDirective(allEntries, session.currentRound);
     const preservedDiscoveries = pending?.recovery &&
       getPolicy().engine.backtrack_preserve_discoveries
       ? pending.recovery.skipped_discoveries
@@ -165,7 +152,8 @@ function referenceFactsFor(
           }),
         }));
     const previouslyRetired = uniqueNormalized(
-      windowRounds.flatMap((round) => round.retractedConstraints ?? []),
+      windowRounds.flatMap((round) =>
+        round.compiledRetirements ?? round.retractedConstraints ?? []),
     );
     return { subGoals, criteria, constraints, previouslyRetired };
   } catch {
@@ -210,13 +198,9 @@ export function activeContractOf(
   store: LoopStore,
   session: { loopId: string; currentRound: number },
 ): ActiveContractView | null {
-  const prefix = `loop:${session.loopId}:`;
-  const entries: VaultEntry[] = [
-    ...queryLoopEntries(store, session.loopId, { prefix }),
-    ...queryLoopEntries(store, session.loopId, { prefix, feedbackOnly: true }),
-  ];
+  const history = loadCommittedHistory(store, session.loopId);
   return deriveActiveRoundContract(
-    derivationRounds(entries, session.currentRound),
+    historyWindow(history, session.currentRound),
   );
 }
 
@@ -381,7 +365,6 @@ export function validateSubmission(
     store,
     session,
     submission,
-    facts?.subGoals ?? null,
     facts?.criteria ?? null,
   );
   if (contractErrors.length > 0) {
@@ -463,21 +446,9 @@ function contractShapeErrors(
   store: LoopStore,
   session: CompileContextSession | undefined,
   submission: Record<string, unknown>,
-  subGoals: ReadonlyArray<SubGoal> | null,
   criteria: ReadonlyArray<{ id: string; text: string }> | null,
 ): ContractValidationError[] {
   const active = session ? activeContractOf(store, session) : null;
-  // v3.9.4: contract refs can only cite what the prompt actually displays.
-  // Same-round emerged sub-goals are deliberately excluded; they are not in
-  // the prompt and become referenceable in the NEXT round.
-  const displayedSubGoals = subGoals
-    ? new Set(
-        subGoals
-          .filter((subGoal) =>
-            subGoal.status !== "done" && subGoal.status !== "canceled")
-          .map((subGoal) => subGoal.id),
-      )
-    : null;
   const shapeErrors = validateContractShape(submission, {
     activeItemIds: session
       ? new Set((active?.items ?? []).map((item) => item.id))
@@ -485,7 +456,6 @@ function contractShapeErrors(
     knownCriterionIds: criteria
       ? new Set(criteria.map((criterion) => criterion.id))
       : null,
-    displayedSubGoalIds: displayedSubGoals,
     isConfiguredCommand,
   });
   // v3.9.9: the transition is a STRUCTURAL boundary like the contract itself.

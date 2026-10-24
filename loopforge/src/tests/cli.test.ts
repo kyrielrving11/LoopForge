@@ -7,6 +7,7 @@ import { spawnSync } from "node:child_process";
 import { FileLoopStore } from "../loop-store.js";
 import { PROMPT_ARTIFACT_SCHEMA_VERSION } from "../protocol.js";
 import { POLICY_SCHEMA_VERSION } from "../policy.js";
+import { committedFeedbackRound } from "./_helpers.js";
 
 const cli = resolve("dist/cli.js");
 
@@ -57,12 +58,7 @@ describe("loopforge CLI", () => {
     const root = temporaryDirectory();
     try {
       const store = new FileLoopStore(join(root, ".loopforge"));
-      store.appendEntry({
-        task_id: "loop:inspect-me:r1",
-        task_type: "loop_lineage",
-        loop_id: "inspect-me",
-        loop_lineage: { round: 1, task: "inspect" },
-      });
+      store.appendEntry(committedFeedbackRound(1, { loopId: "inspect-me" }));
       const result = run(["inspect", "inspect-me", "--round", "1", "--json"], root);
       assert.equal(result.status, 0, result.stderr);
       const document = JSON.parse(result.stdout) as { round: number; promptArtifact?: unknown };
@@ -77,12 +73,7 @@ describe("loopforge CLI", () => {
     const root = temporaryDirectory();
     try {
       const store = new FileLoopStore(join(root, ".loopforge"));
-      store.appendEntry({
-        task_id: "loop:inspect-me:r1",
-        task_type: "loop_lineage",
-        loop_id: "inspect-me",
-        loop_lineage: { round: 1, task: "inspect" },
-      });
+      store.appendEntry(committedFeedbackRound(1, { loopId: "inspect-me" }));
       // Regression: `inspect --round 1 inspect-me` took the option VALUE "1"
       // as the LOOP_ID (first non-dash argument) and reported
       // "round not found: 1#1" — the real loop was never read.
@@ -110,10 +101,10 @@ describe("loopforge CLI", () => {
         loop_lineage: {
           round: 1,
           round_transaction: {
-            schema_version: 5,
+            schema_version: 6,
             round_id: "loop:inspect-me:round:1",
             snapshot: {
-              schemaVersion: 5,
+              schemaVersion: 6,
               kind: "evaluation",
               branchId: "loop:inspect-me:branch:root",
               transactionId: "tx-inspect-me-1-1",
@@ -123,6 +114,17 @@ describe("loopforge CLI", () => {
               attempt: 1,
               phase: "committed",
               beforeEvidence: [],
+              operatorAcceptance: {
+                task: "Inspect task",
+                success_criteria: [],
+                hard_constraints: [],
+              },
+              compiled: {
+                task: "Inspect task",
+                goalId: "inspect-me:inspect-task",
+                constraintsActive: [],
+                constraintsRetired: [],
+              },
               submittedFields: [
                 "success", "output_summary", "constraint_violations", "should_continue",
               ],
@@ -176,10 +178,10 @@ describe("loopforge CLI", () => {
         loop_lineage: {
           round: 1,
           round_transaction: {
-            schema_version: 5,
+            schema_version: 6,
             round_id: "loop:explain-me:round:1",
             snapshot: {
-              schemaVersion: 5,
+              schemaVersion: 6,
               kind: "evaluation",
               branchId: "loop:explain-me:branch:root",
               transactionId: "tx-explain-me-1-1",
@@ -190,6 +192,17 @@ describe("loopforge CLI", () => {
               phase: "committed",
               beforeEvidence: [],
               afterEvidence: [],
+              operatorAcceptance: {
+                task: "Explain task",
+                success_criteria: [],
+                hard_constraints: [],
+              },
+              compiled: {
+                task: "Explain task",
+                goalId: "explain-me:explain-task",
+                constraintsActive: [],
+                constraintsRetired: [],
+              },
               evaluation: {
                 success: false,
                 output_summary: "Scaffolded the module.",

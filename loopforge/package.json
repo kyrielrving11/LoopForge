@@ -1,6 +1,6 @@
 {
   "name": "loopforge",
-  "version": "4.0.0",
+  "version": "4.0.1",
   "description": "Durable round runtime for coding agents with committed history, machine evidence, and agent-directed recovery.",
   "type": "module",
   "main": "./dist/index.js",

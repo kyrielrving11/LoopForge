@@ -15,6 +15,7 @@ import {
   StorageCorruptionError,
 } from "../loop-store.js";
 import type { VaultEntry } from "../loop-store.js";
+import { committedFeedbackRound } from "./_helpers.js";
 
 function temporaryDirectory(): string {
   return mkdtempSync(join(tmpdir(), "loopforge-seq-"));
@@ -244,9 +245,9 @@ describe("loop-store sequence integrity", () => {
       const store = new FileLoopStore(dir);
       const loopId = "prefix-gap";
       // Rounds 3..5 stamped — rounds 1-2 are missing
-      store.appendEntry(entry(loopId, 3, "loop_lineage"));
-      store.appendEntry(entry(loopId, 4, "loop_lineage"));
-      store.appendEntry(entry(loopId, 5, "loop_lineage"));
+      store.appendEntry(committedFeedbackRound(3, { loopId }));
+      store.appendEntry(committedFeedbackRound(4, { loopId }));
+      store.appendEntry(committedFeedbackRound(5, { loopId }));
       assert.throws(
         () => checkRoundSequence(store, loopId),
         (error: unknown) =>

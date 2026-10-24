@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { FileLoopStore } from "../loop-store.js";
+import { committedFeedbackRound } from "./_helpers.js";
 
 const cleanup: string[] = [];
 
@@ -29,12 +30,7 @@ afterEach(() => {
 });
 
 function append(store: FileLoopStore): void {
-  store.appendEntry({
-    task_id: "loop:lock-test:r1",
-    task_type: "loop_lineage",
-    loop_id: "lock-test",
-    loop_lineage: { round: 1 },
-  });
+  store.appendEntry(committedFeedbackRound(1, { loopId: "lock-test" }));
 }
 
 describe("FileLoopStore lock ownership", () => {

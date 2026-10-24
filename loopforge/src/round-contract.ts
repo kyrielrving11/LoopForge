@@ -79,7 +79,6 @@ export function activateContract(
     items: proposal.items.map((item, index) => ({
       description: item.description,
       criterion_refs: [...item.criterion_refs],
-      subgoal_refs: [...item.subgoal_refs],
       verify_with: [...item.verify_with],
       id: itemIds[index],
     })),

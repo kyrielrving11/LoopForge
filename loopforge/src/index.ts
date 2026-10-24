@@ -18,16 +18,12 @@
 
 // Protocol types
 export {
-  Mode,
   AgentStatus,
-  makeExecutionFeedback,
   makeSelfEvaluation,
   makeLoopObjective,
   makeLoopRoundResult,
   makeLoopCompileRequest,
   makeLoopCompileResponse,
-  makeSessionState,
-  makeTaskId,
   makeEvidenceSnapshot,
   makeVerificationFlag,
   makeVerificationResult,
@@ -37,16 +33,11 @@ export {
 } from "./protocol.js";
 
 export type {
-  ExecutionFeedback,
   SelfEvaluation,
-  LoopForgeRequest,
   LoopObjective,
   LoopRoundResult,
   LoopCompileRequest,
   LoopCompileResponse,
-  LoopForgeResponse,
-  SessionState,
-  AgentLoopResult,
   WorkerResult,
   EvidenceSnapshot,
   VerificationFlag,
@@ -56,10 +47,9 @@ export type {
   ConstraintMeta,
   PromptArtifact,
   PromptCoverage,
-  PromptRequestEffect,
+  CompiledRoundFacts,
   ContractTransition,
   ProgressCoverage,
-  ProgressSnapshot,
   SubmissionDiagnostic,
   SubmissionDiagnosticHandling,
   SubmissionGuidance,
@@ -145,12 +135,13 @@ export { ReplayBackend } from "./replay.js";
 export {
   LoopForgeEngine,
   createEngine,
+} from "./engine.js";
+export {
   buildSelfEvaluation,
   parseExecutionReport,
   parseWorkerResults,
-} from "./engine.js";
+} from "./self-eval.js";
 
-export type { EngineMetrics, DelegationEntry } from "./engine.js";
 
 export type { StopReason } from "./protocol.js";
 
@@ -169,7 +160,6 @@ export {
   isPassedAfterObservation,
   deriveObservationDeltas,
   gitDeltaState,
-  isValidProgressSnapshot,
   observationVersionIssue,
   expectedObservationSchemaVersion,
   coverageKey,
@@ -189,11 +179,8 @@ export {
   deriveProgressWindow,
   deriveRoundProgress,
   GIT_WORKSPACE_COVERAGE,
-  STALL_PROGRESS_COVERAGE,
 } from "./progress.js";
 export type {
-  ProgressCoverageSelector,
-  ProgressSelector,
   ProgressWindow,
   RoundProgress,
 } from "./progress.js";

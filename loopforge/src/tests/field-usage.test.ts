@@ -49,19 +49,9 @@ const OPPORTUNITIES: Opportunity[] = [
     field: "worker_results",
   },
   {
-    name: "the objective was refined",
-    payload: { objective_refinement: "the migration also needs a rollback path" },
-    field: "objective_refinement",
-  },
-  {
     name: "a checkpoint boundary was declared",
     payload: { compression_checkpoint: true, checkpoint_label: "parser complete" },
     field: "compression_checkpoint",
-  },
-  {
-    name: "the next prompt needs context",
-    payload: { prompt_requests: { emphasize: ["exact constraint text"] } },
-    field: "prompt_requests",
   },
   {
     name: "the round is blocked",

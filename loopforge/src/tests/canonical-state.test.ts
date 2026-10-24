@@ -176,71 +176,14 @@ describe("createCanonicalLoopState", () => {
   });
 
   it("handles empty state without errors", () => {
-    const state = createCanonicalLoopState(request({
-      last_round_result: null,
-    }), response({
+    const state = createCanonicalLoopState(request(), response({
       loop_objective: null,
     }), "test.md");
     assert.ok(state.objective);
     assert.equal("estimate" in state.progress, false);
   });
 
-  it("v3.9.5: only committed reports become corrections/blockers", () => {
-    const previous = makeLoopRoundResult({
-      round: 1,
-      success: false,
-      output_summary: "previous summary",
-      constraint_violations: ["committed violation"],
-      manual_fixes_needed: "manual cleanup",
-      wrong_assumptions: ["old belief"],
-      discovered_constraints: ["uncommitted discovery"],
-      emerged_subtasks: ["uncommitted subtask"],
-      execution_report: {
-        files_changed: ["uncommitted.ts"],
-        tests_reported: { passed: 1, failed: 0, skipped: 0 },
-        criterion_claims: criterionClaims(["met criterion"], ["remaining criterion"]),
-      },
-    });
-    const fallback = createCanonicalLoopState(
-      request({ last_round_result: previous }),
-      response(),
-      "test.md",
-    );
-    assert.deepEqual(fallback.corrections, [],
-      "fallback wrong assumptions do not enter Corrections");
-    assert.ok(!fallback.blockers.includes("committed violation"));
-    assert.ok(!fallback.blockers.includes("manual cleanup"));
-    assert.deepEqual(fallback.discoveries, []);
-    assert.deepEqual(fallback.remainingCriteria, []);
-    assert.deepEqual(fallback.progress.filesChanged, []);
-    assert.equal(fallback.progress.tests, null);
-    assert.deepEqual(fallback.progress.criteriaMet, []);
-    assert.deepEqual(fallback.progress.criteriaRemaining, []);
 
-    const committed = createCanonicalLoopState(
-      request(),
-      response(),
-      "test.md",
-      { previousRound: { result: previous, verificationFlags: [], committed: true } },
-    );
-    assert.deepEqual(committed.corrections, ["old belief"]);
-    assert.ok(committed.blockers.includes("committed violation"));
-    assert.ok(!committed.blockers.includes("manual cleanup"),
-      "manual_fixes_needed has no committed source");
-    assert.deepEqual(committed.discoveries, ["uncommitted discovery"],
-      "emerged_subtasks are a plan, not a discovery");
-    assert.deepEqual(committed.remainingCriteria, ["remaining criterion"]);
-    assert.deepEqual(committed.progress.filesChanged, ["uncommitted.ts"]);
-    assert.deepEqual(committed.progress.tests, { passed: 1, failed: 0, skipped: 0 });
-    assert.ok(!committed.corrections.join(" ").includes("previous summary"));
-  });
-});
-
-// ═══════════════════════════════════════════════════════════════════════════
-// renderCanonicalStateMarkdown
-// ═══════════════════════════════════════════════════════════════════════════
-
-describe("renderCanonicalStateMarkdown", () => {
   it("renders objective and current task", () => {
     const state = createCanonicalLoopState(request(), response(), "test.md");
     const md = renderCanonicalStateMarkdown(state);
@@ -265,22 +208,20 @@ describe("renderCanonicalStateMarkdown", () => {
   });
 
   it("renders objective progress evidence without a subjective percentage", () => {
-    const req = request({
-      last_round_result: {
-        round: 1,
-        success: true,
-        output_summary: "done",
-        constraint_violations: [],
-        manual_fixes_needed: "",
-        execution_report: {
-          files_changed: ["a.ts"],
-          tests_reported: { passed: 8, failed: 1, skipped: 0 },
-          criterion_claims: criterionClaims(["c1"], ["c2"]),
-        },
+    const previous = makeLoopRoundResult({
+      round: 1,
+      success: true,
+      output_summary: "done",
+      constraint_violations: [],
+      manual_fixes_needed: "",
+      execution_report: {
+        files_changed: ["a.ts"],
+        tests_reported: { passed: 8, failed: 1, skipped: 0 },
+        criterion_claims: criterionClaims(["c1"], ["c2"]),
       },
     });
-    const state = createCanonicalLoopState(req, response(), "test.md", {
-      previousRound: { result: req.last_round_result!, verificationFlags: [], committed: true },
+    const state = createCanonicalLoopState(request(), response(), "test.md", {
+      previousRound: { result: previous, verificationFlags: [], committed: true },
     });
     const md = renderCanonicalStateMarkdown(state);
     assert.ok(md.includes("Progress Dashboard"));
@@ -370,7 +311,7 @@ describe("state-file tiering (v3.7.1)", () => {
     const idxHistorical = md.indexOf("## Historical Summary");
     assert.ok(idxCurrent >= 0 && idxRecent > idxCurrent && idxHistorical > idxRecent,
       "tiers must render in order: Current → Recent → Historical Summary");
-    assert.ok(md.includes("**Schema**: 4"), "v3.9.7 schema marker");
+    assert.ok(md.includes("**Schema**: 5"), "state schema marker");
     assert.ok(md.includes("**Derived**: true"), "derived marker in the header");
     assert.ok(md.includes("**Source**: round 2 (attempt 2)"), "attempt marker");
     assert.ok(md.includes("**Authority**: committed typed rounds"));
@@ -429,9 +370,9 @@ describe("v3.3 — Roadmap and derived state", () => {
   const fullResponse = (): LoopCompileResponse => response({
     round: 7,
     criterion_statuses: [
-      { id: "cr-11111111", text: "all tests pass", status: "verified" as const, met_at_round: 3, related_subgoal_ids: [] },
-      { id: "cr-22222222", text: "no regressions", status: "remaining" as const, related_subgoal_ids: [] },
-      { id: "cr-33333333", text: "clean lint", status: "unknown" as const, related_subgoal_ids: [] },
+      { id: "cr-11111111", text: "all tests pass", status: "verified" as const, met_at_round: 3 },
+      { id: "cr-22222222", text: "no regressions", status: "remaining" as const },
+      { id: "cr-33333333", text: "clean lint", status: "unknown" as const },
     ],
     sub_goals: [{
       id: "sg-1",
@@ -485,8 +426,8 @@ describe("Round Contract state (v3.3 rendering, v3.4 active source)", () => {
     work_item: "Implement auth",
     scope: ["src/auth"],
     items: [
-      { id: "rci-11111111", description: "login works", criterion_refs: ["cr-auth-login"], subgoal_refs: [], verify_with: ["run-tests"] },
-      { id: "rci-22222222", description: "logout works", criterion_refs: ["cr-auth-logout"], subgoal_refs: [], verify_with: ["run-tests"] },
+      { id: "rci-11111111", description: "login works", criterion_refs: ["cr-auth-login"], verify_with: ["run-tests"] },
+      { id: "rci-22222222", description: "logout works", criterion_refs: ["cr-auth-logout"], verify_with: ["run-tests"] },
     ],
     config_hash_by_command: {},
   };
@@ -505,8 +446,6 @@ describe("Round Contract state (v3.3 rendering, v3.4 active source)", () => {
       contradictedCount: 0,
       insufficientCount: 0,
     },
-    verifiedSubGoals: [],
-    verificationDebt: [],
     criterionFacts: [],
   });
 
@@ -552,7 +491,7 @@ describe("Round Contract state (v3.3 rendering, v3.4 active source)", () => {
       declared_at_round: 1,
       work_item: "Tidy",
       scope: [],
-      items: [{ id: "rci-33333333", description: "lint clean", criterion_refs: [], subgoal_refs: [], verify_with: [] }],
+      items: [{ id: "rci-33333333", description: "lint clean", criterion_refs: [], verify_with: [] }],
       config_hash_by_command: {},
     });
     assert.equal(
@@ -564,7 +503,7 @@ describe("Round Contract state (v3.3 rendering, v3.4 active source)", () => {
       id: "rc-cccccccc",
       declared_at_round: 1,
       scope: [],
-      items: [{ id: "rci-44444444", description: "tests pass", criterion_refs: [], subgoal_refs: [], verify_with: ["run-tests"] }],
+      items: [{ id: "rci-44444444", description: "tests pass", criterion_refs: [], verify_with: ["run-tests"] }],
       config_hash_by_command: {},
     });
     assert.equal(
@@ -574,7 +513,7 @@ describe("Round Contract state (v3.3 rendering, v3.4 active source)", () => {
     );
   });
 
-  it("v3.9.5: renders item status, sub-goal refs and scope hierarchy", () => {
+  it("v3.9.5: renders item status and scope hierarchy", () => {
     const statuses: ContractItemStatusView = {
       contractId: "rc-dddddddd",
       closure: "open",
@@ -600,7 +539,6 @@ describe("Round Contract state (v3.3 rendering, v3.4 active source)", () => {
         id: "rci-55555555",
         description: "login works",
         criterion_refs: ["cr-11111111"],
-        subgoal_refs: ["sg-11111111"],
         verify_with: ["verify", "lint"],
       }],
       config_hash_by_command: {},
@@ -609,7 +547,6 @@ describe("Round Contract state (v3.3 rendering, v3.4 active source)", () => {
     assert.match(text, /— insufficient/);
     assert.match(text, /Verify via: verify, lint/);
     assert.match(text, /Criteria: cr-11111111/);
-    assert.match(text, /Sub-goals: sg-11111111/);
     assert.match(text, /Unverified because: command/);
     assert.match(text, /Declared scope \(Agent report; not enforced\):\n  - src\/auth/);
   });

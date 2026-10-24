@@ -34,7 +34,7 @@ function proposal(overrides: Partial<RoundContractProposal> = {}): RoundContract
   return {
     work_item: "Implement auth",
     scope: ["src/auth"],
-    items: [{ description: "login works", criterion_refs: ["cr-11111111"], subgoal_refs: [], verify_with: ["run-tests"] }],
+    items: [{ description: "login works", criterion_refs: ["cr-11111111"], verify_with: ["run-tests"] }],
     ...overrides,
   };
 }
@@ -112,6 +112,7 @@ function round(
     checkpoints: [],
     restore: null,
     operatorAcceptance: null,
+    compiled: null,
     attempt: 1,
     promptArtifact: null,
     evaluation: null,
@@ -154,7 +155,7 @@ describe("v3.8 — contract identity", () => {
   });
 
   it("gives identical item text distinct ids through the duplicate ordinal", () => {
-    const item = { description: "same", criterion_refs: [], subgoal_refs: [], verify_with: [] };
+    const item = { description: "same", criterion_refs: [], verify_with: [] };
     const ids = deriveContractItemIds([item, item]);
     assert.equal(new Set(ids).size, 2);
     assert.equal(ids[0], deriveContractItemId(item, 0));
@@ -238,8 +239,8 @@ describe("v3.8 — active contract walker", () => {
     const E2E: CommandEvidencePolicy = { ...COMMAND, name: "e2e" };
     const twoItems = proposal({
       items: [
-        { description: "login works", criterion_refs: [], subgoal_refs: [], verify_with: ["run-tests"] },
-        { description: "signup works", criterion_refs: [], subgoal_refs: [], verify_with: ["e2e"] },
+        { description: "login works", criterion_refs: [], verify_with: ["run-tests"] },
+        { description: "signup works", criterion_refs: [], verify_with: ["e2e"] },
       ],
     });
     const [loginId, signupId] = deriveContractItemIds(twoItems.items);

@@ -89,7 +89,7 @@ describe("v3.8.1 — schema fidelity", () => {
     // must read it rather than guess.
     const version = props("PromptArtifact").schemaVersion;
     assert.equal(version.type, "number", "the artifact schema version is a number");
-    assert.equal(version.const, 6);
+    assert.equal(version.const, 7);
   });
 });
 
@@ -136,7 +136,11 @@ describe("Generated JSON Schema — top-level", () => {
     // RecoveryTarget joined (67 → 71).
     // v3.9.9: ContractTransition and ProgressCoverage joined (71 → 73).
     // v4.0.0: SubmissionHandle joined (73 → 74).
-    assert.equal(names.length, 74, `expected 74, got ${names.length}: ${names.join(", ")}`);
+    // v4.0.1: PromptRequests, PromptRequestEffect, ProgressSnapshot,
+    // VerifiedSubGoalFact, LoopForgeRequest, LoopForgeResponse, SessionState,
+    // AgentLoopResult and ExecutionFeedback were removed; CompiledRoundFacts
+    // joined. The current wire surface is 65 definitions.
+    assert.equal(names.length, 65, `expected 65, got ${names.length}: ${names.join(", ")}`);
     assert.ok(names.includes("SubmissionHandle"));
     assert.ok(names.includes("PromptArtifact"));
     assert.ok(names.includes("RoundOutcome"));
@@ -149,7 +153,8 @@ describe("Generated JSON Schema — top-level", () => {
     assert.ok(names.includes("SubmissionReceipt"));
     assert.ok(names.includes("FilesReconciliation"));
     assert.ok(names.includes("SubmissionDiagnostic"));
-    assert.ok(names.includes("PromptRequestEffect"));
+    assert.ok(names.includes("ProgressCoverage"));
+    assert.ok(names.includes("CompiledRoundFacts"));
     assert.ok(names.includes("PromptCoverage"));
     assert.ok(names.includes("ToolError"));
     assert.ok(names.includes("ToolErrorCode"));
@@ -189,13 +194,6 @@ describe("Generated JSON Schema — top-level", () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("Enums", () => {
-  it("Mode — 2 values", () => {
-    assert.equal(def("Mode").type, "string");
-    assert.deepEqual(def("Mode").enum, [
-      "loop_compile", "feedback",
-    ]);
-  });
-
   it("AgentStatus — 3 values", () => {
     assert.equal(def("AgentStatus").type, "string");
     assert.deepEqual(def("AgentStatus").enum, ["ok", "error", "stalled"]);
@@ -233,11 +231,10 @@ describe("Array properties", () => {
     assert.equal((p.hard_constraints.items as Record<string, unknown>).type, "string");
   });
 
-  it("LoopCompileResponse — warnings and lineage are string arrays", () => {
+  it("LoopCompileResponse — warnings are a string array", () => {
     const p = props("LoopCompileResponse");
     assert.equal(p.warnings.type, "array");
     assert.equal((p.warnings.items as Record<string, unknown>).type, "string");
-    assert.equal(p.lineage.type, "array");
   });
 
 });
@@ -256,51 +253,25 @@ describe("$ref links", () => {
     assert.equal(nulls.length, 1);
   });
 
-  it("LoopForgeResponse.status → AgentStatus ($ref)", () => {
-    assert.equal(props("LoopForgeResponse").status.$ref, "#/$defs/AgentStatus");
-  });
-
-  it("AgentLoopResult.response → LoopForgeResponse | null (anyOf)", () => {
-    const rProp = props("AgentLoopResult").response;
-    assert.ok(rProp.anyOf);
-    const refs = (rProp.anyOf as Record<string, unknown>[]).map((x) => x.$ref).filter(Boolean);
-    assert.ok(refs.includes("#/$defs/LoopForgeResponse"));
-  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Index signature → additionalProperties
 // ═══════════════════════════════════════════════════════════════════════════
 
-describe("Index signature handling", () => {
-  it("LoopForgeRequest has additionalProperties: true (index signature)", () => {
-    assert.equal(
-      def("LoopForgeRequest").additionalProperties,
-      true,
-      "LoopForgeRequest has [key: string]: unknown → additionalProperties",
-    );
-  });
-});
-
 // ═══════════════════════════════════════════════════════════════════════════
 // required arrays
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("required arrays", () => {
-  it("LoopForgeRequest — task is required", () => {
-    assert.ok(required("LoopForgeRequest").includes("task"));
-  });
-
   it("LoopCompileRequest — all non-optional fields are required, nullable not", () => {
     const req = required("LoopCompileRequest");
-    assert.ok(req.includes("mode"));
     assert.ok(req.includes("loop_id"));
     assert.ok(req.includes("round"));
     assert.ok(req.includes("task"));
     // Optional (nullable) fields should NOT be in required
     assert.ok(!req.includes("loop_objective"));
     assert.ok(!req.includes("plan_source"));
-    assert.ok(!req.includes("last_round_result"));
     assert.ok(!req.includes("new_since_last_round"));
     assert.ok(!("new_since_last_round" in props("LoopCompileRequest")),
       "v3.9.5 removed the caller narrative field from the protocol");

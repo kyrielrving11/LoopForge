@@ -1,6 +1,7 @@
 /** Persistence adapters for session state and committed round lookup. */
 
-import { queryLoopEntries } from "./loop-store.js";
+import { randomUUID } from "node:crypto";
+import { LoopExistsError } from "./errors.js";
 import type { LoopStore, LoopSessionDocument, VaultEntry } from "./loop-store.js";
 import { LOOP_STORE_SCHEMA_VERSION } from "./loop-store.js";
 
@@ -49,6 +50,10 @@ export interface SessionStateStore {
 export interface SessionSaveOptions {
   /** Reject a write if another process owns the existing session entry. */
   expectedLeaseOwner?: string;
+  /** Reject the write when ANY session document already exists. This is the
+   *  atomic "create only" gate: the preflight read is not enough under a
+   *  concurrent start. */
+  expectAbsent?: boolean;
 }
 
 export class SessionLeaseConflictError extends Error {
@@ -58,8 +63,31 @@ export class SessionLeaseConflictError extends Error {
   }
 }
 
+export interface RoundTransactionEnvelope {
+  schema_version: number;
+  round_id: string;
+  snapshot: unknown;
+  result: unknown;
+}
+
 export interface RoundCommitStore {
   find(loopId: string, round: number): VaultEntry[];
+  findRollback(
+    loopId: string,
+    round: number,
+    transactionId: string,
+  ): VaultEntry | null;
+  appendFeedback(
+    loopId: string,
+    round: number,
+    envelope: RoundTransactionEnvelope,
+  ): VaultEntry;
+  appendRollbackDirective(
+    loopId: string,
+    round: number,
+    transactionId: string,
+    envelope: RoundTransactionEnvelope,
+  ): VaultEntry;
 }
 
 export class VaultSessionStateStore implements SessionStateStore {
@@ -86,6 +114,9 @@ export class VaultSessionStateStore implements SessionStateStore {
     }
     const write = () => {
       const existing = this.store.readSession(loopId);
+      if (existing && options.expectAbsent) {
+        throw new LoopExistsError(loopId, "session");
+      }
       if (existing && options.expectedLeaseOwner) {
         const lineage = this.lineage(existing.entry);
         const owner = typeof lineage.lease_owner === "string"
@@ -231,9 +262,62 @@ export class VaultRoundCommitStore implements RoundCommitStore {
   constructor(private readonly store: LoopStore) {}
 
   find(loopId: string, round: number): VaultEntry[] {
-    return queryLoopEntries(this.store, loopId, {
-      prefix: `loop:${loopId}:r${round}:feedback`,
-      feedbackOnly: true,
-    });
+    const feedback = this.store.readRound(loopId, round)?.feedback;
+    return feedback ? [feedback] : [];
+  }
+
+  findRollback(
+    loopId: string,
+    round: number,
+    transactionId: string,
+  ): VaultEntry | null {
+    const taskId = `loop:${loopId}:r${round}:rollback:${transactionId}`;
+    const doc = this.store.readRound(loopId, round);
+    return doc?.events.find((entry) =>
+      entry.task_id === taskId && entry.task_type === "rollback_directive",
+    ) ?? null;
+  }
+
+  appendFeedback(
+    loopId: string,
+    round: number,
+    envelope: RoundTransactionEnvelope,
+  ): VaultEntry {
+    const entry: VaultEntry = {
+      id: randomUUID(),
+      task_id: `loop:${loopId}:r${round}:feedback`,
+      task_type: "feedback",
+      loop_id: loopId,
+      timestamp: new Date().toISOString(),
+      loop_lineage: {
+        round,
+        round_id: envelope.round_id,
+        round_transaction: envelope,
+      },
+    };
+    this.store.appendEntry(entry);
+    return entry;
+  }
+
+  appendRollbackDirective(
+    loopId: string,
+    round: number,
+    transactionId: string,
+    envelope: RoundTransactionEnvelope,
+  ): VaultEntry {
+    const entry: VaultEntry = {
+      id: randomUUID(),
+      task_id: `loop:${loopId}:r${round}:rollback:${transactionId}`,
+      task_type: "rollback_directive",
+      loop_id: loopId,
+      timestamp: new Date().toISOString(),
+      loop_lineage: {
+        round,
+        round_id: envelope.round_id,
+        round_transaction: envelope,
+      },
+    };
+    this.store.appendEntry(entry);
+    return entry;
   }
 }

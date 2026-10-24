@@ -28,6 +28,7 @@ const RETRYABLE_ERROR_CODES = new Set<ToolErrorCode>([
   "evaluation_invalid",
   "contract_invalid",
   "policy_invalid",
+  "start_failed",
   "submission_handle_required",
   "submission_handle_mismatch",
   "invalid_argument",

@@ -16,7 +16,6 @@ import { gitMotionSignal } from "../git-motion.js";
 import {
   deriveProgressWindow,
   deriveRoundProgress,
-  STALL_PROGRESS_COVERAGE,
 } from "../progress.js";
 import type {
   CustomObservation,
@@ -103,7 +102,20 @@ function feedbackEntry(
           phase: "committed",
           beforeEvidence: opts.before ?? [],
           ...(opts.schemaVersion === undefined
-            ? fixtureBeforeCheckpointError(opts.before ?? [])
+            ? {
+                ...fixtureBeforeCheckpointError(opts.before ?? []),
+                operatorAcceptance: {
+                  task: "Observe rounds",
+                  success_criteria: [],
+                  hard_constraints: [],
+                },
+                compiled: {
+                  task: "Observe rounds",
+                  goalId: "obs-loop:observe-rounds",
+                  constraintsActive: [],
+                  constraintsRetired: [],
+                },
+              }
             : {}),
           ...(opts.after ? { afterEvidence: opts.after } : {}),
           evaluation: {
@@ -242,13 +254,12 @@ describe("Git progress facts under the explicit selector", () => {
           [gitObservation([], {}, "aaa")],
           [gitObservation([], {}, "bbb")],
         ),
-        STALL_PROGRESS_COVERAGE,
-      ).state,
+            ).state,
       "changed",
     );
     const noBaseline = deriveRoundObservationDelta([], [gitObservation(["a.ts"])]);
     assert.equal(
-      deriveRoundProgress(noBaseline, STALL_PROGRESS_COVERAGE).state,
+      deriveRoundProgress(noBaseline).state,
       "unknown",
       "no baseline and no HEAD evidence is unknown, not motion",
     );
@@ -256,7 +267,7 @@ describe("Git progress facts under the explicit selector", () => {
 
   it("is not_applicable when Git never observed the round", () => {
     assert.equal(
-      deriveRoundProgress([], STALL_PROGRESS_COVERAGE).state,
+      deriveRoundProgress([]).state,
       "not_applicable",
     );
     assert.equal(
@@ -265,8 +276,7 @@ describe("Git progress facts under the explicit selector", () => {
           [gitObservation([])],
           [{ ...gitObservation([]), status: "timeout" }],
         ),
-        STALL_PROGRESS_COVERAGE,
-      ).state,
+            ).state,
       "unknown",
     );
   });
@@ -277,7 +287,7 @@ describe("Git progress facts under the explicit selector", () => {
       [gitObservation([], {}, "abcdef123456")],
     );
     assert.equal(
-      deriveRoundProgress(deltas, STALL_PROGRESS_COVERAGE).state,
+      deriveRoundProgress(deltas).state,
       "unknown",
       "a before-less boundary is unknown, and a restore adds no motion arm",
     );
@@ -300,8 +310,7 @@ describe("progress window under the Git selector", () => {
         after: [gitObservation([], {}, "ccc333")],
       }),
     ].flatMap((entry) => derivationRounds([entry]));
-    const window = deriveProgressWindow(
-      views, 4, 3, STALL_PROGRESS_COVERAGE);
+    const window = deriveProgressWindow(views, 4, 3);
     assert.equal(window.state, "changed");
     assert.deepEqual(
       window.roundStates.map((entry) => entry.state),
@@ -322,7 +331,7 @@ describe("progress window under the Git selector", () => {
       assert.equal(views[0].observationDelta[0].changedFiles, null,
         "an unobservable after boundary must not manufacture a delta");
       assert.equal(
-        deriveProgressWindow(views, 4, 3, STALL_PROGRESS_COVERAGE).state,
+        deriveProgressWindow(views, 4, 3).state,
         "unknown",
         status,
       );
@@ -339,7 +348,7 @@ describe("progress window under the Git selector", () => {
       feedbackEntry(3, { after: [gitObservation([], {}, "same")] }),
     ]);
     assert.equal(
-      deriveProgressWindow(views, 4, 3, STALL_PROGRESS_COVERAGE).state,
+      deriveProgressWindow(views, 4, 3).state,
       "unknown",
     );
   });
@@ -448,59 +457,7 @@ describe("v3.9.1 — transaction schema 3", () => {
     );
   });
 
-  it("v3.9.9: reports the retired progressCapable marker as observation legacy", () => {
-    const entry = feedbackEntry(1, {
-      after: [customObservation({
-        progressCapable: true,
-        progress: {
-          schemaVersion: 2,
-          coverage: COVERAGE,
-          complete: true,
-          fingerprint: "a".repeat(64),
-        },
-      })],
-    });
-    assert.deepEqual(legacyTransactionRounds([entry]), [
-      { round: 1, schemaVersion: 1, envelope: "observation" },
-    ]);
-    assert.deepEqual(derivationRounds([entry]), []);
-  });
 
-  it("v3.9.9: reports an inner schema-1 progress snapshot as legacy", () => {
-    const entry = feedbackEntry(1, {
-      after: [customObservation({
-        progress: { schemaVersion: 1, fingerprint: "a".repeat(64) },
-      })],
-    });
-    assert.deepEqual(legacyTransactionRounds([entry]), [
-      { round: 1, schemaVersion: 1, envelope: "observation" },
-    ]);
-    assert.deepEqual(derivationRounds([entry]), []);
-  });
-
-  it("v3.9.9: reads an inner schema-2 snapshot under custom base schema 1", () => {
-    const entry = feedbackEntry(1, {
-      before: [customObservation({
-        progress: {
-          schemaVersion: 2,
-          coverage: COVERAGE,
-          complete: true,
-          fingerprint: "a".repeat(64),
-        },
-      }, "before")],
-      after: [customObservation({
-        progress: {
-          schemaVersion: 2,
-          coverage: COVERAGE,
-          complete: true,
-          fingerprint: "b".repeat(64),
-        },
-      })],
-    });
-    assert.deepEqual(legacyTransactionRounds([entry]), []);
-    const view = derivationRounds([entry])[0];
-    assert.equal(view.observationDelta[0].progress?.state, "changed");
-  });
 });
 
 describe("v3.8 — read-model observation fields", () => {
@@ -543,8 +500,7 @@ describe("v3.8 — read-model observation fields", () => {
         after: [gitObservation(["c.ts"], { "c.ts": "m:1" }, "h2")],
       }),
     ]);
-    const window = deriveProgressWindow(
-      rounds, 4, 3, STALL_PROGRESS_COVERAGE);
+    const window = deriveProgressWindow(rounds, 4, 3);
     assert.equal(window.state, "changed");
     assert.deepEqual(
       window.roundStates.map((entry) => entry.state),

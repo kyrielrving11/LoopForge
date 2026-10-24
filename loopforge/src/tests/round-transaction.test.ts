@@ -10,8 +10,38 @@ import {
 import type { RoundTransactionSnapshot } from "../round-transaction.js";
 import type { SelfEvaluation } from "../protocol.js";
 import { queryLoopEntries } from "../loop-store.js";
-import { MemoryLoopStore, criterionClaims } from "./_helpers.js";
+import { VaultRoundCommitStore } from "../storage.js";
+import { MemoryLoopStore, committedBacktrackRound, criterionClaims } from "./_helpers.js";
 import { getPolicyMetrics, resetPolicyMetrics } from "../policy-metrics.js";
+
+const ACCEPTANCE = {
+  task: "Transaction test",
+  success_criteria: ["Task goal achieved with verifiable evidence"],
+  hard_constraints: [],
+};
+
+function compiled(loopId: string, round: number) {
+  return {
+    task: "Transaction test",
+    goalId: `${loopId}:test`,
+    constraintsActive: [],
+    constraintsRetired: [],
+  };
+}
+
+function prepare(
+  loopId: string,
+  round: number,
+  before: Parameters<typeof prepareRoundTransaction>[2] = [],
+  artifact?: Parameters<typeof prepareRoundTransaction>[3],
+  opts: Parameters<typeof prepareRoundTransaction>[4] = {},
+): RoundTransactionSnapshot {
+  return prepareRoundTransaction(loopId, round, before, artifact, {
+    operatorAcceptance: ACCEPTANCE,
+    compiled: compiled(loopId, round),
+    ...opts,
+  });
+}
 
 function continuingEvaluation(): SelfEvaluation {
   return {
@@ -41,6 +71,61 @@ function rejectedEvaluation(): SelfEvaluation {
   };
 }
 
+describe("schema 6 structural invariants", () => {
+  it("rejects a submitted evaluation without compile facts or acceptance", () => {
+    const base: RoundTransactionSnapshot = {
+      ...prepare("schema-six", 1, []),
+      phase: "committed",
+      afterEvidence: [],
+      evaluation: continuingEvaluation(),
+      submittedFields: [
+        "success", "output_summary", "constraint_violations", "should_continue",
+      ],
+      result: {
+        action: "continue",
+        verificationStatus: "trusted",
+        roundSuccess: false,
+        gateContradicted: false,
+        newConsecutiveRejections: 0,
+        shouldPushSuccessTrajectory: false,
+        verificationFlags: [],
+      },
+    };
+    const asRecord = (value: unknown) => value as Record<string, unknown>;
+    assert.ok(parseRoundTransactionSnapshot(asRecord(base)) !== null);
+
+    assert.equal(
+      parseRoundTransactionSnapshot(asRecord({ ...base, compiled: undefined })),
+      null,
+      "a committed evaluation must carry its compile facts",
+    );
+    assert.equal(
+      parseRoundTransactionSnapshot(asRecord({ ...base, operatorAcceptance: undefined })),
+      null,
+      "a committed evaluation must carry the immutable operator surface",
+    );
+  });
+
+  it("requires acceptance and forbids compile facts on a rollback directive", () => {
+    const envelope = committedBacktrackRound(2, "schema-six-rollback");
+    const snapshot = (envelope.loop_lineage as Record<string, unknown>)
+      .round_transaction as Record<string, unknown>;
+    const value = snapshot.snapshot as Record<string, unknown>;
+    assert.ok(parseRoundTransactionSnapshot(value) !== null);
+
+    assert.equal(
+      parseRoundTransactionSnapshot({ ...value, operatorAcceptance: undefined }),
+      null,
+      "a rollback directive must preserve the operator surface",
+    );
+    assert.equal(
+      parseRoundTransactionSnapshot({ ...value, compiled: compiled("schema-six-rollback", 2) }),
+      null,
+      "a rollback directive never carries compile facts",
+    );
+  });
+});
+
 describe("RoundTransactionCoordinator", () => {
   it("keeps one stable round ID across rejected attempts", () => {
     assert.equal(makeRoundId("stable", 2), makeRoundId("stable", 2));
@@ -51,8 +136,8 @@ describe("RoundTransactionCoordinator", () => {
     resetPolicyMetrics();
     const store = new MemoryLoopStore();
     const engine = new LoopForgeEngine(store);
-    const coordinator = new RoundTransactionCoordinator(engine, store);
-    const prepared = prepareRoundTransaction("tx-retry", 1, []);
+    const coordinator = new RoundTransactionCoordinator(store);
+    const prepared = prepare("tx-retry", 1, []);
 
     const rejected = coordinator.process({
       snapshot: prepared,
@@ -113,7 +198,7 @@ describe("RoundTransactionCoordinator", () => {
 
 describe("backtrack commit replay", () => {
   it("parseRoundTransactionSnapshot accepts backtrack action", () => {
-    const base = prepareRoundTransaction("bt-loop", 3, []);
+    const base = prepare("bt-loop", 3, []);
     const snapshot: RoundTransactionSnapshot = {
       ...base,
       phase: "committed",
@@ -150,10 +235,10 @@ describe("backtrack commit replay", () => {
   it("recover replays committed backtrack without re-evaluating", () => {
     const store = new MemoryLoopStore();
     const engine = new LoopForgeEngine(store);
-    const coordinator = new RoundTransactionCoordinator(engine, store);
+    const coordinator = new RoundTransactionCoordinator(store);
 
     // 1. Create a committed backtrack transaction
-    const before = prepareRoundTransaction("bt-recover", 5, []);
+    const before = prepare("bt-recover", 5, []);
     const committed: RoundTransactionSnapshot = {
       ...before,
       phase: "committed",
@@ -196,18 +281,12 @@ describe("backtrack commit replay", () => {
     };
 
     // Write the committed transaction to the store
-    engine.autoFeedback(
-      committed.evaluation!,
-      "bt-recover",
-      5,
-      "test task",
-      {
-        schema_version: 3,
-        round_id: committed.roundId,
-        snapshot: committed,
-        result: committed.result!,
-      },
-    );
+    new VaultRoundCommitStore(store).appendFeedback("bt-recover", 5, {
+      schema_version: 3,
+      round_id: committed.roundId,
+      snapshot: committed,
+      result: committed.result!,
+    });
 
     // 2. Recover via new coordinator (simulating crash restart)
     const recovered = coordinator.recover(before);
@@ -222,8 +301,8 @@ describe("backtrack commit replay", () => {
   it("does not replay an abandoned commit with the same roundId on another branch", () => {
     const store = new MemoryLoopStore();
     const engine = new LoopForgeEngine(store);
-    const coordinator = new RoundTransactionCoordinator(engine, store);
-    const root = prepareRoundTransaction("tx-branch", 2, []);
+    const coordinator = new RoundTransactionCoordinator(store);
+    const root = prepare("tx-branch", 2, []);
     const committed = coordinator.process({
       snapshot: root,
       task: "branch identity",
@@ -235,7 +314,7 @@ describe("backtrack commit replay", () => {
     assert.equal(committed.result.action, "continue");
     assert.equal(committed.replayed, false);
 
-    const child = prepareRoundTransaction("tx-branch", 2, [], undefined, {
+    const child = prepare("tx-branch", 2, [], undefined, {
       branchId: "loop:tx-branch:branch:child",
     });
     assert.notEqual(child.transactionId, root.transactionId);

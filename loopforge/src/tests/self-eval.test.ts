@@ -68,7 +68,6 @@ describe("buildSelfEvaluation", () => {
       constraint_violations: [],
       should_continue: true,
       discovered_constraints: ["use SafeERC20"],
-      objective_refinement: "scope expanded",
       emerged_subtasks: ["audit timelock"],
       execution_report: {
         files_changed: ["token.sol"],
@@ -96,7 +95,6 @@ describe("buildSelfEvaluation", () => {
     });
     assert.equal(result.success, false);
     assert.deepEqual(result.discovered_constraints, []);
-    assert.equal(result.objective_refinement, "");
   });
 
   it("handles non-boolean success gracefully", () => {
@@ -139,71 +137,6 @@ describe("buildSelfEvaluation", () => {
     assert.equal(result.stop_reason, undefined);
   });
 
-  // ── v2.9: prompt_requests parsing ──────────────────────────────────────
-
-  it("parses prompt_requests with all fields", () => {
-    const result = buildSelfEvaluation({
-      success: false,
-      output_summary: "done",
-      constraint_violations: [],
-      should_continue: true,
-      prompt_requests: {
-        emphasize: ["SafeERC20", "gas optimization"],
-        confusion_points: ["Why is milestone 3 complete?"],
-      },
-    });
-    assert.ok(result.prompt_requests);
-    assert.deepEqual(result.prompt_requests!.emphasize, ["SafeERC20", "gas optimization"]);
-    assert.deepEqual(result.prompt_requests!.confusion_points, ["Why is milestone 3 complete?"]);
-  });
-
-  it("returns undefined for absent prompt_requests", () => {
-    const result = buildSelfEvaluation({
-      success: false,
-      output_summary: "done",
-      constraint_violations: [],
-      should_continue: true,
-    });
-    assert.equal(result.prompt_requests, undefined);
-  });
-
-  it("returns undefined for all-empty prompt_requests", () => {
-    const result = buildSelfEvaluation({
-      success: false,
-      output_summary: "done",
-      constraint_violations: [],
-      should_continue: true,
-      prompt_requests: { emphasize: [], confusion_points: [] },
-    });
-    assert.equal(result.prompt_requests, undefined);
-  });
-
-  it("ignores non-object prompt_requests", () => {
-    const result = buildSelfEvaluation({
-      success: false,
-      output_summary: "done",
-      constraint_violations: [],
-      should_continue: true,
-      prompt_requests: "not an object",
-    } as Record<string, unknown>);
-    assert.equal(result.prompt_requests, undefined);
-  });
-
-  it("caps emphasize and confusion_points at reasonable limits", () => {
-    const manyItems = Array.from({ length: 20 }, (_, i) => `item ${i}`);
-    const result = buildSelfEvaluation({
-      success: false,
-      output_summary: "done",
-      constraint_violations: [],
-      should_continue: true,
-      prompt_requests: {
-        emphasize: manyItems,
-        confusion_points: manyItems,
-      },
-    });
-    assert.ok(result.prompt_requests!.emphasize!.length <= 10);
-    assert.ok(result.prompt_requests!.confusion_points!.length <= 5);
-  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -279,7 +212,6 @@ describe("v3.3 — round_contract parsing", () => {
         {
           description: "login works",
           criterion_refs: ["cr-auth-login", 42],
-          subgoal_refs: ["sg-11111111", 7],
           verify_with: ["run-tests"],
         },
         "not an object",
@@ -287,7 +219,6 @@ describe("v3.3 — round_contract parsing", () => {
     });
     assert.equal(parsed?.items.length, 1);
     assert.deepEqual(parsed?.items[0].criterion_refs, ["cr-auth-login"]);
-    assert.deepEqual(parsed?.items[0].subgoal_refs, ["sg-11111111"]);
     assert.deepEqual(parsed?.items[0].verify_with, ["run-tests"]);
     assert.deepEqual(parsed?.scope, ["src/auth"]);
     assert.equal(parsed?.work_item, "Implement auth");
@@ -326,7 +257,7 @@ describe("v3.3 — round_contract parsing", () => {
       round_contract: {
         work_item: "auth",
         scope: [],
-        items: [{ description: "done", criterion_refs: [], subgoal_refs: [], verify_with: ["run-tests"] }],
+        items: [{ description: "done", criterion_refs: [], verify_with: ["run-tests"] }],
       },
     });
     assert.equal(withContract.round_contract?.work_item, "auth");
@@ -386,14 +317,13 @@ describe("v3.7.1 — worker_results parsing (outcome is the single fact)", () =>
     assert.equal(se.worker_results?.[0].agentId, "w2");
   });
 
-  it("defaults subAgentType to general-purpose and keeps existing caps", () => {
+  it("keeps existing caps", () => {
     const se = build([{
       agentId: "w1",
       subTask: "scan",
       resultSummary: "r".repeat(2000),
       outcome: "success",
     }]);
-    assert.equal(se.worker_results?.[0].subAgentType, "general-purpose");
     assert.equal(se.worker_results?.[0].resultSummary.length, 1000);
   });
 
@@ -416,7 +346,6 @@ describe("validateContractShape", () => {
   ): ContractValidationContext => ({
     activeItemIds: null,
     knownCriterionIds: null,
-    displayedSubGoalIds: null,
     isConfiguredCommand: known,
     ...overrides,
   });
@@ -428,7 +357,7 @@ describe("validateContractShape", () => {
     execution_report: { contract_item_claims: [{ item_id, outcome }] },
   });
   const item = (overrides: Record<string, unknown> = {}) => ({
-    description: "works", criterion_refs: [], subgoal_refs: [], verify_with: ["verify"], ...overrides,
+    description: "works", criterion_refs: [], verify_with: ["verify"], ...overrides,
   });
 
   it("accepts a well-formed declaration", () => {
@@ -436,7 +365,7 @@ describe("validateContractShape", () => {
       round_contract: {
         work_item: "Slice",
         scope: ["src/a"],
-        items: [item({ criterion_refs: ["cr-11111111"], subgoal_refs: ["sg-11111111"] })],
+        items: [item({ criterion_refs: ["cr-11111111"] })],
       },
     }), []);
   });
@@ -577,27 +506,6 @@ describe("validateContractShape", () => {
     assert.equal(errors[0]?.reason, "invalid_criterion_ref");
   });
 
-  it("rejects malformed, duplicate, and unknown sub-goal refs on an item", () => {
-    const malformed = check({
-      round_contract: { work_item: "Slice", scope: [], items: [item({ subgoal_refs: ["nope"] })] },
-    });
-    assert.equal(malformed[0]?.reason, "invalid_subgoal_ref");
-    const duplicate = check({
-      round_contract: { work_item: "Slice", scope: [], items: [item({ subgoal_refs: ["sg-11111111", "sg-11111111"] })] },
-    });
-    assert.equal(duplicate[0]?.reason, "duplicate_subgoal_ref");
-    const unknown = check(
-      { round_contract: { work_item: "Slice", scope: [], items: [item({ subgoal_refs: ["sg-11111111"] })] } },
-      { displayedSubGoalIds: new Set(["sg-22222222"]) },
-    );
-    assert.equal(unknown[0]?.reason, "unknown_subgoal_ref");
-    // Fail open: an unobservable sub-goal set never invents a rejection.
-    assert.deepEqual(
-      check({ round_contract: { work_item: "Slice", scope: [], items: [item({ subgoal_refs: ["sg-11111111"] })] } }),
-      [],
-    );
-  });
-
   it("rejects malformed item ids, duplicates, and unknown active items", () => {
     const malformed = check(claim("nope"));
     assert.equal(malformed[0]?.reason, "invalid_item_id");
@@ -673,7 +581,6 @@ describe("v3.9.1 — normalization diagnostics", () => {
         { agentId: "w1", subTask: "s", resultSummary: "r", outcome: "success" },
         { agentId: "w2" },
       ],
-      prompt_requests: { emphasize: ["a", "b", "c", "d", "e", "f"], odd: 1 },
     });
     const byPath = new Map(result.diagnostics.map((item) => [item.path, item]));
     assert.equal(byPath.get("discovered_constraints")?.code, "not_array");
@@ -685,8 +592,6 @@ describe("v3.9.1 — normalization diagnostics", () => {
     assert.equal(byPath.get("execution_report.tests_reported")?.code, "invalid_value");
     assert.equal(byPath.get("execution_report.unknown_report_key")?.code, "unknown_field");
     assert.equal(byPath.get("worker_results")?.code, "invalid_entry");
-    assert.equal(byPath.get("prompt_requests.emphasize")?.code, "too_many");
-    assert.equal(byPath.get("prompt_requests.odd")?.code, "unknown_field");
   });
 
   it("keeps a valid payload diagnostic-free and deterministic", () => {

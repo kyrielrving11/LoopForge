@@ -8,11 +8,6 @@
 
 // ── Enums ──────────────────────────────────────────────────────────────────
 
-export enum Mode {
-  LOOP_COMPILE = "loop_compile",
-  FEEDBACK = "feedback",
-}
-
 // Type-only import — erased at runtime, no dependency cycle with
 // canonical-state.ts (which imports protocol.ts for its types).
 
@@ -23,25 +18,6 @@ export enum AgentStatus {
 }
 
 // ── Request schemas ─────────────────────────────────────────────────────────
-
-export interface ExecutionFeedback {
-  output: string;
-  success: boolean;
-  constraint_violations: string[];
-  manual_fixes_needed: string;
-}
-
-export function makeExecutionFeedback(
-  overrides: Partial<ExecutionFeedback> = {},
-): ExecutionFeedback {
-  return {
-    output: "",
-    success: false,
-    constraint_violations: [],
-    manual_fixes_needed: "",
-    ...overrides,
-  };
-}
 
 // ── Agent Self-Evaluation (autonomous loop feedback) ────────────────────────
 
@@ -79,12 +55,6 @@ export interface SelfEvaluation {
    *  known before. Merged into the active constraint set by the compiler.
    *  Omit or leave empty if none discovered. */
   discovered_constraints?: string[];
-  /** A refinement / deepening of the Agent's understanding of the task.
-   *  REPORT ONLY: it never modifies the operator objective, criteria, hard
-   *  constraints, gate or objective version. It is preserved in the committed
-   *  evaluation for audit/replay; it is not a second objective history.
-   *  Omit if understanding is unchanged. */
-  objective_refinement?: string;
   /** Sub-problems that surfaced during execution. This is the ONLY
    *  sub-goal creation channel; the runtime derives stable sg- ids and tracks
    *  their lifecycle. Omit or leave empty if none emerged.
@@ -118,9 +88,8 @@ export interface SelfEvaluation {
    *  later prompt heading. */
   checkpoint_label?: string;
   /** Multi-agent: Results of sub-agent / Worker delegations this round.
-   *  The main agent (or Coordinator) reports what it delegated.
-   *  The engine automatically writes these to the delegation journal.
-   *  Omit or leave empty if no delegations occurred. */
+   *  The main agent reports what it delegated; the report is saved inside the
+   *  committed transaction for audit. Omit or leave empty if none occurred. */
   worker_results?: WorkerResult[];
   /** v2.5: Why the agent is stopping. Only meaningful when
    *  should_continue=false and success=false. Defaults to "gave_up"
@@ -152,9 +121,6 @@ export interface SelfEvaluation {
    *  the round is rejected. Safe pre-work (investigation, dry-runs,
    *  rollback evidence) never needs a gate. */
   gate_ids?: string[];
-  /** Model's information needs for the next round's prompt.
-   *  Consumed by the Compiler — not durable across rounds. */
-  prompt_requests?: PromptRequests;
   /** v3.3: Round Contract. v3.4: a PROPOSAL for the NEXT round's contract
    *  (restated unchanged while the current one is active; a new one after
    *  it completes or blocks). Becomes the ACTIVE contract only once this
@@ -271,6 +237,17 @@ export interface RecoveryTarget {
   redo_round: number;
 }
 
+/** v4.0.1: the compile facts stamped into an evaluation transaction at commit.
+ *  They are the machine-computed state the next compile carries forward, not
+ *  Agent input. `task`/`goalId` serve level and replay; the constraint sets
+ *  are the effective compile result. */
+export interface CompiledRoundFacts {
+  task: string;
+  goalId: string;
+  constraintsActive: string[];
+  constraintsRetired: string[];
+}
+
 /** v3.9.7: A committed rollback directive. It is a typed event in the same
  *  round document as the abandoned/triggering transaction, not a normal
  *  round. `transaction_id` also names the child branch; the redo and all
@@ -353,25 +330,6 @@ export function makeGateDecision(
     actionHash: "",
     ...overrides,
   };
-}
-
-/** v2.9: Model-expressed information needs for the next round.
- *  Submitted via SelfEvaluation.prompt_requests, consumed by the
- *  Compiler when assembling the next prompt. Transient — each round's
- *  requests apply to that round only. */
-export interface PromptRequests {
-  /** Current-governance objects to emphasize. Candidates are derived from the
-   *  current CanonicalLoopState: active constraints, criteria, active
-   *  contract (rc-), contract items (rci-), active sub-goals (sg-), current
-   *  findings (f-), and the recovery brief (reserved id "recovery").
-   *  Matched by exact stable id or normalized-exact text; closed/historical
-   *  objects never resurrect. Matched objects move into Critical Context.
-   *  Max moved objects: policy-driven (L2: 5, L1: 3). L0: ignored. */
-  emphasize?: string[];
-  /** Things the model is confused about. Echoed verbatim at the prompt top as
-   *  "Confusion Alerts"; never matched against state, never used to infer a
-   *  fact or decide an action. Max 3 entries, each ≤ 200 chars. L0: ignored. */
-  confusion_points?: string[];
 }
 
 /** v3.9.1: One normalization diagnostic. The submission boundary NEVER drops
@@ -512,22 +470,8 @@ export interface SubmissionReceipt {
   prompt: {
     level: "l0" | "l1" | "l2";
     dropped_sections: string[];
-    prompt_request_effects: PromptRequestEffect[];
   } | null;
   diagnostics: SubmissionDiagnostic[];
-}
-
-/** v3.9.1: What a prompt request actually did in the rendered prompt. This is
- *  an OUTPUT fact about the current render; it is never an instruction for a
- *  later prompt. */
-export interface PromptRequestEffect {
-  field: "emphasize" | "confusion_points";
-  request: string;
-  status: "applied" | "no_match" | "level_ignored" | "capped" | "ambiguous";
-  /** Emphasize only: the stable ids actually moved into Critical Context. */
-  matched_ids?: string[];
-  /** Emphasize only: hits before the level cap. */
-  matched_count?: number;
 }
 
 /** v3.9.1: The live submission-guidance projection returned with a prepared
@@ -599,11 +543,9 @@ export interface SubmissionGuidance {
  *  is always accepted. */
 export interface WorkerResult {
   agentId: string;
-  subAgentType?: string;
   subTask: string;
   resultSummary: string;
   outcome: "success" | "partial" | "failed";
-  discoveredConstraints?: string[];
 }
 
 export function makeSelfEvaluation(
@@ -615,7 +557,6 @@ export function makeSelfEvaluation(
     constraint_violations: [],
     should_continue: true,
     discovered_constraints: [],
-    objective_refinement: "",
     emerged_subtasks: [],
     subgoal_updates: [],
     execution_report: undefined,
@@ -629,23 +570,9 @@ export function makeSelfEvaluation(
     blocker: undefined,
     retroactiveClaims: [],
     no_change_reason: undefined,
-    prompt_requests: undefined,
     round_contract: undefined,
     ...overrides,
   };
-}
-
-/** Regex to extract a self-evaluation JSON block from agent output. */
-export interface LoopForgeRequest {
-  task: string;
-  mode: Mode;
-  feedback: ExecutionFeedback | null;
-  skill_name: string | null;
-  task_id: string | null;
-  // Extended fields accepted by invokeLoopCompile() to populate LoopCompileRequest:
-  //   loop_id, round, goal_id, domain, next_task_proposal, plan_source,
-  //   constraints_from_plan, force_level, verification_flags
-  [key: string]: unknown;
 }
 
 // ── Loop Compile types ──────────────────────────────────────────────────────
@@ -682,9 +609,6 @@ export interface CriterionStatus {
     | "verified";
   /** Round when the criterion was first reported met (machine-backed). */
   met_at_round?: number;
-  /** Sub-goals an item referencing this criterion also names, via explicit
-   *  `subgoal_refs` (v3.8.1 — never a text-similarity guess). */
-  related_subgoal_ids: string[];
 }
 
 /** v3.2: A deterministic "lesson learned" — a constraint or verification
@@ -724,6 +648,18 @@ export function makeLoopObjective(
     created_at_round: 1,
     loop_id: "",
     ...overrides,
+  };
+}
+
+/** The operator acceptance carried by a committed transaction is the same
+ *  immutable surface the compiler used to derive the objective. */
+export function operatorAcceptanceFromObjective(
+  objective: LoopObjective,
+): OperatorAcceptance {
+  return {
+    task: objective.objective,
+    success_criteria: [...objective.success_criteria],
+    hard_constraints: [...objective.hard_constraints],
   };
 }
 
@@ -825,8 +761,6 @@ export interface LoopRoundResult {
   manual_fixes_needed: string;
   /** P0: Constraints discovered during this round. */
   discovered_constraints?: string[];
-  /** P1: Objective refinement from this round. */
-  objective_refinement?: string;
   /** P2: Sub-problems that emerged during this round. */
   emerged_subtasks?: string[];
   /** v3.7.1: Explicit sub-goal transitions declared this round.
@@ -845,9 +779,6 @@ export interface LoopRoundResult {
   compression_checkpoint?: boolean;
   /** v1.10: Human-readable label for the checkpoint. */
   checkpoint_label?: string;
-  /** Model's information needs for the next round's prompt.
-   *  Carried forward from SelfEvaluation. Consumed by the Compiler. */
-  prompt_requests?: PromptRequests;
   /** v2.12: Declared outcome. Carried forward from SelfEvaluation. */
   outcome?: RoundOutcome;
   /** v2.12: Flat blocker description (outcome==="blocked" only). */
@@ -869,7 +800,6 @@ export function makeLoopRoundResult(
     constraint_violations: [],
     manual_fixes_needed: "",
     discovered_constraints: [],
-    objective_refinement: "",
     emerged_subtasks: [],
     subgoal_updates: [],
     execution_report: undefined,
@@ -878,7 +808,6 @@ export function makeLoopRoundResult(
     worker_results: [],
     compression_checkpoint: false,
     checkpoint_label: "",
-    prompt_requests: undefined,
     outcome: undefined,
     blocker: undefined,
     retroactiveClaims: [],
@@ -888,17 +817,13 @@ export function makeLoopRoundResult(
 }
 
 export interface LoopCompileRequest {
-  mode: Mode;
   loop_id: string;
   round: number;
   goal_id: string;
   task: string;
-  domain: string;
-  next_task_proposal: string;
   loop_objective: LoopObjective | null;
   plan_source: string | null;
   constraints_from_plan: string[];
-  last_round_result: LoopRoundResult | null;
   force_level: string;
   /** Maximum rounds for this loop. Used by the state file header to show
    *  accurate progress (Round X / Y). */
@@ -920,17 +845,13 @@ export function makeLoopCompileRequest(
   overrides: Partial<LoopCompileRequest> = {},
 ): LoopCompileRequest {
   return {
-    mode: Mode.LOOP_COMPILE,
     loop_id: "",
     round: 1,
     goal_id: "",
     task: "",
-    domain: "",
-    next_task_proposal: "",
     loop_objective: null,
     plan_source: null,
     constraints_from_plan: [],
-    last_round_result: null,
     force_level: "auto",
     verification_flags: [],
     attempt: 1,
@@ -978,12 +899,11 @@ export interface PromptCoverage {
 /** v3.8.1: the artifact schema version, next to the type it versions. The
  *  transaction envelope parser reads it, so the constant lives here rather
  *  than in the renderer. */
-/** v3.9.4: schema 4 adds `coverage`. v3.9.7: schema 6 adds prompt-request
- *  `matched_ids`/`matched_count` and the single `defect` coverage reason.
- *  Older versions are a HARD break — a round whose artifact does not parse is
- *  not committed history, and `legacyTransactionRounds` reports the loss
- *  rather than letting it vanish. */
-export const PROMPT_ARTIFACT_SCHEMA_VERSION = 6 as const;
+/** v4.0.1: schema 7 removes the prompt-request effects. Older versions are a
+ *  HARD break — a round whose artifact does not parse is not committed
+ *  history, and `legacyTransactionRounds` reports the loss rather than letting
+ *  it vanish. */
+export const PROMPT_ARTIFACT_SCHEMA_VERSION = 7 as const;
 
 export interface PromptArtifact {
   schemaVersion: typeof PROMPT_ARTIFACT_SCHEMA_VERSION;
@@ -1008,13 +928,10 @@ export interface PromptArtifact {
    *  budgeting because it is never dropped. Measured over the SAME region as
    *  `renderedChars`. */
   budget: number;
-  /** Characters the budgeted region produced: the fixed header, the confusion
-   *  alerts and the rendered sections — everything except the footer. NOT the
-   *  full prompt length; `renderedPrompt` adds the footer on top. */
+  /** Characters the budgeted region produced: the fixed header and the
+   *  rendered sections — everything except the footer. NOT the full prompt
+   *  length; `renderedPrompt` adds the footer on top. */
   renderedChars: number;
-  /** v3.9.1: what the PREVIOUS round's prompt_requests did in this render.
-   *  OUTPUT ONLY — no compile or decision path may read it as control state. */
-  promptRequestEffects?: PromptRequestEffect[];
   /** v3.9.4: ID-level proof that every active normative object was rendered.
    *  Required: a schema-4 artifact without it is a hard break. */
   coverage: PromptCoverage;
@@ -1028,14 +945,11 @@ export interface LoopCompileResponse {
   status: AgentStatus;
   prompt: string;
   recompile_level: string;
-  diff_from_previous: string;
-  lineage: string[];
   constraints_active: string[];
   constraints_retired: string[];
   loop_id: string;
   round: number;
   goal_id: string;
-  goal_text_hash: string;
   loop_objective: LoopObjective | null;
   /** v2.2: Structured sub-goals tracked across rounds. Compiler-managed
    *  lifecycle with derived status. Rendered as Sub-Goal Dashboard. */
@@ -1065,6 +979,10 @@ export interface LoopCompileResponse {
   state_file_content?: string;
   /** Exact, hashed prompt record used by transaction replay and audit. */
   prompt_artifact?: PromptArtifact;
+  /** v4.0.1: the compile facts the transaction stamps at commit. */
+  compiled?: CompiledRoundFacts;
+  /** v4.0.1: the immutable operator surface this compile used. */
+  operatorAcceptance?: OperatorAcceptance;
 }
 
 export function makeLoopCompileResponse(
@@ -1074,14 +992,11 @@ export function makeLoopCompileResponse(
     status: AgentStatus.OK,
     prompt: "",
     recompile_level: "l2",
-    diff_from_previous: "",
-    lineage: [],
     constraints_active: [],
     constraints_retired: [],
     loop_id: "",
     round: 0,
     goal_id: "",
-    goal_text_hash: "",
     loop_objective: null,
     sub_goals: [],
     constraint_metadata: [],
@@ -1117,47 +1032,6 @@ export function makeEvidenceSnapshot(
   return { verified: [], pending: [], invalidated: [], discovered: [], ...overrides };
 }
 
-// ── Response schemas ────────────────────────────────────────────────────────
-
-export interface LoopForgeResponse {
-  status: AgentStatus;
-  prompt: string | null;
-  error: string | null;
-  /** v1.14: State file content from the compiler. Written to disk by the caller. */
-  state_file_content?: string;
-  /** Exact prompt artifact produced by the compiler. */
-  prompt_artifact?: PromptArtifact;
-  /** Structured warnings from the compiler — preferred over parsing prompt text. */
-  warnings?: string[];
-  /** v2.12: Compiler-derived state passed through for typed projections
-   *  (zero extra persistence — derived fresh each compile). */
-  loop_objective?: LoopObjective | null;
-  sub_goals?: SubGoal[];
-  criterion_statuses?: CriterionStatus[];
-}
-
-// ── Session state (Engine internal) ─────────────────────────────────────────
-
-export interface SessionState {
-  task_id: string;
-  call_count: number;
-  success_trend: boolean[];
-}
-
-export function makeSessionState(taskId: string): SessionState {
-  return {
-    task_id: taskId,
-    call_count: 0,
-    success_trend: [],
-  };
-}
-
-// ── Agent result ────────────────────────────────────────────────────────────
-
-export interface AgentLoopResult {
-  status: AgentStatus;
-  response: LoopForgeResponse | null;
-}
 /** Why a loop stopped. Used by MCP session and vault persistence.
  *  `completed` requires both success=true and should_continue=false.
  *  `failed` is success=false + should_continue=false (agent gave up).
@@ -1354,21 +1228,13 @@ export interface ContractItemClaim {
  *  `description` states what must be true, not an activity. `verify_with`
  *  must name configured, enabled, after-capable evidence commands — the
  *  declaration is strict. A command may back several conditions, and one
- *  condition may bind several commands.
- *
- *  `subgoal_refs` lives HERE, not on the contract: a machine-verified item
- *  backs exactly the sub-goals it names, so "item A verifies SubGoal 1, item B
- *  verifies SubGoal 2" is expressible and `VerifiedSubGoalFact` attribution is
- *  per-item instead of "every verified item backs every sub-goal". */
+ *  condition may bind several commands. */
 export interface ContractItemProposal {
   /** The acceptance condition: what must be true for this slice. */
   description: string;
   /** v3.9.4: real cr-XXXXXXXX ids of ACTIVE criteria rendered in the
    *  current prompt. Free text and unknown ids are `contract_invalid`. */
   criterion_refs: string[];
-  /** v3.9.4: sg-XXXXXXXX ids of ACTIVE sub-goals displayed in the current
-   *  prompt. A same-submission emerged sub-goal is referenceable next round. */
-  subgoal_refs: string[];
   /** Evidence command ids (policy.evidence.commands[].name) that check this
    *  acceptance condition. */
   verify_with: string[];
@@ -1594,33 +1460,11 @@ export interface ProgressCoverage {
   version: number;
 }
 
-/** v3.9.9: a custom provider's progress snapshot. Only the provider's own
- *  stable, content-addressed state digest belongs here; timestamps, durations
- *  and runtime bookkeeping are not progress. Version 2 adds the coverage
- *  descriptor and the provider's completeness assertion, and allows a null
- *  fingerprint on a failed capture (the collector fills the declared coverage
- *  so "unknown" never disappears). */
-export interface ProgressSnapshot {
-  /** Shape version of the nested snapshot. The custom observation base schema
-   *  stays 1 — only this nested boundary changed. */
-  schemaVersion: 2;
-  coverage: ProgressCoverage;
-  /** The provider's assertion that this capture covers the whole declared
-   *  range. Display/diagnosis only; `state` remains the authority. */
-  complete: boolean;
-  /** 64 lowercase hex characters (sha256) when observed; null only when the
-   *  capture failed. */
-  fingerprint: string | null;
-}
-
 export interface CustomObservation extends MachineObservationBase {
   kind: "custom";
-  data: Record<string, unknown> & {
-    /** Present only when the provider declared `progressCoverage`. A failed
-     *  capture carries the same coverage with `complete:false` and a null
-     *  fingerprint; it is never silently omitted. */
-    progress?: ProgressSnapshot | null;
-  };
+  /** Provider-defined display data. It is a report, not a progress fact:
+   *  only Git workspace progress participates in stall/freshness rules. */
+  data: Record<string, unknown>;
 }
 
 export type MachineObservation =
@@ -1691,16 +1535,6 @@ export interface EvidenceCapability {
   warnings: string[];
 }
 
-/** v3.8: A machine-verified sub-goal fact. DERIVED in cognitive-facts.ts,
- *  never persisted: it exists only while a committed contract item references
- *  the sub-goal AND that item is verified. It never writes SubGoal.status —
- *  `done` stays the agent's declaration. */
-export interface VerifiedSubGoalFact {
-  subgoal_id: string;
-  contract_item_ids: string[];
-  verified_at_round: number;
-}
-
 // ── v3.8: MCP tool error codes ──────────────────────────────────────────────
 
 /** v3.8: The STABLE error codes every tool answers with. A client can branch
@@ -1740,6 +1574,10 @@ export type ToolErrorCode =
   | "gate_invalid"
   | "loop_already_running"
   | "lease_conflict"
+  | "start_failed"
+  | "loop_exists"
+  | "legacy_history"
+  | "operator_acceptance_conflict"
   | "recovery_invalid"
   | "recovery_disabled"
   | "recovery_unavailable"
@@ -1765,10 +1603,3 @@ export interface ToolError {
 }
 
 // ── Factory helpers ─────────────────────────────────────────────────────────
-
-export function makeTaskId(taskDescription: string): string {
-  let slug = taskDescription.toLowerCase().trim().slice(0, 60);
-  slug = slug.replace(/[^a-z0-9\s-]/g, "");
-  slug = slug.replace(/\s+/g, "-");
-  return slug || "unnamed-task";
-}

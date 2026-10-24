@@ -28,7 +28,6 @@ import { makeEnforcementResult } from "./protocol.js";
 import { CHECK_SUCCESS_WITH_REMAINING_CRITERIA, CHECK_RECURRING_VIOLATION, CHECK_REQUIRED_COMMAND_FAILED, CHECK_COMMAND_EVIDENCE_MISMATCH, CHECK_OUTCOME_SUCCESS_CONTRADICTION, CHECK_VERIFICATION_ENTRYPOINT_MODIFIED, CHECK_CONTRACT_ITEMS_UNVERIFIED, CHECK_USER_GATE_UNRESOLVED } from "./verification-gate.js";
 import {
   deriveProgressWindow,
-  STALL_PROGRESS_COVERAGE,
   type RoundProgress,
 } from "./progress.js";
 import { declaresBlocked } from "./round-outcome.js";
@@ -485,7 +484,6 @@ function evaluateStallWindow(
     derivationRounds(vaultEntries, currentRound),
     currentRound,
     window,
-    STALL_PROGRESS_COVERAGE,
   );
   if (progress.state !== "unchanged") return null;
   // The verdict is about the Git workspace coverage ONLY. A custom provider's

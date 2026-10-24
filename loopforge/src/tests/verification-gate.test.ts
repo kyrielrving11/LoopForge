@@ -13,7 +13,6 @@ import type { EntrypointDrift } from "../evidence-provider.js";
 import { verifySelfEvaluation as rawVerifySelfEvaluation, parseTestOutput, deriveEvidenceStatus, CHECK_VERIFICATION_ENTRYPOINT_MODIFIED, CHECK_TEST_FILES_MODIFIED, CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE } from "../verification-gate.js";
 import {
   deriveProgressWindow,
-  STALL_PROGRESS_COVERAGE,
 } from "../progress.js";
 import { derivationRounds } from "../committed-round.js";
 import type {
@@ -322,11 +321,21 @@ describe("verification-gate — recurring violation", () => {
     const prev = se({
       constraint_violations: ["deadline", "other"],
     });
-    // The committed round-2 entry stores the PREVIOUS round's violations
-    // (round 1) on its top-level field, as persistLoopLineage does.
-    const entry = committedRound(2, { loopId: "test-loop" });
-    entry.constraint_violations = ["deadline"];
-    const vault = [entry];
+    // The committed evaluations carry each round's own violations.
+    const withViolations = (
+      round: number,
+      violations: string[],
+    ): VaultEntry => {
+      const entry = committedRound(round, { loopId: "test-loop" });
+      const transaction = entry.loop_lineage!.round_transaction as Record<string, unknown>;
+      const snapshot = transaction.snapshot as Record<string, unknown>;
+      (snapshot.evaluation as Record<string, unknown>).constraint_violations = violations;
+      return entry;
+    };
+    const vault = [
+      withViolations(1, ["deadline"]),
+      withViolations(2, ["deadline", "other"]),
+    ];
 
     const result = verifySelfEvaluation(curr, 3, vault, prev);
     assert.equal(result.verdict, "contradicted");
@@ -829,10 +838,10 @@ describe("verification-gate — v2.12 outcome consistency", () => {
       loop_lineage: {
         round: 1,
         round_transaction: {
-          schema_version: 5,
+          schema_version: 6,
           round_id: "loop:test-loop:round:1",
           snapshot: {
-            schemaVersion: 5,
+            schemaVersion: 6,
             kind: "evaluation" as const,
             branchId: "loop:test-loop:branch:root",
             transactionId: "tx-test-loop-1-1",
@@ -878,6 +887,17 @@ describe("verification-gate — v2.12 outcome consistency", () => {
                 coverage: "tracked_and_non_ignored_untracked",
               },
             }],
+            operatorAcceptance: {
+              task: "Verification task",
+              success_criteria: [],
+              hard_constraints: [],
+            },
+            compiled: {
+              task: "Verification task",
+              goalId: "test-loop:verification-task",
+              constraintsActive: [],
+              constraintsRetired: [],
+            },
             submittedFields: [
               "success", "output_summary", "constraint_violations", "should_continue",
             ],
@@ -1001,7 +1021,6 @@ describe("v3.2 — machineProgressSeries", () => {
     derivationRounds(entries, currentRound),
     currentRound,
     lookback,
-    STALL_PROGRESS_COVERAGE,
   );
   const feedbackRound = (
     round: number,
@@ -1211,7 +1230,7 @@ describe("Round Contract checks (v3.8 item model)", () => {
   const itemContract = (overrides: Partial<RoundContractProposal> = {}): RoundContractProposal => ({
     work_item: "Slice A",
     scope: ["src/auth"],
-    items: [{ description: "login works", criterion_refs: [], subgoal_refs: [], verify_with: ["run-tests"] }],
+    items: [{ description: "login works", criterion_refs: [], verify_with: ["run-tests"] }],
     ...overrides,
   });
 
@@ -1255,7 +1274,6 @@ describe("Round Contract checks (v3.8 item model)", () => {
       items: Array.from({ length: 5 }, (_, index) => ({
         description: `slice ${index}`,
         criterion_refs: [],
-        subgoal_refs: [],
         verify_with: ["run-tests"],
       })),
     });

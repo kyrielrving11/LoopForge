@@ -9,6 +9,7 @@ import { spawnSync } from "node:child_process";
 import { FileLoopStore } from "../loop-store.js";
 import type { VaultEntry } from "../loop-store.js";
 import { SessionLeaseConflictError, VaultSessionStateStore } from "../storage.js";
+import { LoopExistsError } from "../errors.js";
 import type { SessionStateStore } from "../storage.js";
 import { SessionManager } from "../mcp/session.js";
 
@@ -114,23 +115,25 @@ describe("create() lease fencing (v3.2.1)", () => {
       "a conflicting create must not leak a registered session",
     );
 
-    // A's vault is not polluted: round-1 lineage still records A's task.
+    // A's vault has no round history from either process: a start only
+    // prepares a prompt, it never commits a round.
     const entries = store.listEntries("lease-create-1");
-    const lineage = entries.find((e) => String(e.task_id).endsWith(":r1"));
-    assert.ok(lineage, "A's round-1 lineage must still exist");
     assert.equal(
-      lineage!.task, "Process A task",
-      "a conflicting create must not overwrite A's round-1 lineage",
+      entries.filter((entry) => String(entry.task_id).endsWith(":feedback")).length,
+      0,
+      "a conflicting create must not write round history",
     );
 
-    // B can create the loop once A releases the lease.
+    // Once A releases the lease, the persisted session still exists. 4.0.1
+    // never lets a second start overwrite a loop's durable state; C must
+    // resume it (or use a new loopId), not create a duplicate round 1.
     mgrA.close();
     const mgrC = new SessionManager(store);
-    const createdC = await mgrC.create({
-      task: "Process C task",
-      loopId: "lease-create-1",
-    });
-    assert.ok(createdC.sessionId, "C must be able to create after A releases");
+    await assert.rejects(
+      mgrC.create({ task: "Process C task", loopId: "lease-create-1" }),
+      LoopExistsError,
+      "a persisted session blocks a new start even after the lease is released",
+    );
     mgrB.close();
     mgrC.close();
   });

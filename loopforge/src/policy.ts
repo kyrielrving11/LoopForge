@@ -57,15 +57,6 @@ export interface PromptPolicy {
   l0_max_chars: number;
   l1_max_chars: number;
   l2_max_chars: number;
-  /** v2.9: Max emphasize items when level is L2. Default: 5. */
-  max_emphasize_l2: number;
-  /** v2.9: Max emphasize items when level is L1. Default: 3. */
-  max_emphasize_l1: number;
-  /** v2.9: Max confusion points rendered at L2. Default: 3.
-   *  L1 renders the FIRST alert plus a pointer to the state file — that is a
-   *  density decision of the lean level (like the split max_emphasize_l1/l2
-   *  caps), not this knob. */
-  max_confusion_points: number;
 }
 
 export interface BackendPolicy {
@@ -127,7 +118,7 @@ export interface GatePolicy {
 
 /** v3.8.1: the policy schema version. A policy file that does not declare
  *  exactly this version is REJECTED — see loadPolicy. */
-export const POLICY_SCHEMA_VERSION = "9";
+export const POLICY_SCHEMA_VERSION = "10";
 
 export interface LoopPolicy {
   version: string;
@@ -148,9 +139,6 @@ export const DEFAULT_POLICY: LoopPolicy = {
     l0_max_chars: 5000,
     l1_max_chars: 10000,
     l2_max_chars: 18000,
-    max_emphasize_l2: 5,
-    max_emphasize_l1: 3,
-    max_confusion_points: 3,
   },
   backend: { root_dir: ".loopforge" },
   evolution: {
@@ -484,6 +472,12 @@ export function writeStateFile(loopId: string, content: string | undefined): voi
   const target = resolve(directory, `${loopId}-state.md`);
   if (existsSync(target) && lstatSync(target).isSymbolicLink()) {
     throw new Error("State file target must not be a symbolic link");
+  }
+  // Derived views are rewritten only when the rendered content actually
+  // changed. A long loop re-prepares the same state many times; rewriting an
+  // identical file is pure I/O and churns the workspace.
+  if (existsSync(target) && readFileSync(target, "utf8") === content) {
+    return;
   }
   const temporary = resolve(
     directory,

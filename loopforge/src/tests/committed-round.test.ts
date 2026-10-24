@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import {
   decodeCommittedRecord,
   decodeCommittedRound,
-  decodeMergedRound,
   derivationRounds,
   historyRounds,
   pendingBacktrackRecord,
@@ -13,10 +12,9 @@ import {
 } from "../committed-round.js";
 import {
   deriveRoundProgress,
-  STALL_PROGRESS_COVERAGE,
 } from "../progress.js";
 import type { MachineObservation } from "../protocol.js";
-import { committedBacktrackRound, committedFeedbackRound, mergedLineageRound, withTransaction } from "./_helpers.js";
+import { committedBacktrackRound, committedFeedbackRound, withTransaction } from "./_helpers.js";
 import { claimedMetCriteria } from "../self-eval.js";
 
 /** The durable session document — the frontier a read-only view reads. */
@@ -30,7 +28,7 @@ function sessionEntry(loopId: string, currentRound: number): Record<string, unkn
 }
 
 describe("CommittedRoundView", () => {
-  it("normalizes durable and hydrated representations to the same facts", () => {
+  it("decodes the durable committed envelope", () => {
     const raw = committedFeedbackRound(2, {
       loopId: "view",
       outcome: "partial",
@@ -39,19 +37,11 @@ describe("CommittedRoundView", () => {
       attempt: 3,
     });
     raw.sequence = 2;
-    const merged = mergedLineageRound(2, {
-      loopId: "view",
-      outcome: "partial",
-      met: ["criterion"],
-      files: ["src/a.ts"],
-      attempt: 3,
-    });
     const durable = decodeCommittedRound(raw)!;
-    const hydrated = decodeMergedRound(merged)!;
-    assert.deepEqual(
-      [durable.round, durable.attempt, durable.outcome, claimedMetCriteria(durable.executionReport)],
-      [hydrated.round, hydrated.attempt, hydrated.outcome, claimedMetCriteria(hydrated.executionReport)],
-    );
+    assert.equal(durable.round, 2);
+    assert.equal(durable.attempt, 3);
+    assert.equal(durable.outcome, "partial");
+    assert.deepEqual(claimedMetCriteria(durable.executionReport), ["criterion"]);
     assert.equal(durable.sequence, 2);
   });
 
@@ -193,7 +183,7 @@ describe("CommittedRoundView", () => {
         coverage: "tracked_and_non_ignored_untracked",
       },
     } as MachineObservation);
-    const view = decodeMergedRound(withTransaction({
+    const view = decodeCommittedRound(withTransaction({
       loop_id: "motion",
       loop_lineage: {
         loop_id: "motion",
@@ -214,7 +204,7 @@ describe("CommittedRoundView", () => {
     }));
     assert.ok(view);
     assert.equal(
-      deriveRoundProgress(view.observationDelta, STALL_PROGRESS_COVERAGE).state,
+      deriveRoundProgress(view.observationDelta).state,
       "changed",
       "the second Git provider's HEAD move is motion even when the first is still",
     );

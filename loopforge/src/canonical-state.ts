@@ -28,10 +28,10 @@ import { getPolicy } from "./policy.js";
 import type { ActiveContractView } from "./round-contract.js";
 import type { ContractItemStatusView } from "./contract-items.js";
 import { deriveConfiguredCapability } from "./policy.js";
-import type { ConfiguredCapability, VerifiedSubGoalFact } from "./protocol.js";
+import type { ConfiguredCapability } from "./protocol.js";
 import type { RoundFacts } from "./round-facts.js";
 
-export const CANONICAL_STATE_SCHEMA_VERSION = 4 as const;
+export const CANONICAL_STATE_SCHEMA_VERSION = 5 as const;
 
 /** v3.7.1: Presentation view of sub-goals shared by prompts and the state
  *  file (one derivation, no second copy). Only ACTIVE items render as rows
@@ -127,11 +127,8 @@ export function formatCriterionRows(
     if (seen.has(id)) continue;
     seen.add(id);
     ids.push(id);
-    const related = status && status.related_subgoal_ids.length > 0
-      ? ` (related: ${status.related_subgoal_ids.join(", ")})`
-      : "";
     lines.push(
-      `- ${criterionIcon(status?.status ?? "unknown")} [\`${id}\`] ${text}${related}`,
+      `- ${criterionIcon(status?.status ?? "unknown")} [\`${id}\`] ${text}`,
     );
   }
   return { lines, ids };
@@ -144,14 +141,9 @@ export function formatActiveSubGoals(
   subGoals: ReadonlyArray<SubGoal>,
   round: number,
   cap: number = getPolicy().evolution.max_active_subgoals,
-  /** v3.9.7: objects moved to Critical Context are removed from the rows and
-   *  the overflow line, but still count in the totals. */
-  omitIds?: ReadonlySet<string>,
 ): { lines: string[]; ids: string[] } {
   const view = activeSubGoalView([...subGoals], Number.POSITIVE_INFINITY);
-  const visible = omitIds
-    ? view.active.filter((subGoal) => !omitIds.has(subGoal.id))
-    : view.active;
+  const visible = view.active;
   const shown = visible.slice(0, Math.max(0, cap));
   const hidden = visible.slice(shown.length);
   const lines: string[] = [];
@@ -246,9 +238,6 @@ export interface CanonicalLoopState {
    *  statement about what the agent claimed under it. Conditional presence:
    *  absent without an active contract. */
   contractItemStatuses?: ContractItemStatusView;
-  /** v3.8: Sub-goals a verified contract item backs. DERIVED, never
-   *  persisted — the machine's separate statement about a `done` sub-goal. */
-  verifiedSubGoals?: VerifiedSubGoalFact[];
   /** v3.8: The static verification capability (policy-derived). Unconditional:
    *  it is part of the round's verification context, so every state hash
    *  changes once, deliberately. */
@@ -394,13 +383,6 @@ export function constraintProvenanceLabel(meta: ConstraintMeta | undefined): str
  *  body — the single formatting source shared by prompts and the state
  *  file (module contract above). The original objective is NOT here: it
  *  lives in the Objective section. Empty arrays render no line. */
-export interface RoundContractFormatOptions {
-  /** Omit the whole contract block (the contract itself was moved). */
-  omitContract?: boolean;
-  /** Omit individual item rows (items moved to Critical Context). */
-  omitItemIds?: ReadonlySet<string>;
-}
-
 export interface FormattedRoundContract {
   text: string;
   /** IDs this rendering actually emitted (contract id + item ids). */
@@ -412,9 +394,7 @@ export function formatRoundContractWithIds(
   /** v3.8: the derived item statuses. When given, each item renders with its
    *  machine status — the agent sees the verification debt in its own task. */
   statuses?: ContractItemStatusView | null,
-  options: RoundContractFormatOptions = {},
 ): FormattedRoundContract {
-  if (options.omitContract) return { text: "", emittedIds: [] };
   const lines: string[] = [];
   const emittedIds: string[] = [contract.id];
   const heading = contract.work_item?.trim();
@@ -422,9 +402,7 @@ export function formatRoundContractWithIds(
   const statusById = new Map(
     (statuses?.items ?? []).map((item) => [item.itemId, item]),
   );
-  const items = options.omitItemIds
-    ? contract.items.filter((item) => !options.omitItemIds!.has(item.id))
-    : contract.items;
+  const items = contract.items;
   if (items.length > 0) {
     lines.push("- Acceptance conditions:");
   }
@@ -446,9 +424,6 @@ export function formatRoundContractWithIds(
     if (item.criterion_refs.length > 0) {
       lines.push(`    - Criteria: ${item.criterion_refs.join(", ")}`);
     }
-    if (item.subgoal_refs.length > 0) {
-      lines.push(`    - Sub-goals: ${item.subgoal_refs.join(", ")}`);
-    }
     if (machine?.reasons.length) {
       lines.push(`    - Unverified because: ${machine.reasons[0]}`);
     }
@@ -469,51 +444,6 @@ export function formatRoundContract(
   statuses?: ContractItemStatusView | null,
 ): string {
   return formatRoundContractWithIds(contract, statuses).text;
-}
-
-/** v3.9.7: one contract item as the prompt renders it. Critical Context uses
- *  the same line when an item is moved, so the text cannot drift. */
-export function formatContractItemLine(
-  item: ActiveContractView["items"][number],
-  machine?: ContractItemStatusView["items"][number] | null,
-): string {
-  const mark = machine?.status === "verified" ? "✅"
-    : machine?.status === "insufficient" ? "🟠"
-    : machine?.status === "contradicted" ? "⛔"
-    : machine?.status === "pending" ? "⬜"
-    : "";
-  const status = machine ? ` — ${machine.status}` : "";
-  const lines = [
-    `- ${mark ? `${mark} ` : ""}[\`${item.id}\`] ${item.description}${status}`,
-  ];
-  if (item.verify_with.length > 0) {
-    lines.push(`  - Verify via: ${item.verify_with.join(", ")}`);
-  }
-  if (item.criterion_refs.length > 0) {
-    lines.push(`  - Criteria: ${item.criterion_refs.join(", ")}`);
-  }
-  if (item.subgoal_refs.length > 0) {
-    lines.push(`  - Sub-goals: ${item.subgoal_refs.join(", ")}`);
-  }
-  if (machine?.reasons.length) {
-    lines.push(`  - Unverified because: ${machine.reasons[0]}`);
-  }
-  return lines.join("\n");
-}
-
-/** v3.9.7: one active sub-goal row as the prompt renders it. */
-export function formatSubGoalRow(subGoal: SubGoal, round: number): string {
-  const statusIcon =
-    subGoal.status === "in_progress" ? "🔄" :
-    subGoal.status === "blocked" ? "🚫" : "⏳";
-  const stale = subGoal.status === "pending" &&
-    round - subGoal.declared_at_round >= 10 ? " ⚠️ stale" : "";
-  const detail = subGoal.status === "in_progress"
-    ? ` (since R${subGoal.status_changed_at_round})`
-    : subGoal.status === "pending"
-    ? ` (since R${subGoal.declared_at_round})`
-    : ` (blocked R${subGoal.status_changed_at_round})`;
-  return `- ${statusIcon} [\`${subGoal.id}\`] ${subGoal.description}${detail}${stale}`;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -540,7 +470,6 @@ const STATE_SECTION_TIER: Record<string, StateTier> = {
   Remaining: "Current",
   Blockers: "Current",
   "Sub-Goal Dashboard": "Current",
-  "External Context": "Current",
   // v3.8.1: the one-line phase position (the only fact the deleted Roadmap
   // section carried that no other section renders). It is orientation for the
   // NEXT round, so it belongs with the working-memory tier — and it must be
@@ -689,10 +618,7 @@ function flatStateSections(state: CanonicalLoopState): Array<{ title: string; bo
         : cs.status === "remaining" ? "⬜" : "❔";
       const idTag = ` [\`${cs.id}\`]`;
       const met = cs.met_at_round !== undefined ? ` (met R${cs.met_at_round})` : "";
-      const related = cs.related_subgoal_ids.length > 0
-        ? ` (related: ${cs.related_subgoal_ids.join(", ")})`
-        : "";
-      lines.push(`- ${icon}${idTag} ${cs.text}${met}${related}`);
+      lines.push(`- ${icon}${idTag} ${cs.text}${met}`);
     }
     lines.push("");
   }
@@ -811,7 +737,7 @@ export function createCanonicalLoopState(
     recoveryBrief?: string[];
   },
 ): CanonicalLoopState {
-  const last = derived?.previousRound?.result ?? request.last_round_result;
+  const last = derived?.previousRound?.result ?? null;
   const objective = response.loop_objective;
   const verificationFlags = derived?.previousRound?.verificationFlags ??
     request.verification_flags ?? [];
@@ -914,10 +840,6 @@ export function createCanonicalLoopState(
     ...(roundContract ? { roundContract } : {}),
     ...(derived?.roundFacts?.itemStatuses
       ? { contractItemStatuses: derived.roundFacts.itemStatuses }
-      : {}),
-    ...(derived?.roundFacts?.verifiedSubGoals &&
-      derived.roundFacts.verifiedSubGoals.length > 0
-      ? { verifiedSubGoals: [...derived.roundFacts.verifiedSubGoals] }
       : {}),
     capability: deriveConfiguredCapability(getPolicy()),
   };

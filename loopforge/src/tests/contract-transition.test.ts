@@ -50,7 +50,6 @@ const CONTRACT: RoundContractProposal = {
   items: [{
     description: "A is done",
     criterion_refs: [],
-    subgoal_refs: [],
     verify_with: ["verify"],
   }],
 };
@@ -60,7 +59,6 @@ const SUCCESSOR: RoundContractProposal = {
   items: [{
     description: "B is done",
     criterion_refs: [],
-    subgoal_refs: [],
     verify_with: ["verify"],
   }],
 };

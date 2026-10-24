@@ -2,7 +2,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
-  decodeRound,
+  decodeCommittedRound,
   type CommittedRoundView,
 } from "../committed-round.js";
 import {
@@ -122,7 +122,7 @@ function committedView(input: {
     beforeEvidence: input.before ?? [],
     afterEvidence: input.after ?? [],
   });
-  const view = decodeRound(entry);
+  const view = decodeCommittedRound(entry);
   assert.ok(view, "fixture must decode to a committed round");
   return view;
 }
@@ -258,24 +258,15 @@ describe("derivePromptFreshness", () => {
   it("treats every committed semantic declaration as evolution", () => {
     const declarations: Array<Record<string, unknown>> = [
       { discovered_constraints: ["a limit"] },
-      { objective_refinement: "a deeper understanding" },
       { emerged_subtasks: ["a new sub-problem"] },
       { subgoal_updates: [{ id: "sg-00000000", status: "in_progress" }] },
       { retracted_constraints: ["an old constraint"] },
-      { wrong_assumptions: ["a falsified assumption"] },
-      { worker_results: [{
-        agentId: "w1",
-        subTask: "scan",
-        resultSummary: "found it",
-        outcome: "success",
-      }] },
       { round_contract: {
         work_item: "slice",
         scope: [],
         items: [{
           description: "outcome",
           criterion_refs: [],
-          subgoal_refs: [],
           verify_with: ["verify"],
         }],
       } },
@@ -293,6 +284,21 @@ describe("derivePromptFreshness", () => {
         JSON.stringify(evaluation));
       assert.ok(freshness.reasons.includes("declared_evolution"),
         JSON.stringify(evaluation));
+    }
+  });
+
+  it("does not treat reports as declared evolution", () => {
+    for (const evaluation of [
+      { wrong_assumptions: ["a falsified assumption"] },
+      { worker_results: [{ agentId: "w1", subTask: "scan", resultSummary: "found it", outcome: "success" }] },
+    ] as Array<Record<string, unknown>>) {
+      const freshness = derivePromptFreshness(committedView({
+        before: [gitObservation("before", FINGERPRINTS_EMPTY, "aaa")],
+        after: [gitObservation("after", FINGERPRINTS_EMPTY, "aaa")],
+        evaluation,
+      }));
+      assert.equal(freshness.declaredEvolution, false, JSON.stringify(evaluation));
+      assert.equal(freshness.observableNewInformation, false, JSON.stringify(evaluation));
     }
   });
 

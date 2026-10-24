@@ -24,6 +24,7 @@ import {
   makeSelfEvaluation,
 } from "../protocol.js";
 import type {
+  CompiledRoundFacts,
   ContractTransition,
   CriterionClaim,
   MachineObservation,
@@ -179,16 +180,6 @@ function fixtureProgress(
       detail: "test fixture has no before boundary",
     };
   }
-  if (observation.kind === "custom") {
-    const snapshot = observation.data.progress;
-    if (!snapshot) return null;
-    return {
-      kind: "custom",
-      coverage: { ...snapshot.coverage },
-      state: "unknown",
-      complete: snapshot.complete,
-    };
-  }
   return null;
 }
 
@@ -271,6 +262,10 @@ export function committedFeedbackRound(
     contractItemClaims?: Array<{ item_id: string; outcome: "met" | "remaining" }>;
     /** v3.9.9: a committed contract redirect. */
     contractTransition?: ContractTransition;
+    /** v4.0.1: the prompt artifact stamped on the committed transaction. */
+    promptArtifact?: PromptArtifact;
+    /** v4.0.1: compile facts stamped on the committed transaction. */
+    compiled?: CompiledRoundFacts;
     restore?: {
       directiveTransactionId: string;
       redoRound: number;
@@ -320,6 +315,18 @@ export function committedFeedbackRound(
           phase: "committed",
           beforeEvidence: opts.beforeEvidence ?? [],
           afterEvidence: opts.roundEvidence,
+          operatorAcceptance: {
+            task: "Test task",
+            success_criteria: [],
+            hard_constraints: [],
+          },
+          compiled: opts.compiled ?? {
+            task: "Test task",
+            goalId: "",
+            constraintsActive: [],
+            constraintsRetired: [],
+          },
+          ...(opts.promptArtifact ? { promptArtifact: opts.promptArtifact } : {}),
           ...fixtureBeforeCheckpointError(opts.beforeEvidence ?? []),
           ...(opts.restore ? { restore: opts.restore } : {}),
           ...(opts.contractBinding !== undefined ? { contractBinding: opts.contractBinding } : {}),
@@ -392,6 +399,11 @@ export function committedBacktrackRound(
           phase: "committed",
           beforeEvidence: [],
           afterEvidence: [],
+          operatorAcceptance: {
+            task: "Test task",
+            success_criteria: [],
+            hard_constraints: [],
+          },
           recovery,
           createdAt: 0,
           updatedAt: 0,
@@ -423,6 +435,8 @@ export function withTransaction(
   const lineage = (entry.loop_lineage ?? {}) as Record<string, unknown>;
   const loopId = String(entry.loop_id ?? lineage.loop_id ?? "");
   const round = Number(lineage.round ?? entry.round ?? 0);
+  entry.task_id = `loop:${loopId}:r${round}:feedback`;
+  entry.task_type = "feedback";
   const evaluation = {
     success: entry.success === true,
     output_summary: String(entry.output_summary ?? ""),
@@ -445,9 +459,6 @@ export function withTransaction(
     ...(Array.isArray(entry.wrong_assumptions)
       ? { wrong_assumptions: entry.wrong_assumptions }
       : {}),
-    ...(typeof entry.objective_refinement === "string"
-      ? { objective_refinement: entry.objective_refinement }
-      : {}),
     ...(Array.isArray(entry.worker_results)
       ? { worker_results: entry.worker_results }
       : {}),
@@ -458,9 +469,6 @@ export function withTransaction(
             ? { checkpoint_label: entry.checkpoint_label }
             : {}),
         }
-      : {}),
-    ...(entry.prompt_requests !== undefined
-      ? { prompt_requests: entry.prompt_requests }
       : {}),
     ...(entry.execution_report !== undefined
       ? { execution_report: entry.execution_report }
@@ -496,6 +504,21 @@ export function withTransaction(
     phase: "committed",
     beforeEvidence: evidence.beforeEvidence ?? [],
     afterEvidence: evidence.afterEvidence ?? [],
+    operatorAcceptance: {
+      task: String(entry.task ?? "Test task"),
+      success_criteria: [],
+      hard_constraints: [],
+    },
+    compiled: {
+      task: String(entry.task ?? "Test task"),
+      goalId: "",
+      constraintsActive: Array.isArray(lineage.constraints_active)
+        ? lineage.constraints_active as string[]
+        : [],
+      constraintsRetired: Array.isArray(lineage.constraints_retired)
+        ? lineage.constraints_retired as string[]
+        : [],
+    },
     ...fixtureBeforeCheckpointError(evidence.beforeEvidence ?? []),
     evaluation,
     submittedFields: manifestFor(evaluation),
@@ -574,8 +597,8 @@ export function mergedLineageRound(
   if (opts.contractBinding !== undefined) lin.contract_binding = opts.contractBinding;
   const body: Record<string, unknown> = {
     loop_id: loopId,
-    task_id: `${loopId}:r${round}`,
-    task_type: "loop_lineage",
+    task_id: `loop:${loopId}:r${round}:feedback`,
+    task_type: "feedback",
     success: opts.success ?? false,
     ...(opts.outputSummary !== undefined ? { output_summary: opts.outputSummary } : {}),
     execution_report: {
@@ -637,6 +660,21 @@ export function mergedLineageRound(
     phase: "committed",
     beforeEvidence: opts.beforeEvidence ?? [],
     afterEvidence: opts.roundEvidence ?? [],
+    operatorAcceptance: {
+      task: String(body.task ?? "Test task"),
+      success_criteria: [],
+      hard_constraints: [],
+    },
+    compiled: {
+      task: String(body.task ?? "Test task"),
+      goalId: "",
+      constraintsActive: Array.isArray(lin.constraints_active)
+        ? lin.constraints_active as string[]
+        : [],
+      constraintsRetired: Array.isArray(lin.constraints_retired)
+        ? lin.constraints_retired as string[]
+        : [],
+    },
     ...fixtureBeforeCheckpointError(opts.beforeEvidence ?? []),
     evaluation,
     submittedFields: manifestFor(evaluation),
@@ -730,7 +768,14 @@ export class MemoryLoopStore implements LoopStore {
    *  same file), so a session document replaces any raw entry with the same
    *  task_id instead of appearing twice. */
   listEntries(loopId?: string, opts?: { sinceRound?: number }): VaultEntry[] {
-    const result = [...this.entries];
+    // FileLoopStore scopes the flat view to one loop; the in-memory store
+    // must do the same or a loader that trusts `listEntries(loopId)` would
+    // read another loop's history.
+    const result = loopId === undefined
+      ? [...this.entries]
+      : this.entries.filter((entry) =>
+          entry.loop_id === loopId ||
+          String(entry.task_id ?? "").startsWith(`loop:${loopId}:`));
     // v3.0.1: mirror FileLoopStore.listEntries — sinceRound drops entries
     // from round documents older than the window (session entries have no
     // round and are always kept).
@@ -757,8 +802,56 @@ export class MemoryLoopStore implements LoopStore {
     }
     return result;
   }
-  appendEntry(entry: VaultEntry): void { this.entries.push(entry); }
-  appendEntries(entries: VaultEntry[]): number { this.entries.push(...entries); return entries.length; }
+  /** Mirror FileLoopStore.writeEntry: the flat log stays available for tests
+   *  that inspect appended events, and the typed round/session documents are
+   *  updated in parallel so `readRound` and the transaction commit store see
+   *  the same fact. */
+  appendEntry(entry: VaultEntry): void {
+    this.entries.push(entry);
+    const loopId = typeof entry.loop_id === "string" && entry.loop_id.length > 0
+      ? entry.loop_id
+      : String(entry.task_id ?? "").match(/^loop:(.+):(?:session|r\d+(?::|$))/)?.[1];
+    if (!loopId) return;
+    if (entry.task_type === "session_state" ||
+        entry.task_id === `loop:${loopId}:session`) {
+      this.sessions.set(loopId, {
+        schemaVersion: LOOP_STORE_SCHEMA_VERSION,
+        loopId,
+        updatedAt: new Date().toISOString(),
+        entry,
+      });
+      return;
+    }
+    const lineage = entry.loop_lineage as Record<string, unknown> | undefined;
+    const round = lineage && typeof lineage.round === "number"
+      ? lineage.round
+      : Number(String(entry.task_id ?? "").match(/:r(\d+)(?::|$)/)?.[1] ?? NaN);
+    if (!Number.isInteger(round) || round < 1) return;
+    const key = `${loopId}:${round}`;
+    const current = this.rounds.get(key) ?? {
+      schemaVersion: LOOP_STORE_SCHEMA_VERSION,
+      loopId,
+      round,
+      sequence: round,
+      updatedAt: new Date().toISOString(),
+      events: [],
+    };
+    const taskId = String(entry.task_id ?? "");
+    if (taskId.endsWith(":feedback")) {
+      current.feedback = entry;
+    } else {
+      current.events = [
+        ...current.events.filter((event) => event.task_id !== taskId),
+        entry,
+      ];
+    }
+    current.updatedAt = new Date().toISOString();
+    this.rounds.set(key, current);
+  }
+  appendEntries(entries: VaultEntry[]): number {
+    for (const entry of entries) this.appendEntry(entry);
+    return entries.length;
+  }
   readSession(loopId: string): LoopSessionDocument | null {
     return this.sessions.get(loopId) ?? null;
   }

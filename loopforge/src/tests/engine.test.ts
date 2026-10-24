@@ -7,152 +7,42 @@ import {
 } from "../engine.js";
 import {
   AgentStatus,
-  Mode,
-  makeExecutionFeedback,
-  makeLoopRoundResult,
-  type LoopForgeRequest,
+  makeLoopCompileRequest,
+  type LoopCompileRequest,
 } from "../protocol.js";
 import { resetPolicy } from "../policy.js";
 import { installTestCommandProvider, criterionClaims } from "./_helpers.js";
 import { deriveItemId } from "../token-utils.js";
 
-function makeRequest(overrides: Record<string, unknown> = {}): import("../protocol.js").LoopForgeRequest {
-  return {
+function makeRequest(overrides: Partial<LoopCompileRequest> = {}): LoopCompileRequest {
+  return makeLoopCompileRequest({
     task: "Audit ERC20 token",
-    mode: Mode.LOOP_COMPILE,
-    feedback: null,
-    skill_name: null,
-    task_id: null,
-    // Prevents "LoopStore only accepts loop-scoped entries" warnings in tests
-    // that don't explicitly set a loop_id. Engine tests use the real
-    // FileLoopStore backend (via createEngine), so every write needs a
-    // valid loop-scoped task_id.
     loop_id: "loop:engine-test",
     ...overrides,
-  };
+  });
 }
 
 describe("Engine — Initialisation", () => {
   beforeEach(() => {
     resetPolicy();
-    // v3.3: success claims need machine-backed evidence — install a real
-    // passing command so R8 / success_unverified stay silent in these flows.
     installTestCommandProvider();
   });
 
   it("createEngine returns LoopForgeEngine instance", () => {
     const engine = createEngine();
     assert.ok(engine instanceof LoopForgeEngine);
-    assert.equal(engine.state, null);
-    assert.equal(engine.lastTask, null);
   });
 
-  it("engine lazy-inits state on first invocation", () => {
-    const engine = createEngine();
-    engine.invokeLoopCompile(makeRequest({
-      loop_id: "test",
-      round: 1,
-      goal_id: "audit",
-    }));
-    assert.notEqual(engine.state, null);
-    assert.equal(engine.state!.call_count, 0);
-  });
-});
-
-describe("Engine — Feedback mode", () => {
-  beforeEach(() => {
-    resetPolicy();
-    // v3.3: success claims need machine-backed evidence — install a real
-    // passing command so R8 / success_unverified stay silent in these flows.
-    installTestCommandProvider();
-  });
-
-  it("returns error when no feedback payload", () => {
-    const engine = createEngine();
-    const result = engine.invokeFeedback(makeRequest());
-    assert.equal(result.status, AgentStatus.ERROR);
-    assert.ok(result.response!.error!.includes("feedback payload"));
-  });
-
-  it("returns error when loop_id is missing (feedback is loop-scoped)", () => {
-    const engine = createEngine();
-    const req = makeRequest({
-      mode: Mode.FEEDBACK,
-      round: 1,
-      loop_id: undefined,
-      feedback: makeExecutionFeedback({
-        success: true,
-        constraint_violations: [],
-        manual_fixes_needed: "",
-        output: "All tests passed",
-      }),
-    });
-    const result = engine.invokeFeedback(req);
-    assert.equal(result.status, AgentStatus.ERROR);
-    assert.ok(result.response!.error!.includes("loop_id"));
-  });
-
-  it("returns error when the feedback write fails", () => {
-    const engine = createEngine();
-    const req = makeRequest({
-      mode: Mode.FEEDBACK,
-      round: 1,
-      loop_id: "../not-a-loop",
-      feedback: makeExecutionFeedback({
-        success: true,
-        constraint_violations: [],
-        manual_fixes_needed: "",
-        output: "All tests passed",
-      }),
-    });
-    const result = engine.invokeFeedback(req);
-    assert.equal(result.status, AgentStatus.ERROR);
-    assert.ok(result.response!.error!.includes("persisted"));
-  });
-
-  it("returns OK with success flag when feedback provided", () => {
-    const engine = createEngine();
-    const req = makeRequest({
-      mode: Mode.FEEDBACK,
-      round: 1,
-      feedback: makeExecutionFeedback({
-        success: true,
-        constraint_violations: [],
-        manual_fixes_needed: "",
-        output: "All tests passed",
-      }),
-    });
-    const result = engine.invokeFeedback(req);
-    assert.equal(result.status, AgentStatus.OK);
-    assert.ok(result.response!.prompt!.includes("Success: true"));
-  });
-
-  it("returns OK with success=false for failures", () => {
-    const engine = createEngine();
-    const req = makeRequest({
-      mode: Mode.FEEDBACK,
-      round: 1,
-      feedback: makeExecutionFeedback({
-        success: false,
-        constraint_violations: [],
-        manual_fixes_needed: "formatting",
-        output: "Works with manual tweaks",
-      }),
-    });
-    const result = engine.invokeFeedback(req);
-    assert.ok(result.response!.prompt!.includes("Success: false"));
-  });
-
-  it("updates success trend in state", () => {
-    const engine = createEngine();
-    const req = makeRequest({
-      mode: Mode.FEEDBACK,
-      round: 1,
-      feedback: makeExecutionFeedback({ success: true, output: "ok" }),
-    });
-    engine.invokeFeedback(req);
-    assert.equal(engine.state!.success_trend.length, 1);
-    assert.equal(engine.state!.success_trend[0], true);
+  it("the engine has no round-history write API", () => {
+    const engine = createEngine() as unknown as Record<string, unknown>;
+    for (const name of [
+      "invokeFeedback",
+      "autoFeedback",
+      "commitRollbackDirective",
+      "recordDelegation",
+    ]) {
+      assert.equal(typeof engine[name], "undefined", `${name} must not be public`);
+    }
   });
 });
 
@@ -177,7 +67,6 @@ describe("Engine — Loop Compile mode", () => {
   it("returns OK with compiled prompt for round 1", () => {
     const engine = createEngine();
     const req = makeRequest({
-      mode: Mode.LOOP_COMPILE,
       loop_id: "test",
       round: 1,
       goal_id: "audit",
@@ -185,14 +74,13 @@ describe("Engine — Loop Compile mode", () => {
     });
     const result = engine.invokeLoopCompile(req);
     assert.equal(result.status, AgentStatus.OK);
-    assert.ok(result.response!.prompt!.includes("Level: L2"));
-    assert.equal(result.response!.prompt_artifact?.level, "l2");
+    assert.ok(result.prompt.includes("Level: L2"));
+    assert.equal(result.prompt_artifact?.level, "l2");
   });
 
   it("includes loop health in prompt", () => {
     const engine = createEngine();
     const req = makeRequest({
-      mode: Mode.LOOP_COMPILE,
       loop_id: "test",
       round: 1,
       goal_id: "audit",
@@ -208,13 +96,12 @@ describe("Engine — Loop Compile mode", () => {
     const result = engine.invokeLoopCompile(req);
     // v2.8: L2 pointer mode renders "### Objective" (path B), not
     // "Loop Objective" from the full state blob (path A).
-    assert.ok(result.response!.prompt!.includes("Full security audit"));
+    assert.ok(result.prompt.includes("Full security audit"));
   });
 
   it("handles round 2 with existing vault context", () => {
     const engine = createEngine();
     const req = makeRequest({
-      mode: Mode.LOOP_COMPILE,
       loop_id: "test-r2",
       round: 2,
       goal_id: "audit",
@@ -234,201 +121,9 @@ describe("Engine — P0-P5 Cognitive Evolution (v1.7 E2E)", () => {
     installTestCommandProvider();
   });
 
-  it("P0: discovered_constraints survive engine boundary and reach compiler", () => {
-    const engine = createEngine();
-    // First round: establish loop objective
-    const r1 = engine.invokeLoopCompile(makeRequest({
-      mode: Mode.LOOP_COMPILE,
-      loop_id: "p0-test",
-      round: 1,
-      goal_id: "audit",
-      task: "Audit ERC20 token",
-    }));
-    assert.equal(r1.status, AgentStatus.OK);
-
-    // Round 2: pass discovered_constraints via last_round_result
-    const r2 = engine.invokeLoopCompile({
-      ...makeRequest({
-        mode: Mode.LOOP_COMPILE,
-        loop_id: "p0-test",
-        round: 2,
-        goal_id: "audit",
-        task: "Audit ERC20 token",
-      }),
-      last_round_result: {
-        round: 1,
-        success: true,
-        output_summary: "Found 2 reentrancy bugs",
-        constraint_violations: [],
-        manual_fixes_needed: "",
-        discovered_constraints: ["Use SafeERC20 for all external calls"],
-        objective_refinement: "Scope includes upgradeable proxy patterns",
-        emerged_subtasks: ["Audit proxy init", "Verify timelock"],
-      },
-    } as unknown as LoopForgeRequest);
-    assert.equal(r2.status, AgentStatus.OK);
-    const prompt = r2.response!.prompt!;
-    // P0: discovered constraint should appear in active constraints
-    assert.ok(prompt.includes("SafeERC20"), "P0: discovered constraint not in prompt");
-    // P2: emerged subtasks → suggested next task
-    assert.ok(prompt.includes("proxy init") || prompt.includes("timelock"),
-      "P2: emerged subtasks not forwarded");
-  });
-
-  it("P4: uncommitted fallback execution_report does not enter the state projection", () => {
-    const engine = createEngine();
-    // Round 1
-    engine.invokeLoopCompile(makeRequest({
-      mode: Mode.LOOP_COMPILE,
-      loop_id: "p4-test",
-      round: 1,
-      goal_id: "audit",
-      task: "Fix security bugs",
-      loop_objective: {
-        objective: "Fix all security bugs",
-        success_criteria: ["No reentrancy", "Access control OK", "Overflow checks"],
-        hard_constraints: [],
-        created_at_round: 1,
-        loop_id: "p4-test",
-      },
-    }));
-    // Round 2 with execution evidence — force L2 so progress dashboard is rendered
-    const r2 = engine.invokeLoopCompile({
-      ...makeRequest({
-        mode: Mode.LOOP_COMPILE,
-        loop_id: "p4-test",
-        round: 2,
-        goal_id: "audit",
-        task: "Fix security bugs",
-        force_level: "l2",  // trigger full recompile for P4 processing
-        loop_objective: {
-          objective: "Fix all security bugs",
-          success_criteria: ["No reentrancy", "Access control OK", "Overflow checks"],
-          hard_constraints: [],
-          created_at_round: 1,
-          loop_id: "p4-test",
-        },
-      }),
-      last_round_result: {
-        round: 1,
-        success: true,
-        output_summary: "Fixed reentrancy in withdraw()",
-        constraint_violations: [],
-        manual_fixes_needed: "",
-        execution_report: {
-          files_changed: ["contracts/Token.sol", "test/Token.test.ts"],
-          tests_reported: { passed: 24, failed: 0, skipped: 0 },
-          criterion_claims: criterionClaims(["No reentrancy"], ["Access control OK", "Overflow checks"]),
-        },
-      },
-    } as unknown as LoopForgeRequest);
-    assert.equal(r2.status, AgentStatus.OK);
-    // The request fallback is available for compiler evolution, but only a
-    // committed round may contribute report-derived progress to the state.
-    const stateFile = r2.response!.state_file_content;
-    assert.ok(stateFile, "P4: state_file_content should be set for L2 compile");
-    assert.ok(!stateFile!.includes("Progress Dashboard"), "fallback report must not create progress");
-    assert.ok(!stateFile!.includes("Token.sol"), "fallback files_changed must not enter the state file");
-    // v3.8.1: the dashboard is a STATE-FILE view. It used to also reach the
-    // prompt as an L2 structured section, which is where the assertion below
-    // used to pass from; that section is deleted (it re-composed facts the
-    // prompt already states elsewhere, plus the agent's own numbers).
-    const prompt = r2.response!.prompt!;
-    assert.ok(!prompt.includes("Progress Dashboard"),
-      "the L2 prompt no longer carries the dashboard; the state file does");
-  });
-
-  it("v3.9.5: fallback wrong_assumptions do not become prompt lessons", () => {
-    const engine = createEngine();
-    engine.invokeLoopCompile(makeRequest({
-      mode: Mode.LOOP_COMPILE,
-      loop_id: "p5-test",
-      round: 1,
-      goal_id: "audit",
-      task: "Audit ERC20",
-    }));
-    const r2 = engine.invokeLoopCompile({
-      ...makeRequest({
-        mode: Mode.LOOP_COMPILE,
-        loop_id: "p5-test",
-        round: 2,
-        goal_id: "audit",
-        task: "Audit ERC20",
-      }),
-      last_round_result: {
-        round: 1,
-        success: false,
-        output_summary: "Found missing access control",
-        constraint_violations: [],
-        manual_fixes_needed: "",
-        wrong_assumptions: ["Assumed OZ v4.0 has no known issues"],
-        retracted_constraints: [],
-      },
-    } as unknown as LoopForgeRequest);
-    assert.equal(r2.status, AgentStatus.OK);
-    const prompt = r2.response!.prompt!;
-    // v3.9.5: only committed corrections reach the prompt. This caller
-    // fallback is in-flight, so it must not become prompt narrative.
-    assert.ok(!prompt.includes("Assumed OZ v4.0"),
-      "fallback wrong_assumptions must not leak into the prompt");
-    assert.ok(!prompt.includes("Corrected assumption"));
-  });
-
-  it("P5: a same-round discovery survives a same-round retraction request", () => {
-    const engine = createEngine();
-    engine.invokeLoopCompile(makeRequest({
-      mode: Mode.LOOP_COMPILE,
-      loop_id: "p5b-test",
-      round: 1,
-      goal_id: "audit",
-      task: "Audit ERC20",
-    }));
-    const r2 = engine.invokeLoopCompile({
-      ...makeRequest({
-        mode: Mode.LOOP_COMPILE,
-        loop_id: "p5b-test",
-        round: 2,
-        goal_id: "audit",
-        task: "Audit ERC20",
-      }),
-      last_round_result: {
-        round: 1,
-        success: true,
-        output_summary: "Audited contracts",
-        constraint_violations: [],
-        manual_fixes_needed: "",
-        discovered_constraints: ["No external deps"],
-        retracted_constraints: ["No external deps"],
-        wrong_assumptions: [],
-      },
-    } as unknown as LoopForgeRequest);
-    assert.equal(r2.status, AgentStatus.OK);
-    // v3.9.7: retraction resolves against the active set at the START of the
-    // round. A constraint declared by the same submission is a NEW declaration,
-    // so the retraction is an inert same-round no-op and the discovery stays.
-    const prompt = r2.response!.prompt!;
-    // Check the prompt body portion (after any inlined state file) for the
-    // Active Constraints block
-    const stateMarker = "*(State also saved to";
-    const searchStart = prompt.includes(stateMarker)
-      ? prompt.indexOf(stateMarker) + stateMarker.length
-      : 0;
-    const promptBody = prompt.slice(searchStart);
-    if (promptBody.includes("Active Constraints")) {
-      const activeStart = promptBody.indexOf("Active Constraints");
-      const nextSection = promptBody.indexOf("###", activeStart + 10);
-      const activeBlock = nextSection >= 0
-        ? promptBody.slice(activeStart, nextSection)
-        : promptBody.slice(activeStart);
-      assert.ok(activeBlock.includes("No external deps"),
-        "a same-round discovery is a new declaration and survives the request");
-    }
-  });
-
   it("verification_flags are rendered as Verification Gate section in prompt", () => {
     const engine = createEngine();
     const req = makeRequest({
-      mode: Mode.LOOP_COMPILE,
       loop_id: "vg-test",
       round: 2,
       goal_id: "audit",
@@ -442,9 +137,9 @@ describe("Engine — P0-P5 Cognitive Evolution (v1.7 E2E)", () => {
         { severity: "warn", field: "blocker", check: "blocked_without_blocker",
           detail: "outcome=blocked but no blocker description" },
       ],
-    } as unknown as LoopForgeRequest);
+    });
     assert.equal(result.status, AgentStatus.OK);
-    const prompt = result.response!.prompt!;
+    const prompt = result.prompt;
     assert.ok(prompt.includes("Verification Gate"), "Gate section missing");
     assert.ok(prompt.includes("🚫"), "Error flag icon missing");
     assert.ok(prompt.includes("CONTRADICTED"), "Contradicted verdict message missing");
@@ -454,42 +149,6 @@ describe("Engine — P0-P5 Cognitive Evolution (v1.7 E2E)", () => {
       "error flag must carry a Fix instruction");
     assert.ok(prompt.includes("→ Action: State the concrete blocker"),
       "warn flag must carry an Action instruction");
-  });
-});
-
-describe("Engine — last_round_result boundary (v3.3.1)", () => {
-  beforeEach(() => {
-    resetPolicy();
-    installTestCommandProvider();
-  });
-
-  it("v3.9.5: fallback prompt_requests do not steer the next prompt", () => {
-    // prompt_requests are committed facts. A library fallback is in-flight
-    // and must not reach the next prompt.
-    const engine = createEngine();
-    const result = engine.invokeLoopCompile(makeRequest({
-      loop_id: "engine-boundary-next",
-      round: 2,
-      force_level: "l2",
-      last_round_result: makeLoopRoundResult({
-        round: 1,
-        success: false,
-        output_summary: "Started the auth module",
-        constraint_violations: [],
-        manual_fixes_needed: "",
-        discovered_constraints: ["auth module"],
-        prompt_requests: {
-          emphasize: ["auth module"],
-          confusion_points: ["What does machine-backed evidence mean?"],
-        },
-      }),
-    }));
-    assert.equal(result.status, AgentStatus.OK);
-    const prompt = result.response?.prompt ?? "";
-    assert.ok(!prompt.includes("🔴 Critical Context"),
-      "fallback emphasize must not reach the prompt");
-    assert.ok(!prompt.includes("⚠️ Confusion Alerts"),
-      "fallback confusion_points must not reach the prompt");
   });
 });
 
@@ -520,7 +179,7 @@ describe("Engine — identity & round-view consistency (v3.3.1)", () => {
       },
     }));
     assert.equal(result.status, AgentStatus.OK);
-    const prompt = result.response?.prompt ?? "";
+    const prompt = result.prompt ?? "";
     const criterionHash = deriveItemId("Ship the ETL module");
     assert.ok(prompt.includes(`cr-${criterionHash}`),
       "the criterion must render under its cr- identity");
@@ -533,47 +192,4 @@ describe("Engine — identity & round-view consistency (v3.3.1)", () => {
       "the constraint must never render under a cr- identity");
   });
 
-  it("a delegation journal entry does not shadow the round's lineage view", () => {
-    // Regression: recordDelegation writes loop:…:rN:delegations entries that
-    // share lineage.round with the round. Compile-side round-level consumers
-    // matched on the round number alone, so with worker_results the journal
-    // (sorted after the lineage entry of the same round) became
-    // getPreviousRound's answer: empty goal_id → spurious forced L2 and a
-    // lost L1 collapse baseline.
-    const engine = createEngine();
-    const loopId = "journal-shadow";
-    const task = "Orchestrate the port";
-    const result1 = engine.invokeLoopCompile(makeRequest({
-      loop_id: loopId,
-      round: 1,
-      task,
-    }));
-    assert.equal(result1.status, AgentStatus.OK);
-    engine.autoFeedback({
-      success: false,
-      output_summary: "coordinated the sub-agents",
-      constraint_violations: [],
-      should_continue: true,
-      worker_results: [{
-        agentId: "w1",
-        subAgentType: "general-purpose",
-        subTask: "scan the module",
-        resultSummary: "found the seam",
-        outcome: "success",
-      }],
-    }, loopId, 1, task);
-    const result2 = engine.invokeLoopCompile(makeRequest({
-      loop_id: loopId,
-      round: 2,
-      task,
-    }));
-    assert.equal(result2.status, AgentStatus.OK);
-    const prompt = result2.response?.prompt ?? "";
-    assert.ok(prompt.includes("Level: L1"),
-      "round 2 with a clean previous round must continue at L1 — the " +
-      "delegation journal must not masquerade as the previous round and " +
-      "force an L2 recovery");
-    assert.ok(!prompt.includes("Level: L2"),
-      "the compiled prompt must not be forced into L2 by a journal entry");
-  });
 });

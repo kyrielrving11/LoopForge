@@ -1,5 +1,5 @@
 {
-  "version": "9",
+  "version": "10",
   "engine": {
     "stall_lookback_rounds": 3,
     "max_rounds": 200,
@@ -13,10 +13,7 @@
   "prompt": {
     "l0_max_chars": 5000,
     "l1_max_chars": 10000,
-    "l2_max_chars": 18000,
-    "max_emphasize_l2": 5,
-    "max_emphasize_l1": 3,
-    "max_confusion_points": 3
+    "l2_max_chars": 18000
   },
   "backend": {
     "root_dir": ".loopforge"

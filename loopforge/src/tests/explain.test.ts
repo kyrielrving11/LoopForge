@@ -31,7 +31,7 @@ describe("v3.8 — explain view", () => {
   const contractFixture = () => ({
     work_item: "Slice A",
     scope: ["src/a"],
-    items: [{ description: "works", criterion_refs: [], subgoal_refs: [], verify_with: ["verify"] }],
+    items: [{ description: "works", criterion_refs: [], verify_with: ["verify"] }],
   });
 
   const commandObservation = () => ({
@@ -101,7 +101,7 @@ describe("v3.8 — explain view", () => {
     const contract = {
       work_item: "Slice A",
       scope: ["src/a"],
-      items: [{ description: "works", criterion_refs: [], subgoal_refs: [], verify_with: ["verify"] }],
+      items: [{ description: "works", criterion_refs: [], verify_with: ["verify"] }],
     };
     const result = buildExplain("explain-loop", [
       entry(1, { contract }),

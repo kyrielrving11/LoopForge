@@ -173,10 +173,10 @@ describe("resolveRoundFiles", () => {
     loop_lineage: {
       round: 1,
       round_transaction: {
-        schema_version: 5,
+        schema_version: 6,
         round_id: "loop:provenance-loop:round:1",
         snapshot: {
-          schemaVersion: 5,
+          schemaVersion: 6,
           kind: "evaluation",
           branchId: "loop:provenance-loop:branch:root",
           transactionId: "tx-provenance-loop-1-1",
@@ -222,6 +222,17 @@ describe("resolveRoundFiles", () => {
               coverage: "tracked_and_non_ignored_untracked",
             },
           }],
+          operatorAcceptance: {
+            task: "Provenance task",
+            success_criteria: [],
+            hard_constraints: [],
+          },
+          compiled: {
+            task: "Provenance task",
+            goalId: "provenance-loop:provenance-task",
+            constraintsActive: [],
+            constraintsRetired: [],
+          },
           submittedFields: [
             "success", "output_summary", "constraint_violations", "should_continue",
           ],
@@ -248,10 +259,10 @@ describe("resolveRoundFiles", () => {
       loop_lineage: {
         round: 1,
         round_transaction: {
-          schema_version: 5,
+          schema_version: 6,
           round_id: "loop:provenance-loop:round:1",
           snapshot: {
-            schemaVersion: 5,
+            schemaVersion: 6,
             kind: "evaluation",
             branchId: "loop:provenance-loop:branch:root",
             transactionId: "tx-provenance-loop-1-1b",
@@ -272,6 +283,17 @@ describe("resolveRoundFiles", () => {
               files: [],
               data: { commandId: "npm-test" },
             }],
+            operatorAcceptance: {
+              task: "Provenance task",
+              success_criteria: [],
+              hard_constraints: [],
+            },
+            compiled: {
+              task: "Provenance task",
+              goalId: "provenance-loop:provenance-task",
+              constraintsActive: [],
+              constraintsRetired: [],
+            },
             submittedFields: [
               "success", "output_summary", "constraint_violations", "should_continue",
             ],
@@ -302,10 +324,10 @@ describe("listVerifiedClaims", () => {
       loop_lineage: {
         round,
         round_transaction: {
-          schema_version: 5,
+          schema_version: 6,
           round_id: `loop:provenance-loop:round:${round}`,
           snapshot: {
-            schemaVersion: 5,
+            schemaVersion: 6,
             kind: "evaluation",
             branchId: "loop:provenance-loop:branch:root",
             transactionId: `tx-provenance-loop-${round}-1`,
@@ -316,6 +338,17 @@ describe("listVerifiedClaims", () => {
             phase: "committed",
             beforeEvidence: [],
             afterEvidence: snapshots,
+            operatorAcceptance: {
+              task: "Provenance task",
+              success_criteria: [],
+              hard_constraints: [],
+            },
+            compiled: {
+              task: "Provenance task",
+              goalId: "provenance-loop:provenance-task",
+              constraintsActive: [],
+              constraintsRetired: [],
+            },
             evaluation,
             submittedFields: [
               "success", "output_summary", "constraint_violations", "should_continue",

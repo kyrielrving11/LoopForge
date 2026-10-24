@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { FileLoopStore, StorageCorruptionError } from "../loop-store.js";
 import { prepareRoundTransaction } from "../round-transaction.js";
+import { committedFeedbackRound } from "./_helpers.js";
 import type { PromptArtifact } from "../protocol.js";
 import { PROMPT_ARTIFACT_SCHEMA_VERSION } from "../protocol.js";
 import type { VaultEntry } from "../loop-store.js";
@@ -70,7 +71,19 @@ describe("FileLoopStore", () => {
         coverage: { active: [], rendered: [], omitted: [], complete: true },
       };
       const snapshot = {
-        ...prepareRoundTransaction(loopId, 1, [], artifact),
+        ...prepareRoundTransaction(loopId, 1, [], artifact, {
+          operatorAcceptance: {
+            task: "Typed store",
+            success_criteria: ["Task goal achieved with verifiable evidence"],
+            hard_constraints: [],
+          },
+          compiled: {
+            task: "Typed store",
+            goalId: `${loopId}:test`,
+            constraintsActive: [],
+            constraintsRetired: [],
+          },
+        }),
         phase: "committed" as const,
         submittedFields: [
           "success", "output_summary", "constraint_violations", "should_continue",
@@ -81,12 +94,6 @@ describe("FileLoopStore", () => {
         `loop:${loopId}:session`,
         "session_state",
         { status: "running" },
-      ));
-      store.appendEntry(entry(
-        loopId,
-        `loop:${loopId}:r1`,
-        "loop_lineage",
-        { round: 1, task: "work" },
       ));
       store.appendEntry({
         ...entry(
@@ -100,7 +107,6 @@ describe("FileLoopStore", () => {
 
       assert.equal(store.readSession(loopId)?.entry.task_type, "session_state");
       const round = store.readRound(loopId, 1);
-      assert.equal(round?.lineage?.task_id, `loop:${loopId}:r1`);
       assert.equal(round?.feedback?.success, true);
       assert.equal(round?.transaction?.phase, "committed");
       assert.equal(round?.promptArtifact?.renderedPrompt, "prompt");
@@ -124,12 +130,7 @@ describe("FileLoopStore", () => {
     try {
       const store = new FileLoopStore(root);
       for (const loopId of ["alpha", "alpha-long"]) {
-        store.appendEntry(entry(
-          loopId,
-          `loop:${loopId}:r1`,
-          "loop_lineage",
-          { round: 1 },
-        ));
+        store.appendEntry(committedFeedbackRound(1, { loopId }));
       }
       assert.deepEqual(store.listLoopIds(), ["alpha", "alpha-long"]);
       assert.equal(store.listEntries("alpha").length, 1);
@@ -171,7 +172,7 @@ describe("FileLoopStore", () => {
       const store = new FileLoopStore(dir);
       const loopId = "corrupt-round";
       // Commit a round so rounds/1.json exists
-      store.appendEntry(entry(loopId, `loop:${loopId}:r1`, "loop_lineage", { round: 1 }));
+      store.appendEntry(committedFeedbackRound(1, { loopId }));
       const roundPath = allFiles(dir).find((p) => p.endsWith("1.json"));
       assert.ok(roundPath, "rounds/1.json should exist");
       writeFileSync(roundPath, "{ corrupted json", "utf8");
@@ -179,7 +180,7 @@ describe("FileLoopStore", () => {
       // A later write for the same round must refuse — not overwrite the
       // corrupted document with a fresh empty one (the pre-v2.14 behavior).
       assert.throws(
-        () => store.appendEntry(entry(loopId, `loop:${loopId}:r1`, "loop_lineage", { round: 1 })),
+        () => store.appendEntry(committedFeedbackRound(1, { loopId })),
         (error: unknown) =>
           error instanceof StorageCorruptionError && error.kind === "invalid_json",
       );

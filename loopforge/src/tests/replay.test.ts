@@ -1,35 +1,53 @@
 import { beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { ReplayBackend } from "../replay.js";
-import type { VaultEntry } from "../loop-store.js";
+import { PROMPT_ARTIFACT_SCHEMA_VERSION } from "../protocol.js";
+import type { PromptArtifact } from "../protocol.js";
 import {
   committedBacktrackRound,
   committedFeedbackRound,
   MemoryLoopStore,
 } from "./_helpers.js";
 
-function lineage(round: number, overrides: Partial<VaultEntry> = {}): VaultEntry {
+function artifact(
+  round: number,
+  level: "l0" | "l1" | "l2",
+  renderedPrompt = "",
+): PromptArtifact {
   return {
-    task_id: `loop:test:r${round}`,
-    loop_id: "test",
-    loop_lineage: {
-      loop_id: "test",
-      round,
-      goal_id: "audit",
-      recompile_level: round === 1 ? "l2" : "l1",
-      task: `Round ${round}`,
-    },
-    ...overrides,
+    schemaVersion: PROMPT_ARTIFACT_SCHEMA_VERSION,
+    roundId: `loop:test:round:${round}`,
+    round,
+    attempt: 1,
+    level,
+    renderedPrompt,
+    promptHash: `hash-${round}`,
+    stateHash: `state-${round}`,
+    sections: [],
+    droppedSections: [],
+    protectedOverflow: false,
+    budget: 18000,
+    renderedChars: renderedPrompt.length,
+    coverage: { active: [], rendered: [], omitted: [], complete: true },
   };
 }
 
 function appendRound(
   store: MemoryLoopStore,
   round: number,
-  overrides: Partial<VaultEntry> = {},
+  overrides: Parameters<typeof committedFeedbackRound>[1] = {},
 ): void {
-  store.appendEntry(lineage(round, overrides));
-  store.appendEntry(committedFeedbackRound(round, { loopId: "test" }));
+  store.appendEntry(committedFeedbackRound(round, {
+    loopId: "test",
+    promptArtifact: artifact(round, round === 1 ? "l2" : "l1"),
+    compiled: {
+      task: `Round ${round}`,
+      goalId: `test:round-${round}`,
+      constraintsActive: [],
+      constraintsRetired: [],
+    },
+    ...overrides,
+  }));
 }
 
 describe("ReplayBackend", () => {
@@ -42,45 +60,43 @@ describe("ReplayBackend", () => {
   });
 
   it("returns only committed rounds", () => {
-    store.appendEntry(lineage(1));
     assert.equal(replay.getRound("test", 1), null);
     store.appendEntry(committedFeedbackRound(1, { loopId: "test" }));
-    assert.equal(replay.getRound("test", 1)?.task_id, "loop:test:r1");
+    assert.equal(replay.getRound("test", 1)?.round, 1);
+    assert.equal(replay.getRound("test", 1)?.source, "feedback");
   });
 
   it("does not confuse round 1 with round 10", () => {
     appendRound(store, 10);
     appendRound(store, 1);
-    assert.equal(replay.getRound("test", 1)?.loop_lineage?.round, 1);
-    assert.equal(replay.getRound("test", 10)?.loop_lineage?.round, 10);
+    assert.equal(replay.getRound("test", 1)?.round, 1);
+    assert.equal(replay.getRound("test", 10)?.round, 10);
   });
 
-  it("preserves the prompt projection and merges committed facts", () => {
-    appendRound(store, 1, { full_prompt: "## Compiled Prompt" });
-    const feedback = store.listEntries("test").find((entry) =>
-      String(entry.task_id).endsWith(":feedback"));
-    const transaction = feedback?.loop_lineage?.round_transaction as Record<string, unknown>;
-    (transaction.result as Record<string, unknown>).roundSuccess = true;
-    assert.equal(replay.getRound("test", 1)?.full_prompt, "## Compiled Prompt");
-    assert.equal(replay.getRound("test", 1)?.success, true);
+  it("returns the committed prompt artifact and result", () => {
+    appendRound(store, 1, {
+      promptArtifact: artifact(1, "l2", "## Compiled Prompt"),
+      success: true,
+    });
+    const view = replay.getRound("test", 1);
+    assert.equal(view?.promptArtifact?.renderedPrompt, "## Compiled Prompt");
+    assert.equal(view?.success, true);
   });
 
   it("replays committed rounds in a selected range", () => {
     for (let round = 1; round <= 5; round++) appendRound(store, round);
     assert.equal(replay.replay("test").length, 5);
     assert.deepEqual(
-      replay.replay("test", { start: 2, end: 4 })
-        .map((entry) => entry.loop_lineage?.round),
+      replay.replay("test", { start: 2, end: 4 }).map((view) => view.round),
       [2, 3, 4],
     );
   });
 
   it("excludes rollback directives from normal rounds", () => {
-    store.appendEntry(lineage(1));
-    store.appendEntry(committedFeedbackRound(1, { loopId: "test" }));
+    appendRound(store, 1);
     store.appendEntry(committedBacktrackRound(2, "test", 1));
     assert.deepEqual(
-      replay.replay("test").map((entry) => entry.loop_lineage?.round),
+      replay.replay("test").map((view) => view.round),
       [1],
     );
   });
@@ -102,9 +118,7 @@ describe("ReplayBackend", () => {
         coverage: "tracked_and_non_ignored_untracked" as const,
       },
     });
-    store.appendEntry(lineage(1));
-    store.appendEntry(committedFeedbackRound(1, {
-      loopId: "test",
+    appendRound(store, 1, {
       beforeEvidence: [git("before", "aaa")],
       roundEvidence: [git("after", "bbb")],
       contractTransition: {
@@ -112,7 +126,7 @@ describe("ReplayBackend", () => {
         contract_id: "rc-12345678",
         reason: "route changed",
       },
-    }));
+    });
     const [row] = replay.timeline("test");
     assert.equal(row?.machine_progress, "changed");
     assert.deepEqual(row?.progress_facts, [{
@@ -134,13 +148,41 @@ describe("ReplayBackend", () => {
     });
   });
 
-  it("returns a sorted factual timeline", () => {
+  it("returns a sorted factual timeline with compile facts", () => {
     appendRound(store, 3);
     appendRound(store, 1);
     const timeline = replay.timeline("test");
     assert.deepEqual(timeline.map((row) => row.round), [1, 3]);
     assert.equal(timeline[0]?.recompile_level, "l2");
     assert.equal(timeline[1]?.recompile_level, "l1");
+    assert.equal(timeline[1]?.task, "Round 3");
+    assert.equal(timeline[1]?.goal_id, "test:round-3");
+  });
+
+  it("v4.0.1: reads the vault once per timeline and never per round", () => {
+    for (let round = 1; round <= 4; round++) appendRound(store, round);
+    let calls = 0;
+    const original = store.listEntries.bind(store);
+    store.listEntries = (loopId?: string, opts?: { sinceRound?: number }) => {
+      calls++;
+      return original(loopId, opts);
+    };
+    const timeline = replay.timeline("test");
+    assert.equal(timeline.length, 4);
+    assert.equal(calls, 1);
+  });
+
+  it("keeps unsupported envelopes visible as legacy rows", () => {
+    appendRound(store, 1);
+    const legacy = committedFeedbackRound(2, { loopId: "test" });
+    const transaction = (legacy.loop_lineage as Record<string, unknown>)
+      .round_transaction as Record<string, unknown>;
+    (transaction.snapshot as Record<string, unknown>).schemaVersion = 5;
+    store.appendEntry(legacy);
+    const timeline = replay.timeline("test");
+    assert.deepEqual(timeline.map((row) => row.round), [1, 2]);
+    assert.equal(timeline[1]?.legacy, true);
+    assert.equal(timeline[1]?.envelope, "transaction");
   });
 
   it("returns empty views for an unknown loop", () => {

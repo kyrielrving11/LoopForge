@@ -35,6 +35,10 @@ export interface CompileContextSession {
     roundSnapshot?: {
         attempt?: number;
         operatorAcceptance?: OperatorAcceptance;
+        compiled?: {
+            constraintsActive: string[];
+            constraintsRetired: string[];
+        };
     } | null;
 }
 /** The sub-goal set an agent may legitimately reference: the committed set the

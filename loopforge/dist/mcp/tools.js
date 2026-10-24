@@ -7,6 +7,7 @@
  */
 import { StartCriteriaError } from "./round-lifecycle.js";
 import { ProjectionCoverageError } from "../prompt-coverage.js";
+import { LegacyHistoryError, LoopExistsError, OperatorAcceptanceConflictError, StartFailureError, } from "../errors.js";
 import { validateCoreSelfEvaluation } from "../self-eval.js";
 import { isRecord } from "../token-utils.js";
 import { getPolicy, validateLoopId } from "../policy.js";
@@ -66,10 +67,6 @@ const TOOL_BASE_SCHEMAS = [
                     type: "integer",
                     minimum: 1,
                     description: "Maximum rounds before auto-stop. Default: 200 from policy.",
-                },
-                domain: {
-                    type: "string",
-                    description: "Domain hint (e.g. 'solidity', 'react', 'rust') for state context.",
                 },
                 planSource: {
                     type: "string",
@@ -155,10 +152,6 @@ const TOOL_BASE_SCHEMAS = [
                             items: { type: "string" },
                             description: fieldGuideDescription("discovered_constraints"),
                         },
-                        objective_refinement: {
-                            type: "string",
-                            description: fieldGuideDescription("objective_refinement"),
-                        },
                         emerged_subtasks: {
                             type: "array",
                             items: { type: "string" },
@@ -227,16 +220,11 @@ const TOOL_BASE_SCHEMAS = [
                                 type: "object",
                                 properties: {
                                     agentId: { type: "string" },
-                                    subAgentType: { type: "string" },
                                     subTask: { type: "string" },
                                     resultSummary: { type: "string" },
                                     outcome: {
                                         type: "string",
                                         enum: ["success", "partial", "failed"],
-                                    },
-                                    discoveredConstraints: {
-                                        type: "array",
-                                        items: { type: "string" },
                                     },
                                 },
                                 required: ["agentId", "subTask", "resultSummary", "outcome"],
@@ -310,22 +298,6 @@ const TOOL_BASE_SCHEMAS = [
                             },
                             description: fieldGuideDescription("retroactiveClaims"),
                         },
-                        prompt_requests: {
-                            type: "object",
-                            description: fieldGuideDescription("prompt_requests"),
-                            properties: {
-                                emphasize: {
-                                    type: "array",
-                                    items: { type: "string" },
-                                    description: "Current governance objects to emphasize in the next prompt. Match by real stable id (c-/cr-/rc-/rci-/sg-/f-XXXXXXXX), the reserved id 'recovery', or normalized-exact text — a paraphrase matches nothing. Closed/historical objects never resurrect. Matched objects move into Critical Context; cap is L1 3 / L2 5. Pure reordering — no duplicated content.",
-                                },
-                                confusion_points: {
-                                    type: "array",
-                                    items: { type: "string" },
-                                    description: "Things you're confused about. Echoed at the TOP of the next prompt as your own notes, not as LoopForge findings; they are never matched against state. Max 3 entries, each ≤ 200 chars recommended.",
-                                },
-                            },
-                        },
                         round_contract: {
                             type: "object",
                             description: fieldGuideDescription("round_contract"),
@@ -362,12 +334,6 @@ const TOOL_BASE_SCHEMAS = [
                                                 maxItems: 20,
                                                 items: { type: "string" },
                                                 description: "Optional. Real cr-XXXXXXXX ids of ACTIVE criteria rendered in this prompt. Free text and unknown ids are rejected. Max 20.",
-                                            },
-                                            subgoal_refs: {
-                                                type: "array",
-                                                maxItems: 20,
-                                                items: { type: "string" },
-                                                description: "Optional. sg-XXXXXXXX ids of ACTIVE sub-goals displayed in this prompt. A sub-goal created by this same submission's emerged_subtasks becomes referenceable next round. Max 20 ids. A machine-verified item produces the derived verified-subgoal fact for exactly the ids it names here.",
                                             },
                                             verify_with: {
                                                 type: "array",
@@ -994,13 +960,31 @@ function projectionErrorResult(error) {
     }
     return null;
 }
+/** Stable state-integrity errors. They are never retryable with the same
+ *  payload: the loop data or the operator surface must be repaired first. */
+function stateErrorResult(error) {
+    if (error instanceof LegacyHistoryError) {
+        return {
+            error: error.code,
+            errorMessage: error.message,
+            details: { loopId: error.loopId, rounds: error.rounds },
+        };
+    }
+    if (error instanceof OperatorAcceptanceConflictError) {
+        return {
+            error: error.code,
+            errorMessage: error.message,
+            details: { loopId: error.loopId },
+        };
+    }
+    return null;
+}
 export const TOOL_HANDLERS = {
     async loopforge_start(mgr, input) {
         const startInput = {
             task: String(input.task ?? ""),
             loopId: input.loopId,
             maxRounds: typeof input.maxRounds === "number" ? input.maxRounds : undefined,
-            domain: input.domain,
             planSource: input.planSource,
             constraints: Array.isArray(input.constraints)
                 ? input.constraints
@@ -1059,6 +1043,23 @@ export const TOOL_HANDLERS = {
             const projectionFailure = projectionErrorResult(error);
             if (projectionFailure)
                 return projectionFailure;
+            const stateFailure = stateErrorResult(error);
+            if (stateFailure)
+                return stateFailure;
+            if (error instanceof LoopExistsError) {
+                return {
+                    error: error.code,
+                    errorMessage: error.message,
+                    details: { loopId: error.loopId, reason: error.reason },
+                };
+            }
+            if (error instanceof StartFailureError) {
+                return {
+                    error: error.code,
+                    errorMessage: error.message,
+                    details: { retry: "call loopforge_start again" },
+                };
+            }
             if (error instanceof SessionLeaseConflictError) {
                 return {
                     error: "lease_conflict",
@@ -1068,15 +1069,6 @@ export const TOOL_HANDLERS = {
             return {
                 error: "policy_invalid",
                 errorMessage: `the runtime policy could not be loaded: ${error.message}`,
-            };
-        }
-        // v2.14: a same-process duplicate loopId surfaces as a clean argument
-        // error instead of a prompt-less "success" the client cannot act on.
-        if (typeof result.stopReason === "string" &&
-            result.stopReason.startsWith("loop_already_running:")) {
-            return {
-                error: "loop_already_running",
-                errorMessage: result.stopDetail ?? "loop already running",
             };
         }
         // v3.8: the static capability warning — a loop with no provider or no
@@ -1112,6 +1104,9 @@ export const TOOL_HANDLERS = {
             const projectionFailure = projectionErrorResult(error);
             if (projectionFailure)
                 return projectionFailure;
+            const stateFailure = stateErrorResult(error);
+            if (stateFailure)
+                return stateFailure;
             throw error;
         }
         if (result.submissionError) {
@@ -1205,7 +1200,7 @@ export const TOOL_HANDLERS = {
                 sessionId,
             };
         }
-        const metrics = session.engine.getMetrics();
+        const policyMetricsView = mgr.getPolicyMetrics(session.loopId);
         return {
             sessionId: session.sessionId,
             loopId: session.loopId,
@@ -1239,13 +1234,12 @@ export const TOOL_HANDLERS = {
             // and by `doctor`, never hashed.
             capability: deriveEvidenceCapability(getPolicy(), session.roundSnapshot?.beforeEvidence ?? []),
             metrics: {
-                vaultWriteErrors: metrics.vaultWriteErrors,
-                // v3.3.1: engine sessionStart was written but never read — surface it
-                // so a status view shows how long this engine session has been alive
-                // (observability design: the runtime is the loop's watchdog).
-                startedAt: metrics.sessionStart,
-                sessionAgeSeconds: Math.max(0, Math.floor((Date.now() - metrics.sessionStart) / 1000)),
-                policy: mgr.getPolicyMetrics(session.loopId),
+                // The vault write counters live in the shared policy metrics now;
+                // the engine no longer owns a second copy.
+                vaultWriteErrors: policyMetricsView.vaultWriteErrors,
+                startedAt: session.createdAt,
+                sessionAgeSeconds: Math.max(0, Math.floor((Date.now() - session.createdAt) / 1000)),
+                policy: policyMetricsView,
             },
         };
     },
@@ -1355,6 +1349,9 @@ export const TOOL_HANDLERS = {
             const projectionFailure = projectionErrorResult(error);
             if (projectionFailure)
                 return projectionFailure;
+            const stateFailure = stateErrorResult(error);
+            if (stateFailure)
+                return stateFailure;
             throw error;
         }
         if (!result) {

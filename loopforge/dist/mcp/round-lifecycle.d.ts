@@ -10,11 +10,11 @@
  * session ownership, queues, and leases remain in SessionManager.
  */
 import { LoopForgeEngine } from "../engine.js";
-import type { CheckpointRef, LoopForgeRequest, OperatorAcceptance, RecoveryRequest, SelfEvaluation, SubmissionDiagnostic, SubmissionGuidance, SubmissionHandle, SubmissionReceipt, VerificationFlag, LoopTerminalSink, RoundVerificationStatus } from "../protocol.js";
+import type { CheckpointRef, LoopCompileRequest, OperatorAcceptance, RecoveryRequest, SelfEvaluation, SubmissionDiagnostic, SubmissionGuidance, SubmissionHandle, SubmissionReceipt, VerificationFlag, LoopTerminalSink, RoundVerificationStatus } from "../protocol.js";
 import type { RoundTransactionSnapshot } from "../round-transaction.js";
 import { FileWorkspaceCheckpointStore } from "../workspace-checkpoint.js";
 import type { LoopStore, VaultEntry } from "../loop-store.js";
-import type { SessionStateStore } from "../storage.js";
+import type { SessionSaveOptions, SessionStateStore } from "../storage.js";
 export interface McpSession {
     sessionId: string;
     loopId: string;
@@ -54,7 +54,6 @@ export interface StartInput {
     task: string;
     loopId?: string;
     maxRounds?: number;
-    domain?: string;
     planSource?: string;
     constraints?: string[];
     /** v3.9.4: initial local requirements, each becoming a stable `cr-*` anchor
@@ -177,7 +176,7 @@ export interface RoundLifecycleDeps {
      *  before-images (the round still runs with an explicit error fact). */
     checkpointStoreFor?: (loopId: string) => FileWorkspaceCheckpointStore | undefined;
 }
-export declare function buildLoopRequest(session: McpSession): LoopForgeRequest;
+export declare function buildLoopRequest(session: McpSession): LoopCompileRequest;
 export declare class RoundLifecycle {
     private readonly store;
     private readonly sessionStore;
@@ -191,7 +190,7 @@ export declare class RoundLifecycle {
      *  the per-loop checkpoint store, or no round can produce a before-image. */
     private driver;
     /** v3.9.1: the submission-guidance projection for a session's held round.
-     *  One history window (`derivationRounds`, the compile window), no writes.
+     *  One history read and one compile window, no writes.
      *  Findings from a rejected/retried attempt are supplied by the caller. */
     guidanceFor(session: McpSession, extras?: {
         verificationFlags?: ReadonlyArray<VerificationFlag>;
@@ -219,7 +218,7 @@ export declare class RoundLifecycle {
     /** Persist session state to vault for cross-process recovery.
      *  The filtered vault and replacement entry are written once under the
      *  backend lock, so recovery never observes the old two-write gap. */
-    save(session: McpSession): void;
+    save(session: McpSession, options?: SessionSaveOptions): void;
     /** Reconstruct a McpSession from a vault session_state entry.
      *  Returns null if the entry is not "running" status.
      *  Shared by resume() and autoResumeAll(). */
@@ -293,8 +292,8 @@ export declare class RoundLifecycle {
      *  result unpause returns instead of persisting a null prompt. */
     resume(session: McpSession): Promise<AdvanceResult>;
     /** Unpause tail: the session has been reconstructed and registered with
-     *  status "running". Refresh async evidence, reconcile a committed round,
-     *  restore the held prompt, or compile the next prompt. */
+     *  status "running". Reconcile a committed round, restore the held prompt,
+     *  or compile the next prompt from the committed window. */
     unpause(session: McpSession): Promise<AdvanceResult>;
     /** Record a gate_opened entry when an accepted round reports a high-risk
      *  blocker (USER_RISK hit). Idempotent per gate. The gate is a record

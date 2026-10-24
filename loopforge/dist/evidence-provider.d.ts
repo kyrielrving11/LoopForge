@@ -9,7 +9,7 @@
  * Built-in: GitEvidenceProvider — git file state capture with parallel async
  * execution (v2.0.1), plus explicitly configured shell-free command providers.
  */
-import type { CommandObservation, ConfiguredCapability, EvidenceCapability, MachineObservation, ObservationStatus, ObservedCapability, ProgressCoverage, ProgressSnapshot } from "./protocol.js";
+import type { CommandObservation, ConfiguredCapability, EvidenceCapability, MachineObservation, ObservedCapability, ProgressCoverage } from "./protocol.js";
 import type { BoundaryCapture, BoundaryMaterializer } from "./git-boundary.js";
 export { captureGitFileStateAsync } from "./git-boundary.js";
 export type { GitCaptureResult, GitCaptureStatus, GitFileState, GitTrackedEntry, } from "./git-boundary.js";
@@ -44,13 +44,6 @@ export interface EvidenceProvider {
     /** Observation kind this provider produces (used for the synthetic
      *  unavailable/timeout/error observations too). */
     readonly kind: MachineObservation["kind"];
-    /** v3.9.9: the evidence range this provider observes, when it can report
-     *  progress. This is a FACT DESCRIPTION, not a policy flag: a provider never
-     *  gains a vote — a rule must explicitly select this exact coverage (and the
-     *  observation kind) before any fact can affect it. When present, every
-     *  custom observation this provider emits carries `data.progress`, including
-     *  failures (same coverage, `complete:false`, null fingerprint). */
-    readonly progressCoverage?: ProgressCoverage;
     /** Capture an observation. Returns null when the provider is structurally
      *  unavailable (e.g. not a git repository); the collector converts that
      *  into an explicit `unavailable` observation rather than dropping it. */
@@ -120,23 +113,15 @@ export declare function deriveEvidenceCapability(policy: LoopPolicy, observation
 /** v3.9.9: THE per-kind base observation schema table. Custom observations
  *  keep base 1; only their nested progress snapshot moved to inner 2. */
 export declare function expectedObservationSchemaVersion(kind: "git" | "command" | "custom"): 1 | 2;
-/** v3.9.9: THE nested progress-snapshot shape check, shared by the collector
- *  and the persisted-transaction parser. Version 2 requires the coverage
- *  descriptor and the completeness assertion; `fingerprint` is 64 lowercase
- *  hex when the capture was observed and may be null only when it failed. */
-export declare function isValidProgressSnapshot(value: unknown, status: ObservationStatus): value is ProgressSnapshot;
-/** v3.9.9: ONE observation-version judgment shared by the collector's parser
- *  (`parseMachineObservations`) and the legacy report (`legacyTransactionRounds`).
- *  Custom observations keep base schema 1; only the NESTED progress snapshot
- *  moved to inner schema 2. A historical custom round without progress stays
- *  readable; one carrying the retired marker or an inner-1 snapshot is
- *  reported as observation legacy instead of vanishing. */
+/** v4.0.1: the base observation-envelope judgment shared by the collector's
+ *  parser and the legacy report. Custom `data` is opaque provider display
+ *  data; an old `progress` key is ignored rather than rejected. */
 export interface ObservationVersionIssue {
     envelope: "observation";
     schemaVersion: number;
-    reason: "schema" | "progress" | "progress_capable" | "malformed";
+    reason: "schema" | "malformed";
 }
-export declare function observationVersionIssue(kind: unknown, schemaVersion: unknown, data: unknown, status?: unknown): ObservationVersionIssue | null;
+export declare function observationVersionIssue(kind: unknown, schemaVersion: unknown, data: unknown, _status?: unknown): ObservationVersionIssue | null;
 /** Collects observations from all configured providers (always async).
  *
  * v3.8: every configured provider produces exactly one observation per
@@ -211,12 +196,11 @@ export declare class GitEvidenceProvider implements EvidenceProvider {
     readonly kind: "git";
     capture(context?: EvidenceCaptureContext): Promise<MachineObservation | null>;
 }
-/** v3.9.9: ONE provider's before→after progress FACT. It reports what the
- *  provider observed — never a vote and never a policy. `null` means the
- *  provider produced no progress fact at all (command observations, or a
- *  custom provider that declared no coverage). */
+/** v4.0.1: the Git workspace progress fact. It reports what the machine
+ *  observed — never a vote and never a policy. `null` means the provider
+ *  produced no progress fact (command/custom observations). */
 export interface ObservationProgress {
-    kind: "git" | "custom";
+    kind: "git";
     coverage: ProgressCoverage;
     /** The only authority. */
     state: "changed" | "unchanged" | "unknown";

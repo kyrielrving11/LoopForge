@@ -42,15 +42,6 @@ export interface PromptPolicy {
     l0_max_chars: number;
     l1_max_chars: number;
     l2_max_chars: number;
-    /** v2.9: Max emphasize items when level is L2. Default: 5. */
-    max_emphasize_l2: number;
-    /** v2.9: Max emphasize items when level is L1. Default: 3. */
-    max_emphasize_l1: number;
-    /** v2.9: Max confusion points rendered at L2. Default: 3.
-     *  L1 renders the FIRST alert plus a pointer to the state file — that is a
-     *  density decision of the lean level (like the split max_emphasize_l1/l2
-     *  caps), not this knob. */
-    max_confusion_points: number;
 }
 export interface BackendPolicy {
     /** Root for typed per-loop documents. */
@@ -104,7 +95,7 @@ export interface GatePolicy {
 }
 /** v3.8.1: the policy schema version. A policy file that does not declare
  *  exactly this version is REJECTED — see loadPolicy. */
-export declare const POLICY_SCHEMA_VERSION = "9";
+export declare const POLICY_SCHEMA_VERSION = "10";
 export interface LoopPolicy {
     version: string;
     engine: EnginePolicy;

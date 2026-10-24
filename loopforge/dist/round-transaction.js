@@ -6,7 +6,6 @@
  * a process crash is idempotent.
  */
 import { createHash } from "node:crypto";
-import { queryLoopEntries } from "./loop-store.js";
 import { deriveObservationDeltas, observationVersionIssue } from "./evidence-provider.js";
 import { RoundCoordinator, } from "./round-coordinator.js";
 import { logEvent } from "./observability.js";
@@ -18,7 +17,7 @@ import { VaultRoundCommitStore } from "./storage.js";
 /** v3.9.7: schema 5 adds the transaction before-image, explicit mid-round
  *  checkpoints and the redo restore marker. Schema 4 is unsupported and is
  *  reported by `legacyTransactionRounds`; there is no compatibility migration. */
-export const ROUND_TRANSACTION_SCHEMA_VERSION = 5;
+export const ROUND_TRANSACTION_SCHEMA_VERSION = 6;
 /** Maximum distinct mid-round checkpoints one transaction may reference. */
 export const MAX_MID_CHECKPOINTS_PER_TRANSACTION = 32;
 /** The root branch identity for every loop. */
@@ -133,6 +132,7 @@ export function prepareRoundTransaction(loopId, round, beforeEvidence, promptArt
         ...(opts.operatorAcceptance
             ? { operatorAcceptance: opts.operatorAcceptance }
             : {}),
+        ...(opts.compiled ? { compiled: opts.compiled } : {}),
         createdAt: now,
         updatedAt: now,
         promptArtifact,
@@ -141,7 +141,7 @@ export function prepareRoundTransaction(loopId, round, beforeEvidence, promptArt
 /** Attach the next prompt attempt to a rejected logical round without changing
  * its identity or evidence baseline. Evaluation fields belong to the previous
  * attempt and are cleared before the Agent receives the retry prompt. */
-export function prepareRejectedAttempt(rejected, promptArtifact) {
+export function prepareRejectedAttempt(rejected, promptArtifact, compiled, operatorAcceptance) {
     if (rejected.phase !== "rejected") {
         throw new Error(`Cannot retry transaction in phase ${rejected.phase}`);
     }
@@ -172,6 +172,16 @@ export function prepareRejectedAttempt(rejected, promptArtifact) {
             ? { beforeCheckpointError: rejected.beforeCheckpointError }
             : {}),
         ...(rejected.restore ? { restore: rejected.restore } : {}),
+        ...(compiled !== undefined
+            ? { compiled }
+            : rejected.compiled
+                ? { compiled: rejected.compiled }
+                : {}),
+        ...(operatorAcceptance !== undefined
+            ? { operatorAcceptance }
+            : rejected.operatorAcceptance
+                ? { operatorAcceptance: rejected.operatorAcceptance }
+                : {}),
         attempt: promptArtifact.attempt,
         phase: "prompted",
         afterEvidence: undefined,
@@ -213,6 +223,14 @@ function isOperatorAcceptance(value) {
 }
 function isCheckpointRole(value) {
     return value === "before" || value === "mid";
+}
+function isCompiledRoundFacts(value) {
+    if (!isRecord(value))
+        return false;
+    return typeof value.task === "string" &&
+        typeof value.goalId === "string" &&
+        stringArray(value.constraintsActive) &&
+        stringArray(value.constraintsRetired);
 }
 const CHECKPOINT_ID_RE = /^ck-[a-f0-9]{24}$/;
 const CONTENT_HASH_RE = /^[a-f0-9]{64}$/;
@@ -358,8 +376,15 @@ export function parseRoundTransactionSnapshot(value) {
     if (value.operatorAcceptance !== undefined &&
         !isOperatorAcceptance(value.operatorAcceptance))
         return null;
+    if (value.compiled !== undefined && !isCompiledRoundFacts(value.compiled)) {
+        return null;
+    }
     if (value.kind === "rollback") {
         if (!isRecoveryDirective(value.recovery))
+            return null;
+        if (!isOperatorAcceptance(value.operatorAcceptance))
+            return null;
+        if (value.compiled !== undefined)
             return null;
     }
     else if (value.recovery !== undefined) {
@@ -375,6 +400,17 @@ export function parseRoundTransactionSnapshot(value) {
     if (!["prepared", "prompted", "evaluated", "rejected", "committed", "terminated"]
         .includes(String(value.phase)))
         return null;
+    // Schema 6 structural invariant: a submitted evaluation always carries the
+    // compile facts and the immutable operator surface. A round without them
+    // cannot be re-derived from the same document, so it is not committed
+    // history.
+    if (value.kind === "evaluation" &&
+        (value.phase === "evaluated" || value.phase === "committed")) {
+        if (!isOperatorAcceptance(value.operatorAcceptance))
+            return null;
+        if (!isCompiledRoundFacts(value.compiled))
+            return null;
+    }
     const beforeEvidence = parseMachineObservations(value.beforeEvidence);
     if (!beforeEvidence)
         return null;
@@ -507,26 +543,13 @@ export function parseRoundTransactionSnapshot(value) {
                 typeof entry.id === "string" &&
                 typeof entry.reason === "string") &&
             typeof coverage.complete === "boolean";
-        const effectsValid = artifact.promptRequestEffects === undefined ||
-            (Array.isArray(artifact.promptRequestEffects) &&
-                artifact.promptRequestEffects.every((effect) => isRecord(effect) &&
-                    (effect.field === "emphasize" || effect.field === "confusion_points") &&
-                    typeof effect.request === "string" &&
-                    ["applied", "no_match", "level_ignored", "capped", "ambiguous"]
-                        .includes(String(effect.status)) &&
-                    (effect.matched_ids === undefined ||
-                        (Array.isArray(effect.matched_ids) &&
-                            effect.matched_ids.every((id) => typeof id === "string"))) &&
-                    (effect.matched_count === undefined ||
-                        typeof effect.matched_count === "number")));
         if (artifact.schemaVersion !== PROMPT_ARTIFACT_SCHEMA_VERSION ||
             typeof artifact.roundId !== "string" ||
             typeof artifact.renderedPrompt !== "string" ||
             typeof artifact.promptHash !== "string" ||
             typeof artifact.stateHash !== "string" ||
             !["l0", "l1", "l2"].includes(String(artifact.level)) ||
-            !coverageValid ||
-            !effectsValid)
+            !coverageValid)
             return null;
     }
     const snapshot = {
@@ -540,12 +563,10 @@ export function parseRoundTransactionSnapshot(value) {
     return snapshot;
 }
 export class RoundTransactionCoordinator {
-    engine;
     store;
     commitStore;
-    constructor(engine, store, commitStore) {
-        this.engine = engine;
-        this.store = store ?? engine.getStore();
+    constructor(store, commitStore) {
+        this.store = store;
         this.commitStore = commitStore ?? new VaultRoundCommitStore(this.store);
     }
     process(input) {
@@ -657,20 +678,32 @@ export class RoundTransactionCoordinator {
             })(),
             updatedAt: Date.now(),
         };
+        if (!snapshot.compiled || !snapshot.operatorAcceptance) {
+            throw new Error("An evaluation commit requires compile facts and the operator acceptance snapshot");
+        }
         const metadata = {
             schema_version: ROUND_TRANSACTION_SCHEMA_VERSION,
             round_id: snapshot.roundId,
             snapshot: committedSnapshot,
             result,
         };
-        this.engine.autoFeedback(input.selfEval, snapshot.loopId, snapshot.round, input.task, metadata);
+        try {
+            this.commitStore.appendFeedback(snapshot.loopId, snapshot.round, metadata);
+        }
+        catch (error) {
+            policyMetrics.recordVaultWriteError("feedback_persist");
+            logEvent("vault_write_error", { error: "feedback_persist" });
+            throw error;
+        }
         // v3.7.1: a backtrack decision commits as the CURRENT round, which the
         // incremental hydration cache never re-reads before the restore compile
         // (it targets the same round). Drop the cache so the rollback — and its
         // Recovery Brief facts — is visible to the very next compile.
-        if (result.action === "backtrack") {
-            this.engine.invalidateHydrationCache(snapshot.loopId);
-        }
+        logEvent("round_complete", {
+            loopId: snapshot.loopId,
+            round: snapshot.round,
+            success: result.roundSuccess,
+        });
         const persisted = this.readCommitted(committedSnapshot);
         if (!persisted) {
             throw new Error(`Round transaction commit failed: ${snapshot.roundId}`);
@@ -706,7 +739,13 @@ export class RoundTransactionCoordinator {
             // what was abandoned. An agent recovery has no evaluation at all.
             evaluation: recovery.origin === "machine" ? snapshot.evaluation : undefined,
             result: undefined,
-            operatorAcceptance: undefined,
+            // The operator surface is immutable and survives the rollback. The
+            // directive carries the same byte-identical copy as the abandoned
+            // evaluation so a cold process can still recover it.
+            ...(snapshot.operatorAcceptance
+                ? { operatorAcceptance: snapshot.operatorAcceptance }
+                : {}),
+            compiled: undefined,
             // The abandoned transaction's savepoints/restore marker belong to that
             // attempt, not to the child branch. The directive target is the only
             // recovery point recorded by this event.
@@ -735,19 +774,22 @@ export class RoundTransactionCoordinator {
             newConsecutiveRejections: 0,
             shouldPushSuccessTrajectory: false,
         };
+        if (!committedSnapshot.operatorAcceptance) {
+            throw new Error("A rollback directive requires the immutable operator acceptance snapshot");
+        }
         const envelope = {
             schema_version: ROUND_TRANSACTION_SCHEMA_VERSION,
             round_id: snapshot.roundId,
             snapshot: committedSnapshot,
             result,
         };
-        if (!this.engine.commitRollbackDirective({
-            loopId: input.loopId,
-            round: snapshot.round,
-            transactionId: recovery.transaction_id,
-            envelope,
-        })) {
-            throw new Error(`Rollback directive commit failed: ${recovery.transaction_id}`);
+        try {
+            this.commitStore.appendRollbackDirective(input.loopId, snapshot.round, recovery.transaction_id, envelope);
+        }
+        catch (error) {
+            policyMetrics.recordVaultWriteError("rollback_persist");
+            logEvent("vault_write_error", { error: "rollback_persist" });
+            throw error;
         }
         const persisted = this.readRecoveryCommitted(input.loopId, snapshot.round, recovery.transaction_id);
         if (!persisted) {
@@ -764,28 +806,21 @@ export class RoundTransactionCoordinator {
         return { snapshot: committedSnapshot, result, replayed: false };
     }
     readRecoveryCommitted(loopId, round, transactionId) {
-        const taskId = `loop:${loopId}:r${round}:rollback:${transactionId}`;
-        const entries = queryLoopEntries(this.store, loopId, {
-            prefix: `loop:${loopId}:r${round}:rollback:`,
-        });
-        for (const entry of entries) {
-            if (entry.task_id !== taskId || entry.task_type !== "rollback_directive") {
-                continue;
-            }
-            const lineage = isRecord(entry.loop_lineage) ? entry.loop_lineage : null;
-            const transaction = lineage && isRecord(lineage.round_transaction)
-                ? lineage.round_transaction
-                : null;
-            if (!transaction)
-                continue;
-            const snapshot = parseRoundTransactionSnapshot(transaction.snapshot);
-            const result = transaction.result;
-            if (!snapshot || snapshot.kind !== "rollback" || !isProcessResult(result)) {
-                continue;
-            }
-            return { snapshot, result, replayed: true };
+        const entry = this.commitStore.findRollback(loopId, round, transactionId);
+        if (!entry)
+            return null;
+        const lineage = isRecord(entry.loop_lineage) ? entry.loop_lineage : null;
+        const transaction = lineage && isRecord(lineage.round_transaction)
+            ? lineage.round_transaction
+            : null;
+        if (!transaction)
+            return null;
+        const snapshot = parseRoundTransactionSnapshot(transaction.snapshot);
+        const result = transaction.result;
+        if (!snapshot || snapshot.kind !== "rollback" || !isProcessResult(result)) {
+            return null;
         }
-        return null;
+        return { snapshot, result, replayed: true };
     }
     /** Recover an already committed decision without evaluating or writing. */
     recover(snapshot) {

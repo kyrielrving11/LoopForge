@@ -42,7 +42,7 @@ Agent 报告描述它认为发生了什么，但报告本身不是证明。LoopF
 
 Agent 可能意识到当前方向不合适，并请求恢复到工作区检查点：轮次准备时自动采集的 before-image，或通过 `loopforge_checkpoint` 显式创建的中途保存点。LoopForge 不替它诊断错误，也不替它选择恢复目标。它通过当前分支的事务引用解析检查点，持久记录回滚事件，然后自己执行文件与 HEAD 还原，并按 manifest 的完整 Git 边界和记录的 HEAD 精确验证；验证通过后才发出 redo prompt。
 
-如果机器规则要求回退，LoopForge 也可以触发 backtrack。两种路径使用同一套恢复协议，并都会保留在历史中。Redo 在子分支上继续，被放弃的工作仍可审计，但不会被当作当前工作。
+如果机器规则要求回退，LoopForge 也可以触发 backtrack。两种路径使用同一套恢复协议，并都会保留在历史中。Redo 在子分支上继续。rollback directive 会保留被放弃的方案、错误假设、跳过文件和 Recovery Brief 事实；同一轮的 redo 会替换该数字轮的 feedback 槽位，因此被放弃的 evaluation 本身不会另存一份。当前分支不会把被放弃的工作当作当前工作。
 
 ## Agent 与 LoopForge 的职责边界
 

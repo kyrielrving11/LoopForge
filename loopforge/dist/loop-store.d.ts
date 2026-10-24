@@ -63,7 +63,6 @@ export interface LoopRoundDocument {
      *  continuity checked) from legacy loops (no stamp → exempt). */
     sequence?: number;
     updatedAt: string;
-    lineage?: VaultEntry;
     feedback?: VaultEntry;
     /** DERIVED ON READ from feedback.loop_lineage.round_transaction; never
      *  persisted. The factual copy lives in the feedback entry (one copy). */

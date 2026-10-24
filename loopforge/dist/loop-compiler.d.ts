@@ -3,7 +3,7 @@
  * The compiler evolves structured state and renders one prompt artifact.
  * L0/L1/L2 control state density only; the external Agent owns reasoning.
  */
-import { type CriterionStatus, type RecurringFlag, type LoopCompileRequest, type LoopCompileResponse, type LoopObjective, type LoopRoundResult, type VerificationFlag } from "./protocol.js";
+import { type CriterionStatus, type RecurringFlag, type LoopCompileRequest, type LoopCompileResponse, type LoopObjective, type LoopRoundResult, type OperatorAcceptance, type VerificationFlag } from "./protocol.js";
 import { type CommittedRoundView } from "./committed-round.js";
 import { type PromptFreshness } from "./prompt-freshness.js";
 import type { CriterionMachineFact } from "./round-facts.js";
@@ -11,7 +11,6 @@ import { type SelfEvalPromptContext } from "./submission-guidance.js";
 export interface PreviousRound {
     round: number;
     goal_id: string;
-    goal_text_hash: string;
     success: boolean;
     task: string;
     constraints_active: string[];
@@ -20,10 +19,9 @@ export interface PreviousRound {
 /** ONE bundle of previous-round facts for a compile.
  *
  *  Every consumer (level policy, canonical state, evaluation block) reads
- *  this bundle instead of re-reading the caller's mutable projection. The
- *  committed view wins whenever it exists; `request.last_round_result` is
- *  only the in-flight/library fallback for callers with no committed round
- *  in the context. */
+ *  this bundle instead of re-reading the caller's mutable projection. It is
+ *  derived exclusively from the committed view; the typed request contributes
+ *  only this attempt's verification findings. */
 export interface PreviousRoundFacts {
     view: CommittedRoundView | null;
     result: LoopRoundResult | null;
@@ -35,15 +33,11 @@ export interface PreviousRoundFacts {
 export declare function computeGoalTextHash(text: string): string;
 export declare function deriveGoalId(loopId: string, task: string, explicit?: string): string;
 export declare function getPreviousRound(loopId: string, round: number, context: Record<string, unknown> | null): PreviousRound | null;
-export declare function latestObjective(loopId: string, context: Record<string, unknown> | null,
-/** Exclusive compile-round bound. A deep-restore redo must never read the
- *  abandoned branch's objective (and its rolled-back refinements). */
-beforeRound: number,
-/** v3.9.4: a round-1 same-round retry has no earlier committed objective.
- *  Reading the prior compile of the SAME round recovers the initial
- *  criteria supplied to `loopforge_start`. It is never enabled for a first
- *  attempt or for later rounds, so it cannot read an abandoned branch. */
-includeRoundOne?: boolean): LoopObjective | null;
+/** The operator objective from the immutable acceptance carried by a committed
+ *  evaluation or rollback directive. Acceptance is byte-identical across
+ *  copies (enforced by the history loader), so it does not need a round or
+ *  branch window. */
+export declare function latestObjective(loopId: string, context: Record<string, unknown> | null): LoopObjective | null;
 /** v3.8.1: THE recurring-fact derivation — one walk over the committed
  *  history, grouping repeated machine facts by what they are ABOUT.
  *
@@ -61,11 +55,10 @@ includeRoundOne?: boolean): LoopObjective | null;
  *  Presentation only: the result never feeds enforcement. */
 export declare function deriveRecurringFlags(committedRounds: ReadonlyArray<CommittedRoundView>): RecurringFlag[];
 /** v3.2: Derive per-criterion status — the "goal → criteria → evidence"
- *  vertical view. Each objective criterion gets: claimed/remaining/unknown
- *  (from per-round criterion_claims, ID-first or normalized-exact matching),
- *  the round it was first reported met, and the sub-goals a contract item
- *  referencing it also names (explicit `subgoal_refs`, never a text guess).
- *  Zero persistence — re-derived from the vault every compile.
+ *  vertical view. Each objective criterion gets claimed/remaining/unknown
+ *  (from per-round criterion_claims, ID-first or normalized-exact matching)
+ *  and the round it was first reported met. Zero persistence — re-derived
+ *  from committed rounds every compile.
  *
  *  v3.9.6: the derivation lives in `criterion-status.ts` so the submission
  *  boundary and guidance can read the same rows without importing this module
@@ -90,5 +83,7 @@ export declare function decideLevel(request: LoopCompileRequest, context: Record
  *  guidance, flag-specific hints) comes from the one FIELD_GUIDES table in
  *  submission-guidance.ts; this function owns no second copy. */
 export declare function buildSelfEvalBlock(ctx: SelfEvalPromptContext): string;
-export declare function compileLoop(request: LoopCompileRequest, context: Record<string, unknown> | null): LoopCompileResponse;
+export declare function compileLoop(request: LoopCompileRequest, context: Record<string, unknown> | null, options?: {
+    operatorAcceptance?: OperatorAcceptance;
+}): LoopCompileResponse;
 //# sourceMappingURL=loop-compiler.d.ts.map

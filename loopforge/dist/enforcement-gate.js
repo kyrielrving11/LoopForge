@@ -18,7 +18,7 @@
  */
 import { makeEnforcementResult } from "./protocol.js";
 import { CHECK_SUCCESS_WITH_REMAINING_CRITERIA, CHECK_RECURRING_VIOLATION, CHECK_REQUIRED_COMMAND_FAILED, CHECK_COMMAND_EVIDENCE_MISMATCH, CHECK_OUTCOME_SUCCESS_CONTRADICTION, CHECK_VERIFICATION_ENTRYPOINT_MODIFIED, CHECK_CONTRACT_ITEMS_UNVERIFIED, CHECK_USER_GATE_UNRESOLVED } from "./verification-gate.js";
-import { deriveProgressWindow, STALL_PROGRESS_COVERAGE, } from "./progress.js";
+import { deriveProgressWindow, } from "./progress.js";
 import { declaresBlocked } from "./round-outcome.js";
 import { getPolicy } from "./policy.js";
 import { derivationRounds, decodeCommittedRound, hasCommittedMachineBacktrack, } from "./committed-round.js";
@@ -366,7 +366,7 @@ inFlightProgress) {
     const window = Math.max(1, getPolicy().engine.stall_lookback_rounds);
     if (currentRound < window)
         return null;
-    const progress = deriveProgressWindow(derivationRounds(vaultEntries, currentRound), currentRound, window, STALL_PROGRESS_COVERAGE);
+    const progress = deriveProgressWindow(derivationRounds(vaultEntries, currentRound), currentRound, window);
     if (progress.state !== "unchanged")
         return null;
     // The verdict is about the Git workspace coverage ONLY. A custom provider's

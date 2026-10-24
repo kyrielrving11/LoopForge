@@ -37,7 +37,8 @@ export interface ActiveContractView {
     /** The bounded deliverable label. Optional only for legacy committed
      *  contracts; new declarations require it at the strict boundary. */
     work_item?: string;
-    /** Machine-enforced files/directories this slice may touch. */
+    /** Report-only intended files/directories for this slice. It grants no
+     *  permission and is never enforced; drift is an info fact. */
     scope: string[];
     items: ActiveContractItem[];
     /** The command configuration in force at declaration (machine-stamped at

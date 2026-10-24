@@ -49,8 +49,8 @@ export interface ReceiptInput {
 /** Build a receipt from explicitly supplied before/after facts. */
 export declare function deriveSubmissionReceipt(input: ReceiptInput): SubmissionReceipt;
 /** Rebuild the same receipt from committed history. No new persistence and
- *  no second history: `allViews` is the caller's `readOnlyRounds` window.
- *  `rollbacks` is the `readOnlyRollbacks` window; it supplies the directive
- *  that governed a redo after that redo has committed. */
+ *  no second history: `allViews` is the loader's current-branch evaluation
+ *  window. `rollbacks` is the loader's directive chain; it supplies the
+ *  directive that governed a redo after that redo has committed. */
 export declare function deriveCommittedSubmissionView(view: CommittedRoundView, allViews: ReadonlyArray<CommittedRoundView>, rollbacks?: ReadonlyArray<CommittedRoundView>): SubmissionReceipt;
 //# sourceMappingURL=submission-receipt.d.ts.map

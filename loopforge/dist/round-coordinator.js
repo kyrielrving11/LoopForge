@@ -17,14 +17,14 @@
  * Persistence is owned by round-transaction.ts so reject paths remain
  * side-effect free and accepted decisions can be replayed idempotently.
  */
-import { queryLoopEntries } from "./loop-store.js";
+import { emptyCommittedHistory, historyWindow, loadCommittedHistory, } from "./history.js";
 import { CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE, verifySelfEvaluation, } from "./verification-gate.js";
 import { checkpointForRoundBoundary, deriveRecoveryDirective, validateCheckpointManifest, } from "./recovery.js";
 import { driftedEntrypoints } from "./evidence-provider.js";
 import { isRecord } from "./token-utils.js";
 import { declaresBlocked, effectiveSuccess } from "./round-outcome.js";
 import { derivationRounds } from "./committed-round.js";
-import { deriveRoundProgress, STALL_PROGRESS_COVERAGE, } from "./progress.js";
+import { deriveRoundProgress, } from "./progress.js";
 import { enforceRound, buildRejectionPrompt, findSafeRestorePoint, } from "./enforcement-gate.js";
 import { logEvent } from "./observability.js";
 import { getPolicy } from "./policy.js";
@@ -225,21 +225,16 @@ export class RoundCoordinator {
     processRound(input) {
         const { loopId, task, currentRound, maxRounds, selfEval, consecutiveRejections, evidenceDeltas, } = input;
         const roundSuccess = selfEval.success ?? false;
-        // ── 1. Query vault entries ──────────────────────────────────────────
-        // Lineage entries (constraint violations, output summaries) and feedback
-        // entries (including execution_report) are both needed by
-        // the enforcement gate. queryLoopEntries excludes feedback by default,
-        // so we issue a second query and merge both result sets.
-        const prefix = `loop:${loopId}:r`;
-        const vaultEntries = this.store
-            ? [
-                ...queryLoopEntries(this.store, loopId, { prefix }),
-                ...queryLoopEntries(this.store, loopId, { prefix, feedbackOnly: true }),
-            ]
-            : [];
+        // ── 1. Load committed history once ──────────────────────────────────
+        // The verification gate and the contract reducer read the same flat entry
+        // view and the same committed window; one store read serves both.
+        const history = this.store
+            ? loadCommittedHistory(this.store, loopId)
+            : emptyCommittedHistory(loopId);
+        const vaultEntries = history.entries;
         // v3.9.6: the previous evaluation is the last committed branch round,
         // never a session copy.
-        const committedRounds = derivationRounds(vaultEntries, currentRound);
+        const committedRounds = historyWindow(history, currentRound);
         const previousCommitted = committedRounds.length > 0
             ? committedRounds[committedRounds.length - 1].evaluation
             : null;
@@ -251,9 +246,7 @@ export class RoundCoordinator {
         const verifyResult = verifySelfEvaluation(selfEval, currentRound, vaultEntries, previousCommitted, evidenceDeltas ?? [],
         // v3.7.1: gate records live under the gate: prefix — outside the round
         // entries above — and are passed separately to the gate check.
-        this.store
-            ? queryLoopEntries(this.store, loopId, { prefix: `loop:${loopId}:gate:` })
-            : [],
+        history.entries.filter((entry) => String(entry.task_id ?? "").startsWith(`loop:${loopId}:gate:`)),
         // v3.8.3: the absolute arm of the entrypoint check. Derived here, not in
         // the gate, because it needs the filesystem and the in-flight trust map
         // captured when this round was prepared — the gate stays a pure function
@@ -299,7 +292,7 @@ export class RoundCoordinator {
         // v3.9.9: what THIS round moved, under the SAME Git workspace selector
         // the committed window uses. Unknown/not_applicable never gains the
         // stall excuse, and no other provider's fact can change this verdict.
-        deriveRoundProgress(evidenceDeltas ?? [], STALL_PROGRESS_COVERAGE));
+        deriveRoundProgress(evidenceDeltas ?? []));
         if (enforceResult.action === "reject") {
             const newRejections = consecutiveRejections + 1;
             const rejectionPrompt = buildRejectionPrompt(currentRound, task, enforceResult, verificationFlags);
@@ -421,7 +414,7 @@ export class RoundCoordinator {
                     shouldPushSuccessTrajectory: false,
                 };
             }
-            const abandonedRounds = derivationRounds(vaultEntries, currentRound)
+            const abandonedRounds = committedRounds
                 .filter((view) => view.round >= targetRef.redoRound);
             const recovery = deriveRecoveryDirective({
                 origin: "machine",

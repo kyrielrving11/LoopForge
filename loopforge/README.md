@@ -92,10 +92,11 @@ the workspace is not restored, and the redirect round cannot be `completed`.
 A stale target, missing successor, blocked declaration, stop, or unchanged
 items is `contract_invalid`.
 
-Progress is reported as facts with an explicit coverage range. Rules select the
-exact coverage they consume: the stall rule and prompt freshness use the fixed
-Git workspace coverage, so a custom provider's facts are visible in replay and
-explain but cannot affect those decisions.
+Progress is a Git workspace fact with an explicit coverage range. The stall rule
+and prompt freshness consume only that fixed coverage. A custom observation is
+an ordinary report: it is shown in replay and explain as raw observation data,
+but it cannot supply a progress fact or affect stall, freshness, or any other
+decision.
 
 ## Recovery and durable history
 
@@ -107,8 +108,11 @@ verifies the restore itself against the manifest's complete Git boundary and
 recorded HEAD. Only after verification does it issue the redo prompt; a failed
 restore leaves the directive pending and the session resumable. LoopForge does
 not choose the target or interpret the Agent's reason. Machine-triggered
-backtracks use the same restore protocol. Redo uses a child branch; abandoned
-work remains auditable and is excluded from the active branch history.
+backtracks use the same restore protocol. Redo uses a child branch and is
+excluded from the active branch history. The directive preserves the abandoned
+approaches, wrong assumptions, skipped files and Recovery Brief; a same-round
+redo replaces that numeric round's feedback slot, so the abandoned evaluation
+is not retained as a second copy.
 
 Committed typed round documents in the Vault are the factual source.
 `CommittedRoundView` is the shared history read model, and `CanonicalLoopState`

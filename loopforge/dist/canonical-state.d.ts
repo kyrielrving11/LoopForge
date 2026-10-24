@@ -6,9 +6,9 @@
 import type { ConstraintMeta, CriterionStatus, RecurringFlag, LoopCompileRequest, LoopCompileResponse, LoopRoundResult, SubGoal, VerificationFlag } from "./protocol.js";
 import type { ActiveContractView } from "./round-contract.js";
 import type { ContractItemStatusView } from "./contract-items.js";
-import type { ConfiguredCapability, VerifiedSubGoalFact } from "./protocol.js";
+import type { ConfiguredCapability } from "./protocol.js";
 import type { RoundFacts } from "./round-facts.js";
-export declare const CANONICAL_STATE_SCHEMA_VERSION: 4;
+export declare const CANONICAL_STATE_SCHEMA_VERSION: 5;
 /** v3.7.1: Presentation view of sub-goals shared by prompts and the state
  *  file (one derivation, no second copy). Only ACTIVE items render as rows
  *  — pending/in_progress/blocked — ordered blocked → in_progress → pending
@@ -48,10 +48,7 @@ export declare function formatCriterionRows(statuses: ReadonlyArray<CriterionSta
 /** v3.9.4: the ONE active-sub-goal formatter shared by the prompt and the
  *  state file. Rows past `cap` lose their descriptions but NEVER their ids:
  *  the overflow line lists every remaining `sg-*`. */
-export declare function formatActiveSubGoals(subGoals: ReadonlyArray<SubGoal>, round: number, cap?: number,
-/** v3.9.7: objects moved to Critical Context are removed from the rows and
- *  the overflow line, but still count in the totals. */
-omitIds?: ReadonlySet<string>): {
+export declare function formatActiveSubGoals(subGoals: ReadonlyArray<SubGoal>, round: number, cap?: number): {
     lines: string[];
     ids: string[];
 };
@@ -124,9 +121,6 @@ export interface CanonicalLoopState {
      *  statement about what the agent claimed under it. Conditional presence:
      *  absent without an active contract. */
     contractItemStatuses?: ContractItemStatusView;
-    /** v3.8: Sub-goals a verified contract item backs. DERIVED, never
-     *  persisted — the machine's separate statement about a `done` sub-goal. */
-    verifiedSubGoals?: VerifiedSubGoalFact[];
     /** v3.8: The static verification capability (policy-derived). Unconditional:
      *  it is part of the round's verification context, so every state hash
      *  changes once, deliberately. */
@@ -154,12 +148,6 @@ export declare function constraintProvenanceLabel(meta: ConstraintMeta | undefin
  *  body — the single formatting source shared by prompts and the state
  *  file (module contract above). The original objective is NOT here: it
  *  lives in the Objective section. Empty arrays render no line. */
-export interface RoundContractFormatOptions {
-    /** Omit the whole contract block (the contract itself was moved). */
-    omitContract?: boolean;
-    /** Omit individual item rows (items moved to Critical Context). */
-    omitItemIds?: ReadonlySet<string>;
-}
 export interface FormattedRoundContract {
     text: string;
     /** IDs this rendering actually emitted (contract id + item ids). */
@@ -168,14 +156,9 @@ export interface FormattedRoundContract {
 export declare function formatRoundContractWithIds(contract: ActiveContractView,
 /** v3.8: the derived item statuses. When given, each item renders with its
  *  machine status — the agent sees the verification debt in its own task. */
-statuses?: ContractItemStatusView | null, options?: RoundContractFormatOptions): FormattedRoundContract;
+statuses?: ContractItemStatusView | null): FormattedRoundContract;
 /** Backwards-compatible text-only view used by the state file. */
 export declare function formatRoundContract(contract: ActiveContractView, statuses?: ContractItemStatusView | null): string;
-/** v3.9.7: one contract item as the prompt renders it. Critical Context uses
- *  the same line when an item is moved, so the text cannot drift. */
-export declare function formatContractItemLine(item: ActiveContractView["items"][number], machine?: ContractItemStatusView["items"][number] | null): string;
-/** v3.9.7: one active sub-goal row as the prompt renders it. */
-export declare function formatSubGoalRow(subGoal: SubGoal, round: number): string;
 /** Options that vary per render: the retry attempt (single version of the
  *  file across attempts is impossible — the attempt IS part of the derived
  *  view) and the recovery-window Recovery Brief lines (W5, present only

@@ -5,7 +5,7 @@ import { resolve } from "node:path";
 import { containInWorkspace } from "./workspace.js";
 /** v3.8.1: the policy schema version. A policy file that does not declare
  *  exactly this version is REJECTED — see loadPolicy. */
-export const POLICY_SCHEMA_VERSION = "9";
+export const POLICY_SCHEMA_VERSION = "10";
 export const DEFAULT_POLICY = {
     version: POLICY_SCHEMA_VERSION,
     engine: { stall_lookback_rounds: 3, max_rounds: 200, enforcement_escalation_enabled: true, agent_recovery_enabled: true, backtrack_enabled: true, backtrack_max_depth: 3, backtrack_preserve_discoveries: true, unverified_claim_streak_limit: 3 },
@@ -13,9 +13,6 @@ export const DEFAULT_POLICY = {
         l0_max_chars: 5000,
         l1_max_chars: 10000,
         l2_max_chars: 18000,
-        max_emphasize_l2: 5,
-        max_emphasize_l1: 3,
-        max_confusion_points: 3,
     },
     backend: { root_dir: ".loopforge" },
     evolution: {
@@ -313,6 +310,12 @@ export function writeStateFile(loopId, content) {
     const target = resolve(directory, `${loopId}-state.md`);
     if (existsSync(target) && lstatSync(target).isSymbolicLink()) {
         throw new Error("State file target must not be a symbolic link");
+    }
+    // Derived views are rewritten only when the rendered content actually
+    // changed. A long loop re-prepares the same state many times; rewriting an
+    // identical file is pure I/O and churns the workspace.
+    if (existsSync(target) && readFileSync(target, "utf8") === content) {
+        return;
     }
     const temporary = resolve(directory, `.${loopId}-state.${process.pid}.${randomUUID()}.tmp`);
     try {

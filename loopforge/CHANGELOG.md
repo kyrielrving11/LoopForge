@@ -1,5 +1,83 @@
 # Changelog
 
+## 4.0.1 (2026-10-24)
+
+**The single-commit release.** One committed typed round transaction is now the
+complete fact of a round. Compiling no longer writes the Vault, so an
+uncommitted prompt or a rejected attempt cannot influence a later prompt.
+History has one interpretation (`CommittedRoundView`), one window
+(`historyWindow` / `derivationRounds`) and one read path
+(`loadCommittedHistory`). This is a breaking release with no migration path.
+
+### Breaking: one committed round document
+
+- `compileLoop` / `LoopForgeEngine.invokeLoopCompile` are read-only. Compile
+  lineage, the merged read model, the hydration cache and their invalidation
+  paths are removed. A round record is written only by
+  `RoundTransactionCoordinator`, as one `:feedback` document containing the
+  complete snapshot.
+- The engine exposes no feedback, rollback or delegation write API. The
+  coordinator is the only history writer.
+- `LoopCompileRequest` is a closed typed request. `LoopForgeRequest`, `Mode`,
+  `ExecutionFeedback`, `LoopForgeResponse`, `SessionState`, `makeTaskId`,
+  `last_round_result`, `next_task_proposal`, `mode`, `domain` and
+  `loop-extras-parser.ts` are removed. Operator acceptance is passed as
+  `invokeLoopCompile(request, { operatorAcceptance })` and is immutable.
+- Removed response fields: `diff_from_previous`, `lineage`, `goal_text_hash`,
+  `PreviousRound.goal_text_hash`. A caller-supplied acceptance that disagrees
+  with committed history fails closed with `operator_acceptance_conflict`.
+
+### Removed channels
+
+- `prompt_requests` (emphasize/confusion points, effects, critical context).
+- `objective_refinement`.
+- Custom progress snapshots, selectors and provider governance. Progress is a
+  Git workspace fact; a custom observation remains a raw report and cannot
+  affect stall or freshness.
+- The delegation journal. `worker_results` keeps only
+  `agentId/subTask/resultSummary/outcome` inside the committed transaction.
+- Contract item `subgoal_refs`, `VerifiedSubGoalFact`, verification debt and
+  `CriterionStatus.related_subgoal_ids`. Sub-goals remain an Agent plan report
+  and are still rendered.
+
+### Lifecycle and integrity
+
+- A failed start returns stable `start_failed` and saves no running session.
+  A failed resume/unpause compilation becomes `stalled` and is retryable; a
+  projection defect remains `projection_incomplete`.
+- Starting over an existing session or any committed round returns
+  `loop_exists` (non-retryable). `SessionStateStore.save` gained
+  `expectAbsent` for the atomic create gate.
+- Compile fails closed when projection coverage is incomplete
+  (`projection_incomplete`) or acceptance copies conflict
+  (`operator_acceptance_conflict`).
+- Schema 6 requires `compiled` and `operatorAcceptance` on a submitted
+  evaluation and `operatorAcceptance` (without `compiled`) on a rollback
+  directive. Schema 5 rounds are reported as legacy; resume/unpause refuse to
+  recompile over them (`legacy_history`), audit reports the gap explicitly, and
+  health exposes `legacy_rounds`.
+- State-file writes are skipped when the rendered content is unchanged.
+
+### Versions
+
+- package: `4.0.0` → `4.0.1`
+- `ROUND_TRANSACTION_SCHEMA_VERSION`: `5` → `6`
+- `PROMPT_ARTIFACT_SCHEMA_VERSION`: `6` → `7`
+- `CANONICAL_STATE_SCHEMA_VERSION`: `4` → `5`
+- `POLICY_SCHEMA_VERSION`: `"9"` → `"10"`
+- Existing round documents are not migrated. Use a new loop id for new work;
+  old rounds stay readable only as explicit legacy diagnostics.
+
+### Read-only views
+
+- `loadCommittedHistory` performs one store read and returns entries, views,
+  branch, window, directives, pending directive and legacy rounds. Session,
+  lifecycle, submission boundary, coordinator, audit, explain, replay and
+  metrics read through it; the CLI remains the allowed low-level query surface.
+- `ReplayBackend.getRound` / `replay` return `CommittedRoundView`; `timeline`
+  reads the Vault once and takes level from `promptArtifact`, task/goal from
+  `compiled`, and progress from Git facts only.
+
 ## 4.0.0 (2026-10-24)
 
 **The submission-handle release.** Held-round identity becomes ONE derived

@@ -30,12 +30,10 @@ export const FIELD_ORDER = [
     "emerged_subtasks",
     "discovered_constraints",
     "wrong_assumptions",
-    "objective_refinement",
     "retracted_constraints",
     "round_contract",
     "contract_transition",
     "worker_results",
-    "prompt_requests",
     "compression_checkpoint",
     "checkpoint_label",
     "retroactiveClaims",
@@ -196,17 +194,6 @@ const GUIDES = [
             "a reflection quota.",
     },
     {
-        path: "objective_refinement",
-        purpose: "A deeper or more accurate understanding of the objective.",
-        when: "When this round changed your understanding of what the task needs.",
-        nature: "report",
-        downstream: "Report only; never modifies the operator objective, criteria, gates, " +
-            "hard constraints, or an objective version. Preserved in the committed " +
-            "evaluation and visible in the receipt/replay/audit.",
-        toolDescription: "Optional. A refinement or deepening of your understanding. Report only: " +
-            "LoopForge never rewrites the operator objective or criteria from it.",
-    },
-    {
         path: "retracted_constraints",
         purpose: "Existing constraints that are no longer correct or relevant.",
         when: "When a prior constraint is proven wrong or obsolete.",
@@ -273,33 +260,13 @@ const GUIDES = [
         decision: "You delegated work",
         compact: true,
         promptRank: 50,
-        downstream: "Saved with its source and written to the delegation journal; worker " +
-            "discoveredConstraints is NOT auto-promoted.",
+        downstream: "Saved inside the committed transaction as an audit report. A worker " +
+            "finding is not auto-promoted.",
         toolDescription: "Optional. Results of sub-agent / Worker delegations this round. Each " +
             "entry must declare an outcome. Entries without a valid outcome are " +
-            "dropped with a diagnostic. A worker's discoveredConstraints stays in " +
-            "this report; to make it a global constraint, submit it in top-level " +
-            "discovered_constraints.",
+            "dropped with a diagnostic. To make a worker finding a global " +
+            "constraint, submit it in top-level discovered_constraints.",
         reportOnly: true,
-    },
-    {
-        path: "prompt_requests",
-        purpose: "Information needs for the next round's prompt.",
-        when: "When you know what context the next round will need.",
-        nature: "control",
-        decision: "You know what the next prompt needs",
-        compact: true,
-        promptRank: 70,
-        downstream: "Matched exactly against current governance objects; applied to the NEXT " +
-            "round's prompt only after this round commits. If that prompt is L0 it " +
-            "is ignored. Unmatched/closed/historical entries have no effect; an " +
-            "uncommitted attempt's requests never steer a later prompt.",
-        toolDescription: "Optional. Information needs for the NEXT prompt. emphasize accepts a " +
-            "real stable id (c-/cr-/rc-/rci-/sg-/f-) or the reserved id recovery, " +
-            "or normalized-exact text; a paraphrase matches nothing. Closed or " +
-            "historical objects never resurrect. confusion_points are echoed at the " +
-            "top. They are applied to the next round's prompt; if that prompt is L0 " +
-            "they are ignored. This never becomes long-term knowledge.",
     },
     {
         path: "compression_checkpoint",
@@ -393,6 +360,10 @@ const RETIRED_FIELDS = {
     next_action: "removed in 3.8 — the agent plans; LoopForge does not accept a next-action field",
     revised_success_criteria: "removed in 3.9.6 — operator acceptance is immutable; report a conflict in " +
         "wrong_assumptions or stop with outcome=blocked/needs_human_input",
+    prompt_requests: "removed in 4.0.1 — the next prompt is compiled from committed facts; " +
+        "there is no per-round prompt-steering channel",
+    objective_refinement: "removed in 4.0.1 — record the new understanding in output_summary or " +
+        "wrong_assumptions; it never rewrites the operator objective",
 };
 export function fieldGuide(path) {
     return GUIDE_BY_PATH.get(path);
@@ -450,8 +421,6 @@ export function fieldExample(path, ctx) {
             return ["<a constraint later rounds must respect>"];
         case "wrong_assumptions":
             return ["<an assumption from an earlier round that was falsified>"];
-        case "objective_refinement":
-            return "<what you now understand better about the objective>";
         case "retracted_constraints":
             return ["<constraint text or c-XXXXXXXX id that is no longer valid>"];
         case "round_contract": {
@@ -462,7 +431,6 @@ export function fieldExample(path, ctx) {
                 items: [{
                         description: "<machine-checkable acceptance condition>",
                         criterion_refs: [],
-                        subgoal_refs: [],
                         verify_with: [ctx.commands[0]],
                     }],
             };
@@ -479,17 +447,10 @@ export function fieldExample(path, ctx) {
         case "worker_results":
             return [{
                     agentId: "<worker id>",
-                    subAgentType: "general-purpose",
                     subTask: "<self-contained subtask you delegated>",
                     resultSummary: "<what the worker reported>",
                     outcome: "success",
-                    discoveredConstraints: [],
                 }];
-        case "prompt_requests":
-            return {
-                emphasize: ["<exact constraint text or stable id>"],
-                confusion_points: ["<what is unclear about the current state>"],
-            };
         case "compression_checkpoint": return false;
         case "checkpoint_label": return "<short phase label>";
         case "retroactiveClaims":
@@ -800,14 +761,13 @@ export function deriveSubmissionGuidance(session, options) {
         rounds: options.rounds,
         currentRound: session.currentRound,
         inFlight: NO_IN_FLIGHT_ROUND,
-        subGoals,
         commands: commandsPolicy,
     });
     const activeContract = facts.activeContract;
     const itemStatuses = facts.itemStatuses;
     const criteria = options.objective
         ? deriveCriterionStatuses({
-            entries: options.rounds.map((round) => round.sourceEntry),
+            rounds: options.rounds,
             currentRound: session.currentRound,
             objective: options.objective,
             criterionFacts: facts.criterionFacts,

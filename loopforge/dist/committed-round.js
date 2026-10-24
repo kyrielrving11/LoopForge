@@ -7,7 +7,7 @@
 import { observationVersionIssue } from "./evidence-provider.js";
 import { PROMPT_ARTIFACT_SCHEMA_VERSION, makeLoopRoundResult, } from "./protocol.js";
 import { ROUND_TRANSACTION_SCHEMA_VERSION, deriveRoundObservationDelta, parseRoundTransactionSnapshot, rootBranchId, transactionSchemaVersionOf, } from "./round-transaction.js";
-import { claimedMetCriteria, claimedRemainingCriteria, effectiveOutcome, parseContractTransition, parseRoundContract, } from "./self-eval.js";
+import { effectiveOutcome, parseContractTransition, parseRoundContract, } from "./self-eval.js";
 import { entryRound, isRecord } from "./token-utils.js";
 function committedAction(value) {
     return value === "continue" || value === "stop" ||
@@ -109,6 +109,7 @@ function viewFromSnapshot(input) {
         checkpoints: snapshot.checkpoints ?? [],
         restore: snapshot.restore ?? null,
         operatorAcceptance: snapshot.operatorAcceptance ?? null,
+        compiled: snapshot.compiled ?? null,
         sequence: input.sequence,
         attempt: snapshot.attempt,
         promptArtifact: snapshot.promptArtifact ?? null,
@@ -135,8 +136,12 @@ function viewFromSnapshot(input) {
         outputSummary: evaluation?.output_summary,
         constraintViolations: strings(evaluation?.constraint_violations),
         discoveredConstraints: strings(evaluation?.discovered_constraints),
-        activeConstraints: strings(lineage?.constraints_active),
-        compiledRetirements: strings(lineage?.constraints_retired),
+        activeConstraints: snapshot.compiled
+            ? [...snapshot.compiled.constraintsActive]
+            : [],
+        compiledRetirements: snapshot.compiled
+            ? [...snapshot.compiled.constraintsRetired]
+            : [],
         retractedConstraints: strings(evaluation?.retracted_constraints),
         emergedSubtasks: strings(evaluation?.emerged_subtasks),
         subgoalUpdates: subGoalUpdates(evaluation?.subgoal_updates),
@@ -203,55 +208,13 @@ export function decodeRollbackEvent(entry) {
         sequence: typeof entry.sequence === "number" ? entry.sequence : undefined,
     });
 }
-/** Decode an in-memory lineage entry after the engine merged its committed
- * feedback. The merged entry MUST carry the embedded transaction snapshot;
- * the old raw top-level evaluation reconstruction is gone, so a partial
- * lineage entry cannot become a second history. */
-export function decodeMergedRound(entry) {
-    if (!isRecord(entry))
-        return null;
-    const raw = entry;
-    const lineage = isRecord(raw.loop_lineage) ? raw.loop_lineage : {};
-    const action = committedAction(lineage.committed_action ?? raw.committed_action);
-    if (!action)
-        return null;
-    const transaction = isRecord(lineage.round_transaction)
-        ? lineage.round_transaction
-        : isRecord(raw.round_transaction)
-            ? raw.round_transaction
-            : null;
-    if (!transaction)
-        return null;
-    const snapshot = parseRoundTransactionSnapshot(transaction.snapshot);
-    if (!snapshot)
-        return null;
-    const resultValue = isRecord(transaction.result)
-        ? transaction.result
-        : snapshot.result;
-    if (!isRecord(resultValue))
-        return null;
-    return viewFromSnapshot({
-        source: "merged",
-        sourceEntry: raw,
-        lineage,
-        snapshot,
-        result: resultValue,
-        sequence: typeof lineage.sequence === "number" ? lineage.sequence : undefined,
-    });
-}
 /** Normalize committed history: rollback directives disappear, later records
  * replace earlier records for the same logical round, and output is ascending. */
-/** Decode a committed round from either representation: an engine-hydrated
- *  merged lineage entry first (decodeMergedRound), then a durable :feedback
- *  entry. Compile-side callers used to inline this chain as a private
- *  `committedView` helper. */
-export function decodeRound(entry) {
-    return decodeMergedRound(entry) ?? decodeCommittedRound(entry);
-}
-/** v3.9.6: decode either an ordinary committed round or a rollback event.
- *  The branch read model is the only caller that needs both kinds together. */
+/** v4.0.1: decode either an ordinary committed round or a rollback event.
+ *  There is no merged-lineage representation any more: a committed round is
+ *  exactly its durable :feedback envelope, and a rollback is its event. */
 export function decodeCommittedRecord(entry) {
-    return decodeRound(entry) ??
+    return decodeCommittedRound(entry) ??
         decodeRollbackEvent(entry);
 }
 /** THE committed-view → compiler-request projection.
@@ -271,7 +234,6 @@ export function roundResultFromCommittedRound(view) {
         constraint_violations: [...(evaluation?.constraint_violations ?? [])],
         manual_fixes_needed: "",
         discovered_constraints: [...(view.discoveredConstraints ?? [])],
-        objective_refinement: evaluation?.objective_refinement ?? "",
         emerged_subtasks: [...(view.emergedSubtasks ?? [])],
         subgoal_updates: [...(view.subgoalUpdates ?? [])],
         execution_report: view.executionReport ?? undefined,
@@ -280,7 +242,6 @@ export function roundResultFromCommittedRound(view) {
         worker_results: [...(evaluation?.worker_results ?? [])],
         compression_checkpoint: evaluation?.compression_checkpoint === true,
         checkpoint_label: evaluation?.checkpoint_label ?? "",
-        prompt_requests: evaluation?.prompt_requests,
         outcome: evaluation?.outcome,
         blocker: evaluation?.blocker,
         retroactiveClaims: [...(evaluation?.retroactiveClaims ?? [])],
@@ -301,117 +262,6 @@ export function entryLineage(entry) {
     const value = entry.loop_lineage;
     return isRecord(value) ? value : {};
 }
-/** Extract execution_report from an entry, handling both direct-field and
- *  lineage-nested shapes. The decoded committed view wins when the entry is
- *  a committed round. Returns null when absent. Moved from loop-compiler so
- *  field-shape interpretation lives in this module only. */
-export function entryExecutionReport(entry) {
-    const view = decodeRound(entry);
-    if (view)
-        return view.executionReport;
-    const record = isRecord(entry) ? entry : {};
-    const direct = record.execution_report;
-    if (isRecord(direct))
-        return direct;
-    const nested = entryLineage(entry).execution_report;
-    return isRecord(nested) ? nested : null;
-}
-/** Read the criteria the agent claimed met from an entry's execution_report. */
-export function entryCriteriaMet(entry) {
-    const view = decodeRound(entry);
-    if (view)
-        return claimedMetCriteria(view.executionReport);
-    const ev = entryExecutionReport(entry);
-    if (!ev)
-        return [];
-    return rawCriterionClaims(ev, "met");
-}
-/** Read the criteria the agent declared outstanding from an entry. */
-export function entryCriteriaRemaining(entry) {
-    const view = decodeRound(entry);
-    if (view)
-        return claimedRemainingCriteria(view.executionReport);
-    const ev = entryExecutionReport(entry);
-    if (!ev)
-        return [];
-    return rawCriterionClaims(ev, "remaining");
-}
-/** Shape-tolerant reader for a raw entry's criterion claims (the durable
- *  shape, before the typed parse). */
-function rawCriterionClaims(report, outcome) {
-    const claims = report.criterion_claims;
-    if (!Array.isArray(claims))
-        return [];
-    return claims
-        .filter(isRecord)
-        .filter((claim) => claim.outcome === outcome && typeof claim.criterion_id === "string")
-        .map((claim) => claim.criterion_id);
-}
-/** Read constraints_active from an entry's lineage. */
-export function entryActiveConstraints(entry) {
-    const view = decodeRound(entry);
-    if (view)
-        return view.activeConstraints ?? [];
-    const arr = entryLineage(entry).constraints_active;
-    return Array.isArray(arr) ? arr.filter((v) => typeof v === "string") : [];
-}
-/** Read retracted_constraints from an entry (direct field, else nested in
- *  the lineage). */
-export function entryRetractedConstraints(entry) {
-    const view = decodeRound(entry);
-    if (view)
-        return view.retractedConstraints ?? [];
-    const record = isRecord(entry) ? entry : {};
-    const direct = record.retracted_constraints;
-    if (Array.isArray(direct))
-        return direct.filter((v) => typeof v === "string");
-    const nested = entryLineage(entry).retracted_constraints;
-    if (Array.isArray(nested))
-        return nested.filter((v) => typeof v === "string");
-    return [];
-}
-/** Read emerged_subtasks from an entry (handles direct + lineage nesting). */
-export function entryEmergedSubtasks(entry) {
-    const view = decodeRound(entry);
-    if (view)
-        return view.emergedSubtasks ?? [];
-    const record = isRecord(entry) ? entry : {};
-    const direct = record.emerged_subtasks;
-    if (Array.isArray(direct))
-        return direct.filter((v) => typeof v === "string");
-    const nested = entryLineage(entry).emerged_subtasks;
-    if (Array.isArray(nested))
-        return nested.filter((v) => typeof v === "string");
-    return [];
-}
-/** Read subgoal_updates from an entry (handles direct + lineage nesting).
- *  v3.7.1: committed status transitions are replayed in round order by the
- *  compiler — every derivation replays ALL committed rounds, not just the
- *  last one. */
-export function entrySubGoalUpdates(entry) {
-    const view = decodeRound(entry);
-    if (view)
-        return view.subgoalUpdates ?? [];
-    const record = isRecord(entry) ? entry : {};
-    const direct = record.subgoal_updates;
-    if (Array.isArray(direct))
-        return subGoalUpdates(direct);
-    const nested = entryLineage(entry).subgoal_updates;
-    if (Array.isArray(nested))
-        return subGoalUpdates(nested);
-    return [];
-}
-/** Read constraint_violations from an entry (entry-level, stored from the
- *  previous round's last_round_result at persist time — distinct from the
- *  evaluation-level violations on the committed view). Moved from
- *  verification-gate so lineage-shape reads live in this module only. */
-export function entryViolations(entry) {
-    const record = isRecord(entry) ? entry : {};
-    const viols = record.constraint_violations;
-    if (Array.isArray(viols))
-        return viols.filter((v) => typeof v === "string");
-    return [];
-}
 export function historyRounds(views, beforeRound = Number.POSITIVE_INFINITY) {
     const byRound = new Map();
     for (const view of views) {
@@ -422,13 +272,11 @@ export function historyRounds(views, beforeRound = Number.POSITIVE_INFINITY) {
     }
     return [...byRound.values()].sort((a, b) => a.round - b.round);
 }
-/** Resolve the current branch from committed branch identities. This is the
- *  only branch-fencing rule; it replaces the session frontier and every
- *  numeric/temporal approximation. */
-export function resolveBranch(entries) {
-    const records = entries
-        .map(decodeCommittedRecord)
-        .filter((view) => view !== null);
+/** Resolve the current branch from already-decoded committed views. This is
+ *  the branch walker itself; `resolveBranch` is only the entry-decoding
+ *  wrapper, so a caller that already holds the views (the history loader)
+ *  never decodes the same entries twice. */
+export function resolveBranchViews(records) {
     const kindOf = (view) => view.kind ?? "evaluation";
     const first = records.find((view) => kindOf(view) === "evaluation") ?? records[0];
     if (!first) {
@@ -483,6 +331,13 @@ export function resolveBranch(entries) {
             pendingDirective = latest;
     }
     return { loopId, branchId, rounds, directives, pendingDirective };
+}
+/** Resolve the current branch from committed records in the raw entry view.
+ *  Decoding happens once here; the walker itself is `resolveBranchViews`. */
+export function resolveBranch(entries) {
+    return resolveBranchViews(entries
+        .map(decodeCommittedRecord)
+        .filter((view) => view !== null));
 }
 /** v3.9.6: current-branch evaluation rounds. */
 export function branchRounds(entries) {

@@ -24,7 +24,7 @@ import { isPassedAfterObservation } from "./evidence-provider.js";
 import { getPolicy } from "./policy.js";
 import { makeVerificationFlag, makeVerificationResult } from "./protocol.js";
 import { isRecord, extractFilePathTokens, deriveConstraintId, normalizeText, } from "./token-utils.js";
-import { derivationRounds, entryViolations, } from "./committed-round.js";
+import { derivationRounds, } from "./committed-round.js";
 import { deriveActiveRoundContract, sameContract, } from "./round-contract.js";
 import { deriveContractItemStatuses, } from "./contract-items.js";
 import { deriveClaimView, resolveRoundFiles } from "./evidence-claims.js";
@@ -463,25 +463,16 @@ function checkDuplicateConstraintDiscovery(selfEval, prevSelfEval, olderViolatio
     }
     return null;
 }
-function checkRecurringViolation(selfEval, prevSelfEval, vaultEntries, currentRound) {
+function checkRecurringViolation(selfEval, prevSelfEval, committedRounds, currentRound) {
     const currViols = selfEval.constraint_violations;
     if (!currViols || currViols.length === 0)
         return null;
     // Build the violation history: [round N-2, round N-1, round N]
     const violationsByRound = [];
-    // Round N-2 violations are stored on the round N-1 entry's
-    // `constraint_violations` field by persistLoopLineage. Read that entry
-    // through the branch-safe view (sourceEntry), never a raw round lookup, so
-    // an abandoned branch cannot contaminate the streak.
+    // Round N-2 violations come from the committed round's own evaluation.
     if (currentRound >= 3) {
-        const window = derivationRounds(vaultEntries, currentRound);
-        const nMinus2 = window.find((view) => view.round === currentRound - 2);
-        const nMinus1 = window.find((view) => view.round === currentRound - 1);
-        // Prefer the committed evaluation's own violations (MCP flow); the
-        // top-level lineage field is the legacy/hand-built carrier, consulted only
-        // through the branch-safe view.
-        const viols = nMinus2?.constraintViolations ??
-            (nMinus1 ? entryViolations(nMinus1.sourceEntry) : []);
+        const nMinus2 = committedRounds.find((view) => view.round === currentRound - 2);
+        const viols = nMinus2?.constraintViolations ?? [];
         if (viols.length) {
             violationsByRound.push(viols.map((v) => normalizeText(v)));
         }
@@ -967,19 +958,17 @@ entrypointDrift = [],
 filesReported) {
     const flags = [];
     const filesReportedForGate = filesReported ?? (selfEval.execution_report != null);
-    // Collect violations from all previous vault entries for duplicate-discovery
-    // and other checks that need deeper history.
-    const olderViolations = [];
-    for (const entry of vaultEntries) {
-        for (const v of entryViolations(entry))
-            olderViolations.push(v);
-    }
     // v3.4: The ACTIVE contract this round executed under — derived from the
     // committed :feedback evals of earlier rounds. The submission's own
     // round_contract is a PROPOSAL for the next round and never participates
     // (the eval under verification is not yet committed, so it structurally
     // cannot influence the derivation).
     const committedRounds = derivationRounds(vaultEntries, currentRound);
+    const olderViolations = [];
+    for (const view of committedRounds) {
+        for (const v of view.constraintViolations ?? [])
+            olderViolations.push(v);
+    }
     const activeContract = deriveActiveRoundContract(committedRounds);
     // v3.8: The item-level status of the ACTIVE contract for THIS round — the
     // same reducer the compile path, audit, and explain consume.
@@ -1019,7 +1008,7 @@ filesReported) {
         // v2.12: retroactive claims against prior rounds
         () => checkRetroactiveClaims(selfEval, vaultEntries, currentRound),
         () => checkDuplicateConstraintDiscovery(selfEval, prevSelfEval, olderViolations),
-        () => checkRecurringViolation(selfEval, prevSelfEval, vaultEntries, currentRound),
+        () => checkRecurringViolation(selfEval, prevSelfEval, committedRounds, currentRound),
         () => checkRetractFreshConstraint(selfEval, prevSelfEval, currentRound),
         // v1.18: Cross-validate agent-reported files_changed against git evidence
         () => checkEvidenceIntegrity(selfEval, evidenceDeltas, filesReportedForGate),

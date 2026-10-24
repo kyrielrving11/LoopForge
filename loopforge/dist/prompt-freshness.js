@@ -16,7 +16,7 @@
  *
  *  Nothing here is persisted, and nothing here is a second history source.
  */
-import { deriveRoundProgress, STALL_PROGRESS_COVERAGE, } from "./progress.js";
+import { deriveRoundProgress, } from "./progress.js";
 /** No committed previous round: freshness is unknown, never "stale". */
 export const UNKNOWN_PROMPT_FRESHNESS = {
     machineProgress: "unknown",
@@ -37,13 +37,13 @@ const AFTER_COMMAND_ACTIVITY = new Set([
 ]);
 function declaredEvolution(previous) {
     const evaluation = previous.evaluation;
+    // Only facts the compiler actually consumes count as declared evolution.
+    // wrong_assumptions and worker_results are reports; they never change the
+    // next prompt's density.
     return ((previous.discoveredConstraints?.length ?? 0) > 0 ||
-        Boolean(evaluation?.objective_refinement?.trim()) ||
         (previous.emergedSubtasks?.length ?? 0) > 0 ||
         (previous.subgoalUpdates?.length ?? 0) > 0 ||
         (previous.retractedConstraints?.length ?? 0) > 0 ||
-        (evaluation?.wrong_assumptions?.length ?? 0) > 0 ||
-        (evaluation?.worker_results?.length ?? 0) > 0 ||
         previous.contractProposal !== null ||
         evaluation?.compression_checkpoint === true);
 }
@@ -56,7 +56,7 @@ export function derivePromptFreshness(previous) {
     // v3.9.9: freshness is a LoopForge density decision. It consumes the SAME
     // Git workspace coverage the stall rule uses — never `"any"`. A custom
     // provider's changed/unknown must not pin the loop at L1 forever.
-    const progress = deriveRoundProgress(previous.observationDelta, STALL_PROGRESS_COVERAGE);
+    const progress = deriveRoundProgress(previous.observationDelta);
     const activity = machineActivity(previous);
     const declared = declaredEvolution(previous);
     const observableNewInformation = progress.state !== "unchanged" || activity || declared;

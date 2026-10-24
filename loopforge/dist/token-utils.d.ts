@@ -79,7 +79,6 @@ export declare function normalizeText(text: string): string;
 export interface ContractIdentityItem {
     description: string;
     criterion_refs: string[];
-    subgoal_refs: string[];
     verify_with: string[];
 }
 /** v3.8: Canonical form of a contract proposal. Identity is CONTENT only —

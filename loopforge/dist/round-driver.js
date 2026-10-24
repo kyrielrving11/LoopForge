@@ -7,6 +7,7 @@
  */
 import { EvidenceCollector } from "./evidence-provider.js";
 import { writeStateFile } from "./policy.js";
+import { CompileFailureError } from "./errors.js";
 import { prepareRejectedAttempt, prepareRoundTransaction, RoundTransactionCoordinator, } from "./round-transaction.js";
 import { buildCheckpointRef, CHECKPOINT_MAX_PATHS, } from "./workspace-checkpoint.js";
 export class RoundDriver {
@@ -23,7 +24,7 @@ export class RoundDriver {
         let response;
         let evidenceBaseline;
         if (opts.baseline) {
-            response = this.compile(request, loopId, true);
+            response = this.compile(request, loopId, opts.operatorAcceptance);
             evidenceBaseline = opts.baseline.observations;
             boundary = opts.baseline.boundary;
         }
@@ -34,7 +35,7 @@ export class RoundDriver {
             // v3.9.7: the Git provider materializes the checkpoint before-image in
             // the SAME boundary pass; no second hash.
             const [compiled, evidence] = await Promise.all([
-                Promise.resolve().then(() => this.compile(request, loopId, true)),
+                Promise.resolve().then(() => this.compile(request, loopId, opts.operatorAcceptance)),
                 this.collectEvidence(loopId, "before", this.checkpointStore
                     ? {
                         materializer: this.checkpointStore,
@@ -46,15 +47,13 @@ export class RoundDriver {
             response = compiled;
             evidenceBaseline = evidence;
         }
-        if (!response)
-            return null;
         return this.finishPrepare(response, loopId, round, evidenceBaseline, opts, boundary);
     }
-    compile(request, loopId, persistLineage) {
-        const compiled = this.engine.invokeLoopCompile(request, undefined, { persistLineage });
-        const response = compiled.response;
-        if (!response?.prompt)
-            return null;
+    compile(request, loopId, operatorAcceptance) {
+        const response = this.engine.invokeLoopCompile(request, operatorAcceptance ? { operatorAcceptance } : {});
+        if (!response.prompt) {
+            throw new CompileFailureError(response.error || "the compiler produced no prompt");
+        }
         writeStateFile(loopId, response.state_file_content);
         return response;
     }
@@ -69,16 +68,26 @@ export class RoundDriver {
             rejection_notice: rejectionNotice,
             force_level: consecutiveRejections >= 2 ? "l2" : "l0",
         };
-        const response = this.compile(retryRequest, rejected.loopId, false);
-        if (!response?.prompt_artifact)
-            return null;
+        const response = this.compile(retryRequest, rejected.loopId, rejected.operatorAcceptance);
+        if (!response.prompt_artifact) {
+            throw new CompileFailureError("the retry compiler produced no prompt artifact");
+        }
         // v3.9.6: warnings live on the artifact; the session no longer mirrors
         // them, so a held prompt is self-contained across a restart.
         const artifact = {
             ...response.prompt_artifact,
             warnings: [...(response.warnings ?? [])],
         };
-        const snapshot = prepareRejectedAttempt(rejected, artifact);
+        // v4.0.1: the compile response is the one source of the facts stamped at
+        // commit. There is no second derivation from the objective or the rejected
+        // attempt; a response missing them is a compile failure, not an input to
+        // guess around.
+        const compiled = response.compiled;
+        const operatorAcceptance = response.operatorAcceptance;
+        if (!compiled || !operatorAcceptance) {
+            throw new CompileFailureError("the retry compiler produced no compile facts or operator acceptance");
+        }
+        const snapshot = prepareRejectedAttempt(rejected, artifact, compiled, operatorAcceptance);
         return {
             prompt: response.prompt,
             artifact,
@@ -134,11 +143,17 @@ export class RoundDriver {
                 at: Date.now(),
             };
         }
+        // v4.0.1: compile facts and the operator surface come directly from the
+        // compile response. The driver never re-derives either one.
+        const compiled = response.compiled;
+        const operatorAcceptance = response.operatorAcceptance;
+        if (!compiled || !operatorAcceptance) {
+            throw new CompileFailureError("the compiler produced no compile facts or operator acceptance");
+        }
         const snapshot = prepareRoundTransaction(loopId, round, evidenceBaseline, artifact, {
             ...(opts.branchId ? { branchId: opts.branchId } : {}),
-            ...(opts.operatorAcceptance
-                ? { operatorAcceptance: opts.operatorAcceptance }
-                : {}),
+            ...(operatorAcceptance ? { operatorAcceptance } : {}),
+            compiled,
             ...(beforeCheckpointError ? { beforeCheckpointError } : {}),
         });
         if (manifest) {
@@ -163,9 +178,14 @@ export class RoundDriver {
             compileResponse: response,
         };
     }
+    /** The ONE coordinator construction for a write. The engine is not a write
+     *  dependency. */
+    coordinator() {
+        return new RoundTransactionCoordinator(this.store);
+    }
     async complete(input) {
         const actualEvidence = await this.collectEvidence(input.loopId, "after");
-        const transaction = new RoundTransactionCoordinator(this.engine, this.store);
+        const transaction = this.coordinator();
         const outcome = transaction.process({
             snapshot: input.snapshot,
             task: input.task,
@@ -194,7 +214,7 @@ export class RoundDriver {
     async completeRecovery(input) {
         const actualEvidence = await this.collectEvidence(input.loopId, "after");
         const recovery = input.buildRecovery(actualEvidence);
-        const outcome = new RoundTransactionCoordinator(this.engine, this.store).commitRecovery({
+        const outcome = this.coordinator().commitRecovery({
             snapshot: input.snapshot,
             loopId: input.loopId,
             recovery,
@@ -203,7 +223,7 @@ export class RoundDriver {
         return { outcome, actualEvidence };
     }
     recover(snapshot) {
-        return new RoundTransactionCoordinator(this.engine, this.store).recover(snapshot);
+        return this.coordinator().recover(snapshot);
     }
     collectEvidence(loopId, phase, opts) {
         return EvidenceCollector.fromPolicy().collectAsync({

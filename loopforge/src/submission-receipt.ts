@@ -379,9 +379,9 @@ export function deriveSubmissionReceipt(input: ReceiptInput): SubmissionReceipt 
 }
 
 /** Rebuild the same receipt from committed history. No new persistence and
- *  no second history: `allViews` is the caller's `readOnlyRounds` window.
- *  `rollbacks` is the `readOnlyRollbacks` window; it supplies the directive
- *  that governed a redo after that redo has committed. */
+ *  no second history: `allViews` is the loader's current-branch evaluation
+ *  window. `rollbacks` is the loader's directive chain; it supplies the
+ *  directive that governed a redo after that redo has committed. */
 export function deriveCommittedSubmissionView(
   view: CommittedRoundView,
   allViews: ReadonlyArray<CommittedRoundView>,

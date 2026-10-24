@@ -16,23 +16,23 @@ import { randomUUID } from "node:crypto";
 import { LoopForgeEngine } from "../engine.js";
 import { canonicalizeGateAction, deriveGate, preflightStructuredGate, } from "../cognitive-governance.js";
 import { makeGateDecision, makeLoopObjective } from "../protocol.js";
+import { loadCommittedHistory } from "../history.js";
 import { buildAudit } from "../audit.js";
 import { buildExplain } from "../explain.js";
 import { CHECK_CONTRACT_ITEMS_UNVERIFIED } from "../verification-gate.js";
-import { readOnlyRollbacks, readOnlyRounds } from "../committed-round.js";
 import { deriveCommittedSubmissionView } from "../submission-receipt.js";
 import { getPolicy, validateLoopId } from "../policy.js";
 import { isRecord, unique } from "../token-utils.js";
 import { ReplayBackend } from "../replay.js";
-import { FileLoopStore, queryLoopEntries } from "../loop-store.js";
-import { MAX_MID_CHECKPOINTS_PER_TRANSACTION, prepareRoundTransaction, } from "../round-transaction.js";
+import { FileLoopStore } from "../loop-store.js";
+import { MAX_MID_CHECKPOINTS_PER_TRANSACTION, } from "../round-transaction.js";
 import { findCheckpointRef } from "../recovery.js";
-import { pendingRollbackDirective } from "../committed-round.js";
 import { buildCheckpointRef, CheckpointError, FileWorkspaceCheckpointStore, } from "../workspace-checkpoint.js";
 import { resolveStateDirectory } from "../policy.js";
 import { resolve, sep } from "node:path";
 import { RoundDriver } from "../round-driver.js";
 import { logEvent } from "../observability.js";
+import { CompileFailureError, LegacyHistoryError, LoopExistsError, StartFailureError, } from "../errors.js";
 import { policyMetrics, derivePolicyMetrics, mergePolicyMetrics, } from "../policy-metrics.js";
 import { SessionLeaseConflictError, VaultSessionStateStore, } from "../storage.js";
 import { StorageCorruptionError } from "../loop-store.js";
@@ -116,6 +116,15 @@ export class SessionManager {
     findSessionEntry(loopId) {
         return this.sessionStore?.load(loopId);
     }
+    /** Whether the loop already has durable round history. A lineage-only round
+     *  document from a failed start is NOT history and must remain retryable;
+     *  only a committed feedback envelope counts. */
+    hasCommittedRounds(loopId) {
+        return this.loopStore.listRoundSequences(loopId).some(({ round }) => {
+            const doc = this.loopStore.readRound(loopId, round);
+            return doc?.feedback !== undefined;
+        });
+    }
     claimSessionEntry(loopId) {
         if (this.sessionStore?.acquireLease) {
             return this.sessionStore.acquireLease(loopId, this.ownerId, this.leaseMs);
@@ -178,21 +187,12 @@ export class SessionManager {
         // state and leave two in-memory sessions pointing at one loop.
         const existing = [...this.sessions.values()].find((s) => s.loopId === loopId);
         if (existing) {
-            return {
-                sessionId: "",
-                round: existing.currentRound,
-                prompt: null,
-                stopReason: `loop_already_running:${loopId}`,
-                stopDetail: `A session for loop "${loopId}" already exists in this process (session ${existing.sessionId}). Inspect or resume it instead of starting a duplicate.`,
-            };
+            throw new LoopExistsError(loopId, "active");
         }
-        // v3.2.1: pre-flight the cross-process lease BEFORE compiling — the
-        // compile persists round-1 lineage and the state file into the loop's
-        // vault, which would corrupt another process's live loop (round-1
-        // lineage replaced, metadata overwritten). Mirrors the save-time check
-        // (VaultSessionStateStore.save: a non-empty lease_owner that is not ours
-        // conflicts), so observable behavior is unchanged — only the side
-        // effects are avoided. The save below remains the atomic final gate.
+        // v3.2.1: pre-flight the cross-process lease BEFORE compiling. A compile
+        // no longer writes round history, but it still writes the derived state
+        // file and would waste evidence work against another process's loop.
+        // The save below remains the atomic final gate.
         const persistedSession = this.sessionStore?.load(loopId);
         const persistedLineage = persistedSession?.loop_lineage;
         const persistedOwner = persistedLineage && typeof persistedLineage === "object" && !Array.isArray(persistedLineage)
@@ -201,34 +201,22 @@ export class SessionManager {
         if (typeof persistedOwner === "string" && persistedOwner && persistedOwner !== this.ownerId) {
             throw new SessionLeaseConflictError(loopId);
         }
+        // A persisted session in ANY status, or any committed round document,
+        // means this loopId already names durable history. Starting a new round 1
+        // would overwrite it. The atomic `expectAbsent` save below is the final
+        // gate; this preflight avoids compiling and collecting evidence first.
+        if (persistedSession) {
+            throw new LoopExistsError(loopId, "session");
+        }
+        if (this.hasCommittedRounds(loopId)) {
+            throw new LoopExistsError(loopId, "rounds");
+        }
         // v3.9.4: normalize initial criteria before any runtime object is created.
         // A structural defect throws StartCriteriaError (mapped to
         // invalid_argument); empty/duplicate/over-cap entries produce warnings.
         const startCriteria = normalizeStartCriteria(input.criteria);
         const engine = new LoopForgeEngine(this.loopStore);
         const maxRounds = input.maxRounds ?? getPolicy().engine.max_rounds;
-        // Populate extra fields for the first round
-        const request = buildLoopRequest({
-            sessionId, loopId, task: input.task, engine, currentRound: 1,
-            maxRounds, status: "running", createdAt: Date.now(),
-            consecutiveRejections: 0,
-            lastRejectionCheck: "",
-        });
-        request.domain = input.domain ?? "";
-        request.plan_source = input.planSource ?? null;
-        request.constraints_from_plan = input.constraints ?? [];
-        // The initial criteria are real objective criteria, not a second ledger.
-        // Supplying the objective here means the first compile persists these
-        // texts (and therefore their cr- ids) through the existing lineage.
-        if (startCriteria.criteria.length > 0) {
-            request.loop_objective = makeLoopObjective({
-                objective: input.task,
-                success_criteria: startCriteria.criteria,
-                hard_constraints: unique(input.constraints ?? []),
-                created_at_round: 1,
-                loop_id: loopId,
-            });
-        }
         const operatorAcceptance = {
             task: input.task,
             success_criteria: startCriteria.criteria.length > 0
@@ -236,10 +224,35 @@ export class SessionManager {
                 : ["Task goal achieved with verifiable evidence"],
             hard_constraints: unique(input.constraints ?? []),
         };
-        const prepared = await new RoundDriver(engine, this.loopStore, this.checkpointStoreFor?.(loopId)).prepare(request, loopId, 1, { operatorAcceptance });
-        const initialPrompt = prepared?.prompt ?? null;
-        const initialLevel = prepared?.level ?? "l2";
-        const evidenceBaseline = prepared?.evidenceBaseline ?? [];
+        // Populate the typed request for the first round. The operator surface is
+        // the one acceptance object; the objective is derived from it.
+        const request = buildLoopRequest({
+            sessionId, loopId, task: input.task, engine, currentRound: 1,
+            maxRounds, status: "running", createdAt: Date.now(),
+            consecutiveRejections: 0,
+            lastRejectionCheck: "",
+        });
+        request.plan_source = input.planSource ?? null;
+        request.constraints_from_plan = input.constraints ?? [];
+        request.loop_objective = makeLoopObjective({
+            objective: operatorAcceptance.task,
+            success_criteria: [...operatorAcceptance.success_criteria],
+            hard_constraints: [...operatorAcceptance.hard_constraints],
+            created_at_round: 1,
+            loop_id: loopId,
+        });
+        let prepared;
+        try {
+            prepared = await new RoundDriver(engine, this.loopStore, this.checkpointStoreFor?.(loopId)).prepare(request, loopId, 1, { operatorAcceptance });
+        }
+        catch (error) {
+            if (error instanceof CompileFailureError) {
+                throw new StartFailureError(error.message);
+            }
+            throw error;
+        }
+        const initialPrompt = prepared.prompt;
+        const initialLevel = prepared.level;
         const session = {
             sessionId, loopId, task: input.task, engine,
             currentRound: 1, maxRounds,
@@ -248,20 +261,20 @@ export class SessionManager {
             consecutiveRejections: 0,
             lastRejectionCheck: "",
             operatorAcceptance,
-            roundSnapshot: prepared?.snapshot ?? prepareRoundTransaction(loopId, 1, evidenceBaseline),
+            roundSnapshot: prepared.snapshot,
         };
         this.sessions.set(sessionId, session);
         policyMetrics.recordStrategy(loopId, initialLevel);
         // Persist to vault for cross-process recovery. The save is the atomic
-        // lease gate — a TOCTOU window between the pre-flight check above and
-        // this write can still lose the lease race to another process.
+        // lease/existence gate — a TOCTOU window between the pre-flight checks
+        // above and this write can still lose the race to another process.
         try {
-            this.lifecycle.save(session);
+            this.lifecycle.save(session, { expectAbsent: true });
         }
         catch (error) {
-            // v3.2.1: roll back the in-memory registration — a registered-but-
-            // unsaved session would make every later create for this loopId
-            // return loop_already_running until this process restarts.
+            // Roll back the in-memory registration: a registered-but-unsaved
+            // session would make every later create for this loopId fail until
+            // this process restarts.
             this.sessions.delete(sessionId);
             throw error;
         }
@@ -291,7 +304,7 @@ export class SessionManager {
             prompt: initialPrompt,
             level: initialLevel,
             roundSuccess: false,
-            warnings: [...startCriteria.warnings, ...(prepared?.warnings ?? [])],
+            warnings: [...startCriteria.warnings, ...(prepared.warnings ?? [])],
             submission_guidance: this.lifecycle.guidanceFor(session),
         };
     }
@@ -313,16 +326,9 @@ export class SessionManager {
         const session = this.sessions.get(sessionId);
         if (!session)
             return null;
-        const prefix = `loop:${session.loopId}:r`;
-        const entries = [
-            ...queryLoopEntries(this.loopStore, session.loopId, { prefix }),
-            ...queryLoopEntries(this.loopStore, session.loopId, {
-                prefix,
-                feedbackOnly: true,
-            }),
-        ];
-        const views = readOnlyRounds(entries);
-        const rollbacks = readOnlyRollbacks(entries);
+        const history = loadCommittedHistory(this.loopStore, session.loopId);
+        const views = history.rounds;
+        const rollbacks = history.directives;
         const latestRound = views[views.length - 1];
         const latestRollback = rollbacks[rollbacks.length - 1];
         if (latestRollback &&
@@ -336,12 +342,7 @@ export class SessionManager {
     /** v3.9.6: the success trajectory is a projection of committed branch
      *  rounds, not a session counter. */
     getSuccessTrajectory(loopId) {
-        const prefix = `loop:${loopId}:`;
-        const entries = [
-            ...queryLoopEntries(this.loopStore, loopId, { prefix }),
-            ...queryLoopEntries(this.loopStore, loopId, { prefix, feedbackOnly: true }),
-        ];
-        return readOnlyRounds(entries)
+        return loadCommittedHistory(this.loopStore, loopId).rounds
             .filter((view) => view.result?.shouldPushSuccessTrajectory === true)
             .map((view) => view.success);
     }
@@ -504,6 +505,11 @@ export class SessionManager {
                 session = this.lifecycle.reconstructSession(claimedEntry, true);
             }
             catch (error) {
+                if (error instanceof LegacyHistoryError) {
+                    // A bulk startup scan must not rewrite history it cannot decode.
+                    logEvent("session_skip_legacy", { loopId: lid, error: error.message });
+                    continue;
+                }
                 if (error instanceof StorageCorruptionError && error.recoverable) {
                     logEvent("session_skip_gap", { loopId: lid, error: error.message });
                     continue;
@@ -712,8 +718,9 @@ export class SessionManager {
             };
         }
         try {
-            const prefix = `loop:${loopId}:gate:`;
-            const opened = queryLoopEntries(this.loopStore, loopId, { prefix })
+            const gatePrefix = `loop:${loopId}:gate:`;
+            const opened = loadCommittedHistory(this.loopStore, loopId).entries
+                .filter((entry) => String(entry.task_id ?? "").startsWith(gatePrefix))
                 .find((entry) => entry.task_type === "gate_opened" && entry.gate_id === gateId);
             if (!opened) {
                 return {
@@ -820,33 +827,24 @@ export class SessionManager {
      *  rebuilds history and never writes. */
     getExplain(loopId, round) {
         validateLoopId(loopId);
-        const prefix = `loop:${loopId}:`;
-        const entries = [
-            ...queryLoopEntries(this.loopStore, loopId, { prefix }),
-            ...queryLoopEntries(this.loopStore, loopId, { prefix, feedbackOnly: true }),
-        ];
+        const entries = loadCommittedHistory(this.loopStore, loopId).entries;
         return buildExplain(loopId, entries, round);
     }
     /** Read-only end-of-loop audit (verification view). Never writes. */
     getAudit(loopId) {
         validateLoopId(loopId);
-        // v3.3.1: audit judges COMMITTED decisions, which live on :feedback
-        // entries — but queryLoopEntries excludes feedback by default, so the
-        // audit view structurally never saw a committed round (it always
-        // reported "passed" on empty history). Merge both result sets like the
-        // round coordinator does.
-        const prefix = `loop:${loopId}:`;
-        const entries = [
-            ...queryLoopEntries(this.loopStore, loopId, { prefix }),
-            ...queryLoopEntries(this.loopStore, loopId, { prefix, feedbackOnly: true }),
-        ];
-        // Zero committed decisions → nothing to audit. Returning null lets the
-        // tools layer report "no audit data" instead of the external auditor
-        // solemnly passing a loop that never ran (or a mistyped loopId).
-        const hasCommittedDecision = readOnlyRounds(entries).length > 0;
-        if (!hasCommittedDecision)
+        // Audit judges COMMITTED decisions. The shared history loader returns the
+        // flat entry view and the decoded branch; there is no second query pair.
+        const history = loadCommittedHistory(this.loopStore, loopId);
+        // No committed decision and no legacy envelope → nothing to audit.
+        // Returning null lets the tools layer report "no audit data" instead of
+        // the external auditor solemnly passing a loop that never ran (or a
+        // mistyped loopId). Legacy-only loops still get a report so the gap is
+        // explicit, never silently empty.
+        if (history.rounds.length === 0 && history.legacyRounds.length === 0) {
             return null;
-        const audit = buildAudit(loopId, entries, this.loopStore);
+        }
+        const audit = buildAudit(loopId, history.entries, this.loopStore);
         return { ...audit };
     }
     /** v3.5: The ACTIVE Round Contract governing the session's next round —
@@ -864,16 +862,10 @@ export class SessionManager {
      *  statistics (A4 port) folded with this process's live observations.
      *  Non-durable fields (evidence, vault errors) come from live only. */
     getPolicyMetrics(loopId) {
-        // v3.3.1: derived metrics judge committed decisions on :feedback entries,
-        // which queryLoopEntries excludes by default — merge both result sets so
-        // restart-surviving metrics actually see the committed rounds (before,
-        // derived.committedRounds was structurally 0 and the merge fell back to
-        // the live-only snapshot every time).
-        const prefix = `loop:${loopId}:`;
-        const entries = [
-            ...queryLoopEntries(this.loopStore, loopId, { prefix }),
-            ...queryLoopEntries(this.loopStore, loopId, { prefix, feedbackOnly: true }),
-        ];
+        // Derived metrics judge committed decisions through the same history
+        // loader as every other read path. Live-only counters are folded in
+        // afterwards; they never become the source of round facts.
+        const entries = loadCommittedHistory(this.loopStore, loopId).entries;
         const derived = derivePolicyMetrics(loopId, entries);
         const live = policyMetrics.snapshot(loopId);
         if (derived.committedRounds === 0)
@@ -891,19 +883,17 @@ export class SessionManager {
      *  `strategy_stability` was a literal `true`. What remains is counted
      *  directly from committed round flags. */
     getHealth(loopId) {
-        const engine = new LoopForgeEngine(this.loopStore);
-        const context = engine.hydrateLoopContext(loopId);
-        // No hydratable context at all → unknown loop. A started-but-uncommitted
-        // loop DOES have a context (the compile persists a lineage entry), so it
-        // still gets a view — with zeros — exactly as it did before.
-        if (!context)
+        const history = loadCommittedHistory(this.loopStore, loopId);
+        // No stored session or round at all → unknown loop. A started-but-
+        // uncommitted loop has a session entry, so it still gets a zeroed view.
+        if (history.entries.length === 0)
             return null;
-        const entries = Array.isArray(context.results) ? context.results : [];
-        const views = readOnlyRounds(entries);
+        const views = history.rounds;
         const roundsWithUnverifiedItems = views.filter((view) => view.verificationFlags.some((flag) => flag.check === CHECK_CONTRACT_ITEMS_UNVERIFIED)).length;
         return {
             loopId,
             committed_rounds: views.length,
+            legacy_rounds: history.legacyRounds.length,
             rounds_with_unverified_items: roundsWithUnverifiedItems,
             // The policy value the enforcement gate escalates on. The streak itself
             // is derived in the gate — re-deriving it here would be a second
@@ -998,15 +988,8 @@ export class SessionManager {
      *  Read-only; used before the queue/lease so a stale handle cannot mask the
      *  "call resume" recovery UX. */
     restorePendingResult(session) {
-        const prefix = `loop:${session.loopId}:`;
-        const entries = [
-            ...queryLoopEntries(this.loopStore, session.loopId, { prefix }),
-            ...queryLoopEntries(this.loopStore, session.loopId, {
-                prefix,
-                feedbackOnly: true,
-            }),
-        ];
-        const pending = pendingRollbackDirective(entries);
+        const pending = loadCommittedHistory(this.loopStore, session.loopId)
+            .pendingDirective;
         if (!pending?.recovery)
             return null;
         if (session.roundSnapshot?.restore?.directiveTransactionId ===
@@ -1152,17 +1135,11 @@ export class SessionManager {
         const reason = recovery.reason;
         // Read-only visibility check against the exact held snapshot. An invalid
         // target must not cause a lease renewal or a directive.
-        const prefix = `loop:${session.loopId}:`;
-        const entries = [
-            ...queryLoopEntries(this.loopStore, session.loopId, { prefix }),
-            ...queryLoopEntries(this.loopStore, session.loopId, {
-                prefix,
-                feedbackOnly: true,
-            }),
-        ];
+        const history = loadCommittedHistory(this.loopStore, session.loopId);
+        const entries = history.entries;
         // A pending directive outranks target validation; the lifecycle retries
         // the same restore and never commits a second directive.
-        if (!pendingRollbackDirective(entries)) {
+        if (!history.pendingDirective) {
             const resolved = findCheckpointRef({
                 entries,
                 held: check.snapshot,
@@ -1453,10 +1430,7 @@ export class SessionManager {
      *  events, not normal rounds; the timeline stays a normal-round projection. */
     replayRollbacks(loopId) {
         validateLoopId(loopId);
-        const entries = queryLoopEntries(this.loopStore, loopId, {
-            prefix: `loop:${loopId}:`,
-        });
-        return readOnlyRollbacks(entries).map((view) => ({
+        return loadCommittedHistory(this.loopStore, loopId).directives.map((view) => ({
             round: view.round,
             roundId: view.roundId,
             transactionId: view.transactionId ?? view.roundId,

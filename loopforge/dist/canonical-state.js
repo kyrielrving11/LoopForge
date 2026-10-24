@@ -8,7 +8,7 @@ import { deriveCriterionId, deriveItemId, normalizeText, STABLE_ID_RE, unique, u
 import { claimedMetCriteria, claimedRemainingCriteria } from "./self-eval.js";
 import { getPolicy } from "./policy.js";
 import { deriveConfiguredCapability } from "./policy.js";
-export const CANONICAL_STATE_SCHEMA_VERSION = 4;
+export const CANONICAL_STATE_SCHEMA_VERSION = 5;
 /** v3.7.1: Presentation view of sub-goals shared by prompts and the state
  *  file (one derivation, no second copy). Only ACTIVE items render as rows
  *  — pending/in_progress/blocked — ordered blocked → in_progress → pending
@@ -73,24 +73,16 @@ export function formatCriterionRows(statuses, successCriteria) {
             continue;
         seen.add(id);
         ids.push(id);
-        const related = status && status.related_subgoal_ids.length > 0
-            ? ` (related: ${status.related_subgoal_ids.join(", ")})`
-            : "";
-        lines.push(`- ${criterionIcon(status?.status ?? "unknown")} [\`${id}\`] ${text}${related}`);
+        lines.push(`- ${criterionIcon(status?.status ?? "unknown")} [\`${id}\`] ${text}`);
     }
     return { lines, ids };
 }
 /** v3.9.4: the ONE active-sub-goal formatter shared by the prompt and the
  *  state file. Rows past `cap` lose their descriptions but NEVER their ids:
  *  the overflow line lists every remaining `sg-*`. */
-export function formatActiveSubGoals(subGoals, round, cap = getPolicy().evolution.max_active_subgoals,
-/** v3.9.7: objects moved to Critical Context are removed from the rows and
- *  the overflow line, but still count in the totals. */
-omitIds) {
+export function formatActiveSubGoals(subGoals, round, cap = getPolicy().evolution.max_active_subgoals) {
     const view = activeSubGoalView([...subGoals], Number.POSITIVE_INFINITY);
-    const visible = omitIds
-        ? view.active.filter((subGoal) => !omitIds.has(subGoal.id))
-        : view.active;
+    const visible = view.active;
     const shown = visible.slice(0, Math.max(0, cap));
     const hidden = visible.slice(shown.length);
     const lines = [];
@@ -227,17 +219,13 @@ export function constraintProvenanceLabel(meta) {
 export function formatRoundContractWithIds(contract,
 /** v3.8: the derived item statuses. When given, each item renders with its
  *  machine status — the agent sees the verification debt in its own task. */
-statuses, options = {}) {
-    if (options.omitContract)
-        return { text: "", emittedIds: [] };
+statuses) {
     const lines = [];
     const emittedIds = [contract.id];
     const heading = contract.work_item?.trim();
     lines.push(`**${heading || "Round Contract"}** (${contract.id})`);
     const statusById = new Map((statuses?.items ?? []).map((item) => [item.itemId, item]));
-    const items = options.omitItemIds
-        ? contract.items.filter((item) => !options.omitItemIds.has(item.id))
-        : contract.items;
+    const items = contract.items;
     if (items.length > 0) {
         lines.push("- Acceptance conditions:");
     }
@@ -257,9 +245,6 @@ statuses, options = {}) {
         if (item.criterion_refs.length > 0) {
             lines.push(`    - Criteria: ${item.criterion_refs.join(", ")}`);
         }
-        if (item.subgoal_refs.length > 0) {
-            lines.push(`    - Sub-goals: ${item.subgoal_refs.join(", ")}`);
-        }
         if (machine?.reasons.length) {
             lines.push(`    - Unverified because: ${machine.reasons[0]}`);
         }
@@ -277,45 +262,6 @@ statuses, options = {}) {
 export function formatRoundContract(contract, statuses) {
     return formatRoundContractWithIds(contract, statuses).text;
 }
-/** v3.9.7: one contract item as the prompt renders it. Critical Context uses
- *  the same line when an item is moved, so the text cannot drift. */
-export function formatContractItemLine(item, machine) {
-    const mark = machine?.status === "verified" ? "✅"
-        : machine?.status === "insufficient" ? "🟠"
-            : machine?.status === "contradicted" ? "⛔"
-                : machine?.status === "pending" ? "⬜"
-                    : "";
-    const status = machine ? ` — ${machine.status}` : "";
-    const lines = [
-        `- ${mark ? `${mark} ` : ""}[\`${item.id}\`] ${item.description}${status}`,
-    ];
-    if (item.verify_with.length > 0) {
-        lines.push(`  - Verify via: ${item.verify_with.join(", ")}`);
-    }
-    if (item.criterion_refs.length > 0) {
-        lines.push(`  - Criteria: ${item.criterion_refs.join(", ")}`);
-    }
-    if (item.subgoal_refs.length > 0) {
-        lines.push(`  - Sub-goals: ${item.subgoal_refs.join(", ")}`);
-    }
-    if (machine?.reasons.length) {
-        lines.push(`  - Unverified because: ${machine.reasons[0]}`);
-    }
-    return lines.join("\n");
-}
-/** v3.9.7: one active sub-goal row as the prompt renders it. */
-export function formatSubGoalRow(subGoal, round) {
-    const statusIcon = subGoal.status === "in_progress" ? "🔄" :
-        subGoal.status === "blocked" ? "🚫" : "⏳";
-    const stale = subGoal.status === "pending" &&
-        round - subGoal.declared_at_round >= 10 ? " ⚠️ stale" : "";
-    const detail = subGoal.status === "in_progress"
-        ? ` (since R${subGoal.status_changed_at_round})`
-        : subGoal.status === "pending"
-            ? ` (since R${subGoal.declared_at_round})`
-            : ` (blocked R${subGoal.status_changed_at_round})`;
-    return `- ${statusIcon} [\`${subGoal.id}\`] ${subGoal.description}${detail}${stale}`;
-}
 const STATE_SECTION_TIER = {
     // Current — what the next round must hold in working memory.
     "Loop Objective": "Current",
@@ -326,7 +272,6 @@ const STATE_SECTION_TIER = {
     Remaining: "Current",
     Blockers: "Current",
     "Sub-Goal Dashboard": "Current",
-    "External Context": "Current",
     // v3.8.1: the one-line phase position (the only fact the deleted Roadmap
     // section carried that no other section renders). It is orientation for the
     // NEXT round, so it belongs with the working-memory tier — and it must be
@@ -457,10 +402,7 @@ function flatStateSections(state) {
                             : cs.status === "remaining" ? "⬜" : "❔";
             const idTag = ` [\`${cs.id}\`]`;
             const met = cs.met_at_round !== undefined ? ` (met R${cs.met_at_round})` : "";
-            const related = cs.related_subgoal_ids.length > 0
-                ? ` (related: ${cs.related_subgoal_ids.join(", ")})`
-                : "";
-            lines.push(`- ${icon}${idTag} ${cs.text}${met}${related}`);
+            lines.push(`- ${icon}${idTag} ${cs.text}${met}`);
         }
         lines.push("");
     }
@@ -547,7 +489,7 @@ export function createCanonicalLoopState(request, response, stateFilePath,
 /** v3.3: Display-only derived data. Optional 4th param — callers that
  *  predate v3.3 stay on 3-arg calls. */
 derived) {
-    const last = derived?.previousRound?.result ?? request.last_round_result;
+    const last = derived?.previousRound?.result ?? null;
     const objective = response.loop_objective;
     const verificationFlags = derived?.previousRound?.verificationFlags ??
         request.verification_flags ?? [];
@@ -641,10 +583,6 @@ derived) {
         ...(roundContract ? { roundContract } : {}),
         ...(derived?.roundFacts?.itemStatuses
             ? { contractItemStatuses: derived.roundFacts.itemStatuses }
-            : {}),
-        ...(derived?.roundFacts?.verifiedSubGoals &&
-            derived.roundFacts.verifiedSubGoals.length > 0
-            ? { verifiedSubGoals: [...derived.roundFacts.verifiedSubGoals] }
             : {}),
         capability: deriveConfiguredCapability(getPolicy()),
     };

@@ -15,8 +15,8 @@
  *   const server = new McpServer();
  *   server.start();
  */
-export { Mode, AgentStatus, makeExecutionFeedback, makeSelfEvaluation, makeLoopObjective, makeLoopRoundResult, makeLoopCompileRequest, makeLoopCompileResponse, makeSessionState, makeTaskId, makeEvidenceSnapshot, makeVerificationFlag, makeVerificationResult, makeEnforcementResult, makeSubGoal, makeConstraintMeta, } from "./protocol.js";
-export type { ExecutionFeedback, SelfEvaluation, LoopForgeRequest, LoopObjective, LoopRoundResult, LoopCompileRequest, LoopCompileResponse, LoopForgeResponse, SessionState, AgentLoopResult, WorkerResult, EvidenceSnapshot, VerificationFlag, VerificationResult, EnforcementResult, SubGoal, ConstraintMeta, PromptArtifact, PromptCoverage, PromptRequestEffect, ContractTransition, ProgressCoverage, ProgressSnapshot, SubmissionDiagnostic, SubmissionDiagnosticHandling, SubmissionGuidance, SubmissionHandle, SubmissionReceipt, SubmissionReportHandling, CheckpointRef, CheckpointRole, WorkspaceCheckpointManifest, RecoveryTarget, } from "./protocol.js";
+export { AgentStatus, makeSelfEvaluation, makeLoopObjective, makeLoopRoundResult, makeLoopCompileRequest, makeLoopCompileResponse, makeEvidenceSnapshot, makeVerificationFlag, makeVerificationResult, makeEnforcementResult, makeSubGoal, makeConstraintMeta, } from "./protocol.js";
+export type { SelfEvaluation, LoopObjective, LoopRoundResult, LoopCompileRequest, LoopCompileResponse, WorkerResult, EvidenceSnapshot, VerificationFlag, VerificationResult, EnforcementResult, SubGoal, ConstraintMeta, PromptArtifact, PromptCoverage, CompiledRoundFacts, ContractTransition, ProgressCoverage, SubmissionDiagnostic, SubmissionDiagnosticHandling, SubmissionGuidance, SubmissionHandle, SubmissionReceipt, SubmissionReportHandling, CheckpointRef, CheckpointRole, WorkspaceCheckpointManifest, RecoveryTarget, } from "./protocol.js";
 export { getPolicy, loadPolicy, resetPolicy, DEFAULT_POLICY, writeStateFile, } from "./policy.js";
 export type { LoopPolicy, EnginePolicy, BackendPolicy, PromptPolicy, StateFilePolicy, EvidencePolicy, CommandEvidencePolicy, McpPolicy, } from "./policy.js";
 export { FileLoopStore, queryLoopEntries, LOOP_STORE_SCHEMA_VERSION, } from "./loop-store.js";
@@ -27,16 +27,16 @@ export type { FieldGuide, GuidanceOptions, GuidanceSessionView, SelfEvalPromptCo
 export { deriveCommittedSubmissionView, deriveSubmissionReceipt, } from "./submission-receipt.js";
 export type { ReceiptFacts, ReceiptInput, } from "./submission-receipt.js";
 export { ReplayBackend } from "./replay.js";
-export { LoopForgeEngine, createEngine, buildSelfEvaluation, parseExecutionReport, parseWorkerResults, } from "./engine.js";
-export type { EngineMetrics, DelegationEntry } from "./engine.js";
+export { LoopForgeEngine, createEngine, } from "./engine.js";
+export { buildSelfEvaluation, parseExecutionReport, parseWorkerResults, } from "./self-eval.js";
 export type { StopReason } from "./protocol.js";
 export { McpServer } from "./mcp/server.js";
 export { SessionManager } from "./mcp/session.js";
 export type { McpSession, McpSessionSummary } from "./mcp/session.js";
-export { EvidenceCollector, GitEvidenceProvider, CommandEvidenceProvider, registerEvidenceProvider, unregisterEvidenceProvider, isProviderRegistered, isPassedAfterObservation, deriveObservationDeltas, gitDeltaState, isValidProgressSnapshot, observationVersionIssue, expectedObservationSchemaVersion, coverageKey, } from "./evidence-provider.js";
+export { EvidenceCollector, GitEvidenceProvider, CommandEvidenceProvider, registerEvidenceProvider, unregisterEvidenceProvider, isProviderRegistered, isPassedAfterObservation, deriveObservationDeltas, gitDeltaState, observationVersionIssue, expectedObservationSchemaVersion, coverageKey, } from "./evidence-provider.js";
 export type { EvidenceProvider, EvidenceCaptureContext, EvidenceCaptureResult, EvidenceCollectOptions, EvidenceProviderFactory, ObservationDelta, ObservationProgress, ObservationVersionIssue, GitDeltaState, } from "./evidence-provider.js";
-export { deriveProgressWindow, deriveRoundProgress, GIT_WORKSPACE_COVERAGE, STALL_PROGRESS_COVERAGE, } from "./progress.js";
-export type { ProgressCoverageSelector, ProgressSelector, ProgressWindow, RoundProgress, } from "./progress.js";
+export { deriveProgressWindow, deriveRoundProgress, GIT_WORKSPACE_COVERAGE, } from "./progress.js";
+export type { ProgressWindow, RoundProgress, } from "./progress.js";
 export { logEvent, } from "./observability.js";
 export type { LogEventData, } from "./observability.js";
 export { PolicyMetricsCollector, policyMetrics, getPolicyMetrics, resetPolicyMetrics, } from "./policy-metrics.js";

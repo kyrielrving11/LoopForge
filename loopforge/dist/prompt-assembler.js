@@ -10,10 +10,9 @@
  * alone are over it — truncation of mandatory content never happens.
  */
 import { createHash } from "node:crypto";
-import { formatActiveSubGoals, formatContractItemLine, formatCriterionRows, formatRoundContractWithIds, formatSubGoalRow, constraintProvenanceLabel, hashCanonicalState, partitionActiveConstraints, } from "./canonical-state.js";
+import { formatActiveSubGoals, formatCriterionRows, formatRoundContractWithIds, constraintProvenanceLabel, hashCanonicalState, partitionActiveConstraints, } from "./canonical-state.js";
 import { PROMPT_ARTIFACT_SCHEMA_VERSION } from "./protocol.js";
 import { deriveCriterionId, deriveFindingId, deriveItemId, normalizeText, } from "./token-utils.js";
-import { getPolicy } from "./policy.js";
 import { verificationActionFor } from "./verification-actions.js";
 import { assertPromptCoverage, derivePromptCoverage, } from "./prompt-coverage.js";
 export const DEFAULT_PROMPT_BUDGETS = {
@@ -81,100 +80,36 @@ function constraintLines(state, texts) {
             (violated ? " (violated this round)" : "");
     }).join("\n");
 }
-export function deriveNormativeObjects(state, level, recoveryBrief) {
+/** v4.0.1: the active normative id set coverage must prove. The set is
+ *  derived directly from the canonical state; sections render independently
+ *  and declare the ids they emitted. There is no prompt-request movement any
+ *  more, so a second "normative object" representation is unnecessary. */
+function activeNormativeIds(state, _level, recoveryBrief) {
     const out = [];
     const partition = partitionActiveConstraints(state);
-    for (const text of partition.hard) {
-        out.push({
-            id: identityForText(state, text),
-            kind: "constraint",
-            text,
-            ownerSection: "hard_constraints",
-            render: constraintLines(state, [text]),
-            coverageIds: [identityForText(state, text)],
-        });
-    }
-    for (const text of partition.other) {
-        out.push({
-            id: identityForText(state, text),
-            kind: "constraint",
-            text,
-            ownerSection: "active_constraints",
-            render: constraintLines(state, [text]),
-            coverageIds: [identityForText(state, text)],
-        });
+    for (const text of [...partition.hard, ...partition.other]) {
+        out.push({ id: identityForText(state, text), kind: "constraint" });
     }
     for (const text of partition.criteria) {
-        const id = identityForText(state, text);
-        out.push({
-            id,
-            kind: "criterion",
-            text,
-            ownerSection: "criteria",
-            render: `- [\`${id}\`] ${text}`,
-            coverageIds: [id],
-        });
+        out.push({ id: identityForText(state, text), kind: "criterion" });
     }
     if (state.roundContract) {
-        const full = formatRoundContractWithIds(state.roundContract, state.contractItemStatuses ?? null);
-        out.push({
-            id: state.roundContract.id,
-            kind: "contract",
-            text: state.roundContract.work_item?.trim() || "Round Contract",
-            ownerSection: "current_task",
-            render: full.text,
-            coverageIds: full.emittedIds,
-        });
+        out.push({ id: state.roundContract.id, kind: "contract" });
         for (const item of state.roundContract.items) {
-            const machine = state.contractItemStatuses?.items.find((entry) => entry.itemId === item.id);
-            out.push({
-                id: item.id,
-                kind: "contract_item",
-                text: item.description,
-                ownerSection: "current_task",
-                render: formatContractItemLine(item, machine ?? null),
-                coverageIds: [item.id],
-            });
+            out.push({ id: item.id, kind: "contract_item" });
         }
     }
     for (const subGoal of state.subGoals) {
         if (subGoal.status === "done" || subGoal.status === "canceled")
             continue;
-        out.push({
-            id: subGoal.id,
-            kind: "subgoal",
-            text: subGoal.description,
-            ownerSection: "sub_goals",
-            render: formatSubGoalRow(subGoal, state.round),
-            coverageIds: [subGoal.id],
-        });
+        out.push({ id: subGoal.id, kind: "subgoal" });
     }
     for (const flag of state.verificationFlags) {
-        const id = deriveFindingId(flag);
-        out.push({
-            id,
-            kind: "finding",
-            text: flag.detail,
-            ownerSection: "verification",
-            render: verificationFlagLine(flag, level),
-            coverageIds: [id],
-        });
+        out.push({ id: deriveFindingId(flag), kind: "finding" });
     }
     const brief = state.recoveryBrief ?? recoveryBrief;
-    if (brief && brief.length > 0) {
-        out.push({
-            id: "recovery",
-            kind: "recovery",
-            text: brief.join("\n"),
-            ownerSection: "recovery",
-            render: brief.join("\n"),
-            coverageIds: ["recovery"],
-        });
-    }
-    return canonicalObjects(out);
-}
-/** Deduplicate by id (strongest kind) and sort deterministically. */
-function canonicalObjects(objects) {
+    if (brief && brief.length > 0)
+        out.push({ id: "recovery", kind: "recovery" });
     const rank = {
         recovery: 0,
         contract: 1,
@@ -185,7 +120,7 @@ function canonicalObjects(objects) {
         finding: 6,
     };
     const byId = new Map();
-    for (const object of objects) {
+    for (const object of out) {
         const existing = byId.get(object.id);
         if (!existing || rank[object.kind] < rank[existing.kind]) {
             byId.set(object.id, object);
@@ -194,20 +129,14 @@ function canonicalObjects(objects) {
     return [...byId.values()].sort((left, right) => rank[left.kind] - rank[right.kind] ||
         (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
 }
-function activeNormativeIds(state, level, recoveryBrief) {
-    return deriveNormativeObjects(state, level, recoveryBrief).map((object) => ({
-        id: object.id,
-        kind: object.kind,
-    }));
-}
 /** v3.9.4: the normative sections shared by L0/L1/L2. Levels change ONLY the
  *  density of narrative sections; they never change which active normative
  *  ids are rendered. Every section here is mandatory (protected). */
-function commonMandatorySections(state, level, recoveryBrief, omittedIds = new Set()) {
+function commonMandatorySections(state, level, recoveryBrief) {
     const partition = partitionActiveConstraints(state);
-    const hard = partition.hard.filter((text) => !omittedIds.has(identityForText(state, text)));
-    const other = partition.other.filter((text) => !omittedIds.has(identityForText(state, text)));
-    const criteriaTexts = state.successCriteria.filter((text) => !omittedIds.has(identityForText(state, text)));
+    const hard = partition.hard;
+    const other = partition.other;
+    const criteriaTexts = state.successCriteria;
     const sections = [
         {
             id: "objective",
@@ -217,11 +146,7 @@ function commonMandatorySections(state, level, recoveryBrief, omittedIds = new S
         },
     ];
     if (state.roundContract) {
-        const omitContract = omittedIds.has(state.roundContract.id);
-        const omitItemIds = new Set(state.roundContract.items
-            .filter((item) => omittedIds.has(item.id))
-            .map((item) => item.id));
-        const formatted = formatRoundContractWithIds(state.roundContract, state.contractItemStatuses ?? null, { omitContract, omitItemIds });
+        const formatted = formatRoundContractWithIds(state.roundContract, state.contractItemStatuses ?? null);
         sections.push({
             id: "current_task",
             text: section("Current Task", formatted.text),
@@ -263,7 +188,7 @@ function commonMandatorySections(state, level, recoveryBrief, omittedIds = new S
         });
     }
     if (state.subGoals.length > 0) {
-        const subGoals = formatActiveSubGoals(state.subGoals, state.round, undefined, omittedIds);
+        const subGoals = formatActiveSubGoals(state.subGoals, state.round);
         sections.push({
             id: "sub_goals",
             text: section("Active Sub-Goals", subGoals.lines.join("\n")),
@@ -272,7 +197,7 @@ function commonMandatorySections(state, level, recoveryBrief, omittedIds = new S
         });
     }
     const brief = state.recoveryBrief ?? recoveryBrief;
-    if (brief && brief.length > 0 && !omittedIds.has("recovery")) {
+    if (brief && brief.length > 0) {
         sections.push({
             id: "recovery",
             text: section("Recovery Brief", brief.join("\n")),
@@ -280,7 +205,7 @@ function commonMandatorySections(state, level, recoveryBrief, omittedIds = new S
             coverageIds: ["recovery"],
         });
     }
-    const findings = state.verificationFlags.filter((flag) => !omittedIds.has(deriveFindingId(flag)));
+    const findings = state.verificationFlags;
     if (findings.length > 0) {
         sections.push({
             id: "verification",
@@ -311,8 +236,8 @@ function retryRequirementsSection(state, level) {
         coverageIds: [],
     };
 }
-function l0Sections(state, recoveryBrief, omittedIds = new Set()) {
-    const sections = commonMandatorySections(state, "l0", recoveryBrief, omittedIds);
+function l0Sections(state, recoveryBrief) {
+    const sections = commonMandatorySections(state, "l0", recoveryBrief);
     const retry = retryRequirementsSection(state, "l0");
     if (retry)
         sections.push(retry);
@@ -347,8 +272,8 @@ function activeWarnings(flags, currentRound) {
         return `- ${icon} ${subject} — ${flag.count}×, latest R${Math.max(...flag.rounds)}`;
     }).join("\n");
 }
-function l1Sections(state, recoveryBrief, omittedIds = new Set()) {
-    const sections = commonMandatorySections(state, "l1", recoveryBrief, omittedIds);
+function l1Sections(state, recoveryBrief) {
+    const sections = commonMandatorySections(state, "l1", recoveryBrief);
     const retry = retryRequirementsSection(state, "l1");
     if (retry)
         sections.push(retry);
@@ -382,8 +307,8 @@ function l1Sections(state, recoveryBrief, omittedIds = new Set()) {
     }
     return sections;
 }
-function l2Sections(state, recoveryBrief, omittedIds = new Set()) {
-    const sections = commonMandatorySections(state, "l2", recoveryBrief, omittedIds);
+function l2Sections(state, recoveryBrief) {
+    const sections = commonMandatorySections(state, "l2", recoveryBrief);
     const retry = retryRequirementsSection(state, "l2");
     if (retry)
         sections.push(retry);
@@ -419,14 +344,14 @@ function l2Sections(state, recoveryBrief, omittedIds = new Set()) {
     }
     return sections;
 }
-function selectSections(input, omittedIds = new Set()) {
+function selectSections(input) {
     if (input.level === "l0") {
-        return l0Sections(input.state, input.recoveryBrief, omittedIds);
+        return l0Sections(input.state, input.recoveryBrief);
     }
     if (input.level === "l1") {
-        return l1Sections(input.state, input.recoveryBrief, omittedIds);
+        return l1Sections(input.state, input.recoveryBrief);
     }
-    return l2Sections(input.state, input.recoveryBrief, omittedIds);
+    return l2Sections(input.state, input.recoveryBrief);
 }
 /** v3.8.1: render order, in ONE place.
  *
@@ -451,10 +376,6 @@ const SECTION_PRIORITY = {
     recovery: 6,
     verification: 7,
     retry_requirements: 8,
-    // Zero-token pure reorder, but it is the ONLY place emphasized items render
-    // (they are MOVED out of their source sections), so dropping it would delete
-    // them rather than just deprioritize them.
-    critical_context: 9,
     // ── optional current-governance / anchor sections ───────────────────────
     blockers: 20,
     corrections: 21,
@@ -529,158 +450,6 @@ function renderWithinBudget(sections, fixedText, budget) {
         }
     }
     return { rendered, included, dropped, protectedOverflow };
-}
-// ═══════════════════════════════════════════════════════════════════════════
-// v2.9: Prompt Requests — model-expressed information needs
-// ═══════════════════════════════════════════════════════════════════════════
-/** Match emphasis targets against the ONE current normative-object list.
- *  v3.9.7: exact stable ids only (the candidate's real id), normalized-exact
- *  text, and the reserved recovery id. No fuzzy match, no historical object,
- *  no text-hash guess for `sg-`/`rci-`/`f-`. */
-function matchEmphasize(targets, candidates, cap) {
-    if (targets.length === 0)
-        return { moved: [], effects: [] };
-    const uniqueTargets = [...new Set(targets)];
-    const hitsByTarget = new Map();
-    const ordered = [];
-    const seenIds = new Set();
-    for (const target of uniqueTargets) {
-        const key = normalizeText(target);
-        const identityHit = target === "recovery"
-            ? candidates.filter((candidate) => candidate.id === "recovery")
-            : candidates.filter((candidate) => candidate.id === target);
-        const hit = identityHit.length > 0
-            ? identityHit
-            : candidates.filter((candidate) => normalizeText(candidate.text) === key);
-        hitsByTarget.set(target, hit);
-        // A normalized text can describe multiple normative objects. LoopForge
-        // must not choose one on the Agent's behalf; the Agent can resubmit a
-        // stable id when it intends a specific object.
-        if (identityHit.length === 0 && hit.length > 1)
-            continue;
-        for (const candidate of hit) {
-            if (seenIds.has(candidate.id))
-                continue;
-            seenIds.add(candidate.id);
-            ordered.push(candidate);
-        }
-    }
-    const moved = ordered.slice(0, Math.max(0, cap));
-    // A moved contract block renders all of its items, so an item target is
-    // applied when its id is covered by any moved object.
-    const renderedIds = new Set(moved.flatMap((object) => object.coverageIds));
-    const effects = targets.map((target) => {
-        const hits = hitsByTarget.get(target) ?? [];
-        if (hits.length === 0) {
-            return { field: "emphasize", request: target, status: "no_match" };
-        }
-        const identityHit = target === "recovery"
-            ? candidates.some((candidate) => candidate.id === "recovery")
-            : candidates.some((candidate) => candidate.id === target);
-        if (!identityHit && hits.length > 1) {
-            return {
-                field: "emphasize",
-                request: target,
-                status: "ambiguous",
-                matched_ids: hits.map((candidate) => candidate.id),
-                matched_count: hits.length,
-            };
-        }
-        const applied = hits
-            .map((candidate) => candidate.id)
-            .filter((id) => renderedIds.has(id));
-        if (applied.length === 0) {
-            return {
-                field: "emphasize",
-                request: target,
-                status: "capped",
-                matched_ids: [],
-                matched_count: hits.length,
-            };
-        }
-        return {
-            field: "emphasize",
-            request: target,
-            status: "applied",
-            matched_ids: [...new Set(applied)],
-            matched_count: hits.length,
-        };
-    });
-    return { moved, effects };
-}
-/** Render the "Confusion Alerts" section that appears at the prompt top.
- *
- *  v3.8.1: the points are echoed back, truncated and capped — nothing more.
- *  The compiler used to score each point against eight section keywords with
- *  Jaccard similarity and point at the argmax. That pointer was both a
- *  similarity verdict and, in practice, nearly always wrong: "I don't
- *  understand milestone tracking" scores 1/8 = 0.125 against the keyword
- *  `milestone`, below the 0.15 default, so it fell through to the generic
- *  line anyway. v3.9.5: the pointer is conditional — a disabled state file
- *  must never be named as the place to look. */
-function renderConfusionAlerts(points, fullDensity, hasStateFile) {
-    if (points.length === 0)
-        return "";
-    const lines = [
-        "## ⚠️ Confusion Alerts (Agent request)",
-        "",
-        "You reported these questions/confusions in the previous round. They are",
-        "your own notes, not LoopForge findings or machine facts.",
-        hasStateFile
-            ? "Full context: the state file."
-            : "No state file is enabled; use the live prompt, replay, or status views.",
-        "",
-    ];
-    // v2.14: L2 renders up to the policy cap (was: every confusion point,
-    // unbounded by max_confusion_points); L1 keeps a single alert.
-    const shown = fullDensity
-        ? points.slice(0, getPolicy().prompt.max_confusion_points)
-        : points.slice(0, 1);
-    for (const point of shown) {
-        const truncated = point.length > 200 ? point.slice(0, 197) + "…" : point;
-        lines.push(`- **"${truncated}"**`);
-        lines.push(hasStateFile
-            ? "  → Read the full state file for relevant context."
-            : "  → Use the current prompt, replay, or status views for context.");
-        lines.push("");
-    }
-    if (!fullDensity && points.length > 1) {
-        lines.push(hasStateFile
-            ? `*… and ${points.length - 1} more confusion point(s) — see state file.*`
-            : `*… and ${points.length - 1} more confusion point(s).*`);
-        lines.push("");
-    }
-    return lines.join("\n");
-}
-/** Render the "Critical Context" section. The text is the exact fragment the
- *  owning section would have rendered, so moving an object never changes its
- *  content. A contract block brings its items; an item-only move brings the
- *  one item line. */
-function renderCriticalContext(moved) {
-    if (moved.length === 0)
-        return "";
-    const lines = [
-        "## 🔴 Critical Context",
-        "",
-        "Requested by you in the previous round (Agent request).",
-        "",
-    ];
-    const movedContract = moved.some((object) => object.kind === "contract");
-    for (const object of moved) {
-        // The contract block already renders every item; do not duplicate an item
-        // that was also targeted individually.
-        if (movedContract && object.kind === "contract_item")
-            continue;
-        if (object.id === "recovery") {
-            lines.push("### Recovery Brief [`recovery`]");
-            lines.push(object.render.trim());
-            lines.push("");
-            continue;
-        }
-        lines.push(object.render.trim());
-        lines.push("");
-    }
-    return lines.join("\n");
 }
 export function assemblePromptArtifact(input) {
     const budgets = { ...DEFAULT_PROMPT_BUDGETS, ...input.budgets };
@@ -771,83 +540,10 @@ export function assemblePromptArtifact(input) {
         evaluation,
     ].join("\n");
     const footer = [pointer, howToRespond].join("");
-    // ── v2.9: Prompt Requests — model-expressed information needs ──────────
-    const pr = input.promptRequests;
-    const levelIsL0 = input.level === "l0";
-    const levelIsL2 = input.level === "l2";
-    // Confusion alerts: L1/L2 only, rendered at the top (before mandatory sections)
-    const confusionText = (!levelIsL0 && pr?.confusion_points?.length)
-        ? renderConfusionAlerts(pr.confusion_points, levelIsL2, Boolean(stateFilePath))
-        : "";
-    // Emphasize: L1/L2 only, matched against the ONE current normative-object
-    // list. Closed/historical objects are absent from the list, so they can
-    // never be resurrected.
-    const policy = getPolicy().prompt;
-    const emphasizeCap = levelIsL2 ? policy.max_emphasize_l2 : policy.max_emphasize_l1;
-    const normative = deriveNormativeObjects(input.state, input.level, input.recoveryBrief);
-    const emphasis = (!levelIsL0 && pr?.emphasize?.length)
-        ? matchEmphasize(pr.emphasize, normative, emphasizeCap)
-        : { moved: [], effects: [] };
-    // v3.9.1: prompt-request effects are OUTPUT facts about this render. They
-    // are never read by compile/decision code.
-    const promptRequestEffects = [...emphasis.effects];
-    if (levelIsL0 && pr?.emphasize?.length) {
-        for (const target of pr.emphasize) {
-            promptRequestEffects.push({
-                field: "emphasize",
-                request: target,
-                status: "level_ignored",
-            });
-        }
-    }
-    if (pr?.confusion_points?.length) {
-        const shown = levelIsL0
-            ? 0
-            : levelIsL2
-                ? policy.max_confusion_points
-                : 1;
-        pr.confusion_points.forEach((point, index) => {
-            promptRequestEffects.push({
-                field: "confusion_points",
-                request: point,
-                status: levelIsL0
-                    ? "level_ignored"
-                    : index < shown
-                        ? "applied"
-                        : "capped",
-            });
-        });
-    }
-    // Emphasize is a pure reorder: the matched objects are MOVED out of their
-    // owning sections, not duplicated. `commonMandatorySections` receives the
-    // omitted-id set and filters only the owning section; blockers are never
-    // filtered by text.
-    const omittedIds = new Set(emphasis.moved.flatMap((object) => object.coverageIds));
-    const sections = selectSections(input, omittedIds);
-    const criticalContextText = renderCriticalContext(emphasis.moved);
-    const criticalCoverageIds = [...new Set(emphasis.moved.flatMap((object) => object.coverageIds))];
-    // v3.8.1: no presentation snapshot. The artifact records what THIS prompt
-    // rendered (level, hashes, round identity, the sections it emitted) and
-    // nothing about what a LATER prompt should do differently — a prompt's
-    // content must follow from committed facts, not from what the previous
-    // prompt happened to show.
-    // Inject confusion alerts into the header area (before mandatory sections)
-    const fixedText = header + confusionText;
-    // Inject critical context as a mandatory section
-    let augmentedSections = sections;
-    if (criticalContextText) {
-        augmentedSections = [
-            {
-                id: "critical_context",
-                text: criticalContextText,
-                mandatory: true,
-                coverageIds: criticalCoverageIds,
-            },
-            ...sections,
-        ];
-    }
+    const sections = selectSections(input);
+    const fixedText = header;
     const sectionBudget = budget - footer.length;
-    const selected = renderWithinBudget(augmentedSections, fixedText, sectionBudget);
+    const selected = renderWithinBudget(sections, fixedText, sectionBudget);
     const renderedPrompt = selected.rendered + footer;
     const promptHash = createHash("sha256").update(renderedPrompt).digest("hex");
     // v3.9.4: coverage is derived from the ORIGINAL state and the sections that
@@ -856,7 +552,7 @@ export function assemblePromptArtifact(input) {
     const active = activeNormativeIds(input.state, input.level, input.recoveryBrief);
     const renderedIds = new Set();
     for (const sectionId of selected.included) {
-        const section = augmentedSections.find((entry) => entry.id === sectionId);
+        const section = sections.find((entry) => entry.id === sectionId);
         if (!section)
             continue;
         for (const id of section.coverageIds)
@@ -884,7 +580,6 @@ export function assemblePromptArtifact(input) {
         protectedOverflow: selected.protectedOverflow,
         budget: sectionBudget,
         renderedChars: selected.rendered.length,
-        promptRequestEffects,
         coverage,
     };
 }

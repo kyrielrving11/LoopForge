@@ -138,7 +138,6 @@ export function canonicalContractText(contract) {
         items: contract.items.map((item) => ({
             description: normalizeText(item.description),
             criterion_refs: item.criterion_refs.map(normalizeText),
-            subgoal_refs: item.subgoal_refs.map(normalizeText),
             verify_with: item.verify_with.map(normalizeText),
         })),
     };
@@ -155,7 +154,6 @@ export function deriveContractItemId(item, duplicateOrdinal) {
     const canonical = JSON.stringify({
         description: normalizeText(item.description),
         criterion_refs: item.criterion_refs.map(normalizeText),
-        subgoal_refs: item.subgoal_refs.map(normalizeText),
         verify_with: item.verify_with.map(normalizeText),
         duplicate_ordinal: duplicateOrdinal,
     });
@@ -169,7 +167,6 @@ export function canonicalContractItemText(item) {
     return JSON.stringify({
         description: normalizeText(item.description),
         criterion_refs: item.criterion_refs.map(normalizeText),
-        subgoal_refs: item.subgoal_refs.map(normalizeText),
         verify_with: item.verify_with.map(normalizeText),
     });
 }

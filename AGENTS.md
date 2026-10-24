@@ -19,19 +19,22 @@ boundary. Do not grow this file with behavior that a test can state instead.
 - Do not reintroduce removed capabilities: MCP Tasks, prompt-technique routing,
   automatic memory discovery, PromptCraft vault writes, Markdown lineage
   fallback, `LoopProjection`/todo/handoff, automatic phase milestones,
-  external-context injection, or Agent revision/retraction of operator
-  acceptance.
+  external-context injection, Agent revision/retraction of operator
+  acceptance, `prompt_requests`, `objective_refinement`, custom progress
+  snapshots/selectors, the delegation journal, or contract `subgoal_refs`.
 
 ## Boundaries
 
 ### 1. One factual source, one cognitive source
 
 Committed typed round documents in the Vault are the only factual source.
-`CanonicalLoopState` is compiled from them. Work decomposition never comes from
-a parallel notion of progress. Compile, projections, gates, audit, explain and
-metrics read the same committed history window. Replay, Audit, Metrics and
-Explain are read-only views: they must not write history or derive an
-independent rule.
+Compiling never writes the Vault; only `RoundTransactionCoordinator` commits a
+round. `CommittedRoundView` is the only history interpretation and
+`loadCommittedHistory` the only runtime read path; compile, projections, gates,
+audit, explain, replay and metrics share that window. `CanonicalLoopState` is
+compiled from it. Work decomposition never comes from a parallel notion of
+progress. Replay, Audit, Metrics and Explain are read-only views: they must not
+write history or derive an independent rule.
 
 ### 2. Stable identity only
 

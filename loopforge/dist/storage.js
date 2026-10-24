@@ -1,5 +1,6 @@
 /** Persistence adapters for session state and committed round lookup. */
-import { queryLoopEntries } from "./loop-store.js";
+import { randomUUID } from "node:crypto";
+import { LoopExistsError } from "./errors.js";
 import { LOOP_STORE_SCHEMA_VERSION } from "./loop-store.js";
 function isLeaseOwnerAlive(ownerId, leaseExpiresAt) {
     const match = ownerId.match(/^(\d+):/);
@@ -59,6 +60,9 @@ export class VaultSessionStateStore {
         }
         const write = () => {
             const existing = this.store.readSession(loopId);
+            if (existing && options.expectAbsent) {
+                throw new LoopExistsError(loopId, "session");
+            }
             if (existing && options.expectedLeaseOwner) {
                 const lineage = this.lineage(existing.entry);
                 const owner = typeof lineage.lease_owner === "string"
@@ -195,10 +199,45 @@ export class VaultRoundCommitStore {
         this.store = store;
     }
     find(loopId, round) {
-        return queryLoopEntries(this.store, loopId, {
-            prefix: `loop:${loopId}:r${round}:feedback`,
-            feedbackOnly: true,
-        });
+        const feedback = this.store.readRound(loopId, round)?.feedback;
+        return feedback ? [feedback] : [];
+    }
+    findRollback(loopId, round, transactionId) {
+        const taskId = `loop:${loopId}:r${round}:rollback:${transactionId}`;
+        const doc = this.store.readRound(loopId, round);
+        return doc?.events.find((entry) => entry.task_id === taskId && entry.task_type === "rollback_directive") ?? null;
+    }
+    appendFeedback(loopId, round, envelope) {
+        const entry = {
+            id: randomUUID(),
+            task_id: `loop:${loopId}:r${round}:feedback`,
+            task_type: "feedback",
+            loop_id: loopId,
+            timestamp: new Date().toISOString(),
+            loop_lineage: {
+                round,
+                round_id: envelope.round_id,
+                round_transaction: envelope,
+            },
+        };
+        this.store.appendEntry(entry);
+        return entry;
+    }
+    appendRollbackDirective(loopId, round, transactionId, envelope) {
+        const entry = {
+            id: randomUUID(),
+            task_id: `loop:${loopId}:r${round}:rollback:${transactionId}`,
+            task_type: "rollback_directive",
+            loop_id: loopId,
+            timestamp: new Date().toISOString(),
+            loop_lineage: {
+                round,
+                round_id: envelope.round_id,
+                round_transaction: envelope,
+            },
+        };
+        this.store.appendEntry(entry);
+        return entry;
     }
 }
 //# sourceMappingURL=storage.js.map

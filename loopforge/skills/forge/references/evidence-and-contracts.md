@@ -7,15 +7,15 @@ shapes, real ids, and usable commands.
 ## Optional evaluation field groups (conceptual)
 
 - **Reports:** `execution_report`, `discovered_constraints`,
-  `wrong_assumptions`, `worker_results`.
+  `wrong_assumptions`, and `worker_results` (the minimal audit shape:
+  `agentId`, `subTask`, `resultSummary`, `outcome`).
 - **State transitions:** `emerged_subtasks`, `subgoal_updates`,
-  `objective_refinement`, `retracted_constraints` (Agent-discovered
-  constraints only; operator criteria/hard constraints are immutable).
+  `retracted_constraints` (Agent-discovered constraints only; operator
+  criteria/hard constraints are immutable).
 - **Claims and verification proposals:** criterion claims, active contract item
   claims, and `round_contract`.
-- **Prompt and lifecycle controls:** `prompt_requests`,
-  `compression_checkpoint` / `checkpoint_label`, `outcome`, `blocker`,
-  `stop_reason`, `no_change_reason`, and `gate_ids`.
+- **Lifecycle controls:** `compression_checkpoint` / `checkpoint_label`,
+  `outcome`, `blocker`, `stop_reason`, `no_change_reason`, and `gate_ids`.
 
 A field is included only when its event actually happened. The live guidance
 decides current applicability and the exact legal shape.
@@ -53,8 +53,9 @@ Use the current `submission_guidance` for the exact legal shape. Conceptually:
   changes outside it are an info fact only.
 - `criterion_refs` must cite real `cr-*` ids from the active criterion set the
   current prompt rendered.
-- `subgoal_refs` must name active `sg-*` ids shown in the current prompt. A
-  sub-goal declared in the same submission becomes referenceable next round.
+- Sub-goals remain an Agent plan report. Contract items do not link to them;
+  their closure depends only on the item, its bound commands and machine
+  evidence.
 
 Unknown fields, free text where an id is required, duplicate refs, duplicate
 normalized items, unconfigured/disabled/not-after commands, and a missing
@@ -86,7 +87,6 @@ redirection in the same evaluation:
     "items": [{
       "description": "<a different acceptance condition>",
       "criterion_refs": [],
-      "subgoal_refs": [],
       "verify_with": ["verify"]
     }]
   }

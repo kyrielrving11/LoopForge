@@ -44,6 +44,10 @@ export declare class SessionManager implements SessionRegistry {
     /** Register (or replace) a session in the in-memory registry. */
     upsert(session: McpSession): void;
     private findSessionEntry;
+    /** Whether the loop already has durable round history. A lineage-only round
+     *  document from a failed start is NOT history and must remain retryable;
+     *  only a committed feedback envelope counts. */
+    private hasCommittedRounds;
     private claimSessionEntry;
     private renewSessionLease;
     private renewOwnedLeases;

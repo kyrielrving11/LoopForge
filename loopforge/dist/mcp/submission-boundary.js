@@ -21,25 +21,20 @@
  *  committed history window the prompt was compiled from, so the prompt, the
  *  boundary and `submission_guidance` cannot disagree about them.
  */
-import { queryLoopEntries } from "../loop-store.js";
 import { deriveActiveRoundContract } from "../round-contract.js";
-import { derivationRounds, pendingRollbackDirective } from "../committed-round.js";
+import { historyWindow, loadCommittedHistory } from "../history.js";
 import { boundedEmergedSubtasks, normalizeSelfEvaluation, parseSubGoalUpdates, validateContractShape, validateContractTransition, validateCoreSelfEvaluation, validateSubGoalUpdatesShape, } from "../self-eval.js";
 import { deriveEmergedItems, deriveSubGoals, validateSubGoalUpdates, } from "../subgoal-state.js";
 import { isConfiguredCommand } from "../policy.js";
-import { canonicalContractItemText, deriveCriterionId, entryRound, isRecord, uniqueNormalized, } from "../token-utils.js";
+import { canonicalContractItemText, deriveCriterionId, isRecord, uniqueNormalized, } from "../token-utils.js";
 import { latestObjective } from "../loop-compiler.js";
 import { deriveConstraintProvenance, resolveConstraintRetractions, } from "../constraint-lifecycle.js";
 import { getPolicy } from "../policy.js";
 function referenceFactsFor(store, session) {
     try {
-        const prefix = `loop:${session.loopId}:`;
-        const entries = queryLoopEntries(store, session.loopId, { prefix });
-        const allEntries = [
-            ...entries,
-            ...queryLoopEntries(store, session.loopId, { prefix, feedbackOnly: true }),
-        ];
-        const windowRounds = derivationRounds(allEntries, session.currentRound);
+        const history = loadCommittedHistory(store, session.loopId);
+        const entries = history.entries;
+        const windowRounds = historyWindow(history, session.currentRound);
         const subGoals = deriveSubGoals({
             loopId: session.loopId,
             currentRound: session.currentRound,
@@ -56,7 +51,7 @@ function referenceFactsFor(store, session) {
                 created_at_round: 1,
                 loop_id: session.loopId,
             }
-            : latestObjective(session.loopId, { results: entries }, session.currentRound, session.currentRound === 1 && (session.roundSnapshot?.attempt ?? 1) > 1);
+            : latestObjective(session.loopId, { results: entries });
         const criteriaTexts = objective?.success_criteria ?? null;
         const criteria = criteriaTexts === null
             ? null
@@ -64,18 +59,14 @@ function referenceFactsFor(store, session) {
                 id: deriveCriterionId(text),
                 text,
             }));
-        // The current round's compile stamped the active set it rendered. This is
-        // the same text set the prompt carried; provenance is re-derived from the
-        // committed window, never from a second ledger.
-        const currentLineage = entries.find((entry) => entryRound(entry) === session.currentRound &&
-            entry.task_type === "loop_lineage");
-        const lineage = isRecord(currentLineage?.loop_lineage)
-            ? currentLineage.loop_lineage
-            : {};
-        const rawActive = Array.isArray(lineage.constraints_active)
-            ? lineage.constraints_active.filter((item) => typeof item === "string")
+        // The held prompt's compile stamped the exact active set it rendered.
+        // This is the same text set the prompt carried; provenance is re-derived
+        // from the committed window, never from a second ledger.
+        const rawActive = session.roundSnapshot?.compiled?.constraintsActive ?? null;
+        const pending = history.pendingDirective?.recovery?.target.redo_round ===
+            session.currentRound
+            ? history.pendingDirective
             : null;
-        const pending = pendingRollbackDirective(allEntries, session.currentRound);
         const preservedDiscoveries = pending?.recovery &&
             getPolicy().engine.backtrack_preserve_discoveries
             ? pending.recovery.skipped_discoveries
@@ -96,7 +87,7 @@ function referenceFactsFor(store, session) {
                     preservedRound: pending?.round,
                 }),
             }));
-        const previouslyRetired = uniqueNormalized(windowRounds.flatMap((round) => round.retractedConstraints ?? []));
+        const previouslyRetired = uniqueNormalized(windowRounds.flatMap((round) => round.compiledRetirements ?? round.retractedConstraints ?? []));
         return { subGoals, criteria, constraints, previouslyRetired };
     }
     catch {
@@ -133,12 +124,8 @@ export function knownSubGoalsFor(session, emerged, knownSubGoals) {
 /** The ACTIVE Round Contract governing a session's next round — ONE
  *  derivation, shared by the session's public view and the boundary. */
 export function activeContractOf(store, session) {
-    const prefix = `loop:${session.loopId}:`;
-    const entries = [
-        ...queryLoopEntries(store, session.loopId, { prefix }),
-        ...queryLoopEntries(store, session.loopId, { prefix, feedbackOnly: true }),
-    ];
-    return deriveActiveRoundContract(derivationRounds(entries, session.currentRound));
+    const history = loadCommittedHistory(store, session.loopId);
+    return deriveActiveRoundContract(historyWindow(history, session.currentRound));
 }
 /** Map a strict boundary error onto the same diagnostic vocabulary, without
  *  persisting it. Strict failures are returned only for that attempt. */
@@ -262,7 +249,7 @@ export function validateSubmission(store, session, submission) {
             },
         };
     }
-    const contractErrors = contractShapeErrors(store, session, submission, facts?.subGoals ?? null, facts?.criteria ?? null);
+    const contractErrors = contractShapeErrors(store, session, submission, facts?.criteria ?? null);
     if (contractErrors.length > 0) {
         return {
             ok: false,
@@ -325,16 +312,8 @@ function resolveSubmissionRetractions(facts, submission) {
         })),
     };
 }
-function contractShapeErrors(store, session, submission, subGoals, criteria) {
+function contractShapeErrors(store, session, submission, criteria) {
     const active = session ? activeContractOf(store, session) : null;
-    // v3.9.4: contract refs can only cite what the prompt actually displays.
-    // Same-round emerged sub-goals are deliberately excluded; they are not in
-    // the prompt and become referenceable in the NEXT round.
-    const displayedSubGoals = subGoals
-        ? new Set(subGoals
-            .filter((subGoal) => subGoal.status !== "done" && subGoal.status !== "canceled")
-            .map((subGoal) => subGoal.id))
-        : null;
     const shapeErrors = validateContractShape(submission, {
         activeItemIds: session
             ? new Set((active?.items ?? []).map((item) => item.id))
@@ -342,7 +321,6 @@ function contractShapeErrors(store, session, submission, subGoals, criteria) {
         knownCriterionIds: criteria
             ? new Set(criteria.map((criterion) => criterion.id))
             : null,
-        displayedSubGoalIds: displayedSubGoals,
         isConfiguredCommand,
     });
     // v3.9.9: the transition is a STRUCTURAL boundary like the contract itself.

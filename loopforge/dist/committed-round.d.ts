@@ -7,12 +7,12 @@
 import type { MachineObservation } from "./protocol.js";
 import type { ObservationDelta } from "./evidence-provider.js";
 import type { VaultEntry } from "./loop-store.js";
-import type { CheckpointRef, ContractBinding, ContractTransition, ExecutionReport, LoopRoundResult, OperatorAcceptance, PromptArtifact, RecoveryDirective, RoundContractProposal, RoundOutcome, SelfEvaluation, SubmissionDiagnostic, SubGoalUpdate, VerificationFlag } from "./protocol.js";
+import type { CheckpointRef, CompiledRoundFacts, ContractBinding, ContractTransition, ExecutionReport, LoopRoundResult, OperatorAcceptance, PromptArtifact, RecoveryDirective, RoundContractProposal, RoundOutcome, SelfEvaluation, SubmissionDiagnostic, SubGoalUpdate, VerificationFlag } from "./protocol.js";
 import type { RoundProcessResult } from "./round-coordinator.js";
 import type { RoundTransactionSnapshot } from "./round-transaction.js";
 export type CommittedAction = "continue" | "stop" | "recovery" | "backtrack";
 export interface CommittedRoundView {
-    readonly source: "feedback" | "merged" | "rollback";
+    readonly source: "feedback" | "rollback";
     readonly sourceEntry: VaultEntry | Record<string, unknown>;
     readonly loopId: string;
     readonly round: number;
@@ -36,6 +36,8 @@ export interface CommittedRoundView {
     readonly restore: RoundTransactionSnapshot["restore"] | null;
     /** Operator-owned immutable acceptance, when this transaction carries it. */
     readonly operatorAcceptance: OperatorAcceptance | null;
+    /** v4.0.1: the compile facts stamped at commit, when present. */
+    readonly compiled: CompiledRoundFacts | null;
     readonly sequence?: number;
     readonly attempt: number;
     readonly promptArtifact: PromptArtifact | null;
@@ -80,20 +82,11 @@ export declare function decodeCommittedRound(entry: VaultEntry): CommittedRoundV
 /** v3.9.6: decode a committed rollback directive event. It is a typed event
  *  in the round document, never a normal feedback round. */
 export declare function decodeRollbackEvent(entry: VaultEntry): CommittedRoundView | null;
-/** Decode an in-memory lineage entry after the engine merged its committed
- * feedback. The merged entry MUST carry the embedded transaction snapshot;
- * the old raw top-level evaluation reconstruction is gone, so a partial
- * lineage entry cannot become a second history. */
-export declare function decodeMergedRound(entry: unknown): CommittedRoundView | null;
 /** Normalize committed history: rollback directives disappear, later records
  * replace earlier records for the same logical round, and output is ascending. */
-/** Decode a committed round from either representation: an engine-hydrated
- *  merged lineage entry first (decodeMergedRound), then a durable :feedback
- *  entry. Compile-side callers used to inline this chain as a private
- *  `committedView` helper. */
-export declare function decodeRound(entry: unknown): CommittedRoundView | null;
-/** v3.9.6: decode either an ordinary committed round or a rollback event.
- *  The branch read model is the only caller that needs both kinds together. */
+/** v4.0.1: decode either an ordinary committed round or a rollback event.
+ *  There is no merged-lineage representation any more: a committed round is
+ *  exactly its durable :feedback envelope, and a rollback is its event. */
 export declare function decodeCommittedRecord(entry: unknown): CommittedRoundView | null;
 /** THE committed-view → compiler-request projection.
  *
@@ -111,32 +104,6 @@ export declare function pendingBacktrackRecord(entries: ReadonlyArray<unknown>, 
 /** Lineage sub-object of an entry (`loop_lineage`; v3.7: the legacy
  *  top-level `lineage` alias was removed), or {} when absent. */
 export declare function entryLineage(entry: unknown): Record<string, unknown>;
-/** Extract execution_report from an entry, handling both direct-field and
- *  lineage-nested shapes. The decoded committed view wins when the entry is
- *  a committed round. Returns null when absent. Moved from loop-compiler so
- *  field-shape interpretation lives in this module only. */
-export declare function entryExecutionReport(entry: unknown): Record<string, unknown> | null;
-/** Read the criteria the agent claimed met from an entry's execution_report. */
-export declare function entryCriteriaMet(entry: unknown): string[];
-/** Read the criteria the agent declared outstanding from an entry. */
-export declare function entryCriteriaRemaining(entry: unknown): string[];
-/** Read constraints_active from an entry's lineage. */
-export declare function entryActiveConstraints(entry: unknown): string[];
-/** Read retracted_constraints from an entry (direct field, else nested in
- *  the lineage). */
-export declare function entryRetractedConstraints(entry: unknown): string[];
-/** Read emerged_subtasks from an entry (handles direct + lineage nesting). */
-export declare function entryEmergedSubtasks(entry: unknown): string[];
-/** Read subgoal_updates from an entry (handles direct + lineage nesting).
- *  v3.7.1: committed status transitions are replayed in round order by the
- *  compiler — every derivation replays ALL committed rounds, not just the
- *  last one. */
-export declare function entrySubGoalUpdates(entry: unknown): SubGoalUpdate[];
-/** Read constraint_violations from an entry (entry-level, stored from the
- *  previous round's last_round_result at persist time — distinct from the
- *  evaluation-level violations on the committed view). Moved from
- *  verification-gate so lineage-shape reads live in this module only. */
-export declare function entryViolations(entry: unknown): string[];
 export declare function historyRounds(views: Iterable<CommittedRoundView | null>, beforeRound?: number): CommittedRoundView[];
 /** v3.9.6: the ONE branch read model. */
 export interface BranchView {
@@ -149,9 +116,13 @@ export interface BranchView {
     /** The last directive whose child branch has no evaluation commit yet. */
     pendingDirective: CommittedRoundView | null;
 }
-/** Resolve the current branch from committed branch identities. This is the
- *  only branch-fencing rule; it replaces the session frontier and every
- *  numeric/temporal approximation. */
+/** Resolve the current branch from already-decoded committed views. This is
+ *  the branch walker itself; `resolveBranch` is only the entry-decoding
+ *  wrapper, so a caller that already holds the views (the history loader)
+ *  never decodes the same entries twice. */
+export declare function resolveBranchViews(records: ReadonlyArray<CommittedRoundView>): BranchView;
+/** Resolve the current branch from committed records in the raw entry view.
+ *  Decoding happens once here; the walker itself is `resolveBranchViews`. */
 export declare function resolveBranch(entries: ReadonlyArray<unknown>): BranchView;
 /** v3.9.6: current-branch evaluation rounds. */
 export declare function branchRounds(entries: ReadonlyArray<unknown>): CommittedRoundView[];

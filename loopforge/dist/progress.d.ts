@@ -1,34 +1,18 @@
-/** v3.9.9: the ONE coverage-selected progress derivation.
+/** The ONE machine-progress derivation.
  *
- *  A provider reports a FACT about the range it observed. A rule selects the
- *  exact facts it consumes via an explicit `(kind, coverage)` selector; there
- *  is no global vote, no wildcard, and no subset inference. The Git arm keeps
- *  its complete-boundary/HEAD rule; a custom provider reports its own
- *  persisted fingerprint snapshot. Command observations are not progress
- *  providers.
+ * Progress is a Git workspace fact: a round either moved (file boundary or
+ * HEAD), did not move, or could not be observed. Custom and command
+ * observations are reports; they never participate in stall or prompt
+ * freshness. A missing/unobservable signal is `unknown`, never "no progress".
  *
- *  Every consumer — stall, prompt freshness, machine-status display, replay —
- *  reads these functions. Only replay/explain/display may pass `"any"`;
- *  governance rules always name their coverage.
+ * Every consumer — stall, prompt freshness, machine-status display, replay —
+ * reads these functions.
  */
-import type { ProgressCoverage, ProgressState } from "./protocol.js";
+import type { ProgressState } from "./protocol.js";
 import type { ObservationDelta } from "./evidence-provider.js";
 import type { CommittedRoundView } from "./committed-round.js";
 export { gitMotionSignal, observedGitHead } from "./git-motion.js";
 export { GIT_WORKSPACE_COVERAGE } from "./git-motion.js";
-/** v3.9.9: the explicit selection a rule makes. `kind` is the machine type of
- *  the observation, not a provider-supplied string, so a custom provider that
- *  mimics the Git coverage strings still cannot participate in a Git rule. */
-export interface ProgressCoverageSelector {
-    kind: "git" | "custom";
-    coverage: ProgressCoverage;
-}
-/** `"any"` selects every fact — replay/explain/display only. It must never be
- *  used by a governance or prompt-density rule. */
-export type ProgressSelector = "any" | readonly ProgressCoverageSelector[];
-/** v3.9.9: the ONE selector the stall rule, the in-flight round and prompt
- *  freshness share. Fixed in code this release; no policy key is added. */
-export declare const STALL_PROGRESS_COVERAGE: readonly ProgressCoverageSelector[];
 export interface RoundProgress {
     state: ProgressState;
     /** Every provider that participated in this round's verdict. */
@@ -52,20 +36,10 @@ export interface ProgressWindow {
     incomplete: boolean;
     lookback: number;
 }
-/** Aggregate facts with ALL-selector semantics.
- *
- *  - any selected `changed` wins;
- *  - a required coverage with NO fact while another required coverage has one
- *    is `unknown` (a missing signal must never read as `unchanged`);
- *  - any selected `unknown` is `unknown`;
- *  - every required coverage present and all `unchanged` is `unchanged`;
- *  - no selected fact at all is `not_applicable`.
- *
- *  A provider that exists but cannot be observed produces an `unknown` fact —
- *  that is different from a provider that does not exist. */
-export declare function deriveRoundProgress(deltas: ReadonlyArray<ObservationDelta>, selector: ProgressSelector): RoundProgress;
-/** The committed window verdict under the SAME selector. A full contiguous
+/** The Git progress verdict for one round's observation deltas. */
+export declare function deriveRoundProgress(deltas: ReadonlyArray<ObservationDelta>): RoundProgress;
+/** The committed window verdict over the same Git facts. A full contiguous
  *  window is required for a definite verdict; any missing/legacy round is
  *  `unknown`, never "no progress". */
-export declare function deriveProgressWindow(rounds: ReadonlyArray<CommittedRoundView>, currentRound: number, lookback: number, selector: ProgressSelector): ProgressWindow;
+export declare function deriveProgressWindow(rounds: ReadonlyArray<CommittedRoundView>, currentRound: number, lookback: number): ProgressWindow;
 //# sourceMappingURL=progress.d.ts.map

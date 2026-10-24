@@ -6,11 +6,6 @@
  * v3.3: 41 types — 2 enums + 35 interfaces + 4 type aliases.
  */
 // ── Enums ──────────────────────────────────────────────────────────────────
-export var Mode;
-(function (Mode) {
-    Mode["LOOP_COMPILE"] = "loop_compile";
-    Mode["FEEDBACK"] = "feedback";
-})(Mode || (Mode = {}));
 // Type-only import — erased at runtime, no dependency cycle with
 // canonical-state.ts (which imports protocol.ts for its types).
 export var AgentStatus;
@@ -19,15 +14,6 @@ export var AgentStatus;
     AgentStatus["ERROR"] = "error";
     AgentStatus["STALLED"] = "stalled";
 })(AgentStatus || (AgentStatus = {}));
-export function makeExecutionFeedback(overrides = {}) {
-    return {
-        output: "",
-        success: false,
-        constraint_violations: [],
-        manual_fixes_needed: "",
-        ...overrides,
-    };
-}
 export function makeGateDecision(overrides = {}) {
     return {
         gateId: "",
@@ -50,7 +36,6 @@ export function makeSelfEvaluation(overrides = {}) {
         constraint_violations: [],
         should_continue: true,
         discovered_constraints: [],
-        objective_refinement: "",
         emerged_subtasks: [],
         subgoal_updates: [],
         execution_report: undefined,
@@ -64,7 +49,6 @@ export function makeSelfEvaluation(overrides = {}) {
         blocker: undefined,
         retroactiveClaims: [],
         no_change_reason: undefined,
-        prompt_requests: undefined,
         round_contract: undefined,
         ...overrides,
     };
@@ -77,6 +61,15 @@ export function makeLoopObjective(overrides = {}) {
         created_at_round: 1,
         loop_id: "",
         ...overrides,
+    };
+}
+/** The operator acceptance carried by a committed transaction is the same
+ *  immutable surface the compiler used to derive the objective. */
+export function operatorAcceptanceFromObjective(objective) {
+    return {
+        task: objective.objective,
+        success_criteria: [...objective.success_criteria],
+        hard_constraints: [...objective.hard_constraints],
     };
 }
 export function makeSubGoal(overrides = {}) {
@@ -107,7 +100,6 @@ export function makeLoopRoundResult(overrides = {}) {
         constraint_violations: [],
         manual_fixes_needed: "",
         discovered_constraints: [],
-        objective_refinement: "",
         emerged_subtasks: [],
         subgoal_updates: [],
         execution_report: undefined,
@@ -116,7 +108,6 @@ export function makeLoopRoundResult(overrides = {}) {
         worker_results: [],
         compression_checkpoint: false,
         checkpoint_label: "",
-        prompt_requests: undefined,
         outcome: undefined,
         blocker: undefined,
         retroactiveClaims: [],
@@ -126,17 +117,13 @@ export function makeLoopRoundResult(overrides = {}) {
 }
 export function makeLoopCompileRequest(overrides = {}) {
     return {
-        mode: Mode.LOOP_COMPILE,
         loop_id: "",
         round: 1,
         goal_id: "",
         task: "",
-        domain: "",
-        next_task_proposal: "",
         loop_objective: null,
         plan_source: null,
         constraints_from_plan: [],
-        last_round_result: null,
         force_level: "auto",
         verification_flags: [],
         attempt: 1,
@@ -149,25 +136,21 @@ export function makeLoopCompileRequest(overrides = {}) {
 /** v3.8.1: the artifact schema version, next to the type it versions. The
  *  transaction envelope parser reads it, so the constant lives here rather
  *  than in the renderer. */
-/** v3.9.4: schema 4 adds `coverage`. v3.9.7: schema 6 adds prompt-request
- *  `matched_ids`/`matched_count` and the single `defect` coverage reason.
- *  Older versions are a HARD break — a round whose artifact does not parse is
- *  not committed history, and `legacyTransactionRounds` reports the loss
- *  rather than letting it vanish. */
-export const PROMPT_ARTIFACT_SCHEMA_VERSION = 6;
+/** v4.0.1: schema 7 removes the prompt-request effects. Older versions are a
+ *  HARD break — a round whose artifact does not parse is not committed
+ *  history, and `legacyTransactionRounds` reports the loss rather than letting
+ *  it vanish. */
+export const PROMPT_ARTIFACT_SCHEMA_VERSION = 7;
 export function makeLoopCompileResponse(overrides = {}) {
     return {
         status: AgentStatus.OK,
         prompt: "",
         recompile_level: "l2",
-        diff_from_previous: "",
-        lineage: [],
         constraints_active: [],
         constraints_retired: [],
         loop_id: "",
         round: 0,
         goal_id: "",
-        goal_text_hash: "",
         loop_objective: null,
         sub_goals: [],
         constraint_metadata: [],
@@ -181,13 +164,6 @@ export function makeLoopCompileResponse(overrides = {}) {
 }
 export function makeEvidenceSnapshot(overrides = {}) {
     return { verified: [], pending: [], invalidated: [], discovered: [], ...overrides };
-}
-export function makeSessionState(taskId) {
-    return {
-        task_id: taskId,
-        call_count: 0,
-        success_trend: [],
-    };
 }
 export function makeEnforcementResult(overrides = {}) {
     return {
@@ -229,10 +205,4 @@ export function makeExecutionReport(overrides = {}) {
  *  dirty-files-only shape; version 2 is the complete workspace boundary. */
 export const GIT_OBSERVATION_SCHEMA_VERSION = 2;
 // ── Factory helpers ─────────────────────────────────────────────────────────
-export function makeTaskId(taskDescription) {
-    let slug = taskDescription.toLowerCase().trim().slice(0, 60);
-    slug = slug.replace(/[^a-z0-9\s-]/g, "");
-    slug = slug.replace(/\s+/g, "-");
-    return slug || "unnamed-task";
-}
 //# sourceMappingURL=protocol.js.map

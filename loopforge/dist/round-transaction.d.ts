@@ -6,15 +6,14 @@
  * a process crash is idempotent.
  */
 import type { LoopStore } from "./loop-store.js";
-import { LoopForgeEngine } from "./engine.js";
 import type { ObservationDelta } from "./evidence-provider.js";
-import type { CheckpointRef, ContractBinding, MachineObservation, OperatorAcceptance, PromptArtifact, RecoveryDirective, RecoveryTarget, SelfEvaluation, SubmissionDiagnostic, WorkspaceCheckpointManifest } from "./protocol.js";
+import type { CheckpointRef, CompiledRoundFacts, ContractBinding, MachineObservation, OperatorAcceptance, PromptArtifact, RecoveryDirective, RecoveryTarget, SelfEvaluation, SubmissionDiagnostic, WorkspaceCheckpointManifest } from "./protocol.js";
 import { type RoundProcessResult } from "./round-coordinator.js";
 import type { RoundCommitStore } from "./storage.js";
 /** v3.9.7: schema 5 adds the transaction before-image, explicit mid-round
  *  checkpoints and the redo restore marker. Schema 4 is unsupported and is
  *  reported by `legacyTransactionRounds`; there is no compatibility migration. */
-export declare const ROUND_TRANSACTION_SCHEMA_VERSION: 5;
+export declare const ROUND_TRANSACTION_SCHEMA_VERSION: 6;
 /** Maximum distinct mid-round checkpoints one transaction may reference. */
 export declare const MAX_MID_CHECKPOINTS_PER_TRANSACTION = 32;
 /** The root branch identity for every loop. */
@@ -55,9 +54,14 @@ export interface RoundTransactionSnapshot {
     beforeEvidence: MachineObservation[];
     afterEvidence?: MachineObservation[];
     evaluation?: SelfEvaluation;
-    /** v3.9.6: operator acceptance, written once on the root branch's round 1
-     *  evaluation transaction. Absent on every later transaction. */
+    /** v4.0.1: the immutable operator surface, carried byte-identically on every
+     *  evaluation transaction and rollback directive. A same-round redo may
+     *  replace the numeric round slot, so the fact must travel with each durable
+     *  document rather than existing only on the root. */
     operatorAcceptance?: OperatorAcceptance;
+    /** v4.0.1: the compile facts that produced this evaluation. Absent on a
+     *  rollback directive. */
+    compiled?: CompiledRoundFacts;
     /** v3.9.6: committed rollback directive facts (rollback kind only). */
     recovery?: RecoveryDirective;
     result?: RoundProcessResult;
@@ -145,6 +149,7 @@ export declare function makeRoundId(loopId: string, round: number): string;
 export declare function prepareRoundTransaction(loopId: string, round: number, beforeEvidence: MachineObservation[], promptArtifact?: PromptArtifact, opts?: {
     branchId?: string;
     operatorAcceptance?: OperatorAcceptance;
+    compiled?: CompiledRoundFacts;
     kind?: "evaluation";
     beforeCheckpoint?: CheckpointRef;
     beforeCheckpointError?: {
@@ -156,15 +161,14 @@ export declare function prepareRoundTransaction(loopId: string, round: number, b
 /** Attach the next prompt attempt to a rejected logical round without changing
  * its identity or evidence baseline. Evaluation fields belong to the previous
  * attempt and are cleared before the Agent receives the retry prompt. */
-export declare function prepareRejectedAttempt(rejected: RoundTransactionSnapshot, promptArtifact: PromptArtifact): RoundTransactionSnapshot;
+export declare function prepareRejectedAttempt(rejected: RoundTransactionSnapshot, promptArtifact: PromptArtifact, compiled?: CompiledRoundFacts, operatorAcceptance?: OperatorAcceptance): RoundTransactionSnapshot;
 export declare function isProcessResult(value: unknown): value is RoundProcessResult;
 /** Parse a persisted snapshot without trusting arbitrary vault data. */
 export declare function parseRoundTransactionSnapshot(value: unknown): RoundTransactionSnapshot | null;
 export declare class RoundTransactionCoordinator {
-    private readonly engine;
     private readonly store;
     private readonly commitStore;
-    constructor(engine: LoopForgeEngine, store?: LoopStore, commitStore?: RoundCommitStore);
+    constructor(store: LoopStore, commitStore?: RoundCommitStore);
     process(input: RoundTransactionInput): RoundTransactionOutcome;
     /** v3.9.6: commit an Agent-initiated rollback directive. This path does not
      *  run verification or enforcement: abandoning work is an action, not a

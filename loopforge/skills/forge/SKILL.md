@@ -154,7 +154,7 @@ every field; `references/evidence-and-contracts.md` groups the optional fields
 conceptually. Reports and claims are not machine evidence. A criterion claim is
 advisory, while a contract item becomes verified only from its configured
 machine observations. A worker's discoveries remain a report until the main
-Agent promotes a finding through the supported top-level field.
+Agent promotes a finding through top-level `discovered_constraints`.
 
 `execution_report.files_changed` is the **boundary net change**: paths whose
 content or file type differs between round preparation and this submission,
@@ -286,6 +286,7 @@ shapes, real ids, and usable commands always come from the live
   redirecting a contract, or relying on a verification command.
 - [`references/recovery-and-views.md`](references/recovery-and-views.md):
   backtrack/Agent recovery, checkpoint authority, pending restore, prompt
-  levels, read-only views, gates/delegation, and the derived state file. Read
+  levels, read-only views, the optional gate, worker reports, and the derived
+  state file. Read
   before requesting recovery/backtrack, interpreting L0/L1/L2, or using
   status/replay/audit/explain/gates.

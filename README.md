@@ -76,8 +76,11 @@ before issuing the redo prompt.
 
 LoopForge can also trigger a backtrack when a machine rule requires it. Both
 paths use the same restore protocol and remain visible in history. Redo
-continues on a child branch, preserving the abandoned work for audit without
-treating it as current work.
+continues on a child branch. The rollback directive keeps the abandoned
+approaches, wrong assumptions, skipped files and Recovery Brief facts; a
+same-round redo replaces that numeric round's feedback slot, so the abandoned
+evaluation itself is not kept as a second copy. The current branch never treats
+abandoned work as current work.
 
 ## The responsibility boundary
 

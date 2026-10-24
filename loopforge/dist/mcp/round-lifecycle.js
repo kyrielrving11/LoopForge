@@ -13,8 +13,8 @@ import { randomUUID } from "node:crypto";
 import { relative, resolve, sep } from "node:path";
 import { LoopForgeEngine } from "../engine.js";
 import { deriveGate } from "../cognitive-governance.js";
-import { Mode, makeLoopCompileRequest, } from "../protocol.js";
-import { captureEntrypointTrust, EvidenceCollector } from "../evidence-provider.js";
+import { makeLoopObjective, } from "../protocol.js";
+import { captureEntrypointTrust } from "../evidence-provider.js";
 import { deriveRoundObservationDelta, deriveTransactionId, parseRoundTransactionSnapshot, prepareRoundTransaction, rootBranchId, } from "../round-transaction.js";
 import { deriveActiveRoundContract, deriveRoundContractView } from "../round-contract.js";
 import { deriveSubGoals } from "../subgoal-state.js";
@@ -26,8 +26,9 @@ import { executeRestore, preflightRestore, RestoreFailure, } from "../workspace-
 import { resolveStateDirectory } from "../policy.js";
 import { finalizeStopReason } from "../round-coordinator.js";
 import { getPolicy } from "../policy.js";
-import { checkRoundSequence, queryLoopEntries } from "../loop-store.js";
-import { branchDirectives, branchRounds, derivationRounds, pendingRollbackDirective, readOnlyRounds, resolveBranch, } from "../committed-round.js";
+import { checkRoundSequence } from "../loop-store.js";
+import { branchRounds } from "../committed-round.js";
+import { historyWindow, loadCommittedHistory, } from "../history.js";
 import { deriveSubmissionGuidance } from "../submission-guidance.js";
 import { latestObjective } from "../loop-compiler.js";
 import { heldPromptSnapshot, makeSubmissionHandle, } from "./submission-handle.js";
@@ -35,6 +36,7 @@ import { logEvent } from "../observability.js";
 import { policyMetrics } from "../policy-metrics.js";
 import { isRecord, normalizeText } from "../token-utils.js";
 import { ProjectionCoverageError } from "../prompt-coverage.js";
+import { CompileFailureError, LegacyHistoryError } from "../errors.js";
 // ── Types ──────────────────────────────────────────────────────────────────
 /** M3: parse a persisted skipped-file fingerprint map (string → string).
  *  Lenient by design — v3.8.3 reuses it for the entrypoint trust baseline,
@@ -135,17 +137,31 @@ export function buildLoopRequest(session) {
     const heldAttempt = session.roundSnapshot?.round === session.currentRound
         ? session.roundSnapshot.attempt
         : 1;
+    const acceptance = session.operatorAcceptance ?? session.roundSnapshot?.operatorAcceptance;
     return {
-        task: session.task,
-        mode: Mode.LOOP_COMPILE,
-        feedback: null,
-        skill_name: null,
-        task_id: null,
         loop_id: session.loopId,
         round: session.currentRound,
+        goal_id: "",
+        task: session.task,
+        // Round 1 has no committed acceptance to read from history; the session
+        // cursor is the bootstrap. Later rounds read the committed copy.
+        loop_objective: session.currentRound === 1 && acceptance
+            ? makeLoopObjective({
+                objective: acceptance.task,
+                success_criteria: [...acceptance.success_criteria],
+                hard_constraints: [...acceptance.hard_constraints],
+                created_at_round: 1,
+                loop_id: session.loopId,
+            })
+            : null,
+        plan_source: null,
+        constraints_from_plan: [],
+        force_level: "auto",
         max_rounds: session.maxRounds,
+        verification_flags: [],
         attempt: heldAttempt,
         consecutive_rejections: session.consecutiveRejections,
+        rejection_notice: "",
     };
 }
 // ── RoundLifecycle ─────────────────────────────────────────────────────────
@@ -172,17 +188,13 @@ export class RoundLifecycle {
         return new RoundDriver(engine, this.store, this.checkpointStoreFor?.(loopId));
     }
     /** v3.9.1: the submission-guidance projection for a session's held round.
-     *  One history window (`derivationRounds`, the compile window), no writes.
+     *  One history read and one compile window, no writes.
      *  Findings from a rejected/retried attempt are supplied by the caller. */
     guidanceFor(session, extras = {}) {
-        const prefix = `loop:${session.loopId}:`;
-        const entries = [
-            ...queryLoopEntries(this.store, session.loopId, { prefix }),
-            ...queryLoopEntries(this.store, session.loopId, { prefix, feedbackOnly: true }),
-        ];
-        const criteria = this.objectiveCriteriaFor(session, entries);
+        const history = loadCommittedHistory(this.store, session.loopId);
+        const criteria = this.objectiveCriteriaFor(session, history.entries);
         return deriveSubmissionGuidance(session, {
-            rounds: derivationRounds(entries, session.currentRound),
+            rounds: historyWindow(history, session.currentRound),
             ...(criteria ? { objective: { success_criteria: criteria } } : {}),
             ...extras,
             // A pending directive is a current fact. Unless the caller supplied a
@@ -200,21 +212,18 @@ export class RoundLifecycle {
         const acceptance = session.operatorAcceptance ?? session.roundSnapshot?.operatorAcceptance;
         if (acceptance)
             return acceptance.success_criteria;
-        const attempt = session.roundSnapshot?.round === session.currentRound
-            ? session.roundSnapshot.attempt
-            : 1;
-        return latestObjective(session.loopId, { results: entries }, session.currentRound, session.currentRound === 1 && attempt > 1)?.success_criteria ?? null;
+        return latestObjective(session.loopId, { results: entries })?.success_criteria ?? null;
     }
     /** v3.9.1: the before facts of the round being submitted, from the SAME
      *  history window the compile uses. Works on a replay too: rounds below the
      *  logical round exclude the round itself. */
     beforeFactsFor(session) {
-        const prefix = `loop:${session.loopId}:`;
-        const entries = [
-            ...queryLoopEntries(this.store, session.loopId, { prefix }),
-            ...queryLoopEntries(this.store, session.loopId, { prefix, feedbackOnly: true }),
-        ];
-        const rounds = derivationRounds(entries, session.currentRound);
+        const history = loadCommittedHistory(this.store, session.loopId);
+        const rounds = historyWindow(history, session.currentRound);
+        const pending = history.pendingDirective?.recovery?.target.redo_round ===
+            session.currentRound
+            ? history.pendingDirective
+            : null;
         return {
             contractId: deriveActiveRoundContract(rounds, getPolicy().evidence.commands ?? [])?.id ?? null,
             subGoals: deriveSubGoals({
@@ -224,22 +233,15 @@ export class RoundLifecycle {
             }),
             // Captured before the transaction commits. A redo commit consumes the
             // pending directive, so reading it afterwards would lose the fact.
-            recoveryDirective: pendingRollbackDirective(entries, session.currentRound)?.recovery ?? null,
+            recoveryDirective: pending?.recovery ?? null,
         };
     }
     /** v3.9.1: derive this submission's receipt from the transaction and the
      *  shared read model. Never writes and never invents an applied effect. */
     buildReceipt(base, opts) {
-        const prefix = `loop:${base.snapshot.loopId}:`;
-        const entries = [
-            ...queryLoopEntries(this.store, base.snapshot.loopId, { prefix }),
-            ...queryLoopEntries(this.store, base.snapshot.loopId, {
-                prefix,
-                feedbackOnly: true,
-            }),
-        ];
+        const history = loadCommittedHistory(this.store, base.snapshot.loopId);
         const committed = opts.disposition === "accepted" || opts.disposition === "stopped";
-        const rounds = derivationRounds(entries, committed ? base.snapshot.round + 1 : base.snapshot.round);
+        const rounds = historyWindow(history, committed ? base.snapshot.round + 1 : base.snapshot.round);
         const commands = getPolicy().evidence.commands ?? [];
         const roundDeltas = deriveRoundObservationDelta(base.snapshot.beforeEvidence, base.actualEvidence);
         const contractView = deriveRoundContractView({
@@ -273,7 +275,7 @@ export class RoundLifecycle {
         const recoveryDirective = base.recoveryDirective ??
             (base.snapshot.kind === "rollback"
                 ? null
-                : [...branchDirectives(entries)].reverse().find((item) => item.recovery !== null && item.recovery !== undefined &&
+                : [...history.directives].reverse().find((item) => item.recovery !== null && item.recovery !== undefined &&
                     item.recovery.target.redo_round === base.snapshot.round &&
                     item.recovery.transaction_id === base.snapshot.branchId)?.recovery ?? null);
         return deriveSubmissionReceipt({
@@ -303,7 +305,7 @@ export class RoundLifecycle {
     /** Persist session state to vault for cross-process recovery.
      *  The filtered vault and replacement entry are written once under the
      *  backend lock, so recovery never observes the old two-write gap. */
-    save(session) {
+    save(session, options = {}) {
         if (!this.sessionStore)
             return;
         const leaseActive = session.status === "running";
@@ -338,6 +340,7 @@ export class RoundLifecycle {
         };
         this.sessionStore.save(sessionEntry, {
             expectedLeaseOwner: this.ownerId,
+            ...options,
         });
     }
     /** Reconstruct a McpSession from a vault session_state entry.
@@ -364,29 +367,24 @@ export class RoundLifecycle {
         const task = entry.task ?? "";
         const maxRounds = lineage.max_rounds ?? getPolicy().engine.max_rounds;
         const parsedSnapshot = parseRoundTransactionSnapshot(lineage.round_snapshot);
-        // v3.7: the synchronous evidence fallback was removed (async providers
-        // could never be collected synchronously — they were skipped and logged
-        // as failures). Every path that needs evidence re-collects asynchronously
-        // through prepare()/unpause(); a missing snapshot starts with no baseline.
-        const fallbackEvidence = [];
-        const entries = [
-            ...queryLoopEntries(this.store, loopId, { prefix: `loop:${loopId}:` }),
-            ...queryLoopEntries(this.store, loopId, { prefix: `loop:${loopId}:`, feedbackOnly: true }),
-        ];
-        const branch = resolveBranch(entries);
-        const pending = pendingRollbackDirective(entries);
+        const history = loadCommittedHistory(this.store, loopId);
+        // Legacy rounds are NOT history. Recompiling over them would overwrite
+        // data this runtime cannot read; refuse and leave the loop read-only.
+        if (history.legacyRounds.length > 0) {
+            throw new LegacyHistoryError(loopId, history.legacyRounds.map((round) => round.round));
+        }
+        const branch = history.branch;
+        const pending = history.pendingDirective;
         // The session cursor is the primary copy; the held snapshot and the
         // visible root transaction are fallbacks. Losing the operator surface
         // during a restore/restart would be unrecoverable.
         const operatorAcceptance = parseOperatorAcceptance(lineage.operator_acceptance) ??
             parsedSnapshot?.operatorAcceptance ??
-            branch.rounds.find((view) => view.operatorAcceptance !== null)?.operatorAcceptance ??
+            [...branch.rounds, ...branch.directives].find((view) => view.operatorAcceptance !== null)?.operatorAcceptance ??
             undefined;
-        const effectiveBranchId = parsedSnapshot?.branchId ?? branch.branchId ?? rootBranchId(loopId);
-        // When a rollback directive is pending, do NOT synthesize an empty
-        // beforeEvidence snapshot: it would be mistaken for a held evaluation.
-        // Resume must run the pending restore first.
-        const roundSnapshot = parsedSnapshot ?? (pending ? undefined : prepareRoundTransaction(loopId, currentRound, fallbackEvidence, undefined, { branchId: effectiveBranchId }));
+        // No synthesized evaluation snapshot: a held prompt is exactly the parsed
+        // session snapshot. Resume/unpause recompile from committed history.
+        const roundSnapshot = parsedSnapshot ?? undefined;
         const engine = new LoopForgeEngine(this.store);
         return {
             sessionId: typeof lineage.session_id === "string" && lineage.session_id
@@ -536,12 +534,7 @@ export class RoundLifecycle {
      *  They are derived from the still-pending committed directive, so a
      *  restart returns the same surface as the original recovery response. */
     pendingRecoveryGuidance(session) {
-        const prefix = `loop:${session.loopId}:`;
-        const entries = [
-            ...queryLoopEntries(this.store, session.loopId, { prefix }),
-            ...queryLoopEntries(this.store, session.loopId, { prefix, feedbackOnly: true }),
-        ];
-        const pending = pendingRollbackDirective(entries);
+        const pending = loadCommittedHistory(this.store, session.loopId).pendingDirective;
         const directive = pending?.recovery;
         if (!directive)
             return null;
@@ -646,24 +639,25 @@ export class RoundLifecycle {
             session.currentRound = recovered.snapshot.round + 1;
         }
         const request = buildLoopRequest(session);
-        const prepared = await this.driver(session.engine, session.loopId).prepare(request, session.loopId, session.currentRound, this.prepareOptions(session));
-        if (!prepared) {
-            session.status = "stalled";
-            this.save(session);
-            return {
-                sessionId: session.sessionId,
-                round: session.currentRound,
-                prompt: null,
-                stopReason: "stalled",
-                stopDetail: "RoundDriver.prepare returned null — prompt compilation failed during crash recovery. The session state may be inconsistent.",
-            };
+        let prepared;
+        try {
+            prepared = await this.driver(session.engine, session.loopId).prepare(request, session.loopId, session.currentRound, this.prepareOptions(session));
+        }
+        catch (error) {
+            if (error instanceof ProjectionCoverageError) {
+                return this.stalledAfterCommit(session.sessionId, session, pr.roundSuccess, error.message, { code: "projection_incomplete", details: { coverage: error.coverage } });
+            }
+            if (error instanceof CompileFailureError) {
+                return this.stalledAfterCommit(session.sessionId, session, pr.roundSuccess, `The committed round is held, but the next prompt could not be compiled: ${error.message}. Call loopforge_resume to retry.`);
+            }
+            throw error;
         }
         return this.persistPrepared(session, {
             prompt: prepared.prompt,
             level: prepared.level,
             baseline: prepared.evidenceBaseline,
             snapshot: prepared.snapshot,
-            warnings: prepared?.warnings ?? [],
+            warnings: prepared.warnings ?? [],
         }, pr.roundSuccess);
     }
     /** v3.9.7: a committed directive with no verified redo snapshot must be
@@ -671,12 +665,7 @@ export class RoundLifecycle {
      *  redo prepare are idempotent; a verified held redo prompt is returned
      *  without re-checking the workspace (the Agent may already have worked). */
     async completePendingRecovery(session) {
-        const prefix = `loop:${session.loopId}:`;
-        const entries = [
-            ...queryLoopEntries(this.store, session.loopId, { prefix }),
-            ...queryLoopEntries(this.store, session.loopId, { prefix, feedbackOnly: true }),
-        ];
-        const pending = pendingRollbackDirective(entries);
+        const pending = loadCommittedHistory(this.store, session.loopId).pendingDirective;
         if (!pending?.recovery)
             return null;
         const directive = pending.recovery;
@@ -739,50 +728,34 @@ export class RoundLifecycle {
             return restored;
         // Missing held prompt: compile (async) once, then persist it.
         const request = buildLoopRequest(session);
-        const prepared = await this.driver(session.engine, session.loopId).prepare(request, session.loopId, session.currentRound, this.prepareOptions(session));
-        if (!prepared) {
-            session.status = "stopped";
-            this.save(session);
-            void this.notifyTerminal(session, "stalled");
-            return {
-                sessionId: session.sessionId,
-                round: session.currentRound,
-                prompt: null,
-                stopReason: "stalled",
-                stopDetail: "RoundDriver.prepare returned null during resume — the compiler could not produce a prompt.",
-            };
+        let prepared;
+        try {
+            prepared = await this.driver(session.engine, session.loopId).prepare(request, session.loopId, session.currentRound, this.prepareOptions(session));
+        }
+        catch (error) {
+            if (error instanceof ProjectionCoverageError) {
+                return this.stalledAfterCommit(session.sessionId, session, false, error.message, { code: "projection_incomplete", details: { coverage: error.coverage } });
+            }
+            if (error instanceof CompileFailureError) {
+                return this.stalledAfterCommit(session.sessionId, session, false, `The compiler could not produce a prompt during resume: ${error.message}. Call loopforge_resume to retry.`);
+            }
+            throw error;
         }
         return this.persistPrepared(session, {
             prompt: prepared.prompt,
             level: prepared.level,
             baseline: prepared.evidenceBaseline,
             snapshot: prepared.snapshot,
-            warnings: prepared?.warnings ?? [],
+            warnings: prepared.warnings ?? [],
         }, false);
     }
     /** Unpause tail: the session has been reconstructed and registered with
-     *  status "running". Refresh async evidence, reconcile a committed round,
-     *  restore the held prompt, or compile the next prompt. */
+     *  status "running". Reconcile a committed round, restore the held prompt,
+     *  or compile the next prompt from the committed window. */
     async unpause(session) {
         const pendingRecovery = await this.completePendingRecovery(session);
         if (pendingRecovery)
             return pendingRecovery;
-        // Replace the sync-fallback evidence baseline with async evidence
-        // so resumed sessions don't silently drop async provider data.
-        try {
-            const asyncEvidence = await EvidenceCollector.fromPolicy().collectAsync({
-                loopId: session.loopId,
-                phase: "before",
-            });
-            if (asyncEvidence.length > 0) {
-                if (!session.roundSnapshot?.beforeEvidence?.length) {
-                    session.roundSnapshot = prepareRoundTransaction(session.loopId, session.currentRound, asyncEvidence);
-                }
-            }
-        }
-        catch {
-            // Async evidence is best-effort; fall back to sync baseline.
-        }
         const reconciled = await this.reconcileCommittedRound(session);
         if (reconciled)
             return reconciled;
@@ -791,49 +764,25 @@ export class RoundLifecycle {
             this.save(session);
             return restored;
         }
-        // Compile the next prompt from the current round state
-        const lcr = makeLoopCompileRequest({
-            loop_id: session.loopId,
-            round: session.currentRound,
-            goal_id: "",
-            task: session.task,
-            domain: undefined,
-            plan_source: null,
-            constraints_from_plan: [],
-        });
-        const compileRequest = {
-            task: session.task,
-            mode: Mode.LOOP_COMPILE,
-            feedback: null,
-            skill_name: null,
-            task_id: null,
-            loop_id: lcr.loop_id,
-            round: lcr.round,
-            goal_id: lcr.goal_id,
-            domain: lcr.domain ?? "",
-            plan_source: lcr.plan_source ?? null,
-            constraints_from_plan: lcr.constraints_from_plan ?? [],
-            max_rounds: session.maxRounds,
-            // Preserve an in-flight retry's attempt; a next-round compile resets
-            // it because the held snapshot belongs to the previous round.
-            attempt: session.roundSnapshot?.round === session.currentRound
-                ? session.roundSnapshot.attempt
-                : 1,
-            consecutive_rejections: session.consecutiveRejections,
-        };
-        const prepared = await this.driver(session.engine, session.loopId).prepare(compileRequest, session.loopId, session.currentRound, this.prepareOptions(session));
-        if (!prepared) {
-            session.status = "stopped";
-            this.save(session);
-            void this.notifyTerminal(session, "stalled");
-            return { sessionId: session.sessionId, round: session.currentRound, prompt: null, stopReason: "stalled", stopDetail: "RoundDriver.prepare returned null during unpause — the compiler could not produce a prompt." };
+        let prepared;
+        try {
+            prepared = await this.driver(session.engine, session.loopId).prepare(buildLoopRequest(session), session.loopId, session.currentRound, this.prepareOptions(session));
+        }
+        catch (error) {
+            if (error instanceof ProjectionCoverageError) {
+                return this.stalledAfterCommit(session.sessionId, session, false, error.message, { code: "projection_incomplete", details: { coverage: error.coverage } });
+            }
+            if (error instanceof CompileFailureError) {
+                return this.stalledAfterCommit(session.sessionId, session, false, `The compiler could not produce a prompt during unpause: ${error.message}. Call loopforge_resume to retry.`);
+            }
+            throw error;
         }
         return this.persistPrepared(session, {
             prompt: prepared.prompt,
             level: prepared.level,
             baseline: prepared.evidenceBaseline,
             snapshot: prepared.snapshot,
-            warnings: prepared?.warnings ?? [],
+            warnings: prepared.warnings ?? [],
         }, undefined,
         // Historical contract: unpause returns an empty warnings array even
         // though the session carries the compiled warnings.
@@ -849,8 +798,8 @@ export class RoundLifecycle {
         if (gate.kind !== "user")
             return;
         const taskId = `loop:${session.loopId}:gate:${id}`;
-        const existing = queryLoopEntries(this.store, session.loopId, { prefix: taskId })
-            .some((entry) => entry.task_id === taskId);
+        const existing = loadCommittedHistory(this.store, session.loopId)
+            .entries.some((entry) => entry.task_id === taskId);
         if (existing)
             return;
         const entry = {
@@ -871,7 +820,9 @@ export class RoundLifecycle {
     }
     /** Undecided user gate descriptions for a loop (recorded but unresolved). */
     listOpenGateDescriptions(loopId) {
-        const entries = queryLoopEntries(this.store, loopId, { prefix: `loop:${loopId}:gate:` });
+        const gatePrefix = `loop:${loopId}:gate:`;
+        const entries = loadCommittedHistory(this.store, loopId).entries
+            .filter((entry) => String(entry.task_id ?? "").startsWith(gatePrefix));
         const decided = new Set(entries.filter((entry) => entry.task_type === "gate_decision")
             .map((entry) => String(entry.gate_id ?? "")));
         return entries
@@ -890,7 +841,10 @@ export class RoundLifecycle {
      *  MUTATES: session.roundSnapshot, session.consecutiveRejections,
      *           session.lastRejectionCheck */
     async executeRoundTransaction(session, selfEval, normalizationDiagnostics, submittedFields) {
-        const snapshot = session.roundSnapshot ?? prepareRoundTransaction(session.loopId, session.currentRound, []);
+        const snapshot = session.roundSnapshot;
+        if (!snapshot) {
+            throw new Error("No held round transaction — the submission boundary must reject this attempt.");
+        }
         const completed = await this.driver(session.engine, session.loopId).complete({
             snapshot,
             loopId: session.loopId,
@@ -922,17 +876,18 @@ export class RoundLifecycle {
         // committed history: write them explicitly on the retry request.
         const retryRequest = buildLoopRequest(session);
         retryRequest.verification_flags = verificationFlags;
-        const preparedRetry = await this.driver(session.engine, session.loopId).prepareRetry(retryRequest, session.roundSnapshot, pr.rejectionPrompt ?? "", session.consecutiveRejections);
-        if (!preparedRetry) {
-            session.status = "stalled";
-            this.save(session);
-            return {
-                sessionId,
-                round: session.currentRound,
-                prompt: null,
-                stopReason: "stalled",
-                stopDetail: "RoundDriver.prepareRetry returned null — the retry prompt could not be compiled.",
-            };
+        let preparedRetry;
+        try {
+            preparedRetry = await this.driver(session.engine, session.loopId).prepareRetry(retryRequest, session.roundSnapshot, pr.rejectionPrompt ?? "", session.consecutiveRejections);
+        }
+        catch (error) {
+            if (error instanceof ProjectionCoverageError) {
+                return this.stalledAfterCommit(sessionId, session, false, error.message, { code: "projection_incomplete", details: { coverage: error.coverage } });
+            }
+            if (error instanceof CompileFailureError) {
+                return this.stalledAfterCommit(sessionId, session, false, `The retry prompt could not be compiled: ${error.message}. Call loopforge_resume to retry.`);
+            }
+            throw error;
         }
         session.roundSnapshot = preparedRetry.snapshot;
         this.save(session);
@@ -1066,12 +1021,6 @@ export class RoundLifecycle {
             return {
                 ok: false,
                 result: this.restoreFailedResult(session, directive, "prepare_failed", String(error instanceof Error ? error.message : error)),
-            };
-        }
-        if (!prepared) {
-            return {
-                ok: false,
-                result: this.restoreFailedResult(session, directive, "prepare_failed", "the restore verified, but the redo prompt could not be compiled"),
             };
         }
         return { ok: true, restore, prepared };
@@ -1313,18 +1262,13 @@ export class RoundLifecycle {
                 // verdict. Keep the committed round held and surface the stable code.
                 return this.stalledAfterCommit(sessionId, session, roundSuccess, error.message, { code: "projection_incomplete", details: { coverage: error.coverage } });
             }
+            if (error instanceof CompileFailureError) {
+                return this.stalledAfterCommit(sessionId, session, roundSuccess, `The round committed but the next prompt could not be compiled: ${error.message}. ` +
+                    `Call loopforge_resume to reconcile the commit and retry.`);
+            }
             return this.stalledAfterCommit(sessionId, session, roundSuccess, `RoundDriver.prepare threw after the round committed: ${String(error).slice(0, 300)}. ` +
                 `The session is stalled with the committed round still held — call ` +
                 `loopforge_resume to reconcile it and compile the next prompt.`);
-        }
-        if (!prepared) {
-            // M4: align with the sibling paths (resume / unpause / reject /
-            // backtrack / crash recovery) that treat a null preparation as a
-            // stalled session — previously this silently returned prompt:null
-            // without a stopReason while the session kept running.
-            return this.stalledAfterCommit(sessionId, session, roundSuccess, "RoundDriver.prepare returned null after the round committed — the " +
-                "next prompt could not be compiled. Call loopforge_resume to retry " +
-                "the reconciliation and compile the next prompt.");
         }
         // Commit fence after the async prepare: pause()/delete() may have run
         // while the compile/evidence collection was in flight. Do not install a
@@ -1423,15 +1367,7 @@ export class RoundLifecycle {
         // v3.9.7: a pending rollback directive with no verified redo snapshot
         // means the workspace is (or may be) mid-restore. Ordinary work must not
         // be evaluated against it. Resume completes the restore first.
-        const pendingPrefix = `loop:${session.loopId}:`;
-        const pendingEntries = [
-            ...queryLoopEntries(this.store, session.loopId, { prefix: pendingPrefix }),
-            ...queryLoopEntries(this.store, session.loopId, {
-                prefix: pendingPrefix,
-                feedbackOnly: true,
-            }),
-        ];
-        const pending = pendingRollbackDirective(pendingEntries);
+        const pending = loadCommittedHistory(this.store, session.loopId).pendingDirective;
         if (pending?.recovery &&
             (session.roundSnapshot?.restore?.directiveTransactionId !==
                 pending.recovery.transaction_id ||
@@ -1475,7 +1411,10 @@ export class RoundLifecycle {
         // transaction commits (a replay sees the same window: rounds < R).
         const beforeFacts = this.beforeFactsFor(session);
         const tx = await this.executeRoundTransaction(session, selfEval, normalizationDiagnostics, submittedFields);
-        const receiptSnapshot = session.roundSnapshot ?? prepareRoundTransaction(session.loopId, session.currentRound, []);
+        const receiptSnapshot = session.roundSnapshot;
+        if (!receiptSnapshot) {
+            throw new Error("The committed round transaction disappeared before the receipt was built.");
+        }
         const receiptBase = {
             snapshot: receiptSnapshot,
             selfEval,
@@ -1586,11 +1525,7 @@ export class RoundLifecycle {
                 },
             };
         }
-        const prefix = `loop:${session.loopId}:`;
-        const entries = [
-            ...queryLoopEntries(this.store, session.loopId, { prefix }),
-            ...queryLoopEntries(this.store, session.loopId, { prefix, feedbackOnly: true }),
-        ];
+        const entries = loadCommittedHistory(this.store, session.loopId).entries;
         const found = findCheckpointRef({
             entries,
             held,
@@ -1787,12 +1722,7 @@ export class RoundLifecycle {
     async notifyTerminal(session, stopReason) {
         if (this.terminalSinks.size === 0)
             return;
-        const prefix = `loop:${session.loopId}:`;
-        const entries = [
-            ...queryLoopEntries(this.store, session.loopId, { prefix }),
-            ...queryLoopEntries(this.store, session.loopId, { prefix, feedbackOnly: true }),
-        ];
-        const views = readOnlyRounds(entries);
+        const views = loadCommittedHistory(this.store, session.loopId).rounds;
         const successTrajectory = views
             .filter((view) => view.result?.shouldPushSuccessTrajectory === true)
             .map((view) => view.success);

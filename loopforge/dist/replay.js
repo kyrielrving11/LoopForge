@@ -1,10 +1,11 @@
-/** ReplayBackend — time-travel queries over loop lineage.
+/** ReplayBackend — time-travel queries over committed rounds.
  *
  * Depends on LoopStore interface — no direct filesystem access.
- * Enables audit, comparison, and timeline analysis of loop rounds.
+ * Every query loads the same committed history once and reads the branch's
+ * `CommittedRoundView`s; there is no second decode pass and no synthesized
+ * lineage-shaped entry.
  */
-import { queryLoopEntries } from "./loop-store.js";
-import { decodeCommittedRound, legacyTransactionRounds, readOnlyRounds, } from "./committed-round.js";
+import { loadCommittedHistory } from "./history.js";
 import { deriveRoundProgress } from "./progress.js";
 import { observedGitHead } from "./git-motion.js";
 // ═══════════════════════════════════════════════════════════════════════════
@@ -17,68 +18,31 @@ export class ReplayBackend {
     }
     // ── Single-round lookup ────────────────────────────────────────────────
     getRound(loopId, roundNum) {
-        const prefix = `loop:${loopId}:r${roundNum}`;
-        const entries = queryLoopEntries(this.store, loopId, { prefix });
-        const lineageEntries = entries.filter((e) => !String(e.task_id ?? "").endsWith(":feedback"));
-        const fbEntries = queryLoopEntries(this.store, loopId, {
-            prefix,
-            feedbackOnly: true,
-        });
-        const committed = fbEntries.map(decodeCommittedRound)
-            .find((view) => view?.round === roundNum && view.kind === "evaluation");
-        if (!committed)
-            return null;
-        const base = lineageEntries[0] ?? committed.sourceEntry;
-        const entry = { ...base };
-        entry.success = committed.success;
-        entry.output_summary = committed.evaluation?.output_summary ?? entry.output_summary;
-        entry.round_contract = committed.contractProposal ?? undefined;
-        entry.loop_lineage = {
-            ...(entry.loop_lineage ?? {}),
-            success: committed.success,
-            committed_action: committed.action,
-        };
-        return entry;
+        const history = loadCommittedHistory(this.store, loopId);
+        return history.rounds.find((view) => view.kind === "evaluation" && view.round === roundNum) ?? null;
     }
     // ── Multi-round replay ─────────────────────────────────────────────────
     replay(loopId, opts) {
         const start = opts?.start ?? 1;
-        let end = opts?.end;
-        if (end === undefined) {
-            end = this.maxRound(loopId);
-            if (end === 0)
-                return [];
-        }
-        const results = [];
-        for (let rnd = start; rnd <= end; rnd++) {
-            const entry = this.getRound(loopId, rnd);
-            if (entry)
-                results.push(entry);
-        }
-        return results;
+        const end = opts?.end ?? Number.POSITIVE_INFINITY;
+        return loadCommittedHistory(this.store, loopId).rounds.filter((view) => view.kind === "evaluation" && view.round >= start && view.round <= end);
     }
     // ── Timeline ──────────────────────────────────────────────────────────
     timeline(loopId) {
-        const prefix = `loop:${loopId}:r`;
-        const feedback = queryLoopEntries(this.store, loopId, {
-            prefix,
-            feedbackOnly: true,
-        });
-        const views = new Map(readOnlyRounds(feedback).map((view) => [view.round, view]));
+        // ONE history read feeds the whole timeline: rounds, branch and legacy
+        // report are already decoded. `replay()` is not called per round.
+        const history = loadCommittedHistory(this.store, loopId);
         const timeline = [];
-        // `replay()` keeps the lineage projection (task/goal/level/full_prompt)
-        // while the derived delta comes from the same committed-round view.
-        for (const entry of this.replay(loopId)) {
-            const lineage = (entry.loop_lineage ?? {});
-            const round = typeof lineage.round === "number" ? lineage.round : 0;
-            const view = views.get(round);
-            const gitDelta = view?.observationDelta.find((item) => item.kind === "git");
-            const gitBefore = view?.beforeEvidence.find((item) => item.providerId === "git");
-            const gitAfter = view?.afterEvidence.find((item) => item.providerId === "git");
+        for (const view of history.rounds) {
+            if (view.kind !== "evaluation")
+                continue;
+            const gitDelta = view.observationDelta.find((item) => item.kind === "git");
+            const gitBefore = view.beforeEvidence.find((item) => item.providerId === "git");
+            const gitAfter = view.afterEvidence.find((item) => item.providerId === "git");
             // v3.9.9: replay is a display surface, so it selects every fact. The
             // per-fact list below makes the coverage of each fact visible.
-            const progress = view ? deriveRoundProgress(view.observationDelta, "any") : null;
-            const progressFacts = (view?.observationDelta ?? [])
+            const progress = deriveRoundProgress(view.observationDelta);
+            const progressFacts = view.observationDelta
                 .filter((delta) => delta.progress !== null)
                 .map((delta) => ({
                 kind: delta.progress.kind,
@@ -88,11 +52,12 @@ export class ReplayBackend {
                 complete: delta.progress.complete,
             }));
             timeline.push({
-                round,
-                recompile_level: lineage.recompile_level ?? view?.promptArtifact?.level ?? "l2",
-                success: entry.success ?? view?.success ?? false,
-                task: lineage.task ?? "",
-                goal_id: lineage.goal_id ?? "",
+                round: view.round,
+                recompile_level: view.promptArtifact?.level ?? "l2",
+                success: view.success,
+                // v4.0.1: task and goal identity are compile facts stamped at commit.
+                task: view.compiled?.task ?? "",
+                goal_id: view.compiled?.goalId ?? "",
                 // v3.9.1: the shared round delta and Git boundary facts.
                 files_changed: gitDelta?.changedFiles ?? null,
                 git_change_state: gitDelta === undefined
@@ -109,18 +74,14 @@ export class ReplayBackend {
                 progress_facts: progressFacts,
                 // v3.5: the round's declared contract (proposal for the next round),
                 // when it committed one — lets replay show the contract arc.
-                ...(entry.round_contract
-                    ? { proposal: entry.round_contract }
-                    : view?.contractProposal
-                        ? { proposal: view.contractProposal }
-                        : {}),
+                ...(view.contractProposal ? { proposal: view.contractProposal } : {}),
                 // v3.9.9: the committed redirect, report-only.
-                contract_transition: view?.contractTransition ?? null,
+                contract_transition: view.contractTransition ?? null,
             });
         }
         // Unsupported envelope versions are NOT history. Keep them visible in the
         // timeline instead of letting the loop look shorter than it was.
-        for (const legacy of legacyTransactionRounds(feedback)) {
+        for (const legacy of history.legacyRounds) {
             timeline.push({
                 round: legacy.round,
                 legacy: true,
@@ -133,15 +94,7 @@ export class ReplayBackend {
     }
     /** v3.9.1: explicit legacy-envelope report for the tool envelope. */
     legacyRounds(loopId) {
-        const prefix = `loop:${loopId}:r`;
-        return legacyTransactionRounds(queryLoopEntries(this.store, loopId, { prefix, feedbackOnly: true }));
-    }
-    // ── Helpers ─────────────────────────────────────────────────────────────
-    maxRound(loopId) {
-        const prefix = `loop:${loopId}:r`;
-        const feedback = queryLoopEntries(this.store, loopId, { prefix, feedbackOnly: true });
-        const rounds = readOnlyRounds(feedback);
-        return rounds.length > 0 ? rounds[rounds.length - 1].round : 0;
+        return loadCommittedHistory(this.store, loopId).legacyRounds;
     }
 }
 //# sourceMappingURL=replay.js.map

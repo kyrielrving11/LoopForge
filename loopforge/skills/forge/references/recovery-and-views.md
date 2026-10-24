@@ -128,7 +128,8 @@ The two gate tools are opt-in through `policy.gate.enabled`. When enabled:
 
 Delegation does not create another LoopForge mode. Give each worker a
 self-contained subtask and hard constraints, then place the result in
-`worker_results`. A worker result is a report with its source: its
-`discoveredConstraints` does not enter the global constraint set by itself. If
-you accept a worker's finding, state it in top-level `discovered_constraints`.
-That is the only promotion channel.
+`worker_results` with `agentId`, `subTask`, `resultSummary`, and `outcome`.
+The result is saved with the committed transaction as an audit report. It does
+not enter the global constraint set by itself. If you accept a worker's finding,
+state it in top-level `discovered_constraints`; that is the only promotion
+channel.

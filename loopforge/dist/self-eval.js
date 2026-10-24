@@ -412,16 +412,12 @@ export function parseWorkerResults(raw, sink) {
     return valid.slice(0, 20).map((v, index) => {
         const w = v;
         for (const key of Object.keys(w)) {
-            if (!["agentId", "subAgentType", "subTask", "resultSummary", "outcome",
-                "discoveredConstraints"].includes(key)) {
+            if (!["agentId", "subTask", "resultSummary", "outcome"].includes(key)) {
                 sink?.push(`worker_results[${index}].${key}`, "unknown_field", "dropped", "not a declared worker-result field; it was dropped");
             }
         }
-        if (w.subAgentType !== undefined && typeof w.subAgentType !== "string") {
-            sink?.push(`worker_results[${index}].subAgentType`, "invalid_value", "normalized", "expected a string; defaulted to general-purpose");
-        }
         for (const [key, cap] of [
-            ["agentId", 200], ["subAgentType", 100], ["subTask", 500], ["resultSummary", 1000],
+            ["agentId", 200], ["subTask", 500], ["resultSummary", 1000],
         ]) {
             const value = w[key];
             if (typeof value === "string" && value.length > cap) {
@@ -430,13 +426,9 @@ export function parseWorkerResults(raw, sink) {
         }
         return {
             agentId: (w.agentId.slice(0, 200)),
-            subAgentType: typeof w.subAgentType === "string"
-                ? w.subAgentType.slice(0, 100)
-                : "general-purpose",
             subTask: (w.subTask.slice(0, 500)),
             resultSummary: (w.resultSummary.slice(0, 1000)),
             outcome: w.outcome,
-            discoveredConstraints: boundedStringArray(w.discoveredConstraints, 50, 500, sink, `worker_results[${index}].discoveredConstraints`),
         };
     });
 }
@@ -547,7 +539,6 @@ export function validateSubGoalUpdatesShape(raw) {
     });
     return errors;
 }
-const SUBGOAL_ID_RE = /^sg-[a-f0-9]{8}$/;
 const CONTRACT_ID_RE = /^rc-[a-f0-9]{8}$/;
 export const CONTRACT_TRANSITION_REASON_MAX = 500;
 /** v3.9.9: LENIENT contract-transition parser. Historical/externally written
@@ -733,7 +724,7 @@ function validateContractItem(item, index, context, errors) {
     }
     const entry = item;
     for (const key of Object.keys(entry)) {
-        if (!["description", "criterion_refs", "subgoal_refs", "verify_with"].includes(key)) {
+        if (!["description", "criterion_refs", "verify_with"].includes(key)) {
             errors.push({
                 field: "round_contract",
                 reason: "unknown_field",
@@ -831,53 +822,6 @@ function validateContractItem(item, index, context, errors) {
             });
         }
     }
-    const subgoalRefs = entry.subgoal_refs;
-    if (subgoalRefs !== undefined) {
-        if (!Array.isArray(subgoalRefs)) {
-            errors.push({
-                field: "round_contract",
-                reason: "invalid_subgoal_refs",
-                detail: `item ${index} subgoal_refs must be an array of sg-XXXXXXXX ids`,
-            });
-        }
-        else {
-            if (subgoalRefs.length > CONTRACT_LIMITS.subgoalRefs) {
-                errors.push({
-                    field: "round_contract",
-                    reason: "too_many_subgoal_refs",
-                    detail: `item ${index} subgoal_refs may list at most ` +
-                        `${CONTRACT_LIMITS.subgoalRefs} ids (got ${subgoalRefs.length})`,
-                });
-            }
-            const seen = new Set();
-            for (const ref of subgoalRefs) {
-                if (typeof ref !== "string" || !SUBGOAL_ID_RE.test(ref.trim())) {
-                    errors.push({
-                        field: "round_contract",
-                        reason: "invalid_subgoal_ref",
-                        detail: `item ${index} subgoal_refs entry "${String(ref)}" must be an sg-XXXXXXXX id`,
-                    });
-                    continue;
-                }
-                const id = ref.trim();
-                if (seen.has(id)) {
-                    errors.push({
-                        field: "round_contract",
-                        reason: "duplicate_subgoal_ref",
-                        detail: `item ${index} subgoal_refs repeats ${id}`,
-                    });
-                }
-                seen.add(id);
-                if (context.displayedSubGoalIds && !context.displayedSubGoalIds.has(id)) {
-                    errors.push({
-                        field: "round_contract",
-                        reason: "unknown_subgoal_ref",
-                        detail: `item ${index} references ${id}, which is not an active sub-goal displayed in this prompt`,
-                    });
-                }
-            }
-        }
-    }
 }
 /** v3.9.4: the normalized content identity of a RAW proposal item. Malformed
  *  items return null (their own shape errors already fire); valid items use
@@ -890,7 +834,6 @@ function rawContractItemIdentity(item) {
     return canonicalContractItemText({
         description: typeof entry.description === "string" ? entry.description : "",
         criterion_refs: strings(entry.criterion_refs),
-        subgoal_refs: strings(entry.subgoal_refs),
         verify_with: strings(entry.verify_with),
     });
 }
@@ -1135,7 +1078,6 @@ export function buildSelfEvaluation(raw, sink, facts) {
         constraint_violations: constraintViolations,
         should_continue: typeof raw.should_continue === "boolean" ? raw.should_continue : true,
         discovered_constraints: boundedStringArray(raw.discovered_constraints, facts?.maxDiscoveredConstraints ?? 50, 500, sink, "discovered_constraints"),
-        objective_refinement: boundedString(raw.objective_refinement, 1000, sink, "objective_refinement") ?? "",
         emerged_subtasks: boundedEmergedSubtasks(raw.emerged_subtasks, sink),
         execution_report: executionReport,
         retracted_constraints: retractedConstraints,
@@ -1157,7 +1099,6 @@ export function buildSelfEvaluation(raw, sink, facts) {
         gate_ids: boundedStringArray(raw.gate_ids, 20, 64, sink, "gate_ids"),
         retroactiveClaims: parseRetroactiveClaims(raw.retroactiveClaims, sink),
         no_change_reason: noChangeReason || undefined,
-        prompt_requests: parsePromptRequests(raw.prompt_requests, sink),
         round_contract: parseRoundContract(raw.round_contract, sink),
         contract_transition: parseContractTransition(raw.contract_transition, sink),
     });
@@ -1186,7 +1127,6 @@ export const CONTRACT_LIMITS = {
     items: 20,
     scope: 50,
     criterionRefs: 20,
-    subgoalRefs: 20,
     verifyWith: 20,
 };
 /** Parse a Round Contract PROPOSAL from raw JSON input. Lenient on shapes
@@ -1257,7 +1197,7 @@ export function parseRoundContract(raw, sink) {
         .slice(0, CONTRACT_LIMITS.items)
         .map((item, index) => {
         for (const key of Object.keys(item)) {
-            if (!["description", "criterion_refs", "subgoal_refs", "verify_with"].includes(key)) {
+            if (!["description", "criterion_refs", "verify_with"].includes(key)) {
                 sink?.push(`round_contract.items[${index}].${key}`, "unknown_field", "dropped", "not a declared contract-item field; it was dropped");
             }
         }
@@ -1273,7 +1213,6 @@ export function parseRoundContract(raw, sink) {
                 ? item.description.trim().slice(0, CONTRACT_LIMITS.itemDescription)
                 : "",
             criterion_refs: capStrings(item.criterion_refs, 200, CONTRACT_LIMITS.criterionRefs, `round_contract.items[${index}].criterion_refs`),
-            subgoal_refs: capStrings(item.subgoal_refs, 64, CONTRACT_LIMITS.subgoalRefs, `round_contract.items[${index}].subgoal_refs`),
             verify_with: capStrings(item.verify_with, 200, CONTRACT_LIMITS.verifyWith, `round_contract.items[${index}].verify_with`),
         };
     });
@@ -1301,41 +1240,6 @@ export function parseRoundContract(raw, sink) {
         scope: capStrings(obj.scope, 500, CONTRACT_LIMITS.scope, "round_contract.scope"),
         items,
     };
-}
-/** Parse a PromptRequests object from raw JSON input.
- *  Lenient: missing or invalid fields get sensible defaults.
- *  Returns undefined if the raw value is absent or not an object,
- *  so makeSelfEvaluation can distinguish "not set" from "empty".
- *  Exported for the engine's last_round_result rebuild — the MCP
- *  lifecycle assembles prompt_requests into the request, but every
- *  compile path funnels through engine.invokeLoopCompile, whose
- *  field-by-field reconstruction must preserve them (v3.3.1). */
-export function parsePromptRequests(raw, sink) {
-    if (raw === undefined)
-        return undefined;
-    if (raw === null) {
-        sink?.push("prompt_requests", "invalid_value", "dropped", "expected an object with emphasize/confusion_points; null was dropped");
-        return undefined;
-    }
-    if (typeof raw !== "object" || Array.isArray(raw)) {
-        sink?.push("prompt_requests", "invalid_entry", "dropped", "expected an object with emphasize/confusion_points; the value was dropped");
-        return undefined;
-    }
-    const obj = raw;
-    for (const key of Object.keys(obj)) {
-        if (key !== "emphasize" && key !== "confusion_points") {
-            sink?.push(`prompt_requests.${key}`, "unknown_field", "dropped", "not a declared prompt-request field; it was dropped");
-        }
-    }
-    const emphasize = boundedStringArray(obj.emphasize, 5, 500, sink, "prompt_requests.emphasize");
-    const confusionPoints = boundedStringArray(obj.confusion_points, 3, 200, sink, "prompt_requests.confusion_points");
-    // Return undefined when all fields are empty — semantically equivalent
-    // to "not set", avoids carrying an empty object through the pipeline.
-    if (emphasize.length === 0 && confusionPoints.length === 0) {
-        sink?.push("prompt_requests", DIAG_EMPTY_VALUE, "dropped", "emphasize and confusion_points are both empty; treated as not set");
-        return undefined;
-    }
-    return { emphasize, confusion_points: confusionPoints };
 }
 // Free-text inference is intentionally absent. Invalid core fields are
 // rejected before round advancement and may be resubmitted with the same

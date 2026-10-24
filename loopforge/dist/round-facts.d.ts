@@ -1,21 +1,20 @@
 /** v3.8.1: THE contract-fact derivation.
  *
- * The contract walker, the item reducer, the verified sub-goal facts and the
- * verification debt are one pass over one history window. Before this module
- * the compile path and the projection each ran the same reducers over their
- * own window, so the prompt and the projection could tell different stories
- * about what the machine had verified — and nothing stopped a third caller
- * from picking a third window.
+ * The contract walker, the item reducer and the criterion machine facts are
+ * one pass over one history window. Every caller passes
+ * `derivationRounds(entries, currentRound)` (the shared window from
+ * committed-round.ts) and receives the same bundle.
  *
- * Every caller passes `derivationRounds(entries, currentRound)` (the shared
- * window from committed-round.ts) and receives the same bundle, so "one fact,
- * one derivation" is a property of the types rather than a convention.
+ * v4.0.1: the sub-goal verification link (`subgoal_refs`,
+ * `VerifiedSubGoalFact`, verification debt) was removed. It never rendered in
+ * a prompt or state file; it only fed stateHash. Sub-goals remain the Agent's
+ * plan report, not a machine acceptance surface.
  */
 import type { CommittedRoundView } from "./committed-round.js";
 import type { ContractItemStatusView } from "./contract-items.js";
 import type { ObservationDelta } from "./evidence-provider.js";
 import type { CommandEvidencePolicy } from "./policy.js";
-import type { ContractItemStatus, ContractTransition, ExecutionReport, SubGoal, VerifiedSubGoalFact } from "./protocol.js";
+import type { ContractItemStatus, ContractTransition, ExecutionReport } from "./protocol.js";
 import type { ActiveContractView } from "./round-contract.js";
 export interface RoundFacts {
     /** The contract the NEXT round executes under — derived from committed
@@ -23,24 +22,16 @@ export interface RoundFacts {
     activeContract: ActiveContractView | null;
     /** Per-item status of `activeContract`. */
     itemStatuses: ContractItemStatusView;
-    /** v3.8: machine-verified sub-goals. Never writes `SubGoal.status`. */
-    verifiedSubGoals: VerifiedSubGoalFact[];
-    /** `done` sub-goals no verified item backs, plus `insufficient` items. */
-    verificationDebt: string[];
     /** v3.8.1: the machine fact about each criterion a contract item referenced,
-     *  over the WHOLE committed history — the criterion-side twin of
-     *  `verifiedSubGoals`, and read by the same callers. */
+     *  over the WHOLE committed history. */
     criterionFacts: CriterionMachineFact[];
 }
 /** v3.8.1: ONE criterion's machine fact. `status` is absent while every item
  *  referencing the criterion is still `pending` — "no claim yet" says nothing
- *  about the criterion, so the criterion keeps its claim-derived status. The
- *  links are explicit `subgoal_refs` only, and they survive their item's
- *  contract closing just like the status does. */
+ *  about the criterion, so the criterion keeps its claim-derived status. */
 export interface CriterionMachineFact {
     criterion_id: string;
     status?: Exclude<ContractItemStatus, "pending">;
-    related_subgoal_ids: string[];
 }
 /** The in-flight slice of a round that is being decided but is not yet
  *  committed. A pure committed-history replay passes null / [] — the reducer
@@ -63,39 +54,6 @@ export declare function deriveRoundFacts(input: {
     rounds: ReadonlyArray<CommittedRoundView>;
     currentRound: number;
     inFlight: InFlightRoundSlice;
-    subGoals: ReadonlyArray<SubGoal>;
     commands: ReadonlyArray<CommandEvidencePolicy>;
 }): RoundFacts;
-/** v3.8: Machine-verified sub-goal facts. DERIVED, never persisted. It never
- *  writes `SubGoal.status`: `done` stays the agent's declaration, and the fact
- *  is the machine's separate statement about it.
- *
- *  Derived from the WHOLE committed history, not from the currently-open
- *  contract. A verified item is machine history — once proven, it stays
- *  proven — while the active contract necessarily disappears the moment its
- *  last item verifies. Deriving from the active contract alone made the fact
- *  vanish at exactly the moment it became fully true, and turned the
- *  verification-debt view into a false accusation ("agent reported done,
- *  machine verification absent") against a sub-goal the machine had just
- *  verified. Each round is read through `deriveRoundContractView`, the same
- *  derivation the coordinator, explain and audit use — one history
- *  interpretation, no second read model. That re-derivation is quadratic in the
- *  round count (≈40ms at 120 rounds) and is deliberately bought: an incremental
- *  walker would be a second implementation of the closure rule, which is the
- *  one thing this module must never grow.
- *
- *  Attribution is per ITEM (`ContractItemProposal.subgoal_refs`), not per
- *  contract: an item backs exactly the sub-goals it references, so a contract
- *  whose item A verifies SubGoal 1 and whose item B verifies SubGoal 2 yields
- *  two facts with disjoint `contract_item_ids` instead of both sub-goals
- *  claiming every verified item. */
-export declare function deriveVerifiedSubGoals(input: {
-    subGoals: ReadonlyArray<SubGoal>;
-    /** Committed rounds (rollback-excluded), ascending. */
-    rounds: ReadonlyArray<CommittedRoundView>;
-    commands: ReadonlyArray<CommandEvidencePolicy>;
-}): VerifiedSubGoalFact[];
-/** v3.8: Sub-goals the agent declared `done` that no verified contract item
- *  backs — verification debt, surfaced in the handoff's open risks. */
-export declare function deriveVerificationDebt(subGoals: ReadonlyArray<SubGoal>, verified: ReadonlyArray<VerifiedSubGoalFact>, statuses: ContractItemStatusView): string[];
 //# sourceMappingURL=round-facts.d.ts.map

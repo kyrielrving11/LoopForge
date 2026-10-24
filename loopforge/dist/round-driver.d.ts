@@ -9,7 +9,7 @@ import type { LoopStore } from "./loop-store.js";
 import { LoopForgeEngine } from "./engine.js";
 import type { MachineObservation } from "./protocol.js";
 import type { BoundaryCapture } from "./git-boundary.js";
-import type { LoopForgeRequest, LoopForgeResponse, OperatorAcceptance, PromptArtifact, SelfEvaluation, SubmissionDiagnostic } from "./protocol.js";
+import { type LoopCompileRequest, type LoopCompileResponse, type OperatorAcceptance, type PromptArtifact, type SelfEvaluation, type SubmissionDiagnostic } from "./protocol.js";
 import type { RoundTransactionOutcome, RoundTransactionSnapshot } from "./round-transaction.js";
 import { FileWorkspaceCheckpointStore } from "./workspace-checkpoint.js";
 /** A pre-collected before baseline, used by the post-restore redo path. The
@@ -29,7 +29,7 @@ export interface PreparedRound {
     warnings?: string[];
     /** v3.0.1: The full compile response. Callers may cache it (e.g. for the
      *  typed projection) instead of recompiling for derived views. */
-    compileResponse?: LoopForgeResponse;
+    compileResponse?: LoopCompileResponse;
 }
 export interface CompleteRoundInput {
     snapshot: RoundTransactionSnapshot;
@@ -62,19 +62,22 @@ export declare class RoundDriver {
     private readonly checkpointStore?;
     private readonly store;
     constructor(engine: LoopForgeEngine, store?: LoopStore, checkpointStore?: FileWorkspaceCheckpointStore | undefined);
-    prepare(request: LoopForgeRequest, loopId: string, round: number, opts?: {
+    prepare(request: LoopCompileRequest, loopId: string, round: number, opts?: {
         branchId?: string;
         operatorAcceptance?: OperatorAcceptance;
         /** Post-restore baseline: compile only, do not capture again. */
         baseline?: PreparedBaseline;
         /** Set on the redo transaction after a verified restore. */
         restore?: RoundTransactionSnapshot["restore"];
-    }): Promise<PreparedRound | null>;
+    }): Promise<PreparedRound>;
     private compile;
     /** Compile a fresh prompt for a zero-commit enforcement retry. The logical
      * round ID and before-evidence snapshot remain stable; only attempt changes. */
-    prepareRetry(request: LoopForgeRequest, rejected: RoundTransactionSnapshot, rejectionNotice: string, consecutiveRejections: number): Promise<PreparedRound | null>;
+    prepareRetry(request: LoopCompileRequest, rejected: RoundTransactionSnapshot, rejectionNotice: string, consecutiveRejections: number): Promise<PreparedRound>;
     private finishPrepare;
+    /** The ONE coordinator construction for a write. The engine is not a write
+     *  dependency. */
+    private coordinator;
     complete(input: CompleteRoundInput): Promise<CompletedRound>;
     /** v3.9.6: collect the abandoned round's after evidence, then commit the
      *  rollback directive. The Agent has already decided to abandon; this path

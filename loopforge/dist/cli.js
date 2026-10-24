@@ -332,10 +332,7 @@ function inspect(args) {
         print(result, json);
         return;
     }
-    const rounds = [...new Set(store.listEntries(loopId).map((entry) => {
-            const value = entry.loop_lineage?.round;
-            return typeof value === "number" ? value : null;
-        }).filter((value) => value !== null))].sort((a, b) => a - b);
+    const rounds = store.listRoundSequences(loopId).map((doc) => doc.round);
     const summary = { loopId, session: store.readSession(loopId), rounds };
     print(includePrompt ? summary : withoutPrompts(summary), json);
 }

@@ -16,7 +16,7 @@
  *   server.start();
  */
 // Protocol types
-export { Mode, AgentStatus, makeExecutionFeedback, makeSelfEvaluation, makeLoopObjective, makeLoopRoundResult, makeLoopCompileRequest, makeLoopCompileResponse, makeSessionState, makeTaskId, makeEvidenceSnapshot, makeVerificationFlag, makeVerificationResult, makeEnforcementResult, makeSubGoal, makeConstraintMeta, } from "./protocol.js";
+export { AgentStatus, makeSelfEvaluation, makeLoopObjective, makeLoopRoundResult, makeLoopCompileRequest, makeLoopCompileResponse, makeEvidenceSnapshot, makeVerificationFlag, makeVerificationResult, makeEnforcementResult, makeSubGoal, makeConstraintMeta, } from "./protocol.js";
 // Policy
 export { getPolicy, loadPolicy, resetPolicy, DEFAULT_POLICY, writeStateFile, } from "./policy.js";
 // Durable store
@@ -29,13 +29,14 @@ export { deriveCommittedSubmissionView, deriveSubmissionReceipt, } from "./submi
 // Replay
 export { ReplayBackend } from "./replay.js";
 // Engine
-export { LoopForgeEngine, createEngine, buildSelfEvaluation, parseExecutionReport, parseWorkerResults, } from "./engine.js";
+export { LoopForgeEngine, createEngine, } from "./engine.js";
+export { buildSelfEvaluation, parseExecutionReport, parseWorkerResults, } from "./self-eval.js";
 // MCP (v1.3)
 export { McpServer } from "./mcp/server.js";
 export { SessionManager } from "./mcp/session.js";
 // EvidenceProvider (v1.18 / v3.8: machine observations)
-export { EvidenceCollector, GitEvidenceProvider, CommandEvidenceProvider, registerEvidenceProvider, unregisterEvidenceProvider, isProviderRegistered, isPassedAfterObservation, deriveObservationDeltas, gitDeltaState, isValidProgressSnapshot, observationVersionIssue, expectedObservationSchemaVersion, coverageKey, } from "./evidence-provider.js";
-export { deriveProgressWindow, deriveRoundProgress, GIT_WORKSPACE_COVERAGE, STALL_PROGRESS_COVERAGE, } from "./progress.js";
+export { EvidenceCollector, GitEvidenceProvider, CommandEvidenceProvider, registerEvidenceProvider, unregisterEvidenceProvider, isProviderRegistered, isPassedAfterObservation, deriveObservationDeltas, gitDeltaState, observationVersionIssue, expectedObservationSchemaVersion, coverageKey, } from "./evidence-provider.js";
+export { deriveProgressWindow, deriveRoundProgress, GIT_WORKSPACE_COVERAGE, } from "./progress.js";
 // Structured tracing and policy effectiveness metrics (v1.20)
 export { logEvent, } from "./observability.js";
 export { PolicyMetricsCollector, policyMetrics, getPolicyMetrics, resetPolicyMetrics, } from "./policy-metrics.js";

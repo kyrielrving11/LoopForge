@@ -1,7 +1,7 @@
 /** Structured self-evaluation parsing and normalization — pure functions.
  * The MCP boundary validates required fields before these helpers run.
  */
-import { type ContractTransition, type ExecutionReport, type PromptRequests, type RoundContractProposal, type SelfEvaluation, type SubGoalUpdate, type SubmissionDiagnostic, type SubmissionDiagnosticHandling } from "./protocol.js";
+import { type ContractTransition, type ExecutionReport, type RoundContractProposal, type SelfEvaluation, type SubGoalUpdate, type SubmissionDiagnostic, type SubmissionDiagnosticHandling } from "./protocol.js";
 /** A diagnostics sink. `buildSelfEvaluation` keeps working without one (the
  *  engine parses historical last_round_result payloads); the submission
  *  boundary always supplies one. */
@@ -138,11 +138,6 @@ export interface ContractValidationContext {
     /** v3.9.4: cr- ids of the ACTIVE criterion set rendered by the prompt. Null
      *  when the compile response cannot be observed (fail open). */
     knownCriterionIds: ReadonlySet<string> | null;
-    /** v3.9.4: sg- ids displayed as ACTIVE in the current prompt (compiled,
-     *  non-terminal). Same-round `emerged_subtasks` are deliberately absent —
-     *  a new sub-goal can be referenced by a contract only next round. Null
-     *  when it cannot be observed (fail open). */
-    displayedSubGoalIds: ReadonlySet<string> | null;
     /** Configured AND enabled AND after-capable evidence command. */
     isConfiguredCommand: (name: string) => boolean;
 }
@@ -189,7 +184,6 @@ export declare const CONTRACT_LIMITS: {
     readonly items: 20;
     readonly scope: 50;
     readonly criterionRefs: 20;
-    readonly subgoalRefs: 20;
     readonly verifyWith: 20;
 };
 /** Parse a Round Contract PROPOSAL from raw JSON input. Lenient on shapes
@@ -198,13 +192,4 @@ export declare const CONTRACT_LIMITS: {
  *  preserved — the derived rci- ids depend on them. Returns undefined only
  *  when the raw value is absent or not an object. */
 export declare function parseRoundContract(raw: unknown, sink?: DiagnosticSink): RoundContractProposal | undefined;
-/** Parse a PromptRequests object from raw JSON input.
- *  Lenient: missing or invalid fields get sensible defaults.
- *  Returns undefined if the raw value is absent or not an object,
- *  so makeSelfEvaluation can distinguish "not set" from "empty".
- *  Exported for the engine's last_round_result rebuild — the MCP
- *  lifecycle assembles prompt_requests into the request, but every
- *  compile path funnels through engine.invokeLoopCompile, whose
- *  field-by-field reconstruction must preserve them (v3.3.1). */
-export declare function parsePromptRequests(raw: unknown, sink?: DiagnosticSink): PromptRequests | undefined;
 //# sourceMappingURL=self-eval.d.ts.map

@@ -3,9 +3,8 @@
  * A SubGoal is the AGENT's declaration event, not a machine boundary:
  *   - `emerged_subtasks` creates items (always `pending`);
  *   - `subgoal_updates` is the only channel that changes a status;
- *   - machine verification NEVER writes a status. A verified contract item
- *     that references a sub-goal produces a derived `VerifiedSubGoalFact`
- *     (cognitive-facts.ts) instead.
+ *   - machine verification NEVER writes a status; sub-goals are a plan
+ *     report, not an acceptance surface.
  *
  * Identity (v3.8): `sg-<hash(loopId, declarationRound, declarationOrdinal,
  * normalizedDescription)>`. The round is part of the identity, so

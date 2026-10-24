@@ -10,9 +10,8 @@
  * alone are over it — truncation of mandatory content never happens.
  */
 import type { CanonicalLoopState } from "./canonical-state.js";
-import type { PromptArtifact, PromptRequests } from "./protocol.js";
+import type { PromptArtifact } from "./protocol.js";
 import type { PromptLevel, PromptLevelReason } from "./prompt-policy.js";
-import { type CoverageKind } from "./prompt-coverage.js";
 export interface PromptBudgets {
     l0: number;
     l1: number;
@@ -30,8 +29,6 @@ export interface PromptAssemblyInput {
      *  `committedBacktrackBrief` the state file renders. Present only while a
      *  committed rollback directive is the current redo boundary. */
     recoveryBrief?: string[];
-    /** v2.9: Model's information needs for this prompt. L0: ignored. */
-    promptRequests?: PromptRequests;
 }
 /** 3.9.3: The action table lives in a neutral module so the evaluation-field
  *  guidance can quote the same wording without depending on a renderer.
@@ -42,16 +39,5 @@ export { verificationActionFor } from "./verification-actions.js";
  *  Agent can cite; the detail is a machine fact and the action is the one
  *  canonical short action from `verification-actions.ts`. */
 export declare function verificationFlagLine(flag: CanonicalLoopState["verificationFlags"][number], level?: "l0" | "l1" | "l2"): string;
-/** v3.9.7: ONE normative-object derivation. Coverage, section rendering and
- *  emphasis candidates all read this list, so they cannot drift. */
-export interface NormativeObject {
-    id: string;
-    kind: CoverageKind;
-    text: string;
-    ownerSection: string;
-    render: string;
-    coverageIds: string[];
-}
-export declare function deriveNormativeObjects(state: CanonicalLoopState, level: "l0" | "l1" | "l2", recoveryBrief?: ReadonlyArray<string>): NormativeObject[];
 export declare function assemblePromptArtifact(input: PromptAssemblyInput): PromptArtifact;
 //# sourceMappingURL=prompt-assembler.d.ts.map

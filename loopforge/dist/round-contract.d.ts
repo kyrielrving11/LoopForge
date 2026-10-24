@@ -73,8 +73,6 @@ export declare const NO_CURRENT_ROUND_FACTS: CurrentRoundFacts;
 export declare function committedRoundFacts(view: CommittedRoundView): CurrentRoundFacts;
 /** v3.8: The active contract after replaying committed rounds in order. */
 export declare function deriveActiveRoundContract(rounds: ReadonlyArray<CommittedRoundView>, commands?: ReadonlyArray<CommandEvidencePolicy>): ActiveContractView | null;
-/** v3.8: Every criterion id referenced by the contract's items. */
-export declare function contractCriterionIds(contract: ActiveContractView): string[];
 /** v3.8: The contract a round EXECUTED under, plus every item's status as of
  *  that round — the ONE derivation the live coordinator, explain and audit
  *  share, so the three can never disagree about what a round ran under.

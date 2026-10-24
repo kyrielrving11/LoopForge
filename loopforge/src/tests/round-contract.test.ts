@@ -3,7 +3,6 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   activateContract,
-  contractCriterionIds,
   deriveActiveRoundContract,
   sameContract,
 } from "../round-contract.js";
@@ -220,11 +219,6 @@ describe("v3.8 — active contract walker", () => {
       round(2, { outcome: "blocked", contract: proposal({ work_item: "After block" }) }),
     ], [COMMAND]);
     assert.equal(active?.work_item, "After block");
-  });
-
-  it("exposes the criterion ids its items reference", () => {
-    const active = activateContract(proposal(), 1, null, "cc");
-    assert.deepEqual(contractCriterionIds(active), ["cr-11111111"]);
   });
 
   it("v3.8.1: a later failing observation overturns an earlier pass", () => {

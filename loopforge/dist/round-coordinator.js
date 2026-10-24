@@ -21,9 +21,7 @@ import { emptyCommittedHistory, historyWindow, loadCommittedHistory, } from "./h
 import { CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE, verifySelfEvaluation, } from "./verification-gate.js";
 import { checkpointForRoundBoundary, deriveRecoveryDirective, validateCheckpointManifest, } from "./recovery.js";
 import { driftedEntrypoints } from "./evidence-provider.js";
-import { isRecord } from "./token-utils.js";
 import { declaresBlocked, effectiveSuccess } from "./round-outcome.js";
-import { derivationRounds } from "./committed-round.js";
 import { deriveRoundProgress, } from "./progress.js";
 import { enforceRound, buildRejectionPrompt, findSafeRestorePoint, } from "./enforcement-gate.js";
 import { logEvent } from "./observability.js";
@@ -115,98 +113,6 @@ transition) {
     return { reason, flags: [] };
 }
 // ── RoundCoordinator ───────────────────────────────────────────────────────
-/** v3.8.1: The rolled-back branch's facts — the ONE derivation of which rounds
- *  failed, which approaches must not be repeated, which assumptions were
- *  falsified, and which files (with their failed-round git fingerprints) the
- *  agent must restore.
- *
- *  Sources are COMMITTED rounds above the restore point; rejected attempts are
- *  not durable history and never become a source. The in-flight attempt that
- *  triggered the rollback is the one exception — its evaluation lives in this
- *  process, not in committed history.
- *
- *  Extracted from the coordinator's inline walk so it is unit-testable without
- *  driving a whole rollback, and so the prompt, the state file and the
- *  committed decision all describe one event. */
-export function deriveBacktrackRecoveryFacts(input) {
-    const { currentRound, restoreRound, vaultEntries, selfEval } = input;
-    // v2.13: files changed in skipped rounds, for the restore prompt.
-    const skippedFiles = [];
-    // M3 (v3.7.x): each skipped file's git fingerprint at its failed round.
-    // Recorded from the round's own after-evidence (machine data, not the
-    // agent's report); later rounds overwrite earlier ones so the map holds the
-    // LAST failed state of every file.
-    const skippedFingerprints = {};
-    const skippedDiscoveries = [...input.skippedDiscoveries];
-    const failedRounds = [];
-    const approaches = [];
-    const wrongAssumptions = [];
-    const window = derivationRounds(vaultEntries, currentRound);
-    for (let r = restoreRound + 1; r < currentRound; r++) {
-        const view = window.find((candidate) => candidate.round === r) ?? null;
-        const evaluation = view?.evaluation ?? null;
-        const report = view?.executionReport ?? null;
-        if (report) {
-            const reported = (report.files_changed ?? [])
-                .filter((f) => typeof f === "string");
-            // v3.9.1: the machine delta is the primary set of files the failed
-            // round changed; the agent report is unioned in so an ignored file the
-            // agent named is not lost from the recovery brief.
-            const machineFiles = (view?.observationDelta ?? [])
-                .filter((delta) => delta.kind === "git" && delta.changedFiles !== null)
-                .flatMap((delta) => delta.changedFiles);
-            const files = [...new Set([...machineFiles, ...reported])];
-            const git = view?.afterEvidence.find((snapshot) => snapshot.kind === "git" &&
-                snapshot.status === "observed" &&
-                isRecord(snapshot.data.fingerprints));
-            const gitFingerprints = git && git.kind === "git"
-                ? git.data.fingerprints
-                : null;
-            for (const f of files) {
-                if (!skippedFiles.includes(f))
-                    skippedFiles.push(f);
-                const fp = gitFingerprints?.[f];
-                if (typeof fp === "string")
-                    skippedFingerprints[f] = fp;
-            }
-        }
-        const summary = evaluation?.output_summary ?? "";
-        if (summary.trim().length > 0) {
-            failedRounds.push(r);
-            approaches.push(summary.trim().slice(0, 200));
-        }
-        const assumptions = (evaluation?.wrong_assumptions ?? [])
-            .filter((v) => typeof v === "string")
-            .map((s) => s.slice(0, 500));
-        for (const a of assumptions) {
-            if (!wrongAssumptions.includes(a))
-                wrongAssumptions.push(a);
-        }
-    }
-    // The in-flight attempt that triggered this rollback.
-    const triggerSummary = selfEval.output_summary?.trim() ?? "";
-    if (triggerSummary.length > 0) {
-        if (!failedRounds.includes(currentRound))
-            failedRounds.push(currentRound);
-        approaches.push(triggerSummary.slice(0, 200));
-        for (const a of (selfEval.wrong_assumptions ?? [])
-            .filter((v) => typeof v === "string")) {
-            if (!wrongAssumptions.includes(a))
-                wrongAssumptions.push(a.slice(0, 500));
-        }
-    }
-    // A discovery declared by the rejected trigger attempt is NOT committed and
-    // must never become an active constraint through the rollback. Only
-    // discoveries from committed skipped rounds are preserved.
-    return {
-        skippedFiles,
-        skippedFingerprints,
-        skippedDiscoveries,
-        failedRounds,
-        approaches,
-        wrongAssumptions,
-    };
-}
 export class RoundCoordinator {
     store;
     constructor(store) {

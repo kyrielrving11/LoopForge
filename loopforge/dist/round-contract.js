@@ -124,17 +124,6 @@ export function deriveActiveRoundContract(rounds, commands = getPolicy().evidenc
     }
     return active;
 }
-/** v3.8: Every criterion id referenced by the contract's items. */
-export function contractCriterionIds(contract) {
-    const ids = new Set();
-    for (const item of contract.items) {
-        for (const ref of item.criterion_refs) {
-            if (/^cr-[a-f0-9]{8}$/.test(ref))
-                ids.add(ref);
-        }
-    }
-    return [...ids];
-}
 /** v3.8: The contract a round EXECUTED under, plus every item's status as of
  *  that round — the ONE derivation the live coordinator, explain and audit
  *  share, so the three can never disagree about what a round ran under.

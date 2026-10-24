@@ -46,7 +46,6 @@ import {
   deriveTransactionId,
   makeRoundId,
   parseRoundTransactionSnapshot,
-  prepareRoundTransaction,
   rootBranchId,
 } from "../round-transaction.js";
 import { deriveActiveRoundContract, deriveRoundContractView } from "../round-contract.js";
@@ -1058,13 +1057,28 @@ export class RoundLifecycle {
       newConsecutiveRejections: 0,
       shouldPushSuccessTrajectory: false,
     };
-    const snapshot = prepareRoundTransaction(
-      session.loopId,
-      directive.target.redo_round,
-      [],
-      undefined,
-      { branchId: directive.transaction_id },
-    );
+    // The receipt base is the committed directive's own snapshot, not a
+    // freshly synthesized empty transaction. It is readable history (the
+    // legacy guard already ran) and carries the operator acceptance the
+    // recovery preserved.
+    const source = pending.sourceEntry as Record<string, unknown>;
+    const lineage = isRecord(source.loop_lineage) ? source.loop_lineage : {};
+    const transaction = isRecord(lineage.round_transaction)
+      ? lineage.round_transaction
+      : {};
+    const snapshot = parseRoundTransactionSnapshot(transaction.snapshot);
+    if (!snapshot) {
+      session.status = "stalled";
+      this.save(session);
+      return {
+        sessionId: session.sessionId,
+        round: session.currentRound,
+        prompt: null,
+        stopReason: "stalled",
+        stopDetail:
+          "The committed rollback directive is unreadable; its history must be repaired before the restore can continue.",
+      };
+    }
     const beforeFacts = this.beforeFactsFor(session);
     return this.buildBacktrackResult(session.sessionId, session, pr, {
       snapshot,

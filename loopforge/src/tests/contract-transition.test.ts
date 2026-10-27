@@ -517,7 +517,7 @@ describe("contract_transition — MCP end-to-end", () => {
 
     const replay = mgr.replayTimeline(sessionId) ?? [];
     const replayed = replay.find((entry) => entry.round === 2) as Record<string, unknown>;
-    assert.deepEqual(replayed.contract_transition, {
+    assert.deepEqual(replayed.contract_redirect, {
       kind: "supersede",
       contract_id: e2eContractId,
       reason: TRANSITION.reason,

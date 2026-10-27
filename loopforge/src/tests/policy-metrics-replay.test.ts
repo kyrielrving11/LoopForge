@@ -67,7 +67,8 @@ function committedFeedback(
           promptArtifact: level
             ? {
                 schemaVersion: PROMPT_ARTIFACT_SCHEMA_VERSION, roundId: "", round: 1,
-                attempt: 1, level, renderedPrompt: "", promptHash: "h", stateHash: "s",
+                attempt: 1, level, contextMode: "fresh_round", contextReason: "next_round",
+                renderedPrompt: "", promptHash: "h", stateHash: "s",
                 sections: [], droppedSections: [], protectedOverflow: false,
                 budget: 0, renderedChars: 0,
                 coverage: { active: [], rendered: [], omitted: [], complete: true },

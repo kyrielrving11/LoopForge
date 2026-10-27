@@ -8,7 +8,8 @@ import { deriveCriterionId, deriveItemId, normalizeText, STABLE_ID_RE, unique, u
 import { claimedMetCriteria, claimedRemainingCriteria } from "./self-eval.js";
 import { getPolicy } from "./policy.js";
 import { deriveConfiguredCapability } from "./policy.js";
-export const CANONICAL_STATE_SCHEMA_VERSION = 5;
+import { formatWorkingMemoryState, hasWorkingMemoryContent, } from "./working-memory.js";
+export const CANONICAL_STATE_SCHEMA_VERSION = 6;
 /** v3.7.1: Presentation view of sub-goals shared by prompts and the state
  *  file (one derivation, no second copy). Only ACTIVE items render as rows
  *  — pending/in_progress/blocked — ordered blocked → in_progress → pending
@@ -282,8 +283,10 @@ const STATE_SECTION_TIER = {
     // derived Recovery Brief injected at the top of this tier).
     "Progress Dashboard": "Recent",
     Verification: "Recent",
-    Corrections: "Recent",
-    Discoveries: "Recent",
+    // v4.0.2: bounded committed working memory. It replaces the former
+    // Corrections/Discoveries sections; discovered constraints remain visible
+    // through active-constraint provenance.
+    "Working Memory": "Recent",
     // Historical Summary — the loop's memory skeleton, kept under existing
     // milestone/window caps.
     "Goal → Criteria": "Historical Summary",
@@ -308,6 +311,7 @@ export function renderCanonicalStateMarkdown(state, options) {
         `**Source**: round ${state.round} (attempt ${options?.attempt ?? 1})`,
         "**Authority**: committed typed rounds are the factual source; this file is a derived view.",
         "**Agent reports**: summaries below are claims, not machine evidence.",
+        "**Working memory**: recent committed reports only; older history via replay/explain.",
         `**State hash**: ${hashCanonicalState(state).slice(0, 12)}`,
         "",
     ];
@@ -351,7 +355,9 @@ function flatStateSections(state) {
     addListWithIds(lines, "Success Criteria", constraintPartition.criteria, "cr");
     addListWithIdentities(lines, "Hard Constraints", constraintPartition.hard, state.constraintMetadata);
     addListWithIdentities(lines, "Active Constraints", constraintPartition.other, state.constraintMetadata);
-    addList(lines, "Corrections", state.corrections);
+    if (hasWorkingMemoryContent(state.workingMemory)) {
+        lines.push("## Working Memory", "", ...formatWorkingMemoryState(state.workingMemory), "");
+    }
     if (state.progress.criteriaMet.length > 0 ||
         state.progress.criteriaRemaining.length > 0 ||
         state.progress.filesChanged.length > 0 ||
@@ -409,7 +415,6 @@ function flatStateSections(state) {
     addListWithIds(lines, "Remaining", state.remainingCriteria, "cr");
     addList(lines, "Blockers", state.blockers);
     const recurring = recurringOnly(state.recurringFlags);
-    addList(lines, "Discoveries", state.discoveries);
     // v3.8.1: ONE recurring-facts section. "Recurring Issues" (the last 5
     // rounds' raw violations, no threshold) and "Lessons Learned" (the whole
     // history, count >= 2) were two windows over one fact set rendered as two
@@ -501,18 +506,6 @@ derived) {
     // evolution, but an uncommitted/rejected attempt cannot become durable
     // progress, discovery, or criterion state.
     const executionReport = committed ? last?.execution_report : undefined;
-    // A wrong assumption is the Agent's report, not a LoopForge verdict that
-    // it was "corrected" or "falsified". Render it verbatim under a report
-    // heading.
-    const corrections = committed
-        ? unique(last?.wrong_assumptions ?? [])
-        : [];
-    // Discoveries are discovered constraints only. emerged_subtasks are the
-    // Agent's execution plan and live in the Sub-Goal Dashboard; mixing them
-    // here made a plan look like a discovery.
-    const discoveries = committed
-        ? unique(last?.discovered_constraints ?? [])
-        : [];
     const blockers = unique([
         ...(committed ? (last?.constraint_violations ?? []) : []),
         ...response.warnings,
@@ -556,12 +549,14 @@ derived) {
         activeConstraints,
         retiredConstraints: unique(response.constraints_retired),
         constraintMetadata: response.constraint_metadata ?? [],
-        corrections,
         rejectionNotice: request.rejection_notice.trim() ? request.rejection_notice : null,
         remainingCriteria: unique(claimedRemainingCriteria(executionReport)),
         blockers,
         verificationFlags,
-        discoveries,
+        // v4.0.2: conditional presence — no committed working memory, no key.
+        ...(hasWorkingMemoryContent(derived?.workingMemory)
+            ? { workingMemory: derived.workingMemory }
+            : {}),
         subGoals: response.sub_goals ?? [],
         criterionStatuses: response.criterion_statuses ?? [],
         recurringFlags: response.recurring_flags ?? [],

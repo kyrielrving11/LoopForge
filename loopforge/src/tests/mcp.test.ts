@@ -506,6 +506,8 @@ describe("MCP — multi-round lifecycle", async () => {
     // consecutive-rejection count: reject, reject, terminate.
     const start = await TOOL_HANDLERS.loopforge_start(mgr, { task: "Audit ERC20", maxRounds: 20 });
     const sessionId = String(start.sessionId);
+    assert.equal(start.contextMode, "fresh_round");
+    assert.equal(start.contextReason, "first_round");
     const violationEval = (round: number, summary: string): Record<string, unknown> => ({
       success: false,
       output_summary: summary,
@@ -533,6 +535,8 @@ describe("MCP — multi-round lifecycle", async () => {
     });
     assert.ok(!last.enforcementAction || last.enforcementAction === "accept",
       "round 2 must advance");
+    assert.equal(last.contextMode, "fresh_round");
+    assert.equal(last.contextReason, "next_round");
 
     // Submission 3: same violation again → R2 fires (first occurrence).
     last = await toolNext(mgr, {
@@ -542,6 +546,9 @@ describe("MCP — multi-round lifecycle", async () => {
     });
     assert.equal(last.enforcementAction, "reject",
       "the first recurring-violation occurrence must reject");
+    assert.equal(last.contextMode, "same_round_retry");
+    assert.equal(last.contextReason, "enforcement_retry");
+    assert.doesNotMatch(String(last.prompt ?? ""), /Working Memory \(committed history/);
     // Submission 4: second consecutive same-check rejection.
     last = await toolNext(mgr, {
       sessionId,
@@ -948,6 +955,21 @@ describe("MCP — status / list / stop / replay", async () => {
     const timeline = result.timeline as Array<Record<string, unknown>>;
     assert.ok(timeline.length >= 1, "timeline should have entries");
     assert.equal(typeof timeline[0].round, "number");
+    assert.equal(timeline[0].context_mode, "fresh_round");
+    assert.equal(timeline[0].context_reason, "first_round");
+    assert.deepEqual(result.window, {
+      start: 1,
+      end: 1,
+      totalRounds: 1,
+      hasBefore: false,
+      hasAfter: false,
+    });
+    const badWindow = await TOOL_HANDLERS.loopforge_replay(mgr, {
+      sessionId,
+      start: 1,
+      end: 51,
+    });
+    assert.equal(badWindow.error, "invalid_argument");
   });
 });
 

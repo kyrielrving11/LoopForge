@@ -54,6 +54,22 @@ workspace changes and explicitly configured verification commands. If an
 observation is unavailable, LoopForge preserves that uncertainty instead of
 treating it as a pass or as an empty change set.
 
+Each prompt carries a derived context boundary. A normal next round (or the
+first round, or a recovery redo) is a `fresh_round`: the host starts a new
+Agent invocation, so the previous transcript, tool logs and uncommitted
+reasoning do not leak into the next round. A fresh context is not a workspace
+reset; only rollback/recovery restores a checkpoint. An enforcement retry is a
+`same_round_retry` and continues the same logical round.
+
+Continuity comes from a bounded Working Memory derived from the current
+branch's committed rounds and committed rollback directives: recent reports,
+falsified assumptions and retractions, open questions, consumed recoveries and
+contract redirects. Its window and character caps are fixed code constants,
+not policy. It is part of the one canonical cognitive state, never a second
+history or memory store, and Agent-reported entries never enter a verification
+gate. Older history is retrieved explicitly with `loopforge_replay` or
+`loopforge_status view: "explain"`.
+
 For work that benefits from a bounded slice, the agent can propose a Round
 Contract: a deliverable, acceptance conditions, and commands to check them.
 LoopForge validates the structure and command bindings. An item is verified

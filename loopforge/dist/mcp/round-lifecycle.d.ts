@@ -10,7 +10,7 @@
  * session ownership, queues, and leases remain in SessionManager.
  */
 import { LoopForgeEngine } from "../engine.js";
-import type { CheckpointRef, LoopCompileRequest, OperatorAcceptance, RecoveryRequest, SelfEvaluation, SubmissionDiagnostic, SubmissionGuidance, SubmissionHandle, SubmissionReceipt, VerificationFlag, LoopTerminalSink, RoundVerificationStatus } from "../protocol.js";
+import type { CheckpointRef, LoopCompileRequest, OperatorAcceptance, PromptContextMode, PromptContextReason, RecoveryRequest, SelfEvaluation, SubmissionDiagnostic, SubmissionGuidance, SubmissionHandle, SubmissionReceipt, VerificationFlag, LoopTerminalSink, RoundVerificationStatus } from "../protocol.js";
 import type { RoundTransactionSnapshot } from "../round-transaction.js";
 import { FileWorkspaceCheckpointStore } from "../workspace-checkpoint.js";
 import type { LoopStore, VaultEntry } from "../loop-store.js";
@@ -103,6 +103,11 @@ export interface AdvanceResult {
      *  without LoopForge prescribing a specific behavior. */
     stopDetail?: string;
     level?: string;
+    /** v4.0.2: the context boundary of the delivered prompt. Projected from the
+     *  PromptArtifact, never re-derived by the lifecycle. Absent when this
+     *  result carries no prompt. */
+    contextMode?: PromptContextMode;
+    contextReason?: PromptContextReason;
     roundSuccess?: boolean;
     warnings?: string[];
     /** v1.13: Enforcement action for this round. accept/reject/terminate.
@@ -260,6 +265,10 @@ export declare class RoundLifecycle {
      *  root or lose the operator's acceptance surface. */
     private prepareOptions;
     private persistPrepared;
+    /** v4.0.2: the context boundary carried by a prompt-bearing result. It is
+     *  a PROJECTION of the artifact that produced the prompt — never a second
+     *  derivation from live session state. */
+    private contextFacts;
     /** v3.9.7: execution metadata attached to every held/prepared prompt. These
      *  are transport facts, never prompt governance content. v4.0.0: the anchor
      *  itself is the separate `submissionHandle`; this bundle owns only the

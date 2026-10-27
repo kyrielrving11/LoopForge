@@ -489,6 +489,7 @@ export class RoundLifecycle {
             round: session.currentRound,
             ...this.heldHandle(session),
             ...this.transactionFacts(session),
+            ...this.contextFacts(prepared.snapshot.promptArtifact),
             prompt: prepared.prompt,
             level: prepared.level,
             roundSuccess,
@@ -499,6 +500,17 @@ export class RoundLifecycle {
                 session.roundSnapshot?.promptArtifact?.warnings ??
                 prepared.warnings ?? [],
             submission_guidance: this.guidanceFor(session),
+        };
+    }
+    /** v4.0.2: the context boundary carried by a prompt-bearing result. It is
+     *  a PROJECTION of the artifact that produced the prompt — never a second
+     *  derivation from live session state. */
+    contextFacts(artifact) {
+        if (!artifact)
+            return {};
+        return {
+            contextMode: artifact.contextMode,
+            contextReason: artifact.contextReason,
         };
     }
     /** v3.9.7: execution metadata attached to every held/prepared prompt. These
@@ -570,6 +582,7 @@ export class RoundLifecycle {
             round: session.currentRound,
             submissionHandle: handle,
             ...this.transactionFacts(session),
+            ...this.contextFacts(artifact),
             prompt: artifact.renderedPrompt,
             level: artifact.level,
             roundSuccess: undefined,
@@ -912,11 +925,14 @@ export class RoundLifecycle {
         }
         session.roundSnapshot = preparedRetry.snapshot;
         this.save(session);
+        const retryArtifact = preparedRetry.artifact ??
+            preparedRetry.compileResponse?.prompt_artifact ?? null;
         return {
             sessionId,
             round: session.currentRound,
             ...this.heldHandle(session),
             ...this.transactionFacts(session),
+            ...this.contextFacts(retryArtifact),
             prompt: preparedRetry.prompt,
             level: preparedRetry.level,
             enforcementAction: "reject",
@@ -927,8 +943,7 @@ export class RoundLifecycle {
             }),
             submission_receipt: this.buildReceipt(receiptBase, {
                 disposition: "rejected",
-                nextArtifact: preparedRetry.artifact ??
-                    preparedRetry.compileResponse?.prompt_artifact ?? null,
+                nextArtifact: retryArtifact,
                 afterSubGoals: null,
                 constraintsActiveAfter: null,
                 contractAfterId: receiptBase.beforeContractId,
@@ -1118,11 +1133,14 @@ export class RoundLifecycle {
         session.roundSnapshot = prepared.snapshot;
         this.seedEntrypointTrust(session);
         this.save(session);
+        const nextArtifact = prepared.artifact ??
+            prepared.compileResponse?.prompt_artifact ?? null;
         return {
             sessionId,
             round: newRound,
             ...this.heldHandle(session),
             ...this.transactionFacts(session),
+            ...this.contextFacts(nextArtifact),
             prompt: prepared.prompt,
             level: prepared.level,
             enforcementAction: directive.origin === "agent" ? "recovery" : "backtrack",
@@ -1158,8 +1176,7 @@ export class RoundLifecycle {
             }),
             submission_receipt: this.buildReceipt(receiptBase, {
                 disposition: "backtracked",
-                nextArtifact: prepared.artifact ??
-                    prepared.compileResponse?.prompt_artifact ?? null,
+                nextArtifact,
                 afterSubGoals: null,
                 constraintsActiveAfter: null,
                 contractAfterId: receiptBase.beforeContractId,
@@ -1327,11 +1344,13 @@ export class RoundLifecycle {
                 `Resume the loop to recover the held prompt.`);
         }
         const compiled = prepared.compileResponse;
+        const nextArtifact = prepared.artifact ?? compiled?.prompt_artifact ?? null;
         return {
             sessionId,
             round: session.currentRound,
             ...this.heldHandle(session),
             ...this.transactionFacts(session),
+            ...this.contextFacts(nextArtifact),
             prompt: nextPrompt,
             level: nextLevel,
             roundSuccess,
@@ -1339,7 +1358,7 @@ export class RoundLifecycle {
             submission_guidance: this.guidanceFor(session),
             submission_receipt: this.buildReceipt(receiptBase, {
                 disposition: "accepted",
-                nextArtifact: prepared.artifact ?? compiled?.prompt_artifact ?? null,
+                nextArtifact,
                 afterSubGoals: compiled?.sub_goals ?? null,
                 constraintsActiveAfter: compiled?.constraints_active ?? null,
                 constraintsRetiredAfter: compiled?.constraints_retired ?? null,

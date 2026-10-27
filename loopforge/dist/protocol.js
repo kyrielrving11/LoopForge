@@ -41,6 +41,7 @@ export function makeSelfEvaluation(overrides = {}) {
         execution_report: undefined,
         retracted_constraints: [],
         wrong_assumptions: [],
+        open_questions: [],
         worker_results: [],
         compression_checkpoint: false,
         checkpoint_label: "",
@@ -105,6 +106,7 @@ export function makeLoopRoundResult(overrides = {}) {
         execution_report: undefined,
         retracted_constraints: [],
         wrong_assumptions: [],
+        open_questions: [],
         worker_results: [],
         compression_checkpoint: false,
         checkpoint_label: "",
@@ -132,15 +134,16 @@ export function makeLoopCompileRequest(overrides = {}) {
         ...overrides,
     };
 }
-/** Immutable record of the exact prompt delivered for one round attempt. */
-/** v3.8.1: the artifact schema version, next to the type it versions. The
- *  transaction envelope parser reads it, so the constant lives here rather
- *  than in the renderer. */
-/** v4.0.1: schema 7 removes the prompt-request effects. Older versions are a
- *  HARD break — a round whose artifact does not parse is not committed
- *  history, and `legacyTransactionRounds` reports the loss rather than letting
- *  it vanish. */
-export const PROMPT_ARTIFACT_SCHEMA_VERSION = 7;
+/** v3.8.1: the artifact schema version lives next to the type it versions.
+ *  The transaction envelope parser reads it, so the constant lives here rather
+ *  than in the renderer.
+ *
+ *  v4.0.1: schema 7 removes the prompt-request effects. v4.0.2: schema 8 adds
+ *  the derived context boundary and the optional Working Memory projection.
+ *  Older versions are a HARD break — a round whose artifact does not parse is
+ *  not committed history, and `legacyTransactionRounds` reports the loss
+ *  rather than letting it vanish. */
+export const PROMPT_ARTIFACT_SCHEMA_VERSION = 8;
 export function makeLoopCompileResponse(overrides = {}) {
     return {
         status: AgentStatus.OK,

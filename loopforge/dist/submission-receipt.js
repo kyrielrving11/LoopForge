@@ -290,6 +290,9 @@ export function deriveSubmissionReceipt(input) {
             ? {
                 level: input.nextArtifact.level,
                 dropped_sections: [...input.nextArtifact.droppedSections],
+                // v4.0.2: the SAME artifact fact the next prompt was compiled with.
+                context_mode: input.nextArtifact.contextMode,
+                context_reason: input.nextArtifact.contextReason,
             }
             : null,
         diagnostics: input.diagnostics,

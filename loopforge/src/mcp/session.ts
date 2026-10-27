@@ -40,6 +40,7 @@ import type { ActiveContractView } from "../round-contract.js";
 import { getPolicy, validateLoopId } from "../policy.js";
 import { isRecord, unique } from "../token-utils.js";
 import { ReplayBackend } from "../replay.js";
+import type { ReplayPage, ReplayWindowOptions } from "../replay.js";
 import { FileLoopStore } from "../loop-store.js";
 import type { LoopStore, VaultEntry } from "../loop-store.js";
 import {
@@ -415,6 +416,14 @@ export class SessionManager implements SessionRegistry {
       loopId,
       round: 1,
       ...(handle ? { submissionHandle: handle } : {}),
+      // v4.0.2: start is a prompt-bearing result like next/resume; the
+      // boundary is projected from the same compiled artifact.
+      ...(snapshot?.promptArtifact
+        ? {
+            contextMode: snapshot.promptArtifact.contextMode,
+            contextReason: snapshot.promptArtifact.contextReason,
+          }
+        : {}),
       ...(snapshot?.beforeCheckpoint
         ? { checkpoints: [snapshot.beforeCheckpoint] }
         : {}),
@@ -1654,6 +1663,19 @@ export class SessionManager implements SessionRegistry {
     return timeline.length > 0 ? timeline : null;
   }
 
+  /** v4.0.2: a bounded replay page with its window metadata. `null` only when
+   *  the session does not exist; an empty loop returns an empty page. */
+  replayPage(sessionId: string, opts?: ReplayWindowOptions): ReplayPage | null {
+    const session = this.sessions.get(sessionId);
+    if (!session) return null;
+    return this.replayPageByLoop(session.loopId, opts);
+  }
+
+  replayPageByLoop(loopId: string, opts?: ReplayWindowOptions): ReplayPage {
+    validateLoopId(loopId);
+    return new ReplayBackend(this.loopStore).page(loopId, opts);
+  }
+
   /** v3.9.6: committed rollback directives for the replay view. They are
    *  events, not normal rounds; the timeline stays a normal-round projection. */
   replayRollbacks(loopId: string): Record<string, unknown>[] {
@@ -1669,6 +1691,13 @@ export class SessionManager implements SessionRegistry {
       reason: view.recovery?.reason ?? "",
       skippedFiles: [...(view.recovery?.skipped_files ?? [])],
       preservedDiscoveries: [...(view.recovery?.skipped_discoveries ?? [])],
+      // v4.0.2: the committed abandoned-path facts, same display caps as
+      // Working Memory / replay.
+      failedRounds: [...(view.recovery?.failed_rounds ?? [])],
+      approaches: [...(view.recovery?.approaches ?? [])].map((value) =>
+        value.slice(0, 200)),
+      wrongAssumptions: [...(view.recovery?.wrong_assumptions ?? [])].map((value) =>
+        value.slice(0, 500)),
     }));
   }
 

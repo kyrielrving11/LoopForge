@@ -27,13 +27,24 @@ export interface ExplainRound {
   attempt: number;
   action: string;
   outcome: string | null;
-  /** The agent's own report, quoted back for audit. */
+  /** v4.0.2: the committed context boundary this round was compiled under. */
+  context: {
+    mode: "fresh_round" | "same_round_retry";
+    reason: "first_round" | "next_round" | "recovery_redo" | "enforcement_retry";
+  } | null;
+  /** The agent's own report, quoted back for audit. Present whenever the
+   *  committed evaluation exists, even without an execution_report. */
   report: {
     output_summary: string;
     success: boolean;
     criterion_claims: Array<{ criterion_id: string; outcome: string }>;
     contract_item_claims: Array<{ item_id: string; outcome: string }>;
   } | null;
+  /** v4.0.2: committed Agent reports, bounded for display. */
+  wrongAssumptions: string[];
+  retractedConstraints: string[];
+  openQuestions: string[];
+  blocker: string | null;
   /** What the machine observed this round. */
   observations: Array<{
     providerId: string;
@@ -94,6 +105,20 @@ export interface ExplainRound {
   } | null;
 }
 
+/** v4.0.2: display caps for report facts. Committed originals stay in the
+ *  transaction; explain is a bounded read-only view. */
+function clip(text: string | undefined, maxChars: number): string {
+  const value = text ?? "";
+  return value.length > maxChars ? value.slice(0, maxChars) : value;
+}
+
+function clipList(
+  values: ReadonlyArray<string> | undefined,
+  maxChars: number,
+): string[] {
+  return (values ?? []).map((value) => clip(value, maxChars));
+}
+
 export interface ExplainResult {
   loopId: string;
   /** Only the requested round when `round` was given. */
@@ -109,6 +134,11 @@ export interface ExplainResult {
     targetCheckpointId: string;
     reason: string;
     skippedFiles: string[];
+    /** v4.0.2: the directive's committed abandoned-path facts, same caps as
+     *  Working Memory and replay. */
+    failedRounds: number[];
+    approaches: string[];
+    wrongAssumptions: string[];
   }>;
 }
 
@@ -153,19 +183,33 @@ export function buildExplain(
       attempt: view.attempt,
       action: view.action,
       outcome: view.outcome,
-      report: view.executionReport
+      context: view.promptArtifact
         ? {
-            output_summary: view.evaluation?.output_summary ?? "",
-            success: view.evaluation?.success ?? false,
-            criterion_claims: (view.executionReport.criterion_claims ?? []).map((claim) => ({
+            mode: view.promptArtifact.contextMode,
+            reason: view.promptArtifact.contextReason,
+          }
+        : null,
+      // v4.0.2: a committed evaluation always carries a report; claims are an
+      // optional execution_report projection, defaulting to [].
+      report: view.evaluation
+        ? {
+            output_summary: clip(view.evaluation.output_summary, 4000),
+            success: view.evaluation.success,
+            criterion_claims: (view.executionReport?.criterion_claims ?? []).map((claim) => ({
               criterion_id: claim.criterion_id,
               outcome: claim.outcome,
             })),
-            contract_item_claims: (view.executionReport.contract_item_claims ?? []).map((claim) => ({
+            contract_item_claims: (view.executionReport?.contract_item_claims ?? []).map((claim) => ({
               item_id: claim.item_id,
               outcome: claim.outcome,
             })),
           }
+        : null,
+      wrongAssumptions: clipList(view.evaluation?.wrong_assumptions, 500),
+      retractedConstraints: clipList(view.retractedConstraints, 500),
+      openQuestions: clipList(view.openQuestions, 300),
+      blocker: view.evaluation?.blocker
+        ? clip(view.evaluation.blocker, 500)
         : null,
       observations: view.afterEvidence.map((observation) => ({
         providerId: observation.providerId,
@@ -242,8 +286,11 @@ export function buildExplain(
       origin: view.origin === "agent" ? "agent" as const : "machine" as const,
       redoRound: view.recovery?.target.redo_round ?? 0,
       targetCheckpointId: view.recovery?.target.checkpoint_id ?? "",
-      reason: view.recovery?.reason ?? "",
+      reason: clip(view.recovery?.reason, 500),
       skippedFiles: [...(view.recovery?.skipped_files ?? [])],
+      failedRounds: [...(view.recovery?.failed_rounds ?? [])],
+      approaches: clipList(view.recovery?.approaches, 200),
+      wrongAssumptions: clipList(view.recovery?.wrong_assumptions, 500),
     })),
   };
 }
@@ -259,12 +306,27 @@ export function renderExplain(result: ExplainResult): string {
     );
   }
   for (const round of result.rounds) {
-    lines.push("", `Round ${round.round} (${round.roundId}, attempt ${round.attempt}) — ${round.action}${round.outcome ? ` / ${round.outcome}` : ""}`);
+    const context = round.context
+      ? ` — context ${round.context.mode} (${round.context.reason})`
+      : "";
+    lines.push("", `Round ${round.round} (${round.roundId}, attempt ${round.attempt}) — ${round.action}${round.outcome ? ` / ${round.outcome}` : ""}${context}`);
     if (round.report) {
       lines.push(`  report: success=${round.report.success} — ${round.report.output_summary.slice(0, 200)}`);
       for (const claim of round.report.contract_item_claims) {
         lines.push(`    item claim: ${claim.item_id} → ${claim.outcome}`);
       }
+    }
+    for (const assumption of round.wrongAssumptions) {
+      lines.push(`  wrong assumption (report): ${assumption.slice(0, 160)}`);
+    }
+    for (const retraction of round.retractedConstraints) {
+      lines.push(`  retracted constraint (report): ${retraction.slice(0, 160)}`);
+    }
+    for (const question of round.openQuestions) {
+      lines.push(`  open question (report): ${question.slice(0, 160)}`);
+    }
+    if (round.blocker) {
+      lines.push(`  blocker: ${round.blocker.slice(0, 160)}`);
     }
     for (const observation of round.observations) {
       lines.push(`  observation: ${observation.providerId} [${observation.status}] ${observation.files.length} file(s)`);
@@ -289,6 +351,25 @@ export function renderExplain(result: ExplainResult): string {
           ? ` — ${round.contractTransition.reason.slice(0, 160)} (report only)`
           : " (report only)"),
       );
+    }
+  }
+  for (const rollback of result.rollbacks) {
+    lines.push(
+      "",
+      `Rollback R${rollback.round} (${rollback.origin}) → redo R${rollback.redoRound}` +
+      `, checkpoint ${rollback.targetCheckpointId}`,
+    );
+    if (rollback.reason) {
+      lines.push(`  reason: ${rollback.reason.slice(0, 200)}`);
+    }
+    if (rollback.failedRounds.length > 0) {
+      lines.push(`  failed rounds: R${rollback.failedRounds.join(", R")}`);
+    }
+    for (const approach of rollback.approaches) {
+      lines.push(`  abandoned approach (report): ${approach.slice(0, 160)}`);
+    }
+    for (const assumption of rollback.wrongAssumptions) {
+      lines.push(`  wrong assumption (report): ${assumption.slice(0, 160)}`);
     }
   }
   return lines.join("\n");

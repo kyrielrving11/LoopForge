@@ -36,6 +36,10 @@ LoopForge 记录观察并应用轮次规则
 
 Agent 报告描述它认为发生了什么，但报告本身不是证明。LoopForge 将报告与可用观察对照，例如 Git 工作区变化和明确配置的验证命令。观察不可用时，LoopForge 保留未知状态，不会将它当成通过或空变更。
 
+每个 prompt 都带有派生出的 context boundary。正常下一轮、第一轮和 recovery redo 都是 `fresh_round`：宿主启动新的 Agent invocation，上一轮 transcript、工具日志和未提交推理不会进入下一轮。fresh context 不是工作区重置；只有 rollback/recovery 才恢复检查点。enforcement retry 是 `same_round_retry`，继续同一个逻辑轮。
+
+连续性来自有界 Working Memory：只从当前分支的已提交轮次和已提交 rollback directive 派生，包含近期报告、被证伪假设与撤回、未闭合问题、已消费恢复事件和契约转向。窗口与字符上限是固定代码常量，不是 policy；它是唯一 canonical 认知状态的一部分，不是第二套历史或独立 memory store，Agent 报告也不会进入验证 gate。更早历史通过 `loopforge_replay` 或 `loopforge_status view: "explain"` 主动检索。
+
 对于适合有界分片的工作，Agent 可以提出 Round Contract：一个交付物、验收条件，以及用于检查这些条件的命令。LoopForge 校验契约结构和命令绑定。只有 Agent 声明条目满足，且关闭轮次中的绑定命令通过，条目才会标记为已验证。交付物或测试在语义上是否合适，仍由 Agent 和操作者判断。Agent 声明的 `scope` 只是报告用的意图，不是权限；当前分片确实不再合适时，可以用 `contract_transition` 显式改向，旧契约以 `superseded` 关闭并继续保留在审计记录中。
 
 ## 由 Agent 主导的恢复

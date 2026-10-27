@@ -364,6 +364,13 @@ describe("RoundLifecycle — resume / crash window", async () => {
       "HELD-PROMPT",
       "prompt not consumed",
     );
+    // v4.0.2: the boundary is projected from the held artifact, and a second
+    // delivery of the same held prompt does not create a new boundary.
+    assert.equal(result.contextMode, "fresh_round");
+    assert.equal(result.contextReason, "next_round");
+    const again = await lifecycle.resume(session);
+    assert.equal(again.contextMode, result.contextMode);
+    assert.equal(again.contextReason, result.contextReason);
   });
 
   it("resume recovers a missing round-1 prompt and persists it", async () => {
@@ -384,6 +391,8 @@ describe("RoundLifecycle — resume / crash window", async () => {
     assert.ok(result.prompt, "legacy resume compiles a prompt");
     assert.ok(result.prompt!.includes("LoopForge"));
     assert.equal(result.round, 1);
+    assert.equal(result.contextMode, "fresh_round");
+    assert.equal(result.contextReason, "first_round");
     // Persisted for cross-process recovery
     const persisted = new VaultSessionStateStore(store).load("loop-legacy-resume")!;
     const lineage = persisted.loop_lineage as Record<string, unknown>;

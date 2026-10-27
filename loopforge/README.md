@@ -60,6 +60,18 @@ A submission is either an evaluation or an Agent-requested recovery, never
 both. Invalid core fields can be corrected for the same round without
 committing that attempt.
 
+Every returned prompt declares its derived context boundary in the header:
+`fresh_round` (first round, next round, or recovery redo) starts a new Agent
+invocation without the previous transcript, while `same_round_retry`
+continues the same logical round after an enforcement rejection. A fresh
+context is not a workspace reset. A fresh prompt also carries a bounded
+Working Memory compiled from committed reports, assumptions, open questions,
+consumed recoveries, and contract redirects; it is part of the canonical
+state, not a second history, and never feeds a gate. Older history is
+available through `loopforge_replay` (`start`/`end`; default last 10 committed
+rounds, at most 50 in an explicit window) and `loopforge_status view:
+"explain"`.
+
 The four required evaluation fields are `success`, `output_summary`,
 `constraint_violations`, and `should_continue`. They are the Agent's report,
 not evidence. Optional fields let the Agent report events such as changed files,

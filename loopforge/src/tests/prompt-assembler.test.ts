@@ -7,6 +7,7 @@ import { PROMPT_ARTIFACT_SCHEMA_VERSION } from "../protocol.js";
 import type { PromptAssemblyInput } from "../prompt-assembler.js";
 import type { CanonicalLoopState } from "../canonical-state.js";
 import type { ConstraintMeta } from "../protocol.js";
+import type { WorkingMemory } from "../working-memory.js";
 import { deriveItemId } from "../token-utils.js";
 import { deriveConfiguredCapability, getPolicy, resetPolicy, setPolicyForTest, DEFAULT_POLICY } from "../policy.js";
 // Namespace import of the verification-gate CHECK_* constants: the coverage
@@ -19,9 +20,27 @@ import * as verificationGate from "../verification-gate.js";
 // Helpers
 // ═══════════════════════════════════════════════════════════════════════════
 
+function memory(overrides: Partial<WorkingMemory> = {}): WorkingMemory {
+  return {
+    reports: [{
+      round: 1,
+      attempt: 1,
+      success: true,
+      outcome: "success",
+      outputSummary: "implemented the parser and ran the suite",
+      sourceChars: 38,
+    }],
+    assumptions: [],
+    openQuestions: [],
+    recoveries: [],
+    redirects: [],
+    ...overrides,
+  };
+}
+
 function minimalState(overrides: Partial<CanonicalLoopState> = {}): CanonicalLoopState {
   return {
-    schemaVersion: 5 as const,
+    schemaVersion: 6 as const,
     loopId: "test-loop",
     round: 1,
     maxRounds: 20,
@@ -34,11 +53,9 @@ function minimalState(overrides: Partial<CanonicalLoopState> = {}): CanonicalLoo
     activeConstraints: ["no runtime deps", "all tests pass"],
     retiredConstraints: [],
     constraintMetadata: [],
-    corrections: [],
     remainingCriteria: [],
     blockers: [],
     verificationFlags: [],
-    discoveries: [],
     subGoals: [],
     criterionStatuses: [],
     recurringFlags: [],
@@ -55,12 +72,14 @@ function minimalState(overrides: Partial<CanonicalLoopState> = {}): CanonicalLoo
 }
 
 function input(overrides: Partial<PromptAssemblyInput> = {}): PromptAssemblyInput {
+  const state = overrides.state ?? minimalState();
   return {
-    state: minimalState(),
+    state,
     level: "l2",
     reasons: ["first_round"],
     attempt: 1,
     selfEvaluationBlock: "",
+    workingMemory: state.workingMemory,
     ...overrides,
   };
 }
@@ -220,7 +239,7 @@ describe("assemblePromptArtifact — L2", () => {
       level: "l2",
       reasons: ["recovery_boundary"],
     }));
-    assert.ok(artifact.renderedPrompt.includes("Read the full state file before acting"));
+    assert.ok(artifact.renderedPrompt.includes("Read the state file before acting"));
   });
 });
 
@@ -239,26 +258,48 @@ describe("assemblePromptArtifact — memory boundary", () => {
     }
   });
 
+  it("routes older history through replay/explain at every level", () => {
+    for (const level of ["l0", "l1", "l2"] as const) {
+      const artifact = assemblePromptArtifact(input({ level }));
+      assert.ok(artifact.renderedPrompt.includes("loopforge_replay"),
+        `${level} must route older history to replay`);
+      assert.ok(artifact.renderedPrompt.includes("loopforge_status view=explain"),
+        `${level} must route older history to explain`);
+    }
+    const retry = assemblePromptArtifact(input({
+      level: "l0",
+      contextMode: "same_round_retry",
+      contextReason: "enforcement_retry",
+    }));
+    assert.ok(retry.renderedPrompt.includes("loopforge_replay"));
+    assert.ok(retry.renderedPrompt.includes("loopforge_status view=explain"));
+  });
+
   it("does not call the state file the source of truth", () => {
     const artifact = assemblePromptArtifact(input({
       level: "l2",
       reasons: ["recovery_boundary"],
     }));
-    assert.ok(artifact.renderedPrompt.includes("Read the full state file before acting"));
+    assert.ok(artifact.renderedPrompt.includes("Read the state file before acting"));
     assert.ok(!artifact.renderedPrompt.includes("the state file is the source of truth"));
     assert.ok(artifact.renderedPrompt.includes("derived"));
   });
 
-  it("renders committed Corrections but not output summaries", () => {
+  it("renders bounded Working Memory reports with explicit report labels", () => {
     const artifact = assemblePromptArtifact(input({
       level: "l1",
       state: minimalState({
-        corrections: ["Corrected assumption: old belief"],
+        workingMemory: memory({
+          reports: [{
+            round: 1, attempt: 1, success: false, outcome: "partial",
+            outputSummary: "Corrected assumption: old belief", sourceChars: 35,
+          }],
+        }),
       }),
     }));
-    assert.ok(artifact.renderedPrompt.includes("Corrections (committed reports)"));
-    assert.ok(artifact.renderedPrompt.includes("Corrected assumption: old belief"));
-    assert.ok(!artifact.renderedPrompt.includes("prior summary"));
+    assert.ok(artifact.renderedPrompt.includes("Working Memory (committed history"));
+    assert.ok(artifact.renderedPrompt.includes("Previous Round Report (Agent report) — R1"));
+    assert.ok(artifact.renderedPrompt.includes("> Corrected assumption: old belief"));
   });
 
   it("labels reported and agent-supplied optional sections", () => {
@@ -273,26 +314,25 @@ describe("assemblePromptArtifact — memory boundary", () => {
           count: 2,
           rounds: [1, 2],
         }],
-        corrections: ["Corrected assumption: old belief"],
+        workingMemory: memory(),
       }),
     }));
     assert.ok(artifact.renderedPrompt.includes("Blockers (reported/current)"));
     assert.ok(artifact.renderedPrompt.includes("Recurring Findings"));
-    assert.ok(artifact.renderedPrompt.includes("Corrections (committed reports)"));
+    assert.ok(artifact.renderedPrompt.includes("Working Memory (committed history"));
   });
 
   it("records no removed narrative sections", () => {
     const artifact = assemblePromptArtifact(input({
       level: "l2",
       state: minimalState({
-        corrections: ["Corrected assumption: old belief"],
-        discoveries: ["a discovery"],
+        workingMemory: memory(),
         retiredConstraints: ["old rule"],
       }),
     }));
     for (const id of [
       "changes", "rolling_outcomes", "discoveries", "failed_patterns",
-      "retired_constraints", "full_state",
+      "retired_constraints", "full_state", "corrections",
     ]) {
       assert.ok(!artifact.sections.includes(id), `${id} must not render`);
     }
@@ -341,11 +381,11 @@ describe("assemblePromptArtifact — metadata", () => {
   });
 
   it("drops optional sections under a tight budget", () => {
-    const state = minimalState({ corrections: ["Corrected assumption: added auth.ts"] });
+    const state = minimalState({ blockers: ["a reported blocker"] });
     const tight = assemblePromptArtifact(input({ level: "l1", budgets: { l1: 10 }, state }));
     const ample = assemblePromptArtifact(input({ level: "l1", state }));
-    assert.ok(ample.renderedPrompt.includes("Corrections"));
-    assert.ok(!tight.renderedPrompt.includes("Corrections"));
+    assert.ok(ample.renderedPrompt.includes("Blockers (reported/current)"));
+    assert.ok(!tight.renderedPrompt.includes("Blockers (reported/current)"));
     assert.ok(tight.renderedPrompt.includes("Current Task"));
   });
 
@@ -561,8 +601,7 @@ describe("assemblePromptArtifact — budget determinism", () => {
     ],
     remainingCriteria: ["criterion one", "criterion two"],
     blockers: ["a blocker"],
-    corrections: ["Corrected assumption: an old belief"],
-    discoveries: ["a discovery"],
+    workingMemory: memory(),
     retiredConstraints: ["an old rule"],
     recurringFlags: [
       { subject: "test_files_modified", kind: "verification_warning", ref: "", count: 3, rounds: [1, 2, 3] },
@@ -591,7 +630,7 @@ describe("assemblePromptArtifact — budget determinism", () => {
     // Make the lowest-priority optional section large enough to create a real
     // cut point: blockers/corrections can fit while this one cannot.
     state.recurringFlags = Array.from({ length: 8 }, (_, index) => ({
-      subject: `recurring finding ${index} ${"x".repeat(180)}`,
+      subject: `recurring finding ${index} ${"x".repeat(1000)}`,
       kind: "verification_warning" as const,
       ref: "",
       count: 3,
@@ -599,7 +638,7 @@ describe("assemblePromptArtifact — budget determinism", () => {
     }));
     const artifact = assemblePromptArtifact(input({
       level: "l2", state,
-      budgets: { l2: 2500 },
+      budgets: { l2: 3200 },
     }));
     // The invariant is about the CUT POINT, not about any single section:
     // every optional section that rendered must outrank every one that was
@@ -607,7 +646,7 @@ describe("assemblePromptArtifact — budget determinism", () => {
     // low-priority section into room a larger high-priority one could not
     // use.)
     const order = [
-      "blockers", "corrections", "active_warnings",
+      "blockers", "active_warnings",
     ];
     const rendered = order.filter((id) => artifact.sections.includes(id));
     const dropped = order.filter((id) => artifact.droppedSections.includes(id));

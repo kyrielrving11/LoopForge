@@ -65,6 +65,12 @@
             "type": "string"
           }
         },
+        "open_questions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "compression_checkpoint": {
           "type": "boolean"
         },
@@ -1318,6 +1324,12 @@
                   "items": {
                     "type": "string"
                   }
+                },
+                "context_mode": {
+                  "$ref": "#/$defs/PromptContextMode"
+                },
+                "context_reason": {
+                  "$ref": "#/$defs/PromptContextReason"
                 }
               },
               "required": [
@@ -2049,6 +2061,12 @@
             "type": "string"
           }
         },
+        "open_questions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "worker_results": {
           "type": "array",
           "items": {
@@ -2271,12 +2289,109 @@
       ],
       "description": "v3.9.4: ID-level proof that the current prompt rendered every active\r\nnormative object. This is an OUTPUT fact about one render — never an\r\ninstruction for a later prompt and never an input to fact derivation.\r\n\r\n`active` is the required set derived from the same `CanonicalLoopState`\r\nthe renderer consumed; `rendered` is the union of the IDs the included\r\nsections declared; `omitted = active - rendered`. `complete` is false only\r\nwhen a normative ID was lost; prompt preparation then fails closed.\r\n\r\nOrdering is deterministic: `active` by (kind rank, id), `rendered` sorted\r\nunique, `omitted` by id."
     },
+    "PromptContextMode": {
+      "type": "string",
+      "enum": [
+        "fresh_round",
+        "same_round_retry"
+      ]
+    },
+    "PromptContextReason": {
+      "type": "string",
+      "enum": [
+        "first_round",
+        "next_round",
+        "recovery_redo",
+        "enforcement_retry"
+      ]
+    },
+    "PromptWorkingMemoryProjection": {
+      "type": "object",
+      "properties": {
+        "reportRounds": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          }
+        },
+        "counts": {
+          "type": "object",
+          "properties": {
+            "reports": {
+              "type": "number"
+            },
+            "assumptions": {
+              "type": "number"
+            },
+            "openQuestions": {
+              "type": "number"
+            },
+            "recoveries": {
+              "type": "number"
+            },
+            "redirects": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "reports",
+            "assumptions",
+            "openQuestions",
+            "recoveries",
+            "redirects"
+          ]
+        },
+        "previousReport": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "round": {
+                  "type": "number"
+                },
+                "sourceChars": {
+                  "type": "number"
+                },
+                "renderedChars": {
+                  "type": "number"
+                },
+                "truncated": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "round",
+                "sourceChars",
+                "renderedChars",
+                "truncated"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "renderedChars": {
+          "type": "number"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "reportRounds",
+        "counts",
+        "renderedChars",
+        "truncated"
+      ],
+      "description": "v4.0.2: what the prompt projection actually rendered from the bounded\r\nWorking Memory. Audit metadata only — it never feeds a decision."
+    },
     "PromptArtifact": {
       "type": "object",
       "properties": {
         "schemaVersion": {
           "type": "number",
-          "const": 7
+          "const": 8
         },
         "roundId": {
           "type": "string"
@@ -2308,6 +2423,12 @@
               ]
             }
           ]
+        },
+        "contextMode": {
+          "$ref": "#/$defs/PromptContextMode"
+        },
+        "contextReason": {
+          "$ref": "#/$defs/PromptContextReason"
         },
         "renderedPrompt": {
           "type": "string"
@@ -2347,6 +2468,9 @@
           "items": {
             "type": "string"
           }
+        },
+        "workingMemory": {
+          "$ref": "#/$defs/PromptWorkingMemoryProjection"
         }
       },
       "required": [
@@ -2355,6 +2479,8 @@
         "round",
         "attempt",
         "level",
+        "contextMode",
+        "contextReason",
         "renderedPrompt",
         "promptHash",
         "stateHash",

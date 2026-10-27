@@ -1017,6 +1017,9 @@ export function buildSelfEvaluation(raw, sink, facts) {
     const executionReport = parseExecutionReport(raw.execution_report, sink, facts?.knownCriterionRefs);
     const retractedConstraints = boundedStringArray(raw.retracted_constraints, 50, 500, sink, "retracted_constraints");
     const wrongAssumptions = boundedStringArray(raw.wrong_assumptions, 50, 500, sink, "wrong_assumptions");
+    // v4.0.2: strictly report-only. The window/caps are the field's contract,
+    // not policy: at most 3 entries, 300 chars each.
+    const openQuestions = boundedStringArray(raw.open_questions, 3, 300, sink, "open_questions");
     const workerResults = parseWorkerResults(raw.worker_results, sink);
     if (raw.success !== undefined && typeof raw.success !== "boolean") {
         sink?.push("success", "invalid_value", "dropped", "expected a boolean; normalized to false (core validation rejects it)");
@@ -1082,6 +1085,7 @@ export function buildSelfEvaluation(raw, sink, facts) {
         execution_report: executionReport,
         retracted_constraints: retractedConstraints,
         wrong_assumptions: wrongAssumptions,
+        open_questions: openQuestions,
         worker_results: workerResults,
         compression_checkpoint: typeof raw.compression_checkpoint === "boolean" ? raw.compression_checkpoint : false,
         checkpoint_label: boundedString(raw.checkpoint_label, 200, sink, "checkpoint_label") ?? "",

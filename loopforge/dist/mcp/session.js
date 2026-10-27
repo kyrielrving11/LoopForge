@@ -292,6 +292,14 @@ export class SessionManager {
             loopId,
             round: 1,
             ...(handle ? { submissionHandle: handle } : {}),
+            // v4.0.2: start is a prompt-bearing result like next/resume; the
+            // boundary is projected from the same compiled artifact.
+            ...(snapshot?.promptArtifact
+                ? {
+                    contextMode: snapshot.promptArtifact.contextMode,
+                    contextReason: snapshot.promptArtifact.contextReason,
+                }
+                : {}),
             ...(snapshot?.beforeCheckpoint
                 ? { checkpoints: [snapshot.beforeCheckpoint] }
                 : {}),
@@ -1444,6 +1452,18 @@ export class SessionManager {
         const timeline = replay.timeline(loopId);
         return timeline.length > 0 ? timeline : null;
     }
+    /** v4.0.2: a bounded replay page with its window metadata. `null` only when
+     *  the session does not exist; an empty loop returns an empty page. */
+    replayPage(sessionId, opts) {
+        const session = this.sessions.get(sessionId);
+        if (!session)
+            return null;
+        return this.replayPageByLoop(session.loopId, opts);
+    }
+    replayPageByLoop(loopId, opts) {
+        validateLoopId(loopId);
+        return new ReplayBackend(this.loopStore).page(loopId, opts);
+    }
     /** v3.9.6: committed rollback directives for the replay view. They are
      *  events, not normal rounds; the timeline stays a normal-round projection. */
     replayRollbacks(loopId) {
@@ -1459,6 +1479,11 @@ export class SessionManager {
             reason: view.recovery?.reason ?? "",
             skippedFiles: [...(view.recovery?.skipped_files ?? [])],
             preservedDiscoveries: [...(view.recovery?.skipped_discoveries ?? [])],
+            // v4.0.2: the committed abandoned-path facts, same display caps as
+            // Working Memory / replay.
+            failedRounds: [...(view.recovery?.failed_rounds ?? [])],
+            approaches: [...(view.recovery?.approaches ?? [])].map((value) => value.slice(0, 200)),
+            wrongAssumptions: [...(view.recovery?.wrong_assumptions ?? [])].map((value) => value.slice(0, 500)),
         }));
     }
     /** v3.9.1: unsupported envelope versions for a loop, reported explicitly

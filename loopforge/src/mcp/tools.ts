@@ -22,6 +22,8 @@ import { deriveEvidenceCapability } from "../evidence-provider.js";
 import { fieldGuideDescription } from "../submission-guidance.js";
 import { LOST_HANDLE_ROUTING } from "../recovery-guidance.js";
 import { SessionLeaseConflictError } from "../storage.js";
+import { ReplayWindowError } from "../replay.js";
+import type { ReplayPage } from "../replay.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Tool schemas (MCP JSON Schema format)
@@ -128,7 +130,7 @@ const TOOL_BASE_SCHEMAS = [
   {
     name: "loopforge_next",
     description:
-      "Submit the output from the current round and advance to the next. Returns the next-round prompt, or null with a stopReason when the loop ends. A structured evaluation is required; output is optional supporting context.",
+      "Submit the output from the current round and advance to the next. Returns the next-round prompt (with its derived contextMode/contextReason), or null with a stopReason when the loop ends. A structured evaluation is required; output is optional supporting context.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -249,6 +251,12 @@ const TOOL_BASE_SCHEMAS = [
               type: "array" as const,
               items: { type: "string" as const },
               description: fieldGuideDescription("wrong_assumptions"),
+            },
+            open_questions: {
+              type: "array" as const,
+              maxItems: 3,
+              items: { type: "string" as const, maxLength: 300 },
+              description: fieldGuideDescription("open_questions"),
             },
             worker_results: {
               type: "array" as const,
@@ -531,10 +539,12 @@ const TOOL_BASE_SCHEMAS = [
   {
     name: "loopforge_replay",
     description:
-      "Replay a completed or running loop as an auditable round timeline. " +
-      "Pass sessionId for a live session, or loopId to replay straight from " +
-      "the vault (works after a process restart, when no session is in " +
-      "memory) — the timeline is derived from committed round documents.",
+      "Replay committed rounds as an auditable timeline. Pass sessionId for a " +
+      "live session, or loopId to replay straight from the vault (works after " +
+      "a process restart). Returns the last 10 committed rounds by default; " +
+      "pass start/end for an explicit window (at most 50 rounds). Each round " +
+      "carries its context boundary, committed report, assumptions, open " +
+      "questions, blocker and contract redirect. Read-only projection.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -546,6 +556,16 @@ const TOOL_BASE_SCHEMAS = [
           type: "string" as const,
           description: "Loop ID to replay from the vault — works without a " +
             "live session, e.g. after a restart.",
+        },
+        start: {
+          type: "integer" as const,
+          minimum: 1,
+          description: "First round of the explicit window (inclusive).",
+        },
+        end: {
+          type: "integer" as const,
+          minimum: 1,
+          description: "Last round of the explicit window (inclusive).",
         },
       },
       // v3.3.1: either identifier resolves the timeline; sessionId wins when
@@ -681,6 +701,17 @@ const ADVANCE_OUTPUT_SCHEMA: JsonSchema = {
     stopReason: { type: ["string", "null"] },
     stopDetail: { type: ["string", "null"], description: "Human-readable context for why the loop stopped. Provides facts without prescribing a specific agent action." },
     level: { type: ["string", "null"] },
+    contextMode: {
+      enum: ["fresh_round", "same_round_retry"],
+      description:
+        "v4.0.2: the context boundary the returned prompt was compiled under. " +
+        "fresh_round starts a new Agent invocation; same_round_retry continues " +
+        "the same logical round. Projected from the PromptArtifact.",
+    },
+    contextReason: {
+      enum: ["first_round", "next_round", "recovery_redo", "enforcement_retry"],
+      description: "v4.0.2: why the context boundary was selected.",
+    },
     roundSuccess: { type: ["boolean", "null"] },
     checkpoints: {
       type: ["array", "null"],
@@ -808,6 +839,13 @@ export const TOOL_OUTPUT_SCHEMAS: Record<string, JsonSchema> = {
       sessionId: { type: "string" },
       loopId: { type: "string" },
       timeline: { type: "array", items: { type: "object", additionalProperties: true } },
+      window: {
+        type: "object",
+        additionalProperties: true,
+        description:
+          "v4.0.2: the returned round window: { start, end, totalRounds, " +
+          "hasBefore, hasAfter }.",
+      },
       legacyRounds: {
         type: "array",
         items: { type: "object", additionalProperties: true },
@@ -1466,16 +1504,46 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
       };
     }
 
+    // v4.0.2: an explicit window is validated at the tool boundary. The
+    // backend owns the rule; the boundary only converts the type.
+    const windowOptions: { start?: number; end?: number } = {};
+    for (const name of ["start", "end"] as const) {
+      const value = input[name];
+      if (value === undefined) continue;
+      if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
+        return {
+          error: "invalid_argument",
+          errorMessage: `${name} must be a positive integer`,
+        };
+      }
+      windowOptions[name] = value;
+    }
+
+    const pageFor = (
+      resolvePage: () => ReplayPage,
+    ): ReplayPage | { error: string; errorMessage: string } => {
+      try {
+        return resolvePage();
+      } catch (error) {
+        if (error instanceof ReplayWindowError) {
+          return { error: "invalid_argument", errorMessage: error.message };
+        }
+        throw error;
+      }
+    };
+
     // Live session first: it disambiguates re-used loopIds and the session
     // registry is the cheapest lookup.
     if (sessionId) {
       const session = mgr.get(sessionId);
       if (session) {
-        const timeline = mgr.replayTimeline(sessionId) ?? [];
+        const page = pageFor(() => mgr.replayPage(sessionId, windowOptions)!);
+        if ("error" in page) return page;
         return {
           sessionId,
           loopId: session.loopId,
-          timeline,
+          timeline: page.timeline,
+          window: page.window,
           rollbacks: mgr.replayRollbacks(session.loopId),
           legacyRounds: mgr.replayLegacyRounds(session.loopId),
         };
@@ -1494,8 +1562,9 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
 
     // Vault-direct replay — the timeline lives in the committed round
     // documents, not in the session registry.
-    const timeline = mgr.replayByLoop(loopId);
-    if (!timeline) {
+    const page = pageFor(() => mgr.replayPageByLoop(loopId, windowOptions));
+    if ("error" in page) return page;
+    if (page.window.totalRounds === 0 && page.timeline.length === 0) {
       return {
         error: "state_unavailable",
         errorMessage: `no committed rounds found for loop "${loopId}"`,
@@ -1505,7 +1574,8 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
     return {
       ...(sessionId ? { sessionId } : {}),
       loopId,
-      timeline,
+      timeline: page.timeline,
+      window: page.window,
       rollbacks: mgr.replayRollbacks(loopId),
       legacyRounds: mgr.replayLegacyRounds(loopId),
     };

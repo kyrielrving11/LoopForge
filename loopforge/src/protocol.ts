@@ -77,10 +77,16 @@ export interface SelfEvaluation {
    *  Omit or leave empty if none. */
   retracted_constraints?: string[];
   /** Assumptions the agent made in earlier rounds that turned out to be
-   *  wrong. A committed Agent report; it surfaces as Corrections and
-   *  recovery brief facts, never as a LoopForge conclusion or machine
+   *  wrong. A committed Agent report; it surfaces in bounded Working Memory
+   *  and recovery brief facts, never as a LoopForge conclusion or machine
    *  evidence. Omit or leave empty if none. */
   wrong_assumptions?: string[];
+  /** v4.0.2: unresolved questions that still affect later slices. Strictly
+   *  report-only: it feeds Working Memory, replay and explain, never the
+   *  verification gate, success, contract closure or machine evidence.
+   *  At most 3 entries, 300 chars each. It is a question list, not a todo
+   *  list and not a completion checklist. */
+  open_questions?: string[];
   /** Agent declares a subtask boundary. When true, the next compile uses an
    *  L2 rehydration boundary; no milestone or phase narrative is generated. */
   compression_checkpoint?: boolean;
@@ -471,6 +477,11 @@ export interface SubmissionReceipt {
   prompt: {
     level: "l0" | "l1" | "l2";
     dropped_sections: string[];
+    /** v4.0.2: the context boundary the NEXT prompt was compiled under, read
+     *  from the same PromptArtifact that produced it. Absent only when no next
+     *  artifact exists (terminal/rejected-without-retry paths). */
+    context_mode?: PromptContextMode;
+    context_reason?: PromptContextReason;
   } | null;
   diagnostics: SubmissionDiagnostic[];
 }
@@ -563,6 +574,7 @@ export function makeSelfEvaluation(
     execution_report: undefined,
     retracted_constraints: [],
     wrong_assumptions: [],
+    open_questions: [],
     worker_results: [],
     compression_checkpoint: false,
     checkpoint_label: "",
@@ -773,6 +785,8 @@ export interface LoopRoundResult {
   retracted_constraints?: string[];
   /** P5: Wrong assumptions identified this round. */
   wrong_assumptions?: string[];
+  /** v4.0.2: unresolved questions reported this round (report-only). */
+  open_questions?: string[];
   /** Multi-agent: Delegation results from this round.
    *  Set from SelfEvaluation.worker_results during buildLoopRequest. */
   worker_results?: WorkerResult[];
@@ -806,6 +820,7 @@ export function makeLoopRoundResult(
     execution_report: undefined,
     retracted_constraints: [],
     wrong_assumptions: [],
+    open_questions: [],
     worker_results: [],
     compression_checkpoint: false,
     checkpoint_label: "",
@@ -897,14 +912,60 @@ export interface PromptCoverage {
 }
 
 /** Immutable record of the exact prompt delivered for one round attempt. */
-/** v3.8.1: the artifact schema version, next to the type it versions. The
- *  transaction envelope parser reads it, so the constant lives here rather
- *  than in the renderer. */
-/** v4.0.1: schema 7 removes the prompt-request effects. Older versions are a
- *  HARD break — a round whose artifact does not parse is not committed
- *  history, and `legacyTransactionRounds` reports the loss rather than letting
- *  it vanish. */
-export const PROMPT_ARTIFACT_SCHEMA_VERSION = 7 as const;
+/** v4.0.2: the context boundary of one prompt delivery.
+ *
+ *  `fresh_round` means the host starts a NEW Agent invocation for this logical
+ *  round: the previous transcript, tool logs and uncommitted reasoning are
+ *  not part of the prompt. `same_round_retry` means this is another attempt
+ *  of the SAME logical round after an enforcement rejection; if the original
+ *  invocation still exists, it continues.
+ *
+ *  The value is DERIVED by the compiler from compile inputs and committed
+ *  facts. It is never submitted by the Agent and never re-derived by the MCP
+ *  lifecycle; every response projects it from the committed PromptArtifact. */
+export type PromptContextMode = "fresh_round" | "same_round_retry";
+
+export type PromptContextReason =
+  | "first_round"
+  | "next_round"
+  | "recovery_redo"
+  | "enforcement_retry";
+
+/** v4.0.2: what the prompt projection actually rendered from the bounded
+ *  Working Memory. Audit metadata only — it never feeds a decision. */
+export interface PromptWorkingMemoryProjection {
+  /** Report rounds actually rendered, newest first. */
+  reportRounds: number[];
+  counts: {
+    reports: number;
+    assumptions: number;
+    openQuestions: number;
+    recoveries: number;
+    redirects: number;
+  };
+  /** The latest report's projection facts; null when none was rendered. */
+  previousReport: {
+    round: number;
+    sourceChars: number;
+    renderedChars: number;
+    truncated: boolean;
+  } | null;
+  /** Characters the Working Memory section body produced. */
+  renderedChars: number;
+  /** True when a window/cap/budget rule dropped or truncated any content. */
+  truncated: boolean;
+}
+
+/** v3.8.1: the artifact schema version lives next to the type it versions.
+ *  The transaction envelope parser reads it, so the constant lives here rather
+ *  than in the renderer.
+ *
+ *  v4.0.1: schema 7 removes the prompt-request effects. v4.0.2: schema 8 adds
+ *  the derived context boundary and the optional Working Memory projection.
+ *  Older versions are a HARD break — a round whose artifact does not parse is
+ *  not committed history, and `legacyTransactionRounds` reports the loss
+ *  rather than letting it vanish. */
+export const PROMPT_ARTIFACT_SCHEMA_VERSION = 8 as const;
 
 export interface PromptArtifact {
   schemaVersion: typeof PROMPT_ARTIFACT_SCHEMA_VERSION;
@@ -914,6 +975,9 @@ export interface PromptArtifact {
   round: number;
   attempt: number;
   level: "l0" | "l1" | "l2";
+  /** v4.0.2: the derived context boundary of THIS delivery. */
+  contextMode: PromptContextMode;
+  contextReason: PromptContextReason;
   renderedPrompt: string;
   promptHash: string;
   stateHash: string;
@@ -940,6 +1004,10 @@ export interface PromptArtifact {
    *  the session-only `currentWarnings` mirror, so a held prompt remains
    *  self-contained across a restart. */
   warnings?: string[];
+  /** v4.0.2: present only when this prompt rendered bounded Working Memory.
+   *  Audit metadata; it is not a second history and is never an input to a
+   *  later prompt. */
+  workingMemory?: PromptWorkingMemoryProjection;
 }
 
 export interface LoopCompileResponse {

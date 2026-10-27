@@ -18,6 +18,8 @@ import { recoveryBriefLines } from "./enforcement-gate.js";
 import { deriveSubGoals, duplicateEmergedDeclarations } from "./subgoal-state.js";
 import { deriveConstraintProvenance, resolveConstraintRetractions, } from "./constraint-lifecycle.js";
 import { assemblePromptArtifact } from "./prompt-assembler.js";
+import { derivePromptContextBoundary } from "./context-boundary.js";
+import { deriveWorkingMemory } from "./working-memory.js";
 import { renderSelfEvalBlock, } from "./submission-guidance.js";
 import { decidePromptLevel, } from "./prompt-policy.js";
 import { criterionRefMatches, deriveConstraintId, deriveCriterionId, normalizeText, unique, uniqueNormalized, } from "./token-utils.js";
@@ -548,6 +550,16 @@ export function compileLoop(request, context, options = {}, committedHistory) {
     // (and therefore into stateHash) and read by nothing. `windowRounds` is the
     // ONE window computed at the top of this function.
     const machineStatus = deriveMachineStatus(windowRounds, request.round);
+    // v4.0.2: ONE derivation of the bounded Working Memory and the context
+    // boundary for the whole compile. State, prompt, artifact and every
+    // prompt-bearing response project these values; none re-derives them.
+    const workingMemory = deriveWorkingMemory(history, request.round);
+    const contextBoundary = derivePromptContextBoundary({
+        round: request.round,
+        attempt: request.attempt,
+        recoveryBoundary: previous.recoveryBoundary,
+        hasPreviousCommittedRound: previous.view !== null,
+    });
     const response = makeLoopCompileResponse({
         status: AgentStatus.OK,
         recompile_level: decision.level,
@@ -589,6 +601,7 @@ export function compileLoop(request, context, options = {}, committedHistory) {
         // prompt/state narrative.
         previousRound: { ...previous, committed: previous.view !== null },
         recoveryBrief,
+        workingMemory,
     });
     const configuredCapability = deriveConfiguredCapability(policy);
     const contractCommands = configuredCapability.commands
@@ -638,6 +651,11 @@ export function compileLoop(request, context, options = {}, committedHistory) {
         // recovery section is part of the artifact, so the delivered prompt is
         // exactly `artifact.renderedPrompt` (no post-compile prepend).
         recoveryBrief,
+        // v4.0.2: the ONE context boundary and the SAME bounded Working Memory
+        // the state carries. A retry renders no Working Memory section.
+        contextMode: contextBoundary.mode,
+        contextReason: contextBoundary.reason,
+        workingMemory,
     });
     response.prompt = artifact.renderedPrompt;
     response.prompt_artifact = artifact;

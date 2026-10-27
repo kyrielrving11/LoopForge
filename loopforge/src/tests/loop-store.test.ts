@@ -60,6 +60,8 @@ describe("FileLoopStore", () => {
         round: 1,
         attempt: 1,
         level: "l2",
+        contextMode: "fresh_round",
+        contextReason: "first_round",
         renderedPrompt: "prompt",
         promptHash: "prompt-hash",
         stateHash: "state-hash",

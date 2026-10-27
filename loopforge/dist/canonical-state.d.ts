@@ -8,7 +8,8 @@ import type { ActiveContractView } from "./round-contract.js";
 import type { ContractItemStatusView } from "./contract-items.js";
 import type { ConfiguredCapability } from "./protocol.js";
 import type { RoundFacts } from "./round-facts.js";
-export declare const CANONICAL_STATE_SCHEMA_VERSION: 5;
+import type { WorkingMemory } from "./working-memory.js";
+export declare const CANONICAL_STATE_SCHEMA_VERSION: 6;
 /** v3.7.1: Presentation view of sub-goals shared by prompts and the state
  *  file (one derivation, no second copy). Only ACTIVE items render as rows
  *  — pending/in_progress/blocked — ordered blocked → in_progress → pending
@@ -75,10 +76,10 @@ export interface CanonicalLoopState {
     retiredConstraints: string[];
     /** v2.3: Per-constraint lifecycle metadata. */
     constraintMetadata: ConstraintMeta[];
-    /** v3.9.5: committed Agent corrections (wrong assumptions). This is a
-     *  REPORT, never machine evidence, and only the committed round feeds it.
-     *  LoopForge does not prefix or reframe it. */
-    corrections: string[];
+    /** v4.0.2: the bounded cognitive extension of this state. Present only when
+     *  committed history produced content; it is a derived projection, never a
+     *  second factual source and never persisted as its own store. */
+    workingMemory?: WorkingMemory;
     /** Current retry's enforcement notice. A protected protocol fact for the
      *  next prompt, not a committed history field. */
     rejectionNotice: string | null;
@@ -88,7 +89,6 @@ export interface CanonicalLoopState {
     remainingCriteria: string[];
     blockers: string[];
     verificationFlags: VerificationFlag[];
-    discoveries: string[];
     /** v2.2: Structured sub-goals with compiler-managed lifecycle. */
     subGoals: SubGoal[];
     /** v3.2: Derived per-criterion status (goal → criteria → evidence view). */
@@ -202,5 +202,8 @@ derived?: {
     /** v3.9.7: committed recovery brief, derived from the pending rollback
      *  directive. Conditional — absent outside a recovery window. */
     recoveryBrief?: string[];
+    /** v4.0.2: the compiler's ONE bounded Working Memory derivation. This
+     *  module never re-reads the Vault or re-interprets history. */
+    workingMemory?: WorkingMemory;
 }): CanonicalLoopState;
 //# sourceMappingURL=canonical-state.d.ts.map

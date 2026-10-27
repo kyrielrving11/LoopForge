@@ -1,6 +1,6 @@
 import { beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { ReplayBackend } from "../replay.js";
+import { ReplayBackend, ReplayWindowError } from "../replay.js";
 import { PROMPT_ARTIFACT_SCHEMA_VERSION } from "../protocol.js";
 import type { PromptArtifact } from "../protocol.js";
 import {
@@ -20,6 +20,8 @@ function artifact(
     round,
     attempt: 1,
     level,
+    contextMode: "fresh_round",
+    contextReason: "next_round",
     renderedPrompt,
     promptHash: `hash-${round}`,
     stateHash: `state-${round}`,
@@ -141,7 +143,7 @@ describe("ReplayBackend", () => {
       state: "changed",
       complete: true,
     }]);
-    assert.deepEqual(row?.contract_transition, {
+    assert.deepEqual(row?.contract_redirect, {
       kind: "supersede",
       contract_id: "rc-12345678",
       reason: "route changed",
@@ -189,5 +191,94 @@ describe("ReplayBackend", () => {
     assert.equal(replay.getRound("missing", 1), null);
     assert.deepEqual(replay.replay("missing"), []);
     assert.deepEqual(replay.timeline("missing"), []);
+  });
+});
+
+describe("v4.0.2 — bounded replay window", () => {
+  let store: MemoryLoopStore;
+  let replay: ReplayBackend;
+
+  beforeEach(() => {
+    store = new MemoryLoopStore();
+    replay = new ReplayBackend(store);
+  });
+
+  it("defaults to the last 10 committed rounds and reports the window", () => {
+    for (let round = 1; round <= 12; round++) {
+      store.appendEntry(committedFeedbackRound(round, { loopId: "test" }));
+    }
+    const page = replay.page("test");
+    assert.deepEqual(page.timeline.map((row) => row.round),
+      [3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    assert.deepEqual(page.window, {
+      start: 3,
+      end: 12,
+      totalRounds: 12,
+      hasBefore: true,
+      hasAfter: false,
+    });
+  });
+
+  it("honours an explicit inclusive start/end window", () => {
+    for (let round = 1; round <= 6; round++) {
+      store.appendEntry(committedFeedbackRound(round, { loopId: "test" }));
+    }
+    const page = replay.page("test", { start: 2, end: 4 });
+    assert.deepEqual(page.timeline.map((row) => row.round), [2, 3, 4]);
+    assert.deepEqual(page.window, {
+      start: 2,
+      end: 4,
+      totalRounds: 6,
+      hasBefore: true,
+      hasAfter: true,
+    });
+  });
+
+  it("rejects invalid or oversized explicit windows", () => {
+    assert.throws(() => replay.page("test", { start: 0 }), ReplayWindowError);
+    assert.throws(() => replay.page("test", { start: 5, end: 4 }), ReplayWindowError);
+    assert.throws(() => replay.page("test", { start: 1, end: 51 }), ReplayWindowError);
+  });
+
+  it("carries context, report, assumptions, questions and redirect", () => {
+    store.appendEntry(committedFeedbackRound(1, {
+      loopId: "test",
+      promptArtifact: {
+        ...artifact(1, "l1"),
+        contextMode: "same_round_retry",
+        contextReason: "enforcement_retry",
+      },
+      success: false,
+      outcome: "partial",
+      outputSummary: "bounded report",
+      wrongAssumptions: ["old belief"],
+      retractedConstraints: ["old rule"],
+      openQuestions: ["still open?"],
+      blocker: "needs input",
+      contractTransition: {
+        kind: "supersede",
+        contract_id: "rc-12345678",
+        reason: "route changed",
+      },
+    }));
+    const [row] = replay.timeline("test");
+    assert.equal(row?.context_mode, "same_round_retry");
+    assert.equal(row?.context_reason, "enforcement_retry");
+    assert.equal(row?.attempt, 1);
+    assert.equal(row?.outcome, "partial");
+    assert.deepEqual(row?.report, {
+      success: false,
+      output_summary: "bounded report",
+      truncated: false,
+    });
+    assert.deepEqual(row?.wrong_assumptions, ["old belief"]);
+    assert.deepEqual(row?.retracted_constraints, ["old rule"]);
+    assert.deepEqual(row?.open_questions, ["still open?"]);
+    assert.equal(row?.blocker, "needs input");
+    assert.deepEqual(row?.contract_redirect, {
+      kind: "supersede",
+      contract_id: "rc-12345678",
+      reason: "route changed",
+    });
   });
 });

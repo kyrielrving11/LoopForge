@@ -231,7 +231,7 @@ describe("createCanonicalLoopState", () => {
     assert.ok(md.includes("1 failed"));
   });
 
-  it("v3.9.5: renders the authority header and committed corrections", () => {
+  it("v4.0.2: renders the authority header and bounded Working Memory", () => {
     const previous = makeLoopRoundResult({
       round: 1,
       success: false,
@@ -240,15 +240,67 @@ describe("createCanonicalLoopState", () => {
     });
     const state = createCanonicalLoopState(request(), response(), "test.md", {
       previousRound: { result: previous, verificationFlags: [], committed: true },
+      workingMemory: {
+        reports: [{
+          round: 1,
+          attempt: 1,
+          success: false,
+          outcome: "failed",
+          outputSummary: "previous summary",
+          sourceChars: "previous summary".length,
+        }],
+        assumptions: [{
+          round: 1,
+          kind: "wrong_assumption",
+          text: "old belief",
+        }],
+        openQuestions: [],
+        recoveries: [],
+        redirects: [],
+      },
     });
     const md = renderCanonicalStateMarkdown(state);
     assert.ok(md.includes("**Authority**: committed typed rounds are the factual source"));
     assert.ok(md.includes("**Agent reports**:"));
-    assert.ok(md.includes("### Corrections"));
-    assert.ok(md.includes("old belief"));
+    assert.ok(md.includes("**Working memory**: recent committed reports only"));
+    assert.ok(md.includes("### Working Memory"));
+    assert.ok(md.includes("Previous Round Report (Agent report) — R1"));
+    assert.ok(md.includes("> old belief"));
+    assert.ok(!md.includes("### Corrections"));
     assert.ok(!md.includes("Changes Since Last Round"));
-    assert.ok(md.indexOf("## Recent") < md.indexOf("### Corrections"),
-      "Corrections belongs to the Recent tier");
+    assert.ok(md.indexOf("## Recent") < md.indexOf("### Working Memory"),
+      "Working Memory belongs to the Recent tier");
+  });
+
+  it("v4.0.2: discovered constraints stay visible through Active Constraints provenance", () => {
+    const state = createCanonicalLoopState(request(), response({
+      constraints_active: ["no external deps", "all tests pass", "discovered rule"],
+      constraint_metadata: [{
+        id: "c-22222222",
+        text: "discovered rule",
+        last_violated_at_round: 0,
+        source: "discovered" as const,
+        source_round: 1,
+      }],
+    }), "test.md", {
+      workingMemory: {
+        reports: [{
+          round: 1, attempt: 1, success: true, outcome: "success",
+          outputSummary: "done", sourceChars: 4,
+        }],
+        assumptions: [{ round: 1, kind: "wrong_assumption", text: "old belief" }],
+        openQuestions: [],
+        recoveries: [],
+        redirects: [],
+      },
+    });
+    const md = renderCanonicalStateMarkdown(state);
+    assert.ok(md.includes("### Active Constraints"));
+    assert.ok(md.includes("discovered rule"));
+    assert.ok(md.includes("Agent-declared R1; report, not machine-verified"));
+    assert.ok(!md.includes("### Discoveries"));
+    assert.ok(md.includes("### Working Memory"));
+    assert.ok(md.includes("old belief"));
   });
 
   it("renders sub-goal dashboard", () => {
@@ -311,7 +363,7 @@ describe("state-file tiering (v3.7.1)", () => {
     const idxHistorical = md.indexOf("## Historical Summary");
     assert.ok(idxCurrent >= 0 && idxRecent > idxCurrent && idxHistorical > idxRecent,
       "tiers must render in order: Current → Recent → Historical Summary");
-    assert.ok(md.includes("**Schema**: 5"), "state schema marker");
+    assert.ok(md.includes("**Schema**: 6"), "state schema marker");
     assert.ok(md.includes("**Derived**: true"), "derived marker in the header");
     assert.ok(md.includes("**Source**: round 2 (attempt 2)"), "attempt marker");
     assert.ok(md.includes("**Authority**: committed typed rounds"));

@@ -1245,10 +1245,9 @@ describe("L7 — state file disabled cross-knob guard", () => {
     }), { results: [baselineRound1("l7-l2")] });
     assert.equal(response.state_file_content, undefined,
       "no state file content is produced when the file is disabled");
-    assert.ok(!response.prompt.includes("Full state:"),
-      "the L2 pointer line must not reference a file that is never written");
-    assert.ok(!response.prompt.includes("Read the full state file"),
-      "no read-the-file instruction may appear");
+    assert.ok(!response.prompt.toLowerCase().includes("state file"),
+      "v4.0.2: no state-file path, pointer, read instruction or implied fallback " +
+      "when the file is disabled");
     assert.ok(!response.prompt.includes("Full Rehydrated State"),
       "L2 never falls back to a monolithic history blob");
     assert.ok(response.prompt.includes("Continue the migration"),
@@ -1361,11 +1360,11 @@ describe("3.9.3 — committed-fact prompt level", () => {
     ...entry,
   }, "continue", noMotionEvidence());
 
-  it("v3.9.5: committed corrections reach the next prompt", () => {
+  it("v4.0.2: committed reports reach bounded Working Memory", () => {
     const loopId = "committed-reports";
     const context = {
       results: [committed(loopId, 2, {
-        output_summary: "a prior summary that must not be replayed",
+        output_summary: "a prior summary in the bounded report window",
         wrong_assumptions: ["old belief"],
       })],
     };
@@ -1375,13 +1374,14 @@ describe("3.9.3 — committed-fact prompt level", () => {
       task: "Continue",
       force_level: "l2",
     }), context);
-    assert.match(response.prompt, /Corrections \(committed reports\)/);
+    assert.match(response.prompt, /Working Memory \(committed history/);
+    assert.match(response.prompt, /Previous Round Report \(Agent report\) — R2/);
     assert.match(response.prompt, /old belief/);
-    assert.doesNotMatch(response.prompt, /a prior summary that must not be replayed/);
+    assert.match(response.prompt, /a prior summary in the bounded report window/);
   });
 
-  it("v3.9.5: no prompt level replays a committed output_summary", () => {
-    const loopId = "no-summary-any-level";
+  it("v4.0.2: every fresh level renders the latest report, and retry renders none", () => {
+    const loopId = "summary-every-level";
     const context = {
       results: [committed(loopId, 2, {
         output_summary: "UNIQUE_COMMITTED_SUMMARY",
@@ -1396,12 +1396,54 @@ describe("3.9.3 — committed-fact prompt level", () => {
         force_level: level,
       }), context);
       assert.equal(response.prompt_artifact?.level, level);
-      assert.ok(!response.prompt.includes("UNIQUE_COMMITTED_SUMMARY"),
-        `${level} must not replay the committed output summary`);
+      assert.equal(response.prompt_artifact?.contextMode, "fresh_round");
+      assert.ok(response.prompt.includes("UNIQUE_COMMITTED_SUMMARY"),
+        `${level} renders the latest committed report in Working Memory`);
       assert.ok(!response.warnings.some((warning) =>
         warning.includes("duplicate_declaration")),
         "zero emerged_subtasks is not a warning");
     }
+    const retry = compileLoop(makeLoopCompileRequest({
+      loop_id: loopId,
+      round: 3,
+      task: "Continue",
+      force_level: "l0",
+      attempt: 2,
+      rejection_notice: "retry the same round",
+    }), context);
+    assert.equal(retry.prompt_artifact?.contextMode, "same_round_retry");
+    assert.equal(retry.prompt_artifact?.contextReason, "enforcement_retry");
+    assert.doesNotMatch(retry.prompt, /Working Memory \(committed history/);
+    assert.doesNotMatch(retry.prompt, /UNIQUE_COMMITTED_SUMMARY/);
+  });
+
+  it("v4.0.2: prompt memory stays bounded and drops the oldest summaries", () => {
+    const loopId = "long-horizon-memory";
+    const context = {
+      results: Array.from({ length: 12 }, (_, index) =>
+        committed(loopId, index + 1, {
+          output_summary: `ROUND_${index + 1}_MARKER_${"x".repeat(80)}`,
+        })),
+    };
+    const response = compileLoop(makeLoopCompileRequest({
+      loop_id: loopId,
+      round: 13,
+      task: "Continue",
+      force_level: "l2",
+    }), context);
+    // L2 keeps five reports: rounds 12..8.
+    assert.match(response.prompt, /ROUND_12_MARKER/);
+    assert.match(response.prompt, /ROUND_8_MARKER/);
+    assert.doesNotMatch(response.prompt, /ROUND_7_MARKER/);
+    assert.doesNotMatch(response.prompt, /ROUND_1_MARKER/);
+    assert.equal(response.prompt_artifact?.workingMemory?.reportRounds.length, 5);
+    assert.deepEqual(response.prompt_artifact?.workingMemory?.reportRounds,
+      [12, 11, 10, 9, 8]);
+    // The state file uses the same fixed five-report window; older history is
+    // retrieved through replay, not carried in every prompt.
+    assert.doesNotMatch(response.state_file_content ?? "", /ROUND_7_MARKER/);
+    assert.ok(response.prompt.length < 20_000,
+      "prompt length is bounded by fixed windows, not by round count");
   });
 
 
@@ -1433,6 +1475,7 @@ describe("3.9.3 — committed-fact prompt level", () => {
       "execution_report.criterion_claims",
       "discovered_constraints",
       "wrong_assumptions",
+      "open_questions",
       "emerged_subtasks",
       "worker_results",
       "compression_checkpoint",

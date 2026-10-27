@@ -12,6 +12,7 @@
 import { createHash } from "node:crypto";
 import { formatActiveSubGoals, formatCriterionRows, formatRoundContractWithIds, constraintProvenanceLabel, hashCanonicalState, partitionActiveConstraints, } from "./canonical-state.js";
 import { PROMPT_ARTIFACT_SCHEMA_VERSION } from "./protocol.js";
+import { formatWorkingMemoryPrompt } from "./working-memory.js";
 import { deriveCriterionId, deriveFindingId, deriveItemId, normalizeText, } from "./token-utils.js";
 import { verificationActionFor } from "./verification-actions.js";
 import { LOST_HANDLE_ROUTING } from "./recovery-guidance.js";
@@ -133,7 +134,7 @@ function activeNormativeIds(state, _level, recoveryBrief) {
 /** v3.9.4: the normative sections shared by L0/L1/L2. Levels change ONLY the
  *  density of narrative sections; they never change which active normative
  *  ids are rendered. Every section here is mandatory (protected). */
-function commonMandatorySections(state, level, recoveryBrief) {
+function commonMandatorySections(state, level, recoveryBrief, workingMemory) {
     const partition = partitionActiveConstraints(state);
     const hard = partition.hard;
     const other = partition.other;
@@ -215,6 +216,20 @@ function commonMandatorySections(state, level, recoveryBrief) {
             coverageIds: findings.map((flag) => deriveFindingId(flag)),
         });
     }
+    // v4.0.2: bounded Working Memory is protected, renders at every level, and
+    // declares no normative ids. Absent in a same-round retry.
+    const working = workingMemory
+        ? formatWorkingMemoryPrompt(workingMemory, level)
+        : null;
+    if (working) {
+        sections.push({
+            id: "working_memory",
+            text: section("Working Memory (committed history — Agent reports are claims)", working.body),
+            mandatory: true,
+            coverageIds: [],
+            workingMemoryProjection: working.projection,
+        });
+    }
     return sections;
 }
 /** v3.9.7: the enforcement notice is a protected protocol fact, not an
@@ -237,8 +252,8 @@ function retryRequirementsSection(state, level) {
         coverageIds: [],
     };
 }
-function l0Sections(state, recoveryBrief) {
-    const sections = commonMandatorySections(state, "l0", recoveryBrief);
+function l0Sections(state, recoveryBrief, workingMemory) {
+    const sections = commonMandatorySections(state, "l0", recoveryBrief, workingMemory);
     const retry = retryRequirementsSection(state, "l0");
     if (retry)
         sections.push(retry);
@@ -273,19 +288,11 @@ function activeWarnings(flags, currentRound) {
         return `- ${icon} ${subject} — ${flag.count}×, latest R${Math.max(...flag.rounds)}`;
     }).join("\n");
 }
-function l1Sections(state, recoveryBrief) {
-    const sections = commonMandatorySections(state, "l1", recoveryBrief);
+function l1Sections(state, recoveryBrief, workingMemory) {
+    const sections = commonMandatorySections(state, "l1", recoveryBrief, workingMemory);
     const retry = retryRequirementsSection(state, "l1");
     if (retry)
         sections.push(retry);
-    if (state.corrections.length > 0) {
-        sections.push({
-            id: "corrections",
-            text: section("Corrections (committed reports)", bullets(state.corrections)),
-            mandatory: false,
-            coverageIds: [],
-        });
-    }
     if (state.blockers.length > 0) {
         sections.push({
             id: "blockers",
@@ -308,22 +315,14 @@ function l1Sections(state, recoveryBrief) {
     }
     return sections;
 }
-function l2Sections(state, recoveryBrief) {
-    const sections = commonMandatorySections(state, "l2", recoveryBrief);
+function l2Sections(state, recoveryBrief, workingMemory) {
+    const sections = commonMandatorySections(state, "l2", recoveryBrief, workingMemory);
     const retry = retryRequirementsSection(state, "l2");
     if (retry)
         sections.push(retry);
     // v3.9.5: L2 is a boundary rehydration, not a history dump. The full state
     // lives in the optional state file / replay / audit; the prompt carries the
     // current governance projection plus a small stage anchor.
-    if (state.corrections.length > 0) {
-        sections.push({
-            id: "corrections",
-            text: section("Corrections (committed reports)", bullets(state.corrections)),
-            mandatory: false,
-            coverageIds: [],
-        });
-    }
     if (state.blockers.length > 0) {
         sections.push({
             id: "blockers",
@@ -346,13 +345,19 @@ function l2Sections(state, recoveryBrief) {
     return sections;
 }
 function selectSections(input) {
+    // A same-round retry runs in the invocation that saw the previous prompt;
+    // it depends on the rejection notice and Verification Gate, not on a memory
+    // re-render. The state file still carries the full bounded memory.
+    const workingMemory = input.contextMode === "same_round_retry"
+        ? undefined
+        : input.workingMemory;
     if (input.level === "l0") {
-        return l0Sections(input.state, input.recoveryBrief);
+        return l0Sections(input.state, input.recoveryBrief, workingMemory);
     }
     if (input.level === "l1") {
-        return l1Sections(input.state, input.recoveryBrief);
+        return l1Sections(input.state, input.recoveryBrief, workingMemory);
     }
-    return l2Sections(input.state, input.recoveryBrief);
+    return l2Sections(input.state, input.recoveryBrief, workingMemory);
 }
 /** v3.8.1: render order, in ONE place.
  *
@@ -377,9 +382,11 @@ const SECTION_PRIORITY = {
     recovery: 6,
     verification: 7,
     retry_requirements: 8,
+    // v4.0.2: protected bounded memory, after the retry authority and before
+    // every optional anchor. It declares no normative ids.
+    working_memory: 9,
     // ── optional current-governance / anchor sections ───────────────────────
     blockers: 20,
-    corrections: 21,
     active_warnings: 25,
 };
 const DEFAULT_SECTION_PRIORITY = 50;
@@ -457,32 +464,68 @@ export function assemblePromptArtifact(input) {
     const budget = budgets[input.level];
     const stateHash = hashCanonicalState(input.state);
     const attempt = Math.max(1, input.attempt ?? 1);
-    // ── State file reference + conditional read instruction ────────────
-    // L2 rounds (full rehydration), recovery and rejection all benefit from the
-    // model reading the durable state file rather than relying on
-    // potentially-compacted conversation history.
-    const fullContextReasons = new Set([
-        "first_round", "plan_boundary", "checkpoint_boundary", "goal_changed",
-        "missing_previous_state", "verification_contradicted",
-        "rejection_rehydrate", "recovery_boundary",
-    ]);
-    const needsFullContext = input.level === "l2"
-        || input.reasons.some((r) => fullContextReasons.has(r));
+    const contextMode = input.contextMode ?? "fresh_round";
+    const contextReason = input.contextReason ?? "next_round";
     const stateFilePath = input.state.stateFilePath;
     // v3.2: L1 annotates the pointer with the round the freshly-regenerated
     // state file describes (it is rewritten every compile); L0/L2 keep the
     // plain pointer byte-identical.
     const stateFileRef = stateFilePath
         ? (input.level === "l1"
-            ? `📄 Full state: \`${stateFilePath}\` (updated round ${input.state.round})\n`
-            : `📄 Full state: \`${stateFilePath}\`\n`)
+            ? `📄 State file: \`${stateFilePath}\` (updated round ${input.state.round})\n`
+            : `📄 State file: \`${stateFilePath}\`\n`)
         : "";
+    // v4.0.2: a fresh prompt is a NEW Agent context, not a workspace reset.
+    // The state-file instruction names the bounded projection instead of
+    // promising "complete phase history".
+    const freshBoundary = contextMode === "fresh_round"
+        ? [
+            "- This round starts a new Agent context. The previous round's",
+            "  transcript, tool logs and uncommitted reasoning are not part of this",
+            "  prompt.",
+            ...(stateFilePath
+                ? [
+                    "- A fresh context is not a workspace reset: committed files, the",
+                    "  workspace, loopId and session continue.",
+                    "- When you need earlier history, read the state file named below",
+                    "  (current governance + bounded working memory + diagnostic",
+                    "  views) or call `loopforge_replay` / `loopforge_status view=explain`.",
+                    "  Do not ask the user to restate the task. If the state hash does",
+                    "  not match, treat the file as stale and re-align with",
+                    "  `loopforge_status` or `loopforge_resume`.",
+                ]
+                : [
+                    "- A fresh context is not a workspace reset: committed files, the",
+                    "  workspace, loopId and session continue.",
+                    "- For earlier history, call `loopforge_replay` (loopId, optional",
+                    "  start/end) or `loopforge_status view=explain`; do not ask the",
+                    "  user to restate the task.",
+                ]),
+        ]
+        : [
+            "- This is a retry of the same logical round. The rejection notice and",
+            "  any Verification Gate below are the current authority.",
+            ...(stateFilePath
+                ? [
+                    "- If the invocation that received the previous prompt is gone,",
+                    "  start a new invocation with this self-contained prompt and read",
+                    "  the state file first; do not treat remembered work as committed.",
+                ]
+                : [
+                    "- If the invocation that received the previous prompt is gone,",
+                    "  start a new invocation with this self-contained prompt; do not",
+                    "  treat remembered work as committed.",
+                ]),
+            "- For earlier committed history, call `loopforge_replay` (loopId,",
+            "  optional start/end) or `loopforge_status view=explain`.",
+        ];
     // v3.9.5: a static boundary rule, not a fact source. It resolves the real
     // competition between the Agent's own memory/context and LoopForge's
     // committed governance projection, and names the three decomposition layers.
     const authorityBoundary = [
         "## LoopForge authority boundary",
         "",
+        ...freshBoundary,
         "- For committed rounds, active criteria/constraints/contracts, machine",
         "  verification and recovery state, use LoopForge's current projection.",
         "- Your conversation history and long-term memory are background. They may",
@@ -498,30 +541,27 @@ export function assemblePromptArtifact(input) {
         "  durable facts, machine checks, and governance.",
         "",
     ].join("\n");
-    const readInstruction = needsFullContext && stateFilePath
+    const readInstruction = stateFilePath && contextMode === "fresh_round"
         ? [
             "",
-            "> ⚠️ **Read the full state file before acting when you need history.**",
-            "> It contains complete phase history, the sub-goal dashboard, constraint",
-            "> lifecycle, and diagnostic facts. Conversation history may be",
-            "> incomplete after compaction or resume. The state file is a derived",
-            "> view of committed typed rounds — not an independent ledger or a",
-            "> second factual source.",
+            "> ⚠️ **Read the state file before acting when you need history.**",
+            "> It carries current governance, bounded working memory, and diagnostic",
+            "> facts. It is a derived view of committed typed rounds — not an",
+            "> independent ledger or a second factual source.",
             "",
         ].join("\n")
         : "";
     const header = [
         `## LoopForge Round ${input.state.round}`,
-        `State: ${stateHash.slice(0, 12)} | Level: ${input.level.toUpperCase()} | Attempt: ${attempt}`,
+        `State: ${stateHash.slice(0, 12)} | Level: ${input.level.toUpperCase()} | ` +
+            `Attempt: ${attempt} | Context: ` +
+            `${contextMode === "fresh_round" ? "fresh" : "same-round retry"} (${contextReason})`,
         "",
         authorityBoundary,
         stateFileRef,
         readInstruction,
         "",
     ].join("\n");
-    const pointer = stateFilePath
-        ? section("Full State", stateFilePath)
-        : "";
     const evaluation = input.selfEvaluationBlock.trim()
         ? `${input.selfEvaluationBlock.trim()}\n`
         : "";
@@ -539,7 +579,9 @@ export function assemblePromptArtifact(input) {
         "",
         evaluation,
     ].join("\n");
-    const footer = [pointer, howToRespond].join("");
+    // v4.0.2: the header owns the one state-file pointer. A repeated footer
+    // pointer was a second presentation of the same fact.
+    const footer = howToRespond;
     const sections = selectSections(input);
     const fixedText = header;
     const sectionBudget = budget - footer.length;
@@ -551,12 +593,16 @@ export function assemblePromptArtifact(input) {
     // An incomplete projection fails closed — no prompt or artifact escapes.
     const active = activeNormativeIds(input.state, input.level, input.recoveryBrief);
     const renderedIds = new Set();
+    let workingMemoryProjection;
     for (const sectionId of selected.included) {
         const section = sections.find((entry) => entry.id === sectionId);
         if (!section)
             continue;
         for (const id of section.coverageIds)
             renderedIds.add(id);
+        if (section.workingMemoryProjection) {
+            workingMemoryProjection = section.workingMemoryProjection;
+        }
     }
     const coverage = derivePromptCoverage({
         active,
@@ -569,6 +615,8 @@ export function assemblePromptArtifact(input) {
         round: input.state.round,
         attempt,
         level: input.level,
+        contextMode,
+        contextReason,
         renderedPrompt,
         promptHash,
         stateHash,
@@ -581,6 +629,9 @@ export function assemblePromptArtifact(input) {
         budget: sectionBudget,
         renderedChars: selected.rendered.length,
         coverage,
+        ...(workingMemoryProjection
+            ? { workingMemory: workingMemoryProjection }
+            : {}),
     };
 }
 //# sourceMappingURL=prompt-assembler.js.map

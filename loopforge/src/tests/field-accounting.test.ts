@@ -119,6 +119,12 @@ const CASES: FieldCase[] = [
     partial: ["the API was synchronous", 1],
   },
   {
+    path: "open_questions",
+    valid: ["does the migration preserve ids?"],
+    invalid: "not-array",
+    partial: ["does the migration preserve ids?", 1],
+  },
+  {
     path: "retracted_constraints",
     valid: ["old constraint"],
     invalid: "not-array",

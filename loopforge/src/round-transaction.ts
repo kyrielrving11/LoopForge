@@ -691,6 +691,17 @@ export function parseRoundTransactionSnapshot(
         typeof entry.id === "string" &&
         typeof entry.reason === "string") &&
       typeof coverage.complete === "boolean";
+    // v4.0.2: the context boundary is a REQUIRED artifact fact. A schema-8
+    // artifact without a legal pair is a hard break, never an implicit
+    // "fresh_round" default.
+    const contextModeValid =
+      artifact.contextMode === "fresh_round" ||
+      artifact.contextMode === "same_round_retry";
+    const contextReasonValid =
+      artifact.contextReason === "first_round" ||
+      artifact.contextReason === "next_round" ||
+      artifact.contextReason === "recovery_redo" ||
+      artifact.contextReason === "enforcement_retry";
     if (
       artifact.schemaVersion !== PROMPT_ARTIFACT_SCHEMA_VERSION ||
       typeof artifact.roundId !== "string" ||
@@ -698,6 +709,8 @@ export function parseRoundTransactionSnapshot(
       typeof artifact.promptHash !== "string" ||
       typeof artifact.stateHash !== "string" ||
       !["l0", "l1", "l2"].includes(String(artifact.level)) ||
+      !contextModeValid ||
+      !contextReasonValid ||
       !coverageValid
     ) return null;
   }

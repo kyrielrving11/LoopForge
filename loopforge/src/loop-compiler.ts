@@ -58,6 +58,8 @@ import {
   type ConstraintProvenance,
 } from "./constraint-lifecycle.js";
 import { assemblePromptArtifact } from "./prompt-assembler.js";
+import { derivePromptContextBoundary } from "./context-boundary.js";
+import { deriveWorkingMemory } from "./working-memory.js";
 import {
   renderSelfEvalBlock,
   type SelfEvalPromptContext,
@@ -773,6 +775,17 @@ export function compileLoop(
   // ONE window computed at the top of this function.
   const machineStatus = deriveMachineStatus(windowRounds, request.round);
 
+  // v4.0.2: ONE derivation of the bounded Working Memory and the context
+  // boundary for the whole compile. State, prompt, artifact and every
+  // prompt-bearing response project these values; none re-derives them.
+  const workingMemory = deriveWorkingMemory(history, request.round);
+  const contextBoundary = derivePromptContextBoundary({
+    round: request.round,
+    attempt: request.attempt,
+    recoveryBoundary: previous.recoveryBoundary,
+    hasPreviousCommittedRound: previous.view !== null,
+  });
+
   const response = makeLoopCompileResponse({
     status: AgentStatus.OK,
     recompile_level: decision.level,
@@ -814,6 +827,7 @@ export function compileLoop(
     // prompt/state narrative.
     previousRound: { ...previous, committed: previous.view !== null },
     recoveryBrief,
+    workingMemory,
   });
   const configuredCapability = deriveConfiguredCapability(policy);
   const contractCommands = configuredCapability.commands
@@ -864,6 +878,11 @@ export function compileLoop(
     // recovery section is part of the artifact, so the delivered prompt is
     // exactly `artifact.renderedPrompt` (no post-compile prepend).
     recoveryBrief,
+    // v4.0.2: the ONE context boundary and the SAME bounded Working Memory
+    // the state carries. A retry renders no Working Memory section.
+    contextMode: contextBoundary.mode,
+    contextReason: contextBoundary.reason,
+    workingMemory,
   });
   response.prompt = artifact.renderedPrompt;
   response.prompt_artifact = artifact;

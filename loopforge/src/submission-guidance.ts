@@ -85,6 +85,7 @@ export const FIELD_ORDER = [
   "emerged_subtasks",
   "discovered_constraints",
   "wrong_assumptions",
+  "open_questions",
   "retracted_constraints",
   "round_contract",
   "contract_transition",
@@ -264,13 +265,36 @@ const GUIDES: FieldGuide[] = [
     compact: true,
     promptRank: 30,
     downstream:
-      "Committed Corrections section, state-file 'Corrections', recovery brief, " +
-      "and backtrack wrong-assumption facts. Only committed corrections reach " +
-      "the next prompt.",
+      "Bounded Working Memory (fresh prompts and the committed projection), " +
+      "recovery brief, replay and explain. Only committed reports reach the " +
+      "next prompt.",
     toolDescription:
       "Assumptions from earlier rounds that turned out to be wrong. Record one " +
       "only when this round actually falsified it; otherwise omit. This is not " +
       "a reflection quota.",
+  },
+  {
+    path: "open_questions",
+    purpose:
+      "Unresolved questions that still affect later slices (a question list, " +
+      "not a todo list).",
+    when:
+      "Only when a real open question affects how later work should proceed; " +
+      "omit when none.",
+    nature: "report",
+    reportOnly: true,
+    decision: "A question remains open that later slices must resolve",
+    compact: true,
+    promptRank: 35,
+    downstream:
+      "Bounded Working Memory (fresh prompts and the committed projection), " +
+      "replay and explain. Strictly report-only: it never enters the " +
+      "verification gate, success, contract closure or machine evidence.",
+    toolDescription:
+      "Optional. At most 3 unresolved questions, 300 chars each. Record only " +
+      "questions that still affect later slices — not a todo list, not a " +
+      "completion checklist, and not a substitute for a blocker or decision. " +
+      "Report-only: LoopForge never acts on these entries.",
   },
   {
     path: "retracted_constraints",
@@ -562,6 +586,8 @@ export function fieldExample(
       return ["<a constraint later rounds must respect>"];
     case "wrong_assumptions":
       return ["<an assumption from an earlier round that was falsified>"];
+    case "open_questions":
+      return ["<an unresolved question that still affects later slices>"];
     case "retracted_constraints":
       return ["<constraint text or c-XXXXXXXX id that is no longer valid>"];
     case "round_contract": {

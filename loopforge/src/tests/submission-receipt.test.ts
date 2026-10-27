@@ -88,11 +88,13 @@ function input(overrides: Partial<ReceiptInput> = {}): ReceiptInput {
     updatedAt: 0,
   } as RoundTransactionSnapshot;
   const artifact: PromptArtifact = {
-    schemaVersion: 7,
+    schemaVersion: 8,
     roundId: "loop:receipt:round:2",
     round: 2,
     attempt: 1,
     level: "l1",
+    contextMode: "fresh_round",
+    contextReason: "next_round",
     renderedPrompt: "next",
     promptHash: "h",
     stateHash: "s",
@@ -135,6 +137,31 @@ function report(receipt: SubmissionReceipt, path: string) {
 afterEach(() => resetPolicy());
 
 describe("v3.9.1 — submission receipt", () => {
+  it("v4.0.2: open_questions is report-only and the prompt context is projected", () => {
+    const selfEval = makeSelfEvaluation({
+      success: true,
+      output_summary: "did the work",
+      constraint_violations: [],
+      should_continue: true,
+      open_questions: ["does the migration preserve ids?"],
+    });
+    const receipt = deriveSubmissionReceipt(input({
+      selfEval,
+      submittedFields: [
+        "success", "output_summary", "constraint_violations", "should_continue",
+        "open_questions",
+      ],
+      nextArtifact: {
+        ...input().nextArtifact!,
+        contextMode: "same_round_retry",
+        contextReason: "enforcement_retry",
+      },
+    }));
+    assert.equal(report(receipt, "open_questions")?.handling, "saved_not_expanded");
+    assert.equal(receipt.prompt?.context_mode, "same_round_retry");
+    assert.equal(receipt.prompt?.context_reason, "enforcement_retry");
+  });
+
   it("separates saved reports, derived effects and machine verification", () => {
     const receipt = deriveSubmissionReceipt(input());
     assert.equal(receipt.entered_history, true);

@@ -120,6 +120,8 @@ describe("schema 6 structural invariants", () => {
       round: rejected.round,
       attempt: rejected.attempt + 1,
       level: "l0" as const,
+      contextMode: "same_round_retry" as const,
+      contextReason: "enforcement_retry" as const,
       renderedPrompt: "retry prompt",
       promptHash: "retry-hash",
       stateHash: "retry-state",

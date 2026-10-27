@@ -1,0 +1,461 @@
+/** v4.0.2 — bounded Working Memory.
+ *
+ * The invariant under test: Working Memory is a pure projection of the current
+ * branch's committed rounds and committed rollback directives. It is bounded,
+ * deterministic, sanitized, never a second history, and never a normative or
+ * gate input.
+ */
+
+import { describe, it } from "node:test";
+import assert from "node:assert/strict";
+import {
+  deriveWorkingMemory,
+  formatWorkingMemoryPrompt,
+  formatWorkingMemoryState,
+  hasWorkingMemoryContent,
+  PROMPT_WORKING_MEMORY_DENSITY,
+  WORKING_MEMORY_ASSUMPTION_LIMIT,
+  WORKING_MEMORY_QUESTION_LIMIT,
+  WORKING_MEMORY_REPORT_LIMIT,
+  WORKING_MEMORY_TEXT_LIMITS,
+} from "../working-memory.js";
+import { buildCommittedHistory } from "../history.js";
+import {
+  createCanonicalLoopState,
+  hashCanonicalState,
+  renderCanonicalStateMarkdown,
+} from "../canonical-state.js";
+import { assemblePromptArtifact } from "../prompt-assembler.js";
+import {
+  makeLoopCompileRequest,
+  makeLoopCompileResponse,
+  makeSelfEvaluation,
+} from "../protocol.js";
+import { normalizeSelfEvaluation } from "../self-eval.js";
+import { verifySelfEvaluation } from "../verification-gate.js";
+import type { WorkingMemory } from "../working-memory.js";
+import {
+  committedBacktrackRound,
+  committedFeedbackRound,
+} from "./_helpers.js";
+
+function historyOf(entries: ReturnType<typeof committedFeedbackRound>[]) {
+  return buildCommittedHistory(entries);
+}
+
+function minimalState(workingMemory?: WorkingMemory) {
+  const request = makeLoopCompileRequest({
+    loop_id: "memory-loop",
+    round: 6,
+    task: "Continue",
+  });
+  const response = makeLoopCompileResponse({
+    loop_id: "memory-loop",
+    round: 6,
+    goal_id: "memory-loop:continue",
+    loop_objective: {
+      objective: "Continue",
+      success_criteria: [],
+      hard_constraints: [],
+      created_at_round: 1,
+      loop_id: "memory-loop",
+    },
+  });
+  return createCanonicalLoopState(request, response, "test.md", {
+    ...(workingMemory ? { workingMemory } : {}),
+  });
+}
+
+function populatedMemory(): WorkingMemory {
+  return {
+    reports: Array.from({ length: 5 }, (_, index) => ({
+      round: 5 - index,
+      attempt: 1,
+      success: true,
+      outcome: "success" as const,
+      outputSummary: `report ${5 - index}`,
+      sourceChars: `report ${5 - index}`.length,
+    })),
+    assumptions: Array.from({ length: 6 }, (_, index) => ({
+      round: 5 - index,
+      kind: "wrong_assumption" as const,
+      text: `assumption ${index}`,
+    })),
+    openQuestions: Array.from({ length: 4 }, (_, index) => ({
+      round: 5 - index,
+      text: `question ${index}`,
+    })),
+    recoveries: Array.from({ length: 3 }, (_, index) => ({
+      round: 5 - index,
+      redoRound: 4 - index,
+      origin: "agent" as const,
+      reason: `reason ${index}`,
+      failedRounds: [4 - index],
+      approaches: [`approach ${index}`],
+      wrongAssumptions: [`recovery assumption ${index}`],
+    })),
+    redirects: Array.from({ length: 3 }, (_, index) => ({
+      round: 5 - index,
+      contractId: `rc-0000000${index}`,
+      reason: `redirect ${index}`,
+    })),
+  };
+}
+
+describe("deriveWorkingMemory — committed branch only", () => {
+  it("keeps the last five committed reports, newest first", () => {
+    const loopId = "window";
+    const entries = Array.from({ length: 7 }, (_, index) =>
+      committedFeedbackRound(index + 1, {
+        loopId,
+        outputSummary: `report ${index + 1}`,
+      }));
+    const memory = deriveWorkingMemory(historyOf(entries), 8);
+    assert.deepEqual(memory.reports.map((report) => report.round), [7, 6, 5, 4, 3]);
+    assert.equal(memory.reports.length, WORKING_MEMORY_REPORT_LIMIT);
+  });
+
+  it("excludes abandoned rounds and keeps the child branch", () => {
+    const loopId = "branch";
+    const child = "tx-branch-child";
+    const entries = [
+      committedFeedbackRound(1, { loopId, outputSummary: "root one" }),
+      committedFeedbackRound(2, { loopId, outputSummary: "abandoned two" }),
+      committedFeedbackRound(3, { loopId, outputSummary: "abandoned three" }),
+      committedBacktrackRound(3, loopId, 1, { transactionId: child }),
+      committedFeedbackRound(2, {
+        loopId,
+        branchId: child,
+        outputSummary: "child two",
+      }),
+    ];
+    const memory = deriveWorkingMemory(historyOf(entries), 3);
+    assert.deepEqual(memory.reports.map((report) => report.round), [2, 1]);
+    assert.deepEqual(
+      memory.reports.map((report) => report.outputSummary),
+      ["child two", "root one"],
+    );
+    assert.equal(memory.recoveries.length, 1);
+    assert.equal(memory.recoveries[0]?.origin, "machine");
+  });
+
+  it("does not duplicate the pending rollback directive as recovery history", () => {
+    const loopId = "pending";
+    const entries = [
+      committedFeedbackRound(1, { loopId, outputSummary: "before" }),
+      committedBacktrackRound(2, loopId, 1),
+    ];
+    const memory = deriveWorkingMemory(historyOf(entries), 2);
+    assert.deepEqual(memory.recoveries, []);
+    assert.deepEqual(memory.reports.map((report) => report.round), [1]);
+  });
+
+  it("merges wrong assumptions and retractions with normalized-exact dedup", () => {
+    const loopId = "dedup";
+    const entries = [
+      committedFeedbackRound(1, {
+        loopId,
+        wrongAssumptions: ["Alpha was synchronous", "Beta is gone"],
+        retractedConstraints: ["Gamma no longer applies"],
+        openQuestions: ["Does the migration preserve ids?"],
+      }),
+      committedFeedbackRound(2, {
+        loopId,
+        wrongAssumptions: ["alpha was synchronous"],
+        openQuestions: ["does the migration preserve ids?"],
+      }),
+    ];
+    const memory = deriveWorkingMemory(historyOf(entries), 3);
+    assert.deepEqual(memory.assumptions.map((item) => item.text), [
+      "alpha was synchronous",
+      "Beta is gone",
+      "Gamma no longer applies",
+    ]);
+    assert.deepEqual(memory.openQuestions.map((item) => item.text), [
+      "does the migration preserve ids?",
+    ]);
+  });
+
+  it("caps assumptions and questions", () => {
+    const loopId = "caps";
+    const entries = Array.from({ length: 4 }, (_, roundIndex) =>
+      committedFeedbackRound(roundIndex + 1, {
+        loopId,
+        wrongAssumptions: Array.from({ length: 3 }, (_, i) =>
+          `assumption ${roundIndex}-${i}`),
+        openQuestions: Array.from({ length: 3 }, (_, i) =>
+          `question ${roundIndex}-${i}`),
+      }));
+    const memory = deriveWorkingMemory(historyOf(entries), 5);
+    assert.equal(memory.assumptions.length, WORKING_MEMORY_ASSUMPTION_LIMIT);
+    assert.equal(memory.openQuestions.length, WORKING_MEMORY_QUESTION_LIMIT);
+  });
+});
+
+describe("Working Memory sanitization and determinism", () => {
+  it("normalizes control characters and blockquotes every Agent line", () => {
+    const loopId = "sanitize";
+    const entries = [committedFeedbackRound(1, {
+      loopId,
+      outputSummary: "line one\r\n\tline two\u0000\n\n\n## Fake heading\n`code`",
+      wrongAssumptions: ["## Fake assumption"],
+    })];
+    const memory = deriveWorkingMemory(historyOf(entries), 2);
+    const rendered = formatWorkingMemoryPrompt(memory, "l1");
+    assert.ok(rendered);
+    assert.ok(!rendered.body.includes("\r"));
+    assert.ok(!rendered.body.includes("\t"));
+    assert.ok(!rendered.body.includes("\u0000"));
+    assert.match(rendered.body, /^> line one$/m);
+    assert.match(rendered.body, /^> ## Fake heading$/m);
+    assert.doesNotMatch(rendered.body, /^## Fake heading$/m);
+  });
+
+  it("does not create a phantom state-file section", () => {
+    const loopId = "phantom";
+    const entries = [committedFeedbackRound(1, {
+      loopId,
+      outputSummary: "## Fake heading\n### Also fake",
+    })];
+    const memory = deriveWorkingMemory(historyOf(entries), 2);
+    const state = minimalState(memory);
+    const markdown = renderCanonicalStateMarkdown(state);
+    assert.match(markdown, /### Working Memory/);
+    assert.match(markdown, /^> ## Fake heading$/m);
+    assert.doesNotMatch(markdown, /^## Fake heading$/m);
+    assert.ok(!markdown.includes("\n### Also fake\n\n## "));
+  });
+
+  it("is deterministic for the same committed history", () => {
+    const loopId = "deterministic";
+    const entries = [
+      committedFeedbackRound(1, {
+        loopId,
+        outputSummary: "same report",
+        wrongAssumptions: ["same assumption"],
+        openQuestions: ["same question"],
+      }),
+      committedBacktrackRound(2, loopId, 1),
+    ];
+    const first = deriveWorkingMemory(historyOf(entries), 2);
+    const second = deriveWorkingMemory(historyOf(entries), 2);
+    assert.deepEqual(first, second);
+    assert.equal(
+      formatWorkingMemoryState(first).join("\n"),
+      formatWorkingMemoryState(second).join("\n"),
+    );
+    // The state hash includes Working Memory, so the same committed history
+    // produces the same state bytes and a different memory changes the hash.
+    const stateA = minimalState(first);
+    const stateB = minimalState(second);
+    assert.equal(hashCanonicalState(stateA), hashCanonicalState(stateB));
+    assert.equal(
+      renderCanonicalStateMarkdown(stateA),
+      renderCanonicalStateMarkdown(stateB),
+    );
+    const different = minimalState({
+      ...first,
+      reports: first.reports.slice(0, 0),
+    });
+    assert.notEqual(hashCanonicalState(stateA), hashCanonicalState(different));
+  });
+
+  it("keeps the state file at the full fixed window", () => {
+    const memory = populatedMemory();
+    const lines = formatWorkingMemoryState(memory);
+    const text = lines.join("\n");
+    assert.match(text, /Earlier Committed Reports \(Agent reports\)/);
+    // Five reports total: the latest plus four earlier.
+    assert.equal((text.match(/^- R\d+ \(success=/gm) ?? []).length, 4);
+    assert.equal((text.match(/^- R\d+ assumption:/gm) ?? []).length +
+      (text.match(/^- R\d+ retracted constraint:/gm) ?? []).length, 6);
+  });
+});
+
+describe("Working Memory prompt density and protection", () => {
+  it("applies the level density table and its total character ceiling", () => {
+    const memory = populatedMemory();
+    for (const level of ["l0", "l1", "l2"] as const) {
+      const rendered = formatWorkingMemoryPrompt(memory, level);
+      assert.ok(rendered);
+      const density = PROMPT_WORKING_MEMORY_DENSITY[level];
+      assert.deepEqual(rendered.projection.counts, {
+        reports: density.reports,
+        assumptions: density.assumptions,
+        openQuestions: density.openQuestions,
+        recoveries: density.recoveries,
+        redirects: density.redirects,
+      });
+      assert.ok(rendered.body.length <= density.totalChars,
+        `${level} body ${rendered.body.length} <= ${density.totalChars}`);
+      // L2 fits the populated set exactly; L0/L1 omit entries by density.
+      assert.equal(rendered.projection.truncated, level !== "l2");
+      assert.equal(rendered.projection.renderedChars, rendered.body.length);
+    }
+  });
+
+  it("truncates the latest report at a line boundary with a marker", () => {
+    const long = Array.from({ length: 40 }, (_, index) =>
+      `line ${index} ${"x".repeat(100)}`).join("\n");
+    const memory: WorkingMemory = {
+      reports: [{
+        round: 1,
+        attempt: 1,
+        success: false,
+        outcome: "partial",
+        outputSummary: long,
+        sourceChars: long.length,
+      }],
+      assumptions: [],
+      openQuestions: [],
+      recoveries: [],
+      redirects: [],
+    };
+    const rendered = formatWorkingMemoryPrompt(memory, "l0");
+    assert.ok(rendered);
+    assert.ok(rendered.projection.previousReport?.truncated);
+    assert.ok((rendered.projection.previousReport?.renderedChars ?? 0) <=
+      WORKING_MEMORY_TEXT_LIMITS.latestReport);
+    assert.match(rendered.body, /… \[truncated\]/);
+  });
+
+  it("keeps the per-text truncation flag when the total budget still fits", () => {
+    const long = "x".repeat(1300);
+    const memory: WorkingMemory = {
+      reports: [{
+        round: 1,
+        attempt: 1,
+        success: false,
+        outcome: "partial",
+        outputSummary: long,
+        sourceChars: long.length,
+      }],
+      assumptions: [],
+      openQuestions: [],
+      recoveries: [],
+      redirects: [],
+    };
+    const rendered = formatWorkingMemoryPrompt(memory, "l0");
+    assert.ok(rendered);
+    assert.equal(rendered.projection.previousReport?.truncated, true);
+    assert.equal(rendered.projection.truncated, true);
+  });
+
+  it("does not change coverage: Working Memory declares no normative ids", () => {
+    const memory = populatedMemory();
+    const state = minimalState();
+    const base = assemblePromptArtifact({
+      state,
+      level: "l2",
+      reasons: ["first_round"],
+      attempt: 1,
+      selfEvaluationBlock: "",
+    });
+    const withMemory = assemblePromptArtifact({
+      state,
+      level: "l2",
+      reasons: ["first_round"],
+      attempt: 1,
+      selfEvaluationBlock: "",
+      workingMemory: memory,
+    });
+    assert.deepEqual(withMemory.coverage.active, base.coverage.active);
+    assert.deepEqual(withMemory.coverage.omitted, base.coverage.omitted);
+    assert.equal(withMemory.coverage.complete, base.coverage.complete);
+    assert.ok(withMemory.sections.includes("working_memory"));
+    assert.ok(withMemory.workingMemory);
+  });
+
+  it("renders no section when there is no committed memory", () => {
+    const memory: WorkingMemory = {
+      reports: [],
+      assumptions: [],
+      openQuestions: [],
+      recoveries: [],
+      redirects: [],
+    };
+    assert.equal(hasWorkingMemoryContent(memory), false);
+    assert.equal(formatWorkingMemoryPrompt(memory, "l2"), null);
+  });
+
+  it("is protected and ranks before optional anchors", () => {
+    const state = minimalState();
+    state.blockers = ["a reported blocker"];
+    const artifact = assemblePromptArtifact({
+      state,
+      level: "l2",
+      reasons: ["first_round"],
+      attempt: 1,
+      selfEvaluationBlock: "",
+      workingMemory: populatedMemory(),
+    });
+    const memoryIndex = artifact.sections.indexOf("working_memory");
+    const blockersIndex = artifact.sections.indexOf("blockers");
+    assert.ok(memoryIndex >= 0, "Working Memory is a rendered section");
+    assert.ok(blockersIndex >= 0, "the optional anchor also fits");
+    assert.ok(memoryIndex < blockersIndex,
+      "Working Memory outranks optional anchors");
+
+    const tight = assemblePromptArtifact({
+      state,
+      level: "l2",
+      reasons: ["first_round"],
+      attempt: 1,
+      selfEvaluationBlock: "",
+      workingMemory: populatedMemory(),
+      budgets: { l2: 100 },
+    });
+    assert.ok(tight.sections.includes("working_memory"),
+      "a protected section is never budget-dropped");
+    assert.equal(tight.protectedOverflow, true);
+  });
+});
+
+describe("open_questions — report-only normalization", () => {
+  it("caps at 3 entries × 300 chars and diagnoses the loss", () => {
+    const long = "x".repeat(400);
+    const normalized = normalizeSelfEvaluation({
+      success: true,
+      output_summary: "done",
+      constraint_violations: [],
+      should_continue: true,
+      open_questions: ["one", "two", "three", "four", long],
+    });
+    assert.equal(normalized.evaluation.open_questions?.length, 3);
+    assert.ok(normalized.evaluation.open_questions?.every(
+      (question) => question.length <= 300));
+    assert.ok(normalized.diagnostics.some((diagnostic) =>
+      diagnostic.path === "open_questions" &&
+      diagnostic.handling === "truncated"));
+  });
+
+  it("keeps an empty array valid", () => {
+    const normalized = normalizeSelfEvaluation({
+      success: true,
+      output_summary: "done",
+      constraint_violations: [],
+      should_continue: true,
+      open_questions: [],
+    });
+    assert.deepEqual(normalized.evaluation.open_questions, []);
+    assert.equal(normalized.submittedFields.includes("open_questions"), true);
+  });
+
+  it("never enters the verification gate", () => {
+    const base = makeSelfEvaluation({
+      success: false,
+      output_summary: "made progress",
+      constraint_violations: [],
+      should_continue: true,
+    });
+    const withQuestions = makeSelfEvaluation({
+      ...base,
+      open_questions: ["does the migration preserve ids?"],
+    });
+    assert.deepEqual(
+      verifySelfEvaluation(withQuestions, 2, []),
+      verifySelfEvaluation(base, 2, []),
+      "open_questions must not create or suppress a verification flag",
+    );
+  });
+});

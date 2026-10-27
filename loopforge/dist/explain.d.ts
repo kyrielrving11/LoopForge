@@ -13,7 +13,13 @@ export interface ExplainRound {
     attempt: number;
     action: string;
     outcome: string | null;
-    /** The agent's own report, quoted back for audit. */
+    /** v4.0.2: the committed context boundary this round was compiled under. */
+    context: {
+        mode: "fresh_round" | "same_round_retry";
+        reason: "first_round" | "next_round" | "recovery_redo" | "enforcement_retry";
+    } | null;
+    /** The agent's own report, quoted back for audit. Present whenever the
+     *  committed evaluation exists, even without an execution_report. */
     report: {
         output_summary: string;
         success: boolean;
@@ -26,6 +32,11 @@ export interface ExplainRound {
             outcome: string;
         }>;
     } | null;
+    /** v4.0.2: committed Agent reports, bounded for display. */
+    wrongAssumptions: string[];
+    retractedConstraints: string[];
+    openQuestions: string[];
+    blocker: string | null;
     /** What the machine observed this round. */
     observations: Array<{
         providerId: string;
@@ -113,6 +124,11 @@ export interface ExplainResult {
         targetCheckpointId: string;
         reason: string;
         skippedFiles: string[];
+        /** v4.0.2: the directive's committed abandoned-path facts, same caps as
+         *  Working Memory and replay. */
+        failedRounds: number[];
+        approaches: string[];
+        wrongAssumptions: string[];
     }>;
 }
 /** Build the explain view. Pure and read-only. */

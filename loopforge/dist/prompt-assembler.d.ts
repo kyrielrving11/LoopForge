@@ -10,7 +10,8 @@
  * alone are over it — truncation of mandatory content never happens.
  */
 import type { CanonicalLoopState } from "./canonical-state.js";
-import type { PromptArtifact } from "./protocol.js";
+import type { PromptArtifact, PromptContextMode, PromptContextReason } from "./protocol.js";
+import type { WorkingMemory } from "./working-memory.js";
 import type { PromptLevel, PromptLevelReason } from "./prompt-policy.js";
 export interface PromptBudgets {
     l0: number;
@@ -29,6 +30,12 @@ export interface PromptAssemblyInput {
      *  `committedBacktrackBrief` the state file renders. Present only while a
      *  committed rollback directive is the current redo boundary. */
     recoveryBrief?: string[];
+    /** v4.0.2: the compiler-derived context boundary. Not Agent input. */
+    contextMode?: PromptContextMode;
+    contextReason?: PromptContextReason;
+    /** v4.0.2: the same bounded Working Memory the canonical state carries.
+     *  Rendered only for `fresh_round`. */
+    workingMemory?: WorkingMemory;
 }
 /** 3.9.3: The action table lives in a neutral module so the evaluation-field
  *  guidance can quote the same wording without depending on a renderer.

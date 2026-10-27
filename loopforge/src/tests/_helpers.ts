@@ -130,6 +130,7 @@ export function manifestFor(evaluation: SelfEvaluation): string[] {
   if ((evaluation.subgoal_updates ?? []).length > 0) fields.push("subgoal_updates");
   if ((evaluation.retracted_constraints ?? []).length > 0) fields.push("retracted_constraints");
   if ((evaluation.wrong_assumptions ?? []).length > 0) fields.push("wrong_assumptions");
+  if ((evaluation.open_questions ?? []).length > 0) fields.push("open_questions");
   if (evaluation.round_contract) fields.push("round_contract");
   if (evaluation.contract_transition) fields.push("contract_transition");
   if (evaluation.outcome) fields.push("outcome");
@@ -144,6 +145,8 @@ export function promptArtifact(input: {
   level?: "l0" | "l1" | "l2";
   attempt?: number;
   warnings?: string[];
+  contextMode?: "fresh_round" | "same_round_retry";
+  contextReason?: "first_round" | "next_round" | "recovery_redo" | "enforcement_retry";
 }): PromptArtifact {
   return {
     schemaVersion: PROMPT_ARTIFACT_SCHEMA_VERSION,
@@ -151,6 +154,8 @@ export function promptArtifact(input: {
     round: input.round,
     attempt: input.attempt ?? 1,
     level: input.level ?? "l1",
+    contextMode: input.contextMode ?? "fresh_round",
+    contextReason: input.contextReason ?? "next_round",
     renderedPrompt: input.renderedPrompt,
     promptHash: `hash-${input.round}`,
     stateHash: `state-${input.round}`,
@@ -254,6 +259,12 @@ export function committedFeedbackRound(
     progress?: number;
     noExecutionReport?: boolean;
     discoveredConstraints?: string[];
+    /** v4.0.2: committed report facts for Working Memory / replay / explain. */
+    outputSummary?: string;
+    wrongAssumptions?: string[];
+    retractedConstraints?: string[];
+    openQuestions?: string[];
+    blocker?: string;
     verificationFlags?: VerificationFlag[];
     loopId?: string;
     /** v3.8: machine binding stamped on the committed contract. */
@@ -276,10 +287,14 @@ export function committedFeedbackRound(
   const loopId = opts.loopId ?? "cc";
   const evaluation = makeSelfEvaluation({
     success: opts.success ?? false,
-    output_summary: `Committed round ${round}.`,
+    output_summary: opts.outputSummary ?? `Committed round ${round}.`,
     constraint_violations: [],
     should_continue: true,
     outcome: opts.outcome,
+    wrong_assumptions: opts.wrongAssumptions ?? [],
+    retracted_constraints: opts.retractedConstraints ?? [],
+    open_questions: opts.openQuestions ?? [],
+    blocker: opts.blocker,
     round_contract: opts.contract,
     contract_transition: opts.contractTransition,
     emerged_subtasks: opts.emergedSubtasks ?? [],

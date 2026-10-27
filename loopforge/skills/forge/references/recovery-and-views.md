@@ -90,6 +90,14 @@ active id is missing, LoopForge fails closed with `projection_incomplete`
 instead of delivering a partial prompt. The delivered prompt equals the
 compiled `renderedPrompt` on every path.
 
+A `fresh_round` prompt additionally renders a protected, bounded **Working
+Memory** section derived from committed history. Its density follows the level
+(L0 1 recent report / L1 3 / L2 5, plus capped assumptions, open questions,
+consumed recoveries and contract redirects). It declares no normative ids and
+never changes coverage, level, freshness, gates or success. A
+`same_round_retry` prompt renders none; it relies on the rejection notice and
+the Verification Gate. The state file always carries the full fixed window.
+
 ## Read-only views
 
 Use these to inspect, never to advance:
@@ -105,14 +113,27 @@ Use these to inspect, never to advance:
 - `loopforge_status` `view: "all"`: every persisted loop summary.
 - `loopforge_status` `view: "audit"`: end-of-loop verification completeness.
 - `loopforge_status` `view: "explain"` (with `round`): the per-round "why" view
-  over committed facts.
-- `loopforge_replay`: committed round timeline and diffs, including explicit
-  legacy reporting for unsupported envelope versions.
+  over committed facts, including the committed report (even without an
+  execution_report), context boundary, assumptions, open questions, blocker and
+  rollback abandoned-path facts.
+- `loopforge_replay`: committed round timeline and diffs. Pass `loopId` (or a
+  live `sessionId`) and optional `start` / `end`. With no window it returns the
+  last 10 committed rounds; an explicit window may span at most 50 rounds. The
+  response includes `window: { start, end, totalRounds, hasBefore, hasAfter }`
+  and each round's `attempt`, `context_mode`, `context_reason`, `outcome`,
+  bounded `report`, `wrong_assumptions`, `retracted_constraints`,
+  `open_questions`, `blocker` and `contract_redirect`. `rollbacks` carries
+  `failedRounds`, `approaches` and `wrongAssumptions`. Legacy envelope rows stay
+  visible instead of disappearing.
+- `loopforge_status` `view: "session"` / `view: "loop"` / `view: "audit"`: live
+  and committed health views.
 
 The optional `.loopforge/state/<loopId>-state.md` is derived and regenerable.
-Read it when an L2 prompt points to it, but never treat it as a second source
-of truth: committed typed rounds are authoritative, and the file's
-Agent-reported summaries are claims, not machine evidence.
+Read it when the prompt points to it (current governance + bounded Working
+Memory + diagnostic views), but never treat it as a second source of truth:
+committed typed rounds are authoritative, the file's Agent-reported summaries
+are claims, and a state hash that differs from the prompt header means the file
+is stale — re-align with status or resume.
 
 ## Gates and delegation
 

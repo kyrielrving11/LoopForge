@@ -83,10 +83,19 @@ an active Agent-discovered constraint.
 ### 7. The prompt is a current-governance projection
 
 It carries committed current-governance facts only. Agent memory and session
-history are background, never an input. `output_summary`, recent rounds, full
-rehydrated state, agent discoveries, failed-pattern history and
-LoopForge-generated phase narratives do not render. The state file is derived
-and is never the source of truth. The current user instruction defines the task.
+history are background, never an input. A fresh prompt also carries BOUNDED
+Working Memory derived from the current branch's committed rounds and
+committed rollback directives: recent reports, falsified assumptions /
+retractions, open questions, consumed recoveries and contract redirects, each
+under a fixed window and character cap. That projection is part of
+`CanonicalLoopState`; it is not a second history, is never persisted as its own
+store, and never feeds a gate, success, contract closure or machine evidence.
+Full rehydrated state, unbounded round history, failed-pattern history and
+LoopForge-generated phase narratives do not render. A same-round retry renders
+no Working Memory. The state file is derived and is never the source of truth.
+The current user instruction defines the task. Every prompt carries a derived
+context boundary (`fresh_round` / `same_round_retry`) in its artifact; the host
+starts a new Agent invocation for `fresh_round`, which is not a workspace reset.
 
 ### 8. `submission-guidance.ts` is the single source of field meaning
 

@@ -89,7 +89,7 @@ describe("v3.8.1 — schema fidelity", () => {
     // must read it rather than guess.
     const version = props("PromptArtifact").schemaVersion;
     assert.equal(version.type, "number", "the artifact schema version is a number");
-    assert.equal(version.const, 7);
+    assert.equal(version.const, 8);
   });
 });
 
@@ -139,8 +139,9 @@ describe("Generated JSON Schema — top-level", () => {
     // v4.0.1: PromptRequests, PromptRequestEffect, ProgressSnapshot,
     // VerifiedSubGoalFact, LoopForgeRequest, LoopForgeResponse, SessionState,
     // AgentLoopResult and ExecutionFeedback were removed; CompiledRoundFacts
-    // joined. The current wire surface is 65 definitions.
-    assert.equal(names.length, 65, `expected 65, got ${names.length}: ${names.join(", ")}`);
+    // joined (65). v4.0.2: PromptContextMode, PromptContextReason and
+    // PromptWorkingMemoryProjection joined (65 → 68).
+    assert.equal(names.length, 68, `expected 68, got ${names.length}: ${names.join(", ")}`);
     assert.ok(names.includes("SubmissionHandle"));
     assert.ok(names.includes("PromptArtifact"));
     assert.ok(names.includes("RoundOutcome"));

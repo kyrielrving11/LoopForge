@@ -51,6 +51,7 @@ function wholeDrop(path, diagnostics) {
         path === "discovered_constraints" ||
         path === "retracted_constraints" ||
         path === "wrong_assumptions" ||
+        path === "open_questions" ||
         path === "gate_ids" ||
         path === "retroactiveClaims" ||
         path === "worker_results" ||

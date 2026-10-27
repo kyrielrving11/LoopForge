@@ -7,8 +7,8 @@ shapes, real ids, and usable commands.
 ## Optional evaluation field groups (conceptual)
 
 - **Reports:** `execution_report`, `discovered_constraints`,
-  `wrong_assumptions`, and `worker_results` (the minimal audit shape:
-  `agentId`, `subTask`, `resultSummary`, `outcome`).
+  `wrong_assumptions`, `open_questions`, and `worker_results` (the minimal audit
+  shape: `agentId`, `subTask`, `resultSummary`, `outcome`).
 - **State transitions:** `emerged_subtasks`, `subgoal_updates`,
   `retracted_constraints` (Agent-discovered constraints only; operator
   criteria/hard constraints are immutable).
@@ -19,6 +19,12 @@ shapes, real ids, and usable commands.
 
 A field is included only when its event actually happened. The live guidance
 decides current applicability and the exact legal shape.
+
+`wrong_assumptions` and `open_questions` are strictly report-only. They feed
+bounded Working Memory, replay and explain, never the verification gate,
+success, contract closure or machine evidence. `open_questions` is a list of
+unresolved questions that still affect later slices (at most 3, 300 chars
+each), not a todo list and not a completion checklist.
 
 ## What a Round Contract is
 

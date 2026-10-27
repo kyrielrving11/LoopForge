@@ -64,7 +64,7 @@ function contract(): ActiveContractView {
 function state(overrides: Partial<CanonicalLoopState> = {}): CanonicalLoopState {
   const activeContract = contract();
   const base: CanonicalLoopState = {
-    schemaVersion: 5 as const,
+    schemaVersion: 6 as const,
     loopId: "coverage-loop",
     round: 3,
     maxRounds: 20,
@@ -82,7 +82,6 @@ function state(overrides: Partial<CanonicalLoopState> = {}): CanonicalLoopState 
       meta("no runtime deps", "hard", "c-11111111"),
       meta("discovered rule", "discovered", "c-22222222"),
     ],
-    corrections: [],
     remainingCriteria: [],
     blockers: [],
     verificationFlags: [{
@@ -91,7 +90,6 @@ function state(overrides: Partial<CanonicalLoopState> = {}): CanonicalLoopState 
       check: "evidence_integrity",
       detail: "Agent files_changed doesn't match evidence: unreported: [src/a.ts]",
     }],
-    discoveries: [],
     subGoals: [subGoal(), subGoal({ id: "sg-22222222", description: "wire api", priority: 1 })],
     criterionStatuses: [
       { id: AUTH_ID, text: AUTH, status: "remaining" },

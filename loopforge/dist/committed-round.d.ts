@@ -75,6 +75,9 @@ export interface CommittedRoundView {
     /** Effective retirements from the compile that produced this round. */
     readonly compiledRetirements?: string[];
     readonly retractedConstraints?: string[];
+    /** v4.0.2: committed Agent-reported unresolved questions (report-only).
+     *  Read by bounded Working Memory, replay and explain; never by a gate. */
+    readonly openQuestions?: string[];
     readonly emergedSubtasks?: string[];
     readonly subgoalUpdates?: SubGoalUpdate[];
 }

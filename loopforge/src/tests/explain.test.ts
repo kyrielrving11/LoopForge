@@ -2,7 +2,12 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { buildExplain, renderExplain } from "../explain.js";
-import { committedFeedbackRound, installTestCommandProvider } from "./_helpers.js";
+import {
+  committedBacktrackRound,
+  committedFeedbackRound,
+  installTestCommandProvider,
+  promptArtifact,
+} from "./_helpers.js";
 import { criterionClaims } from "./_helpers.js";
 import { makeExecutionReport } from "../protocol.js";
 import { deriveContractId, deriveContractItemIds } from "../token-utils.js";
@@ -144,6 +149,61 @@ describe("v3.8 — explain view", () => {
     ]);
     assert.equal(result.rounds[1].contract?.closure, "blocked");
     assert.equal(result.rounds[1].contract?.declared_at_round, 1);
+  });
+
+  it("v4.0.2: reports a committed evaluation even without an execution_report", () => {
+    const result = buildExplain("explain-loop", [
+      entry(1, {
+        noExecutionReport: true,
+        outputSummary: "no execution report but a real summary",
+      }),
+    ]);
+    const round = result.rounds[0];
+    assert.ok(round.report);
+    assert.equal(round.report?.output_summary, "no execution report but a real summary");
+    assert.deepEqual(round.report?.criterion_claims, []);
+    assert.deepEqual(round.report?.contract_item_claims, []);
+  });
+
+  it("v4.0.2: exposes context, assumptions, questions and blocker", () => {
+    const result = buildExplain("explain-loop", [
+      entry(1, {
+        promptArtifact: promptArtifact({
+          roundId: "loop:explain-loop:round:1",
+          round: 1,
+          renderedPrompt: "held",
+          contextMode: "fresh_round",
+          contextReason: "first_round",
+        }),
+        wrongAssumptions: ["old belief"],
+        retractedConstraints: ["old rule"],
+        openQuestions: ["still open?"],
+        blocker: "needs credentials",
+      }),
+    ]);
+    const round = result.rounds[0];
+    assert.deepEqual(round.context, {
+      mode: "fresh_round",
+      reason: "first_round",
+    });
+    assert.deepEqual(round.wrongAssumptions, ["old belief"]);
+    assert.deepEqual(round.retractedConstraints, ["old rule"]);
+    assert.deepEqual(round.openQuestions, ["still open?"]);
+    assert.equal(round.blocker, "needs credentials");
+  });
+
+  it("v4.0.2: rollbacks carry abandoned-path facts", () => {
+    const directive = committedBacktrackRound(2, "explain-loop", 1);
+    const transaction = (directive.loop_lineage as Record<string, unknown>)
+      .round_transaction as Record<string, unknown>;
+    const recovery = (transaction.snapshot as Record<string, unknown>)
+      .recovery as Record<string, unknown>;
+    recovery.approaches = ["tried the parser rewrite"];
+    recovery.wrong_assumptions = ["the old parser was reusable"];
+    const result = buildExplain("explain-loop", [directive]);
+    assert.deepEqual(result.rollbacks[0]?.failedRounds, [2]);
+    assert.deepEqual(result.rollbacks[0]?.approaches, ["tried the parser rewrite"]);
+    assert.deepEqual(result.rollbacks[0]?.wrongAssumptions, ["the old parser was reusable"]);
   });
 
   it("renders a human-readable timeline without inventing facts", () => {

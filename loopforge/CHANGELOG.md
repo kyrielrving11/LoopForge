@@ -1,5 +1,65 @@
 # Changelog
 
+## 4.0.2 (2026-10-27)
+
+**The fresh-context / bounded-working-memory release.** Each round can now run
+in a clean Agent context without losing long-horizon continuity. This is a
+breaking release with no migration path: 4.0.1 committed rounds are reported as
+legacy envelopes, and 4.0.1 held sessions cannot be resumed.
+
+### Derived context boundary
+
+- `PromptArtifact` schema 8 adds required `contextMode` (`fresh_round` /
+  `same_round_retry`) and `contextReason` (`first_round`, `next_round`,
+  `recovery_redo`, `enforcement_retry`). The compiler derives the pair once
+  from compile inputs and committed facts; MCP responses project it from the
+  artifact and never re-derive it.
+- The prompt header shows the boundary, and the authority boundary explains
+  that a fresh context is not a workspace reset. A re-delivered held prompt
+  keeps the same artifact and boundary.
+- `AdvanceResult` and `SubmissionReceipt.prompt` expose the same facts.
+
+### Bounded Working Memory
+
+- `CanonicalLoopState` schema 6 adds `workingMemory`, derived only from the
+  current branch's committed rounds and committed rollback directives: recent
+  reports, falsified assumptions/retractions, open questions, consumed
+  recoveries, and contract redirects.
+- Prompt density follows the level (L0 1 report / L1 3 / L2 5, plus capped
+  assumptions, questions, recoveries and redirects) with a hard per-level
+  character ceiling; the state file keeps the full fixed window. All Agent text
+  is normalized and blockquoted. The section is protected, declares no
+  normative ids, and never changes coverage, level, freshness, gates or
+  success. A same-round retry renders none.
+- The state file's `Corrections` and `Discoveries` sections are replaced by
+  `Working Memory`. Wrong assumptions/retractions now render there; discovered
+  constraints remain visible through active-constraint provenance. `Retired
+  Constraints` is unchanged.
+- `PromptArtifact` carries optional Working Memory projection metadata
+  (`reportRounds`, counts, previous-report source/rendered chars, truncation).
+
+### `open_questions`
+
+- `SelfEvaluation.open_questions` is an optional, strictly report-only list of
+  at most 3 questions × 300 chars. It feeds Working Memory, replay and explain,
+  never a gate, success, contract closure or machine evidence.
+- `submission_guidance`, the MCP evaluation schema, field accounting, the
+  receipt (`saved_not_expanded`) and `CommittedRoundView` carry it.
+
+### Retrieval
+
+- `loopforge_replay` accepts `start` / `end`, defaults to the last 10 committed
+  rounds, caps an explicit window at 50 rounds, and returns
+  `window: { start, end, totalRounds, hasBefore, hasAfter }`.
+- Timeline rows add `attempt`, `context_mode`, `context_reason`, `outcome`,
+  bounded `report`, `wrong_assumptions`, `retracted_constraints`,
+  `open_questions`, `blocker`, and `contract_redirect` (replacing
+  `contract_transition`). Rollbacks add `failedRounds`, `approaches` and
+  `wrongAssumptions`.
+- `explain` returns a committed report whenever an evaluation exists (even
+  without an `execution_report`), plus context, assumptions, open questions,
+  blocker and rollback abandoned-path facts.
+
 ## 4.0.1 (2026-10-24)
 
 **The single-commit release.** One committed typed round transaction is now the

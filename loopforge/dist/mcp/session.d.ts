@@ -15,6 +15,7 @@
 import type { GateActionDescriptor } from "../protocol.js";
 import type { LoopTerminalSink, SubmissionGuidance, SubmissionHandle, SubmissionReceipt } from "../protocol.js";
 import type { ActiveContractView } from "../round-contract.js";
+import type { ReplayPage, ReplayWindowOptions } from "../replay.js";
 import type { LoopStore } from "../loop-store.js";
 import { FileWorkspaceCheckpointStore } from "../workspace-checkpoint.js";
 import type { PolicyMetricsSnapshot } from "../policy-metrics.js";
@@ -190,6 +191,10 @@ export declare class SessionManager implements SessionRegistry {
      *  made every vault loop unreplayable after restart.
      *  Returns null when the loop has no committed rounds. */
     replayByLoop(loopId: string): Record<string, unknown>[] | null;
+    /** v4.0.2: a bounded replay page with its window metadata. `null` only when
+     *  the session does not exist; an empty loop returns an empty page. */
+    replayPage(sessionId: string, opts?: ReplayWindowOptions): ReplayPage | null;
+    replayPageByLoop(loopId: string, opts?: ReplayWindowOptions): ReplayPage;
     /** v3.9.6: committed rollback directives for the replay view. They are
      *  events, not normal rounds; the timeline stays a normal-round projection. */
     replayRollbacks(loopId: string): Record<string, unknown>[];

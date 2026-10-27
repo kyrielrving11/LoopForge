@@ -73,6 +73,41 @@ LoopForge owns the boundary, persistence, evidence collection, and disposition.
 The Agent owns semantic decomposition, tool use, edits, tests, and the choice
 of what to do next.
 
+## Fresh context and Working Memory
+
+Every prompt header states its derived context boundary:
+
+```text
+State: <hash> | Level: L1 | Attempt: 1 | Context: fresh (next_round)
+```
+
+- **`fresh_round`** means start a NEW Agent invocation with only this prompt,
+  the `loopId`, `sessionId`, and `submissionHandle`. Do not carry the previous
+  transcript, tool logs, or uncommitted reasoning. A fresh context is not a
+  workspace reset: committed files, git state, and the session continue.
+- **`same_round_retry`** means this is the same logical round after an
+  enforcement rejection. Continue the current invocation if it exists; if it
+  is gone, start a new one from this self-contained prompt and read the state
+  file first.
+- Re-delivering the same held prompt (`status`, `resume`, `unpause`) is not a
+  new boundary. The same `promptHash` and handle continue the same attempt.
+
+A fresh prompt carries **bounded Working Memory** derived only from the
+current branch's committed rounds and committed rollback directives: the
+latest report, a few earlier reports, falsified assumptions/retractions, open
+questions, consumed recoveries, and contract redirects. Each item is a
+labelled Agent report or committed event, not machine evidence. Its size is
+capped by prompt level; it never enters the verification gate.
+
+For older history, do not ask the user to restate the task and do not assume
+the prompt remembered it. Use:
+
+- `loopforge_replay` with `loopId` (optional `start`/`end`; default last 10
+  committed rounds, at most 50 in an explicit window);
+- `loopforge_status` with `view: "explain"` (optionally `round`);
+- the state file, when the prompt names one. If its hash differs from the
+  prompt header, treat it as stale and re-align with status or resume.
+
 ## Start
 
 Call `loopforge_status` with `view: "all"` before starting. If a loop already

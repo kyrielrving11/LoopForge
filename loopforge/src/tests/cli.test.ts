@@ -134,6 +134,8 @@ describe("loopforge CLI", () => {
                 round: 1,
                 attempt: 1,
                 level: "l2",
+                contextMode: "fresh_round",
+                contextReason: "first_round",
                 renderedPrompt: "TOP-SECRET-PROMPT-TEXT",
                 promptHash: "abc123",
                 stateHash: "def456",

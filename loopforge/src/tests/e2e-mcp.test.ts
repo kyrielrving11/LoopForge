@@ -375,6 +375,17 @@ describe("E2E MCP lifecycle", () => {
     submissionHandle = result.submissionHandle;
   });
 
+  it("status by loopId re-anchors the live handle without advancing", async () => {
+    const result = await client.tool("loopforge_status", { loopId });
+
+    assert.ok(!result.error, `unexpected error: ${String(result.error)}`);
+    assert.deepEqual(result.submissionHandle, submissionHandle,
+      "status by loopId returns the current held handle");
+    const receipt = result.last_submission as { record?: string } | null;
+    assert.equal(receipt?.record, "committed");
+    assert.ok(!("prompt" in result), "status never returns the held prompt");
+  });
+
   // ── Pause and resume ────────────────────────────────────────────────────────
 
   it("pause suspends the session at the round boundary", async () => {

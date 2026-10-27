@@ -98,20 +98,29 @@ Pass it **unchanged** to every `loopforge_next`, `loopforge_checkpoint`, and
 `loopforge_gate_check`. A rejection keeps the round but rebinds the attempt and
 returns a new handle; an invalid evaluation keeps the same handle. An old
 handle never submits work.
-If the response was lost, call `loopforge_status` or `loopforge_resume` to fetch
-the current handle; never edit or reconstruct it.
+If only the `submissionHandle` was lost while the current prompt is still in
+context, call `loopforge_status` with the live `sessionId` or durable `loopId`.
+It returns the current handle without re-delivering the prompt. If the prompt
+was also lost, or status reports no live session or no current handle, call
+`loopforge_resume` with the `loopId`; resume rebuilds the session and re-delivers
+the held prompt. Never edit or reconstruct a handle.
 
 | ID | Lifetime | Use |
 | --- | --- | --- |
-| `loopId` | Durable Vault identity; survives a restart | `loopforge_resume`, `loopforge_status` views session/loop/audit/explain, duplicate-loop checks |
-| `sessionId` | Live session key in the current process; `loopforge_resume` rebuilds it | `loopforge_stop`, `loopforge_pause` |
-| `submissionHandle` | The exact held attempt; changes after a rejection | `loopforge_next`, `loopforge_checkpoint`, `loopforge_gate_check` |
+| `loopId` | Durable Vault identity; survives a restart | `loopforge_resume`, `loopforge_status` views session/loop/audit/explain, duplicate-loop checks, live-session handle re-anchor |
+| `sessionId` | Live session key in the current process; `loopforge_resume` rebuilds it | `loopforge_stop`, `loopforge_pause`, `loopforge_status` view=session |
+| `submissionHandle` | The exact held attempt; changes after a rejection | `loopforge_next`, `loopforge_checkpoint`, `loopforge_gate_check`; re-anchor a lost one with `loopforge_status` |
 
-If a call returns `session_not_found`, the process restarted: call
-`loopforge_status` with `view: "all"`, take the matching `loopId`, and call
-`loopforge_resume`. Do not start a new loop for the same objective. If
-`loopforge_resume` returns `legacy_history`, the loop is read-only; start a new
-loop with a new `loopId`.
+If a call returns `session_not_found`, the process restarted or the live session
+is gone: call `loopforge_status` with `view: "all"`, take the matching `loopId`,
+and either re-anchor with `loopforge_status` (if the prompt is still in context
+and a live session now exists) or call `loopforge_resume` with that `loopId`.
+Status is read-only and cannot re-deliver a lost prompt. Do not start a new loop
+for the same objective. If `loopforge_resume` returns `legacy_history`, the loop
+is read-only; start a new loop with a new `loopId`.
+
+A paused or stalled session may still show a `submissionHandle`; submissions are
+refused until `loopforge_resume` unpauses or retries the session.
 
 ## What is a round?
 
@@ -237,7 +246,9 @@ is never a later prompt's independent fact source.
   with `restore_failed`, call `loopforge_resume` to retry the same pending
   directive.
 - A post-commit compile failure or another stalled result with no prompt is
-  recovered with `loopforge_resume`; do not resubmit an old handle.
+  recovered with `loopforge_resume`. If only the handle was lost while the
+  prompt is still in context, use `loopforge_status` instead. Do not resubmit
+  an old handle.
 - Null `prompt`: inspect `stopReason`.
 
 Read `submission_guidance` before composing the next evaluation, and read
@@ -253,9 +264,10 @@ Errors use `{ok: false, error: {code, message, retryable, ...}}`. Branch on the
 stable `code`, not the prose in `message`. `evaluation_invalid`,
 `contract_invalid`, `policy_invalid`, and `submission_handle_required` are
 retryable with a corrected payload/current handle. `submission_handle_mismatch`
-means the handle no longer names the held attempt: fetch the current prompt and
-handle, then resubmit. `session_not_found`, `state_unavailable`, and
-`gate_disabled` describe state or policy; do not blindly resubmit.
+means the handle no longer names the held attempt: a `loopforge_next`/`recover`
+response re-delivers the current prompt and handle; if the prompt was lost, use
+`loopforge_resume`. `session_not_found`, `state_unavailable`, and `gate_disabled`
+describe state or policy; do not blindly resubmit.
 
 `completed` means success plus every active contract item is `verified`, or
 there is no active contract. Explicit `blocked` always wins over success.

@@ -172,8 +172,9 @@ export interface CheckpointRef {
  *
  *  It is not a security token and grants no authority: the session lease plus
  *  an exact comparison against the held snapshot remain the only authority. A
- *  stale handle never submits work; the caller must re-anchor through
- *  `loopforge_status` or `loopforge_resume`. */
+ *  stale handle never submits work; a live session re-anchors through
+ *  `loopforge_status`, and a lost prompt or missing live session is recovered
+ *  through `loopforge_resume`. */
 export interface SubmissionHandle {
   sessionId: string;
   roundId: string;
@@ -1548,7 +1549,8 @@ export interface EvidenceCapability {
  *    retryable by the agent.
  *  - `submission_handle_required` — the handle is missing or structurally
  *    malformed. The same call may be retried after obtaining the current
- *    handle from `loopforge_status` or `loopforge_resume`.
+ *    handle from `loopforge_status` (live session) or `loopforge_resume`
+ *    (lost prompt or no live session).
  *  - `submission_handle_mismatch` — the handle no longer names the held
  *    attempt. A `next`/`recover` submission returns the held prompt with a
  *    warning and `ok: true` when one exists so the agent can recover the

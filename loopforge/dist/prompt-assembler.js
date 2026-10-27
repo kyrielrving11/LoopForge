@@ -14,6 +14,7 @@ import { formatActiveSubGoals, formatCriterionRows, formatRoundContractWithIds, 
 import { PROMPT_ARTIFACT_SCHEMA_VERSION } from "./protocol.js";
 import { deriveCriterionId, deriveFindingId, deriveItemId, normalizeText, } from "./token-utils.js";
 import { verificationActionFor } from "./verification-actions.js";
+import { LOST_HANDLE_ROUTING } from "./recovery-guidance.js";
 import { assertPromptCoverage, derivePromptCoverage, } from "./prompt-coverage.js";
 export const DEFAULT_PROMPT_BUDGETS = {
     l0: 5000,
@@ -529,12 +530,11 @@ export function assemblePromptArtifact(input) {
         "",
         "1. Execute the task described above and submit one structured evaluation.",
         "2. Call **`loopforge_next`** with the `submissionHandle` object returned",
-        "   with the latest LoopForge response; never edit or reconstruct it. A",
+        "   with the current prompt; never edit or reconstruct it. A",
         "   rejection keeps the logical round but returns a new handle; an invalid",
         "   evaluation keeps the same handle. Call **`loopforge_checkpoint`** with",
         "   the same handle to save an explicit mid-round checkpoint.",
-        "   If the response was lost, call `loopforge_status` or `loopforge_resume`",
-        "   to fetch the current handle. An old handle never submits work.",
+        "   " + LOST_HANDLE_ROUTING + " An old handle never submits work.",
         "3. Use the JSON template below for `evaluation`.",
         "",
         evaluation,

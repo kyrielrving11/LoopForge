@@ -75,6 +75,7 @@ function evalParam(opts: {
 import { SessionManager } from "../mcp/session.js";
 import { TOOL_HANDLERS, validateToolInput, validateToolOutput } from "../mcp/tools.js";
 import { SERVER_INSTRUCTIONS } from "../mcp/server.js";
+import { LOST_HANDLE_ROUTING } from "../recovery-guidance.js";
 import { resetPolicy, getPolicy, setPolicyForTest, DEFAULT_POLICY } from "../policy.js";
 import type { SelfEvaluation } from "../protocol.js";
 import { RoundTransactionCoordinator } from "../round-transaction.js";
@@ -836,6 +837,19 @@ describe("MCP — status / list / stop / replay", async () => {
     assert.equal(status.loopId, "status-by-loop-id");
     assert.equal(status.sessionId, start.sessionId);
     assert.equal(status.round, 1);
+    const handle = status.submissionHandle as { sessionId?: unknown } | null;
+    assert.ok(handle, "status by loopId returns the current held handle");
+    assert.deepEqual(handle, start.submissionHandle);
+    assert.equal(handle.sessionId, start.sessionId);
+    assert.ok(status.submission_guidance, "status by loopId returns current guidance");
+
+    const fallback = await TOOL_HANDLERS.loopforge_status(mgr, {
+      sessionId: "ghost-session",
+      loopId: "status-by-loop-id",
+    });
+    assert.equal(fallback.error, undefined);
+    assert.deepEqual(fallback.submissionHandle, start.submissionHandle,
+      "a stale sessionId falls back to the live loopId projection");
   });
 
   it("status view=session reports a restart hint when only loopId is known", async () => {
@@ -851,10 +865,39 @@ describe("MCP — status / list / stop / replay", async () => {
     });
     assert.equal(status.error, "session_not_found");
     assert.match(String(status.errorMessage), /loopforge_resume/);
+    assert.equal(status.submissionHandle, undefined,
+      "status must not fabricate a handle without a live session");
+    assert.equal(status.prompt, undefined,
+      "status never returns the held prompt");
     assert.deepEqual(status.details, {
       next: "loopforge_resume",
       loopId: "status-after-restart",
     });
+  });
+
+  it("last submission receipt reads committed history by loopId without a live session", async () => {
+    const start = await TOOL_HANDLERS.loopforge_start(mgr, {
+      task: "Receipt by loop",
+      loopId: "receipt-by-loop",
+    });
+    await advanceWithHeld(
+      mgr,
+      String(start.sessionId),
+      "",
+      evalParam({ success: false, shouldContinue: true }),
+    );
+
+    const receipt = mgr.getLastSubmissionReceiptByLoopId("receipt-by-loop");
+    assert.ok(receipt);
+    assert.equal(receipt.record, "committed");
+
+    mgr.close();
+    const restarted = new SessionManager(store);
+    const again = restarted.getLastSubmissionReceiptByLoopId("receipt-by-loop");
+    assert.deepEqual(again, receipt,
+      "the receipt is a committed-history projection, not live-session state");
+    assert.equal(restarted.getLastSubmissionReceiptByLoopId("ghost-loop"), null);
+    restarted.close();
   });
 
   it("list returns multiple sessions", async () => {
@@ -1573,6 +1616,8 @@ describe("MCP — tool contract (v3.2.1)", async () => {
       "instructions must point at the current-fact submission guidance");
     assert.ok(SERVER_INSTRUCTIONS.includes("submission_receipt"),
       "instructions must point at the submission receipt");
+    assert.ok(SERVER_INSTRUCTIONS.includes(LOST_HANDLE_ROUTING),
+      "instructions must carry the shared lost-handle routing rule");
   });
 
   it("loopforge_checkpoint requires the held submissionHandle", () => {
@@ -2144,6 +2189,10 @@ describe("MCP — Round Contract flow", async () => {
       },
     );
     assert.equal(unknown.submissionError?.code, "session_not_found");
+    assert.match(String(unknown.stopDetail), /loopforge_status/,
+      "the stale-session path points at status (view=all)");
+    assert.match(String(unknown.stopDetail), /loopforge_resume/,
+      "the stale-session path still points at resume");
 
     // A matching handle still gets the full payload boundary, and the invalid
     // attempt carries the same handle for a corrected retry.
@@ -2386,6 +2435,53 @@ describe("MCP — Round Contract flow", async () => {
     );
     const row2 = timeline.find((t) => t.round === 2);
     assert.equal(row2?.proposal, undefined, "contract-less rounds carry no proposal key");
+  });
+
+  it("status by loopId exposes the same live projections as by sessionId", async () => {
+    const started = await mgr.create({
+      task: "Build the auth module",
+      loopId: "status-projections-by-loop-id",
+      maxRounds: 4,
+    });
+    const a = CONTRACT("Implement login flow");
+    const r2 = await advanceWithHeld(
+      mgr,
+      started.sessionId,
+      "",
+      honest([], [DEFAULT_CRITERION_ID], a),
+    );
+    assert.ok(String(r2.prompt ?? "").includes("**Implement login flow**"));
+
+    const bySession = await TOOL_HANDLERS.loopforge_status(mgr, {
+      sessionId: started.sessionId,
+    });
+    const byLoop = await TOOL_HANDLERS.loopforge_status(mgr, {
+      loopId: "status-projections-by-loop-id",
+    });
+
+    const handle = byLoop.submissionHandle as {
+      sessionId?: unknown;
+      roundId?: unknown;
+      transactionId?: unknown;
+    } | null;
+    assert.ok(handle, "status by loopId returns a held handle");
+    assert.equal(handle.sessionId, started.sessionId);
+    assert.equal(typeof handle.roundId, "string");
+    assert.equal(typeof handle.transactionId, "string");
+
+    const contract = byLoop.activeContract as { work_item?: string } | null;
+    assert.equal(contract?.work_item, "Implement login flow");
+    assert.ok(byLoop.submission_guidance, "status by loopId returns guidance");
+    const guidance = byLoop.submission_guidance as { fields?: unknown };
+    assert.ok(Array.isArray(guidance.fields));
+    const receipt = byLoop.last_submission as { record?: unknown } | null;
+    assert.equal(receipt?.record, "committed");
+
+    assert.deepEqual(byLoop.submissionHandle, bySession.submissionHandle);
+    assert.deepEqual(byLoop.activeContract, bySession.activeContract);
+    assert.deepEqual(byLoop.submission_guidance, bySession.submission_guidance);
+    assert.deepEqual(byLoop.last_submission, bySession.last_submission);
+    assert.ok(!("prompt" in byLoop), "status never returns the held prompt");
   });
 });
 

@@ -174,7 +174,11 @@ describe("v4.0.0 submission handle", () => {
       undefined,
     );
     assert.equal(noSession.ok, false);
-    if (!noSession.ok) assert.equal(noSession.code, "session_not_found");
+    if (!noSession.ok) {
+      assert.equal(noSession.code, "session_not_found");
+      assert.match(noSession.detail, /loopforge_status/);
+      assert.match(noSession.detail, /loopforge_resume/);
+    }
 
     const noPrompt = validateSubmissionHandle(
       { sessionId: "session-1", roundId: ROUND_ID, transactionId: TX },
@@ -185,6 +189,7 @@ describe("v4.0.0 submission handle", () => {
       assert.equal(noPrompt.code, "submission_handle_mismatch");
       assert.equal(noPrompt.reason, "no_held_prompt");
       assert.equal(noPrompt.current, null);
+      assert.match(noPrompt.detail, /loopforge_resume/);
     }
   });
 

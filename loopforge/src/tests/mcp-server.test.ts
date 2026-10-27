@@ -219,6 +219,13 @@ describe("MCP stdio input boundary", () => {
       assert.equal(missingLoopId.message, "loopId is required for view=audit",
         "the human sentence rides in message, never as the code");
 
+      const noLiveSession = await call("loopforge_status", { loopId: "ghost-loop" });
+      assert.equal(noLiveSession.code, "session_not_found");
+      assert.equal(noLiveSession.submissionHandle, undefined,
+        "status must not fabricate a handle without a live session");
+      assert.equal(noLiveSession.prompt, undefined,
+        "status never returns the held prompt");
+
       // A state condition is not retryable.
       const unknownSession = await call("loopforge_stop", { sessionId: "nope" });
       assert.equal(unknownSession.code, "session_not_found");

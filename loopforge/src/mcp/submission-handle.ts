@@ -148,7 +148,11 @@ export function validateSubmissionHandle(
       reason: "session",
       mismatched: [],
       current: null,
-      detail: `No session exists for sessionId "${parsed.sessionId}".`,
+      detail:
+        `No session exists for sessionId "${parsed.sessionId}". Call ` +
+        `loopforge_status with view="all" to find the loopId; if the held ` +
+        `prompt is still in context, call loopforge_status with that loopId ` +
+        `to fetch the current handle; otherwise call loopforge_resume with it.`,
     };
   }
 
@@ -161,8 +165,9 @@ export function validateSubmissionHandle(
       mismatched: [],
       current: null,
       detail:
-        "No held prompt exists for this session. Call loopforge_status or " +
-        "loopforge_resume to re-anchor.",
+        "No held prompt exists for this session. Call loopforge_resume with " +
+        "the loopId to recover the current prompt; loopforge_status is " +
+        "read-only and cannot create one.",
     };
   }
 
@@ -182,8 +187,9 @@ export function validateSubmissionHandle(
         mismatched: [],
         current: null,
         detail:
-          "No held prompt exists for this session. Call loopforge_status or " +
-          "loopforge_resume to re-anchor.",
+          "No held prompt exists for this session. Call loopforge_resume with " +
+          "the loopId to recover the current prompt; loopforge_status is " +
+          "read-only and cannot create one.",
       };
     }
     return { ok: true, handle: current, snapshot };

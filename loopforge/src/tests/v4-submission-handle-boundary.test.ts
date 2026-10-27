@@ -232,6 +232,34 @@ describe("v4.0.0 submission-handle boundary", () => {
       "the handle is a transport projection, not persisted state");
   });
 
+  it("status by loopId re-anchors a lost handle with zero durable effects", async () => {
+    const started = await mgr.create({
+      task: "Status re-anchor",
+      loopId: "status-reanchor",
+    });
+    const lost = started.submissionHandle!;
+    sessionStore.saves = 0;
+    sessionStore.renews = 0;
+    const entriesBefore = store.listEntries().length;
+
+    const status = await TOOL_HANDLERS.loopforge_status(mgr, {
+      loopId: "status-reanchor",
+    });
+
+    assert.equal(status.error, undefined);
+    assert.deepEqual(status.submissionHandle, lost);
+    assert.ok(status.submission_guidance, "status exposes current guidance");
+    assert.ok(!("prompt" in status), "status never returns the held prompt");
+    assert.equal(sessionStore.saves, 0, "no session save");
+    assert.equal(sessionStore.renews, 0, "no lease renewal");
+    assert.equal(store.listEntries().length, entriesBefore, "no vault entry");
+    assert.equal(mgr.get(started.sessionId)?.currentRound, 1, "no round advance");
+
+    const advanced = await mgr.advance(status.submissionHandle, "", partialEval());
+    assert.equal(advanced.round, 2, "the re-anchored handle submits normally");
+    assert.ok(advanced.submissionHandle);
+  });
+
   it("a rejection rotates the handle; the old handle only returns the retry prompt", async () => {
     const started = await mgr.create({ task: "Rejection rotation", loopId: "handle-reject" });
     const current = started.submissionHandle!;

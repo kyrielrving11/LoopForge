@@ -95,8 +95,12 @@ compiled `renderedPrompt` on every path.
 Use these to inspect, never to advance:
 
 - `loopforge_status` `view: "session"`: live session status, current round,
-  success trajectory, checkpoints, capability, current guidance, and the latest
-  committed receipt. Accepts the live `sessionId` or the durable `loopId`.
+  the current held `submissionHandle`, success trajectory, checkpoints,
+  capability, current guidance, and the latest committed receipt. Accepts the
+  live `sessionId` or the durable `loopId`. It never returns the held prompt: a
+  null handle, a missing live session, or a lost prompt means call
+  `loopforge_resume`. A paused or stalled session may still show its handle, but
+  submissions are refused until resume.
 - `loopforge_status` `view: "loop"`: committed health counts.
 - `loopforge_status` `view: "all"`: every persisted loop summary.
 - `loopforge_status` `view: "audit"`: end-of-loop verification completeness.

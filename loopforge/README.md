@@ -50,9 +50,12 @@ round. Every response that holds a round returns a `submissionHandle` and the
 durable `loopId`; keep both. Pass the handle unchanged to `loopforge_next`,
 `loopforge_checkpoint`, and `loopforge_gate_check`. Never edit or reconstruct
 it. A rejection keeps the logical round but returns a new handle; an invalid
-evaluation keeps the same handle. A stale handle never submits work: fetch the
-current prompt and handle with `loopforge_status` or `loopforge_resume`. After
-a process restart, `loopforge_resume` requires the `loopId` (not `sessionId`).
+evaluation keeps the same handle. A stale handle never submits work: if only the
+handle was lost while the current prompt is still in context, re-anchor it with
+`loopforge_status` using the live `sessionId` or durable `loopId`; if the prompt
+was also lost, or status reports no live session or no current handle, use
+`loopforge_resume` with the `loopId`. After a process restart,
+`loopforge_resume` requires the `loopId` (not `sessionId`).
 A submission is either an evaluation or an Agent-requested recovery, never
 both. Invalid core fields can be corrected for the same round without
 committing that attempt.

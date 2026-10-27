@@ -2,6 +2,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { assemblePromptArtifact, DEFAULT_PROMPT_BUDGETS, verificationActionFor } from "../prompt-assembler.js";
+import { LOST_HANDLE_ROUTING } from "../recovery-guidance.js";
 import { PROMPT_ARTIFACT_SCHEMA_VERSION } from "../protocol.js";
 import type { PromptAssemblyInput } from "../prompt-assembler.js";
 import type { CanonicalLoopState } from "../canonical-state.js";
@@ -353,6 +354,8 @@ describe("assemblePromptArtifact — metadata", () => {
     assert.ok(artifact.renderedPrompt.includes("How to Complete This Round"));
     assert.ok(artifact.renderedPrompt.includes("`submissionHandle` object returned"));
     assert.ok(artifact.renderedPrompt.includes("loopforge_checkpoint"));
+    assert.ok(artifact.renderedPrompt.includes(LOST_HANDLE_ROUTING),
+      "the footer carries the shared lost-handle routing rule");
     assert.ok(!artifact.renderedPrompt.includes("progress_estimate`"));
     assert.ok(!artifact.renderedPrompt.includes("Evaluation Rules"));
   });

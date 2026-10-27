@@ -60,10 +60,11 @@ export declare class SessionManager implements SessionRegistry {
     /** v4.0.0: the current held handle, derived on demand. A read-only
      *  projection; never persisted. */
     getSubmissionHandle(sessionId: string): SubmissionHandle | null;
-    /** v3.9.1: the most recent committed round's receipt, rebuilt from the
-     *  transaction + shared read model. Rejected/terminated attempts are not in
-     *  history; their receipt exists only on their own response. */
-    getLastSubmissionReceipt(sessionId: string): SubmissionReceipt | null;
+    /** v3.9.1: the most recent committed round's receipt for a loop, rebuilt
+     *  from committed history. Rejected/terminated attempts are not history;
+     *  their receipt exists only on their own response. This intentionally takes
+     *  the durable loopId: it never reads live-session state. */
+    getLastSubmissionReceiptByLoopId(loopId: string): SubmissionReceipt | null;
     /** v3.9.6: the success trajectory is a projection of committed branch
      *  rounds, not a session counter. */
     getSuccessTrajectory(loopId: string): boolean[];

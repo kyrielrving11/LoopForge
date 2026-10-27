@@ -8,6 +8,7 @@ import { appendFileSync } from "node:fs";
 import { SessionManager } from "./session.js";
 import { TOOL_HANDLERS, TOOL_SCHEMAS, ToolInputValidationError, validateToolDispatchInput, validateToolOutput, } from "./tools.js";
 import { isRecord } from "../token-utils.js";
+import { LOST_HANDLE_ROUTING } from "../recovery-guidance.js";
 import { getPolicy } from "../policy.js";
 import { VERSION } from "../version.js";
 const SERVER_INFO = { name: "loopforge-mcp", version: VERSION };
@@ -87,8 +88,9 @@ export const SERVER_INSTRUCTIONS = [
     "whose event actually occurred. ",
     "Call loopforge_checkpoint with the same handle to create an explicit mid-round ",
     "savepoint; it adds no round and no progress. ",
-    "A stale handle never submits work: fetch the current handle with ",
-    "loopforge_status or loopforge_resume; never edit or reconstruct a handle. ",
+    "A stale handle never submits work. ",
+    LOST_HANDLE_ROUTING,
+    " Never edit or reconstruct a handle. ",
     "Recovery targets a checkpoint id (ck-...), never a round number. ",
     "Each prepared response carries `submission_guidance`: active contract item ids ",
     "and statuses, active sub-goal ids, usable after-capable commands, recovery ",

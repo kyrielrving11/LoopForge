@@ -20,6 +20,7 @@ import { isRecord } from "../token-utils.js";
 import { getPolicy, validateLoopId } from "../policy.js";
 import { deriveEvidenceCapability } from "../evidence-provider.js";
 import { fieldGuideDescription } from "../submission-guidance.js";
+import { LOST_HANDLE_ROUTING } from "../recovery-guidance.js";
 import { SessionLeaseConflictError } from "../storage.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -33,8 +34,7 @@ const SUBMISSION_HANDLE_SCHEMA = {
   description:
     "The submissionHandle object returned with the held prompt. Copy it " +
     "verbatim; never edit, reconstruct, or derive it. A stale handle never " +
-    "submits work — fetch the current one with loopforge_status or " +
-    "loopforge_resume.",
+    "submits work. " + LOST_HANDLE_ROUTING,
   properties: {
     sessionId: {
       type: "string" as const,
@@ -94,7 +94,8 @@ const TOOL_BASE_SCHEMAS = [
           description:
             "Optional durable loop ID. Generated when omitted and returned " +
             "with the first prompt. Keep it: loopforge_resume and every " +
-            "loopforge_status view use loopId after a restart.",
+            "loopforge_status view use loopId after a restart, and a live " +
+            "session can re-anchor a lost handle with loopId.",
         },
         maxRounds: {
           type: "integer" as const,
@@ -459,7 +460,14 @@ const TOOL_BASE_SCHEMAS = [
   {
     name: "loopforge_status",
     description:
-      "Inspect loop state. view=session (default): session status, round identity, success trajectory and typed projection. view=loop: loop health (goal alignment, constraints, drift). view=all: summary of every persisted loop. view=audit: read-only end-of-loop verification audit (claims, gates, verdict, sequence integrity).",
+      "Read-only inspection. view=session (default): live session status, " +
+      "round identity, the current held submissionHandle when one exists, " +
+      "success trajectory, active contract, current guidance and the latest " +
+      "committed receipt. It never returns the held prompt; a paused or " +
+      "stalled session must resume before submitting. view=loop: committed " +
+      "round counts, unverified-item rounds and policy metrics. view=all: " +
+      "summary of every persisted loop. view=audit: end-of-loop verification " +
+      "audit. view=explain: per-round \"why\" view over committed facts.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -467,13 +475,15 @@ const TOOL_BASE_SCHEMAS = [
           type: "string" as const,
           description:
             "Live session ID returned by loopforge_start or loopforge_resume. " +
-            "Resolvable only in the current process; after a restart use loopId.",
+            "Resolvable only in the current process; after a restart use loopId. " +
+            "view=session returns the current held submissionHandle.",
         },
         loopId: {
           type: "string" as const,
           description:
             "Durable loop ID. Required for views loop/audit/explain; also " +
-            "accepted for view=session, which resolves it to the live session.",
+            "accepted for view=session, which resolves it to the live session " +
+            "and returns its current held submissionHandle.",
         },
         view: {
           type: "string" as const,
@@ -547,11 +557,12 @@ const TOOL_BASE_SCHEMAS = [
     name: "loopforge_resume",
     description:
       "Resume a loop from vault state. Requires the durable loopId returned by " +
-      "loopforge_start (not sessionId) — this is the recovery path after a " +
-      "process restart. Works for both: (a) running sessions that were " +
-      "interrupted by a process restart, and (b) paused sessions (via " +
-      "loopforge_pause). Returns the compiled prompt for the next round, or " +
-      "null with a stopReason if the loop is already complete.",
+      "loopforge_start (not sessionId). Use this when the held prompt was lost, " +
+      "no live session exists, or the session is paused/stalled; if only the " +
+      "submissionHandle was lost while the prompt is still in context, prefer " +
+      "loopforge_status. Returns the held prompt and its current " +
+      "submissionHandle, or a newly compiled prompt when none is held; null " +
+      "with a stopReason when the loop is terminal.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -1347,7 +1358,10 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
         error: "session_not_found",
         errorMessage: sessionId
           ? `session not found: ${sessionId} (process restarted?) — call ` +
-            `loopforge_status with view="all", then loopforge_resume with its loopId`
+            `loopforge_status with view="all" to find the loopId; if the ` +
+            `held prompt is still in context, call loopforge_status with ` +
+            `that loopId to fetch the current handle; otherwise call ` +
+            `loopforge_resume with it`
           : `no live session for loop "${loopId}" — call loopforge_resume with this loopId`,
         ...(sessionId ? { sessionId } : {}),
         ...(loopId ? { loopId } : {}),
@@ -1358,12 +1372,17 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
       };
     }
 
+    // Every live-session-derived projection must use the resolved session's
+    // identity. The caller's raw sessionId is empty on a loopId-only query and
+    // may be stale when the loopId fallback resolved the session; using it here
+    // silently nulled the handle/contract/guidance and forced a full resume.
+    const liveSessionId = session.sessionId;
     const policyMetricsView = mgr.getPolicyMetrics(session.loopId);
     return {
-      sessionId: session.sessionId,
+      sessionId: liveSessionId,
       loopId: session.loopId,
       round: session.currentRound,
-      submissionHandle: mgr.getSubmissionHandle(sessionId),
+      submissionHandle: mgr.getSubmissionHandle(liveSessionId),
       checkpoints: session.roundSnapshot
         ? [
             ...(session.roundSnapshot.beforeCheckpoint
@@ -1380,11 +1399,11 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
       // v3.5: derived ACTIVE Round Contract (display-only — the compile and
       // verification gates derive the same value from the same committed
       // evals via the shared round-contract walker).
-      activeContract: mgr.getActiveContract(sessionId),
+      activeContract: mgr.getActiveContract(liveSessionId),
       // v3.9.1: current-fact submission guidance for the held round. Same
       // derivation as start/next/resume; read-only and never persisted.
-      submission_guidance: mgr.getSubmissionGuidance(sessionId),
-      last_submission: mgr.getLastSubmissionReceipt(sessionId),
+      submission_guidance: mgr.getSubmissionGuidance(liveSessionId),
+      last_submission: mgr.getLastSubmissionReceiptByLoopId(session.loopId),
       last_rollback: mgr.replayRollbacks(session.loopId).at(-1) ?? null,
       // v3.8: the ONE capability fact — the static half the compile hashes
       // (what verification is possible) plus the live half rendered from the

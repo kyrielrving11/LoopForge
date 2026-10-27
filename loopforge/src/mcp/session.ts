@@ -73,6 +73,7 @@ import {
 } from "../storage.js";
 import type { SessionStateStore } from "../storage.js";
 import { StorageCorruptionError } from "../loop-store.js";
+import { LOST_HANDLE_ROUTING } from "../recovery-guidance.js";
 import {
   RoundLifecycle,
   buildLoopRequest,
@@ -446,13 +447,13 @@ export class SessionManager implements SessionRegistry {
     return makeSubmissionHandle(this.sessions.get(sessionId));
   }
 
-  /** v3.9.1: the most recent committed round's receipt, rebuilt from the
-   *  transaction + shared read model. Rejected/terminated attempts are not in
-   *  history; their receipt exists only on their own response. */
-  getLastSubmissionReceipt(sessionId: string): SubmissionReceipt | null {
-    const session = this.sessions.get(sessionId);
-    if (!session) return null;
-    const history = loadCommittedHistory(this.loopStore, session.loopId);
+  /** v3.9.1: the most recent committed round's receipt for a loop, rebuilt
+   *  from committed history. Rejected/terminated attempts are not history;
+   *  their receipt exists only on their own response. This intentionally takes
+   *  the durable loopId: it never reads live-session state. */
+  getLastSubmissionReceiptByLoopId(loopId: string): SubmissionReceipt | null {
+    if (!loopId) return null;
+    const history = loadCommittedHistory(this.loopStore, loopId);
     const views = history.rounds;
     const rollbacks = history.directives;
     const latestRound = views[views.length - 1];
@@ -778,7 +779,7 @@ export class SessionManager implements SessionRegistry {
         "and transactionId as non-empty strings.";
       return {
         error: "submission_handle_required",
-        errorMessage: `${detail} Copy it from the latest LoopForge response; if lost, call loopforge_status or loopforge_resume.`,
+        errorMessage: `${detail} Copy it from the latest LoopForge response. ${LOST_HANDLE_ROUTING}`,
         details: { reason_code: "shape", detail },
       };
     }
@@ -1096,8 +1097,8 @@ export class SessionManager implements SessionRegistry {
       prompt: null,
       stopReason: "submission_handle_required",
       stopDetail:
-        `${detail} Copy it from the latest LoopForge response; if lost, ` +
-        "call loopforge_status or loopforge_resume.",
+        `${detail} Copy it from the latest LoopForge response. ` +
+        LOST_HANDLE_ROUTING,
       submissionError: {
         code: "submission_handle_required",
         details: { reason_code: "shape", detail },
@@ -1113,7 +1114,10 @@ export class SessionManager implements SessionRegistry {
       stopReason: "session_not_found",
       stopDetail:
         "No session exists with this ID. It may have expired, been deleted, " +
-        "or never existed.",
+        "or never existed. Call loopforge_status with view=\"all\" to find the " +
+        "loopId; if the held prompt is still in context, call loopforge_status " +
+        "with that loopId to fetch the current handle; otherwise call " +
+        "loopforge_resume with it.",
       submissionError: {
         code: "session_not_found",
         details: { sessionId },
@@ -1432,7 +1436,7 @@ export class SessionManager implements SessionRegistry {
         "and transactionId as non-empty strings.";
       return {
         error: "submission_handle_required",
-        errorMessage: `${detail} Copy it from the latest LoopForge response; if lost, call loopforge_status or loopforge_resume.`,
+        errorMessage: `${detail} Copy it from the latest LoopForge response. ${LOST_HANDLE_ROUTING}`,
         details: { reason_code: "shape", detail },
       };
     }

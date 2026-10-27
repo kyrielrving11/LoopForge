@@ -23,11 +23,13 @@ export interface CriterionStatusInput {
     } | null;
     criterionFacts?: ReadonlyArray<CriterionMachineFact>;
 }
-/** v3.2: Derive per-criterion status — the "goal → criteria → evidence"
- *  vertical view. Each criterion gets claimed/remaining/unknown (from
- *  per-round `criterion_claims`, ID-first or normalized-exact matching) and
- *  the round it was first reported met. A machine fact from a contract item
- *  outranks the claim. Zero persistence — re-derived from committed facts
- *  every time. */
+/** v3.2/v4.0.3: Derive per-criterion status — the "goal → criteria →
+ *  evidence" vertical view.
+ *
+ *  Without a machine fact the LATEST claim wins (a criterion claimed met in
+ *  R2 and reported remaining in R4 is `remaining`), and the row records that
+ *  claim round with `status_source: "agent"`. A machine fact from a verified
+ *  contract item outranks every claim and records its own round/source. Zero
+ *  persistence — re-derived from committed facts every time. */
 export declare function deriveCriterionStatuses(input: CriterionStatusInput): CriterionStatus[];
 //# sourceMappingURL=criterion-status.d.ts.map

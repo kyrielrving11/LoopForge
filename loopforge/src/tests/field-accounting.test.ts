@@ -152,8 +152,8 @@ const CASES: FieldCase[] = [
     invalid: "not-array",
     partial: [VALID_WORKER, 1],
   },
-  { path: "compression_checkpoint", valid: true, invalid: "yes" },
-  { path: "checkpoint_label", valid: "parser complete", invalid: 42 },
+  { path: "subtask_boundary", valid: true, invalid: "yes" },
+  { path: "subtask_boundary_label", valid: "parser complete", invalid: 42 },
   {
     path: "retroactiveClaims",
     valid: [{ round: 1, claim: "fixed it" }],
@@ -217,7 +217,7 @@ describe("field accounting — empty and null semantics", () => {
       { discovered_constraints: [] },
       { wrong_assumptions: [] },
       { execution_report: { files_changed: [] } },
-      { checkpoint_label: "" },
+      { subtask_boundary_label: "" },
     ]) {
       const { normalized, accounting } = account(raw);
       const path = Object.keys(raw)[0] === "execution_report"

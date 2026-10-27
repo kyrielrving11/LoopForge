@@ -12,7 +12,7 @@ import { validateCoreSelfEvaluation } from "../self-eval.js";
 import { isRecord } from "../token-utils.js";
 import { getPolicy, validateLoopId } from "../policy.js";
 import { deriveEvidenceCapability } from "../evidence-provider.js";
-import { fieldGuideDescription } from "../submission-guidance.js";
+import { CORE_SELF_EVALUATION_FIELDS, fieldGuideDescription, } from "../submission-guidance.js";
 import { LOST_HANDLE_ROUTING } from "../recovery-guidance.js";
 import { SessionLeaseConflictError } from "../storage.js";
 import { ReplayWindowError } from "../replay.js";
@@ -265,13 +265,13 @@ const TOOL_BASE_SCHEMAS = [
                                 required: ["agentId", "subTask", "resultSummary", "outcome"],
                             },
                         },
-                        compression_checkpoint: {
+                        subtask_boundary: {
                             type: "boolean",
-                            description: fieldGuideDescription("compression_checkpoint"),
+                            description: fieldGuideDescription("subtask_boundary"),
                         },
-                        checkpoint_label: {
+                        subtask_boundary_label: {
                             type: "string",
-                            description: fieldGuideDescription("checkpoint_label"),
+                            description: fieldGuideDescription("subtask_boundary_label"),
                         },
                         subgoal_updates: {
                             type: "array",
@@ -680,7 +680,12 @@ const ADVANCE_OUTPUT_SCHEMA = {
             enum: ["first_round", "next_round", "recovery_redo", "enforcement_retry"],
             description: "v4.0.2: why the context boundary was selected.",
         },
-        roundSuccess: { type: ["boolean", "null"] },
+        agentSuccessClaim: { type: ["boolean", "null"] },
+        agentOutcome: {
+            type: ["string", "null"],
+            enum: ["success", "partial", "failed", "blocked", null],
+            description: "v4.0.3: the effective Agent-declared outcome.",
+        },
         checkpoints: {
             type: ["array", "null"],
             items: { type: "object", additionalProperties: true },
@@ -698,7 +703,15 @@ const ADVANCE_OUTPUT_SCHEMA = {
             additionalProperties: true,
             description: "v3.9.7: committed rollback directive facts and the verified restore that produced the redo prompt.",
         },
-        verificationStatus: { enum: ["trusted", "insufficient", "contradicted"] },
+        evidencePosture: {
+            type: ["object", "null"],
+            additionalProperties: true,
+            description: "v4.0.3: the ONE evidence posture of the round this result is about " +
+                "(status, machineBackedSuccess, verificationConfigured, workspace, " +
+                "files reconciliation, providers, commands, contract snapshot, " +
+                "findings and omitted counts). Accepted rounds carry the persisted " +
+                "posture; a rejection carries its transient copy.",
+        },
         submission_guidance: {
             type: ["object", "null"],
             additionalProperties: true,
@@ -758,7 +771,11 @@ export const TOOL_OUTPUT_SCHEMAS = {
             beforeCheckpointError: { type: ["object", "null"], additionalProperties: true },
             maxRounds: { type: "number" },
             status: { enum: ["running", "stopped", "stalled", "paused"] },
-            successTrajectory: { type: "array", items: { type: "boolean" } },
+            machineBackedSuccessTrajectory: { type: "array", items: { type: "boolean" } },
+            evidencePosture: { type: ["object", "null"], additionalProperties: true },
+            machineBackedSuccess: { type: "boolean" },
+            agentSuccessClaim: { type: ["boolean", "null"] },
+            agentOutcome: { type: ["string", "null"] },
             lease: { type: ["object", "null"], additionalProperties: true },
             metrics: { type: "object", additionalProperties: true },
             // v3.5: the ACTIVE Round Contract governing the next round (derived
@@ -779,7 +796,7 @@ export const TOOL_OUTPUT_SCHEMAS = {
             error: { type: "object", additionalProperties: true, description: "v3.8 ToolError: { code, message, retryable, sessionId?, submissionHandle?, details? }" },
             success: { type: "boolean" },
             roundsCompleted: { type: "number" },
-            successTrajectory: { type: "array", items: { type: "boolean" } },
+            machineBackedSuccessTrajectory: { type: "array", items: { type: "boolean" } },
         },
         additionalProperties: true,
     },
@@ -863,12 +880,6 @@ function closeObjectSchemas(schema) {
     }
     return result;
 }
-const CORE_EVALUATION_FIELDS = new Set([
-    "success",
-    "output_summary",
-    "constraint_violations",
-    "should_continue",
-]);
 /** Keep the four authoritative fields schema-strict while leaving optional
  * reporting fields available for buildSelfEvaluation's lossy normalization.
  * Their descriptions remain in tools/list, but malformed optional values do
@@ -881,7 +892,7 @@ function prepareInputSchema(name, schema) {
     if (!isRecord(evaluation) || !isRecord(evaluation.properties))
         return result;
     evaluation.properties = Object.fromEntries(Object.entries(evaluation.properties).map(([field, value]) => {
-        if (CORE_EVALUATION_FIELDS.has(field) || !isRecord(value))
+        if (CORE_SELF_EVALUATION_FIELDS.has(field) || !isRecord(value))
             return [field, value];
         return [field, typeof value.description === "string"
                 ? { description: value.description }
@@ -1331,6 +1342,12 @@ export const TOOL_HANDLERS = {
         // silently nulled the handle/contract/guidance and forced a full resume.
         const liveSessionId = session.sessionId;
         const policyMetricsView = mgr.getPolicyMetrics(session.loopId);
+        // v4.0.3: a live held prompt has no result yet; the last committed
+        // receipt is the correct current machine posture then.
+        const lastReceipt = mgr.getLastSubmissionReceiptByLoopId(session.loopId);
+        const posture = session.roundSnapshot?.result?.evidencePosture ??
+            lastReceipt?.verification.evidence_posture ??
+            null;
         return {
             sessionId: liveSessionId,
             loopId: session.loopId,
@@ -1347,7 +1364,13 @@ export const TOOL_HANDLERS = {
             beforeCheckpointError: session.roundSnapshot?.beforeCheckpointError ?? null,
             maxRounds: session.maxRounds,
             status: session.status,
-            successTrajectory: mgr.getSuccessTrajectory(session.loopId),
+            evidencePosture: posture,
+            machineBackedSuccess: posture?.machineBackedSuccess ?? false,
+            agentSuccessClaim: session.roundSnapshot?.result?.agentSuccessClaim ??
+                lastReceipt?.agent_success_claim ?? null,
+            agentOutcome: session.roundSnapshot?.result?.agentOutcome ??
+                lastReceipt?.agent_outcome ?? null,
+            machineBackedSuccessTrajectory: mgr.getMachineBackedSuccessTrajectory(session.loopId),
             lease: mgr.getLeaseStatus(session.loopId),
             // v3.5: derived ACTIVE Round Contract (display-only — the compile and
             // verification gates derive the same value from the same committed
@@ -1356,7 +1379,7 @@ export const TOOL_HANDLERS = {
             // v3.9.1: current-fact submission guidance for the held round. Same
             // derivation as start/next/resume; read-only and never persisted.
             submission_guidance: mgr.getSubmissionGuidance(liveSessionId),
-            last_submission: mgr.getLastSubmissionReceiptByLoopId(session.loopId),
+            last_submission: lastReceipt,
             last_rollback: mgr.replayRollbacks(session.loopId).at(-1) ?? null,
             // v3.8: the ONE capability fact — the static half the compile hashes
             // (what verification is possible) plus the live half rendered from the
@@ -1387,9 +1410,9 @@ export const TOOL_HANDLERS = {
             };
         }
         const roundsCompleted = session.currentRound;
-        const successTrajectory = mgr.getSuccessTrajectory(session.loopId);
+        const machineBackedSuccessTrajectory = mgr.getMachineBackedSuccessTrajectory(session.loopId);
         mgr.delete(sessionId);
-        return { success: true, roundsCompleted, successTrajectory };
+        return { success: true, roundsCompleted, machineBackedSuccessTrajectory };
     },
     async loopforge_pause(mgr, input) {
         const sessionId = String(input.sessionId ?? "");

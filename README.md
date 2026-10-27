@@ -58,25 +58,31 @@ Each prompt carries a derived context boundary. A normal next round (or the
 first round, or a recovery redo) is a `fresh_round`: the host starts a new
 Agent invocation, so the previous transcript, tool logs and uncommitted
 reasoning do not leak into the next round. A fresh context is not a workspace
-reset; only rollback/recovery restores a checkpoint. An enforcement retry is a
-`same_round_retry` and continues the same logical round.
+reset; only rollback/recovery restores a checkpoint. The first enforcement
+retry (L0) is a `same_round_retry` and continues the same logical round; a
+repeated-rejection rehydrate retry (L2) is a `fresh_round`.
 
 Continuity may include a bounded Working Memory derived from the current
 branch's committed rounds and committed rollback directives: recent reports,
 falsified assumptions and retractions, open questions, consumed recoveries and
 contract redirects. Its window and character caps are fixed code constants,
 not policy; the prompt's total character budget can omit lower-priority memory.
-It is part of the one canonical cognitive state, never a second
-history or memory store, and Agent-reported entries never enter a verification
-gate. Older history is retrieved explicitly with `loopforge_replay` or
-`loopforge_status view: "explain"`.
+Every omission is counted, and a truncated section carries an explicit
+abbreviation notice. It is part of the one canonical cognitive state, never a
+second history or memory store, and Agent-reported entries never enter a
+verification gate. Machine Evidence (observed providers, command statuses and
+verified contract items) is rendered as a separate protected section, not as
+Working Memory. Older history is retrieved explicitly with `loopforge_replay`
+or `loopforge_status view: "explain"`.
 
 For work that benefits from a bounded slice, the agent can propose a Round
 Contract: a deliverable, acceptance conditions, and commands to check them.
 LoopForge validates the structure and command bindings. An item is verified
 when the agent claims it is met and its bound commands pass in the closing
-round. Whether the proposed deliverable or test is semantically appropriate
-remains the agent's and operator's judgment. The agent's declared `scope` is a
+round with the declared binding. A later command disable or reconfigure does
+not rewrite a historical pass, and Agent-reported test counts never upgrade a
+criterion claim. Whether the proposed deliverable or test is semantically
+appropriate remains the agent's and operator's judgment. The agent's declared `scope` is a
 report-only intent, not a permission, and an active slice can be explicitly
 redirected with `contract_transition`; the old contract then closes as
 `superseded` and stays visible in the audit record.
@@ -94,10 +100,11 @@ before issuing the redo prompt.
 LoopForge can also trigger a backtrack when a machine rule requires it. Both
 paths use the same restore protocol and remain visible in history. Redo
 continues on a child branch. The rollback directive keeps the abandoned
-approaches, wrong assumptions, skipped files and Recovery Brief facts; a
-same-round redo replaces that numeric round's feedback slot, so the abandoned
-evaluation itself is not kept as a second copy. The current branch never treats
-abandoned work as current work.
+approaches, wrong assumptions, machine-observed vs Agent-reported skipped
+files, compact trigger findings and Recovery Brief facts; a same-round redo
+replaces that numeric round's feedback slot, so the abandoned evaluation itself
+is not kept as a second copy. The current branch never treats abandoned work as
+current work.
 
 ## The responsibility boundary
 
@@ -112,8 +119,9 @@ harness-authored account of progress.
 
 LoopForge does not execute the coding task, guarantee that a task is correct or
 complete, or manage the agent's private conversation memory. Its prompt carries
-current committed governance facts. The optional state file is a derived view,
-not another source of truth.
+current committed governance facts, compact machine evidence, and bounded
+Agent-report Working Memory. The optional state file is a derived view, not
+another source of truth.
 
 ## Install
 

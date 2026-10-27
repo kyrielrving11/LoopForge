@@ -11,7 +11,7 @@
  *   - verification: what the machine observed/verified.
  * A saved report is never a verified fact.
  */
-import type { ContractItemStatus, PromptArtifact, RecoveryDirective, SelfEvaluation, SubmissionDiagnostic, SubmissionReceipt, SubGoal } from "./protocol.js";
+import type { PromptArtifact, RecoveryDirective, SelfEvaluation, SubmissionDiagnostic, SubmissionReceipt, SubGoal } from "./protocol.js";
 import type { ObservationDelta } from "./evidence-provider.js";
 import type { RoundProcessResult } from "./round-coordinator.js";
 import type { RoundTransactionSnapshot } from "./round-transaction.js";
@@ -35,16 +35,16 @@ export interface ReceiptInput {
     submittedFields: string[];
     facts: ReceiptFacts;
     nextArtifact?: PromptArtifact | null;
-    contractItems: Array<{
-        item_id: string;
-        status: ContractItemStatus;
-    }>;
-    /** The round delta (already derived) used by the evidence posture. */
+    /** The round delta (already derived) used by the files reconciliation. */
     evidenceDeltas: ObservationDelta[];
     /** The pending rollback directive governing this submission, captured
      *  before a redo commit (it stops being "pending" once the child round
      *  commits). Null/absent for ordinary submissions. */
     recoveryDirective?: RecoveryDirective | null;
+    /** v4.0.3: the restore outcome from the run that produced this receipt.
+     *  It is the SAME verified-restore fact the top-level `recovery.restore`
+     *  reports; a committed redo falls back to its snapshot marker. */
+    recoveryRestoreVerified?: boolean;
 }
 /** Build a receipt from explicitly supplied before/after facts. */
 export declare function deriveSubmissionReceipt(input: ReceiptInput): SubmissionReceipt;

@@ -10,7 +10,7 @@
  * session ownership, queues, and leases remain in SessionManager.
  */
 import { LoopForgeEngine } from "../engine.js";
-import type { CheckpointRef, LoopCompileRequest, OperatorAcceptance, PromptContextMode, PromptContextReason, RecoveryRequest, SelfEvaluation, SubmissionDiagnostic, SubmissionGuidance, SubmissionHandle, SubmissionReceipt, VerificationFlag, LoopTerminalSink, RoundVerificationStatus } from "../protocol.js";
+import type { CheckpointRef, EvidencePosture, LoopCompileRequest, OperatorAcceptance, PromptContextMode, PromptContextReason, RecoveryRequest, RoundOutcome, SelfEvaluation, SubmissionDiagnostic, SubmissionGuidance, SubmissionHandle, SubmissionReceipt, VerificationFlag, LoopTerminalSink } from "../protocol.js";
 import type { RoundTransactionSnapshot } from "../round-transaction.js";
 import { FileWorkspaceCheckpointStore } from "../workspace-checkpoint.js";
 import type { LoopStore, VaultEntry } from "../loop-store.js";
@@ -108,17 +108,19 @@ export interface AdvanceResult {
      *  result carries no prompt. */
     contextMode?: PromptContextMode;
     contextReason?: PromptContextReason;
-    roundSuccess?: boolean;
+    agentSuccessClaim?: boolean;
+    /** v4.0.3: the effective Agent-declared outcome of the round this result
+     *  is about. */
+    agentOutcome?: RoundOutcome | null;
     warnings?: string[];
     /** v1.13: Enforcement action for this round. accept/reject/terminate.
      *  When "reject", the prompt contains a rejection notice and the agent
      *  must redo the same round. Round counter does NOT increment. */
     enforcementAction?: "accept" | "reject" | "terminate" | "backtrack" | "recovery";
-    /** v3.8: The round-level verification posture — `trusted` when everything
-     *  claimed this round is machine-backed, `insufficient` when claims are
-     *  unbacked but nothing is denied, `contradicted` when a machine fact
-     *  denies a claim. Never a verdict about the agent's work quality. */
-    verificationStatus?: RoundVerificationStatus;
+    /** v4.0.3: the ONE evidence posture of the round this result is about.
+     *  Accepted rounds carry the persisted posture; a rejection carries its
+     *  transient copy. Never a verdict about the agent's work quality. */
+    evidencePosture?: EvidencePosture;
     /** v1.13: When enforcementAction is "reject" or "terminate", the reason
      *  why the round was rejected or the loop was terminated. */
     enforcementReason?: string;
@@ -258,7 +260,14 @@ export declare class RoundLifecycle {
      *
      *  Best-effort: an unreadable policy or an unresolvable command must leave
      *  the round without the absolute arm, not fail the preparation. */
-    private seedEntrypointTrust;
+    /** v4.0.3: seed the round-start entrypoint baseline. Public so the start
+     *  path can seed BEFORE the first prompt is delivered; a missing baseline
+     *  must never be re-derived from an already-modified workspace. */
+    seedEntrypointTrust(session: McpSession): void;
+    /** v4.0.3: warnings for a resumed round whose trusted baseline is absent.
+     *  The workspace may already have been modified; re-capturing it would
+     *  launder the change, so the round runs with the Git-delta arm only. */
+    private resumeWarnings;
     /** v3.9.7: operator acceptance and branch identity travel with the session
      *  cursor (not only the held snapshot). Every prepare carries them forward;
      *  a recovery that clears the held snapshot must not reset the branch to

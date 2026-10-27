@@ -85,7 +85,8 @@ type Entry = Record<string, unknown>;
 export interface PreviousRound {
   round: number;
   goal_id: string;
-  success: boolean;
+  /** v4.0.3: the Agent's success claim, never a machine verdict. */
+  agentSuccessClaim: boolean;
   task: string;
   constraints_active: string[];
   output_summary: string;
@@ -143,7 +144,7 @@ function previousRoundFromWindow(
   return {
     round,
     goal_id: view.compiled?.goalId ?? "",
-    success: view.success,
+    agentSuccessClaim: view.agentSuccessClaim,
     task: view.compiled?.task ?? "",
     constraints_active: [...(view.activeConstraints ?? [])],
     output_summary: view.evaluation?.output_summary ?? "",
@@ -537,14 +538,16 @@ function levelDecision(
     forceLevel: request.force_level,
     hasPlanSource: Boolean(request.plan_source),
     recoveryBoundary: previous.recoveryBoundary,
-    checkpointBoundary: previous.result?.compression_checkpoint === true,
+    checkpointBoundary: previous.result?.subtask_boundary === true,
     // An empty goal_id is unobservable, not a goal change: never fabricate L2.
     goalChanged: prior !== null && prior.goal_id !== "" &&
       prior.goal_id !== deriveGoalId(request.loop_id, request.task, request.goal_id),
     previousStateMissing: request.round > 1 && prior === null,
+    // v4.0.3: partial/blocked/failed all count as "not a success"; only an
+    // explicit success outcome avoids the failure-triggered rehydration.
     previousRoundFailed: previous.view
-      ? previous.view.success === false
-      : previous.result?.success === false,
+      ? previous.view.agentOutcome !== "success"
+      : previous.result?.agentOutcome !== "success",
     previousRoundObservableNewInformation: previous.view
       ? previous.freshness.observableNewInformation
       : null,
@@ -585,6 +588,7 @@ function committedBacktrackBrief(
   loopId: string,
   round: number,
   context: Record<string, unknown> | null,
+  restoreVerified: boolean,
 ): string[] | undefined {
   // The SAME pending-backtrack lookup the recovery boundary uses: a deep
   // restore commits at the failed round while its redo targets
@@ -596,7 +600,7 @@ function committedBacktrackBrief(
   const lines = recoveryBriefLines({
     redoRound: record.target.redo_round,
     checkpointId: record.target.checkpoint_id,
-    restoreVerified: true,
+    restoreVerified,
     triggerRule: record.origin === "machine"
       ? (record.trigger_rule ?? "machine_recovery")
       : "agent_recovery",
@@ -613,13 +617,23 @@ function committedBacktrackBrief(
     // carried; keep it inside the artifact now.
     recoveryRoundId: `loop:${loopId}:round:${record.target.redo_round}`,
   });
-  if (record.skipped_files.length > 0) {
-    const files = [...record.skipped_files].sort();
-    const shown = files.slice(0, 15);
-    lines.push("- **Files changed since the checkpoint**:");
+  const observedFiles = [...(record.observed_skipped_files ??
+    record.skipped_files ?? [])].sort();
+  const reportedFiles = [...(record.reported_skipped_files ?? [])].sort();
+  if (observedFiles.length > 0) {
+    const shown = observedFiles.slice(0, 15);
+    lines.push("- **Observed changes since the checkpoint (machine)**:");
     for (const file of shown) lines.push(`  - \`${file}\``);
-    if (files.length > shown.length) {
-      lines.push(`  - … and ${files.length - shown.length} more files`);
+    if (observedFiles.length > shown.length) {
+      lines.push(`  - … and ${observedFiles.length - shown.length} more files`);
+    }
+  }
+  if (reportedFiles.length > 0) {
+    const shown = reportedFiles.slice(0, 15);
+    lines.push("- **Agent-reported changed files (report)**:");
+    for (const file of shown) lines.push(`  - \`${file}\``);
+    if (reportedFiles.length > shown.length) {
+      lines.push(`  - … and ${reportedFiles.length - shown.length} more files`);
     }
   }
   return lines;
@@ -814,7 +828,12 @@ export function compileLoop(
   // The recovery brief is a current-round fact, computed once and shared by
   // the state file, the prompt and the evaluation block. It never becomes
   // prompt control state.
-  const recoveryBrief = committedBacktrackBrief(request.loop_id, request.round, context);
+  const recoveryBrief = committedBacktrackBrief(
+    request.loop_id,
+    request.round,
+    context,
+    request.restore_verified === true,
+  );
   const state = createCanonicalLoopState(request, response, statePath, {
     machineStatus,
     // v3.4/v3.8.1: the contract-fact bundle — the Current Task's source of
@@ -829,6 +848,12 @@ export function compileLoop(
     previousRound: { ...previous, committed: previous.view !== null },
     recoveryBrief,
     workingMemory,
+    context: {
+      round: request.round,
+      attempt: request.attempt,
+      mode: contextBoundary.mode,
+      reason: contextBoundary.reason,
+    },
   });
   const configuredCapability = deriveConfiguredCapability(policy);
   const contractCommands = configuredCapability.commands
@@ -841,6 +866,12 @@ export function compileLoop(
     // round's record; the redo commit removes it by construction.
     attempt: request.attempt,
     recoveryBrief,
+    context: {
+      round: request.round,
+      attempt: request.attempt,
+      mode: contextBoundary.mode,
+      reason: contextBoundary.reason,
+    },
   });
 
   // v3.8.1: the L2 budget is a FIXED ceiling. The v2.4 adaptive budget
@@ -855,13 +886,13 @@ export function compileLoop(
   const artifact = assemblePromptArtifact({
     state,
     level: decision.level,
-    reasons: decision.reasons,
     budgets: {
       l0: policy.prompt.l0_max_chars,
       l1: policy.prompt.l1_max_chars,
       l2: policy.prompt.l2_max_chars,
     },
     attempt: request.attempt,
+    warnings,
     selfEvaluationBlock: buildSelfEvalBlock({
       round: request.round,
       level: decision.level,

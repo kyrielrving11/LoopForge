@@ -12,6 +12,8 @@ import { loadCommittedHistory } from "./history.js";
 import { deriveRoundProgress } from "./progress.js";
 import { observedGitHead } from "./git-motion.js";
 import { deriveOpenQuestionId } from "./open-question.js";
+import { gitRoundFacts } from "./git-facts.js";
+import { deriveFindingId } from "./token-utils.js";
 
 export const REPLAY_DEFAULT_ROUNDS = 10;
 export const REPLAY_MAX_WINDOW_ROUNDS = 50;
@@ -21,6 +23,10 @@ const ASSUMPTION_DISPLAY_CHARS = 500;
 const QUESTION_DISPLAY_CHARS = 300;
 const BLOCKER_DISPLAY_CHARS = 500;
 const REDIRECT_REASON_DISPLAY_CHARS = 500;
+const WORKER_DISPLAY_CHARS = 500;
+const RETROACTIVE_DISPLAY_CHARS = 500;
+const SUBTASK_LABEL_DISPLAY_CHARS = 200;
+
 
 /** Invalid explicit replay window. The MCP boundary maps this to
  *  `invalid_argument`. */
@@ -38,15 +44,16 @@ export interface ReplayWindowOptions {
 }
 
 export interface ReplayWindow {
-  /** First returned round; 0 when the window is empty. */
+  /** First round POSITION returned (legacy rows included); 0 when empty. */
   start: number;
-  /** Last returned round; 0 when the window is empty. */
+  /** Last round POSITION returned (legacy rows included); 0 when empty. */
   end: number;
-  /** Committed evaluation rounds on the current branch. */
+  /** Distinct committed round positions on the branch, INCLUDING legacy
+   *  envelopes that are not parseable history. The loss stays counted. */
   totalRounds: number;
-  /** Committed rounds exist before this window. */
+  /** Round positions exist before this window. */
   hasBefore: boolean;
-  /** Committed rounds exist after this window. */
+  /** Round positions exist after this window. */
   hasAfter: boolean;
 }
 
@@ -89,8 +96,12 @@ function resolveWindow(
   legacyRounds: ReadonlyArray<LegacyRound>,
   opts: ReplayWindowOptions | undefined,
 ): { from: number; to: number; window: ReplayWindow } {
-  const totalRounds = rounds.length;
-  const latest = totalRounds > 0 ? rounds[totalRounds - 1]!.round : 0;
+  const positions = [...new Set([
+    ...rounds.map((view) => view.round),
+    ...legacyRounds.map((round) => round.round),
+  ])].sort((a, b) => a - b);
+  const totalRounds = positions.length;
+  const latest = positions.length > 0 ? positions[positions.length - 1]! : 0;
   const validatePositive = (value: number | undefined, name: string): void => {
     if (value === undefined) return;
     if (!Number.isInteger(value) || value < 1) {
@@ -116,12 +127,9 @@ function resolveWindow(
     // Count-based default over the round POSITIONS that exist, including
     // legacy envelopes: an unsupported schema must stay visible rather than
     // fall outside a window derived only from parseable rounds.
-    const positions = [...new Set([
-      ...rounds.map((view) => view.round),
-      ...legacyRounds.map((round) => round.round),
-    ])].sort((a, b) => a - b).slice(-REPLAY_DEFAULT_ROUNDS);
-    from = positions[0] ?? 0;
-    to = positions.at(-1) ?? 0;
+    const windowPositions = positions.slice(-REPLAY_DEFAULT_ROUNDS);
+    from = windowPositions[0] ?? 0;
+    to = windowPositions.at(-1) ?? 0;
   } else if (opts?.start !== undefined && opts?.end !== undefined) {
     from = opts.start;
     to = opts.end;
@@ -138,14 +146,14 @@ function resolveWindow(
     from = Math.max(1, to - REPLAY_MAX_WINDOW_ROUNDS + 1);
   }
 
-  const inWindow = rounds.filter(
-    (view) => view.round >= from && view.round <= to);
+  const inWindowPositions = positions.filter(
+    (position) => position >= from && position <= to);
   const window = {
-    start: inWindow[0]?.round ?? 0,
-    end: inWindow.at(-1)?.round ?? 0,
+    start: inWindowPositions[0] ?? 0,
+    end: inWindowPositions.at(-1) ?? 0,
     totalRounds,
-    hasBefore: rounds.some((view) => view.round < from),
-    hasAfter: rounds.some((view) => view.round > to),
+    hasBefore: positions.some((position) => position < from),
+    hasAfter: positions.some((position) => position > to),
   };
   return { from, to, window };
 }
@@ -194,11 +202,8 @@ export class ReplayBackend {
     const timeline: Record<string, unknown>[] = [];
     for (const view of rounds) {
       if (view.round < from || view.round > to) continue;
-      const gitDelta = view.observationDelta.find(
-        (item) => item.kind === "git",
-      );
-      const gitBefore = view.beforeEvidence.find((item) => item.providerId === "git");
-      const gitAfter = view.afterEvidence.find((item) => item.providerId === "git");
+      // v4.0.3: ONE Git fact set per row, from the union selector.
+      const git = gitRoundFacts(view.observationDelta);
       // v3.9.9: replay is a display surface, so it selects every fact. The
       // per-fact list below makes the coverage of each fact visible.
       const progress = deriveRoundProgress(view.observationDelta);
@@ -221,6 +226,45 @@ export class ReplayBackend {
       const blocker = displayed(view.evaluation?.blocker, BLOCKER_DISPLAY_CHARS);
       const redirectReason = displayed(
         view.contractTransition?.reason, REDIRECT_REASON_DISPLAY_CHARS);
+      const noChangeReason = displayed(
+        view.evaluation?.no_change_reason, BLOCKER_DISPLAY_CHARS);
+      const subtaskLabel = displayed(
+        view.evaluation?.subtask_boundary_label, SUBTASK_LABEL_DISPLAY_CHARS);
+      const workerResults = (view.evaluation?.worker_results ?? []).map((worker) => ({
+        agent_id: worker.agentId.slice(0, SUBTASK_LABEL_DISPLAY_CHARS),
+        sub_task: displayed(worker.subTask, WORKER_DISPLAY_CHARS).text,
+        result_summary: displayed(worker.resultSummary, WORKER_DISPLAY_CHARS).text,
+        outcome: worker.outcome,
+      }));
+      const retroactiveClaims = (view.evaluation?.retroactiveClaims ?? [])
+        .map((claim) => ({
+          round: claim.round,
+          claim: displayed(claim.claim, RETROACTIVE_DISPLAY_CHARS).text,
+        }));
+      const subgoalUpdates = (view.subgoalUpdates ?? []).map((update) => ({
+        id: update.id,
+        status: update.status,
+        ...(update.note !== undefined
+          ? { status_note: update.note.slice(0, 300) }
+          : {}),
+      }));
+      const commandStatuses = view.observationDelta
+        .filter((delta) => delta.kind === "command")
+        .map((delta) => ({
+          command_id: delta.after?.kind === "command"
+            ? delta.after.data.commandId
+            : delta.providerId,
+          status: delta.after?.status ?? null,
+        }));
+      const checkpoints = [
+        ...(view.beforeCheckpoint ? [view.beforeCheckpoint] : []),
+        ...view.checkpoints,
+      ].map((ref) => ({
+        checkpoint_id: ref.checkpointId,
+        role: ref.role,
+        round: ref.round,
+        content_hash: ref.contentHash,
+      }));
       timeline.push({
         round: view.round,
         attempt: view.attempt,
@@ -228,17 +272,31 @@ export class ReplayBackend {
         // v4.0.2: the context boundary is a committed artifact fact.
         context_mode: view.promptArtifact?.contextMode ?? null,
         context_reason: view.promptArtifact?.contextReason ?? null,
-        success: view.success,
-        outcome: view.outcome,
+        // v4.0.3: Agent claims are named as claims. The machine facts are
+        // separate and come from the persisted posture.
+        agent_success_claim: view.agentSuccessClaim,
+        agent_outcome: view.agentOutcome,
+        machine_backed_success: view.evidencePosture?.machineBackedSuccess ?? false,
+        evidence_posture: view.evidencePosture,
         // v4.0.1: task and goal identity are compile facts stamped at commit.
         task: view.compiled?.task ?? "",
         goal_id: view.compiled?.goalId ?? "",
-        // v4.0.2: the committed Agent report, bounded for display.
+        // v4.0.2/v4.0.3: the committed Agent report, bounded for display.
+        // `success` is not duplicated here: the row already names the claim.
         report: view.evaluation
           ? {
-              success: view.evaluation.success,
               output_summary: report.text,
-              truncated: report.truncated,
+              no_change_reason: noChangeReason.text || null,
+              blocker: view.evaluation.blocker ? blocker.text : null,
+              subtask_boundary_label: subtaskLabel.text || null,
+              worker_results: workerResults,
+              retroactive_claims: retroactiveClaims,
+              gate_ids: [...(view.evaluation.gate_ids ?? [])],
+              subgoal_updates: subgoalUpdates,
+              truncated: report.truncated ||
+                noChangeReason.truncated ||
+                blocker.truncated ||
+                subtaskLabel.truncated,
             }
           : null,
         wrong_assumptions: wrongAssumptions.values,
@@ -247,14 +305,30 @@ export class ReplayBackend {
         open_question_ids: (view.openQuestions ?? []).map(deriveOpenQuestionId),
         resolved_open_question_ids: view.resolvedOpenQuestionIds ?? [],
         blocker: view.evaluation?.blocker ? blocker.text : null,
-        // v3.9.1: the shared round delta and Git boundary facts.
-        files_changed: gitDelta?.changedFiles ?? null,
-        git_change_state: gitDelta === undefined
-          ? "not_applicable"
-          : gitDelta.changedFiles === null ? "unknown" : "observed",
-        head_before: observedGitHead(gitBefore),
-        head_after: observedGitHead(gitAfter),
-        git_status: gitAfter?.status ?? null,
+        // v3.9.1/v4.0.3: the shared round delta and Git boundary facts, from
+        // the union selector (never the first Git delta).
+        files_changed: git.changedFiles,
+        git_change_state: git.state,
+        head_before: git.headBefore,
+        head_after: git.headAfter,
+        git_status: git.status,
+        // v4.0.3: finding ids are the stable repair handles.
+        verification_flag_ids: view.verificationFlags.map(deriveFindingId),
+        verification_checks: view.verificationFlags.map((flag) => ({
+          check: flag.check,
+          severity: flag.severity,
+          ref: flag.ref ?? null,
+        })),
+        command_statuses: commandStatuses,
+        checkpoints,
+        restore_verified: view.restore !== null,
+        restore: view.restore
+          ? {
+              directive_transaction_id: view.restore.directiveTransactionId,
+              redo_round: view.restore.redoRound,
+              verified_at: view.restore.verifiedAt,
+            }
+          : null,
         // v3.9.7: the shared per-round progress verdict. Window verdicts are
         // not committed facts; this is the only progress value a round owns.
         machine_progress: progress?.state ?? null,
@@ -280,7 +354,19 @@ export class ReplayBackend {
           retractedConstraints.truncated ||
           openQuestions.truncated ||
           blocker.truncated ||
-          redirectReason.truncated,
+          redirectReason.truncated ||
+          noChangeReason.truncated ||
+          subtaskLabel.truncated,
+        truncation: {
+          output_summary: report.truncated,
+          wrong_assumptions: wrongAssumptions.truncated,
+          retracted_constraints: retractedConstraints.truncated,
+          open_questions: openQuestions.truncated,
+          blocker: blocker.truncated,
+          redirect_reason: redirectReason.truncated,
+          no_change_reason: noChangeReason.truncated,
+          subtask_boundary_label: subtaskLabel.truncated,
+        },
       });
     }
     // Unsupported envelope versions are NOT history. Keep them visible in the

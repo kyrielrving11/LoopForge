@@ -512,8 +512,8 @@ describe("contract_transition — MCP end-to-end", () => {
     const explain = mgr.getExplain("transition-e2e") as unknown as ExplainResult;
     const explained = explain.rounds.find((round) => round.round === 2);
     assert.equal(explained?.contract?.closure, "superseded");
-    assert.equal(explained?.contractTransition?.contract_id, e2eContractId);
-    assert.equal(explained?.contractTransition?.reason, TRANSITION.reason);
+    assert.equal(explained?.contractRedirect?.contract_id, e2eContractId);
+    assert.equal(explained?.contractRedirect?.reason, TRANSITION.reason);
 
     const replay = mgr.replayTimeline(sessionId) ?? [];
     const replayed = replay.find((entry) => entry.round === 2) as Record<string, unknown>;

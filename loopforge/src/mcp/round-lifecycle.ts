@@ -19,7 +19,7 @@ import {
 } from "../protocol.js";
 import type {
   CheckpointRef,
-  ContractItemStatus,
+  EvidencePosture,
   LoopCompileRequest,
   LoopCompileResponse,
   OperatorAcceptance,
@@ -28,6 +28,7 @@ import type {
   PromptContextReason,
   RecoveryDirective,
   RecoveryRequest,
+  RoundOutcome,
   SelfEvaluation,
   SubmissionDiagnostic,
   SubmissionGuidance,
@@ -37,7 +38,6 @@ import type {
   VerificationFlag,
   LoopTerminalEvent,
   LoopTerminalSink,
-  RoundVerificationStatus,
   StopReason,
   WorkspaceCheckpointManifest,
 } from "../protocol.js";
@@ -50,11 +50,18 @@ import {
   parseRoundTransactionSnapshot,
   rootBranchId,
 } from "../round-transaction.js";
-import { deriveActiveRoundContract, deriveRoundContractView } from "../round-contract.js";
+import { deriveActiveRoundContract } from "../round-contract.js";
 import { deriveSubGoals } from "../subgoal-state.js";
 import { declaresBlocked } from "../round-outcome.js";
-import { deriveSubmissionReceipt } from "../submission-receipt.js";
-import type { RoundTransactionSnapshot } from "../round-transaction.js";
+import {
+  deriveCommittedSubmissionView,
+  deriveSubmissionReceipt,
+} from "../submission-receipt.js";
+import { rollbackEvidencePosture } from "../evidence-posture.js";
+import type {
+  RetryContext,
+  RoundTransactionSnapshot,
+} from "../round-transaction.js";
 import { RoundDriver } from "../round-driver.js";
 import {
   deriveRecoveryDirective,
@@ -271,17 +278,19 @@ export interface AdvanceResult {
    *  result carries no prompt. */
   contextMode?: PromptContextMode;
   contextReason?: PromptContextReason;
-  roundSuccess?: boolean;
+  agentSuccessClaim?: boolean;
+  /** v4.0.3: the effective Agent-declared outcome of the round this result
+   *  is about. */
+  agentOutcome?: RoundOutcome | null;
   warnings?: string[];
   /** v1.13: Enforcement action for this round. accept/reject/terminate.
    *  When "reject", the prompt contains a rejection notice and the agent
    *  must redo the same round. Round counter does NOT increment. */
   enforcementAction?: "accept" | "reject" | "terminate" | "backtrack" | "recovery";
-  /** v3.8: The round-level verification posture — `trusted` when everything
-   *  claimed this round is machine-backed, `insufficient` when claims are
-   *  unbacked but nothing is denied, `contradicted` when a machine fact
-   *  denies a claim. Never a verdict about the agent's work quality. */
-  verificationStatus?: RoundVerificationStatus;
+  /** v4.0.3: the ONE evidence posture of the round this result is about.
+   *  Accepted rounds carry the persisted posture; a rejection carries its
+   *  transient copy. Never a verdict about the agent's work quality. */
+  evidencePosture?: EvidencePosture;
   /** v1.13: When enforcementAction is "reject" or "terminate", the reason
    *  why the round was rejected or the loop was terminated. */
   enforcementReason?: string;
@@ -390,10 +399,13 @@ export function buildLoopRequest(session: McpSession): LoopCompileRequest {
   // resume, unpause and backtrack compiles cannot disagree about the same
   // history. `attempt` is restored only while the held snapshot belongs to
   // the current round; entering the next round resets it to 1.
-  const heldAttempt =
-    session.roundSnapshot?.round === session.currentRound
-      ? session.roundSnapshot.attempt
-      : 1;
+  const held = session.roundSnapshot?.round === session.currentRound
+    ? session.roundSnapshot
+    : undefined;
+  // v4.0.3: a held retry carries its attempt/notice/findings/posture even
+  // after a process restart or a failed retry compile.
+  const retry = held?.retryContext;
+  const heldAttempt = retry?.attempt ?? held?.attempt ?? 1;
   const acceptance =
     session.operatorAcceptance ?? session.roundSnapshot?.operatorAcceptance;
   return {
@@ -416,10 +428,11 @@ export function buildLoopRequest(session: McpSession): LoopCompileRequest {
     constraints_from_plan: [],
     force_level: "auto",
     max_rounds: session.maxRounds,
-    verification_flags: [],
+    verification_flags: retry ? [...retry.verificationFlags] : [],
     attempt: heldAttempt,
     consecutive_rejections: session.consecutiveRejections,
-    rejection_notice: "",
+    rejection_notice: retry?.rejectionNotice ?? "",
+    ...(retry ? { retry_evidence_posture: retry.evidencePosture } : {}),
   };
 }
 
@@ -475,10 +488,15 @@ export class RoundLifecycle {
   ): SubmissionGuidance {
     const history = loadCommittedHistory(this.store, session.loopId);
     const criteria = this.objectiveCriteriaFor(session, history.entries);
+    const { verificationFlags: explicitFlags, ...restExtras } = extras;
+    // v4.0.3: a held retry projects its findings even after resume/stall.
+    const verificationFlags = explicitFlags ??
+      session.roundSnapshot?.retryContext?.verificationFlags;
     return deriveSubmissionGuidance(session, {
       rounds: historyWindow(history, session.currentRound),
       ...(criteria ? { objective: { success_criteria: criteria } } : {}),
-      ...extras,
+      ...restExtras,
+      ...(verificationFlags ? { verificationFlags } : {}),
       // A pending directive is a current fact. Unless the caller supplied a
       // more specific projection, expose it so status/resume agree.
       recovery: extras.recovery !== undefined
@@ -548,6 +566,8 @@ export class RoundLifecycle {
       constraintsActiveAfter?: string[] | null;
       constraintsRetiredAfter?: string[] | null;
       contractAfterId?: string | null;
+      /** v4.0.3: the verified-restore fact that produced a redo prompt. */
+      restoreVerified?: boolean;
     },
   ): SubmissionReceipt {
     const history = loadCommittedHistory(this.store, base.snapshot.loopId);
@@ -562,17 +582,6 @@ export class RoundLifecycle {
       base.snapshot.beforeEvidence,
       base.actualEvidence,
     );
-    const contractView = deriveRoundContractView({
-      rounds,
-      round: base.snapshot.round,
-      current: {
-        report: base.selfEval.execution_report ?? null,
-        deltas: roundDeltas,
-        blocked: declaresBlocked(base.selfEval),
-        transition: base.selfEval.contract_transition ?? null,
-      },
-      commands,
-    });
     const contractAfterId = opts.contractAfterId !== undefined
       ? opts.contractAfterId
       : committed
@@ -606,6 +615,9 @@ export class RoundLifecycle {
       diagnostics: base.diagnostics,
       submittedFields: base.submittedFields,
       recoveryDirective,
+      ...(opts.restoreVerified !== undefined
+        ? { recoveryRestoreVerified: opts.restoreVerified }
+        : {}),
       facts: {
         contractBefore: base.beforeContractId,
         contractAfter: contractAfterId,
@@ -615,10 +627,6 @@ export class RoundLifecycle {
         constraintsRetiredAfter: opts.constraintsRetiredAfter ?? null,
       },
       nextArtifact: opts.nextArtifact ?? null,
-      contractItems: contractView.statuses.items.map((item) => ({
-        item_id: item.itemId,
-        status: item.status as ContractItemStatus,
-      })),
       evidenceDeltas: roundDeltas,
     });
   }
@@ -740,7 +748,13 @@ export class RoundLifecycle {
           lastRejectionCheck: check,
         };
       })(),
-      entrypointTrust: parseFingerprintMap(lineage.entrypoint_trust),
+      // v4.0.3: an absent baseline stays absent. `{}` must not masquerade as
+      // a trusted baseline (there is nothing to compare, and re-capturing it
+      // from a modified workspace would launder the change).
+      entrypointTrust: (() => {
+        const trust = parseFingerprintMap(lineage.entrypoint_trust);
+        return Object.keys(trust).length > 0 ? trust : undefined;
+      })(),
       ...(operatorAcceptance ? { operatorAcceptance } : {}),
       roundSnapshot,
     };
@@ -792,12 +806,32 @@ export class RoundLifecycle {
    *
    *  Best-effort: an unreadable policy or an unresolvable command must leave
    *  the round without the absolute arm, not fail the preparation. */
-  private seedEntrypointTrust(session: McpSession): void {
+  /** v4.0.3: seed the round-start entrypoint baseline. Public so the start
+   *  path can seed BEFORE the first prompt is delivered; a missing baseline
+   *  must never be re-derived from an already-modified workspace. */
+  seedEntrypointTrust(session: McpSession): void {
     try {
       session.entrypointTrust = captureEntrypointTrust(getPolicy());
     } catch {
       session.entrypointTrust = undefined;
     }
+  }
+
+  /** v4.0.3: warnings for a resumed round whose trusted baseline is absent.
+   *  The workspace may already have been modified; re-capturing it would
+   *  launder the change, so the round runs with the Git-delta arm only. */
+  private resumeWarnings(
+    session: McpSession,
+    warnings: string[] | undefined,
+  ): string[] {
+    const out = [...(warnings ?? [])];
+    if (!session.entrypointTrust) {
+      out.push(
+        "entrypoint_trust_missing: no trusted round-start baseline is held; " +
+        "only the Git-delta entrypoint arm runs for this resumed round.",
+      );
+    }
+    return out;
   }
 
   /** v3.9.7: operator acceptance and branch identity travel with the session
@@ -826,11 +860,14 @@ export class RoundLifecycle {
       warnings: string[];
       compileResponse?: LoopCompileResponse | null;
     },
-    roundSuccess: boolean | undefined,
+    agentSuccessClaim: boolean | undefined,
     warningsOverride?: string[],
+    /** v4.0.3: a resumed round must NOT re-capture its baseline from a
+     *  possibly modified workspace. */
+    seedTrust = true,
   ): AdvanceResult {
     session.roundSnapshot = prepared.snapshot;
-    this.seedEntrypointTrust(session);
+    if (seedTrust) this.seedEntrypointTrust(session);
     policyMetrics.recordStrategy(session.loopId, prepared.level);
     this.save(session);
 
@@ -842,10 +879,11 @@ export class RoundLifecycle {
       ...this.contextFacts(prepared.snapshot.promptArtifact),
       prompt: prepared.prompt,
       level: prepared.level,
-      roundSuccess,
-      // v3.8: the posture of the round that just committed — read from the
-      // transaction's committed result, not recomputed here.
-      verificationStatus: session.roundSnapshot?.result?.verificationStatus,
+      agentSuccessClaim,
+      agentOutcome: session.roundSnapshot?.result?.agentOutcome ?? null,
+      // v4.0.3: the posture of the round that just committed — read from the
+      // transaction's committed result, never recomputed here.
+      evidencePosture: session.roundSnapshot?.result?.evidencePosture,
       warnings: warningsOverride ??
         session.roundSnapshot?.promptArtifact?.warnings ??
         prepared.warnings ?? [],
@@ -938,6 +976,19 @@ export class RoundLifecycle {
     if (!handle) return null;
     const warnings = [...(artifact.warnings ?? [])];
     if (warning && !warnings.includes(warning)) warnings.push(warning);
+    // v4.0.3: a held-prompt redelivery carries the most recent committed
+    // receipt, so the response it missed is recoverable from history.
+    const history = loadCommittedHistory(this.store, session.loopId);
+    const latestRound = history.rounds[history.rounds.length - 1];
+    const pending = history.pendingDirective;
+    const latestRecord = pending &&
+        (!latestRound || pending.round >= latestRound.round)
+      ? pending
+      : latestRound;
+    const receipt = latestRecord
+      ? deriveCommittedSubmissionView(
+          latestRecord, history.rounds, history.directives)
+      : undefined;
     return {
       sessionId: session.sessionId,
       round: session.currentRound,
@@ -946,11 +997,12 @@ export class RoundLifecycle {
       ...this.contextFacts(artifact),
       prompt: artifact.renderedPrompt,
       level: artifact.level,
-      roundSuccess: undefined,
+      agentSuccessClaim: undefined,
       warnings,
       submission_guidance: this.guidanceFor(session, {
         recovery: this.pendingRecoveryGuidance(session),
       }),
+      ...(receipt ? { submission_receipt: receipt } : {}),
     };
   }
 
@@ -989,7 +1041,8 @@ export class RoundLifecycle {
             : reason === "failed"
               ? "Agent declared should_continue=false with success=false — the task was not achieved."
               : `Loop stopped: ${reason}.`,
-        roundSuccess: pr.roundSuccess,
+        agentSuccessClaim: pr.agentSuccessClaim,
+        agentOutcome: pr.agentOutcome,
       };
     }
 
@@ -1026,13 +1079,13 @@ export class RoundLifecycle {
     } catch (error) {
       if (error instanceof ProjectionCoverageError) {
         return this.stalledAfterCommit(
-          session.sessionId, session, pr.roundSuccess, error.message,
+          session.sessionId, session, pr.agentSuccessClaim, error.message,
           { code: "projection_incomplete", details: { coverage: error.coverage } },
         );
       }
       if (error instanceof CompileFailureError) {
         return this.stalledAfterCommit(
-          session.sessionId, session, pr.roundSuccess,
+          session.sessionId, session, pr.agentSuccessClaim,
           `The committed round is held, but the next prompt could not be compiled: ${error.message}. Call loopforge_resume to retry.`,
         );
       }
@@ -1047,7 +1100,7 @@ export class RoundLifecycle {
         snapshot: prepared.snapshot,
         warnings: prepared.warnings ?? [],
       },
-      pr.roundSuccess,
+      pr.agentSuccessClaim,
     );
   }
 
@@ -1076,10 +1129,13 @@ export class RoundLifecycle {
       origin: directive.origin,
       reason: directive.reason,
       recovery: directive,
-      verificationFlags: [],
-      roundSuccess: false,
+      // v4.0.3: replay the directive's compact trigger findings instead of
+      // losing them with the process that produced the backtrack.
+      verificationFlags: [...(directive.trigger_findings ?? [])],
+      agentSuccessClaim: false,
+      agentOutcome: null,
       gateContradicted: false,
-      verificationStatus: "not_applicable",
+      evidencePosture: rollbackEvidencePosture(directive.target.redo_round),
       newConsecutiveRejections: 0,
       shouldPushSuccessTrajectory: false,
     };
@@ -1176,6 +1232,8 @@ export class RoundLifecycle {
         warnings: prepared.warnings ?? [],
       },
       false,
+      this.resumeWarnings(session, prepared.warnings),
+      false,
     );
   }
 
@@ -1227,9 +1285,8 @@ export class RoundLifecycle {
         warnings: prepared.warnings ?? [],
       },
       undefined,
-      // Historical contract: unpause returns an empty warnings array even
-      // though the session carries the compiled warnings.
-      [],
+      this.resumeWarnings(session, prepared.warnings),
+      false,
     );
   }
 
@@ -1343,15 +1400,43 @@ export class RoundLifecycle {
     verificationFlags: VerificationFlag[],
     receiptBase: ReceiptBase,
   ): Promise<AdvanceResult> {
+    const rejectedSnapshot = session.roundSnapshot;
+    if (!rejectedSnapshot) {
+      throw new Error("A rejected attempt must keep its held transaction snapshot.");
+    }
+    // v4.0.3: persist the retry facts BEFORE compiling the retry prompt. A
+    // compile failure (or a process restart) must not lose the attempt,
+    // notice, findings or transient posture.
+    const retryContext: RetryContext = {
+      attempt: rejectedSnapshot.attempt + 1,
+      rejectedAttempt: rejectedSnapshot.attempt,
+      rejectionNotice: pr.rejectionPrompt ?? "",
+      verificationFlags: [...verificationFlags],
+      evidencePosture: pr.evidencePosture,
+      rejectedAt: Date.now(),
+    };
+    session.roundSnapshot = { ...rejectedSnapshot, retryContext };
+    try {
+      this.save(session);
+    } catch (error) {
+      return this.stalledAfterCommit(
+        sessionId,
+        session,
+        false,
+        `The rejected attempt could not be persisted: ${String(error).slice(0, 300)}. ` +
+        "Call loopforge_resume to retry; the rejection facts are still held in memory.",
+      );
+    }
     // In-flight attempt findings are authority for THIS attempt, not
-    // committed history: write them explicitly on the retry request.
+    // committed history: buildLoopRequest now projects them from retryContext.
     const retryRequest = buildLoopRequest(session);
     retryRequest.verification_flags = verificationFlags;
+    retryRequest.rejection_notice = pr.rejectionPrompt ?? "";
     let preparedRetry: PreparedRound;
     try {
       preparedRetry = await this.driver(session.engine, session.loopId).prepareRetry(
         retryRequest,
-        session.roundSnapshot!,
+        session.roundSnapshot,
         pr.rejectionPrompt ?? "",
         session.consecutiveRejections,
       );
@@ -1382,8 +1467,10 @@ export class RoundLifecycle {
       ...this.contextFacts(retryArtifact),
       prompt: preparedRetry.prompt,
       level: preparedRetry.level,
+      agentSuccessClaim: pr.agentSuccessClaim,
+      agentOutcome: pr.agentOutcome,
       enforcementAction: "reject",
-      verificationStatus: pr.verificationStatus,
+      evidencePosture: pr.evidencePosture,
       enforcementReason: pr.enforcementReason,
       submission_guidance: this.guidanceFor(session, {
         verificationFlags: pr.verificationFlags,
@@ -1622,14 +1709,19 @@ export class RoundLifecycle {
 
     session.consecutiveRejections = 0;
     session.lastRejectionCheck = "";
+    const recoveryFlags = pr.verificationFlags.length > 0
+      ? pr.verificationFlags
+      : (directive.trigger_findings ?? []);
     const outcome = await this.runRestoreAndPrepare(session, directive, {
-      verificationFlags: pr.verificationFlags,
+      verificationFlags: recoveryFlags,
     });
     if (!outcome.ok) {
       return {
         ...outcome.result,
+        agentSuccessClaim: pr.agentSuccessClaim,
+        agentOutcome: pr.agentOutcome,
         enforcementAction: directive.origin === "agent" ? "recovery" : "backtrack",
-        verificationStatus: pr.verificationStatus,
+        evidencePosture: pr.evidencePosture,
         enforcementReason: pr.reason ?? pr.enforcementReason,
       };
     }
@@ -1648,8 +1740,10 @@ export class RoundLifecycle {
       ...this.contextFacts(nextArtifact),
       prompt: prepared.prompt,
       level: prepared.level,
+      agentSuccessClaim: pr.agentSuccessClaim,
+      agentOutcome: pr.agentOutcome,
       enforcementAction: directive.origin === "agent" ? "recovery" : "backtrack",
-      verificationStatus: pr.verificationStatus,
+      evidencePosture: pr.evidencePosture,
       enforcementReason: pr.reason ?? pr.enforcementReason,
       recovery: {
         origin: directive.origin,
@@ -1668,7 +1762,7 @@ export class RoundLifecycle {
       },
       warnings: prepared.warnings ?? [],
       submission_guidance: this.guidanceFor(session, {
-        verificationFlags: pr.verificationFlags,
+        verificationFlags: recoveryFlags,
         recovery: {
           pending: true,
           redo_round: newRound,
@@ -1686,6 +1780,8 @@ export class RoundLifecycle {
         afterSubGoals: null,
         constraintsActiveAfter: null,
         contractAfterId: receiptBase.beforeContractId,
+        // The SAME verified-restore fact the top-level recovery reports.
+        restoreVerified: true,
       }),
     };
   }
@@ -1723,9 +1819,11 @@ export class RoundLifecycle {
       round: session.currentRound,
       prompt: null,
       stopReason: reason,
+      agentSuccessClaim: pr.agentSuccessClaim,
+      agentOutcome: pr.agentOutcome,
       stopDetail: pr.enforcementReason ?? "The enforcement gate terminated the loop.",
       enforcementAction: "terminate",
-      verificationStatus: pr.verificationStatus,
+      evidencePosture: pr.evidencePosture,
       enforcementReason: pr.enforcementReason,
       submission_receipt: this.buildReceipt(receiptBase, {
         disposition: "terminated",
@@ -1762,7 +1860,9 @@ export class RoundLifecycle {
       stopDetail: pr.stopReason === "max_rounds"
           ? "The configured maximum number of rounds has been reached."
           : `Loop stopped: ${reason}.`,
-      roundSuccess: pr.roundSuccess,
+      agentSuccessClaim: pr.agentSuccessClaim,
+      agentOutcome: pr.agentOutcome,
+      evidencePosture: pr.evidencePosture,
       submission_receipt: this.buildReceipt(receiptBase, {
         disposition: "stopped",
         nextArtifact: null,
@@ -1783,7 +1883,7 @@ export class RoundLifecycle {
     actualEvidence: MachineObservation[],
     receiptBase: ReceiptBase,
   ): Promise<AdvanceResult> {
-    const roundSuccess = pr.roundSuccess;
+    const agentSuccessClaim = pr.agentSuccessClaim;
     // M4 (v3.7.x): replay guard. The counter may already point past the
     // committed round when this continue is a REPLAY — after a crash or an
     // in-process exception between the round's commit and this compile, the
@@ -1802,7 +1902,7 @@ export class RoundLifecycle {
         prompt: null,
         stopReason: session.status,
         stopDetail: `Session is no longer running (status: ${session.status}). It was paused or deleted while the next prompt was being prepared.`,
-        roundSuccess,
+        agentSuccessClaim,
       };
     }
 
@@ -1832,7 +1932,7 @@ export class RoundLifecycle {
         return this.stalledAfterCommit(
           sessionId,
           session,
-          roundSuccess,
+          agentSuccessClaim,
           error.message,
           { code: "projection_incomplete", details: { coverage: error.coverage } },
         );
@@ -1841,7 +1941,7 @@ export class RoundLifecycle {
         return this.stalledAfterCommit(
           sessionId,
           session,
-          roundSuccess,
+          agentSuccessClaim,
           `The round committed but the next prompt could not be compiled: ${error.message}. ` +
           `Call loopforge_resume to reconcile the commit and retry.`,
         );
@@ -1849,7 +1949,7 @@ export class RoundLifecycle {
       return this.stalledAfterCommit(
         sessionId,
         session,
-        roundSuccess,
+        agentSuccessClaim,
         `RoundDriver.prepare threw after the round committed: ${String(error).slice(0, 300)}. ` +
         `The session is stalled with the committed round still held — call ` +
         `loopforge_resume to reconcile it and compile the next prompt.`,
@@ -1865,7 +1965,7 @@ export class RoundLifecycle {
         prompt: null,
         stopReason: session.status,
         stopDetail: `Session is no longer running (status: ${session.status}). It was paused or deleted while the next prompt was being prepared.`,
-        roundSuccess,
+        agentSuccessClaim,
       };
     }
     const nextPrompt = prepared.prompt;
@@ -1889,7 +1989,7 @@ export class RoundLifecycle {
       return this.stalledAfterCommit(
         sessionId,
         session,
-        roundSuccess,
+        agentSuccessClaim,
         `The round committed but the session state could not be persisted: ${String(error).slice(0, 300)}. ` +
         `Resume the loop to recover the held prompt.`,
       );
@@ -1905,7 +2005,8 @@ export class RoundLifecycle {
       ...this.contextFacts(nextArtifact),
       prompt: nextPrompt,
       level: nextLevel,
-      roundSuccess,
+      agentSuccessClaim,
+      agentOutcome: pr.agentOutcome,
       warnings: prepared.warnings ?? [],
       submission_guidance: this.guidanceFor(session),
       submission_receipt: this.buildReceipt(receiptBase, {
@@ -1926,7 +2027,7 @@ export class RoundLifecycle {
   private stalledAfterCommit(
     sessionId: string,
     session: McpSession,
-    roundSuccess: boolean,
+    agentSuccessClaim: boolean,
     detail: string,
     projectionError?: AdvanceResult["projectionError"],
   ): AdvanceResult {
@@ -1946,7 +2047,7 @@ export class RoundLifecycle {
       prompt: null,
       stopReason: "stalled",
       stopDetail: detail,
-      roundSuccess,
+      agentSuccessClaim,
       ...(projectionError ? { projectionError } : {}),
     };
   }
@@ -2031,14 +2132,25 @@ export class RoundLifecycle {
     if (!receiptSnapshot) {
       throw new Error("The committed round transaction disappeared before the receipt was built.");
     }
+    // v4.0.3: a REPLAYED commit is reported from its committed payload, not
+    // from the new submission that happened to carry the same identity.
+    const receiptSelfEval = tx.replayed
+      ? receiptSnapshot.evaluation ?? selfEval
+      : selfEval;
     const receiptBase: ReceiptBase = {
       snapshot: receiptSnapshot,
-      selfEval,
+      selfEval: receiptSelfEval,
       pr: tx.pr,
-      actualEvidence: tx.actualEvidence,
-      diagnostics: receiptSnapshot.normalizationDiagnostics ??
-        normalizationDiagnostics ?? [],
-      submittedFields: receiptSnapshot.submittedFields ?? submittedFields ?? [],
+      actualEvidence: tx.replayed
+        ? (receiptSnapshot.afterEvidence ?? [])
+        : tx.actualEvidence,
+      diagnostics: tx.replayed
+        ? (receiptSnapshot.normalizationDiagnostics ?? [])
+        : (receiptSnapshot.normalizationDiagnostics ??
+          normalizationDiagnostics ?? []),
+      submittedFields: tx.replayed
+        ? (receiptSnapshot.submittedFields ?? [])
+        : (receiptSnapshot.submittedFields ?? submittedFields ?? []),
       beforeContractId: beforeFacts.contractId,
       beforeSubGoals: beforeFacts.subGoals,
       recoveryDirective: beforeFacts.recoveryDirective,
@@ -2048,8 +2160,9 @@ export class RoundLifecycle {
     // v2.12: Record a user gate when an accepted round reports a high-risk
     // blocker. Record layer only — never blocks the round decision flow.
     if (tx.pr.action !== "reject" && tx.pr.action !== "terminate" &&
-        declaresBlocked(selfEval) && typeof selfEval.blocker === "string") {
-      this.recordGateFromBlocked(session, selfEval.blocker);
+        declaresBlocked(receiptSelfEval) &&
+        typeof receiptSelfEval.blocker === "string") {
+      this.recordGateFromBlocked(session, receiptSelfEval.blocker);
     }
 
     // ── 4. Route disposition ─────────────────────────────────────────────
@@ -2074,9 +2187,9 @@ export class RoundLifecycle {
     // and leaves an observability record instead of throwing mid-lifecycle.
     const finalized = finalizeStopReason(
       tx.pr.stopReason,
-      selfEval,
+      receiptSelfEval,
       undefined,
-      selfEval.contract_transition ?? null,
+      receiptSelfEval.contract_transition ?? null,
     );
     if (finalized.reason !== tx.pr.stopReason) {
       logEvent("completion_truth_downgraded", {
@@ -2269,17 +2382,24 @@ export class RoundLifecycle {
       transaction_id: ref.transactionId,
       redo_round: ref.redoRound,
     };
+    const abandoned = branchRounds(entries).filter(
+      (view) => view.round >= ref.redoRound,
+    );
+    const reportedSkippedFiles = [...new Set(abandoned.flatMap((view) =>
+      (view.executionReport?.files_changed ?? [])))].sort();
     const directiveTransactionId = deriveTransactionId({
       kind: "rollback",
       branchId: held.branchId ?? rootBranchId(session.loopId),
       roundId: held.roundId,
       attempt: 1,
       promptHash: held.promptArtifact?.promptHash,
-      recovery: { target, reason: recovery.reason },
+      recovery: {
+        target,
+        reason: recovery.reason,
+        abandonedRounds: abandoned.map((view) => view.round),
+        reportedSkippedFiles,
+      },
     });
-    const abandoned = branchRounds(entries).filter(
-      (view) => view.round >= ref.redoRound,
-    );
     const completed = await new RoundDriver(
       session.engine,
       this.store,
@@ -2399,20 +2519,24 @@ export class RoundLifecycle {
   ): Promise<void> {
     if (this.terminalSinks.size === 0) return;
     const views = loadCommittedHistory(this.store, session.loopId).rounds;
-    const successTrajectory = views
-      .filter((view) => view.result?.shouldPushSuccessTrajectory === true)
-      .map((view) => view.success);
-    const lastEvaluation = views.length > 0
-      ? views[views.length - 1]!.evaluation ?? undefined
-      : undefined;
+    const lastView = views.length > 0 ? views[views.length - 1] : undefined;
+    // v4.0.3: the trajectory records MACHINE-BACKED success only.
+    const machineBackedSuccessTrajectory = views
+      .filter((view) =>
+        view.result?.shouldPushSuccessTrajectory === true &&
+        view.result?.evidencePosture?.machineBackedSuccess === true)
+      .map((view) => view.agentSuccessClaim);
     const event: LoopTerminalEvent = {
       loopId: session.loopId,
       task: session.task,
-      success: stopReason === "completed",
+      completed: stopReason === "completed",
+      machineBackedSuccess:
+        lastView?.evidencePosture?.machineBackedSuccess ?? false,
+      evidencePosture: lastView?.evidencePosture ?? null,
       stopReason: stopReason as LoopTerminalEvent["stopReason"],
       roundsCompleted: session.currentRound,
-      successTrajectory,
-      lastEvaluation,
+      machineBackedSuccessTrajectory,
+      lastEvaluation: lastView?.evaluation ?? undefined,
     };
     await Promise.allSettled(
       [...this.terminalSinks].map((sink) => Promise.resolve(sink(event))),

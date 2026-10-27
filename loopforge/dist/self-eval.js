@@ -1064,9 +1064,9 @@ export function buildSelfEvaluation(raw, sink, facts) {
         raw.outcome !== "failed" && raw.outcome !== "blocked") {
         sink?.push("outcome", "invalid_enum", "dropped", "expected success | partial | failed | blocked; the value was dropped");
     }
-    if (raw.compression_checkpoint !== undefined &&
-        typeof raw.compression_checkpoint !== "boolean") {
-        sink?.push("compression_checkpoint", "invalid_value", "dropped", "expected a boolean; normalized to false");
+    if (raw.subtask_boundary !== undefined &&
+        typeof raw.subtask_boundary !== "boolean") {
+        sink?.push("subtask_boundary", "invalid_value", "dropped", "expected a boolean; normalized to false");
     }
     if (raw.blocker !== undefined) {
         if (typeof raw.blocker !== "string") {
@@ -1096,8 +1096,8 @@ export function buildSelfEvaluation(raw, sink, facts) {
         open_questions: openQuestions,
         resolved_open_question_ids: resolvedOpenQuestionIds,
         worker_results: workerResults,
-        compression_checkpoint: typeof raw.compression_checkpoint === "boolean" ? raw.compression_checkpoint : false,
-        checkpoint_label: boundedString(raw.checkpoint_label, 200, sink, "checkpoint_label") ?? "",
+        subtask_boundary: typeof raw.subtask_boundary === "boolean" ? raw.subtask_boundary : false,
+        subtask_boundary_label: boundedString(raw.subtask_boundary_label, 200, sink, "subtask_boundary_label") ?? "",
         subgoal_updates: parseSubGoalUpdates(raw.subgoal_updates, sink),
         stop_reason: raw.stop_reason === "gave_up" || raw.stop_reason === "blocked" || raw.stop_reason === "needs_human_input"
             ? raw.stop_reason

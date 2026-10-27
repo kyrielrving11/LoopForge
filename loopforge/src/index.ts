@@ -24,7 +24,6 @@ export {
   makeLoopRoundResult,
   makeLoopCompileRequest,
   makeLoopCompileResponse,
-  makeEvidenceSnapshot,
   makeVerificationFlag,
   makeVerificationResult,
   makeEnforcementResult,
@@ -39,7 +38,6 @@ export type {
   LoopCompileRequest,
   LoopCompileResponse,
   WorkerResult,
-  EvidenceSnapshot,
   VerificationFlag,
   VerificationResult,
   EnforcementResult,
@@ -63,7 +61,17 @@ export type {
   CheckpointRole,
   WorkspaceCheckpointManifest,
   RecoveryTarget,
+  EvidencePosture,
+  EvidencePostureStatus,
 } from "./protocol.js";
+
+// Evidence posture (v4.0.3)
+export {
+  deriveEvidencePosture,
+  rollbackEvidencePosture,
+  EVIDENCE_POSTURE_CAPS,
+} from "./evidence-posture.js";
+export type { EvidencePostureInput } from "./evidence-posture.js";
 
 // Policy
 export {
@@ -216,6 +224,7 @@ export type {
   RoundTransactionSnapshot,
   RoundTransactionInput,
   RoundTransactionOutcome,
+  RetryContext,
 } from "./round-transaction.js";
 
 // Workspace checkpoints and restore (v3.9.8)

@@ -66,9 +66,10 @@ export declare class SessionManager implements SessionRegistry {
      *  their receipt exists only on their own response. This intentionally takes
      *  the durable loopId: it never reads live-session state. */
     getLastSubmissionReceiptByLoopId(loopId: string): SubmissionReceipt | null;
-    /** v3.9.6: the success trajectory is a projection of committed branch
-     *  rounds, not a session counter. */
-    getSuccessTrajectory(loopId: string): boolean[];
+    /** v4.0.3: the machine-backed success trajectory is a projection of
+     *  committed branch rounds, not a session counter. Unbacked claims never
+     *  enter it. */
+    getMachineBackedSuccessTrajectory(loopId: string): boolean[];
     get(sessionId: string): McpSession | undefined;
     /** Resolve a live session by its durable loop identity. `create` rejects a
      *  second live session for the same loop, so the scan is unambiguous. A

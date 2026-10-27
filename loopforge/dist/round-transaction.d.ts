@@ -7,13 +7,15 @@
  */
 import type { LoopStore } from "./loop-store.js";
 import type { ObservationDelta } from "./evidence-provider.js";
-import type { CheckpointRef, CompiledRoundFacts, ContractBinding, MachineObservation, OperatorAcceptance, PromptArtifact, RecoveryDirective, RecoveryTarget, SelfEvaluation, SubmissionDiagnostic, WorkspaceCheckpointManifest } from "./protocol.js";
+import type { CheckpointRef, CompiledRoundFacts, ContractBinding, EvidencePosture, MachineObservation, OperatorAcceptance, PromptArtifact, RecoveryDirective, RecoveryTarget, SelfEvaluation, SubmissionDiagnostic, VerificationFlag, WorkspaceCheckpointManifest } from "./protocol.js";
 import { type RoundProcessResult } from "./round-coordinator.js";
 import type { RoundCommitStore } from "./storage.js";
 /** v3.9.7: schema 5 adds the transaction before-image, explicit mid-round
- *  checkpoints and the redo restore marker. Schema 4 is unsupported and is
- *  reported by `legacyTransactionRounds`; there is no compatibility migration. */
-export declare const ROUND_TRANSACTION_SCHEMA_VERSION: 6;
+ *  checkpoints and the redo restore marker. v4.0.3: schema 7 requires the
+ *  persisted `EvidencePosture` on every result and adds the transient
+ *  `RetryContext`. Unsupported versions are reported by
+ *  `legacyTransactionRounds`; there is no compatibility migration. */
+export declare const ROUND_TRANSACTION_SCHEMA_VERSION: 7;
 /** Maximum distinct mid-round checkpoints one transaction may reference. */
 export declare const MAX_MID_CHECKPOINTS_PER_TRANSACTION = 32;
 /** The root branch identity for every loop. */
@@ -30,9 +32,42 @@ export declare function deriveTransactionId(input: {
     recovery?: {
         target: RecoveryTarget;
         reason: string;
+        /** v4.0.3: directive facts that distinguish two rollbacks of the same
+         *  target/reason (stable, sorted, never arbitrary object order). */
+        abandonedRounds?: number[];
+        failedRounds?: number[];
+        observedSkippedFiles?: string[];
+        reportedSkippedFiles?: string[];
+        triggerFindings?: string[];
     };
 }): string;
 export type RoundTransactionPhase = "prepared" | "prompted" | "evaluated" | "rejected" | "committed" | "terminated";
+/** v4.0.3: the transient facts a held retry needs, attached to the REJECTED
+ *  snapshot before the retry prompt is compiled.
+ *
+ *  It is in-flight transaction state, never committed history: a rejected
+ *  attempt writes no Vault entry, and the retry commit clears this context
+ *  together with the evaluation/result of the rejected attempt. Keeping it on
+ *  the held snapshot (rather than only in the process that produced the
+ *  rejection) is what lets `loopforge_resume`/a stalled retry still know the
+ *  attempt number, rejection notice, findings and transient posture.
+ *
+ *  `attempt` is the attempt the NEXT compile/submission uses — it equals
+ *  `rejectedAttempt + 1`. */
+export interface RetryContext {
+    /** The next attempt; equals `rejectedAttempt + 1`. */
+    attempt: number;
+    rejectedAttempt: number;
+    /** The enforcement gate's protected rejection notice. */
+    rejectionNotice: string;
+    /** Findings from the rejected attempt — authority for the retry, never for
+     *  committed history. */
+    verificationFlags: VerificationFlag[];
+    /** The rejected attempt's transient evidence posture. It is rendered only
+     *  as "not committed" and never enters the Vault, Working Memory or a gate. */
+    evidencePosture: EvidencePosture;
+    rejectedAt: number;
+}
 export interface RoundTransactionSnapshot {
     schemaVersion: typeof ROUND_TRANSACTION_SCHEMA_VERSION;
     /** v3.9.6: the transaction's branch. The root branch is
@@ -65,6 +100,10 @@ export interface RoundTransactionSnapshot {
     /** v3.9.6: committed rollback directive facts (rollback kind only). */
     recovery?: RecoveryDirective;
     result?: RoundProcessResult;
+    /** v4.0.3: transient retry facts. Present only on a rejected attempt or its
+     *  held retry prompt; never on a committed transaction, a directive or a
+     *  terminated attempt. It is cleared before the retry commit. */
+    retryContext?: RetryContext;
     /** v3.9.1: every lossy normalization decision for this submission. Saved
      *  with the transaction; strict boundary failures never reach here. */
     normalizationDiagnostics?: SubmissionDiagnostic[];
@@ -165,6 +204,13 @@ export declare function prepareRoundTransaction(loopId: string, round: number, b
  * its identity or evidence baseline. Evaluation fields belong to the previous
  * attempt and are cleared before the Agent receives the retry prompt. */
 export declare function prepareRejectedAttempt(rejected: RoundTransactionSnapshot, promptArtifact: PromptArtifact, compiled?: CompiledRoundFacts, operatorAcceptance?: OperatorAcceptance): RoundTransactionSnapshot;
+/** v4.0.3: schema 7 structural validation of the persisted evidence posture.
+ *  A committed round without a well-formed posture is a HARD break — it is not
+ *  committed history and is reported as legacy, never silently re-derived. */
+export declare function isEvidencePosture(value: unknown): value is EvidencePosture;
+/** v4.0.3: structural validation of the transient retry context. It is only
+ *  legal on a rejected attempt or its held retry prompt. */
+export declare function isRetryContext(value: unknown): value is RetryContext;
 export declare function isProcessResult(value: unknown): value is RoundProcessResult;
 /** Parse a persisted snapshot without trusting arbitrary vault data. */
 export declare function parseRoundTransactionSnapshot(value: unknown): RoundTransactionSnapshot | null;

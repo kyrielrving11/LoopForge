@@ -78,7 +78,10 @@ import { SERVER_INSTRUCTIONS } from "../mcp/server.js";
 import { LOST_HANDLE_ROUTING } from "../recovery-guidance.js";
 import { resetPolicy, getPolicy, setPolicyForTest, DEFAULT_POLICY } from "../policy.js";
 import type { SelfEvaluation } from "../protocol.js";
-import { RoundTransactionCoordinator } from "../round-transaction.js";
+import {
+  ROUND_TRANSACTION_SCHEMA_VERSION,
+  RoundTransactionCoordinator,
+} from "../round-transaction.js";
 import { SessionLeaseConflictError } from "../storage.js";
 import { deriveGate } from "../cognitive-governance.js";
 
@@ -231,7 +234,7 @@ describe("MCP — multi-round lifecycle", async () => {
     assert.equal(r1.round, 2);
     assert.ok(typeof r1.prompt === "string");
 
-    // Round 2 → 3 (roundSuccess true)
+    // Round 2 → 3 (agentSuccessClaim true)
     const r2 = await toolNext(mgr, {
       sessionId,
       submissionHandle: r1.submissionHandle,
@@ -548,7 +551,7 @@ describe("MCP — multi-round lifecycle", async () => {
       "the first recurring-violation occurrence must reject");
     assert.equal(last.contextMode, "same_round_retry");
     assert.equal(last.contextReason, "enforcement_retry");
-    assert.doesNotMatch(String(last.prompt ?? ""), /Working Memory \(committed history/);
+    assert.ok(!String(last.prompt ?? "").includes("Working Memory (Agent reports are claims"));
     // Submission 4: second consecutive same-check rejection.
     last = await toolNext(mgr, {
       sessionId,
@@ -812,23 +815,25 @@ describe("MCP — status / list / stop / replay", async () => {
     mgr = new SessionManager(store);
   });
 
-  it("status returns correct round, roundSuccess, status", async () => {
+  it("status returns correct round, agentSuccessClaim, status", async () => {
     const start = await TOOL_HANDLERS.loopforge_start(mgr, { task: "Status test" });
     const sessionId = String(start.sessionId);
 
-    // Advance once to populate roundSuccess and trajectory
+    // Advance once to populate agentSuccessClaim and trajectory. v4.0.3: only a
+    // machine-backed success enters the trajectory, so the claim must pass
+    // through the installed command provider.
     await toolNext(mgr, {
       sessionId,
       submissionHandle: start.submissionHandle,
-      output: agentOutput({ success: false, shouldContinue: true }),
-      evaluation: evalParam({ success: false, shouldContinue: true }),
+      output: agentOutput({ success: true, shouldContinue: true }),
+      evaluation: evalParam({ success: true, shouldContinue: true }),
     });
 
     const status = await TOOL_HANDLERS.loopforge_status(mgr, { sessionId });
     assert.equal(status.sessionId, sessionId);
     assert.equal(status.round, 2);
     assert.equal(status.status, "running");
-    assert.ok((status.successTrajectory as boolean[]).length >= 1);
+    assert.ok((status.machineBackedSuccessTrajectory as boolean[]).length >= 1);
   });
 
   it("status view=session resolves the durable loopId to the live session", async () => {
@@ -921,18 +926,18 @@ describe("MCP — status / list / stop / replay", async () => {
     const start = await TOOL_HANDLERS.loopforge_start(mgr, { task: "Stop test" });
     const sessionId = String(start.sessionId);
 
-    // Advance once
+    // Advance once with a machine-backed success so the trajectory is real.
     await toolNext(mgr, {
       sessionId,
       submissionHandle: start.submissionHandle,
-      output: agentOutput({ success: false, shouldContinue: true }),
-      evaluation: evalParam({ success: false, shouldContinue: true }),
+      output: agentOutput({ success: true, shouldContinue: true }),
+      evaluation: evalParam({ success: true, shouldContinue: true }),
     });
 
     const result = await TOOL_HANDLERS.loopforge_stop(mgr, { sessionId });
     assert.equal(result.success, true);
     assert.equal(result.roundsCompleted, 2);
-    assert.ok((result.successTrajectory as boolean[]).length >= 1);
+    assert.ok((result.machineBackedSuccessTrajectory as boolean[]).length >= 1);
 
     // Session should be gone
     const status = await TOOL_HANDLERS.loopforge_status(mgr, { sessionId });
@@ -1137,7 +1142,7 @@ describe("MCP P0 lifecycle regressions", () => {
     // v3.2: an unverified success commits the loop but never enters the
     // trajectory — success without machine observation is not progress.
     assert.deepEqual(
-      mgr.getSuccessTrajectory(mgr.get(sessionId)!.loopId),
+      mgr.getMachineBackedSuccessTrajectory(mgr.get(sessionId)!.loopId),
       [],
     );
 
@@ -1366,7 +1371,7 @@ describe("MCP P0 lifecycle regressions", () => {
 
     const persisted = counting.readSession("atomic-session-save")
       ?.entry?.loop_lineage?.round_snapshot as Record<string, unknown> | undefined;
-    assert.equal(persisted?.schemaVersion, 6);
+    assert.equal(persisted?.schemaVersion, ROUND_TRANSACTION_SCHEMA_VERSION);
     assert.equal(persisted?.roundId, started.submissionHandle?.roundId);
   });
 });
@@ -1446,7 +1451,7 @@ describe("MCP — input and output contract enforcement", () => {
         sessionId: "s1",
         round: 1,
         prompt: null,
-        roundSuccess: undefined,
+        agentSuccessClaim: undefined,
       }));
   });
 
@@ -1589,10 +1594,12 @@ describe("MCP — v3.2 unverified success trajectory", () => {
     });
     assert.equal(advanced.round, 2, "unverified success still advances the loop");
     const status = await TOOL_HANDLERS.loopforge_status(mgr, { sessionId });
-    assert.deepEqual(status.successTrajectory, [],
+    assert.deepEqual(status.machineBackedSuccessTrajectory, [],
       "an unverified success must not enter the trajectory");
 
-    // A non-success round does.
+    // v4.0.3: a non-success round never enters the trajectory either — the
+    // trajectory is a machine-backed success record, not a record of every
+    // accepted round.
     const second = await toolNext(mgr, {
       sessionId,
       submissionHandle: advanced.submissionHandle,
@@ -1600,8 +1607,8 @@ describe("MCP — v3.2 unverified success trajectory", () => {
       evaluation: evalParam({ success: false, shouldContinue: true }),
     });
     const status2 = await TOOL_HANDLERS.loopforge_status(mgr, { sessionId });
-    assert.deepEqual(status2.successTrajectory, [false],
-      "a non-success round enters the trajectory");
+    assert.deepEqual(status2.machineBackedSuccessTrajectory, [],
+      "only machine-backed success enters the trajectory");
     void second;
   });
 });

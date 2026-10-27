@@ -3,17 +3,20 @@
  */
 
 import { describe, it } from "node:test";
-import { criterionClaims, deltaAfter } from "./_helpers.js";
+import {
+  criterionClaims,
+  fixtureEvidencePosture,
+} from "./_helpers.js";
+import { ROUND_TRANSACTION_SCHEMA_VERSION } from "../round-transaction.js";
 import assert from "node:assert/strict";
 import { makeExecutionReport, makeSelfEvaluation } from "../protocol.js";
 import type { SelfEvaluation, VerificationFlag } from "../protocol.js";
-import type { CommandObservation, ObservationStatus } from "../protocol.js";
 import {
   deriveClaimView,
   rederiveClaimViewWithFlags,
   resolveRoundFiles,
-  listVerifiedClaims,
 } from "../evidence-claims.js";
+import { deriveCriterionId } from "../token-utils.js";
 import type { VaultEntry } from "../loop-store.js";
 
 function evalWithCriteria(
@@ -33,40 +36,11 @@ function evalWithCriteria(
   });
 }
 
-function commandSnapshot(
-  status: "passed" | "failed",
-  required = false,
-): CommandObservation {
-  return {
-    schemaVersion: 1,
-    providerId: "command:npm-test",
-    kind: "command",
-    phase: "after",
-    startedAt: 0,
-    finishedAt: 0,
-    status,
-    files: [],
-    data: {
-      commandId: "npm-test",
-      argv: ["npm", "test"],
-      cwd: ".",
-      configHash: "0".repeat(64),
-      required,
-      exitCode: status === "passed" ? 0 : 1,
-      signal: null,
-      durationMs: 1,
-      stdoutSha256: "0".repeat(64),
-      stderrSha256: "0".repeat(64),
-      stdoutExcerpt: status === "passed" ? "all tests passed" : "FAIL 1",
-      stderrExcerpt: "",
-      truncated: false,
-      entrypointFiles: [],
-    },
-  };
-}
+const verifiedIds = (...texts: string[]): Set<string> =>
+  new Set(texts.map((text) => deriveCriterionId(text)));
 
-describe("deriveClaimView", () => {
-  it("marks all reported criteria as claimed by default (no machine evidence)", () => {
+describe("deriveClaimView — machine-verified ids only", () => {
+  it("marks reported criteria as claimed by default", () => {
     const selfEval = evalWithCriteria({
       execution_report: makeExecutionReport({
         files_changed: ["src/a.ts"],
@@ -74,7 +48,7 @@ describe("deriveClaimView", () => {
         criterion_claims: criterionClaims(["tests pass"], []),
       }),
     });
-    const view = deriveClaimView(selfEval, []);
+    const view = deriveClaimView(selfEval, new Set());
     assert.equal(view.claims.length, 1);
     assert.equal(view.claims[0].status, "claimed");
     assert.equal(view.claims[0].source, "agent");
@@ -82,55 +56,35 @@ describe("deriveClaimView", () => {
     assert.equal(view.hasMachineEvidence, false);
   });
 
-  it("upgrades to verified only with passing test results AND passed after-command", () => {
+  it("upgrades ONLY when the criterion id is machine-verified", () => {
     const selfEval = evalWithCriteria();
-    const view = deriveClaimView(selfEval, [deltaAfter(commandSnapshot("passed"))]);
+    const view = deriveClaimView(selfEval, verifiedIds("tests pass"));
     assert.equal(view.verifiedCount, 1);
     assert.equal(view.claims[0].status, "verified");
-    assert.equal(view.claims[0].source, "command");
+    assert.equal(view.claims[0].source, "machine");
+    assert.equal(view.claims[0].ref, `criterion:${deriveCriterionId("tests pass")}`);
   });
 
-  it("stays claimed when tests pass but no command snapshot observed", () => {
+  it("does NOT upgrade from self-reported tests plus a passed command", () => {
+    // v4.0.3: tests_reported and a passing command are not a criterion fact.
     const selfEval = evalWithCriteria();
-    const view = deriveClaimView(selfEval, []);
-    assert.equal(view.verifiedCount, 0);
+    const view = deriveClaimView(selfEval, new Set());
+    assert.equal(view.verifiedCount, 0,
+      "Agent-reported test counts never upgrade a claim");
     assert.equal(view.claims[0].status, "claimed");
   });
 
-  it("v3.3: self-reported passing tests without a passed command are NOT machine evidence", () => {
-    // The attack the tightening closes: fabricated tests_reported alone used
-    // to satisfy hasMachineEvidence (which gates R8 and the criteria check).
+  it("maps a plain-text target to its stable criterion id", () => {
     const selfEval = evalWithCriteria();
-    const view = deriveClaimView(selfEval, []);
-    assert.equal(view.hasMachineEvidence, false,
-      "self-reported test results alone must not count as machine evidence");
-    const withCommand = deriveClaimView(selfEval, [deltaAfter(commandSnapshot("passed"))]);
-    assert.equal(withCommand.hasMachineEvidence, true,
-      "a passed after-phase command upgrades the claim to machine evidence");
+    const view = deriveClaimView(selfEval, verifiedIds("tests pass"));
+    assert.equal(view.claims[0].status, "verified");
   });
 
-  it("stays claimed when command passed but test results are null", () => {
-    const selfEval = evalWithCriteria({
-      execution_report: makeExecutionReport({
-        files_changed: ["src/a.ts"],
-        tests_reported: null,
-        criterion_claims: criterionClaims(["tests pass"], []),
-      }),
-    });
-    const view = deriveClaimView(selfEval, [deltaAfter(commandSnapshot("passed"))]);
+  it("does not verify a different criterion that happens to share a command", () => {
+    const selfEval = evalWithCriteria();
+    const view = deriveClaimView(selfEval, verifiedIds("another criterion"));
     assert.equal(view.verifiedCount, 0);
-  });
-
-  it("stays claimed when test results have failures", () => {
-    const selfEval = evalWithCriteria({
-      execution_report: makeExecutionReport({
-        files_changed: ["src/a.ts"],
-        tests_reported: { passed: 3, failed: 1, skipped: 0 },
-        criterion_claims: criterionClaims(["tests pass"], []),
-      }),
-    });
-    const view = deriveClaimView(selfEval, [deltaAfter(commandSnapshot("passed"))]);
-    assert.equal(view.verifiedCount, 0);
+    assert.equal(view.claims[0].status, "claimed");
   });
 });
 
@@ -143,7 +97,8 @@ describe("rederiveClaimViewWithFlags", () => {
       check: "required_command_failed",
       detail: "npm-test failed",
     }];
-    const view = rederiveClaimViewWithFlags(selfEval, [deltaAfter(commandSnapshot("passed"))], flags);
+    const view = rederiveClaimViewWithFlags(
+      selfEval, verifiedIds("tests pass"), flags);
     assert.equal(view.claims[0].status, "contradicted");
     assert.equal(view.claims[0].source, "verification");
     assert.equal(view.verifiedCount, 0);
@@ -158,7 +113,8 @@ describe("rederiveClaimViewWithFlags", () => {
       check: "evidence_integrity",
       detail: "ghost file",
     }];
-    const view = rederiveClaimViewWithFlags(selfEval, [deltaAfter(commandSnapshot("passed"))], flags);
+    const view = rederiveClaimViewWithFlags(
+      selfEval, verifiedIds("tests pass"), flags);
     assert.equal(view.claims[0].status, "verified");
   });
 });
@@ -173,10 +129,10 @@ describe("resolveRoundFiles", () => {
     loop_lineage: {
       round: 1,
       round_transaction: {
-        schema_version: 6,
+        schema_version: ROUND_TRANSACTION_SCHEMA_VERSION,
         round_id: "loop:provenance-loop:round:1",
         snapshot: {
-          schemaVersion: 6,
+          schemaVersion: ROUND_TRANSACTION_SCHEMA_VERSION,
           kind: "evaluation",
           branchId: "loop:provenance-loop:branch:root",
           transactionId: "tx-provenance-loop-1-1",
@@ -239,7 +195,11 @@ describe("resolveRoundFiles", () => {
           createdAt: Date.now(),
           updatedAt: Date.now(),
         },
-        result: { action: "continue", verificationFlags: [] },
+        result: {
+          action: "continue",
+          verificationFlags: [],
+          evidencePosture: fixtureEvidencePosture(1),
+        },
       },
     },
   };
@@ -259,10 +219,10 @@ describe("resolveRoundFiles", () => {
       loop_lineage: {
         round: 1,
         round_transaction: {
-          schema_version: 6,
+          schema_version: ROUND_TRANSACTION_SCHEMA_VERSION,
           round_id: "loop:provenance-loop:round:1",
           snapshot: {
-            schemaVersion: 6,
+            schemaVersion: ROUND_TRANSACTION_SCHEMA_VERSION,
             kind: "evaluation",
             branchId: "loop:provenance-loop:branch:root",
             transactionId: "tx-provenance-loop-1-1b",
@@ -300,103 +260,14 @@ describe("resolveRoundFiles", () => {
             createdAt: Date.now(),
             updatedAt: Date.now(),
           },
-          result: { action: "continue", verificationFlags: [] },
+          result: {
+          action: "continue",
+          verificationFlags: [],
+          evidencePosture: fixtureEvidencePosture(1),
+        },
         },
       },
     };
     assert.equal(resolveRoundFiles([noGit], "provenance-loop", 1), null);
-  });
-});
-
-describe("listVerifiedClaims", () => {
-  function committedFeedback(
-    round: number,
-    evaluation: SelfEvaluation,
-    flags: VerificationFlag[],
-    snapshots: CommandObservation[],
-  ): VaultEntry {
-    return {
-      id: `loop:provenance-loop:r${round}:feedback`,
-      task_id: `loop:provenance-loop:r${round}:feedback`,
-      task_type: "feedback",
-      loop_id: "provenance-loop",
-      timestamp: new Date().toISOString(),
-      loop_lineage: {
-        round,
-        round_transaction: {
-          schema_version: 6,
-          round_id: `loop:provenance-loop:round:${round}`,
-          snapshot: {
-            schemaVersion: 6,
-            kind: "evaluation",
-            branchId: "loop:provenance-loop:branch:root",
-            transactionId: `tx-provenance-loop-${round}-1`,
-            roundId: `loop:provenance-loop:round:${round}`,
-            loopId: "provenance-loop",
-            round,
-            attempt: 1,
-            phase: "committed",
-            beforeEvidence: [],
-            afterEvidence: snapshots,
-            operatorAcceptance: {
-              task: "Provenance task",
-              success_criteria: [],
-              hard_constraints: [],
-            },
-            compiled: {
-              task: "Provenance task",
-              goalId: "provenance-loop:provenance-task",
-              constraintsActive: [],
-              constraintsRetired: [],
-            },
-            evaluation,
-            submittedFields: [
-              "success", "output_summary", "constraint_violations", "should_continue",
-            ],
-            result: { action: "continue", verificationFlags: flags },
-            createdAt: Date.now(),
-            updatedAt: Date.now(),
-          },
-          result: { action: "continue", verificationFlags: flags },
-        },
-      },
-    };
-  }
-
-  it("collects verified claim targets across committed rounds", () => {
-    const entries = [
-      committedFeedback(1, evalWithCriteria(), [], [commandSnapshot("passed")]),
-      committedFeedback(
-        2,
-        evalWithCriteria({
-          execution_report: makeExecutionReport({
-            files_changed: ["src/b.ts"],
-            tests_reported: null,
-            criterion_claims: criterionClaims(["docs updated"], []),
-          }),
-        }),
-        [],
-        [],
-      ),
-    ];
-    const verified = listVerifiedClaims(entries, "provenance-loop");
-    assert.deepEqual(verified, ["tests pass"]);
-  });
-
-  it("excludes claims contradicted by error flags", () => {
-    const entries = [
-      committedFeedback(
-        1,
-        evalWithCriteria(),
-        [{
-          severity: "error",
-          field: "success",
-          check: "required_command_failed",
-          detail: "failed",
-        }],
-        [commandSnapshot("passed")],
-      ),
-    ];
-    assert.deepEqual(listVerifiedClaims(entries, "provenance-loop"), []);
   });
 });

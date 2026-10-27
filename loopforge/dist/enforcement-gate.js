@@ -52,6 +52,10 @@ function hasCommittedBacktrack(vaultEntries, currentRound) {
  *  run of such rounds). Rejected/terminated rounds never commit, and
  *  rolled-back rounds are excluded below. */
 function isCleanRound(round) {
+    // v4.0.3: a round without a complete observable boundary is not a
+    // machine-clean restore point. Unknown evidence never reads as clean.
+    if (round.evidenceIncomplete)
+        return false;
     return !round.verificationFlags.some((flag) => flag.severity === "error");
 }
 /** Scan backwards from currentRound to find the most recent clean round.

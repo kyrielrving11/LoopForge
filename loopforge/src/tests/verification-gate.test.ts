@@ -8,7 +8,14 @@ import {
   type VerificationFlag,
 } from "../protocol.js";
 import type { VaultEntry } from "../loop-store.js";
-import { committedFeedbackRound as committedRound, testCommandProvider, criterionClaims, deltasFrom } from "./_helpers.js";
+import {
+  committedFeedbackRound as committedRound,
+  criterionClaims,
+  deltasFrom,
+  fixtureEvidencePosture,
+  testCommandProvider,
+} from "./_helpers.js";
+import { ROUND_TRANSACTION_SCHEMA_VERSION } from "../round-transaction.js";
 import type { EntrypointDrift } from "../evidence-provider.js";
 import { verifySelfEvaluation as rawVerifySelfEvaluation, parseTestOutput, deriveEvidenceStatus, CHECK_VERIFICATION_ENTRYPOINT_MODIFIED, CHECK_TEST_FILES_MODIFIED, CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE } from "../verification-gate.js";
 import {
@@ -74,7 +81,8 @@ function se(overrides: Partial<SelfEvaluation> = {}): SelfEvaluation {
     execution_report: makeExecutionReport({
       files_changed: ["src/a.ts"],
       tests_reported: { passed: 1, failed: 0, skipped: 0 },
-      criterion_claims: criterionClaims(["criterion A"], []),
+      // v4.0.3: no default criterion claim; a claim needs a machine fact.
+      criterion_claims: [],
     }),
     ...overrides,
   });
@@ -173,7 +181,7 @@ describe("verification-gate — happy path", () => {
       execution_report: makeExecutionReport({
         files_changed: ["src/foo.ts"],
         tests_reported: { passed: 3, failed: 0, skipped: 0 },
-        criterion_claims: criterionClaims(["impl"], ["tests"]),
+        criterion_claims: criterionClaims([], ["tests"]),
       }),
       constraint_violations: ["deadline"],
       discovered_constraints: ["new: must handle null"],
@@ -236,7 +244,7 @@ describe("verification-gate — success with remaining criteria", () => {
     assert.ok(flag.detail.includes("tests pass"));
   });
 
-  it("does not flag when success=true and criteria list is empty", () => {
+  it("flags met criteria that no machine fact backs, even with no contract", () => {
     const curr = se({
       success: true,
       execution_report: makeExecutionReport({
@@ -247,7 +255,9 @@ describe("verification-gate — success with remaining criteria", () => {
     });
 
     const result = verifySelfEvaluation(curr, 3, [], null, [gitSnap(), cmdSnap("passed")]);
-    assert.equal(result.verdict, "trusted");
+    assert.equal(result.verdict, "suspect");
+    assert.ok(result.flags.some(
+      (flag) => flag.check === "criteria_claims_unverified"));
   });
 
   it("does not flag when success is false even with remaining criteria", () => {
@@ -839,10 +849,10 @@ describe("verification-gate — v2.12 outcome consistency", () => {
       loop_lineage: {
         round: 1,
         round_transaction: {
-          schema_version: 6,
+          schema_version: ROUND_TRANSACTION_SCHEMA_VERSION,
           round_id: "loop:test-loop:round:1",
           snapshot: {
-            schemaVersion: 6,
+            schemaVersion: ROUND_TRANSACTION_SCHEMA_VERSION,
             kind: "evaluation" as const,
             branchId: "loop:test-loop:branch:root",
             transactionId: "tx-test-loop-1-1",
@@ -905,7 +915,11 @@ describe("verification-gate — v2.12 outcome consistency", () => {
             createdAt: Date.now(),
             updatedAt: Date.now(),
           },
-          result: { action: "continue", verificationFlags: [] },
+          result: {
+            action: "continue",
+            verificationFlags: [],
+            evidencePosture: fixtureEvidencePosture(1),
+          },
         },
       },
     }];
@@ -937,7 +951,7 @@ describe("verification-gate — v2.12 unverified criteria claims", () => {
     assert.equal(flag.severity, "warn");
   });
 
-  it("stays silent when test evidence backs the claims", () => {
+  it("Agent-reported test counts never back a criterion claim", () => {
     const curr = se({
       execution_report: makeExecutionReport({
         files_changed: ["src/a.ts"],
@@ -946,7 +960,9 @@ describe("verification-gate — v2.12 unverified criteria claims", () => {
       }),
     });
     const result = verifySelfEvaluation(curr, 2, [], null);
-    assert.ok(!result.flags.some((f) => f.check === "criteria_claims_unverified"));
+    assert.ok(result.flags.some(
+      (flag) => flag.check === "criteria_claims_unverified"),
+      "tests_reported is a claim, not a machine criterion fact");
   });
 
   it("stays silent when no criteria are reported met", () => {
@@ -971,14 +987,13 @@ describe("v3.2 — deriveEvidenceStatus", () => {
   it("git diff observed but no passed command → unavailable (v3.3)", () => {
     const status = deriveEvidenceStatus(se(), deltasFrom([gitSnap(["src/a.ts"])]));
     assert.equal(status.providerStatus, "unavailable");
-    assert.equal(status.gitObserved, true);
     assert.equal(status.gitChangeState, "observed");
   });
 
   it("git snapshot present but no changes → observed boundary, unavailable verification", () => {
     const status = deriveEvidenceStatus(se(), deltasFrom([gitSnap([])]));
     assert.equal(status.providerStatus, "unavailable");
-    assert.equal(status.gitObserved, true,
+    assert.equal(status.gitChangeState, "observed",
       "an observed empty boundary is not the same as an unobservable one");
   });
 
@@ -987,7 +1002,7 @@ describe("v3.2 — deriveEvidenceStatus", () => {
     assert.equal(status.providerStatus, "absent");
   });
 
-  it("passed after-command → verified, testsMachineBacked when counts agree", () => {
+  it("passed after-command → verified", () => {
     const selfEval = se({
       execution_report: makeExecutionReport({
         files_changed: [],
@@ -997,13 +1012,11 @@ describe("v3.2 — deriveEvidenceStatus", () => {
     const status = deriveEvidenceStatus(selfEval, deltasFrom([cmdSnap("passed")]));
     assert.equal(status.providerStatus, "verified");
     assert.equal(status.commandVerified, true);
-    assert.equal(status.testsMachineBacked, true);
   });
 
-  it("failed after-command → unavailable, testsMachineBacked false", () => {
+  it("failed after-command → unavailable", () => {
     const status = deriveEvidenceStatus(se(), deltasFrom([cmdSnap("failed")]));
     assert.equal(status.providerStatus, "unavailable");
-    assert.equal(status.testsMachineBacked, false);
   });
 });
 

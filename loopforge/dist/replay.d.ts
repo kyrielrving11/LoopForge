@@ -20,15 +20,16 @@ export interface ReplayWindowOptions {
     end?: number;
 }
 export interface ReplayWindow {
-    /** First returned round; 0 when the window is empty. */
+    /** First round POSITION returned (legacy rows included); 0 when empty. */
     start: number;
-    /** Last returned round; 0 when the window is empty. */
+    /** Last round POSITION returned (legacy rows included); 0 when empty. */
     end: number;
-    /** Committed evaluation rounds on the current branch. */
+    /** Distinct committed round positions on the branch, INCLUDING legacy
+     *  envelopes that are not parseable history. The loss stays counted. */
     totalRounds: number;
-    /** Committed rounds exist before this window. */
+    /** Round positions exist before this window. */
     hasBefore: boolean;
-    /** Committed rounds exist after this window. */
+    /** Round positions exist after this window. */
     hasAfter: boolean;
 }
 export interface ReplayPage {

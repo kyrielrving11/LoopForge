@@ -59,7 +59,10 @@ function collectFiles(dir) {
     }
   };
   if (existsSync(dir)) walk(dir);
-  return out.sort();
+  // `dist/tests/` is gitignored and excluded from the published package, so a
+  // clean checkout cannot contain it. The clean build does compile tests;
+  // comparing them would make every fresh-clone verification fail.
+  return out.filter((file) => !file.startsWith("tests/")).sort();
 }
 
 /** Compare line-ending-normalized file contents (git may store CRLF). */

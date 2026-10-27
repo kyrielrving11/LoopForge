@@ -98,8 +98,20 @@ describe("RoundCoordinator — happy path", () => {
   const coordinator = new RoundCoordinator();
 
   it("accepts a normal round and returns continue", () => {
-    const result = coordinator.processRound(minimalInput());
+    // v4.0.3: the success trajectory counts MACHINE-BACKED success only, so
+    // the claim must be effective and the passed command must back it.
+    const result = coordinator.processRound(minimalInput({
+      selfEval: se({
+        success: true,
+        execution_report: makeExecutionReport({
+          files_changed: ["auth.ts"],
+          tests_reported: { passed: 10, failed: 0, skipped: 0 },
+          criterion_claims: [],
+        }),
+      }),
+    }));
     assert.equal(result.action, "continue");
+    assert.equal(result.evidencePosture.status, "verified");
     assert.ok(result.shouldPushSuccessTrajectory);
     assert.equal(result.newConsecutiveRejections, 0);
   });
@@ -150,6 +162,9 @@ describe("RoundCoordinator — stop conditions", () => {
     const result = withVault.processRound(minimalInput({
       loopId: "stop-open-contract",
       currentRound: 2,
+      // No after observation for the bound command: "claimed met" stays
+      // insufficient and the contract stays open.
+      evidenceDeltas: [],
       selfEval: se({
         success: true,
         should_continue: false,

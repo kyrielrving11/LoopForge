@@ -29,9 +29,10 @@ export interface SelfEvaluation {
     /** true ONLY if all hard constraints were met and the task goal was achieved. */
     success: boolean;
     /** Specific, actionable summary of what was DONE this round.
-     *  Feeds: committed record, state file, audit/replay/explain, and
-     *  backtrack failed-approach facts. Never machine evidence, never a
-     *  current-prompt narrative, and never a second history. */
+     *  Feeds: committed record, state file, audit/replay/explain, backtrack
+     *  facts, and the BOUNDED fresh-prompt Working Memory. It is always an
+     *  Agent report — never machine evidence, never current governance, and
+     *  never an independent history. */
     output_summary: string;
     /** Constraints the agent actually violated this round.
      *  Feeds: deriveRecurringFlags (the constraint_violation kind) and
@@ -79,12 +80,15 @@ export interface SelfEvaluation {
     /** v4.0.2: stable ids of questions resolved in this round. IDs are derived
      *  from normalized open-question text and are report-only. */
     resolved_open_question_ids?: string[];
-    /** Agent declares a subtask boundary. When true, the next compile uses an
-     *  L2 rehydration boundary; no milestone or phase narrative is generated. */
-    compression_checkpoint?: boolean;
-    /** Human-readable label stored on the committed report. It does not create a
-     *  later prompt heading. */
-    checkpoint_label?: string;
+    /** v4.0.3 (renamed from compression_checkpoint): the Agent declares a
+     *  subtask boundary. When true, the next compile uses an L2 rehydration
+     *  boundary; no milestone or phase narrative is generated. It is not a
+     *  workspace checkpoint. */
+    subtask_boundary?: boolean;
+    /** v4.0.3 (renamed from checkpoint_label): a label stored on the committed
+     *  report. It does not create a later prompt heading and is not a real
+     *  checkpoint reference. */
+    subtask_boundary_label?: string;
     /** Multi-agent: Results of sub-agent / Worker delegations this round.
      *  The main agent reports what it delegated; the report is saved inside the
      *  committed transaction for audit. Omit or leave empty if none occurred. */
@@ -258,8 +262,16 @@ export interface RecoveryDirective {
     trigger_rule?: string;
     target: RecoveryTarget;
     skipped_files: string[];
+    /** v4.0.3: machine-observed vs Agent-reported abandoned files. */
+    observed_skipped_files?: string[];
+    reported_skipped_files?: string[];
+    /** v4.0.3: every committed round abandoned by the directive. */
+    abandoned_rounds?: number[];
     skipped_discoveries: string[];
     failed_rounds: number[];
+    /** v4.0.3: compact trigger findings replayed into the redo's Verification
+     *  Gate (machine backtrack). Never inferred on an agent directive. */
+    trigger_findings?: VerificationFlag[];
     /** Committed Agent reports from abandoned rounds. */
     approaches: string[];
     wrong_assumptions: string[];
@@ -347,6 +359,10 @@ export interface SubmissionReceipt {
      *  a committed record but NOT the submitted evaluation applied. */
     record: "committed" | "rollback_directive" | "none";
     entered_history: boolean;
+    /** v4.0.3: the Agent's claim carried by this submission. */
+    agent_success_claim: boolean;
+    /** v4.0.3: the effective Agent-declared outcome. */
+    agent_outcome: RoundOutcome | null;
     /** v3.9.7: the checkpoint this submission was judged against. Present only
      *  when a pending rollback directive governed the submission — the redo.
      *  `restore_verified` reads the redo transaction's verified-restore marker;
@@ -401,7 +417,7 @@ export interface SubmissionReceipt {
         constraints_activation: "observed" | "not_observed";
         constraints_active_after: string[] | null;
         constraints_not_expanded: string[];
-        checkpoint: {
+        subtask_boundary: {
             label: string;
             round: number;
         } | null;
@@ -410,16 +426,21 @@ export interface SubmissionReceipt {
             target_checkpoint_id: string;
             preserved_discoveries: string[];
             wrong_assumptions: string[];
+            /** v4.0.3: machine-observed vs Agent-reported abandoned files. */
+            observed_skipped_files: string[];
+            reported_skipped_files: string[];
+            abandoned_rounds: number[];
+            /** Stable finding ids that triggered a machine backtrack. */
+            trigger_finding_ids: string[];
             origin?: "agent" | "machine";
             reason?: string;
         } | null;
     };
     verification: {
-        /** Contract-item posture (RoundVerificationStatus). */
-        contract_status: RoundVerificationStatus;
-        /** Round-level machine evidence posture. A round can have trusted
-         *  contract items while a bare success claim has no machine evidence. */
-        evidence_status: "verified" | "unavailable" | "absent";
+        /** v4.0.3: the ONE persisted evidence posture of this submission. It
+         *  replaces the former `contract_status` + `evidence_status` pair, which
+         *  could disagree about the same round. */
+        evidence_posture: EvidencePosture;
         checks: Array<{
             field: string;
             check: string;
@@ -428,6 +449,7 @@ export interface SubmissionReceipt {
             /** v3.9.4: the concrete subject (command id, path, or stable id). */
             ref?: string;
         }>;
+        /** Read from the same posture snapshot. */
         contract_items: Array<{
             item_id: string;
             status: ContractItemStatus;
@@ -477,7 +499,10 @@ export interface SubmissionGuidance {
     criteria: Array<{
         id: string;
         text: string;
-        status: CriterionStatus["status"];
+        /** The same closed status set as `CriterionStatus.status`, written inline
+         *  so the generated JSON Schema publishes the enum instead of an
+         *  unrepresentable indexed-access placeholder. */
+        status: "unknown" | "claimed" | "remaining" | "insufficient" | "contradicted" | "verified";
     }>;
     recovery: {
         /** The directive is pending until the redo round commits. */
@@ -546,8 +571,14 @@ export interface CriterionStatus {
     /** The criterion text as declared in the objective. */
     text: string;
     status: "unknown" | "claimed" | "remaining" | "insufficient" | "contradicted" | "verified";
-    /** Round when the criterion was first reported met (machine-backed). */
-    met_at_round?: number;
+    /** v4.0.3: the round the CURRENT status was first reached. For an Agent
+     *  claim it is the latest claim round (latest-claim wins); for a machine
+     *  fact it is the round that reached that machine status. Absent for
+     *  `unknown`. */
+    status_at_round?: number;
+    /** v4.0.3: who produced the current status. `agent` for claimed/remaining;
+     *  `machine` for verified/insufficient/contradicted; absent for unknown. */
+    status_source?: "agent" | "machine";
 }
 /** v3.2: A deterministic "lesson learned" — a constraint or verification
  *  check that failed repeatedly across rounds. Rendered in the prompt to
@@ -644,10 +675,12 @@ export interface ConstraintMeta {
 export declare function makeConstraintMeta(overrides?: Partial<ConstraintMeta>): ConstraintMeta;
 export interface LoopRoundResult {
     round: number;
-    success: boolean;
+    /** v4.0.3: the Agent's success claim. */
+    agentSuccessClaim: boolean;
+    /** v4.0.3: the effective Agent-declared outcome. */
+    agentOutcome?: RoundOutcome;
     output_summary: string;
     constraint_violations: string[];
-    manual_fixes_needed: string;
     /** P0: Constraints discovered during this round. */
     discovered_constraints?: string[];
     /** P2: Sub-problems that emerged during this round. */
@@ -668,12 +701,10 @@ export interface LoopRoundResult {
     /** Multi-agent: Delegation results from this round.
      *  Set from SelfEvaluation.worker_results during buildLoopRequest. */
     worker_results?: WorkerResult[];
-    /** v1.10: Agent declared a subtask boundary in this round. */
-    compression_checkpoint?: boolean;
-    /** v1.10: Human-readable label for the checkpoint. */
-    checkpoint_label?: string;
-    /** v2.12: Declared outcome. Carried forward from SelfEvaluation. */
-    outcome?: RoundOutcome;
+    /** v4.0.3: Agent declared a subtask boundary in this round. */
+    subtask_boundary?: boolean;
+    /** v4.0.3: Human-readable label for the subtask boundary. */
+    subtask_boundary_label?: string;
     /** v2.12: Flat blocker description (outcome==="blocked" only). */
     blocker?: string;
     /** v2.12: Retroactive claims against prior rounds. */
@@ -709,6 +740,13 @@ export interface LoopCompileRequest {
     consecutive_rejections: number;
     /** Structured enforcement feedback rendered into retry prompts. */
     rejection_notice: string;
+    /** v4.0.3: the rejected attempt's transient evidence posture. Rendered only
+     *  for a fresh retry (`attempt > 1`, `contextMode === "fresh_round"`); it is
+     *  never committed history, never Working Memory and never a gate input. */
+    retry_evidence_posture?: EvidencePosture;
+    /** v4.0.3: compile-context fact — this prompt was compiled after a verified
+     *  restore of the pending directive. Never Agent input, never persisted. */
+    restore_verified?: boolean;
 }
 export declare function makeLoopCompileRequest(overrides?: Partial<LoopCompileRequest>): LoopCompileRequest;
 /** v3.9.4: ID-level proof that the current prompt rendered every active
@@ -752,11 +790,29 @@ export interface PromptCoverage {
  *  lifecycle; every response projects it from the committed PromptArtifact. */
 export type PromptContextMode = "fresh_round" | "same_round_retry";
 export type PromptContextReason = "first_round" | "next_round" | "recovery_redo" | "enforcement_retry";
-/** v4.0.2: what the prompt projection actually rendered from the bounded
- *  Working Memory. Audit metadata only — it never feeds a decision. */
+/** v4.0.3: how many committed items existed BEFORE any cap/dedupe. It is
+ *  derived once by Working Memory and travels through canonical state (and
+ *  therefore stateHash); renderers compare it with the rendered counts so an
+ *  omission is always visible. */
+export interface WorkingMemorySourceCounts {
+    /** Committed rounds in the fixed recent window. */
+    windowRounds: number;
+    reports: number;
+    assumptions: number;
+    openQuestions: number;
+    recoveries: number;
+    redirects: number;
+}
+/** v4.0.2/v4.0.3: what the prompt projection actually rendered from the
+ *  bounded Working Memory. Audit metadata only — it never feeds a decision.
+ *  `rendered: false` means the section was dropped whole (allowPartial=false)
+ *  or no prompt section exists; `sourceCounts` still states what existed. */
 export interface PromptWorkingMemoryProjection {
+    /** v4.0.3: whether the section body actually entered this prompt. */
+    rendered: boolean;
     /** Report rounds actually rendered, newest first. */
     reportRounds: number[];
+    /** Rendered per-category counts. */
     counts: {
         reports: number;
         assumptions: number;
@@ -764,6 +820,18 @@ export interface PromptWorkingMemoryProjection {
         recoveries: number;
         redirects: number;
     };
+    /** Pre-cap, pre-dedupe committed counts. */
+    sourceCounts: WorkingMemorySourceCounts;
+    /** sourceCounts minus rendered counts, per category. */
+    omittedCounts: {
+        reports: number;
+        assumptions: number;
+        openQuestions: number;
+        recoveries: number;
+        redirects: number;
+    };
+    /** Stable `oq-` ids actually rendered. */
+    questionIds: string[];
     /** The latest report's projection facts; null when none was rendered. */
     previousReport: {
         round: number;
@@ -782,10 +850,11 @@ export interface PromptWorkingMemoryProjection {
  *
  *  v4.0.1: schema 7 removes the prompt-request effects. v4.0.2: schema 8 adds
  *  the derived context boundary and the optional Working Memory projection.
- *  Older versions are a HARD break — a round whose artifact does not parse is
- *  not committed history, and `legacyTransactionRounds` reports the loss
- *  rather than letting it vanish. */
-export declare const PROMPT_ARTIFACT_SCHEMA_VERSION: 8;
+ *  v4.0.3: schema 9 adds the Machine Evidence projection and the expanded
+ *  Working Memory metadata. Older versions are a HARD break — a round whose
+ *  artifact does not parse is not committed history, and
+ *  `legacyTransactionRounds` reports the loss rather than letting it vanish. */
+export declare const PROMPT_ARTIFACT_SCHEMA_VERSION: 9;
 export interface PromptArtifact {
     schemaVersion: typeof PROMPT_ARTIFACT_SCHEMA_VERSION;
     /** Round identity: `loop:<loopId>:round:<n>`. */
@@ -872,21 +941,6 @@ export interface LoopCompileResponse {
     operatorAcceptance?: OperatorAcceptance;
 }
 export declare function makeLoopCompileResponse(overrides?: Partial<LoopCompileResponse>): LoopCompileResponse;
-/** Aggregated evidence snapshot for the state file Evidence section.
- *  Four categories give the agent a clear picture of what's been confirmed,
- *  what remains, what was wrong, and what's newly discovered — all derived
- *  from accumulated SelfEvaluation data across rounds. */
-export interface EvidenceSnapshot {
-    /** Criteria met + successful outcomes confirmed across rounds. */
-    verified: string[];
-    /** Criteria still unmet — work remaining. */
-    pending: string[];
-    /** Wrong assumptions + retracted constraints — things we were wrong about. */
-    invalidated: string[];
-    /** New constraints + emerged subtasks discovered this round. */
-    discovered: string[];
-}
-export declare function makeEvidenceSnapshot(overrides?: Partial<EvidenceSnapshot>): EvidenceSnapshot;
 /** Why a loop stopped. Used by MCP session and vault persistence.
  *  `completed` requires both success=true and should_continue=false.
  *  `failed` is success=false + should_continue=false (agent gave up).
@@ -925,10 +979,17 @@ export interface EnforcementResult {
 }
 export declare function makeEnforcementResult(overrides?: Partial<EnforcementResult>): EnforcementResult;
 export interface LoopTerminalEvent {
-    success: boolean;
+    /** v4.0.3: the loop lifecycle completed (the Agent's stop declaration
+     *  passed the gates). This is NOT a machine-verified task-success claim. */
+    completed: boolean;
+    /** v4.0.3: the last committed round's machine-backed success fact. */
+    machineBackedSuccess: boolean;
+    /** v4.0.3: the last committed round's evidence posture. */
+    evidencePosture: EvidencePosture | null;
     stopReason: StopReason;
     roundsCompleted: number;
-    successTrajectory: boolean[];
+    /** v4.0.3: only machine-backed successful rounds, in order. */
+    machineBackedSuccessTrajectory: boolean[];
     loopId: string;
     task: string;
     lastEvaluation?: SelfEvaluation;
@@ -1077,10 +1138,104 @@ export interface ContractBinding {
 /** v3.8: Runtime-derived contract item status. The agent may only claim
  *  `met` / `remaining`; the other three are machine-derived. */
 export type ContractItemStatus = "pending" | "insufficient" | "contradicted" | "verified";
-/** v3.8: The round-level verification posture. `trusted` means every claim in
- *  the round is machine-backed; `insufficient` means claims are unbacked but
- *  not contradicted; `contradicted` means machine facts deny a claim. */
-export type RoundVerificationStatus = "trusted" | "insufficient" | "contradicted" | "not_applicable";
+/** v4.0.3: the ONE round-level evidence posture.
+ *
+ *  It answers a deliberately narrow question: how well did this round's
+ *  machine observations cover its claims and its active contract? It is NOT a
+ *  task-success verdict and never decides `completed` — the Agent's stop
+ *  declaration still does that. `insufficient` and `unknown` are honest
+ *  coverage statements, not failures.
+ *
+ *  The posture is DERIVED ONCE by the coordinator inside the committed
+ *  transaction and then persisted with it. Every read surface (prompt, state
+ *  file, replay, explain, audit, receipt, metrics, terminal) reads that one
+ *  copy; none re-derives it. The raw observations/evaluation/flags remain the
+ *  underlying facts — the posture is a compact projection of the same
+ *  transaction, not a second store.
+ *
+ *  `unknown` never degrades to `verified` or to an empty result. */
+export type EvidencePostureStatus = "verified" | "insufficient" | "contradicted" | "unknown" | "not_applicable";
+/** v4.0.3: a compact, capped projection of one round's machine evidence.
+ *
+ *  It deliberately carries no stdout/stderr, no file fingerprints and no full
+ *  command output: full observations stay in the committed transaction and are
+ *  read through `explain`/`replay`. Array caps are code constants (never
+ *  policy); `omitted` records how many entries the cap hid, while `status` is
+ *  computed from the COMPLETE data before any cap is applied. */
+export interface EvidencePosture {
+    /** Logical round this posture describes. */
+    round: number;
+    /** Evaluation rounds carry observations; a rollback directive carries none. */
+    kind: "evaluation" | "rollback";
+    status: EvidencePostureStatus;
+    /** ONLY `VerificationResult.machineBackedSuccess` may set this. No read
+     *  surface and no posture consumer re-derives it. */
+    machineBackedSuccess: boolean;
+    /** Policy fact at commit time: at least one enabled, after-capable
+     *  verification command existed. It explains `insufficient`/`unknown`; it
+     *  never decides completion. */
+    verificationConfigured: boolean;
+    /** The committed Git delta boundary. `observed` means the before/after pair
+     *  was comparable; `unknown` means Git participated but the boundary could
+     *  not be compared; `not_applicable` means Git did not participate. */
+    workspace: {
+        status: "observed" | "unknown" | "not_applicable";
+        changedPathCount: number;
+    };
+    /** Agent-reported files vs the machine-observed Git change set. This is a
+     *  reconciliation, never a ledger of "verified files". */
+    files: {
+        reconciliation: "match" | "mismatch" | "unknown" | "not_applicable";
+        reported: number;
+        observed: number;
+    } | null;
+    /** Stable order: kind (git, custom), then providerId. `command` providers
+     *  are listed under `commands`, not here. */
+    providers: Array<{
+        providerId: string;
+        kind: "git" | "custom";
+        status: ObservationStatus;
+    }>;
+    /** Stable order: commandId. */
+    commands: Array<{
+        commandId: string;
+        status: ObservationStatus;
+        required: boolean;
+    }>;
+    /** Snapshot of the contract item statuses AT COMMIT TIME. Later policy or
+     *  command-configuration changes never rewrite it. */
+    contract: {
+        id: string;
+        closure: "open" | "verified" | "blocked" | "superseded";
+        items: Array<{
+            id: string;
+            status: ContractItemStatus;
+            criterionRefs: string[];
+            /** Deduped, capped historical explanation — never re-judged. */
+            reasons: string[];
+        }>;
+        verifiedCount: number;
+        insufficientCount: number;
+        contradictedCount: number;
+        pendingCount: number;
+    } | null;
+    /** Stable order: severity (error, warn, info), then check, ref, id. */
+    findings: Array<{
+        /** Stable `f-XXXXXXXX` finding id (`deriveFindingId`). */
+        id: string;
+        check: string;
+        severity: "info" | "warn" | "error";
+        ref?: string;
+    }>;
+    /** Entries hidden by the code caps. `status`/counts are computed from the
+     *  complete data, never from this capped projection. */
+    omitted: {
+        providers: number;
+        commands: number;
+        contractItems: number;
+        findings: number;
+    };
+}
 /** v3.8: Machine observation status. A configured provider always produces an
  *  observation — the failure modes are recorded, not filtered away.
  *

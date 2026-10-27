@@ -7,7 +7,7 @@
 import type { MachineObservation } from "./protocol.js";
 import type { ObservationDelta } from "./evidence-provider.js";
 import type { VaultEntry } from "./loop-store.js";
-import type { CheckpointRef, CompiledRoundFacts, ContractBinding, ContractTransition, ExecutionReport, LoopRoundResult, OperatorAcceptance, PromptArtifact, RecoveryDirective, RoundContractProposal, RoundOutcome, SelfEvaluation, SubmissionDiagnostic, SubGoalUpdate, VerificationFlag } from "./protocol.js";
+import type { CheckpointRef, CompiledRoundFacts, ContractBinding, ContractTransition, EvidencePosture, ExecutionReport, LoopRoundResult, OperatorAcceptance, PromptArtifact, RecoveryDirective, RoundContractProposal, RoundOutcome, SelfEvaluation, SubmissionDiagnostic, SubGoalUpdate, VerificationFlag } from "./protocol.js";
 import type { RoundProcessResult } from "./round-coordinator.js";
 import type { RoundTransactionSnapshot } from "./round-transaction.js";
 export type CommittedAction = "continue" | "stop" | "recovery" | "backtrack";
@@ -45,9 +45,15 @@ export interface CommittedRoundView {
     readonly executionReport: ExecutionReport | null;
     readonly verificationFlags: VerificationFlag[];
     readonly result: RoundProcessResult | null;
+    /** v4.0.3: the evidence posture persisted with this transaction. The
+     *  decoder refuses a schema-7 commit without one, so this is null only on a
+     *  hand-built/library view. */
+    readonly evidencePosture: EvidencePosture | null;
     readonly action: CommittedAction;
-    readonly success: boolean;
-    readonly outcome: RoundOutcome | null;
+    /** v4.0.3: the Agent's success claim (never a machine verdict). */
+    readonly agentSuccessClaim: boolean;
+    /** v4.0.3: the effective Agent-declared outcome. */
+    readonly agentOutcome: RoundOutcome | null;
     readonly contractProposal: RoundContractProposal | null;
     /** v3.9.9: this round's explicit contract redirection, if it declared one.
      *  Read from the committed evaluation; a target the reducer cannot match is
@@ -99,8 +105,7 @@ export declare function decodeCommittedRecord(entry: unknown): CommittedRoundVie
  *  `last_round_result`, which existed on the live path and was absent on
  *  resume/unpause/backtrack compiles. This projection lets one committed
  *  fact source feed every consumer. Optional declarations are read from the
- *  decoded view where it exposes them; `manual_fixes_needed` has no
- *  committed source and stays empty. */
+ *  decoded view where it exposes them. */
 export declare function roundResultFromCommittedRound(view: CommittedRoundView): LoopRoundResult;
 /** The ONE pending-directive lookup for a redo round. The directive's
  *  `target.redo_round` is the branch fence, so a deep restore and a

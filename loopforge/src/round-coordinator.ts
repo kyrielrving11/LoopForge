@@ -31,8 +31,8 @@ import type {
   CheckpointRef,
   ContractTransition,
   EnforcementResult,
+  EvidencePosture,
   SelfEvaluation,
-  RoundVerificationStatus,
   StopReason,
   VerificationFlag,
   VerificationResult,
@@ -49,7 +49,11 @@ import {
 } from "./recovery.js";
 import { driftedEntrypoints } from "./evidence-provider.js";
 import { isRecord } from "./token-utils.js";
-import { declaresBlocked, effectiveSuccess } from "./round-outcome.js";
+import {
+  declaresBlocked,
+  effectiveOutcome,
+  effectiveSuccess,
+} from "./round-outcome.js";
 import {
   deriveRoundProgress,
 } from "./progress.js";
@@ -60,11 +64,13 @@ import {
 } from "./enforcement-gate.js";
 import { logEvent } from "./observability.js";
 import { getPolicy } from "./policy.js";
-import { deriveRoundContractView } from "./round-contract.js";
+import type { ContractItemStatusView } from "./contract-items.js";
+import { deriveRoundFacts } from "./round-facts.js";
 import {
-  roundVerificationStatus,
-  type ContractItemStatusView,
-} from "./contract-items.js";
+  deriveEvidencePosture,
+  rollbackEvidencePosture,
+} from "./evidence-posture.js";
+import { deriveFilesReconciliation } from "./files-reconciliation.js";
 
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -134,36 +140,45 @@ export interface RoundProcessResult {
   enforcementAction?: "accept" | "reject" | "terminate" | "backtrack" | "recovery";
   /** Enforcement reason (set when rejected or terminated). */
   enforcementReason?: string;
-  /** Whether this round was successful (from selfEval.success). */
-  roundSuccess: boolean;
+  /** v4.0.3: the Agent's success claim (`selfEval.success`). This is a claim,
+   *  never a machine verdict. */
+  agentSuccessClaim: boolean;
+  /** v4.0.3: the effective Agent-declared outcome. */
+  agentOutcome: import("./protocol.js").RoundOutcome | null;
   /** Whether the verification gate returned "contradicted". */
   gateContradicted: boolean;
-  /** v3.8: The round-level verification posture, derived from the ACTIVE
-   *  contract's item statuses and this round's claims: `trusted` (everything
-   *  claimed is machine-backed), `insufficient` (claims unbacked, nothing
-   *  contradicted), `contradicted` (a machine fact denies a claim). */
-  verificationStatus: RoundVerificationStatus;
+  /** v4.0.3: the ONE evidence posture, derived once per round and persisted
+   *  with the accepted transaction. Rejected/terminated attempts carry a
+   *  transient posture that never enters the Vault. */
+  evidencePosture: EvidencePosture;
   /** Updated consecutiveRejections count — caller must persist. */
   newConsecutiveRejections: number;
   /** Which enforcement check fired (set when action is "reject" or "terminate").
    *  Used by callers to track per-rule rejection counters. */
   rejectionCheck?: string;
-  /** Whether the caller should push roundSuccess onto the success trajectory.
+  /** Whether the caller should push agentSuccessClaim onto the success trajectory.
    *  false when gateContradicted or when action is "reject". */
   shouldPushSuccessTrajectory: boolean;
 }
 
-/** v3.2/v3.6: Whether a round's success enters the success trajectory.
- *  Excluded when the gate contradicted the round, or when the success claim
- *  carries no machine-verified observation — the merged R8 check fires a
- *  warn under machine_backed_success "warn" (v3.6: success_unverified merged
- *  into R8; its warn-level trajectory exclusion moved with it) — an
- *  accepted-but-unverified round is not evidence of progress. */
+/** v3.2/v3.6/v4.0.3: Whether a round's success enters the success
+ *  trajectory.
+ *
+ *  The trajectory counts MACHINE-BACKED success only: the Agent must
+ *  effectively claim success AND the verification gate must have found a
+ *  passed, untampered after command (`machineBackedSuccess`). A partial or
+ *  blocked outcome, an unbacked success claim, a contradicted gate, a
+ *  redirect round and an unverified contract item all keep the round out.
+ *  This does not change `completed` — it only keeps progress metrics honest. */
 function shouldPushSuccess(
+  selfEval: SelfEvaluation,
   gateContradicted: boolean,
   verificationFlags: VerificationFlag[],
+  machineBackedSuccess: boolean,
   contractStatuses?: ContractItemStatusView,
 ): boolean {
+  if (!effectiveSuccess(selfEval)) return false;
+  if (!machineBackedSuccess) return false;
   if (gateContradicted) return false;
   // v3.9.9: a redirect round abandons a slice; it is never success evidence.
   if (contractStatuses?.closure === "superseded") return false;
@@ -275,7 +290,8 @@ export class RoundCoordinator {
       evidenceDeltas,
     } = input;
 
-    const roundSuccess = selfEval.success ?? false;
+    const agentSuccessClaim = selfEval.success ?? false;
+    const agentOutcome = effectiveOutcome(selfEval);
 
     // ── 1. Load committed history once ──────────────────────────────────
     // The verification gate and the contract reducer read the same flat entry
@@ -298,6 +314,21 @@ export class RoundCoordinator {
     // verifies the restore before issuing the redo prompt; a redo submission
     // is ordinary work, so its after boundary must never be compared to the
     // restore target.
+    // v4.0.3: ONE RoundFacts derivation for this round. The verification
+    // gate, the stop decision, the success trajectory and the evidence
+    // posture all consume this bundle; none derives the contract again.
+    const commands = getPolicy().evidence.commands ?? [];
+    const roundFacts = deriveRoundFacts({
+      rounds: committedRounds,
+      currentRound,
+      inFlight: {
+        currentReport: selfEval.execution_report ?? null,
+        currentDeltas: evidenceDeltas ?? [],
+        currentBlocked: declaresBlocked(selfEval),
+        currentTransition: selfEval.contract_transition ?? null,
+      },
+      commands,
+    });
     const verifyResult: VerificationResult = verifySelfEvaluation(
       selfEval,
       currentRound,
@@ -318,27 +349,58 @@ export class RoundCoordinator {
       input.submittedFields
         ? input.submittedFields.includes("execution_report.files_changed")
         : undefined,
+      // v4.0.3: the one derivation, computed above. Passing it removes the
+      // gate's private contract/item/claim derivation.
+      roundFacts,
     );
     const verificationFlags = verifyResult.flags;
     const gateContradicted = verifyResult.verdict === "contradicted";
+    const { activeContract, itemStatuses: activeContractStatuses } = roundFacts;
 
-    // v3.8: the ACTIVE contract's derived item statuses for this round — the
-    // same reducer the gate, compile path, audit and explain consume. Drives
-    // the stop mapping (completed vs incomplete) and the success trajectory.
-    // v3.8: the shared executed-contract derivation — the same one explain and
-    // audit call, so the live posture and the read-only views cannot diverge.
-    const { contract: activeContract, statuses: activeContractStatuses } =
-      deriveRoundContractView({
-        rounds: committedRounds,
-        round: currentRound,
-        current: {
-          report: selfEval.execution_report ?? null,
-          deltas: evidenceDeltas ?? [],
-          blocked: declaresBlocked(selfEval),
-          transition: selfEval.contract_transition ?? null,
-        },
-        commands: getPolicy().evidence.commands ?? [],
-      });
+    // v4.0.3: the evidence posture is derived ONCE here, from the same raw
+    // facts every other branch reads. It is persisted with an accepted round;
+    // a rejected/terminated attempt carries only the transient copy.
+    const verificationConfigured = commands.some(
+      (command) => command.enabled === true &&
+        (command.phase === "after" || command.phase === "both"),
+    );
+    const filesReconciliation = deriveFilesReconciliation(
+      selfEval.execution_report ?? null,
+      evidenceDeltas ?? [],
+      input.submittedFields
+        ? {
+            attempted: input.submittedFields.includes(
+              "execution_report.files_changed"),
+          }
+        : {},
+    );
+    const evaluationPosture = deriveEvidencePosture({
+      round: currentRound,
+      kind: "evaluation",
+      selfEval,
+      afterEvidence: input.afterEvidence ?? [],
+      evidenceDeltas: evidenceDeltas ?? [],
+      verificationFlags,
+      machineBackedSuccess: verifyResult.machineBackedSuccess,
+      activeContract,
+      contractStatuses: activeContractStatuses,
+      verificationConfigured,
+      filesReconciliation,
+    });
+    const evaluationResult = (
+      result: Omit<RoundProcessResult, "evidencePosture" | "agentOutcome">,
+    ): RoundProcessResult => ({
+      ...result,
+      evidencePosture: evaluationPosture,
+      agentOutcome,
+    });
+    const rollbackResult = (
+      result: Omit<RoundProcessResult, "evidencePosture" | "agentOutcome">,
+    ): RoundProcessResult => ({
+      ...result,
+      evidencePosture: rollbackEvidencePosture(currentRound),
+      agentOutcome: null,
+    });
 
     if (gateContradicted) {
       logEvent("gate_contradicted", {
@@ -379,19 +441,18 @@ export class RoundCoordinator {
         check: enforceResult.check ?? "",
         consecutiveRejections: newRejections,
       });
-      return {
+      return evaluationResult({
         action: "reject",
-        verificationStatus: roundVerificationStatus(activeContractStatuses, selfEval.execution_report ?? null),
         rejectionPrompt,
         verificationFlags,
         enforcementAction: "reject",
         enforcementReason: enforceResult.reason,
         rejectionCheck: enforceResult.check,
-        roundSuccess,
+        agentSuccessClaim,
         gateContradicted,
         newConsecutiveRejections: newRejections,
         shouldPushSuccessTrajectory: false,
-      };
+      });
     }
 
     if (enforceResult.action === "terminate") {
@@ -405,19 +466,18 @@ export class RoundCoordinator {
         stopReason: terminateReason,
         round: currentRound,
       });
-      return {
+      return evaluationResult({
         action: "terminate",
-        verificationStatus: roundVerificationStatus(activeContractStatuses, selfEval.execution_report ?? null),
         stopReason: terminateReason,
         verificationFlags,
         enforcementAction: "terminate",
         enforcementReason: enforceResult.reason,
         rejectionCheck: enforceResult.check,
-        roundSuccess,
+        agentSuccessClaim,
         gateContradicted,
         newConsecutiveRejections: 0,
         shouldPushSuccessTrajectory: false,
-      };
+      });
     }
 
     // ── v2.10 / v3.9.7: Backtrack ─────────────────────────────────────────
@@ -460,20 +520,19 @@ export class RoundCoordinator {
           stopReason: "enforcement_terminated",
           round: currentRound,
         });
-        return {
+        return evaluationResult({
           action: "terminate",
-          verificationStatus: roundVerificationStatus(activeContractStatuses, selfEval.execution_report ?? null),
           stopReason: "enforcement_terminated",
           verificationFlags,
           enforcementAction: "terminate",
           enforcementReason:
             `${enforceResult.reason} (backtrack failed: no materialized restore point within ${maxDepth} rounds)`,
           rejectionCheck: enforceResult.check,
-          roundSuccess,
+          agentSuccessClaim,
           gateContradicted,
           newConsecutiveRejections: 0,
           shouldPushSuccessTrajectory: false,
-        };
+        });
       }
 
       const targetRef = resolveRef(restorePoint.round);
@@ -486,20 +545,19 @@ export class RoundCoordinator {
           stopReason: "enforcement_terminated",
           round: currentRound,
         });
-        return {
+        return evaluationResult({
           action: "terminate",
-          verificationStatus: roundVerificationStatus(activeContractStatuses, selfEval.execution_report ?? null),
           stopReason: "enforcement_terminated",
           verificationFlags,
           enforcementAction: "terminate",
           enforcementReason:
             `${enforceResult.reason} (backtrack failed: restore point manifest unavailable)`,
           rejectionCheck: enforceResult.check,
-          roundSuccess,
+          agentSuccessClaim,
           gateContradicted,
           newConsecutiveRejections: 0,
           shouldPushSuccessTrajectory: false,
-        };
+        });
       }
 
       const abandonedRounds = committedRounds
@@ -517,6 +575,7 @@ export class RoundCoordinator {
         currentAfterEvidence: input.afterEvidence ?? [],
         triggerEvaluation: selfEval,
         triggerRound: currentRound,
+        triggerFindings: verificationFlags,
       });
 
       logEvent("enforcement_backtrack", {
@@ -528,21 +587,20 @@ export class RoundCoordinator {
         skippedDiscoveries: recovery.skipped_discoveries.length,
       });
 
-      return {
+      return rollbackResult({
         action: "backtrack",
         origin: "machine",
         reason: enforceResult.reason,
         recovery,
-        verificationStatus: "not_applicable",
         verificationFlags,
         enforcementAction: "backtrack",
         enforcementReason: enforceResult.reason,
         rejectionCheck: enforceResult.check,
-        roundSuccess,
+        agentSuccessClaim,
         gateContradicted,
         newConsecutiveRejections: 0, // reset — fresh start
         shouldPushSuccessTrajectory: false,
-      };
+      });
     }
 
     // Accept: reset rejection counter
@@ -595,18 +653,23 @@ export class RoundCoordinator {
         activeContractStatuses,
         selfEval.contract_transition ?? null,
       );
-      return {
+      return evaluationResult({
         action: "stop",
-        verificationStatus: roundVerificationStatus(activeContractStatuses, selfEval.execution_report ?? null),
         stopReason: finalized.reason,
         verificationFlags: finalized.flags.length > 0
           ? [...verificationFlags, ...finalized.flags]
           : verificationFlags,
-        roundSuccess,
+        agentSuccessClaim,
         gateContradicted,
         newConsecutiveRejections: 0,
-        shouldPushSuccessTrajectory: shouldPushSuccess(gateContradicted, verificationFlags, activeContractStatuses),
-      };
+        shouldPushSuccessTrajectory: shouldPushSuccess(
+          selfEval,
+          gateContradicted,
+          verificationFlags,
+          verifyResult.machineBackedSuccess,
+          activeContractStatuses,
+        ),
+      });
     }
 
     // 5c. Max rounds reached
@@ -614,28 +677,38 @@ export class RoundCoordinator {
     // Progress stalls are handled before this point by the R4 delta tier and
     // R5 flatline tier. Max rounds is an independent hard boundary.
     if (currentRound >= maxRounds) {
-      return {
+      return evaluationResult({
         action: "stop",
-        verificationStatus: roundVerificationStatus(activeContractStatuses, selfEval.execution_report ?? null),
         stopReason: "max_rounds",
         verificationFlags,
-        roundSuccess,
+        agentSuccessClaim,
         gateContradicted,
         newConsecutiveRejections: 0,
-        shouldPushSuccessTrajectory: shouldPushSuccess(gateContradicted, verificationFlags, activeContractStatuses),
-      };
+        shouldPushSuccessTrajectory: shouldPushSuccess(
+          selfEval,
+          gateContradicted,
+          verificationFlags,
+          verifyResult.machineBackedSuccess,
+          activeContractStatuses,
+        ),
+      });
     }
 
     // ── 6. Continue — caller compiles next round ────────────────────────
-    return {
+    return evaluationResult({
       action: "continue",
-      verificationStatus: roundVerificationStatus(activeContractStatuses, selfEval.execution_report ?? null),
       verificationFlags,
       enforcementAction: "accept",
-      roundSuccess,
+      agentSuccessClaim,
       gateContradicted,
       newConsecutiveRejections: 0,
-      shouldPushSuccessTrajectory: shouldPushSuccess(gateContradicted, verificationFlags, activeContractStatuses),
-    };
+      shouldPushSuccessTrajectory: shouldPushSuccess(
+        selfEval,
+        gateContradicted,
+        verificationFlags,
+        verifyResult.machineBackedSuccess,
+        activeContractStatuses,
+      ),
+    });
   }
 }

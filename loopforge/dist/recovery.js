@@ -7,6 +7,7 @@
  * and never mutates the workspace. Restore execution lives in
  * `workspace-restore.ts`.
  */
+import { deriveFindingId } from "./token-utils.js";
 import { branchRounds, } from "./committed-round.js";
 function invalid(reason, detail) {
     return { ok: false, code: "recovery_invalid", reason, detail };
@@ -135,9 +136,10 @@ function addBoundaryDiff(target, observation, into) {
  *  data (never a restore gate); discoveries are preserved only from committed
  *  abandoned rounds, never from a rejected/in-flight trigger attempt. */
 export function deriveRecoveryDirective(input) {
-    const skippedFiles = new Set();
+    const observedSkippedFiles = new Set();
+    const reportedSkippedFiles = new Set();
     const skippedDiscoveries = [];
-    const failedRounds = [];
+    const machineFailedRounds = [];
     const approaches = [];
     const wrongAssumptions = [];
     const addDiscovery = (text) => {
@@ -150,12 +152,17 @@ export function deriveRecoveryDirective(input) {
         }
     };
     for (const view of input.abandonedRounds) {
-        addBoundaryDiff(input.targetManifest.fingerprints, firstObservedGit(view.afterEvidence), skippedFiles);
+        addBoundaryDiff(input.targetManifest.fingerprints, firstObservedGit(view.afterEvidence), observedSkippedFiles);
         for (const file of arrayStrings(view.executionReport?.files_changed)) {
-            skippedFiles.add(file);
+            reportedSkippedFiles.add(file);
+        }
+        // v4.0.3: only a MACHINE-detected failure is a failed round. An agent's
+        // output_summary is a report, even when the agent chose to abandon.
+        if (input.origin === "machine" &&
+            view.verificationFlags.some((flag) => flag.severity === "error")) {
+            machineFailedRounds.push(view.round);
         }
         if (view.outputSummary?.trim()) {
-            failedRounds.push(view.round);
             approaches.push(view.outputSummary.trim().slice(0, 200));
         }
         for (const assumption of arrayStrings(view.evaluation?.wrong_assumptions)) {
@@ -168,19 +175,32 @@ export function deriveRecoveryDirective(input) {
     // The current in-flight transaction is not committed history: it can
     // contribute its machine net-diff and its trigger assumptions, but never a
     // discovery that would become an active constraint.
-    addBoundaryDiff(input.targetManifest.fingerprints, firstObservedGit(input.currentAfterEvidence), skippedFiles);
+    addBoundaryDiff(input.targetManifest.fingerprints, firstObservedGit(input.currentAfterEvidence), observedSkippedFiles);
     if (input.triggerEvaluation) {
         for (const assumption of arrayStrings(input.triggerEvaluation.wrong_assumptions)) {
             addAssumption(assumption);
         }
         const summary = input.triggerEvaluation.output_summary?.trim() ?? "";
         if (summary && input.triggerRound !== undefined) {
-            if (!failedRounds.includes(input.triggerRound))
-                failedRounds.push(input.triggerRound);
             const approach = summary.slice(0, 200);
             if (!approaches.includes(approach))
                 approaches.push(approach);
+            if (input.origin === "machine" &&
+                !machineFailedRounds.includes(input.triggerRound)) {
+                machineFailedRounds.push(input.triggerRound);
+            }
         }
+    }
+    const findings = [];
+    const seenFindings = new Set();
+    for (const flag of input.triggerFindings ?? []) {
+        const id = deriveFindingId(flag);
+        if (seenFindings.has(id))
+            continue;
+        seenFindings.add(id);
+        findings.push({ ...flag, detail: flag.detail.slice(0, 500) });
+        if (findings.length >= 12)
+            break;
     }
     const target = {
         checkpoint_id: input.targetRef.checkpointId,
@@ -191,16 +211,23 @@ export function deriveRecoveryDirective(input) {
         transaction_id: input.targetRef.transactionId,
         redo_round: input.targetRef.redoRound,
     };
+    const observed = [...observedSkippedFiles].sort();
+    const reported = [...reportedSkippedFiles].sort();
+    const skipped = [...new Set([...observed, ...reported])].sort();
     return {
         origin: input.origin,
         reason: input.reason.slice(0, 500),
         ...(input.triggerRule ? { trigger_rule: input.triggerRule } : {}),
         target,
-        skipped_files: [...skippedFiles].sort(),
+        skipped_files: skipped,
+        observed_skipped_files: observed,
+        reported_skipped_files: reported,
+        abandoned_rounds: input.abandonedRounds.map((view) => view.round),
         skipped_discoveries: skippedDiscoveries,
-        failed_rounds: failedRounds,
+        failed_rounds: machineFailedRounds,
         approaches,
         wrong_assumptions: wrongAssumptions,
+        ...(findings.length > 0 ? { trigger_findings: findings } : {}),
         transaction_id: input.transactionId,
     };
 }

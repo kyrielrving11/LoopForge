@@ -481,8 +481,25 @@ describe("findSafeRestorePoint", () => {
   // restore points judge only committed feedback entries; rejections never
   // commit, so a committed round's decision is action "continue" and its
   // dirtiness shows in the committed verification flags).
+  /** v4.0.3: a clean restore point also needs a COMPLETE observable boundary;
+   *  this fixture supplies one after-phase observation. */
+  const completeBoundary = (): unknown[] => [{
+    schemaVersion: 1,
+    providerId: "probe",
+    kind: "custom",
+    phase: "after",
+    startedAt: 0,
+    finishedAt: 0,
+    status: "observed",
+    files: [],
+    data: {},
+  }];
+
   function cleanRound(rnd: number): VaultEntry {
-    return committedFeedbackRound(rnd, { loopId: "test" });
+    return committedFeedbackRound(rnd, {
+      loopId: "test",
+      roundEvidence: completeBoundary(),
+    });
   }
 
   function dirtyRound(
@@ -492,6 +509,7 @@ describe("findSafeRestorePoint", () => {
   ): VaultEntry {
     return committedFeedbackRound(rnd, {
       loopId: "test",
+      roundEvidence: completeBoundary(),
       discoveredConstraints: discoveries,
       verificationFlags: [{
         check: "test_flag",

@@ -62,7 +62,7 @@ export function committedRoundFacts(view) {
         deltas: view.observationDelta,
         blocked: view.evaluation
             ? declaresBlocked(view.evaluation)
-            : view.outcome === "blocked",
+            : view.agentOutcome === "blocked",
         transition: view.contractTransition,
     };
 }
@@ -103,7 +103,7 @@ export function deriveActiveRoundContract(rounds, commands = getPolicy().evidenc
             currentDeltas: round.observationDelta,
             currentBlocked: round.evaluation
                 ? declaresBlocked(round.evaluation)
-                : round.outcome === "blocked",
+                : round.agentOutcome === "blocked",
             currentTransition: round.contractTransition,
             commands,
         });

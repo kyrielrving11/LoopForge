@@ -15,8 +15,10 @@
  *   const server = new McpServer();
  *   server.start();
  */
-export { AgentStatus, makeSelfEvaluation, makeLoopObjective, makeLoopRoundResult, makeLoopCompileRequest, makeLoopCompileResponse, makeEvidenceSnapshot, makeVerificationFlag, makeVerificationResult, makeEnforcementResult, makeSubGoal, makeConstraintMeta, } from "./protocol.js";
-export type { SelfEvaluation, LoopObjective, LoopRoundResult, LoopCompileRequest, LoopCompileResponse, WorkerResult, EvidenceSnapshot, VerificationFlag, VerificationResult, EnforcementResult, SubGoal, ConstraintMeta, PromptArtifact, PromptContextMode, PromptContextReason, PromptWorkingMemoryProjection, PromptCoverage, CompiledRoundFacts, ContractTransition, ProgressCoverage, SubmissionDiagnostic, SubmissionDiagnosticHandling, SubmissionGuidance, SubmissionHandle, SubmissionReceipt, SubmissionReportHandling, CheckpointRef, CheckpointRole, WorkspaceCheckpointManifest, RecoveryTarget, } from "./protocol.js";
+export { AgentStatus, makeSelfEvaluation, makeLoopObjective, makeLoopRoundResult, makeLoopCompileRequest, makeLoopCompileResponse, makeVerificationFlag, makeVerificationResult, makeEnforcementResult, makeSubGoal, makeConstraintMeta, } from "./protocol.js";
+export type { SelfEvaluation, LoopObjective, LoopRoundResult, LoopCompileRequest, LoopCompileResponse, WorkerResult, VerificationFlag, VerificationResult, EnforcementResult, SubGoal, ConstraintMeta, PromptArtifact, PromptContextMode, PromptContextReason, PromptWorkingMemoryProjection, PromptCoverage, CompiledRoundFacts, ContractTransition, ProgressCoverage, SubmissionDiagnostic, SubmissionDiagnosticHandling, SubmissionGuidance, SubmissionHandle, SubmissionReceipt, SubmissionReportHandling, CheckpointRef, CheckpointRole, WorkspaceCheckpointManifest, RecoveryTarget, EvidencePosture, EvidencePostureStatus, } from "./protocol.js";
+export { deriveEvidencePosture, rollbackEvidencePosture, EVIDENCE_POSTURE_CAPS, } from "./evidence-posture.js";
+export type { EvidencePostureInput } from "./evidence-posture.js";
 export { getPolicy, loadPolicy, resetPolicy, DEFAULT_POLICY, writeStateFile, } from "./policy.js";
 export type { LoopPolicy, EnginePolicy, BackendPolicy, PromptPolicy, StateFilePolicy, EvidencePolicy, CommandEvidencePolicy, McpPolicy, } from "./policy.js";
 export { FileLoopStore, queryLoopEntries, LOOP_STORE_SCHEMA_VERSION, } from "./loop-store.js";
@@ -42,7 +44,7 @@ export type { LogEventData, } from "./observability.js";
 export { PolicyMetricsCollector, policyMetrics, getPolicyMetrics, resetPolicyMetrics, } from "./policy-metrics.js";
 export type { PolicyMetricsSnapshot } from "./policy-metrics.js";
 export { ROUND_TRANSACTION_SCHEMA_VERSION, RoundTransactionCoordinator, makeRoundId, prepareRoundTransaction, parseRoundTransactionSnapshot, } from "./round-transaction.js";
-export type { RoundTransactionPhase, RoundTransactionSnapshot, RoundTransactionInput, RoundTransactionOutcome, } from "./round-transaction.js";
+export type { RoundTransactionPhase, RoundTransactionSnapshot, RoundTransactionInput, RoundTransactionOutcome, RetryContext, } from "./round-transaction.js";
 export { FileWorkspaceCheckpointStore, buildCheckpointRef, checkpointContentHash, deriveCheckpointId, parseCheckpointManifest, CHECKPOINT_SCHEMA_VERSION, } from "./workspace-checkpoint.js";
 export { executeRestore, preflightRestore, } from "./workspace-restore.js";
 export type { RestorePreflight, RestoreResult, } from "./workspace-restore.js";

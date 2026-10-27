@@ -61,25 +61,34 @@ both. Invalid core fields can be corrected for the same round without
 committing that attempt.
 
 Every returned prompt declares its derived context boundary in the header:
-`fresh_round` (first round, next round, or recovery redo) starts a new Agent
-invocation without the previous transcript, while `same_round_retry`
-continues the same logical round after an enforcement rejection. A fresh
-context is not a workspace reset. A fresh prompt may include bounded Working
+`fresh_round` (first round, next round, recovery redo, or an L2
+repeated-rejection retry) starts a new Agent invocation without the previous
+transcript, while the first L0 enforcement retry is `same_round_retry` and
+continues the same logical round. A fresh context is not a workspace reset.
+
+A fresh prompt carries compact Machine Evidence (the previous committed
+round's evidence posture: workspace/change counts, provider and command
+statuses, contract item statuses, and stable finding ids) plus bounded Working
 Memory compiled from committed reports, assumptions, open questions, consumed
-recoveries, and contract redirects. It is part of the canonical state, not a
-second history, and never feeds a gate; the total prompt budget may omit
-lower-priority memory. Older history is
-available through `loopforge_replay` (`start`/`end`; default last 10 committed
-rounds, at most 50 in an explicit window) and `loopforge_status view:
-"explain"`.
+recoveries, and contract redirects. Machine Evidence is protected; Working
+Memory is optional, indivisible, and may be dropped whole. Both are part of the
+canonical state, never a second history, and never feed a gate. Every Working
+Memory omission has source/rendered/omitted counts and a truncation notice.
+Older history is available through `loopforge_replay` (`start`/`end`; default
+last 10 committed positions, at most 50 in an explicit window) and
+`loopforge_status view: "explain"`.
 
 The four required evaluation fields are `success`, `output_summary`,
 `constraint_violations`, and `should_continue`. They are the Agent's report,
 not evidence. Optional fields let the Agent report events such as changed files,
-discovered constraints, or contract item claims. LoopForge returns guidance
-with the real references and currently applicable fields, plus a receipt that
-distinguishes saved reports from derived effects and machine verification.
-Optional fields are not a completion checklist.
+discovered constraints, or contract item claims. `subtask_boundary` /
+`subtask_boundary_label` declare an L2 rehydration boundary; they are not a
+workspace checkpoint. LoopForge returns guidance with the real references and
+currently applicable fields, plus a receipt that distinguishes saved reports
+from derived effects and machine verification. Read surfaces use
+`agentSuccessClaim`/`agentOutcome` for the Agent's claim and
+`evidencePosture`/`machineBackedSuccess` for machine facts; they are never
+merged. Optional fields are not a completion checklist.
 
 The server also provides status, stop, pause, resume, and replay tools. Two gate
 tools are available only when `policy.gate.enabled` is true. See the MCP tool
@@ -99,8 +108,10 @@ items bind to configured verification commands. LoopForge validates the
 structure, references, and bindings; the Agent's optional `scope` is a
 report-only intent statement (drift is an info fact, not a rejection). An item
 becomes verified when the Agent claims it is met and all bound commands pass in
-the closing round with the declared binding intact. LoopForge does not judge
-whether the deliverable or its tests are semantically appropriate.
+the closing round with the declared binding intact. A command disabled or
+reconfigured later does not rewrite that historical observation; a claim is
+never upgraded by Agent-reported test counts. LoopForge does not judge whether
+the deliverable or its tests are semantically appropriate.
 
 If the active slice is no longer the right route, the Agent can submit an
 explicit `contract_transition` (kind `supersede`, the exact active `rc-*` id,
@@ -128,9 +139,12 @@ restore leaves the directive pending and the session resumable. LoopForge does
 not choose the target or interpret the Agent's reason. Machine-triggered
 backtracks use the same restore protocol. Redo uses a child branch and is
 excluded from the active branch history. The directive preserves the abandoned
-approaches, wrong assumptions, skipped files and Recovery Brief; a same-round
-redo replaces that numeric round's feedback slot, so the abandoned evaluation
-is not retained as a second copy.
+approaches, wrong assumptions, machine-observed vs Agent-reported skipped
+files, compact trigger findings and the Recovery Brief; the Brief states the
+real restore marker (or `restore NOT verified`). A same-round redo replaces
+that numeric round's feedback slot, so the abandoned evaluation is not retained
+as a second copy. Explain, replay, audit and the receipt expose the committed
+checkpoints/restore marker and the directive digest.
 
 Committed typed round documents in the Vault are the factual source.
 `CommittedRoundView` is the shared history read model, and `CanonicalLoopState`
@@ -138,9 +152,10 @@ is compiled from committed facts. Prompts, status views, replay, audit, explain,
 and the optional state file are read or derived views. The state file is
 regenerable and is not a second source of truth.
 
-The prompt contains current governance facts rather than a replay of recent
-Agent summaries or external memory. LoopForge does not execute the coding
-task, automatically plan or decompose it, or guarantee task completion.
+The prompt contains current governance facts, compact Machine Evidence, and a
+bounded Agent-report Working Memory. It is not a replay of external memory or
+an unbounded conversation summary. LoopForge does not execute the coding task,
+automatically plan or decompose it, or guarantee task completion.
 
 ## TypeScript API
 

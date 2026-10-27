@@ -7,7 +7,7 @@
  * and never mutates the workspace. Restore execution lives in
  * `workspace-restore.ts`.
  */
-import type { CheckpointRef, MachineObservation, RecoveryDirective, SelfEvaluation, WorkspaceCheckpointManifest } from "./protocol.js";
+import type { CheckpointRef, MachineObservation, RecoveryDirective, SelfEvaluation, VerificationFlag, WorkspaceCheckpointManifest } from "./protocol.js";
 import { type CommittedRoundView } from "./committed-round.js";
 import type { RoundTransactionSnapshot } from "./round-transaction.js";
 export interface CheckpointTargetResult {
@@ -62,5 +62,7 @@ export declare function deriveRecoveryDirective(input: {
     currentAfterEvidence: ReadonlyArray<MachineObservation>;
     triggerEvaluation?: SelfEvaluation | null;
     triggerRound?: number;
+    /** v4.0.3: the machine findings that triggered this directive. */
+    triggerFindings?: ReadonlyArray<VerificationFlag>;
 }): RecoveryDirective;
 //# sourceMappingURL=recovery.d.ts.map

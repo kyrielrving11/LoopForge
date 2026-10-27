@@ -1,41 +1,38 @@
-/** v2.12: Read-only, replayable end-of-loop audit — the verification view.
+/** v2.12/v4.0.3: Read-only, replayable end-of-loop audit — the verification
+ *  view.
  *
  *  Positioning vs loopforge_replay: replay is the factual timeline (what
  *  happened per round); audit is the assessment layer (which claims are
  *  machine-verified, which gates were decided, is the sequence intact).
  *  Everything is derived from committed vault entries — audit never writes.
  *
- *  v3.8: the CONTRACT ITEM axis is the primary completion basis. The criterion
- *  claims stay as an advisory second view — a criterion claim is an agent
- *  statement whose machine backing is mediated by the contract items, so it
- *  cannot be the completion signal. Both axes read the same committed-round
- *  model and the same item reducer the coordinator and explain use.
+ *  v4.0.3: every round reports the SAME persisted evidence posture. A claim is
+ *  `verified` only when a machine criterion fact backs its criterion; Agent
+ *  reports never upgrade themselves. `evidenceVerdict` is the terminal
+ *  posture, while `verdict` is the verification view over structure + posture.
  */
 import { eventSequence, StorageCorruptionError } from "./loop-store.js";
 import { auditOrder, deriveGate } from "./cognitive-governance.js";
-import { rederiveClaimViewWithFlags, listVerifiedClaims } from "./evidence-claims.js";
-import { isRecord, entryRound } from "./token-utils.js";
+import { deriveCriterionId, entryRound, isCriterionId, isRecord, } from "./token-utils.js";
 import { legacyTransactionRounds, readOnlyRollbacks, readOnlyRounds, } from "./committed-round.js";
 import { committedRoundFacts, deriveRoundContractView, } from "./round-contract.js";
+import { deriveCriterionFacts } from "./round-facts.js";
 import { deriveCommittedSubmissionView } from "./submission-receipt.js";
 import { getPolicy } from "./policy.js";
 /** Build the audit from committed vault entries. Pure, read-only.
  *  @param store Optional LoopStore — when provided, sequence integrity is
  *  checked and provenanceAvailable becomes true. */
 export function buildAudit(loopId, entries, store) {
-    const ordered = auditOrder(entries);
-    // v3.8: the shared committed-round read model — ordering, dedup and rollback
-    // exclusion come from it, not from a private rule. v3.8.1: the READ-ONLY
-    // window, which additionally applies the session frontier while a committed
-    // rollback directive is in effect, so a backtracked branch is not audited as
-    // this branch's history.
+    // v4.0.3: a multi-loop entry list must not leak another loop's gates,
+    // legacy rounds or rollbacks into this audit.
+    const loopEntries = entries.filter((entry) => entry.loop_id === loopId ||
+        String(entry.task_id ?? "").startsWith(`loop:${loopId}:`));
+    const ordered = auditOrder(loopEntries);
     const views = readOnlyRounds(entries).filter((view) => view.loopId === loopId);
     const rollbacks = readOnlyRollbacks(entries).filter((view) => view.loopId === loopId);
     const commands = getPolicy().evidence.commands ?? [];
     // The executed contract per round, through the ONE derivation explain and
-    // the live coordinator also call. Re-derived per round rather than walked
-    // incrementally on purpose: a private incremental walker would be a second
-    // history interpretation, which is exactly what this project forbids.
+    // the live coordinator also call.
     const contractByRound = new Map();
     for (const view of views) {
         contractByRound.set(view.round, deriveRoundContractView({
@@ -45,32 +42,39 @@ export function buildAudit(loopId, entries, store) {
             commands,
         }));
     }
-    // ── Rounds: per-round claims + checks from committed snapshots ─────────
-    //
-    // v3.8.1: the list is built from the SAME window the contract axis below
-    // reads. Scanning the raw entries here applied a second, weaker history
-    // rule — no replacement of a round by a later record of the same logical
-    // round — so a superseded record was listed twice and could still flip the
-    // verdict to `contradicted`, while explain (which reads only the window)
-    // reported a different loop. Rollback exclusion comes from the window too.
+    // v4.0.3: machine criterion facts are the ONLY upgrade path for a claim.
+    const factsUpTo = (round) => deriveCriterionFacts({
+        rounds: views.filter((view) => view.round <= round),
+        commands,
+    });
+    const machineVerifiedIdsUpTo = (round) => new Set(factsUpTo(round)
+        .filter((fact) => fact.status === "verified")
+        .map((fact) => fact.criterion_id));
     const rounds = [];
     for (const view of views) {
         const round = view.round;
-        const outcome = view.outcome ?? "unknown";
-        const claimView = view.evaluation
-            ? rederiveClaimViewWithFlags(view.evaluation, view.observationDelta, view.verificationFlags)
-            : null;
-        const executed = contractByRound.get(round);
+        const verifiedIds = machineVerifiedIdsUpTo(round);
         const receipt = deriveCommittedSubmissionView(view, views, rollbacks);
+        const executed = contractByRound.get(round);
         rounds.push({
             round,
-            outcome,
-            claims: claimView
-                ? claimView.claims.map((claim) => ({
-                    text: claim.targetId,
-                    status: claim.status === "verified" ? "verified" : "unverified",
-                }))
-                : [],
+            agentSuccessClaim: view.agentSuccessClaim,
+            agentOutcome: view.agentOutcome ?? "unknown",
+            machineBackedSuccess: view.evidencePosture?.machineBackedSuccess ?? false,
+            evidencePosture: view.evidencePosture,
+            claims: (view.executionReport?.criterion_claims ?? [])
+                .filter((claim) => claim.outcome === "met")
+                .map((claim) => {
+                const id = isCriterionId(claim.criterion_id)
+                    ? claim.criterion_id
+                    : deriveCriterionId(claim.criterion_id);
+                return {
+                    text: claim.criterion_id,
+                    status: verifiedIds.has(id)
+                        ? "verified"
+                        : "unverified",
+                };
+            }),
             checks: view.verificationFlags.map((flag) => ({
                 check: flag.check,
                 severity: flag.severity,
@@ -87,12 +91,37 @@ export function buildAudit(loopId, entries, store) {
                     })),
                 }
                 : null,
+            checkpoints: [
+                ...(view.beforeCheckpoint ? [view.beforeCheckpoint] : []),
+                ...view.checkpoints,
+            ].map((ref) => ({
+                checkpoint_id: ref.checkpointId,
+                role: ref.role,
+                round: ref.round,
+                content_hash: ref.contentHash,
+            })),
+            restore: view.restore
+                ? {
+                    directive_transaction_id: view.restore.directiveTransactionId,
+                    redo_round: view.restore.redoRound,
+                    verified_at: view.restore.verifiedAt,
+                }
+                : null,
+            restore_verified: view.restore !== null,
             submission: {
+                record: receipt.record,
+                entered_history: receipt.entered_history,
                 diagnostics: receipt.diagnostics,
                 saved_not_expanded: receipt.reports
                     .filter((report) => report.handling === "saved_not_expanded")
                     .map((report) => report.path),
                 effects: receipt.effects,
+                verification: {
+                    evidence_posture: receipt.verification.evidence_posture,
+                    checks: receipt.verification.checks,
+                },
+                files_reconciliation: receipt.files_reconciliation,
+                recovery_checkpoint: receipt.recovery_checkpoint ?? null,
                 prompt: receipt.prompt
                     ? {
                         level: receipt.prompt.level,
@@ -125,7 +154,8 @@ export function buildAudit(loopId, entries, store) {
         });
     }
     const contracts = [...contractsById.values()]
-        .sort((a, b) => a.first_active_round - b.first_active_round || a.contract_id.localeCompare(b.contract_id));
+        .sort((a, b) => a.first_active_round - b.first_active_round ||
+        a.contract_id.localeCompare(b.contract_id));
     const flatItems = contracts.flatMap((contract) => contract.items);
     const contractsSummary = {
         contracts,
@@ -187,56 +217,69 @@ export function buildAudit(loopId, entries, store) {
                 throw error;
         }
     }
-    // ── Criteria accounting (advisory second axis) + verdict ───────────────
-    //
-    // v3.8 fix: `declared` used to be a PER-ROUND SUM while `evidenced` was a
-    // DEDUPLICATED count — a criterion claimed in three rounds read as three
-    // declared against one evidenced, so `missing` was fiction. Both sides are
-    // now distinct-id counts over the same history and compare directly.
-    const verified = listVerifiedClaims(entries, loopId);
-    const declaredIds = new Set(rounds.flatMap((round) => round.claims.map((claim) => claim.text)));
-    const declared = declaredIds.size;
-    const evidenced = verified.length;
-    // v3.8: the contract item axis decides completion. A contradicted item is a
-    // machine denial; an open contract is unfinished verification; the claim
-    // axis only speaks when no contract item exists to speak for it.
-    // v3.9.9: the FINAL round's executed contract closure is the terminal
-    // truth. A loop that ended right after abandoning its slice (superseded) or
-    // declaring blocked did not pass, even when no contract is still open.
+    // ── Criteria accounting: objective declares, machine facts evidence ────
+    const acceptance = views.find((view) => view.operatorAcceptance !== null)
+        ?.operatorAcceptance ?? null;
+    const declaredIds = new Set((acceptance?.success_criteria ?? []).map(deriveCriterionId));
+    const allVerified = new Set(deriveCriterionFacts({ rounds: views, commands })
+        .filter((fact) => fact.status === "verified")
+        .map((fact) => fact.criterion_id));
+    const evidencedIds = [...declaredIds].filter((id) => allVerified.has(id));
+    // v4.0.3: the terminal posture is a fact; the verdict is the verification
+    // view over structure + posture, never a copy of the Agent's claim.
     const lastView = views.length > 0 ? views[views.length - 1] : undefined;
     const terminalClosure = lastView
         ? contractByRound.get(lastView.round)?.statuses.closure
         : undefined;
+    const terminalPosture = lastView?.evidencePosture?.status ?? null;
     let verdict = "passed";
     if (rounds.some((round) => round.checks.some((check) => check.verdict === "failed")) ||
-        contractsSummary.contradictedItems > 0) {
+        contractsSummary.contradictedItems > 0 ||
+        terminalPosture === "contradicted") {
         verdict = "contradicted";
     }
-    else if (unresolvedUserGates.length > 0 || contractsSummary.open > 0 ||
-        terminalClosure === "superseded" || terminalClosure === "blocked" ||
-        (declared > 0 && evidenced === 0)) {
+    else if (unresolvedUserGates.length > 0 ||
+        contractsSummary.open > 0 ||
+        terminalClosure === "superseded" ||
+        terminalClosure === "blocked" ||
+        terminalPosture === "insufficient" ||
+        terminalPosture === "unknown" ||
+        (declaredIds.size > 0 && evidencedIds.length === 0)) {
         verdict = "incomplete";
     }
     return {
         loopId,
         verdict,
+        evidenceVerdict: terminalPosture,
         rounds,
-        rollbacks: readOnlyRollbacks(entries).map((view) => ({
+        rollbacks: rollbacks.map((view) => ({
             round: view.round,
             transactionId: view.transactionId ?? view.roundId,
             origin: view.origin === "agent" ? "agent" : "machine",
             redoRound: view.recovery?.target.redo_round ?? 0,
             targetCheckpointId: view.recovery?.target.checkpoint_id ?? "",
             reason: view.recovery?.reason ?? "",
+            observedSkippedFiles: [...(view.recovery?.observed_skipped_files ??
+                    view.recovery?.skipped_files ?? [])],
+            reportedSkippedFiles: [...(view.recovery?.reported_skipped_files ?? [])],
             skippedFiles: [...(view.recovery?.skipped_files ?? [])],
+            abandonedRounds: [...(view.recovery?.abandoned_rounds ?? [])],
+            failedRounds: [...(view.recovery?.failed_rounds ?? [])],
+            preservedDiscoveries: [...(view.recovery?.skipped_discoveries ?? [])],
+            approaches: [...(view.recovery?.approaches ?? [])],
+            wrongAssumptions: [...(view.recovery?.wrong_assumptions ?? [])],
         })),
         gates,
         unresolvedUserGates,
         contracts: contractsSummary,
-        criteria: { declared, evidenced, missing: Math.max(0, declared - evidenced) },
+        criteria: {
+            declared: declaredIds.size,
+            evidenced: evidencedIds.length,
+            missing: Math.max(0, declaredIds.size - evidencedIds.length),
+        },
         sequenceComplete,
         provenanceAvailable,
-        legacyRounds: legacyTransactionRounds(entries).map((item) => item.round),
+        legacyRounds: legacyTransactionRounds(loopEntries).map((item) => item.round),
     };
 }
 //# sourceMappingURL=audit.js.map

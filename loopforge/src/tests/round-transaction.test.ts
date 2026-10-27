@@ -12,8 +12,16 @@ import { PROMPT_ARTIFACT_SCHEMA_VERSION } from "../protocol.js";
 import type { RoundTransactionSnapshot } from "../round-transaction.js";
 import type { SelfEvaluation } from "../protocol.js";
 import { queryLoopEntries } from "../loop-store.js";
+import { decodeCommittedRound } from "../committed-round.js";
 import { VaultRoundCommitStore } from "../storage.js";
-import { MemoryLoopStore, committedBacktrackRound, criterionClaims } from "./_helpers.js";
+import {
+  MemoryLoopStore,
+  committedBacktrackRound,
+  committedFeedbackRound,
+  criterionClaims,
+  fixtureEvidencePosture,
+  fixtureRollbackEvidencePosture,
+} from "./_helpers.js";
 import { getPolicyMetrics, resetPolicyMetrics } from "../policy-metrics.js";
 
 const ACCEPTANCE = {
@@ -85,8 +93,9 @@ describe("schema 6 structural invariants", () => {
       ],
       result: {
         action: "continue",
-        verificationStatus: "trusted",
-        roundSuccess: false,
+        evidencePosture: fixtureEvidencePosture(1),
+        agentSuccessClaim: false,
+        agentOutcome: null,
         gateContradicted: false,
         newConsecutiveRejections: 0,
         shouldPushSuccessTrajectory: false,
@@ -279,8 +288,9 @@ describe("backtrack commit replay", () => {
       ],
       result: {
         action: "backtrack",
-        verificationStatus: "trusted",
-        roundSuccess: false,
+        evidencePosture: fixtureRollbackEvidencePosture(1),
+        agentSuccessClaim: false,
+        agentOutcome: null,
         gateContradicted: false,
         newConsecutiveRejections: 0,
         shouldPushSuccessTrajectory: false,
@@ -315,7 +325,7 @@ describe("backtrack commit replay", () => {
       ],
       result: {
         action: "backtrack",
-        verificationStatus: "trusted",
+        evidencePosture: fixtureRollbackEvidencePosture(1),
         recovery: {
           origin: "machine",
           reason: "progress_stall",
@@ -336,7 +346,8 @@ describe("backtrack commit replay", () => {
           wrong_assumptions: [],
           transaction_id: "tx-rollback-bt-recover-5",
         },
-        roundSuccess: false,
+        agentSuccessClaim: false,
+        agentOutcome: null,
         gateContradicted: false,
         newConsecutiveRejections: 0,
         shouldPushSuccessTrajectory: false,
@@ -361,6 +372,80 @@ describe("backtrack commit replay", () => {
     assert.equal(recovered!.result.action, "backtrack");
     assert.equal(recovered!.result.recovery?.target.redo_round, 3);
     assert.equal(recovered!.result.recovery?.trigger_rule, "progress_stall");
+  });
+
+  it("v4.0.3: a committed result without a posture is a HARD break", () => {
+    const entry = committedFeedbackRound(1, { loopId: "posture-break" });
+    const transaction = (entry.loop_lineage as Record<string, unknown>)
+      .round_transaction as Record<string, unknown>;
+    const result = { ...(transaction.result as Record<string, unknown>) };
+    delete result.evidencePosture;
+    const snapshot = {
+      ...(transaction.snapshot as Record<string, unknown>),
+      result,
+    };
+    const broken = {
+      ...entry,
+      loop_lineage: {
+        ...(entry.loop_lineage as Record<string, unknown>),
+        round_transaction: { ...transaction, result, snapshot },
+      },
+    };
+    assert.equal(parseRoundTransactionSnapshot(snapshot), null,
+      "a schema-7 committed result must carry a well-formed posture");
+    assert.equal(decodeCommittedRound(broken as never), null,
+      "the committed view never fabricates a missing posture");
+  });
+
+  it("v4.0.3: a malformed posture is rejected, not repaired", () => {
+    const entry = committedFeedbackRound(1, { loopId: "posture-corrupt" });
+    const transaction = (entry.loop_lineage as Record<string, unknown>)
+      .round_transaction as Record<string, unknown>;
+    const result = {
+      ...(transaction.result as Record<string, unknown>),
+      evidencePosture: {
+        ...fixtureEvidencePosture(1),
+        status: "bogus",
+      },
+    };
+    assert.equal(parseRoundTransactionSnapshot({
+      ...(transaction.snapshot as Record<string, unknown>),
+      result,
+    }), null);
+  });
+
+  it("v4.0.3: the committed view exposes the persisted posture", () => {
+    const entry = committedFeedbackRound(1, { loopId: "posture-view" });
+    const view = decodeCommittedRound(entry);
+    assert.ok(view);
+    assert.equal(view!.evidencePosture?.round, 1);
+    assert.equal(view!.evidencePosture?.kind, "evaluation");
+    assert.deepEqual(view!.evidencePosture, fixtureEvidencePosture(1));
+  });
+
+  it("v4.0.3: retryContext is legal only on a rejected/retry prompt", () => {
+    const retryContext = {
+      attempt: 2,
+      rejectedAttempt: 1,
+      rejectionNotice: "redo it",
+      verificationFlags: [],
+      evidencePosture: fixtureEvidencePosture(1),
+      rejectedAt: 1,
+    };
+    const rejected: RoundTransactionSnapshot = {
+      ...prepare("retry-context", 1, []),
+      phase: "rejected",
+      retryContext,
+    };
+    assert.ok(parseRoundTransactionSnapshot(rejected as unknown as Record<string, unknown>));
+
+    const committedEntry = committedFeedbackRound(1, { loopId: "retry-context" });
+    const transaction = (committedEntry.loop_lineage as Record<string, unknown>)
+      .round_transaction as Record<string, unknown>;
+    assert.equal(parseRoundTransactionSnapshot({
+      ...(transaction.snapshot as Record<string, unknown>),
+      retryContext,
+    }), null, "transient retry facts never enter a committed document");
   });
 
   it("does not replay an abandoned commit with the same roundId on another branch", () => {

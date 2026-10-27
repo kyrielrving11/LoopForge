@@ -134,8 +134,8 @@ describe("RoundDriver", () => {
       output_summary: "Implemented the parser.",
       constraint_violations: [],
       should_continue: true,
-      compression_checkpoint: true,
-      checkpoint_label: "Phase 1 done",
+      subtask_boundary: true,
+      subtask_boundary_label: "Phase 1 done",
       discovered_constraints: ["Never log secrets"],
       subgoal_updates: [
         { id: deriveSubGoalId("driver-cross-round", 1, 0, "Add error handling"), status: "done" },
@@ -162,8 +162,8 @@ describe("RoundDriver", () => {
     assert.equal(history.rounds.length, 1);
     const view = history.rounds[0]!;
     assert.equal(view.evaluation?.output_summary, "Implemented the parser.");
-    assert.equal(view.evaluation?.compression_checkpoint, true);
-    assert.equal(view.evaluation?.checkpoint_label, "Phase 1 done");
+    assert.equal(view.evaluation?.subtask_boundary, true);
+    assert.equal(view.evaluation?.subtask_boundary_label, "Phase 1 done");
     assert.deepEqual(view.executionReport, eval1.execution_report);
     assert.deepEqual(view.evaluation?.discovered_constraints, ["Never log secrets"]);
     assert.deepEqual(view.evaluation?.subgoal_updates, [

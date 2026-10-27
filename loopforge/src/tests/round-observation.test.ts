@@ -24,7 +24,10 @@ import type {
   ProgressCoverage,
 } from "../protocol.js";
 import type { VaultEntry } from "../loop-store.js";
-import { fixtureBeforeCheckpointError } from "./_helpers.js";
+import {
+  fixtureBeforeCheckpointError,
+  fixtureEvidencePosture,
+} from "./_helpers.js";
 
 function gitObservation(
   files: string[],
@@ -131,7 +134,12 @@ function feedbackEntry(
           createdAt: 0,
           updatedAt: 0,
         },
-        result: { action: "continue", verificationFlags: [], roundSuccess: true },
+        result: {
+          action: "continue",
+          verificationFlags: [],
+          agentSuccessClaim: true,
+          evidencePosture: fixtureEvidencePosture(round),
+        },
       },
     },
   };

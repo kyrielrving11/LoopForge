@@ -89,7 +89,7 @@ describe("v3.8.1 — schema fidelity", () => {
     // must read it rather than guess.
     const version = props("PromptArtifact").schemaVersion;
     assert.equal(version.type, "number", "the artifact schema version is a number");
-    assert.equal(version.const, 8);
+    assert.equal(version.const, 9);
   });
 });
 
@@ -141,7 +141,10 @@ describe("Generated JSON Schema — top-level", () => {
     // AgentLoopResult and ExecutionFeedback were removed; CompiledRoundFacts
     // joined (65). v4.0.2: PromptContextMode, PromptContextReason and
     // PromptWorkingMemoryProjection joined (65 → 68).
-    assert.equal(names.length, 68, `expected 68, got ${names.length}: ${names.join(", ")}`);
+    // v4.0.3: RoundVerificationStatus and EvidenceSnapshot were deleted;
+    // EvidencePostureStatus/EvidencePosture/WorkingMemorySourceCounts joined
+    // (68 → 69).
+    assert.equal(names.length, 69, `expected 69, got ${names.length}: ${names.join(", ")}`);
     assert.ok(names.includes("SubmissionHandle"));
     assert.ok(names.includes("PromptArtifact"));
     assert.ok(names.includes("RoundOutcome"));
@@ -212,10 +215,11 @@ describe("Interface type correctness", () => {
     assert.equal(p.round.type, "number");
   });
 
-  it("LoopRoundResult — round is number and success is boolean", () => {
+  it("LoopRoundResult — round is number, the claim is boolean", () => {
     const p = props("LoopRoundResult");
     assert.equal(p.round.type, "number");
-    assert.equal(p.success.type, "boolean");
+    assert.equal(p.agentSuccessClaim.type, "boolean");
+    assert.ok(p.agentOutcome, "the effective Agent outcome is published");
   });
 });
 

@@ -521,7 +521,7 @@ describe("RoundLifecycle — advance", async () => {
     assert.ok(resumed.prompt);
     // L1: pause() persisted the trajectory AFTER round 1's success was
     // pushed — the crash-window reconcile must not push it a second time.
-    assert.deepEqual(mgr2.getSuccessTrajectory("pause-race"), [true],
+    assert.deepEqual(mgr2.getMachineBackedSuccessTrajectory("pause-race"), [true],
       "unpause must not duplicate round 1 in the success trajectory");
   });
 });

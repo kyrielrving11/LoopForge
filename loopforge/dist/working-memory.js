@@ -1,4 +1,4 @@
-/** v4.0.2: bounded Working Memory — the ONE cognitive extension of
+/** v4.0.2/v4.0.3: bounded Working Memory — the ONE cognitive extension of
  *  `CanonicalLoopState`.
  *
  *  It is a PURE derivation over the current branch's committed rounds and
@@ -6,6 +6,11 @@
  *  its own store, and is never an independent factual source. Prompt and
  *  state-file renderers share the formatters below and differ only by profile,
  *  so the two projections cannot drift apart.
+ *
+ *  v4.0.3 adds auditable truncation: `sourceCounts` is computed BEFORE any
+ *  cap/dedupe, `renderedCounts`/`omittedCounts` describe what actually entered
+ *  the body, and every omission produces a deterministic notice. Agent text is
+ *  always blockquoted and labeled a report.
  *
  *  Hard exclusions (guaranteed by the inputs this module accepts):
  *  rejected/terminated/invalid attempts, uncommitted held snapshots,
@@ -78,6 +83,10 @@ export const STATE_WORKING_MEMORY_DENSITY = {
     redirects: WORKING_MEMORY_REDIRECT_LIMIT,
     totalChars: Number.POSITIVE_INFINITY,
 };
+/** v4.0.3: the ONE deterministic truncation notice for the prompt. It counts
+ *  toward the body budget, so it can never push the section over its ceiling. */
+export const WORKING_MEMORY_ABBREVIATED_NOTICE = "> Working Memory is abbreviated; omitted committed reports/questions are " +
+    "available through replay/explain (and the state file when enabled).";
 // ═══════════════════════════════════════════════════════════════════════════
 // Text normalization
 // ═══════════════════════════════════════════════════════════════════════════
@@ -120,13 +129,19 @@ function quote(text, indent = "") {
 // ═══════════════════════════════════════════════════════════════════════════
 function reportMemory(view) {
     const raw = view.evaluation?.output_summary ?? "";
+    const noChangeReason = view.evaluation?.no_change_reason?.trim();
+    const blocker = view.evaluation?.blocker?.trim();
     return {
         round: view.round,
         attempt: view.attempt,
-        success: view.success,
-        outcome: view.outcome,
+        agentSuccessClaim: view.agentSuccessClaim,
+        agentOutcome: view.agentOutcome,
         outputSummary: normalizeWorkingMemoryText(raw),
         sourceChars: raw.length,
+        ...(noChangeReason
+            ? { noChangeReason: normalizeWorkingMemoryText(noChangeReason) }
+            : {}),
+        ...(blocker ? { blocker: normalizeWorkingMemoryText(blocker) } : {}),
     };
 }
 function dedupeAssumptions(entries) {
@@ -173,31 +188,36 @@ function boundedRecoveryItems(values) {
  *  (the SAME window the compiler uses) feed reports, assumptions and
  *  redirects. Open questions remain active until explicitly resolved. A
  *  recovery enters memory only after its redo round is in the
- *  past; the pending directive is also excluded. */
+ *  past; the pending directive is also excluded.
+ *
+ *  v4.0.3: `sourceCounts` is measured before any cap/dedupe so every omission
+ *  can be stated. */
 export function deriveWorkingMemory(history, currentRound = Number.POSITIVE_INFINITY) {
     const window = historyWindow(history, currentRound);
     // The window is ascending; the bounded derivation keeps the most recent
     // rounds, then exposes them newest-first.
     const recent = window.slice(-WORKING_MEMORY_WINDOW_ROUNDS);
-    const reports = [...recent]
+    const reportSource = [...recent]
         .reverse()
         .map(reportMemory)
         .slice(0, WORKING_MEMORY_REPORT_LIMIT);
-    const assumptions = [];
+    const reports = reportSource;
+    const assumptionSource = [];
     for (const view of [...recent].reverse()) {
         for (const value of view.evaluation?.wrong_assumptions ?? []) {
             const text = normalizeWorkingMemoryText(value);
             if (text) {
-                assumptions.push({ round: view.round, kind: "wrong_assumption", text });
+                assumptionSource.push({ round: view.round, kind: "wrong_assumption", text });
             }
         }
         for (const value of view.retractedConstraints ?? []) {
             const text = normalizeWorkingMemoryText(value);
             if (text) {
-                assumptions.push({ round: view.round, kind: "retracted_constraint", text });
+                assumptionSource.push({ round: view.round, kind: "retracted_constraint", text });
             }
         }
     }
+    const assumptions = dedupeAssumptions(assumptionSource);
     const activeQuestions = new Map();
     // An unresolved question remains active until its stable id is closed;
     // unlike reports, it must not expire merely because its declaration left
@@ -214,15 +234,17 @@ export function deriveWorkingMemory(history, currentRound = Number.POSITIVE_INFI
             activeQuestions.delete(id);
         }
     }
-    const openQuestions = [...activeQuestions.values()]
+    const questionSource = [...activeQuestions.values()]
         .sort((left, right) => right.round - left.round || left.id.localeCompare(right.id));
+    const openQuestions = dedupeQuestions(questionSource);
     const pendingId = history.pendingDirective?.transactionId ||
         history.pendingDirective?.roundId ||
         null;
-    const recoveries = [...history.directives]
+    const recoverySource = [...history.directives]
         .filter((view) => view.recovery !== null && view.recovery !== undefined)
         .filter((view) => view.recovery.target.redo_round < currentRound)
-        .filter((view) => (view.transactionId ?? view.roundId) !== pendingId)
+        .filter((view) => (view.transactionId ?? view.roundId) !== pendingId);
+    const recoveries = recoverySource
         .slice(-WORKING_MEMORY_RECOVERY_LIMIT)
         .reverse()
         .map((view) => {
@@ -232,13 +254,18 @@ export function deriveWorkingMemory(history, currentRound = Number.POSITIVE_INFI
             redoRound: recovery.target.redo_round,
             origin: recovery.origin,
             reason: normalizeWorkingMemoryText(recovery.reason),
+            abandonedRounds: [...(recovery.abandoned_rounds ?? [])],
             failedRounds: [...recovery.failed_rounds],
+            observedSkippedFiles: boundedRecoveryItems(recovery.observed_skipped_files ?? recovery.skipped_files ?? []),
+            reportedSkippedFiles: boundedRecoveryItems(recovery.reported_skipped_files ?? []),
             approaches: boundedRecoveryItems(recovery.approaches),
             wrongAssumptions: boundedRecoveryItems(recovery.wrong_assumptions),
+            preservedDiscoveries: boundedRecoveryItems(recovery.skipped_discoveries),
         };
     });
-    const redirects = [...recent]
-        .filter((view) => view.contractTransition !== null && view.contractTransition !== undefined)
+    const redirectSource = [...recent]
+        .filter((view) => view.contractTransition !== null && view.contractTransition !== undefined);
+    const redirects = redirectSource
         .slice(-WORKING_MEMORY_REDIRECT_LIMIT)
         .reverse()
         .map((view) => ({
@@ -248,10 +275,18 @@ export function deriveWorkingMemory(history, currentRound = Number.POSITIVE_INFI
     }));
     return {
         reports,
-        assumptions: dedupeAssumptions(assumptions),
-        openQuestions: dedupeQuestions(openQuestions),
+        assumptions,
+        openQuestions,
         recoveries,
         redirects,
+        sourceCounts: {
+            windowRounds: recent.length,
+            reports: reportSource.length,
+            assumptions: assumptionSource.length,
+            openQuestions: activeQuestions.size,
+            recoveries: recoverySource.length,
+            redirects: redirectSource.length,
+        },
     };
 }
 export function hasWorkingMemoryContent(memory) {
@@ -263,31 +298,49 @@ export function hasWorkingMemoryContent(memory) {
         memory.recoveries.length > 0 ||
         memory.redirects.length > 0;
 }
+function emptySourceCounts() {
+    return {
+        windowRounds: 0,
+        reports: 0,
+        assumptions: 0,
+        openQuestions: 0,
+        recoveries: 0,
+        redirects: 0,
+    };
+}
 function reportBlockText(report, maxChars) {
     if (!report.outputSummary)
         return { text: "", truncated: false };
     return truncateWorkingMemoryText(report.outputSummary, maxChars);
 }
 function reportHeader(report, newest) {
-    const outcome = report.outcome ? `, outcome=${report.outcome}` : "";
+    const outcome = report.agentOutcome ? `, agent_outcome=${report.agentOutcome}` : "";
     if (newest) {
         return `**Previous Round Report (Agent report) — R${report.round}** ` +
-            `(success=${report.success}${outcome}, attempt ${report.attempt})`;
+            `(agent_success_claim=${report.agentSuccessClaim}${outcome}, attempt ${report.attempt})`;
     }
     return report.outputSummary
-        ? `- R${report.round} (success=${report.success}${outcome}):`
-        : `- R${report.round} (success=${report.success}${outcome}): (no output_summary recorded)`;
+        ? `- R${report.round} (agent_success_claim=${report.agentSuccessClaim}${outcome}):`
+        : `- R${report.round} (agent_success_claim=${report.agentSuccessClaim}${outcome}): ` +
+            "(no output_summary recorded)";
 }
 function renderReportBlock(report, newest) {
     const header = reportHeader(report, newest);
+    const details = [];
+    if (report.noChangeReason) {
+        details.push(...quote(`no_change_reason (Agent report): ${report.noChangeReason}`));
+    }
+    if (report.blocker) {
+        details.push(...quote(`blocker (Agent report): ${report.blocker}`));
+    }
     if (newest) {
         if (!report.outputSummary)
-            return [header, "(no output_summary recorded)"];
-        return [header, ...quote(report.outputSummary)];
+            return [header, ...details, "(no output_summary recorded)"];
+        return [header, ...quote(report.outputSummary), ...details];
     }
     if (!report.outputSummary)
-        return [header];
-    return [header, ...quote(report.outputSummary, "  ")];
+        return [header, ...details];
+    return [header, ...quote(report.outputSummary, "  "), ...details];
 }
 function renderQuestionItem(item) {
     return [`- [${item.id}] R${item.round}:`, ...quote(item.text, "  ")];
@@ -302,23 +355,36 @@ function renderDecisionItem(item) {
     return item.lines;
 }
 function renderRecoveryDecision(recovery) {
-    const failedRounds = recovery.failedRounds.slice(0, WORKING_MEMORY_FAILED_ROUNDS_DISPLAY);
-    const moreFailed = recovery.failedRounds.length - failedRounds.length;
-    const failed = failedRounds.length > 0
-        ? `; failed R${failedRounds.join(", R")}` +
-            (moreFailed > 0 ? ` and ${moreFailed} more` : "")
+    const rounds = recovery.origin === "agent"
+        ? recovery.abandonedRounds
+        : recovery.failedRounds;
+    const shownRounds = rounds.slice(0, WORKING_MEMORY_FAILED_ROUNDS_DISPLAY);
+    const moreRounds = rounds.length - shownRounds.length;
+    const roundsLabel = recovery.origin === "agent" ? "abandoned" : "failed";
+    const roundsText = shownRounds.length > 0
+        ? `; ${roundsLabel} R${shownRounds.join(", R")}` +
+            (moreRounds > 0 ? ` and ${moreRounds} more` : "")
         : "";
     const lines = [
         `- R${recovery.round} recovery → redo R${recovery.redoRound} ` +
-            `(${recovery.origin}${failed})`,
+            `(${recovery.origin}${roundsText})`,
     ];
     if (recovery.reason)
         lines.push(...quote(`reason: ${recovery.reason}`, "  "));
+    if (recovery.observedSkippedFiles.length > 0) {
+        lines.push(...quote(`observed changed files (machine): ${recovery.observedSkippedFiles.join(", ")}`, "  "));
+    }
+    if (recovery.reportedSkippedFiles.length > 0) {
+        lines.push(...quote(`Agent-reported changed files: ${recovery.reportedSkippedFiles.join(", ")}`, "  "));
+    }
     for (const approach of recovery.approaches) {
-        lines.push(...quote(`approach: ${approach}`, "  "));
+        lines.push(...quote(`abandoned approach (Agent report): ${approach}`, "  "));
     }
     for (const assumption of recovery.wrongAssumptions) {
-        lines.push(...quote(`assumption: ${assumption}`, "  "));
+        lines.push(...quote(`assumption (Agent report): ${assumption}`, "  "));
+    }
+    for (const discovery of recovery.preservedDiscoveries) {
+        lines.push(...quote(`preserved discovery (Agent report): ${discovery}`, "  "));
     }
     return { kind: "recovery", round: recovery.round, lines };
 }
@@ -327,7 +393,7 @@ function renderRedirectDecision(redirect) {
         `- R${redirect.round} contract redirect (${redirect.contractId})`,
     ];
     if (redirect.reason)
-        lines.push(...quote(`reason: ${redirect.reason}`, "  "));
+        lines.push(...quote(`reason (Agent report): ${redirect.reason}`, "  "));
     return { kind: "redirect", round: redirect.round, lines };
 }
 function buildText(previous, earlier, questions, decisions, assumptions) {
@@ -371,12 +437,26 @@ function applyReportCap(report, cap) {
         truncated: clipped.truncated,
     };
 }
+function zeroCounts() {
+    return {
+        reports: 0,
+        assumptions: 0,
+        openQuestions: 0,
+        recoveries: 0,
+        redirects: 0,
+    };
+}
 /** Format Working Memory with a profile. Deterministic: the same memory and
- *  profile always produce the same string and metadata. */
-function formatWorkingMemory(memory, profile) {
+ *  profile always produce the same string and metadata.
+ *
+ *  `surface` selects the truncation notice: the prompt uses the fixed notice
+ *  (which counts toward `totalChars`), the state file appends a structured
+ *  `> Abbreviated: ...` line (it has no character budget). */
+function formatWorkingMemory(memory, profile, surface) {
     if (!hasWorkingMemoryContent(memory))
         return null;
     let anyTruncated = false;
+    const source = memory.sourceCounts ?? emptySourceCounts();
     const reportLimit = Math.max(0, profile.reports);
     const latest = memory.reports[0] ?? null;
     let previous = null;
@@ -394,17 +474,22 @@ function formatWorkingMemory(memory, profile) {
     const questionLimit = Math.max(0, profile.openQuestions);
     if (memory.openQuestions.length > questionLimit)
         anyTruncated = true;
-    let questions = memory.openQuestions
+    const questions = memory.openQuestions
         .slice(0, questionLimit)
         .map((entry) => {
         const clipped = truncateWorkingMemoryText(entry.text, WORKING_MEMORY_TEXT_LIMITS.openQuestion);
         anyTruncated ||= clipped.truncated;
-        return { id: entry.id, round: entry.round, text: clipped.text, truncated: clipped.truncated };
+        return {
+            id: entry.id,
+            round: entry.round,
+            text: clipped.text,
+            truncated: clipped.truncated,
+        };
     });
     const assumptionLimit = Math.max(0, profile.assumptions);
     if (memory.assumptions.length > assumptionLimit)
         anyTruncated = true;
-    let assumptions = memory.assumptions
+    const assumptions = memory.assumptions
         .slice(0, assumptionLimit)
         .map((entry) => {
         const clipped = truncateWorkingMemoryText(entry.text, WORKING_MEMORY_TEXT_LIMITS.assumption);
@@ -444,10 +529,15 @@ function formatWorkingMemory(memory, profile) {
     }
     let text = buildText(previous, earlier, questions, decisions, assumptions);
     const totalChars = profile.totalChars;
+    const noticeSuffix = surface === "prompt" && anyTruncated
+        ? `\n\n${WORKING_MEMORY_ABBREVIATED_NOTICE}`
+        : "";
+    const size = () => text.length + (anyTruncated ? noticeSuffix.length : 0);
     if (Number.isFinite(totalChars)) {
         // Drop lower-priority details first. The previous report is the anchor and
-        // is truncated only after every other block is gone.
-        while (text.length > totalChars) {
+        // is truncated only after every other block is gone. The truncation notice
+        // counts toward the ceiling.
+        while (size() > totalChars) {
             if (earlier.length > 0) {
                 earlier.pop();
             }
@@ -470,9 +560,10 @@ function formatWorkingMemory(memory, profile) {
             anyTruncated = true;
             text = buildText(previous, earlier, questions, decisions, assumptions);
         }
-        if (text.length > totalChars && previous) {
+        if (size() > totalChars && previous) {
             const withoutReport = buildText({ ...previous, report: { ...previous.report, outputSummary: "" }, text: "" }, earlier, questions, decisions, assumptions);
-            const overhead = withoutReport.length > 0 ? withoutReport.length + 1 : 0;
+            const overhead = (withoutReport.length > 0 ? withoutReport.length + 1 : 0) +
+                (anyTruncated ? noticeSuffix.length : 0);
             const room = Math.max(0, totalChars - overhead);
             const clipped = truncateWorkingMemoryText(previous.report.outputSummary, room);
             const wasTruncated = previous.truncated;
@@ -490,16 +581,39 @@ function formatWorkingMemory(memory, profile) {
         ...(previous ? [previous.report.round] : []),
         ...earlier.map((block) => block.report.round),
     ];
+    const renderedCounts = {
+        reports: reportRounds.length,
+        assumptions: assumptions.length,
+        openQuestions: questions.length,
+        recoveries: decisions.filter((item) => item.kind === "recovery").length,
+        redirects: decisions.filter((item) => item.kind === "redirect").length,
+    };
+    if (surface === "prompt" && anyTruncated) {
+        text = text ? `${text}\n\n${WORKING_MEMORY_ABBREVIATED_NOTICE}` : WORKING_MEMORY_ABBREVIATED_NOTICE;
+    }
+    if (surface === "state" && anyTruncated) {
+        const parts = [];
+        const labels = [
+            ["reports", "reports"],
+            ["openQuestions", "questions"],
+            ["assumptions", "assumptions"],
+            ["recoveries", "recoveries"],
+            ["redirects", "redirects"],
+        ];
+        for (const [key, label] of labels) {
+            if (source[key] > renderedCounts[key] || !source[key]) {
+                if (source[key] > renderedCounts[key]) {
+                    parts.push(`${label} ${renderedCounts[key]}/${source[key]}`);
+                }
+            }
+        }
+        text = `${text}\n\n> Abbreviated${parts.length > 0 ? `: ${parts.join(", ")}` : " (text truncated)"}`;
+    }
     return {
         text,
         reportRounds,
-        counts: {
-            reports: reportRounds.length,
-            assumptions: assumptions.length,
-            openQuestions: questions.length,
-            recoveries: decisions.filter((item) => item.kind === "recovery").length,
-            redirects: decisions.filter((item) => item.kind === "redirect").length,
-        },
+        renderedCounts,
+        questionIds: questions.map((item) => item.id),
         previousReport: previous
             ? {
                 round: previous.report.round,
@@ -511,30 +625,89 @@ function formatWorkingMemory(memory, profile) {
         truncated: anyTruncated,
     };
 }
+function projectionFrom(memory, formatted, rendered) {
+    const source = memory.sourceCounts ?? emptySourceCounts();
+    const counts = rendered ? formatted.renderedCounts : zeroCounts();
+    return {
+        rendered,
+        reportRounds: rendered ? formatted.reportRounds : [],
+        counts,
+        sourceCounts: { ...source },
+        omittedCounts: {
+            reports: Math.max(0, source.reports - counts.reports),
+            assumptions: Math.max(0, source.assumptions - counts.assumptions),
+            openQuestions: Math.max(0, source.openQuestions - counts.openQuestions),
+            recoveries: Math.max(0, source.recoveries - counts.recoveries),
+            redirects: Math.max(0, source.redirects - counts.redirects),
+        },
+        questionIds: rendered ? formatted.questionIds : [],
+        previousReport: rendered ? formatted.previousReport : null,
+        renderedChars: rendered ? formatted.text.length : 0,
+        truncated: rendered ? formatted.truncated : true,
+    };
+}
 /** Prompt projection for one level. Returns null when there is nothing to
  *  render, so the prompt renders no empty section. */
 export function formatWorkingMemoryPrompt(memory, level) {
     if (!memory)
         return null;
-    const formatted = formatWorkingMemory(memory, PROMPT_WORKING_MEMORY_DENSITY[level]);
+    const formatted = formatWorkingMemory(memory, PROMPT_WORKING_MEMORY_DENSITY[level], "prompt");
     if (!formatted)
         return null;
     return {
         body: formatted.text,
-        projection: {
-            reportRounds: formatted.reportRounds,
-            counts: formatted.counts,
-            previousReport: formatted.previousReport,
-            renderedChars: formatted.text.length,
-            truncated: formatted.truncated,
-        },
+        projection: projectionFrom(memory, formatted, true),
     };
+}
+/** v4.0.3: the projection of a Working Memory section that the prompt budget
+ *  dropped WHOLE (`allowPartial: false`). `sourceCounts` is preserved so the
+ *  omission is auditable; every rendered count is zero. */
+export function unrenderedWorkingMemoryProjection(memory, level) {
+    if (!memory || !hasWorkingMemoryContent(memory))
+        return null;
+    const formatted = formatWorkingMemory(memory, PROMPT_WORKING_MEMORY_DENSITY[level], "prompt");
+    if (!formatted)
+        return null;
+    return projectionFrom(memory, formatted, false);
 }
 /** State-file projection: the full fixed window, no prompt budget. */
 export function formatWorkingMemoryState(memory) {
-    if (!memory)
-        return [];
-    const formatted = formatWorkingMemory(memory, STATE_WORKING_MEMORY_DENSITY);
-    return formatted ? formatted.text.split("\n") : [];
+    if (!memory) {
+        return {
+            lines: [],
+            truncated: false,
+            sourceCounts: emptySourceCounts(),
+            renderedCounts: zeroCounts(),
+            omittedCounts: zeroCounts(),
+            questionIds: [],
+        };
+    }
+    const formatted = formatWorkingMemory(memory, STATE_WORKING_MEMORY_DENSITY, "state");
+    if (!formatted) {
+        return {
+            lines: [],
+            truncated: false,
+            sourceCounts: { ...(memory.sourceCounts ?? emptySourceCounts()) },
+            renderedCounts: zeroCounts(),
+            omittedCounts: zeroCounts(),
+            questionIds: [],
+        };
+    }
+    const source = memory.sourceCounts ?? emptySourceCounts();
+    const counts = formatted.renderedCounts;
+    return {
+        lines: formatted.text.split("\n"),
+        truncated: formatted.truncated,
+        sourceCounts: { ...source },
+        renderedCounts: counts,
+        omittedCounts: {
+            reports: Math.max(0, source.reports - counts.reports),
+            assumptions: Math.max(0, source.assumptions - counts.assumptions),
+            openQuestions: Math.max(0, source.openQuestions - counts.openQuestions),
+            recoveries: Math.max(0, source.recoveries - counts.recoveries),
+            redirects: Math.max(0, source.redirects - counts.redirects),
+        },
+        questionIds: formatted.questionIds,
+    };
 }
 //# sourceMappingURL=working-memory.js.map

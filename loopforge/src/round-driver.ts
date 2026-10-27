@@ -123,7 +123,13 @@ export class RoundDriver {
     let response: LoopCompileResponse;
     let evidenceBaseline: MachineObservation[];
     if (opts.baseline) {
-      response = this.compile(request, loopId, opts.operatorAcceptance);
+      // v4.0.3: the redo compile carries the verified-restore fact so the
+      // Recovery Brief never hard-codes `restore verified`.
+      response = this.compile(
+        opts.restore ? { ...request, restore_verified: true } : request,
+        loopId,
+        opts.operatorAcceptance,
+      );
       evidenceBaseline = opts.baseline.observations;
       boundary = opts.baseline.boundary;
     } else {
@@ -188,7 +194,8 @@ export class RoundDriver {
       attempt: rejected.attempt + 1,
       consecutive_rejections: consecutiveRejections,
       rejection_notice: rejectionNotice,
-      force_level: consecutiveRejections >= 2 ? "l2" : "l0",
+      // v4.0.3: `force_level` was never consulted for attempt > 1 — the level
+      // policy derives L0 (first retry) / L2 (repeated rejection) from facts.
     } as LoopCompileRequest;
     const response = this.compile(
       retryRequest,
@@ -199,11 +206,9 @@ export class RoundDriver {
       throw new CompileFailureError("the retry compiler produced no prompt artifact");
     }
     // v3.9.6: warnings live on the artifact; the session no longer mirrors
-    // them, so a held prompt is self-contained across a restart.
-    const artifact: PromptArtifact = {
-      ...response.prompt_artifact,
-      warnings: [...(response.warnings ?? [])],
-    };
+    // them, so a held prompt is self-contained across a restart. The
+    // assembler owns `artifact.warnings`; the driver does not re-stamp it.
+    const artifact: PromptArtifact = response.prompt_artifact;
     // v4.0.1: the compile response is the one source of the facts stamped at
     // commit. There is no second derivation from the objective or the rejected
     // attempt; a response missing them is a compile failure, not an input to
@@ -246,10 +251,7 @@ export class RoundDriver {
     } = {},
     boundary?: BoundaryCapture,
   ): PreparedRound {
-    const rawArtifact = response.prompt_artifact;
-    const artifact: PromptArtifact | undefined = rawArtifact
-      ? { ...rawArtifact, warnings: [...(response.warnings ?? [])] }
-      : undefined;
+    const artifact: PromptArtifact | undefined = response.prompt_artifact;
     const observedGitBefore = evidenceBaseline.some(
       (observation) => observation.kind === "git" && observation.status === "observed",
     );

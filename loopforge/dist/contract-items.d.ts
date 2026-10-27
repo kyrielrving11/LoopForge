@@ -57,6 +57,4 @@ export interface ContractItemInput {
 }
 /** v3.8: Derive every item's status plus the contract's closure. */
 export declare function deriveContractItemStatuses(input: ContractItemInput): ContractItemStatusView;
-/** v3.8: The round-level verification posture. */
-export declare function roundVerificationStatus(view: ContractItemStatusView, report: ExecutionReport | null): "trusted" | "insufficient" | "contradicted";
 //# sourceMappingURL=contract-items.d.ts.map

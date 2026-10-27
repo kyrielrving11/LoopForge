@@ -180,7 +180,7 @@ describe("createCanonicalLoopState", () => {
       loop_objective: null,
     }), "test.md");
     assert.ok(state.objective);
-    assert.equal("estimate" in state.progress, false);
+    assert.equal("estimate" in state.reportedProgress, false);
   });
 
 
@@ -210,10 +210,9 @@ describe("createCanonicalLoopState", () => {
   it("renders objective progress evidence without a subjective percentage", () => {
     const previous = makeLoopRoundResult({
       round: 1,
-      success: true,
+      agentSuccessClaim: true,
       output_summary: "done",
       constraint_violations: [],
-      manual_fixes_needed: "",
       execution_report: {
         files_changed: ["a.ts"],
         tests_reported: { passed: 8, failed: 1, skipped: 0 },
@@ -225,7 +224,7 @@ describe("createCanonicalLoopState", () => {
     });
     const md = renderCanonicalStateMarkdown(state);
     assert.ok(md.includes("Progress Dashboard"));
-    assert.ok(md.includes("**Criteria**: 1/2"));
+    assert.ok(md.includes("**Agent-reported criteria**: 1/2"));
     assert.ok(!md.includes("Estimated Completion"));
     assert.ok(md.includes("8 passed"));
     assert.ok(md.includes("1 failed"));
@@ -234,7 +233,7 @@ describe("createCanonicalLoopState", () => {
   it("v4.0.2: renders the authority header and bounded Working Memory", () => {
     const previous = makeLoopRoundResult({
       round: 1,
-      success: false,
+      agentSuccessClaim: false,
       output_summary: "previous summary",
       wrong_assumptions: ["old belief"],
     });
@@ -244,8 +243,8 @@ describe("createCanonicalLoopState", () => {
         reports: [{
           round: 1,
           attempt: 1,
-          success: false,
-          outcome: "failed",
+          agentSuccessClaim: false,
+          agentOutcome: "failed",
           outputSummary: "previous summary",
           sourceChars: "previous summary".length,
         }],
@@ -257,12 +256,16 @@ describe("createCanonicalLoopState", () => {
         openQuestions: [],
         recoveries: [],
         redirects: [],
+        sourceCounts: {
+          windowRounds: 1, reports: 1, assumptions: 1,
+          openQuestions: 0, recoveries: 0, redirects: 0,
+        },
       },
     });
     const md = renderCanonicalStateMarkdown(state);
     assert.ok(md.includes("**Authority**: committed typed rounds are the factual source"));
-    assert.ok(md.includes("**Agent reports**:"));
-    assert.ok(md.includes("**Working memory**: recent committed reports only"));
+    assert.ok(md.includes("**Evidence**: machine evidence = providers"));
+    assert.ok(md.includes("**Working memory**: bounded"));
     assert.ok(md.includes("### Working Memory"));
     assert.ok(md.includes("Previous Round Report (Agent report) — R1"));
     assert.ok(md.includes("> old belief"));
@@ -285,13 +288,17 @@ describe("createCanonicalLoopState", () => {
     }), "test.md", {
       workingMemory: {
         reports: [{
-          round: 1, attempt: 1, success: true, outcome: "success",
+          round: 1, attempt: 1, agentSuccessClaim: true, agentOutcome: "success",
           outputSummary: "done", sourceChars: 4,
         }],
         assumptions: [{ round: 1, kind: "wrong_assumption", text: "old belief" }],
         openQuestions: [],
         recoveries: [],
         redirects: [],
+        sourceCounts: {
+          windowRounds: 1, reports: 1, assumptions: 1,
+          openQuestions: 0, recoveries: 0, redirects: 0,
+        },
       },
     });
     const md = renderCanonicalStateMarkdown(state);
@@ -363,11 +370,11 @@ describe("state-file tiering (v3.7.1)", () => {
     const idxHistorical = md.indexOf("## Historical Summary");
     assert.ok(idxCurrent >= 0 && idxRecent > idxCurrent && idxHistorical > idxRecent,
       "tiers must render in order: Current → Recent → Historical Summary");
-    assert.ok(md.includes("**Schema**: 6"), "state schema marker");
+    assert.ok(md.includes("**Schema**: 7"), "state schema marker");
     assert.ok(md.includes("**Derived**: true"), "derived marker in the header");
     assert.ok(md.includes("**Source**: round 2 (attempt 2)"), "attempt marker");
     assert.ok(md.includes("**Authority**: committed typed rounds"));
-    assert.ok(md.includes("**Agent reports**:"));
+    assert.ok(md.includes("**Evidence**: machine evidence = providers"));
     assert.match(md, /\*\*State hash\*\*: [a-f0-9]{12}/);
     // Sections are demoted to H3 under their tier.
     const current = md.slice(idxCurrent, idxRecent);
@@ -422,7 +429,7 @@ describe("v3.3 — Roadmap and derived state", () => {
   const fullResponse = (): LoopCompileResponse => response({
     round: 7,
     criterion_statuses: [
-      { id: "cr-11111111", text: "all tests pass", status: "verified" as const, met_at_round: 3 },
+      { id: "cr-11111111", text: "all tests pass", status: "verified" as const, status_at_round: 3, status_source: "machine" as const },
       { id: "cr-22222222", text: "no regressions", status: "remaining" as const },
       { id: "cr-33333333", text: "clean lint", status: "unknown" as const },
     ],

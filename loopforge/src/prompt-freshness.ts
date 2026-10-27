@@ -56,7 +56,7 @@ function declaredEvolution(previous: CommittedRoundView): boolean {
     (previous.subgoalUpdates?.length ?? 0) > 0 ||
     (previous.retractedConstraints?.length ?? 0) > 0 ||
     previous.contractProposal !== null ||
-    evaluation?.compression_checkpoint === true
+    evaluation?.subtask_boundary === true
   );
 }
 

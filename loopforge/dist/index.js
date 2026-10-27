@@ -16,7 +16,9 @@
  *   server.start();
  */
 // Protocol types
-export { AgentStatus, makeSelfEvaluation, makeLoopObjective, makeLoopRoundResult, makeLoopCompileRequest, makeLoopCompileResponse, makeEvidenceSnapshot, makeVerificationFlag, makeVerificationResult, makeEnforcementResult, makeSubGoal, makeConstraintMeta, } from "./protocol.js";
+export { AgentStatus, makeSelfEvaluation, makeLoopObjective, makeLoopRoundResult, makeLoopCompileRequest, makeLoopCompileResponse, makeVerificationFlag, makeVerificationResult, makeEnforcementResult, makeSubGoal, makeConstraintMeta, } from "./protocol.js";
+// Evidence posture (v4.0.3)
+export { deriveEvidencePosture, rollbackEvidencePosture, EVIDENCE_POSTURE_CAPS, } from "./evidence-posture.js";
 // Policy
 export { getPolicy, loadPolicy, resetPolicy, DEFAULT_POLICY, writeStateFile, } from "./policy.js";
 // Durable store

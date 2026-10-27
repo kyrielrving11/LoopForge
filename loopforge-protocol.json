@@ -77,10 +77,10 @@
             "type": "string"
           }
         },
-        "compression_checkpoint": {
+        "subtask_boundary": {
           "type": "boolean"
         },
-        "checkpoint_label": {
+        "subtask_boundary_label": {
           "type": "string"
         },
         "worker_results": {
@@ -439,6 +439,24 @@
             "type": "string"
           }
         },
+        "observed_skipped_files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "reported_skipped_files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "abandoned_rounds": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          }
+        },
         "skipped_discoveries": {
           "type": "array",
           "items": {
@@ -449,6 +467,12 @@
           "type": "array",
           "items": {
             "type": "number"
+          }
+        },
+        "trigger_findings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/VerificationFlag"
           }
         },
         "approaches": {
@@ -916,6 +940,19 @@
         "entered_history": {
           "type": "boolean"
         },
+        "agent_success_claim": {
+          "type": "boolean"
+        },
+        "agent_outcome": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RoundOutcome"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "recovery_checkpoint": {
           "type": "object",
           "properties": {
@@ -1122,7 +1159,7 @@
                 "type": "string"
               }
             },
-            "checkpoint": {
+            "subtask_boundary": {
               "anyOf": [
                 {
                   "type": "object",
@@ -1167,6 +1204,30 @@
                         "type": "string"
                       }
                     },
+                    "observed_skipped_files": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "reported_skipped_files": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "abandoned_rounds": {
+                      "type": "array",
+                      "items": {
+                        "type": "number"
+                      }
+                    },
+                    "trigger_finding_ids": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
                     "origin": {
                       "anyOf": [
                         {
@@ -1191,7 +1252,11 @@
                     "redo_round",
                     "target_checkpoint_id",
                     "preserved_discoveries",
-                    "wrong_assumptions"
+                    "wrong_assumptions",
+                    "observed_skipped_files",
+                    "reported_skipped_files",
+                    "abandoned_rounds",
+                    "trigger_finding_ids"
                   ]
                 },
                 {
@@ -1215,30 +1280,8 @@
         "verification": {
           "type": "object",
           "properties": {
-            "contract_status": {
-              "$ref": "#/$defs/RoundVerificationStatus"
-            },
-            "evidence_status": {
-              "anyOf": [
-                {
-                  "type": "string",
-                  "enum": [
-                    "verified"
-                  ]
-                },
-                {
-                  "type": "string",
-                  "enum": [
-                    "unavailable"
-                  ]
-                },
-                {
-                  "type": "string",
-                  "enum": [
-                    "absent"
-                  ]
-                }
-              ]
+            "evidence_posture": {
+              "$ref": "#/$defs/EvidencePosture"
             },
             "checks": {
               "type": "array",
@@ -1289,8 +1332,7 @@
             }
           },
           "required": [
-            "contract_status",
-            "evidence_status",
+            "evidence_posture",
             "checks",
             "contract_items"
           ]
@@ -1361,6 +1403,7 @@
         "disposition",
         "record",
         "entered_history",
+        "agent_success_claim",
         "reports",
         "effects",
         "verification",
@@ -1477,7 +1520,44 @@
                 "type": "string"
               },
               "status": {
-                "description": "Not representable in JSON Schema: IndexedAccessType"
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "unknown"
+                    ]
+                  },
+                  {
+                    "type": "string",
+                    "enum": [
+                      "claimed"
+                    ]
+                  },
+                  {
+                    "type": "string",
+                    "enum": [
+                      "remaining"
+                    ]
+                  },
+                  {
+                    "type": "string",
+                    "enum": [
+                      "insufficient"
+                    ]
+                  },
+                  {
+                    "type": "string",
+                    "enum": [
+                      "contradicted"
+                    ]
+                  },
+                  {
+                    "type": "string",
+                    "enum": [
+                      "verified"
+                    ]
+                  }
+                ]
               }
             },
             "required": [
@@ -1775,8 +1855,24 @@
             }
           ]
         },
-        "met_at_round": {
+        "status_at_round": {
           "type": "number"
+        },
+        "status_source": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "agent"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "machine"
+              ]
+            }
+          ]
         }
       },
       "required": [
@@ -2019,8 +2115,11 @@
         "round": {
           "type": "number"
         },
-        "success": {
+        "agentSuccessClaim": {
           "type": "boolean"
+        },
+        "agentOutcome": {
+          "$ref": "#/$defs/RoundOutcome"
         },
         "output_summary": {
           "type": "string"
@@ -2030,9 +2129,6 @@
           "items": {
             "type": "string"
           }
-        },
-        "manual_fixes_needed": {
-          "type": "string"
         },
         "discovered_constraints": {
           "type": "array",
@@ -2085,14 +2181,11 @@
             "$ref": "#/$defs/WorkerResult"
           }
         },
-        "compression_checkpoint": {
+        "subtask_boundary": {
           "type": "boolean"
         },
-        "checkpoint_label": {
+        "subtask_boundary_label": {
           "type": "string"
-        },
-        "outcome": {
-          "$ref": "#/$defs/RoundOutcome"
         },
         "blocker": {
           "type": "string"
@@ -2121,10 +2214,9 @@
       },
       "required": [
         "round",
-        "success",
+        "agentSuccessClaim",
         "output_summary",
-        "constraint_violations",
-        "manual_fixes_needed"
+        "constraint_violations"
       ]
     },
     "LoopCompileRequest": {
@@ -2184,6 +2276,12 @@
         },
         "rejection_notice": {
           "type": "string"
+        },
+        "retry_evidence_posture": {
+          "$ref": "#/$defs/EvidencePosture"
+        },
+        "restore_verified": {
+          "type": "boolean"
         }
       },
       "required": [
@@ -2317,9 +2415,44 @@
         "enforcement_retry"
       ]
     },
+    "WorkingMemorySourceCounts": {
+      "type": "object",
+      "properties": {
+        "windowRounds": {
+          "type": "number"
+        },
+        "reports": {
+          "type": "number"
+        },
+        "assumptions": {
+          "type": "number"
+        },
+        "openQuestions": {
+          "type": "number"
+        },
+        "recoveries": {
+          "type": "number"
+        },
+        "redirects": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "windowRounds",
+        "reports",
+        "assumptions",
+        "openQuestions",
+        "recoveries",
+        "redirects"
+      ],
+      "description": "v4.0.3: how many committed items existed BEFORE any cap/dedupe. It is\r\nderived once by Working Memory and travels through canonical state (and\r\ntherefore stateHash); renderers compare it with the rendered counts so an\r\nomission is always visible."
+    },
     "PromptWorkingMemoryProjection": {
       "type": "object",
       "properties": {
+        "rendered": {
+          "type": "boolean"
+        },
         "reportRounds": {
           "type": "array",
           "items": {
@@ -2352,6 +2485,42 @@
             "recoveries",
             "redirects"
           ]
+        },
+        "sourceCounts": {
+          "$ref": "#/$defs/WorkingMemorySourceCounts"
+        },
+        "omittedCounts": {
+          "type": "object",
+          "properties": {
+            "reports": {
+              "type": "number"
+            },
+            "assumptions": {
+              "type": "number"
+            },
+            "openQuestions": {
+              "type": "number"
+            },
+            "recoveries": {
+              "type": "number"
+            },
+            "redirects": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "reports",
+            "assumptions",
+            "openQuestions",
+            "recoveries",
+            "redirects"
+          ]
+        },
+        "questionIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         },
         "previousReport": {
           "anyOf": [
@@ -2391,19 +2560,23 @@
         }
       },
       "required": [
+        "rendered",
         "reportRounds",
         "counts",
+        "sourceCounts",
+        "omittedCounts",
+        "questionIds",
         "renderedChars",
         "truncated"
       ],
-      "description": "v4.0.2: what the prompt projection actually rendered from the bounded\r\nWorking Memory. Audit metadata only — it never feeds a decision."
+      "description": "v4.0.2/v4.0.3: what the prompt projection actually rendered from the\r\nbounded Working Memory. Audit metadata only — it never feeds a decision.\r\n`rendered: false` means the section was dropped whole (allowPartial=false)\r\nor no prompt section exists; `sourceCounts` still states what existed."
     },
     "PromptArtifact": {
       "type": "object",
       "properties": {
         "schemaVersion": {
           "type": "number",
-          "const": 8
+          "const": 9
         },
         "roundId": {
           "type": "string"
@@ -2612,42 +2785,6 @@
         "error"
       ]
     },
-    "EvidenceSnapshot": {
-      "type": "object",
-      "properties": {
-        "verified": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "pending": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "invalidated": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "discovered": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        }
-      },
-      "required": [
-        "verified",
-        "pending",
-        "invalidated",
-        "discovered"
-      ],
-      "description": "Aggregated evidence snapshot for the state file Evidence section.\r\nFour categories give the agent a clear picture of what's been confirmed,\r\nwhat remains, what was wrong, and what's newly discovered — all derived\r\nfrom accumulated SelfEvaluation data across rounds."
-    },
     "StopReason": {
       "type": "string",
       "enum": [
@@ -2716,8 +2853,21 @@
     "LoopTerminalEvent": {
       "type": "object",
       "properties": {
-        "success": {
+        "completed": {
           "type": "boolean"
+        },
+        "machineBackedSuccess": {
+          "type": "boolean"
+        },
+        "evidencePosture": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvidencePosture"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "stopReason": {
           "$ref": "#/$defs/StopReason"
@@ -2725,7 +2875,7 @@
         "roundsCompleted": {
           "type": "number"
         },
-        "successTrajectory": {
+        "machineBackedSuccessTrajectory": {
           "type": "array",
           "items": {
             "type": "boolean"
@@ -2742,10 +2892,11 @@
         }
       },
       "required": [
-        "success",
+        "completed",
+        "machineBackedSuccess",
         "stopReason",
         "roundsCompleted",
-        "successTrajectory",
+        "machineBackedSuccessTrajectory",
         "loopId",
         "task"
       ]
@@ -3053,14 +3204,366 @@
         "verified"
       ]
     },
-    "RoundVerificationStatus": {
+    "EvidencePostureStatus": {
       "type": "string",
       "enum": [
-        "trusted",
+        "verified",
         "insufficient",
         "contradicted",
+        "unknown",
         "not_applicable"
       ]
+    },
+    "EvidencePosture": {
+      "type": "object",
+      "properties": {
+        "round": {
+          "type": "number"
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "evaluation"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "rollback"
+              ]
+            }
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/EvidencePostureStatus"
+        },
+        "machineBackedSuccess": {
+          "type": "boolean"
+        },
+        "verificationConfigured": {
+          "type": "boolean"
+        },
+        "workspace": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "observed"
+                  ]
+                },
+                {
+                  "type": "string",
+                  "enum": [
+                    "unknown"
+                  ]
+                },
+                {
+                  "type": "string",
+                  "enum": [
+                    "not_applicable"
+                  ]
+                }
+              ]
+            },
+            "changedPathCount": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "status",
+            "changedPathCount"
+          ]
+        },
+        "files": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "reconciliation": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "enum": [
+                        "match"
+                      ]
+                    },
+                    {
+                      "type": "string",
+                      "enum": [
+                        "mismatch"
+                      ]
+                    },
+                    {
+                      "type": "string",
+                      "enum": [
+                        "unknown"
+                      ]
+                    },
+                    {
+                      "type": "string",
+                      "enum": [
+                        "not_applicable"
+                      ]
+                    }
+                  ]
+                },
+                "reported": {
+                  "type": "number"
+                },
+                "observed": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "reconciliation",
+                "reported",
+                "observed"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "providers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "providerId": {
+                "type": "string"
+              },
+              "kind": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "git"
+                    ]
+                  },
+                  {
+                    "type": "string",
+                    "enum": [
+                      "custom"
+                    ]
+                  }
+                ]
+              },
+              "status": {
+                "$ref": "#/$defs/ObservationStatus"
+              }
+            },
+            "required": [
+              "providerId",
+              "kind",
+              "status"
+            ]
+          }
+        },
+        "commands": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "commandId": {
+                "type": "string"
+              },
+              "status": {
+                "$ref": "#/$defs/ObservationStatus"
+              },
+              "required": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "commandId",
+              "status",
+              "required"
+            ]
+          }
+        },
+        "contract": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "closure": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "enum": [
+                        "open"
+                      ]
+                    },
+                    {
+                      "type": "string",
+                      "enum": [
+                        "verified"
+                      ]
+                    },
+                    {
+                      "type": "string",
+                      "enum": [
+                        "blocked"
+                      ]
+                    },
+                    {
+                      "type": "string",
+                      "enum": [
+                        "superseded"
+                      ]
+                    }
+                  ]
+                },
+                "items": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "status": {
+                        "$ref": "#/$defs/ContractItemStatus"
+                      },
+                      "criterionRefs": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "reasons": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "status",
+                      "criterionRefs",
+                      "reasons"
+                    ]
+                  }
+                },
+                "verifiedCount": {
+                  "type": "number"
+                },
+                "insufficientCount": {
+                  "type": "number"
+                },
+                "contradictedCount": {
+                  "type": "number"
+                },
+                "pendingCount": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "id",
+                "closure",
+                "items",
+                "verifiedCount",
+                "insufficientCount",
+                "contradictedCount",
+                "pendingCount"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "check": {
+                "type": "string"
+              },
+              "severity": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "info"
+                    ]
+                  },
+                  {
+                    "type": "string",
+                    "enum": [
+                      "warn"
+                    ]
+                  },
+                  {
+                    "type": "string",
+                    "enum": [
+                      "error"
+                    ]
+                  }
+                ]
+              },
+              "ref": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "check",
+              "severity"
+            ]
+          }
+        },
+        "omitted": {
+          "type": "object",
+          "properties": {
+            "providers": {
+              "type": "number"
+            },
+            "commands": {
+              "type": "number"
+            },
+            "contractItems": {
+              "type": "number"
+            },
+            "findings": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "providers",
+            "commands",
+            "contractItems",
+            "findings"
+          ]
+        }
+      },
+      "required": [
+        "round",
+        "kind",
+        "status",
+        "machineBackedSuccess",
+        "verificationConfigured",
+        "workspace",
+        "providers",
+        "commands",
+        "findings",
+        "omitted"
+      ],
+      "description": "v4.0.3: a compact, capped projection of one round's machine evidence.\r\n\r\nIt deliberately carries no stdout/stderr, no file fingerprints and no full\r\ncommand output: full observations stay in the committed transaction and are\r\nread through `explain`/`replay`. Array caps are code constants (never\r\npolicy); `omitted` records how many entries the cap hid, while `status` is\r\ncomputed from the COMPLETE data before any cap is applied."
     },
     "ProgressState": {
       "type": "string",

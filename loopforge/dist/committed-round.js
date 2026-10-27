@@ -6,7 +6,7 @@
  */
 import { observationVersionIssue } from "./evidence-provider.js";
 import { PROMPT_ARTIFACT_SCHEMA_VERSION, makeLoopRoundResult, } from "./protocol.js";
-import { ROUND_TRANSACTION_SCHEMA_VERSION, deriveRoundObservationDelta, parseRoundTransactionSnapshot, rootBranchId, transactionSchemaVersionOf, } from "./round-transaction.js";
+import { ROUND_TRANSACTION_SCHEMA_VERSION, deriveRoundObservationDelta, isProcessResult, parseRoundTransactionSnapshot, rootBranchId, transactionSchemaVersionOf, } from "./round-transaction.js";
 import { effectiveOutcome, parseContractTransition, parseRoundContract, } from "./self-eval.js";
 import { entryRound, isRecord } from "./token-utils.js";
 import { transactionIdentityIssue } from "./transaction-identity.js";
@@ -118,9 +118,10 @@ function viewFromSnapshot(input) {
         executionReport: evaluation?.execution_report ?? null,
         verificationFlags: flags(result.verificationFlags),
         result,
+        evidencePosture: result.evidencePosture ?? null,
         action,
-        success: result.roundSuccess === true,
-        outcome,
+        agentSuccessClaim: result.agentSuccessClaim === true,
+        agentOutcome: result.agentOutcome ?? outcome,
         contractProposal: evaluation?.round_contract
             ? parseRoundContract(evaluation.round_contract) ?? null
             : null,
@@ -172,7 +173,10 @@ export function decodeCommittedRound(entry) {
     const resultValue = isRecord(transaction.result)
         ? transaction.result
         : snapshot.result;
-    if (!isRecord(resultValue))
+    // v4.0.3: a schema-7 committed result must carry a well-formed Evidence
+    // Posture. Missing/corrupt posture is a HARD break, not something to
+    // re-derive at read time.
+    if (!isRecord(resultValue) || !isProcessResult(resultValue))
         return null;
     return viewFromSnapshot({
         source: "feedback",
@@ -203,7 +207,7 @@ export function decodeRollbackEvent(entry) {
     const resultValue = isRecord(transaction.result)
         ? transaction.result
         : snapshot.result;
-    if (!isRecord(resultValue))
+    if (!isRecord(resultValue) || !isProcessResult(resultValue))
         return null;
     const result = resultValue;
     if (result.action !== "recovery" && result.action !== "backtrack")
@@ -232,16 +236,14 @@ export function decodeCommittedRecord(entry) {
  *  `last_round_result`, which existed on the live path and was absent on
  *  resume/unpause/backtrack compiles. This projection lets one committed
  *  fact source feed every consumer. Optional declarations are read from the
- *  decoded view where it exposes them; `manual_fixes_needed` has no
- *  committed source and stays empty. */
+ *  decoded view where it exposes them. */
 export function roundResultFromCommittedRound(view) {
     const evaluation = view.evaluation;
     return makeLoopRoundResult({
         round: view.round,
-        success: view.success,
+        agentSuccessClaim: view.agentSuccessClaim,
         output_summary: evaluation?.output_summary ?? "",
         constraint_violations: [...(evaluation?.constraint_violations ?? [])],
-        manual_fixes_needed: "",
         discovered_constraints: [...(view.discoveredConstraints ?? [])],
         emerged_subtasks: [...(view.emergedSubtasks ?? [])],
         subgoal_updates: [...(view.subgoalUpdates ?? [])],
@@ -251,9 +253,11 @@ export function roundResultFromCommittedRound(view) {
         open_questions: [...(evaluation?.open_questions ?? [])],
         resolved_open_question_ids: [...(evaluation?.resolved_open_question_ids ?? [])],
         worker_results: [...(evaluation?.worker_results ?? [])],
-        compression_checkpoint: evaluation?.compression_checkpoint === true,
-        checkpoint_label: evaluation?.checkpoint_label ?? "",
-        outcome: evaluation?.outcome,
+        subtask_boundary: evaluation?.subtask_boundary === true,
+        subtask_boundary_label: evaluation?.subtask_boundary_label ?? "",
+        agentOutcome: evaluation
+            ? effectiveOutcome(evaluation)
+            : view.agentOutcome ?? undefined,
         blocker: evaluation?.blocker,
         retroactiveClaims: [...(evaluation?.retroactiveClaims ?? [])],
         no_change_reason: evaluation?.no_change_reason,

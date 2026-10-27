@@ -84,28 +84,34 @@ L0. L2 is not a round-count timer.
 
 Every level renders the same protected normative set: active criteria, every
 active constraint, the active contract and all its items, every active sub-goal
-id, every current verification finding, and the committed recovery brief.
-Display caps may shorten descriptions but never remove ids. If a protected
-active id is missing, LoopForge fails closed with `projection_incomplete`
-instead of delivering a partial prompt. The delivered prompt equals the
-compiled `renderedPrompt` on every path.
+id, every current verification finding, the committed recovery brief, and the
+previous committed round's **Machine Evidence**. Display caps may shorten
+descriptions but never remove ids. If a protected active id is missing,
+LoopForge fails closed with `projection_incomplete` instead of delivering a
+partial prompt. The delivered prompt equals the compiled `renderedPrompt` on
+every path.
 
 A `fresh_round` prompt may render a bounded **Working Memory** section derived
 from committed history. Its density follows the level (L0 1 recent report / L1
 3 / L2 5, plus capped assumptions, open questions, consumed recoveries and
-contract redirects); the total prompt budget may omit it or lower-priority
-details. It declares no normative ids and never changes coverage, level,
-freshness, gates or success. A
-`same_round_retry` prompt renders none; it relies on the rejection notice and
-the Verification Gate. The state file always carries the full fixed window.
+contract redirects). Working Memory is optional but INDIVISIBLE: it is dropped
+whole rather than partially rendered, and the artifact records `rendered:false`
+with source counts. Every omission has source/rendered/omitted counts and a
+deterministic abbreviation notice. It declares no normative ids and never
+changes coverage, level, freshness, gates or success. An L0 `same_round_retry`
+renders none; it relies on the rejection notice and the Verification Gate. An
+L2 rehydrate retry is `fresh_round` and may render the previous posture plus the
+rejected attempt's transient, explicitly `not committed` posture. The state file
+always carries the full fixed window.
 
 ## Read-only views
 
 Use these to inspect, never to advance:
 
 - `loopforge_status` `view: "session"`: live session status, current round,
-  the current held `submissionHandle`, success trajectory, checkpoints,
-  capability, current guidance, and the latest committed receipt. Accepts the
+  the current held `submissionHandle`, `machineBackedSuccessTrajectory`,
+  `evidencePosture`/`machineBackedSuccess`, checkpoints, capability, current
+  guidance, and the latest committed receipt. Accepts the
   live `sessionId` or the durable `loopId`. It never returns the held prompt: a
   null handle, a missing live session, or a lost prompt means call
   `loopforge_resume`. A paused or stalled session may still show its handle, but
@@ -115,8 +121,9 @@ Use these to inspect, never to advance:
 - `loopforge_status` `view: "audit"`: end-of-loop verification completeness.
 - `loopforge_status` `view: "explain"` (with `round`): the per-round "why" view
   over committed facts, including the committed report (even without an
-  execution_report), context boundary, assumptions, open questions, blocker and
-  rollback abandoned-path facts.
+  execution_report), context boundary, assumptions, open questions, blocker,
+  the persisted `evidencePosture`, full before/after command observations,
+  committed checkpoints and restore marker, and rollback digest facts.
 - `loopforge_replay`: committed round timeline and diffs. Pass `loopId` (or a
   live `sessionId`) and optional `start` / `end`. With no window it returns the
   last 10 committed rounds; an explicit window may span at most 50 rounds. The

@@ -8,10 +8,13 @@ import { createHash } from "node:crypto";
 import type {
   ConstraintMeta,
   CriterionStatus,
+  EvidencePosture,
   RecurringFlag,
   LoopCompileRequest,
   LoopCompileResponse,
   LoopRoundResult,
+  PromptContextMode,
+  PromptContextReason,
   SubGoal,
   VerificationFlag,
 } from "./protocol.js";
@@ -35,8 +38,15 @@ import {
   formatWorkingMemoryState,
   hasWorkingMemoryContent,
 } from "./working-memory.js";
+import {
+  MACHINE_EVIDENCE_AUTHORITY,
+  formatEvidencePostureLines,
+} from "./evidence-posture-view.js";
 
-export const CANONICAL_STATE_SCHEMA_VERSION = 6 as const;
+/** v4.0.3: schema 7 adds the previous/retry evidence posture, explicitly split
+ *  reported progress/issues/warnings, compile context and Working Memory
+ *  source counts. Older state documents are reported, never migrated. */
+export const CANONICAL_STATE_SCHEMA_VERSION = 7 as const;
 
 /** v3.7.1: Presentation view of sub-goals shared by prompts and the state
  *  file (one derivation, no second copy). Only ACTIVE items render as rows
@@ -136,6 +146,13 @@ export function formatCriterionRows(
       `- ${criterionIcon(status?.status ?? "unknown")} [\`${id}\`] ${text}`,
     );
   }
+  if (lines.length > 0) {
+    // v4.0.3: the icons are meaningless without their provenance.
+    lines.push(
+      "> ✅ machine verified · 🟡 Agent claim · 🟠 insufficient · " +
+      "⛔ contradicted · ⬜ Agent-reported remaining · ❔ unknown",
+    );
+  }
   return { lines, ids };
 }
 
@@ -211,8 +228,17 @@ export interface CanonicalLoopState {
   /** Committed rollback recovery brief, present only in a recovery window.
    *  Derived from the pending directive; prompt and state file share it. */
   recoveryBrief?: string[];
-  remainingCriteria: string[];
-  blockers: string[];
+  /** v4.0.3: the previous committed evaluation's evidence posture. The prompt
+   *  and state file render it as Machine Evidence; it is never re-derived. */
+  previousEvidencePosture?: EvidencePosture;
+  /** v4.0.3: a fresh retry's transient posture (not committed). Rendered only
+   *  as "rejected attempt (not committed)". */
+  retryEvidencePosture?: EvidencePosture;
+  /** v4.0.3: Agent-reported blockers (`blocker` + constraint violations).
+   *  Explicitly distinct from compiler warnings. */
+  reportedIssues: string[];
+  /** v4.0.3: compiler warnings — machine/compile facts, not Agent reports. */
+  warnings: string[];
   verificationFlags: VerificationFlag[];
   /** v2.2: Structured sub-goals with compiler-managed lifecycle. */
   subGoals: SubGoal[];
@@ -223,11 +249,23 @@ export interface CanonicalLoopState {
    *  "recurring_issues" window; renderers filter it. */
   recurringFlags: RecurringFlag[];
   stateFilePath: string;
-  progress: {
+  /** v4.0.3: Agent-reported progress. Every field is a claim; the Machine
+   *  Evidence section is the machine side. */
+  reportedProgress: {
     criteriaMet: string[];
     criteriaRemaining: string[];
+    /** The same claim set, named for the state-file "remaining" section. */
+    agentReportedRemaining: string[];
     filesChanged: string[];
     tests: { passed: number; failed: number; skipped: number } | null;
+  };
+  /** v4.0.3: the compile/transport context. Attempt is derived context, not a
+   *  committed fact. */
+  context?: {
+    round: number;
+    attempt: number;
+    mode: PromptContextMode;
+    reason: PromptContextReason;
   };
   /** v3.3: Machine git-motion cross-check for the progress dashboard.
    *  Conditional presence: absent when no committed git snapshots exist. */
@@ -471,8 +509,10 @@ const STATE_SECTION_TIER: Record<string, StateTier> = {
   "Success Criteria": "Current",
   "Hard Constraints": "Current",
   "Active Constraints": "Current",
-  Remaining: "Current",
-  Blockers: "Current",
+  // v4.0.3: Agent-reported blockers and remaining claims are one report
+  // surface; compile warnings are a separate machine/compile surface.
+  "Agent-Reported Blockers": "Current",
+  "Agent-Reported Remaining Criteria": "Current",
   "Sub-Goal Dashboard": "Current",
   // v3.8.1: the one-line phase position (the only fact the deleted Roadmap
   // section carried that no other section renders). It is orientation for the
@@ -484,6 +524,12 @@ const STATE_SECTION_TIER: Record<string, StateTier> = {
   // derived Recovery Brief injected at the top of this tier).
   "Progress Dashboard": "Recent",
   Verification: "Recent",
+  // v4.0.3: the retry/governance facts and machine evidence live next to the
+  // round boundary they describe.
+  "Retry Requirements": "Recent",
+  "Compile Warnings": "Recent",
+  "Machine Evidence": "Recent",
+  "Rejected Attempt Evidence": "Recent",
   // v4.0.2: bounded committed working memory. It replaces the former
   // Corrections/Discoveries sections; discovered constraints remain visible
   // through active-constraint provenance.
@@ -504,6 +550,8 @@ const STATE_TIER_ORDER: StateTier[] = ["Current", "Recent", "Historical Summary"
 export interface StateFileRenderOptions {
   attempt?: number;
   recoveryBrief?: string[];
+  /** v4.0.3: compile context when the caller built the state without one. */
+  context?: CanonicalLoopState["context"];
 }
 
 /** Human/Agent-readable materialized view. It is always reproducible from the
@@ -516,17 +564,22 @@ export function renderCanonicalStateMarkdown(
   state: CanonicalLoopState,
   options?: StateFileRenderOptions,
 ): string {
+  const context = state.context ?? options?.context;
   const preamble = [
     `# LoopForge State — ${state.loopId}`,
     "",
     `**Schema**: ${state.schemaVersion}`,
     `**Round**: ${state.round}/${state.maxRounds}`,
     `**Goal ID**: ${state.goalId}`,
+    ...(context
+      ? [`**Context**: ${context.mode} (${context.reason}), attempt ${context.attempt}`]
+      : []),
     "**Derived**: true",
-    `**Source**: round ${state.round} (attempt ${options?.attempt ?? 1})`,
+    `**Source**: round ${state.round} (attempt ${context?.attempt ?? options?.attempt ?? 1})`,
     "**Authority**: committed typed rounds are the factual source; this file is a derived view.",
-    "**Agent reports**: summaries below are claims, not machine evidence.",
-    "**Working memory**: recent committed reports only; older history via replay/explain.",
+    "**Round commit**: a LoopForge round commit is not a Git commit; it does not verify every workspace change.",
+    "**Evidence**: machine evidence = providers, command observations and verified contract items. Agent reports = success/outcome/tests/files/criteria claims.",
+    "**Working memory**: bounded; it may be abbreviated; full history via replay/explain or this file when enabled.",
     `**State hash**: ${hashCanonicalState(state).slice(0, 12)}`,
     "",
   ];
@@ -571,20 +624,72 @@ function flatStateSections(state: CanonicalLoopState): Array<{ title: string; bo
   addListWithIds(lines, "Success Criteria", constraintPartition.criteria, "cr");
   addListWithIdentities(lines, "Hard Constraints", constraintPartition.hard, state.constraintMetadata);
   addListWithIdentities(lines, "Active Constraints", constraintPartition.other, state.constraintMetadata);
-  if (hasWorkingMemoryContent(state.workingMemory)) {
-    lines.push("## Working Memory", "", ...formatWorkingMemoryState(state.workingMemory), "");
+  if (state.rejectionNotice) {
+    lines.push("## Retry Requirements", "", state.rejectionNotice.trim(), "");
   }
+  addList(lines, "Compile Warnings", state.warnings);
+  if (state.previousEvidencePosture) {
+    lines.push(
+      "## Machine Evidence", "",
+      ...formatEvidencePostureLines(state.previousEvidencePosture),
+      "",
+      `> ${MACHINE_EVIDENCE_AUTHORITY}`,
+      "",
+    );
+  }
+  if (state.retryEvidencePosture) {
+    lines.push(
+      "## Rejected Attempt Evidence", "",
+      "> Not committed; it exists only for the current retry.",
+      "",
+      ...formatEvidencePostureLines(state.retryEvidencePosture),
+      "",
+    );
+  }
+  if (hasWorkingMemoryContent(state.workingMemory)) {
+    const working = formatWorkingMemoryState(state.workingMemory);
+    lines.push("## Working Memory", "", ...working.lines, "");
+  }
+  const reported = state.reportedProgress;
+  const posture = state.previousEvidencePosture;
   if (
-    state.progress.criteriaMet.length > 0 ||
-    state.progress.criteriaRemaining.length > 0 ||
-    state.progress.filesChanged.length > 0 ||
-    state.progress.tests !== null ||
-    state.machineStatus !== undefined
+    reported.criteriaMet.length > 0 ||
+    reported.criteriaRemaining.length > 0 ||
+    reported.filesChanged.length > 0 ||
+    reported.tests !== null ||
+    state.machineStatus !== undefined ||
+    posture !== undefined
   ) {
-    const total = state.progress.criteriaMet.length + state.progress.criteriaRemaining.length;
+    const total = reported.criteriaMet.length + reported.criteriaRemaining.length;
     lines.push("## Progress Dashboard", "");
     if (total > 0) {
-      lines.push(`**Criteria**: ${state.progress.criteriaMet.length}/${total}`);
+      lines.push(`**Agent-reported criteria**: ${reported.criteriaMet.length}/${total}`);
+    }
+    if (state.criterionStatuses.length > 0) {
+      const verifiedCount = state.criterionStatuses.filter(
+        (criterion) => criterion.status === "verified").length;
+      lines.push(
+        `**Machine-verified criteria**: ${verifiedCount}/${state.criterionStatuses.length}`,
+      );
+    }
+    if (reported.tests) {
+      lines.push(
+        `**Tests (Agent report)**: ${reported.tests.passed} passed, ` +
+        `${reported.tests.failed} failed, ${reported.tests.skipped} skipped`,
+      );
+    }
+    if (reported.filesChanged.length > 0) {
+      lines.push("", "**Agent-reported files**:");
+      for (const file of reported.filesChanged) lines.push(`- ${file}`);
+    }
+    if (posture) {
+      const observed = posture.workspace.status === "observed"
+        ? `${posture.workspace.changedPathCount}`
+        : posture.workspace.status === "unknown" ? "unknown" : "not applicable";
+      lines.push(`**Observed changes (last committed round)**: ${observed}`);
+      lines.push(
+        `**Files reconciliation**: ${posture.files?.reconciliation ?? "not_applicable"}`,
+      );
     }
     // v3.3: machine side of the comparison — git motion over committed rounds
     // (v3.6: the object always carries definite values — no "unavailable" arm).
@@ -600,20 +705,6 @@ function flatStateSections(state: CanonicalLoopState): Array<{ title: string; bo
           : `no machine-observed progress in the last ${ms.windowRounds} committed rounds${providers}`;
       lines.push(`**Machine progress**: ${progress}`);
     }
-    if (state.criterionStatuses.length > 0) {
-      const metCount = state.criterionStatuses.filter((cs) => cs.status === "verified" || cs.status === "claimed").length;
-      lines.push(`**Machine (criteria)**: ${metCount}/${state.criterionStatuses.length} met across committed rounds`);
-    }
-    if (state.progress.tests) {
-      lines.push(
-        `**Tests**: ${state.progress.tests.passed} passed, ` +
-        `${state.progress.tests.failed} failed, ${state.progress.tests.skipped} skipped`,
-      );
-    }
-    if (state.progress.filesChanged.length > 0) {
-      lines.push("", "**Files Changed**:");
-      for (const file of state.progress.filesChanged) lines.push(`- ${file}`);
-    }
     lines.push("");
   }
   // v3.2: Goal → criteria → evidence vertical view. IDs are always rendered.
@@ -626,13 +717,29 @@ function flatStateSections(state: CanonicalLoopState): Array<{ title: string; bo
         : cs.status === "contradicted" ? "⛔"
         : cs.status === "remaining" ? "⬜" : "❔";
       const idTag = ` [\`${cs.id}\`]`;
-      const met = cs.met_at_round !== undefined ? ` (met R${cs.met_at_round})` : "";
-      lines.push(`- ${icon}${idTag} ${cs.text}${met}`);
+      // v4.0.3: the round and the provenance are separate facts. A claimed
+      // row names the latest Agent claim; a verified/contradicted/insufficient
+      // row names the machine round that reached it.
+      const at = cs.status_at_round !== undefined ? ` R${cs.status_at_round}` : "";
+      const label = cs.status === "verified" ? `machine verified${at}`
+        : cs.status === "claimed" ? `agent claim${at}`
+        : cs.status === "insufficient" ? `machine insufficient${at}`
+        : cs.status === "contradicted" ? `machine contradicted${at}`
+        : cs.status === "remaining" ? `agent reported remaining${at}`
+        : "unknown";
+      lines.push(`- ${icon}${idTag} ${cs.text} (${label})`);
     }
     lines.push("");
   }
-  addListWithIds(lines, "Remaining", state.remainingCriteria, "cr");
-  addList(lines, "Blockers", state.blockers);
+  if (reported.agentReportedRemaining.length > 0) {
+    addListWithIds(
+      lines,
+      "Agent-Reported Remaining Criteria",
+      reported.agentReportedRemaining,
+      "cr",
+    );
+  }
+  addList(lines, "Agent-Reported Blockers", state.reportedIssues);
   const recurring = recurringOnly(state.recurringFlags);
   // v3.8.1: ONE recurring-facts section. "Recurring Issues" (the last 5
   // rounds' raw violations, no threshold) and "Lessons Learned" (the whole
@@ -646,8 +753,11 @@ function flatStateSections(state: CanonicalLoopState): Array<{ title: string; bo
         ? "🚫"
         : flag.kind === "verification_error" ? "⚠️" : "ℹ️";
       const subject = flag.ref ? `${flag.subject} [${flag.ref}]` : flag.subject;
+      const source = flag.kind === "constraint_violation"
+        ? "Agent-reported violation"
+        : "machine finding";
       lines.push(
-        `- ${icon} ${subject} — ${flag.count}× (R${flag.rounds.join(", R")})`,
+        `- ${icon} ${subject} — ${flag.count}× (R${flag.rounds.join(", R")}) — ${source}`,
       );
     }
     if (recurring.length > RECURRING_RENDER_CAP) {
@@ -655,7 +765,13 @@ function flatStateSections(state: CanonicalLoopState): Array<{ title: string; bo
     }
     lines.push("");
   }
-  addList(lines, "Retired Constraints", state.retiredConstraints);
+  if (state.retiredConstraints.length > 0) {
+    lines.push("## Retired Constraints", "");
+    for (const constraint of state.retiredConstraints) {
+      lines.push(`- ${constraint} (Agent report)`);
+    }
+    lines.push("");
+  }
   if (state.verificationFlags.length > 0) {
     lines.push("## Verification", "");
     for (const flag of state.verificationFlags) {
@@ -739,6 +855,8 @@ export function createCanonicalLoopState(
        *  Agent reports (wrong assumptions, blockers) enter the prompt/state
        *  projection only under this flag; a library fallback is in-flight. */
       committed?: boolean;
+      /** v4.0.3: the committed view's persisted posture. */
+      view?: { evidencePosture?: EvidencePosture | null } | null;
     };
     /** v3.9.7: committed recovery brief, derived from the pending rollback
      *  directive. Conditional — absent outside a recovery window. */
@@ -746,6 +864,8 @@ export function createCanonicalLoopState(
     /** v4.0.2: the compiler's ONE bounded Working Memory derivation. This
      *  module never re-reads the Vault or re-interprets history. */
     workingMemory?: WorkingMemory;
+    /** v4.0.3: the compile context boundary (derived by the compiler). */
+    context?: CanonicalLoopState["context"];
   },
 ): CanonicalLoopState {
   const last = derived?.previousRound?.result ?? null;
@@ -761,10 +881,16 @@ export function createCanonicalLoopState(
   // progress, discovery, or criterion state.
   const executionReport = committed ? last?.execution_report : undefined;
 
-  const blockers = unique([
+  // v4.0.3: blockers are Agent reports; warnings are compiler facts. They
+  // were previously merged into one `blockers` list.
+  const reportedIssues = unique([
     ...(committed ? (last?.constraint_violations ?? []) : []),
-    ...response.warnings,
+    ...(committed && last?.blocker ? [last.blocker] : []),
   ]);
+  const warnings = unique(response.warnings);
+  const committedPosture =
+    committed ? derived?.previousRound?.view?.evidencePosture ?? null : null;
+  const retryPosture = request.retry_evidence_posture ?? null;
 
   // v3.4: The ACTIVE Round Contract (derived — loop-compiler computes it
   // from committed rounds) drives the Current Task — the contract IS "what
@@ -809,8 +935,11 @@ export function createCanonicalLoopState(
     retiredConstraints: unique(response.constraints_retired),
     constraintMetadata: response.constraint_metadata ?? [],
     rejectionNotice: request.rejection_notice.trim() ? request.rejection_notice : null,
-    remainingCriteria: unique(claimedRemainingCriteria(executionReport)),
-    blockers,
+    // v4.0.3: conditional presence keeps hashes stable for a first round.
+    ...(committedPosture ? { previousEvidencePosture: committedPosture } : {}),
+    ...(retryPosture ? { retryEvidencePosture: retryPosture } : {}),
+    reportedIssues,
+    warnings,
     verificationFlags,
     // v4.0.2: conditional presence — no committed working memory, no key.
     ...(hasWorkingMemoryContent(derived?.workingMemory)
@@ -820,14 +949,14 @@ export function createCanonicalLoopState(
     criterionStatuses: response.criterion_statuses ?? [],
     recurringFlags: response.recurring_flags ?? [],
     stateFilePath,
-    progress: {
+    reportedProgress: {
       criteriaMet: unique(claimedMetCriteria(executionReport)),
-      criteriaRemaining: unique(
-        claimedRemainingCriteria(executionReport),
-      ),
+      criteriaRemaining: unique(claimedRemainingCriteria(executionReport)),
+      agentReportedRemaining: unique(claimedRemainingCriteria(executionReport)),
       filesChanged: unique(executionReport?.files_changed ?? []),
       tests: executionReport?.tests_reported ?? null,
     },
+    ...(derived?.context ? { context: derived.context } : {}),
     // v3.3: Conditional presence — empty/absent derived data must not add
     // keys, or every state hash would change for rounds without it.
     ...(derived?.recoveryBrief && derived.recoveryBrief.length > 0

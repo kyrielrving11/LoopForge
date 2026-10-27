@@ -21,8 +21,8 @@ import type { LoopStore } from "./loop-store.js";
 import { type CommittedHistory } from "./history.js";
 import type { MachineObservation } from "./protocol.js";
 import type { ObservationDelta } from "./evidence-provider.js";
-import type { CheckpointRef, ContractTransition, SelfEvaluation, RoundVerificationStatus, StopReason, VerificationFlag, WorkspaceCheckpointManifest } from "./protocol.js";
-import { type ContractItemStatusView } from "./contract-items.js";
+import type { CheckpointRef, ContractTransition, EvidencePosture, SelfEvaluation, StopReason, VerificationFlag, WorkspaceCheckpointManifest } from "./protocol.js";
+import type { ContractItemStatusView } from "./contract-items.js";
 /** Input to a single round processing step. */
 export interface RoundProcessInput {
     loopId: string;
@@ -85,21 +85,23 @@ export interface RoundProcessResult {
     enforcementAction?: "accept" | "reject" | "terminate" | "backtrack" | "recovery";
     /** Enforcement reason (set when rejected or terminated). */
     enforcementReason?: string;
-    /** Whether this round was successful (from selfEval.success). */
-    roundSuccess: boolean;
+    /** v4.0.3: the Agent's success claim (`selfEval.success`). This is a claim,
+     *  never a machine verdict. */
+    agentSuccessClaim: boolean;
+    /** v4.0.3: the effective Agent-declared outcome. */
+    agentOutcome: import("./protocol.js").RoundOutcome | null;
     /** Whether the verification gate returned "contradicted". */
     gateContradicted: boolean;
-    /** v3.8: The round-level verification posture, derived from the ACTIVE
-     *  contract's item statuses and this round's claims: `trusted` (everything
-     *  claimed is machine-backed), `insufficient` (claims unbacked, nothing
-     *  contradicted), `contradicted` (a machine fact denies a claim). */
-    verificationStatus: RoundVerificationStatus;
+    /** v4.0.3: the ONE evidence posture, derived once per round and persisted
+     *  with the accepted transaction. Rejected/terminated attempts carry a
+     *  transient posture that never enters the Vault. */
+    evidencePosture: EvidencePosture;
     /** Updated consecutiveRejections count — caller must persist. */
     newConsecutiveRejections: number;
     /** Which enforcement check fired (set when action is "reject" or "terminate").
      *  Used by callers to track per-rule rejection counters. */
     rejectionCheck?: string;
-    /** Whether the caller should push roundSuccess onto the success trajectory.
+    /** Whether the caller should push agentSuccessClaim onto the success trajectory.
      *  false when gateContradicted or when action is "reject". */
     shouldPushSuccessTrajectory: boolean;
 }

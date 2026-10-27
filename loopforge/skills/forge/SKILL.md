@@ -47,8 +47,8 @@ Keep these meanings separate:
 - A **workspace checkpoint** is the before-image of a prepared round or an
   explicit mid-round savepoint (`loopforge_checkpoint`). It is recovery
   material, not a round, a commit, or progress. This is different from an
-  evaluation's `compression_checkpoint`, which is only an Agent declaration /
-  L2 boundary reason.
+  evaluation's `subtask_boundary` / `subtask_boundary_label`, which is only an
+  Agent declaration / L2 boundary reason.
 
 The lifecycle is:
 
@@ -274,8 +274,11 @@ is never a later prompt's independent fact source.
 - Non-null `prompt`: execute it and submit the next evaluation with the
   `submissionHandle` returned alongside it.
 - `enforcementAction: "reject"`: retry the same logical round with the
-  **new** handle; the attempt increases. The old handle only returns the
-  current retry prompt with a warning.
+  **new** handle; the attempt increases. The first L0 retry continues the same
+  invocation (`same_round_retry`); a repeated-rejection L2 rehydrate retry is a
+  new invocation (`fresh_round`). The old handle only returns the current retry
+  prompt with a warning. A retry prompt may carry the rejected attempt's
+  transient Machine Evidence, explicitly marked `not committed`.
 - `enforcementAction: "backtrack"` (machine) or `"recovery"` (Agent):
   LoopForge already restored and verified the workspace. Execute the held redo
   prompt and submit with its new handle. If the response instead is `stalled`
@@ -288,13 +291,15 @@ is never a later prompt's independent fact source.
 - Null `prompt`: inspect `stopReason`.
 
 Read `submission_guidance` before composing the next evaluation, and read
-`verificationStatus`, `roundSuccess`, `level`, `warnings`, and
-`enforcementReason` before planning the next slice. In
-`submission_receipt.verification`, `contract_status` is the contract-item
-posture and `evidence_status` is the round-level machine evidence posture; do
-not read "no active contract" as "verified". `submission_receipt.reports`
-distinguishes a saved report from derived state that changed and from a machine
-verification result; `not_applied` means the submission did not become history.
+`agentSuccessClaim`, `agentOutcome`, `evidencePosture`, `machineBackedSuccess`,
+`level`, `warnings`, and `enforcementReason` before planning the next slice.
+The Agent's claim and the machine posture are separate: `evidencePosture.status`
+is evidence coverage, not task success, and `machineBackedSuccess` is only the
+verification gate's fact. In `submission_receipt.verification`,
+`evidence_posture` is the ONE persisted posture; do not read "no active
+contract" as "verified". `submission_receipt.reports` distinguishes a saved
+report from derived state that changed and from a machine verification result;
+`not_applied` means the submission did not become history.
 
 Errors use `{ok: false, error: {code, message, retryable, ...}}`. Branch on the
 stable `code`, not the prose in `message`. `evaluation_invalid`,
@@ -305,11 +310,13 @@ response re-delivers the current prompt and handle; if the prompt was lost, use
 `loopforge_resume`. `session_not_found`, `state_unavailable`, and `gate_disabled`
 describe state or policy; do not blindly resubmit.
 
-`completed` means success plus every active contract item is `verified`, or
-there is no active contract. Explicit `blocked` always wins over success.
-`incomplete` means completion was not machine-verified. Other terminal reasons
-include `failed`, `max_rounds`, `stalled`, `enforcement_terminated`, `paused`,
-and `cancelled`.
+`completed` is the loop lifecycle result of your stop declaration passing the
+existing gates: `success` plus every active contract item `verified`, or no
+active contract. It is not a machine-verified task-success verdict; terminal
+output reports `machineBackedSuccess` and `evidencePosture` alongside it.
+Explicit `blocked` always wins over success. `incomplete` means you stopped
+without machine closure. Other terminal reasons include `failed`, `max_rounds`,
+`stalled`, `enforcement_terminated`, `paused`, and `cancelled`.
 
 ## Avoid these mistakes
 

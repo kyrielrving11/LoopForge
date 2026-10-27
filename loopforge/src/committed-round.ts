@@ -18,6 +18,7 @@ import type {
   CompiledRoundFacts,
   ContractBinding,
   ContractTransition,
+  EvidencePosture,
   ExecutionReport,
   LoopRoundResult,
   OperatorAcceptance,
@@ -34,6 +35,7 @@ import type { RoundProcessResult } from "./round-coordinator.js";
 import {
   ROUND_TRANSACTION_SCHEMA_VERSION,
   deriveRoundObservationDelta,
+  isProcessResult,
   parseRoundTransactionSnapshot,
   rootBranchId,
   transactionSchemaVersionOf,
@@ -85,9 +87,15 @@ export interface CommittedRoundView {
   readonly executionReport: ExecutionReport | null;
   readonly verificationFlags: VerificationFlag[];
   readonly result: RoundProcessResult | null;
+  /** v4.0.3: the evidence posture persisted with this transaction. The
+   *  decoder refuses a schema-7 commit without one, so this is null only on a
+   *  hand-built/library view. */
+  readonly evidencePosture: EvidencePosture | null;
   readonly action: CommittedAction;
-  readonly success: boolean;
-  readonly outcome: RoundOutcome | null;
+  /** v4.0.3: the Agent's success claim (never a machine verdict). */
+  readonly agentSuccessClaim: boolean;
+  /** v4.0.3: the effective Agent-declared outcome. */
+  readonly agentOutcome: RoundOutcome | null;
   readonly contractProposal: RoundContractProposal | null;
   /** v3.9.9: this round's explicit contract redirection, if it declared one.
    *  Read from the committed evaluation; a target the reducer cannot match is
@@ -241,9 +249,10 @@ function viewFromSnapshot(input: {
     executionReport: evaluation?.execution_report ?? null,
     verificationFlags: flags(result.verificationFlags),
     result,
+    evidencePosture: result.evidencePosture ?? null,
     action,
-    success: result.roundSuccess === true,
-    outcome,
+    agentSuccessClaim: result.agentSuccessClaim === true,
+    agentOutcome: result.agentOutcome ?? outcome,
     contractProposal: evaluation?.round_contract
       ? parseRoundContract(evaluation.round_contract) ?? null
       : null,
@@ -292,7 +301,10 @@ export function decodeCommittedRound(entry: VaultEntry): CommittedRoundView | nu
   const resultValue = isRecord(transaction.result)
     ? transaction.result
     : snapshot.result;
-  if (!isRecord(resultValue)) return null;
+  // v4.0.3: a schema-7 committed result must carry a well-formed Evidence
+  // Posture. Missing/corrupt posture is a HARD break, not something to
+  // re-derive at read time.
+  if (!isRecord(resultValue) || !isProcessResult(resultValue)) return null;
   return viewFromSnapshot({
     source: "feedback",
     sourceEntry: entry,
@@ -319,7 +331,7 @@ export function decodeRollbackEvent(entry: VaultEntry): CommittedRoundView | nul
   const resultValue = isRecord(transaction.result)
     ? transaction.result
     : snapshot.result;
-  if (!isRecord(resultValue)) return null;
+  if (!isRecord(resultValue) || !isProcessResult(resultValue)) return null;
   const result = resultValue as unknown as RoundProcessResult;
   if (result.action !== "recovery" && result.action !== "backtrack") return null;
   return viewFromSnapshot({
@@ -348,18 +360,16 @@ export function decodeCommittedRecord(entry: unknown): CommittedRoundView | null
  *  `last_round_result`, which existed on the live path and was absent on
  *  resume/unpause/backtrack compiles. This projection lets one committed
  *  fact source feed every consumer. Optional declarations are read from the
- *  decoded view where it exposes them; `manual_fixes_needed` has no
- *  committed source and stays empty. */
+ *  decoded view where it exposes them. */
 export function roundResultFromCommittedRound(
   view: CommittedRoundView,
 ): LoopRoundResult {
   const evaluation = view.evaluation;
   return makeLoopRoundResult({
     round: view.round,
-    success: view.success,
+    agentSuccessClaim: view.agentSuccessClaim,
     output_summary: evaluation?.output_summary ?? "",
     constraint_violations: [...(evaluation?.constraint_violations ?? [])],
-    manual_fixes_needed: "",
     discovered_constraints: [...(view.discoveredConstraints ?? [])],
     emerged_subtasks: [...(view.emergedSubtasks ?? [])],
     subgoal_updates: [...(view.subgoalUpdates ?? [])],
@@ -369,9 +379,11 @@ export function roundResultFromCommittedRound(
     open_questions: [...(evaluation?.open_questions ?? [])],
     resolved_open_question_ids: [...(evaluation?.resolved_open_question_ids ?? [])],
     worker_results: [...(evaluation?.worker_results ?? [])],
-    compression_checkpoint: evaluation?.compression_checkpoint === true,
-    checkpoint_label: evaluation?.checkpoint_label ?? "",
-    outcome: evaluation?.outcome,
+    subtask_boundary: evaluation?.subtask_boundary === true,
+    subtask_boundary_label: evaluation?.subtask_boundary_label ?? "",
+    agentOutcome: evaluation
+      ? effectiveOutcome(evaluation)
+      : view.agentOutcome ?? undefined,
     blocker: evaluation?.blocker,
     retroactiveClaims: [...(evaluation?.retroactiveClaims ?? [])],
     no_change_reason: evaluation?.no_change_reason,

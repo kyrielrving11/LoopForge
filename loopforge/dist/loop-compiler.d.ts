@@ -12,7 +12,8 @@ import { type SelfEvalPromptContext } from "./submission-guidance.js";
 export interface PreviousRound {
     round: number;
     goal_id: string;
-    success: boolean;
+    /** v4.0.3: the Agent's success claim, never a machine verdict. */
+    agentSuccessClaim: boolean;
     task: string;
     constraints_active: string[];
     output_summary: string;

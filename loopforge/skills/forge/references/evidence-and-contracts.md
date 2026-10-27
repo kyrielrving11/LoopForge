@@ -14,7 +14,7 @@ shapes, real ids, and usable commands.
   criteria/hard constraints are immutable).
 - **Claims and verification proposals:** criterion claims, active contract item
   claims, and `round_contract`.
-- **Lifecycle controls:** `compression_checkpoint` / `checkpoint_label`,
+- **Lifecycle controls:** `subtask_boundary` / `subtask_boundary_label`,
   `outcome`, `blocker`, `stop_reason`, `no_change_reason`, and `gate_ids`.
 
 A field is included only when its event actually happened. The live guidance

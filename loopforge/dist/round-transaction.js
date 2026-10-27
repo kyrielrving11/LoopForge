@@ -7,6 +7,7 @@
  */
 import { createHash } from "node:crypto";
 import { deriveObservationDeltas, observationVersionIssue } from "./evidence-provider.js";
+import { EVIDENCE_POSTURE_CAPS, rollbackEvidencePosture, } from "./evidence-posture.js";
 import { RoundCoordinator, } from "./round-coordinator.js";
 import { logEvent } from "./observability.js";
 import { deriveContractId, deriveContractItemIds, isRecord } from "./token-utils.js";
@@ -16,9 +17,11 @@ import { policyMetrics } from "./policy-metrics.js";
 import { VaultRoundCommitStore } from "./storage.js";
 import { transactionIdentityIssue } from "./transaction-identity.js";
 /** v3.9.7: schema 5 adds the transaction before-image, explicit mid-round
- *  checkpoints and the redo restore marker. Schema 4 is unsupported and is
- *  reported by `legacyTransactionRounds`; there is no compatibility migration. */
-export const ROUND_TRANSACTION_SCHEMA_VERSION = 6;
+ *  checkpoints and the redo restore marker. v4.0.3: schema 7 requires the
+ *  persisted `EvidencePosture` on every result and adds the transient
+ *  `RetryContext`. Unsupported versions are reported by
+ *  `legacyTransactionRounds`; there is no compatibility migration. */
+export const ROUND_TRANSACTION_SCHEMA_VERSION = 7;
 /** Maximum distinct mid-round checkpoints one transaction may reference. */
 export const MAX_MID_CHECKPOINTS_PER_TRANSACTION = 32;
 /** The root branch identity for every loop. */
@@ -42,6 +45,11 @@ export function deriveTransactionId(input) {
                 String(input.recovery.target.redo_round),
                 input.recovery.reason,
                 input.recovery.target.transaction_id,
+                (input.recovery.abandonedRounds ?? []).join(","),
+                (input.recovery.failedRounds ?? []).join(","),
+                [...(input.recovery.observedSkippedFiles ?? [])].sort().join(","),
+                [...(input.recovery.reportedSkippedFiles ?? [])].sort().join(","),
+                [...(input.recovery.triggerFindings ?? [])].sort().join(","),
             ].join("\n")
             : "",
     ].join("\n");
@@ -152,6 +160,12 @@ export function prepareRejectedAttempt(rejected, promptArtifact, compiled, opera
     if (promptArtifact.attempt !== rejected.attempt + 1) {
         throw new Error(`Retry prompt attempt mismatch: ${promptArtifact.attempt} !== ${rejected.attempt + 1}`);
     }
+    if (rejected.retryContext) {
+        if (rejected.retryContext.rejectedAttempt !== rejected.attempt ||
+            rejected.retryContext.attempt !== promptArtifact.attempt) {
+            throw new Error("Retry context identity does not match the rejected attempt");
+        }
+    }
     const transactionId = deriveTransactionId({
         kind: rejected.kind,
         branchId: rejected.branchId,
@@ -207,10 +221,178 @@ function isContractBinding(value) {
         return false;
     return isRecord(value.config_hash_by_command);
 }
+const EVIDENCE_POSTURE_STATUSES = [
+    "verified", "insufficient", "contradicted", "unknown", "not_applicable",
+];
+const CONTRACT_ITEM_STATUSES = [
+    "pending", "insufficient", "contradicted", "verified",
+];
+const CONTRACT_CLOSURES = [
+    "open", "verified", "blocked", "superseded",
+];
+const FILE_RECONCILIATIONS = [
+    "match", "mismatch", "unknown", "not_applicable",
+];
+function isNonNegativeInteger(value) {
+    return Number.isInteger(value) && value >= 0;
+}
+function isVerificationFlag(value) {
+    if (!isRecord(value))
+        return false;
+    // `severity` and `check` are the structural facts every consumer keys on.
+    // `field`/`detail` are present on every runtime-generated flag but are
+    // optional here so an older committed flag shape does not make the whole
+    // round unreadable.
+    return (value.severity === "info" || value.severity === "warn" ||
+        value.severity === "error") &&
+        typeof value.check === "string" &&
+        (value.field === undefined || typeof value.field === "string") &&
+        (value.detail === undefined || typeof value.detail === "string") &&
+        (value.ref === undefined || typeof value.ref === "string");
+}
+/** v4.0.3: schema 7 structural validation of the persisted evidence posture.
+ *  A committed round without a well-formed posture is a HARD break — it is not
+ *  committed history and is reported as legacy, never silently re-derived. */
+export function isEvidencePosture(value) {
+    if (!isRecord(value))
+        return false;
+    if (!Number.isInteger(value.round) || value.round < 1)
+        return false;
+    if (value.kind !== "evaluation" && value.kind !== "rollback")
+        return false;
+    if (!EVIDENCE_POSTURE_STATUSES.includes(String(value.status))) {
+        return false;
+    }
+    if (typeof value.machineBackedSuccess !== "boolean" ||
+        typeof value.verificationConfigured !== "boolean")
+        return false;
+    const workspace = value.workspace;
+    if (!isRecord(workspace) ||
+        (workspace.status !== "observed" && workspace.status !== "unknown" &&
+            workspace.status !== "not_applicable") ||
+        !isNonNegativeInteger(workspace.changedPathCount))
+        return false;
+    if (value.files !== null) {
+        const files = value.files;
+        if (!isRecord(files) ||
+            !FILE_RECONCILIATIONS.includes(String(files.reconciliation)) ||
+            !isNonNegativeInteger(files.reported) ||
+            !isNonNegativeInteger(files.observed))
+            return false;
+    }
+    if (!Array.isArray(value.providers) ||
+        value.providers.length > EVIDENCE_POSTURE_CAPS.providers)
+        return false;
+    for (const provider of value.providers) {
+        if (!isRecord(provider) ||
+            typeof provider.providerId !== "string" ||
+            (provider.kind !== "git" && provider.kind !== "custom") ||
+            !OBSERVATION_STATUSES.includes(String(provider.status))) {
+            return false;
+        }
+    }
+    if (!Array.isArray(value.commands) ||
+        value.commands.length > EVIDENCE_POSTURE_CAPS.commands)
+        return false;
+    for (const command of value.commands) {
+        if (!isRecord(command) ||
+            typeof command.commandId !== "string" ||
+            !OBSERVATION_STATUSES.includes(String(command.status)) ||
+            typeof command.required !== "boolean")
+            return false;
+    }
+    if (value.contract !== null) {
+        const contract = value.contract;
+        if (!isRecord(contract) ||
+            typeof contract.id !== "string" ||
+            contract.id.length === 0 ||
+            !CONTRACT_CLOSURES.includes(String(contract.closure)) ||
+            !isNonNegativeInteger(contract.verifiedCount) ||
+            !isNonNegativeInteger(contract.insufficientCount) ||
+            !isNonNegativeInteger(contract.contradictedCount) ||
+            !isNonNegativeInteger(contract.pendingCount) ||
+            !Array.isArray(contract.items) ||
+            contract.items.length > EVIDENCE_POSTURE_CAPS.contractItems)
+            return false;
+        for (const item of contract.items) {
+            if (!isRecord(item) ||
+                typeof item.id !== "string" ||
+                !CONTRACT_ITEM_STATUSES.includes(String(item.status)) ||
+                !stringArray(item.criterionRefs) ||
+                !stringArray(item.reasons))
+                return false;
+        }
+    }
+    if (!Array.isArray(value.findings) ||
+        value.findings.length > EVIDENCE_POSTURE_CAPS.findings)
+        return false;
+    for (const finding of value.findings) {
+        if (!isRecord(finding) ||
+            typeof finding.id !== "string" ||
+            typeof finding.check !== "string" ||
+            (finding.severity !== "info" && finding.severity !== "warn" &&
+                finding.severity !== "error") ||
+            (finding.ref !== undefined && typeof finding.ref !== "string"))
+            return false;
+    }
+    const omitted = value.omitted;
+    if (!isRecord(omitted) ||
+        !isNonNegativeInteger(omitted.providers) ||
+        !isNonNegativeInteger(omitted.commands) ||
+        !isNonNegativeInteger(omitted.contractItems) ||
+        !isNonNegativeInteger(omitted.findings))
+        return false;
+    if (value.kind === "rollback") {
+        // A directive abandons work; it never carries evaluation evidence.
+        if (value.status !== "not_applicable" ||
+            value.machineBackedSuccess !== false ||
+            value.verificationConfigured !== false ||
+            workspace.status !== "not_applicable" ||
+            workspace.changedPathCount !== 0 ||
+            value.files !== null ||
+            value.providers.length > 0 ||
+            value.commands.length > 0 ||
+            value.contract !== null ||
+            value.findings.length > 0 ||
+            omitted.providers !== 0 ||
+            omitted.commands !== 0 ||
+            omitted.contractItems !== 0 ||
+            omitted.findings !== 0)
+            return false;
+    }
+    return true;
+}
+/** v4.0.3: structural validation of the transient retry context. It is only
+ *  legal on a rejected attempt or its held retry prompt. */
+export function isRetryContext(value) {
+    if (!isRecord(value))
+        return false;
+    if (!Number.isInteger(value.attempt) || value.attempt < 2)
+        return false;
+    if (!Number.isInteger(value.rejectedAttempt) ||
+        value.rejectedAttempt < 1)
+        return false;
+    if (value.attempt !== value.rejectedAttempt + 1)
+        return false;
+    if (typeof value.rejectionNotice !== "string")
+        return false;
+    if (!Array.isArray(value.verificationFlags) ||
+        !value.verificationFlags.every(isVerificationFlag))
+        return false;
+    if (!isEvidencePosture(value.evidencePosture))
+        return false;
+    if (value.evidencePosture.kind !== "evaluation")
+        return false;
+    if (typeof value.rejectedAt !== "number")
+        return false;
+    return true;
+}
 export function isProcessResult(value) {
     if (!isRecord(value))
         return false;
-    return ["continue", "stop", "reject", "terminate", "backtrack", "recovery"].includes(String(value.action)) && Array.isArray(value.verificationFlags);
+    return ["continue", "stop", "reject", "terminate", "backtrack", "recovery"].includes(String(value.action)) && Array.isArray(value.verificationFlags) &&
+        value.verificationFlags.every(isVerificationFlag) &&
+        isEvidencePosture(value.evidencePosture);
 }
 function stringArray(value) {
     return Array.isArray(value) && value.every((item) => typeof item === "string");
@@ -302,6 +484,21 @@ function isRecoveryDirective(value) {
         return false;
     if (!Array.isArray(value.failed_rounds) ||
         !value.failed_rounds.every((item) => Number.isInteger(item)))
+        return false;
+    if (value.observed_skipped_files !== undefined &&
+        !stringArray(value.observed_skipped_files))
+        return false;
+    if (value.reported_skipped_files !== undefined &&
+        !stringArray(value.reported_skipped_files))
+        return false;
+    if (value.abandoned_rounds !== undefined &&
+        (!Array.isArray(value.abandoned_rounds) ||
+            !value.abandoned_rounds.every((item) => Number.isInteger(item)))) {
+        return false;
+    }
+    if (value.trigger_findings !== undefined &&
+        (!Array.isArray(value.trigger_findings) ||
+            !value.trigger_findings.every(isVerificationFlag)))
         return false;
     return true;
 }
@@ -488,6 +685,15 @@ export function parseRoundTransactionSnapshot(value) {
     }
     if (value.result !== undefined && !isProcessResult(value.result))
         return null;
+    if (value.retryContext !== undefined) {
+        if (!isRetryContext(value.retryContext))
+            return null;
+        // Transient retry facts exist only between a rejection and the next
+        // attempt. A committed/terminated document that carries them would leak
+        // rejected-attempt evidence into history.
+        if (value.phase !== "rejected" && value.phase !== "prompted")
+            return null;
+    }
     if (value.contractBinding !== undefined && !isContractBinding(value.contractBinding))
         return null;
     if (value.normalizationDiagnostics !== undefined) {
@@ -555,6 +761,10 @@ export function parseRoundTransactionSnapshot(value) {
             artifact.contextReason === "enforcement_retry";
         if (artifact.schemaVersion !== PROMPT_ARTIFACT_SCHEMA_VERSION ||
             typeof artifact.roundId !== "string" ||
+            // v4.0.3: the artifact identity is part of the transaction identity.
+            artifact.roundId !== snapshotRoundId ||
+            artifact.round !== snapshotRound ||
+            artifact.attempt !== value.attempt ||
             typeof artifact.renderedPrompt !== "string" ||
             typeof artifact.promptHash !== "string" ||
             typeof artifact.stateHash !== "string" ||
@@ -639,6 +849,8 @@ export class RoundTransactionCoordinator {
             afterEvidence: input.actualEvidence,
             evaluation: input.selfEval,
             result,
+            // A terminated attempt has no next retry; transient facts die with it.
+            ...(result.action === "terminate" ? { retryContext: undefined } : {}),
             ...(input.normalizationDiagnostics !== undefined
                 ? { normalizationDiagnostics: input.normalizationDiagnostics }
                 : {}),
@@ -669,6 +881,12 @@ export class RoundTransactionCoordinator {
                     recovery: {
                         target: result.recovery.target,
                         reason: result.recovery.reason,
+                        abandonedRounds: result.recovery.abandoned_rounds,
+                        failedRounds: result.recovery.failed_rounds,
+                        observedSkippedFiles: result.recovery.observed_skipped_files,
+                        reportedSkippedFiles: result.recovery.reported_skipped_files,
+                        triggerFindings: (result.recovery.trigger_findings ?? [])
+                            .map((flag) => flag.check),
                     },
                 }),
             };
@@ -682,6 +900,9 @@ export class RoundTransactionCoordinator {
         const committedSnapshot = {
             ...evaluated,
             phase: "committed",
+            // v4.0.3: transient retry facts die at the commit boundary. The retry
+            // prompt artifact remains the record of what the Agent was asked.
+            retryContext: undefined,
             // v3.8: the contract binding is resolved HERE, at commit time, because
             // the command configuration in force at declaration is not recoverable
             // from the Vault afterwards. Machine-recomputed — never agent-supplied.
@@ -715,7 +936,7 @@ export class RoundTransactionCoordinator {
         logEvent("round_complete", {
             loopId: snapshot.loopId,
             round: snapshot.round,
-            success: result.roundSuccess,
+            agentSuccessClaim: result.agentSuccessClaim,
         });
         const persisted = this.readCommitted(committedSnapshot);
         if (!persisted) {
@@ -766,6 +987,7 @@ export class RoundTransactionCoordinator {
             beforeCheckpointError: undefined,
             checkpoints: undefined,
             restore: undefined,
+            retryContext: undefined,
             recovery,
             submittedFields: recovery.origin === "machine"
                 ? (snapshot.submittedFields ?? [])
@@ -781,9 +1003,10 @@ export class RoundTransactionCoordinator {
             reason: recovery.reason,
             recovery,
             verificationFlags: [],
-            roundSuccess: false,
+            agentSuccessClaim: false,
+            agentOutcome: null,
             gateContradicted: false,
-            verificationStatus: "not_applicable",
+            evidencePosture: rollbackEvidencePosture(snapshot.round),
             newConsecutiveRejections: 0,
             shouldPushSuccessTrajectory: false,
         };

@@ -9,6 +9,7 @@ import {
   ProjectionCoverageError,
 } from "../prompt-coverage.js";
 import {
+  CANONICAL_STATE_SCHEMA_VERSION,
   formatRoundContract,
   renderCanonicalStateMarkdown,
   type CanonicalLoopState,
@@ -64,7 +65,7 @@ function contract(): ActiveContractView {
 function state(overrides: Partial<CanonicalLoopState> = {}): CanonicalLoopState {
   const activeContract = contract();
   const base: CanonicalLoopState = {
-    schemaVersion: 6 as const,
+    schemaVersion: CANONICAL_STATE_SCHEMA_VERSION,
     loopId: "coverage-loop",
     round: 3,
     maxRounds: 20,
@@ -82,8 +83,8 @@ function state(overrides: Partial<CanonicalLoopState> = {}): CanonicalLoopState 
       meta("no runtime deps", "hard", "c-11111111"),
       meta("discovered rule", "discovered", "c-22222222"),
     ],
-    remainingCriteria: [],
-    blockers: [],
+    reportedIssues: [],
+    warnings: [],
     verificationFlags: [{
       severity: "warn",
       field: "execution_report.files_changed",
@@ -97,7 +98,10 @@ function state(overrides: Partial<CanonicalLoopState> = {}): CanonicalLoopState 
     ],
     recurringFlags: [],
     stateFilePath: ".loopforge/state/coverage-state.md",
-    progress: { criteriaMet: [], criteriaRemaining: [], filesChanged: [], tests: null },
+    reportedProgress: {
+      criteriaMet: [], criteriaRemaining: [], agentReportedRemaining: [],
+      filesChanged: [], tests: null,
+    },
     roundContract: activeContract,
     capability: deriveConfiguredCapability(DEFAULT_POLICY),
     ...overrides,
@@ -109,7 +113,7 @@ function artifact(level: "l0" | "l1" | "l2", value = state()) {
   return assemblePromptArtifact({
     state: value,
     level,
-    reasons: level === "l2" ? ["first_round"] : [],
+
     attempt: 1,
     selfEvaluationBlock: "",
   });
@@ -217,7 +221,6 @@ describe("v3.9.4 — PromptCoverage", () => {
     const current = assemblePromptArtifact({
       state: value,
       level: "l0",
-      reasons: [],
       attempt: 1,
       selfEvaluationBlock: "",
       budgets: { l0: 1 },
@@ -305,7 +308,6 @@ describe("v3.9.4 — PromptCoverage", () => {
     const current = assemblePromptArtifact({
       state: state(),
       level: "l2",
-      reasons: ["recovery_boundary"],
       attempt: 1,
       selfEvaluationBlock: "",
       recoveryBrief: [

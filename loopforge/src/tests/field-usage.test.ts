@@ -50,8 +50,8 @@ const OPPORTUNITIES: Opportunity[] = [
   },
   {
     name: "a checkpoint boundary was declared",
-    payload: { compression_checkpoint: true, checkpoint_label: "parser complete" },
-    field: "compression_checkpoint",
+    payload: { subtask_boundary: true, subtask_boundary_label: "parser complete" },
+    field: "subtask_boundary",
   },
   {
     name: "the round is blocked",

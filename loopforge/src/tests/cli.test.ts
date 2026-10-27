@@ -7,7 +7,8 @@ import { spawnSync } from "node:child_process";
 import { FileLoopStore } from "../loop-store.js";
 import { PROMPT_ARTIFACT_SCHEMA_VERSION } from "../protocol.js";
 import { POLICY_SCHEMA_VERSION } from "../policy.js";
-import { committedFeedbackRound } from "./_helpers.js";
+import { ROUND_TRANSACTION_SCHEMA_VERSION } from "../round-transaction.js";
+import { committedFeedbackRound, fixtureEvidencePosture } from "./_helpers.js";
 
 const cli = resolve("dist/cli.js");
 
@@ -101,10 +102,10 @@ describe("loopforge CLI", () => {
         loop_lineage: {
           round: 1,
           round_transaction: {
-            schema_version: 6,
+            schema_version: ROUND_TRANSACTION_SCHEMA_VERSION,
             round_id: "loop:inspect-me:round:1",
             snapshot: {
-              schemaVersion: 6,
+              schemaVersion: ROUND_TRANSACTION_SCHEMA_VERSION,
               kind: "evaluation",
               branchId: "loop:inspect-me:branch:root",
               transactionId: "tx-inspect-me-1-1",
@@ -149,7 +150,11 @@ describe("loopforge CLI", () => {
               createdAt: Date.now(),
               updatedAt: Date.now(),
             },
-            result: { action: "continue", verificationFlags: [] },
+            result: {
+              action: "continue",
+              verificationFlags: [],
+              evidencePosture: fixtureEvidencePosture(1),
+            },
           },
         },
       });
@@ -180,10 +185,10 @@ describe("loopforge CLI", () => {
         loop_lineage: {
           round: 1,
           round_transaction: {
-            schema_version: 6,
+            schema_version: ROUND_TRANSACTION_SCHEMA_VERSION,
             round_id: "loop:explain-me:round:1",
             snapshot: {
-              schemaVersion: 6,
+              schemaVersion: ROUND_TRANSACTION_SCHEMA_VERSION,
               kind: "evaluation",
               branchId: "loop:explain-me:branch:root",
               transactionId: "tx-explain-me-1-1",
@@ -217,7 +222,12 @@ describe("loopforge CLI", () => {
               createdAt: 0,
               updatedAt: 0,
             },
-            result: { action: "continue", verificationFlags: [], roundSuccess: false },
+            result: {
+              action: "continue",
+              verificationFlags: [],
+              agentSuccessClaim: false,
+              evidencePosture: fixtureEvidencePosture(1),
+            },
           },
         },
       });

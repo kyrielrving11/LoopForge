@@ -120,12 +120,11 @@ function evaluateCommand(
   fromRound: number,
   configured: boolean,
 ): { verdict: CommandVerdict; reason: string } {
-  if (!configured) {
-    return {
-      verdict: "insufficient",
-      reason: `command "${commandId}" is no longer configured/enabled — cannot observe it`,
-    };
-  }
+  // v4.0.3: observations come FIRST. A command that was disabled after the
+  // round that observed it passing does not rewrite that historical result;
+  // the missing configuration only matters when there is no observation to
+  // judge. A reconfigured command (configHash mismatch) is still insufficient.
+  //
   // v3.8.1: the LATEST observation at or after the claim decides, so the
   // closing round's evidence is the one consulted. Scanning forward let an
   // early pass outlive a later failure: the item stayed `verified`, its
@@ -186,7 +185,9 @@ function evaluateCommand(
   }
   return {
     verdict: "insufficient",
-    reason: `command "${commandId}" produced no after-phase observation since round ${fromRound}`,
+    reason: configured
+      ? `command "${commandId}" produced no after-phase observation since round ${fromRound}`
+      : `command "${commandId}" is no longer configured/enabled and produced no after-phase observation since round ${fromRound} — cannot observe it`,
   };
 }
 
@@ -202,7 +203,7 @@ export function deriveContractItemStatuses(input: ContractItemInput): ContractIt
       deltas: round.observationDelta,
       blocked: round.evaluation
         ? declaresBlocked(round.evaluation)
-        : round.outcome === "blocked",
+        : round.agentOutcome === "blocked",
       transition: round.contractTransition,
     })),
     {
@@ -289,19 +290,4 @@ export function deriveContractItemStatuses(input: ContractItemInput): ContractIt
     contradictedCount,
     insufficientCount,
   };
-}
-
-/** v3.8: The round-level verification posture. */
-export function roundVerificationStatus(
-  view: ContractItemStatusView,
-  report: ExecutionReport | null,
-): "trusted" | "insufficient" | "contradicted" {
-  if (view.contradictedCount > 0) return "contradicted";
-  if (view.insufficientCount > 0) return "insufficient";
-  // A success claim with no machine-backed item at all is insufficient too.
-  const claims = report?.contract_item_claims ?? [];
-  if (claims.some((claim) => claim.outcome === "met") && view.verifiedCount === 0) {
-    return "insufficient";
-  }
-  return "trusted";
 }

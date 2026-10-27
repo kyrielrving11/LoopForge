@@ -28,10 +28,15 @@ export interface RoundFacts {
 }
 /** v3.8.1: ONE criterion's machine fact. `status` is absent while every item
  *  referencing the criterion is still `pending` — "no claim yet" says nothing
- *  about the criterion, so the criterion keeps its claim-derived status. */
+ *  about the criterion, so the criterion keeps its claim-derived status.
+ *
+ *  v4.0.3: `status_at_round` is the round the CURRENT status was first
+ *  reached (not the claim round). It is a machine fact, so a later
+ *  verification can supersede an earlier contradiction. */
 export interface CriterionMachineFact {
     criterion_id: string;
     status?: Exclude<ContractItemStatus, "pending">;
+    status_at_round?: number;
 }
 /** The in-flight slice of a round that is being decided but is not yet
  *  committed. A pure committed-history replay passes null / [] — the reducer
@@ -56,4 +61,17 @@ export declare function deriveRoundFacts(input: {
     inFlight: InFlightRoundSlice;
     commands: ReadonlyArray<CommandEvidencePolicy>;
 }): RoundFacts;
+/** v3.8.1/v4.0.3: criterion → machine status, derived over the WHOLE committed
+ *  history exactly like the contract walk.
+ *
+ *  Within one round the strongest item fact wins (contradicted > verified >
+ *  insufficient); a `pending` item contributes nothing. Across rounds the
+ *  LATEST authoritative fact wins: a later `verified` or `contradicted` may
+ *  supersede an earlier one (so a contradiction can be re-verified), while an
+ *  `insufficient` round never erases an existing verified/contradicted fact.
+ *  `status_at_round` records when the current status was first reached. */
+export declare function deriveCriterionFacts(input: {
+    rounds: ReadonlyArray<CommittedRoundView>;
+    commands: ReadonlyArray<CommandEvidencePolicy>;
+}): CriterionMachineFact[];
 //# sourceMappingURL=round-facts.d.ts.map

@@ -43,6 +43,18 @@ content hash. Never reintroduce similarity matching or fuzzy identity.
 
 ### 3. Agent reports are claims, never machine evidence
 
+`SelfEvaluation.success`/`outcome`, `execution_report`, `output_summary`,
+`open_questions`, `worker_results`, `retroactiveClaims` and `no_change_reason`
+are Agent claims. A read surface names them `agentSuccessClaim`/`agentOutcome`
+or labels them as reports; it never displays them as machine evidence.
+
+`machineBackedSuccess` has exactly ONE definition and ONE source: the
+verification gate's `VerificationResult`, derived from an effective success
+claim plus an untampered passed after-phase command. It is persisted only inside
+the round's `EvidencePosture`; no consumer re-derives it. `completed` remains
+the Agent's stop declaration passing the existing gates, not a machine
+verification verdict.
+
 A success claim needs an independent machine observation, normally a passed
 after-phase command whose entrypoint and configuration are untampered.
 `no_change_reason` is an escape only when no verification command is configured.
@@ -82,21 +94,37 @@ an active Agent-discovered constraint.
 
 ### 7. The prompt is a current-governance projection
 
-It carries committed current-governance facts only. Agent memory and session
-history are background, never an input. A fresh prompt may render BOUNDED
-Working Memory derived from the current branch's committed rounds and
+It carries committed current-governance facts, compact Machine Evidence, and a
+BOUNDED Agent-report Working Memory. Agent memory and session history are
+background, never an input.
+
+Machine Evidence renders the previous committed round's persisted
+`EvidencePosture` in a protected section (status, `machineBackedSuccess`,
+workspace/files counts, provider/command statuses, contract items, findings).
+It is not Working Memory and declares no normative ids.
+
+Working Memory is derived from the current branch's committed rounds and
 committed rollback directives: recent reports, falsified assumptions /
-retractions, open questions, consumed recoveries and contract redirects, each
-under a fixed window and character cap and the prompt's total character budget.
-That projection is part of
-`CanonicalLoopState`; it is not a second history, is never persisted as its own
-store, and never feeds a gate, success, contract closure or machine evidence.
-Full rehydrated state, unbounded round history, failed-pattern history and
-LoopForge-generated phase narratives do not render. A same-round retry renders
-no Working Memory. The state file is derived and is never the source of truth.
-The current user instruction defines the task. Every prompt carries a derived
-context boundary (`fresh_round` / `same_round_retry`) in its artifact; the host
-starts a new Agent invocation for `fresh_round`, which is not a workspace reset.
+retractions, open questions, consumed recoveries and contract redirects. Reports
+and assumptions use a 5-round window; open questions remain active across the
+branch until resolved; recoveries are consumed committed directives. Caps are
+fixed code constants. Source counts are measured before cap/dedupe, rendered
+counts after; every omission is stated, and an abbreviated body carries a
+fixed notice. The prompt section is optional but INDIVISIBLE: `allowPartial:
+false`, so it is dropped whole rather than rendered half, and the artifact
+records `rendered:false` with source counts.
+
+The projection is part of `CanonicalLoopState`; it is not a second history, is
+never persisted as its own store, and never feeds a gate, success, contract
+closure or machine evidence. Full rehydrated state, unbounded round history,
+failed-pattern history and LoopForge-generated phase narratives do not render.
+An L0 same-round retry renders no Working Memory and no Machine Evidence; an L2
+rehydrate retry is a `fresh_round` and may render the previous committed posture
+plus the rejected attempt's transient, clearly `not committed` posture. The
+state file is derived and is never the source of truth. The current user
+instruction defines the task. Every prompt carries a derived context boundary
+(`fresh_round` / `same_round_retry`) in its artifact; the host starts a new
+Agent invocation for `fresh_round`, which is not a workspace reset.
 
 ### 8. `submission-guidance.ts` is the single source of field meaning
 
@@ -109,8 +137,9 @@ checklist.
 
 `[]` is an observed no-change; `null` is unknown; `not_applicable` means the
 provider did not participate. `unknown` never reads as empty, as no-change or as
-a pass, and never downgrades a prompt level. A commit alone adds no change when
-content is unchanged.
+a pass, and never downgrades a prompt level. An evidence posture's `unknown`
+never degrades to `verified` or to an empty result. A commit alone adds no
+change when content is unchanged.
 
 ### 10. Persistence boundaries
 
@@ -119,6 +148,17 @@ serialized per session and fenced by renewable cross-process leases. Derived
 state is separate from committed rounds and from the session document. Schema
 versions are boundaries: older documents are reported, never silently migrated
 or dropped. An invalid policy is never merged over the defaults.
+
+### 11. Evidence posture is a transaction projection, not a second store
+
+`EvidencePosture` is derived ONCE by the coordinator from one round's raw
+facts, persisted inside that round's result, and read by every surface. It is
+not a second factual source and must never be re-derived by a read surface.
+The contract-item snapshot inside it is the status at commit time; later policy
+or command-configuration changes must not rewrite it. Current compile-time
+contract status is a separate `current verification capability` projection.
+Rejected attempts keep a transient posture only in `RetryContext`; it never
+enters the Vault or Working Memory.
 
 ## Changing a boundary
 

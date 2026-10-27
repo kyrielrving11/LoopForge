@@ -5,7 +5,10 @@ import { assemblePromptArtifact, DEFAULT_PROMPT_BUDGETS, verificationActionFor }
 import { LOST_HANDLE_ROUTING } from "../recovery-guidance.js";
 import { PROMPT_ARTIFACT_SCHEMA_VERSION } from "../protocol.js";
 import type { PromptAssemblyInput } from "../prompt-assembler.js";
-import type { CanonicalLoopState } from "../canonical-state.js";
+import {
+  CANONICAL_STATE_SCHEMA_VERSION,
+  type CanonicalLoopState,
+} from "../canonical-state.js";
 import type { ConstraintMeta } from "../protocol.js";
 import type { WorkingMemory } from "../working-memory.js";
 import { deriveItemId } from "../token-utils.js";
@@ -25,8 +28,8 @@ function memory(overrides: Partial<WorkingMemory> = {}): WorkingMemory {
     reports: [{
       round: 1,
       attempt: 1,
-      success: true,
-      outcome: "success",
+      agentSuccessClaim: true,
+      agentOutcome: "success",
       outputSummary: "implemented the parser and ran the suite",
       sourceChars: 38,
     }],
@@ -34,13 +37,17 @@ function memory(overrides: Partial<WorkingMemory> = {}): WorkingMemory {
     openQuestions: [],
     recoveries: [],
     redirects: [],
+    sourceCounts: {
+      windowRounds: 1, reports: 1, assumptions: 0,
+      openQuestions: 0, recoveries: 0, redirects: 0,
+    },
     ...overrides,
   };
 }
 
 function minimalState(overrides: Partial<CanonicalLoopState> = {}): CanonicalLoopState {
   return {
-    schemaVersion: 6 as const,
+    schemaVersion: CANONICAL_STATE_SCHEMA_VERSION,
     loopId: "test-loop",
     round: 1,
     maxRounds: 20,
@@ -53,17 +60,18 @@ function minimalState(overrides: Partial<CanonicalLoopState> = {}): CanonicalLoo
     activeConstraints: ["no runtime deps", "all tests pass"],
     retiredConstraints: [],
     constraintMetadata: [],
-    remainingCriteria: [],
-    blockers: [],
+    reportedIssues: [],
+    warnings: [],
     verificationFlags: [],
     subGoals: [],
     criterionStatuses: [],
     recurringFlags: [],
     stateFilePath: ".loopforge/state/test.md",
     capability: deriveConfiguredCapability(DEFAULT_POLICY),
-    progress: {
+    reportedProgress: {
       criteriaMet: [],
       criteriaRemaining: [],
+      agentReportedRemaining: [],
       filesChanged: [],
       tests: null,
     },
@@ -76,7 +84,6 @@ function input(overrides: Partial<PromptAssemblyInput> = {}): PromptAssemblyInpu
   return {
     state,
     level: "l2",
-    reasons: ["first_round"],
     attempt: 1,
     selfEvaluationBlock: "",
     workingMemory: state.workingMemory,
@@ -98,7 +105,7 @@ describe("assemblePromptArtifact — L0", () => {
 
   it("includes retry requirements when blockers present", () => {
     const state = minimalState({
-      blockers: ["fix progress regression"],
+      reportedIssues: ["fix progress regression"],
       verificationFlags: [
         { severity: "warn", field: "test", check: "test_flag", detail: "flag detail" },
       ],
@@ -217,8 +224,9 @@ describe("assemblePromptArtifact — L2", () => {
           declared_at_round: 1, status_changed_at_round: 3,
           completed_at_round: 3, priority: 0 },
       ],
-      progress: {
+      reportedProgress: {
         criteriaMet: ["auth"], criteriaRemaining: ["api"],
+        agentReportedRemaining: ["api"],
         filesChanged: ["src/auth.ts"],
         tests: { passed: 42, failed: 0, skipped: 0 },
       },
@@ -237,7 +245,6 @@ describe("assemblePromptArtifact — L2", () => {
   it("includes read instruction for L2 boundary reasons", () => {
     const artifact = assemblePromptArtifact(input({
       level: "l2",
-      reasons: ["recovery_boundary"],
     }));
     assert.ok(artifact.renderedPrompt.includes("Read the state file before acting"));
   });
@@ -253,8 +260,14 @@ describe("assemblePromptArtifact — memory boundary", () => {
       const artifact = assemblePromptArtifact(input({ level }));
       assert.ok(artifact.renderedPrompt.includes("LoopForge authority boundary"),
         `${level} must carry the authority boundary`);
-      assert.ok(artifact.renderedPrompt.includes("Criteria are the operator's acceptance surface"));
-      assert.ok(artifact.renderedPrompt.includes("Round Contract is this round's deliverable"));
+      assert.ok(artifact.renderedPrompt.includes("not a Git commit"),
+        `${level} must state the round-commit boundary`);
+      if (level !== "l0") {
+        // L0 is the same-invocation retry density: it restates the authority
+        // facts compactly, while L1/L2 carry the full boundary.
+        assert.ok(artifact.renderedPrompt.includes("Criteria are the operator's acceptance surface"));
+        assert.ok(artifact.renderedPrompt.includes("Round Contract is this round's deliverable"));
+      }
     }
   });
 
@@ -278,7 +291,6 @@ describe("assemblePromptArtifact — memory boundary", () => {
   it("does not call the state file the source of truth", () => {
     const artifact = assemblePromptArtifact(input({
       level: "l2",
-      reasons: ["recovery_boundary"],
     }));
     assert.ok(artifact.renderedPrompt.includes("Read the state file before acting"));
     assert.ok(!artifact.renderedPrompt.includes("the state file is the source of truth"));
@@ -291,13 +303,13 @@ describe("assemblePromptArtifact — memory boundary", () => {
       state: minimalState({
         workingMemory: memory({
           reports: [{
-            round: 1, attempt: 1, success: false, outcome: "partial",
+            round: 1, attempt: 1, agentSuccessClaim: false, agentOutcome: "partial",
             outputSummary: "Corrected assumption: old belief", sourceChars: 35,
           }],
         }),
       }),
     }));
-    assert.ok(artifact.renderedPrompt.includes("Working Memory (committed history"));
+    assert.ok(artifact.renderedPrompt.includes("Working Memory (Agent reports are claims"));
     assert.ok(artifact.renderedPrompt.includes("Previous Round Report (Agent report) — R1"));
     assert.ok(artifact.renderedPrompt.includes("> Corrected assumption: old belief"));
   });
@@ -306,7 +318,7 @@ describe("assemblePromptArtifact — memory boundary", () => {
     const artifact = assemblePromptArtifact(input({
       level: "l2",
       state: minimalState({
-        blockers: ["reported blocker"],
+        reportedIssues: ["reported blocker"],
         recurringFlags: [{
           subject: "test_files_modified",
           kind: "verification_warning",
@@ -317,9 +329,9 @@ describe("assemblePromptArtifact — memory boundary", () => {
         workingMemory: memory(),
       }),
     }));
-    assert.ok(artifact.renderedPrompt.includes("Blockers (reported/current)"));
+    assert.ok(artifact.renderedPrompt.includes("Agent-Reported Blockers (Agent report)"));
     assert.ok(artifact.renderedPrompt.includes("Recurring Findings"));
-    assert.ok(artifact.renderedPrompt.includes("Working Memory (committed history"));
+    assert.ok(artifact.renderedPrompt.includes("Working Memory (Agent reports are claims"));
   });
 
   it("records no removed narrative sections", () => {
@@ -381,11 +393,11 @@ describe("assemblePromptArtifact — metadata", () => {
   });
 
   it("drops optional sections under a tight budget", () => {
-    const state = minimalState({ blockers: ["a reported blocker"] });
+    const state = minimalState({ reportedIssues: ["a reported blocker"] });
     const tight = assemblePromptArtifact(input({ level: "l1", budgets: { l1: 10 }, state }));
     const ample = assemblePromptArtifact(input({ level: "l1", state }));
-    assert.ok(ample.renderedPrompt.includes("Blockers (reported/current)"));
-    assert.ok(!tight.renderedPrompt.includes("Blockers (reported/current)"));
+    assert.ok(ample.renderedPrompt.includes("Agent-Reported Blockers (Agent report)"));
+    assert.ok(!tight.renderedPrompt.includes("Agent-Reported Blockers (Agent report)"));
     assert.ok(tight.renderedPrompt.includes("Current Task"));
   });
 
@@ -535,7 +547,7 @@ describe("v3.3 — Roadmap section", () => {
   const roadmapState = (): CanonicalLoopState => minimalState({
     round: 7,
     criterionStatuses: [
-      { id: "cr-11111111", text: "all tests pass", status: "verified" as const, met_at_round: 3 },
+      { id: "cr-11111111", text: "all tests pass", status: "verified" as const, status_at_round: 3, status_source: "machine" as const },
       { id: "cr-22222222", text: "no regressions", status: "remaining" as const },
     ],
     subGoals: [
@@ -561,9 +573,10 @@ describe("v3.3 — machine dashboard rows and round stats", () => {
     // machine git/criteria rows still render in the STATE FILE, where a human
     // or external tool reads them — see canonical-state.test.ts.
     const state = minimalState({
-      progress: {
+      reportedProgress: {
         criteriaMet: [],
         criteriaRemaining: [],
+        agentReportedRemaining: [],
         filesChanged: ["src/a.ts"],
         tests: { passed: 8, failed: 1, skipped: 0 },
       },
@@ -574,7 +587,7 @@ describe("v3.3 — machine dashboard rows and round stats", () => {
         providers: ["git"],
       },
       criterionStatuses: [
-        { id: "cr-11111111", text: "all tests pass", status: "verified" as const, met_at_round: 3 },
+        { id: "cr-11111111", text: "all tests pass", status: "verified" as const, status_at_round: 3, status_source: "machine" as const },
       ],
     });
     const artifact = assemblePromptArtifact(input({
@@ -599,8 +612,7 @@ describe("assemblePromptArtifact — budget determinism", () => {
     subGoals: [
       { id: "sg-1", description: "Task A", status: "in_progress", declared_at_round: 1, status_changed_at_round: 2, priority: 0 },
     ],
-    remainingCriteria: ["criterion one", "criterion two"],
-    blockers: ["a blocker"],
+    reportedIssues: ["a blocker"],
     workingMemory: memory(),
     retiredConstraints: ["an old rule"],
     recurringFlags: [
@@ -638,7 +650,7 @@ describe("assemblePromptArtifact — budget determinism", () => {
     }));
     const artifact = assemblePromptArtifact(input({
       level: "l2", state,
-      budgets: { l2: 3200 },
+      budgets: { l2: 4500 },
     }));
     // The invariant is about the CUT POINT, not about any single section:
     // every optional section that rendered must outrank every one that was
@@ -646,18 +658,26 @@ describe("assemblePromptArtifact — budget determinism", () => {
     // low-priority section into room a larger high-priority one could not
     // use.)
     const order = [
-      "blockers", "active_warnings",
+      "working_memory", "compile_warnings", "blockers", "active_warnings",
     ];
     const rendered = order.filter((id) => artifact.sections.includes(id));
     const dropped = order.filter((id) => artifact.droppedSections.includes(id));
-    assert.ok(dropped.length > 0, "a tight budget must cut something");
-    assert.ok(rendered.length > 0, "...but not everything");
-    const lastRendered = order.indexOf(rendered[rendered.length - 1]);
-    const firstDropped = order.indexOf(dropped[0]);
-    assert.ok(
-      lastRendered < firstDropped,
-      `rendered [${rendered.join(", ")}] must all outrank dropped [${dropped.join(", ")}]`,
-    );
+    assert.ok(rendered.length > 0, "a tight budget must render the higher-priority tail");
+    if (dropped.length > 0) {
+      const lastRendered = order.indexOf(rendered[rendered.length - 1]);
+      const firstDropped = order.indexOf(dropped[0]);
+      assert.ok(
+        lastRendered < firstDropped,
+        `rendered [${rendered.join(", ")}] must all outrank dropped [${dropped.join(", ")}]`,
+      );
+    } else {
+      // v4.0.3: the cut point can be a PARTIAL render of the lowest-priority
+      // section. Every higher-priority optional section must still be whole,
+      // and the partial one must be the tail of the ordering.
+      assert.ok(rendered.includes("blockers"),
+        "a partial tail never displaces a higher-priority optional section");
+      assert.equal(rendered[rendered.length - 1], "active_warnings");
+    }
   });
 
   it("is deterministic: identical input gives an identical prompt and artifact", () => {

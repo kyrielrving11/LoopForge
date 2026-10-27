@@ -104,7 +104,7 @@ describe("compileLoop — context boundary is an artifact fact", () => {
     assert.equal(response.prompt_artifact?.contextMode, "same_round_retry");
     assert.equal(response.prompt_artifact?.contextReason, "enforcement_retry");
     assert.match(response.prompt, /Context: same-round retry \(enforcement_retry\)/);
-    assert.doesNotMatch(response.prompt, /Working Memory \(committed history/);
+    assert.ok(!response.prompt.includes("Working Memory (Agent reports are claims"));
     assert.doesNotMatch(response.prompt, /COMMITTED_REPORT_TEXT/);
     assert.equal(response.prompt_artifact?.workingMemory, undefined);
   });
@@ -122,7 +122,7 @@ describe("compileLoop — context boundary is an artifact fact", () => {
     // The redo still renders the retained committed memory and the current
     // Recovery Brief; the pending directive is not duplicated as recovery
     // history.
-    assert.match(response.prompt, /Working Memory \(committed history/);
+    assert.ok(response.prompt.includes("Working Memory (Agent reports are claims"));
     assert.match(response.prompt, /Recovery Brief/);
     const memory = response.prompt_artifact?.workingMemory;
     assert.deepEqual(memory?.reportRounds, [1]);
@@ -139,7 +139,7 @@ describe("compileLoop — context boundary is an artifact fact", () => {
     assert.equal(response.recompile_level, "l2");
     assert.equal(response.prompt_artifact?.contextMode, "fresh_round");
     assert.equal(response.prompt_artifact?.contextReason, "enforcement_retry");
-    assert.match(response.prompt, /Working Memory \(committed history/);
+    assert.ok(response.prompt.includes("Working Memory (Agent reports are claims"));
   });
 
   it("an L2 enforcement retry re-renders committed memory for a fresh invocation", () => {

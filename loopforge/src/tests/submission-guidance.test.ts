@@ -322,7 +322,7 @@ describe("v3.9.2 — compact trigger guidance", () => {
       "resolved_open_question_ids",
       "emerged_subtasks",
       "worker_results",
-      "compression_checkpoint",
+      "subtask_boundary",
     ]);
     assert.ok(compact.length <= 8, "the compact checklist is structurally max eight");
     assert.equal(isFieldPrompted("round_contract", facts()), false,
@@ -395,7 +395,7 @@ describe("v3.9.2 — compact trigger guidance", () => {
       "open_questions",
       "emerged_subtasks",
       "worker_results",
-      "compression_checkpoint",
+      "subtask_boundary",
     ]) {
       assert.match(block, new RegExp(`\`${path.replace(/\./g, "\\.")}\``),
         `L0 must offer the applicable field ${path}`);

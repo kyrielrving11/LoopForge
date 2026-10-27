@@ -31,7 +31,6 @@ import type {
 } from "../protocol.js";
 import { NO_IN_FLIGHT_ROUND, deriveRoundFacts } from "../round-facts.js";
 import { loadCommittedHistory } from "../history.js";
-import { listVerifiedClaims } from "../evidence-claims.js";
 import { buildAudit } from "../audit.js";
 import { buildExplain } from "../explain.js";
 import { CHECK_CONTRACT_ITEMS_UNVERIFIED } from "../verification-gate.js";
@@ -317,7 +316,13 @@ export class SessionManager implements SessionRegistry {
     // would overwrite it. The atomic `expectAbsent` save below is the final
     // gate; this preflight avoids compiling and collecting evidence first.
     if (persistedSession) {
-      throw new LoopExistsError(loopId, "session");
+      const persistedStatus = isRecord(persistedLineage)
+        ? persistedLineage.status
+        : undefined;
+      throw new LoopExistsError(
+        loopId,
+        persistedStatus === "stopped" ? "stopped" : "session",
+      );
     }
     if (this.hasCommittedRounds(loopId)) {
       throw new LoopExistsError(loopId, "rounds");
@@ -386,6 +391,9 @@ export class SessionManager implements SessionRegistry {
       operatorAcceptance,
       roundSnapshot: prepared.snapshot,
     };
+    // v4.0.3: seed the round-1 trust baseline BEFORE the first prompt is
+    // delivered, so the first round already has the absolute entrypoint arm.
+    this.lifecycle.seedEntrypointTrust(session);
     this.sessions.set(sessionId, session);
     policyMetrics.recordStrategy(loopId, initialLevel);
 
@@ -437,7 +445,8 @@ export class SessionManager implements SessionRegistry {
         : {}),
       prompt: initialPrompt,
       level: initialLevel,
-      roundSuccess: false,
+      agentSuccessClaim: false,
+      agentOutcome: null,
       warnings: [...startCriteria.warnings, ...(prepared.warnings ?? [])],
       submission_guidance: this.lifecycle.guidanceFor(session),
     };
@@ -476,12 +485,15 @@ export class SessionManager implements SessionRegistry {
       : null;
   }
 
-  /** v3.9.6: the success trajectory is a projection of committed branch
-   *  rounds, not a session counter. */
-  getSuccessTrajectory(loopId: string): boolean[] {
+  /** v4.0.3: the machine-backed success trajectory is a projection of
+   *  committed branch rounds, not a session counter. Unbacked claims never
+   *  enter it. */
+  getMachineBackedSuccessTrajectory(loopId: string): boolean[] {
     return loadCommittedHistory(this.loopStore, loopId).rounds
-      .filter((view) => view.result?.shouldPushSuccessTrajectory === true)
-      .map((view) => view.success);
+      .filter((view) =>
+        view.result?.shouldPushSuccessTrajectory === true &&
+        view.result?.evidencePosture?.machineBackedSuccess === true)
+      .map((view) => view.agentSuccessClaim);
   }
 
   get(sessionId: string): McpSession | undefined {
@@ -1082,11 +1094,25 @@ export class SessionManager implements SessionRegistry {
         (flag) => flag.check === CHECK_CONTRACT_ITEMS_UNVERIFIED,
       ),
     ).length;
+    // v4.0.3: the ONE persisted posture is the source of this distribution.
+    const roundsByEvidenceStatus: Record<string, number> = {
+      verified: 0,
+      insufficient: 0,
+      contradicted: 0,
+      unknown: 0,
+      not_applicable: 0,
+    };
+    for (const view of views) {
+      if (view.evidencePosture) {
+        roundsByEvidenceStatus[view.evidencePosture.status]++;
+      }
+    }
     return {
       loopId,
       committed_rounds: views.length,
       legacy_rounds: history.legacyRounds.length,
       rounds_with_unverified_items: roundsWithUnverifiedItems,
+      rounds_by_evidence_status: roundsByEvidenceStatus,
       // The policy value the enforcement gate escalates on. The streak itself
       // is derived in the gate — re-deriving it here would be a second
       // implementation of the same rule, which is what this release removes.
@@ -1689,7 +1715,12 @@ export class SessionManager implements SessionRegistry {
       redoRound: view.recovery?.target.redo_round ?? 0,
       targetCheckpointId: view.recovery?.target.checkpoint_id ?? "",
       reason: view.recovery?.reason ?? "",
+      observedSkippedFiles: [...(view.recovery?.observed_skipped_files ??
+        view.recovery?.skipped_files ?? [])],
+      reportedSkippedFiles: [...(view.recovery?.reported_skipped_files ?? [])],
       skippedFiles: [...(view.recovery?.skipped_files ?? [])],
+      abandonedRounds: [...(view.recovery?.abandoned_rounds ?? [])],
+      triggerFindings: [...(view.recovery?.trigger_findings ?? [])],
       preservedDiscoveries: [...(view.recovery?.skipped_discoveries ?? [])],
       // v4.0.2: the committed abandoned-path facts, same display caps as
       // Working Memory / replay.

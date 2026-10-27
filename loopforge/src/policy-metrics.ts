@@ -1,13 +1,30 @@
-/** In-process policy effectiveness metrics with no runtime dependency. */
+/** In-process policy effectiveness metrics with no runtime dependency.
+ *
+ *  v4.0.3: Agent claims and machine-backed success are separate counters.
+ *  Evidence posture counts come from the persisted posture, never from a
+ *  read-time re-derivation. Git file/head facts use the shared union selector.
+ */
 
 import type { RoundProcessResult } from "./round-coordinator.js";
 import type { VaultEntry } from "./loop-store.js";
 import { readOnlyRounds } from "./committed-round.js";
-import { observedGitHead } from "./git-motion.js";
 import { deriveFieldAccounting } from "./field-accounting.js";
 import { deriveFilesReconciliation } from "./files-reconciliation.js";
-import { gitDeltaState } from "./evidence-provider.js";
-import type { FilesReconciliation } from "./protocol.js";
+import { gitRoundFacts } from "./git-facts.js";
+import { CORE_SELF_EVALUATION_FIELDS } from "./submission-guidance.js";
+import type {
+  EvidencePostureStatus,
+  FilesReconciliation,
+  ObservationStatus,
+} from "./protocol.js";
+
+const EVIDENCE_POSTURE_STATUSES: EvidencePostureStatus[] = [
+  "verified", "insufficient", "contradicted", "unknown", "not_applicable",
+];
+
+const OBSERVATION_STATUSES: ObservationStatus[] = [
+  "observed", "passed", "failed", "timeout", "unavailable", "error", "aborted",
+];
 
 export interface PolicyMetricsSnapshot {
   loopId?: string;
@@ -17,8 +34,16 @@ export interface PolicyMetricsSnapshot {
   terminatedRounds: number;
   stoppedRounds: number;
   replayedTransactions: number;
-  successfulRounds: number;
-  contradictedRounds: number;
+  /** Rounds whose Agent-declared outcome is `success` (claim only). */
+  agentClaimedSuccessRounds: number;
+  /** Rounds whose persisted posture has machineBackedSuccess=true. */
+  machineBackedSuccessRounds: number;
+  /** Rounds whose verification gate verdict was `contradicted`. */
+  gateContradictedRounds: number;
+  /** Per-status counts from the committed posture. */
+  evidenceStatusCounts: Record<EvidencePostureStatus, number>;
+  /** Per-status counts of after-phase observations. */
+  observationStatusCounts: Record<ObservationStatus, number>;
   verificationFlags: Record<string, number>;
   enforcementReasons: Record<string, number>;
   evidenceOutcomesByProvider: Record<string, number>;
@@ -38,18 +63,15 @@ export interface PolicyMetricsSnapshot {
    *  round delta. Display only — never a gate. */
   filesChangedRounds: number;
   filesChangedTotal: number;
-  unobservableGitRounds: number;
+  /** v4.0.3: rounds whose persisted workspace boundary is `unknown`. */
+  workspaceUnknownRounds: number;
   headMoveRounds: number;
-  /** Optional-field counts (core fields excluded). `attempted` = the raw
-   *  payload named the field; `retained` = the normalizer kept a value.
-   *  `retained` covers only complete accounting rounds; the two round counts
-   *  make that coverage explicit. Pure observation — never a gate. */
+  /** Optional-field counts (core fields excluded). */
   attemptedFieldUsage: Record<string, number>;
   retainedFieldUsage: Record<string, number>;
   fieldAccountingRounds: number;
   fieldAccountingIncompleteRounds: number;
-  /** v3.9.2: read-only file-report reconciliation counts, derived from the
-   *  same helper the gate and receipt use. */
+  /** v3.9.2: read-only file-report reconciliation counts. */
   filesReconciliation: Record<FilesReconciliation["status"], number>;
   acceptanceRate: number;
   evidenceAvailabilityRate: number;
@@ -60,6 +82,28 @@ type MutableMetrics = Omit<
   "acceptanceRate" | "evidenceAvailabilityRate" | "evidenceLatencyAvgMs"
 >;
 
+function zeroPostureCounts(): Record<EvidencePostureStatus, number> {
+  return {
+    verified: 0,
+    insufficient: 0,
+    contradicted: 0,
+    unknown: 0,
+    not_applicable: 0,
+  };
+}
+
+function zeroObservationCounts(): Record<ObservationStatus, number> {
+  return {
+    observed: 0,
+    passed: 0,
+    failed: 0,
+    timeout: 0,
+    unavailable: 0,
+    error: 0,
+    aborted: 0,
+  };
+}
+
 function empty(loopId?: string): MutableMetrics {
   return {
     loopId,
@@ -69,8 +113,11 @@ function empty(loopId?: string): MutableMetrics {
     terminatedRounds: 0,
     stoppedRounds: 0,
     replayedTransactions: 0,
-    successfulRounds: 0,
-    contradictedRounds: 0,
+    agentClaimedSuccessRounds: 0,
+    machineBackedSuccessRounds: 0,
+    gateContradictedRounds: 0,
+    evidenceStatusCounts: zeroPostureCounts(),
+    observationStatusCounts: zeroObservationCounts(),
     verificationFlags: {},
     enforcementReasons: {},
     evidenceOutcomesByProvider: {},
@@ -85,7 +132,7 @@ function empty(loopId?: string): MutableMetrics {
     levels: {},
     filesChangedRounds: 0,
     filesChangedTotal: 0,
-    unobservableGitRounds: 0,
+    workspaceUnknownRounds: 0,
     headMoveRounds: 0,
     attemptedFieldUsage: {},
     retainedFieldUsage: {},
@@ -126,18 +173,21 @@ export class PolicyMetricsCollector {
       }
       metric.roundAttempts++;
       if (result.action === "reject") metric.rejectedAttempts++;
-      // v3.3.1: only continue/stop decisions commit a round outcome —
-      // terminates never commit (v2.14 invariant) and backtracks are
-      // roll-back directives whose redo replaces the round document, so
-      // neither may inflate committedRounds/acceptanceRate. This mirrors
-      // the vault-derived side, which already excludes backtrack entries.
+      // Only continue/stop decisions commit a round outcome — terminates never
+      // commit and backtracks are roll-back directives whose redo replaces the
+      // round document.
       else if (result.action === "continue" || result.action === "stop") {
         metric.committedRounds++;
       }
       if (result.action === "terminate") metric.terminatedRounds++;
       if (result.action === "stop") metric.stoppedRounds++;
-      if (result.roundSuccess) metric.successfulRounds++;
-      if (result.gateContradicted) metric.contradictedRounds++;
+      if (result.agentOutcome === "success") metric.agentClaimedSuccessRounds++;
+      if (result.gateContradicted) metric.gateContradictedRounds++;
+      const posture = result.evidencePosture;
+      if (posture) {
+        if (posture.machineBackedSuccess) metric.machineBackedSuccessRounds++;
+        increment(metric.evidenceStatusCounts, posture.status);
+      }
       for (const flag of result.verificationFlags) {
         increment(metric.verificationFlags, flag.check);
       }
@@ -164,9 +214,6 @@ export class PolicyMetricsCollector {
     }
   }
 
-  /** Record a vault write failure. The reason distinguishes feedback_persist,
-   *  lineage_persist, and delegation_persist so operators can identify which
-   *  write path is failing. */
   recordVaultWriteError(reason: string, loopId?: string): void {
     for (const metric of this.targets(loopId)) {
       metric.vaultWriteErrors++;
@@ -201,6 +248,8 @@ function snapshotFrom(source: MutableMetrics): PolicyMetricsSnapshot {
   const evidence = source.evidenceCaptures;
   return {
     ...source,
+    evidenceStatusCounts: { ...source.evidenceStatusCounts },
+    observationStatusCounts: { ...source.observationStatusCounts },
     verificationFlags: { ...source.verificationFlags },
     enforcementReasons: { ...source.enforcementReasons },
     evidenceOutcomesByProvider: { ...source.evidenceOutcomesByProvider },
@@ -208,15 +257,13 @@ function snapshotFrom(source: MutableMetrics): PolicyMetricsSnapshot {
     filesReconciliation: { ...source.filesReconciliation },
     acceptanceRate: attempts === 0 ? 0 : source.committedRounds / attempts,
     evidenceAvailabilityRate: evidence === 0 ? 0 : source.evidenceAvailable / evidence,
-    // evidenceLatencyMs is a raw sum; derive the average for consumers
     evidenceLatencyAvgMs: evidence === 0 ? 0 : source.evidenceLatencyMs / evidence,
   };
 }
 
-/** v2.12: Derive a metrics snapshot from durable vault entries (3.x A4 port).
- *  Committed round decisions, verification flags, and prompt levels are
- *  replayed into the same counters the live collector maintains, so a
- *  restarted process reports nonzero metrics for persisted loops. */
+/** v2.12: Derive a metrics snapshot from durable vault entries. Committed
+ *  round decisions, verification flags and prompt levels are replayed into the
+ *  same counters the live collector maintains. */
 export function derivePolicyMetrics(
   loopId: string,
   entries: VaultEntry[],
@@ -230,8 +277,19 @@ export function derivePolicyMetrics(
     metric.committedRounds++;
     if (result.action === "stop") metric.stoppedRounds++;
     if (result.action === "terminate") metric.terminatedRounds++;
-    if (result.roundSuccess === true) metric.successfulRounds++;
-    if (result.gateContradicted === true) metric.contradictedRounds++;
+    if ((result.agentOutcome ?? (result.agentSuccessClaim ? "success" : "failed")) === "success") {
+      metric.agentClaimedSuccessRounds++;
+    }
+    if (result.gateContradicted === true) metric.gateContradictedRounds++;
+    const posture = round.evidencePosture;
+    if (posture) {
+      increment(metric.evidenceStatusCounts, posture.status);
+      if (posture.machineBackedSuccess) metric.machineBackedSuccessRounds++;
+      if (posture.workspace.status === "unknown") metric.workspaceUnknownRounds++;
+    }
+    for (const observation of round.afterEvidence) {
+      increment(metric.observationStatusCounts, observation.status);
+    }
     for (const flag of round.verificationFlags) {
       increment(metric.verificationFlags, flag.check);
     }
@@ -241,12 +299,14 @@ export function derivePolicyMetrics(
     if (round.promptArtifact?.level) {
       increment(metric.levels, round.promptArtifact.level);
     }
-    // v3.9.1: the shared delta is the only file-change source.
-    if (round.evidenceIncomplete) metric.unobservableGitRounds++;
-    const git = gitDeltaState(round.observationDelta);
-    if (git.state === "observed" && git.changedFiles.size > 0) {
+    const git = gitRoundFacts(round.observationDelta);
+    if (git.changedFiles !== null && git.changedFiles.length > 0) {
       metric.filesChangedRounds++;
-      metric.filesChangedTotal += git.changedFiles.size;
+      metric.filesChangedTotal += git.changedFiles.length;
+    }
+    if (git.headBefore !== null && git.headAfter !== null &&
+        git.headBefore !== git.headAfter) {
+      metric.headMoveRounds++;
     }
     const reconciliation = deriveFilesReconciliation(
       round.executionReport,
@@ -257,20 +317,10 @@ export function derivePolicyMetrics(
       },
     );
     metric.filesReconciliation[reconciliation.status]++;
-    const headBefore = observedGitHead(
-      round.beforeEvidence.find((item) => item.providerId === "git"),
-    );
-    const headAfter = observedGitHead(
-      round.afterEvidence.find((item) => item.providerId === "git"),
-    );
-    if (headBefore && headAfter && headBefore !== headAfter) {
-      metric.headMoveRounds++;
-    }
-    const CORE = new Set([
-      "success", "output_summary", "constraint_violations", "should_continue",
-    ]);
     for (const path of round.submittedFields) {
-      if (!CORE.has(path)) increment(metric.attemptedFieldUsage, path);
+      if (!CORE_SELF_EVALUATION_FIELDS.has(path)) {
+        increment(metric.attemptedFieldUsage, path);
+      }
     }
     const accounting = deriveFieldAccounting({
       submittedFields: round.submittedFields,
@@ -282,7 +332,9 @@ export function derivePolicyMetrics(
     } else {
       metric.fieldAccountingRounds++;
       for (const path of accounting.retained) {
-        if (!CORE.has(path)) increment(metric.retainedFieldUsage, path);
+        if (!CORE_SELF_EVALUATION_FIELDS.has(path)) {
+          increment(metric.retainedFieldUsage, path);
+        }
       }
     }
   }
@@ -290,8 +342,7 @@ export function derivePolicyMetrics(
 }
 
 /** v2.12: Fold live in-process observations over a vault-derived snapshot
- *  without double-counting committed rounds — the derived snapshot already
- *  includes rounds this process committed. Only non-durable fields are
+ *  without double-counting committed rounds. Only non-durable fields are
  *  overlaid: evidence captures, vault write errors, replays, rejections. */
 export function mergePolicyMetrics(
   derived: PolicyMetricsSnapshot,
@@ -299,24 +350,18 @@ export function mergePolicyMetrics(
 ): PolicyMetricsSnapshot {
   const merged: MutableMetrics = {
     loopId: derived.loopId,
-    // v2.14: attempts = committed rounds (durable, all processes) + this
-    // process's uncommitted decisions. Rejects and terminates never commit
-    // (round-transaction early-returns), so they exist only in the live
-    // snapshot — derived can never see them. Previously roundAttempts came
-    // from derived alone, making acceptanceRate read 1.0 after any
-    // rejections (3 rejects + 1 commit → 1/1 instead of 1/4).
     roundAttempts:
       derived.roundAttempts + live.rejectedAttempts + live.terminatedRounds,
     committedRounds: derived.committedRounds,
     rejectedAttempts: live.rejectedAttempts,
-    // v2.14: terminates never commit, so derived.terminatedRounds is
-    // structurally 0; the live count is the only source. Max keeps the
-    // count honest if a future version commits terminal rounds.
     terminatedRounds: Math.max(derived.terminatedRounds, live.terminatedRounds),
     stoppedRounds: derived.stoppedRounds,
     replayedTransactions: live.replayedTransactions,
-    successfulRounds: derived.successfulRounds,
-    contradictedRounds: derived.contradictedRounds,
+    agentClaimedSuccessRounds: derived.agentClaimedSuccessRounds,
+    machineBackedSuccessRounds: derived.machineBackedSuccessRounds,
+    gateContradictedRounds: derived.gateContradictedRounds,
+    evidenceStatusCounts: { ...derived.evidenceStatusCounts },
+    observationStatusCounts: { ...derived.observationStatusCounts },
     verificationFlags: { ...derived.verificationFlags },
     enforcementReasons: { ...derived.enforcementReasons },
     evidenceOutcomesByProvider: { ...live.evidenceOutcomesByProvider },
@@ -331,7 +376,7 @@ export function mergePolicyMetrics(
     levels: { ...derived.levels },
     filesChangedRounds: derived.filesChangedRounds,
     filesChangedTotal: derived.filesChangedTotal,
-    unobservableGitRounds: derived.unobservableGitRounds,
+    workspaceUnknownRounds: derived.workspaceUnknownRounds,
     headMoveRounds: derived.headMoveRounds,
     attemptedFieldUsage: { ...derived.attemptedFieldUsage },
     retainedFieldUsage: { ...derived.retainedFieldUsage },

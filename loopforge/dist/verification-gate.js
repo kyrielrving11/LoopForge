@@ -23,11 +23,11 @@ import { deriveFilesReconciliation } from "./files-reconciliation.js";
 import { isPassedAfterObservation } from "./evidence-provider.js";
 import { getPolicy } from "./policy.js";
 import { makeVerificationFlag, makeVerificationResult } from "./protocol.js";
-import { isRecord, extractFilePathTokens, deriveConstraintId, normalizeText, } from "./token-utils.js";
+import { isRecord, extractFilePathTokens, deriveConstraintId, deriveCriterionId, isCriterionId, normalizeText, } from "./token-utils.js";
 import { derivationRounds, } from "./committed-round.js";
-import { deriveActiveRoundContract, sameContract, } from "./round-contract.js";
-import { deriveContractItemStatuses, } from "./contract-items.js";
-import { deriveClaimView, resolveRoundFiles } from "./evidence-claims.js";
+import { sameContract, } from "./round-contract.js";
+import { deriveRoundFacts } from "./round-facts.js";
+import { machineVerifiedCriterionIds, resolveRoundFiles, } from "./evidence-claims.js";
 import { claimedMetCriteria, claimedRemainingCriteria, effectiveSuccess } from "./self-eval.js";
 import { declaresBlocked } from "./round-outcome.js";
 import { deriveGate, preflightStructuredGate } from "./cognitive-governance.js";
@@ -205,21 +205,8 @@ function passedAfterCommand(deltas) {
  *  missing — the fix for the "weakest when it matters most" gap. */
 export function deriveEvidenceStatus(selfEval, evidenceDeltas) {
     const git = gitDeltaState(evidenceDeltas);
-    const gitObserved = git.state === "observed";
     const command = passedAfterCommand(evidenceDeltas);
     const commandVerified = command !== null;
-    // testsMachineBacked: agent-reported tests_reported agree with a passed
-    // command's parsed stdout (the same comparison checkCommandEvidenceIntegrity
-    // performs — parseTestOutput lives in this module).
-    let testsMachineBacked = false;
-    const reported = selfEval.execution_report?.tests_reported;
-    if (command && command.kind === "command" && reported) {
-        const parsed = parseTestOutput(command.data.stdoutExcerpt ?? "");
-        testsMachineBacked = parsed !== null &&
-            parsed.passed === reported.passed &&
-            parsed.failed === reported.failed &&
-            parsed.skipped === reported.skipped;
-    }
     // v3.3: git observation alone is no longer "verified" — the machine seeing
     // file changes is not the machine verifying success. Only a passed
     // after-phase command (observed by the runtime itself) upgrades a round.
@@ -233,10 +220,8 @@ export function deriveEvidenceStatus(selfEval, evidenceDeltas) {
             : "unavailable";
     return {
         providerStatus,
-        gitObserved,
         gitChangeState: git.state,
         commandVerified,
-        testsMachineBacked,
     };
 }
 // ═══════════════════════════════════════════════════════════════════════════
@@ -261,18 +246,25 @@ function checkSuccessWithRemainingCriteria(selfEval) {
  *  command snapshot backs them. Warn — completion still counts, but the
  *  next prompt tells the agent its claims are unverified. This is the
  *  mild form of the 3.x criterion-specific completion rule. */
-function checkUnverifiedCriteriaClaims(selfEval, claimView) {
+function checkUnverifiedCriteriaClaims(selfEval, machineVerifiedIds) {
     const met = claimedMetCriteria(selfEval.execution_report);
     if (met.length === 0)
         return null;
-    if (claimView.verifiedCount > 0 || claimView.hasMachineEvidence)
+    // v4.0.3: EVERY met claim is checked. A verified claim elsewhere in the
+    // same round does not excuse an unbacked one.
+    const unverified = met.filter((target) => {
+        const id = isCriterionId(target) ? target : deriveCriterionId(target);
+        return !machineVerifiedIds.has(id);
+    });
+    if (unverified.length === 0)
         return null;
     return makeVerificationFlag({
         severity: "warn",
         field: "execution_report",
         check: CHECK_CRITERIA_CLAIMS_UNVERIFIED,
-        detail: `${met.length} criteria reported met but none machine-verified ` +
-            "(no passing test evidence or command snapshot)",
+        detail: `${unverified.length} of ${met.length} criteria reported met are not ` +
+            "machine-verified: " + unverified.slice(0, 3).join("; ") +
+            (unverified.length > 3 ? " …" : ""),
     });
 }
 /** Declared outcome vs the core success flag — one check id for the whole
@@ -422,8 +414,8 @@ function checkSuccessWithoutVerifiedEvidence(selfEval, status) {
     // this warn). The bounded verification-debt row is what eventually acts on
     // a persistent pattern. `no_change_reason` stays info, and only works when
     // machine verification was structurally impossible (no enabled command).
-    // A success claim with NO execution_report at all is the other arm and
-    // remains an unconditional error.
+    // A success claim with NO execution_report at all is the other arm and is
+    // also a warn: report coverage never decides acceptance.
     const severity = noChange ? "info" : "warn";
     return makeVerificationFlag({
         severity,
@@ -955,7 +947,13 @@ entrypointDrift = [],
 /** v3.9.4: whether the raw submission attempted
  *  `execution_report.files_changed` (from the persisted submittedFields
  *  manifest). Undefined falls back to "an execution report exists". */
-filesReported) {
+filesReported,
+/** v4.0.3: the ONE `RoundFacts` bundle the coordinator derived before
+ *  verification. When supplied, the gate consumes it instead of deriving
+ *  the active contract / item statuses a second time. The fallback exists
+ *  for direct library callers and unit tests; it calls the same derivation
+ *  function, so there is still exactly one rule. */
+facts) {
     const flags = [];
     const filesReportedForGate = filesReported ?? (selfEval.execution_report != null);
     // v3.4: The ACTIVE contract this round executed under — derived from the
@@ -969,24 +967,31 @@ filesReported) {
         for (const v of view.constraintViolations ?? [])
             olderViolations.push(v);
     }
-    const activeContract = deriveActiveRoundContract(committedRounds);
-    // v3.8: The item-level status of the ACTIVE contract for THIS round — the
-    // same reducer the compile path, audit, and explain consume.
-    const contractStatuses = deriveContractItemStatuses({
-        contract: activeContract,
+    // v4.0.3: the coordinator computes this bundle once and passes it in. A
+    // direct caller gets the SAME derivation — never a second rule.
+    const roundFacts = facts ?? deriveRoundFacts({
         rounds: committedRounds,
         currentRound,
-        currentReport: selfEval.execution_report ?? null,
-        currentDeltas: evidenceDeltas,
-        currentBlocked: declaresBlocked(selfEval),
-        // v3.9.9: without this, debt/premature checks cannot see a superseded
-        // closure and would report the old contract as merely open.
-        currentTransition: selfEval.contract_transition ?? null,
+        inFlight: {
+            currentReport: selfEval.execution_report ?? null,
+            currentDeltas: evidenceDeltas,
+            currentBlocked: declaresBlocked(selfEval),
+            // v3.9.9: without this, debt/premature checks cannot see a superseded
+            // closure and would report the old contract as merely open.
+            currentTransition: selfEval.contract_transition ?? null,
+        },
         commands: getPolicy().evidence.commands ?? [],
     });
-    // v2.12: Derived claim provenance — which reported criteria completions
-    // are backed by machine evidence (pure derivation, not persisted).
-    const claimView = deriveClaimView(selfEval, evidenceDeltas);
+    const activeContract = roundFacts.activeContract;
+    const contractStatuses = roundFacts.itemStatuses;
+    // v4.0.3: the ONLY machine-verified criterion ids are contract-bound
+    // criterion facts and verified active-contract items. Agent claims and
+    // self-reported tests never enter this set.
+    const machineVerified = machineVerifiedCriterionIds({
+        criterionFacts: roundFacts.criterionFacts,
+        activeContract,
+        itemStatuses: contractStatuses,
+    });
     // v3.2: Runtime machine-verification status (git observed / command passed /
     // absent). v3.6: feeds the merged R8 check (providerStatus lens) that
     // never self-skips.
@@ -1001,8 +1006,8 @@ filesReported) {
         // v2.12/v3.6/v3.7: the single success-evidence semantic — empty/missing-
         // evidence arm (ex-R3) + claims arm (providerStatus lens, tamper-aware)
         () => checkSuccessWithoutVerifiedEvidence(selfEval, evidenceStatus),
-        // v2.12: criteria met but none machine-verified (mild criterion-specific rule)
-        () => checkUnverifiedCriteriaClaims(selfEval, claimView),
+        // v2.12/v4.0.3: per-claim machine verification
+        () => checkUnverifiedCriteriaClaims(selfEval, machineVerified),
         // Declared outcome vs the required core success flag.
         () => checkOutcomeConsistency(selfEval),
         // v2.12: retroactive claims against prior rounds

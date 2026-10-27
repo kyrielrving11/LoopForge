@@ -12,14 +12,15 @@
  * A saved report is never a verified fact.
  */
 import { ROUND_TRANSACTION_SCHEMA_VERSION, rootBranchId, } from "./round-transaction.js";
-import { committedRoundFacts, deriveActiveRoundContract, deriveRoundContractView, } from "./round-contract.js";
+import { deriveActiveRoundContract } from "./round-contract.js";
 import { deriveSubGoals } from "./subgoal-state.js";
-import { deriveEvidenceStatus } from "./verification-gate.js";
+import { rollbackEvidencePosture } from "./evidence-posture.js";
 import { fieldGuide } from "./submission-guidance.js";
+import { effectiveOutcome } from "./self-eval.js";
 import { deriveFieldAccounting } from "./field-accounting.js";
 import { deriveFilesReconciliation } from "./files-reconciliation.js";
 import { getPolicy } from "./policy.js";
-import { deriveConstraintId, normalizeText } from "./token-utils.js";
+import { deriveConstraintId, deriveFindingId, normalizeText, } from "./token-utils.js";
 const HANDLING_PRIORITY = {
     "not_applied": 6,
     "dropped": 5,
@@ -130,8 +131,9 @@ export function deriveSubmissionReceipt(input) {
             redo_round: input.recoveryDirective.target.redo_round,
             origin: input.recoveryDirective.origin,
             reason: input.recoveryDirective.reason,
-            restore_verified: input.snapshot.restore?.directiveTransactionId ===
-                input.recoveryDirective.transaction_id,
+            restore_verified: input.recoveryRestoreVerified ??
+                (input.snapshot.restore?.directiveTransactionId ===
+                    input.recoveryDirective.transaction_id),
         }
         : null;
     // ── reports ────────────────────────────────────────────────────────────
@@ -208,9 +210,10 @@ export function deriveSubmissionReceipt(input) {
     const notExpanded = activationObserved
         ? declared.filter((item) => !activeAfter.some((active) => normalizeText(active) === normalizeText(item)))
         : [];
-    const checkpoint = diffApplied && selfEval.compression_checkpoint === true
+    const subtaskBoundary = diffApplied && selfEval.subtask_boundary === true
         ? {
-            label: (selfEval.checkpoint_label ?? "").trim() || `Round ${input.snapshot.round}`,
+            label: (selfEval.subtask_boundary_label ?? "").trim() ||
+                `Round ${input.snapshot.round}`,
             round: input.snapshot.round,
         }
         : null;
@@ -221,6 +224,12 @@ export function deriveSubmissionReceipt(input) {
             target_checkpoint_id: pr.recovery?.target.checkpoint_id ?? "",
             preserved_discoveries: [...(pr.recovery?.skipped_discoveries ?? [])],
             wrong_assumptions: [...(pr.recovery?.wrong_assumptions ?? [])],
+            observed_skipped_files: [...(pr.recovery?.observed_skipped_files ??
+                    pr.recovery?.skipped_files ?? [])],
+            reported_skipped_files: [...(pr.recovery?.reported_skipped_files ?? [])],
+            abandoned_rounds: [...(pr.recovery?.abandoned_rounds ?? [])],
+            trigger_finding_ids: (pr.recovery?.trigger_findings ?? [])
+                .map((flag) => deriveFindingId(flag)),
             ...(pr.recovery?.origin ? { origin: pr.recovery.origin } : {}),
             ...(pr.recovery?.reason ? { reason: pr.recovery.reason } : {}),
         }
@@ -234,7 +243,9 @@ export function deriveSubmissionReceipt(input) {
     const transitionApplied = diffApplied && transition !== null &&
         contractBefore !== null && transition.contract_id === contractBefore;
     // ── verification ───────────────────────────────────────────────────────
-    const evidence = deriveEvidenceStatus(selfEval, input.evidenceDeltas);
+    // v4.0.3: the receipt reads the ONE posture the transaction persisted. It
+    // never re-derives verification status or a second evidence verdict.
+    const posture = pr.evidencePosture;
     const filesReconciliation = deriveFilesReconciliation(selfEval.execution_report ?? null, input.evidenceDeltas, {
         attempted: input.submittedFields.includes("execution_report.files_changed"),
     });
@@ -244,6 +255,8 @@ export function deriveSubmissionReceipt(input) {
         disposition,
         record,
         entered_history: enteredHistory,
+        agent_success_claim: selfEval.success === true,
+        agent_outcome: effectiveOutcome(selfEval),
         ...(recoveryCheckpoint ? { recovery_checkpoint: recoveryCheckpoint } : {}),
         reports: [...reports.values()],
         effects: {
@@ -270,12 +283,11 @@ export function deriveSubmissionReceipt(input) {
             constraints_activation: activationObserved ? "observed" : "not_observed",
             constraints_active_after: activationObserved ? activeAfter : null,
             constraints_not_expanded: notExpanded,
-            checkpoint,
+            subtask_boundary: subtaskBoundary,
             rollback,
         },
         verification: {
-            contract_status: pr.verificationStatus,
-            evidence_status: evidence.providerStatus,
+            evidence_posture: posture,
             checks: pr.verificationFlags.map((flag) => ({
                 field: flag.field,
                 check: flag.check,
@@ -283,7 +295,10 @@ export function deriveSubmissionReceipt(input) {
                 detail: flag.detail,
                 ...(flag.ref ? { ref: flag.ref } : {}),
             })),
-            contract_items: input.contractItems,
+            contract_items: (posture.contract?.items ?? []).map((item) => ({
+                item_id: item.id,
+                status: item.status,
+            })),
         },
         files_reconciliation: filesReconciliation,
         prompt: input.nextArtifact
@@ -319,26 +334,27 @@ export function deriveCommittedSubmissionView(view, allViews, rollbacks = []) {
         currentRound: view.round + 1,
         rounds: afterRounds,
     });
-    const contractView = deriveRoundContractView({
-        rounds: allViews,
-        round: view.round,
-        current: committedRoundFacts(view),
-        commands,
-    });
     const selfEval = view.evaluation ?? {
-        success: view.success,
+        success: view.agentSuccessClaim,
         output_summary: "",
         constraint_violations: [],
         should_continue: view.action === "continue",
+    };
+    const fallbackPosture = view.evidencePosture ?? {
+        // A hand-built view that predates the posture carries no machine claim;
+        // a not_applicable posture is the honest projection, never a guess.
+        ...rollbackEvidencePosture(view.round),
+        kind: "evaluation",
     };
     const pr = view.result ?? {
         action: view.action,
         origin: view.kind === "rollback" ? (view.origin ?? "machine") : "evaluation",
         ...(view.recovery ? { reason: view.recovery.reason, recovery: view.recovery } : {}),
         verificationFlags: view.verificationFlags,
-        roundSuccess: view.success,
+        agentSuccessClaim: view.agentSuccessClaim,
+        agentOutcome: view.agentOutcome,
         gateContradicted: false,
-        verificationStatus: view.kind === "rollback" ? "not_applicable" : "trusted",
+        evidencePosture: fallbackPosture,
         newConsecutiveRejections: 0,
         shouldPushSuccessTrajectory: false,
     };
@@ -404,10 +420,6 @@ export function deriveCommittedSubmissionView(view, allViews, rollbacks = []) {
                 : null,
         },
         nextArtifact: next?.promptArtifact ?? null,
-        contractItems: contractView.statuses.items.map((item) => ({
-            item_id: item.itemId,
-            status: item.status,
-        })),
         evidenceDeltas: view.observationDelta,
         recoveryDirective,
     });

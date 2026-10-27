@@ -73,8 +73,8 @@ function populatedMemory(): WorkingMemory {
     reports: Array.from({ length: 5 }, (_, index) => ({
       round: 5 - index,
       attempt: 1,
-      success: true,
-      outcome: "success" as const,
+      agentSuccessClaim: true,
+      agentOutcome: "success" as const,
       outputSummary: `report ${5 - index}`,
       sourceChars: `report ${5 - index}`.length,
     })),
@@ -93,15 +93,27 @@ function populatedMemory(): WorkingMemory {
       redoRound: 4 - index,
       origin: "agent" as const,
       reason: `reason ${index}`,
-      failedRounds: [4 - index],
+      abandonedRounds: [4 - index],
+      failedRounds: [],
+      observedSkippedFiles: [],
+      reportedSkippedFiles: [],
       approaches: [`approach ${index}`],
       wrongAssumptions: [`recovery assumption ${index}`],
+      preservedDiscoveries: [],
     })),
     redirects: Array.from({ length: 3 }, (_, index) => ({
       round: 5 - index,
       contractId: `rc-0000000${index}`,
       reason: `redirect ${index}`,
     })),
+    sourceCounts: {
+      windowRounds: 5,
+      reports: 5,
+      assumptions: 6,
+      openQuestions: 4,
+      recoveries: 3,
+      redirects: 3,
+    },
   };
 }
 
@@ -297,8 +309,8 @@ describe("Working Memory sanitization and determinism", () => {
     const second = deriveWorkingMemory(historyOf(entries), 2);
     assert.deepEqual(first, second);
     assert.equal(
-      formatWorkingMemoryState(first).join("\n"),
-      formatWorkingMemoryState(second).join("\n"),
+      formatWorkingMemoryState(first).lines.join("\n"),
+      formatWorkingMemoryState(second).lines.join("\n"),
     );
     // The state hash includes Working Memory, so the same committed history
     // produces the same state bytes and a different memory changes the hash.
@@ -318,11 +330,11 @@ describe("Working Memory sanitization and determinism", () => {
 
   it("keeps the state file at the full fixed window", () => {
     const memory = populatedMemory();
-    const lines = formatWorkingMemoryState(memory);
+    const lines = formatWorkingMemoryState(memory).lines;
     const text = lines.join("\n");
     assert.match(text, /Earlier Committed Reports \(Agent reports\)/);
     // Five reports total: the latest plus four earlier.
-    assert.equal((text.match(/^- R\d+ \(success=/gm) ?? []).length, 4);
+    assert.equal((text.match(/^- R\d+ \(agent_success_claim=/gm) ?? []).length, 4);
     assert.equal((text.match(/^- R\d+ assumption:/gm) ?? []).length +
       (text.match(/^- R\d+ retracted constraint:/gm) ?? []).length, 6);
   });
@@ -357,8 +369,8 @@ describe("Working Memory prompt density and protection", () => {
       reports: [{
         round: 1,
         attempt: 1,
-        success: false,
-        outcome: "partial",
+        agentSuccessClaim: false,
+        agentOutcome: "partial",
         outputSummary: long,
         sourceChars: long.length,
       }],
@@ -366,6 +378,10 @@ describe("Working Memory prompt density and protection", () => {
       openQuestions: [],
       recoveries: [],
       redirects: [],
+      sourceCounts: {
+        windowRounds: 1, reports: 1, assumptions: 0,
+        openQuestions: 0, recoveries: 0, redirects: 0,
+      },
     };
     const rendered = formatWorkingMemoryPrompt(memory, "l0");
     assert.ok(rendered);
@@ -381,8 +397,8 @@ describe("Working Memory prompt density and protection", () => {
       reports: [{
         round: 1,
         attempt: 1,
-        success: false,
-        outcome: "partial",
+        agentSuccessClaim: false,
+        agentOutcome: "partial",
         outputSummary: long,
         sourceChars: long.length,
       }],
@@ -390,6 +406,10 @@ describe("Working Memory prompt density and protection", () => {
       openQuestions: [],
       recoveries: [],
       redirects: [],
+      sourceCounts: {
+        windowRounds: 1, reports: 1, assumptions: 0,
+        openQuestions: 0, recoveries: 0, redirects: 0,
+      },
     };
     const rendered = formatWorkingMemoryPrompt(memory, "l0");
     assert.ok(rendered);
@@ -403,14 +423,12 @@ describe("Working Memory prompt density and protection", () => {
     const base = assemblePromptArtifact({
       state,
       level: "l2",
-      reasons: ["first_round"],
       attempt: 1,
       selfEvaluationBlock: "",
     });
     const withMemory = assemblePromptArtifact({
       state,
       level: "l2",
-      reasons: ["first_round"],
       attempt: 1,
       selfEvaluationBlock: "",
       workingMemory: memory,
@@ -429,6 +447,10 @@ describe("Working Memory prompt density and protection", () => {
       openQuestions: [],
       recoveries: [],
       redirects: [],
+      sourceCounts: {
+        windowRounds: 0, reports: 0, assumptions: 0,
+        openQuestions: 0, recoveries: 0, redirects: 0,
+      },
     };
     assert.equal(hasWorkingMemoryContent(memory), false);
     assert.equal(formatWorkingMemoryPrompt(memory, "l2"), null);
@@ -436,11 +458,10 @@ describe("Working Memory prompt density and protection", () => {
 
   it("is budgeted before lower-priority optional anchors", () => {
     const state = minimalState();
-    state.blockers = ["a reported blocker"];
+    state.reportedIssues = ["a reported blocker"];
     const artifact = assemblePromptArtifact({
       state,
       level: "l2",
-      reasons: ["first_round"],
       attempt: 1,
       selfEvaluationBlock: "",
       workingMemory: populatedMemory(),
@@ -455,7 +476,6 @@ describe("Working Memory prompt density and protection", () => {
     const base = assemblePromptArtifact({
       state,
       level: "l2",
-      reasons: ["first_round"],
       attempt: 1,
       selfEvaluationBlock: "",
     });
@@ -463,7 +483,6 @@ describe("Working Memory prompt density and protection", () => {
     const tight = assemblePromptArtifact({
       state,
       level: "l2",
-      reasons: ["first_round"],
       attempt: 1,
       selfEvaluationBlock: "",
       workingMemory: populatedMemory(),

@@ -6,7 +6,11 @@ import {
   deriveSubmissionReceipt,
 } from "../submission-receipt.js";
 import type { ReceiptInput } from "../submission-receipt.js";
-import { makeExecutionReport, makeSelfEvaluation } from "../protocol.js";
+import {
+  PROMPT_ARTIFACT_SCHEMA_VERSION,
+  makeExecutionReport,
+  makeSelfEvaluation,
+} from "../protocol.js";
 import type {
   PromptArtifact,
   RecoveryDirective,
@@ -14,10 +18,14 @@ import type {
   SubmissionReceipt,
 } from "../protocol.js";
 import type { RoundProcessResult } from "../round-coordinator.js";
+import {
+  ROUND_TRANSACTION_SCHEMA_VERSION,
+} from "../round-transaction.js";
 import type { RoundTransactionSnapshot } from "../round-transaction.js";
 import {
   committedBacktrackRound,
   committedFeedbackRound,
+  fixtureEvidencePosture,
 } from "./_helpers.js";
 import {
   decodeCommittedRound,
@@ -41,9 +49,27 @@ function result(overrides: Partial<RoundProcessResult> = {}): RoundProcessResult
   return {
     action: "continue",
     verificationFlags: [],
-    roundSuccess: true,
+    agentSuccessClaim: true,
     gateContradicted: false,
-    verificationStatus: "trusted",
+    evidencePosture: fixtureEvidencePosture(1, {
+      status: "verified",
+      machineBackedSuccess: true,
+      verificationConfigured: true,
+      contract: {
+        id: "rc-12345678",
+        closure: "verified",
+        items: [{
+          id: "rci-12345678",
+          status: "verified",
+          criterionRefs: [],
+          reasons: [],
+        }],
+        verifiedCount: 1,
+        insufficientCount: 0,
+        contradictedCount: 0,
+        pendingCount: 0,
+      },
+    }),
     newConsecutiveRejections: 0,
     shouldPushSuccessTrajectory: true,
     ...overrides,
@@ -60,7 +86,7 @@ function input(overrides: Partial<ReceiptInput> = {}): ReceiptInput {
   });
   const pr = result();
   const snapshot = {
-    schemaVersion: 6 as const,
+    schemaVersion: ROUND_TRANSACTION_SCHEMA_VERSION,
     branchId: "loop:receipt:branch:root",
     transactionId: "tx-test",
     kind: "evaluation",
@@ -88,7 +114,7 @@ function input(overrides: Partial<ReceiptInput> = {}): ReceiptInput {
     updatedAt: 0,
   } as RoundTransactionSnapshot;
   const artifact: PromptArtifact = {
-    schemaVersion: 8,
+    schemaVersion: PROMPT_ARTIFACT_SCHEMA_VERSION,
     roundId: "loop:receipt:round:2",
     round: 2,
     attempt: 1,
@@ -124,7 +150,6 @@ function input(overrides: Partial<ReceiptInput> = {}): ReceiptInput {
       constraintsRetiredAfter: null,
     },
     nextArtifact: artifact,
-    contractItems: [{ item_id: "rci-12345678", status: "verified" }],
     evidenceDeltas: [],
     ...overrides,
   };
@@ -176,8 +201,8 @@ describe("v3.9.1 — submission receipt", () => {
     assert.deepEqual(receipt.effects.constraints_declared, ["never touch prod"]);
     assert.deepEqual(receipt.effects.constraints_active_after, ["never touch prod"]);
     assert.equal(receipt.effects.constraints_activation, "observed");
-    assert.equal(receipt.verification.contract_status, "trusted");
-    assert.equal(receipt.verification.evidence_status, "absent");
+    assert.equal(receipt.verification.evidence_posture.status, "verified");
+    assert.equal(receipt.verification.evidence_posture.machineBackedSuccess, true);
     assert.deepEqual(receipt.verification.contract_items.map((item) => item.status),
       ["verified"]);
   });
@@ -329,20 +354,20 @@ describe("v3.9.1 — submission receipt", () => {
         output_summary: "did the work",
         constraint_violations: [],
         should_continue: true,
-        compression_checkpoint: false,
+        subtask_boundary: false,
       }),
       submittedFields: [
         "success", "output_summary", "constraint_violations", "should_continue",
-        "compression_checkpoint",
+        "subtask_boundary",
       ],
       diagnostics: [{
-        path: "compression_checkpoint",
+        path: "subtask_boundary",
         code: "invalid_value",
         handling: "dropped",
         detail: "expected a boolean",
       }],
     }));
-    assert.equal(report(receipt, "compression_checkpoint")?.handling, "dropped");
+    assert.equal(report(receipt, "subtask_boundary")?.handling, "dropped");
   });
 
   it("labels an uncertain retained value as retention unknown", () => {

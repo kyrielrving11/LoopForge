@@ -82,7 +82,7 @@ describe("ReplayBackend", () => {
     });
     const view = replay.getRound("test", 1);
     assert.equal(view?.promptArtifact?.renderedPrompt, "## Compiled Prompt");
-    assert.equal(view?.success, true);
+    assert.equal(view?.agentSuccessClaim, true);
   });
 
   it("replays committed rounds in a selected range", () => {
@@ -265,12 +265,26 @@ describe("v4.0.2 — bounded replay window", () => {
     assert.equal(row?.context_mode, "same_round_retry");
     assert.equal(row?.context_reason, "enforcement_retry");
     assert.equal(row?.attempt, 1);
-    assert.equal(row?.outcome, "partial");
-    assert.deepEqual(row?.report, {
-      success: false,
-      output_summary: "bounded report",
-      truncated: false,
-    });
+    assert.equal(row?.agent_success_claim, false);
+    assert.equal(row?.agent_outcome, "partial");
+    assert.equal(row?.machine_backed_success, false);
+    assert.equal(
+      (row?.report as Record<string, unknown>)?.output_summary,
+      "bounded report",
+    );
+    assert.equal(
+      (row?.report as Record<string, unknown>)?.blocker,
+      "needs input",
+    );
+    assert.equal(
+      (row?.report as Record<string, unknown>)?.truncated,
+      false,
+    );
+    assert.equal(
+      "success" in (row?.report as Record<string, unknown>),
+      false,
+      "the row's claim is not duplicated inside the report block",
+    );
     assert.deepEqual(row?.wrong_assumptions, ["old belief"]);
     assert.deepEqual(row?.retracted_constraints, ["old rule"]);
     assert.deepEqual(row?.open_questions, ["still open?"]);

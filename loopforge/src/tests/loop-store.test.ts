@@ -112,7 +112,7 @@ describe("FileLoopStore", () => {
               result: {
                 action: "continue",
                 verificationFlags: [],
-                roundSuccess: true,
+                agentSuccessClaim: true,
               },
             },
           },

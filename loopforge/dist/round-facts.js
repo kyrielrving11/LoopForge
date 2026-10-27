@@ -42,12 +42,16 @@ export function deriveRoundFacts(input) {
         }),
     };
 }
-/** v3.8.1: criterion → machine status, derived over the WHOLE committed
- *  history exactly like the contract walk. A verified item is machine history
- *  that survives its contract closing. Statuses fold by STRENGTH across the
- *  items that reference a criterion (a machine denial outranks a verification,
- *  which outranks insufficient), and a `pending` item contributes nothing. */
-function deriveCriterionFacts(input) {
+/** v3.8.1/v4.0.3: criterion → machine status, derived over the WHOLE committed
+ *  history exactly like the contract walk.
+ *
+ *  Within one round the strongest item fact wins (contradicted > verified >
+ *  insufficient); a `pending` item contributes nothing. Across rounds the
+ *  LATEST authoritative fact wins: a later `verified` or `contradicted` may
+ *  supersede an earlier one (so a contradiction can be re-verified), while an
+ *  `insufficient` round never erases an existing verified/contradicted fact.
+ *  `status_at_round` records when the current status was first reached. */
+export function deriveCriterionFacts(input) {
     const byCriterion = new Map();
     for (const round of input.rounds) {
         const { contract, statuses } = deriveRoundContractView({
@@ -59,23 +63,40 @@ function deriveCriterionFacts(input) {
         if (!contract)
             continue;
         const statusByItem = new Map(statuses.items.map((item) => [item.itemId, item.status]));
+        // One round can reference a criterion from several items; fold them to
+        // the strongest fact THIS round states.
+        const roundBest = new Map();
         for (const item of contract.items) {
             const itemStatus = statusByItem.get(item.id);
+            if (!itemStatus || itemStatus === "pending")
+                continue;
             for (const ref of item.criterion_refs) {
                 if (!isCriterionId(ref))
                     continue;
-                const existing = byCriterion.get(ref);
-                const machineStatus = itemStatus && itemStatus !== "pending"
-                    ? strongestStatus(existing?.status, itemStatus)
-                    : existing?.status;
-                byCriterion.set(ref, {
-                    criterion_id: ref,
-                    ...(machineStatus ? { status: machineStatus } : {}),
-                });
+                roundBest.set(ref, strongestStatus(roundBest.get(ref), itemStatus));
             }
         }
+        for (const [ref, status] of roundBest) {
+            const existing = byCriterion.get(ref);
+            if (!existing) {
+                byCriterion.set(ref, { status, status_at_round: round.round });
+                continue;
+            }
+            // A later insufficient observation is not a new conclusion; it cannot
+            // erase a machine-supported status. The same status keeps its first
+            // round.
+            if (status === "insufficient" || existing.status === status)
+                continue;
+            byCriterion.set(ref, { status, status_at_round: round.round });
+        }
     }
-    return [...byCriterion.values()];
+    return [...byCriterion.entries()]
+        .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+        .map(([criterion_id, fact]) => ({
+        criterion_id,
+        status: fact.status,
+        status_at_round: fact.status_at_round,
+    }));
 }
 /** Rank item statuses so the strongest machine fact wins when several items
  *  reference the same criterion. */

@@ -2,8 +2,10 @@
 import {
   committedBacktrackRound,
   criterionClaims,
+  fixtureEvidencePosture,
   installTestCommandProvider,
 } from "./_helpers.js";
+import { ROUND_TRANSACTION_SCHEMA_VERSION } from "../round-transaction.js";
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -62,6 +64,7 @@ function committedFeedback(
   flags: Array<Record<string, unknown>> = [],
   action = "continue",
   afterEvidence: unknown[] = [],
+  criteria: string[] = [],
 ): VaultEntry {
   return {
     id: `loop:audit-loop:r${round}:feedback`,
@@ -72,10 +75,10 @@ function committedFeedback(
     loop_lineage: {
       round,
       round_transaction: {
-        schema_version: 6,
+        schema_version: ROUND_TRANSACTION_SCHEMA_VERSION,
         round_id: `loop:audit-loop:round:${round}`,
         snapshot: {
-          schemaVersion: 6,
+          schemaVersion: ROUND_TRANSACTION_SCHEMA_VERSION,
           kind: "evaluation" as const,
           branchId: "loop:audit-loop:branch:root",
           transactionId: `tx-audit-loop-${round}-1`,
@@ -88,7 +91,7 @@ function committedFeedback(
           afterEvidence,
           operatorAcceptance: {
             task: "Audit task",
-            success_criteria: [],
+            success_criteria: criteria,
             hard_constraints: [],
           },
           compiled: {
@@ -101,11 +104,19 @@ function committedFeedback(
           submittedFields: [
             "success", "output_summary", "constraint_violations", "should_continue",
           ],
-          result: { action, verificationFlags: flags },
+          result: {
+            action,
+            verificationFlags: flags,
+            evidencePosture: fixtureEvidencePosture(round),
+          },
           createdAt: Date.now(),
           updatedAt: Date.now(),
         },
-        result: { action, verificationFlags: flags },
+        result: {
+          action,
+          verificationFlags: flags,
+          evidencePosture: fixtureEvidencePosture(round),
+        },
       },
     },
   };
@@ -163,8 +174,8 @@ describe("buildAudit", () => {
     ];
     const audit = buildAudit("audit-loop", entries);
     assert.equal(audit.rounds.length, 2);
-    assert.equal(audit.rounds[0].outcome, "success");
-    assert.equal(audit.rounds[1].outcome, "failed");
+    assert.equal(audit.rounds[0].agentOutcome, "success");
+    assert.equal(audit.rounds[1].agentOutcome, "failed");
     assert.equal(audit.rounds[1].checks[0].verdict, "failed");
     assert.equal(audit.verdict, "contradicted");
     // v3.9.1: audit exposes the same submission accounting as explain/status.
@@ -186,7 +197,7 @@ describe("buildAudit", () => {
           tests_reported: { passed: 2, failed: 0, skipped: 0 },
           criterion_claims: criterionClaims(["tests pass"], []),
         },
-      }),
+      }, [], "continue", [], ["tests pass"]),
     ];
     const audit = buildAudit("audit-loop", entries);
     assert.equal(audit.criteria.declared, 1);
@@ -291,8 +302,8 @@ describe("buildAudit", () => {
       },
     });
     const audit = buildAudit("audit-loop", [
-      committedFeedback(1, claim("tests pass")),
-      committedFeedback(2, claim("tests pass")),
+      committedFeedback(1, claim("tests pass"), [], "continue", [], ["tests pass"]),
+      committedFeedback(2, claim("tests pass"), [], "continue", [], ["tests pass"]),
     ]);
     assert.equal(audit.criteria.declared, 1,
       "the same criterion claimed twice is ONE declared criterion");

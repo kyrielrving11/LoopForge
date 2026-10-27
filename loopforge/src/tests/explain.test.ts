@@ -80,8 +80,8 @@ describe("v3.8 — explain view", () => {
     const round = result.rounds[0];
     assert.equal(round.round, 1);
     assert.equal(round.action, "continue");
-    assert.equal(round.observations.length, 1);
-    assert.equal(round.observations[0].providerId, "git");
+    assert.equal(round.observations.after.length, 1);
+    assert.equal(round.observations.after[0].providerId, "git");
     assert.deepEqual(round.observationDelta[0].changedFiles, ["src/a.ts"]);
     assert.equal(round.flags[0].check, "evidence_integrity");
     // v3.9.1: explain reads the same receipt projection as status.

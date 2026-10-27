@@ -19,9 +19,9 @@ export declare class StartFailureError extends Error {
  *  new round 1 would overwrite durable history. */
 export declare class LoopExistsError extends Error {
     readonly loopId: string;
-    readonly reason: "session" | "rounds" | "active";
+    readonly reason: "session" | "rounds" | "active" | "stopped";
     readonly code: "loop_exists";
-    constructor(loopId: string, reason: "session" | "rounds" | "active");
+    constructor(loopId: string, reason: "session" | "rounds" | "active" | "stopped");
 }
 /** A stored loop contains rounds this runtime cannot decode. Recompiling
  *  would overwrite them, so resume refuses and leaves the data read-only. */

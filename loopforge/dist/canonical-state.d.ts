@@ -3,13 +3,16 @@
  * The canonical state is data, not Markdown. Prompt and state-file renderers
  * consume the same value so they cannot silently drift apart.
  */
-import type { ConstraintMeta, CriterionStatus, RecurringFlag, LoopCompileRequest, LoopCompileResponse, LoopRoundResult, SubGoal, VerificationFlag } from "./protocol.js";
+import type { ConstraintMeta, CriterionStatus, EvidencePosture, RecurringFlag, LoopCompileRequest, LoopCompileResponse, LoopRoundResult, PromptContextMode, PromptContextReason, SubGoal, VerificationFlag } from "./protocol.js";
 import type { ActiveContractView } from "./round-contract.js";
 import type { ContractItemStatusView } from "./contract-items.js";
 import type { ConfiguredCapability } from "./protocol.js";
 import type { RoundFacts } from "./round-facts.js";
 import type { WorkingMemory } from "./working-memory.js";
-export declare const CANONICAL_STATE_SCHEMA_VERSION: 6;
+/** v4.0.3: schema 7 adds the previous/retry evidence posture, explicitly split
+ *  reported progress/issues/warnings, compile context and Working Memory
+ *  source counts. Older state documents are reported, never migrated. */
+export declare const CANONICAL_STATE_SCHEMA_VERSION: 7;
 /** v3.7.1: Presentation view of sub-goals shared by prompts and the state
  *  file (one derivation, no second copy). Only ACTIVE items render as rows
  *  — pending/in_progress/blocked — ordered blocked → in_progress → pending
@@ -86,8 +89,17 @@ export interface CanonicalLoopState {
     /** Committed rollback recovery brief, present only in a recovery window.
      *  Derived from the pending directive; prompt and state file share it. */
     recoveryBrief?: string[];
-    remainingCriteria: string[];
-    blockers: string[];
+    /** v4.0.3: the previous committed evaluation's evidence posture. The prompt
+     *  and state file render it as Machine Evidence; it is never re-derived. */
+    previousEvidencePosture?: EvidencePosture;
+    /** v4.0.3: a fresh retry's transient posture (not committed). Rendered only
+     *  as "rejected attempt (not committed)". */
+    retryEvidencePosture?: EvidencePosture;
+    /** v4.0.3: Agent-reported blockers (`blocker` + constraint violations).
+     *  Explicitly distinct from compiler warnings. */
+    reportedIssues: string[];
+    /** v4.0.3: compiler warnings — machine/compile facts, not Agent reports. */
+    warnings: string[];
     verificationFlags: VerificationFlag[];
     /** v2.2: Structured sub-goals with compiler-managed lifecycle. */
     subGoals: SubGoal[];
@@ -98,15 +110,27 @@ export interface CanonicalLoopState {
      *  "recurring_issues" window; renderers filter it. */
     recurringFlags: RecurringFlag[];
     stateFilePath: string;
-    progress: {
+    /** v4.0.3: Agent-reported progress. Every field is a claim; the Machine
+     *  Evidence section is the machine side. */
+    reportedProgress: {
         criteriaMet: string[];
         criteriaRemaining: string[];
+        /** The same claim set, named for the state-file "remaining" section. */
+        agentReportedRemaining: string[];
         filesChanged: string[];
         tests: {
             passed: number;
             failed: number;
             skipped: number;
         } | null;
+    };
+    /** v4.0.3: the compile/transport context. Attempt is derived context, not a
+     *  committed fact. */
+    context?: {
+        round: number;
+        attempt: number;
+        mode: PromptContextMode;
+        reason: PromptContextReason;
     };
     /** v3.3: Machine git-motion cross-check for the progress dashboard.
      *  Conditional presence: absent when no committed git snapshots exist. */
@@ -166,6 +190,8 @@ export declare function formatRoundContract(contract: ActiveContractView, status
 export interface StateFileRenderOptions {
     attempt?: number;
     recoveryBrief?: string[];
+    /** v4.0.3: compile context when the caller built the state without one. */
+    context?: CanonicalLoopState["context"];
 }
 /** Human/Agent-readable materialized view. It is always reproducible from the
  *  canonical state and is never consulted as transaction truth.
@@ -198,6 +224,10 @@ derived?: {
          *  Agent reports (wrong assumptions, blockers) enter the prompt/state
          *  projection only under this flag; a library fallback is in-flight. */
         committed?: boolean;
+        /** v4.0.3: the committed view's persisted posture. */
+        view?: {
+            evidencePosture?: EvidencePosture | null;
+        } | null;
     };
     /** v3.9.7: committed recovery brief, derived from the pending rollback
      *  directive. Conditional — absent outside a recovery window. */
@@ -205,5 +235,7 @@ derived?: {
     /** v4.0.2: the compiler's ONE bounded Working Memory derivation. This
      *  module never re-reads the Vault or re-interprets history. */
     workingMemory?: WorkingMemory;
+    /** v4.0.3: the compile context boundary (derived by the compiler). */
+    context?: CanonicalLoopState["context"];
 }): CanonicalLoopState;
 //# sourceMappingURL=canonical-state.d.ts.map

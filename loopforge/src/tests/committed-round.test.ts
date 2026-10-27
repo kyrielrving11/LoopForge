@@ -40,7 +40,7 @@ describe("CommittedRoundView", () => {
     const durable = decodeCommittedRound(raw)!;
     assert.equal(durable.round, 2);
     assert.equal(durable.attempt, 3);
-    assert.equal(durable.outcome, "partial");
+    assert.equal(durable.agentOutcome, "partial");
     assert.deepEqual(claimedMetCriteria(durable.executionReport), ["criterion"]);
     assert.equal(durable.sequence, 2);
   });
@@ -63,7 +63,7 @@ describe("CommittedRoundView", () => {
     )!;
     const history = historyRounds([first, rollback, replacement]);
     assert.equal(history.length, 1);
-    assert.equal(history[0]?.outcome, "blocked");
+    assert.equal(history[0]?.agentOutcome, "blocked");
   });
 
   it("v3.8.1: read-only views drop a backtracked branch while a directive stands", () => {
@@ -148,11 +148,10 @@ describe("CommittedRoundView", () => {
     assert.ok(view);
     const result = roundResultFromCommittedRound(view);
     assert.equal(result.round, 2);
-    assert.equal(result.success, true);
+    assert.equal(result.agentSuccessClaim, true);
     assert.equal(result.output_summary, "Committed round 2.");
     assert.deepEqual(result.discovered_constraints, ["a limit"]);
-    assert.equal(result.outcome, "partial");
-    assert.equal(result.manual_fixes_needed, "");
+    assert.equal(result.agentOutcome, "partial");
     assert.deepEqual(result.execution_report, view.executionReport);
     assert.deepEqual(result.constraint_violations, []);
   });

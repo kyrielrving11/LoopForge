@@ -583,11 +583,14 @@ describe("v3.2 — criterion status derivation", () => {
     assert.equal(statuses.length, 3);
     const parser = statuses.find((s) => s.text === "Parser complete")!;
     assert.equal(parser.status, "claimed");
-    assert.equal(parser.met_at_round, 2, "first met report wins");
+    // v4.0.3: latest-claim wins, and the row names the Agent claim round.
+    assert.equal(parser.status_at_round, 2);
+    assert.equal(parser.status_source, "agent");
 
     const tests = statuses.find((s) => s.text === "Tests ≥90%")!;
     assert.equal(tests.status, "remaining");
-    assert.equal(tests.met_at_round, undefined);
+    assert.equal(tests.status_at_round, 2, "latest remaining claim round");
+    assert.equal(tests.status_source, "agent");
 
     const deps = statuses.find((s) => s.text === "No runtime deps")!;
     assert.equal(deps.status, "unknown", "never mentioned → unknown");
@@ -613,6 +616,7 @@ describe("v3.8.1 — recurring flags", () => {
     loopId: "recurring",
     round: number,
     roundId: `loop:recurring:round:${number}`,
+    evidencePosture: null,
     transactionId: `tx-recurring-${number}`,
     branchId: "loop:recurring:branch:root",
     kind: "evaluation",
@@ -630,8 +634,8 @@ describe("v3.8.1 — recurring flags", () => {
     verificationFlags: opts.flags ?? [],
     result: null,
     action: "continue",
-    success: false,
-    outcome: null,
+    agentSuccessClaim: false,
+    agentOutcome: null,
     contractProposal: null,
     contractTransition: null,
     contractBinding: null,
@@ -1374,7 +1378,7 @@ describe("3.9.3 — committed-fact prompt level", () => {
       task: "Continue",
       force_level: "l2",
     }), context);
-    assert.match(response.prompt, /Working Memory \(committed history/);
+    assert.ok(response.prompt.includes("Working Memory (Agent reports are claims"));
     assert.match(response.prompt, /Previous Round Report \(Agent report\) — R2/);
     assert.match(response.prompt, /old belief/);
     assert.match(response.prompt, /a prior summary in the bounded report window/);
@@ -1413,7 +1417,7 @@ describe("3.9.3 — committed-fact prompt level", () => {
     }), context);
     assert.equal(retry.prompt_artifact?.contextMode, "same_round_retry");
     assert.equal(retry.prompt_artifact?.contextReason, "enforcement_retry");
-    assert.doesNotMatch(retry.prompt, /Working Memory \(committed history/);
+    assert.ok(!retry.prompt.includes("Working Memory (Agent reports are claims"));
     assert.doesNotMatch(retry.prompt, /UNIQUE_COMMITTED_SUMMARY/);
   });
 
@@ -1478,7 +1482,7 @@ describe("3.9.3 — committed-fact prompt level", () => {
       "open_questions",
       "emerged_subtasks",
       "worker_results",
-      "compression_checkpoint",
+      "subtask_boundary",
     ]) {
       assert.match(prompt, new RegExp("`" + path.replace(/\./g, "\.") + "`"),
         `L0 must still offer ${path}`);

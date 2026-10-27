@@ -44,7 +44,10 @@ export interface FieldGuide {
 /** Field order used by the prompt, guidance and receipts. Core fields first,
  *  then the execution report, then contract/sub-goal state, then the
  *  cognitive/report fields, then terminal fields. Deterministic by design. */
-export declare const FIELD_ORDER: readonly ["success", "output_summary", "constraint_violations", "should_continue", "execution_report.files_changed", "execution_report.tests_reported", "execution_report.contract_item_claims", "execution_report.criterion_claims", "subgoal_updates", "emerged_subtasks", "discovered_constraints", "wrong_assumptions", "open_questions", "resolved_open_question_ids", "retracted_constraints", "round_contract", "contract_transition", "worker_results", "compression_checkpoint", "checkpoint_label", "retroactiveClaims", "gate_ids", "outcome", "blocker", "stop_reason", "no_change_reason"];
+/** v4.0.3: THE four structural evaluation fields. The MCP input schema, the
+ *  prompt template and field accounting read this one set. */
+export declare const CORE_SELF_EVALUATION_FIELDS: ReadonlySet<string>;
+export declare const FIELD_ORDER: readonly ["success", "output_summary", "constraint_violations", "should_continue", "execution_report.files_changed", "execution_report.tests_reported", "execution_report.contract_item_claims", "execution_report.criterion_claims", "subgoal_updates", "emerged_subtasks", "discovered_constraints", "wrong_assumptions", "open_questions", "resolved_open_question_ids", "retracted_constraints", "round_contract", "contract_transition", "worker_results", "subtask_boundary", "subtask_boundary_label", "retroactiveClaims", "gate_ids", "outcome", "blocker", "stop_reason", "no_change_reason"];
 export type FieldPath = (typeof FIELD_ORDER)[number];
 export declare function fieldGuide(path: string): FieldGuide | undefined;
 export declare function fieldGuideDescription(path: string): string;

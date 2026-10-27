@@ -23,6 +23,7 @@ import type { GitDeltaState, ObservationDelta } from "./evidence-provider.js";
 import type { EntrypointDrift } from "./evidence-provider.js";
 import type { SelfEvaluation, VerificationResult } from "./protocol.js";
 import { type ActiveContractView } from "./round-contract.js";
+import { type RoundFacts } from "./round-facts.js";
 export declare const CHECK_SUCCESS_WITH_REMAINING_CRITERIA = "success_with_remaining_criteria";
 export declare const CHECK_SUCCESS_WITHOUT_VERIFIED_EVIDENCE = "success_without_verified_evidence";
 export declare const CHECK_OUTCOME_SUCCESS_CONTRADICTION = "outcome_success_contradiction";
@@ -90,14 +91,10 @@ export declare function collectOutOfScopeFiles(files: string[], scope: string[])
 export interface EvidenceStatus {
     /** Whether this round produced a machine-verified observation. */
     providerStatus: "verified" | "unavailable" | "absent";
-    /** The Git boundary was observed and its change set is known. */
-    gitObserved: boolean;
     /** Applicability vs observability of the Git change set. */
     gitChangeState: GitDeltaState["state"];
     /** A passed after-phase command snapshot exists. */
     commandVerified: boolean;
-    /** Agent-reported tests_reported agree with a passed command's parsed stdout. */
-    testsMachineBacked: boolean;
 }
 /** v3.2: Derive the machine-verification status of a round. The verification
  *  capability is modeled explicitly (verified / unavailable / absent) instead
@@ -142,6 +139,12 @@ entrypointDrift?: EntrypointDrift[],
 /** v3.9.4: whether the raw submission attempted
  *  `execution_report.files_changed` (from the persisted submittedFields
  *  manifest). Undefined falls back to "an execution report exists". */
-filesReported?: boolean): VerificationResult;
+filesReported?: boolean,
+/** v4.0.3: the ONE `RoundFacts` bundle the coordinator derived before
+ *  verification. When supplied, the gate consumes it instead of deriving
+ *  the active contract / item statuses a second time. The fallback exists
+ *  for direct library callers and unit tests; it calls the same derivation
+ *  function, so there is still exactly one rule. */
+facts?: RoundFacts): VerificationResult;
 export {};
 //# sourceMappingURL=verification-gate.d.ts.map

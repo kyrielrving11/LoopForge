@@ -6,7 +6,7 @@
  *   L0/L1/L2 level transitions:
  *     - L2 first_round (R1)
  *     - L1 state_capsule (R2-R3, R5-R7)
- *     - L2 checkpoint_boundary (R4, via compression_checkpoint at R3)
+ *     - L2 checkpoint_boundary (R4, via subtask_boundary at R3)
  *     - L0 retry_delta (R8 rejection prompt + R8b post-retry)
  *     - L1 normal continuation (R8b, R9)
  *
@@ -198,25 +198,25 @@ describe("Long-Horizon Verification", () => {
 
   // ── R2 L1 → R3 L2 (checkpoint_boundary) ────────────────────────────────
   //
-  // R2's eval declared compression_checkpoint → R3's prompt is L2.
+  // R2's eval declared subtask_boundary → R3's prompt is L2.
 
   it("R3 L2 — checkpoint_boundary: boundary prompt with checkpoint label", async () => {
     const r = await client.tool("loopforge_next", { submissionHandle, evaluation: {
       success: false, should_continue: true, constraint_violations: [],
       output_summary: "Wrote tests for isPalindrome and capitalize. isPalindrome passes (3/3), capitalize fails on empty string. Declaring checkpoint.",
       discovered_constraints: ["All functions must handle empty string input gracefully"],
-      compression_checkpoint: true, checkpoint_label: "core-functions-complete",
+      subtask_boundary: true, subtask_boundary_label: "core-functions-complete",
       execution_report: { files_changed: ["src/strkit.test.ts"], tests_reported: { passed: 3, failed: 1, skipped: 0 }, criterion_claims: criterionClaims([], ["Fix capitalize bug", "Implement truncate + toCamelCase"])},
     }});
     assert.ok(!r.error);
-    // R2's eval declared compression_checkpoint → R3 prompt is L2.
+    // R2's eval declared subtask_boundary → R3 prompt is L2.
     const lv = String(r.level ?? "").toLowerCase();
     assert.equal(lv, "l2", `R3 expected L2 (checkpoint_boundary from R2), got '${lv}'`);
     assert.equal(r.round, 3);
     const p = String(r.prompt ?? "");
     assert.ok(p.includes("core-functions-complete") || p.toLowerCase().includes("checkpoint"), `R3 missing checkpoint: ${p.slice(0, 200)}`);
     assert.ok(p.length > 200, `L2 prompt too small: ${p.length}`);
-    assert.strictEqual(r.roundSuccess, false);
+    assert.strictEqual(r.agentSuccessClaim, false);
     submissionHandle = r.submissionHandle;
     LL.push("R3:L2");
   });
@@ -380,15 +380,24 @@ describe("Long-Horizon Verification", () => {
     assert.ok(!health.error);
     // v3.8.1: counted facts, not similarity verdicts.
     assert.equal(typeof health.committed_rounds, "number");
-    for (const f of ["rounds_with_unverified_items", "unverified_streak_limit"])
+    for (const f of [
+      "rounds_with_unverified_items",
+      "unverified_streak_limit",
+      "rounds_by_evidence_status",
+    ]) {
       assert.ok(health[f] !== undefined, `${f} missing`);
+    }
 
     const list = await client.tool("loopforge_status", { view: "all" });
     assert.ok((list.sessions as Array<Record<string, unknown>>).some((s: Record<string, unknown>) => s.loopId === loopId || s.sessionId === sessionId));
 
     const st = await client.tool("loopforge_status", { sessionId });
     assert.equal(String(st.status ?? ""), "stopped");
-    assert.ok((st.successTrajectory as Array<unknown>)?.length ?? 0 >= 7);
+    // v4.0.3: the trajectory records MACHINE-BACKED success only; a run of
+    // failed/partial rounds contributes nothing.
+    assert.ok(Array.isArray(st.machineBackedSuccessTrajectory));
+    assert.ok((st.machineBackedSuccessTrajectory as boolean[])
+      .every((value) => value === true));
 
     const loopsDir = join(storeDir, ".loopforge", "loops");
     assert.ok(existsSync(loopsDir));
@@ -407,13 +416,13 @@ describe("Long-Horizon Verification", () => {
       "  Mechanisms exercised:",
       "    L2 first_round             ✓ R1  initial full-state prompt",
       "    L1 state_capsule           ✓ R2-R3,R5-R7 incremental prompts",
-      "    L2 checkpoint_boundary     ✓ R3  via compression_checkpoint at R2",
+      "    L2 checkpoint_boundary     ✓ R3  via subtask_boundary at R2",
       "    L0 same_round_retry        ✓ R8  rejection prompt (attempt>1)",
       "    L1 normal continuation     ✓ R8b clean retry, no L2 reason applies",
       "    L1 machine-motion freshness ✓ R9  files/command activity beats empty self-report",
       "    enforcement reject         ✓ R8  false success claim caught",
       "    circuit breaker removed    ✓ R1-R7 all success=false, loop continues",
-      "    compression_checkpoint     ✓ R2→R3 checkpoint label in R3 prompt",
+      "    subtask_boundary     ✓ R2→R3 checkpoint label in R3 prompt",
       "    constraint lifecycle       ✓ discover → accumulate → retract",
       "    objective refinement       ✓ R7  goal versioning + subtasks",
       "    wrong assumptions          ✓ R6  retraction tracking",

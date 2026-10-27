@@ -12,7 +12,7 @@
 import type { CanonicalLoopState } from "./canonical-state.js";
 import type { PromptArtifact, PromptContextMode, PromptContextReason } from "./protocol.js";
 import type { WorkingMemory } from "./working-memory.js";
-import type { PromptLevel, PromptLevelReason } from "./prompt-policy.js";
+import type { PromptLevel } from "./prompt-policy.js";
 export interface PromptBudgets {
     l0: number;
     l1: number;
@@ -22,7 +22,6 @@ export declare const DEFAULT_PROMPT_BUDGETS: PromptBudgets;
 export interface PromptAssemblyInput {
     state: CanonicalLoopState;
     level: PromptLevel;
-    reasons: PromptLevelReason[];
     budgets?: Partial<PromptBudgets>;
     attempt?: number;
     selfEvaluationBlock: string;
@@ -36,6 +35,10 @@ export interface PromptAssemblyInput {
     /** v4.0.2: the same bounded Working Memory the canonical state carries.
      *  Rendered only for `fresh_round`. */
     workingMemory?: WorkingMemory;
+    /** v4.0.3: compile warnings recorded on the artifact by the assembler
+     *  itself, so a direct `compileLoop` caller gets a complete artifact
+     *  without a driver-side post-fix. */
+    warnings?: string[];
 }
 /** 3.9.3: The action table lives in a neutral module so the evaluation-field
  *  guidance can quote the same wording without depending on a renderer.

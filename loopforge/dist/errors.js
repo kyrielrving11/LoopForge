@@ -30,8 +30,10 @@ export class LoopExistsError extends Error {
     constructor(loopId, reason) {
         super(reason === "active"
             ? `A loop "${loopId}" is already running in this process. Resume or stop it instead of starting a duplicate.`
-            : `Loop "${loopId}" already has persisted ${reason === "session" ? "session state" : "rounds"}. ` +
-                "Resume it, or start a new loop with a different loopId.");
+            : reason === "stopped"
+                ? `Loop "${loopId}" is stopped. Stopped loops are terminal — start a new loop with a different loopId.`
+                : `Loop "${loopId}" already has persisted ${reason === "session" ? "session state" : "rounds"}. ` +
+                    "Resume it, or start a new loop with a different loopId.");
         this.loopId = loopId;
         this.reason = reason;
         this.name = "LoopExistsError";

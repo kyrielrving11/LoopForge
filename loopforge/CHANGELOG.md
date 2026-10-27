@@ -1,5 +1,120 @@
 # Changelog
 
+## 4.0.3 (2026-10-27)
+
+**The evidence-posture / provenance release.** A committed round now carries
+ONE persisted evidence posture; Agent claims and machine facts are named and
+displayed separately everywhere. This is a breaking release with no migration:
+4.0.2 committed rounds and held sessions are reported as legacy.
+
+### Evidence posture
+
+- `EvidencePosture` (`verified` / `insufficient` / `contradicted` / `unknown` /
+  `not_applicable`) is derived ONCE by the coordinator from one round's raw
+  facts, persisted inside `RoundProcessResult`, and read by prompt, state file,
+  replay, explain, audit, receipt, metrics and terminal. Read surfaces never
+  re-derive it.
+- `RoundProcessResult.verificationStatus` and `RoundVerificationStatus` are
+  deleted. `RoundTransactionSnapshot` schema 7 requires a well-formed posture on
+  a committed result; a missing/corrupt posture is a hard break. Rollback
+  directives carry `not_applicable`.
+- `machineBackedSuccess` has one definition and one source: the verification
+  gate's `VerificationResult`. It is stored only in the posture.
+- The prompt and state file render a protected **Machine Evidence** section for
+  the previous committed round (status, workspace/file counts, provider and
+  command statuses, contract items, stable finding ids, omitted counts). An L2
+  rehydrate retry also renders the rejected attempt's transient posture,
+  explicitly marked `not committed`; L0 retries render neither.
+- `explain` exposes full before/after command observations, checkpoints and the
+  restore marker; replay exposes command statuses, posture, checkpoints and
+  `restore_verified`. Git facts use the shared union selector, not the first
+  Git delta.
+
+### Agent claim vs machine fact
+
+- Read surfaces use `agentSuccessClaim` / `agentOutcome` for Agent reports and
+  `evidencePosture` / `machineBackedSuccess` for machine facts:
+  `CommittedRoundView`, `RoundProcessResult`, `LoopRoundResult`,
+  `AdvanceResult`, replay, explain and audit.
+- Receipts keep one `verification.evidence_posture` (replacing
+  `contract_status` + `evidence_status`) and expose
+  `agent_success_claim`/`agent_outcome`.
+- A criterion claim becomes `verified` ONLY from a verified contract item /
+  criterion fact that references it. Agent-reported `tests_reported` plus a
+  passing command no longer upgrades claims; every unverified met claim is
+  reported individually.
+- Criterion facts are latest-wins: a later verification can supersede an earlier
+  contradiction, while an `insufficient` round never erases a verified or
+  contradicted fact. `CriterionStatus` uses `status_at_round` +
+  `status_source` (`agent` / `machine`); `met_at_round` is deleted.
+- Historical contract item statuses are snapshots: a command disabled or
+  reconfigured later does not rewrite a verified item. A passed observation
+  since the claim still verifies even when the command is now disabled; a
+  reconfigured `configHash` remains insufficient.
+- The success trajectory is `machineBackedSuccessTrajectory` and records only
+  machine-backed success. `LoopTerminalEvent` reports `completed`,
+  `machineBackedSuccess`, `evidencePosture` and that trajectory separately.
+- Audit gains `evidenceVerdict` (the terminal posture) and a stricter `verdict`
+  over structure + posture; `criteria.declared` comes from the operator
+  objective, `criteria.evidenced` from machine criterion facts. Metrics split
+  `agentClaimedSuccessRounds` / `machineBackedSuccessRounds` and add
+  `evidenceStatusCounts`.
+
+### Working Memory
+
+- Prompt Working Memory is optional and INDIVISIBLE (`allowPartial: false`): a
+  section that cannot fit is dropped whole; the artifact records
+  `rendered:false` with source counts and `truncated:true`.
+- `WorkingMemorySourceCounts` are measured before cap/dedupe; renderers expose
+  rendered/omitted counts and `questionIds`. Every omission produces a
+  deterministic abbreviation notice, and the state file no longer discards
+  truncation metadata.
+- Reports use `agentSuccessClaim`/`agentOutcome`; `no_change_reason` and
+  `blocker` are carried as Agent reports.
+- Corrects the 4.0.2 wording: Working Memory was never a protected section.
+  It is the highest-priority optional section and may be dropped whole.
+
+### Workspace, retry and recovery
+
+- Machine Evidence and the state file state that a LoopForge round commit is
+  not a Git commit and does not verify every workspace change; observed changes
+  are the committed before/after delta, not the live workspace.
+- `RetryContext` (attempt, rejection notice, findings, transient posture) is
+  persisted on the held snapshot BEFORE the retry compile, survives restart and
+  stalled resumes, and is cleared before the retry commit. Rejected attempts
+  never enter the Vault.
+- `deriveRecoveryDirective` splits machine-observed vs Agent-reported skipped
+  files, adds `abandoned_rounds`, machine-only `failed_rounds`, and compact
+  `trigger_findings`; transaction ids include those facts. Explain/replay/audit/
+  receipt/Working Memory label the sources.
+- The Recovery Brief uses the real verified-restore marker instead of a
+  hard-coded `true`; a receipt's `restore_verified` and the top-level
+  `recovery.restore` come from the same outcome.
+- Round 1 seeds the entrypoint trust baseline before the first prompt. A resumed
+  round with no baseline is never re-seeded from a possibly modified workspace;
+  it runs with the Git-delta arm and an `entrypoint_trust_missing` warning.
+- `isCleanRound` requires a complete observable boundary
+  (`evidenceIncomplete === false`), so an unknown after-evidence round cannot
+  become a machine-clean restore point.
+- `SelfEvaluation.compression_checkpoint` / `checkpoint_label` are renamed to
+  `subtask_boundary` / `subtask_boundary_label`; `receipt.effects.checkpoint` is
+  `subtask_boundary`. They remain Agent declarations, never workspace
+  checkpoints.
+- A stopped loop is terminal: `create` reports "start a new loop" instead of
+  suggesting resume.
+
+### Schema and versions
+
+- Package version 4.0.3.
+- `PROMPT_ARTIFACT_SCHEMA_VERSION` 9, `ROUND_TRANSACTION_SCHEMA_VERSION` 7,
+  `CANONICAL_STATE_SCHEMA_VERSION` 7. `loopforge-protocol.json` and `dist/`
+  are regenerated; 4.0.2 documents are legacy, not migrated.
+- Removed dead `EvidenceSnapshot`, `manual_fixes_needed`, `reasons` prompt
+  input and stale comments.
+- `verify:artifacts` now ignores gitignored `dist/tests/` in its clean-build
+  comparison, so a fresh clone (which does not contain that directory) can
+  verify the published artifacts.
+
 ## 4.0.2 (2026-10-27)
 
 **The fresh-context / bounded-working-memory release.** Each round can now run

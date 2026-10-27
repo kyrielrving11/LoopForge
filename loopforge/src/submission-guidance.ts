@@ -72,6 +72,15 @@ export interface FieldGuide {
 /** Field order used by the prompt, guidance and receipts. Core fields first,
  *  then the execution report, then contract/sub-goal state, then the
  *  cognitive/report fields, then terminal fields. Deterministic by design. */
+/** v4.0.3: THE four structural evaluation fields. The MCP input schema, the
+ *  prompt template and field accounting read this one set. */
+export const CORE_SELF_EVALUATION_FIELDS: ReadonlySet<string> = new Set([
+  "success",
+  "output_summary",
+  "constraint_violations",
+  "should_continue",
+]);
+
 export const FIELD_ORDER = [
   "success",
   "output_summary",
@@ -91,8 +100,8 @@ export const FIELD_ORDER = [
   "round_contract",
   "contract_transition",
   "worker_results",
-  "compression_checkpoint",
-  "checkpoint_label",
+  "subtask_boundary",
+  "subtask_boundary_label",
   "retroactiveClaims",
   "gate_ids",
   "outcome",
@@ -402,29 +411,29 @@ const GUIDES: FieldGuide[] = [
     reportOnly: true,
   },
   {
-    path: "compression_checkpoint",
+    path: "subtask_boundary",
     purpose: "Mark a meaningful work boundary.",
     when: "At a subtask boundary that warrants an L2 rehydration.",
     nature: "report",
-    decision: "This round reached a real phase boundary; pair with checkpoint_label",
+    decision: "This round reached a real phase boundary; pair with subtask_boundary_label",
     compact: true,
     promptRank: 60,
     downstream:
       "Forces an L2 rehydration boundary. It creates no milestone or phase narrative.",
     toolDescription:
       "Optional. true at a subtask boundary to force an L2 rehydration boundary. " +
-      "Pair with checkpoint_label.",
+      "Pair with subtask_boundary_label.",
   },
   {
-    path: "checkpoint_label",
+    path: "subtask_boundary_label",
     purpose: "A human-readable label for the checkpoint.",
-    when: "Only together with compression_checkpoint=true.",
+    when: "Only together with subtask_boundary=true.",
     nature: "report",
     downstream:
       "Stored on the committed report; it does not create a later prompt heading.",
     toolDescription:
       "Optional. Short label for the checkpoint (for example " +
-      "'core-model-complete'). Meaningful only when compression_checkpoint=true.",
+      "'core-model-complete'). Meaningful only when subtask_boundary=true.",
   },
   {
     path: "retroactiveClaims",
@@ -635,8 +644,8 @@ export function fieldExample(
         resultSummary: "<what the worker reported>",
         outcome: "success",
       }];
-    case "compression_checkpoint": return false;
-    case "checkpoint_label": return "<short phase label>";
+    case "subtask_boundary": return false;
+    case "subtask_boundary_label": return "<short phase label>";
     case "retroactiveClaims":
       return [{ round: 1, claim: "<what that earlier round satisfied>" }];
     case "gate_ids":

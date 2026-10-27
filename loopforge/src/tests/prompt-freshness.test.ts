@@ -270,7 +270,7 @@ describe("derivePromptFreshness", () => {
           verify_with: ["verify"],
         }],
       } },
-      { compression_checkpoint: true },
+      { subtask_boundary: true },
     ];
     for (const evaluation of declarations) {
       const freshness = derivePromptFreshness(committedView({

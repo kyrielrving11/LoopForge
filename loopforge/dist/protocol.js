@@ -44,8 +44,8 @@ export function makeSelfEvaluation(overrides = {}) {
         open_questions: [],
         resolved_open_question_ids: [],
         worker_results: [],
-        compression_checkpoint: false,
-        checkpoint_label: "",
+        subtask_boundary: false,
+        subtask_boundary_label: "",
         stop_reason: undefined,
         outcome: undefined,
         blocker: undefined,
@@ -97,10 +97,9 @@ export function makeConstraintMeta(overrides = {}) {
 export function makeLoopRoundResult(overrides = {}) {
     return {
         round: 0,
-        success: false,
+        agentSuccessClaim: false,
         output_summary: "",
         constraint_violations: [],
-        manual_fixes_needed: "",
         discovered_constraints: [],
         emerged_subtasks: [],
         subgoal_updates: [],
@@ -110,9 +109,9 @@ export function makeLoopRoundResult(overrides = {}) {
         open_questions: [],
         resolved_open_question_ids: [],
         worker_results: [],
-        compression_checkpoint: false,
-        checkpoint_label: "",
-        outcome: undefined,
+        subtask_boundary: false,
+        subtask_boundary_label: "",
+        agentOutcome: undefined,
         blocker: undefined,
         retroactiveClaims: [],
         no_change_reason: undefined,
@@ -142,10 +141,11 @@ export function makeLoopCompileRequest(overrides = {}) {
  *
  *  v4.0.1: schema 7 removes the prompt-request effects. v4.0.2: schema 8 adds
  *  the derived context boundary and the optional Working Memory projection.
- *  Older versions are a HARD break — a round whose artifact does not parse is
- *  not committed history, and `legacyTransactionRounds` reports the loss
- *  rather than letting it vanish. */
-export const PROMPT_ARTIFACT_SCHEMA_VERSION = 8;
+ *  v4.0.3: schema 9 adds the Machine Evidence projection and the expanded
+ *  Working Memory metadata. Older versions are a HARD break — a round whose
+ *  artifact does not parse is not committed history, and
+ *  `legacyTransactionRounds` reports the loss rather than letting it vanish. */
+export const PROMPT_ARTIFACT_SCHEMA_VERSION = 9;
 export function makeLoopCompileResponse(overrides = {}) {
     return {
         status: AgentStatus.OK,
@@ -166,9 +166,6 @@ export function makeLoopCompileResponse(overrides = {}) {
         prompt_artifact: undefined,
         ...overrides,
     };
-}
-export function makeEvidenceSnapshot(overrides = {}) {
-    return { verified: [], pending: [], invalidated: [], discovered: [], ...overrides };
 }
 export function makeEnforcementResult(overrides = {}) {
     return {

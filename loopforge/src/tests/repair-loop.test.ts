@@ -66,7 +66,9 @@ describe("v3.9.4 — the machine finding is the next prompt's repair fact", () =
       ]),
     );
     assert.equal(broken.prompt_artifact?.level, "l0");
-    assert.match(broken.prompt, /Retry Requirements/);
+    // v4.0.3: machine findings render in the protected Verification Gate, not
+    // in Retry Requirements (which now carries only rejection/Agent issues).
+    assert.match(broken.prompt, /Verification Gate/);
     assert.match(broken.prompt, /unreported: \[src\/b\.ts\]/);
     assert.match(broken.prompt, /unconfirmed: \[src\/c\.ts\]/);
     assert.equal(broken.prompt_artifact?.coverage.complete, true);

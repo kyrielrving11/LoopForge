@@ -24,9 +24,11 @@ import {
   makeSelfEvaluation,
 } from "../protocol.js";
 import type {
+  CheckpointRef,
   CompiledRoundFacts,
   ContractTransition,
   CriterionClaim,
+  EvidencePosture,
   MachineObservation,
   PromptArtifact,
   RoundContractProposal,
@@ -47,6 +49,35 @@ import { POLICY_SCHEMA_VERSION } from "../policy.js";
 /** The compiler's default objective criterion when the task declares none. */
 export const DEFAULT_SUCCESS_CRITERION =
   "Task goal achieved with verifiable evidence";
+
+/** v4.0.3: a structurally valid committed posture for fixtures that only need
+ *  the envelope to decode. Tests that assert posture semantics build their
+ *  own facts. */
+export function fixtureEvidencePosture(
+  round: number,
+  overrides: Partial<EvidencePosture> = {},
+): EvidencePosture {
+  return {
+    round,
+    kind: "evaluation",
+    status: "not_applicable",
+    machineBackedSuccess: false,
+    verificationConfigured: false,
+    workspace: { status: "not_applicable", changedPathCount: 0 },
+    files: null,
+    providers: [],
+    commands: [],
+    contract: null,
+    findings: [],
+    omitted: { providers: 0, commands: 0, contractItems: 0, findings: 0 },
+    ...overrides,
+  };
+}
+
+/** The rollback posture: no evaluation, no evidence, no claims. */
+export function fixtureRollbackEvidencePosture(round: number): EvidencePosture {
+  return fixtureEvidencePosture(round, { kind: "rollback" });
+}
 
 /** v4.0.0: tool-handler wrapper that supplies the current held handle for
  *  tests that drive the handler directly. A test that deliberately submits a
@@ -250,7 +281,7 @@ export function committedFeedbackRound(
     action?: string;
     attempt?: number;
     /** 3.9.3: the committed round's effective success. Fixtures used to omit
-     *  `roundSuccess`, making every decoded view look failed. */
+     *  `agentSuccessClaim`, making every decoded view look failed. */
     success?: boolean;
     /** v3.9.6: the branch this evaluation belongs to. */
     branchId?: string;
@@ -279,6 +310,21 @@ export function committedFeedbackRound(
     promptArtifact?: PromptArtifact;
     /** v4.0.1: compile facts stamped on the committed transaction. */
     compiled?: CompiledRoundFacts;
+    /** v4.0.3: an explicit persisted evidence posture for the round. */
+    evidencePosture?: EvidencePosture;
+    /** v4.0.3: Agent-report fields surfaced by replay/explain. */
+    workerResults?: import("../protocol.js").WorkerResult[];
+    retroactiveClaims?: Array<{ round: number; claim: string }>;
+    gateIds?: string[];
+    noChangeReason?: string;
+    subtaskBoundary?: boolean;
+    subtaskBoundaryLabel?: string;
+    subgoalUpdates?: import("../protocol.js").SubGoalUpdate[];
+    /** v4.0.3: committed checkpoints and the verified-restore marker. */
+    beforeCheckpoint?: CheckpointRef;
+    checkpoints?: CheckpointRef[];
+    /** v4.0.3: the immutable operator criteria carried by the round. */
+    criteria?: string[];
     restore?: {
       directiveTransactionId: string;
       redoRound: number;
@@ -301,6 +347,13 @@ export function committedFeedbackRound(
     round_contract: opts.contract,
     contract_transition: opts.contractTransition,
     emerged_subtasks: opts.emergedSubtasks ?? [],
+    subgoal_updates: opts.subgoalUpdates ?? [],
+    worker_results: opts.workerResults ?? [],
+    retroactiveClaims: opts.retroactiveClaims ?? [],
+    gate_ids: opts.gateIds ?? [],
+    no_change_reason: opts.noChangeReason,
+    subtask_boundary: opts.subtaskBoundary ?? false,
+    subtask_boundary_label: opts.subtaskBoundaryLabel ?? "",
     discovered_constraints: opts.discoveredConstraints ?? [],
     execution_report: opts.noExecutionReport
       ? undefined
@@ -336,9 +389,11 @@ export function committedFeedbackRound(
           afterEvidence: opts.roundEvidence,
           operatorAcceptance: {
             task: "Test task",
-            success_criteria: [],
+            success_criteria: opts.criteria ?? [],
             hard_constraints: [],
           },
+          ...(opts.beforeCheckpoint ? { beforeCheckpoint: opts.beforeCheckpoint } : {}),
+          ...(opts.checkpoints ? { checkpoints: opts.checkpoints } : {}),
           compiled: opts.compiled ?? {
             task: "Test task",
             goalId: "",
@@ -357,7 +412,9 @@ export function committedFeedbackRound(
         result: {
           action: opts.action ?? "continue",
           verificationFlags: opts.verificationFlags ?? [],
-          roundSuccess: opts.success ?? false,
+          agentSuccessClaim: opts.success ?? false,
+          agentOutcome: opts.outcome ?? (opts.success ? "success" : "failed"),
+          evidencePosture: opts.evidencePosture ?? fixtureEvidencePosture(round),
         },
       },
     },
@@ -433,7 +490,9 @@ export function committedBacktrackRound(
           reason: recovery.reason,
           recovery,
           verificationFlags: [],
-          roundSuccess: false,
+          agentSuccessClaim: false,
+          agentOutcome: null,
+          evidencePosture: fixtureRollbackEvidencePosture(round),
         },
       },
     },
@@ -481,11 +540,11 @@ export function withTransaction(
     ...(Array.isArray(entry.worker_results)
       ? { worker_results: entry.worker_results }
       : {}),
-    ...(entry.compression_checkpoint === true
+    ...(entry.subtask_boundary === true
       ? {
-          compression_checkpoint: true,
-          ...(typeof entry.checkpoint_label === "string"
-            ? { checkpoint_label: entry.checkpoint_label }
+          subtask_boundary: true,
+          ...(typeof entry.subtask_boundary_label === "string"
+            ? { subtask_boundary_label: entry.subtask_boundary_label }
             : {}),
         }
       : {}),
@@ -505,9 +564,10 @@ export function withTransaction(
     verificationFlags: Array.isArray(entry.verification_flags)
       ? entry.verification_flags
       : [],
-    roundSuccess: entry.success === true,
+    agentSuccessClaim: entry.success === true,
+    agentOutcome: entry.success === true ? "success" : "failed",
     gateContradicted: false,
-    verificationStatus: "trusted",
+    evidencePosture: fixtureEvidencePosture(round),
     newConsecutiveRejections: 0,
     shouldPushSuccessTrajectory: false,
   };
@@ -661,9 +721,10 @@ export function mergedLineageRound(
   const result = {
     action: opts.action ?? "continue",
     verificationFlags: opts.verificationFlags ?? [],
-    roundSuccess: opts.success ?? false,
+    agentSuccessClaim: opts.success ?? false,
+    agentOutcome: opts.outcome ?? (opts.success ? "success" : "failed"),
     gateContradicted: false,
-    verificationStatus: "trusted",
+    evidencePosture: fixtureEvidencePosture(round),
     newConsecutiveRejections: 0,
     shouldPushSuccessTrajectory: false,
   };

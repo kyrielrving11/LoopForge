@@ -1,23 +1,27 @@
-/** v2.12: Read-only, replayable end-of-loop audit — the verification view.
+/** v2.12/v4.0.3: Read-only, replayable end-of-loop audit — the verification
+ *  view.
  *
  *  Positioning vs loopforge_replay: replay is the factual timeline (what
  *  happened per round); audit is the assessment layer (which claims are
  *  machine-verified, which gates were decided, is the sequence intact).
  *  Everything is derived from committed vault entries — audit never writes.
  *
- *  v3.8: the CONTRACT ITEM axis is the primary completion basis. The criterion
- *  claims stay as an advisory second view — a criterion claim is an agent
- *  statement whose machine backing is mediated by the contract items, so it
- *  cannot be the completion signal. Both axes read the same committed-round
- *  model and the same item reducer the coordinator and explain use.
+ *  v4.0.3: every round reports the SAME persisted evidence posture. A claim is
+ *  `verified` only when a machine criterion fact backs its criterion; Agent
+ *  reports never upgrade themselves. `evidenceVerdict` is the terminal
+ *  posture, while `verdict` is the verification view over structure + posture.
  */
 import type { LoopStore } from "./loop-store.js";
 import type { VaultEntry } from "./loop-store.js";
-import type { ContractItemStatus, SubmissionDiagnostic } from "./protocol.js";
+import type { ContractItemStatus, EvidencePosture, EvidencePostureStatus, FilesReconciliation, SubmissionDiagnostic } from "./protocol.js";
 import type { SubmissionReceipt } from "./protocol.js";
 export interface AuditRound {
     round: number;
-    outcome: string;
+    /** v4.0.3: Agent claim; never a machine verdict. */
+    agentSuccessClaim: boolean;
+    agentOutcome: string;
+    machineBackedSuccess: boolean;
+    evidencePosture: EvidencePosture | null;
     claims: Array<{
         text: string;
         status: "verified" | "unverified";
@@ -38,12 +42,32 @@ export interface AuditRound {
             status: ContractItemStatus;
         }>;
     } | null;
-    /** v3.9.1: compact submission accounting. The full receipt is available in
-     *  explain/status; audit keeps the fields that matter for its verdict. */
+    /** v4.0.3: committed recovery material that history can still discover. */
+    checkpoints: Array<{
+        checkpoint_id: string;
+        role: "before" | "mid";
+        round: number;
+        content_hash: string;
+    }>;
+    restore: {
+        directive_transaction_id: string;
+        redo_round: number;
+        verified_at: number;
+    } | null;
+    restore_verified: boolean;
+    /** v3.9.1/v4.0.3: compact submission accounting. */
     submission: {
+        record: SubmissionReceipt["record"];
+        entered_history: boolean;
         diagnostics: SubmissionDiagnostic[];
         saved_not_expanded: string[];
         effects: SubmissionReceipt["effects"];
+        verification: {
+            evidence_posture: EvidencePosture;
+            checks: SubmissionReceipt["verification"]["checks"];
+        };
+        files_reconciliation: FilesReconciliation;
+        recovery_checkpoint: SubmissionReceipt["recovery_checkpoint"] | null;
         prompt: {
             level: string;
             dropped_sections: string[];
@@ -58,9 +82,9 @@ export interface AuditGate {
     decidedAt: string;
     round: number;
 }
-/** v3.8: One contract's outcome over the loaned loop, keyed by its content-
- *  addressed id. Re-declaring the same contract later extends the same entry —
- *  the identity says it IS the same contract. */
+/** v3.8: One contract's outcome over the loop, keyed by its content-addressed
+ *  id. Re-declaring the same contract later extends the same entry — the
+ *  identity says it IS the same contract. */
 export interface AuditContract {
     contract_id: string;
     declared_at_round: number;
@@ -88,7 +112,11 @@ export interface AuditContractSummary {
 }
 export interface AuditResult {
     loopId: string;
+    /** Verification-view verdict: `passed` requires the structure to be intact
+     *  AND the terminal evidence posture to be verified/not_applicable. */
     verdict: "passed" | "incomplete" | "contradicted";
+    /** v4.0.3: the terminal posture itself, unmodified. */
+    evidenceVerdict: EvidencePostureStatus | null;
     rounds: AuditRound[];
     /** v3.9.6: committed rollback directives — events, never normal rounds. */
     rollbacks: Array<{
@@ -98,14 +126,23 @@ export interface AuditResult {
         redoRound: number;
         targetCheckpointId: string;
         reason: string;
+        observedSkippedFiles: string[];
+        reportedSkippedFiles: string[];
         skippedFiles: string[];
+        abandonedRounds: number[];
+        failedRounds: number[];
+        /** v4.0.3: Agent reports preserved by the rollback. */
+        preservedDiscoveries: string[];
+        approaches: string[];
+        wrongAssumptions: string[];
     }>;
     gates: AuditGate[];
     unresolvedUserGates: string[];
     /** v3.8: the verification skeleton — the primary completion basis. */
     contracts: AuditContractSummary;
     /** Advisory second axis: criterion claims, not the completion signal.
-     *  `declared` and `evidenced` are both DISTINCT-id counts, so they compare. */
+     *  `declared` comes from the immutable operator objective; `evidenced` is the
+     *  machine-verified set. Both are distinct-id counts. */
     criteria: {
         declared: number;
         evidenced: number;

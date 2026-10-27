@@ -45,7 +45,7 @@ function declaredEvolution(previous) {
         (previous.subgoalUpdates?.length ?? 0) > 0 ||
         (previous.retractedConstraints?.length ?? 0) > 0 ||
         previous.contractProposal !== null ||
-        evaluation?.compression_checkpoint === true);
+        evaluation?.subtask_boundary === true);
 }
 function machineActivity(previous) {
     return previous.afterEvidence.some((observation) => observation.kind === "command" &&

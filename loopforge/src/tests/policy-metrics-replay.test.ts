@@ -10,7 +10,12 @@ import {
 } from "../policy-metrics.js";
 import type { VaultEntry } from "../loop-store.js";
 import { PROMPT_ARTIFACT_SCHEMA_VERSION } from "../protocol.js";
-import { committedBacktrackRound, fixtureBeforeCheckpointError } from "./_helpers.js";
+import { ROUND_TRANSACTION_SCHEMA_VERSION } from "../round-transaction.js";
+import {
+  committedBacktrackRound,
+  fixtureBeforeCheckpointError,
+  fixtureEvidencePosture,
+} from "./_helpers.js";
 
 function committedFeedback(
   round: number,
@@ -25,6 +30,12 @@ function committedFeedback(
   const fields = submittedFields ?? [
     "success", "output_summary", "constraint_violations", "should_continue",
   ];
+  // v4.0.3: every committed result carries a posture; a metrics fixture that
+  // is not about posture uses the neutral not_applicable one.
+  const committedResult = {
+    ...result,
+    evidencePosture: result.evidencePosture ?? fixtureEvidencePosture(round),
+  };
   return {
     id: `loop:metrics-loop:r${round}:feedback`,
     task_id: `loop:metrics-loop:r${round}:feedback`,
@@ -34,10 +45,10 @@ function committedFeedback(
     loop_lineage: {
       round,
       round_transaction: {
-        schema_version: 6,
+        schema_version: ROUND_TRANSACTION_SCHEMA_VERSION,
         round_id: `loop:metrics-loop:round:${round}`,
         snapshot: {
-          schemaVersion: 6,
+          schemaVersion: ROUND_TRANSACTION_SCHEMA_VERSION,
           kind: "evaluation",
           branchId: "loop:metrics-loop:branch:root",
           transactionId: `tx-metrics-loop-${round}-1`,
@@ -60,13 +71,14 @@ function committedFeedback(
             constraintsActive: [],
             constraintsRetired: [],
           },
-          result,
+          result: committedResult,
           ...(evaluation ? { evaluation } : {}),
           ...(normalizationDiagnostics ? { normalizationDiagnostics } : {}),
           submittedFields: fields,
           promptArtifact: level
             ? {
-                schemaVersion: PROMPT_ARTIFACT_SCHEMA_VERSION, roundId: "", round: 1,
+                schemaVersion: PROMPT_ARTIFACT_SCHEMA_VERSION,
+                roundId: `loop:metrics-loop:round:${round}`, round,
                 attempt: 1, level, contextMode: "fresh_round", contextReason: "next_round",
                 renderedPrompt: "", promptHash: "h", stateHash: "s",
                 sections: [], droppedSections: [], protectedOverflow: false,
@@ -77,7 +89,7 @@ function committedFeedback(
           createdAt: Date.now(),
           updatedAt: Date.now(),
         },
-        result,
+        result: committedResult,
       },
     },
   };
@@ -86,13 +98,13 @@ function committedFeedback(
 describe("derivePolicyMetrics", () => {
   it("replays committed rounds from vault entries", () => {
     const entries = [
-      committedFeedback(1, { action: "continue", roundSuccess: false, gateContradicted: false, verificationFlags: [] }, "l2"),
-      committedFeedback(2, { action: "continue", roundSuccess: true, gateContradicted: false, verificationFlags: [{ severity: "warn", check: "evidence_integrity" }] }, "l1"),
-      committedFeedback(3, { action: "stop", stopReason: "completed", roundSuccess: true, gateContradicted: false, verificationFlags: [] }, "l1"),
+      committedFeedback(1, { action: "continue", agentSuccessClaim: false, agentOutcome: "failed", gateContradicted: false, verificationFlags: [] }, "l2"),
+      committedFeedback(2, { action: "continue", agentSuccessClaim: true, agentOutcome: "success", gateContradicted: false, verificationFlags: [{ severity: "warn", check: "evidence_integrity" }] }, "l1"),
+      committedFeedback(3, { action: "stop", stopReason: "completed", agentSuccessClaim: true, agentOutcome: "success", gateContradicted: false, verificationFlags: [] }, "l1"),
     ];
     const metrics = derivePolicyMetrics("metrics-loop", entries);
     assert.equal(metrics.committedRounds, 3);
-    assert.equal(metrics.successfulRounds, 2);
+    assert.equal(metrics.agentClaimedSuccessRounds, 2);
     assert.equal(metrics.stoppedRounds, 1);
     assert.equal(metrics.verificationFlags.evidence_integrity, 1);
     assert.equal(metrics.levels.l2, 1);
@@ -103,7 +115,7 @@ describe("derivePolicyMetrics", () => {
     const entries = [
       committedFeedback(1, {
         action: "continue",
-        roundSuccess: true,
+        agentSuccessClaim: true, agentOutcome: "success",
         gateContradicted: false,
         verificationFlags: [],
       }, "l1", [
@@ -149,28 +161,28 @@ describe("derivePolicyMetrics", () => {
     const entries = [
       committedFeedback(1, {
         action: "continue",
-        roundSuccess: true,
+        agentSuccessClaim: true, agentOutcome: "success",
         gateContradicted: false,
         verificationFlags: [],
       }, "l1", [
         "success", "output_summary", "constraint_violations", "should_continue",
-        "compression_checkpoint",
+        "subtask_boundary",
       ], {
         success: false,
         output_summary: "made progress",
         constraint_violations: [],
         should_continue: true,
-        compression_checkpoint: false,
+        subtask_boundary: false,
       }, [{
-        path: "compression_checkpoint",
+        path: "subtask_boundary",
         code: "invalid_value",
         handling: "dropped",
         detail: "expected a boolean; normalized to false",
       }]),
     ];
     const metrics = derivePolicyMetrics("metrics-loop", entries);
-    assert.equal(metrics.attemptedFieldUsage.compression_checkpoint, 1);
-    assert.equal(metrics.retainedFieldUsage.compression_checkpoint, undefined);
+    assert.equal(metrics.attemptedFieldUsage.subtask_boundary, 1);
+    assert.equal(metrics.retainedFieldUsage.subtask_boundary, undefined);
     assert.equal(metrics.fieldAccountingRounds, 1);
     assert.equal(metrics.fieldAccountingIncompleteRounds, 0);
   });
@@ -191,12 +203,12 @@ describe("mergePolicyMetrics", () => {
 
   it("keeps vault-derived round counts and overlays live-only fields", () => {
     const derived = derivePolicyMetrics("metrics-loop", [
-      committedFeedback(1, { action: "continue", roundSuccess: true, gateContradicted: false, verificationFlags: [] }),
+      committedFeedback(1, { action: "continue", agentSuccessClaim: true, agentOutcome: "success", gateContradicted: false, verificationFlags: [] }),
     ]);
     policyMetrics.recordRound("metrics-loop", {
       action: "continue",
       verificationFlags: [],
-      roundSuccess: true,
+      agentSuccessClaim: true, agentOutcome: "success",
       gateContradicted: false,
       newConsecutiveRejections: 0,
       shouldPushSuccessTrajectory: true,
@@ -205,30 +217,30 @@ describe("mergePolicyMetrics", () => {
     const merged = mergePolicyMetrics(derived, live);
     // committed rounds come from the vault exactly once — no double count.
     assert.equal(merged.committedRounds, 1);
-    assert.equal(merged.successfulRounds, 1);
+    assert.equal(merged.agentClaimedSuccessRounds, 1);
     // live-only observations are preserved.
     assert.equal(merged.rejectedAttempts, live.rejectedAttempts);
   });
 
   it("excludes rolled-back rounds from committed statistics", () => {
     const entries = [
-      committedFeedback(1, { action: "continue", roundSuccess: true, gateContradicted: false, verificationFlags: [] }, "l1"),
+      committedFeedback(1, { action: "continue", agentSuccessClaim: true, agentOutcome: "success", gateContradicted: false, verificationFlags: [] }, "l1"),
       committedBacktrackRound(2, "metrics-loop", 1),
     ];
     const metrics = derivePolicyMetrics("metrics-loop", entries);
     assert.equal(metrics.committedRounds, 1);
-    assert.equal(metrics.successfulRounds, 1);
+    assert.equal(metrics.agentClaimedSuccessRounds, 1);
     assert.equal(metrics.levels.l1, 1);
   });
 
   it("merges uncommitted decisions into attempts and terminatedRounds", () => {
     const derived = derivePolicyMetrics("metrics-loop", [
-      committedFeedback(1, { action: "continue", roundSuccess: true, gateContradicted: false, verificationFlags: [] }),
+      committedFeedback(1, { action: "continue", agentSuccessClaim: true, agentOutcome: "success", gateContradicted: false, verificationFlags: [] }),
     ]);
     policyMetrics.recordRound("metrics-loop", {
       action: "reject",
       verificationFlags: [],
-      roundSuccess: false,
+      agentSuccessClaim: false, agentOutcome: "failed",
       gateContradicted: false,
       newConsecutiveRejections: 1,
       shouldPushSuccessTrajectory: false,
@@ -236,7 +248,7 @@ describe("mergePolicyMetrics", () => {
     policyMetrics.recordRound("metrics-loop", {
       action: "reject",
       verificationFlags: [],
-      roundSuccess: false,
+      agentSuccessClaim: false, agentOutcome: "failed",
       gateContradicted: false,
       newConsecutiveRejections: 2,
       shouldPushSuccessTrajectory: false,
@@ -244,7 +256,7 @@ describe("mergePolicyMetrics", () => {
     policyMetrics.recordRound("metrics-loop", {
       action: "terminate",
       verificationFlags: [],
-      roundSuccess: false,
+      agentSuccessClaim: false, agentOutcome: "failed",
       gateContradicted: false,
       newConsecutiveRejections: 3,
       shouldPushSuccessTrajectory: false,
@@ -266,7 +278,7 @@ describe("live collector — commit semantics (v3.3.1)", () => {
     // acceptanceRate for loops that terminated pre-commit.
     resetPolicyMetrics();
     const decision = (action: string): never => ({
-      action, verificationFlags: [], roundSuccess: false, gateContradicted: false,
+      action, verificationFlags: [], agentSuccessClaim: false, agentOutcome: "failed", gateContradicted: false,
       newConsecutiveRejections: 1, shouldPushSuccessTrajectory: false,
     } as never);
     policyMetrics.recordRound("metrics-live-bucket", decision("terminate"));
@@ -324,7 +336,7 @@ describe("v3.9.2 — files reconciliation metrics", () => {
   });
   const result = {
     action: "continue",
-    roundSuccess: true,
+    agentSuccessClaim: true, agentOutcome: "success",
     gateContradicted: false,
     verificationFlags: [],
   };

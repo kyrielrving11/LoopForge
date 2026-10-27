@@ -20,13 +20,13 @@ import {
   deriveCriterionId,
 } from "./token-utils.js";
 
-function claimedCriteria(
+function claimsFor(
   view: CommittedRoundView,
-  outcome: "met" | "remaining",
-): string[] {
+  text: string,
+): Array<"met" | "remaining"> {
   return (view.executionReport?.criterion_claims ?? [])
-    .filter((claim) => claim.outcome === outcome)
-    .map((claim) => claim.criterion_id);
+    .filter((claim) => criterionRefMatches(claim.criterion_id, text))
+    .map((claim) => claim.outcome);
 }
 
 export interface CriterionStatusInput {
@@ -39,12 +39,14 @@ export interface CriterionStatusInput {
   criterionFacts?: ReadonlyArray<CriterionMachineFact>;
 }
 
-/** v3.2: Derive per-criterion status — the "goal → criteria → evidence"
- *  vertical view. Each criterion gets claimed/remaining/unknown (from
- *  per-round `criterion_claims`, ID-first or normalized-exact matching) and
- *  the round it was first reported met. A machine fact from a contract item
- *  outranks the claim. Zero persistence — re-derived from committed facts
- *  every time. */
+/** v3.2/v4.0.3: Derive per-criterion status — the "goal → criteria →
+ *  evidence" vertical view.
+ *
+ *  Without a machine fact the LATEST claim wins (a criterion claimed met in
+ *  R2 and reported remaining in R4 is `remaining`), and the row records that
+ *  claim round with `status_source: "agent"`. A machine fact from a verified
+ *  contract item outranks every claim and records its own round/source. Zero
+ *  persistence — re-derived from committed facts every time. */
 export function deriveCriterionStatuses(
   input: CriterionStatusInput,
 ): CriterionStatus[] {
@@ -53,9 +55,6 @@ export function deriveCriterionStatuses(
   const rounds = input.rounds
     .filter((round) => round.round >= 1 && round.round < input.currentRound)
     .sort((a, b) => a.round - b.round);
-  const lastRound = rounds.length > 0 ? rounds[rounds.length - 1]! : null;
-  const lastRemaining = lastRound ? claimedCriteria(lastRound, "remaining") : [];
-  const lastMet = lastRound ? claimedCriteria(lastRound, "met") : [];
   const factsByCriterion = new Map(
     (input.criterionFacts ?? []).map((fact) => [fact.criterion_id, fact] as const),
   );
@@ -69,28 +68,47 @@ export function deriveCriterionStatuses(
     const id = deriveCriterionId(text);
     if (seenIds.has(id)) continue;
     seenIds.add(id);
-    let metAtRound: number | null = null;
+
+    // Latest-claim wins: scan ascending and keep the last claim seen.
+    let latestOutcome: "met" | "remaining" | null = null;
+    let latestClaimRound: number | null = null;
     for (const round of rounds) {
-      if (claimedCriteria(round, "met").some((met) => criterionRefMatches(met, text))) {
-        metAtRound = round.round;
-        break; // first report wins — chronological scan
+      const claims = claimsFor(round, text);
+      if (claims.length === 0) continue;
+      const outcome = claims[claims.length - 1]!;
+      if (outcome !== latestOutcome) {
+        latestOutcome = outcome;
+        latestClaimRound = round.round;
+      } else {
+        // A repeated same-direction claim still advances the claim round.
+        latestClaimRound = round.round;
       }
     }
-    if (metAtRound === null &&
-        lastMet.some((met) => criterionRefMatches(met, text))) {
-      metAtRound = lastRound!.round;
-    }
-    const claimedStatus: CriterionStatus["status"] = metAtRound !== null
-      ? "claimed"
-      : lastRemaining.some((remaining) => criterionRefMatches(remaining, text))
-        ? "remaining"
-        : "unknown";
+
     const fact = factsByCriterion.get(id);
+    if (fact?.status) {
+      statuses.push({
+        id,
+        text,
+        status: fact.status,
+        ...(fact.status_at_round !== undefined
+          ? { status_at_round: fact.status_at_round }
+          : {}),
+        status_source: "machine",
+      });
+      continue;
+    }
     statuses.push({
       id,
       text,
-      status: fact?.status ?? claimedStatus,
-      ...(metAtRound !== null ? { met_at_round: metAtRound } : {}),
+      status: latestOutcome === "met"
+        ? "claimed"
+        : latestOutcome === "remaining"
+          ? "remaining"
+          : "unknown",
+      ...(latestOutcome !== null && latestClaimRound !== null
+        ? { status_at_round: latestClaimRound, status_source: "agent" as const }
+        : {}),
     });
   }
   return statuses;

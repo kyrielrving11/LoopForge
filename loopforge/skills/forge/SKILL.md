@@ -92,12 +92,13 @@ State: <hash> | Level: L1 | Attempt: 1 | Context: fresh (next_round)
 - Re-delivering the same held prompt (`status`, `resume`, `unpause`) is not a
   new boundary. The same `promptHash` and handle continue the same attempt.
 
-A fresh prompt carries **bounded Working Memory** derived only from the
+A fresh prompt may render **bounded Working Memory** derived only from the
 current branch's committed rounds and committed rollback directives: the
 latest report, a few earlier reports, falsified assumptions/retractions, open
 questions, consumed recoveries, and contract redirects. Each item is a
 labelled Agent report or committed event, not machine evidence. Its size is
-capped by prompt level; it never enters the verification gate.
+capped by prompt level and the total prompt budget may omit lower-priority
+memory; it never enters the verification gate.
 
 For older history, do not ask the user to restate the task and do not assume
 the prompt remembered it. Use:

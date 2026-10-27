@@ -557,6 +557,7 @@ export function compileLoop(request, context, options = {}, committedHistory) {
     const contextBoundary = derivePromptContextBoundary({
         round: request.round,
         attempt: request.attempt,
+        level: decision.level,
         recoveryBoundary: previous.recoveryBoundary,
         hasPreviousCommittedRound: previous.view !== null,
     });

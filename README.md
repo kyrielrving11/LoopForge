@@ -61,11 +61,12 @@ reasoning do not leak into the next round. A fresh context is not a workspace
 reset; only rollback/recovery restores a checkpoint. An enforcement retry is a
 `same_round_retry` and continues the same logical round.
 
-Continuity comes from a bounded Working Memory derived from the current
+Continuity may include a bounded Working Memory derived from the current
 branch's committed rounds and committed rollback directives: recent reports,
 falsified assumptions and retractions, open questions, consumed recoveries and
 contract redirects. Its window and character caps are fixed code constants,
-not policy. It is part of the one canonical cognitive state, never a second
+not policy; the prompt's total character budget can omit lower-priority memory.
+It is part of the one canonical cognitive state, never a second
 history or memory store, and Agent-reported entries never enter a verification
 gate. Older history is retrieved explicitly with `loopforge_replay` or
 `loopforge_status view: "explain"`.

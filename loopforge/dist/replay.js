@@ -8,6 +8,7 @@
 import { loadCommittedHistory } from "./history.js";
 import { deriveRoundProgress } from "./progress.js";
 import { observedGitHead } from "./git-motion.js";
+import { deriveOpenQuestionId } from "./open-question.js";
 export const REPLAY_DEFAULT_ROUNDS = 10;
 export const REPLAY_MAX_WINDOW_ROUNDS = 50;
 const REPORT_DISPLAY_CHARS = 4000;
@@ -178,6 +179,8 @@ export class ReplayBackend {
                 wrong_assumptions: wrongAssumptions.values,
                 retracted_constraints: retractedConstraints.values,
                 open_questions: openQuestions.values,
+                open_question_ids: (view.openQuestions ?? []).map(deriveOpenQuestionId),
+                resolved_open_question_ids: view.resolvedOpenQuestionIds ?? [],
                 blocker: view.evaluation?.blocker ? blocker.text : null,
                 // v3.9.1: the shared round delta and Git boundary facts.
                 files_changed: gitDelta?.changedFiles ?? null,

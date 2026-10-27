@@ -125,6 +125,12 @@ const CASES: FieldCase[] = [
     partial: ["does the migration preserve ids?", 1],
   },
   {
+    path: "resolved_open_question_ids",
+    valid: ["oq-0123456789ab"],
+    invalid: "not-array",
+    partial: ["oq-0123456789ab", "invalid-id"],
+  },
+  {
     path: "retracted_constraints",
     valid: ["old constraint"],
     invalid: "not-array",

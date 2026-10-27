@@ -5,6 +5,7 @@ import { makeExecutionReport, makeSelfEvaluation, } from "./protocol.js";
 import { retiredFieldDetail, submittedFieldPaths, unknownExecutionReportEntryFields, unknownTopLevelFields, } from "./submission-guidance.js";
 import { DIAG_ALL_ENTRIES_DROPPED, DIAG_EMPTY_VALUE, } from "./submission-diagnostics.js";
 import { canonicalContractItemText, criterionRefMatches, isCriterionId, } from "./token-utils.js";
+import { isOpenQuestionId } from "./open-question.js";
 const DIAGNOSTICS_LIMIT = 100;
 class DiagnosticsCollector {
     entries = [];
@@ -1020,6 +1021,13 @@ export function buildSelfEvaluation(raw, sink, facts) {
     // v4.0.2: strictly report-only. The window/caps are the field's contract,
     // not policy: at most 3 entries, 300 chars each.
     const openQuestions = boundedStringArray(raw.open_questions, 3, 300, sink, "open_questions");
+    const resolvedOpenQuestionIds = boundedStringArray(raw.resolved_open_question_ids, 20, 80, sink, "resolved_open_question_ids")
+        .filter((value) => {
+        if (isOpenQuestionId(value))
+            return true;
+        sink?.push("resolved_open_question_ids", "invalid_value", "dropped", `invalid open-question id: ${value}`);
+        return false;
+    });
     const workerResults = parseWorkerResults(raw.worker_results, sink);
     if (raw.success !== undefined && typeof raw.success !== "boolean") {
         sink?.push("success", "invalid_value", "dropped", "expected a boolean; normalized to false (core validation rejects it)");
@@ -1086,6 +1094,7 @@ export function buildSelfEvaluation(raw, sink, facts) {
         retracted_constraints: retractedConstraints,
         wrong_assumptions: wrongAssumptions,
         open_questions: openQuestions,
+        resolved_open_question_ids: resolvedOpenQuestionIds,
         worker_results: workerResults,
         compression_checkpoint: typeof raw.compression_checkpoint === "boolean" ? raw.compression_checkpoint : false,
         checkpoint_label: boundedString(raw.checkpoint_label, 200, sink, "checkpoint_label") ?? "",

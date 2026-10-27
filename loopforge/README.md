@@ -64,10 +64,11 @@ Every returned prompt declares its derived context boundary in the header:
 `fresh_round` (first round, next round, or recovery redo) starts a new Agent
 invocation without the previous transcript, while `same_round_retry`
 continues the same logical round after an enforcement rejection. A fresh
-context is not a workspace reset. A fresh prompt also carries a bounded
-Working Memory compiled from committed reports, assumptions, open questions,
-consumed recoveries, and contract redirects; it is part of the canonical
-state, not a second history, and never feeds a gate. Older history is
+context is not a workspace reset. A fresh prompt may include bounded Working
+Memory compiled from committed reports, assumptions, open questions, consumed
+recoveries, and contract redirects. It is part of the canonical state, not a
+second history, and never feeds a gate; the total prompt budget may omit
+lower-priority memory. Older history is
 available through `loopforge_replay` (`start`/`end`; default last 10 committed
 rounds, at most 50 in an explicit window) and `loopforge_status view:
 "explain"`.

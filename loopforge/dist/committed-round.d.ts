@@ -78,6 +78,8 @@ export interface CommittedRoundView {
     /** v4.0.2: committed Agent-reported unresolved questions (report-only).
      *  Read by bounded Working Memory, replay and explain; never by a gate. */
     readonly openQuestions?: string[];
+    /** v4.0.3: stable ids of questions resolved in this committed round. */
+    readonly resolvedOpenQuestionIds?: string[];
     readonly emergedSubtasks?: string[];
     readonly subgoalUpdates?: SubGoalUpdate[];
 }

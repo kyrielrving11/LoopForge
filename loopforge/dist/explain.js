@@ -10,6 +10,7 @@ import { observedGitHead } from "./git-motion.js";
 import { deriveCommittedSubmissionView } from "./submission-receipt.js";
 import { committedRoundFacts, deriveActiveRoundContract, deriveRoundContractView, } from "./round-contract.js";
 import { getPolicy } from "./policy.js";
+import { deriveOpenQuestionId } from "./open-question.js";
 /** v4.0.2: display caps for report facts. Committed originals stay in the
  *  transaction; explain is a bounded read-only view. */
 function clip(text, maxChars) {
@@ -80,6 +81,8 @@ export function buildExplain(loopId, entries, round) {
             wrongAssumptions: clipList(view.evaluation?.wrong_assumptions, 500),
             retractedConstraints: clipList(view.retractedConstraints, 500),
             openQuestions: clipList(view.openQuestions, 300),
+            openQuestionIds: (view.openQuestions ?? []).map(deriveOpenQuestionId),
+            resolvedOpenQuestionIds: [...(view.resolvedOpenQuestionIds ?? [])],
             blocker: view.evaluation?.blocker
                 ? clip(view.evaluation.blocker, 500)
                 : null,

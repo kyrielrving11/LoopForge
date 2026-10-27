@@ -118,6 +118,8 @@ export interface CommittedRoundView {
   /** v4.0.2: committed Agent-reported unresolved questions (report-only).
    *  Read by bounded Working Memory, replay and explain; never by a gate. */
   readonly openQuestions?: string[];
+  /** v4.0.3: stable ids of questions resolved in this committed round. */
+  readonly resolvedOpenQuestionIds?: string[];
   readonly emergedSubtasks?: string[];
   readonly subgoalUpdates?: SubGoalUpdate[];
 }
@@ -266,6 +268,7 @@ function viewFromSnapshot(input: {
       : [],
     retractedConstraints: strings(evaluation?.retracted_constraints),
     openQuestions: strings(evaluation?.open_questions),
+    resolvedOpenQuestionIds: strings(evaluation?.resolved_open_question_ids),
     emergedSubtasks: strings(evaluation?.emerged_subtasks),
     subgoalUpdates: subGoalUpdates(evaluation?.subgoal_updates),
   };
@@ -364,6 +367,7 @@ export function roundResultFromCommittedRound(
     retracted_constraints: [...(view.retractedConstraints ?? [])],
     wrong_assumptions: [...(evaluation?.wrong_assumptions ?? [])],
     open_questions: [...(evaluation?.open_questions ?? [])],
+    resolved_open_question_ids: [...(evaluation?.resolved_open_question_ids ?? [])],
     worker_results: [...(evaluation?.worker_results ?? [])],
     compression_checkpoint: evaluation?.compression_checkpoint === true,
     checkpoint_label: evaluation?.checkpoint_label ?? "",

@@ -319,11 +319,12 @@ describe("v3.9.2 — compact trigger guidance", () => {
       "discovered_constraints",
       "wrong_assumptions",
       "open_questions",
+      "resolved_open_question_ids",
       "emerged_subtasks",
       "worker_results",
       "compression_checkpoint",
     ]);
-    assert.ok(compact.length <= 7, "the compact checklist is structurally max seven");
+    assert.ok(compact.length <= 8, "the compact checklist is structurally max eight");
     assert.equal(isFieldPrompted("round_contract", facts()), false,
       "the dedicated contract renderer owns this field");
     assert.equal(isFieldPrompted("subgoal_updates", facts({ subGoals: [activeSubGoal] })), false,

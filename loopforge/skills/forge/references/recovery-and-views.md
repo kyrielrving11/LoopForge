@@ -90,11 +90,12 @@ active id is missing, LoopForge fails closed with `projection_incomplete`
 instead of delivering a partial prompt. The delivered prompt equals the
 compiled `renderedPrompt` on every path.
 
-A `fresh_round` prompt additionally renders a protected, bounded **Working
-Memory** section derived from committed history. Its density follows the level
-(L0 1 recent report / L1 3 / L2 5, plus capped assumptions, open questions,
-consumed recoveries and contract redirects). It declares no normative ids and
-never changes coverage, level, freshness, gates or success. A
+A `fresh_round` prompt may render a bounded **Working Memory** section derived
+from committed history. Its density follows the level (L0 1 recent report / L1
+3 / L2 5, plus capped assumptions, open questions, consumed recoveries and
+contract redirects); the total prompt budget may omit it or lower-priority
+details. It declares no normative ids and never changes coverage, level,
+freshness, gates or success. A
 `same_round_retry` prompt renders none; it relies on the rejection notice and
 the Verification Gate. The state file always carries the full fixed window.
 

@@ -131,6 +131,7 @@ export function manifestFor(evaluation: SelfEvaluation): string[] {
   if ((evaluation.retracted_constraints ?? []).length > 0) fields.push("retracted_constraints");
   if ((evaluation.wrong_assumptions ?? []).length > 0) fields.push("wrong_assumptions");
   if ((evaluation.open_questions ?? []).length > 0) fields.push("open_questions");
+  if ((evaluation.resolved_open_question_ids ?? []).length > 0) fields.push("resolved_open_question_ids");
   if (evaluation.round_contract) fields.push("round_contract");
   if (evaluation.contract_transition) fields.push("contract_transition");
   if (evaluation.outcome) fields.push("outcome");
@@ -264,6 +265,7 @@ export function committedFeedbackRound(
     wrongAssumptions?: string[];
     retractedConstraints?: string[];
     openQuestions?: string[];
+    resolvedOpenQuestionIds?: string[];
     blocker?: string;
     verificationFlags?: VerificationFlag[];
     loopId?: string;
@@ -294,6 +296,7 @@ export function committedFeedbackRound(
     wrong_assumptions: opts.wrongAssumptions ?? [],
     retracted_constraints: opts.retractedConstraints ?? [],
     open_questions: opts.openQuestions ?? [],
+    resolved_open_question_ids: opts.resolvedOpenQuestionIds ?? [],
     blocker: opts.blocker,
     round_contract: opts.contract,
     contract_transition: opts.contractTransition,

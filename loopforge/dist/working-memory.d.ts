@@ -31,6 +31,7 @@ export interface AssumptionMemory {
     text: string;
 }
 export interface OpenQuestionMemory {
+    id: string;
     round: number;
     text: string;
 }
@@ -113,9 +114,10 @@ export declare function truncateWorkingMemoryText(text: string, maxChars: number
 /** Derive the bounded Working Memory from committed history only.
  *
  *  `currentRound` selects the compile window: only rounds strictly below it
- *  (the SAME window the compiler uses) feed reports, assumptions, questions
- *  and redirects. Recovery history reads the committed directive chain and
- *  excludes the pending directive. */
+ *  (the SAME window the compiler uses) feed reports, assumptions and
+ *  redirects. Open questions remain active until explicitly resolved. A
+ *  recovery enters memory only after its redo round is in the
+ *  past; the pending directive is also excluded. */
 export declare function deriveWorkingMemory(history: CommittedHistory, currentRound?: number): WorkingMemory;
 export declare function hasWorkingMemoryContent(memory: WorkingMemory | undefined): boolean;
 export interface PromptWorkingMemoryRender {

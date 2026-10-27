@@ -28,6 +28,7 @@ describe("derivePromptContextBoundary — fixed priority", () => {
       derivePromptContextBoundary({
         round: 3,
         attempt: 2,
+        level: "l0",
         recoveryBoundary: true,
         hasPreviousCommittedRound: true,
       }),
@@ -40,6 +41,7 @@ describe("derivePromptContextBoundary — fixed priority", () => {
       derivePromptContextBoundary({
         round: 3,
         attempt: 1,
+        level: "l2",
         recoveryBoundary: true,
         hasPreviousCommittedRound: true,
       }),
@@ -52,6 +54,7 @@ describe("derivePromptContextBoundary — fixed priority", () => {
       derivePromptContextBoundary({
         round: 1,
         attempt: 1,
+        level: "l2",
         recoveryBoundary: false,
         hasPreviousCommittedRound: false,
       }),
@@ -64,6 +67,7 @@ describe("derivePromptContextBoundary — fixed priority", () => {
       derivePromptContextBoundary({
         round: 4,
         attempt: 1,
+        level: "l1",
         recoveryBoundary: false,
         hasPreviousCommittedRound: true,
       }),
@@ -124,7 +128,7 @@ describe("compileLoop — context boundary is an artifact fact", () => {
     assert.deepEqual(memory?.reportRounds, [1]);
   });
 
-  it("a retry inside the recovery redo is same_round_retry", () => {
+  it("a recovery redo retry at L2 starts a fresh invocation", () => {
     const loopId = "context-loop";
     const response = compile({
       results: [
@@ -132,7 +136,29 @@ describe("compileLoop — context boundary is an artifact fact", () => {
         committedBacktrackRound(2, loopId, 1),
       ],
     }, { round: 2, attempt: 2, rejection_notice: "fix the finding" });
-    assert.equal(response.prompt_artifact?.contextMode, "same_round_retry");
+    assert.equal(response.recompile_level, "l2");
+    assert.equal(response.prompt_artifact?.contextMode, "fresh_round");
     assert.equal(response.prompt_artifact?.contextReason, "enforcement_retry");
+    assert.match(response.prompt, /Working Memory \(committed history/);
+  });
+
+  it("an L2 enforcement retry re-renders committed memory for a fresh invocation", () => {
+    const loopId = "context-loop";
+    const response = compile({
+      results: [committedFeedbackRound(1, {
+        loopId,
+        outputSummary: "COMMITTED_REPORT_TEXT",
+      })],
+    }, {
+      round: 2,
+      attempt: 2,
+      consecutive_rejections: 2,
+      rejection_notice: "rebuild from committed facts",
+    });
+    assert.equal(response.recompile_level, "l2");
+    assert.equal(response.prompt_artifact?.contextMode, "fresh_round");
+    assert.equal(response.prompt_artifact?.contextReason, "enforcement_retry");
+    assert.match(response.prompt, /COMMITTED_REPORT_TEXT/);
+    assert.deepEqual(response.prompt_artifact?.workingMemory?.reportRounds, [1]);
   });
 });

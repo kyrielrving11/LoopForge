@@ -338,8 +338,9 @@ function commonMandatorySections(
       coverageIds: findings.map((flag) => deriveFindingId(flag)),
     });
   }
-  // v4.0.2: bounded Working Memory is protected, renders at every level, and
-  // declares no normative ids. Absent in a same-round retry.
+  // v4.0.2: bounded Working Memory is a budgeted memory section, not a
+  // normative fact. It declares no ids and may be dropped when the prompt is
+  // tight. Absent in a same-round retry.
   const working = workingMemory
     ? formatWorkingMemoryPrompt(workingMemory, level)
     : null;
@@ -350,7 +351,7 @@ function commonMandatorySections(
         "Working Memory (committed history — Agent reports are claims)",
         working.body,
       ),
-      mandatory: true,
+      mandatory: false,
       coverageIds: [],
       workingMemoryProjection: working.projection,
     });
@@ -536,8 +537,8 @@ const SECTION_PRIORITY: Readonly<Record<string, number>> = {
   recovery: 6,
   verification: 7,
   retry_requirements: 8,
-  // v4.0.2: protected bounded memory, after the retry authority and before
-  // every optional anchor. It declares no normative ids.
+  // v4.0.2: bounded memory is the first optional section, after retry
+  // authority and before lower-priority anchors. It declares no normative ids.
   working_memory: 9,
   // ── optional current-governance / anchor sections ───────────────────────
   blockers: 20,

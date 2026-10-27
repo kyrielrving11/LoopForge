@@ -239,6 +239,15 @@ const TOOL_BASE_SCHEMAS = [
                             items: { type: "string", maxLength: 300 },
                             description: fieldGuideDescription("open_questions"),
                         },
+                        resolved_open_question_ids: {
+                            type: "array",
+                            maxItems: 20,
+                            items: {
+                                type: "string",
+                                pattern: "^oq-[a-f0-9]{12}$",
+                            },
+                            description: fieldGuideDescription("resolved_open_question_ids"),
+                        },
                         worker_results: {
                             type: "array",
                             description: fieldGuideDescription("worker_results"),

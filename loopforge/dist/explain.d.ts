@@ -36,6 +36,8 @@ export interface ExplainRound {
     wrongAssumptions: string[];
     retractedConstraints: string[];
     openQuestions: string[];
+    openQuestionIds: string[];
+    resolvedOpenQuestionIds: string[];
     blocker: string | null;
     /** What the machine observed this round. */
     observations: Array<{

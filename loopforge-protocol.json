@@ -71,6 +71,12 @@
             "type": "string"
           }
         },
+        "resolved_open_question_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "compression_checkpoint": {
           "type": "boolean"
         },
@@ -2062,6 +2068,12 @@
           }
         },
         "open_questions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "resolved_open_question_ids": {
           "type": "array",
           "items": {
             "type": "string"

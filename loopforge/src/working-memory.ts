@@ -22,6 +22,7 @@ import type {
   RoundOutcome,
 } from "./protocol.js";
 import { normalizeText } from "./token-utils.js";
+import { deriveOpenQuestionId } from "./open-question.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Data shape
@@ -45,6 +46,7 @@ export interface AssumptionMemory {
 }
 
 export interface OpenQuestionMemory {
+  id: string;
   round: number;
   text: string;
 }
@@ -233,7 +235,7 @@ function dedupeQuestions(entries: OpenQuestionMemory[]): OpenQuestionMemory[] {
   const out: OpenQuestionMemory[] = [];
   for (const entry of entries) {
     if (!entry.text) continue;
-    const key = normalizeText(entry.text);
+    const key = entry.id;
     if (!key || seen.has(key)) continue;
     seen.add(key);
     out.push(entry);
@@ -252,9 +254,10 @@ function boundedRecoveryItems(values: ReadonlyArray<string>): string[] {
 /** Derive the bounded Working Memory from committed history only.
  *
  *  `currentRound` selects the compile window: only rounds strictly below it
- *  (the SAME window the compiler uses) feed reports, assumptions, questions
- *  and redirects. Recovery history reads the committed directive chain and
- *  excludes the pending directive. */
+ *  (the SAME window the compiler uses) feed reports, assumptions and
+ *  redirects. Open questions remain active until explicitly resolved. A
+ *  recovery enters memory only after its redo round is in the
+ *  past; the pending directive is also excluded. */
 export function deriveWorkingMemory(
   history: CommittedHistory,
   currentRound: number = Number.POSITIVE_INFINITY,
@@ -285,19 +288,31 @@ export function deriveWorkingMemory(
     }
   }
 
-  const openQuestions: OpenQuestionMemory[] = [];
-  for (const view of [...recent].reverse()) {
+  const activeQuestions = new Map<string, OpenQuestionMemory>();
+  // An unresolved question remains active until its stable id is closed;
+  // unlike reports, it must not expire merely because its declaration left
+  // the recent-report window.
+  for (const view of window) {
     for (const value of view.openQuestions ?? []) {
       const text = normalizeWorkingMemoryText(value);
-      if (text) openQuestions.push({ round: view.round, text });
+      if (text) {
+        const id = deriveOpenQuestionId(text);
+        activeQuestions.set(id, { id, round: view.round, text });
+      }
+    }
+    for (const id of view.resolvedOpenQuestionIds ?? []) {
+      activeQuestions.delete(id);
     }
   }
+  const openQuestions = [...activeQuestions.values()]
+    .sort((left, right) => right.round - left.round || left.id.localeCompare(right.id));
 
   const pendingId = history.pendingDirective?.transactionId ||
     history.pendingDirective?.roundId ||
     null;
   const recoveries = [...history.directives]
     .filter((view) => view.recovery !== null && view.recovery !== undefined)
+    .filter((view) => view.recovery!.target.redo_round < currentRound)
     .filter((view) =>
       (view.transactionId ?? view.roundId) !== pendingId)
     .slice(-WORKING_MEMORY_RECOVERY_LIMIT)
@@ -362,6 +377,7 @@ interface AssumptionBlockItem {
 }
 
 interface QuestionBlockItem {
+  id: string;
   round: number;
   text: string;
   truncated: boolean;
@@ -417,7 +433,7 @@ function renderReportBlock(
 }
 
 function renderQuestionItem(item: QuestionBlockItem): string[] {
-  return [`- R${item.round}:`, ...quote(item.text, "  ")];
+  return [`- [${item.id}] R${item.round}:`, ...quote(item.text, "  ")];
 }
 
 function renderAssumptionItem(item: AssumptionBlockItem): string[] {
@@ -538,11 +554,11 @@ function formatWorkingMemory(
   if (memory.openQuestions.length > questionLimit) anyTruncated = true;
   let questions: QuestionBlockItem[] = memory.openQuestions
     .slice(0, questionLimit)
-    .map((entry) => {
+     .map((entry) => {
       const clipped = truncateWorkingMemoryText(
         entry.text, WORKING_MEMORY_TEXT_LIMITS.openQuestion);
       anyTruncated ||= clipped.truncated;
-      return { round: entry.round, text: clipped.text, truncated: clipped.truncated };
+       return { id: entry.id, round: entry.round, text: clipped.text, truncated: clipped.truncated };
     });
 
   const assumptionLimit = Math.max(0, profile.assumptions);

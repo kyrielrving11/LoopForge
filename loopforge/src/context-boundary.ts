@@ -19,6 +19,8 @@ export interface ContextBoundaryInput {
   round: number;
   /** One-based attempt within the same logical round. */
   attempt: number;
+  /** The final prompt density selected for this delivery. */
+  level: "l0" | "l1" | "l2";
   /** A committed rollback directive controls this round's redo. */
   recoveryBoundary: boolean;
   /** A committed evaluation round exists before this one. */
@@ -31,10 +33,11 @@ export interface PromptContextBoundary {
 }
 
 /** Fixed priority:
- *  1. attempt > 1            → same_round_retry / enforcement_retry
- *  2. recovery boundary      → fresh_round / recovery_redo
- *  3. round 1, no prior      → fresh_round / first_round
- *  4. otherwise              → fresh_round / next_round
+ *  1. attempt > 1, L0        → same_round_retry / enforcement_retry
+ *  2. attempt > 1, L1/L2     → fresh_round / enforcement_retry
+ *  3. recovery boundary      → fresh_round / recovery_redo
+ *  4. round 1, no prior      → fresh_round / first_round
+ *  5. otherwise              → fresh_round / next_round
  */
 export function derivePromptContextBoundary(
   input: ContextBoundaryInput,
@@ -43,7 +46,10 @@ export function derivePromptContextBoundary(
     ? Math.max(1, Math.trunc(input.attempt))
     : 1;
   if (attempt > 1) {
-    return { mode: "same_round_retry", reason: "enforcement_retry" };
+    return {
+      mode: input.level === "l0" ? "same_round_retry" : "fresh_round",
+      reason: "enforcement_retry",
+    };
   }
   if (input.recoveryBoundary) {
     return { mode: "fresh_round", reason: "recovery_redo" };

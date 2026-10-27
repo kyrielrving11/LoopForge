@@ -145,6 +145,7 @@ function viewFromSnapshot(input) {
             : [],
         retractedConstraints: strings(evaluation?.retracted_constraints),
         openQuestions: strings(evaluation?.open_questions),
+        resolvedOpenQuestionIds: strings(evaluation?.resolved_open_question_ids),
         emergedSubtasks: strings(evaluation?.emerged_subtasks),
         subgoalUpdates: subGoalUpdates(evaluation?.subgoal_updates),
     };
@@ -248,6 +249,7 @@ export function roundResultFromCommittedRound(view) {
         retracted_constraints: [...(view.retractedConstraints ?? [])],
         wrong_assumptions: [...(evaluation?.wrong_assumptions ?? [])],
         open_questions: [...(evaluation?.open_questions ?? [])],
+        resolved_open_question_ids: [...(evaluation?.resolved_open_question_ids ?? [])],
         worker_results: [...(evaluation?.worker_results ?? [])],
         compression_checkpoint: evaluation?.compression_checkpoint === true,
         checkpoint_label: evaluation?.checkpoint_label ?? "",

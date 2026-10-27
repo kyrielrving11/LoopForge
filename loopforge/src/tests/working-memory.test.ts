@@ -17,6 +17,7 @@ import {
   WORKING_MEMORY_ASSUMPTION_LIMIT,
   WORKING_MEMORY_QUESTION_LIMIT,
   WORKING_MEMORY_REPORT_LIMIT,
+  WORKING_MEMORY_WINDOW_ROUNDS,
   WORKING_MEMORY_TEXT_LIMITS,
 } from "../working-memory.js";
 import { buildCommittedHistory } from "../history.js";
@@ -33,6 +34,7 @@ import {
 } from "../protocol.js";
 import { normalizeSelfEvaluation } from "../self-eval.js";
 import { verifySelfEvaluation } from "../verification-gate.js";
+import { deriveOpenQuestionId } from "../open-question.js";
 import type { WorkingMemory } from "../working-memory.js";
 import {
   committedBacktrackRound,
@@ -82,6 +84,7 @@ function populatedMemory(): WorkingMemory {
       text: `assumption ${index}`,
     })),
     openQuestions: Array.from({ length: 4 }, (_, index) => ({
+      id: deriveOpenQuestionId(`question ${index}`),
       round: 5 - index,
       text: `question ${index}`,
     })),
@@ -150,6 +153,25 @@ describe("deriveWorkingMemory — committed branch only", () => {
     assert.deepEqual(memory.reports.map((report) => report.round), [1]);
   });
 
+  it("excludes recovery directives whose redo round is not yet in the past", () => {
+    const loopId = "future-recovery";
+    const child = "tx-future-recovery";
+    const entries = [
+      committedFeedbackRound(1, { loopId, outputSummary: "root one" }),
+      committedBacktrackRound(5, loopId, 2, { transactionId: child }),
+      committedFeedbackRound(3, {
+        loopId,
+        branchId: child,
+        outputSummary: "redo three",
+      }),
+    ];
+    const atRedo = deriveWorkingMemory(historyOf(entries), 3);
+    const afterRedo = deriveWorkingMemory(historyOf(entries), 4);
+
+    assert.deepEqual(atRedo.recoveries, []);
+    assert.deepEqual(afterRedo.recoveries.map((entry) => entry.redoRound), [3]);
+  });
+
   it("merges wrong assumptions and retractions with normalized-exact dedup", () => {
     const loopId = "dedup";
     const entries = [
@@ -174,6 +196,40 @@ describe("deriveWorkingMemory — committed branch only", () => {
     assert.deepEqual(memory.openQuestions.map((item) => item.text), [
       "does the migration preserve ids?",
     ]);
+  });
+
+  it("closes open questions by stable id and keeps them closed", () => {
+    const loopId = "resolved-question";
+    const question = "Does the migration preserve ids?";
+    const id = deriveOpenQuestionId(question);
+    const entries = [
+      committedFeedbackRound(1, { loopId, openQuestions: [question] }),
+      committedFeedbackRound(2, { loopId, resolvedOpenQuestionIds: [id] }),
+      committedFeedbackRound(3, { loopId, outputSummary: "continued" }),
+    ];
+    const memory = deriveWorkingMemory(historyOf(entries), 4);
+    assert.deepEqual(memory.openQuestions, []);
+  });
+
+  it("keeps unresolved questions active beyond the recent report window", () => {
+    const loopId = "long-lived-question";
+    const question = "Does the migration preserve ids?";
+    const id = deriveOpenQuestionId(question);
+    const entries = [
+      committedFeedbackRound(1, { loopId, openQuestions: [question] }),
+      ...Array.from({ length: WORKING_MEMORY_WINDOW_ROUNDS }, (_, index) =>
+        committedFeedbackRound(index + 2, { loopId })),
+    ];
+
+    const stillOpen = deriveWorkingMemory(historyOf(entries), entries.length + 1);
+    assert.deepEqual(stillOpen.openQuestions.map((item) => item.id), [id]);
+
+    entries.push(committedFeedbackRound(entries.length + 1, {
+      loopId,
+      resolvedOpenQuestionIds: [id],
+    }));
+    const resolved = deriveWorkingMemory(historyOf(entries), entries.length + 1);
+    assert.deepEqual(resolved.openQuestions, []);
   });
 
   it("caps assumptions and questions", () => {
@@ -378,7 +434,7 @@ describe("Working Memory prompt density and protection", () => {
     assert.equal(formatWorkingMemoryPrompt(memory, "l2"), null);
   });
 
-  it("is protected and ranks before optional anchors", () => {
+  it("is budgeted before lower-priority optional anchors", () => {
     const state = minimalState();
     state.blockers = ["a reported blocker"];
     const artifact = assemblePromptArtifact({
@@ -396,6 +452,14 @@ describe("Working Memory prompt density and protection", () => {
     assert.ok(memoryIndex < blockersIndex,
       "Working Memory outranks optional anchors");
 
+    const base = assemblePromptArtifact({
+      state,
+      level: "l2",
+      reasons: ["first_round"],
+      attempt: 1,
+      selfEvaluationBlock: "",
+    });
+    const footerChars = base.renderedPrompt.length - base.renderedChars;
     const tight = assemblePromptArtifact({
       state,
       level: "l2",
@@ -403,11 +467,16 @@ describe("Working Memory prompt density and protection", () => {
       attempt: 1,
       selfEvaluationBlock: "",
       workingMemory: populatedMemory(),
-      budgets: { l2: 100 },
+      budgets: { l2: base.renderedChars + footerChars },
     });
-    assert.ok(tight.sections.includes("working_memory"),
-      "a protected section is never budget-dropped");
-    assert.equal(tight.protectedOverflow, true);
+    assert.ok(!tight.sections.includes("working_memory"),
+      "Working Memory is dropped when the whole prompt budget has no room");
+    assert.ok(tight.droppedSections.includes("working_memory"));
+    assert.equal(tight.protectedOverflow, false,
+      "optional memory does not create protected overflow");
+    assert.ok(tight.renderedChars <= tight.budget,
+      "the assembled prompt stays within its configured section budget");
+    assert.ok(tight.renderedChars <= base.renderedChars);
   });
 });
 

@@ -76,6 +76,9 @@ export interface SelfEvaluation {
      *  At most 3 entries, 300 chars each. It is a question list, not a todo
      *  list and not a completion checklist. */
     open_questions?: string[];
+    /** v4.0.2: stable ids of questions resolved in this round. IDs are derived
+     *  from normalized open-question text and are report-only. */
+    resolved_open_question_ids?: string[];
     /** Agent declares a subtask boundary. When true, the next compile uses an
      *  L2 rehydration boundary; no milestone or phase narrative is generated. */
     compression_checkpoint?: boolean;
@@ -660,6 +663,8 @@ export interface LoopRoundResult {
     wrong_assumptions?: string[];
     /** v4.0.2: unresolved questions reported this round (report-only). */
     open_questions?: string[];
+    /** v4.0.2: stable ids of questions resolved this round (report-only). */
+    resolved_open_question_ids?: string[];
     /** Multi-agent: Delegation results from this round.
      *  Set from SelfEvaluation.worker_results during buildLoopRequest. */
     worker_results?: WorkerResult[];
@@ -737,9 +742,10 @@ export interface PromptCoverage {
  *
  *  `fresh_round` means the host starts a NEW Agent invocation for this logical
  *  round: the previous transcript, tool logs and uncommitted reasoning are
- *  not part of the prompt. `same_round_retry` means this is another attempt
- *  of the SAME logical round after an enforcement rejection; if the original
- *  invocation still exists, it continues.
+ *  not part of the prompt. `same_round_retry` means an L0 attempt continues
+ *  in the original invocation after an enforcement rejection. L1/L2 retries
+ *  use `fresh_round`, so the host starts a new invocation with the re-rendered
+ *  governance context. The host must honor this derived boundary.
  *
  *  The value is DERIVED by the compiler from compile inputs and committed
  *  facts. It is never submitted by the Agent and never re-derived by the MCP

@@ -14,6 +14,7 @@
  */
 import { historyWindow } from "./history.js";
 import { normalizeText } from "./token-utils.js";
+import { deriveOpenQuestionId } from "./open-question.js";
 // ═══════════════════════════════════════════════════════════════════════════
 // Deterministic windows and caps (code constants, never policy)
 // ═══════════════════════════════════════════════════════════════════════════
@@ -150,7 +151,7 @@ function dedupeQuestions(entries) {
     for (const entry of entries) {
         if (!entry.text)
             continue;
-        const key = normalizeText(entry.text);
+        const key = entry.id;
         if (!key || seen.has(key))
             continue;
         seen.add(key);
@@ -169,9 +170,10 @@ function boundedRecoveryItems(values) {
 /** Derive the bounded Working Memory from committed history only.
  *
  *  `currentRound` selects the compile window: only rounds strictly below it
- *  (the SAME window the compiler uses) feed reports, assumptions, questions
- *  and redirects. Recovery history reads the committed directive chain and
- *  excludes the pending directive. */
+ *  (the SAME window the compiler uses) feed reports, assumptions and
+ *  redirects. Open questions remain active until explicitly resolved. A
+ *  recovery enters memory only after its redo round is in the
+ *  past; the pending directive is also excluded. */
 export function deriveWorkingMemory(history, currentRound = Number.POSITIVE_INFINITY) {
     const window = historyWindow(history, currentRound);
     // The window is ascending; the bounded derivation keeps the most recent
@@ -196,19 +198,30 @@ export function deriveWorkingMemory(history, currentRound = Number.POSITIVE_INFI
             }
         }
     }
-    const openQuestions = [];
-    for (const view of [...recent].reverse()) {
+    const activeQuestions = new Map();
+    // An unresolved question remains active until its stable id is closed;
+    // unlike reports, it must not expire merely because its declaration left
+    // the recent-report window.
+    for (const view of window) {
         for (const value of view.openQuestions ?? []) {
             const text = normalizeWorkingMemoryText(value);
-            if (text)
-                openQuestions.push({ round: view.round, text });
+            if (text) {
+                const id = deriveOpenQuestionId(text);
+                activeQuestions.set(id, { id, round: view.round, text });
+            }
+        }
+        for (const id of view.resolvedOpenQuestionIds ?? []) {
+            activeQuestions.delete(id);
         }
     }
+    const openQuestions = [...activeQuestions.values()]
+        .sort((left, right) => right.round - left.round || left.id.localeCompare(right.id));
     const pendingId = history.pendingDirective?.transactionId ||
         history.pendingDirective?.roundId ||
         null;
     const recoveries = [...history.directives]
         .filter((view) => view.recovery !== null && view.recovery !== undefined)
+        .filter((view) => view.recovery.target.redo_round < currentRound)
         .filter((view) => (view.transactionId ?? view.roundId) !== pendingId)
         .slice(-WORKING_MEMORY_RECOVERY_LIMIT)
         .reverse()
@@ -277,7 +290,7 @@ function renderReportBlock(report, newest) {
     return [header, ...quote(report.outputSummary, "  ")];
 }
 function renderQuestionItem(item) {
-    return [`- R${item.round}:`, ...quote(item.text, "  ")];
+    return [`- [${item.id}] R${item.round}:`, ...quote(item.text, "  ")];
 }
 function renderAssumptionItem(item) {
     const label = item.kind === "wrong_assumption"
@@ -386,7 +399,7 @@ function formatWorkingMemory(memory, profile) {
         .map((entry) => {
         const clipped = truncateWorkingMemoryText(entry.text, WORKING_MEMORY_TEXT_LIMITS.openQuestion);
         anyTruncated ||= clipped.truncated;
-        return { round: entry.round, text: clipped.text, truncated: clipped.truncated };
+        return { id: entry.id, round: entry.round, text: clipped.text, truncated: clipped.truncated };
     });
     const assumptionLimit = Math.max(0, profile.assumptions);
     if (memory.assumptions.length > assumptionLimit)

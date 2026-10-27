@@ -20,6 +20,7 @@ import {
 } from "./round-contract.js";
 import { getPolicy } from "./policy.js";
 import type { VaultEntry } from "./loop-store.js";
+import { deriveOpenQuestionId } from "./open-question.js";
 
 export interface ExplainRound {
   round: number;
@@ -44,6 +45,8 @@ export interface ExplainRound {
   wrongAssumptions: string[];
   retractedConstraints: string[];
   openQuestions: string[];
+  openQuestionIds: string[];
+  resolvedOpenQuestionIds: string[];
   blocker: string | null;
   /** What the machine observed this round. */
   observations: Array<{
@@ -208,6 +211,8 @@ export function buildExplain(
       wrongAssumptions: clipList(view.evaluation?.wrong_assumptions, 500),
       retractedConstraints: clipList(view.retractedConstraints, 500),
       openQuestions: clipList(view.openQuestions, 300),
+      openQuestionIds: (view.openQuestions ?? []).map(deriveOpenQuestionId),
+      resolvedOpenQuestionIds: [...(view.resolvedOpenQuestionIds ?? [])],
       blocker: view.evaluation?.blocker
         ? clip(view.evaluation.blocker, 500)
         : null,

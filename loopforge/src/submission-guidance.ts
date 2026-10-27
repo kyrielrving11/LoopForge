@@ -86,6 +86,7 @@ export const FIELD_ORDER = [
   "discovered_constraints",
   "wrong_assumptions",
   "open_questions",
+  "resolved_open_question_ids",
   "retracted_constraints",
   "round_contract",
   "contract_transition",
@@ -295,6 +296,22 @@ const GUIDES: FieldGuide[] = [
       "questions that still affect later slices — not a todo list, not a " +
       "completion checklist, and not a substitute for a blocker or decision. " +
       "Report-only: LoopForge never acts on these entries.",
+  },
+  {
+    path: "resolved_open_question_ids",
+    purpose: "Open-question ids that this round resolved.",
+    when: "When a previously rendered open question is no longer unresolved.",
+    nature: "report",
+    reportOnly: true,
+    decision: "A rendered open question was resolved",
+    compact: true,
+    promptRank: 36,
+    downstream:
+      "Working Memory removes the cited question; replay and explain retain the report.",
+    toolDescription:
+      "Optional. Use only stable oq-... ids rendered beside open questions in " +
+      "Working Memory or the state file. Report-only; it never changes the " +
+      "verification gate or acceptance criteria.",
   },
   {
     path: "retracted_constraints",
@@ -588,6 +605,8 @@ export function fieldExample(
       return ["<an assumption from an earlier round that was falsified>"];
     case "open_questions":
       return ["<an unresolved question that still affects later slices>"];
+    case "resolved_open_question_ids":
+      return ["oq-<stable id rendered for a question>"];
     case "retracted_constraints":
       return ["<constraint text or c-XXXXXXXX id that is no longer valid>"];
     case "round_contract": {

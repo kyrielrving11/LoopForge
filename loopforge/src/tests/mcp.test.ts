@@ -1618,6 +1618,8 @@ describe("MCP — tool contract (v3.2.1)", async () => {
       "instructions must point at the submission receipt");
     assert.ok(SERVER_INSTRUCTIONS.includes(LOST_HANDLE_ROUTING),
       "instructions must carry the shared lost-handle routing rule");
+    assert.match(LOST_HANDLE_ROUTING, /Paused\/stalled/,
+      "lost-handle routing must direct paused/stalled sessions through resume");
   });
 
   it("loopforge_checkpoint requires the held submissionHandle", () => {

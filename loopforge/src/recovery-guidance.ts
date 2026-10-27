@@ -10,7 +10,6 @@
  *  one test fixture uses a very tight L2 budget.
  */
 export const LOST_HANDLE_ROUTING =
-  "If only the submissionHandle was lost, call loopforge_status with the " +
-  "live sessionId or loopId; it returns the current handle without the " +
-  "prompt. If the prompt was also lost, or status reports no live session " +
-  "or no handle, call loopforge_resume with the loopId.";
+  "Lost handle only: loopforge_status(sessionId or loopId) returns it, not " +
+  "the prompt. Paused/stalled: call loopforge_resume before submitting. " +
+  "Lost prompt, no live session, or no handle: loopforge_resume(loopId).";

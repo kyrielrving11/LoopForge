@@ -1,12 +1,9 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
-  decodeCommittedRecord,
   decodeCommittedRound,
   derivationRounds,
-  historyRounds,
   pendingBacktrackRecord,
-  persistedFrontier,
   readOnlyRounds,
   roundResultFromCommittedRound,
 } from "../committed-round.js";
@@ -52,18 +49,6 @@ describe("CommittedRoundView", () => {
     assert.equal(decodeCommittedRound(prepared), null);
     (transaction.snapshot as Record<string, unknown>).phase = "rejected";
     assert.equal(decodeCommittedRound(prepared), null);
-  });
-
-  it("deduplicates by logical round and removes rollback directives", () => {
-    const first = decodeCommittedRound(committedFeedbackRound(1, { loopId: "view" }))!;
-    const replacementEntry = committedFeedbackRound(1, { loopId: "view", outcome: "blocked" });
-    const replacement = decodeCommittedRound(replacementEntry)!;
-    const rollback = decodeCommittedRecord(
-      committedBacktrackRound(2, "view", 1),
-    )!;
-    const history = historyRounds([first, rollback, replacement]);
-    assert.equal(history.length, 1);
-    assert.equal(history[0]?.agentOutcome, "blocked");
   });
 
   it("v3.8.1: read-only views drop a backtracked branch while a directive stands", () => {
@@ -117,7 +102,6 @@ describe("CommittedRoundView", () => {
       sessionEntry("ro", 1),
     ];
     assert.deepEqual(readOnlyRounds(entries).map((view) => view.round), [1]);
-    assert.equal(persistedFrontier(entries), 1, "the frontier is still observable");
   });
 
   it("rejects an envelope without a parseable snapshot (v3.8 hard break)", () => {

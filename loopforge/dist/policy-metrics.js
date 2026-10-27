@@ -9,12 +9,6 @@ import { deriveFieldAccounting } from "./field-accounting.js";
 import { deriveFilesReconciliation } from "./files-reconciliation.js";
 import { gitRoundFacts } from "./git-facts.js";
 import { CORE_SELF_EVALUATION_FIELDS } from "./submission-guidance.js";
-const EVIDENCE_POSTURE_STATUSES = [
-    "verified", "insufficient", "contradicted", "unknown", "not_applicable",
-];
-const OBSERVATION_STATUSES = [
-    "observed", "passed", "failed", "timeout", "unavailable", "error", "aborted",
-];
 function zeroPostureCounts() {
     return {
         verified: 0,
@@ -130,18 +124,40 @@ export class PolicyMetricsCollector {
             }
         }
     }
-    recordEvidence(provider, outcome, latencyMs, loopId) {
+    recordEvidence(provider, outcome, latencyMs, loopId,
+    /** v4.0.3: the observation's own status, when the provider returned one.
+     *  `evidenceAvailable` counts ONLY `observed`/`passed`; a failed/error/
+     *  aborted observation is not "available evidence" merely because the
+     *  provider call itself succeeded. */
+    observationStatus) {
         for (const metric of this.targets(loopId)) {
             metric.evidenceCaptures++;
             metric.evidenceLatencyMs += Math.max(0, latencyMs);
-            if (outcome === "available")
-                metric.evidenceAvailable++;
-            if (outcome === "unavailable")
-                metric.evidenceUnavailable++;
-            if (outcome === "failure")
-                metric.evidenceFailures++;
-            if (outcome === "timeout")
-                metric.evidenceTimeouts++;
+            if (observationStatus !== undefined) {
+                if (observationStatus === "observed" || observationStatus === "passed") {
+                    metric.evidenceAvailable++;
+                }
+                else if (observationStatus === "unavailable") {
+                    metric.evidenceUnavailable++;
+                }
+                else if (observationStatus === "timeout") {
+                    metric.evidenceTimeouts++;
+                }
+                else {
+                    // failed / error / aborted: observed, but not a passing observation.
+                    metric.evidenceFailures++;
+                }
+            }
+            else {
+                if (outcome === "available")
+                    metric.evidenceAvailable++;
+                if (outcome === "unavailable")
+                    metric.evidenceUnavailable++;
+                if (outcome === "failure")
+                    metric.evidenceFailures++;
+                if (outcome === "timeout")
+                    metric.evidenceTimeouts++;
+            }
             increment(metric.evidenceOutcomesByProvider, `${provider}:${outcome}`);
         }
     }

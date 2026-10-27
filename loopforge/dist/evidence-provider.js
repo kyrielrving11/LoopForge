@@ -341,7 +341,7 @@ export class EvidenceCollector {
                     return unavailable;
                 }
                 const normalized = observation;
-                policyMetrics.recordEvidence(provider.name, normalized.status === "timeout" ? "timeout" : "available", Date.now() - startedAt, options.loopId);
+                policyMetrics.recordEvidence(provider.name, normalized.status === "timeout" ? "timeout" : "available", Date.now() - startedAt, options.loopId, normalized.status);
                 return normalized;
             }
             catch (error) {

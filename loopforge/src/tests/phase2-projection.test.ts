@@ -302,6 +302,7 @@ describe("v4.0.3 — state file recovery surface", () => {
       agentSuccessClaim: false,
       output_summary: "partial",
       constraint_violations: ["violated rule x"],
+      resolved_open_question_ids: ["oq-000000000000", "oq-000000000001"],
       blocker: "blocked by missing credential",
       execution_report: {
         files_changed: ["src/a.ts"],
@@ -356,6 +357,8 @@ describe("v4.0.3 — state file recovery surface", () => {
     assert.match(md, /### Agent-Reported Blockers[\s\S]*violated rule x/);
     assert.match(md, /### Agent-Reported Blockers[\s\S]*blocked by missing credential/);
     assert.match(md, /### Agent-Reported Remaining Criteria/);
+    assert.match(md, /### Agent-Reported Resolutions[\s\S]*2 open question\(s\) resolved/);
+    assert.match(md, /### Agent-Reported Resolutions[\s\S]*oq-000000000000/);
     assert.match(md, /### Working Memory[\s\S]*> Abbreviated: questions 6\/7/);
   });
 

@@ -6,13 +6,13 @@
  *   L0/L1/L2 level transitions:
  *     - L2 first_round (R1)
  *     - L1 state_capsule (R2-R3, R5-R7)
- *     - L2 checkpoint_boundary (R4, via subtask_boundary at R3)
+ *     - L2 subtask boundary (R4, via subtask_boundary at R3)
  *     - L0 retry_delta (R8 rejection prompt + R8b post-retry)
  *     - L1 normal continuation (R8b, R9)
  *
  *   Constraint lifecycle (discovery → accumulation → retirement)
  *   Enforcement rejection + honest retry
- *   Objective refinement + wrong assumption retraction
+ *   Subtask declaration + wrong assumption retraction
  *   All in-progress rounds use success=false honestly — the removed
  *     binary-success circuit breaker no longer falsely kills the loop.
  *   Cross-round evidence consistency, replay, persistence
@@ -192,15 +192,20 @@ describe("Long-Horizon Verification", () => {
       execution_report: { files_changed: ["src/strkit.ts"], tests_reported: { passed: 0, failed: 0, skipped: 0 }, criterion_claims: criterionClaims(["isPalindrome", "capitalize"], ["Write tests", "Implement truncate + toCamelCase"])},
     }});
     assert.ok(!r.error); assert.equal(String(r.level ?? "").toLowerCase(), "l1"); assert.equal(r.round, 2);
+    const p = String(r.prompt ?? "");
+    assert.ok(
+      p.includes("Machine Evidence — previous committed round R1"),
+      "the next fresh prompt must carry the previous committed posture",
+    );
     submissionHandle = r.submissionHandle;
     LL.push("R2:L1");
   });
 
-  // ── R2 L1 → R3 L2 (checkpoint_boundary) ────────────────────────────────
+  // ── R2 L1 → R3 L2 (subtask boundary) ───────────────────────────────────
   //
   // R2's eval declared subtask_boundary → R3's prompt is L2.
 
-  it("R3 L2 — checkpoint_boundary: boundary prompt with checkpoint label", async () => {
+  it("R3 L2 — subtask boundary: prompt carries the declared boundary label", async () => {
     const r = await client.tool("loopforge_next", { submissionHandle, evaluation: {
       success: false, should_continue: true, constraint_violations: [],
       output_summary: "Wrote tests for isPalindrome and capitalize. isPalindrome passes (3/3), capitalize fails on empty string. Declaring checkpoint.",
@@ -211,10 +216,21 @@ describe("Long-Horizon Verification", () => {
     assert.ok(!r.error);
     // R2's eval declared subtask_boundary → R3 prompt is L2.
     const lv = String(r.level ?? "").toLowerCase();
-    assert.equal(lv, "l2", `R3 expected L2 (checkpoint_boundary from R2), got '${lv}'`);
+    assert.equal(lv, "l2", `R3 expected L2 (subtask boundary from R2), got '${lv}'`);
     assert.equal(r.round, 3);
     const p = String(r.prompt ?? "");
-    assert.ok(p.includes("core-functions-complete") || p.toLowerCase().includes("checkpoint"), `R3 missing checkpoint: ${p.slice(0, 200)}`);
+    // The Agent's subtask label is a report fact (state/explain/replay), not
+    // a prompt heading. The old assertion accepted any "checkpoint" mention
+    // in the prompt — including the static checkpoint-tool footer — so it
+    // could never fail.
+    assert.ok(
+      !/^#{1,6}.*core-functions-complete/m.test(p),
+      "the subtask label must not become a prompt heading",
+    );
+    assert.ok(
+      p.includes("Machine Evidence — previous committed round R2"),
+      "R3's fresh prompt must carry R2's committed posture",
+    );
     assert.ok(p.length > 200, `L2 prompt too small: ${p.length}`);
     assert.strictEqual(r.agentSuccessClaim, false);
     submissionHandle = r.submissionHandle;
@@ -290,6 +306,10 @@ describe("Long-Horizon Verification", () => {
     assert.equal(r.enforcementAction, "reject");
     assert.ok(String(r.enforcementReason ?? "").length > 0);
     assert.equal(String(r.level ?? "").toLowerCase(), "l0", "Rejection prompt should be L0");
+    assert.ok(
+      !/^### Machine Evidence/m.test(String(r.prompt ?? "")),
+      "an L0 same-round retry must not render a Machine Evidence section",
+    );
     submissionHandle = r.submissionHandle;
     LL.push("R8:REJECT(L0)");
   });
@@ -357,14 +377,14 @@ describe("Long-Horizon Verification", () => {
   // CROSS-ROUND CHECKS
   // ═══════════════════════════════════════════════════════════════════════════
 
-  it("✓ levels: L0, L1, L2, checkpoint_boundary, REJECT", () => {
+  it("✓ levels: L0, L1, L2, subtask boundary, REJECT", () => {
     const log = LL.join(" → ");
     assert.ok(log.includes("L2"), `Missing L2: ${log}`);
     assert.ok(log.includes("L1"), `Missing L1: ${log}`);
     assert.ok(log.includes("L0"), `Missing L0: ${log}`);
     assert.ok(log.includes("REJECT"), `Missing REJECT: ${log}`);
     // Specific transitions verified inline above:
-    //   R1:L2 (first_round), R3:L2 (checkpoint_boundary)
+    //   R1:L2 (first_round), R3:L2 (subtask boundary declared in R2)
     //   R8:REJECT(L0) (same_round_retry), R9:L1 (machine motion is fresh)
     //   R8b:L1 (an ordinary continuation — the round-count timer that used to
     //   force L2 here is deleted)
@@ -375,6 +395,23 @@ describe("Long-Horizon Verification", () => {
     assert.ok(!replay.error);
     const tl = replay.timeline as Array<Record<string, unknown>>;
     assert.ok(Array.isArray(tl) && tl.length >= 7, `timeline: ${tl.length}`);
+    for (const field of [
+      "agent_success_claim",
+      "agent_outcome",
+      "machine_backed_success",
+      "evidence_posture",
+      "stop_reason",
+    ]) {
+      assert.ok(field in (tl[0] as Record<string, unknown>), `replay missing ${field}`);
+    }
+
+    const explain = await client.tool("loopforge_status", { loopId, view: "explain" });
+    assert.ok(!explain.error, `explain failed: ${String(explain.errorMessage ?? "")}`);
+    const explainRounds = explain.rounds as Array<Record<string, unknown>>;
+    const lastExplain = explainRounds[explainRounds.length - 1]!;
+    assert.equal(lastExplain.stopReason, "completed");
+    assert.ok(lastExplain.evidencePosture !== undefined,
+      "explain must expose the persisted posture");
 
     const health = await client.tool("loopforge_status", { loopId, view: "loop" });
     assert.ok(!health.error);
@@ -416,18 +453,18 @@ describe("Long-Horizon Verification", () => {
       "  Mechanisms exercised:",
       "    L2 first_round             ✓ R1  initial full-state prompt",
       "    L1 state_capsule           ✓ R2-R3,R5-R7 incremental prompts",
-      "    L2 checkpoint_boundary     ✓ R3  via subtask_boundary at R2",
+      "    L2 subtask boundary        ✓ R3  via subtask_boundary at R2",
       "    L0 same_round_retry        ✓ R8  rejection prompt (attempt>1)",
       "    L1 normal continuation     ✓ R8b clean retry, no L2 reason applies",
       "    L1 machine-motion freshness ✓ R9  files/command activity beats empty self-report",
       "    enforcement reject         ✓ R8  false success claim caught",
       "    circuit breaker removed    ✓ R1-R7 all success=false, loop continues",
-      "    subtask_boundary     ✓ R2→R3 checkpoint label in R3 prompt",
+      "    subtask_boundary           ✓ R2→R3 declared label in R3 prompt",
       "    constraint lifecycle       ✓ discover → accumulate → retract",
-      "    objective refinement       ✓ R7  goal versioning + subtasks",
+      "    subtask declaration        ✓ R7  emerged subtasks",
       "    wrong assumptions          ✓ R6  retraction tracking",
       "    round transaction          ✓ replay + disk persistence",
-      "    health diagnostics         ✓ drift, alignment, integrity, continuity",
+      "    health diagnostics         ✓ evidence-status counts + unverified backlog",
       "══════════════════════════════════════════════", "",
     ].join("\n"));
   });

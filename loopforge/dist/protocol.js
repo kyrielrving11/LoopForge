@@ -2,8 +2,8 @@
  *
  * All types exchanged between the Main Agent and LoopForge flow through
  * these interfaces. This is the contract layer — no implementation logic.
- *
- * v3.3: 41 types — 2 enums + 35 interfaces + 4 type aliases.
+ * The generated JSON Schema in `loopforge-protocol.json` is the complete,
+ * machine-readable wire contract; `$defs` is the authoritative type set.
  */
 // ── Enums ──────────────────────────────────────────────────────────────────
 // Type-only import — erased at runtime, no dependency cycle with
@@ -14,6 +14,9 @@ export var AgentStatus;
     AgentStatus["ERROR"] = "error";
     AgentStatus["STALLED"] = "stalled";
 })(AgentStatus || (AgentStatus = {}));
+/** v4.0.3: the checkpoint manifest version. The wire type, the store and the
+ *  restore preflight all read this ONE constant. */
+export const CHECKPOINT_SCHEMA_VERSION = 1;
 export function makeGateDecision(overrides = {}) {
     return {
         gateId: "",

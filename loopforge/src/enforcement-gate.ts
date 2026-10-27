@@ -32,12 +32,9 @@ import {
 } from "./progress.js";
 import { declaresBlocked } from "./round-outcome.js";
 import { getPolicy } from "./policy.js";
-import type { RoundProcessResult } from "./round-coordinator.js";
 import {
   derivationRounds,
-  decodeCommittedRound,
   hasCommittedMachineBacktrack,
-  pendingRollbackDirective,
   type CommittedRoundView,
 } from "./committed-round.js";
 
@@ -48,14 +45,6 @@ import {
 // ═══════════════════════════════════════════════════════════════════════════
 // v2.10: Backtrack helpers
 // ═══════════════════════════════════════════════════════════════════════════
-
-/** Extract the committed round decision's result from a vault entry.
- *  The round commit entry (`loop:<id>:r<N>:feedback`) carries the full
- *  decision under loop_lineage.round_transaction; lineage entries carry
- *  nothing at the top level. */
-function committedRoundResult(entry: VaultEntry): RoundProcessResult | null {
-  return decodeCommittedRound(entry)?.result ?? null;
-}
 
 /** True when a backtrack already committed at or after the current round —
  *  i.e. the loop is re-walking territory the system already rolled back

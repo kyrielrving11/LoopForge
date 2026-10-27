@@ -22,6 +22,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
+import { CHECKPOINT_SCHEMA_VERSION } from "./protocol.js";
 import type {
   CheckpointRef,
   CheckpointRole,
@@ -34,7 +35,7 @@ import type {
 } from "./git-boundary.js";
 import { isRecord } from "./token-utils.js";
 
-export const CHECKPOINT_SCHEMA_VERSION = 1 as const;
+export { CHECKPOINT_SCHEMA_VERSION };
 export const CHECKPOINT_ID_RE = /^ck-[a-f0-9]{24}$/;
 export const CONTENT_HASH_RE = /^[a-f0-9]{64}$/;
 

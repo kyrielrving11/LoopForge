@@ -21,20 +21,13 @@ import { CHECK_SUCCESS_WITH_REMAINING_CRITERIA, CHECK_RECURRING_VIOLATION, CHECK
 import { deriveProgressWindow, } from "./progress.js";
 import { declaresBlocked } from "./round-outcome.js";
 import { getPolicy } from "./policy.js";
-import { derivationRounds, decodeCommittedRound, hasCommittedMachineBacktrack, } from "./committed-round.js";
+import { derivationRounds, hasCommittedMachineBacktrack, } from "./committed-round.js";
 // ═══════════════════════════════════════════════════════════════════════════
 // Helpers
 // ═══════════════════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════════════════
 // v2.10: Backtrack helpers
 // ═══════════════════════════════════════════════════════════════════════════
-/** Extract the committed round decision's result from a vault entry.
- *  The round commit entry (`loop:<id>:r<N>:feedback`) carries the full
- *  decision under loop_lineage.round_transaction; lineage entries carry
- *  nothing at the top level. */
-function committedRoundResult(entry) {
-    return decodeCommittedRound(entry)?.result ?? null;
-}
 /** True when a backtrack already committed at or after the current round —
  *  i.e. the loop is re-walking territory the system already rolled back
  *  once. Guards against the reject↔backtrack deadlock on persistent stalls. */

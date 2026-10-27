@@ -77,6 +77,22 @@ describe("P2 async evidence", () => {
     assert.equal(metrics.evidenceFailures, 1);
   });
 
+  it("does not count a failed observation as available evidence", async () => {
+    const failed = { ...snapshot("failed-provider"), status: "failed" as const };
+    const collector = new EvidenceCollector([
+      { name: "observed-provider", kind: "custom", capture: () => snapshot("observed-provider") },
+      { name: "failed-provider", kind: "custom", capture: () => failed },
+    ]);
+    const result = await collector.collectAsync({
+      timeoutMs: 100,
+      loopId: "evidence-status-availability",
+    });
+    assert.deepEqual(result.map((item) => item.status), ["observed", "failed"]);
+    const metrics = getPolicyMetrics("evidence-status-availability");
+    assert.equal(metrics.evidenceAvailable, 1, "only the observed result is available");
+    assert.equal(metrics.evidenceFailures, 1, "the failed observation is not a pass");
+  });
+
   it("times out one provider without delaying the others", async () => {
     let signal: AbortSignal | undefined;
     const hanging: EvidenceProvider = {

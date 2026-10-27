@@ -3,11 +3,11 @@
  *  (loopforge-protocol.json).
  *
  *  The MCP evaluation input schema must expose exactly the SelfEvaluation
- *  fields of the wire protocol — the schema is closed (additionalProperties:
- *  false), so a field missing here is silently rejected for strict MCP
- *  clients while the runtime already supports it (the v2.8
- *  drift_clarification gap). The generated protocol schema is the single
- *  source of truth; this test makes any future divergence fail the suite.
+ *  fields of the wire protocol. The evaluation object is open
+ *  (`additionalProperties: true`) so future optional report fields are not
+ *  silently rejected, while the required core fields remain pinned. The
+ *  generated protocol schema is the single source of truth; this test makes
+ *  any future divergence fail the suite.
  */
 
 import { describe, it } from "node:test";
@@ -15,6 +15,11 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { START_INPUT_KEYS, TOOL_SCHEMAS } from "../mcp/tools.js";
+import { PROMPT_ARTIFACT_SCHEMA_VERSION } from "../protocol.js";
+import { ROUND_TRANSACTION_SCHEMA_VERSION } from "../round-transaction.js";
+import { CANONICAL_STATE_SCHEMA_VERSION } from "../canonical-state.js";
+import { POLICY_SCHEMA_VERSION } from "../policy.js";
+import { CHECKPOINT_SCHEMA_VERSION } from "../workspace-checkpoint.js";
 
 // In npm scripts, process.cwd() is the package root (loopforge/).
 // The generated schema is written to the repo root (../loopforge-protocol.json).
@@ -24,12 +29,15 @@ const schema = JSON.parse(
 
 type SchemaNode = Record<string, unknown>;
 
-function evaluationProps(): SchemaNode {
+function evaluationSchema(): SchemaNode {
   const tool = TOOL_SCHEMAS.find((t) => t.name === "loopforge_next");
   assert.ok(tool, "loopforge_next tool schema must exist");
   const input = tool.inputSchema as SchemaNode;
-  const evaluation = (input.properties as SchemaNode).evaluation as SchemaNode;
-  return evaluation.properties as SchemaNode;
+  return (input.properties as SchemaNode).evaluation as SchemaNode;
+}
+
+function evaluationProps(): SchemaNode {
+  return evaluationSchema().properties as SchemaNode;
 }
 
 function protocolSelfEvalProps(): SchemaNode {
@@ -97,8 +105,63 @@ describe("MCP schema ↔ protocol schema sync", () => {
     const evalProps = evaluationProps();
     assert.ok(
       "subgoal_updates" in evalProps,
-      "subgoal_updates must be accepted by the closed MCP evaluation " +
-      "schema — the sub-goal lifecycle depends on it",
+      "subgoal_updates must be accepted by the MCP evaluation schema — " +
+      "the sub-goal lifecycle depends on it",
     );
+  });
+
+  it("keeps the evaluation object open with the required core fields pinned", () => {
+    const evaluation = evaluationSchema();
+    assert.equal(
+      evaluation.additionalProperties,
+      true,
+      "optional Agent report fields must not be rejected by strict clients",
+    );
+    assert.deepEqual(
+      [...(evaluation.required as string[])].sort(),
+      ["constraint_violations", "output_summary", "should_continue", "success"],
+    );
+  });
+
+  it("publishes every evidence-posture status, including not_applicable", () => {
+    const defs = schema.$defs as SchemaNode;
+    const status = defs.EvidencePostureStatus as SchemaNode;
+    assert.deepEqual(
+      [...(status.enum as string[])].sort(),
+      ["contradicted", "insufficient", "not_applicable", "unknown", "verified"],
+    );
+    const posture = defs.EvidencePosture as SchemaNode;
+    assert.ok(
+      (posture.required as string[]).includes("machineBackedSuccess"),
+      "machineBackedSuccess is a required posture fact",
+    );
+  });
+
+  it("pins the published schema versions to the runtime constants", () => {
+    const defs = schema.$defs as SchemaNode;
+    const artifactProps = (defs.PromptArtifact as SchemaNode).properties as SchemaNode;
+    assert.equal(
+      (artifactProps.schemaVersion as SchemaNode).const,
+      PROMPT_ARTIFACT_SCHEMA_VERSION,
+    );
+    const manifestProps =
+      (defs.WorkspaceCheckpointManifest as SchemaNode).properties as SchemaNode;
+    assert.equal(
+      (manifestProps.schemaVersion as SchemaNode).const,
+      CHECKPOINT_SCHEMA_VERSION,
+    );
+    assert.equal(ROUND_TRANSACTION_SCHEMA_VERSION, 7);
+    assert.equal(CANONICAL_STATE_SCHEMA_VERSION, 7);
+    assert.equal(POLICY_SCHEMA_VERSION, "10");
+    assert.equal(CHECKPOINT_SCHEMA_VERSION, 1);
+  });
+
+  it("requires the context boundary and keeps the Working Memory projection optional", () => {
+    const defs = schema.$defs as SchemaNode;
+    const artifact = defs.PromptArtifact as SchemaNode;
+    const required = artifact.required as string[];
+    assert.ok(required.includes("contextMode"));
+    assert.ok(required.includes("contextReason"));
+    assert.ok(!required.includes("workingMemory"));
   });
 });

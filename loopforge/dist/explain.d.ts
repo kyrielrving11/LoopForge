@@ -31,6 +31,8 @@ export interface ExplainRound {
     roundId: string;
     attempt: number;
     action: string;
+    /** v4.0.3: the committed stop reason, when the round stopped the loop. */
+    stopReason: string | null;
     /** v4.0.3: the Agent's claim (never a machine verdict). */
     agentSuccessClaim: boolean;
     /** v4.0.3: the effective Agent-declared outcome. */
@@ -73,6 +75,10 @@ export interface ExplainRound {
             status: string;
             status_note?: string;
         }>;
+        /** v4.0.3: the remaining Agent report fields, bounded for display. */
+        constraint_violations: string[];
+        discovered_constraints: string[];
+        emerged_subtasks: string[];
         truncated: Record<string, boolean>;
     } | null;
     /** v4.0.2: committed Agent reports, bounded for display. */

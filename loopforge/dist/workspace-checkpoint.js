@@ -10,9 +10,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, } from "node:fs";
 import { dirname, join } from "node:path";
+import { CHECKPOINT_SCHEMA_VERSION } from "./protocol.js";
 import { captureBoundary } from "./git-boundary.js";
 import { isRecord } from "./token-utils.js";
-export const CHECKPOINT_SCHEMA_VERSION = 1;
+export { CHECKPOINT_SCHEMA_VERSION };
 export const CHECKPOINT_ID_RE = /^ck-[a-f0-9]{24}$/;
 export const CONTENT_HASH_RE = /^[a-f0-9]{64}$/;
 /** Module constants, not policy knobs. A checkpoint that exceeds them is

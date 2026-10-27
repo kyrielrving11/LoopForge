@@ -18,14 +18,6 @@ import type {
   ObservationStatus,
 } from "./protocol.js";
 
-const EVIDENCE_POSTURE_STATUSES: EvidencePostureStatus[] = [
-  "verified", "insufficient", "contradicted", "unknown", "not_applicable",
-];
-
-const OBSERVATION_STATUSES: ObservationStatus[] = [
-  "observed", "passed", "failed", "timeout", "unavailable", "error", "aborted",
-];
-
 export interface PolicyMetricsSnapshot {
   loopId?: string;
   roundAttempts: number;
@@ -202,14 +194,32 @@ export class PolicyMetricsCollector {
     outcome: "available" | "unavailable" | "failure" | "timeout",
     latencyMs: number,
     loopId?: string,
+    /** v4.0.3: the observation's own status, when the provider returned one.
+     *  `evidenceAvailable` counts ONLY `observed`/`passed`; a failed/error/
+     *  aborted observation is not "available evidence" merely because the
+     *  provider call itself succeeded. */
+    observationStatus?: ObservationStatus,
   ): void {
     for (const metric of this.targets(loopId)) {
       metric.evidenceCaptures++;
       metric.evidenceLatencyMs += Math.max(0, latencyMs);
-      if (outcome === "available") metric.evidenceAvailable++;
-      if (outcome === "unavailable") metric.evidenceUnavailable++;
-      if (outcome === "failure") metric.evidenceFailures++;
-      if (outcome === "timeout") metric.evidenceTimeouts++;
+      if (observationStatus !== undefined) {
+        if (observationStatus === "observed" || observationStatus === "passed") {
+          metric.evidenceAvailable++;
+        } else if (observationStatus === "unavailable") {
+          metric.evidenceUnavailable++;
+        } else if (observationStatus === "timeout") {
+          metric.evidenceTimeouts++;
+        } else {
+          // failed / error / aborted: observed, but not a passing observation.
+          metric.evidenceFailures++;
+        }
+      } else {
+        if (outcome === "available") metric.evidenceAvailable++;
+        if (outcome === "unavailable") metric.evidenceUnavailable++;
+        if (outcome === "failure") metric.evidenceFailures++;
+        if (outcome === "timeout") metric.evidenceTimeouts++;
+      }
       increment(metric.evidenceOutcomesByProvider, `${provider}:${outcome}`);
     }
   }

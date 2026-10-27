@@ -42,8 +42,6 @@ import {
 } from "./round-transaction.js";
 import type { RoundTransactionSnapshot } from "./round-transaction.js";
 import {
-  claimedMetCriteria,
-  claimedRemainingCriteria,
   effectiveOutcome,
   parseContractTransition,
   parseRoundContract,
@@ -147,13 +145,6 @@ function flags(value: unknown): VerificationFlag[] {
   return Array.isArray(value) ? value as VerificationFlag[] : [];
 }
 
-function roundOutcome(value: unknown): RoundOutcome | null {
-  return value === "success" || value === "partial" ||
-    value === "failed" || value === "blocked"
-    ? value
-    : null;
-}
-
 function strings(value: unknown): string[] {
   return Array.isArray(value)
     ? value.filter((item): item is string => typeof item === "string")
@@ -207,12 +198,11 @@ function evidenceIncomplete(
 function viewFromSnapshot(input: {
   source: "feedback" | "rollback";
   sourceEntry: VaultEntry | Record<string, unknown>;
-  lineage: Record<string, unknown> | null;
   snapshot: RoundTransactionSnapshot;
   result: RoundProcessResult;
   sequence?: number;
 }): CommittedRoundView | null {
-  const { snapshot, result, lineage } = input;
+  const { snapshot, result } = input;
   if (snapshot.phase !== "committed") return null;
   const action = committedAction(result.action);
   if (!action) return null;
@@ -308,7 +298,6 @@ export function decodeCommittedRound(entry: VaultEntry): CommittedRoundView | nu
   return viewFromSnapshot({
     source: "feedback",
     sourceEntry: entry,
-    lineage,
     snapshot,
     result: resultValue as unknown as RoundProcessResult,
     sequence: typeof entry.sequence === "number" ? entry.sequence : undefined,
@@ -337,7 +326,6 @@ export function decodeRollbackEvent(entry: VaultEntry): CommittedRoundView | nul
   return viewFromSnapshot({
     source: "rollback",
     sourceEntry: entry,
-    lineage,
     snapshot,
     result,
     sequence: typeof entry.sequence === "number" ? entry.sequence : undefined,
@@ -406,19 +394,6 @@ export function entryLineage(entry: unknown): Record<string, unknown> {
   if (!isRecord(entry)) return {};
   const value = entry.loop_lineage;
   return isRecord(value) ? value : {};
-}
-
-export function historyRounds(
-  views: Iterable<CommittedRoundView | null>,
-  beforeRound = Number.POSITIVE_INFINITY,
-): CommittedRoundView[] {
-  const byRound = new Map<number, CommittedRoundView>();
-  for (const view of views) {
-    if (!view || (view.kind !== undefined && view.kind !== "evaluation") ||
-        view.round >= beforeRound) continue;
-    byRound.set(view.round, view);
-  }
-  return [...byRound.values()].sort((a, b) => a.round - b.round);
 }
 
 /** v3.9.6: the ONE branch read model. */
@@ -553,14 +528,6 @@ export function hasCommittedMachineBacktrack(
   });
 }
 
-/** v3.9.6: the latest current-branch evaluation round. */
-export function lastCommittedView(
-  entries: ReadonlyArray<unknown>,
-): CommittedRoundView | null {
-  const rounds = branchRounds(entries);
-  return rounds.length > 0 ? rounds[rounds.length - 1]! : null;
-}
-
 /** v3.9.6: live history window = current branch below the round being
  *  compiled. `currentRound` is the round being prepared/submitted. */
 export function derivationRounds(
@@ -568,19 +535,6 @@ export function derivationRounds(
   currentRound: number = Number.POSITIVE_INFINITY,
 ): CommittedRoundView[] {
   return branchRounds(entries).filter((view) => view.round < currentRound);
-}
-
-/** Kept for read-only callers/tests that still inspect the persisted cursor;
- *  branch fencing no longer depends on it. */
-export function persistedFrontier(entries: ReadonlyArray<unknown>): number | null {
-  for (const entry of entries) {
-    if (!isRecord(entry) || entry.task_type !== "session_state") continue;
-    const round = entryLineage(entry).current_round;
-    return typeof round === "number" && Number.isFinite(round) && round >= 1
-      ? round
-      : null;
-  }
-  return null;
 }
 
 /** v3.9.6: read-only history = current branch rounds. No session frontier,
@@ -596,17 +550,6 @@ export function readOnlyRollbacks(
   entries: ReadonlyArray<unknown>,
 ): CommittedRoundView[] {
   return branchDirectives(entries);
-}
-
-/** The machine-evidence set that best represents a committed round: the
- *  after-phase observations (captured post-execution), else the pre-round
- *  baseline. The derived delta is never evidence — it is a change-set view
- *  over these facts, not a second observation collection. */
-export function machineEvidenceForRound(
-  view: CommittedRoundView,
-): MachineObservation[] {
-  if (view.afterEvidence.length > 0) return view.afterEvidence;
-  return view.beforeEvidence;
 }
 
 /** v3.8: Rounds whose persisted transaction carries a LEGACY schema version.

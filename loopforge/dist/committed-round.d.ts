@@ -114,7 +114,6 @@ export declare function pendingBacktrackRecord(entries: ReadonlyArray<unknown>, 
 /** Lineage sub-object of an entry (`loop_lineage`; v3.7: the legacy
  *  top-level `lineage` alias was removed), or {} when absent. */
 export declare function entryLineage(entry: unknown): Record<string, unknown>;
-export declare function historyRounds(views: Iterable<CommittedRoundView | null>, beforeRound?: number): CommittedRoundView[];
 /** v3.9.6: the ONE branch read model. */
 export interface BranchView {
     loopId: string;
@@ -142,24 +141,14 @@ export declare function branchDirectives(entries: ReadonlyArray<unknown>): Commi
 export declare function pendingRollbackDirective(entries: ReadonlyArray<unknown>, redoRound?: number): CommittedRoundView | null;
 /** v3.9.6: machine deadlock guard. Agent-origin directives never consume it. */
 export declare function hasCommittedMachineBacktrack(entries: ReadonlyArray<unknown>, currentRound: number): boolean;
-/** v3.9.6: the latest current-branch evaluation round. */
-export declare function lastCommittedView(entries: ReadonlyArray<unknown>): CommittedRoundView | null;
 /** v3.9.6: live history window = current branch below the round being
  *  compiled. `currentRound` is the round being prepared/submitted. */
 export declare function derivationRounds(entries: ReadonlyArray<unknown>, currentRound?: number): CommittedRoundView[];
-/** Kept for read-only callers/tests that still inspect the persisted cursor;
- *  branch fencing no longer depends on it. */
-export declare function persistedFrontier(entries: ReadonlyArray<unknown>): number | null;
 /** v3.9.6: read-only history = current branch rounds. No session frontier,
  *  no numeric fence, no second cursor. */
 export declare function readOnlyRounds(entries: ReadonlyArray<unknown>): CommittedRoundView[];
 /** v3.9.6: read-only rollback events = committed directive chain. */
 export declare function readOnlyRollbacks(entries: ReadonlyArray<unknown>): CommittedRoundView[];
-/** The machine-evidence set that best represents a committed round: the
- *  after-phase observations (captured post-execution), else the pre-round
- *  baseline. The derived delta is never evidence — it is a change-set view
- *  over these facts, not a second observation collection. */
-export declare function machineEvidenceForRound(view: CommittedRoundView): MachineObservation[];
 /** v3.8: Rounds whose persisted transaction carries a LEGACY schema version.
  *  A hard version break must be visible, not silent: these rounds drop out of
  *  history views, so audit/status surface them here instead of letting the

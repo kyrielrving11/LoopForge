@@ -11,12 +11,10 @@ import type { CriterionMachineFact } from "./round-facts.js";
 import { type SelfEvalPromptContext } from "./submission-guidance.js";
 export interface PreviousRound {
     round: number;
+    /** The goal identity used only to distinguish a goal change from an
+     *  unobservable/empty goal. The other previous-round facts are read from
+     *  `PreviousRoundFacts` (the committed view), never duplicated here. */
     goal_id: string;
-    /** v4.0.3: the Agent's success claim, never a machine verdict. */
-    agentSuccessClaim: boolean;
-    task: string;
-    constraints_active: string[];
-    output_summary: string;
 }
 /** ONE bundle of previous-round facts for a compile.
  *

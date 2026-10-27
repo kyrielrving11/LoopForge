@@ -13,6 +13,7 @@
 import { createHash } from "node:crypto";
 import { chmodSync, closeSync, copyFileSync, createReadStream, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, rmdirSync, symlinkSync, unlinkSync, } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
+import { CHECKPOINT_SCHEMA_VERSION } from "./protocol.js";
 import { captureBoundary, runGitCommandStatus } from "./git-boundary.js";
 import { containInWorkspace } from "./workspace.js";
 import { checkpointContentHash, deriveCheckpointId, } from "./workspace-checkpoint.js";
@@ -245,7 +246,7 @@ async function headRelation(targetHead, currentHead, context) {
 }
 /** Read-only restore preflight. Throws RestoreFailure with a stable reason. */
 export async function preflightRestore(input) {
-    if (input.manifest.schemaVersion !== 1 ||
+    if (input.manifest.schemaVersion !== CHECKPOINT_SCHEMA_VERSION ||
         input.manifest.coverage !== "tracked_and_non_ignored_untracked") {
         throw new RestoreFailure("manifest_invalid", "unsupported checkpoint manifest schema");
     }

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://loopforge.dev/loopforge-protocol.json",
   "title": "LoopForge Protocol",
-  "description": "JSON Schema for the LoopForge loop-compile protocol. Defines the wire format for all 3 modes (loop_compile, feedback, review) and internal types. Language-agnostic — reference implementation in TypeScript.",
+  "description": "JSON Schema for the LoopForge loop-compile protocol: request and response envelopes, self-evaluation, committed-round evidence posture, and internal types. Language-agnostic — reference implementation in TypeScript.",
   "type": "object",
   "$defs": {
     "AgentStatus": {
@@ -12,7 +12,7 @@
         "error",
         "stalled"
       ],
-      "description": "LoopForge-loop_compile — TypeScript protocol definitions.\r\n\r\nAll types exchanged between the Main Agent and LoopForge flow through\r\nthese interfaces. This is the contract layer — no implementation logic.\r\n\r\nv3.3: 41 types — 2 enums + 35 interfaces + 4 type aliases."
+      "description": "LoopForge-loop_compile — TypeScript protocol definitions.\r\n\r\nAll types exchanged between the Main Agent and LoopForge flow through\r\nthese interfaces. This is the contract layer — no implementation logic.\r\nThe generated JSON Schema in `loopforge-protocol.json` is the complete,\r\nmachine-readable wire contract; `$defs` is the authoritative type set."
     },
     "SelfEvaluation": {
       "type": "object",
@@ -234,7 +234,8 @@
       "type": "object",
       "properties": {
         "schemaVersion": {
-          "type": "number"
+          "type": "number",
+          "const": 1
         },
         "checkpointId": {
           "type": "string"

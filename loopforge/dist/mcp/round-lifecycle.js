@@ -373,7 +373,6 @@ export class RoundLifecycle {
             throw new LegacyHistoryError(loopId, history.legacyRounds.map((round) => round.round));
         }
         const branch = history.branch;
-        const pending = history.pendingDirective;
         // The session cursor is the primary copy; the held snapshot and the
         // visible root transaction are fallbacks. Losing the operator surface
         // during a restore/restart would be unrecoverable.

@@ -22,12 +22,6 @@ function snapshots(value) {
 function flags(value) {
     return Array.isArray(value) ? value : [];
 }
-function roundOutcome(value) {
-    return value === "success" || value === "partial" ||
-        value === "failed" || value === "blocked"
-        ? value
-        : null;
-}
 function strings(value) {
     return Array.isArray(value)
         ? value.filter((item) => typeof item === "string")
@@ -78,7 +72,7 @@ function evidenceIncomplete(after, deltas) {
  *  feedback entry and the engine's hydrated merged entry call it, so there is
  *  no second evaluation/history interpretation. */
 function viewFromSnapshot(input) {
-    const { snapshot, result, lineage } = input;
+    const { snapshot, result } = input;
     if (snapshot.phase !== "committed")
         return null;
     const action = committedAction(result.action);
@@ -181,7 +175,6 @@ export function decodeCommittedRound(entry) {
     return viewFromSnapshot({
         source: "feedback",
         sourceEntry: entry,
-        lineage,
         snapshot,
         result: resultValue,
         sequence: typeof entry.sequence === "number" ? entry.sequence : undefined,
@@ -215,7 +208,6 @@ export function decodeRollbackEvent(entry) {
     return viewFromSnapshot({
         source: "rollback",
         sourceEntry: entry,
-        lineage,
         snapshot,
         result,
         sequence: typeof entry.sequence === "number" ? entry.sequence : undefined,
@@ -276,16 +268,6 @@ export function entryLineage(entry) {
         return {};
     const value = entry.loop_lineage;
     return isRecord(value) ? value : {};
-}
-export function historyRounds(views, beforeRound = Number.POSITIVE_INFINITY) {
-    const byRound = new Map();
-    for (const view of views) {
-        if (!view || (view.kind !== undefined && view.kind !== "evaluation") ||
-            view.round >= beforeRound)
-            continue;
-        byRound.set(view.round, view);
-    }
-    return [...byRound.values()].sort((a, b) => a.round - b.round);
 }
 /** Resolve the current branch from already-decoded committed views. This is
  *  the branch walker itself; `resolveBranch` is only the entry-decoding
@@ -382,28 +364,10 @@ export function hasCommittedMachineBacktrack(entries, currentRound) {
             view.round >= currentRound;
     });
 }
-/** v3.9.6: the latest current-branch evaluation round. */
-export function lastCommittedView(entries) {
-    const rounds = branchRounds(entries);
-    return rounds.length > 0 ? rounds[rounds.length - 1] : null;
-}
 /** v3.9.6: live history window = current branch below the round being
  *  compiled. `currentRound` is the round being prepared/submitted. */
 export function derivationRounds(entries, currentRound = Number.POSITIVE_INFINITY) {
     return branchRounds(entries).filter((view) => view.round < currentRound);
-}
-/** Kept for read-only callers/tests that still inspect the persisted cursor;
- *  branch fencing no longer depends on it. */
-export function persistedFrontier(entries) {
-    for (const entry of entries) {
-        if (!isRecord(entry) || entry.task_type !== "session_state")
-            continue;
-        const round = entryLineage(entry).current_round;
-        return typeof round === "number" && Number.isFinite(round) && round >= 1
-            ? round
-            : null;
-    }
-    return null;
 }
 /** v3.9.6: read-only history = current branch rounds. No session frontier,
  *  no numeric fence, no second cursor. */
@@ -413,15 +377,6 @@ export function readOnlyRounds(entries) {
 /** v3.9.6: read-only rollback events = committed directive chain. */
 export function readOnlyRollbacks(entries) {
     return branchDirectives(entries);
-}
-/** The machine-evidence set that best represents a committed round: the
- *  after-phase observations (captured post-execution), else the pre-round
- *  baseline. The derived delta is never evidence — it is a change-set view
- *  over these facts, not a second observation collection. */
-export function machineEvidenceForRound(view) {
-    if (view.afterEvidence.length > 0)
-        return view.afterEvidence;
-    return view.beforeEvidence;
 }
 export function legacyTransactionRounds(entries) {
     const out = [];

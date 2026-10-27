@@ -39,14 +39,12 @@ import type {
   LoopTerminalEvent,
   LoopTerminalSink,
   StopReason,
-  WorkspaceCheckpointManifest,
 } from "../protocol.js";
 import { captureEntrypointTrust } from "../evidence-provider.js";
 import type { MachineObservation } from "../protocol.js";
 import {
   deriveRoundObservationDelta,
   deriveTransactionId,
-  makeRoundId,
   parseRoundTransactionSnapshot,
   rootBranchId,
 } from "../round-transaction.js";
@@ -75,7 +73,6 @@ import {
 } from "../workspace-restore.js";
 import type { RestoreResult } from "../workspace-restore.js";
 import {
-  buildCheckpointRef,
   FileWorkspaceCheckpointStore,
 } from "../workspace-checkpoint.js";
 import { resolveStateDirectory } from "../policy.js";
@@ -92,7 +89,6 @@ import {
 } from "../history.js";
 import { deriveSubmissionGuidance } from "../submission-guidance.js";
 import { latestObjective } from "../loop-compiler.js";
-import { activeContractOf } from "./submission-boundary.js";
 import {
   heldPromptSnapshot,
   makeSubmissionHandle,
@@ -711,7 +707,6 @@ export class RoundLifecycle {
       );
     }
     const branch = history.branch;
-    const pending = history.pendingDirective;
     // The session cursor is the primary copy; the held snapshot and the
     // visible root transaction are fallbacks. Losing the operator surface
     // during a restore/restart would be unrecoverable.

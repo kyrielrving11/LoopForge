@@ -31,6 +31,7 @@ import {
   unlinkSync,
 } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
+import { CHECKPOINT_SCHEMA_VERSION } from "./protocol.js";
 import type {
   MachineObservation,
   WorkspaceCheckpointManifest,
@@ -362,7 +363,7 @@ export async function preflightRestore(input: {
   signal?: AbortSignal;
   timeoutMs?: number;
 }): Promise<RestorePreflight> {
-  if (input.manifest.schemaVersion !== 1 ||
+  if (input.manifest.schemaVersion !== CHECKPOINT_SCHEMA_VERSION ||
       input.manifest.coverage !== "tracked_and_non_ignored_untracked") {
     throw new RestoreFailure("manifest_invalid", "unsupported checkpoint manifest schema");
   }

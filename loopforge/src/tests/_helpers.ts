@@ -291,6 +291,8 @@ export function committedFeedbackRound(
     progress?: number;
     noExecutionReport?: boolean;
     discoveredConstraints?: string[];
+    constraintViolations?: string[];
+    stopReason?: import("../protocol.js").StopReason;
     /** v4.0.2: committed report facts for Working Memory / replay / explain. */
     outputSummary?: string;
     wrongAssumptions?: string[];
@@ -336,7 +338,7 @@ export function committedFeedbackRound(
   const evaluation = makeSelfEvaluation({
     success: opts.success ?? false,
     output_summary: opts.outputSummary ?? `Committed round ${round}.`,
-    constraint_violations: [],
+    constraint_violations: opts.constraintViolations ?? [],
     should_continue: true,
     outcome: opts.outcome,
     wrong_assumptions: opts.wrongAssumptions ?? [],
@@ -411,6 +413,7 @@ export function committedFeedbackRound(
         },
         result: {
           action: opts.action ?? "continue",
+          ...(opts.stopReason ? { stopReason: opts.stopReason } : {}),
           verificationFlags: opts.verificationFlags ?? [],
           agentSuccessClaim: opts.success ?? false,
           agentOutcome: opts.outcome ?? (opts.success ? "success" : "failed"),
@@ -423,8 +426,8 @@ export function committedFeedbackRound(
 
 /** v3.8: A committed backtrack directive — the rollback record written when
  *  the enforcement gate rolls a stalled round back. Its transaction carries a
- *  full committed snapshot like every other committed round; `historyRounds`
- *  excludes it from final history. */
+ *  full committed snapshot like every other committed round; the branch read
+ *  model excludes it from final history. */
 export function committedBacktrackRound(
   round: number,
   loopId = "test-loop",

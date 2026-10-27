@@ -162,6 +162,9 @@ export class ReplayBackend {
             const redirectReason = displayed(view.contractTransition?.reason, REDIRECT_REASON_DISPLAY_CHARS);
             const noChangeReason = displayed(view.evaluation?.no_change_reason, BLOCKER_DISPLAY_CHARS);
             const subtaskLabel = displayed(view.evaluation?.subtask_boundary_label, SUBTASK_LABEL_DISPLAY_CHARS);
+            const constraintViolations = displayedList(view.constraintViolations, ASSUMPTION_DISPLAY_CHARS);
+            const discoveredConstraints = displayedList(view.discoveredConstraints, ASSUMPTION_DISPLAY_CHARS);
+            const emergedSubtasks = displayedList(view.emergedSubtasks, ASSUMPTION_DISPLAY_CHARS);
             const workerResults = (view.evaluation?.worker_results ?? []).map((worker) => ({
                 agent_id: worker.agentId.slice(0, SUBTASK_LABEL_DISPLAY_CHARS),
                 sub_task: displayed(worker.subTask, WORKER_DISPLAY_CHARS).text,
@@ -200,6 +203,7 @@ export class ReplayBackend {
             timeline.push({
                 round: view.round,
                 attempt: view.attempt,
+                stop_reason: view.result?.stopReason ?? null,
                 recompile_level: view.promptArtifact?.level ?? "l2",
                 // v4.0.2: the context boundary is a committed artifact fact.
                 context_mode: view.promptArtifact?.contextMode ?? null,
@@ -225,10 +229,16 @@ export class ReplayBackend {
                         retroactive_claims: retroactiveClaims,
                         gate_ids: [...(view.evaluation.gate_ids ?? [])],
                         subgoal_updates: subgoalUpdates,
+                        constraint_violations: constraintViolations.values,
+                        discovered_constraints: discoveredConstraints.values,
+                        emerged_subtasks: emergedSubtasks.values,
                         truncated: report.truncated ||
                             noChangeReason.truncated ||
                             blocker.truncated ||
-                            subtaskLabel.truncated,
+                            subtaskLabel.truncated ||
+                            constraintViolations.truncated ||
+                            discoveredConstraints.truncated ||
+                            emergedSubtasks.truncated,
                     }
                     : null,
                 wrong_assumptions: wrongAssumptions.values,
@@ -288,7 +298,10 @@ export class ReplayBackend {
                     blocker.truncated ||
                     redirectReason.truncated ||
                     noChangeReason.truncated ||
-                    subtaskLabel.truncated,
+                    subtaskLabel.truncated ||
+                    constraintViolations.truncated ||
+                    discoveredConstraints.truncated ||
+                    emergedSubtasks.truncated,
                 truncation: {
                     output_summary: report.truncated,
                     wrong_assumptions: wrongAssumptions.truncated,
@@ -298,6 +311,9 @@ export class ReplayBackend {
                     redirect_reason: redirectReason.truncated,
                     no_change_reason: noChangeReason.truncated,
                     subtask_boundary_label: subtaskLabel.truncated,
+                    constraint_violations: constraintViolations.truncated,
+                    discovered_constraints: discoveredConstraints.truncated,
+                    emerged_subtasks: emergedSubtasks.truncated,
                 },
             });
         }

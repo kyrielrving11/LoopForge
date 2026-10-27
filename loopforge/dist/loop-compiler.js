@@ -49,10 +49,6 @@ function previousRoundFromWindow(window, round) {
     return {
         round,
         goal_id: view.compiled?.goalId ?? "",
-        agentSuccessClaim: view.agentSuccessClaim,
-        task: view.compiled?.task ?? "",
-        constraints_active: [...(view.activeConstraints ?? [])],
-        output_summary: view.evaluation?.output_summary ?? "",
     };
 }
 /** The operator objective from the immutable acceptance carried by a committed

@@ -506,6 +506,7 @@ export class EvidenceCollector {
           normalized.status === "timeout" ? "timeout" : "available",
           Date.now() - startedAt,
           options.loopId,
+          normalized.status,
         );
         return normalized;
       } catch (error) {

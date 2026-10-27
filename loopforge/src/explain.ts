@@ -53,6 +53,8 @@ export interface ExplainRound {
   roundId: string;
   attempt: number;
   action: string;
+  /** v4.0.3: the committed stop reason, when the round stopped the loop. */
+  stopReason: string | null;
   /** v4.0.3: the Agent's claim (never a machine verdict). */
   agentSuccessClaim: boolean;
   /** v4.0.3: the effective Agent-declared outcome. */
@@ -82,6 +84,10 @@ export interface ExplainRound {
     retroactive_claims: Array<{ round: number; claim: string }>;
     gate_ids: string[];
     subgoal_updates: Array<{ id: string; status: string; status_note?: string }>;
+    /** v4.0.3: the remaining Agent report fields, bounded for display. */
+    constraint_violations: string[];
+    discovered_constraints: string[];
+    emerged_subtasks: string[];
     truncated: Record<string, boolean>;
   } | null;
   /** v4.0.2: committed Agent reports, bounded for display. */
@@ -267,6 +273,9 @@ export function buildExplain(
     const questions = clipList(view.openQuestions, 300);
     const blocker = clip(view.evaluation?.blocker, 500);
     const redirectReason = clip(view.contractTransition?.reason, 500);
+    const constraintViolations = clipList(view.constraintViolations, 500);
+    const discoveredConstraints = clipList(view.discoveredConstraints, 500);
+    const emergedSubtasks = clipList(view.emergedSubtasks, 500);
     let workerTruncated = false;
     const workerResults = (view.evaluation?.worker_results ?? []).map((worker) => {
       const summary = clip(worker.resultSummary, 1000);
@@ -307,6 +316,7 @@ export function buildExplain(
       roundId: view.roundId,
       attempt: view.attempt,
       action: view.action,
+      stopReason: view.result?.stopReason ?? null,
       agentSuccessClaim: view.agentSuccessClaim,
       agentOutcome: view.agentOutcome,
       machineBackedSuccess: view.evidencePosture?.machineBackedSuccess ?? false,
@@ -336,12 +346,18 @@ export function buildExplain(
             retroactive_claims: retroactiveClaims,
             gate_ids: [...(view.evaluation.gate_ids ?? [])],
             subgoal_updates: subgoalUpdates,
+            constraint_violations: constraintViolations.values,
+            discovered_constraints: discoveredConstraints.values,
+            emerged_subtasks: emergedSubtasks.values,
             truncated: {
               output_summary: reportText.truncated,
               no_change_reason: noChange.truncated,
               subtask_boundary_label: subtaskLabel.truncated,
               worker_results: workerTruncated,
               retroactive_claims: retroTruncated,
+              constraint_violations: constraintViolations.truncated,
+              discovered_constraints: discoveredConstraints.truncated,
+              emerged_subtasks: emergedSubtasks.truncated,
             },
           }
         : null,
@@ -477,6 +493,9 @@ export function renderExplain(result: ExplainResult): string {
     const claim = `claim=${round.agentSuccessClaim}` +
       (round.agentOutcome ? ` / outcome=${round.agentOutcome}` : "");
     lines.push("", `Round ${round.round} (${round.roundId}, attempt ${round.attempt}) — ${round.action} — ${claim}${context}`);
+    if (round.stopReason) {
+      lines.push(`  stop_reason: ${round.stopReason}`);
+    }
     const posture = round.evidencePosture;
     if (posture) {
       lines.push(
@@ -529,6 +548,21 @@ export function renderExplain(result: ExplainResult): string {
         lines.push(`    sub-goal ${update.id} → ${update.status}` +
           (update.status_note ? ` — ${update.status_note.slice(0, 160)}` : ""));
       }
+      for (const violation of round.report.constraint_violations) {
+        lines.push(`    constraint violation (Agent report): ${violation.slice(0, 160)}`);
+      }
+      for (const discovered of round.report.discovered_constraints) {
+        lines.push(`    discovered constraint (Agent report): ${discovered.slice(0, 160)}`);
+      }
+      for (const emerged of round.report.emerged_subtasks) {
+        lines.push(`    emerged subtask (Agent report): ${emerged.slice(0, 160)}`);
+      }
+    }
+    if (round.resolvedOpenQuestionIds.length > 0) {
+      lines.push(
+        `  resolved open questions (Agent report): ` +
+        round.resolvedOpenQuestionIds.slice(0, 20).join(", "),
+      );
     }
     for (const assumption of round.wrongAssumptions) {
       lines.push(`  wrong assumption (report): ${assumption.slice(0, 160)}`);

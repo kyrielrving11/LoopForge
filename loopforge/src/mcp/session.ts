@@ -29,7 +29,6 @@ import type {
   SubmissionHandle,
   SubmissionReceipt,
 } from "../protocol.js";
-import { NO_IN_FLIGHT_ROUND, deriveRoundFacts } from "../round-facts.js";
 import { loadCommittedHistory } from "../history.js";
 import { buildAudit } from "../audit.js";
 import { buildExplain } from "../explain.js";

@@ -29,6 +29,12 @@ displayed separately everywhere. This is a breaking release with no migration:
   restore marker; replay exposes command statuses, posture, checkpoints and
   `restore_verified`. Git facts use the shared union selector, not the first
   Git delta.
+- `explain` and `replay` now surface the remaining committed Agent-report
+  fields: `stop_reason`, `constraint_violations`, `discovered_constraints` and
+  `emerged_subtasks`, with explicit truncation metadata. Explain text also
+  renders resolved open-question ids, and the state file has a bounded
+  **Agent-Reported Resolutions** section instead of showing resolution only by
+  silently dropping questions from Working Memory.
 
 ### Agent claim vs machine fact
 
@@ -58,7 +64,9 @@ displayed separately everywhere. This is a breaking release with no migration:
   over structure + posture; `criteria.declared` comes from the operator
   objective, `criteria.evidenced` from machine criterion facts. Metrics split
   `agentClaimedSuccessRounds` / `machineBackedSuccessRounds` and add
-  `evidenceStatusCounts`.
+  `evidenceStatusCounts`. `evidenceAvailable` counts only `observed`/`passed`
+  observations; `failed`/`error`/`aborted` results are not availability, even
+  when the provider call itself returned.
 
 ### Working Memory
 
@@ -71,6 +79,10 @@ displayed separately everywhere. This is a breaking release with no migration:
   truncation metadata.
 - Reports use `agentSuccessClaim`/`agentOutcome`; `no_change_reason` and
   `blocker` are carried as Agent reports.
+- The state file keeps the Progress Dashboard. Its rows now label Agent
+  reports (`Tests (Agent report)`, `Agent-reported files`, Agent criteria)
+  separately from machine evidence (verified criteria, observed changes,
+  files reconciliation, machine progress).
 - Corrects the 4.0.2 wording: Working Memory was never a protected section.
   It is the highest-priority optional section and may be dropped whole.
 
@@ -109,8 +121,15 @@ displayed separately everywhere. This is a breaking release with no migration:
 - `PROMPT_ARTIFACT_SCHEMA_VERSION` 9, `ROUND_TRANSACTION_SCHEMA_VERSION` 7,
   `CANONICAL_STATE_SCHEMA_VERSION` 7. `loopforge-protocol.json` and `dist/`
   are regenerated; 4.0.2 documents are legacy, not migrated.
+- The generated schema description no longer claims the removed feedback/review
+  modes or the old type count. `WorkspaceCheckpointManifest.schemaVersion`
+  and the restore preflight use the single `CHECKPOINT_SCHEMA_VERSION`
+  constant. Schema-sync tests pin the artifact/checkpoint versions, required
+  fields, the evidence-posture enum and the open MCP evaluation object.
 - Removed dead `EvidenceSnapshot`, `manual_fixes_needed`, `reasons` prompt
-  input and stale comments.
+  input, the unreferenced committed-round helpers/exports, remaining unused
+  production imports and the duplicate array-path list in field accounting.
+  Array paths now come from the field-guide metadata.
 - `verify:artifacts` now ignores gitignored `dist/tests/` in its clean-build
   comparison, so a fresh clone (which does not contain that directory) can
   verify the published artifacts.

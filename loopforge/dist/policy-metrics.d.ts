@@ -62,7 +62,12 @@ export declare class PolicyMetricsCollector {
     private aggregate;
     private targets;
     recordRound(loopId: string, result: RoundProcessResult, replayed?: boolean): void;
-    recordEvidence(provider: string, outcome: "available" | "unavailable" | "failure" | "timeout", latencyMs: number, loopId?: string): void;
+    recordEvidence(provider: string, outcome: "available" | "unavailable" | "failure" | "timeout", latencyMs: number, loopId?: string,
+    /** v4.0.3: the observation's own status, when the provider returned one.
+     *  `evidenceAvailable` counts ONLY `observed`/`passed`; a failed/error/
+     *  aborted observation is not "available evidence" merely because the
+     *  provider call itself succeeded. */
+    observationStatus?: ObservationStatus): void;
     recordVaultWriteError(reason: string, loopId?: string): void;
     recordStrategy(loopId: string, level?: string): void;
     snapshot(loopId?: string): PolicyMetricsSnapshot;

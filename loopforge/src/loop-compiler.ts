@@ -72,24 +72,19 @@ import {
   criterionRefMatches,
   deriveConstraintId,
   deriveCriterionId,
-  deriveItemId,
-  isCriterionId,
   normalizeText,
   unique,
   uniqueNormalized,
-  entryRound,
 } from "./token-utils.js";
 
 type Entry = Record<string, unknown>;
 
 export interface PreviousRound {
   round: number;
+  /** The goal identity used only to distinguish a goal change from an
+   *  unobservable/empty goal. The other previous-round facts are read from
+   *  `PreviousRoundFacts` (the committed view), never duplicated here. */
   goal_id: string;
-  /** v4.0.3: the Agent's success claim, never a machine verdict. */
-  agentSuccessClaim: boolean;
-  task: string;
-  constraints_active: string[];
-  output_summary: string;
 }
 
 /** ONE bundle of previous-round facts for a compile.
@@ -144,10 +139,6 @@ function previousRoundFromWindow(
   return {
     round,
     goal_id: view.compiled?.goalId ?? "",
-    agentSuccessClaim: view.agentSuccessClaim,
-    task: view.compiled?.task ?? "",
-    constraints_active: [...(view.activeConstraints ?? [])],
-    output_summary: view.evaluation?.output_summary ?? "",
   };
 }
 

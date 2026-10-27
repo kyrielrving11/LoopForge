@@ -12,7 +12,7 @@
  *  losses (some array entries dropped) leave the field retained; their
  *  diagnostics remain visible in the receipt.
  */
-import { FIELD_ORDER } from "./submission-guidance.js";
+import { ARRAY_SELF_EVALUATION_FIELDS, FIELD_ORDER, } from "./submission-guidance.js";
 import { DIAG_ALL_ENTRIES_DROPPED, DIAG_DIAGNOSTICS_TRUNCATED, } from "./submission-diagnostics.js";
 const ARRAY_WHOLE_DROP_CODES = new Set(["not_array", DIAG_ALL_ENTRIES_DROPPED]);
 const ROUND_CONTRACT_WHOLE_DROP_CODES = new Set([
@@ -44,19 +44,7 @@ function wholeDrop(path, diagnostics) {
     if (path === "round_contract") {
         return exact.some((diagnostic) => ROUND_CONTRACT_WHOLE_DROP_CODES.has(diagnostic.code));
     }
-    if (path.endsWith("_claims") ||
-        path === "execution_report.files_changed" ||
-        path === "constraint_violations" ||
-        path === "emerged_subtasks" ||
-        path === "discovered_constraints" ||
-        path === "retracted_constraints" ||
-        path === "wrong_assumptions" ||
-        path === "open_questions" ||
-        path === "resolved_open_question_ids" ||
-        path === "gate_ids" ||
-        path === "retroactiveClaims" ||
-        path === "worker_results" ||
-        path === "subgoal_updates") {
+    if (ARRAY_SELF_EVALUATION_FIELDS.has(path)) {
         return exact.some((diagnostic) => ARRAY_WHOLE_DROP_CODES.has(diagnostic.code));
     }
     return true;

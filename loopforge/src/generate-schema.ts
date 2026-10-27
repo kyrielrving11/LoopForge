@@ -597,8 +597,8 @@ function generateSchema(): void {
     $id: "https://loopforge.dev/loopforge-protocol.json",
     title: "LoopForge Protocol",
     description:
-      "JSON Schema for the LoopForge loop-compile protocol. " +
-      "Defines the wire format for all 3 modes (loop_compile, feedback, review) " +
+      "JSON Schema for the LoopForge loop-compile protocol: request and " +
+      "response envelopes, self-evaluation, committed-round evidence posture, " +
       "and internal types. Language-agnostic — reference implementation in TypeScript.",
     type: "object",
     $defs: defs,

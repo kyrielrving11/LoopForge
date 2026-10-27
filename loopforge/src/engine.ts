@@ -17,7 +17,6 @@ import {
 } from "./protocol.js";
 import { compileLoop } from "./loop-compiler.js";
 import { loadCommittedHistory, type CommittedHistory } from "./history.js";
-import { parseExecutionReport, parseWorkerResults } from "./self-eval.js";
 
 // ── Re-export self-evaluation utilities (moved to self-eval.ts) ──────────
 export {

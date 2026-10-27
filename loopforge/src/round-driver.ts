@@ -17,7 +17,6 @@ import type { BoundaryCapture } from "./git-boundary.js";
 import { writeStateFile } from "./policy.js";
 import { CompileFailureError } from "./errors.js";
 import type {
-  CompiledRoundFacts,
   LoopCompileRequest,
   LoopCompileResponse,
   OperatorAcceptance,

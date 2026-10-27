@@ -29,6 +29,9 @@ export interface FieldGuide {
     /** True when the value is saved as a report but never auto-expands into
      *  derived state (e.g. worker-reported discoveries). */
     reportOnly?: boolean;
+    /** v4.0.3: the persisted value is an array. Field accounting reads this
+     *  flag instead of keeping a second hardcoded path list. */
+    array?: true;
     /** One of the four strict core fields. */
     core?: boolean;
     /** v3.9.2: a compact trigger sentence used only by the prompt checklist. */
@@ -49,6 +52,10 @@ export interface FieldGuide {
 export declare const CORE_SELF_EVALUATION_FIELDS: ReadonlySet<string>;
 export declare const FIELD_ORDER: readonly ["success", "output_summary", "constraint_violations", "should_continue", "execution_report.files_changed", "execution_report.tests_reported", "execution_report.contract_item_claims", "execution_report.criterion_claims", "subgoal_updates", "emerged_subtasks", "discovered_constraints", "wrong_assumptions", "open_questions", "resolved_open_question_ids", "retracted_constraints", "round_contract", "contract_transition", "worker_results", "subtask_boundary", "subtask_boundary_label", "retroactiveClaims", "gate_ids", "outcome", "blocker", "stop_reason", "no_change_reason"];
 export type FieldPath = (typeof FIELD_ORDER)[number];
+/** v4.0.3: array-valued evaluation paths, derived from the SAME field
+ *  metadata the prompt, MCP schema and receipts read. Field accounting uses
+ *  this set instead of a second hardcoded list. */
+export declare const ARRAY_SELF_EVALUATION_FIELDS: ReadonlySet<string>;
 export declare function fieldGuide(path: string): FieldGuide | undefined;
 export declare function fieldGuideDescription(path: string): string;
 export declare function retiredFieldDetail(path: string): string | undefined;

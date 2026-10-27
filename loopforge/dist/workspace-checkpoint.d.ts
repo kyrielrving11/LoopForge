@@ -7,9 +7,10 @@
  * transaction snapshot's `CheckpointRef` is the authority for visibility,
  * ownership and the redo round.
  */
+import { CHECKPOINT_SCHEMA_VERSION } from "./protocol.js";
 import type { CheckpointRef, CheckpointRole, WorkspaceCheckpointManifest } from "./protocol.js";
 import type { BoundaryCapture, BoundaryMaterializer } from "./git-boundary.js";
-export declare const CHECKPOINT_SCHEMA_VERSION: 1;
+export { CHECKPOINT_SCHEMA_VERSION };
 export declare const CHECKPOINT_ID_RE: RegExp;
 export declare const CONTENT_HASH_RE: RegExp;
 /** Module constants, not policy knobs. A checkpoint that exceeds them is

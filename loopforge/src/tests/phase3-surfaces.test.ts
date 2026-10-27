@@ -11,7 +11,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 import { ReplayBackend } from "../replay.js";
-import { buildExplain } from "../explain.js";
+import { buildExplain, renderExplain } from "../explain.js";
 import { buildAudit } from "../audit.js";
 import { derivePolicyMetrics } from "../policy-metrics.js";
 import type { VaultEntry } from "../loop-store.js";
@@ -124,6 +124,11 @@ describe("v4.0.3 — replay surfaces", () => {
       outputSummary: "x".repeat(4200),
       wrongAssumptions: ["old belief"],
       openQuestions: ["still open?"],
+      constraintViolations: ["missed hard constraint"],
+      discoveredConstraints: ["new limit discovered"],
+      emergedSubtasks: ["extra work surfaced"],
+      resolvedOpenQuestionIds: ["oq-0123456789ab"],
+      stopReason: "completed",
       blocker: "needs input",
       noChangeReason: "no code change needed",
       subtaskBoundary: true,
@@ -173,6 +178,7 @@ describe("v4.0.3 — replay surfaces", () => {
       { checkpoint_id: mid.checkpointId, role: "mid", round: 1, content_hash: mid.contentHash },
     ]);
     assert.equal(row.restore_verified, true);
+    assert.equal(row.stop_reason, "completed");
     assert.equal((row.truncation as Record<string, boolean>).output_summary, true);
     const report = row.report as Record<string, unknown>;
     assert.equal(report.no_change_reason, "no code change needed");
@@ -183,6 +189,10 @@ describe("v4.0.3 — replay surfaces", () => {
     assert.deepEqual(report.subgoal_updates, [
       { id: "sg-1", status: "done", status_note: "finished" },
     ]);
+    assert.deepEqual(report.constraint_violations, ["missed hard constraint"]);
+    assert.deepEqual(report.discovered_constraints, ["new limit discovered"]);
+    assert.deepEqual(report.emerged_subtasks, ["extra work surfaced"]);
+    assert.deepEqual(row.resolved_open_question_ids, ["oq-0123456789ab"]);
   });
 
   it("unions every Git provider and reports a head only when all agree", () => {
@@ -239,6 +249,11 @@ describe("v4.0.3 — explain surfaces", () => {
       outputSummary: "done",
       noChangeReason: "docs only",
       subtaskBoundaryLabel: "slice done",
+      constraintViolations: ["did not run docs check"],
+      discoveredConstraints: ["docs must stay offline"],
+      emergedSubtasks: ["add docs fixture"],
+      resolvedOpenQuestionIds: ["oq-0123456789ab"],
+      stopReason: "completed",
       workerResults: [{
         agentId: "w1", subTask: "scan", resultSummary: "ok", outcome: "success",
       }],
@@ -271,6 +286,15 @@ describe("v4.0.3 — explain surfaces", () => {
     assert.deepEqual(round.report?.subgoal_updates, [
       { id: "sg-1", status: "done", status_note: "note" },
     ]);
+    assert.deepEqual(round.report?.constraint_violations, ["did not run docs check"]);
+    assert.deepEqual(round.report?.discovered_constraints, ["docs must stay offline"]);
+    assert.deepEqual(round.report?.emerged_subtasks, ["add docs fixture"]);
+    assert.deepEqual(round.resolvedOpenQuestionIds, ["oq-0123456789ab"]);
+    assert.equal(round.stopReason, "completed");
+    const text = renderExplain(result);
+    assert.match(text, /stop_reason: completed/);
+    assert.match(text, /resolved open questions \(Agent report\): oq-0123456789ab/);
+    assert.match(text, /constraint violation \(Agent report\): did not run docs check/);
   });
 });
 

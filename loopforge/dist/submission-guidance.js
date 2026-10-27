@@ -77,6 +77,7 @@ const GUIDES = [
     },
     {
         path: "constraint_violations",
+        array: true,
         purpose: "Hard constraints actually violated this round.",
         when: "Every round; empty when none were violated.",
         nature: "report",
@@ -97,6 +98,7 @@ const GUIDES = [
     },
     {
         path: "execution_report.files_changed",
+        array: true,
         purpose: "The boundary net change: paths whose content or file type differs between " +
             "round preparation and this submission, including deleted paths.",
         when: "Every round that changed the workspace. A commit alone adds no entry when content is unchanged.",
@@ -120,6 +122,7 @@ const GUIDES = [
     },
     {
         path: "execution_report.contract_item_claims",
+        array: true,
         purpose: "Claims about items of the ACTIVE Round Contract.",
         when: "Only when an active contract is open; cite the rci-XXXXXXXX ids rendered in the prompt.",
         nature: "claim",
@@ -132,6 +135,7 @@ const GUIDES = [
     },
     {
         path: "execution_report.criterion_claims",
+        array: true,
         purpose: "Advisory claims about objective criteria.",
         when: "When you want to state which criteria are met or still remaining.",
         nature: "claim",
@@ -147,6 +151,7 @@ const GUIDES = [
     },
     {
         path: "subgoal_updates",
+        array: true,
         purpose: "Explicit status transitions for existing sub-goals.",
         when: "When an active sg-XXXXXXXX sub-goal starts, is blocked, completes, or is canceled.",
         nature: "transition",
@@ -160,6 +165,7 @@ const GUIDES = [
     },
     {
         path: "emerged_subtasks",
+        array: true,
         purpose: "New execution-plan work that the active criteria/contract do not already cover.",
         when: "Only when new work appears or an existing work item must be split. Zero " +
             "is correct when the current criteria/contract already cover the round.",
@@ -175,6 +181,7 @@ const GUIDES = [
     },
     {
         path: "discovered_constraints",
+        array: true,
         purpose: "New constraints that later rounds must respect.",
         when: "When this round discovered a limit that was not known before.",
         nature: "report",
@@ -190,6 +197,7 @@ const GUIDES = [
     },
     {
         path: "wrong_assumptions",
+        array: true,
         purpose: "Assumptions from earlier rounds that this round falsified.",
         when: "When evidence proved an earlier assumption wrong; omit when none.",
         nature: "report",
@@ -205,6 +213,7 @@ const GUIDES = [
     },
     {
         path: "open_questions",
+        array: true,
         purpose: "Unresolved questions that still affect later slices (a question list, " +
             "not a todo list).",
         when: "Only when a real open question affects how later work should proceed; " +
@@ -224,6 +233,7 @@ const GUIDES = [
     },
     {
         path: "resolved_open_question_ids",
+        array: true,
         purpose: "Open-question ids that this round resolved.",
         when: "When a previously rendered open question is no longer unresolved.",
         nature: "report",
@@ -238,6 +248,7 @@ const GUIDES = [
     },
     {
         path: "retracted_constraints",
+        array: true,
         purpose: "Existing constraints that are no longer correct or relevant.",
         when: "When a prior constraint is proven wrong or obsolete.",
         nature: "report",
@@ -297,6 +308,7 @@ const GUIDES = [
     },
     {
         path: "worker_results",
+        array: true,
         purpose: "Results of sub-agent / worker delegations.",
         when: "Only when work was actually delegated.",
         nature: "report",
@@ -334,6 +346,7 @@ const GUIDES = [
     },
     {
         path: "retroactiveClaims",
+        array: true,
         purpose: "A claim that an earlier round satisfied a criterion.",
         when: "When you can point at an earlier round's evidence.",
         nature: "claim",
@@ -344,6 +357,7 @@ const GUIDES = [
     },
     {
         path: "gate_ids",
+        array: true,
         purpose: "Approved gate ids this round's work depended on.",
         when: "Only when policy.gate.enabled is true and an approval was actually obtained.",
         nature: "control",
@@ -394,6 +408,10 @@ const GUIDES = [
     },
 ];
 const GUIDE_BY_PATH = new Map(GUIDES.map((guide) => [guide.path, guide]));
+/** v4.0.3: array-valued evaluation paths, derived from the SAME field
+ *  metadata the prompt, MCP schema and receipts read. Field accounting uses
+ *  this set instead of a second hardcoded list. */
+export const ARRAY_SELF_EVALUATION_FIELDS = new Set(GUIDES.filter((guide) => guide.array === true).map((guide) => guide.path));
 /** Fields that existed in earlier releases and are now unknown. A diagnostic
  *  for one of these names explains the removal instead of silently dropping. */
 const RETIRED_FIELDS = {
@@ -426,10 +444,6 @@ function firstActiveItem(contract) {
 }
 function firstActiveSubGoal(subGoals) {
     return subGoals.find((item) => item.status !== "done" && item.status !== "canceled") ?? null;
-}
-function clipContractText(text) {
-    const collapsed = (text ?? "").trim().replace(/\s+/g, " ");
-    return collapsed.length > 200 ? collapsed.slice(0, 200) : collapsed;
 }
 /** A legal minimal example for a field, or null when the current facts make the
  *  field unusable (no real id/command to cite). The renderer omits nulls; it

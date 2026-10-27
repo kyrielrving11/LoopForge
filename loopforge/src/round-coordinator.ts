@@ -48,7 +48,6 @@ import {
   validateCheckpointManifest,
 } from "./recovery.js";
 import { driftedEntrypoints } from "./evidence-provider.js";
-import { isRecord } from "./token-utils.js";
 import {
   declaresBlocked,
   effectiveOutcome,

@@ -38,6 +38,7 @@ import {
   formatWorkingMemoryState,
   hasWorkingMemoryContent,
 } from "./working-memory.js";
+import { isOpenQuestionId } from "./open-question.js";
 import {
   MACHINE_EVIDENCE_AUTHORITY,
   formatEvidencePostureLines,
@@ -259,6 +260,10 @@ export interface CanonicalLoopState {
     filesChanged: string[];
     tests: { passed: number; failed: number; skipped: number } | null;
   };
+  /** v4.0.3: stable `oq-` ids the last committed round reported as resolved.
+   *  Agent report — display only; Working Memory removes the matching open
+   *  questions. Bounded at render time. */
+  resolvedOpenQuestionIds?: string[];
   /** v4.0.3: the compile/transport context. Attempt is derived context, not a
    *  committed fact. */
   context?: {
@@ -513,6 +518,7 @@ const STATE_SECTION_TIER: Record<string, StateTier> = {
   // surface; compile warnings are a separate machine/compile surface.
   "Agent-Reported Blockers": "Current",
   "Agent-Reported Remaining Criteria": "Current",
+  "Agent-Reported Resolutions": "Recent",
   "Sub-Goal Dashboard": "Current",
   // v3.8.1: the one-line phase position (the only fact the deleted Roadmap
   // section carried that no other section renders). It is orientation for the
@@ -740,6 +746,22 @@ function flatStateSections(state: CanonicalLoopState): Array<{ title: string; bo
     );
   }
   addList(lines, "Agent-Reported Blockers", state.reportedIssues);
+  if (state.resolvedOpenQuestionIds && state.resolvedOpenQuestionIds.length > 0) {
+    const shown = state.resolvedOpenQuestionIds.slice(0, 6);
+    lines.push(
+      "## Agent-Reported Resolutions", "",
+      `- ${state.resolvedOpenQuestionIds.length} open question(s) resolved in the ` +
+      "last committed round (Agent report):",
+      ...shown.map((id) => `  - \`${id}\``),
+    );
+    if (state.resolvedOpenQuestionIds.length > shown.length) {
+      lines.push(
+        `  - ... and ${state.resolvedOpenQuestionIds.length - shown.length} more ` +
+        "(replay/explain shows every id)",
+      );
+    }
+    lines.push("");
+  }
   const recurring = recurringOnly(state.recurringFlags);
   // v3.8.1: ONE recurring-facts section. "Recurring Issues" (the last 5
   // rounds' raw violations, no threshold) and "Lessons Learned" (the whole
@@ -891,6 +913,13 @@ export function createCanonicalLoopState(
   const committedPosture =
     committed ? derived?.previousRound?.view?.evidencePosture ?? null : null;
   const retryPosture = request.retry_evidence_posture ?? null;
+  // v4.0.3: the Agent's resolved-question report is bounded and rendered as a
+  // separate provenance line; it never silently disappears into Working
+  // Memory's active-set filtering.
+  const resolvedOpenQuestionIds = committed
+    ? unique(last?.resolved_open_question_ids ?? [])
+        .filter(isOpenQuestionId)
+    : [];
 
   // v3.4: The ACTIVE Round Contract (derived — loop-compiler computes it
   // from committed rounds) drives the Current Task — the contract IS "what
@@ -956,6 +985,9 @@ export function createCanonicalLoopState(
       filesChanged: unique(executionReport?.files_changed ?? []),
       tests: executionReport?.tests_reported ?? null,
     },
+    ...(resolvedOpenQuestionIds.length > 0
+      ? { resolvedOpenQuestionIds }
+      : {}),
     ...(derived?.context ? { context: derived.context } : {}),
     // v3.3: Conditional presence — empty/absent derived data must not add
     // keys, or every state hash would change for rounds without it.

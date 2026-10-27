@@ -2,8 +2,8 @@
  *
  * All types exchanged between the Main Agent and LoopForge flow through
  * these interfaces. This is the contract layer — no implementation logic.
- *
- * v3.3: 41 types — 2 enums + 35 interfaces + 4 type aliases.
+ * The generated JSON Schema in `loopforge-protocol.json` is the complete,
+ * machine-readable wire contract; `$defs` is the authoritative type set.
  */
 export declare enum AgentStatus {
     OK = "ok",
@@ -182,11 +182,14 @@ export interface SubmissionHandle {
     roundId: string;
     transactionId: string;
 }
+/** v4.0.3: the checkpoint manifest version. The wire type, the store and the
+ *  restore preflight all read this ONE constant. */
+export declare const CHECKPOINT_SCHEMA_VERSION: 1;
 /** v3.9.7: the restore-relevant content manifest. `fingerprints` is exactly
  *  the Git observation boundary; `contents` names the dirty regular files and
  *  symlinks whose bytes are stored as content-addressed blobs. */
 export interface WorkspaceCheckpointManifest {
-    schemaVersion: 1;
+    schemaVersion: typeof CHECKPOINT_SCHEMA_VERSION;
     checkpointId: string;
     loopId: string;
     round: number;

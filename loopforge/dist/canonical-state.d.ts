@@ -124,6 +124,10 @@ export interface CanonicalLoopState {
             skipped: number;
         } | null;
     };
+    /** v4.0.3: stable `oq-` ids the last committed round reported as resolved.
+     *  Agent report — display only; Working Memory removes the matching open
+     *  questions. Bounded at render time. */
+    resolvedOpenQuestionIds?: string[];
     /** v4.0.3: the compile/transport context. Attempt is derived context, not a
      *  committed fact. */
     context?: {

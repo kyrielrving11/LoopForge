@@ -94,11 +94,17 @@ State: <hash> | Level: L1 | Attempt: 1 | Context: fresh (next_round)
 
 A fresh prompt may render **bounded Working Memory** derived only from the
 current branch's committed rounds and committed rollback directives: the
-latest report, a few earlier reports, falsified assumptions/retractions, open
-questions, consumed recoveries, and contract redirects. Each item is a
-labelled Agent report or committed event, not machine evidence. Its size is
-capped by prompt level and the total prompt budget may omit lower-priority
-memory; it never enters the verification gate.
+latest report, earlier reports in the fixed window, falsified
+assumptions/retractions, open questions, consumed recoveries, and contract
+redirects. Source windows and per-item limits are code constants, not policy.
+L1 and L2 render the same full fixed projection; L0 stays compact. The default
+prompt ceilings are 5,000 / 50,000 / 100,000 characters for L0 / L1 / L2.
+These are safety ceilings, not targets for routine memory omission. Working
+Memory is an indivisible optional section and may be dropped whole when the
+prompt cannot fit it; the prompt artifact records its rendered state and
+source/rendered/omitted counts. Each item is a labelled Agent report or
+committed event, not machine evidence, and it never enters the verification
+gate.
 
 For older history, do not ask the user to restate the task and do not assume
 the prompt remembered it. Use:

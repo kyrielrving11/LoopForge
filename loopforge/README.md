@@ -70,12 +70,16 @@ A fresh prompt carries compact Machine Evidence (the previous committed
 round's evidence posture: workspace/change counts, provider and command
 statuses, contract item statuses, and stable finding ids) plus bounded Working
 Memory compiled from committed reports, assumptions, open questions, consumed
-recoveries, and contract redirects. Machine Evidence is protected; Working
-Memory is optional, indivisible, and may be dropped whole. Both are part of the
-canonical state, never a second history, and never feed a gate. Every Working
-Memory omission has source/rendered/omitted counts and a truncation notice.
-Older history is available through `loopforge_replay` (`start`/`end`; default
-last 10 committed positions, at most 50 in an explicit window) and
+recoveries, and contract redirects. Machine Evidence is protected and informs
+verification. Working Memory is optional, indivisible, and may be dropped whole
+if the prompt budget cannot fit it; the artifact records whether it rendered
+and its source/rendered/omitted counts. L1 and L2 include the same full fixed
+Working Memory projection, while L0 remains compact. The default prompt
+ceilings are 5,000 / 50,000 / 100,000 characters for L0 / L1 / L2. They are
+safety ceilings, not targets for routine memory omission. Working Memory is
+derived from the canonical state, never a second history, and does not feed a
+gate. Older history is available through `loopforge_replay` (`start`/`end`;
+default last 10 committed positions, at most 50 in an explicit window) and
 `loopforge_status view: "explain"`.
 
 The four required evaluation fields are `success`, `output_summary`,

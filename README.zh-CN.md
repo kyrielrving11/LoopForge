@@ -38,7 +38,7 @@ Agent 报告描述它认为发生了什么，但报告本身不是证明。LoopF
 
 每个 prompt 都带有派生出的 context boundary。正常下一轮、第一轮和 recovery redo 都是 `fresh_round`：宿主启动新的 Agent invocation，上一轮 transcript、工具日志和未提交推理不会进入下一轮。fresh context 不是工作区重置；只有 rollback/recovery 才恢复检查点。第一次 enforcement retry（L0）是 `same_round_retry`，继续同一个逻辑轮；连续拒绝后的 L2 rehydrate retry 是 `fresh_round`。
 
-连续性可以由有界 Working Memory 补充：只从当前分支的已提交轮次和已提交 rollback directive 派生，包含近期报告、被证伪假设与撤回、未闭合问题、已消费恢复事件和契约转向。窗口与字符上限是固定代码常量，不是 policy；总 prompt 字符预算不足时会省略低优先级记忆。每次省略都有 source/rendered/omitted 计数，被截断的段落带显式提示。它是唯一 canonical 认知状态的一部分，不是第二套历史或独立 memory store，Agent 报告也不会进入验证 gate。Machine Evidence（provider、command 状态和已验证契约项）是独立的受保护段落，不属于 Working Memory。更早历史通过 `loopforge_replay` 或 `loopforge_status view: "explain"` 主动检索。
+连续性可以由有界 Working Memory 补充。它只从当前分支的已提交轮次和 rollback directive 派生，包含近期报告、被证伪的假设与撤回、未闭合问题、已消费的恢复事件和契约转向。来源窗口与各类条目上限是固定代码常量，不由 policy 配置。L1 和 L2 使用相同的固定窗口，L0 保持紧凑。默认 prompt 字符上限分别为 L0 5,000、L1 50,000、L2 100,000。这些是安全上限，不是日常裁剪记忆的目标。Working Memory 是一个不可拆分的可选段落；提示空间不足时会整体省略，prompt artifact 会记录省略状态和计数。它由唯一 canonical 认知状态派生，不是第二套历史或独立 memory store，Agent 报告也不会进入验证 gate。Machine Evidence（provider、command 状态和已验证契约项）单独作为受保护段落呈现，并参与验证判断。更早历史通过 `loopforge_replay` 或 `loopforge_status view: "explain"` 主动检索。
 
 对于适合有界分片的工作，Agent 可以提出 Round Contract：一个交付物、验收条件，以及用于检查这些条件的命令。LoopForge 校验契约结构和命令绑定。只有 Agent 声明条目满足，且关闭轮次中的绑定命令在声明的 binding 下通过，条目才会标记为已验证。之后命令被 disable 或 reconfigure 不会重写历史通过结论；Agent 自报的测试数量也不会把 criterion claim 升级为 verified。交付物或测试在语义上是否合适，仍由 Agent 和操作者判断。Agent 声明的 `scope` 只是报告用的意图，不是权限；当前分片确实不再合适时，可以用 `contract_transition` 显式改向，旧契约以 `superseded` 关闭并继续保留在审计记录中。
 

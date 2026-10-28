@@ -92,17 +92,25 @@ partial prompt. The delivered prompt equals the compiled `renderedPrompt` on
 every path.
 
 A `fresh_round` prompt may render a bounded **Working Memory** section derived
-from committed history. Its density follows the level (L0 1 recent report / L1
-3 / L2 5, plus capped assumptions, open questions, consumed recoveries and
-contract redirects). Working Memory is optional but INDIVISIBLE: it is dropped
-whole rather than partially rendered, and the artifact records `rendered:false`
-with source counts. Every omission has source/rendered/omitted counts and a
-deterministic abbreviation notice. It declares no normative ids and never
-changes coverage, level, freshness, gates or success. An L0 `same_round_retry`
-renders none; it relies on the rejection notice and the Verification Gate. An
-L2 rehydrate retry is `fresh_round` and may render the previous posture plus the
-rejected attempt's transient, explicitly `not committed` posture. The state file
-always carries the full fixed window.
+from committed history. L1 and L2 render the same full fixed projection: up to
+five reports, eight assumptions, six open questions, three recoveries and
+three contract redirects, with per-item text limits. L0 stays compact (one
+report, two assumptions, two questions, one recovery and one redirect). The
+underlying source window is five committed rounds for reports, assumptions,
+questions and redirects; recovery directives have their own fixed limit. These
+limits are code constants, not policy. The default whole-prompt ceilings are
+5,000 / 50,000 / 100,000 characters for L0 / L1 / L2. They are safety ceilings,
+not routine targets for memory omission.
+
+Working Memory is optional but INDIVISIBLE: if it cannot fit, it is dropped
+whole, and the artifact records `rendered:false` with source counts. Every
+omission has source/rendered/omitted counts and a deterministic abbreviation
+notice. It declares no normative ids and never changes coverage, level,
+freshness, gates or success. An L0 `same_round_retry` renders none; it relies on
+the rejection notice and Verification Gate. An L2 rehydrate retry is
+`fresh_round` and may render the previous posture plus the rejected attempt's
+transient, explicitly `not committed` posture. The state file carries the full
+fixed Working Memory window.
 
 ## Read-only views
 
@@ -141,7 +149,7 @@ Read it when the prompt points to it (current governance + bounded Working
 Memory + diagnostic views), but never treat it as a second source of truth:
 committed typed rounds are authoritative, the file's Agent-reported summaries
 are claims, and a state hash that differs from the prompt header means the file
-is stale — re-align with status or resume.
+is stale. Re-align with status or resume.
 
 ## Gates and delegation
 

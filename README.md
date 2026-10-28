@@ -62,18 +62,21 @@ reset; only rollback/recovery restores a checkpoint. The first enforcement
 retry (L0) is a `same_round_retry` and continues the same logical round; a
 repeated-rejection rehydrate retry (L2) is a `fresh_round`.
 
-Continuity may include a bounded Working Memory derived from the current
-branch's committed rounds and committed rollback directives: recent reports,
-falsified assumptions and retractions, open questions, consumed recoveries and
-contract redirects. Its window and character caps are fixed code constants,
-not policy; the prompt's total character budget can omit lower-priority memory.
-Every omission is counted, and a truncated section carries an explicit
-abbreviation notice. It is part of the one canonical cognitive state, never a
-second history or memory store, and Agent-reported entries never enter a
-verification gate. Machine Evidence (observed providers, command statuses and
-verified contract items) is rendered as a separate protected section, not as
-Working Memory. Older history is retrieved explicitly with `loopforge_replay`
-or `loopforge_status view: "explain"`.
+Continuity may include bounded Working Memory derived from the current branch's
+committed rounds and rollback directives: recent reports, falsified assumptions
+and retractions, open questions, consumed recoveries and contract redirects.
+Its source window and per-item limits are fixed code constants, not policy.
+L1 and L2 render the same full fixed projection; L0 stays compact. The default
+prompt ceilings are 5,000 characters for L0, 50,000 for L1 and 100,000 for L2.
+These are safety ceilings, not targets for routine memory omission. Working
+Memory is one indivisible optional section, so it can be dropped whole if the
+prompt cannot fit it; the prompt artifact records that omission and its counts.
+It is part of the one canonical cognitive state, never a second history or
+memory store, and Agent-reported entries never enter a verification gate.
+Machine Evidence (observed providers, command statuses and verified contract
+items) is a separate protected section and informs verification. Older history
+is retrieved explicitly with `loopforge_replay` or `loopforge_status view:
+\"explain\"`.
 
 For work that benefits from a bounded slice, the agent can propose a Round
 Contract: a deliverable, acceptance conditions, and commands to check them.
@@ -90,7 +93,7 @@ redirected with `contract_transition`; the old contract then closes as
 ## Recovery with the agent in control
 
 The agent may recognize that its current direction is wrong and request
-recovery to a workspace checkpoint — the automatic before-image of a prepared
+recovery to a workspace checkpoint, the automatic before-image of a prepared
 round or an explicit `loopforge_checkpoint` savepoint. LoopForge does not
 diagnose the mistake or choose the destination. It resolves the checkpoint
 through the branch's transaction refs, records the rollback as a durable event,

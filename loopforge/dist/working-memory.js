@@ -58,20 +58,20 @@ export const PROMPT_WORKING_MEMORY_DENSITY = {
         totalChars: 1600,
     },
     l1: {
-        reports: 3,
-        assumptions: 4,
-        openQuestions: 3,
-        recoveries: 2,
-        redirects: 2,
-        totalChars: 3000,
+        reports: WORKING_MEMORY_REPORT_LIMIT,
+        assumptions: WORKING_MEMORY_ASSUMPTION_LIMIT,
+        openQuestions: WORKING_MEMORY_QUESTION_LIMIT,
+        recoveries: WORKING_MEMORY_RECOVERY_LIMIT,
+        redirects: WORKING_MEMORY_REDIRECT_LIMIT,
+        totalChars: Number.POSITIVE_INFINITY,
     },
     l2: {
-        reports: 5,
-        assumptions: 6,
-        openQuestions: 4,
-        recoveries: 3,
-        redirects: 3,
-        totalChars: 4500,
+        reports: WORKING_MEMORY_REPORT_LIMIT,
+        assumptions: WORKING_MEMORY_ASSUMPTION_LIMIT,
+        openQuestions: WORKING_MEMORY_QUESTION_LIMIT,
+        recoveries: WORKING_MEMORY_RECOVERY_LIMIT,
+        redirects: WORKING_MEMORY_REDIRECT_LIMIT,
+        totalChars: Number.POSITIVE_INFINITY,
     },
 };
 /** The state file keeps the full fixed window; it has no prompt budget. */
@@ -85,7 +85,7 @@ export const STATE_WORKING_MEMORY_DENSITY = {
 };
 /** v4.0.3: the ONE deterministic truncation notice for the prompt. It counts
  *  toward the body budget, so it can never push the section over its ceiling. */
-export const WORKING_MEMORY_ABBREVIATED_NOTICE = "> Working Memory is abbreviated; omitted committed reports/questions are " +
+export const WORKING_MEMORY_ABBREVIATED_NOTICE = "> Working Memory is abbreviated; omitted committed memory is " +
     "available through replay/explain (and the state file when enabled).";
 // ═══════════════════════════════════════════════════════════════════════════
 // Text normalization
@@ -132,6 +132,7 @@ function reportMemory(view) {
     const noChangeReason = view.evaluation?.no_change_reason?.trim();
     const blocker = view.evaluation?.blocker?.trim();
     return {
+        roundId: view.roundId,
         round: view.round,
         attempt: view.attempt,
         agentSuccessClaim: view.agentSuccessClaim,
@@ -317,11 +318,14 @@ function reportHeader(report, newest) {
     const outcome = report.agentOutcome ? `, agent_outcome=${report.agentOutcome}` : "";
     if (newest) {
         return `**Previous Round Report (Agent report) — R${report.round}** ` +
-            `(agent_success_claim=${report.agentSuccessClaim}${outcome}, attempt ${report.attempt})`;
+            `(source=agent_report; ref=${report.roundId}; ` +
+            `agent_success_claim=${report.agentSuccessClaim}${outcome}, attempt ${report.attempt})`;
     }
     return report.outputSummary
-        ? `- R${report.round} (agent_success_claim=${report.agentSuccessClaim}${outcome}):`
-        : `- R${report.round} (agent_success_claim=${report.agentSuccessClaim}${outcome}): ` +
+        ? `- R${report.round} (agent_success_claim=${report.agentSuccessClaim}${outcome}; ` +
+            `source=agent_report; ref=${report.roundId}):`
+        : `- R${report.round} (agent_success_claim=${report.agentSuccessClaim}${outcome}; ` +
+            `source=agent_report; ref=${report.roundId}): ` +
             "(no output_summary recorded)";
 }
 function renderReportBlock(report, newest) {
@@ -457,6 +461,15 @@ function formatWorkingMemory(memory, profile, surface) {
         return null;
     let anyTruncated = false;
     const source = memory.sourceCounts ?? emptySourceCounts();
+    // The derivation applies fixed source caps before this renderer sees the
+    // arrays. Preserve that omission in the prompt projection even when the
+    // current profile can render the complete bounded arrays.
+    anyTruncated =
+        source.reports > memory.reports.length ||
+            source.assumptions > memory.assumptions.length ||
+            source.openQuestions > memory.openQuestions.length ||
+            source.recoveries > memory.recoveries.length ||
+            source.redirects > memory.redirects.length;
     const reportLimit = Math.max(0, profile.reports);
     const latest = memory.reports[0] ?? null;
     let previous = null;

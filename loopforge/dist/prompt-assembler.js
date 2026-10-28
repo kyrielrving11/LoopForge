@@ -20,8 +20,10 @@ import { LOST_HANDLE_ROUTING } from "./recovery-guidance.js";
 import { assertPromptCoverage, derivePromptCoverage, } from "./prompt-coverage.js";
 export const DEFAULT_PROMPT_BUDGETS = {
     l0: 5000,
-    l1: 10000,
-    l2: 18000,
+    // L1/L2 start a fresh Agent context and carry a bounded projection. These
+    // are high safety ceilings, not targets for routine memory omission.
+    l1: 50000,
+    l2: 100000,
 };
 function section(title, body) {
     return body.trim() ? `### ${title}\n${body.trim()}\n\n` : "";

@@ -18,9 +18,7 @@ function defaults(overrides: Partial<PromptLevelInput> = {}): PromptLevelInput {
     checkpointBoundary: false,
     goalChanged: false,
     previousStateMissing: false,
-    previousRoundFailed: false,
-    previousRoundObservableNewInformation: null,
-    verificationContradicted: false,
+    previousRound: null,
     ...overrides,
   };
 }
@@ -74,8 +72,12 @@ describe("decidePromptLevel", () => {
 
   it("returns L0 only when the failed previous round is provably stale", () => {
     const d = decidePromptLevel(defaults({
-      previousRoundFailed: true,
-      previousRoundObservableNewInformation: false,
+      previousRound: {
+        agentOutcome: "failed",
+        evidencePosture: "insufficient",
+        observableNewInformation: false,
+        hasVerificationError: false,
+      },
       round: 2,
     }));
     assert.equal(d.level, "l0");
@@ -84,8 +86,12 @@ describe("decidePromptLevel", () => {
 
   it("keeps L1 when the failed previous round has observable new information", () => {
     const d = decidePromptLevel(defaults({
-      previousRoundFailed: true,
-      previousRoundObservableNewInformation: true,
+      previousRound: {
+        agentOutcome: "failed",
+        evidencePosture: "insufficient",
+        observableNewInformation: true,
+        hasVerificationError: false,
+      },
       round: 2,
     }));
     assert.equal(d.level, "l1");
@@ -94,16 +100,78 @@ describe("decidePromptLevel", () => {
 
   it("keeps L1 when the failed previous round's activity is unknown", () => {
     const d = decidePromptLevel(defaults({
-      previousRoundFailed: true,
-      previousRoundObservableNewInformation: null,
+      previousRound: {
+        agentOutcome: "failed",
+        evidencePosture: "unknown",
+        observableNewInformation: null,
+        hasVerificationError: false,
+      },
       round: 2,
     }));
     assert.equal(d.level, "l1");
     assert.ok(d.reasons.includes("state_capsule"));
   });
 
+  it("never downgrades an unknown evidence posture to L0", () => {
+    const d = decidePromptLevel(defaults({
+      round: 2,
+      previousRound: {
+        agentOutcome: "failed",
+        evidencePosture: "unknown",
+        observableNewInformation: false,
+        hasVerificationError: false,
+      },
+    }));
+    assert.equal(d.level, "l1");
+  });
+
+  it("does not treat a missing posture as proof of a stale round", () => {
+    const d = decidePromptLevel(defaults({
+      round: 2,
+      previousRound: {
+        agentOutcome: "failed",
+        evidencePosture: null,
+        observableNewInformation: false,
+        hasVerificationError: false,
+      },
+    }));
+    assert.equal(d.level, "l1");
+  });
+
+  it("uses Agent outcome and machine posture as separate prompt facts", () => {
+    const partialButVerified = decidePromptLevel(defaults({
+      round: 2,
+      previousRound: {
+        agentOutcome: "partial",
+        evidencePosture: "verified",
+        observableNewInformation: true,
+        hasVerificationError: false,
+      },
+    }));
+    assert.equal(partialButVerified.level, "l1");
+
+    const successWithInsufficientEvidence = decidePromptLevel(defaults({
+      round: 2,
+      previousRound: {
+        agentOutcome: "success",
+        evidencePosture: "insufficient",
+        observableNewInformation: false,
+        hasVerificationError: false,
+      },
+    }));
+    assert.equal(successWithInsufficientEvidence.level, "l1");
+  });
+
   it("returns L2 for verification_contradicted", () => {
-    const d = decidePromptLevel(defaults({ verificationContradicted: true, round: 2 }));
+    const d = decidePromptLevel(defaults({
+      round: 2,
+      previousRound: {
+        agentOutcome: "success",
+        evidencePosture: "contradicted",
+        observableNewInformation: true,
+        hasVerificationError: false,
+      },
+    }));
     assert.equal(d.level, "l2");
     assert.ok(d.reasons.includes("verification_contradicted"));
   });

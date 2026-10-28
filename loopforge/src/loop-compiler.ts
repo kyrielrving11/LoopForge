@@ -534,16 +534,19 @@ function levelDecision(
     goalChanged: prior !== null && prior.goal_id !== "" &&
       prior.goal_id !== deriveGoalId(request.loop_id, request.task, request.goal_id),
     previousStateMissing: request.round > 1 && prior === null,
-    // v4.0.3: partial/blocked/failed all count as "not a success"; only an
-    // explicit success outcome avoids the failure-triggered rehydration.
-    previousRoundFailed: previous.view
-      ? previous.view.agentOutcome !== "success"
-      : previous.result?.agentOutcome !== "success",
-    previousRoundObservableNewInformation: previous.view
-      ? previous.freshness.observableNewInformation
+    // v4.0.4: prompt density consumes one explicit previous-round bundle.
+    // Agent outcome remains semantic input; posture/finding facts remain
+    // machine input. The policy owns the combination so callers cannot drift.
+    previousRound: previous.view
+      ? {
+          agentOutcome: previous.view.agentOutcome,
+          evidencePosture: previous.view.evidencePosture?.status ?? null,
+          observableNewInformation: previous.freshness.observableNewInformation,
+          hasVerificationError: previous.verificationFlags.some(
+            (flag) => flag.severity === "error",
+          ),
+        }
       : null,
-    verificationContradicted: previous.verificationFlags
-      .some((flag) => flag.severity === "error"),
     consecutiveRejections: request.consecutive_rejections,
   });
 }

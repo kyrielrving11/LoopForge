@@ -21,6 +21,8 @@ import type { CommittedHistory } from "./history.js";
 import type { PromptLevel } from "./prompt-policy.js";
 import type { PromptWorkingMemoryProjection, RoundOutcome, WorkingMemorySourceCounts } from "./protocol.js";
 export interface CommittedReportMemory {
+    /** Stable identity of the committed report's source round. */
+    roundId: string;
     round: number;
     attempt: number;
     /** The Agent's claim, never a machine verdict. */

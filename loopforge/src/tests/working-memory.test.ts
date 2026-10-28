@@ -71,6 +71,7 @@ function minimalState(workingMemory?: WorkingMemory) {
 function populatedMemory(): WorkingMemory {
   return {
     reports: Array.from({ length: 5 }, (_, index) => ({
+      roundId: `loop:populated:round:${5 - index}`,
       round: 5 - index,
       attempt: 1,
       agentSuccessClaim: true,
@@ -341,23 +342,33 @@ describe("Working Memory sanitization and determinism", () => {
 });
 
 describe("Working Memory prompt density and protection", () => {
-  it("applies the level density table and its total character ceiling", () => {
+  it("renders the full bounded projection for fresh levels and keeps L0 dense", () => {
     const memory = populatedMemory();
     for (const level of ["l0", "l1", "l2"] as const) {
       const rendered = formatWorkingMemoryPrompt(memory, level);
       assert.ok(rendered);
       const density = PROMPT_WORKING_MEMORY_DENSITY[level];
-      assert.deepEqual(rendered.projection.counts, {
-        reports: density.reports,
-        assumptions: density.assumptions,
-        openQuestions: density.openQuestions,
-        recoveries: density.recoveries,
-        redirects: density.redirects,
-      });
-      assert.ok(rendered.body.length <= density.totalChars,
-        `${level} body ${rendered.body.length} <= ${density.totalChars}`);
-      // L2 fits the populated set exactly; L0/L1 omit entries by density.
-      assert.equal(rendered.projection.truncated, level !== "l2");
+      for (const key of [
+        "reports", "assumptions", "openQuestions", "recoveries", "redirects",
+      ] as const) {
+        assert.ok(rendered.projection.counts[key] <= density[key]);
+      }
+      if (level !== "l0") {
+        assert.deepEqual(rendered.projection.counts, {
+          reports: memory.reports.length,
+          assumptions: memory.assumptions.length,
+          openQuestions: memory.openQuestions.length,
+          recoveries: memory.recoveries.length,
+          redirects: memory.redirects.length,
+        });
+      }
+      if (Number.isFinite(density.totalChars)) {
+        assert.ok(rendered.body.length <= density.totalChars,
+          `${level} body ${rendered.body.length} <= ${density.totalChars}`);
+      }
+      // Fresh L1/L2 contexts receive the complete fixed working-memory window;
+      // L0 remains the intentionally compact same-round retry view.
+      assert.equal(rendered.projection.truncated, level === "l0");
       assert.equal(rendered.projection.renderedChars, rendered.body.length);
     }
   });
@@ -367,6 +378,7 @@ describe("Working Memory prompt density and protection", () => {
       `line ${index} ${"x".repeat(100)}`).join("\n");
     const memory: WorkingMemory = {
       reports: [{
+        roundId: "loop:sanitize:round:1",
         round: 1,
         attempt: 1,
         agentSuccessClaim: false,
@@ -385,6 +397,8 @@ describe("Working Memory prompt density and protection", () => {
     };
     const rendered = formatWorkingMemoryPrompt(memory, "l0");
     assert.ok(rendered);
+    assert.match(rendered.body, /source=agent_report/);
+    assert.match(rendered.body, /ref=loop:sanitize:round:1/);
     assert.ok(rendered.projection.previousReport?.truncated);
     assert.ok((rendered.projection.previousReport?.renderedChars ?? 0) <=
       WORKING_MEMORY_TEXT_LIMITS.latestReport);
@@ -395,6 +409,7 @@ describe("Working Memory prompt density and protection", () => {
     const long = "x".repeat(1300);
     const memory: WorkingMemory = {
       reports: [{
+        roundId: "loop:report:round:1",
         round: 1,
         attempt: 1,
         agentSuccessClaim: false,

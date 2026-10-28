@@ -12,8 +12,8 @@
   },
   "prompt": {
     "l0_max_chars": 5000,
-    "l1_max_chars": 10000,
-    "l2_max_chars": 18000
+    "l1_max_chars": 50000,
+    "l2_max_chars": 100000
   },
   "backend": {
     "root_dir": ".loopforge"

@@ -241,6 +241,7 @@ describe("createCanonicalLoopState", () => {
       previousRound: { result: previous, verificationFlags: [], committed: true },
       workingMemory: {
         reports: [{
+          roundId: "loop:test:round:1",
           round: 1,
           attempt: 1,
           agentSuccessClaim: false,
@@ -288,6 +289,7 @@ describe("createCanonicalLoopState", () => {
     }), "test.md", {
       workingMemory: {
         reports: [{
+          roundId: "loop:test:round:1",
           round: 1, attempt: 1, agentSuccessClaim: true, agentOutcome: "success",
           outputSummary: "done", sourceChars: 4,
         }],

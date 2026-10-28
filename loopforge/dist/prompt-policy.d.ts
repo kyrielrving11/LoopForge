@@ -3,6 +3,7 @@
  * Levels describe how much canonical state is rendered. They do not select a
  * reasoning technique; the external Agent owns its reasoning strategy.
  */
+import type { EvidencePosture, RoundOutcome } from "./protocol.js";
 export type PromptLevel = "l0" | "l1" | "l2";
 export type PromptLevelReason = "explicit_override" | "first_round" | "plan_boundary" | "checkpoint_boundary" | "goal_changed" | "missing_previous_state" | "verification_contradicted" | "same_round_retry" | "failed_without_observable_new_information" | "rejection_rehydrate" | "recovery_boundary" | "state_capsule";
 export interface PromptLevelInput {
@@ -13,11 +14,14 @@ export interface PromptLevelInput {
     checkpointBoundary: boolean;
     goalChanged: boolean;
     previousStateMissing: boolean;
-    previousRoundFailed: boolean;
-    /** null = the previous round's activity could not be observed. Unknown is
-     *  NOT evidence of absence and must never downgrade to L0. */
-    previousRoundObservableNewInformation: boolean | null;
-    verificationContradicted: boolean;
+    /** Facts from the previous committed round, interpreted here once for the
+     *  prompt density decision. A null posture/outcome means unavailable. */
+    previousRound: {
+        agentOutcome: RoundOutcome | null;
+        evidencePosture: EvidencePosture["status"] | null;
+        observableNewInformation: boolean | null;
+        hasVerificationError: boolean;
+    } | null;
     consecutiveRejections?: number;
     recoveryBoundary?: boolean;
 }

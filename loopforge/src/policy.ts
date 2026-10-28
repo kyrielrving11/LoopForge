@@ -137,8 +137,10 @@ export const DEFAULT_POLICY: LoopPolicy = {
   engine: { stall_lookback_rounds: 3, max_rounds: 200, enforcement_escalation_enabled: true, agent_recovery_enabled: true, backtrack_enabled: true, backtrack_max_depth: 3, backtrack_preserve_discoveries: true, unverified_claim_streak_limit: 3 },
   prompt: {
     l0_max_chars: 5000,
-    l1_max_chars: 10000,
-    l2_max_chars: 18000,
+    // Fresh L1/L2 contexts receive the complete bounded projection. These
+    // remain safety ceilings for the host, not routine memory budgets.
+    l1_max_chars: 50000,
+    l2_max_chars: 100000,
   },
   backend: { root_dir: ".loopforge" },
   evolution: {

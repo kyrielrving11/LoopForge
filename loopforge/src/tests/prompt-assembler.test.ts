@@ -26,6 +26,7 @@ import * as verificationGate from "../verification-gate.js";
 function memory(overrides: Partial<WorkingMemory> = {}): WorkingMemory {
   return {
     reports: [{
+      roundId: "loop:test-loop:round:1",
       round: 1,
       attempt: 1,
       agentSuccessClaim: true,
@@ -125,6 +126,19 @@ describe("assemblePromptArtifact — L0", () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("assemblePromptArtifact — L1", () => {
+  it("uses a high safety ceiling so fresh prompts do not drop ordinary context", () => {
+    assert.equal(DEFAULT_PROMPT_BUDGETS.l1, 50000);
+    assert.equal(DEFAULT_PROMPT_BUDGETS.l2, 100000);
+    const warning = "w".repeat(22000);
+    const artifact = assemblePromptArtifact(input({
+      level: "l1",
+      state: minimalState({ warnings: [warning] }),
+    }));
+    assert.ok(artifact.renderedPrompt.includes(warning));
+    assert.equal(artifact.droppedSections.length, 0);
+    assert.equal(artifact.protectedOverflow, false);
+  });
+
   it("includes mandatory sections", () => {
     const artifact = assemblePromptArtifact(input({ level: "l1" }));
     assert.ok(artifact.renderedPrompt.includes("Objective"));
@@ -303,6 +317,7 @@ describe("assemblePromptArtifact — memory boundary", () => {
       state: minimalState({
         workingMemory: memory({
           reports: [{
+            roundId: "loop:test-loop:round:1",
             round: 1, attempt: 1, agentSuccessClaim: false, agentOutcome: "partial",
             outputSummary: "Corrected assumption: old belief", sourceChars: 35,
           }],

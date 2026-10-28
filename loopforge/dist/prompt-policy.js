@@ -3,6 +3,17 @@
  * Levels describe how much canonical state is rendered. They do not select a
  * reasoning technique; the external Agent owns its reasoning strategy.
  */
+function previousRoundIsContradicted(previous) {
+    return previous?.hasVerificationError === true ||
+        previous?.evidencePosture === "contradicted";
+}
+function previousRoundIsProvablyStale(previous) {
+    return previous !== null &&
+        previous.agentOutcome !== "success" &&
+        previous.evidencePosture !== null &&
+        previous.evidencePosture !== "unknown" &&
+        previous.observableNewInformation === false;
+}
 export function decidePromptLevel(input) {
     if ((input.consecutiveRejections ?? 0) >= 2) {
         return { level: "l2", reasons: ["rejection_rehydrate"] };
@@ -13,7 +24,7 @@ export function decidePromptLevel(input) {
     if ((input.attempt ?? 1) > 1) {
         return { level: "l0", reasons: ["same_round_retry"] };
     }
-    if (input.verificationContradicted) {
+    if (previousRoundIsContradicted(input.previousRound)) {
         return { level: "l2", reasons: ["verification_contradicted"] };
     }
     if (input.round === 1)
@@ -36,8 +47,7 @@ export function decidePromptLevel(input) {
     if (input.previousStateMissing) {
         return { level: "l2", reasons: ["missing_previous_state"] };
     }
-    if (input.previousRoundFailed &&
-        input.previousRoundObservableNewInformation === false) {
+    if (previousRoundIsProvablyStale(input.previousRound)) {
         return {
             level: "l0",
             reasons: ["failed_without_observable_new_information"],

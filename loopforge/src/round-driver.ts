@@ -28,6 +28,7 @@ import type { CommittedHistory } from "./history.js";
 import {
   prepareRejectedAttempt,
   prepareRoundTransaction,
+  rebindHeldPrompt,
   RoundTransactionCoordinator,
 } from "./round-transaction.js";
 import type {
@@ -180,12 +181,17 @@ export class RoundDriver {
   }
 
   /** Compile a fresh prompt for a zero-commit enforcement retry. The logical
-   * round ID and before-evidence snapshot remain stable; only attempt changes. */
+   * round ID and before-evidence snapshot remain stable; only attempt changes.
+   *
+   * v4.0.5: `invocationRecovery` marks the cold-handoff case. It only applies
+   * below the escalation threshold — an escalated retry is already clean
+   * context and keeps `rejection_escalation`. */
   async prepareRetry(
     request: LoopCompileRequest,
     rejected: RoundTransactionSnapshot,
     rejectionNotice: string,
     consecutiveRejections: number,
+    opts: { invocationRecovery?: boolean } = {},
   ): Promise<PreparedRound> {
     const retryRequest = {
       ...request,
@@ -195,6 +201,12 @@ export class RoundDriver {
       rejection_notice: rejectionNotice,
       // v4.0.3: `force_level` was never consulted for attempt > 1 — the level
       // policy derives L0 (first retry) / L2 (repeated rejection) from facts.
+      ...(opts.invocationRecovery && consecutiveRejections < 2
+        ? { invocation_recovery: true }
+        : {}),
+      // v4.0.5: a rejected retry of a verified redo keeps the restore fact, so
+      // the Recovery Brief can still state it was machine-verified.
+      ...(rejected.restore ? { restore_verified: true } : {}),
     } as LoopCompileRequest;
     const response = this.compile(
       retryRequest,
@@ -230,6 +242,70 @@ export class RoundDriver {
       artifact,
       level: artifact.level,
       evidenceBaseline: rejected.beforeEvidence,
+      snapshot,
+      stateFileContent: response.state_file_content,
+      warnings: response.warnings,
+      compileResponse: response,
+    };
+  }
+
+  /** v4.0.5: recompile the HELD retry prompt for the SAME logical round and
+   * attempt. This is not a new attempt, a recovery or a round advance: it
+   * compiles only, never collects before/after evidence, never writes a Vault
+   * round and never changes attempt/round.
+   *
+   * Any held prompt keeps its context boundary. If the held artifact is
+   * already `invocation_recovery`, the flag is re-applied even when this call
+   * carries only a new instruction, so a cold-context prompt can never fall
+   * back to `same_round_retry`. */
+  async recompileHeld(
+    request: LoopCompileRequest,
+    held: RoundTransactionSnapshot,
+  ): Promise<PreparedRound> {
+    if (held.phase !== "prompted" || !held.promptArtifact) {
+      throw new CompileFailureError("no held prompt exists to recompile");
+    }
+    const preserveInvocationRecovery =
+      held.promptArtifact.contextReason === "invocation_recovery";
+    const compileRequest = {
+      ...request,
+      round: held.round,
+      attempt: held.attempt,
+      consecutive_rejections: request.consecutive_rejections,
+      rejection_notice:
+        request.rejection_notice || held.retryContext?.rejectionNotice || "",
+      ...(preserveInvocationRecovery || request.invocation_recovery === true
+        ? { invocation_recovery: true }
+        : {}),
+      ...(held.restore ? { restore_verified: true } : {}),
+    } as LoopCompileRequest;
+    const response = this.compile(
+      compileRequest,
+      held.loopId,
+      held.operatorAcceptance,
+    );
+    if (!response.prompt_artifact) {
+      throw new CompileFailureError("the recompile produced no prompt artifact");
+    }
+    const artifact: PromptArtifact = response.prompt_artifact;
+    const compiled = response.compiled;
+    const operatorAcceptance = response.operatorAcceptance;
+    if (!compiled || !operatorAcceptance) {
+      throw new CompileFailureError(
+        "the recompile produced no compile facts or operator acceptance",
+      );
+    }
+    const snapshot = rebindHeldPrompt(
+      held,
+      artifact,
+      compiled,
+      operatorAcceptance,
+    );
+    return {
+      prompt: response.prompt!,
+      artifact,
+      level: artifact.level,
+      evidenceBaseline: held.beforeEvidence,
       snapshot,
       stateFileContent: response.state_file_content,
       warnings: response.warnings,

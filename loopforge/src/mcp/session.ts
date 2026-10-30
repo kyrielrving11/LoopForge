@@ -77,6 +77,7 @@ import {
   MANUAL_STOP_REASON,
   RoundLifecycle,
   buildLoopRequest,
+  normalizeInvocationInputs,
   normalizeStartCriteria,
 } from "./round-lifecycle.js";
 import type {
@@ -84,6 +85,8 @@ import type {
   McpSessionSummary,
   StartInput,
   AdvanceResult,
+  InvocationInputs,
+  ResumeInputs,
   SessionRegistry,
 } from "./round-lifecycle.js";
 import {
@@ -362,6 +365,13 @@ export class SessionManager implements SessionRegistry {
     });
     request.plan_source = input.planSource ?? null;
     request.constraints_from_plan = input.constraints ?? [];
+    // v4.0.5: the start task IS the initial invocation instruction. The
+    // prompt de-duplicates it against Current Task/Objective, but the round-1
+    // artifact records it. Later invocations only receive an instruction the
+    // host supplies explicitly.
+    if (input.task.trim()) {
+      request.current_user_instruction = input.task.trim();
+    }
     request.loop_objective = makeLoopObjective({
       objective: operatorAcceptance.task,
       success_criteria: [...operatorAcceptance.success_criteria],
@@ -585,7 +595,12 @@ export class SessionManager implements SessionRegistry {
    *  Reconstructs the session and compiles the prompt for the next round
    *  (async — compilation collects evidence through RoundDriver.prepare).
    *  Returns null if no session_state entry exists for this loopId. */
-  async resume(loopId: string): Promise<AdvanceResult | null> {
+  async resume(
+    loopId: string,
+    inputs?: ResumeInputs,
+  ): Promise<AdvanceResult | null> {
+    // v4.0.5: validate invocation input before any state is read or saved.
+    const normalizedInputs = normalizeInvocationInputs(inputs);
     const persistedEntry = this.findSessionEntry(loopId);
     if (!persistedEntry) return null;
     const persistedLineage = (persistedEntry.loop_lineage ?? {}) as Record<string, unknown>;
@@ -619,18 +634,37 @@ export class SessionManager implements SessionRegistry {
       return this.lifecycle.stoppedLoopResult(loopId, currentRound);
     }
 
+    // v4.0.5: the queue only serializes work if it runs against the ONE live
+    // object. If this process still holds a running/stalled session for the
+    // same identity, prefer it over a document reconstructed from a possibly
+    // pre-commit save; replacing it here would let an in-flight advance and
+    // this resume operate on two different snapshots.
+    const live = this.sessions.get(session.sessionId);
+    const target = live && live.loopId === loopId &&
+        (live.status === "running" || live.status === "stalled")
+      ? live
+      : session;
     // Resume is a recovery attempt: set running so the lease is renewed while
     // the (possibly long) restore executes. A failure saves stalled again.
-    if (session.status === "stalled") session.status = "running";
-    this.sessions.set(session.sessionId, session);
+    if (target.status === "stalled") target.status = "running";
+    if (target !== live) this.sessions.set(target.sessionId, target);
 
-    return this.lifecycle.resume(session);
+    // Serialize with any in-process advance holding this session's queue, so
+    // a recompile cannot race an in-flight held-handle submission.
+    return this.withSessionQueue(
+      target.sessionId,
+      () => this.lifecycle.resume(target, normalizedInputs),
+    );
   }
 
   /** v1.18: Resume a paused session. Reconstructs from vault state and
    *  compiles the next prompt. Returns null if no paused session exists
    *  for this loopId. */
-  async unpause(loopId: string): Promise<AdvanceResult | null> {
+  async unpause(
+    loopId: string,
+    inputs?: ResumeInputs,
+  ): Promise<AdvanceResult | null> {
+    const normalizedInputs = normalizeInvocationInputs(inputs);
     const persistedEntry = this.findSessionEntry(loopId);
     if (!persistedEntry) return null;
 
@@ -643,11 +677,20 @@ export class SessionManager implements SessionRegistry {
     const session = this.lifecycle.reconstructSession(sessionEntry, true);
     if (!session) return null;
 
-    // Set to running so advance() works
-    session.status = "running";
-    this.sessions.set(session.sessionId, session);
+    // v4.0.5: keep the ONE live object when this process already holds it,
+    // for the same queue-visibility reason as resume().
+    const live = this.sessions.get(session.sessionId);
+    const target = live && live.loopId === loopId && live.status !== "stopped"
+      ? live
+      : session;
+    // Set to running so advance() works.
+    target.status = "running";
+    if (target !== live) this.sessions.set(target.sessionId, target);
 
-    return this.lifecycle.unpause(session);
+    return this.withSessionQueue(
+      target.sessionId,
+      () => this.lifecycle.unpause(target, normalizedInputs),
+    );
   }
 
   /** Auto-resume all "running" sessions from vault on server startup.
@@ -1300,7 +1343,9 @@ export class SessionManager implements SessionRegistry {
     handle: unknown,
     output: string,
     submission?: unknown,
+    inputs?: InvocationInputs,
   ): Promise<AdvanceResult> {
+    const normalizedInputs = normalizeInvocationInputs(inputs);
     const parsed = parseSubmissionHandle(handle);
     if (!parsed) return this.handleRequiredResult();
     const session = this.sessions.get(parsed.sessionId);
@@ -1358,6 +1403,7 @@ export class SessionManager implements SessionRegistry {
           boundary.evaluation,
           boundary.diagnostics,
           boundary.submittedFields,
+          normalizedInputs,
         );
       } catch (error) {
         if (error instanceof SessionLeaseConflictError) {
@@ -1368,10 +1414,75 @@ export class SessionManager implements SessionRegistry {
     });
   }
 
+  /** v4.0.5: recompile the held prompt for a new host-provided instruction.
+   *  This does NOT submit an evaluation or advance the round: the exact held
+   *  handle is required, and the same round/attempt/context boundary is
+   *  preserved. The handle is re-checked inside the queue before the lease is
+   *  renewed, so a stale handle has zero side effects. */
+  async recompileHeld(
+    handle: unknown,
+    instruction: string,
+  ): Promise<AdvanceResult> {
+    const normalizedInputs = normalizeInvocationInputs({
+      currentUserInstruction: instruction,
+    });
+    const parsed = parseSubmissionHandle(handle);
+    if (!parsed) return this.handleRequiredResult();
+    const session = this.sessions.get(parsed.sessionId);
+    if (!session) return this.sessionNotFoundResult(parsed.sessionId);
+    if (session.status !== "running" && session.status !== "stalled") {
+      return this.sessionStateResult(session);
+    }
+    const pending = this.restorePendingResult(session);
+    if (pending) return pending;
+    const check = validateSubmissionHandle(parsed, session);
+    if (!check.ok) return this.handleMismatchResult(check, session);
+
+    return this.withSessionQueue(session.sessionId, async () => {
+      const current = this.sessions.get(session.sessionId);
+      if (!current) return this.sessionNotFoundResult(session.sessionId);
+      if (current.status !== "running" && current.status !== "stalled") {
+        return this.sessionStateResult(current);
+      }
+      const pendingInside = this.restorePendingResult(current);
+      if (pendingInside) return pendingInside;
+      const inside = validateSubmissionHandle(parsed, current);
+      if (!inside.ok) return this.handleMismatchResult(inside, current);
+      if (
+        current.status === "running" &&
+        !this.renewSessionLease(current.loopId)
+      ) {
+        return this.leaseConflictResult(
+          current.loopId,
+          this.findSessionEntry(current.loopId),
+        );
+      }
+      try {
+        return await this.lifecycle.recompileHeldWithInstruction(
+          current,
+          normalizedInputs!.currentUserInstruction!,
+        );
+      } catch (error) {
+        if (error instanceof SessionLeaseConflictError) {
+          return this.leaseConflictResult(
+            error.loopId,
+            this.findSessionEntry(error.loopId),
+          );
+        }
+        throw error;
+      }
+    });
+  }
+
   /** v3.9.7: submit an Agent-initiated recovery. v4.0.0: the handle is the
    *  only anchor; shape and target visibility are checked before the
    *  queue/lease, and the exact handle is re-checked before lease renewal. */
-  async recover(handle: unknown, recovery: unknown): Promise<AdvanceResult> {
+  async recover(
+    handle: unknown,
+    recovery: unknown,
+    inputs?: InvocationInputs,
+  ): Promise<AdvanceResult> {
+    const normalizedInputs = normalizeInvocationInputs(inputs);
     const parsed = parseSubmissionHandle(handle);
     if (!parsed) return this.handleRequiredResult();
     const session = this.sessions.get(parsed.sessionId);
@@ -1471,7 +1582,11 @@ export class SessionManager implements SessionRegistry {
         );
       }
       try {
-        return await this.lifecycle.recover(current.sessionId, validatedRecovery);
+        return await this.lifecycle.recover(
+          current.sessionId,
+          validatedRecovery,
+          normalizedInputs,
+        );
       } catch (error) {
         if (error instanceof SessionLeaseConflictError) {
           return this.leaseConflictResult(error.loopId, this.findSessionEntry(error.loopId));

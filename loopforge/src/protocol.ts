@@ -522,6 +522,9 @@ export interface SubmissionReceipt {
      *  artifact exists (terminal/rejected-without-retry paths). */
     context_mode?: PromptContextMode;
     context_reason?: PromptContextReason;
+    /** v4.0.5: the host instruction this prompt carried, projected from the
+     *  same artifact. null means none was provided for that invocation. */
+    current_user_instruction?: string | null;
   } | null;
   diagnostics: SubmissionDiagnostic[];
 }
@@ -900,8 +903,24 @@ export interface LoopCompileRequest {
   /** The CURRENT user/operator task text for this compile. It is not the
    *  immutable `LoopObjective.objective`; the prompt renders the objective
    *  separately, and the Agent's `Current Task` comes from the active Round
-   *  Contract's `work_item` when one exists. */
+   *  Contract's `work_item` when one exists.
+   *
+   *  v4.0.5: this is the LOOP's task. It participates in goal identity,
+   *  density and state hashing. The latest host-provided user input for this
+   *  invocation is `current_user_instruction`, which never changes `task`. */
   task: string;
+  /** v4.0.5: the host's explicit user instruction for THIS invocation,
+   *  already trimmed by the transport boundary. It is invocation input, not
+   *  loop identity: it never rewrites `task`, the objective, criteria, hard
+   *  constraints, the Round Contract or goal identity. It projects into
+   *  `CanonicalLoopState.currentUserInstruction` and the prompt/artifact; it
+   *  is not evaluation input, not Working Memory and not a gate fact. */
+  current_user_instruction?: string;
+  /** v4.0.5: set only by the held-attempt recompile path when the host
+   *  declares the original invocation is gone (`invocationLost`). It selects
+   *  `fresh_invocation / invocation_recovery` and L2 density for the SAME
+   *  logical round/attempt. Not an Agent evaluation, not machine evidence. */
+  invocation_recovery?: boolean;
   loop_objective: LoopObjective | null;
   plan_source: string | null;
   constraints_from_plan: string[];
@@ -1002,9 +1021,11 @@ export interface PromptCoverage {
  *  `same_round_retry` means IN-CONTEXT REPAIR: a retry below the repeated
  *  rejection escalation threshold. Prompt density is independent: an L0/L1/L2
  *  prompt can continue the original invocation when it is still alive. The
- *  host injects the rejection notice and Verification Gate findings; if the
- *  invocation is gone it starts a new one from the self-contained prompt,
- *  without changing round/attempt semantics.
+ *  host injects the rejection notice and Verification Gate findings. If the
+ *  invocation is gone, the host must call
+ *  `loopforge_resume(loopId, invocationLost: true)`: LoopForge recompiles the
+ *  SAME logical round and attempt as `fresh_invocation / invocation_recovery`
+ *  instead of reusing this in-context prompt.
  *
  *  `rejection_escalation` means the same enforcement check has been rejected
  *  repeatedly. The host starts a new invocation to break a potentially
@@ -1012,6 +1033,10 @@ export interface PromptCoverage {
  *  modified workspace continue. The rejected posture is an observation of
  *  that attempt, not a snapshot of the current workspace; inspect the current
  *  workspace before acting.
+ *
+ *  `invocation_recovery` means the host declared the original invocation
+ *  lost. It is a clean context for the SAME logical round/attempt, compiled
+ *  from the held retry facts; the host never starts a new round or attempt.
  *
  *  The value is DERIVED by the compiler from compile inputs and committed
  *  facts. It is never submitted by the Agent and never re-derived by the MCP
@@ -1022,13 +1047,46 @@ export type PromptContextMode = "fresh_invocation" | "same_round_retry";
  *  it does not replace the contextStrategy label (`clean context`,
  *  `in-context repair`, `clean context after restore`, `clean context
  *  repair`). Repeated same-check rejection escalation has its own reason,
- *  including when the current round is a recovered redo with a Recovery Brief. */
+ *  including when the current round is a recovered redo with a Recovery Brief.
+ *  `invocation_recovery` is the cold-context replacement of an in-context
+ *  retry whose invocation disappeared. */
 export type PromptContextReason =
   | "first_round"
   | "next_round"
   | "recovery_redo"
   | "enforcement_retry"
-  | "rejection_escalation";
+  | "rejection_escalation"
+  | "invocation_recovery";
+
+/** v4.0.5: the ONE runtime whitelist for context modes. The types above stay
+ *  explicit string unions (the schema generator reads them); these arrays are
+ *  the runtime legality boundary shared by the transaction decoder,
+ *  committed-history validation and the MCP output schema. */
+export const PROMPT_CONTEXT_MODES = [
+  "fresh_invocation",
+  "same_round_retry",
+] as const satisfies readonly PromptContextMode[];
+
+/** v4.0.5: the ONE runtime whitelist for context reasons. See
+ *  `PROMPT_CONTEXT_MODES`. */
+export const PROMPT_CONTEXT_REASONS = [
+  "first_round",
+  "next_round",
+  "recovery_redo",
+  "enforcement_retry",
+  "rejection_escalation",
+  "invocation_recovery",
+] as const satisfies readonly PromptContextReason[];
+
+export function isPromptContextMode(value: unknown): value is PromptContextMode {
+  return (PROMPT_CONTEXT_MODES as readonly unknown[]).includes(value);
+}
+
+export function isPromptContextReason(
+  value: unknown,
+): value is PromptContextReason {
+  return (PROMPT_CONTEXT_REASONS as readonly unknown[]).includes(value);
+}
 
 /** v4.0.3: how many committed items existed BEFORE any cap/dedupe. It is
  *  derived once by Working Memory and travels through canonical state (and
@@ -1099,9 +1157,14 @@ export interface PromptWorkingMemoryProjection {
  *  Machine Evidence projection is rendered INTO the prompt text, not carried as
  *  a separate artifact field; the committed posture lives on the transaction
  *  result. v4.0.4: schema 10 renames the clean-context `contextMode` value to
- *  `fresh_invocation`. Older versions are a HARD break — a round whose
- *  artifact does not parse is not committed history, and
- *  `legacyTransactionRounds` reports the loss rather than letting it vanish. */
+ *  `fresh_invocation`. v4.0.5: schema 11 is ADDITIVELY extended — it adds the
+ *  optional `currentUserInstruction` fact and the legal
+ *  `invocation_recovery` reason. No required field was removed or renamed, so
+ *  every 4.0.4 artifact still decodes; the shared decoder whitelists
+ *  (`PROMPT_CONTEXT_MODES` / `PROMPT_CONTEXT_REASONS`) are the only legality
+ *  boundary. Older versions are a HARD break — a round whose artifact does
+ *  not parse is not committed history, and `legacyTransactionRounds` reports
+ *  the loss rather than letting it vanish. */
 export const PROMPT_ARTIFACT_SCHEMA_VERSION = 11 as const;
 
 export interface PromptArtifact {
@@ -1145,6 +1208,13 @@ export interface PromptArtifact {
    *  Audit metadata; it is not a second history and is never an input to a
    *  later prompt. */
   workingMemory?: PromptWorkingMemoryProjection;
+  /** v4.0.5: the trimmed host-provided user instruction THIS prompt carried,
+   *  even when prompt de-duplication rendered no separate section. It is an
+   *  audit fact about the invocation, not committed governance: it never
+   *  becomes an objective/criterion/constraint/contract, never enters
+   *  `CompiledRoundFacts`, Working Memory or a gate, and read views project it
+   *  from here instead of keeping a second copy. */
+  currentUserInstruction?: string;
 }
 
 export interface LoopCompileResponse {

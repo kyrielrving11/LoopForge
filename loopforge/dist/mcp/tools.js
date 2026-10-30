@@ -5,7 +5,8 @@
  * status is the unified inspection tool (view=session|loop|all|audit|explain).
  * Each handler receives SessionManager + parsed input, returns the output object.
  */
-import { MANUAL_STOP_REASON, StartCriteriaError, } from "./round-lifecycle.js";
+import { InvocationInputError, MANUAL_STOP_REASON, StartCriteriaError, } from "./round-lifecycle.js";
+import { PROMPT_CONTEXT_REASONS } from "../protocol.js";
 import { ProjectionCoverageError } from "../prompt-coverage.js";
 import { LegacyHistoryError, LoopExistsError, OperatorAcceptanceConflictError, StartFailureError, } from "../errors.js";
 import { validateCoreSelfEvaluation } from "../self-eval.js";
@@ -112,7 +113,7 @@ const TOOL_BASE_SCHEMAS = [
     },
     {
         name: "loopforge_next",
-        description: "Submit one evaluation for the held attempt. Returns the next prompt (with its derived contextMode/contextReason and a strategy label), or null with stopReason/stopDetail when the loop ends. The submission may be accepted, rejected (same logical round, attempt+1, new handle), replayed, or answered with a rollback directive. A structured evaluation is required; output is optional supporting context.",
+        description: "Submit one evaluation for the held attempt. Returns the next prompt (with its derived contextMode/contextReason and a strategy label), or null with stopReason/stopDetail when the loop ends. The submission may be accepted, rejected (same logical round, attempt+1, new handle), replayed, or answered with a rollback directive. A structured evaluation is required unless currentUserInstruction is the only argument: then the held prompt is recompiled for that instruction without submitting or advancing. If the held prompt is same_round_retry and the original invocation is gone, do NOT use next — call loopforge_resume(loopId, invocationLost: true) so LoopForge recompiles the same round/attempt as a cold-context prompt.",
         inputSchema: {
             type: "object",
             properties: {
@@ -120,6 +121,16 @@ const TOOL_BASE_SCHEMAS = [
                 output: {
                     type: "string",
                     description: "Optional. The agent's full output from executing the current round's prompt. The structured evaluation is the authoritative report.",
+                },
+                currentUserInstruction: {
+                    type: "string",
+                    description: "v4.0.5: the host's current user instruction for this invocation, " +
+                        "trimmed and non-empty. It is invocation input, not a task update: " +
+                        "it never rewrites session.task, the Objective, Success Criteria, " +
+                        "hard constraints or the Round Contract. With evaluation/recovery " +
+                        "it is carried into the retry/redo/next prompt compiled after the " +
+                        "submission; with only the handle it recompiles the held prompt " +
+                        "without submitting or advancing the round.",
                 },
                 recovery: {
                     type: "object",
@@ -560,13 +571,36 @@ const TOOL_BASE_SCHEMAS = [
             "submissionHandle, or a newly compiled prompt when none is held. A " +
             "terminal loop returns no prompt, the committed stopReason when one was " +
             "committed, and/or sessionStatus (paused/stopped/stalled); a stopped " +
-            "loop without a committed stop round reports sessionStatus only.",
+            "loop without a committed stop round reports sessionStatus only. " +
+            "v4.0.5: pass invocationLost=true when the original in-context retry " +
+            "invocation no longer exists; LoopForge recompiles the SAME logical " +
+            "round and attempt as a cold-context invocation_recovery prompt. " +
+            "currentUserInstruction carries the host's current instruction into " +
+            "that recompile or redelivery.",
         inputSchema: {
             type: "object",
             properties: {
                 loopId: {
                     type: "string",
                     description: "Loop ID to resume. Must have a saved session_state entry from a previous start/run.",
+                },
+                invocationLost: {
+                    type: "boolean",
+                    description: "v4.0.5: set true when the invocation that received the held " +
+                        "same_round_retry prompt is gone. A held retry is then recompiled " +
+                        "as fresh_invocation / invocation_recovery for the SAME round and " +
+                        "attempt (L2, with Machine Evidence, Working Memory and rejection " +
+                        "lessons). On an already clean-context prompt this is an " +
+                        "idempotent no-op.",
+                },
+                currentUserInstruction: {
+                    type: "string",
+                    description: "v4.0.5: the host's current user instruction, trimmed and " +
+                        "non-empty. It is invocation input only; it never rewrites " +
+                        "session.task, the Objective, criteria, constraints or the Round " +
+                        "Contract. An instruction identical (trimmed, case-sensitive) to " +
+                        "the held prompt's is idempotent; a different one recompiles the " +
+                        "same round/attempt with a new handle.",
                 },
             },
             required: ["loopId"],
@@ -695,7 +729,9 @@ const ADVANCE_OUTPUT_SCHEMA = {
                 "Projected from the PromptArtifact.",
         },
         contextReason: {
-            enum: ["first_round", "next_round", "recovery_redo", "enforcement_retry", "rejection_escalation"],
+            // v4.0.5: the ONE runtime whitelist; a new reason cannot drift between
+            // the protocol, the decoder and this output schema.
+            enum: [...PROMPT_CONTEXT_REASONS],
             description: "v4.0.2: why the context boundary was selected.",
         },
         agentSuccessClaim: { type: ["boolean", "null"] },
@@ -1249,6 +1285,7 @@ export const TOOL_HANDLERS = {
         const rawEval = input.evaluation;
         const rawRecovery = input.recovery;
         const handle = input.submissionHandle;
+        const rawInstruction = input.currentUserInstruction;
         if (rawRecovery !== undefined && rawEval !== undefined) {
             return {
                 error: "recovery_invalid",
@@ -1259,13 +1296,31 @@ export const TOOL_HANDLERS = {
         // shape, resolves the session, checks the exact held attempt, then runs
         // the payload boundary — all before its queue/lease heartbeat. This
         // handler only maps the refusal onto the tool envelope.
+        // v4.0.5: handle + instruction alone is the instruction-recompile mode:
+        // no submission and no round/attempt advance.
         let result;
         try {
-            result = rawRecovery !== undefined
-                ? await mgr.recover(handle, rawRecovery)
-                : await mgr.advance(handle, output, rawEval);
+            if (rawRecovery !== undefined) {
+                result = await mgr.recover(handle, rawRecovery, rawInstruction !== undefined
+                    ? { currentUserInstruction: String(rawInstruction) }
+                    : undefined);
+            }
+            else if (rawEval !== undefined) {
+                result = await mgr.advance(handle, output, rawEval, rawInstruction !== undefined
+                    ? { currentUserInstruction: String(rawInstruction) }
+                    : undefined);
+            }
+            else if (rawInstruction !== undefined) {
+                result = await mgr.recompileHeld(handle, String(rawInstruction));
+            }
+            else {
+                result = await mgr.advance(handle, output, rawEval);
+            }
         }
         catch (error) {
+            if (error instanceof InvocationInputError) {
+                return { error: "invalid_argument", errorMessage: error.message };
+            }
             const projectionFailure = projectionErrorResult(error);
             if (projectionFailure)
                 return projectionFailure;
@@ -1618,16 +1673,33 @@ export const TOOL_HANDLERS = {
                 errorMessage: `invalid loopId: ${error.message}`,
             };
         }
+        const inputs = {
+            ...(input.invocationLost === true ? { invocationLost: true } : {}),
+            ...(input.currentUserInstruction !== undefined
+                ? { currentUserInstruction: String(input.currentUserInstruction) }
+                : {}),
+        };
         // Paused recovery must run first so the persisted status is atomically
         // changed back to running before a prompt is returned.
         let result;
         try {
-            result = await mgr.unpause(loopId);
+            result = await mgr.unpause(loopId, inputs);
             if (!result) {
-                result = await mgr.resume(loopId);
+                result = await mgr.resume(loopId, inputs);
             }
         }
         catch (error) {
+            if (error instanceof InvocationInputError) {
+                return { error: "invalid_argument", errorMessage: error.message };
+            }
+            if (error instanceof SessionLeaseConflictError) {
+                return {
+                    error: "lease_conflict",
+                    errorMessage: `loop "${error.loopId}" is owned by another running LoopForge process`,
+                    details: { reason_code: "lease_conflict" },
+                    loopId,
+                };
+            }
             const projectionFailure = projectionErrorResult(error);
             if (projectionFailure)
                 return projectionFailure;

@@ -372,7 +372,7 @@ describe("state-file tiering (v3.7.1)", () => {
     const idxHistorical = md.indexOf("## Historical Summary");
     assert.ok(idxCurrent >= 0 && idxRecent > idxCurrent && idxHistorical > idxRecent,
       "tiers must render in order: Current → Recent → Historical Summary");
-    assert.ok(md.includes("**Schema**: 8"), "state schema marker");
+    assert.ok(md.includes("**Schema**: 9"), "state schema marker");
     assert.ok(md.includes("**Derived**: true"), "derived marker in the header");
     assert.ok(md.includes("**Source**: round 2 (attempt 2)"), "attempt marker");
     assert.ok(md.includes("**Authority**: committed typed rounds"));

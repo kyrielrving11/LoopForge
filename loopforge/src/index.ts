@@ -160,6 +160,11 @@ export type { StopReason } from "./protocol.js";
 export { McpServer } from "./mcp/server.js";
 export { SessionManager } from "./mcp/session.js";
 export type { McpSession, McpSessionSummary } from "./mcp/session.js";
+export type {
+  InvocationInputs,
+  ResumeInputs,
+  StartInput,
+} from "./mcp/round-lifecycle.js";
 // EvidenceProvider (v1.18 / v3.8: machine observations)
 export {
   EvidenceCollector,

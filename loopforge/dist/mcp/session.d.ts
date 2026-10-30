@@ -20,7 +20,7 @@ import type { LoopStore } from "../loop-store.js";
 import { FileWorkspaceCheckpointStore } from "../workspace-checkpoint.js";
 import type { PolicyMetricsSnapshot } from "../policy-metrics.js";
 import type { SessionStateStore } from "../storage.js";
-import type { McpSession, McpSessionSummary, StartInput, AdvanceResult, SessionRegistry } from "./round-lifecycle.js";
+import type { McpSession, McpSessionSummary, StartInput, AdvanceResult, InvocationInputs, ResumeInputs, SessionRegistry } from "./round-lifecycle.js";
 export type { McpSession, McpSessionSummary, StartInput, AdvanceResult, } from "./round-lifecycle.js";
 export declare class SessionManager implements SessionRegistry {
     private sessions;
@@ -92,11 +92,11 @@ export declare class SessionManager implements SessionRegistry {
      *  Reconstructs the session and compiles the prompt for the next round
      *  (async — compilation collects evidence through RoundDriver.prepare).
      *  Returns null if no session_state entry exists for this loopId. */
-    resume(loopId: string): Promise<AdvanceResult | null>;
+    resume(loopId: string, inputs?: ResumeInputs): Promise<AdvanceResult | null>;
     /** v1.18: Resume a paused session. Reconstructs from vault state and
      *  compiles the next prompt. Returns null if no paused session exists
      *  for this loopId. */
-    unpause(loopId: string): Promise<AdvanceResult | null>;
+    unpause(loopId: string, inputs?: ResumeInputs): Promise<AdvanceResult | null>;
     /** Auto-resume all "running" sessions from vault on server startup.
      *  Scans vault for session_state entries, reconstructs each as an in-memory
      *  McpSession (without compiling — the next loopforge_next will do that).
@@ -181,11 +181,17 @@ export declare class SessionManager implements SessionRegistry {
      *  checked before the payload boundary and before the queue/lease heartbeat.
      *  `submission` is the RAW evaluation payload. The whole payload boundary
      *  still runs here, so every public caller gets the same strictness. */
-    advance(handle: unknown, output: string, submission?: unknown): Promise<AdvanceResult>;
+    advance(handle: unknown, output: string, submission?: unknown, inputs?: InvocationInputs): Promise<AdvanceResult>;
+    /** v4.0.5: recompile the held prompt for a new host-provided instruction.
+     *  This does NOT submit an evaluation or advance the round: the exact held
+     *  handle is required, and the same round/attempt/context boundary is
+     *  preserved. The handle is re-checked inside the queue before the lease is
+     *  renewed, so a stale handle has zero side effects. */
+    recompileHeld(handle: unknown, instruction: string): Promise<AdvanceResult>;
     /** v3.9.7: submit an Agent-initiated recovery. v4.0.0: the handle is the
      *  only anchor; shape and target visibility are checked before the
      *  queue/lease, and the exact handle is re-checked before lease renewal. */
-    recover(handle: unknown, recovery: unknown): Promise<AdvanceResult>;
+    recover(handle: unknown, recovery: unknown, inputs?: InvocationInputs): Promise<AdvanceResult>;
     private recoveryDisabledResult;
     /** v3.9.7: Agent-created mid-round savepoint. v4.0.0: handle identity is
      *  checked before the queue and again before lease renewal; capture/save

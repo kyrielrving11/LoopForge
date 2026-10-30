@@ -35,6 +35,7 @@ export type { StopReason } from "./protocol.js";
 export { McpServer } from "./mcp/server.js";
 export { SessionManager } from "./mcp/session.js";
 export type { McpSession, McpSessionSummary } from "./mcp/session.js";
+export type { InvocationInputs, ResumeInputs, StartInput, } from "./mcp/round-lifecycle.js";
 export { EvidenceCollector, GitEvidenceProvider, CommandEvidenceProvider, registerEvidenceProvider, unregisterEvidenceProvider, isProviderRegistered, isPassedAfterObservation, deriveObservationDeltas, gitDeltaState, observationVersionIssue, expectedObservationSchemaVersion, coverageKey, } from "./evidence-provider.js";
 export type { EvidenceProvider, EvidenceCaptureContext, EvidenceCaptureResult, EvidenceCollectOptions, EvidenceProviderFactory, ObservationDelta, ObservationProgress, ObservationVersionIssue, GitDeltaState, } from "./evidence-provider.js";
 export { deriveProgressWindow, deriveRoundProgress, GIT_WORKSPACE_COVERAGE, } from "./progress.js";

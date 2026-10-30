@@ -395,6 +395,10 @@ export function deriveSubmissionReceipt(input: ReceiptInput): SubmissionReceipt 
           // v4.0.2: the SAME artifact fact the next prompt was compiled with.
           context_mode: input.nextArtifact.contextMode,
           context_reason: input.nextArtifact.contextReason,
+          // v4.0.5: host input this prompt carried, projected from the same
+          // artifact; live and committed receipts share this source.
+          current_user_instruction:
+            input.nextArtifact.currentUserInstruction ?? null,
         }
       : null,
     diagnostics: input.diagnostics,

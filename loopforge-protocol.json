@@ -1414,6 +1414,12 @@
                 },
                 "context_reason": {
                   "$ref": "#/$defs/PromptContextReason"
+                },
+                "current_user_instruction": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 }
               },
               "required": [
@@ -2270,6 +2276,12 @@
         "task": {
           "type": "string"
         },
+        "current_user_instruction": {
+          "type": "string"
+        },
+        "invocation_recovery": {
+          "type": "boolean"
+        },
         "loop_objective": {
           "anyOf": [
             {
@@ -2449,7 +2461,8 @@
         "next_round",
         "recovery_redo",
         "enforcement_retry",
-        "rejection_escalation"
+        "rejection_escalation",
+        "invocation_recovery"
       ]
     },
     "WorkingMemorySourceCounts": {
@@ -2693,6 +2706,9 @@
         },
         "workingMemory": {
           "$ref": "#/$defs/PromptWorkingMemoryProjection"
+        },
+        "currentUserInstruction": {
+          "type": "string"
         }
       },
       "required": [

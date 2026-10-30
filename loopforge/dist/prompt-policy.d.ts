@@ -5,7 +5,7 @@
  */
 import type { EvidencePosture, RoundOutcome } from "./protocol.js";
 export type PromptLevel = "l0" | "l1" | "l2";
-export type PromptLevelReason = "explicit_override" | "first_round" | "plan_boundary" | "subtask_boundary" | "goal_changed" | "missing_previous_state" | "verification_contradicted" | "same_round_retry" | "failed_without_observable_new_information" | "rejection_rehydrate" | "recovery_boundary" | "state_capsule";
+export type PromptLevelReason = "explicit_override" | "first_round" | "plan_boundary" | "subtask_boundary" | "goal_changed" | "missing_previous_state" | "verification_contradicted" | "same_round_retry" | "failed_without_observable_new_information" | "rejection_rehydrate" | "recovery_boundary" | "invocation_recovery" | "state_capsule";
 export interface PromptLevelInput {
     round: number;
     attempt?: number;
@@ -24,6 +24,9 @@ export interface PromptLevelInput {
     } | null;
     consecutiveRejections?: number;
     recoveryBoundary?: boolean;
+    /** v4.0.5: a held retry recompiled because the original invocation is gone.
+     *  A cold handoff has no transcript to rely on, so it rehydrates at L2. */
+    invocationRecovery?: boolean;
 }
 export interface PromptLevelDecision {
     level: PromptLevel;

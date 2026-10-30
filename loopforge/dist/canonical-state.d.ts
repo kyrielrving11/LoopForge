@@ -12,10 +12,18 @@ import type { WorkingMemory } from "./working-memory.js";
 /** v4.0.3: schema 7 adds the previous/retry evidence posture, explicitly split
  *  reported progress/issues/warnings, compile context and Working Memory
  *  source counts. v4.0.4: schema 8 records the renamed context vocabulary
- *  (`fresh_invocation`) in the derived declaration and stateHash. The state
+ *  (`fresh_invocation`) in the derived declaration and stateHash. v4.0.5:
+ *  schema 9 adds the optional `currentUserInstruction` projection. The state
  *  file is regenerated every round; an older file is a stale view, not a
  *  legacy document to decode. */
-export declare const CANONICAL_STATE_SCHEMA_VERSION: 8;
+export declare const CANONICAL_STATE_SCHEMA_VERSION: 9;
+/** v4.0.5: the ONE wording for "the host supplied no instruction". Prompt and
+ *  state file both render it; neither infers an instruction from the old task
+ *  or transcript. */
+export declare const CURRENT_USER_INSTRUCTION_NOT_PROVIDED = "not provided for this invocation (the Objective and Current Task remain operative).";
+/** v4.0.5: the protected section's fixed authority note. The instruction is
+ *  invocation input; it never edits the loop's objective or acceptance. */
+export declare const CURRENT_USER_INSTRUCTION_AUTHORITY: string;
 /** v3.7.1: Presentation view of sub-goals shared by prompts and the state
  *  file (one derivation, no second copy). Only ACTIVE items render as rows
  *  — pending/in_progress/blocked — ordered blocked → in_progress → pending
@@ -76,6 +84,11 @@ export interface CanonicalLoopState {
     goalId: string;
     objective: string;
     currentTask: string;
+    /** v4.0.5: the trimmed host-provided user instruction for this invocation.
+     *  Conditional presence keeps state hashes unchanged when none was given.
+     *  It is invocation input, never loop identity: it does not rewrite the
+     *  objective, criteria, constraints, contract or goal. */
+    currentUserInstruction?: string;
     successCriteria: string[];
     hardConstraints: string[];
     activeConstraints: string[];

@@ -18,6 +18,12 @@ export function decidePromptLevel(input) {
     if ((input.consecutiveRejections ?? 0) >= 2) {
         return { level: "l2", reasons: ["rejection_rehydrate"] };
     }
+    // v4.0.5: the original invocation is gone, so the prompt itself must carry
+    // the rehydration a live in-context retry could rely on its transcript for.
+    // This is the existing L2 boundary semantics, not a new policy.
+    if (input.invocationRecovery) {
+        return { level: "l2", reasons: ["invocation_recovery"] };
+    }
     if (input.recoveryBoundary) {
         return { level: "l2", reasons: ["recovery_boundary"] };
     }

@@ -371,6 +371,9 @@ function levelDecision(request, prior, previous) {
             }
             : null,
         consecutiveRejections: request.consecutive_rejections,
+        // v4.0.5: a cold handoff rehydrates at L2; the escalation threshold above
+        // still wins because that retry is already clean context.
+        invocationRecovery: request.invocation_recovery === true,
     });
 }
 export function decideLevel(request, context) {
@@ -570,6 +573,7 @@ export function compileLoop(request, context, options = {}, committedHistory) {
         consecutiveRejections: request.consecutive_rejections,
         recoveryBoundary: previous.recoveryBoundary,
         hasPreviousCommittedRound: previous.view !== null,
+        invocationRecovery: request.invocation_recovery === true,
     });
     const response = makeLoopCompileResponse({
         status: AgentStatus.OK,

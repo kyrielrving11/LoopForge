@@ -6,7 +6,7 @@
  */
 import { observationVersionIssue } from "./evidence-provider.js";
 import { promptContextPairIssue } from "./context-boundary.js";
-import { PROMPT_ARTIFACT_SCHEMA_VERSION, makeLoopRoundResult, } from "./protocol.js";
+import { PROMPT_ARTIFACT_SCHEMA_VERSION, isPromptContextMode, isPromptContextReason, makeLoopRoundResult, } from "./protocol.js";
 import { ROUND_TRANSACTION_SCHEMA_VERSION, deriveRoundObservationDelta, isProcessResult, parseRoundTransactionSnapshot, rootBranchId, transactionSchemaVersionOf, } from "./round-transaction.js";
 import { effectiveOutcome, parseContractTransition, parseRoundContract, } from "./self-eval.js";
 import { entryRound, isRecord } from "./token-utils.js";
@@ -413,14 +413,16 @@ export function legacyTransactionRounds(entries) {
                 out.push({ round, schemaVersion: artifactVersion, envelope: "prompt_artifact" });
                 continue;
             }
+            // v4.0.5: the same runtime whitelists the decoder uses. A malformed
+            // optional invocation instruction is a legacy artifact, not accepted
+            // silently.
+            const validInstruction = artifact.currentUserInstruction === undefined ||
+                (typeof artifact.currentUserInstruction === "string" &&
+                    artifact.currentUserInstruction.trim().length > 0);
             const validContextFields = (artifact.level === "l0" || artifact.level === "l1" || artifact.level === "l2") &&
-                (artifact.contextMode === "fresh_invocation" ||
-                    artifact.contextMode === "same_round_retry") &&
-                (artifact.contextReason === "first_round" ||
-                    artifact.contextReason === "next_round" ||
-                    artifact.contextReason === "recovery_redo" ||
-                    artifact.contextReason === "enforcement_retry" ||
-                    artifact.contextReason === "rejection_escalation") &&
+                isPromptContextMode(artifact.contextMode) &&
+                isPromptContextReason(artifact.contextReason) &&
+                validInstruction &&
                 typeof artifact.attempt === "number" &&
                 typeof artifact.round === "number";
             const contextIssue = validContextFields

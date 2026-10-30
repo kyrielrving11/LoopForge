@@ -77,6 +77,12 @@ selection rules and the context boundary live in the prompt's `## Round Boundary
 context-strategy label, and the MCP server instructions; this reference does not
 restate them.
 
+The optional `currentUserInstruction` on `loopforge_next` / `loopforge_resume`
+is invocation input: it is rendered in the prompt and recorded in that prompt's
+artifact, and never rewrites the task, Objective, criteria, constraints or
+Round Contract. Omitting it means the prompt says "not provided"; never infer
+it from the old task or transcript.
+
 Every level renders the same protected normative set: active criteria, every
 active constraint, the active contract and all its items, every active sub-goal
 id, every current verification finding, and the committed recovery brief. A
@@ -107,7 +113,11 @@ freshness, gates or success. A `same_round_retry` renders neither Working Memory
 nor Machine Evidence at any density; it relies on the rejection notice and
 Verification Gate. A `fresh_invocation` retry with `rejection_escalation` may
 render the previous posture plus the rejected attempt's transient, explicitly
-`not committed` posture. The state
+`not committed` posture. A `fresh_invocation` / `invocation_recovery` prompt is
+the cold replacement of a lost in-context retry for the SAME round/attempt:
+`loopforge_resume(loopId, invocationLost: true)` recompiles it at L2 with the
+rejection notice, findings, previous Machine Evidence, bounded Working Memory
+and the rejected attempt's posture. The state
 file carries the full fixed Working Memory window.
 
 ## Read-only views

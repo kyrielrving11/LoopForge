@@ -15,10 +15,20 @@ import { formatContextBoundaryLabel } from "./round-guidance.js";
 /** v4.0.3: schema 7 adds the previous/retry evidence posture, explicitly split
  *  reported progress/issues/warnings, compile context and Working Memory
  *  source counts. v4.0.4: schema 8 records the renamed context vocabulary
- *  (`fresh_invocation`) in the derived declaration and stateHash. The state
+ *  (`fresh_invocation`) in the derived declaration and stateHash. v4.0.5:
+ *  schema 9 adds the optional `currentUserInstruction` projection. The state
  *  file is regenerated every round; an older file is a stale view, not a
  *  legacy document to decode. */
-export const CANONICAL_STATE_SCHEMA_VERSION = 8;
+export const CANONICAL_STATE_SCHEMA_VERSION = 9;
+/** v4.0.5: the ONE wording for "the host supplied no instruction". Prompt and
+ *  state file both render it; neither infers an instruction from the old task
+ *  or transcript. */
+export const CURRENT_USER_INSTRUCTION_NOT_PROVIDED = "not provided for this invocation (the Objective and Current Task remain operative).";
+/** v4.0.5: the protected section's fixed authority note. The instruction is
+ *  invocation input; it never edits the loop's objective or acceptance. */
+export const CURRENT_USER_INSTRUCTION_AUTHORITY = "Host-provided current user instruction for this invocation. It does not " +
+    "rewrite the Objective, Success Criteria, hard constraints, or the Round " +
+    "Contract; a changed objective or acceptance requires a new loop.";
 /** v3.7.1: Presentation view of sub-goals shared by prompts and the state
  *  file (one derivation, no second copy). Only ACTIVE items render as rows
  *  — pending/in_progress/blocked — ordered blocked → in_progress → pending
@@ -281,6 +291,7 @@ const STATE_SECTION_TIER = {
     // Current — what the next round must hold in working memory.
     "Loop Objective": "Current",
     "Current Task": "Current",
+    "Current User Instruction": "Current",
     "Success Criteria": "Current",
     "Hard Constraints": "Current",
     "Active Constraints": "Current",
@@ -331,6 +342,9 @@ export function renderCanonicalStateMarkdown(state, options) {
         `**Schema**: ${state.schemaVersion}`,
         `**Round**: ${state.round}/${state.maxRounds}`,
         `**Goal ID**: ${state.goalId}`,
+        ...(state.currentUserInstruction
+            ? []
+            : [`**Current user instruction**: ${CURRENT_USER_INSTRUCTION_NOT_PROVIDED}`]),
         ...(context
             ? [
                 `**Context**: ${formatContextBoundaryLabel(context.mode, context.reason, { recoveryBoundary: (state.recoveryBrief?.length ?? 0) > 0 })}, attempt ${context.attempt}`,
@@ -378,6 +392,15 @@ export function renderCanonicalStateMarkdown(state, options) {
 function flatStateSections(state) {
     const lines = [];
     lines.push("## Loop Objective", "", state.objective, "", "## Current Task", "", state.currentTask);
+    // v4.0.5: with an active contract the Current Task is the contract; the
+    // host's invocation instruction renders as its own protected section when
+    // it is not already visible verbatim. Without a contract the instruction IS
+    // the Current Task, so it is never repeated.
+    if (state.roundContract && state.currentUserInstruction &&
+        state.currentUserInstruction !== state.currentTask.trim() &&
+        state.currentUserInstruction !== state.objective.trim()) {
+        lines.push("## Current User Instruction", "", state.currentUserInstruction, "", `> ${CURRENT_USER_INSTRUCTION_AUTHORITY}`);
+    }
     // v2.11: Success Criteria and Constraints render with stable IDs for exact
     // agent matching. v3.9.4: the three groups are the SAME mutually exclusive
     // partition the prompt uses, so one text never appears with two prefixes.
@@ -609,6 +632,10 @@ derived) {
     // section above. No active contract → the original task text is used,
     // byte-identical to pre-v3.3 behavior.
     const roundContract = derived?.roundFacts?.activeContract ?? null;
+    // v4.0.5: the host's explicit invocation input. Empty/whitespace is "not
+    // provided", never a second task. Conditional presence keeps the state hash
+    // byte-identical when no instruction was given.
+    const currentUserInstruction = request.current_user_instruction?.trim() || undefined;
     // v3.9.4: the rendered criterion/hard sets are ACTIVE sets. The compile
     // response's `criterion_statuses` is the active criterion reference space
     // (loop-compiler filters it); `constraints_active` is the active constraint
@@ -636,7 +663,8 @@ derived) {
         objective: objective?.objective || request.task,
         currentTask: roundContract
             ? formatRoundContract(roundContract, derived?.roundFacts?.itemStatuses ?? null)
-            : request.task,
+            : currentUserInstruction ?? request.task,
+        ...(currentUserInstruction ? { currentUserInstruction } : {}),
         successCriteria,
         hardConstraints,
         activeConstraints,

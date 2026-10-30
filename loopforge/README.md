@@ -67,10 +67,19 @@ Every returned prompt declares its derived context strategy in the header.
 transcript, used for the first round, the next round, recovery redo, or repeated
 same-check rejection escalation. It may describe the SAME logical round.
 `same_round_retry` (in-context repair) continues the original invocation with
-the failure lessons injected. Prompt density and context boundary are independent; use the
-returned `contextMode` and `contextReason` at any L0/L1/L2 density. Clean context
-is not a workspace reset: the current modified workspace and the loop identity
-continue; only recovery restores a checkpoint.
+the failure lessons injected. If that invocation is gone, call
+`loopforge_resume` with `invocationLost: true`: LoopForge recompiles the SAME
+round and attempt as `fresh_invocation` / `invocation_recovery` at L2, with
+Machine Evidence, bounded Working Memory and the rejection lessons. Prompt
+density and context boundary are independent; use the returned `contextMode`
+and `contextReason` at any L0/L1/L2 density. Clean context is not a workspace
+reset: the current modified workspace and the loop identity continue; only
+recovery restores a checkpoint.
+
+`loopforge_next` and `loopforge_resume` accept an optional
+`currentUserInstruction`. It is host input for that invocation and never
+rewrites the loop task, objective, criteria, constraints or Round Contract;
+omitting it makes the prompt state that none was provided.
 
 Round results keep three kinds of facts separate: the **Agent report**
 (`success_claim`, `outcome`, `agent_stop_reason`), the **LoopForge decision**

@@ -13,6 +13,10 @@ export declare const ROUND_BOUNDARY_PRINCIPLE: string;
 export declare const ROUND_BOUNDARY_SIZING: string;
 export declare const ROUND_BOUNDARY_SUBMISSION: string;
 export declare const ROUND_BOUNDARY_NON_BOUNDARIES: string;
+/** v4.0.5: the ONE routing sentence for a lost in-context retry invocation.
+ *  The prompt footer and the short retry guidance read it. LoopForge — not
+ *  the Agent — recompiles the same round/attempt in clean context. */
+export declare const ROUND_BOUNDARY_INVOCATION_LOST: string;
 /** The host execution contract. It names the four context strategies instead
  *  of asking the host to reinterpret an enum value:
  *  clean context, in-context repair, clean-context repair, recovery redo. */

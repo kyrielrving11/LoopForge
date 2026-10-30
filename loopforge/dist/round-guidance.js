@@ -16,6 +16,13 @@ export const ROUND_BOUNDARY_SUBMISSION = "Submit at a completion, decision point
     "commits the round, a rejection keeps it (+1 attempt).";
 export const ROUND_BOUNDARY_NON_BOUNDARIES = "Time, a new invocation/session/stage, a re-delivered prompt, checkpoint, " +
     "restore, status, resume or unpause is not a boundary.";
+/** v4.0.5: the ONE routing sentence for a lost in-context retry invocation.
+ *  The prompt footer and the short retry guidance read it. LoopForge — not
+ *  the Agent — recompiles the same round/attempt in clean context. */
+export const ROUND_BOUNDARY_INVOCATION_LOST = "If the invocation that received the previous prompt is gone, call " +
+    "loopforge_resume(loopId, invocationLost: true); LoopForge recompiles the " +
+    "same logical round and attempt in clean context. Never carry this " +
+    "in-context retry prompt into a new invocation.";
 /** The host execution contract. It names the four context strategies instead
  *  of asking the host to reinterpret an enum value:
  *  clean context, in-context repair, clean-context repair, recovery redo. */
@@ -30,9 +37,11 @@ export const CONTEXT_CONTINUITY_RULES = "A fresh invocation is not a new loop: r
     "Working Memory, Machine Evidence and failure lessons it contains. Prompt " +
     "density does not choose the context boundary. Below the repeated " +
     "same-check rejection threshold, continue the original invocation and " +
-    "inject the rejection notice, findings and failure reason; if it is gone, " +
-    "start a new invocation from the self-contained prompt but keep the same " +
-    "round and attempt. At the rejection escalation threshold, start a clean " +
+    "inject the rejection notice, findings and failure reason. If that " +
+    "invocation is gone, call loopforge_resume(loopId, invocationLost: true): " +
+    "LoopForge recompiles the SAME round and attempt as a cold-context " +
+    "invocation_recovery prompt; never reuse the in-context retry prompt in a " +
+    "new invocation. At the rejection escalation threshold, start a clean " +
     "invocation with the retry notice, findings, rejected-attempt posture and " +
     "committed memory. That posture describes the rejected attempt, not the " +
     "current workspace; inspect the current workspace before acting. A retry " +
@@ -54,8 +63,11 @@ export const CONTEXT_CONTINUITY_RULES = "A fresh invocation is not a new loop: r
 export function renderRoundGuidance(density, contextMode) {
     if (density === "prompt") {
         if (contextMode === "same_round_retry") {
-            return [ROUND_BOUNDARY_SUBMISSION, ROUND_BOUNDARY_NON_BOUNDARIES]
-                .join("\n");
+            return [
+                ROUND_BOUNDARY_SUBMISSION,
+                ROUND_BOUNDARY_NON_BOUNDARIES,
+                ROUND_BOUNDARY_INVOCATION_LOST,
+            ].join("\n");
         }
         return [
             ROUND_BOUNDARY_PRINCIPLE,
@@ -89,6 +101,14 @@ export function formatContextBoundaryLabel(mode, reason, options = {}) {
                 "rejection_escalation; recovery lessons carried)"
             : "clean context repair (fresh_invocation; rejection_escalation; same " +
                 "logical round; rejected posture is attempt-time only)";
+    }
+    if (reason === "invocation_recovery") {
+        return options.recoveryBoundary
+            ? "clean context repair + invocation recovery + recovery retry " +
+                "(fresh_invocation; invocation_recovery; same logical round; " +
+                "retry and recovery lessons carried)"
+            : "clean context repair + invocation recovery (fresh_invocation; " +
+                "invocation_recovery; same logical round; retry lessons carried)";
     }
     if (reason === "enforcement_retry") {
         return options.recoveryBoundary

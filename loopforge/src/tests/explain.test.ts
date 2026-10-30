@@ -185,6 +185,8 @@ describe("v3.8 — explain view", () => {
     assert.deepEqual(round.context, {
       mode: "fresh_invocation",
       reason: "first_round",
+      // v4.0.5: the artifact carried no host instruction.
+      userInstruction: null,
     });
     assert.deepEqual(round.wrongAssumptions, ["old belief"]);
     assert.deepEqual(round.retractedConstraints, ["old rule"]);

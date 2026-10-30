@@ -63,9 +63,19 @@ context is not a workspace reset; only rollback/recovery restores a checkpoint.
 `same_round_retry` is in-context repair: it continues the
 original invocation and injects the rejection notice, findings and failure
 reason. A `rejection_escalation` retry is clean-context repair: a new invocation
-that still carries those failure lessons. Prompt density and context boundary
-are independent; follow the returned `contextMode` and `contextReason`, rather
-than inferring the boundary from L0, L1, or L2.
+that still carries those failure lessons. If the invocation that received an
+in-context retry prompt is gone, call `loopforge_resume` with
+`invocationLost: true`; LoopForge recompiles the SAME round and attempt as
+`fresh_invocation` / `invocation_recovery` at L2, with Machine Evidence,
+bounded Working Memory and the rejection lessons. Prompt density and context
+boundary are independent; follow the returned `contextMode` and
+`contextReason`, rather than inferring the boundary from L0, L1, or L2.
+
+`loopforge_next` and `loopforge_resume` accept an optional
+`currentUserInstruction`. It is host input for that invocation and never
+rewrites the loop's task, objective, criteria, constraints or Round Contract;
+omitting it makes the prompt state that no instruction was provided instead of
+inferring one from older text.
 
 Round results keep three kinds of facts separate: the Agent report
 (`agent_stop_reason` among its claims), the LoopForge decision

@@ -82,6 +82,7 @@ strategy label is what the host follows:
 ```text
 Context: clean context — next round (fresh_invocation; workspace continues)
 Context: clean context repair (fresh_invocation; rejection_escalation; same logical round; rejected posture is attempt-time only)
+Context: clean context repair + invocation recovery (fresh_invocation; invocation_recovery; same logical round; retry lessons carried)
 Context: in-context repair (same_round_retry; enforcement_retry; continue original invocation if alive; lessons injected)
 Context: clean context after restore (fresh_invocation; recovery_redo; lessons carried)
 ```
@@ -95,8 +96,15 @@ Context: clean context after restore (fresh_invocation; recovery_redo; lessons c
 - **in-context repair** (`same_round_retry`, `enforcement_retry`): a retry in
   the original context, independent of prompt density.
   Continue the current invocation if it exists; the rejection notice, findings
-  and failure reason are injected. If it is gone, start a new one from this
-  self-contained prompt, but keep the same round and attempt.
+  and failure reason are injected. If it is gone, call
+  `loopforge_resume(loopId, invocationLost: true)`: LoopForge recompiles the
+  SAME round and attempt as `fresh_invocation / invocation_recovery` at L2.
+  Never start a new invocation from the in-context retry prompt.
+- **invocation recovery** (`fresh_invocation`, `invocation_recovery`): the
+  original retry invocation is gone. LoopForge already recompiled the same
+  round/attempt with the rejection notice, findings, previous Machine
+  Evidence, bounded Working Memory and the rejected attempt's transient
+  posture. Inspect the current workspace; the posture is not a snapshot of it.
 - **clean context repair** (`fresh_invocation`, `rejection_escalation`): start a
   new invocation; the retry notice, findings, transient rejected posture and
   committed memory are already
@@ -107,6 +115,15 @@ Context: clean context after restore (fresh_invocation; recovery_redo; lessons c
 
 Read `contextMode`, `contextReason` and the strategy label together; L0/L1/L2
 select density and do not determine the invocation boundary.
+
+`loopforge_next` and `loopforge_resume` accept an optional
+`currentUserInstruction`. It is host input for THIS invocation: it reaches the
+prompt and its artifact, but it never rewrites `session.task`, the Objective,
+Success Criteria, hard constraints, the Round Contract or goal identity. When
+omitted, the prompt states that no instruction was provided for this
+invocation; never infer one from the old task or transcript. Calling
+`loopforge_next` with only the handle and an instruction recompiles the held
+prompt without submitting or advancing the round.
 
 The executable round division and submission rules live in every prompt's
 `## Round Boundary` section and in the MCP server instructions. This manual
@@ -291,11 +308,13 @@ is never a later prompt's independent fact source.
 - `enforcementAction: "reject"`: retry the same logical round with the
   **new** handle; the attempt increases. Follow the returned context strategy:
   `same_round_retry` keeps the original invocation; `fresh_invocation` with
-  `rejection_escalation` starts a clean invocation for the same logical round.
-  Prompt density does not choose between them. The old handle only
-  returns the current retry prompt with a warning. A retry prompt may carry the
-  rejected attempt's transient Machine Evidence, explicitly marked
-  `not committed`.
+  `rejection_escalation` starts a clean invocation for the same logical round;
+  `invocation_recovery` is the cold replacement of a lost in-context retry for
+  the same round/attempt. Prompt density does not choose between them. The old
+  handle only returns the current retry prompt with a warning. A retry prompt
+  may carry the rejected attempt's transient Machine Evidence, explicitly
+  marked `not committed`. If the original invocation is gone, do not reuse its
+  retry prompt: call `loopforge_resume(loopId, invocationLost: true)`.
 - `enforcementAction: "backtrack"` (machine) or `"recovery"` (Agent):
   LoopForge already restored and verified the workspace. Execute the held redo
   prompt and submit with its new handle. If the response instead is `stalled`

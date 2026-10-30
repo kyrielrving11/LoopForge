@@ -55,10 +55,13 @@ export interface ExplainRound {
     evidencePosture: EvidencePosture | null;
     /** v4.0.4: the committed enforcement reason, when one was recorded. */
     enforcementReason: string | null;
-    /** v4.0.2: the committed context boundary this round was compiled under. */
+    /** v4.0.2: the committed context boundary this round was compiled under.
+     *  v4.0.5: `userInstruction` is the host instruction this round's prompt
+     *  carried, projected from the same artifact; null means none was given. */
     context: {
         mode: PromptContextMode;
         reason: PromptContextReason;
+        userInstruction: string | null;
     } | null;
     /** The agent's own report, quoted back for audit. Present whenever the
      *  committed evaluation exists, even without an execution_report. */

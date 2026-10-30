@@ -34,6 +34,10 @@ export interface ContextBoundaryInput {
   recoveryBoundary: boolean;
   /** A committed evaluation round exists before this one. */
   hasPreviousCommittedRound: boolean;
+  /** v4.0.5: the host declared the original in-context retry invocation lost.
+   *  Required — every caller states the fact explicitly, so no silent default
+   *  can turn a cold handoff back into an in-context retry. */
+  invocationRecovery: boolean;
 }
 
 export interface PromptContextBoundary {
@@ -43,14 +47,18 @@ export interface PromptContextBoundary {
 
 /** Fixed priority:
  *  1. attempt > 1, rejection streak >= 2 → fresh_invocation / rejection_escalation
- *  2. attempt > 1, rejection streak < 2  → same_round_retry / enforcement_retry
- *  3. recovery boundary      → fresh_invocation / recovery_redo
- *  4. round 1, no prior      → fresh_invocation / first_round
- *  5. otherwise              → fresh_invocation / next_round
+ *  2. attempt > 1, invocation recovery    → fresh_invocation / invocation_recovery
+ *  3. attempt > 1, rejection streak < 2  → same_round_retry / enforcement_retry
+ *  4. recovery boundary      → fresh_invocation / recovery_redo
+ *  5. round 1, no prior      → fresh_invocation / first_round
+ *  6. otherwise              → fresh_invocation / next_round
  *
  *  A retried recovery redo keeps its Recovery Brief. At the rejection
  *  escalation threshold, `rejection_escalation` identifies why the host must
  *  start a clean context; the rollback directive remains a separate fact.
+ *  `invocation_recovery` outranks the ordinary retry boundary but never the
+ *  escalation threshold: an escalated retry is already clean context and is
+ *  not rewritten as an invocation recovery.
  */
 export function derivePromptContextBoundary(
   input: ContextBoundaryInput,
@@ -61,6 +69,9 @@ export function derivePromptContextBoundary(
   if (attempt > 1) {
     if (input.consecutiveRejections >= 2) {
       return { mode: "fresh_invocation", reason: "rejection_escalation" };
+    }
+    if (input.invocationRecovery) {
+      return { mode: "fresh_invocation", reason: "invocation_recovery" };
     }
     return { mode: "same_round_retry", reason: "enforcement_retry" };
   }
@@ -91,6 +102,8 @@ export interface PromptContextPairInput {
  *  - rejection_escalation is a clean context and requires attempt > 1.
  *  - enforcement_retry is only an in-context boundary; escalated retries use
  *    rejection_escalation with fresh_invocation.
+ *  - invocation_recovery is a clean context for the SAME retried attempt, so
+ *    it requires fresh_invocation and attempt > 1.
  *  - fresh_invocation + first_round requires round 1.
  *
  *  Returns a stable diagnostic, or null when the tuple is legal. Callers fail
@@ -112,6 +125,9 @@ export function promptContextPairIssue(
   }
   if (input.reason === "enforcement_retry") {
     return "enforcement_retry requires same_round_retry";
+  }
+  if (input.reason === "invocation_recovery" && attempt <= 1) {
+    return "invocation_recovery requires attempt > 1";
   }
   if (input.reason === "rejection_escalation" && attempt <= 1) {
     return "rejection_escalation requires attempt > 1";

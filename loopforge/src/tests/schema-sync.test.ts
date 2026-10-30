@@ -14,8 +14,15 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { START_INPUT_KEYS, TOOL_SCHEMAS } from "../mcp/tools.js";
-import { PROMPT_ARTIFACT_SCHEMA_VERSION } from "../protocol.js";
+import {
+  START_INPUT_KEYS,
+  TOOL_OUTPUT_SCHEMAS,
+  TOOL_SCHEMAS,
+} from "../mcp/tools.js";
+import {
+  PROMPT_ARTIFACT_SCHEMA_VERSION,
+  PROMPT_CONTEXT_REASONS,
+} from "../protocol.js";
 import { ROUND_TRANSACTION_SCHEMA_VERSION } from "../round-transaction.js";
 import { CANONICAL_STATE_SCHEMA_VERSION } from "../canonical-state.js";
 import { POLICY_SCHEMA_VERSION } from "../policy.js";
@@ -151,7 +158,7 @@ describe("MCP schema ↔ protocol schema sync", () => {
       CHECKPOINT_SCHEMA_VERSION,
     );
     assert.equal(ROUND_TRANSACTION_SCHEMA_VERSION, 8);
-    assert.equal(CANONICAL_STATE_SCHEMA_VERSION, 8);
+    assert.equal(CANONICAL_STATE_SCHEMA_VERSION, 9);
     assert.equal(POLICY_SCHEMA_VERSION, "10");
     assert.equal(CHECKPOINT_SCHEMA_VERSION, 1);
   });
@@ -184,6 +191,37 @@ describe("MCP schema ↔ protocol schema sync", () => {
     assert.ok(!("machineBackedSuccess" in receiptProps),
       "the receipt never duplicates the posture's machine fact");
     assert.ok(!JSON.stringify(schema).includes("fresh_round"));
+  });
+
+  it("v4.0.5: publishes the shared reason whitelist and an optional instruction", () => {
+    const defs = schema.$defs as SchemaNode;
+    const reason = defs.PromptContextReason as SchemaNode;
+    assert.deepEqual(
+      [...(reason.enum as string[])].sort(),
+      [...PROMPT_CONTEXT_REASONS].sort(),
+      "the generated enum and the runtime whitelist must not drift",
+    );
+    const artifact = defs.PromptArtifact as SchemaNode;
+    const props = artifact.properties as SchemaNode;
+    assert.ok("currentUserInstruction" in props);
+    assert.ok(!(artifact.required as string[]).includes("currentUserInstruction"));
+
+    // The tool surfaces expose the same facts and the same output enum.
+    const nextInput = TOOL_SCHEMAS.find((tool) => tool.name === "loopforge_next")!
+      .inputSchema as SchemaNode;
+    assert.ok("currentUserInstruction" in (nextInput.properties as SchemaNode));
+    const resumeInput = TOOL_SCHEMAS.find((tool) => tool.name === "loopforge_resume")!
+      .inputSchema as SchemaNode;
+    const resumeProps = resumeInput.properties as SchemaNode;
+    assert.ok("currentUserInstruction" in resumeProps);
+    assert.ok("invocationLost" in resumeProps);
+    const outputProps =
+      (TOOL_OUTPUT_SCHEMAS.loopforge_next as SchemaNode).properties as SchemaNode;
+    assert.deepEqual(
+      [...((outputProps.contextReason as SchemaNode).enum as string[])].sort(),
+      [...PROMPT_CONTEXT_REASONS].sort(),
+      "the MCP output enum must match the runtime reason whitelist",
+    );
   });
 
   it("v4.0.4: read-view names never become persisted protocol fields", () => {

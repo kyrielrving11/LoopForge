@@ -207,6 +207,21 @@ export declare function prepareRoundTransaction(loopId: string, round: number, b
  * its identity or evidence baseline. Evaluation fields belong to the previous
  * attempt and are cleared before the Agent receives the retry prompt. */
 export declare function prepareRejectedAttempt(rejected: RoundTransactionSnapshot, promptArtifact: PromptArtifact, compiled?: CompiledRoundFacts, operatorAcceptance?: OperatorAcceptance): RoundTransactionSnapshot;
+/** v4.0.5: re-bind a held RETRY prompt to a newly compiled artifact for the
+ *  SAME logical round and attempt. This is not a new attempt: attempt, round,
+ *  before evidence, retry facts, restore marker and branch stay byte-identical;
+ *  only the prompt-derived identity (artifact, prompt hash, transaction id and
+ *  the owning ids on checkpoints) changes.
+ *
+ *  Context preservation is enforced here, not by convention:
+ *  - the artifact identity must equal the held identity;
+ *  - an invocation-recovery recompile must be
+ *    `fresh_invocation / invocation_recovery`;
+ *  - every other recompile must keep the held mode and reason exactly.
+ *
+ *  Evaluation/result fields of the rejected attempt are cleared before the
+ *  Agent receives the new prompt, exactly like `prepareRejectedAttempt`. */
+export declare function rebindHeldPrompt(held: RoundTransactionSnapshot, artifact: PromptArtifact, compiled?: CompiledRoundFacts, operatorAcceptance?: OperatorAcceptance): RoundTransactionSnapshot;
 /** v4.0.3: schema 7 structural validation of the persisted evidence posture.
  *  A committed round without a well-formed posture is a HARD break — it is not
  *  committed history and is reported as legacy, never silently re-derived. */

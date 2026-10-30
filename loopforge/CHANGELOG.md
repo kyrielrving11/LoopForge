@@ -1,5 +1,55 @@
 # Changelog
 
+## 4.0.5 (2026-10-30)
+
+**The invocation cold-handoff / current-instruction release.** Additive only:
+`PROMPT_ARTIFACT_SCHEMA_VERSION` stays 11 and
+`ROUND_TRANSACTION_SCHEMA_VERSION` stays 8. Every 4.0.4 committed round and
+held session remains readable; only the derived
+`CANONICAL_STATE_SCHEMA_VERSION` moves 8 → 9. `POLICY_SCHEMA_VERSION` stays
+"10" and the L0 ceiling is unchanged.
+
+### Invocation recovery (same round, same attempt)
+
+- `PromptContextReason` adds `invocation_recovery`; the artifact schema 11 is
+  additively extended (a new legal enum value and the optional
+  `currentUserInstruction` field). The transaction snapshot shape is unchanged.
+- `loopforge_resume(loopId, invocationLost: true)` recompiles a held
+  `same_round_retry` prompt as `fresh_invocation / invocation_recovery` at L2.
+  It keeps the round and attempt, reuses the before evidence, retry context
+  and restore facts, rebinds only the prompt-derived transaction identity and
+  writes no Vault round. The old handle remains stale with zero side effects.
+- A rejected attempt whose retry prompt never compiled (phase `rejected` with
+  `retryContext`, no held prompt) is recompiled through the same retry path.
+  A held retry without retry context is refused with
+  `invalid_argument` / `invocation_recovery_unavailable`.
+- The prompt's clean-context repair text names the cold-context replacement;
+  the host guidance routes a lost invocation to `loopforge_resume` and no
+  longer claims the in-context retry prompt is self-contained.
+- All recompile paths share the atomic `persistPrepared` tail: a failed session
+  save rolls back the in-memory snapshot/trust and returns `stalled` with the
+  previous handle intact.
+
+### Current user instruction (invocation input)
+
+- `loopforge_next` and `loopforge_resume` accept optional
+  `currentUserInstruction` (trimmed non-empty; empty is `invalid_argument`).
+  It is invocation input, not a task update: it never rewrites `session.task`,
+  `OperatorAcceptance`, the objective, criteria, hard constraints, contract,
+  round/attempt or goalId, and never enters evaluation, gates, Working Memory
+  or the Vault.
+- With an active contract the prompt renders a protected
+  `Current User Instruction` section; without one it becomes the Current Task.
+  Exact (trimmed, case-sensitive) duplicates are not repeated. When omitted,
+  the prompt states that no instruction was provided for this invocation.
+- `loopforge_next` with only the handle and an instruction recompiles the held
+  prompt without submitting or advancing. A same-round retry inherits the
+  submitted instruction when the host does not supply a new one; a new round
+  and a redo never inherit automatically.
+- The committed `PromptArtifact` records the instruction; Replay, Explain and
+  the submission receipt project it from that one artifact, never a second
+  store.
+
 ## 4.0.4 (2026-10-30)
 
 **The context-strategy / result-facts release.** This is a small breaking

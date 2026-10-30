@@ -210,6 +210,9 @@ export class ReplayBackend {
                 // v4.0.2: the context boundary is a committed artifact fact.
                 context_mode: view.promptArtifact?.contextMode ?? null,
                 context_reason: view.promptArtifact?.contextReason ?? null,
+                // v4.0.5: the host invocation instruction this round's prompt carried,
+                // projected from the artifact (never a second store).
+                current_user_instruction: view.promptArtifact?.currentUserInstruction ?? null,
                 // v4.0.3/v4.0.4: Agent claims are named as claims. The Agent's stop
                 // reason is a report; machine facts (including machineBackedSuccess)
                 // live only inside the persisted posture, so no duplicate top-level

@@ -121,9 +121,16 @@ failed-pattern history and LoopForge-generated phase narratives do not render.
 An in-context retry renders no Working Memory and no Machine Evidence. A clean
 retry may render the previous committed posture plus the rejected attempt's
 transient, clearly `not committed` posture; this posture describes that attempt,
-not the current workspace. The state file is derived and is never the source of
-truth.
-The current user instruction defines the task.
+not the current workspace. When the host declares the in-context invocation
+lost (`invocationLost`), LoopForge recompiles the SAME round and attempt as
+`fresh_invocation / invocation_recovery` at L2; it is not a new round, a new
+attempt, a recovery or a restore. The state file is derived and is never the
+source of truth.
+
+The current user instruction is invocation input, not loop identity: it
+projects into one prompt/artifact and never rewrites `session.task`,
+`OperatorAcceptance`, the objective, criteria, hard constraints, contract or
+goalId. A changed objective or acceptance requires a new loop.
 
 Every prompt carries a derived context boundary in its artifact and a strategy
 label in its header. Prompt density and context boundary are independent.

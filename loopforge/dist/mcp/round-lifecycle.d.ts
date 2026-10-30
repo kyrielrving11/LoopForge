@@ -66,6 +66,32 @@ export interface StartInput {
      *  in the objective. Omit to keep the default criterion. */
     criteria?: string[];
 }
+/** v4.0.5: the host's invocation-level input. It is carried into ONE prompt
+ *  compilation/artifact and never stored as loop task, acceptance, history or
+ *  Working Memory. The host owns cross-process persistence. */
+export interface InvocationInputs {
+    /** Trimmed, non-empty. An empty/whitespace value is `invalid_argument`. */
+    currentUserInstruction?: string;
+}
+/** v4.0.5: resume/unpause transport input. `invocationLost` is the host's
+ *  declaration that the original in-context retry invocation is gone; it is
+ *  never persisted and only changes the context reason of the SAME attempt. */
+export interface ResumeInputs extends InvocationInputs {
+    invocationLost?: boolean;
+}
+/** v4.0.5: a structural defect in invocation input. The MCP handlers map this
+ *  to `invalid_argument`; it is never a policy or round defect. */
+export declare class InvocationInputError extends Error {
+    readonly code = "invalid_argument";
+}
+/** v4.0.5: normalize the invocation instruction at the transport boundary.
+ *  `undefined`/absent stays absent ("not provided"); non-string or
+ *  empty/whitespace is a structural defect. The trimmed text is stored
+ *  verbatim — no case folding, no internal-whitespace folding. */
+export declare function normalizeCurrentUserInstruction(raw: unknown): string | undefined;
+/** v4.0.5: normalize a whole transport input bundle before any state is read
+ *  or mutated. */
+export declare function normalizeInvocationInputs<T extends InvocationInputs>(inputs?: T): T | undefined;
 /** v3.9.4: a structural defect in the start criteria argument. The MCP
  *  handler maps this to `invalid_argument`; it is never a policy defect. */
 export declare class StartCriteriaError extends Error {
@@ -218,7 +244,9 @@ export interface RoundLifecycleDeps {
      *  before-images (the round still runs with an explicit error fact). */
     checkpointStoreFor?: (loopId: string) => FileWorkspaceCheckpointStore | undefined;
 }
-export declare function buildLoopRequest(session: McpSession): LoopCompileRequest;
+export declare function buildLoopRequest(session: McpSession,
+/** v4.0.5: the host's explicit invocation input for THIS compile. */
+inputs?: InvocationInputs): LoopCompileRequest;
 export declare class RoundLifecycle {
     private readonly store;
     private readonly sessionStore;
@@ -337,21 +365,55 @@ export declare class RoundLifecycle {
      *  redo prepare are idempotent; a verified held redo prompt is returned
      *  without re-checking the workspace (the Agent may already have worked). */
     private completePendingRecovery;
+    /** v4.0.5: the zero-side-effect refusal for a cold handoff whose held retry
+     *  facts are missing or inconsistent. Nothing is saved, compiled or
+     *  advanced; the held snapshot and handle are unchanged. */
+    private invocationRecoveryUnavailable;
+    /** v4.0.5: map a compile failure onto the existing stalled/coverage result.
+     *  Returns null for an unexpected error so the caller can rethrow it. */
+    private compileStalledResult;
+    /** v4.0.5: ONE held-prompt entry for resume/unpause/recovery. With no new
+     *  instruction it re-delivers the stored prompt and handle unchanged; with a
+     *  new instruction it recompiles the SAME round/attempt and preserves the
+     *  held context boundary (including an existing invocation recovery). */
+    private heldPromptWithInputs;
+    /** v4.0.5: the public `loopforge_next` instruction-recompile entry. It only
+     *  recompiles the held prompt for a new invocation instruction: no
+     *  submission, no round/attempt change, no evidence collection. The handle
+     *  was validated by SessionManager before its queue and lease heartbeat. */
+    recompileHeldWithInstruction(session: McpSession, instruction: string): Promise<AdvanceResult>;
+    /** v4.0.5: compile a held prompt again without collecting evidence, writing
+     *  the Vault, changing attempt/round or touching retry counters. */
+    private recompileHeldPrompt;
+    /** v4.0.5: compile the retry prompt for a rejected attempt that has no held
+     *  prompt (its retry compile failed before). This is the one path that
+     *  creates the next attempt for such a session. */
+    private prepareRetryWithInputs;
+    /** v4.0.5: recompile the SAME retry attempt when the host declared the
+     *  original invocation lost, or when a submitted retry prompt never existed
+     *  (rejected snapshot). Returns null when this session has no retry material
+     *  or when the held prompt is already a clean context (idempotent no-op). */
+    private recompileRetryAttempt;
     /** A rejected round still owns its original before-image. Recover its next
      *  attempt through the same retry preparation used by a live rejection;
-     *  ordinary prepare would recapture evidence and reset snapshot.attempt. */
+     *  ordinary prepare would recapture evidence and reset snapshot.attempt.
+     *  v4.0.5: the instruction travels with the compile and is inherited from
+     *  the rejected prompt within the same logical round. */
     private prepareMissingPrompt;
     /** Resume tail: the session has been reconstructed and registered. Reconcile
      *  a committed-but-undelivered round, restore the held prompt, or recover a
      *  missing prompt from current round state. v3.7: async — compilation runs
      *  through RoundDriver.prepare like unpause (the prepareSync fallback was
      *  removed); a failed compile now degrades to the same stalled terminal
-     *  result unpause returns instead of persisting a null prompt. */
-    resume(session: McpSession): Promise<AdvanceResult>;
+     *  result unpause returns instead of persisting a null prompt.
+     *  v4.0.5: an `invocationLost` retry is recompiled as a cold-context prompt
+     *  for the SAME logical round/attempt, before the ordinary held-prompt path. */
+    resume(session: McpSession, inputs?: ResumeInputs): Promise<AdvanceResult>;
     /** Unpause tail: the session has been reconstructed and registered with
      *  status "running". Reconcile a committed round, restore the held prompt,
-     *  or compile the next prompt from the committed window. */
-    unpause(session: McpSession): Promise<AdvanceResult>;
+     *  or compile the next prompt from the committed window. v4.0.5: the same
+     *  invocation inputs and cold-handoff recompile apply here. */
+    unpause(session: McpSession, inputs?: ResumeInputs): Promise<AdvanceResult>;
     /** Record a gate_opened entry when an accepted round reports a high-risk
      *  blocker (USER_RISK hit). Idempotent per gate. The gate is a record
      *  layer — it never blocks the round decision flow. */
@@ -420,7 +482,7 @@ export declare class RoundLifecycle {
      *  method only validates it against committed facts, records the rollback
      *  directive and compiles the redo. It never runs ordinary verification or
      *  enforcement on the abandoned work. */
-    recover(sessionId: string, recovery: RecoveryRequest): Promise<AdvanceResult>;
+    recover(sessionId: string, recovery: RecoveryRequest, inputs?: InvocationInputs): Promise<AdvanceResult>;
     /** Execute the committed directive's restore and return the redo prompt. */
     private restoreAndPrepareRedo;
     /** Core cycle entry used by SessionManager.advance after the queue + lease
@@ -429,7 +491,9 @@ export declare class RoundLifecycle {
      *  v4.0.0: the submission identity (the exact held transaction) is validated
      *  by SessionManager before its queue and lease heartbeat. This entry point
      *  owns the round state machine and does not re-check anchors. */
-    advance(sessionId: string, output: string, preExtractedEval?: SelfEvaluation, normalizationDiagnostics?: SubmissionDiagnostic[], submittedFields?: string[]): Promise<AdvanceResult>;
+    advance(sessionId: string, output: string, preExtractedEval?: SelfEvaluation, normalizationDiagnostics?: SubmissionDiagnostic[], submittedFields?: string[],
+    /** v4.0.5: invocation input for the prompt compiled after this submission. */
+    inputs?: InvocationInputs): Promise<AdvanceResult>;
     /** Write back loop knowledge to long-term memory.
      *  Uses shared base builder from policy.ts. Called when a loop terminates. */
     notifyTerminal(session: McpSession, stopReason: string): Promise<void>;

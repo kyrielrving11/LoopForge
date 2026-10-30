@@ -138,6 +138,30 @@ export function makeLoopCompileRequest(overrides = {}) {
         ...overrides,
     };
 }
+/** v4.0.5: the ONE runtime whitelist for context modes. The types above stay
+ *  explicit string unions (the schema generator reads them); these arrays are
+ *  the runtime legality boundary shared by the transaction decoder,
+ *  committed-history validation and the MCP output schema. */
+export const PROMPT_CONTEXT_MODES = [
+    "fresh_invocation",
+    "same_round_retry",
+];
+/** v4.0.5: the ONE runtime whitelist for context reasons. See
+ *  `PROMPT_CONTEXT_MODES`. */
+export const PROMPT_CONTEXT_REASONS = [
+    "first_round",
+    "next_round",
+    "recovery_redo",
+    "enforcement_retry",
+    "rejection_escalation",
+    "invocation_recovery",
+];
+export function isPromptContextMode(value) {
+    return PROMPT_CONTEXT_MODES.includes(value);
+}
+export function isPromptContextReason(value) {
+    return PROMPT_CONTEXT_REASONS.includes(value);
+}
 /** v3.8.1: the artifact schema version lives next to the type it versions.
  *  The transaction envelope parser reads it, so the constant lives here rather
  *  than in the renderer.
@@ -148,9 +172,14 @@ export function makeLoopCompileRequest(overrides = {}) {
  *  Machine Evidence projection is rendered INTO the prompt text, not carried as
  *  a separate artifact field; the committed posture lives on the transaction
  *  result. v4.0.4: schema 10 renames the clean-context `contextMode` value to
- *  `fresh_invocation`. Older versions are a HARD break — a round whose
- *  artifact does not parse is not committed history, and
- *  `legacyTransactionRounds` reports the loss rather than letting it vanish. */
+ *  `fresh_invocation`. v4.0.5: schema 11 is ADDITIVELY extended — it adds the
+ *  optional `currentUserInstruction` fact and the legal
+ *  `invocation_recovery` reason. No required field was removed or renamed, so
+ *  every 4.0.4 artifact still decodes; the shared decoder whitelists
+ *  (`PROMPT_CONTEXT_MODES` / `PROMPT_CONTEXT_REASONS`) are the only legality
+ *  boundary. Older versions are a HARD break — a round whose artifact does
+ *  not parse is not committed history, and `legacyTransactionRounds` reports
+ *  the loss rather than letting it vanish. */
 export const PROMPT_ARTIFACT_SCHEMA_VERSION = 11;
 export function makeLoopCompileResponse(overrides = {}) {
     return {

@@ -70,6 +70,27 @@ describe("decidePromptLevel", () => {
     assert.ok(d.reasons.includes("same_round_retry"));
   });
 
+  it("v4.0.5: a lost invocation rehydrates at L2", () => {
+    const d = decidePromptLevel(defaults({
+      attempt: 2,
+      round: 2,
+      invocationRecovery: true,
+    }));
+    assert.equal(d.level, "l2");
+    assert.deepEqual(d.reasons, ["invocation_recovery"]);
+  });
+
+  it("v4.0.5: the rejection escalation threshold still wins", () => {
+    const d = decidePromptLevel(defaults({
+      attempt: 3,
+      round: 2,
+      consecutiveRejections: 2,
+      invocationRecovery: true,
+    }));
+    assert.equal(d.level, "l2");
+    assert.deepEqual(d.reasons, ["rejection_rehydrate"]);
+  });
+
   it("returns L0 only when the failed previous round is provably stale", () => {
     const d = decidePromptLevel(defaults({
       previousRound: {

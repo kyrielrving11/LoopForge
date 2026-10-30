@@ -11,7 +11,7 @@ import { EVIDENCE_POSTURE_CAPS, rollbackEvidencePosture, } from "./evidence-post
 import { RoundCoordinator, } from "./round-coordinator.js";
 import { logEvent } from "./observability.js";
 import { deriveContractId, deriveContractItemIds, isRecord } from "./token-utils.js";
-import { PROMPT_ARTIFACT_SCHEMA_VERSION } from "./protocol.js";
+import { PROMPT_ARTIFACT_SCHEMA_VERSION, isPromptContextMode, isPromptContextReason, } from "./protocol.js";
 import { promptContextPairIssue } from "./context-boundary.js";
 import { commandConfigHash, getPolicy } from "./policy.js";
 import { policyMetrics } from "./policy-metrics.js";
@@ -212,6 +212,82 @@ export function prepareRejectedAttempt(rejected, promptArtifact, compiled, opera
         normalizationDiagnostics: undefined,
         submittedFields: undefined,
         promptArtifact,
+        updatedAt: Date.now(),
+    };
+}
+/** v4.0.5: re-bind a held RETRY prompt to a newly compiled artifact for the
+ *  SAME logical round and attempt. This is not a new attempt: attempt, round,
+ *  before evidence, retry facts, restore marker and branch stay byte-identical;
+ *  only the prompt-derived identity (artifact, prompt hash, transaction id and
+ *  the owning ids on checkpoints) changes.
+ *
+ *  Context preservation is enforced here, not by convention:
+ *  - the artifact identity must equal the held identity;
+ *  - an invocation-recovery recompile must be
+ *    `fresh_invocation / invocation_recovery`;
+ *  - every other recompile must keep the held mode and reason exactly.
+ *
+ *  Evaluation/result fields of the rejected attempt are cleared before the
+ *  Agent receives the new prompt, exactly like `prepareRejectedAttempt`. */
+export function rebindHeldPrompt(held, artifact, compiled, operatorAcceptance) {
+    if (held.phase !== "prompted" || !held.promptArtifact) {
+        throw new Error(`Cannot recompile a prompt in phase ${held.phase}`);
+    }
+    if (artifact.roundId !== held.roundId) {
+        throw new Error(`Held prompt identity mismatch: ${artifact.roundId} !== ${held.roundId}`);
+    }
+    if (artifact.round !== held.round || artifact.attempt !== held.attempt) {
+        throw new Error("Held prompt round/attempt mismatch: a recompile must keep the same " +
+            `round/attempt (${artifact.round}/${artifact.attempt} !== ` +
+            `${held.round}/${held.attempt})`);
+    }
+    const previous = held.promptArtifact;
+    if (artifact.contextReason === "invocation_recovery") {
+        if (artifact.contextMode !== "fresh_invocation") {
+            throw new Error("invocation_recovery requires a fresh_invocation recompile");
+        }
+    }
+    else if (artifact.contextMode !== previous.contextMode ||
+        artifact.contextReason !== previous.contextReason) {
+        throw new Error("A held-prompt recompile must preserve the context boundary: " +
+            `${previous.contextMode}/${previous.contextReason} !== ` +
+            `${artifact.contextMode}/${artifact.contextReason}`);
+    }
+    const transactionId = deriveTransactionId({
+        kind: held.kind,
+        branchId: held.branchId,
+        roundId: held.roundId,
+        attempt: artifact.attempt,
+        promptHash: artifact.promptHash,
+    });
+    const beforeCheckpoint = held.beforeCheckpoint
+        ? { ...held.beforeCheckpoint, transactionId }
+        : undefined;
+    const checkpoints = held.checkpoints
+        ? held.checkpoints.map((item) => ({ ...item, transactionId }))
+        : undefined;
+    return {
+        ...held,
+        transactionId,
+        ...(beforeCheckpoint ? { beforeCheckpoint } : {}),
+        ...(checkpoints ? { checkpoints } : {}),
+        ...(compiled !== undefined
+            ? { compiled }
+            : held.compiled
+                ? { compiled: held.compiled }
+                : {}),
+        ...(operatorAcceptance !== undefined
+            ? { operatorAcceptance }
+            : held.operatorAcceptance
+                ? { operatorAcceptance: held.operatorAcceptance }
+                : {}),
+        phase: "prompted",
+        afterEvidence: undefined,
+        evaluation: undefined,
+        result: undefined,
+        normalizationDiagnostics: undefined,
+        submittedFields: undefined,
+        promptArtifact: artifact,
         updatedAt: Date.now(),
     };
 }
@@ -757,13 +833,15 @@ export function parseRoundTransactionSnapshot(value) {
         // v4.0.2/v4.0.4: the context boundary is a REQUIRED artifact fact. An
         // artifact without a legal pair is a hard break, never an implicit
         // "fresh_invocation" default.
-        const contextModeValid = artifact.contextMode === "fresh_invocation" ||
-            artifact.contextMode === "same_round_retry";
-        const contextReasonValid = artifact.contextReason === "first_round" ||
-            artifact.contextReason === "next_round" ||
-            artifact.contextReason === "recovery_redo" ||
-            artifact.contextReason === "enforcement_retry" ||
-            artifact.contextReason === "rejection_escalation";
+        // v4.0.5: the shared runtime whitelists are the only legality source; the
+        // optional invocation instruction, when present, must be a non-empty
+        // string. A malformed value is reported as legacy, never silently
+        // accepted.
+        const contextModeValid = isPromptContextMode(artifact.contextMode);
+        const contextReasonValid = isPromptContextReason(artifact.contextReason);
+        const instructionValid = artifact.currentUserInstruction === undefined ||
+            (typeof artifact.currentUserInstruction === "string" &&
+                artifact.currentUserInstruction.trim().length > 0);
         if (artifact.schemaVersion !== PROMPT_ARTIFACT_SCHEMA_VERSION ||
             typeof artifact.roundId !== "string" ||
             // v4.0.3: the artifact identity is part of the transaction identity.
@@ -776,6 +854,7 @@ export function parseRoundTransactionSnapshot(value) {
             !["l0", "l1", "l2"].includes(String(artifact.level)) ||
             !contextModeValid ||
             !contextReasonValid ||
+            !instructionValid ||
             !coverageValid)
             return null;
         // v4.0.4: the SAME legality guard the assembler enforces. An illegal

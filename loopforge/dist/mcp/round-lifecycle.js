@@ -35,6 +35,7 @@ import { latestObjective } from "../loop-compiler.js";
 import { heldPromptSnapshot, makeSubmissionHandle, } from "./submission-handle.js";
 import { logEvent } from "../observability.js";
 import { policyMetrics } from "../policy-metrics.js";
+import { SessionLeaseConflictError } from "../storage.js";
 import { isRecord, normalizeText } from "../token-utils.js";
 import { ProjectionCoverageError } from "../prompt-coverage.js";
 import { CompileFailureError, LegacyHistoryError } from "../errors.js";
@@ -67,6 +68,38 @@ function parseOperatorAcceptance(value) {
         return undefined;
     }
     return value;
+}
+/** v4.0.5: a structural defect in invocation input. The MCP handlers map this
+ *  to `invalid_argument`; it is never a policy or round defect. */
+export class InvocationInputError extends Error {
+    code = "invalid_argument";
+}
+/** v4.0.5: normalize the invocation instruction at the transport boundary.
+ *  `undefined`/absent stays absent ("not provided"); non-string or
+ *  empty/whitespace is a structural defect. The trimmed text is stored
+ *  verbatim — no case folding, no internal-whitespace folding. */
+export function normalizeCurrentUserInstruction(raw) {
+    if (raw === undefined || raw === null)
+        return undefined;
+    if (typeof raw !== "string") {
+        throw new InvocationInputError("currentUserInstruction must be a non-empty string");
+    }
+    const text = raw.trim();
+    if (text.length === 0) {
+        throw new InvocationInputError("currentUserInstruction must be a non-empty string");
+    }
+    return text;
+}
+/** v4.0.5: normalize a whole transport input bundle before any state is read
+ *  or mutated. */
+export function normalizeInvocationInputs(inputs) {
+    if (!inputs)
+        return undefined;
+    const instruction = normalizeCurrentUserInstruction(inputs.currentUserInstruction);
+    if (instruction === undefined && inputs.currentUserInstruction === undefined) {
+        return inputs;
+    }
+    return { ...inputs, currentUserInstruction: instruction };
 }
 /** v3.9.4: a structural defect in the start criteria argument. The MCP
  *  handler maps this to `invalid_argument`; it is never a policy defect. */
@@ -135,7 +168,9 @@ export function normalizeStartCriteria(raw) {
  *  terminal reason". One constant keeps the response and the sink aligned. */
 export const MANUAL_STOP_REASON = "cancelled";
 // ── Helpers ────────────────────────────────────────────────────────────────
-export function buildLoopRequest(session) {
+export function buildLoopRequest(session,
+/** v4.0.5: the host's explicit invocation input for THIS compile. */
+inputs) {
     // The request carries CURRENT-ROUND context only. Every previous-round
     // fact is read from the Vault's committed rounds by the compiler, so live,
     // resume, unpause and backtrack compiles cannot disagree about the same
@@ -174,6 +209,11 @@ export function buildLoopRequest(session) {
         consecutive_rejections: session.consecutiveRejections,
         rejection_notice: retry?.rejectionNotice ?? "",
         ...(retry ? { retry_evidence_posture: retry.evidencePosture } : {}),
+        // v4.0.5: invocation input only. It never replaces `task`; the compiler
+        // and assembler project it into the current prompt/state/artifact.
+        ...(inputs?.currentUserInstruction !== undefined
+            ? { current_user_instruction: inputs.currentUserInstruction }
+            : {}),
     };
 }
 // ── RoundLifecycle ─────────────────────────────────────────────────────────
@@ -514,11 +554,50 @@ export class RoundLifecycle {
     /** v4.0.3: a resumed round must NOT re-capture its baseline from a
      *  possibly modified workspace. */
     seedTrust = true) {
+        // v4.0.5: the shared compile → save → result tail is ATOMIC. If the save
+        // fails, the in-memory session must not keep the new snapshot/trust: a
+        // caller would otherwise receive a handle for a prompt that was never
+        // persisted. The old held snapshot and handle stay valid, and the session
+        // becomes resumable.
+        const previousSnapshot = session.roundSnapshot;
+        const previousTrust = session.entrypointTrust;
         session.roundSnapshot = prepared.snapshot;
         if (seedTrust)
             this.seedEntrypointTrust(session);
+        try {
+            this.save(session);
+        }
+        catch (error) {
+            session.roundSnapshot = previousSnapshot;
+            session.entrypointTrust = previousTrust;
+            if (error instanceof SessionLeaseConflictError)
+                throw error;
+            logEvent("session_save_failed", {
+                loopId: session.loopId,
+                round: session.currentRound,
+                error: String(error),
+            });
+            session.status = "stalled";
+            try {
+                this.save(session);
+            }
+            catch {
+                // The store is still unavailable; the in-memory held facts remain the
+                // best available state and the next resume retries the save.
+            }
+            return {
+                sessionId: session.sessionId,
+                round: session.currentRound,
+                ...this.heldHandle(session),
+                ...this.transactionFacts(session),
+                prompt: null,
+                stopReason: "stalled",
+                stopDetail: "The prompt was compiled but the session could not be saved: " +
+                    `${String(error).slice(0, 300)}. The previous held prompt and ` +
+                    "handle are unchanged; call loopforge_resume to retry.",
+            };
+        }
         policyMetrics.recordStrategy(session.loopId, prepared.level);
-        this.save(session);
         return {
             sessionId: session.sessionId,
             round: session.currentRound,
@@ -645,7 +724,7 @@ export class RoundLifecycle {
      *  still points at the old prompt. Returns null when no commit is pending.
      *  v3.7: async — the continue-after-crash branch compiles through
      *  RoundDriver.prepare (the sync prepareSync fallback was removed). */
-    async reconcileCommittedRound(session) {
+    async reconcileCommittedRound(session, inputs) {
         if (!session.roundSnapshot)
             return null;
         const recovered = this.driver(session.engine, session.loopId).recover(session.roundSnapshot);
@@ -709,7 +788,10 @@ export class RoundLifecycle {
         if (session.currentRound <= recovered.snapshot.round) {
             session.currentRound = recovered.snapshot.round + 1;
         }
-        const request = buildLoopRequest(session);
+        // v4.0.5: a host instruction explicitly supplied with THIS resume call
+        // carries into the next round's compile. It is never inherited from an
+        // older artifact here.
+        const request = buildLoopRequest(session, inputs);
         let prepared;
         try {
             prepared = await this.driver(session.engine, session.loopId).prepare(request, session.loopId, session.currentRound, this.prepareOptions(session));
@@ -735,7 +817,7 @@ export class RoundLifecycle {
      *  completed BEFORE any ordinary compile/held-prompt path. The restore and
      *  redo prepare are idempotent; a verified held redo prompt is returned
      *  without re-checking the workspace (the Agent may already have worked). */
-    async completePendingRecovery(session) {
+    async completePendingRecovery(session, inputs) {
         const pending = loadCommittedHistory(this.store, session.loopId).pendingDirective;
         if (!pending?.recovery)
             return null;
@@ -744,7 +826,10 @@ export class RoundLifecycle {
             directive.transaction_id &&
             session.roundSnapshot.round === directive.target.redo_round;
         if (verified) {
-            return this.heldPromptResult(session);
+            // v4.0.5: the verified redo prompt goes through the SAME held-prompt
+            // entry as every other resume/unpause path, so a new instruction is
+            // never silently dropped on this branch.
+            return this.heldPromptWithInputs(session, inputs);
         }
         session.currentRound = directive.target.redo_round;
         session.roundSnapshot = undefined;
@@ -802,40 +887,236 @@ export class RoundLifecycle {
             beforeSubGoals: beforeFacts.subGoals,
             recoveryDirective: directive,
             replayed: true,
+        }, inputs);
+    }
+    /** v4.0.5: the zero-side-effect refusal for a cold handoff whose held retry
+     *  facts are missing or inconsistent. Nothing is saved, compiled or
+     *  advanced; the held snapshot and handle are unchanged. */
+    invocationRecoveryUnavailable(session, detail) {
+        return {
+            sessionId: session.sessionId,
+            round: session.currentRound,
+            ...this.heldHandle(session),
+            ...this.transactionFacts(session),
+            prompt: null,
+            submissionError: {
+                code: "invalid_argument",
+                details: { reason_code: "invocation_recovery_unavailable", detail },
+            },
+            stopDetail: detail,
+        };
+    }
+    /** v4.0.5: map a compile failure onto the existing stalled/coverage result.
+     *  Returns null for an unexpected error so the caller can rethrow it. */
+    compileStalledResult(session, error, detail) {
+        if (error instanceof ProjectionCoverageError) {
+            return this.stalledAfterCommit(session.sessionId, session, false, error.message, { code: "projection_incomplete", details: { coverage: error.coverage } });
+        }
+        if (error instanceof CompileFailureError) {
+            return this.stalledAfterCommit(session.sessionId, session, false, `${detail}: ${error.message}. The previous prompt and handle are ` +
+                "unchanged; call loopforge_resume to retry.");
+        }
+        return null;
+    }
+    /** v4.0.5: ONE held-prompt entry for resume/unpause/recovery. With no new
+     *  instruction it re-delivers the stored prompt and handle unchanged; with a
+     *  new instruction it recompiles the SAME round/attempt and preserves the
+     *  held context boundary (including an existing invocation recovery). */
+    async heldPromptWithInputs(session, inputs) {
+        const held = heldPromptSnapshot(session);
+        if (!held?.promptArtifact)
+            return null;
+        const instruction = inputs?.currentUserInstruction;
+        if (instruction === undefined ||
+            instruction === held.promptArtifact.currentUserInstruction) {
+            return this.heldPromptResult(session);
+        }
+        return this.recompileHeldPrompt(session, held, {
+            currentUserInstruction: instruction,
+        });
+    }
+    /** v4.0.5: the public `loopforge_next` instruction-recompile entry. It only
+     *  recompiles the held prompt for a new invocation instruction: no
+     *  submission, no round/attempt change, no evidence collection. The handle
+     *  was validated by SessionManager before its queue and lease heartbeat. */
+    async recompileHeldWithInstruction(session, instruction) {
+        const held = heldPromptSnapshot(session);
+        if (!held?.promptArtifact) {
+            return {
+                sessionId: session.sessionId,
+                round: session.currentRound,
+                prompt: null,
+                submissionError: {
+                    code: "invalid_argument",
+                    details: {
+                        reason_code: "no_held_prompt",
+                        detail: "No held prompt exists to recompile.",
+                    },
+                },
+            };
+        }
+        if (instruction === held.promptArtifact.currentUserInstruction) {
+            // Idempotent: the exact same instruction returns the same prompt and
+            // handle without compiling again.
+            return this.heldPromptResult(session) ?? {
+                sessionId: session.sessionId,
+                round: session.currentRound,
+                prompt: null,
+            };
+        }
+        return this.recompileHeldPrompt(session, held, {
+            currentUserInstruction: instruction,
+        });
+    }
+    /** v4.0.5: compile a held prompt again without collecting evidence, writing
+     *  the Vault, changing attempt/round or touching retry counters. */
+    async recompileHeldPrompt(session, held, inputs) {
+        const request = buildLoopRequest(session, inputs);
+        if (inputs.invocationRecovery)
+            request.invocation_recovery = true;
+        let prepared;
+        try {
+            prepared = await this.driver(session.engine, session.loopId)
+                .recompileHeld(request, held);
+        }
+        catch (error) {
+            const stalled = this.compileStalledResult(session, error, "The held prompt could not be recompiled");
+            if (stalled)
+                return stalled;
+            throw error;
+        }
+        return this.persistPrepared(session, {
+            prompt: prepared.prompt,
+            level: prepared.level,
+            baseline: prepared.evidenceBaseline,
+            snapshot: prepared.snapshot,
+            warnings: prepared.warnings ?? [],
+        }, undefined, this.resumeWarnings(session, prepared.warnings), false);
+    }
+    /** v4.0.5: compile the retry prompt for a rejected attempt that has no held
+     *  prompt (its retry compile failed before). This is the one path that
+     *  creates the next attempt for such a session. */
+    async prepareRetryWithInputs(session, rejected, opts) {
+        const retryContext = rejected.retryContext;
+        if (!retryContext) {
+            throw new Error("prepareRetryWithInputs requires a retry context");
+        }
+        const request = buildLoopRequest(session, opts);
+        let prepared;
+        try {
+            prepared = await this.driver(session.engine, session.loopId).prepareRetry(request, rejected, retryContext.rejectionNotice, session.consecutiveRejections, opts.invocationRecovery ? { invocationRecovery: true } : {});
+        }
+        catch (error) {
+            const stalled = this.compileStalledResult(session, error, "The retry prompt could not be compiled");
+            if (stalled)
+                return stalled;
+            throw error;
+        }
+        return this.persistPrepared(session, {
+            prompt: prepared.prompt,
+            level: prepared.level,
+            baseline: prepared.evidenceBaseline,
+            snapshot: prepared.snapshot,
+            warnings: prepared.warnings ?? [],
+        }, undefined, this.resumeWarnings(session, prepared.warnings), false);
+    }
+    /** v4.0.5: recompile the SAME retry attempt when the host declared the
+     *  original invocation lost, or when a submitted retry prompt never existed
+     *  (rejected snapshot). Returns null when this session has no retry material
+     *  or when the held prompt is already a clean context (idempotent no-op). */
+    async recompileRetryAttempt(session, inputs) {
+        const invocationLost = inputs.invocationLost === true;
+        if (!invocationLost && inputs.currentUserInstruction === undefined) {
+            return null;
+        }
+        const held = session.roundSnapshot?.round === session.currentRound
+            ? session.roundSnapshot
+            : undefined;
+        // A rejected attempt whose retry prompt never compiled: there is nothing
+        // to re-deliver, so the retry prompt is compiled for real. Instruction
+        // inheritance is scoped to this same logical round.
+        if (held?.phase === "rejected" && held.retryContext) {
+            const instruction = inputs.currentUserInstruction ??
+                held.promptArtifact?.currentUserInstruction;
+            return this.prepareRetryWithInputs(session, held, {
+                ...(instruction !== undefined
+                    ? { currentUserInstruction: instruction }
+                    : {}),
+                invocationRecovery: invocationLost && session.consecutiveRejections < 2,
+            });
+        }
+        // Only an in-context retry has an invocation to recover. A held clean
+        // prompt (first/next round, escalation, recovery redo) is already the
+        // cold-context prompt, so `invocationLost` is an idempotent no-op.
+        if (held?.phase !== "prompted" || !held.promptArtifact)
+            return null;
+        if (held.promptArtifact.contextMode !== "same_round_retry")
+            return null;
+        // A plain instruction recompile is handled by the unified held-prompt
+        // entry; only the lost invocation rebuilds the context boundary.
+        if (!invocationLost)
+            return null;
+        if (!held.retryContext) {
+            return this.invocationRecoveryUnavailable(session, "The held in-context retry has no retry context, so the same attempt " +
+                "cannot be recompiled in cold context.");
+        }
+        if (held.retryContext.attempt !== held.attempt ||
+            held.retryContext.rejectedAttempt + 1 !== held.attempt) {
+            return this.invocationRecoveryUnavailable(session, "The held retry context does not match the held attempt, so the same " +
+                "attempt cannot be recompiled in cold context.");
+        }
+        if (session.consecutiveRejections >= 2) {
+            return this.invocationRecoveryUnavailable(session, "The retry has reached the rejection escalation threshold; it is " +
+                "already clean context and is not rewritten as an invocation recovery.");
+        }
+        const instruction = inputs.currentUserInstruction ??
+            held.promptArtifact.currentUserInstruction;
+        return this.recompileHeldPrompt(session, held, {
+            ...(instruction !== undefined ? { currentUserInstruction: instruction } : {}),
+            invocationRecovery: true,
         });
     }
     /** A rejected round still owns its original before-image. Recover its next
      *  attempt through the same retry preparation used by a live rejection;
-     *  ordinary prepare would recapture evidence and reset snapshot.attempt. */
-    prepareMissingPrompt(session) {
+     *  ordinary prepare would recapture evidence and reset snapshot.attempt.
+     *  v4.0.5: the instruction travels with the compile and is inherited from
+     *  the rejected prompt within the same logical round. */
+    prepareMissingPrompt(session, inputs) {
         const driver = this.driver(session.engine, session.loopId);
-        const request = buildLoopRequest(session);
         const rejected = session.roundSnapshot;
         if (rejected?.phase === "rejected" && rejected.retryContext) {
+            const instruction = inputs?.currentUserInstruction ??
+                rejected.promptArtifact?.currentUserInstruction;
+            const request = buildLoopRequest(session, instruction !== undefined ? { currentUserInstruction: instruction } : undefined);
             return driver.prepareRetry(request, rejected, rejected.retryContext.rejectionNotice, session.consecutiveRejections);
         }
-        return driver.prepare(request, session.loopId, session.currentRound, this.prepareOptions(session));
+        return driver.prepare(buildLoopRequest(session, inputs), session.loopId, session.currentRound, this.prepareOptions(session));
     }
     /** Resume tail: the session has been reconstructed and registered. Reconcile
      *  a committed-but-undelivered round, restore the held prompt, or recover a
      *  missing prompt from current round state. v3.7: async — compilation runs
      *  through RoundDriver.prepare like unpause (the prepareSync fallback was
      *  removed); a failed compile now degrades to the same stalled terminal
-     *  result unpause returns instead of persisting a null prompt. */
-    async resume(session) {
-        const pendingRecovery = await this.completePendingRecovery(session);
+     *  result unpause returns instead of persisting a null prompt.
+     *  v4.0.5: an `invocationLost` retry is recompiled as a cold-context prompt
+     *  for the SAME logical round/attempt, before the ordinary held-prompt path. */
+    async resume(session, inputs) {
+        const pendingRecovery = await this.completePendingRecovery(session, inputs);
         if (pendingRecovery)
             return pendingRecovery;
-        const reconciled = await this.reconcileCommittedRound(session);
+        const reconciled = await this.reconcileCommittedRound(session, inputs);
         if (reconciled)
             return reconciled;
-        const restored = this.heldPromptResult(session);
+        const retryRecovery = await this.recompileRetryAttempt(session, inputs ?? {});
+        if (retryRecovery)
+            return retryRecovery;
+        const restored = await this.heldPromptWithInputs(session, inputs);
         if (restored)
             return restored;
         // Missing held prompt: compile (async) once, then persist it.
         let prepared;
         try {
-            prepared = await this.prepareMissingPrompt(session);
+            prepared = await this.prepareMissingPrompt(session, inputs);
         }
         catch (error) {
             if (error instanceof ProjectionCoverageError) {
@@ -856,22 +1137,26 @@ export class RoundLifecycle {
     }
     /** Unpause tail: the session has been reconstructed and registered with
      *  status "running". Reconcile a committed round, restore the held prompt,
-     *  or compile the next prompt from the committed window. */
-    async unpause(session) {
-        const pendingRecovery = await this.completePendingRecovery(session);
+     *  or compile the next prompt from the committed window. v4.0.5: the same
+     *  invocation inputs and cold-handoff recompile apply here. */
+    async unpause(session, inputs) {
+        const pendingRecovery = await this.completePendingRecovery(session, inputs);
         if (pendingRecovery)
             return pendingRecovery;
-        const reconciled = await this.reconcileCommittedRound(session);
+        const reconciled = await this.reconcileCommittedRound(session, inputs);
         if (reconciled)
             return reconciled;
-        const restored = this.heldPromptResult(session);
+        const retryRecovery = await this.recompileRetryAttempt(session, inputs ?? {});
+        if (retryRecovery)
+            return retryRecovery;
+        const restored = await this.heldPromptWithInputs(session, inputs);
         if (restored) {
             this.save(session);
             return restored;
         }
         let prepared;
         try {
-            prepared = await this.prepareMissingPrompt(session);
+            prepared = await this.prepareMissingPrompt(session, inputs);
         }
         catch (error) {
             if (error instanceof ProjectionCoverageError) {
@@ -974,7 +1259,7 @@ export class RoundLifecycle {
     }
     /** Build a rejection result: compile a retry prompt, persist, return.
      *  MUTATES: session.roundSnapshot, session.currentPrompt, session.currentLevel */
-    async buildRejectionResult(sessionId, session, pr, verificationFlags, receiptBase) {
+    async buildRejectionResult(sessionId, session, pr, verificationFlags, receiptBase, inputs) {
         const rejectedSnapshot = session.roundSnapshot;
         if (!rejectedSnapshot) {
             throw new Error("A rejected attempt must keep its held transaction snapshot.");
@@ -1000,7 +1285,13 @@ export class RoundLifecycle {
         }
         // In-flight attempt findings are authority for THIS attempt, not
         // committed history: buildLoopRequest now projects them from retryContext.
-        const retryRequest = buildLoopRequest(session);
+        // v4.0.5: a same-round retry inherits the rejected prompt's instruction
+        // unless the host supplied a new one for this submission.
+        const inheritedInstruction = inputs?.currentUserInstruction ??
+            rejectedSnapshot.promptArtifact?.currentUserInstruction;
+        const retryRequest = buildLoopRequest(session, inheritedInstruction !== undefined
+            ? { currentUserInstruction: inheritedInstruction }
+            : undefined);
         retryRequest.verification_flags = verificationFlags;
         retryRequest.rejection_notice = pr.rejectionPrompt ?? "";
         let preparedRetry;
@@ -1124,7 +1415,7 @@ export class RoundLifecycle {
                 result: this.restoreFailedResult(session, directive, error instanceof RestoreFailure ? error.reasonCode : "restore_failed", String(error instanceof Error ? error.message : error)),
             };
         }
-        const request = buildLoopRequest(session);
+        const request = buildLoopRequest(session, extra.inputs);
         if (extra.verificationFlags) {
             request.verification_flags = [...extra.verificationFlags];
         }
@@ -1187,7 +1478,7 @@ export class RoundLifecycle {
      *  LoopForge executes and verifies the restore, then compiles the redo from
      *  the verified baseline. A failed restore leaves the directive pending and
      *  the session stalled — no redo prompt is ever issued unverified. */
-    async buildBacktrackResult(sessionId, session, pr, receiptBase) {
+    async buildBacktrackResult(sessionId, session, pr, receiptBase, inputs) {
         const directive = pr.recovery;
         if (!directive) {
             session.status = "stalled";
@@ -1218,6 +1509,7 @@ export class RoundLifecycle {
             : (directive.trigger_findings ?? []);
         const outcome = await this.runRestoreAndPrepare(session, directive, {
             verificationFlags: recoveryFlags,
+            ...(inputs ? { inputs } : {}),
         });
         if (!outcome.ok) {
             return {
@@ -1435,7 +1727,7 @@ export class RoundLifecycle {
      *  Includes the commit fence (pause/delete race guard) and context provider.
      *  MUTATES: session.currentRound, session.currentPrompt, session.currentLevel,
      *           session.evidenceBaseline, session.roundSnapshot */
-    async advanceToNextRound(sessionId, session, selfEval, pr, actualEvidence, receiptBase) {
+    async advanceToNextRound(sessionId, session, selfEval, pr, actualEvidence, receiptBase, inputs) {
         const agentSuccessClaim = pr.agentSuccessClaim;
         // M4 (v3.7.x): replay guard. The counter may already point past the
         // committed round when this continue is a REPLAY — after a crash or an
@@ -1458,7 +1750,9 @@ export class RoundLifecycle {
                 agentSuccessClaim,
             };
         }
-        const request = buildLoopRequest(session);
+        // v4.0.5: a new round never inherits an earlier artifact's instruction;
+        // only the explicit host input for this call travels.
+        const request = buildLoopRequest(session, inputs);
         let prepared;
         try {
             prepared = await this.driver(session.engine, session.loopId).prepare(request, session.loopId, session.currentRound, this.prepareOptions(session));
@@ -1572,7 +1866,7 @@ export class RoundLifecycle {
             ...(projectionError ? { projectionError } : {}),
         };
     }
-    async advanceUnlocked(sessionId, output, preExtractedEval, normalizationDiagnostics, submittedFields) {
+    async advanceUnlocked(sessionId, output, preExtractedEval, normalizationDiagnostics, submittedFields, inputs) {
         // ── 1. Validate session ──────────────────────────────────────────────
         // The handle identity (including the exact transaction attempt) was
         // already validated by SessionManager before its queue and lease
@@ -1699,11 +1993,11 @@ export class RoundLifecycle {
         }
         // ── 4. Route disposition ─────────────────────────────────────────────
         if (tx.pr.action === "reject") {
-            return this.buildRejectionResult(sessionId, session, tx.pr, tx.verificationFlags, receiptBase);
+            return this.buildRejectionResult(sessionId, session, tx.pr, tx.verificationFlags, receiptBase, inputs);
         }
         // ── v2.10/v3.9.6: recovery directive (machine or agent) ───────────────
         if (tx.pr.action === "backtrack" || tx.pr.action === "recovery") {
-            return this.buildBacktrackResult(sessionId, session, tx.pr, receiptBase);
+            return this.buildBacktrackResult(sessionId, session, tx.pr, receiptBase, inputs);
         }
         // Accepted rounds advance the before-snapshot baseline. Rejected rounds
         // retain the original baseline so their retry remains zero-commit.
@@ -1729,13 +2023,13 @@ export class RoundLifecycle {
             return this.buildStopResult(sessionId, session, tx.pr, finalized.reason, receiptBase);
         }
         // ── 5. Continue — compile next round ─────────────────────────────────
-        return this.advanceToNextRound(sessionId, session, selfEval, tx.pr, tx.actualEvidence, receiptBase);
+        return this.advanceToNextRound(sessionId, session, selfEval, tx.pr, tx.actualEvidence, receiptBase, inputs);
     }
     /** v3.9.6: Agent-initiated recovery. The Agent selects the target; this
      *  method only validates it against committed facts, records the rollback
      *  directive and compiles the redo. It never runs ordinary verification or
      *  enforcement on the abandoned work. */
-    async recover(sessionId, recovery) {
+    async recover(sessionId, recovery, inputs) {
         const session = this.registry.get(sessionId);
         if (!session) {
             return {
@@ -1773,7 +2067,7 @@ export class RoundLifecycle {
         const held = session.roundSnapshot;
         // Pending directive first: one directive is the record, so a repeated
         // request never reads a new target and never commits a second directive.
-        const pending = await this.completePendingRecovery(session);
+        const pending = await this.completePendingRecovery(session, inputs);
         if (pending)
             return pending;
         if (held?.kind !== "evaluation" || held.round !== session.currentRound) {
@@ -1935,11 +2229,13 @@ export class RoundLifecycle {
                 transaction_id: directiveTransactionId,
             }, "directive_unavailable", "the committed rollback directive could not be read back");
         }
-        return this.restoreAndPrepareRedo(session, directive);
+        return this.restoreAndPrepareRedo(session, directive, inputs);
     }
     /** Execute the committed directive's restore and return the redo prompt. */
-    async restoreAndPrepareRedo(session, directive) {
-        const outcome = await this.runRestoreAndPrepare(session, directive);
+    async restoreAndPrepareRedo(session, directive, inputs) {
+        const outcome = await this.runRestoreAndPrepare(session, directive, {
+            ...(inputs ? { inputs } : {}),
+        });
         if (!outcome.ok)
             return outcome.result;
         const { restore, prepared } = outcome;
@@ -1985,8 +2281,10 @@ export class RoundLifecycle {
      *  v4.0.0: the submission identity (the exact held transaction) is validated
      *  by SessionManager before its queue and lease heartbeat. This entry point
      *  owns the round state machine and does not re-check anchors. */
-    async advance(sessionId, output, preExtractedEval, normalizationDiagnostics, submittedFields) {
-        return this.advanceUnlocked(sessionId, output, preExtractedEval, normalizationDiagnostics, submittedFields);
+    async advance(sessionId, output, preExtractedEval, normalizationDiagnostics, submittedFields,
+    /** v4.0.5: invocation input for the prompt compiled after this submission. */
+    inputs) {
+        return this.advanceUnlocked(sessionId, output, preExtractedEval, normalizationDiagnostics, submittedFields, inputs);
     }
     /** Write back loop knowledge to long-term memory.
      *  Uses shared base builder from policy.ts. Called when a loop terminates. */

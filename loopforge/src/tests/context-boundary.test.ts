@@ -6,7 +6,10 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { derivePromptContextBoundary } from "../context-boundary.js";
+import {
+  derivePromptContextBoundary,
+  promptContextPairIssue,
+} from "../context-boundary.js";
 import { compileLoop } from "../loop-compiler.js";
 import { makeLoopCompileRequest } from "../protocol.js";
 import { committedBacktrackRound, committedFeedbackRound } from "./_helpers.js";
@@ -31,6 +34,7 @@ describe("derivePromptContextBoundary — explicit context policy", () => {
         consecutiveRejections: 1,
         recoveryBoundary: true,
         hasPreviousCommittedRound: true,
+        invocationRecovery: false,
       }),
       { mode: "same_round_retry", reason: "enforcement_retry" },
     );
@@ -44,6 +48,7 @@ describe("derivePromptContextBoundary — explicit context policy", () => {
         consecutiveRejections: 2,
         recoveryBoundary: false,
         hasPreviousCommittedRound: true,
+        invocationRecovery: false,
       }),
       { mode: "fresh_invocation", reason: "rejection_escalation" },
     );
@@ -57,6 +62,7 @@ describe("derivePromptContextBoundary — explicit context policy", () => {
         consecutiveRejections: 0,
         recoveryBoundary: true,
         hasPreviousCommittedRound: true,
+        invocationRecovery: false,
       }),
       { mode: "fresh_invocation", reason: "recovery_redo" },
     );
@@ -70,6 +76,7 @@ describe("derivePromptContextBoundary — explicit context policy", () => {
         consecutiveRejections: 0,
         recoveryBoundary: false,
         hasPreviousCommittedRound: false,
+        invocationRecovery: false,
       }),
       { mode: "fresh_invocation", reason: "first_round" },
     );
@@ -83,6 +90,7 @@ describe("derivePromptContextBoundary — explicit context policy", () => {
         consecutiveRejections: 0,
         recoveryBoundary: false,
         hasPreviousCommittedRound: true,
+        invocationRecovery: false,
       }),
       { mode: "fresh_invocation", reason: "next_round" },
     );
@@ -183,6 +191,112 @@ describe("compileLoop — context boundary is an artifact fact", () => {
     assert.deepEqual(response.prompt_artifact?.workingMemory?.reportRounds, [1]);
     assert.equal(response.prompt_artifact?.round, 2);
     assert.equal(response.prompt_artifact?.attempt, 2);
+  });
+});
+
+describe("v4.0.5 — invocation recovery is a cold retry boundary", () => {
+  it("below the escalation threshold a lost invocation becomes fresh context", () => {
+    assert.deepEqual(
+      derivePromptContextBoundary({
+        round: 3,
+        attempt: 2,
+        consecutiveRejections: 1,
+        recoveryBoundary: true,
+        hasPreviousCommittedRound: true,
+        invocationRecovery: true,
+      }),
+      { mode: "fresh_invocation", reason: "invocation_recovery" },
+    );
+  });
+
+  it("the escalation threshold wins over invocation recovery", () => {
+    assert.deepEqual(
+      derivePromptContextBoundary({
+        round: 3,
+        attempt: 3,
+        consecutiveRejections: 2,
+        recoveryBoundary: false,
+        hasPreviousCommittedRound: true,
+        invocationRecovery: true,
+      }),
+      { mode: "fresh_invocation", reason: "rejection_escalation" },
+    );
+  });
+
+  it("without the flag the first retry stays in context", () => {
+    assert.deepEqual(
+      derivePromptContextBoundary({
+        round: 3,
+        attempt: 2,
+        consecutiveRejections: 0,
+        recoveryBoundary: false,
+        hasPreviousCommittedRound: true,
+        invocationRecovery: false,
+      }),
+      { mode: "same_round_retry", reason: "enforcement_retry" },
+    );
+  });
+
+  it("attempt 1 ignores the flag", () => {
+    assert.deepEqual(
+      derivePromptContextBoundary({
+        round: 3,
+        attempt: 1,
+        consecutiveRejections: 0,
+        recoveryBoundary: false,
+        hasPreviousCommittedRound: true,
+        invocationRecovery: true,
+      }),
+      { mode: "fresh_invocation", reason: "next_round" },
+    );
+  });
+
+  it("a cold handoff rehydrates L2 with memory, prior evidence and routing", () => {
+    const loopId = "context-loop";
+    const response = compile({
+      results: [committedFeedbackRound(1, {
+        loopId,
+        outputSummary: "COMMITTED_REPORT_TEXT",
+      })],
+    }, {
+      round: 2,
+      attempt: 2,
+      invocation_recovery: true,
+      rejection_notice: "fix the finding",
+    });
+    assert.equal(response.recompile_level, "l2");
+    assert.equal(response.prompt_artifact?.contextMode, "fresh_invocation");
+    assert.equal(response.prompt_artifact?.contextReason, "invocation_recovery");
+    assert.match(response.prompt, /clean context repair \+ invocation recovery/);
+    assert.match(response.prompt, /COMMITTED_REPORT_TEXT/);
+    assert.match(response.prompt, /Working Memory \(Agent reports are claims\)/);
+    assert.match(response.prompt, /Machine Evidence — previous committed round R1/);
+    assert.doesNotMatch(response.prompt, /self-contained prompt/);
+    assert.match(response.prompt, /SAME logical round and/);
+  });
+
+  it("the pair guard requires clean context and attempt > 1", () => {
+    assert.equal(promptContextPairIssue({
+      level: "l2",
+      mode: "fresh_invocation",
+      reason: "invocation_recovery",
+      attempt: 2,
+      round: 2,
+    }), null);
+    assert.ok(promptContextPairIssue({
+      level: "l2",
+      mode: "same_round_retry",
+      reason: "invocation_recovery",
+      attempt: 2,
+      round: 2,
+    }));
+    assert.ok(promptContextPairIssue({
+      level: "l2",
+      mode: "fresh_invocation",
+      reason: "invocation_recovery",
+      attempt: 1,
+      round: 2,
+    }));
   });
 });
 

@@ -50,6 +50,10 @@ describe("v4.0.4 — runtime round guidance", () => {
     assert.ok(retry.includes(ROUND_BOUNDARY_NON_BOUNDARIES));
     assert.ok(!retry.includes(ROUND_BOUNDARY_PRINCIPLE));
     assert.ok(!retry.includes(ROUND_BOUNDARY_SIZING));
+    // v4.0.5: the lost invocation has ONE route; the old "reuse the
+    // self-contained prompt" claim is gone.
+    assert.ok(retry.includes("invocationLost: true"));
+    assert.ok(!retry.includes("self-contained"));
   });
 
   it("the server instructions carry the boundary rules and the host contract", () => {
@@ -81,6 +85,10 @@ describe("v4.0.4 — runtime round guidance", () => {
       formatContextBoundaryLabel("fresh_invocation", "rejection_escalation", {
         recoveryBoundary: true,
       }),
+      formatContextBoundaryLabel("fresh_invocation", "invocation_recovery"),
+      formatContextBoundaryLabel("fresh_invocation", "invocation_recovery", {
+        recoveryBoundary: true,
+      }),
       formatContextBoundaryLabel("same_round_retry", "enforcement_retry"),
     ];
     assert.deepEqual(labels, [
@@ -91,6 +99,8 @@ describe("v4.0.4 — runtime round guidance", () => {
       "clean context repair + recovery retry (fresh_invocation; enforcement_retry; recovery lessons carried)",
       "clean context repair (fresh_invocation; rejection_escalation; same logical round; rejected posture is attempt-time only)",
       "clean context repair + recovery retry (fresh_invocation; rejection_escalation; recovery lessons carried)",
+      "clean context repair + invocation recovery (fresh_invocation; invocation_recovery; same logical round; retry lessons carried)",
+      "clean context repair + invocation recovery + recovery retry (fresh_invocation; invocation_recovery; same logical round; retry and recovery lessons carried)",
       "in-context repair (same_round_retry; enforcement_retry; continue original invocation if alive; lessons injected)",
     ]);
     for (const label of labels) {
@@ -185,7 +195,11 @@ describe("v4.0.4 — the skill points at the runtime rules", () => {
       const reason = fields[1]!.trim().replace(")", "") as Parameters<typeof promptContextPairIssue>[0]["reason"];
       assert.equal(promptContextPairIssue({
         level: "l2", mode, reason, round: 3,
-        attempt: reason === "enforcement_retry" || reason === "rejection_escalation" ? 2 : 1,
+        attempt: reason === "enforcement_retry" ||
+            reason === "rejection_escalation" ||
+            reason === "invocation_recovery"
+          ? 2
+          : 1,
       }), null, `advertised strategy is illegal: ${example}`);
     }
     assert.ok(skill.includes(formatContextBoundaryLabel(

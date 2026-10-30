@@ -75,8 +75,24 @@ export declare class RoundDriver {
     }): Promise<PreparedRound>;
     private compile;
     /** Compile a fresh prompt for a zero-commit enforcement retry. The logical
-     * round ID and before-evidence snapshot remain stable; only attempt changes. */
-    prepareRetry(request: LoopCompileRequest, rejected: RoundTransactionSnapshot, rejectionNotice: string, consecutiveRejections: number): Promise<PreparedRound>;
+     * round ID and before-evidence snapshot remain stable; only attempt changes.
+     *
+     * v4.0.5: `invocationRecovery` marks the cold-handoff case. It only applies
+     * below the escalation threshold — an escalated retry is already clean
+     * context and keeps `rejection_escalation`. */
+    prepareRetry(request: LoopCompileRequest, rejected: RoundTransactionSnapshot, rejectionNotice: string, consecutiveRejections: number, opts?: {
+        invocationRecovery?: boolean;
+    }): Promise<PreparedRound>;
+    /** v4.0.5: recompile the HELD retry prompt for the SAME logical round and
+     * attempt. This is not a new attempt, a recovery or a round advance: it
+     * compiles only, never collects before/after evidence, never writes a Vault
+     * round and never changes attempt/round.
+     *
+     * Any held prompt keeps its context boundary. If the held artifact is
+     * already `invocation_recovery`, the flag is re-applied even when this call
+     * carries only a new instruction, so a cold-context prompt can never fall
+     * back to `same_round_retry`. */
+    recompileHeld(request: LoopCompileRequest, held: RoundTransactionSnapshot): Promise<PreparedRound>;
     private finishPrepare;
     /** The ONE coordinator construction for a write. The engine is not a write
      *  dependency. */

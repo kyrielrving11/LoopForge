@@ -20,6 +20,7 @@ export type PromptLevelReason =
   | "failed_without_observable_new_information"
   | "rejection_rehydrate"
   | "recovery_boundary"
+  | "invocation_recovery"
   | "state_capsule";
 
 export interface PromptLevelInput {
@@ -40,6 +41,9 @@ export interface PromptLevelInput {
   } | null;
   consecutiveRejections?: number;
   recoveryBoundary?: boolean;
+  /** v4.0.5: a held retry recompiled because the original invocation is gone.
+   *  A cold handoff has no transcript to rely on, so it rehydrates at L2. */
+  invocationRecovery?: boolean;
 }
 
 export interface PromptLevelDecision {
@@ -67,6 +71,12 @@ function previousRoundIsProvablyStale(
 export function decidePromptLevel(input: PromptLevelInput): PromptLevelDecision {
   if ((input.consecutiveRejections ?? 0) >= 2) {
     return { level: "l2", reasons: ["rejection_rehydrate"] };
+  }
+  // v4.0.5: the original invocation is gone, so the prompt itself must carry
+  // the rehydration a live in-context retry could rely on its transcript for.
+  // This is the existing L2 boundary semantics, not a new policy.
+  if (input.invocationRecovery) {
+    return { level: "l2", reasons: ["invocation_recovery"] };
   }
   if (input.recoveryBoundary) {
     return { level: "l2", reasons: ["recovery_boundary"] };

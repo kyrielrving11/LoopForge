@@ -138,6 +138,7 @@ export function buildExplain(loopId, entries, round, legacyRounds = 0) {
                 ? {
                     mode: view.promptArtifact.contextMode,
                     reason: view.promptArtifact.contextReason,
+                    userInstruction: view.promptArtifact.currentUserInstruction ?? null,
                 }
                 : null,
             report: view.evaluation
@@ -313,6 +314,13 @@ export function renderExplain(result) {
         lines.push("", `Round ${round.round} (${round.roundId}, attempt ${round.attempt})`);
         if (round.context) {
             lines.push(`  context: ${formatContextBoundaryLabel(round.context.mode, round.context.reason, { recoveryBoundary: round.restore_verified })}`);
+            // v4.0.5: host input projected from the committed artifact. Bounded for
+            // display; the full text stays in the artifact.
+            if (round.context.userInstruction) {
+                const instruction = clip(round.context.userInstruction, 500);
+                lines.push(`  current user instruction: ${instruction.text}` +
+                    (instruction.truncated ? " …" : ""));
+            }
         }
         if (round.branchId &&
             round.branchId !== `loop:${result.loopId}:branch:root`) {

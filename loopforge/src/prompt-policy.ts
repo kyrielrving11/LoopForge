@@ -12,7 +12,7 @@ export type PromptLevelReason =
   | "explicit_override"
   | "first_round"
   | "plan_boundary"
-  | "checkpoint_boundary"
+  | "subtask_boundary"
   | "goal_changed"
   | "missing_previous_state"
   | "verification_contradicted"
@@ -27,7 +27,7 @@ export interface PromptLevelInput {
   attempt?: number;
   forceLevel?: string;
   hasPlanSource: boolean;
-  checkpointBoundary: boolean;
+  subtaskBoundary: boolean;
   goalChanged: boolean;
   previousStateMissing: boolean;
   /** Facts from the previous committed round, interpreted here once for the
@@ -89,8 +89,8 @@ export function decidePromptLevel(input: PromptLevelInput): PromptLevelDecision 
       reasons: ["explicit_override"],
     };
   }
-  if (input.checkpointBoundary) {
-    return { level: "l2", reasons: ["checkpoint_boundary"] };
+  if (input.subtaskBoundary) {
+    return { level: "l2", reasons: ["subtask_boundary"] };
   }
   if (input.goalChanged) return { level: "l2", reasons: ["goal_changed"] };
   if (input.previousStateMissing) {

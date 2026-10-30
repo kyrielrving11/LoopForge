@@ -1,5 +1,129 @@
 # Changelog
 
+## 4.0.4 (2026-10-30)
+
+**The context-strategy / result-facts release.** This is a small breaking
+release with NO migration: two wire renames, new schema versions, and a
+single presentation source for round results. 4.0.3 committed rounds and held
+sessions are reported as legacy (`legacyRounds` / `legacy_history`); they are
+never silently migrated or recompiled.
+
+### Breaking renames
+
+- `PromptContextMode`: `fresh_round` → `fresh_invocation`; `same_round_retry`
+  is unchanged. The old value is not accepted by the artifact decoder.
+- `SelfEvaluation.stop_reason` → `agent_stop_reason` (same three values). The
+  Agent's declared stop reason is now named separately from LoopForge's
+  `StopReason` everywhere. `StopReason` itself is unchanged.
+- `PROMPT_ARTIFACT_SCHEMA_VERSION` 9 → 10,
+  `ROUND_TRANSACTION_SCHEMA_VERSION` 7 → 8,
+  `CANONICAL_STATE_SCHEMA_VERSION` 7 → 8. `POLICY_SCHEMA_VERSION` stays "10";
+  no policy file changes, and the L0 ceiling was not raised.
+
+### Context strategies (clean context vs failure retry)
+
+- `fresh_invocation` is CLEAN CONTEXT: a new Agent invocation without the
+  previous transcript, tool logs or uncommitted reasoning. It is not a
+  workspace reset, and it may describe the SAME logical round (an L2 retry).
+- Every L2 prompt is a clean context, whatever triggered it: first round,
+  plan/subtask boundary, goal change, missing state, verification
+  contradiction, recovery, repeated rejection or forced L2.
+- Only the first L0 enforcement retry is `same_round_retry` (in-context
+  repair): it continues the original invocation and injects the rejection
+  notice, findings and failure reason.
+- An L2 retry is clean-context repair: new invocation, but retry notice,
+  findings, transient rejected posture and committed memory are carried.
+- A recovery redo is clean context + restored workspace + the Recovery Brief;
+  a retry of that redo keeps the recovery lessons even when `contextReason`
+  becomes `enforcement_retry`.
+- The prompt assembler and the transaction decoder share one legality guard:
+  L2 + `same_round_retry`, `same_round_retry` outside L0/attempt>1/
+  `enforcement_retry`, and mismatched first-round/retry attempts fail closed.
+
+### One guidance source
+
+- New pure module `src/round-guidance.ts` owns the round-boundary and
+  context-continuity prose. The prompt footer's `## Round Boundary`, the MCP
+  `SERVER_INSTRUCTIONS`, the state file and Explain consume it.
+- The Forge skill keeps definitions and a pointer only; its executable
+  round-sizing rules, `agent-process boundary` and `outer agent rounds` wording
+  are removed. A test prevents the second rule set from growing back.
+- Prompt `contextMode`/`contextReason` are required inputs; there is no silent
+  default.
+
+### One result-facts presentation
+
+- New `src/result-facts.ts` renders three separate blocks in a fixed order:
+  **Agent report**, **LoopForge decision**, **Machine evidence**. The machine
+  block is rendered only by the shared `formatEvidencePostureLines`.
+- Explain human output uses those blocks per round; `stop_reason` becomes
+  `loop_stop_reason`, Agent fields gain `agent_stop_reason` /
+  `agent_should_continue`, the top-level duplicate `machineBackedSuccess` is
+  removed, and the commit-time contract snapshot is labelled separately from
+  the derived current status. `ExplainResult.legacyRounds` reports undecoded
+  4.0.3 rounds instead of showing an empty timeline.
+- MCP terminal `stopDetail` uses the same formatter for live stop,
+  termination, crash-recovered stop and resume-of-stopped. `completed` no
+  longer implies machine-backed success and is never rendered as "Task
+  completed successfully".
+- `resume` of a stopped loop returns the committed `stopReason` (for example
+  `completed`/`failed`/`max_rounds`); a loop with no committed stop round
+  returns `sessionStatus: "stopped"` and says so. Legacy history returns
+  `legacy_history`.
+- `AdvanceResult.stopReason` is typed as `StopReason` only; session state,
+  handle and payload errors use `sessionStatus` / `submissionError`. New
+  `agentStopReason`/`agentShouldContinue` report the Agent's declaration.
+- `SubmissionReceipt` and replay rows expose derived `loop_stop_reason` and
+  `agent_stop_reason`; replay's duplicate top-level `machine_backed_success`
+  is removed (the posture remains the source). The receipt/replay/Explain/
+  resume fields are read-views, never persisted.
+- `status view=session` and `LoopTerminalEvent.machineBackedSuccess` now report
+  `null` when no committed posture exists; an unknown is never rendered as a
+  machine `false`.
+
+### Legacy behavior
+
+- 4.0.3 committed rounds are reported as legacy, not decoded.
+- A held session whose `round_snapshot` exists but cannot be parsed now fails
+  closed with `LegacyHistoryError`; it is never silently recompiled over.
+
+### Terminology and other fixes
+
+- L0 is documented as a density level that can be either a clean-context
+  invocation or an in-context retry.
+- Working Memory labels its newest report "Latest committed report (Agent
+  report)" instead of implying R(N-1).
+- `subtask_boundary` is never called a workspace checkpoint; the internal
+  prompt-level input/reason are renamed `subtaskBoundary` / `subtask_boundary`.
+- The tool count is corrected to 10 (including `loopforge_checkpoint`), the
+  `pause` description matches its immediate behavior, and the schema-9
+  Machine Evidence comment is corrected (the posture is not an artifact field).
+- `scripts/FIELD-USAGE-EVAL.md` drops the removed `prompt_requests` row.
+- `loopforge_stop` still returns `success: true` for the TOOL CALL (the docs
+  now say so); it is not a task-success verdict. `paused` is a session status,
+  not a committed loop terminal reason.
+
+### Follow-up hardening
+
+- `loopforge init` reports `stale: true` when the installed Forge skill differs
+  from the packaged one (for example after an upgrade). The default still never
+  overwrites an existing tree; `--force` refreshes it, and `loopforge doctor`
+  warns about a stale workspace-scoped `.loopforge/skills/forge` without
+  repairing it.
+- `loopforge_status view=session` with a `loopId` now returns a read-only
+  summary for a persisted STOPPED loop: `status`, `loopStopReason`, the Agent
+  stop facts, `stopDetail` (same three fact blocks), and `last_submission`. It
+  does not claim a lease or write session/history. A running/paused/stalled
+  loop without a live session still routes to `loopforge_resume`; absence of a
+  live session is never treated as "stopped".
+- `loopforge_stop` returns `loopId`, `roundCursor`, `sessionStatus: "stopped"`,
+  `loopStopReason: "cancelled"` and `machineBackedSuccessRounds`. The cancel
+  reason is a response fact, not a committed round fact, so a later status or
+  resume still reports "no committed terminal reason".
+- `LoopTerminalEvent` adds `roundCursor` and `committedRounds`;
+  `roundsCompleted` remains as a deprecated alias of the cursor (it was never a
+  committed-round count).
+
 ## 4.0.3 (2026-10-27)
 
 **The evidence-posture / provenance release.** A committed round now carries

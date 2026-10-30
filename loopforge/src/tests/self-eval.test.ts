@@ -115,26 +115,26 @@ describe("buildSelfEvaluation", () => {
     assert.equal(result.output_summary, "");
   });
 
-  it("parses valid stop_reason", () => {
+  it("parses valid agent_stop_reason", () => {
     const result = buildSelfEvaluation({
       success: false,
       output_summary: "done",
       constraint_violations: [],
       should_continue: false,
-      stop_reason: "blocked",
+      agent_stop_reason: "blocked",
     });
-    assert.equal(result.stop_reason, "blocked");
+    assert.equal(result.agent_stop_reason, "blocked");
   });
 
-  it("ignores invalid stop_reason values", () => {
+  it("ignores invalid agent_stop_reason values", () => {
     const result = buildSelfEvaluation({
       success: false,
       output_summary: "done",
       constraint_violations: [],
       should_continue: false,
-      stop_reason: "invalid_value",
+      agent_stop_reason: "invalid_value",
     });
-    assert.equal(result.stop_reason, undefined);
+    assert.equal(result.agent_stop_reason, undefined);
   });
 
 });

@@ -29,11 +29,13 @@ export interface PromptAssemblyInput {
      *  `committedBacktrackBrief` the state file renders. Present only while a
      *  committed rollback directive is the current redo boundary. */
     recoveryBrief?: string[];
-    /** v4.0.2: the compiler-derived context boundary. Not Agent input. */
-    contextMode?: PromptContextMode;
-    contextReason?: PromptContextReason;
+    /** v4.0.2/v4.0.4: the compiler-derived context boundary. REQUIRED: the
+     *  assembler has no fallback, so the compiler remains the single derivation
+     *  point. Not Agent input. */
+    contextMode: PromptContextMode;
+    contextReason: PromptContextReason;
     /** v4.0.2: the same bounded Working Memory the canonical state carries.
-     *  Rendered only for `fresh_round`. */
+     *  Rendered only for `fresh_invocation`. */
     workingMemory?: WorkingMemory;
     /** v4.0.3: compile warnings recorded on the artifact by the assembler
      *  itself, so a direct `compileLoop` caller gets a complete artifact

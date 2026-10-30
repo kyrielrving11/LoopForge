@@ -1,8 +1,8 @@
 /** LoopForge MCP — Tool definitions and handlers.
  *
- * 9 tools: start, next, status, stop, pause, resume, replay,
- *          gate_check, gate_resolve.
- * status is the unified inspection tool (view=session|loop|all|audit).
+ * 10 tools: start, next, status, stop, pause, resume, replay,
+ *           checkpoint, gate_check, gate_resolve.
+ * status is the unified inspection tool (view=session|loop|all|audit|explain).
  * Each handler receives SessionManager + parsed input, returns the output object.
  */
 import type { SessionManager } from "./session.js";

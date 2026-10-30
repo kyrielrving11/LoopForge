@@ -18,6 +18,10 @@ import { deriveConfiguredCapability, getPolicy, resetPolicy, setPolicyForTest, D
 // action entry. (Tests may import verification-gate freely — only the src
 // modules must respect the prompt-assembler ← verification-gate cycle rule.)
 import * as verificationGate from "../verification-gate.js";
+import {
+  ROUND_BOUNDARY_PRINCIPLE,
+  renderRoundGuidance,
+} from "../round-guidance.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Helpers
@@ -86,6 +90,8 @@ function input(overrides: Partial<PromptAssemblyInput> = {}): PromptAssemblyInpu
     state,
     level: "l2",
     attempt: 1,
+    contextMode: "fresh_invocation",
+    contextReason: "next_round",
     selfEvaluationBlock: "",
     workingMemory: state.workingMemory,
     ...overrides,
@@ -277,8 +283,8 @@ describe("assemblePromptArtifact — memory boundary", () => {
       assert.ok(artifact.renderedPrompt.includes("not a Git commit"),
         `${level} must state the round-commit boundary`);
       if (level !== "l0") {
-        // L0 is the same-invocation retry density: it restates the authority
-        // facts compactly, while L1/L2 carry the full boundary.
+        // L0 is a DENSITY level (fresh or in-context retry): it restates the
+        // authority facts compactly, while L1/L2 carry the full boundary.
         assert.ok(artifact.renderedPrompt.includes("Criteria are the operator's acceptance surface"));
         assert.ok(artifact.renderedPrompt.includes("Round Contract is this round's deliverable"));
       }
@@ -295,6 +301,7 @@ describe("assemblePromptArtifact — memory boundary", () => {
     }
     const retry = assemblePromptArtifact(input({
       level: "l0",
+      attempt: 2,
       contextMode: "same_round_retry",
       contextReason: "enforcement_retry",
     }));
@@ -325,7 +332,7 @@ describe("assemblePromptArtifact — memory boundary", () => {
       }),
     }));
     assert.ok(artifact.renderedPrompt.includes("Working Memory (Agent reports are claims"));
-    assert.ok(artifact.renderedPrompt.includes("Previous Round Report (Agent report) — R1"));
+    assert.ok(artifact.renderedPrompt.includes("Latest committed report (Agent report) — R1"));
     assert.ok(artifact.renderedPrompt.includes("> Corrected assumption: old belief"));
   });
 
@@ -665,7 +672,7 @@ describe("assemblePromptArtifact — budget determinism", () => {
     }));
     const artifact = assemblePromptArtifact(input({
       level: "l2", state,
-      budgets: { l2: 4500 },
+      budgets: { l2: 5000 },
     }));
     // The invariant is about the CUT POINT, not about any single section:
     // every optional section that rendered must outrank every one that was
@@ -740,4 +747,81 @@ describe("v3.9.7 — rejection notice is protected at every level", () => {
       assert.ok(artifact.sections.includes("retry_requirements"));
     });
   }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v4.0.4 — runtime round guidance and context-pair fail-closed
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("v4.0.4 — round guidance in the fixed footer", () => {
+  it("L0 is a density level that can be a clean-context invocation", () => {
+    const artifact = assemblePromptArtifact(input({
+      level: "l0",
+      contextMode: "fresh_invocation",
+      contextReason: "next_round",
+    }));
+    assert.match(artifact.renderedPrompt,
+      /Context: clean context — next round \(fresh_invocation; workspace continues\)/);
+    assert.ok(artifact.renderedPrompt.includes("## Round Boundary"));
+    assert.ok(artifact.renderedPrompt.includes(
+      renderRoundGuidance("prompt", "fresh_invocation")));
+    assert.ok(artifact.renderedPrompt.includes(ROUND_BOUNDARY_PRINCIPLE));
+  });
+
+  it("a clean-context prompt states both workspace continuity and transcript exclusion", () => {
+    const artifact = assemblePromptArtifact(input({
+      level: "l1",
+      contextMode: "fresh_invocation",
+      contextReason: "next_round",
+    }));
+    assert.ok(artifact.renderedPrompt.includes("not a workspace reset"));
+    assert.ok(artifact.renderedPrompt.includes("current modified workspace"));
+    assert.ok(artifact.renderedPrompt.includes("previous transcript"));
+    assert.ok(artifact.renderedPrompt.includes("uncommitted reasoning"));
+  });
+
+  it("a same-round retry renders the short guidance and in-context label", () => {
+    const artifact = assemblePromptArtifact(input({
+      level: "l0",
+      attempt: 2,
+      contextMode: "same_round_retry",
+      contextReason: "enforcement_retry",
+    }));
+    assert.match(artifact.renderedPrompt, /Context: in-context repair/);
+    assert.ok(artifact.renderedPrompt.includes(
+      renderRoundGuidance("prompt", "same_round_retry")));
+  });
+
+  it("fails closed on an illegal context pair instead of correcting it", () => {
+    assert.throws(() => assemblePromptArtifact(input({
+      level: "l2",
+      attempt: 2,
+      contextMode: "same_round_retry",
+      contextReason: "enforcement_retry",
+    })), /Illegal prompt context boundary/);
+  });
+
+  it("charges the guidance against the default budget without protected overflow", () => {
+    for (const level of ["l0", "l1", "l2"] as const) {
+      const artifact = assemblePromptArtifact(input({ level }));
+      assert.ok(artifact.renderedChars <= artifact.budget,
+        `${level}: renderedChars ${artifact.renderedChars} <= budget ${artifact.budget}`);
+      assert.equal(artifact.protectedOverflow, false,
+        `${level}: protected content must fit beside the footer`);
+      assert.ok(artifact.budget < DEFAULT_PROMPT_BUDGETS[level],
+        "the footer is excluded from the section budget");
+    }
+  });
+
+  it("keeps a real L0 enforcement retry inside the 5000-char ceiling", () => {
+    const artifact = assemblePromptArtifact(input({
+      level: "l0",
+      attempt: 2,
+      contextMode: "same_round_retry",
+      contextReason: "enforcement_retry",
+      state: minimalState({ rejectionNotice: "fix the finding", reportedIssues: [] }),
+    }));
+    assert.ok(artifact.renderedPrompt.length <= 5000,
+      `L0 retry prompt was ${artifact.renderedPrompt.length} chars`);
+  });
 });

@@ -529,12 +529,12 @@ function levelDecision(
     forceLevel: request.force_level,
     hasPlanSource: Boolean(request.plan_source),
     recoveryBoundary: previous.recoveryBoundary,
-    checkpointBoundary: previous.result?.subtask_boundary === true,
+    subtaskBoundary: previous.result?.subtask_boundary === true,
     // An empty goal_id is unobservable, not a goal change: never fabricate L2.
     goalChanged: prior !== null && prior.goal_id !== "" &&
       prior.goal_id !== deriveGoalId(request.loop_id, request.task, request.goal_id),
     previousStateMissing: request.round > 1 && prior === null,
-    // v4.0.4: prompt density consumes one explicit previous-round bundle.
+    // v4.0.3: prompt density consumes one explicit previous-round bundle.
     // Agent outcome remains semantic input; posture/finding facts remain
     // machine input. The policy owns the combination so callers cannot drift.
     previousRound: previous.view

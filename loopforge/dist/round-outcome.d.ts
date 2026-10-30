@@ -10,9 +10,9 @@ import type { RoundOutcome, SelfEvaluation } from "./protocol.js";
 export declare function effectiveOutcome(selfEval: SelfEvaluation): RoundOutcome;
 /** v2.12: Whether the effective outcome is a success claim. */
 export declare function effectiveSuccess(selfEval: SelfEvaluation): boolean;
-/** v3.8.3/v3.9.7: the ONE definition of "this round declares itself blocked".
- *  A declared `outcome: "blocked"` and a `stop_reason` of `blocked` or
- *  `needs_human_input` say the same thing. `effectiveOutcome` alone is NOT
- *  this predicate: it reads `outcome` only. */
+/** v3.8.3/v3.9.7/v4.0.4: the ONE definition of "this round declares itself
+ *  blocked". A declared `outcome: "blocked"` and an `agent_stop_reason` of
+ *  `blocked` or `needs_human_input` say the same thing. `effectiveOutcome`
+ *  alone is NOT this predicate: it reads `outcome` only. */
 export declare function declaresBlocked(selfEval: SelfEvaluation): boolean;
 //# sourceMappingURL=round-outcome.d.ts.map

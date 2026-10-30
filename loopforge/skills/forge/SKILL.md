@@ -73,26 +73,43 @@ LoopForge owns the boundary, persistence, evidence collection, and disposition.
 The Agent owns semantic decomposition, tool use, edits, tests, and the choice
 of what to do next.
 
-## Fresh context and Working Memory
+## Context strategies and Working Memory
 
-Every prompt header states its derived context boundary:
+A clean context and a failed retry are not the same axis. Every prompt header
+names its derived strategy; the enum values below are transport facts, and the
+strategy label is what the host follows:
 
 ```text
-State: <hash> | Level: L1 | Attempt: 1 | Context: fresh (next_round)
+Context: clean context — next round (fresh_invocation; workspace continues)
+Context: clean context repair (fresh_invocation; enforcement_retry; same logical round; lessons carried)
+Context: in-context repair (same_round_retry; enforcement_retry; continue original invocation if alive; lessons injected)
+Context: clean context after restore (fresh_invocation; recovery_redo; lessons carried)
 ```
 
-- **`fresh_round`** means start a NEW Agent invocation with only this prompt,
-  the `loopId`, `sessionId`, and `submissionHandle`. Do not carry the previous
-  transcript, tool logs, or uncommitted reasoning. A fresh context is not a
-  workspace reset: committed files, git state, and the session continue.
-- **`same_round_retry`** means this is the same logical round after an
-  enforcement rejection. Continue the current invocation if it exists; if it
-  is gone, start a new one from this self-contained prompt and read the state
-  file first.
-- Re-delivering the same held prompt (`status`, `resume`, `unpause`) is not a
-  new boundary. The same `promptHash` and handle continue the same attempt.
+- **clean context** (`fresh_invocation`): start a NEW Agent invocation with only
+  this prompt, the `loopId`, `sessionId`, and `submissionHandle`. Do not carry
+  the previous transcript, tool logs, or uncommitted reasoning. It is not a
+  workspace reset: committed files, git state, and the session continue. It may
+  be the next logical round, the first round, a recovery redo, or the SAME
+  logical round on an L2 retry.
+- **in-context repair** (`same_round_retry`): the first L0 enforcement retry.
+  Continue the current invocation if it exists; the rejection notice, findings
+  and failure reason are injected. If it is gone, start a new one from this
+  self-contained prompt, but keep the same round and attempt.
+- **clean context repair**: an L2 retry. Start a new invocation; the retry
+  notice, findings, transient rejected posture and committed memory are already
+  in the prompt.
+- **clean context after restore**: recovery redo. LoopForge has already restored
+  and verified the workspace; the Recovery Brief and failure lessons are in the
+  prompt. Never continue the abandoned transcript.
 
-A fresh prompt may render **bounded Working Memory** derived only from the
+The executable round division and submission rules live in every prompt's
+`## Round Boundary` section and in the MCP server instructions. This manual
+does not copy them. Re-delivering the same held prompt (`status`, `resume`,
+`unpause`) is not a new boundary: the same `promptHash` and handle continue the
+same attempt.
+
+A clean-context prompt may render **bounded Working Memory** derived only from the
 current branch's committed rounds and committed rollback directives: the
 latest report, earlier reports in the fixed window, falsified
 assumptions/retractions, open questions, consumed recoveries, and contract
@@ -166,40 +183,26 @@ refused until `loopforge_resume` unpauses or retries the session.
 
 ## What is a round?
 
-A round is one coherent work slice that can be described, checked, and disposed
-of at the next boundary. It is not a fixed number of files, tokens, commits, or
-minutes. A capable Agent may complete a large change in one round when the
-change shares one objective, one evidence story, and one recovery path. Split
-it when those boundaries diverge.
+A round is one coherent work slice with one before/after evidence boundary: it
+can be described, checked, and disposed of at that boundary. It is not a fixed
+number of files, tokens, commits, or minutes, and it is not an Agent invocation,
+session, checkpoint, or elapsed-time interval.
 
-Before choosing the slice, ask:
+A completed slice is not the same as a completed task.
 
-1. **Coherence:** does the work serve one immediate objective rather than
-   several unrelated goals?
-2. **Verifiability:** can the result and its hard constraints be checked with
-   the available tests, commands, or other machine observations?
-3. **Disposition:** will the boundary produce a clear continuation, stop,
-   blocker, rejection, or recovery decision?
-4. **Recovery:** can the slice be safely retried or rolled back without
-   invalidating unrelated work?
-
-Make a round larger when changes are tightly coupled and can be verified
-together. Make it smaller when uncertainty, external effects, evidence gaps, or
-rollback risk is high. Do not combine independent objectives merely because the
-Agent can edit them in one context. Do not split a single atomic change only to
-create more round records.
-
-At the end of a round, inspect the actual diff, relevant tests, hard
-constraints, and remaining work. A completed slice is not the same as a
-completed task.
+The runtime division and submission rules are not restated here. Every prompt
+carries them in `## Round Boundary`, and the MCP server instructions carry the
+host contract; those two are the only executable sources.
 
 ## Execute a round
 
 1. Execute the returned prompt and do the repository work.
 2. Use the tools and reasoning approach that fit the slice.
 3. Check actual evidence before claiming success.
-4. Submit exactly one honest structured evaluation attempt with
-   `loopforge_next`, using the current `submissionHandle`.
+4. Submit one honest structured evaluation for the held attempt with
+   `loopforge_next`, using the current `submissionHandle`. An invalid
+   submission is corrected on the same handle and does not increment the
+   attempt; only an enforcement rejection does.
 
 After the strict boundary accepts the payload, LoopForge collects before/after
 evidence, runs the verification gate, then the enforcement gate, and applies one
@@ -240,8 +243,9 @@ done and canceled are terminal and cannot be reopened. The prompt or
 `submission_guidance` renders the real active IDs; never invent one.
 
 `outcome` may be `success`, `partial`, `failed`, or `blocked`. A blocked
-outcome needs a concrete `blocker`; `stop_reason` of `blocked` or
-`needs_human_input` also stops without claiming success.
+outcome needs a concrete `blocker`; `agent_stop_reason` of `blocked` or
+`needs_human_input` also stops without claiming success. It is the Agent's
+report, never LoopForge's terminal reason.
 
 Optional malformed values are diagnosed and normalized or dropped. The strict
 exceptions are `subgoal_updates`, `round_contract`, and
@@ -280,11 +284,12 @@ is never a later prompt's independent fact source.
 - Non-null `prompt`: execute it and submit the next evaluation with the
   `submissionHandle` returned alongside it.
 - `enforcementAction: "reject"`: retry the same logical round with the
-  **new** handle; the attempt increases. The first L0 retry continues the same
-  invocation (`same_round_retry`); a repeated-rejection L2 rehydrate retry is a
-  new invocation (`fresh_round`). The old handle only returns the current retry
-  prompt with a warning. A retry prompt may carry the rejected attempt's
-  transient Machine Evidence, explicitly marked `not committed`.
+  **new** handle; the attempt increases. The first L0 retry is in-context repair
+  (`same_round_retry`); a repeated-rejection L2 retry is a clean-context repair
+  (`fresh_invocation`, still the same logical round). The old handle only
+  returns the current retry prompt with a warning. A retry prompt may carry the
+  rejected attempt's transient Machine Evidence, explicitly marked
+  `not committed`.
 - `enforcementAction: "backtrack"` (machine) or `"recovery"` (Agent):
   LoopForge already restored and verified the workspace. Execute the held redo
   prompt and submit with its new handle. If the response instead is `stalled`
@@ -294,14 +299,26 @@ is never a later prompt's independent fact source.
   recovered with `loopforge_resume`. If only the handle was lost while the
   prompt is still in context, use `loopforge_status` instead. Do not resubmit
   an old handle.
-- Null `prompt`: inspect `stopReason`.
+- Null `prompt`: read `stopReason` (LoopForge's terminal reason),
+  `sessionStatus` (a live session condition such as `paused`/`stopped`/
+  `stalled`, not a terminal reason), and `agentStopReason` (the Agent's own
+  report). `stopDetail` renders the Agent report, the LoopForge decision and
+  the Machine evidence as separate fact blocks.
+- After a loop is stopped, `loopforge_status` with its `loopId` returns the
+  committed terminal facts read-only (`status`, `loopStopReason`,
+  `last_submission`) without resuming or reopening it. A manual
+  `loopforge_stop` reports `loopStopReason: cancelled` in that response only;
+  because it is not a committed round fact, later status/resume report "no
+  committed terminal reason".
 
 Read `submission_guidance` before composing the next evaluation, and read
-`agentSuccessClaim`, `agentOutcome`, `evidencePosture`, `machineBackedSuccess`,
-`level`, `warnings`, and `enforcementReason` before planning the next slice.
+`agentSuccessClaim`, `agentOutcome`, `agentStopReason`, `agentShouldContinue`,
+`evidencePosture`, `level`, `warnings`, and `enforcementReason` before planning
+the next slice.
 The Agent's claim and the machine posture are separate: `evidencePosture.status`
-is evidence coverage, not task success, and `machineBackedSuccess` is only the
-verification gate's fact. In `submission_receipt.verification`,
+is evidence coverage, not task success, and
+`evidencePosture.machineBackedSuccess` is only the verification gate's fact. In
+`submission_receipt.verification`,
 `evidence_posture` is the ONE persisted posture; do not read "no active
 contract" as "verified". `submission_receipt.reports` distinguishes a saved
 report from derived state that changed and from a machine verification result;
@@ -319,10 +336,13 @@ describe state or policy; do not blindly resubmit.
 `completed` is the loop lifecycle result of your stop declaration passing the
 existing gates: `success` plus every active contract item `verified`, or no
 active contract. It is not a machine-verified task-success verdict; terminal
-output reports `machineBackedSuccess` and `evidencePosture` alongside it.
+output reports it as `loop_stop_reason` in the LoopForge decision block and
+renders the persisted posture separately in the Machine evidence block.
 Explicit `blocked` always wins over success. `incomplete` means you stopped
 without machine closure. Other terminal reasons include `failed`, `max_rounds`,
-`stalled`, `enforcement_terminated`, `paused`, and `cancelled`.
+`stalled`, `enforcement_terminated`, and `cancelled`. `paused` is a session
+status, not a committed loop reason. `loopforge_stop` returning `success: true`
+means the tool call succeeded, not that the task was achieved.
 
 ## Avoid these mistakes
 

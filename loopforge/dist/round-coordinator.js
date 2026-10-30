@@ -423,7 +423,7 @@ export class RoundCoordinator {
                 activeContractStatuses.closure === "verified";
             // The agent's explicit declaration of a blocked stop outranks the
             // success claim. It is checked FIRST so `success: true` + a declared
-            // `outcome`/`stop_reason` of blocked can never be reported as
+            // `outcome`/`agent_stop_reason` of blocked can never be reported as
             // `completed` — the two fields contradict, and the honest reading is the
             // declared one. A contradicted item also never reaches `completed`
             // (closure is `verified` only when EVERY item is), so the

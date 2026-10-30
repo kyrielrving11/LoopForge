@@ -317,7 +317,10 @@ function reportBlockText(report, maxChars) {
 function reportHeader(report, newest) {
     const outcome = report.agentOutcome ? `, agent_outcome=${report.agentOutcome}` : "";
     if (newest) {
-        return `**Previous Round Report (Agent report) — R${report.round}** ` +
+        // v4.0.4: the newest report in the window is the latest COMMITTED report.
+        // After a redo it is not necessarily R(N-1), so the label does not claim a
+        // previous-round identity.
+        return `**Latest committed report (Agent report) — R${report.round}** ` +
             `(source=agent_report; ref=${report.roundId}; ` +
             `agent_success_claim=${report.agentSuccessClaim}${outcome}, attempt ${report.attempt})`;
     }

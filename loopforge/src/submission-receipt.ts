@@ -339,6 +339,11 @@ export function deriveSubmissionReceipt(input: ReceiptInput): SubmissionReceipt 
     entered_history: enteredHistory,
     agent_success_claim: selfEval.success === true,
     agent_outcome: effectiveOutcome(selfEval),
+    // v4.0.4: derived read-view fields. `loop_stop_reason` is the SAME
+    // `pr.stopReason` every other live surface reports; neither field is
+    // persisted in the receipt and neither is a second source.
+    agent_stop_reason: selfEval.agent_stop_reason ?? null,
+    loop_stop_reason: pr.stopReason ?? null,
     ...(recoveryCheckpoint ? { recovery_checkpoint: recoveryCheckpoint } : {}),
     reports: [...reports.values()],
     effects: {

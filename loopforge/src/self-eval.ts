@@ -790,8 +790,8 @@ export interface ContractTransitionValidationContext {
 
 function declaresBlockedRaw(raw: Record<string, unknown>): boolean {
   return raw.outcome === "blocked" ||
-    raw.stop_reason === "blocked" ||
-    raw.stop_reason === "needs_human_input";
+    raw.agent_stop_reason === "blocked" ||
+    raw.agent_stop_reason === "needs_human_input";
 }
 
 /** v3.9.9: strict transition boundary. Every failure is `contract_invalid` and
@@ -867,7 +867,7 @@ export function validateContractTransition(
       field: "contract_transition",
       reason: "transition_conflicts_with_blocked",
       detail:
-        "a contract transition cannot be combined with a blocked outcome/stop_reason",
+        "a contract transition cannot be combined with a blocked outcome/agent_stop_reason",
     });
   }
   if (raw.should_continue === false) {
@@ -1303,10 +1303,10 @@ export function buildSelfEvaluation(
     sink?.push("should_continue", "invalid_value", "dropped",
       "expected a boolean; normalized to true (core validation rejects it)");
   }
-  if (raw.stop_reason !== undefined &&
-      raw.stop_reason !== "gave_up" && raw.stop_reason !== "blocked" &&
-      raw.stop_reason !== "needs_human_input") {
-    sink?.push("stop_reason", "invalid_enum", "dropped",
+  if (raw.agent_stop_reason !== undefined &&
+      raw.agent_stop_reason !== "gave_up" && raw.agent_stop_reason !== "blocked" &&
+      raw.agent_stop_reason !== "needs_human_input") {
+    sink?.push("agent_stop_reason", "invalid_enum", "dropped",
       "expected gave_up | blocked | needs_human_input; the value was dropped");
   }
   if (raw.outcome !== undefined &&
@@ -1362,9 +1362,10 @@ export function buildSelfEvaluation(
     subtask_boundary_label: boundedString(
       raw.subtask_boundary_label, 200, sink, "subtask_boundary_label") ?? "",
     subgoal_updates: parseSubGoalUpdates(raw.subgoal_updates, sink),
-    stop_reason:
-      raw.stop_reason === "gave_up" || raw.stop_reason === "blocked" || raw.stop_reason === "needs_human_input"
-        ? raw.stop_reason
+    agent_stop_reason:
+      raw.agent_stop_reason === "gave_up" || raw.agent_stop_reason === "blocked" ||
+      raw.agent_stop_reason === "needs_human_input"
+        ? raw.agent_stop_reason
         : undefined,
     outcome:
       raw.outcome === "success" || raw.outcome === "partial" ||

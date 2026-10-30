@@ -195,7 +195,7 @@ describe("RoundCoordinator — stop conditions", () => {
       selfEval: se({
         success: false,
         should_continue: false,
-        stop_reason: "blocked",
+        agent_stop_reason: "blocked",
       }),
     }));
     assert.equal(result.action, "stop");
@@ -207,7 +207,7 @@ describe("RoundCoordinator — stop conditions", () => {
       selfEval: se({
         success: false,
         should_continue: false,
-        stop_reason: "needs_human_input",
+        agent_stop_reason: "needs_human_input",
       }),
     }));
     assert.equal(result.action, "stop");
@@ -225,7 +225,7 @@ describe("RoundCoordinator — stop conditions", () => {
       selfEval: se({
         success: true,
         should_continue: false,
-        stop_reason: "blocked",
+        agent_stop_reason: "blocked",
         execution_report: makeExecutionReport({
           files_changed: ["auth.ts"],
           tests_reported: { passed: 10, failed: 0, skipped: 0 },
@@ -260,7 +260,7 @@ describe("RoundCoordinator — stop conditions", () => {
       selfEval: se({
         success: true,
         should_continue: false,
-        stop_reason: "needs_human_input",
+        agent_stop_reason: "needs_human_input",
         execution_report: makeExecutionReport({
           files_changed: [],
           tests_reported: { passed: 0, failed: 0, skipped: 0 },
@@ -467,12 +467,12 @@ describe("v3.8.3 — finalizeStopReason", () => {
     assert.equal(result.flags[0]?.severity, "warn");
   });
 
-  it("treats stop_reason blocked / needs_human_input as the same declaration", () => {
+  it("treats agent_stop_reason blocked / needs_human_input as the same declaration", () => {
     for (const stop of ["blocked", "needs_human_input"] as const) {
       assert.equal(
-        finalizeStopReason("completed", se({ stop_reason: stop })).reason,
+        finalizeStopReason("completed", se({ agent_stop_reason: stop })).reason,
         "blocked",
-        `stop_reason ${stop} must declare a block`,
+        `agent_stop_reason ${stop} must declare a block`,
       );
     }
   });

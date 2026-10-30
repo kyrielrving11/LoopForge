@@ -116,6 +116,8 @@ function artifact(level: "l0" | "l1" | "l2", value = state()) {
 
     attempt: 1,
     selfEvaluationBlock: "",
+    contextMode: "fresh_invocation",
+    contextReason: "next_round",
   });
 }
 
@@ -223,6 +225,8 @@ describe("v3.9.4 — PromptCoverage", () => {
       level: "l0",
       attempt: 1,
       selfEvaluationBlock: "",
+      contextMode: "fresh_invocation",
+      contextReason: "next_round",
       budgets: { l0: 1 },
     });
     assert.equal(current.protectedOverflow, true);
@@ -310,6 +314,8 @@ describe("v3.9.4 — PromptCoverage", () => {
       level: "l2",
       attempt: 1,
       selfEvaluationBlock: "",
+      contextMode: "fresh_invocation",
+      contextReason: "next_round",
       recoveryBrief: [
         "- **Trigger**: progress_stall",
         "- **Restored checkpoint**: `ck-0123456789abcdef01234567` (machine-verified by LoopForge)",

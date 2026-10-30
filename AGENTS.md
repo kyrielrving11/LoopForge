@@ -119,12 +119,18 @@ never persisted as its own store, and never feeds a gate, success, contract
 closure or machine evidence. Full rehydrated state, unbounded round history,
 failed-pattern history and LoopForge-generated phase narratives do not render.
 An L0 same-round retry renders no Working Memory and no Machine Evidence; an L2
-rehydrate retry is a `fresh_round` and may render the previous committed posture
-plus the rejected attempt's transient, clearly `not committed` posture. The
-state file is derived and is never the source of truth. The current user
-instruction defines the task. Every prompt carries a derived context boundary
-(`fresh_round` / `same_round_retry`) in its artifact; the host starts a new
-Agent invocation for `fresh_round`, which is not a workspace reset.
+rehydrate retry is a clean-context `fresh_invocation` and may render the previous
+committed posture plus the rejected attempt's transient, clearly `not
+committed` posture. The state file is derived and is never the source of truth.
+The current user instruction defines the task.
+
+Every prompt carries a derived context boundary in its artifact and a strategy
+label in its header. `fresh_invocation` is clean context: a new Agent
+invocation, never a workspace reset, used for the first/next round, recovery
+redo, and every L2 (rehydration or retry) — it may describe the same logical
+round. `same_round_retry` is in-context repair for the first L0 enforcement
+retry only. The one prose source is `src/round-guidance.ts`; the skill keeps
+definitions and a pointer, never a second copy of the executable rules.
 
 ### 8. `submission-guidance.ts` is the single source of field meaning
 

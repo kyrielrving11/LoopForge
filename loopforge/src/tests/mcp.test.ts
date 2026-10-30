@@ -17,6 +17,7 @@ import { toolNext } from "./_helpers.js";
 import { deriveCriterionId } from "../token-utils.js";
 import { queryLoopEntries } from "../loop-store.js";
 import type { LoopSessionDocument } from "../loop-store.js";
+import type { LoopTerminalEvent } from "../protocol.js";
 
 import { deriveSubGoalId } from "../subgoal-state.js";
 import { deriveContractItemIds } from "../token-utils.js";
@@ -73,6 +74,7 @@ function evalParam(opts: {
 }
 
 import { SessionManager } from "../mcp/session.js";
+import { LegacyHistoryError } from "../errors.js";
 import { TOOL_HANDLERS, validateToolInput, validateToolOutput } from "../mcp/tools.js";
 import { SERVER_INSTRUCTIONS } from "../mcp/server.js";
 import { LOST_HANDLE_ROUTING } from "../recovery-guidance.js";
@@ -509,7 +511,7 @@ describe("MCP — multi-round lifecycle", async () => {
     // consecutive-rejection count: reject, reject, terminate.
     const start = await TOOL_HANDLERS.loopforge_start(mgr, { task: "Audit ERC20", maxRounds: 20 });
     const sessionId = String(start.sessionId);
-    assert.equal(start.contextMode, "fresh_round");
+    assert.equal(start.contextMode, "fresh_invocation");
     assert.equal(start.contextReason, "first_round");
     const violationEval = (round: number, summary: string): Record<string, unknown> => ({
       success: false,
@@ -538,7 +540,7 @@ describe("MCP — multi-round lifecycle", async () => {
     });
     assert.ok(!last.enforcementAction || last.enforcementAction === "accept",
       "round 2 must advance");
-    assert.equal(last.contextMode, "fresh_round");
+    assert.equal(last.contextMode, "fresh_invocation");
     assert.equal(last.contextReason, "next_round");
 
     // Submission 3: same violation again → R2 fires (first occurrence).
@@ -640,7 +642,7 @@ describe("MCP — session persistence (save / resume)", async () => {
     const beforeRoundDocuments = store.rounds.size;
 
     const invalid = await advanceWithHeld(mgr, sessionId, agentOutputNoEval("Just some text"));
-    assert.equal(invalid.stopReason, "evaluation_invalid");
+    assert.equal(invalid.submissionError?.code, "evaluation_invalid");
     assert.equal(JSON.stringify(store.listEntries("stall-persist")), beforeEntries,
       "format errors must not save session or vault state");
     assert.equal(JSON.stringify(mgr.getPolicyMetrics("stall-persist")), beforeMetrics,
@@ -731,7 +733,135 @@ describe("MCP — session persistence (save / resume)", async () => {
     const resumed = await mgr2.resume("resume-done");
     assert.ok(resumed !== null);
     assert.equal(resumed!.prompt, null);
-    assert.ok(resumed!.stopReason === "stopped" || resumed!.stopReason === "completed");
+    assert.equal(resumed!.sessionStatus, "stopped");
+    assert.equal(resumed!.stopReason, "completed");
+    // The resume terminal path uses the SAME three fact blocks as a live stop.
+    assert.ok(String(resumed!.stopDetail).includes("Agent report"));
+    assert.ok(String(resumed!.stopDetail).includes("LoopForge decision"));
+    assert.ok(String(resumed!.stopDetail).includes("Machine evidence"));
+    assert.ok(String(resumed!.stopDetail).includes("loop_stop_reason: completed"));
+  });
+
+  it("v4.0.4: live and crash-recovered stops render the same terminal facts", async () => {
+    const loopId = "crash-stop-parity";
+    const started = await mgr.create({ task: "Crash parity", loopId });
+    const held = mgr.get(started.sessionId)?.roundSnapshot;
+    assert.ok(held, "a prepared round must hold its snapshot");
+    const live = await advanceWithHeld(
+      mgr,
+      started.sessionId,
+      agentOutput({ success: true, shouldContinue: false }),
+      evalParam({ success: true, shouldContinue: false }),
+    );
+    assert.equal(live.stopReason, "completed");
+    assert.ok(String(live.stopDetail).includes("loop_stop_reason: completed"));
+    assert.ok(String(live.stopDetail).includes("Machine evidence"));
+
+    // Simulate the crash window: the round committed, but the session document
+    // still points at the pre-commit held snapshot and still says "running".
+    const doc = store.readSession(loopId);
+    assert.ok(doc);
+    const lineage = doc!.entry.loop_lineage as Record<string, unknown>;
+    store.writeSession(loopId, {
+      ...doc!,
+      entry: {
+        ...doc!.entry,
+        loop_lineage: {
+          ...lineage,
+          status: "running",
+          current_round: 1,
+          round_snapshot: held,
+        },
+      },
+    });
+    mgr.close();
+    const mgr2 = new SessionManager(store);
+    const crash = await mgr2.resume(loopId);
+    assert.ok(crash);
+    assert.equal(crash!.stopReason, live.stopReason);
+    assert.equal(crash!.stopDetail, live.stopDetail,
+      "the same committed fact must render identically on both paths");
+    assert.ok(crash!.submission_receipt);
+    assert.equal(
+      crash!.submission_receipt!.loop_stop_reason,
+      live.submission_receipt!.loop_stop_reason,
+    );
+  });
+
+  it("v4.0.4: a stopped loop without a committed stop round reports sessionStatus only", async () => {
+    const started = await mgr.create({ task: "Cancelled before any stop round", loopId: "resume-cancelled" });
+    assert.equal(mgr.delete(started.sessionId), true);
+    const mgr2 = new SessionManager(store);
+    const resumed = await mgr2.resume("resume-cancelled");
+    assert.ok(resumed !== null);
+    assert.equal(resumed!.sessionStatus, "stopped");
+    assert.equal(resumed!.stopReason, undefined,
+      "there is no committed terminal reason to invent");
+    assert.match(String(resumed!.stopDetail), /no committed terminal reason/);
+  });
+
+  it("v4.0.4: a held session with an unsupported snapshot fails closed as legacy", async () => {
+    store.writeSession("legacy-held", {
+      schemaVersion: 1,
+      loopId: "legacy-held",
+      updatedAt: new Date().toISOString(),
+      entry: {
+        task_id: "loop:legacy-held:session",
+        task_type: "session_state",
+        loop_id: "legacy-held",
+        task: "legacy held round",
+        loop_lineage: {
+          session_id: "legacy-held-session",
+          status: "running",
+          current_round: 1,
+          max_rounds: 20,
+          // A 4.0.3 held snapshot: present, but not decodable by this runtime.
+          round_snapshot: { schemaVersion: 7, kind: "evaluation", round: 1 },
+        },
+      },
+    });
+    const mgr2 = new SessionManager(store);
+    await assert.rejects(
+      () => mgr2.resume("legacy-held"),
+      (error) => error instanceof LegacyHistoryError,
+      "a present-but-unparseable held snapshot must never be silently recompiled",
+    );
+  });
+
+  it("v4.0.4: status view=session reads a stopped loop's committed terminal facts", async () => {
+    const loopId = "status-stopped";
+    const started = await mgr.create({ task: "Status stopped", loopId });
+    await advanceWithHeld(
+      mgr,
+      started.sessionId,
+      agentOutput({ success: true, shouldContinue: false }),
+      evalParam({ success: true, shouldContinue: false }),
+    );
+    mgr.close();
+    const mgr2 = new SessionManager(store);
+    const before = JSON.stringify(store.listEntries(loopId));
+    const status = await TOOL_HANDLERS.loopforge_status(mgr2, { loopId });
+    assert.equal(status.ok, true);
+    assert.equal(status.status, "stopped");
+    assert.equal(status.loopStopReason, "completed");
+    assert.equal(status.agentStopReason, null);
+    assert.equal(status.agentShouldContinue, false);
+    assert.match(String(status.stopDetail), /Agent report/);
+    assert.match(String(status.stopDetail), /Machine evidence/);
+    const receipt = status.last_submission as { loop_stop_reason?: unknown };
+    assert.equal(receipt.loop_stop_reason, "completed");
+    assert.equal(JSON.stringify(store.listEntries(loopId)), before,
+      "status is a read-only projection; it must not claim a lease or save");
+  });
+
+  it("v4.0.4: status view=session still routes a non-stopped loop without a live session to resume", async () => {
+    const loopId = "status-running-no-live";
+    await mgr.create({ task: "Still running", loopId });
+    mgr.close();
+    const mgr2 = new SessionManager(store);
+    const status = await TOOL_HANDLERS.loopforge_status(mgr2, { loopId });
+    assert.equal(status.error, "session_not_found",
+      "no live session is not the same as a stopped loop");
   });
 
   it("resume() returns null for unknown loop", async () => {
@@ -937,11 +1067,63 @@ describe("MCP — status / list / stop / replay", async () => {
     const result = await TOOL_HANDLERS.loopforge_stop(mgr, { sessionId });
     assert.equal(result.success, true);
     assert.equal(result.roundsCompleted, 2);
+    assert.equal(result.roundCursor, 2);
+    assert.equal(result.sessionStatus, "stopped");
+    assert.equal(result.loopStopReason, "cancelled");
+    assert.equal(typeof result.loopId, "string");
+    assert.equal(
+      result.machineBackedSuccessRounds,
+      (result.machineBackedSuccessTrajectory as boolean[]).length,
+      "the count and the trajectory come from the same committed view",
+    );
     assert.ok((result.machineBackedSuccessTrajectory as boolean[]).length >= 1);
 
     // Session should be gone
     const status = await TOOL_HANDLERS.loopforge_status(mgr, { sessionId });
     assert.ok("error" in status);
+
+    // v4.0.4: the read-only stopped summary reports the persisted session
+    // status, but manual cancel is NOT a committed terminal reason.
+    const summary = await TOOL_HANDLERS.loopforge_status(mgr, {
+      loopId: String(result.loopId),
+    });
+    assert.equal(summary.status, "stopped");
+    assert.equal(summary.loopStopReason, null);
+    assert.match(String(summary.stopDetail), /no committed terminal reason/);
+  });
+
+  it("v4.0.4: the terminal event separates the round cursor from committed rounds", async () => {
+    const events: LoopTerminalEvent[] = [];
+    const remove = mgr.addTerminalSink((event) => {
+      events.push(event);
+    });
+    try {
+      const start = await TOOL_HANDLERS.loopforge_start(mgr, {
+        task: "Terminal fields",
+        loopId: "terminal-fields",
+      });
+      const second = await toolNext(mgr, {
+        sessionId: start.sessionId,
+        submissionHandle: start.submissionHandle,
+        output: agentOutput({ success: true, shouldContinue: true }),
+        evaluation: evalParam({ success: true, shouldContinue: true }),
+      });
+      await toolNext(mgr, {
+        sessionId: start.sessionId,
+        submissionHandle: second.submissionHandle,
+        output: agentOutput({ success: true, shouldContinue: false }),
+        evaluation: evalParam({ success: true, shouldContinue: false }),
+      });
+      assert.equal(events.length, 1);
+      const event = events[0]!;
+      assert.equal(event.stopReason, "completed");
+      assert.equal(event.roundCursor, 2);
+      assert.equal(event.committedRounds, 2);
+      assert.equal(event.roundsCompleted, 2,
+        "the deprecated alias keeps the cursor value");
+    } finally {
+      remove();
+    }
   });
 
   it("replay returns timeline", async () => {
@@ -960,7 +1142,7 @@ describe("MCP — status / list / stop / replay", async () => {
     const timeline = result.timeline as Array<Record<string, unknown>>;
     assert.ok(timeline.length >= 1, "timeline should have entries");
     assert.equal(typeof timeline[0].round, "number");
-    assert.equal(timeline[0].context_mode, "fresh_round");
+    assert.equal(timeline[0].context_mode, "fresh_invocation");
     assert.equal(timeline[0].context_reason, "first_round");
     assert.deepEqual(result.window, {
       start: 1,
@@ -1071,6 +1253,8 @@ describe("MCP — resume / list-vault / health", async () => {
     const status = await TOOL_HANDLERS.loopforge_status(mgr, { sessionId });
     const handle = status.submissionHandle as { roundId?: unknown } | null;
     assert.equal(typeof handle?.roundId, "string");
+    // v4.0.4: no committed/held posture yet is null (unknown), not false.
+    assert.equal(status.machineBackedSuccess, null);
   });
 });
 
@@ -1223,7 +1407,8 @@ describe("MCP P0 lifecycle regressions", () => {
     assert.equal(mgr.pause(started.sessionId).status, "paused");
 
     const result = await advancing;
-    assert.equal(result.stopReason, "paused");
+    assert.equal(result.sessionStatus, "paused");
+    assert.equal(result.stopReason, undefined);
     assert.equal(result.prompt, null);
     assert.equal(mgr.get(started.sessionId)?.status, "paused");
   });
@@ -1243,7 +1428,8 @@ describe("MCP P0 lifecycle regressions", () => {
     assert.equal(mgr.delete(started.sessionId), true);
 
     const result = await advancing;
-    assert.equal(result.stopReason, "stopped");
+    assert.equal(result.sessionStatus, "stopped");
+    assert.equal(result.stopReason, undefined);
     assert.equal(result.prompt, null);
     assert.equal(mgr.get(started.sessionId), undefined);
   });
@@ -2158,7 +2344,7 @@ describe("MCP — Round Contract flow", async () => {
         items: [{ description: "login works", criterion_refs: [], verify_with: ["not-configured"] }],
       },
     });
-    assert.equal(rejected.stopReason, "contract_invalid");
+    assert.equal(rejected.stopReason, undefined);
     assert.equal(rejected.submissionError?.code, "contract_invalid");
     assert.equal(rejected.prompt, null, "a rejected submission compiles no prompt");
     assert.ok(
@@ -2179,7 +2365,7 @@ describe("MCP — Round Contract flow", async () => {
       }],
     } as never;
     const rejected = await advanceWithHeld(mgr, r1.sessionId, "Scaffolded.", invalid);
-    assert.equal(rejected.stopReason, "contract_invalid");
+    assert.equal(rejected.stopReason, undefined);
     assert.equal(rejected.submissionError?.code, "contract_invalid");
     assert.equal(rejected.prompt, null);
     assert.ok(
@@ -2234,7 +2420,8 @@ describe("MCP — Round Contract flow", async () => {
       constraint_violations: [],
       should_continue: true,
     });
-    assert.equal(rejected.stopReason, "evaluation_invalid");
+    assert.equal(rejected.stopReason, undefined);
+    assert.equal(rejected.submissionError?.code, "evaluation_invalid");
     assert.equal(rejected.submissionError?.code, "evaluation_invalid");
     assert.deepEqual(rejected.submissionHandle, started.submissionHandle);
   });

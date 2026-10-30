@@ -12,6 +12,8 @@
 import { readOnlyRollbacks, readOnlyRounds, } from "./committed-round.js";
 import { gitRoundFacts } from "./git-facts.js";
 import { deriveCommittedSubmissionView } from "./submission-receipt.js";
+import { renderResultFacts } from "./result-facts.js";
+import { formatContextBoundaryLabel } from "./round-guidance.js";
 import { committedRoundFacts, deriveActiveRoundContract, deriveRoundContractView, } from "./round-contract.js";
 import { getPolicy } from "./policy.js";
 import { deriveOpenQuestionId } from "./open-question.js";
@@ -42,8 +44,12 @@ function observationView(observation) {
         data: { ...observation.data },
     };
 }
-/** Build the explain view. Pure and read-only. */
-export function buildExplain(loopId, entries, round) {
+/** Build the explain view. Pure and read-only.
+ *
+ *  `legacyRounds` is the loader's explicit legacy count
+ *  (`loadCommittedHistory(...).legacyRounds.length`); it is passed through so
+ *  Explain never re-scans for it and never migrates it. */
+export function buildExplain(loopId, entries, round, legacyRounds = 0) {
     // v4.0.3: the public function must not mix another loop's records even when
     // a caller passes a multi-loop entry list.
     const all = readOnlyRounds(entries).filter((view) => view.loopId === loopId);
@@ -115,12 +121,19 @@ export function buildExplain(loopId, entries, round) {
             round: view.round,
             roundId: view.roundId,
             attempt: view.attempt,
+            ...(view.branchId ? { branchId: view.branchId } : {}),
+            ...(view.transactionId ? { transactionId: view.transactionId } : {}),
             action: view.action,
-            stopReason: view.result?.stopReason ?? null,
+            // v4.0.4: ONE source — the committed result. Explain, Replay, the
+            // receipt and resume all read this same field.
+            loopStopReason: view.result?.stopReason ?? null,
             agentSuccessClaim: view.agentSuccessClaim,
             agentOutcome: view.agentOutcome,
-            machineBackedSuccess: view.evidencePosture?.machineBackedSuccess ?? false,
+            agentOutcomeDeclared: view.evaluation?.outcome ?? null,
+            agentStopReason: view.evaluation?.agent_stop_reason ?? null,
+            agentShouldContinue: view.evaluation?.should_continue ?? null,
             evidencePosture: view.evidencePosture,
+            enforcementReason: view.result?.enforcementReason ?? null,
             context: view.promptArtifact
                 ? {
                     mode: view.promptArtifact.contextMode,
@@ -245,6 +258,7 @@ export function buildExplain(loopId, entries, round) {
     return {
         loopId,
         rounds,
+        legacyRounds,
         activeContract: active
             ? { id: active.id, work_item: active.work_item, itemCount: active.items.length }
             : null,
@@ -274,7 +288,14 @@ export function buildExplain(loopId, entries, round) {
         })),
     };
 }
-/** Human-readable rendering of the explain view (CLI default). */
+/** Human-readable rendering of the explain view (CLI default).
+ *
+ *  v4.0.4: every round renders the three fact blocks (Agent report,
+ *  LoopForge decision, Machine evidence) through `renderResultFacts`, then the
+ *  detailed audit rows. Agent claims are labelled `(Agent report)`, the
+ *  machine evidence is rendered ONLY by the shared posture formatter, and the
+ *  commit-time contract snapshot is labelled separately from the derived
+ *  current status. No "changed"/"conflict" boolean is derived here. */
 export function renderExplain(result) {
     const lines = [`Loop ${result.loopId}`];
     if (result.activeContract) {
@@ -282,40 +303,44 @@ export function renderExplain(result) {
             (result.activeContract.work_item ? ` — ${result.activeContract.work_item}` : "") +
             ` (${result.activeContract.itemCount} item(s))`);
     }
+    // v4.0.4: a legacy round is reported, never silently omitted and never
+    // decoded into a fake row.
+    if (result.legacyRounds > 0) {
+        lines.push(`${result.legacyRounds} 4.0.3 legacy round(s) not decoded; ` +
+            "use inspect/raw vault.");
+    }
     for (const round of result.rounds) {
-        const context = round.context
-            ? ` — context ${round.context.mode} (${round.context.reason})`
-            : "";
-        const claim = `claim=${round.agentSuccessClaim}` +
-            (round.agentOutcome ? ` / outcome=${round.agentOutcome}` : "");
-        lines.push("", `Round ${round.round} (${round.roundId}, attempt ${round.attempt}) — ${round.action} — ${claim}${context}`);
-        if (round.stopReason) {
-            lines.push(`  stop_reason: ${round.stopReason}`);
+        lines.push("", `Round ${round.round} (${round.roundId}, attempt ${round.attempt})`);
+        if (round.context) {
+            lines.push(`  context: ${formatContextBoundaryLabel(round.context.mode, round.context.reason, { recoveryBoundary: round.restore_verified })}`);
         }
-        const posture = round.evidencePosture;
-        if (posture) {
-            lines.push(`  evidence: ${posture.status}` +
-                ` (machine_backed_success=${posture.machineBackedSuccess}, ` +
-                `verification_configured=${posture.verificationConfigured})`);
-            lines.push(`    workspace: ${posture.workspace.status}` +
-                (posture.workspace.status === "observed"
-                    ? ` (${posture.workspace.changedPathCount} changed)`
-                    : "") +
-                `; files reconciliation: ${posture.files?.reconciliation ?? "not_applicable"}`);
-            for (const command of posture.commands) {
-                lines.push(`    command ${command.commandId}: ${command.status}` +
-                    (command.required ? " (required)" : ""));
-            }
-            if (posture.contract) {
-                lines.push(`    contract ${posture.contract.id}: ${posture.contract.closure}`);
-                for (const item of posture.contract.items) {
-                    lines.push(`      ${item.id}: ${item.status}`);
-                }
-            }
+        if (round.branchId &&
+            round.branchId !== `loop:${result.loopId}:branch:root`) {
+            lines.push(`  branch: ${round.branchId}`);
         }
+        lines.push(...renderResultFacts({
+            agent: {
+                successClaim: round.agentSuccessClaim,
+                outcome: round.agentOutcome,
+                outcomeDeclared: round.agentOutcomeDeclared,
+                shouldContinue: round.agentShouldContinue,
+                agentStopReason: round.agentStopReason,
+            },
+            loopforge: {
+                action: round.action,
+                loopStopReason: round.loopStopReason,
+                enforcementReason: round.enforcementReason,
+            },
+            machine: {
+                posture: round.evidencePosture,
+                // Explain only decodes committed evaluation rounds.
+                committed: true,
+            },
+        }, "explain"));
         if (round.report) {
             const truncated = round.report.truncated.output_summary ? " [truncated]" : "";
-            lines.push(`  report: ${round.report.output_summary.slice(0, 200)}${truncated}`);
+            lines.push(`  output_summary (Agent report): ` +
+                `${round.report.output_summary.slice(0, 200)}${truncated}`);
             if (round.report.no_change_reason) {
                 lines.push(`    no_change_reason (Agent report): ${round.report.no_change_reason.slice(0, 160)}`);
             }
@@ -323,7 +348,7 @@ export function renderExplain(result) {
                 lines.push(`    subtask boundary (Agent report): ${round.report.subtask_boundary_label}`);
             }
             for (const claim of round.report.contract_item_claims) {
-                lines.push(`    item claim: ${claim.item_id} → ${claim.outcome}`);
+                lines.push(`    item claim (Agent report): ${claim.item_id} → ${claim.outcome}`);
             }
             for (const worker of round.report.worker_results) {
                 lines.push(`    worker ${worker.agent_id} (${worker.outcome}): ${worker.result_summary.slice(0, 160)}`);
@@ -353,16 +378,16 @@ export function renderExplain(result) {
                 round.resolvedOpenQuestionIds.slice(0, 20).join(", "));
         }
         for (const assumption of round.wrongAssumptions) {
-            lines.push(`  wrong assumption (report): ${assumption.slice(0, 160)}`);
+            lines.push(`  wrong assumption (Agent report): ${assumption.slice(0, 160)}`);
         }
         for (const retraction of round.retractedConstraints) {
-            lines.push(`  retracted constraint (report): ${retraction.slice(0, 160)}`);
+            lines.push(`  retracted constraint (Agent report): ${retraction.slice(0, 160)}`);
         }
         for (const question of round.openQuestions) {
-            lines.push(`  open question (report): ${question.slice(0, 160)}`);
+            lines.push(`  open question (Agent report): ${question.slice(0, 160)}`);
         }
         if (round.blocker) {
-            lines.push(`  blocker: ${round.blocker.slice(0, 160)}`);
+            lines.push(`  blocker (Agent report): ${round.blocker.slice(0, 160)}`);
         }
         for (const observation of round.observations.after) {
             lines.push(`  observation: ${observation.providerId} [${observation.status}] ${observation.files.length} file(s)`);
@@ -382,13 +407,23 @@ export function renderExplain(result) {
             lines.push(`  restore: verified (redo R${round.restore?.redo_round ?? "?"})`);
         }
         if (round.evidenceIncomplete) {
-            lines.push("  evidence: INCOMPLETE — the round committed without after-phase observations");
+            lines.push("  Evidence boundary: INCOMPLETE — no after-phase observations");
         }
         for (const flag of round.flags) {
             lines.push(`  flag: ${flag.severity} ${flag.check} — ${flag.detail.slice(0, 160)}`);
         }
+        // v4.0.4: the two contract sources are labelled and shown side by side.
+        // The commit-time snapshot is the posture's persisted contract block
+        // (already rendered above by the shared posture formatter); the derived
+        // status is this read-time projection. No comparison boolean is emitted.
+        const snapshotContract = round.evidencePosture?.contract ?? null;
+        if (snapshotContract) {
+            lines.push(`  Contract at commit (snapshot): ${snapshotContract.id} → ` +
+                `${snapshotContract.closure}`);
+        }
         if (round.contract) {
-            lines.push(`  contract ${round.contract.id} → ${round.contract.closure}`);
+            lines.push(`  Contract status now (derived): ${round.contract.id} → ` +
+                `${round.contract.closure}`);
             for (const item of round.contract.items) {
                 lines.push(`    ${item.itemId}: ${item.status}${item.reasons.length > 0 ? ` — ${item.reasons[0]}` : ""}`);
             }
@@ -411,10 +446,10 @@ export function renderExplain(result) {
             lines.push(`  failed rounds: R${rollback.failedRounds.join(", R")}`);
         }
         for (const approach of rollback.approaches) {
-            lines.push(`  abandoned approach (report): ${approach.slice(0, 160)}`);
+            lines.push(`  abandoned approach (Agent report): ${approach.slice(0, 160)}`);
         }
         for (const assumption of rollback.wrongAssumptions) {
-            lines.push(`  wrong assumption (report): ${assumption.slice(0, 160)}`);
+            lines.push(`  wrong assumption (Agent report): ${assumption.slice(0, 160)}`);
         }
         for (const flag of rollback.triggerFindings) {
             lines.push(`  trigger finding: ${flag.severity} ${flag.check} — ${flag.detail.slice(0, 160)}`);

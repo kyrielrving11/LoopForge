@@ -26,7 +26,7 @@ interface RoundSlice {
   round: number;
   report: ExecutionReport | null;
   deltas: ReadonlyArray<ObservationDelta>;
-  /** The round's ONE blocked declaration (outcome or stop_reason). */
+  /** The round's ONE blocked declaration (outcome or agent_stop_reason). */
   blocked: boolean;
   /** v3.9.9: the round's explicit contract redirect, if it declared one. */
   transition: ContractTransition | null;

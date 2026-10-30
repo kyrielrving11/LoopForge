@@ -86,8 +86,8 @@ export interface CommittedRoundView {
   readonly verificationFlags: VerificationFlag[];
   readonly result: RoundProcessResult | null;
   /** v4.0.3: the evidence posture persisted with this transaction. The
-   *  decoder refuses a schema-7 commit without one, so this is null only on a
-   *  hand-built/library view. */
+   *  current (schema 8) decoder refuses a commit without one, so this is null
+   *  only on a hand-built/library view. */
   readonly evidencePosture: EvidencePosture | null;
   readonly action: CommittedAction;
   /** v4.0.3: the Agent's success claim (never a machine verdict). */
@@ -291,8 +291,9 @@ export function decodeCommittedRound(entry: VaultEntry): CommittedRoundView | nu
   const resultValue = isRecord(transaction.result)
     ? transaction.result
     : snapshot.result;
-  // v4.0.3: a schema-7 committed result must carry a well-formed Evidence
-  // Posture. Missing/corrupt posture is a HARD break, not something to
+  // v4.0.3/v4.0.4: a current-schema (8) committed result must carry a
+  // well-formed Evidence Posture and the Agent's `agent_stop_reason` lives in
+  // its evaluation. Missing/corrupt posture is a HARD break, not something to
   // re-derive at read time.
   if (!isRecord(resultValue) || !isProcessResult(resultValue)) return null;
   return viewFromSnapshot({

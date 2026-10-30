@@ -4,6 +4,7 @@ import {
   cpSync,
   existsSync,
   mkdirSync,
+  readFileSync,
   readdirSync,
   rmSync,
 } from "node:fs";
@@ -26,6 +27,10 @@ export interface InitResult {
   /** The core SKILL.md path inside that directory. */
   skillPath: string;
   installed: boolean;
+  /** v4.0.4: the directory exists but at least one packaged skill file is
+   *  missing or differs. Default init never overwrites it; `--force`
+   *  refreshes it. Extra user files do not make a tree stale. */
+  stale: boolean;
   /** Installed files, relative to `skillDir`, sorted for deterministic output. */
   files: string[];
   registration: string | Record<string, unknown>;
@@ -84,6 +89,35 @@ function listFiles(root: string, current = root): string[] {
   return out.sort();
 }
 
+/** v4.0.4: does every packaged skill file exist in `destDir` with identical
+ *  bytes? Extra files in the destination are user state and are ignored, so a
+ *  local note never makes the package-owned tree look stale. */
+export function installedSkillIsCurrent(destDir: string): boolean {
+  if (!existsSync(destDir)) return false;
+  try {
+    for (const rel of listFiles(skillSourceDir)) {
+      const installed = join(destDir, rel);
+      if (!existsSync(installed)) return false;
+      if (!readFileSync(join(skillSourceDir, rel)).equals(readFileSync(installed))) {
+        return false;
+      }
+    }
+    return true;
+  } catch {
+    // A path that is not a readable file (a directory named SKILL.md, a
+    // permission error) is not a current install. init must still report it,
+    // never throw while merely inspecting.
+    return false;
+  }
+}
+
+/** Read-only inspection for `doctor`. Returns null when no skill is installed
+ *  at `destDir`; never copies or repairs anything. */
+export function inspectInstalledSkill(destDir: string): "current" | "stale" | null {
+  if (!existsSync(destDir)) return null;
+  return installedSkillIsCurrent(destDir) ? "current" : "stale";
+}
+
 export function initializeClient(options: InitOptions): InitResult {
   const skillPath = join(skillSourceDir, "SKILL.md");
   if (!existsSync(skillPath)) {
@@ -105,6 +139,9 @@ export function initializeClient(options: InitOptions): InitResult {
     skillDir,
     skillPath: join(skillDir, "SKILL.md"),
     installed,
+    // v4.0.4: an upgrade can leave an older installed copy behind. Report it
+    // instead of silently keeping rules that may contradict the runtime.
+    stale: !installed && !installedSkillIsCurrent(skillDir),
     files: installed ? listFiles(skillDir) : [],
     registration: registration(options.client),
   };

@@ -89,7 +89,7 @@
             "$ref": "#/$defs/WorkerResult"
           }
         },
-        "stop_reason": {
+        "agent_stop_reason": {
           "anyOf": [
             {
               "type": "string",
@@ -948,6 +948,41 @@
           "anyOf": [
             {
               "$ref": "#/$defs/RoundOutcome"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "agent_stop_reason": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "gave_up"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "blocked"
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "needs_human_input"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "loop_stop_reason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StopReason"
             },
             {
               "type": "null"
@@ -2403,7 +2438,7 @@
     "PromptContextMode": {
       "type": "string",
       "enum": [
-        "fresh_round",
+        "fresh_invocation",
         "same_round_retry"
       ]
     },
@@ -2577,7 +2612,7 @@
       "properties": {
         "schemaVersion": {
           "type": "number",
-          "const": 9
+          "const": 10
         },
         "roundId": {
           "type": "string"
@@ -2858,7 +2893,10 @@
           "type": "boolean"
         },
         "machineBackedSuccess": {
-          "type": "boolean"
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
         "evidencePosture": {
           "anyOf": [
@@ -2874,6 +2912,12 @@
           "$ref": "#/$defs/StopReason"
         },
         "roundsCompleted": {
+          "type": "number"
+        },
+        "roundCursor": {
+          "type": "number"
+        },
+        "committedRounds": {
           "type": "number"
         },
         "machineBackedSuccessTrajectory": {
@@ -2894,9 +2938,10 @@
       },
       "required": [
         "completed",
-        "machineBackedSuccess",
         "stopReason",
         "roundsCompleted",
+        "roundCursor",
+        "committedRounds",
         "machineBackedSuccessTrajectory",
         "loopId",
         "task"
@@ -3146,7 +3191,7 @@
       "required": [
         "items"
       ],
-      "description": "v3.9.5: A Round Contract proposal for the NEXT round. It becomes ACTIVE\r\nonly after the declaring round commits. Identity (rc-/rci-) is derived\r\nfrom CONTENT ONLY — restating an unchanged contract keeps the same\r\nidentity, unlike a SubGoal whose id includes its declaration round.\r\n\r\n`work_item` is the bounded deliverable this slice produces (an outcome,\r\nnot an activity). New declarations must provide it; it stays optional in\r\nthis persisted type because committed history may contain legacy\r\ncontracts without a label. `items[]` are the acceptance conditions;\r\n`verify_with` remains item-level.\r\n\r\nThe runtime validates structure, command bindings and references. It never\r\njudges whether `work_item` sounds like a deliverable, whether an item\r\nmatches a command semantically, or whether a command is the right\r\nacceptance test; that is Agent/operator semantic judgment."
+      "description": "A contract PROPOSAL carried by one evaluation. Three related objects must\r\nnot be conflated:\r\n- the proposal: this object, for the NEXT round;\r\n- the ACTIVE contract: the proposal once its declaring round commits,\r\n  governing the round that follows;\r\n- `work_item`: the bounded deliverable that becomes the prompt's\r\n  `Current Task` while the contract is active.\r\nThe proposal is never the contract of the round that declared it."
     },
     "ContractTransition": {
       "type": "object",

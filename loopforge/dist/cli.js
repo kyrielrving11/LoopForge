@@ -5,11 +5,12 @@ import { delimiter, dirname, join, resolve } from "node:path";
 import { containInWorkspace } from "./workspace.js";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { initializeClient } from "./init.js";
+import { initializeClient, inspectInstalledSkill, } from "./init.js";
 import { FileLoopStore, queryLoopEntries } from "./loop-store.js";
 import { getPolicy, validateLoopId, writeDefaultPolicy, DEFAULT_POLICY, POLICY_INVALID_CODE } from "./policy.js";
 import { deriveEvidenceCapability, isProviderRegistered } from "./evidence-provider.js";
 import { buildExplain, renderExplain } from "./explain.js";
+import { buildCommittedHistory } from "./history.js";
 import { McpServer } from "./mcp/server.js";
 import { VERSION } from "./version.js";
 const HELP = `LoopForge ${VERSION}
@@ -260,6 +261,20 @@ function doctor(json) {
             detail,
         });
     }
+    // v4.0.4: the workspace-scoped generic skill is a real runtime input (an
+    // Agent reads these rules). An upgrade can leave an older copy behind; warn
+    // without failing the workspace, and never touch it from doctor.
+    const genericSkillDir = resolve(".loopforge", "skills", "forge");
+    const skillStatus = inspectInstalledSkill(genericSkillDir);
+    if (skillStatus === "stale") {
+        checks.push({
+            name: "skill",
+            ok: false,
+            required: false,
+            detail: `${genericSkillDir} differs from this package — run ` +
+                "`loopforge init --client generic --force` in this workspace to refresh it",
+        });
+    }
     const report = {
         version: VERSION,
         ok: checks.every((check) => check.ok || !check.required),
@@ -299,7 +314,9 @@ function explain(args) {
     const store = new FileLoopStore(getPolicy().backend.root_dir);
     const entries = queryLoopEntries(store, loopId, { prefix: `loop:${loopId}:` })
         .concat(queryLoopEntries(store, loopId, { prefix: `loop:${loopId}:`, feedbackOnly: true }));
-    const result = buildExplain(loopId, entries, round);
+    // v4.0.4: report legacy rounds instead of showing a silently empty timeline.
+    const legacyRounds = buildCommittedHistory(entries).legacyRounds.length;
+    const result = buildExplain(loopId, entries, round, legacyRounds);
     print(has(args, "--json") ? result : renderExplain(result), has(args, "--json"));
     return 0;
 }
@@ -352,10 +369,20 @@ function init(args) {
     const target = option(args, "--target");
     const workspace = option(args, "--workspace") ?? process.cwd();
     const result = initializeClient({ client, force, target });
-    process.stdout.write(result.installed
-        ? `Installed: ${result.skillDir} (${result.files.length} file(s))\n`
-        : `Already present: ${result.skillDir}\n`);
-    if (!result.installed) {
+    if (result.installed) {
+        process.stdout.write(`Installed: ${result.skillDir} (${result.files.length} file(s))\n`);
+    }
+    else if (result.stale) {
+        // v4.0.4: an upgrade can leave an older installed copy behind. Keep the
+        // default no-overwrite contract but make the contradiction visible.
+        process.stdout.write(`Stale: ${result.skillDir}\n`);
+        process.stdout.write("The installed Forge skill differs from this package (for example " +
+            "after an upgrade).\n" +
+            "Rerun with --force to refresh the package-owned skill tree; local " +
+            "extra files are not overwritten by this check.\n");
+    }
+    else {
+        process.stdout.write(`Already present: ${result.skillDir}\n`);
         process.stdout.write("Existing Forge skill left untouched; use --force to update the full skill tree.\n");
     }
     process.stdout.write("Register MCP with:\n");

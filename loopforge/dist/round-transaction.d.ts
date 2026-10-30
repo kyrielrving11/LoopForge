@@ -13,9 +13,12 @@ import type { RoundCommitStore } from "./storage.js";
 /** v3.9.7: schema 5 adds the transaction before-image, explicit mid-round
  *  checkpoints and the redo restore marker. v4.0.3: schema 7 requires the
  *  persisted `EvidencePosture` on every result and adds the transient
- *  `RetryContext`. Unsupported versions are reported by
+ *  `RetryContext`. v4.0.4: schema 8 embeds the schema-10 PromptArtifact
+ *  (`fresh_invocation`) and the renamed `SelfEvaluation.agent_stop_reason`;
+ *  schema 7 documents are reported as legacy, never migrated or silently
+ *  re-read under the new field name. Unsupported versions are reported by
  *  `legacyTransactionRounds`; there is no compatibility migration. */
-export declare const ROUND_TRANSACTION_SCHEMA_VERSION: 7;
+export declare const ROUND_TRANSACTION_SCHEMA_VERSION: 8;
 /** Maximum distinct mid-round checkpoints one transaction may reference. */
 export declare const MAX_MID_CHECKPOINTS_PER_TRANSACTION = 32;
 /** The root branch identity for every loop. */

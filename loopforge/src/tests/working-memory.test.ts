@@ -366,8 +366,9 @@ describe("Working Memory prompt density and protection", () => {
         assert.ok(rendered.body.length <= density.totalChars,
           `${level} body ${rendered.body.length} <= ${density.totalChars}`);
       }
-      // Fresh L1/L2 contexts receive the complete fixed working-memory window;
-      // L0 remains the intentionally compact same-round retry view.
+      // Fresh L1/L2 contexts receive the complete fixed working-memory window.
+      // L0 is a DENSITY level, not a context boundary: it renders the compact
+      // view whether the delivery is clean-context or an in-context retry.
       assert.equal(rendered.projection.truncated, level === "l0");
       assert.equal(rendered.projection.renderedChars, rendered.body.length);
     }
@@ -440,12 +441,16 @@ describe("Working Memory prompt density and protection", () => {
       level: "l2",
       attempt: 1,
       selfEvaluationBlock: "",
+      contextMode: "fresh_invocation",
+      contextReason: "next_round",
     });
     const withMemory = assemblePromptArtifact({
       state,
       level: "l2",
       attempt: 1,
       selfEvaluationBlock: "",
+      contextMode: "fresh_invocation",
+      contextReason: "next_round",
       workingMemory: memory,
     });
     assert.deepEqual(withMemory.coverage.active, base.coverage.active);
@@ -479,6 +484,8 @@ describe("Working Memory prompt density and protection", () => {
       level: "l2",
       attempt: 1,
       selfEvaluationBlock: "",
+      contextMode: "fresh_invocation",
+      contextReason: "next_round",
       workingMemory: populatedMemory(),
     });
     const memoryIndex = artifact.sections.indexOf("working_memory");
@@ -493,6 +500,8 @@ describe("Working Memory prompt density and protection", () => {
       level: "l2",
       attempt: 1,
       selfEvaluationBlock: "",
+      contextMode: "fresh_invocation",
+      contextReason: "next_round",
     });
     const footerChars = base.renderedPrompt.length - base.renderedChars;
     const tight = assemblePromptArtifact({
@@ -500,6 +509,8 @@ describe("Working Memory prompt density and protection", () => {
       level: "l2",
       attempt: 1,
       selfEvaluationBlock: "",
+      contextMode: "fresh_invocation",
+      contextReason: "next_round",
       workingMemory: populatedMemory(),
       budgets: { l2: base.renderedChars + footerChars },
     });

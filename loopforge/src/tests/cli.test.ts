@@ -135,7 +135,7 @@ describe("loopforge CLI", () => {
                 round: 1,
                 attempt: 1,
                 level: "l2",
-                contextMode: "fresh_round",
+                contextMode: "fresh_invocation",
                 contextReason: "first_round",
                 renderedPrompt: "TOP-SECRET-PROMPT-TEXT",
                 promptHash: "abc123",
@@ -389,6 +389,62 @@ describe("loopforge CLI", () => {
       assert.match(forced.stdout, /Installed:/);
       assert.equal(existsSync(marker), false, "--force syncs the package-owned tree");
       assert.ok(existsSync(join(target, "forge", "references", "evidence-and-contracts.md")));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("v4.0.4: reports a stale installed skill and refreshes it only with --force", () => {
+    const root = temporaryDirectory();
+    try {
+      const target = join(root, "skills");
+      const workspace = join(root, "workspace");
+      mkdirSync(target);
+      mkdirSync(workspace);
+      run(["init", "--client", "generic", "--target", target, "--workspace", workspace]);
+      const installedSkill = join(target, "forge", "SKILL.md");
+      writeFileSync(installedSkill, "outdated 4.0.3 rules\n");
+
+      const stale = run([
+        "init", "--client", "generic", "--target", target, "--workspace", workspace,
+      ]);
+      assert.equal(stale.status, 0, stale.stderr);
+      assert.match(stale.stdout, /Stale:/);
+      assert.match(stale.stdout, /--force/);
+      assert.equal(readFileSync(installedSkill, "utf8"), "outdated 4.0.3 rules\n",
+        "default init never overwrites a stale installed skill");
+
+      const forced = run([
+        "init", "--client", "generic", "--target", target,
+        "--workspace", workspace, "--force",
+      ]);
+      assert.equal(forced.status, 0, forced.stderr);
+      assert.match(forced.stdout, /Installed:/);
+      assert.notEqual(readFileSync(installedSkill, "utf8"), "outdated 4.0.3 rules\n");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("v4.0.4: doctor warns about a stale workspace Forge skill without repairing it", () => {
+    const root = temporaryDirectory();
+    try {
+      const skillDir = join(root, ".loopforge", "skills", "forge");
+      mkdirSync(skillDir, { recursive: true });
+      const installedSkill = join(skillDir, "SKILL.md");
+      writeFileSync(installedSkill, "outdated rules\n");
+      const result = run(["doctor", "--json"], root);
+      const report = JSON.parse(result.stdout) as {
+        ok: boolean;
+        checks: Array<{ name: string; ok: boolean; required: boolean; detail: string }>;
+      };
+      const skill = report.checks.find((check) => check.name === "skill");
+      assert.ok(skill, "doctor must report the workspace-scoped skill");
+      assert.equal(skill!.ok, false);
+      assert.equal(skill!.required, false, "a stale skill is a warning, not a broken workspace");
+      assert.match(skill!.detail, /init --client generic --force/);
+      assert.equal(readFileSync(installedSkill, "utf8"), "outdated rules\n",
+        "doctor is read-only");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

@@ -1,5 +1,5 @@
 /** Client-specific skill onboarding. */
-import { cpSync, existsSync, mkdirSync, readdirSync, rmSync, } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -53,6 +53,37 @@ function listFiles(root, current = root) {
     }
     return out.sort();
 }
+/** v4.0.4: does every packaged skill file exist in `destDir` with identical
+ *  bytes? Extra files in the destination are user state and are ignored, so a
+ *  local note never makes the package-owned tree look stale. */
+export function installedSkillIsCurrent(destDir) {
+    if (!existsSync(destDir))
+        return false;
+    try {
+        for (const rel of listFiles(skillSourceDir)) {
+            const installed = join(destDir, rel);
+            if (!existsSync(installed))
+                return false;
+            if (!readFileSync(join(skillSourceDir, rel)).equals(readFileSync(installed))) {
+                return false;
+            }
+        }
+        return true;
+    }
+    catch {
+        // A path that is not a readable file (a directory named SKILL.md, a
+        // permission error) is not a current install. init must still report it,
+        // never throw while merely inspecting.
+        return false;
+    }
+}
+/** Read-only inspection for `doctor`. Returns null when no skill is installed
+ *  at `destDir`; never copies or repairs anything. */
+export function inspectInstalledSkill(destDir) {
+    if (!existsSync(destDir))
+        return null;
+    return installedSkillIsCurrent(destDir) ? "current" : "stale";
+}
 export function initializeClient(options) {
     const skillPath = join(skillSourceDir, "SKILL.md");
     if (!existsSync(skillPath)) {
@@ -74,6 +105,9 @@ export function initializeClient(options) {
         skillDir,
         skillPath: join(skillDir, "SKILL.md"),
         installed,
+        // v4.0.4: an upgrade can leave an older installed copy behind. Report it
+        // instead of silently keeping rules that may contradict the runtime.
+        stale: !installed && !installedSkillIsCurrent(skillDir),
         files: installed ? listFiles(skillDir) : [],
         registration: registration(options.client),
     };

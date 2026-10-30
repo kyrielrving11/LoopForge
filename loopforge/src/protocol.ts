@@ -104,11 +104,13 @@ export interface SelfEvaluation {
    *  The main agent reports what it delegated; the report is saved inside the
    *  committed transaction for audit. Omit or leave empty if none occurred. */
   worker_results?: WorkerResult[];
-  /** v2.5: Why the agent is stopping. Only meaningful when
-   *  should_continue=false and success=false. Defaults to "gave_up"
-   *  (current behavior) when absent. "blocked" means work cannot proceed
-   *  under current constraints; "needs_human_input" requires intervention. */
-  stop_reason?: "gave_up" | "blocked" | "needs_human_input";
+  /** v2.5 / v4.0.4: the AGENT's declared stop reason (renamed from
+   *  `stop_reason` so it cannot be confused with LoopForge's `StopReason`).
+   *  Only meaningful when should_continue=false and success=false. Defaults to
+   *  "gave_up" (current behavior) when absent. "blocked" means work cannot
+   *  proceed under current constraints; "needs_human_input" requires
+   *  intervention. It is an Agent report, never a loop terminal reason. */
+  agent_stop_reason?: "gave_up" | "blocked" | "needs_human_input";
   /** v2.12: Declared outcome (four values). When absent, derived from success
    *  (true → "success", false → "failed"). "partial" and "blocked" can only
    *  be declared explicitly. A declared non-success outcome suppresses the
@@ -422,6 +424,15 @@ export interface SubmissionReceipt {
   agent_success_claim: boolean;
   /** v4.0.3: the effective Agent-declared outcome. */
   agent_outcome: RoundOutcome | null;
+  /** v4.0.4: the Agent's declared stop reason, if any. Derived read-view from
+   *  the committed evaluation; never persisted here and never a second
+   *  source. null means the Agent declared none. */
+  agent_stop_reason: "gave_up" | "blocked" | "needs_human_input" | null;
+  /** v4.0.4: the LoopForge terminal reason, when this submission stopped the
+   *  loop. Derived read-view from the SAME `result.stopReason` that Explain,
+   *  Replay and resume read; never persisted in the receipt and never
+   *  re-derived from the Agent's outcome or the evidence posture. */
+  loop_stop_reason: StopReason | null;
   /** v3.9.7: the checkpoint this submission was judged against. Present only
    *  when a pending rollback directive governed the submission — the redo.
    *  `restore_verified` reads the redo transaction's verified-restore marker;
@@ -617,7 +628,7 @@ export function makeSelfEvaluation(
     worker_results: [],
     subtask_boundary: false,
     subtask_boundary_label: "",
-    stop_reason: undefined,
+    agent_stop_reason: undefined,
     outcome: undefined,
     blocker: undefined,
     retroactiveClaims: [],
@@ -882,7 +893,14 @@ export function makeLoopRoundResult(
 export interface LoopCompileRequest {
   loop_id: string;
   round: number;
+  /** The change-detection tag derived from `loopId + task`
+   *  (`loop-compiler.ts`). It is a label, not a goal object and not a second
+   *  plan. */
   goal_id: string;
+  /** The CURRENT user/operator task text for this compile. It is not the
+   *  immutable `LoopObjective.objective`; the prompt renders the objective
+   *  separately, and the Agent's `Current Task` comes from the active Round
+   *  Contract's `work_item` when one exists. */
   task: string;
   loop_objective: LoopObjective | null;
   plan_source: string | null;
@@ -895,16 +913,19 @@ export interface LoopCompileRequest {
    *  these to select a rehydrate view and render the gate findings exactly
    *  once as part of the final prompt. */
   verification_flags?: VerificationFlag[];
-  /** One-based attempt within the same logical round. Enforcement rejection
-   * increments this without advancing `round`. */
+  /** One-based submission-attempt number within the same logical round. Only
+   * an enforcement rejection increments it (payload errors such as
+   * `evaluation_invalid`/`contract_invalid` do not change attempt or the
+   * handle). It does not advance `round`. */
   attempt: number;
   /** Consecutive zero-commit enforcement rejections for this round. */
   consecutive_rejections: number;
   /** Structured enforcement feedback rendered into retry prompts. */
   rejection_notice: string;
   /** v4.0.3: the rejected attempt's transient evidence posture. Rendered only
-   *  for a fresh retry (`attempt > 1`, `contextMode === "fresh_round"`); it is
-   *  never committed history, never Working Memory and never a gate input. */
+   *  for a clean-context retry (`attempt > 1`,
+   *  `contextMode === "fresh_invocation"`); it is never committed history,
+   *  never Working Memory and never a gate input. */
   retry_evidence_posture?: EvidencePosture;
   /** v4.0.3: compile-context fact — this prompt was compiled after a verified
    *  restore of the pending directive. Never Agent input, never persisted. */
@@ -966,20 +987,41 @@ export interface PromptCoverage {
 }
 
 /** Immutable record of the exact prompt delivered for one round attempt. */
-/** v4.0.2: the context boundary of one prompt delivery.
+/** v4.0.2 / v4.0.4: the context boundary of one prompt delivery.
  *
- *  `fresh_round` means the host starts a NEW Agent invocation for this logical
- *  round: the previous transcript, tool logs and uncommitted reasoning are
- *  not part of the prompt. `same_round_retry` means an L0 attempt continues
- *  in the original invocation after an enforcement rejection. L1/L2 retries
- *  use `fresh_round`, so the host starts a new invocation with the re-rendered
- *  governance context. The host must honor this derived boundary.
+ *  `fresh_invocation` means CLEAN CONTEXT: the host starts a NEW Agent
+ *  invocation with only this prompt, the loop/session identity and the
+ *  committed/derived facts it carries; the previous transcript, tool logs and
+ *  uncommitted reasoning are NOT part of it. A clean context is not a new
+ *  loop and not a workspace reset: the loopId and the current modified
+ *  workspace continue. It may describe the SAME logical round (an L2
+ *  enforcement retry, or the library-level L1 defensive branch) or the next
+ *  logical round after the last commit. Read `contextReason` and `attempt`
+ *  together; a fresh invocation alone does not mean a new round.
+ *
+ *  `same_round_retry` means IN-CONTEXT REPAIR: the first L0 enforcement retry
+ *  of the same logical round. The host continues the original invocation when
+ *  it is still alive and injects the rejection notice and Verification Gate
+ *  findings; if that invocation is gone it starts a new one from the
+ *  self-contained prompt, but the round/attempt semantics do not change. It is
+ *  never used for L1/L2 (L2 always uses a clean context).
+ *
+ *  Every L2 prompt is `fresh_invocation`, whatever triggered it (first round,
+ *  plan/subtask boundary, goal change, missing state, verification
+ *  contradiction, recovery, repeated rejection, forced L2). Only the first
+ *  L0 enforcement retry keeps the original context.
  *
  *  The value is DERIVED by the compiler from compile inputs and committed
  *  facts. It is never submitted by the Agent and never re-derived by the MCP
  *  lifecycle; every response projects it from the committed PromptArtifact. */
-export type PromptContextMode = "fresh_round" | "same_round_retry";
+export type PromptContextMode = "fresh_invocation" | "same_round_retry";
 
+/** Why the compiler selected the context boundary. It explains the selection;
+ *  it does not replace the contextStrategy label (`clean context`,
+ *  `in-context repair`, `clean context after restore`, `clean context
+ *  repair`). A recovered redo that is itself retried keeps `enforcement_retry`
+ *  here (attempt > 1 wins the fixed priority) while the prompt still renders
+ *  the Recovery Brief. */
 export type PromptContextReason =
   | "first_round"
   | "next_round"
@@ -1048,11 +1090,14 @@ export interface PromptWorkingMemoryProjection {
  *
  *  v4.0.1: schema 7 removes the prompt-request effects. v4.0.2: schema 8 adds
  *  the derived context boundary and the optional Working Memory projection.
- *  v4.0.3: schema 9 adds the Machine Evidence projection and the expanded
- *  Working Memory metadata. Older versions are a HARD break — a round whose
+ *  v4.0.3: schema 9 adds the expanded Working Memory audit metadata. The
+ *  Machine Evidence projection is rendered INTO the prompt text, not carried as
+ *  a separate artifact field; the committed posture lives on the transaction
+ *  result. v4.0.4: schema 10 renames the clean-context `contextMode` value to
+ *  `fresh_invocation`. Older versions are a HARD break — a round whose
  *  artifact does not parse is not committed history, and
  *  `legacyTransactionRounds` reports the loss rather than letting it vanish. */
-export const PROMPT_ARTIFACT_SCHEMA_VERSION = 9 as const;
+export const PROMPT_ARTIFACT_SCHEMA_VERSION = 10 as const;
 
 export interface PromptArtifact {
   schemaVersion: typeof PROMPT_ARTIFACT_SCHEMA_VERSION;
@@ -1165,10 +1210,18 @@ export function makeLoopCompileResponse(
   };
 }
 
-/** Why a loop stopped. Used by MCP session and vault persistence.
- *  `completed` requires both success=true and should_continue=false.
+/** Why a LOOP stopped — the LoopForge terminal reason (`loop_stop_reason` in
+ *  read surfaces). It is never the Agent's declared stop reason; that is
+ *  `SelfEvaluation.agent_stop_reason` (`gave_up` / `blocked` /
+ *  `needs_human_input`) and is only an Agent report.
+ *
+ *  `completed` requires both success=true and should_continue=false. It means
+ *  the Agent's stop declaration passed the gates; it does NOT imply
+ *  `machineBackedSuccess` (the evidence posture's separate machine fact).
  *  `failed` is success=false + should_continue=false (agent gave up).
- *  `cancelled` is manual stop via loopforge_stop. */
+ *  `cancelled` is manual stop via loopforge_stop. `paused` exists in the type
+ *  but a committed round never carries it; pause is expressed by a session
+ *  status, not a loop terminal reason. */
 export type StopReason =
   | "completed"
   | "failed"
@@ -1230,12 +1283,25 @@ export interface LoopTerminalEvent {
   /** v4.0.3: the loop lifecycle completed (the Agent's stop declaration
    *  passed the gates). This is NOT a machine-verified task-success claim. */
   completed: boolean;
-  /** v4.0.3: the last committed round's machine-backed success fact. */
-  machineBackedSuccess: boolean;
+  /** v4.0.3: the last committed round's machine-backed success fact.
+   *  v4.0.4: null means there is NO committed posture to read (for example a
+   *  loop cancelled before any round commit). It is never synthesized as
+   *  false. */
+  machineBackedSuccess: boolean | null;
   /** v4.0.3: the last committed round's evidence posture. */
   evidencePosture: EvidencePosture | null;
   stopReason: StopReason;
+  /** @deprecated v4.0.4: the historical name for `roundCursor`. It is NOT a
+   *  committed-round count. Kept for wire compatibility; new consumers should
+   *  read `roundCursor` / `committedRounds`. */
   roundsCompleted: number;
+  /** v4.0.4: the session's current round cursor (the round it is on or just
+   *  finished). It is not a count of committed rounds. */
+  roundCursor: number;
+  /** v4.0.4: committed evaluation rounds on the current branch, derived from
+   *  the same `loadCommittedHistory` window every read surface uses. Rollback
+   *  directives are events, not rounds, and are not counted. */
+  committedRounds: number;
   /** v4.0.3: only machine-backed successful rounds, in order. */
   machineBackedSuccessTrajectory: boolean[];
   loopId: string;
@@ -1395,9 +1461,18 @@ export interface ContractItemProposal {
  *  judges whether `work_item` sounds like a deliverable, whether an item
  *  matches a command semantically, or whether a command is the right
  *  acceptance test; that is Agent/operator semantic judgment. */
+/** A contract PROPOSAL carried by one evaluation. Three related objects must
+ *  not be conflated:
+ *  - the proposal: this object, for the NEXT round;
+ *  - the ACTIVE contract: the proposal once its declaring round commits,
+ *    governing the round that follows;
+ *  - `work_item`: the bounded deliverable that becomes the prompt's
+ *    `Current Task` while the contract is active.
+ *  The proposal is never the contract of the round that declared it. */
 export interface RoundContractProposal {
   /** The bounded deliverable this slice produces. Required for NEW
-   *  declarations, optional when reading legacy committed history. */
+   *  declarations, optional when reading legacy committed history. This is
+   *  the text the next prompt renders as `Current Task` once active. */
   work_item?: string;
   /** v3.9.9: the Agent's declared intended file boundary — an optional,
    *  report-only intent statement. Omission and `[]` both mean "no declared

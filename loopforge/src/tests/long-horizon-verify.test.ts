@@ -398,9 +398,9 @@ describe("Long-Horizon Verification", () => {
     for (const field of [
       "agent_success_claim",
       "agent_outcome",
-      "machine_backed_success",
+      "agent_stop_reason",
       "evidence_posture",
-      "stop_reason",
+      "loop_stop_reason",
     ]) {
       assert.ok(field in (tl[0] as Record<string, unknown>), `replay missing ${field}`);
     }
@@ -409,7 +409,7 @@ describe("Long-Horizon Verification", () => {
     assert.ok(!explain.error, `explain failed: ${String(explain.errorMessage ?? "")}`);
     const explainRounds = explain.rounds as Array<Record<string, unknown>>;
     const lastExplain = explainRounds[explainRounds.length - 1]!;
-    assert.equal(lastExplain.stopReason, "completed");
+    assert.equal(lastExplain.loopStopReason, "completed");
     assert.ok(lastExplain.evidencePosture !== undefined,
       "explain must expose the persisted posture");
 

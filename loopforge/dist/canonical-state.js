@@ -11,10 +11,14 @@ import { deriveConfiguredCapability } from "./policy.js";
 import { formatWorkingMemoryState, hasWorkingMemoryContent, } from "./working-memory.js";
 import { isOpenQuestionId } from "./open-question.js";
 import { MACHINE_EVIDENCE_AUTHORITY, formatEvidencePostureLines, } from "./evidence-posture-view.js";
+import { formatContextBoundaryLabel } from "./round-guidance.js";
 /** v4.0.3: schema 7 adds the previous/retry evidence posture, explicitly split
  *  reported progress/issues/warnings, compile context and Working Memory
- *  source counts. Older state documents are reported, never migrated. */
-export const CANONICAL_STATE_SCHEMA_VERSION = 7;
+ *  source counts. v4.0.4: schema 8 records the renamed context vocabulary
+ *  (`fresh_invocation`) in the derived declaration and stateHash. The state
+ *  file is regenerated every round; an older file is a stale view, not a
+ *  legacy document to decode. */
+export const CANONICAL_STATE_SCHEMA_VERSION = 8;
 /** v3.7.1: Presentation view of sub-goals shared by prompts and the state
  *  file (one derivation, no second copy). Only ACTIVE items render as rows
  *  — pending/in_progress/blocked — ordered blocked → in_progress → pending
@@ -328,7 +332,9 @@ export function renderCanonicalStateMarkdown(state, options) {
         `**Round**: ${state.round}/${state.maxRounds}`,
         `**Goal ID**: ${state.goalId}`,
         ...(context
-            ? [`**Context**: ${context.mode} (${context.reason}), attempt ${context.attempt}`]
+            ? [
+                `**Context**: ${formatContextBoundaryLabel(context.mode, context.reason, { recoveryBoundary: (state.recoveryBrief?.length ?? 0) > 0 })}, attempt ${context.attempt}`,
+            ]
             : []),
         "**Derived**: true",
         `**Source**: round ${state.round} (attempt ${context?.attempt ?? options?.attempt ?? 1})`,

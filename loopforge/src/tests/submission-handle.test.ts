@@ -27,7 +27,7 @@ function artifact(overrides: Partial<PromptArtifact> = {}): PromptArtifact {
     round: 2,
     attempt: 1,
     level: "l1",
-    contextMode: "fresh_round",
+    contextMode: "fresh_invocation",
     contextReason: "next_round",
     renderedPrompt: "the held prompt",
     promptHash: "prompt-hash",

@@ -49,7 +49,7 @@ export function makeSelfEvaluation(overrides = {}) {
         worker_results: [],
         subtask_boundary: false,
         subtask_boundary_label: "",
-        stop_reason: undefined,
+        agent_stop_reason: undefined,
         outcome: undefined,
         blocker: undefined,
         retroactiveClaims: [],
@@ -144,11 +144,14 @@ export function makeLoopCompileRequest(overrides = {}) {
  *
  *  v4.0.1: schema 7 removes the prompt-request effects. v4.0.2: schema 8 adds
  *  the derived context boundary and the optional Working Memory projection.
- *  v4.0.3: schema 9 adds the Machine Evidence projection and the expanded
- *  Working Memory metadata. Older versions are a HARD break — a round whose
+ *  v4.0.3: schema 9 adds the expanded Working Memory audit metadata. The
+ *  Machine Evidence projection is rendered INTO the prompt text, not carried as
+ *  a separate artifact field; the committed posture lives on the transaction
+ *  result. v4.0.4: schema 10 renames the clean-context `contextMode` value to
+ *  `fresh_invocation`. Older versions are a HARD break — a round whose
  *  artifact does not parse is not committed history, and
  *  `legacyTransactionRounds` reports the loss rather than letting it vanish. */
-export const PROMPT_ARTIFACT_SCHEMA_VERSION = 9;
+export const PROMPT_ARTIFACT_SCHEMA_VERSION = 10;
 export function makeLoopCompileResponse(overrides = {}) {
     return {
         status: AgentStatus.OK,

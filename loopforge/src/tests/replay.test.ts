@@ -20,7 +20,7 @@ function artifact(
     round,
     attempt: 1,
     level,
-    contextMode: "fresh_round",
+    contextMode: "fresh_invocation",
     contextReason: "next_round",
     renderedPrompt,
     promptHash: `hash-${round}`,
@@ -243,13 +243,17 @@ describe("v4.0.2 — bounded replay window", () => {
   it("carries context, report, assumptions, questions and redirect", () => {
     store.appendEntry(committedFeedbackRound(1, {
       loopId: "test",
+      // A same_round_retry artifact is legal only at L0 with attempt > 1.
       promptArtifact: {
-        ...artifact(1, "l1"),
+        ...artifact(1, "l0"),
+        attempt: 2,
         contextMode: "same_round_retry",
         contextReason: "enforcement_retry",
       },
+      attempt: 2,
       success: false,
       outcome: "partial",
+      agentStopReason: "blocked",
       outputSummary: "bounded report",
       wrongAssumptions: ["old belief"],
       retractedConstraints: ["old rule"],
@@ -264,10 +268,14 @@ describe("v4.0.2 — bounded replay window", () => {
     const [row] = replay.timeline("test");
     assert.equal(row?.context_mode, "same_round_retry");
     assert.equal(row?.context_reason, "enforcement_retry");
-    assert.equal(row?.attempt, 1);
+    assert.equal(row?.loop_stop_reason, null);
+    assert.equal(row?.agent_stop_reason, "blocked");
+    assert.ok(!("machine_backed_success" in (row ?? {})),
+      "machineBackedSuccess lives only in the posture");
+    assert.equal(row?.attempt, 2);
     assert.equal(row?.agent_success_claim, false);
     assert.equal(row?.agent_outcome, "partial");
-    assert.equal(row?.machine_backed_success, false);
+    assert.equal((row?.evidence_posture as { machineBackedSuccess?: boolean } | null)?.machineBackedSuccess, false);
     assert.equal(
       (row?.report as Record<string, unknown>)?.output_summary,
       "bounded report",

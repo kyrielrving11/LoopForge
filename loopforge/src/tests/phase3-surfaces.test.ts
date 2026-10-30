@@ -168,7 +168,7 @@ describe("v4.0.3 — replay surfaces", () => {
     assert.ok(row);
     assert.equal(row.agent_success_claim, true);
     assert.equal(row.agent_outcome, "success");
-    assert.equal(row.machine_backed_success, true);
+    assert.equal((row.evidence_posture as EvidencePosture).machineBackedSuccess, true);
     assert.equal((row.evidence_posture as EvidencePosture).status, "verified");
     assert.deepEqual(row.command_statuses, [
       { command_id: "verify", status: "passed" },
@@ -178,7 +178,7 @@ describe("v4.0.3 — replay surfaces", () => {
       { checkpoint_id: mid.checkpointId, role: "mid", round: 1, content_hash: mid.contentHash },
     ]);
     assert.equal(row.restore_verified, true);
-    assert.equal(row.stop_reason, "completed");
+    assert.equal(row.loop_stop_reason, "completed");
     assert.equal((row.truncation as Record<string, boolean>).output_summary, true);
     const report = row.report as Record<string, unknown>;
     assert.equal(report.no_change_reason, "no code change needed");
@@ -270,7 +270,7 @@ describe("v4.0.3 — explain surfaces", () => {
     const result = buildExplain(loopId, [entry]);
     const round = result.rounds[0]!;
     assert.equal(round.agentSuccessClaim, true);
-    assert.equal(round.machineBackedSuccess, true);
+    assert.equal(round.evidencePosture?.machineBackedSuccess, true);
     assert.equal(round.evidencePosture?.status, "verified");
     assert.equal(round.observations.before.length, 1);
     assert.equal(round.observations.after.length, 1);
@@ -290,9 +290,9 @@ describe("v4.0.3 — explain surfaces", () => {
     assert.deepEqual(round.report?.discovered_constraints, ["docs must stay offline"]);
     assert.deepEqual(round.report?.emerged_subtasks, ["add docs fixture"]);
     assert.deepEqual(round.resolvedOpenQuestionIds, ["oq-0123456789ab"]);
-    assert.equal(round.stopReason, "completed");
+    assert.equal(round.loopStopReason, "completed");
     const text = renderExplain(result);
-    assert.match(text, /stop_reason: completed/);
+    assert.match(text, /loop_stop_reason: completed/);
     assert.match(text, /resolved open questions \(Agent report\): oq-0123456789ab/);
     assert.match(text, /constraint violation \(Agent report\): did not run docs check/);
   });

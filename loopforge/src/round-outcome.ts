@@ -22,12 +22,12 @@ export function effectiveSuccess(selfEval: SelfEvaluation): boolean {
   return effectiveOutcome(selfEval) === "success";
 }
 
-/** v3.8.3/v3.9.7: the ONE definition of "this round declares itself blocked".
- *  A declared `outcome: "blocked"` and a `stop_reason` of `blocked` or
- *  `needs_human_input` say the same thing. `effectiveOutcome` alone is NOT
- *  this predicate: it reads `outcome` only. */
+/** v3.8.3/v3.9.7/v4.0.4: the ONE definition of "this round declares itself
+ *  blocked". A declared `outcome: "blocked"` and an `agent_stop_reason` of
+ *  `blocked` or `needs_human_input` say the same thing. `effectiveOutcome`
+ *  alone is NOT this predicate: it reads `outcome` only. */
 export function declaresBlocked(selfEval: SelfEvaluation): boolean {
   return selfEval.outcome === "blocked" ||
-    selfEval.stop_reason === "blocked" ||
-    selfEval.stop_reason === "needs_human_input";
+    selfEval.agent_stop_reason === "blocked" ||
+    selfEval.agent_stop_reason === "needs_human_input";
 }

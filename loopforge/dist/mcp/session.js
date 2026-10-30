@@ -37,7 +37,7 @@ import { policyMetrics, derivePolicyMetrics, mergePolicyMetrics, } from "../poli
 import { SessionLeaseConflictError, VaultSessionStateStore, } from "../storage.js";
 import { StorageCorruptionError } from "../loop-store.js";
 import { LOST_HANDLE_ROUTING } from "../recovery-guidance.js";
-import { RoundLifecycle, buildLoopRequest, normalizeStartCriteria, } from "./round-lifecycle.js";
+import { MANUAL_STOP_REASON, RoundLifecycle, buildLoopRequest, normalizeStartCriteria, } from "./round-lifecycle.js";
 import { activeContractOf, validateSubmission, } from "./submission-boundary.js";
 import { makeSubmissionHandle, parseSubmissionHandle, staleHandleWarning, validateSubmissionHandle, } from "./submission-handle.js";
 // ── SessionManager ─────────────────────────────────────────────────────────
@@ -150,12 +150,19 @@ export class SessionManager {
     }
     leaseConflictResult(loopId, entry) {
         const lineage = (entry?.loop_lineage ?? {});
+        const owner = entry?.loop_lineage
+            ? entry.loop_lineage.lease_owner ?? "unknown"
+            : "unknown";
         return {
             sessionId: "",
             round: typeof lineage.current_round === "number" ? lineage.current_round : 0,
             prompt: null,
-            stopReason: `session_owned_elsewhere:${loopId}`,
-            stopDetail: `Another process (PID ${entry?.loop_lineage ? entry.loop_lineage.lease_owner ?? "unknown" : "unknown"}) holds the lease for loop "${loopId}". Wait for the lease to expire or stop the other process.`,
+            stopDetail: `Another process (PID ${String(owner)}) holds the lease for loop ` +
+                `"${loopId}". Wait for the lease to expire or stop the other process.`,
+            submissionError: {
+                code: "lease_conflict",
+                details: { loopId, owner: String(owner) },
+            },
         };
     }
     async withSessionQueue(sessionId, work) {
@@ -406,13 +413,13 @@ export class SessionManager {
             return false;
         session.status = "stopped";
         this.lifecycle.save(session);
-        void this.lifecycle.notifyTerminal(session, "cancelled");
+        void this.lifecycle.notifyTerminal(session, MANUAL_STOP_REASON);
         this.sessions.delete(sessionId);
         this.sessionQueues.delete(sessionId);
         logEvent("session_end", {
             sessionId,
             loopId: session.loopId,
-            stopReason: "cancelled",
+            stopReason: MANUAL_STOP_REASON,
             roundsCompleted: session.currentRound,
         });
         return true;
@@ -460,17 +467,24 @@ export class SessionManager {
             return this.leaseConflictResult(loopId, persistedEntry);
         const session = this.lifecycle.reconstructSession(sessionEntry);
         if (!session) {
-            // was not "running"/"stalled" — return stopped/paused status
+            // was not "running"/"stalled" — report the SESSION status and, for a
+            // stopped loop, the committed loop terminal reason.
             const lineage = (sessionEntry.loop_lineage ?? {});
             const currentRound = lineage.current_round ?? 1;
             const status = lineage.status ?? "stopped";
-            return {
-                sessionId: "",
-                round: currentRound,
-                prompt: null,
-                stopReason: status,
-                stopDetail: `Loop is not running (status: ${status}). It may have already completed or been stopped.`,
-            };
+            if (status !== "stopped") {
+                return {
+                    sessionId: "",
+                    round: currentRound,
+                    prompt: null,
+                    sessionStatus: status,
+                    stopDetail: `Loop is not running (session status: ${status}).`,
+                };
+            }
+            // v4.0.4: resume of a stopped loop reports the committed `StopReason`
+            // (completed/failed/blocked/max_rounds/...) and the SAME three fact
+            // blocks as a live stop. Never a fake "stopped", never a legacy guess.
+            return this.lifecycle.stoppedLoopResult(loopId, currentRound);
         }
         // Resume is a recovery attempt: set running so the lease is renewed while
         // the (possibly long) restore executes. A failure saves stalled again.
@@ -854,12 +868,34 @@ export class SessionManager {
      *  the runtime's submission boundary reads the same context (the sub-goal
      *  reference space is exactly the compiled set the prompt carried), and two
      *  copies would let the projection and the boundary disagree about it. */
+    /** v4.0.4: read-only terminal summary of a persisted STOPPED loop.
+     *
+     *  Returns null unless the persisted session status is exactly "stopped":
+     *  a running/paused/stalled loop without a live session must still go
+     *  through `loopforge_resume`, so "no live session" is never mistaken for
+     *  "already stopped". It never claims a lease, saves a session or writes
+     *  history; the committed view supplies every field. */
+    getStoppedLoopSummary(loopId) {
+        validateLoopId(loopId);
+        const entry = this.findSessionEntry(loopId);
+        if (!entry)
+            return null;
+        const lineage = (entry.loop_lineage ?? {});
+        if (lineage.status !== "stopped")
+            return null;
+        const currentRound = typeof lineage.current_round === "number"
+            ? lineage.current_round
+            : 1;
+        return this.lifecycle.stoppedLoopResult(loopId, currentRound);
+    }
     /** v3.8: Read-only per-round "why" view over committed facts. Never
      *  rebuilds history and never writes. */
     getExplain(loopId, round) {
         validateLoopId(loopId);
-        const entries = loadCommittedHistory(this.loopStore, loopId).entries;
-        return buildExplain(loopId, entries, round);
+        // v4.0.4: the SAME loader reports the legacy count Explain prints; Explain
+        // never re-scans for it and never decodes a legacy round into a fake row.
+        const history = loadCommittedHistory(this.loopStore, loopId);
+        return buildExplain(loopId, history.entries, round, history.legacyRounds.length);
     }
     /** Read-only end-of-loop audit (verification view). Never writes. */
     getAudit(loopId) {
@@ -956,7 +992,6 @@ export class SessionManager {
             sessionId: "",
             round: 0,
             prompt: null,
-            stopReason: "submission_handle_required",
             stopDetail: `${detail} Copy it from the latest LoopForge response. ` +
                 LOST_HANDLE_ROUTING,
             submissionError: {
@@ -970,7 +1005,6 @@ export class SessionManager {
             sessionId,
             round: 0,
             prompt: null,
-            stopReason: "session_not_found",
             stopDetail: "No session exists with this ID. It may have expired, been deleted, " +
                 "or never existed. Call loopforge_status with view=\"all\" to find the " +
                 "loopId; if the held prompt is still in context, call loopforge_status " +
@@ -989,7 +1023,7 @@ export class SessionManager {
             round: session.currentRound,
             ...(handle ? { submissionHandle: handle } : {}),
             prompt: null,
-            stopReason: session.status,
+            sessionStatus: session.status,
             stopDetail: `Session is ${session.status}. Use loopforge_resume to restart a ` +
                 "paused session, or loopforge_start for a new task.",
         };
@@ -1008,7 +1042,6 @@ export class SessionManager {
             round: session.currentRound,
             ...(check.current ? { submissionHandle: check.current } : {}),
             prompt: null,
-            stopReason: "submission_handle_mismatch",
             stopDetail: check.detail,
             submissionError: {
                 code: "submission_handle_mismatch",
@@ -1097,7 +1130,6 @@ export class SessionManager {
                 round: session.currentRound,
                 ...(current ? { submissionHandle: current } : {}),
                 prompt: null,
-                stopReason: boundary.submissionError.code,
                 stopDetail: boundary.stopDetail,
                 submissionError: boundary.submissionError,
             };
@@ -1331,7 +1363,7 @@ export class SessionManager {
             if (!this.renewSessionLease(current.loopId)) {
                 const conflict = this.leaseConflictResult(current.loopId, this.findSessionEntry(current.loopId));
                 return {
-                    error: conflict.stopReason ?? "lease_conflict",
+                    error: "lease_conflict",
                     errorMessage: conflict.stopDetail ?? "Another process owns this loop.",
                     sessionId: current.sessionId,
                     details: { reason_code: "lease_conflict" },

@@ -9,7 +9,7 @@
  * with truncation metadata, so replay/explain are the complete-observation
  * read surfaces the prompt intentionally points at.
  */
-import type { EvidencePosture, SubmissionReceipt } from "./protocol.js";
+import type { EvidencePosture, PromptContextMode, PromptContextReason, RoundOutcome, StopReason, SubmissionReceipt } from "./protocol.js";
 import type { VaultEntry } from "./loop-store.js";
 export interface ExplainObservation {
     providerId: string;
@@ -30,20 +30,35 @@ export interface ExplainRound {
     round: number;
     roundId: string;
     attempt: number;
+    /** Optional transaction/branch identity: a redo may reuse the same numeric
+     *  round on a child branch, and these are what distinguish it. */
+    branchId?: string;
+    transactionId?: string;
     action: string;
-    /** v4.0.3: the committed stop reason, when the round stopped the loop. */
-    stopReason: string | null;
+    /** v4.0.4: LoopForge's committed terminal reason, when the round stopped the
+     *  loop. Renamed from `stopReason` so it cannot be read as the Agent's
+     *  `agent_stop_reason`. */
+    loopStopReason: StopReason | null;
     /** v4.0.3: the Agent's claim (never a machine verdict). */
     agentSuccessClaim: boolean;
     /** v4.0.3: the effective Agent-declared outcome. */
-    agentOutcome: string | null;
-    /** v4.0.3: read from the persisted posture. */
-    machineBackedSuccess: boolean;
+    agentOutcome: RoundOutcome | null;
+    /** v4.0.4: the raw `evaluation.outcome`; null means it was derived from
+     *  `success`, not declared. */
+    agentOutcomeDeclared: RoundOutcome | null;
+    /** v4.0.4: the Agent's declared stop reason (an Agent report). */
+    agentStopReason: "gave_up" | "blocked" | "needs_human_input" | null;
+    /** v4.0.4: the Agent's declared should_continue. */
+    agentShouldContinue: boolean | null;
+    /** v4.0.3: the ONE persisted posture. `machineBackedSuccess` lives only
+     *  inside it; Explain no longer repeats it at the top level. */
     evidencePosture: EvidencePosture | null;
+    /** v4.0.4: the committed enforcement reason, when one was recorded. */
+    enforcementReason: string | null;
     /** v4.0.2: the committed context boundary this round was compiled under. */
     context: {
-        mode: "fresh_round" | "same_round_retry";
-        reason: "first_round" | "next_round" | "recovery_redo" | "enforcement_retry";
+        mode: PromptContextMode;
+        reason: PromptContextReason;
     } | null;
     /** The agent's own report, quoted back for audit. Present whenever the
      *  committed evaluation exists, even without an execution_report. */
@@ -197,9 +212,24 @@ export interface ExplainResult {
     } | null;
     /** v3.9.6: committed rollback directives as events, never normal rounds. */
     rollbacks: ExplainRollback[];
+    /** v4.0.4: rounds whose persisted envelope is an unsupported schema. They
+     *  are NOT decoded into fake round rows; the count makes the loss visible
+     *  instead of showing a silently empty timeline. */
+    legacyRounds: number;
 }
-/** Build the explain view. Pure and read-only. */
-export declare function buildExplain(loopId: string, entries: VaultEntry[], round?: number): ExplainResult;
-/** Human-readable rendering of the explain view (CLI default). */
+/** Build the explain view. Pure and read-only.
+ *
+ *  `legacyRounds` is the loader's explicit legacy count
+ *  (`loadCommittedHistory(...).legacyRounds.length`); it is passed through so
+ *  Explain never re-scans for it and never migrates it. */
+export declare function buildExplain(loopId: string, entries: VaultEntry[], round?: number, legacyRounds?: number): ExplainResult;
+/** Human-readable rendering of the explain view (CLI default).
+ *
+ *  v4.0.4: every round renders the three fact blocks (Agent report,
+ *  LoopForge decision, Machine evidence) through `renderResultFacts`, then the
+ *  detailed audit rows. Agent claims are labelled `(Agent report)`, the
+ *  machine evidence is rendered ONLY by the shared posture formatter, and the
+ *  commit-time contract snapshot is labelled separately from the derived
+ *  current status. No "changed"/"conflict" boolean is derived here. */
 export declare function renderExplain(result: ExplainResult): string;
 //# sourceMappingURL=explain.d.ts.map

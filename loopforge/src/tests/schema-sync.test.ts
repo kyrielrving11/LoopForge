@@ -150,8 +150,8 @@ describe("MCP schema ↔ protocol schema sync", () => {
       (manifestProps.schemaVersion as SchemaNode).const,
       CHECKPOINT_SCHEMA_VERSION,
     );
-    assert.equal(ROUND_TRANSACTION_SCHEMA_VERSION, 7);
-    assert.equal(CANONICAL_STATE_SCHEMA_VERSION, 7);
+    assert.equal(ROUND_TRANSACTION_SCHEMA_VERSION, 8);
+    assert.equal(CANONICAL_STATE_SCHEMA_VERSION, 8);
     assert.equal(POLICY_SCHEMA_VERSION, "10");
     assert.equal(CHECKPOINT_SCHEMA_VERSION, 1);
   });
@@ -163,5 +163,37 @@ describe("MCP schema ↔ protocol schema sync", () => {
     assert.ok(required.includes("contextMode"));
     assert.ok(required.includes("contextReason"));
     assert.ok(!required.includes("workingMemory"));
+  });
+
+  it("v4.0.4: publishes the renamed context vocabulary and the Agent stop field", () => {
+    const defs = schema.$defs as SchemaNode;
+    const contextMode = defs.PromptContextMode as SchemaNode;
+    assert.deepEqual([...(contextMode.enum as string[])].sort(), [
+      "fresh_invocation",
+      "same_round_retry",
+    ]);
+    const selfEvalProps = (defs.SelfEvaluation as SchemaNode).properties as SchemaNode;
+    assert.ok("agent_stop_reason" in selfEvalProps,
+      "SelfEvaluation.agent_stop_reason is the only Agent stop-reason field");
+    assert.ok(!("stop_reason" in selfEvalProps),
+      "the old ambiguous Agent field must not survive");
+    const receiptProps =
+      (defs.SubmissionReceipt as SchemaNode).properties as SchemaNode;
+    assert.ok("loop_stop_reason" in receiptProps);
+    assert.ok("agent_stop_reason" in receiptProps);
+    assert.ok(!("machineBackedSuccess" in receiptProps),
+      "the receipt never duplicates the posture's machine fact");
+    assert.ok(!JSON.stringify(schema).includes("fresh_round"));
+  });
+
+  it("v4.0.4: read-view names never become persisted protocol fields", () => {
+    const defs = JSON.stringify(schema.$defs);
+    for (const readOnly of ["agentStopReason", "loopStopReason", "sessionStatus"]) {
+      assert.ok(!defs.includes(`"${readOnly}"`),
+        `${readOnly} is a response/read-view fact, not a protocol $def`);
+    }
+    const selfEvalProps = ((schema.$defs as SchemaNode).SelfEvaluation as SchemaNode)
+      .properties as SchemaNode;
+    assert.ok("agent_stop_reason" in selfEvalProps);
   });
 });

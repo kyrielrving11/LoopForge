@@ -1,13 +1,17 @@
 /** LoopForge MCP — Tool definitions and handlers.
  *
- * 9 tools: start, next, status, stop, pause, resume, replay,
- *          gate_check, gate_resolve.
- * status is the unified inspection tool (view=session|loop|all|audit).
+ * 10 tools: start, next, status, stop, pause, resume, replay,
+ *           checkpoint, gate_check, gate_resolve.
+ * status is the unified inspection tool (view=session|loop|all|audit|explain).
  * Each handler receives SessionManager + parsed input, returns the output object.
  */
 
 import type { SessionManager, StartInput } from "./session.js";
-import { StartCriteriaError } from "./round-lifecycle.js";
+import {
+  MANUAL_STOP_REASON,
+  StartCriteriaError,
+  type AdvanceResult,
+} from "./round-lifecycle.js";
 import { ProjectionCoverageError } from "../prompt-coverage.js";
 import {
   LegacyHistoryError,
@@ -86,7 +90,7 @@ const TOOL_BASE_SCHEMAS = [
   {
     name: "loopforge_start",
     description:
-      "Start a new LoopForge loop session. Compiles the first-round prompt from the task description and returns it. Use this at the beginning of an autonomous multi-round coding loop.",
+      "Start a new LoopForge loop for a NEW objective. Compiles the first-round prompt from the task description and returns it. Use loopforge_status/loopforge_resume instead for an objective that already has a loopId.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -133,7 +137,7 @@ const TOOL_BASE_SCHEMAS = [
   {
     name: "loopforge_next",
     description:
-      "Submit the output from the current round and advance to the next. Returns the next-round prompt (with its derived contextMode/contextReason), or null with a stopReason when the loop ends. A structured evaluation is required; output is optional supporting context.",
+      "Submit one evaluation for the held attempt. Returns the next prompt (with its derived contextMode/contextReason and a strategy label), or null with stopReason/stopDetail when the loop ends. The submission may be accepted, rejected (same logical round, attempt+1, new handle), replayed, or answered with a rollback directive. A structured evaluation is required; output is optional supporting context.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -318,10 +322,10 @@ const TOOL_BASE_SCHEMAS = [
                 required: ["id", "status"],
               },
             },
-            stop_reason: {
+            agent_stop_reason: {
               type: "string" as const,
               enum: ["gave_up", "blocked", "needs_human_input"],
-              description: fieldGuideDescription("stop_reason"),
+              description: fieldGuideDescription("agent_stop_reason"),
             },
             no_change_reason: {
               type: "string" as const,
@@ -521,7 +525,8 @@ const TOOL_BASE_SCHEMAS = [
   {
     name: "loopforge_stop",
     description:
-      "Manually stop a loop session and return its final trajectory.",
+      "Manually stop a loop session and return its final trajectory. The " +
+      "returned `success` is tool-call success, not a task-success verdict.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -536,7 +541,7 @@ const TOOL_BASE_SCHEMAS = [
   {
     name: "loopforge_pause",
     description:
-      "Pause a running loop session. The loop suspends at the next round boundary and its state is persisted to vault. Paused loops can be resumed with loopforge_resume. Use this to interrupt a long-running loop without losing progress.",
+      "Pause a running loop session: it immediately stops accepting submissions (an in-flight advance may still finish) and its state is persisted to vault. Paused loops can be resumed with loopforge_resume. Use this to interrupt a long-running loop without losing progress.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -593,8 +598,10 @@ const TOOL_BASE_SCHEMAS = [
       "no live session exists, or the session is paused/stalled; if only the " +
       "submissionHandle was lost while the prompt is still in context, prefer " +
       "loopforge_status. Returns the held prompt and its current " +
-      "submissionHandle, or a newly compiled prompt when none is held; null " +
-      "with a stopReason when the loop is terminal.",
+      "submissionHandle, or a newly compiled prompt when none is held. A " +
+      "terminal loop returns no prompt, the committed stopReason when one was " +
+      "committed, and/or sessionStatus (paused/stopped/stalled); a stopped " +
+      "loop without a committed stop round reports sessionStatus only.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -710,15 +717,32 @@ const ADVANCE_OUTPUT_SCHEMA: JsonSchema = {
     round: { type: "number" },
     submissionHandle: SUBMISSION_HANDLE_OUTPUT_SCHEMA,
     prompt: { type: ["string", "null"] },
-    stopReason: { type: ["string", "null"] },
-    stopDetail: { type: ["string", "null"], description: "Human-readable context for why the loop stopped. Provides facts without prescribing a specific agent action." },
+    stopReason: {
+      type: ["string", "null"],
+      enum: [
+        "completed", "failed", "blocked", "cancelled", "max_rounds",
+        "stalled", "enforcement_terminated", "paused", "incomplete", null,
+      ],
+      description:
+        "v4.0.4: LoopForge's terminal reason. Never a session status, a tool " +
+        "error or the Agent's declared agent_stop_reason.",
+    },
+    sessionStatus: {
+      enum: ["running", "stopped", "paused", "stalled"],
+      description:
+        "v4.0.4: the live session status when the result is not a committed " +
+        "loop terminal reason.",
+    },
+    stopDetail: { type: ["string", "null"], description: "Human-readable context for why the loop stopped. Three fact blocks: Agent report, LoopForge decision, Machine evidence. Provides facts without prescribing a specific agent action." },
     level: { type: ["string", "null"] },
     contextMode: {
-      enum: ["fresh_round", "same_round_retry"],
+      enum: ["fresh_invocation", "same_round_retry"],
       description:
-        "v4.0.2: the context boundary the returned prompt was compiled under. " +
-        "fresh_round starts a new Agent invocation; same_round_retry continues " +
-        "the same logical round. Projected from the PromptArtifact.",
+        "v4.0.4: the context boundary the returned prompt was compiled under. " +
+        "fresh_invocation is clean context (a new Agent invocation; it may be " +
+        "the same logical round on an L2 retry); same_round_retry is " +
+        "in-context repair for the first L0 enforcement retry. Projected from " +
+        "the PromptArtifact.",
     },
     contextReason: {
       enum: ["first_round", "next_round", "recovery_redo", "enforcement_retry"],
@@ -729,6 +753,17 @@ const ADVANCE_OUTPUT_SCHEMA: JsonSchema = {
       type: ["string", "null"],
       enum: ["success", "partial", "failed", "blocked", null],
       description: "v4.0.3: the effective Agent-declared outcome.",
+    },
+    agentStopReason: {
+      type: ["string", "null"],
+      enum: ["gave_up", "blocked", "needs_human_input", null],
+      description:
+        "v4.0.4: the Agent's declared stop reason of the round this result " +
+        "is about. An Agent report, never a loop terminal reason.",
+    },
+    agentShouldContinue: {
+      type: ["boolean", "null"],
+      description: "v4.0.4: the Agent's declared should_continue for that same round.",
     },
     checkpoints: {
       type: ["array", "null"],
@@ -821,9 +856,24 @@ export const TOOL_OUTPUT_SCHEMAS: Record<string, JsonSchema> = {
       beforeCheckpointError: { type: ["object", "null"], additionalProperties: true },
       maxRounds: { type: "number" },
       status: { enum: ["running", "stopped", "stalled", "paused"] },
+      // v4.0.4: a stopped loop's committed terminal facts are readable from
+      // view=session without calling resume.
+      loopStopReason: {
+        type: ["string", "null"],
+        enum: [
+          "completed", "failed", "blocked", "cancelled", "max_rounds",
+          "stalled", "enforcement_terminated", "paused", "incomplete", null,
+        ],
+      },
+      agentStopReason: {
+        type: ["string", "null"],
+        enum: ["gave_up", "blocked", "needs_human_input", null],
+      },
+      agentShouldContinue: { type: ["boolean", "null"] },
+      stopDetail: { type: ["string", "null"] },
       machineBackedSuccessTrajectory: { type: "array", items: { type: "boolean" } },
       evidencePosture: { type: ["object", "null"], additionalProperties: true },
-      machineBackedSuccess: { type: "boolean" },
+      machineBackedSuccess: { type: ["boolean", "null"] },
       agentSuccessClaim: { type: ["boolean", "null"] },
       agentOutcome: { type: ["string", "null"] },
       lease: { type: ["object", "null"], additionalProperties: true },
@@ -844,8 +894,14 @@ export const TOOL_OUTPUT_SCHEMAS: Record<string, JsonSchema> = {
     properties: {
       ok: { type: "boolean", description: "v3.8: uniform result envelope — false means the error object describes a rejected call." },
       error: { type: "object", additionalProperties: true, description: "v3.8 ToolError: { code, message, retryable, sessionId?, submissionHandle?, details? }" },
-      success: { type: "boolean" },
-      roundsCompleted: { type: "number" },
+      success: { type: "boolean", description: "Tool-call success, not a task-success verdict." },
+      sessionId: { type: "string" },
+      loopId: { type: "string" },
+      roundsCompleted: { type: "number", description: "Deprecated alias of roundCursor (the session round cursor, not a committed count)." },
+      roundCursor: { type: "number", description: "The session's current round cursor." },
+      sessionStatus: { const: "stopped" },
+      loopStopReason: { const: MANUAL_STOP_REASON, description: "The manual-cancel terminal reason sent to the terminal sink; not a committed round fact." },
+      machineBackedSuccessRounds: { type: "number", description: "Machine-backed successful rounds (same committed-view source as the trajectory)." },
       machineBackedSuccessTrajectory: { type: "array", items: { type: "boolean" } },
     },
     additionalProperties: true,
@@ -1416,6 +1472,34 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
     const session = (sessionId ? mgr.get(sessionId) : undefined) ??
       (loopId ? mgr.getByLoopId(loopId) : undefined);
     if (!session) {
+      // v4.0.4: a persisted STOPPED loop has no live session, but its
+      // committed terminal facts are still readable. This is a projection of
+      // committed history — no lease, no session save, no resume side effect.
+      // A running/paused/stalled loop with no live session still goes through
+      // resume; "no live session" is never treated as "stopped".
+      if (loopId) {
+        let stopped: AdvanceResult | null = null;
+        try {
+          stopped = mgr.getStoppedLoopSummary(loopId);
+        } catch (error) {
+          const stateFailure = stateErrorResult(error);
+          if (stateFailure) return stateFailure;
+          throw error;
+        }
+        if (stopped) {
+          return {
+            ok: true,
+            loopId,
+            round: stopped.round,
+            status: stopped.sessionStatus ?? "stopped",
+            loopStopReason: stopped.stopReason ?? null,
+            agentStopReason: stopped.agentStopReason ?? null,
+            agentShouldContinue: stopped.agentShouldContinue ?? null,
+            stopDetail: stopped.stopDetail ?? null,
+            last_submission: stopped.submission_receipt ?? null,
+          };
+        }
+      }
       return {
         error: "session_not_found",
         errorMessage: sessionId
@@ -1463,7 +1547,8 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
       maxRounds: session.maxRounds,
       status: session.status,
       evidencePosture: posture,
-      machineBackedSuccess: posture?.machineBackedSuccess ?? false,
+      // v4.0.4: no committed/held posture is null (unknown), not false.
+      machineBackedSuccess: posture?.machineBackedSuccess ?? null,
       agentSuccessClaim: session.roundSnapshot?.result?.agentSuccessClaim ??
         lastReceipt?.agent_success_claim ?? null,
       agentOutcome: session.roundSnapshot?.result?.agentOutcome ??
@@ -1513,11 +1598,28 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
       };
     }
 
-    const roundsCompleted = session.currentRound;
-    const machineBackedSuccessTrajectory = mgr.getMachineBackedSuccessTrajectory(session.loopId);
+    const loopId = session.loopId;
+    const roundCursor = session.currentRound;
+    const roundsCompleted = roundCursor;
+    const machineBackedSuccessTrajectory = mgr.getMachineBackedSuccessTrajectory(loopId);
     mgr.delete(sessionId);
 
-    return { success: true, roundsCompleted, machineBackedSuccessTrajectory };
+    // v4.0.4: make the stop response self-describing. `cancelled` is the
+    // terminal reason the terminal sink just received; it is NOT persisted as
+    // a committed round fact, so resume/status still report "no committed
+    // terminal reason" after a restart. `success` remains tool-call success.
+    return {
+      ok: true,
+      success: true,
+      sessionId,
+      loopId,
+      roundsCompleted,
+      roundCursor,
+      sessionStatus: "stopped",
+      loopStopReason: MANUAL_STOP_REASON,
+      machineBackedSuccessRounds: machineBackedSuccessTrajectory.length,
+      machineBackedSuccessTrajectory,
+    };
   },
 
   async loopforge_pause(mgr, input): Promise<Record<string, unknown>> {

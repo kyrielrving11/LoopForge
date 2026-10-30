@@ -127,6 +127,14 @@ export declare class SessionManager implements SessionRegistry {
      *  the runtime's submission boundary reads the same context (the sub-goal
      *  reference space is exactly the compiled set the prompt carried), and two
      *  copies would let the projection and the boundary disagree about it. */
+    /** v4.0.4: read-only terminal summary of a persisted STOPPED loop.
+     *
+     *  Returns null unless the persisted session status is exactly "stopped":
+     *  a running/paused/stalled loop without a live session must still go
+     *  through `loopforge_resume`, so "no live session" is never mistaken for
+     *  "already stopped". It never claims a lease, saves a session or writes
+     *  history; the committed view supplies every field. */
+    getStoppedLoopSummary(loopId: string): AdvanceResult | null;
     /** v3.8: Read-only per-round "why" view over committed facts. Never
      *  rebuilds history and never writes. */
     getExplain(loopId: string, round?: number): Record<string, unknown>;

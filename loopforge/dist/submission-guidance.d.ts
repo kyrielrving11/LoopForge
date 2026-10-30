@@ -50,7 +50,7 @@ export interface FieldGuide {
 /** v4.0.3: THE four structural evaluation fields. The MCP input schema, the
  *  prompt template and field accounting read this one set. */
 export declare const CORE_SELF_EVALUATION_FIELDS: ReadonlySet<string>;
-export declare const FIELD_ORDER: readonly ["success", "output_summary", "constraint_violations", "should_continue", "execution_report.files_changed", "execution_report.tests_reported", "execution_report.contract_item_claims", "execution_report.criterion_claims", "subgoal_updates", "emerged_subtasks", "discovered_constraints", "wrong_assumptions", "open_questions", "resolved_open_question_ids", "retracted_constraints", "round_contract", "contract_transition", "worker_results", "subtask_boundary", "subtask_boundary_label", "retroactiveClaims", "gate_ids", "outcome", "blocker", "stop_reason", "no_change_reason"];
+export declare const FIELD_ORDER: readonly ["success", "output_summary", "constraint_violations", "should_continue", "execution_report.files_changed", "execution_report.tests_reported", "execution_report.contract_item_claims", "execution_report.criterion_claims", "subgoal_updates", "emerged_subtasks", "discovered_constraints", "wrong_assumptions", "open_questions", "resolved_open_question_ids", "retracted_constraints", "round_contract", "contract_transition", "worker_results", "subtask_boundary", "subtask_boundary_label", "retroactiveClaims", "gate_ids", "outcome", "blocker", "agent_stop_reason", "no_change_reason"];
 export type FieldPath = (typeof FIELD_ORDER)[number];
 /** v4.0.3: array-valued evaluation paths, derived from the SAME field
  *  metadata the prompt, MCP schema and receipts read. Field accounting uses
@@ -84,7 +84,7 @@ export interface GuidanceFacts {
 /** Semantic applicability — the ONE rule, deliberately independent of prompt
  *  level. Core fields and the two baseline execution-report fields are always
  *  applicable; the rest depend on facts the runtime can actually observe.
- *  Future events (delegation, a checkpoint boundary, a falsified assumption)
+ *  Future events (delegation, a subtask boundary, a falsified assumption)
  *  remain conditional opportunities, not render-time facts. */
 export declare function isFieldApplicable(path: string, facts: GuidanceFacts): boolean;
 /** Compact-checklist membership: the explicit `compact` marker plus semantic

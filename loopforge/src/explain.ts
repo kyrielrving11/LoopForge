@@ -20,8 +20,14 @@ import type {
   EvidencePosture,
   GitObservation,
   MachineObservation,
+  PromptContextMode,
+  PromptContextReason,
+  RoundOutcome,
+  StopReason,
   SubmissionReceipt,
 } from "./protocol.js";
+import { renderResultFacts } from "./result-facts.js";
+import { formatContextBoundaryLabel } from "./round-guidance.js";
 import {
   committedRoundFacts,
   deriveActiveRoundContract,
@@ -52,20 +58,35 @@ export interface ExplainRound {
   round: number;
   roundId: string;
   attempt: number;
+  /** Optional transaction/branch identity: a redo may reuse the same numeric
+   *  round on a child branch, and these are what distinguish it. */
+  branchId?: string;
+  transactionId?: string;
   action: string;
-  /** v4.0.3: the committed stop reason, when the round stopped the loop. */
-  stopReason: string | null;
+  /** v4.0.4: LoopForge's committed terminal reason, when the round stopped the
+   *  loop. Renamed from `stopReason` so it cannot be read as the Agent's
+   *  `agent_stop_reason`. */
+  loopStopReason: StopReason | null;
   /** v4.0.3: the Agent's claim (never a machine verdict). */
   agentSuccessClaim: boolean;
   /** v4.0.3: the effective Agent-declared outcome. */
-  agentOutcome: string | null;
-  /** v4.0.3: read from the persisted posture. */
-  machineBackedSuccess: boolean;
+  agentOutcome: RoundOutcome | null;
+  /** v4.0.4: the raw `evaluation.outcome`; null means it was derived from
+   *  `success`, not declared. */
+  agentOutcomeDeclared: RoundOutcome | null;
+  /** v4.0.4: the Agent's declared stop reason (an Agent report). */
+  agentStopReason: "gave_up" | "blocked" | "needs_human_input" | null;
+  /** v4.0.4: the Agent's declared should_continue. */
+  agentShouldContinue: boolean | null;
+  /** v4.0.3: the ONE persisted posture. `machineBackedSuccess` lives only
+   *  inside it; Explain no longer repeats it at the top level. */
   evidencePosture: EvidencePosture | null;
+  /** v4.0.4: the committed enforcement reason, when one was recorded. */
+  enforcementReason: string | null;
   /** v4.0.2: the committed context boundary this round was compiled under. */
   context: {
-    mode: "fresh_round" | "same_round_retry";
-    reason: "first_round" | "next_round" | "recovery_redo" | "enforcement_retry";
+    mode: PromptContextMode;
+    reason: PromptContextReason;
   } | null;
   /** The agent's own report, quoted back for audit. Present whenever the
    *  committed evaluation exists, even without an execution_report. */
@@ -231,13 +252,22 @@ export interface ExplainResult {
   activeContract: { id: string; work_item?: string; itemCount: number } | null;
   /** v3.9.6: committed rollback directives as events, never normal rounds. */
   rollbacks: ExplainRollback[];
+  /** v4.0.4: rounds whose persisted envelope is an unsupported schema. They
+   *  are NOT decoded into fake round rows; the count makes the loss visible
+   *  instead of showing a silently empty timeline. */
+  legacyRounds: number;
 }
 
-/** Build the explain view. Pure and read-only. */
+/** Build the explain view. Pure and read-only.
+ *
+ *  `legacyRounds` is the loader's explicit legacy count
+ *  (`loadCommittedHistory(...).legacyRounds.length`); it is passed through so
+ *  Explain never re-scans for it and never migrates it. */
 export function buildExplain(
   loopId: string,
   entries: VaultEntry[],
   round?: number,
+  legacyRounds = 0,
 ): ExplainResult {
   // v4.0.3: the public function must not mix another loop's records even when
   // a caller passes a multi-loop entry list.
@@ -315,12 +345,19 @@ export function buildExplain(
       round: view.round,
       roundId: view.roundId,
       attempt: view.attempt,
+      ...(view.branchId ? { branchId: view.branchId } : {}),
+      ...(view.transactionId ? { transactionId: view.transactionId } : {}),
       action: view.action,
-      stopReason: view.result?.stopReason ?? null,
+      // v4.0.4: ONE source — the committed result. Explain, Replay, the
+      // receipt and resume all read this same field.
+      loopStopReason: view.result?.stopReason ?? null,
       agentSuccessClaim: view.agentSuccessClaim,
       agentOutcome: view.agentOutcome,
-      machineBackedSuccess: view.evidencePosture?.machineBackedSuccess ?? false,
+      agentOutcomeDeclared: view.evaluation?.outcome ?? null,
+      agentStopReason: view.evaluation?.agent_stop_reason ?? null,
+      agentShouldContinue: view.evaluation?.should_continue ?? null,
       evidencePosture: view.evidencePosture,
+      enforcementReason: view.result?.enforcementReason ?? null,
       context: view.promptArtifact
         ? {
             mode: view.promptArtifact.contextMode,
@@ -446,6 +483,7 @@ export function buildExplain(
   return {
     loopId,
     rounds,
+    legacyRounds,
     activeContract: active
       ? { id: active.id, work_item: active.work_item, itemCount: active.items.length }
       : null,
@@ -476,7 +514,14 @@ export function buildExplain(
   };
 }
 
-/** Human-readable rendering of the explain view (CLI default). */
+/** Human-readable rendering of the explain view (CLI default).
+ *
+ *  v4.0.4: every round renders the three fact blocks (Agent report,
+ *  LoopForge decision, Machine evidence) through `renderResultFacts`, then the
+ *  detailed audit rows. Agent claims are labelled `(Agent report)`, the
+ *  machine evidence is rendered ONLY by the shared posture formatter, and the
+ *  commit-time contract snapshot is labelled separately from the derived
+ *  current status. No "changed"/"conflict" boolean is derived here. */
 export function renderExplain(result: ExplainResult): string {
   const lines: string[] = [`Loop ${result.loopId}`];
   if (result.activeContract) {
@@ -486,46 +531,63 @@ export function renderExplain(result: ExplainResult): string {
       ` (${result.activeContract.itemCount} item(s))`,
     );
   }
+  // v4.0.4: a legacy round is reported, never silently omitted and never
+  // decoded into a fake row.
+  if (result.legacyRounds > 0) {
+    lines.push(
+      `${result.legacyRounds} 4.0.3 legacy round(s) not decoded; ` +
+      "use inspect/raw vault.",
+    );
+  }
   for (const round of result.rounds) {
-    const context = round.context
-      ? ` — context ${round.context.mode} (${round.context.reason})`
-      : "";
-    const claim = `claim=${round.agentSuccessClaim}` +
-      (round.agentOutcome ? ` / outcome=${round.agentOutcome}` : "");
-    lines.push("", `Round ${round.round} (${round.roundId}, attempt ${round.attempt}) — ${round.action} — ${claim}${context}`);
-    if (round.stopReason) {
-      lines.push(`  stop_reason: ${round.stopReason}`);
-    }
-    const posture = round.evidencePosture;
-    if (posture) {
+    lines.push(
+      "",
+      `Round ${round.round} (${round.roundId}, attempt ${round.attempt})`,
+    );
+    if (round.context) {
       lines.push(
-        `  evidence: ${posture.status}` +
-        ` (machine_backed_success=${posture.machineBackedSuccess}, ` +
-        `verification_configured=${posture.verificationConfigured})`,
+        `  context: ${formatContextBoundaryLabel(
+          round.context.mode,
+          round.context.reason,
+          { recoveryBoundary: round.restore_verified },
+        )}`,
       );
-      lines.push(
-        `    workspace: ${posture.workspace.status}` +
-        (posture.workspace.status === "observed"
-          ? ` (${posture.workspace.changedPathCount} changed)`
-          : "") +
-        `; files reconciliation: ${posture.files?.reconciliation ?? "not_applicable"}`,
-      );
-      for (const command of posture.commands) {
-        lines.push(`    command ${command.commandId}: ${command.status}` +
-          (command.required ? " (required)" : ""));
-      }
-      if (posture.contract) {
-        lines.push(
-          `    contract ${posture.contract.id}: ${posture.contract.closure}`,
-        );
-        for (const item of posture.contract.items) {
-          lines.push(`      ${item.id}: ${item.status}`);
-        }
-      }
     }
+    if (round.branchId &&
+        round.branchId !== `loop:${result.loopId}:branch:root`) {
+      lines.push(`  branch: ${round.branchId}`);
+    }
+    lines.push(
+      ...renderResultFacts(
+        {
+          agent: {
+            successClaim: round.agentSuccessClaim,
+            outcome: round.agentOutcome,
+            outcomeDeclared: round.agentOutcomeDeclared,
+            shouldContinue: round.agentShouldContinue,
+            agentStopReason: round.agentStopReason,
+          },
+          loopforge: {
+            action: round.action as
+              | "continue" | "stop" | "reject" | "terminate" | "backtrack" | "recovery",
+            loopStopReason: round.loopStopReason,
+            enforcementReason: round.enforcementReason,
+          },
+          machine: {
+            posture: round.evidencePosture,
+            // Explain only decodes committed evaluation rounds.
+            committed: true,
+          },
+        },
+        "explain",
+      ),
+    );
     if (round.report) {
       const truncated = round.report.truncated.output_summary ? " [truncated]" : "";
-      lines.push(`  report: ${round.report.output_summary.slice(0, 200)}${truncated}`);
+      lines.push(
+        `  output_summary (Agent report): ` +
+        `${round.report.output_summary.slice(0, 200)}${truncated}`,
+      );
       if (round.report.no_change_reason) {
         lines.push(`    no_change_reason (Agent report): ${round.report.no_change_reason.slice(0, 160)}`);
       }
@@ -533,7 +595,7 @@ export function renderExplain(result: ExplainResult): string {
         lines.push(`    subtask boundary (Agent report): ${round.report.subtask_boundary_label}`);
       }
       for (const claim of round.report.contract_item_claims) {
-        lines.push(`    item claim: ${claim.item_id} → ${claim.outcome}`);
+        lines.push(`    item claim (Agent report): ${claim.item_id} → ${claim.outcome}`);
       }
       for (const worker of round.report.worker_results) {
         lines.push(`    worker ${worker.agent_id} (${worker.outcome}): ${worker.result_summary.slice(0, 160)}`);
@@ -565,16 +627,16 @@ export function renderExplain(result: ExplainResult): string {
       );
     }
     for (const assumption of round.wrongAssumptions) {
-      lines.push(`  wrong assumption (report): ${assumption.slice(0, 160)}`);
+      lines.push(`  wrong assumption (Agent report): ${assumption.slice(0, 160)}`);
     }
     for (const retraction of round.retractedConstraints) {
-      lines.push(`  retracted constraint (report): ${retraction.slice(0, 160)}`);
+      lines.push(`  retracted constraint (Agent report): ${retraction.slice(0, 160)}`);
     }
     for (const question of round.openQuestions) {
-      lines.push(`  open question (report): ${question.slice(0, 160)}`);
+      lines.push(`  open question (Agent report): ${question.slice(0, 160)}`);
     }
     if (round.blocker) {
-      lines.push(`  blocker: ${round.blocker.slice(0, 160)}`);
+      lines.push(`  blocker (Agent report): ${round.blocker.slice(0, 160)}`);
     }
     for (const observation of round.observations.after) {
       lines.push(`  observation: ${observation.providerId} [${observation.status}] ${observation.files.length} file(s)`);
@@ -594,13 +656,27 @@ export function renderExplain(result: ExplainResult): string {
       lines.push(`  restore: verified (redo R${round.restore?.redo_round ?? "?"})`);
     }
     if (round.evidenceIncomplete) {
-      lines.push("  evidence: INCOMPLETE — the round committed without after-phase observations");
+      lines.push("  Evidence boundary: INCOMPLETE — no after-phase observations");
     }
     for (const flag of round.flags) {
       lines.push(`  flag: ${flag.severity} ${flag.check} — ${flag.detail.slice(0, 160)}`);
     }
+    // v4.0.4: the two contract sources are labelled and shown side by side.
+    // The commit-time snapshot is the posture's persisted contract block
+    // (already rendered above by the shared posture formatter); the derived
+    // status is this read-time projection. No comparison boolean is emitted.
+    const snapshotContract = round.evidencePosture?.contract ?? null;
+    if (snapshotContract) {
+      lines.push(
+        `  Contract at commit (snapshot): ${snapshotContract.id} → ` +
+        `${snapshotContract.closure}`,
+      );
+    }
     if (round.contract) {
-      lines.push(`  contract ${round.contract.id} → ${round.contract.closure}`);
+      lines.push(
+        `  Contract status now (derived): ${round.contract.id} → ` +
+        `${round.contract.closure}`,
+      );
       for (const item of round.contract.items) {
         lines.push(`    ${item.itemId}: ${item.status}${item.reasons.length > 0 ? ` — ${item.reasons[0]}` : ""}`);
       }
@@ -628,10 +704,10 @@ export function renderExplain(result: ExplainResult): string {
       lines.push(`  failed rounds: R${rollback.failedRounds.join(", R")}`);
     }
     for (const approach of rollback.approaches) {
-      lines.push(`  abandoned approach (report): ${approach.slice(0, 160)}`);
+      lines.push(`  abandoned approach (Agent report): ${approach.slice(0, 160)}`);
     }
     for (const assumption of rollback.wrongAssumptions) {
-      lines.push(`  wrong assumption (report): ${assumption.slice(0, 160)}`);
+      lines.push(`  wrong assumption (Agent report): ${assumption.slice(0, 160)}`);
     }
     for (const flag of rollback.triggerFindings) {
       lines.push(`  trigger finding: ${flag.severity} ${flag.check} — ${flag.detail.slice(0, 160)}`);

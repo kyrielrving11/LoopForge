@@ -47,8 +47,7 @@ Use these labeled opportunity points in each sample task:
 | A contract slice is planned | `round_contract` | A proposal is committed and activates on the next round; its items close by machine evidence |
 | A criterion is met | `criterion_claims` / `contract_item_claims` | The claim cites a real `cr-` id/text from the prompt; unknown references are dropped with a diagnostic; verification status is derived by the machine |
 | Files changed | `execution_report.files_changed` | The receipt's `files_reconciliation` reports match/mismatch/unknown/not_applicable with reported/observed sets |
-| A round is blocked | `outcome`, `blocker` | The stop reason is `blocked` and the blocker is retained |
-| Context is needed next round | `prompt_requests` | The next prompt's `promptRequestEffects` is `applied` or `no_match` |
+| A round is blocked | `outcome`, `blocker` | The Agent's `agent_stop_reason` is `blocked` and the blocker is retained |
 | No event in this round | none of the above | No optional field is fabricated; diagnostics stay empty |
 
 Control rounds: include at least one round per task where no labeled event

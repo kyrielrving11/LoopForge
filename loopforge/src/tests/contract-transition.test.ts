@@ -199,7 +199,7 @@ describe("contract_transition — strict boundary", () => {
         reason: "transition_conflicts_with_blocked",
       },
       {
-        raw: { ...valid, stop_reason: "needs_human_input" },
+        raw: { ...valid, agent_stop_reason: "needs_human_input" },
         reason: "transition_conflicts_with_blocked",
       },
       {
@@ -296,9 +296,9 @@ describe("contract_transition — superseded closure", () => {
       CONTRACT_ID);
   });
 
-  it("read views treat stop_reason=blocked as a blocked closure", () => {
+  it("read views treat agent_stop_reason=blocked as a blocked closure", () => {
     // The live coordinator always saw both blocked declarations; read views
-    // used to pass only `outcome`, so a `stop_reason: "blocked"` round could
+    // used to pass only `outcome`, so a `agent_stop_reason: "blocked"` round could
     // look open there. The shared fact bundle removes that second judgment.
     const declaring = committedFeedbackRound(1, {
       loopId: "ct",
@@ -313,7 +313,7 @@ describe("contract_transition — superseded closure", () => {
     const envelope = (blocked.loop_lineage as Record<string, unknown>)
       .round_transaction as Record<string, unknown>;
     ((envelope.snapshot as Record<string, unknown>)
-      .evaluation as Record<string, unknown>).stop_reason = "blocked";
+      .evaluation as Record<string, unknown>).agent_stop_reason = "blocked";
 
     const explain = buildExplain("ct", [declaring, blocked]);
     const explained = explain.rounds.find((round) => round.round === 2);

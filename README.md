@@ -54,13 +54,22 @@ workspace changes and explicitly configured verification commands. If an
 observation is unavailable, LoopForge preserves that uncertainty instead of
 treating it as a pass or as an empty change set.
 
-Each prompt carries a derived context boundary. A normal next round (or the
-first round, or a recovery redo) is a `fresh_round`: the host starts a new
-Agent invocation, so the previous transcript, tool logs and uncommitted
-reasoning do not leak into the next round. A fresh context is not a workspace
-reset; only rollback/recovery restores a checkpoint. The first enforcement
-retry (L0) is a `same_round_retry` and continues the same logical round; a
-repeated-rejection rehydrate retry (L2) is a `fresh_round`.
+Each prompt carries a derived context strategy. `fresh_invocation` is clean
+context: the host starts a new Agent invocation, so the previous transcript,
+tool logs and uncommitted reasoning do not leak into the next round. It is used
+for the first round, a normal next round, a recovery redo, and every L2
+(rehydration or retry), and it may describe the SAME logical round. Clean
+context is not a workspace reset; only rollback/recovery restores a checkpoint.
+The first enforcement retry (L0) is `same_round_retry`: it continues the
+original invocation and injects the rejection notice, findings and failure
+reason. An L2 retry is clean-context repair: a new invocation that still
+carries those failure lessons.
+
+Round results keep three kinds of facts separate: the Agent report
+(`agent_stop_reason` among its claims), the LoopForge decision
+(`loop_stop_reason`), and the persisted Machine evidence. Explain, terminal
+stop output and `resume` of a stopped loop render the same three blocks;
+`completed` never implies machine-backed success.
 
 Continuity may include bounded Working Memory derived from the current branch's
 committed rounds and rollback directives: recent reports, falsified assumptions

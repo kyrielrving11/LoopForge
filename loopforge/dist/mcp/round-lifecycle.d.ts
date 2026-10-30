@@ -10,14 +10,20 @@
  * session ownership, queues, and leases remain in SessionManager.
  */
 import { LoopForgeEngine } from "../engine.js";
-import type { CheckpointRef, EvidencePosture, LoopCompileRequest, OperatorAcceptance, PromptContextMode, PromptContextReason, RecoveryRequest, RoundOutcome, SelfEvaluation, SubmissionDiagnostic, SubmissionGuidance, SubmissionHandle, SubmissionReceipt, VerificationFlag, LoopTerminalSink } from "../protocol.js";
+import type { CheckpointRef, EvidencePosture, LoopCompileRequest, OperatorAcceptance, PromptContextMode, PromptContextReason, RecoveryRequest, RoundOutcome, SelfEvaluation, SubmissionDiagnostic, SubmissionGuidance, SubmissionHandle, SubmissionReceipt, VerificationFlag, LoopTerminalSink, StopReason } from "../protocol.js";
 import type { RoundTransactionSnapshot } from "../round-transaction.js";
 import { FileWorkspaceCheckpointStore } from "../workspace-checkpoint.js";
 import type { LoopStore, VaultEntry } from "../loop-store.js";
 import type { SessionSaveOptions, SessionStateStore } from "../storage.js";
 export interface McpSession {
+    /** v4.0.4: a LIVE key inside this process. It is persisted and rebuilt by
+     *  `loopforge_resume`/`autoResumeAll`, but it is not the durable identity:
+     *  relationships and recovery use `loopId`. */
     sessionId: string;
+    /** The one durable loop identity. */
     loopId: string;
+    /** The compile-time task text; the immutable operator objective is a
+     *  separate committed fact (`OperatorAcceptance`). */
     task: string;
     engine: LoopForgeEngine;
     currentRound: number;
@@ -79,12 +85,21 @@ export declare function normalizeStartCriteria(raw: unknown): {
     criteria: string[];
     warnings: string[];
 };
+/** v4.0.4: the terminal reason a manual `loopforge_stop` reports to the
+ *  terminal sink and in its response. It is never persisted as a committed
+ *  round fact, so status/resume after a restart still report "no committed
+ *  terminal reason". One constant keeps the response and the sink aligned. */
+export declare const MANUAL_STOP_REASON: "cancelled";
 export interface AdvanceResult {
     sessionId: string;
     /** Durable loop identity, returned with the held prompt so a restarted
      *  agent can call `loopforge_resume` without reconstructing IDs. Absent on
      *  results that have no session (for example a missing-handle refusal). */
     loopId?: string;
+    /** On a continue result this is the NEXT round being prepared; the
+     *  `agentOutcome`/`agentStopReason` fields and the receipt describe the
+     *  round that was just submitted. Use `submission_receipt.round_id` as the
+     *  authoritative identity of the submitted round. */
     round: number;
     /** v4.0.0: the ONE transport anchor for the held attempt. Derived from the
      *  persisted snapshot; never persisted itself. Absent on terminal results. */
@@ -97,7 +112,15 @@ export interface AdvanceResult {
         detail: string;
     };
     prompt: string | null;
-    stopReason?: string;
+    /** v4.0.4: LoopForge's terminal reason. ONLY a `StopReason` — session
+     *  state, handle/payload/session errors are reported through
+     *  `sessionStatus`/`submissionError` and never masquerade as a stop reason. */
+    stopReason?: StopReason;
+    /** v4.0.4: the live session's status when the result is not a loop terminal
+     *  reason. `paused`/`stopped`/`stalled` describe the SESSION, not a
+     *  `StopReason`; `running` is present only where the caller needs the
+     *  distinction. */
+    sessionStatus?: "running" | "stopped" | "paused" | "stalled";
     /** v2.0.1: Human-readable context for why the loop stopped.
      *  Provides facts the agent can use to decide its next action,
      *  without LoopForge prescribing a specific behavior. */
@@ -112,6 +135,11 @@ export interface AdvanceResult {
     /** v4.0.3: the effective Agent-declared outcome of the round this result
      *  is about. */
     agentOutcome?: RoundOutcome | null;
+    /** v4.0.4: the Agent's declared stop reason of the round this result is
+     *  about (an Agent report, never a loop terminal reason). */
+    agentStopReason?: "gave_up" | "blocked" | "needs_human_input";
+    /** v4.0.4: the Agent's declared should_continue of the same round. */
+    agentShouldContinue?: boolean;
     warnings?: string[];
     /** v1.13: Enforcement action for this round. accept/reject/terminate.
      *  When "reject", the prompt contains a rejection notice and the agent
@@ -148,7 +176,10 @@ export interface AdvanceResult {
      *  `validateSubmission` in submission-boundary.ts, which SessionManager
      *  runs before its queue and lease heartbeat. */
     submissionError?: {
-        code: "evaluation_invalid" | "contract_invalid" | "invalid_argument" | "session_not_found" | "submission_handle_required" | "submission_handle_mismatch" | "recovery_invalid" | "recovery_disabled" | "recovery_unavailable" | "checkpoint_invalid" | "checkpoint_unavailable" | "checkpoint_failed" | "checkpoint_limit" | "restore_failed" | "restore_pending";
+        code: "evaluation_invalid" | "contract_invalid" | "invalid_argument" | "session_not_found" | "submission_handle_required" | "submission_handle_mismatch" | "recovery_invalid" | "recovery_disabled" | "recovery_unavailable" | "checkpoint_invalid" | "checkpoint_unavailable" | "checkpoint_failed" | "checkpoint_limit" | "restore_failed" | "restore_pending"
+        /** v4.0.4: another live process owns the session lease; this is a
+         *  session error, not a loop terminal reason. */
+         | "lease_conflict";
         details: Record<string, unknown>;
     };
     /** v3.9.4: a prompt-projection code defect. This is NOT a submission
@@ -347,6 +378,16 @@ export declare class RoundLifecycle {
      *  the verified baseline. A failed restore leaves the directive pending and
      *  the session stalled — no redo prompt is ever issued unverified. */
     private buildBacktrackResult;
+    /** v4.0.4: the ONE terminal stop-detail formatter. Live stop, termination,
+     *  crash-recovered stop and resume-of-stopped read the same three fact
+     *  blocks; a committed fact is described identically on every path. */
+    private terminalFacts;
+    /** v4.0.4: the terminal result of an already-stopped loop, built from
+     *  committed history. This is the ONE read path for `resume` of a stopped
+     *  loop: it reports the committed `StopReason` and renders the same three
+     *  fact blocks as a live stop. A loop with no committed stop round reports
+     *  the session status and says so instead of inventing a reason. */
+    stoppedLoopResult(loopId: string, currentRound: number): AdvanceResult;
     /** Build a termination result: persist stopped status, notify sinks.
      *  MUTATES: session.status, session.currentPrompt
      *

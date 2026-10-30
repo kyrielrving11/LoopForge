@@ -1379,7 +1379,7 @@ describe("3.9.3 — committed-fact prompt level", () => {
       force_level: "l2",
     }), context);
     assert.ok(response.prompt.includes("Working Memory (Agent reports are claims"));
-    assert.match(response.prompt, /Previous Round Report \(Agent report\) — R2/);
+    assert.match(response.prompt, /Latest committed report \(Agent report\) — R2/);
     assert.match(response.prompt, /old belief/);
     assert.match(response.prompt, /a prior summary in the bounded report window/);
   });
@@ -1400,9 +1400,30 @@ describe("3.9.3 — committed-fact prompt level", () => {
         force_level: level,
       }), context);
       assert.equal(response.prompt_artifact?.level, level);
-      assert.equal(response.prompt_artifact?.contextMode, "fresh_round");
-      assert.ok(response.prompt.includes("UNIQUE_COMMITTED_SUMMARY"),
-        `${level} renders the latest committed report in Working Memory`);
+      assert.equal(response.prompt_artifact?.contextMode, "fresh_invocation");
+      if (level === "l0") {
+        // L0 is the tight density: the optional, indivisible Working Memory may
+        // be dropped whole to keep the prompt inside its ceiling. The artifact
+        // must then SAY it was dropped, never omit it silently.
+        if (response.prompt.includes("UNIQUE_COMMITTED_SUMMARY")) {
+          assert.equal(response.prompt_artifact?.workingMemory?.rendered, true);
+        } else {
+          assert.equal(response.prompt_artifact?.workingMemory?.rendered, false,
+            "an omitted L0 Working Memory must be recorded as dropped whole");
+        }
+      } else {
+        assert.ok(response.prompt.includes("UNIQUE_COMMITTED_SUMMARY"),
+          `${level} renders the latest committed report in Working Memory`);
+      }
+      // v4.0.4: the runtime guidance is charged against the same budget, so
+      // the protected content must still fit beside the footer.
+      const artifact = response.prompt_artifact;
+      assert.ok(artifact);
+      assert.ok(artifact!.renderedChars <= artifact!.budget,
+        `${level} rendered ${artifact!.renderedChars} <= budget ${artifact!.budget}`);
+      assert.equal(artifact!.protectedOverflow, false,
+        `${level} protected content must fit beside the guidance footer`);
+      assert.ok(response.prompt.includes("## Round Boundary"));
       assert.ok(!response.warnings.some((warning) =>
         warning.includes("duplicate_declaration")),
         "zero emerged_subtasks is not a warning");
@@ -1419,6 +1440,10 @@ describe("3.9.3 — committed-fact prompt level", () => {
     assert.equal(retry.prompt_artifact?.contextReason, "enforcement_retry");
     assert.ok(!retry.prompt.includes("Working Memory (Agent reports are claims"));
     assert.doesNotMatch(retry.prompt, /UNIQUE_COMMITTED_SUMMARY/);
+    assert.ok(retry.prompt.includes("## Round Boundary"));
+    assert.ok(retry.prompt.length <= 5000,
+      `a real L0 retry must stay <= 5000 chars, got ${retry.prompt.length}`);
+    assert.equal(retry.prompt_artifact?.protectedOverflow, false);
   });
 
   it("v4.0.2: prompt memory stays bounded and drops the oldest summaries", () => {

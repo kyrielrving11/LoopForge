@@ -5,13 +5,13 @@
  */
 import type { EvidencePosture, RoundOutcome } from "./protocol.js";
 export type PromptLevel = "l0" | "l1" | "l2";
-export type PromptLevelReason = "explicit_override" | "first_round" | "plan_boundary" | "checkpoint_boundary" | "goal_changed" | "missing_previous_state" | "verification_contradicted" | "same_round_retry" | "failed_without_observable_new_information" | "rejection_rehydrate" | "recovery_boundary" | "state_capsule";
+export type PromptLevelReason = "explicit_override" | "first_round" | "plan_boundary" | "subtask_boundary" | "goal_changed" | "missing_previous_state" | "verification_contradicted" | "same_round_retry" | "failed_without_observable_new_information" | "rejection_rehydrate" | "recovery_boundary" | "state_capsule";
 export interface PromptLevelInput {
     round: number;
     attempt?: number;
     forceLevel?: string;
     hasPlanSource: boolean;
-    checkpointBoundary: boolean;
+    subtaskBoundary: boolean;
     goalChanged: boolean;
     previousStateMissing: boolean;
     /** Facts from the previous committed round, interpreted here once for the

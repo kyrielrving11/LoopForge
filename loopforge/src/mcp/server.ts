@@ -17,6 +17,7 @@ import {
 } from "./tools.js";
 import { isRecord } from "../token-utils.js";
 import { LOST_HANDLE_ROUTING } from "../recovery-guidance.js";
+import { renderRoundGuidance } from "../round-guidance.js";
 import { getPolicy } from "../policy.js";
 import { VERSION } from "../version.js";
 import type { ToolErrorCode } from "../protocol.js";
@@ -93,7 +94,9 @@ export const SERVER_INSTRUCTIONS = [
   "for the same objective. ",
   // v3.9.1: the guidance projection carries the current facts (real ids,
   // usable commands, applicable fields); do not restate a second copy here.
-  "Before each agent-process boundary, call loopforge_next with the ",
+  // v4.0.4: a round boundary is the Agent's coherent-slice boundary, never a
+  // process/session/clock boundary.
+  "At a round boundary, call loopforge_next with the ",
   "`submissionHandle` returned with the held prompt and one honest evaluation: ",
   "the strict core fields named by the tool schema, plus only the optional fields ",
   "whose event actually occurred. ",
@@ -110,22 +113,18 @@ export const SERVER_INSTRUCTIONS = [
   "legal shapes, real ids, and usable commands. Use only ids it or the prompt ",
   "rendered, never invent an id. Submission_guidance is a projection of current ",
   "facts, not state. ",
-  // v4.0.2: the host execution contract for the derived context boundary.
-  "The prompt header names its context boundary. On `Context: fresh`, start a ",
-  "new Agent invocation with only this prompt, loopId, sessionId and ",
-  "submissionHandle; do not carry the previous transcript, tool logs or ",
-  "uncommitted reasoning. A fresh context is not a workspace reset: committed ",
-  "files and the session continue. On `Context: same-round retry`, continue the ",
-  "same logical round; if the original invocation is gone, start a new one from ",
-  "this self-contained prompt and read the state file first. A re-delivered held ",
-  "prompt is not a new boundary. ",
+  // v4.0.4: the host execution contract and round-boundary rules come from
+  // the ONE runtime guidance module. The prompt header label names the
+  // strategy (`clean context`, `clean context repair`, `in-context repair`,
+  // `clean context after restore`); the host must honor it. A re-delivered
+  // held prompt is not a new boundary.
+  renderRoundGuidance("server"), " ",
   "Each submission returns `submission_receipt`, which separates reports that were ",
   "saved, derived state that actually changed, and machine verification results. ",
   "A saved report is never a verified fact. ",
   "Claims never verify themselves: only machine observations do. ",
   "Follow reject, backtrack, or recovery prompts and retry loopforge_next with the ",
   "handle returned alongside the current prompt. ",
-  "Keep one LoopForge session across outer agent rounds. ",
   "Do not replace these MCP calls with shell or CLI wrappers.",
 ].join("");
 

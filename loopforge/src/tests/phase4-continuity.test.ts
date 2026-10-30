@@ -171,7 +171,7 @@ describe("v4.0.3 — RetryContext survives resume", () => {
     );
     assert.equal(second.enforcementAction, "reject");
     assert.equal(second.level, "l2");
-    assert.equal(second.contextMode, "fresh_round");
+    assert.equal(second.contextMode, "fresh_invocation");
     assert.match(second.prompt ?? "", /Machine Evidence — rejected attempt \(not committed\)/);
     assert.match(second.prompt ?? "", /not committed history/);
     assert.equal(

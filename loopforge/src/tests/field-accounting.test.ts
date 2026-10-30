@@ -163,7 +163,7 @@ const CASES: FieldCase[] = [
   { path: "gate_ids", valid: ["g-1"], invalid: "not-array", partial: ["g-1", 1] },
   { path: "outcome", valid: "success", invalid: "nope" },
   { path: "blocker", valid: "missing credentials", invalid: 42 },
-  { path: "stop_reason", valid: "blocked", invalid: "nope" },
+  { path: "agent_stop_reason", valid: "blocked", invalid: "nope" },
   { path: "no_change_reason", valid: "nothing to change", invalid: "" },
 ];
 

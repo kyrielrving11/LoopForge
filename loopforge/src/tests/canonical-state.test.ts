@@ -268,7 +268,7 @@ describe("createCanonicalLoopState", () => {
     assert.ok(md.includes("**Evidence**: machine evidence = providers"));
     assert.ok(md.includes("**Working memory**: bounded"));
     assert.ok(md.includes("### Working Memory"));
-    assert.ok(md.includes("Previous Round Report (Agent report) — R1"));
+    assert.ok(md.includes("Latest committed report (Agent report) — R1"));
     assert.ok(md.includes("> old belief"));
     assert.ok(!md.includes("### Corrections"));
     assert.ok(!md.includes("Changes Since Last Round"));
@@ -372,7 +372,7 @@ describe("state-file tiering (v3.7.1)", () => {
     const idxHistorical = md.indexOf("## Historical Summary");
     assert.ok(idxCurrent >= 0 && idxRecent > idxCurrent && idxHistorical > idxRecent,
       "tiers must render in order: Current → Recent → Historical Summary");
-    assert.ok(md.includes("**Schema**: 7"), "state schema marker");
+    assert.ok(md.includes("**Schema**: 8"), "state schema marker");
     assert.ok(md.includes("**Derived**: true"), "derived marker in the header");
     assert.ok(md.includes("**Source**: round 2 (attempt 2)"), "attempt marker");
     assert.ok(md.includes("**Authority**: committed typed rounds"));

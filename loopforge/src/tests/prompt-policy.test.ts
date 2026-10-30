@@ -15,7 +15,7 @@ function defaults(overrides: Partial<PromptLevelInput> = {}): PromptLevelInput {
     round: 1,
     attempt: 1,
     hasPlanSource: false,
-    checkpointBoundary: false,
+    subtaskBoundary: false,
     goalChanged: false,
     previousStateMissing: false,
     previousRound: null,
@@ -46,10 +46,10 @@ describe("decidePromptLevel", () => {
     assert.ok(d.reasons.includes("plan_boundary"));
   });
 
-  it("returns L2 for checkpoint_boundary", () => {
-    const d = decidePromptLevel(defaults({ checkpointBoundary: true, round: 2 }));
+  it("returns L2 for subtask_boundary", () => {
+    const d = decidePromptLevel(defaults({ subtaskBoundary: true, round: 2 }));
     assert.equal(d.level, "l2");
-    assert.ok(d.reasons.includes("checkpoint_boundary"));
+    assert.ok(d.reasons.includes("subtask_boundary"));
   });
 
   it("returns L2 for goal_changed", () => {

@@ -167,8 +167,9 @@ export function decodeCommittedRound(entry) {
     const resultValue = isRecord(transaction.result)
         ? transaction.result
         : snapshot.result;
-    // v4.0.3: a schema-7 committed result must carry a well-formed Evidence
-    // Posture. Missing/corrupt posture is a HARD break, not something to
+    // v4.0.3/v4.0.4: a current-schema (8) committed result must carry a
+    // well-formed Evidence Posture and the Agent's `agent_stop_reason` lives in
+    // its evaluation. Missing/corrupt posture is a HARD break, not something to
     // re-derive at read time.
     if (!isRecord(resultValue) || !isProcessResult(resultValue))
         return null;

@@ -12,6 +12,7 @@ import { RoundCoordinator, } from "./round-coordinator.js";
 import { logEvent } from "./observability.js";
 import { deriveContractId, deriveContractItemIds, isRecord } from "./token-utils.js";
 import { PROMPT_ARTIFACT_SCHEMA_VERSION } from "./protocol.js";
+import { promptContextPairIssue } from "./context-boundary.js";
 import { commandConfigHash, getPolicy } from "./policy.js";
 import { policyMetrics } from "./policy-metrics.js";
 import { VaultRoundCommitStore } from "./storage.js";
@@ -19,9 +20,12 @@ import { transactionIdentityIssue } from "./transaction-identity.js";
 /** v3.9.7: schema 5 adds the transaction before-image, explicit mid-round
  *  checkpoints and the redo restore marker. v4.0.3: schema 7 requires the
  *  persisted `EvidencePosture` on every result and adds the transient
- *  `RetryContext`. Unsupported versions are reported by
+ *  `RetryContext`. v4.0.4: schema 8 embeds the schema-10 PromptArtifact
+ *  (`fresh_invocation`) and the renamed `SelfEvaluation.agent_stop_reason`;
+ *  schema 7 documents are reported as legacy, never migrated or silently
+ *  re-read under the new field name. Unsupported versions are reported by
  *  `legacyTransactionRounds`; there is no compatibility migration. */
-export const ROUND_TRANSACTION_SCHEMA_VERSION = 7;
+export const ROUND_TRANSACTION_SCHEMA_VERSION = 8;
 /** Maximum distinct mid-round checkpoints one transaction may reference. */
 export const MAX_MID_CHECKPOINTS_PER_TRANSACTION = 32;
 /** The root branch identity for every loop. */
@@ -750,10 +754,10 @@ export function parseRoundTransactionSnapshot(value) {
                 typeof entry.id === "string" &&
                 typeof entry.reason === "string") &&
             typeof coverage.complete === "boolean";
-        // v4.0.2: the context boundary is a REQUIRED artifact fact. A schema-8
+        // v4.0.2/v4.0.4: the context boundary is a REQUIRED artifact fact. An
         // artifact without a legal pair is a hard break, never an implicit
-        // "fresh_round" default.
-        const contextModeValid = artifact.contextMode === "fresh_round" ||
+        // "fresh_invocation" default.
+        const contextModeValid = artifact.contextMode === "fresh_invocation" ||
             artifact.contextMode === "same_round_retry";
         const contextReasonValid = artifact.contextReason === "first_round" ||
             artifact.contextReason === "next_round" ||
@@ -772,6 +776,16 @@ export function parseRoundTransactionSnapshot(value) {
             !contextModeValid ||
             !contextReasonValid ||
             !coverageValid)
+            return null;
+        // v4.0.4: the SAME legality guard the assembler enforces. An illegal
+        // pair (for example L2 + same_round_retry) is not committed history.
+        if (promptContextPairIssue({
+            level: artifact.level,
+            mode: artifact.contextMode,
+            reason: artifact.contextReason,
+            attempt: artifact.attempt,
+            round: artifact.round,
+        }) !== null)
             return null;
     }
     const snapshot = {

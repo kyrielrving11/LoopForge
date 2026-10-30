@@ -39,8 +39,8 @@ export function decidePromptLevel(input) {
             reasons: ["explicit_override"],
         };
     }
-    if (input.checkpointBoundary) {
-        return { level: "l2", reasons: ["checkpoint_boundary"] };
+    if (input.subtaskBoundary) {
+        return { level: "l2", reasons: ["subtask_boundary"] };
     }
     if (input.goalChanged)
         return { level: "l2", reasons: ["goal_changed"] };

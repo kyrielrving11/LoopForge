@@ -177,7 +177,7 @@ export function promptArtifact(input: {
   level?: "l0" | "l1" | "l2";
   attempt?: number;
   warnings?: string[];
-  contextMode?: "fresh_round" | "same_round_retry";
+  contextMode?: "fresh_invocation" | "same_round_retry";
   contextReason?: "first_round" | "next_round" | "recovery_redo" | "enforcement_retry";
 }): PromptArtifact {
   return {
@@ -186,7 +186,7 @@ export function promptArtifact(input: {
     round: input.round,
     attempt: input.attempt ?? 1,
     level: input.level ?? "l1",
-    contextMode: input.contextMode ?? "fresh_round",
+    contextMode: input.contextMode ?? "fresh_invocation",
     contextReason: input.contextReason ?? "next_round",
     renderedPrompt: input.renderedPrompt,
     promptHash: `hash-${input.round}`,
@@ -295,6 +295,10 @@ export function committedFeedbackRound(
     stopReason?: import("../protocol.js").StopReason;
     /** v4.0.2: committed report facts for Working Memory / replay / explain. */
     outputSummary?: string;
+    /** v4.0.4: the Agent's declared stop reason (an Agent report). */
+    agentStopReason?: SelfEvaluation["agent_stop_reason"];
+    /** v4.0.4: the Agent's declared should_continue. */
+    shouldContinue?: boolean;
     wrongAssumptions?: string[];
     retractedConstraints?: string[];
     openQuestions?: string[];
@@ -339,7 +343,8 @@ export function committedFeedbackRound(
     success: opts.success ?? false,
     output_summary: opts.outputSummary ?? `Committed round ${round}.`,
     constraint_violations: opts.constraintViolations ?? [],
-    should_continue: true,
+    should_continue: opts.shouldContinue ?? true,
+    ...(opts.agentStopReason ? { agent_stop_reason: opts.agentStopReason } : {}),
     outcome: opts.outcome,
     wrong_assumptions: opts.wrongAssumptions ?? [],
     retracted_constraints: opts.retractedConstraints ?? [],

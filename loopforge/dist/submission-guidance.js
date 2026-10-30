@@ -50,7 +50,7 @@ export const FIELD_ORDER = [
     "gate_ids",
     "outcome",
     "blocker",
-    "stop_reason",
+    "agent_stop_reason",
     "no_change_reason",
 ];
 const GUIDES = [
@@ -302,7 +302,7 @@ const GUIDES = [
             "in this prompt. The successor round_contract is REQUIRED in the same " +
             "evaluation, and its acceptance items must differ from the active " +
             "contract's (changing only work_item/scope is not a new slice). Not " +
-            "allowed with a blocked outcome/stop_reason or should_continue=false. " +
+            "allowed with a blocked outcome/agent_stop_reason or should_continue=false. " +
             "The old contract closes as superseded; its unverified items stay in the " +
             "audit record.",
     },
@@ -337,11 +337,11 @@ const GUIDES = [
     },
     {
         path: "subtask_boundary_label",
-        purpose: "A human-readable label for the checkpoint.",
+        purpose: "A human-readable label for the subtask boundary.",
         when: "Only together with subtask_boundary=true.",
         nature: "report",
         downstream: "Stored on the committed report; it does not create a later prompt heading.",
-        toolDescription: "Optional. Short label for the checkpoint (for example " +
+        toolDescription: "Optional. Short label for the subtask boundary (for example " +
             "'core-model-complete'). Meaningful only when subtask_boundary=true.",
     },
     {
@@ -379,7 +379,7 @@ const GUIDES = [
     {
         path: "blocker",
         purpose: "A concrete description of what blocks the work.",
-        when: "Required when outcome=blocked; useful with stop_reason=blocked.",
+        when: "Required when outcome=blocked; useful with agent_stop_reason=blocked.",
         nature: "report",
         downstream: "Stop decision, blocked-contract closure, and gate classification when enabled.",
         toolDescription: "Optional. A flat blocker description, required when outcome=blocked. " +
@@ -387,7 +387,7 @@ const GUIDES = [
             "`success=false`.",
     },
     {
-        path: "stop_reason",
+        path: "agent_stop_reason",
         purpose: "Why the agent is stopping.",
         when: "Only when should_continue=false and success=false.",
         nature: "control",
@@ -520,7 +520,7 @@ export function fieldExample(path, ctx) {
             return ["<approved gateId from loopforge_gate_check>"];
         case "outcome": return "partial";
         case "blocker": return "<what cannot proceed and why>";
-        case "stop_reason": return "blocked";
+        case "agent_stop_reason": return "blocked";
         case "no_change_reason": return "<why no workspace change was needed>";
         default: return null;
     }
@@ -528,7 +528,7 @@ export function fieldExample(path, ctx) {
 /** Semantic applicability — the ONE rule, deliberately independent of prompt
  *  level. Core fields and the two baseline execution-report fields are always
  *  applicable; the rest depend on facts the runtime can actually observe.
- *  Future events (delegation, a checkpoint boundary, a falsified assumption)
+ *  Future events (delegation, a subtask boundary, a falsified assumption)
  *  remain conditional opportunities, not render-time facts. */
 export function isFieldApplicable(path, facts) {
     const guide = GUIDE_BY_PATH.get(path);

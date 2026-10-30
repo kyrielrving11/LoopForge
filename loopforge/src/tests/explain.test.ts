@@ -172,7 +172,7 @@ describe("v3.8 — explain view", () => {
           roundId: "loop:explain-loop:round:1",
           round: 1,
           renderedPrompt: "held",
-          contextMode: "fresh_round",
+          contextMode: "fresh_invocation",
           contextReason: "first_round",
         }),
         wrongAssumptions: ["old belief"],
@@ -183,7 +183,7 @@ describe("v3.8 — explain view", () => {
     ]);
     const round = result.rounds[0];
     assert.deepEqual(round.context, {
-      mode: "fresh_round",
+      mode: "fresh_invocation",
       reason: "first_round",
     });
     assert.deepEqual(round.wrongAssumptions, ["old belief"]);
@@ -226,5 +226,118 @@ describe("v3.8 — explain view", () => {
   it("keeps the machine report out of the agent's claim fields", () => {
     const report = makeExecutionReport({ criterion_claims: criterionClaims(["cr-11111111"]) });
     assert.equal(report.contract_item_claims?.length, 0);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v4.0.4 — result facts, labels and legacy reporting
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("v4.0.4 — explain separates the three fact kinds", () => {
+  const loopId = "explain-facts";
+  const entryFor = (
+    round: number,
+    opts: Parameters<typeof committedFeedbackRound>[1] = {},
+  ) => committedFeedbackRound(round, { loopId, ...opts });
+
+  it("renders Agent report, LoopForge decision and Machine evidence once", () => {
+    const result = buildExplain(loopId, [
+      entryFor(1, {
+        success: false,
+        shouldContinue: false,
+        agentStopReason: "gave_up",
+        stopReason: "failed",
+        outputSummary: "tried and failed",
+        blocker: "missing credentials",
+      }),
+    ]);
+    const round = result.rounds[0]!;
+    assert.equal(round.loopStopReason, "failed");
+    assert.equal(round.agentStopReason, "gave_up");
+    assert.equal(round.agentShouldContinue, false);
+    assert.equal(round.agentOutcomeDeclared, null);
+    assert.ok(!("machineBackedSuccess" in round),
+      "the posture owns machineBackedSuccess; explain must not repeat it");
+
+    const text = renderExplain(result);
+    assert.ok(text.includes("Agent report"));
+    assert.ok(text.includes("LoopForge decision"));
+    assert.ok(text.includes("Machine evidence"));
+    assert.ok(text.includes("loop_stop_reason: failed"));
+    assert.ok(text.includes("agent_stop_reason: gave_up"));
+    assert.ok(text.includes("output_summary (Agent report): tried and failed"));
+    assert.ok(text.includes("blocker (Agent report): missing credentials"));
+    assert.ok(!/\n  stop_reason:/.test(text), "the old ambiguous label is gone");
+    assert.ok(!/\n  evidence: /.test(text), "explain must not hand-render a second posture");
+    assert.ok(!/\bconflict\b/i.test(text));
+    assert.ok(!/\bverdict\b/i.test(text));
+  });
+
+  it("labels the commit snapshot and the derived contract status separately", () => {
+    const contract = {
+      work_item: "Slice A",
+      scope: ["src/a"],
+      items: [{ description: "works", criterion_refs: [], verify_with: ["verify"] }],
+    };
+    const itemId = deriveContractItemIds(contract.items)[0]!;
+    const withPosture = buildExplain(loopId, [
+      entryFor(1, { contract }),
+      entryFor(2, {
+        contractItemClaims: [{ item_id: itemId, outcome: "met" }],
+        evidencePosture: {
+          round: 2,
+          kind: "evaluation",
+          status: "verified",
+          machineBackedSuccess: true,
+          verificationConfigured: true,
+          workspace: { status: "observed", changedPathCount: 1 },
+          files: null,
+          providers: [],
+          commands: [{ commandId: "verify", status: "passed", required: true }],
+          contract: {
+            id: deriveContractId(loopId, contract),
+            closure: "verified",
+            items: [{
+              id: itemId,
+              status: "verified",
+              criterionRefs: [],
+              reasons: ["verified by verify"],
+            }],
+            verifiedCount: 1,
+            insufficientCount: 0,
+            contradictedCount: 0,
+            pendingCount: 0,
+          },
+          findings: [],
+          omitted: { providers: 0, commands: 0, contractItems: 0, findings: 0 },
+        },
+      }),
+    ]);
+    const text = renderExplain(withPosture);
+    assert.ok(text.includes("Contract at commit (snapshot):"));
+    assert.ok(text.includes("Contract status now (derived):"));
+    assert.equal(withPosture.rounds.length, 2);
+  });
+
+  it("reports legacy rounds instead of silently showing an empty timeline", () => {
+    const result = buildExplain(loopId, [], undefined, 2);
+    assert.equal(result.legacyRounds, 2);
+    assert.match(renderExplain(result), /2 4\.0\.3 legacy round\(s\) not decoded/);
+  });
+
+  it("Explain and its embedded receipt agree about the same committed facts", () => {
+    const result = buildExplain(loopId, [
+      entryFor(1, {
+        success: false,
+        outcome: "blocked",
+        shouldContinue: false,
+        agentStopReason: "needs_human_input",
+        stopReason: "blocked",
+        blocker: "needs a decision",
+      }),
+    ]);
+    const round = result.rounds[0]!;
+    assert.equal(round.submission.loop_stop_reason, round.loopStopReason);
+    assert.equal(round.submission.agent_stop_reason, round.agentStopReason);
   });
 });

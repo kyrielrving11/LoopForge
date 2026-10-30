@@ -79,7 +79,7 @@ function committedFeedback(
             ? {
                 schemaVersion: PROMPT_ARTIFACT_SCHEMA_VERSION,
                 roundId: `loop:metrics-loop:round:${round}`, round,
-                attempt: 1, level, contextMode: "fresh_round", contextReason: "next_round",
+                attempt: 1, level, contextMode: "fresh_invocation", contextReason: "next_round",
                 renderedPrompt: "", promptHash: "h", stateHash: "s",
                 sections: [], droppedSections: [], protectedOverflow: false,
                 budget: 0, renderedChars: 0,

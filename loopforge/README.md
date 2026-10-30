@@ -40,8 +40,10 @@ round received its disposition.
 `--target` selects where the Forge skill directory is installed. `--workspace`
 selects the runtime boundary for policy, storage, evidence commands, and
 workspace checks. If omitted, the current directory is used. A normal `init`
-leaves an existing Forge skill untouched; `--force` replaces the package-owned
-skill tree (including its `references/` files).
+leaves an existing Forge skill untouched; if the installed files differ from
+the packaged skill (for example after an upgrade), `init` reports `Stale:` and
+`loopforge doctor` warns, but neither overwrites your tree. `--force` replaces
+the package-owned skill tree (including its `references/` files).
 
 ## MCP workflow
 
@@ -60,13 +62,25 @@ A submission is either an evaluation or an Agent-requested recovery, never
 both. Invalid core fields can be corrected for the same round without
 committing that attempt.
 
-Every returned prompt declares its derived context boundary in the header:
-`fresh_round` (first round, next round, recovery redo, or an L2
-repeated-rejection retry) starts a new Agent invocation without the previous
-transcript, while the first L0 enforcement retry is `same_round_retry` and
-continues the same logical round. A fresh context is not a workspace reset.
+Every returned prompt declares its derived context strategy in the header.
+`fresh_invocation` is clean context: a new Agent invocation without the previous
+transcript, used for the first round, the next round, recovery redo, any L2
+rehydration or L2 retry, and the library-level L1 retry branch. It may describe
+the SAME logical round. The first L0 enforcement retry is `same_round_retry`
+(in-context repair) and continues the original invocation with the failure
+lessons injected. Clean context is not a workspace reset: the current modified
+workspace and the loop identity continue; only recovery restores a checkpoint.
 
-A fresh prompt carries compact Machine Evidence (the previous committed
+Round results keep three kinds of facts separate: the **Agent report**
+(`success_claim`, `outcome`, `agent_stop_reason`), the **LoopForge decision**
+(`action`, `loop_stop_reason`, `enforcement_reason`), and the persisted
+**Machine evidence** (the round's `evidencePosture`). Explain, a terminal
+`stopDetail` and `resume` of a stopped loop render the same blocks. `completed`
+means the Agent's stop declaration passed the gates; it does not imply
+machine-backed success. `agent_stop_reason` is the Agent's report, never a loop
+terminal reason.
+
+A clean-context prompt carries compact Machine Evidence (the previous committed
 round's evidence posture: workspace/change counts, provider and command
 statuses, contract item statuses, and stable finding ids) plus bounded Working
 Memory compiled from committed reports, assumptions, open questions, consumed

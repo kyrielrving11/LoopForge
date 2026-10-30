@@ -70,17 +70,12 @@ and blobs hold only what HEAD cannot reproduce.
 
 ## Prompt levels
 
-L0, L1, and L2 select prompt density only. They never control the set of
-evaluation fields you may use.
-
-- **L0** is a same-round retry, or a committed failed round whose freshness
-  derivation proves no machine activity and no declared evolution.
-- **L1** is normal continuation.
-- **L2** is boundary rehydration: first round, plan/checkpoint boundary, deep or
-  shallow committed recovery, machine contradiction, or repeated rejection.
-
-An unobservable boundary stays L1; unknown machine activity never downgrades to
-L0. L2 is not a round-count timer.
+L0, L1, and L2 select prompt density only; they never control which evaluation
+fields you may use. L0 is a density level, not a context boundary: it can be a
+clean-context invocation or an in-context retry. The runtime selection rules and
+the context boundary live in the prompt's `## Round Boundary` section, its
+context-strategy label, and the MCP server instructions; this reference does not
+restate them.
 
 Every level renders the same protected normative set: active criteria, every
 active constraint, the active contract and all its items, every active sub-goal
@@ -91,8 +86,8 @@ LoopForge fails closed with `projection_incomplete` instead of delivering a
 partial prompt. The delivered prompt equals the compiled `renderedPrompt` on
 every path.
 
-A `fresh_round` prompt may render a bounded **Working Memory** section derived
-from committed history. L1 and L2 render the same full fixed projection: up to
+A clean-context (`fresh_invocation`) prompt may render a bounded **Working
+Memory** section derived from committed history. L1 and L2 render the same full fixed projection: up to
 five reports, eight assumptions, six open questions, three recoveries and
 three contract redirects, with per-item text limits. L0 stays compact (one
 report, two assumptions, two questions, one recovery and one redirect). The
@@ -107,10 +102,10 @@ whole, and the artifact records `rendered:false` with source counts. Every
 omission has source/rendered/omitted counts and a deterministic abbreviation
 notice. It declares no normative ids and never changes coverage, level,
 freshness, gates or success. An L0 `same_round_retry` renders none; it relies on
-the rejection notice and Verification Gate. An L2 rehydrate retry is
-`fresh_round` and may render the previous posture plus the rejected attempt's
-transient, explicitly `not committed` posture. The state file carries the full
-fixed Working Memory window.
+the rejection notice and Verification Gate. An L2 rehydrate retry is a
+clean-context `fresh_invocation` and may render the previous posture plus the
+rejected attempt's transient, explicitly `not committed` posture. The state
+file carries the full fixed Working Memory window.
 
 ## Read-only views
 
@@ -120,7 +115,11 @@ Use these to inspect, never to advance:
   the current held `submissionHandle`, `machineBackedSuccessTrajectory`,
   `evidencePosture`/`machineBackedSuccess`, checkpoints, capability, current
   guidance, and the latest committed receipt. Accepts the
-  live `sessionId` or the durable `loopId`. It never returns the held prompt: a
+  live `sessionId` or the durable `loopId`. A persisted STOPPED loop is
+  readable by `loopId` without resuming: it returns `status`, the committed
+  `loopStopReason`, the Agent stop facts, `stopDetail` and `last_submission`.
+  A running/paused/stalled loop without a live session still means call
+  `loopforge_resume`. It never returns the held prompt: a
   null handle, a missing live session, or a lost prompt means call
   `loopforge_resume`. A paused or stalled session may still show its handle, but
   submissions are refused until resume.

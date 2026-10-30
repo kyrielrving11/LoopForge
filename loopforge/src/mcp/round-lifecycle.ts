@@ -50,7 +50,7 @@ import {
 } from "../round-transaction.js";
 import { deriveActiveRoundContract } from "../round-contract.js";
 import { deriveSubGoals } from "../subgoal-state.js";
-import { declaresBlocked } from "../round-outcome.js";
+import { declaresBlocked, effectiveOutcome } from "../round-outcome.js";
 import {
   deriveCommittedSubmissionView,
   deriveSubmissionReceipt,
@@ -100,6 +100,7 @@ import type { SessionSaveOptions, SessionStateStore } from "../storage.js";
 import { isRecord, normalizeText } from "../token-utils.js";
 import { ProjectionCoverageError } from "../prompt-coverage.js";
 import { CompileFailureError, LegacyHistoryError } from "../errors.js";
+import { renderResultFacts, type ResultFacts } from "../result-facts.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -131,8 +132,14 @@ function parseOperatorAcceptance(value: unknown): OperatorAcceptance | undefined
 }
 
 export interface McpSession {
+  /** v4.0.4: a LIVE key inside this process. It is persisted and rebuilt by
+   *  `loopforge_resume`/`autoResumeAll`, but it is not the durable identity:
+   *  relationships and recovery use `loopId`. */
   sessionId: string;
+  /** The one durable loop identity. */
   loopId: string;
+  /** The compile-time task text; the immutable operator objective is a
+   *  separate committed fact (`OperatorAcceptance`). */
   task: string;
   engine: LoopForgeEngine;
   currentRound: number;
@@ -248,12 +255,22 @@ export function normalizeStartCriteria(raw: unknown): {
   return { criteria, warnings };
 }
 
+/** v4.0.4: the terminal reason a manual `loopforge_stop` reports to the
+ *  terminal sink and in its response. It is never persisted as a committed
+ *  round fact, so status/resume after a restart still report "no committed
+ *  terminal reason". One constant keeps the response and the sink aligned. */
+export const MANUAL_STOP_REASON = "cancelled" as const;
+
 export interface AdvanceResult {
   sessionId: string;
   /** Durable loop identity, returned with the held prompt so a restarted
    *  agent can call `loopforge_resume` without reconstructing IDs. Absent on
    *  results that have no session (for example a missing-handle refusal). */
   loopId?: string;
+  /** On a continue result this is the NEXT round being prepared; the
+   *  `agentOutcome`/`agentStopReason` fields and the receipt describe the
+   *  round that was just submitted. Use `submission_receipt.round_id` as the
+   *  authoritative identity of the submitted round. */
   round: number;
   /** v4.0.0: the ONE transport anchor for the held attempt. Derived from the
    *  persisted snapshot; never persisted itself. Absent on terminal results. */
@@ -263,7 +280,15 @@ export interface AdvanceResult {
   /** v3.9.7: explicit fact when the automatic before-image failed. */
   beforeCheckpointError?: { code: string; detail: string };
   prompt: string | null;
-  stopReason?: string;
+  /** v4.0.4: LoopForge's terminal reason. ONLY a `StopReason` — session
+   *  state, handle/payload/session errors are reported through
+   *  `sessionStatus`/`submissionError` and never masquerade as a stop reason. */
+  stopReason?: StopReason;
+  /** v4.0.4: the live session's status when the result is not a loop terminal
+   *  reason. `paused`/`stopped`/`stalled` describe the SESSION, not a
+   *  `StopReason`; `running` is present only where the caller needs the
+   *  distinction. */
+  sessionStatus?: "running" | "stopped" | "paused" | "stalled";
   /** v2.0.1: Human-readable context for why the loop stopped.
    *  Provides facts the agent can use to decide its next action,
    *  without LoopForge prescribing a specific behavior. */
@@ -278,6 +303,11 @@ export interface AdvanceResult {
   /** v4.0.3: the effective Agent-declared outcome of the round this result
    *  is about. */
   agentOutcome?: RoundOutcome | null;
+  /** v4.0.4: the Agent's declared stop reason of the round this result is
+   *  about (an Agent report, never a loop terminal reason). */
+  agentStopReason?: "gave_up" | "blocked" | "needs_human_input";
+  /** v4.0.4: the Agent's declared should_continue of the same round. */
+  agentShouldContinue?: boolean;
   warnings?: string[];
   /** v1.13: Enforcement action for this round. accept/reject/terminate.
    *  When "reject", the prompt contains a rejection notice and the agent
@@ -329,7 +359,10 @@ export interface AdvanceResult {
       | "checkpoint_failed"
       | "checkpoint_limit"
       | "restore_failed"
-      | "restore_pending";
+      | "restore_pending"
+      /** v4.0.4: another live process owns the session lease; this is a
+       *  session error, not a loop terminal reason. */
+      | "lease_conflict";
     details: Record<string, unknown>;
   };
   /** v3.9.4: a prompt-projection code defect. This is NOT a submission
@@ -696,7 +729,14 @@ export class RoundLifecycle {
     const task = (entry.task as string) ?? "";
     const maxRounds =
       (lineage.max_rounds as number) ?? getPolicy().engine.max_rounds;
-    const parsedSnapshot = parseRoundTransactionSnapshot(lineage.round_snapshot);
+    const rawSnapshot = lineage.round_snapshot;
+    const parsedSnapshot = parseRoundTransactionSnapshot(rawSnapshot);
+    // v4.0.4: a held snapshot written by an unsupported schema must fail
+    // closed. Silently recompiling would discard the held attempt (and, for a
+    // 4.0.3 session, rewrite history this runtime cannot read).
+    if (rawSnapshot !== undefined && rawSnapshot !== null && !parsedSnapshot) {
+      throw new LegacyHistoryError(loopId, [currentRound]);
+    }
     const history = loadCommittedHistory(this.store, loopId);
     // Legacy rounds are NOT history. Recompiling over them would overwrite
     // data this runtime cannot read; refuse and leave the loop read-only.
@@ -1024,20 +1064,40 @@ export class RoundLifecycle {
       session.status = reason === "stalled" ? "stalled" : "stopped";
       this.save(session);
       void this.notifyTerminal(session, reason);
+      // v4.0.4: the crash-recovery stop renders the SAME three fact blocks as
+      // the live path. A committed stop also carries the equivalent receipt;
+      // a termination never fabricates one.
+      const history = loadCommittedHistory(this.store, session.loopId);
+      const committedView = pr.action === "stop"
+        ? history.rounds.find((view) => view.round === recovered.snapshot.round) ?? null
+        : null;
+      const receipt = committedView
+        ? deriveCommittedSubmissionView(
+            committedView,
+            history.rounds,
+            history.directives,
+          )
+        : undefined;
       return {
         sessionId: session.sessionId,
         round: session.currentRound,
         prompt: null,
         stopReason: reason,
-        stopDetail: reason === "completed"
-          ? "Task completed successfully — the agent declared should_continue=false with success=true."
-          : reason === "blocked"
-            ? "Agent cannot proceed under current constraints. The task may need revised constraints or human intervention."
-            : reason === "failed"
-              ? "Agent declared should_continue=false with success=false — the task was not achieved."
-              : `Loop stopped: ${reason}.`,
+        sessionStatus: session.status,
+        stopDetail: renderResultFacts(
+          this.terminalFacts(
+            pr,
+            reason,
+            recovered.snapshot.evaluation ?? null,
+            pr.action === "stop",
+          ),
+          "terminal",
+        ).join("\n"),
         agentSuccessClaim: pr.agentSuccessClaim,
         agentOutcome: pr.agentOutcome,
+        agentStopReason: recovered.snapshot.evaluation?.agent_stop_reason,
+        agentShouldContinue: recovered.snapshot.evaluation?.should_continue,
+        ...(receipt ? { submission_receipt: receipt } : {}),
       };
     }
 
@@ -1781,6 +1841,93 @@ export class RoundLifecycle {
     };
   }
 
+  /** v4.0.4: the ONE terminal stop-detail formatter. Live stop, termination,
+   *  crash-recovered stop and resume-of-stopped read the same three fact
+   *  blocks; a committed fact is described identically on every path. */
+  private terminalFacts(
+    pr: RoundProcessResult,
+    reason: StopReason,
+    selfEval: SelfEvaluation | null,
+    committed: boolean,
+  ): ResultFacts {
+    return {
+      agent: selfEval
+        ? {
+            successClaim: selfEval.success,
+            outcome: effectiveOutcome(selfEval),
+            outcomeDeclared: selfEval.outcome ?? null,
+            shouldContinue: selfEval.should_continue,
+            agentStopReason: selfEval.agent_stop_reason ?? null,
+          }
+        : null,
+      loopforge: {
+        action: pr.action,
+        loopStopReason: reason,
+        enforcementReason: pr.enforcementReason ?? null,
+      },
+      machine: {
+        posture: pr.evidencePosture ?? null,
+        committed,
+      },
+    };
+  }
+
+  /** v4.0.4: the terminal result of an already-stopped loop, built from
+   *  committed history. This is the ONE read path for `resume` of a stopped
+   *  loop: it reports the committed `StopReason` and renders the same three
+   *  fact blocks as a live stop. A loop with no committed stop round reports
+   *  the session status and says so instead of inventing a reason. */
+  stoppedLoopResult(loopId: string, currentRound: number): AdvanceResult {
+    const history = loadCommittedHistory(this.store, loopId);
+    if (history.legacyRounds.length > 0) {
+      throw new LegacyHistoryError(
+        loopId,
+        history.legacyRounds.map((round) => round.round),
+      );
+    }
+    const terminal = [...history.rounds].reverse().find(
+      (view) => view.result?.stopReason !== undefined &&
+        view.result?.stopReason !== null,
+    );
+    const reason = terminal?.result?.stopReason;
+    if (!terminal || !reason) {
+      return {
+        sessionId: "",
+        round: currentRound,
+        prompt: null,
+        sessionStatus: "stopped",
+        stopDetail:
+          "Loop is stopped; there is no committed terminal reason for this " +
+          "loop (it may have been cancelled before a stop round committed).",
+      };
+    }
+    return {
+      sessionId: "",
+      round: currentRound,
+      prompt: null,
+      stopReason: reason,
+      sessionStatus: "stopped",
+      stopDetail: renderResultFacts(
+        this.terminalFacts(
+          terminal.result as RoundProcessResult,
+          reason,
+          terminal.evaluation ?? null,
+          true,
+        ),
+        "terminal",
+      ).join("\n"),
+      agentSuccessClaim: terminal.agentSuccessClaim,
+      agentOutcome: terminal.agentOutcome,
+      agentStopReason: terminal.evaluation?.agent_stop_reason,
+      agentShouldContinue: terminal.evaluation?.should_continue,
+      submission_receipt: deriveCommittedSubmissionView(
+        terminal,
+        history.rounds,
+        history.directives,
+      ),
+    };
+  }
+
   /** Build a termination result: persist stopped status, notify sinks.
    *  MUTATES: session.status, session.currentPrompt
    *
@@ -1814,9 +1961,17 @@ export class RoundLifecycle {
       round: session.currentRound,
       prompt: null,
       stopReason: reason,
+      sessionStatus: "stopped",
       agentSuccessClaim: pr.agentSuccessClaim,
       agentOutcome: pr.agentOutcome,
-      stopDetail: pr.enforcementReason ?? "The enforcement gate terminated the loop.",
+      agentStopReason: receiptBase.selfEval.agent_stop_reason,
+      agentShouldContinue: receiptBase.selfEval.should_continue,
+      // v4.0.4: a terminated attempt never committed, so its posture is
+      // explicitly transient; no committed receipt is fabricated.
+      stopDetail: renderResultFacts(
+        this.terminalFacts(pr, reason, receiptBase.selfEval, false),
+        "terminal",
+      ).join("\n"),
       enforcementAction: "terminate",
       evidencePosture: pr.evidencePosture,
       enforcementReason: pr.enforcementReason,
@@ -1852,11 +2007,18 @@ export class RoundLifecycle {
     return {
       sessionId, round: session.currentRound,
       prompt: null, stopReason: reason,
-      stopDetail: pr.stopReason === "max_rounds"
-          ? "The configured maximum number of rounds has been reached."
-          : `Loop stopped: ${reason}.`,
+      sessionStatus: session.status,
       agentSuccessClaim: pr.agentSuccessClaim,
       agentOutcome: pr.agentOutcome,
+      agentStopReason: receiptBase.selfEval.agent_stop_reason,
+      agentShouldContinue: receiptBase.selfEval.should_continue,
+      // v4.0.4: `completed` no longer implies machine success; the three
+      // fact blocks state the Agent report, the LoopForge decision and the
+      // persisted posture separately.
+      stopDetail: renderResultFacts(
+        this.terminalFacts(pr, reason, receiptBase.selfEval, true),
+        "terminal",
+      ).join("\n"),
       evidencePosture: pr.evidencePosture,
       submission_receipt: this.buildReceipt(receiptBase, {
         disposition: "stopped",
@@ -1895,7 +2057,7 @@ export class RoundLifecycle {
         sessionId,
         round: session.currentRound,
         prompt: null,
-        stopReason: session.status,
+        sessionStatus: session.status,
         stopDetail: `Session is no longer running (status: ${session.status}). It was paused or deleted while the next prompt was being prepared.`,
         agentSuccessClaim,
       };
@@ -1958,7 +2120,7 @@ export class RoundLifecycle {
         sessionId,
         round: session.currentRound,
         prompt: null,
-        stopReason: session.status,
+        sessionStatus: session.status,
         stopDetail: `Session is no longer running (status: ${session.status}). It was paused or deleted while the next prompt was being prepared.`,
         agentSuccessClaim,
       };
@@ -2060,9 +2222,31 @@ export class RoundLifecycle {
     // heartbeat. This lifecycle owns the round state machine, not a second
     // anchor rule.
     const session = this.registry.get(sessionId);
-    if (!session) return { sessionId, round: 0, prompt: null, stopReason: "session_not_found", stopDetail: "No session exists with this ID. It may have expired, been deleted, or never existed." };
+    if (!session) {
+      return {
+        sessionId,
+        round: 0,
+        prompt: null,
+        submissionError: {
+          code: "session_not_found",
+          details: {
+            detail:
+              "No session exists with this ID. It may have expired, been " +
+              "deleted, or never existed.",
+          },
+        },
+      };
+    }
     if (session.status !== "running" && session.status !== "stalled") {
-      return { sessionId, round: session.currentRound, prompt: null, stopReason: session.status, stopDetail: `Session is ${session.status}. Use loopforge_resume to restart a paused session, or loopforge_start for a new task.` };
+      return {
+        sessionId,
+        round: session.currentRound,
+        prompt: null,
+        sessionStatus: session.status,
+        stopDetail:
+          `Session is ${session.status}. Use loopforge_resume to restart a ` +
+          "paused session, or loopforge_start for a new task.",
+      };
     }
     // v3.9.7: a pending rollback directive with no verified redo snapshot
     // means the workspace is (or may be) mid-restore. Ordinary work must not
@@ -2106,8 +2290,19 @@ export class RoundLifecycle {
         round: session.currentRound,
         ...this.heldHandle(session),
         prompt: null,
-        stopReason: "evaluation_invalid",
-        stopDetail: "A structured evaluation object is required. Resubmit the same submissionHandle with success, output_summary, constraint_violations, and should_continue.",
+        submissionError: {
+          code: "evaluation_invalid",
+          details: {
+            detail:
+              "A structured evaluation object is required. Resubmit the same " +
+              "submissionHandle with success, output_summary, " +
+              "constraint_violations, and should_continue.",
+          },
+        },
+        stopDetail:
+          "A structured evaluation object is required. Resubmit the same " +
+          "submissionHandle with success, output_summary, " +
+          "constraint_violations, and should_continue.",
       };
     }
     const selfEval = extracted;
@@ -2225,8 +2420,10 @@ export class RoundLifecycle {
         sessionId,
         round: 0,
         prompt: null,
-        stopReason: "session_not_found",
-        stopDetail: "No session exists with this ID.",
+        submissionError: {
+          code: "session_not_found",
+          details: { detail: "No session exists with this ID." },
+        },
       };
     }
     if (session.status !== "running" && session.status !== "stalled") {
@@ -2234,7 +2431,7 @@ export class RoundLifecycle {
         sessionId,
         round: session.currentRound,
         prompt: null,
-        stopReason: session.status,
+        sessionStatus: session.status,
         stopDetail: `Session is ${session.status}.`,
       };
     }
@@ -2525,11 +2722,15 @@ export class RoundLifecycle {
       loopId: session.loopId,
       task: session.task,
       completed: stopReason === "completed",
+      // v4.0.4: no committed posture is unknown, never a synthesized false.
       machineBackedSuccess:
-        lastView?.evidencePosture?.machineBackedSuccess ?? false,
+        lastView?.evidencePosture?.machineBackedSuccess ?? null,
       evidencePosture: lastView?.evidencePosture ?? null,
       stopReason: stopReason as LoopTerminalEvent["stopReason"],
+      // v4.0.4: keep the historical alias, but state the two facts separately.
       roundsCompleted: session.currentRound,
+      roundCursor: session.currentRound,
+      committedRounds: views.length,
       machineBackedSuccessTrajectory,
       lastEvaluation: lastView?.evaluation ?? undefined,
     };

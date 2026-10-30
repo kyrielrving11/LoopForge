@@ -119,7 +119,7 @@ function input(overrides: Partial<ReceiptInput> = {}): ReceiptInput {
     round: 2,
     attempt: 1,
     level: "l1",
-    contextMode: "fresh_round",
+    contextMode: "fresh_invocation",
     contextReason: "next_round",
     renderedPrompt: "next",
     promptHash: "h",
@@ -178,6 +178,8 @@ describe("v3.9.1 — submission receipt", () => {
       ],
       nextArtifact: {
         ...input().nextArtifact!,
+        level: "l0",
+        attempt: 2,
         contextMode: "same_round_retry",
         contextReason: "enforcement_retry",
       },
@@ -185,6 +187,33 @@ describe("v3.9.1 — submission receipt", () => {
     assert.equal(report(receipt, "open_questions")?.handling, "saved_not_expanded");
     assert.equal(receipt.prompt?.context_mode, "same_round_retry");
     assert.equal(receipt.prompt?.context_reason, "enforcement_retry");
+  });
+
+  it("v4.0.4: derives loop_stop_reason and agent_stop_reason without persisting them", () => {
+    const selfEval = makeSelfEvaluation({
+      success: false,
+      output_summary: "cannot continue",
+      constraint_violations: [],
+      should_continue: false,
+      outcome: "blocked",
+      agent_stop_reason: "blocked",
+      blocker: "needs a decision",
+    });
+    const receipt = deriveSubmissionReceipt(input({
+      selfEval,
+      pr: {
+        ...input().pr,
+        action: "stop",
+        stopReason: "blocked",
+        agentSuccessClaim: false,
+        agentOutcome: "blocked",
+      },
+      disposition: "stopped",
+    }));
+    assert.equal(receipt.loop_stop_reason, "blocked");
+    assert.equal(receipt.agent_stop_reason, "blocked");
+    assert.equal(receipt.disposition, "stopped",
+      "disposition stays a disposition, not a terminal reason");
   });
 
   it("separates saved reports, derived effects and machine verification", () => {

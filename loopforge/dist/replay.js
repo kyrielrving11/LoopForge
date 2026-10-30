@@ -203,16 +203,20 @@ export class ReplayBackend {
             timeline.push({
                 round: view.round,
                 attempt: view.attempt,
-                stop_reason: view.result?.stopReason ?? null,
+                // v4.0.4: LoopForge's terminal reason, from the ONE committed
+                // `result.stopReason`. It is not the Agent's stop reason.
+                loop_stop_reason: view.result?.stopReason ?? null,
                 recompile_level: view.promptArtifact?.level ?? "l2",
                 // v4.0.2: the context boundary is a committed artifact fact.
                 context_mode: view.promptArtifact?.contextMode ?? null,
                 context_reason: view.promptArtifact?.contextReason ?? null,
-                // v4.0.3: Agent claims are named as claims. The machine facts are
-                // separate and come from the persisted posture.
+                // v4.0.3/v4.0.4: Agent claims are named as claims. The Agent's stop
+                // reason is a report; machine facts (including machineBackedSuccess)
+                // live only inside the persisted posture, so no duplicate top-level
+                // machine boolean is rendered here.
                 agent_success_claim: view.agentSuccessClaim,
                 agent_outcome: view.agentOutcome,
-                machine_backed_success: view.evidencePosture?.machineBackedSuccess ?? false,
+                agent_stop_reason: view.evaluation?.agent_stop_reason ?? null,
                 evidence_posture: view.evidencePosture,
                 // v4.0.1: task and goal identity are compile facts stamped at commit.
                 task: view.compiled?.task ?? "",

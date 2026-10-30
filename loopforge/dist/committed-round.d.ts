@@ -46,8 +46,8 @@ export interface CommittedRoundView {
     readonly verificationFlags: VerificationFlag[];
     readonly result: RoundProcessResult | null;
     /** v4.0.3: the evidence posture persisted with this transaction. The
-     *  decoder refuses a schema-7 commit without one, so this is null only on a
-     *  hand-built/library view. */
+     *  current (schema 8) decoder refuses a commit without one, so this is null
+     *  only on a hand-built/library view. */
     readonly evidencePosture: EvidencePosture | null;
     readonly action: CommittedAction;
     /** v4.0.3: the Agent's success claim (never a machine verdict). */

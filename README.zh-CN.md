@@ -36,7 +36,9 @@ LoopForge 记录观察并应用轮次规则
 
 Agent 报告描述它认为发生了什么，但报告本身不是证明。LoopForge 将报告与可用观察对照，例如 Git 工作区变化和明确配置的验证命令。观察不可用时，LoopForge 保留未知状态，不会将它当成通过或空变更。
 
-每个 prompt 都带有派生出的 context boundary。正常下一轮、第一轮和 recovery redo 都是 `fresh_round`：宿主启动新的 Agent invocation，上一轮 transcript、工具日志和未提交推理不会进入下一轮。fresh context 不是工作区重置；只有 rollback/recovery 才恢复检查点。第一次 enforcement retry（L0）是 `same_round_retry`，继续同一个逻辑轮；连续拒绝后的 L2 rehydrate retry 是 `fresh_round`。
+每个 prompt 都带有派生出的上下文策略。`fresh_invocation` 表示干净上下文：宿主启动新的 Agent invocation，上一轮 transcript、工具日志和未提交推理不会进入下一轮；它用于第一轮、正常下一轮、recovery redo、任意 L2 再水合/L2 retry，以及库级 L1 重试分支，并且可能仍是**同一个逻辑轮**。第一次 L0 enforcement retry 是 `same_round_retry`（原上下文修复），继续原 invocation 并注入失败原因与发现。干净上下文不是工作区重置：当前已修改的工作区与 loop 身份继续；只有 rollback/recovery 才恢复检查点。L2 不论由首次、计划/子任务边界、目标变化、状态缺失、机器反证、恢复还是连续拒绝触发，都使用干净上下文。
+
+轮次结果把三类事实分开呈现：Agent 报告（含 `agent_stop_reason`）、LoopForge 处置（`loop_stop_reason`）和持久化的 Machine evidence。Explain、终态 `stopDetail` 以及 `resume` 已停止 loop 使用同一组事实块；`completed` 表示 Agent 的停止声明通过了 gate，不代表机器背书的任务成功。
 
 连续性可以由有界 Working Memory 补充。它只从当前分支的已提交轮次和 rollback directive 派生，包含近期报告、被证伪的假设与撤回、未闭合问题、已消费的恢复事件和契约转向。来源窗口与各类条目上限是固定代码常量，不由 policy 配置。L1 和 L2 使用相同的固定窗口，L0 保持紧凑。默认 prompt 字符上限分别为 L0 5,000、L1 50,000、L2 100,000。这些是安全上限，不是日常裁剪记忆的目标。Working Memory 是一个不可拆分的可选段落；提示空间不足时会整体省略，prompt artifact 会记录省略状态和计数。它由唯一 canonical 认知状态派生，不是第二套历史或独立 memory store，Agent 报告也不会进入验证 gate。Machine Evidence（provider、command 状态和已验证契约项）单独作为受保护段落呈现，并参与验证判断。更早历史通过 `loopforge_replay` 或 `loopforge_status view: "explain"` 主动检索。
 

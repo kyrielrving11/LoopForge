@@ -366,7 +366,7 @@ describe("RoundLifecycle — resume / crash window", async () => {
     );
     // v4.0.2: the boundary is projected from the held artifact, and a second
     // delivery of the same held prompt does not create a new boundary.
-    assert.equal(result.contextMode, "fresh_round");
+    assert.equal(result.contextMode, "fresh_invocation");
     assert.equal(result.contextReason, "next_round");
     const again = await lifecycle.resume(session);
     assert.equal(again.contextMode, result.contextMode);
@@ -391,7 +391,7 @@ describe("RoundLifecycle — resume / crash window", async () => {
     assert.ok(result.prompt, "legacy resume compiles a prompt");
     assert.ok(result.prompt!.includes("LoopForge"));
     assert.equal(result.round, 1);
-    assert.equal(result.contextMode, "fresh_round");
+    assert.equal(result.contextMode, "fresh_invocation");
     assert.equal(result.contextReason, "first_round");
     // Persisted for cross-process recovery
     const persisted = new VaultSessionStateStore(store).load("loop-legacy-resume")!;
@@ -485,7 +485,8 @@ describe("RoundLifecycle — advance", async () => {
     const result = await advancing;
 
     assert.equal(result.prompt, null, "next prompt must not be compiled");
-    assert.equal(result.stopReason, "paused");
+    assert.equal(result.sessionStatus, "paused");
+    assert.equal(result.stopReason, undefined);
     assert.equal(mgr.get(sid)!.status, "paused");
   });
 
@@ -507,7 +508,8 @@ describe("RoundLifecycle — advance", async () => {
     );
     mgr.pause(sid);
     const result = await advancing;
-    assert.equal(result.stopReason, "paused");
+    assert.equal(result.sessionStatus, "paused");
+    assert.equal(result.stopReason, undefined);
     assert.equal(mgr.get(sid)!.currentRound, 2, "round counter incremented before the fence");
 
     // "Process restart": unpause must compile round 2 — previously the

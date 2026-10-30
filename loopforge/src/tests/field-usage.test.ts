@@ -49,7 +49,7 @@ const OPPORTUNITIES: Opportunity[] = [
     field: "worker_results",
   },
   {
-    name: "a checkpoint boundary was declared",
+    name: "a subtask boundary was declared",
     payload: { subtask_boundary: true, subtask_boundary_label: "parser complete" },
     field: "subtask_boundary",
   },

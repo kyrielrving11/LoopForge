@@ -99,12 +99,12 @@ export function sameContract(
 
 /** v3.9.9: the ONE current-round fact bundle for contract derivations. Every
  *  caller passes report/deltas/blocked/transition together, so a consumer can
- *  no longer forget `stop_reason: "blocked"` or the transition while another
+ *  no longer forget `agent_stop_reason: "blocked"` or the transition while another
  *  consumer sees them. */
 export interface CurrentRoundFacts {
   report: ExecutionReport | null;
   deltas: ReadonlyArray<ObservationDelta>;
-  /** The round's ONE blocked declaration (outcome OR stop_reason). */
+  /** The round's ONE blocked declaration (outcome OR agent_stop_reason). */
   blocked: boolean;
   /** The round's explicit contract redirect, if it declared one. */
   transition: ContractTransition | null;

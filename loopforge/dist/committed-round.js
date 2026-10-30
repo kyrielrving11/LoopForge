@@ -5,6 +5,7 @@
  * lineage representation. Consumers receive one stable, read-only view.
  */
 import { observationVersionIssue } from "./evidence-provider.js";
+import { promptContextPairIssue } from "./context-boundary.js";
 import { PROMPT_ARTIFACT_SCHEMA_VERSION, makeLoopRoundResult, } from "./protocol.js";
 import { ROUND_TRANSACTION_SCHEMA_VERSION, deriveRoundObservationDelta, isProcessResult, parseRoundTransactionSnapshot, rootBranchId, transactionSchemaVersionOf, } from "./round-transaction.js";
 import { effectiveOutcome, parseContractTransition, parseRoundContract, } from "./self-eval.js";
@@ -405,10 +406,37 @@ export function legacyTransactionRounds(entries) {
         // silently, which is the one thing this function exists to prevent.
         const snapshot = envelope.snapshot;
         if (isRecord(snapshot.promptArtifact)) {
-            const artifactVersion = snapshot.promptArtifact.schemaVersion;
+            const artifact = snapshot.promptArtifact;
+            const artifactVersion = artifact.schemaVersion;
             if (typeof artifactVersion === "number" &&
                 artifactVersion !== PROMPT_ARTIFACT_SCHEMA_VERSION) {
                 out.push({ round, schemaVersion: artifactVersion, envelope: "prompt_artifact" });
+                continue;
+            }
+            const validContextFields = (artifact.level === "l0" || artifact.level === "l1" || artifact.level === "l2") &&
+                (artifact.contextMode === "fresh_invocation" ||
+                    artifact.contextMode === "same_round_retry") &&
+                (artifact.contextReason === "first_round" ||
+                    artifact.contextReason === "next_round" ||
+                    artifact.contextReason === "recovery_redo" ||
+                    artifact.contextReason === "enforcement_retry") &&
+                typeof artifact.attempt === "number" &&
+                typeof artifact.round === "number";
+            const contextIssue = validContextFields
+                ? promptContextPairIssue({
+                    level: artifact.level,
+                    mode: artifact.contextMode,
+                    reason: artifact.contextReason,
+                    attempt: artifact.attempt,
+                    round: artifact.round,
+                })
+                : "missing or malformed context boundary fields";
+            if (contextIssue !== null) {
+                out.push({
+                    round,
+                    schemaVersion: typeof artifactVersion === "number" ? artifactVersion : -1,
+                    envelope: "prompt_context",
+                });
                 continue;
             }
         }

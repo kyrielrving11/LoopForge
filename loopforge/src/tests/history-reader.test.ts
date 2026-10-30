@@ -77,6 +77,37 @@ describe("committed history reader", () => {
     assert.equal(history.rounds.some((view) => view.round === 4), false);
   });
 
+  it("reports an illegal prompt-context pair instead of silently dropping its round", () => {
+    const invalid = committedFeedbackRound(1, { loopId: "hist" });
+    const transaction = (invalid.loop_lineage as Record<string, unknown>)
+      .round_transaction as Record<string, unknown>;
+    const snapshot = transaction.snapshot as Record<string, unknown>;
+    snapshot.promptArtifact = {
+      schemaVersion: 10,
+      roundId: "loop:hist:round:1",
+      round: 1,
+      attempt: 2,
+      level: "l2",
+      contextMode: "same_round_retry",
+      contextReason: "enforcement_retry",
+      renderedPrompt: "retry",
+      promptHash: "hash-1",
+      stateHash: "state-1",
+      sections: [],
+      droppedSections: [],
+      protectedOverflow: false,
+      budget: 10_000,
+      renderedChars: 5,
+      coverage: { active: [], rendered: [], omitted: [], complete: true },
+    };
+
+    const history = buildCommittedHistory([invalid]);
+    assert.equal(history.rounds.some((view) => view.round === 1), false);
+    assert.deepEqual(history.legacyRounds, [
+      { round: 1, schemaVersion: 10, envelope: "prompt_context" },
+    ]);
+  });
+
   it("empty history is a valid read model", () => {
     const history = emptyCommittedHistory("empty");
     assert.equal(history.loopId, "empty");

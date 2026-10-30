@@ -160,8 +160,9 @@ export interface LegacyRound {
      *  breaks — a round that fails any check is not committed history — so all
      *  must be REPORTED, not just the transaction one.
      *  v3.9.1 adds "observation": a transaction whose embedded Git/command
-     *  observation schema is unsupported. */
-    envelope: "transaction" | "prompt_artifact" | "observation";
+     *  observation schema is unsupported. v4.0.4 adds "prompt_context": the
+     *  artifact has the current schema but an illegal context-boundary pair. */
+    envelope: "transaction" | "prompt_artifact" | "prompt_context" | "observation";
 }
 export declare function legacyTransactionRounds(entries: unknown[]): LegacyRound[];
 //# sourceMappingURL=committed-round.d.ts.map

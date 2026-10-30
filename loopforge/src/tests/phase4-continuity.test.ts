@@ -50,6 +50,8 @@ import { makeLoopCompileRequest } from "../protocol.js";
 import { derivePolicyMetrics } from "../policy-metrics.js";
 import { deriveRoundObservationDelta } from "../round-transaction.js";
 import { deriveRoundProgress } from "../progress.js";
+import { registerEvidenceProvider } from "../evidence-provider.js";
+import { CompileFailureError } from "../errors.js";
 
 afterEach(() => resetPolicy());
 
@@ -84,6 +86,98 @@ function continuingEvaluation(): SelfEvaluation {
 }
 
 describe("v4.0.3 — RetryContext survives resume", () => {
+  it("a failed retry compile resumes the same attempt and before-image across restarts", async () => {
+    let captures = 0;
+    registerEvidenceProvider("retry-baseline", () => ({
+      name: "retry-baseline",
+      kind: "custom",
+      capture: (context) => {
+        assert.ok(context);
+        return {
+        schemaVersion: 1, providerId: "retry-baseline", kind: "custom",
+        phase: context.phase, status: "observed",
+        startedAt: 0, finishedAt: 0, files: [],
+        data: { capture: ++captures },
+        };
+      },
+    }));
+    getPolicy().evidence.providers = ["retry-baseline"];
+    getPolicy().state_file.enabled = false;
+    installTestCommandProvider();
+    const loopId = "failed-retry-compile";
+    const store = new MemoryLoopStore();
+    const mgr = new SessionManager(store);
+    const restarted = new SessionManager(store);
+    try {
+      const started = await mgr.create({ task: "Retry compile recovery", loopId });
+      const session = mgr.get(started.sessionId)!;
+      const initial = session.roundSnapshot!;
+      const baseline = structuredClone(initial.beforeEvidence);
+      const checkpoint: CheckpointRef = {
+        checkpointId: `ck-${"a".repeat(24)}`, contentHash: "b".repeat(64),
+        role: "before", round: initial.round, roundId: initial.roundId,
+        transactionId: initial.transactionId, branchId: initial.branchId,
+        redoRound: initial.round, createdAt: 1,
+      };
+      initial.beforeCheckpoint = checkpoint;
+      mgr.save(session);
+      const originalCompile = session.engine.invokeLoopCompile;
+      session.engine.invokeLoopCompile = () => {
+        throw new CompileFailureError("injected retry compile failure");
+      };
+      const failed = await advanceWithHeld(
+        mgr, started.sessionId, "", rejectedEvaluation(), started.submissionHandle,
+      );
+      session.engine.invokeLoopCompile = originalCompile;
+      assert.equal(failed.stopReason, "stalled");
+      assert.equal(session.roundSnapshot?.phase, "rejected");
+      assert.equal(session.roundSnapshot?.retryContext?.attempt, 2);
+      const capturesAfterRejection = captures;
+      mgr.close();
+
+      const resumed = await restarted.resume(loopId);
+      assert.ok(resumed?.prompt);
+      assert.ok(resumed.submissionHandle, "the recovered prompt must be submittable");
+      const held = restarted.getByLoopId(loopId)!.roundSnapshot!;
+      assert.equal(held.attempt, 2);
+      assert.equal(held.promptArtifact?.attempt, 2);
+      assert.equal(held.retryContext?.attempt, 2);
+      assert.deepEqual(held.beforeEvidence, baseline);
+      assert.equal(captures, capturesAfterRejection, "resume must not recapture evidence");
+      assert.deepEqual(held.beforeCheckpoint, {
+        ...checkpoint, transactionId: held.transactionId,
+      });
+      assert.match(resumed.prompt, /REJECTED/);
+      assert.ok(resumed.submission_guidance?.findings.some(
+        (finding) => finding.check === "success_with_remaining_criteria",
+      ));
+      assert.equal(store.listEntries(loopId).filter(
+        (entry) => entry.task_type === "feedback",
+      ).length, 0, "recovery must not commit the rejected attempt");
+
+      const repeated = await restarted.resume(loopId);
+      assert.deepEqual(repeated?.submissionHandle, resumed.submissionHandle);
+      assert.equal(repeated?.prompt, resumed.prompt);
+      assert.equal(captures, capturesAfterRejection);
+      const accepted = await advanceWithHeld(
+        restarted, resumed.sessionId, "", continuingEvaluation(), resumed.submissionHandle,
+      );
+      assert.equal(accepted.round, 2);
+      const committed = store.listEntries(loopId).find(
+        (entry) => entry.task_type === "feedback",
+      )!;
+      const transaction = (committed.loop_lineage as Record<string, unknown>)
+        .round_transaction as Record<string, unknown>;
+      const snapshot = transaction.snapshot as Record<string, unknown>;
+      assert.equal(snapshot.attempt, 2);
+      assert.deepEqual(snapshot.beforeEvidence, baseline);
+      assert.equal(snapshot.retryContext, undefined);
+    } finally {
+      mgr.close();
+      restarted.close();
+    }
+  });
+
   it("keeps attempt, notice, findings and posture across a restart", async () => {
     resetPolicy();
     installTestCommandProvider();

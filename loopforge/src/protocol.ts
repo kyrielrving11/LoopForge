@@ -1082,7 +1082,10 @@ export interface PromptWorkingMemoryProjection {
   } | null;
   /** Characters the Working Memory section body produced. */
   renderedChars: number;
-  /** True when a window/cap/budget rule dropped or truncated any content. */
+  /** True when a window, list/item cap, text limit or budget rule omitted any
+   *  content, including details within a rendered recovery. Per-recovery
+   *  source/rendered/omitted detail counts are stated in that item's body;
+   *  `omittedCounts.recoveries` counts whole recovery records only. */
   truncated: boolean;
 }
 

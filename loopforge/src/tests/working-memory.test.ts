@@ -101,6 +101,10 @@ function populatedMemory(): WorkingMemory {
       approaches: [`approach ${index}`],
       wrongAssumptions: [`recovery assumption ${index}`],
       preservedDiscoveries: [],
+      detailSourceCounts: {
+        observedSkippedFiles: 0, reportedSkippedFiles: 0, approaches: 1,
+        wrongAssumptions: 1, preservedDiscoveries: 0,
+      },
     })),
     redirects: Array.from({ length: 3 }, (_, index) => ({
       round: 5 - index,
@@ -119,6 +123,49 @@ function populatedMemory(): WorkingMemory {
 }
 
 describe("deriveWorkingMemory — committed branch only", () => {
+  it("reports omitted recovery details in both prompt and state projections", () => {
+    const loopId = "recovery-detail-omissions";
+    const rollback = committedBacktrackRound(2, loopId, 1);
+    const lineage = rollback.loop_lineage as Record<string, unknown>;
+    const transaction = lineage.round_transaction as Record<string, unknown>;
+    const snapshot = transaction.snapshot as Record<string, unknown>;
+    const recovery = snapshot.recovery as Record<string, unknown>;
+    for (const key of [
+      "observed_skipped_files", "reported_skipped_files", "approaches",
+      "wrong_assumptions", "skipped_discoveries",
+    ]) {
+      recovery[key] = Array.from({ length: 4 }, (_, index) => `${key}-${index + 1}`);
+    }
+    const memory = deriveWorkingMemory(historyOf([
+      committedFeedbackRound(1, { loopId, outputSummary: "first" }),
+      rollback,
+      committedFeedbackRound(2, {
+        loopId, branchId: snapshot.transactionId as string, outputSummary: "redo",
+      }),
+    ]), 3);
+    assert.equal(memory.recoveries.length, 1);
+    assert.equal(memory.recoveries[0]!.approaches.length, 3);
+    for (const level of ["l0", "l1", "l2"] as const) {
+      const rendered = formatWorkingMemoryPrompt(memory, level)!;
+      assert.equal(rendered.projection.truncated, true);
+      assert.match(rendered.body, /Working Memory is abbreviated/);
+      if (level !== "l0") {
+        assert.ok(rendered.body.includes("approaches 3/4 (omitted 1)"));
+        assert.ok(rendered.body.includes("wrong assumptions 3/4 (omitted 1)"));
+        assert.ok(rendered.body.includes("preserved discoveries 3/4 (omitted 1)"));
+        assert.ok(rendered.body.includes("observed files 3/4 (omitted 1)"));
+        assert.ok(rendered.body.includes("reported files 3/4 (omitted 1)"));
+        assert.match(rendered.body, /approaches-3/);
+        assert.doesNotMatch(rendered.body, /approaches-4/);
+      }
+    }
+    const state = formatWorkingMemoryState(memory);
+    assert.equal(state.truncated, true);
+    assert.ok(state.lines.join("\n").includes("approaches 3/4 (omitted 1)"));
+    assert.equal((recovery.approaches as string[]).length, 4,
+      "bounded projection must leave committed recovery details intact");
+  });
+
   it("keeps the last five committed reports, newest first", () => {
     const loopId = "window";
     const entries = Array.from({ length: 7 }, (_, index) =>
@@ -342,6 +389,28 @@ describe("Working Memory sanitization and determinism", () => {
 });
 
 describe("Working Memory prompt density and protection", () => {
+  it("counts a newly required abbreviation notice inside the L0 memory budget", () => {
+    const memory = populatedMemory();
+    memory.reports = [{ ...memory.reports[0]!, outputSummary: "r".repeat(850), sourceChars: 850 }];
+    memory.assumptions = [{ round: 1, kind: "wrong_assumption", text: "a".repeat(200) }];
+    memory.openQuestions = [
+      { id: "oq-11111111", round: 1, text: "q".repeat(190) },
+      { id: "oq-22222222", round: 1, text: "p".repeat(190) },
+    ];
+    memory.recoveries = [];
+    memory.redirects = [];
+    memory.sourceCounts = {
+      windowRounds: 1, reports: 1, assumptions: 1,
+      openQuestions: 2, recoveries: 0, redirects: 0,
+    };
+    const rendered = formatWorkingMemoryPrompt(memory, "l0")!;
+    assert.equal(rendered.projection.truncated, true);
+    assert.match(rendered.body, /Working Memory is abbreviated/);
+    assert.ok(rendered.body.length <= PROMPT_WORKING_MEMORY_DENSITY.l0.totalChars,
+      `complete memory body must fit, got ${rendered.body.length}`);
+    assert.equal(rendered.projection.renderedChars, rendered.body.length);
+  });
+
   it("renders the full bounded projection for fresh levels and keeps L0 dense", () => {
     const memory = populatedMemory();
     for (const level of ["l0", "l1", "l2"] as const) {

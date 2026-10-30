@@ -71,16 +71,17 @@ and blobs hold only what HEAD cannot reproduce.
 ## Prompt levels
 
 L0, L1, and L2 select prompt density only; they never control which evaluation
-fields you may use. L0 is a density level, not a context boundary: it can be a
-clean-context invocation or an in-context retry. The runtime selection rules and
-the context boundary live in the prompt's `## Round Boundary` section, its
+fields you may use. Each density can accompany a clean-context invocation or
+an in-context retry; read `contextMode` and `contextReason`. The runtime
+selection rules and the context boundary live in the prompt's `## Round Boundary` section, its
 context-strategy label, and the MCP server instructions; this reference does not
 restate them.
 
 Every level renders the same protected normative set: active criteria, every
 active constraint, the active contract and all its items, every active sub-goal
-id, every current verification finding, the committed recovery brief, and the
-previous committed round's **Machine Evidence**. Display caps may shorten
+id, every current verification finding, and the committed recovery brief. A
+clean-context prompt also renders the previous committed round's **Machine
+Evidence** when present. Display caps may shorten
 descriptions but never remove ids. If a protected active id is missing,
 LoopForge fails closed with `projection_incomplete` instead of delivering a
 partial prompt. The delivered prompt equals the compiled `renderedPrompt` on
@@ -91,9 +92,10 @@ Memory** section derived from committed history. L1 and L2 render the same full 
 five reports, eight assumptions, six open questions, three recoveries and
 three contract redirects, with per-item text limits. L0 stays compact (one
 report, two assumptions, two questions, one recovery and one redirect). The
-underlying source window is five committed rounds for reports, assumptions,
-questions and redirects; recovery directives have their own fixed limit. These
-limits are code constants, not policy. The default whole-prompt ceilings are
+underlying source window is five committed rounds for reports, assumptions and
+redirects; open questions remain active until resolved, and recovery directives
+have their own fixed limit. These limits are code constants, not policy. The
+default whole-prompt ceilings are
 5,000 / 50,000 / 100,000 characters for L0 / L1 / L2. They are safety ceilings,
 not routine targets for memory omission.
 
@@ -101,10 +103,11 @@ Working Memory is optional but INDIVISIBLE: if it cannot fit, it is dropped
 whole, and the artifact records `rendered:false` with source counts. Every
 omission has source/rendered/omitted counts and a deterministic abbreviation
 notice. It declares no normative ids and never changes coverage, level,
-freshness, gates or success. An L0 `same_round_retry` renders none; it relies on
-the rejection notice and Verification Gate. An L2 rehydrate retry is a
-clean-context `fresh_invocation` and may render the previous posture plus the
-rejected attempt's transient, explicitly `not committed` posture. The state
+freshness, gates or success. A `same_round_retry` renders neither Working Memory
+nor Machine Evidence at any density; it relies on the rejection notice and
+Verification Gate. A `fresh_invocation` retry with `rejection_escalation` may
+render the previous posture plus the rejected attempt's transient, explicitly
+`not committed` posture. The state
 file carries the full fixed Working Memory window.
 
 ## Read-only views

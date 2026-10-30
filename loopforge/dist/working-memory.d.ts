@@ -47,6 +47,13 @@ export interface OpenQuestionMemory {
     round: number;
     text: string;
 }
+export interface RecoveryDetailCounts {
+    observedSkippedFiles: number;
+    reportedSkippedFiles: number;
+    approaches: number;
+    wrongAssumptions: number;
+    preservedDiscoveries: number;
+}
 export interface RecoveryMemory {
     round: number;
     redoRound: number;
@@ -59,6 +66,9 @@ export interface RecoveryMemory {
     approaches: string[];
     wrongAssumptions: string[];
     preservedDiscoveries: string[];
+    /** Committed detail counts before normalization and per-list display caps.
+     *  Derived with the bounded lists, never persisted as a separate source. */
+    detailSourceCounts: RecoveryDetailCounts;
 }
 export interface ContractRedirectMemory {
     round: number;

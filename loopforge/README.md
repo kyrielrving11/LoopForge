@@ -64,12 +64,13 @@ committing that attempt.
 
 Every returned prompt declares its derived context strategy in the header.
 `fresh_invocation` is clean context: a new Agent invocation without the previous
-transcript, used for the first round, the next round, recovery redo, any L2
-rehydration or L2 retry, and the library-level L1 retry branch. It may describe
-the SAME logical round. The first L0 enforcement retry is `same_round_retry`
-(in-context repair) and continues the original invocation with the failure
-lessons injected. Clean context is not a workspace reset: the current modified
-workspace and the loop identity continue; only recovery restores a checkpoint.
+transcript, used for the first round, the next round, recovery redo, or repeated
+same-check rejection escalation. It may describe the SAME logical round.
+`same_round_retry` (in-context repair) continues the original invocation with
+the failure lessons injected. Prompt density and context boundary are independent; use the
+returned `contextMode` and `contextReason` at any L0/L1/L2 density. Clean context
+is not a workspace reset: the current modified workspace and the loop identity
+continue; only recovery restores a checkpoint.
 
 Round results keep three kinds of facts separate: the **Agent report**
 (`success_claim`, `outcome`, `agent_stop_reason`), the **LoopForge decision**

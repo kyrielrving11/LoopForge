@@ -337,6 +337,10 @@ export declare class RoundLifecycle {
      *  redo prepare are idempotent; a verified held redo prompt is returned
      *  without re-checking the workspace (the Agent may already have worked). */
     private completePendingRecovery;
+    /** A rejected round still owns its original before-image. Recover its next
+     *  attempt through the same retry preparation used by a live rejection;
+     *  ordinary prepare would recapture evidence and reset snapshot.attempt. */
+    private prepareMissingPrompt;
     /** Resume tail: the session has been reconstructed and registered. Reconcile
      *  a committed-but-undelivered round, restore the held prompt, or recover a
      *  missing prompt from current round state. v3.7: async — compilation runs

@@ -36,7 +36,9 @@ LoopForge 记录观察并应用轮次规则
 
 Agent 报告描述它认为发生了什么，但报告本身不是证明。LoopForge 将报告与可用观察对照，例如 Git 工作区变化和明确配置的验证命令。观察不可用时，LoopForge 保留未知状态，不会将它当成通过或空变更。
 
-每个 prompt 都带有派生出的上下文策略。`fresh_invocation` 表示干净上下文：宿主启动新的 Agent invocation，上一轮 transcript、工具日志和未提交推理不会进入下一轮；它用于第一轮、正常下一轮、recovery redo、任意 L2 再水合/L2 retry，以及库级 L1 重试分支，并且可能仍是**同一个逻辑轮**。第一次 L0 enforcement retry 是 `same_round_retry`（原上下文修复），继续原 invocation 并注入失败原因与发现。干净上下文不是工作区重置：当前已修改的工作区与 loop 身份继续；只有 rollback/recovery 才恢复检查点。L2 不论由首次、计划/子任务边界、目标变化、状态缺失、机器反证、恢复还是连续拒绝触发，都使用干净上下文。
+每个 prompt 都带有派生出的上下文策略。`fresh_invocation` 表示干净上下文：宿主启动新的 Agent invocation，上一轮 transcript、工具日志和未提交推理不会进入下一轮；它用于第一轮、正常下一轮、recovery redo，或同一检查连续拒绝后的升级，并且可能仍是**同一个逻辑轮**。`same_round_retry` 表示原上下文修复，继续原 invocation 并注入失败原因与发现。`rejection_escalation` 表示重开上下文的重试，失败经验仍随提示携带。
+
+提示密度与上下文边界相互独立，应读取返回的 `contextMode`、`contextReason` 和策略标签，而不是根据 L0、L1、L2 推断是否重开上下文。干净上下文不是工作区重置：当前已修改的工作区与 loop 身份继续；只有 rollback/recovery 才恢复检查点。
 
 轮次结果把三类事实分开呈现：Agent 报告（含 `agent_stop_reason`）、LoopForge 处置（`loop_stop_reason`）和持久化的 Machine evidence。Explain、终态 `stopDetail` 以及 `resume` 已停止 loop 使用同一组事实块；`completed` 表示 Agent 的停止声明通过了 gate，不代表机器背书的任务成功。
 

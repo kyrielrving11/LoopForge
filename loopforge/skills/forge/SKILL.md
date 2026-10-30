@@ -81,7 +81,7 @@ strategy label is what the host follows:
 
 ```text
 Context: clean context — next round (fresh_invocation; workspace continues)
-Context: clean context repair (fresh_invocation; enforcement_retry; same logical round; lessons carried)
+Context: clean context repair (fresh_invocation; rejection_escalation; same logical round; rejected posture is attempt-time only)
 Context: in-context repair (same_round_retry; enforcement_retry; continue original invocation if alive; lessons injected)
 Context: clean context after restore (fresh_invocation; recovery_redo; lessons carried)
 ```
@@ -91,17 +91,22 @@ Context: clean context after restore (fresh_invocation; recovery_redo; lessons c
   the previous transcript, tool logs, or uncommitted reasoning. It is not a
   workspace reset: committed files, git state, and the session continue. It may
   be the next logical round, the first round, a recovery redo, or the SAME
-  logical round on an L2 retry.
-- **in-context repair** (`same_round_retry`): the first L0 enforcement retry.
+  logical round on a `rejection_escalation` retry.
+- **in-context repair** (`same_round_retry`, `enforcement_retry`): a retry in
+  the original context, independent of prompt density.
   Continue the current invocation if it exists; the rejection notice, findings
   and failure reason are injected. If it is gone, start a new one from this
   self-contained prompt, but keep the same round and attempt.
-- **clean context repair**: an L2 retry. Start a new invocation; the retry
-  notice, findings, transient rejected posture and committed memory are already
+- **clean context repair** (`fresh_invocation`, `rejection_escalation`): start a
+  new invocation; the retry notice, findings, transient rejected posture and
+  committed memory are already
   in the prompt.
 - **clean context after restore**: recovery redo. LoopForge has already restored
   and verified the workspace; the Recovery Brief and failure lessons are in the
   prompt. Never continue the abandoned transcript.
+
+Read `contextMode`, `contextReason` and the strategy label together; L0/L1/L2
+select density and do not determine the invocation boundary.
 
 The executable round division and submission rules live in every prompt's
 `## Round Boundary` section and in the MCP server instructions. This manual
@@ -284,9 +289,10 @@ is never a later prompt's independent fact source.
 - Non-null `prompt`: execute it and submit the next evaluation with the
   `submissionHandle` returned alongside it.
 - `enforcementAction: "reject"`: retry the same logical round with the
-  **new** handle; the attempt increases. The first L0 retry is in-context repair
-  (`same_round_retry`); a repeated-rejection L2 retry is a clean-context repair
-  (`fresh_invocation`, still the same logical round). The old handle only
+  **new** handle; the attempt increases. Follow the returned context strategy:
+  `same_round_retry` keeps the original invocation; `fresh_invocation` with
+  `rejection_escalation` starts a clean invocation for the same logical round.
+  Prompt density does not choose between them. The old handle only
   returns the current retry prompt with a warning. A retry prompt may carry the
   rejected attempt's transient Machine Evidence, explicitly marked
   `not committed`.

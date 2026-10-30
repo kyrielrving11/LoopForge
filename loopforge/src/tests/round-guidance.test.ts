@@ -175,6 +175,24 @@ describe("v4.0.4 — the skill points at the runtime rules", () => {
     }
   });
 
+  it("the skill's context examples are legal under the current boundary contract", () => {
+    const skill = skillFile("SKILL.md");
+    const examples = skill.split("\n").filter((line) => line.startsWith("Context: "));
+    assert.ok(examples.length >= 4, "the advertised strategies must be exercised");
+    for (const example of examples) {
+      const fields = example.slice(example.indexOf("(") + 1).split(";");
+      const mode = fields[0]!.trim() as Parameters<typeof promptContextPairIssue>[0]["mode"];
+      const reason = fields[1]!.trim().replace(")", "") as Parameters<typeof promptContextPairIssue>[0]["reason"];
+      assert.equal(promptContextPairIssue({
+        level: "l2", mode, reason, round: 3,
+        attempt: reason === "enforcement_retry" || reason === "rejection_escalation" ? 2 : 1,
+      }), null, `advertised strategy is illegal: ${example}`);
+    }
+    assert.ok(skill.includes(formatContextBoundaryLabel(
+      "fresh_invocation", "rejection_escalation",
+    )), "the clean retry example must name rejection escalation");
+  });
+
   it("calls subtask_boundary a subtask boundary, never a workspace checkpoint", () => {
     const description = fieldGuideDescription("subtask_boundary");
     assert.ok(description.includes("subtask boundary"));

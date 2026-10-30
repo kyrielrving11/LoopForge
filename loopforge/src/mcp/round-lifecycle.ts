@@ -1236,6 +1236,24 @@ export class RoundLifecycle {
     });
   }
 
+  /** A rejected round still owns its original before-image. Recover its next
+   *  attempt through the same retry preparation used by a live rejection;
+   *  ordinary prepare would recapture evidence and reset snapshot.attempt. */
+  private prepareMissingPrompt(session: McpSession): Promise<PreparedRound> {
+    const driver = this.driver(session.engine, session.loopId);
+    const request = buildLoopRequest(session);
+    const rejected = session.roundSnapshot;
+    if (rejected?.phase === "rejected" && rejected.retryContext) {
+      return driver.prepareRetry(
+        request, rejected, rejected.retryContext.rejectionNotice,
+        session.consecutiveRejections,
+      );
+    }
+    return driver.prepare(
+      request, session.loopId, session.currentRound, this.prepareOptions(session),
+    );
+  }
+
   /** Resume tail: the session has been reconstructed and registered. Reconcile
    *  a committed-but-undelivered round, restore the held prompt, or recover a
    *  missing prompt from current round state. v3.7: async — compilation runs
@@ -1253,15 +1271,9 @@ export class RoundLifecycle {
     if (restored) return restored;
 
     // Missing held prompt: compile (async) once, then persist it.
-    const request = buildLoopRequest(session);
     let prepared: PreparedRound;
     try {
-      prepared = await this.driver(session.engine, session.loopId).prepare(
-        request,
-        session.loopId,
-        session.currentRound,
-        this.prepareOptions(session),
-      );
+      prepared = await this.prepareMissingPrompt(session);
     } catch (error) {
       if (error instanceof ProjectionCoverageError) {
         return this.stalledAfterCommit(
@@ -1309,12 +1321,7 @@ export class RoundLifecycle {
 
     let prepared: PreparedRound;
     try {
-      prepared = await this.driver(session.engine, session.loopId).prepare(
-        buildLoopRequest(session),
-        session.loopId,
-        session.currentRound,
-        this.prepareOptions(session),
-      );
+      prepared = await this.prepareMissingPrompt(session);
     } catch (error) {
       if (error instanceof ProjectionCoverageError) {
         return this.stalledAfterCommit(

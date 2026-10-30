@@ -64,6 +64,14 @@ export interface OpenQuestionMemory {
   text: string;
 }
 
+export interface RecoveryDetailCounts {
+  observedSkippedFiles: number;
+  reportedSkippedFiles: number;
+  approaches: number;
+  wrongAssumptions: number;
+  preservedDiscoveries: number;
+}
+
 export interface RecoveryMemory {
   round: number;
   redoRound: number;
@@ -76,6 +84,9 @@ export interface RecoveryMemory {
   approaches: string[];
   wrongAssumptions: string[];
   preservedDiscoveries: string[];
+  /** Committed detail counts before normalization and per-list display caps.
+   *  Derived with the bounded lists, never persisted as a separate source. */
+  detailSourceCounts: RecoveryDetailCounts;
 }
 
 export interface ContractRedirectMemory {
@@ -276,11 +287,17 @@ function dedupeQuestions(entries: OpenQuestionMemory[]): OpenQuestionMemory[] {
   return out;
 }
 
-function boundedRecoveryItems(values: ReadonlyArray<string>): string[] {
-  return values
-    .map((value) => normalizeWorkingMemoryText(value))
-    .filter(Boolean)
-    .slice(0, WORKING_MEMORY_RECOVERY_ITEM_LIMIT);
+function boundedRecoveryItems(values: ReadonlyArray<string>): {
+  items: string[];
+  sourceCount: number;
+} {
+  return {
+    items: values
+      .map((value) => normalizeWorkingMemoryText(value))
+      .filter(Boolean)
+      .slice(0, WORKING_MEMORY_RECOVERY_ITEM_LIMIT),
+    sourceCount: values.length,
+  };
 }
 
 /** Derive the bounded Working Memory from committed history only.
@@ -358,6 +375,12 @@ export function deriveWorkingMemory(
     .reverse()
     .map((view): RecoveryMemory => {
       const recovery = view.recovery!;
+      const observedFiles = boundedRecoveryItems(
+        recovery.observed_skipped_files ?? recovery.skipped_files ?? []);
+      const reportedFiles = boundedRecoveryItems(recovery.reported_skipped_files ?? []);
+      const approaches = boundedRecoveryItems(recovery.approaches);
+      const assumptions = boundedRecoveryItems(recovery.wrong_assumptions);
+      const discoveries = boundedRecoveryItems(recovery.skipped_discoveries);
       return {
         round: view.round,
         redoRound: recovery.target.redo_round,
@@ -365,13 +388,18 @@ export function deriveWorkingMemory(
         reason: normalizeWorkingMemoryText(recovery.reason),
         abandonedRounds: [...(recovery.abandoned_rounds ?? [])],
         failedRounds: [...recovery.failed_rounds],
-        observedSkippedFiles: boundedRecoveryItems(
-          recovery.observed_skipped_files ?? recovery.skipped_files ?? []),
-        reportedSkippedFiles: boundedRecoveryItems(
-          recovery.reported_skipped_files ?? []),
-        approaches: boundedRecoveryItems(recovery.approaches),
-        wrongAssumptions: boundedRecoveryItems(recovery.wrong_assumptions),
-        preservedDiscoveries: boundedRecoveryItems(recovery.skipped_discoveries),
+        observedSkippedFiles: observedFiles.items,
+        reportedSkippedFiles: reportedFiles.items,
+        approaches: approaches.items,
+        wrongAssumptions: assumptions.items,
+        preservedDiscoveries: discoveries.items,
+        detailSourceCounts: {
+          observedSkippedFiles: observedFiles.sourceCount,
+          reportedSkippedFiles: reportedFiles.sourceCount,
+          approaches: approaches.sourceCount,
+          wrongAssumptions: assumptions.sourceCount,
+          preservedDiscoveries: discoveries.sourceCount,
+        },
       };
     });
 
@@ -535,6 +563,23 @@ function renderDecisionItem(item: DecisionBlockItem): string[] {
   return item.lines;
 }
 
+function recoveryDetailOmissions(recovery: RecoveryMemory): string[] {
+  const labels: Array<[keyof RecoveryDetailCounts, string]> = [
+    ["observedSkippedFiles", "observed files"],
+    ["reportedSkippedFiles", "reported files"],
+    ["approaches", "approaches"],
+    ["wrongAssumptions", "wrong assumptions"],
+    ["preservedDiscoveries", "preserved discoveries"],
+  ];
+  return labels.flatMap(([key, label]) => {
+    const source = recovery.detailSourceCounts[key];
+    const rendered = recovery[key].length;
+    return source > rendered
+      ? [`${label} ${rendered}/${source} (omitted ${source - rendered})`]
+      : [];
+  });
+}
+
 function renderRecoveryDecision(recovery: RecoveryMemory): DecisionBlockItem {
   const rounds = recovery.origin === "agent"
     ? recovery.abandonedRounds
@@ -550,6 +595,10 @@ function renderRecoveryDecision(recovery: RecoveryMemory): DecisionBlockItem {
     `- R${recovery.round} recovery → redo R${recovery.redoRound} ` +
     `(${recovery.origin}${roundsText})`,
   ];
+  const omissions = recoveryDetailOmissions(recovery);
+  if (omissions.length > 0) {
+    lines.push(`  Recovery details abbreviated: ${omissions.join(", ")}`);
+  }
   if (recovery.reason) lines.push(...quote(`reason: ${recovery.reason}`, "  "));
   if (recovery.observedSkippedFiles.length > 0) {
     lines.push(...quote(
@@ -728,7 +777,10 @@ function formatWorkingMemory(
       truncateWorkingMemoryText(value, WORKING_MEMORY_TEXT_LIMITS.recoveryApproach));
     const wrongAssumptions = recovery.wrongAssumptions.map((value) =>
       truncateWorkingMemoryText(value, WORKING_MEMORY_TEXT_LIMITS.recoveryAssumption));
-    anyTruncated ||= reason.truncated ||
+    const rounds = recovery.origin === "agent"
+      ? recovery.abandonedRounds : recovery.failedRounds;
+    anyTruncated ||= recoveryDetailOmissions(recovery).length > 0 ||
+      rounds.length > WORKING_MEMORY_FAILED_ROUNDS_DISPLAY || reason.truncated ||
       approaches.some((item) => item.truncated) ||
       wrongAssumptions.some((item) => item.truncated);
     decisions.push(renderRecoveryDecision({
@@ -747,7 +799,7 @@ function formatWorkingMemory(
 
   let text = buildText(previous, earlier, questions, decisions, assumptions);
   const totalChars = profile.totalChars;
-  const noticeSuffix = surface === "prompt" && anyTruncated
+  const noticeSuffix = surface === "prompt"
     ? `\n\n${WORKING_MEMORY_ABBREVIATED_NOTICE}`
     : "";
   const size = () => text.length + (anyTruncated ? noticeSuffix.length : 0);
@@ -827,7 +879,7 @@ function formatWorkingMemory(
         }
       }
     }
-    text = `${text}\n\n> Abbreviated${parts.length > 0 ? `: ${parts.join(", ")}` : " (text truncated)"}`;
+    text = `${text}\n\n> Abbreviated${parts.length > 0 ? `: ${parts.join(", ")}` : " (item details truncated)"}`;
   }
   return {
     text,

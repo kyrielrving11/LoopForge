@@ -83,13 +83,13 @@ describe("committed history reader", () => {
       .round_transaction as Record<string, unknown>;
     const snapshot = transaction.snapshot as Record<string, unknown>;
     snapshot.promptArtifact = {
-      schemaVersion: 10,
+      schemaVersion: 11,
       roundId: "loop:hist:round:1",
       round: 1,
       attempt: 2,
       level: "l2",
       contextMode: "same_round_retry",
-      contextReason: "enforcement_retry",
+      contextReason: "rejection_escalation",
       renderedPrompt: "retry",
       promptHash: "hash-1",
       stateHash: "state-1",
@@ -104,7 +104,7 @@ describe("committed history reader", () => {
     const history = buildCommittedHistory([invalid]);
     assert.equal(history.rounds.some((view) => view.round === 1), false);
     assert.deepEqual(history.legacyRounds, [
-      { round: 1, schemaVersion: 10, envelope: "prompt_context" },
+      { round: 1, schemaVersion: 11, envelope: "prompt_context" },
     ]);
   });
 

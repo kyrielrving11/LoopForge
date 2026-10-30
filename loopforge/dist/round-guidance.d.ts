@@ -32,8 +32,8 @@ export declare function renderRoundGuidance(density: GuidanceDensity, contextMod
  *  the enum values; every human surface uses this ONE mapping.
  *
  *  `recoveryBoundary` means a committed rollback directive governs this
- *  compile. When a retried redo has `contextReason === "enforcement_retry"`,
- *  the label must keep the recovery-lesson fact instead of dropping it. */
+ *  compile. A repeated rejection can escalate a retried redo; the label must
+ *  keep the recovery-lesson fact instead of dropping it. */
 export declare function formatContextBoundaryLabel(mode: PromptContextMode, reason: PromptContextReason, options?: {
     recoveryBoundary?: boolean;
 }): string;

@@ -570,16 +570,20 @@ export function assemblePromptArtifact(input) {
         ? [
             "- Clean context: this prompt starts a new Agent invocation. The",
             "  previous transcript, tool logs and uncommitted reasoning are not part",
-            "  of this prompt. It may still be the same logical round (an L2",
-            "  rehydrate retry); read the context label and attempt above.",
-            // v4.0.4: a clean-context RETRY is still clean-context repair: the
-            // failure lessons travel in the prompt even though the transcript does
-            // not. (L0 retries use the same_round_retry branch instead.)
-            ...(contextReason === "enforcement_retry"
+            "  of this prompt. It may still be the same logical round; read the",
+            "  context label and attempt above.",
+            // Retry facts describe the rejected attempt; the workspace may have
+            // changed since those observations, so the Agent checks it before acting.
+            ...(contextReason === "enforcement_retry" ||
+                contextReason === "rejection_escalation"
                 ? [
                     "- Clean-context repair: this retry carries the rejection notice,",
                     "  Verification Gate findings and the rejected attempt's transient",
-                    "  posture (explicitly not committed).",
+                    "  posture (explicitly not committed, not a current workspace snapshot).",
+                    ...(contextReason === "rejection_escalation"
+                        ? ["- Inspect the current workspace before acting; it continues " +
+                                "across this new invocation and may have changed since rejection."]
+                        : []),
                 ]
                 : []),
             ...(stateFilePath

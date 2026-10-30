@@ -567,7 +567,7 @@ export function compileLoop(request, context, options = {}, committedHistory) {
     const contextBoundary = derivePromptContextBoundary({
         round: request.round,
         attempt: request.attempt,
-        level: decision.level,
+        consecutiveRejections: request.consecutive_rejections,
         recoveryBoundary: previous.recoveryBoundary,
         hasPreviousCommittedRound: previous.view !== null,
     });

@@ -42,16 +42,16 @@ export const CONTEXT_CONTINUITY_RULES =
   "uncommitted reasoning do not; it exists to keep the round focused and " +
   "avoid an overloaded or misleading transcript. Start a new invocation, and " +
   "carry only the prompt, loopId, session and the committed facts, bounded " +
-  "Working Memory, Machine Evidence and failure lessons it contains. Every L2 " +
-  "prompt uses a clean context, whatever triggered it. Only the first L0 " +
-  "enforcement retry is in-context repair: continue the original invocation " +
-  "and inject the rejection notice, findings and failure reason; if it is " +
-  "gone, start a new invocation from the self-contained prompt but keep the " +
-  "same round and attempt. An L2 retry is clean-context repair: new " +
-  "invocation, but the retry notice, findings, transient rejected posture and " +
-  "committed memory are in the prompt. A retry inside a recovered redo is " +
-  "still clean context after restore (a recovery repair): its Recovery Brief " +
-  "remains even when contextReason is enforcement_retry. A held prompt, " +
+  "Working Memory, Machine Evidence and failure lessons it contains. Prompt " +
+  "density does not choose the context boundary. Below the repeated " +
+  "same-check rejection threshold, continue the original invocation and " +
+  "inject the rejection notice, findings and failure reason; if it is gone, " +
+  "start a new invocation from the self-contained prompt but keep the same " +
+  "round and attempt. At the rejection escalation threshold, start a clean " +
+  "invocation with the retry notice, findings, rejected-attempt posture and " +
+  "committed memory. That posture describes the rejected attempt, not the " +
+  "current workspace; inspect the current workspace before acting. A retry " +
+  "inside a recovered redo keeps its Recovery Brief. A held prompt, " +
   "checkpoint, restore, " +
   "status, resume or unpause never advances or resets the round. If the " +
   "loopId or prompt is lost, use loopforge_status view=all and " +
@@ -98,18 +98,23 @@ export function renderRoundGuidance(
  *  the enum values; every human surface uses this ONE mapping.
  *
  *  `recoveryBoundary` means a committed rollback directive governs this
- *  compile. When a retried redo has `contextReason === "enforcement_retry"`,
- *  the label must keep the recovery-lesson fact instead of dropping it. */
+ *  compile. A repeated rejection can escalate a retried redo; the label must
+ *  keep the recovery-lesson fact instead of dropping it. */
 export function formatContextBoundaryLabel(
   mode: PromptContextMode,
   reason: PromptContextReason,
   options: { recoveryBoundary?: boolean } = {},
 ): string {
   if (mode === "same_round_retry") {
-    // The guard permits only L0 enforcement retries; render the strategy
-    // honestly even if a future caller passes something else.
     return "in-context repair (same_round_retry; enforcement_retry; continue " +
       "original invocation if alive; lessons injected)";
+  }
+  if (reason === "rejection_escalation") {
+    return options.recoveryBoundary
+      ? "clean context repair + recovery retry (fresh_invocation; " +
+          "rejection_escalation; recovery lessons carried)"
+      : "clean context repair (fresh_invocation; rejection_escalation; same " +
+          "logical round; rejected posture is attempt-time only)";
   }
   if (reason === "enforcement_retry") {
     return options.recoveryBoundary

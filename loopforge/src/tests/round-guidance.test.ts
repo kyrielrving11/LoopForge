@@ -77,6 +77,10 @@ describe("v4.0.4 — runtime round guidance", () => {
       formatContextBoundaryLabel("fresh_invocation", "enforcement_retry", {
         recoveryBoundary: true,
       }),
+      formatContextBoundaryLabel("fresh_invocation", "rejection_escalation"),
+      formatContextBoundaryLabel("fresh_invocation", "rejection_escalation", {
+        recoveryBoundary: true,
+      }),
       formatContextBoundaryLabel("same_round_retry", "enforcement_retry"),
     ];
     assert.deepEqual(labels, [
@@ -85,6 +89,8 @@ describe("v4.0.4 — runtime round guidance", () => {
       "clean context after restore (fresh_invocation; recovery_redo; lessons carried)",
       "clean context repair (fresh_invocation; enforcement_retry; same logical round; lessons carried)",
       "clean context repair + recovery retry (fresh_invocation; enforcement_retry; recovery lessons carried)",
+      "clean context repair (fresh_invocation; rejection_escalation; same logical round; rejected posture is attempt-time only)",
+      "clean context repair + recovery retry (fresh_invocation; rejection_escalation; recovery lessons carried)",
       "in-context repair (same_round_retry; enforcement_retry; continue original invocation if alive; lessons injected)",
     ]);
     for (const label of labels) {
@@ -94,21 +100,17 @@ describe("v4.0.4 — runtime round guidance", () => {
 });
 
 describe("v4.0.4 — context pair legality is fail-closed", () => {
-  it("rejects L2 with same_round_retry", () => {
-    assert.ok(promptContextPairIssue({
+  it("allows same_round_retry at any prompt level", () => {
+    assert.equal(promptContextPairIssue({
       level: "l2",
       mode: "same_round_retry",
       reason: "enforcement_retry",
       attempt: 2,
       round: 3,
-    }));
+    }), null);
   });
 
-  it("same_round_retry is legal only at L0/attempt>1/enforcement_retry", () => {
-    assert.ok(promptContextPairIssue({
-      level: "l1", mode: "same_round_retry", reason: "enforcement_retry",
-      attempt: 2, round: 3,
-    }));
+  it("same_round_retry requires attempt>1 and enforcement_retry", () => {
     assert.ok(promptContextPairIssue({
       level: "l0", mode: "same_round_retry", reason: "enforcement_retry",
       attempt: 1, round: 3,
@@ -123,10 +125,21 @@ describe("v4.0.4 — context pair legality is fail-closed", () => {
     }), null);
   });
 
+  it("rejection escalation requires a retry attempt and starts clean", () => {
+    assert.ok(promptContextPairIssue({
+      level: "l2", mode: "fresh_invocation", reason: "rejection_escalation",
+      attempt: 1, round: 3,
+    }));
+    assert.equal(promptContextPairIssue({
+      level: "l0", mode: "fresh_invocation", reason: "rejection_escalation",
+      attempt: 3, round: 3,
+    }), null);
+  });
+
   it("fresh retry and first-round pairs require matching attempt/round", () => {
     assert.ok(promptContextPairIssue({
       level: "l2", mode: "fresh_invocation", reason: "enforcement_retry",
-      attempt: 1, round: 3,
+      attempt: 2, round: 3,
     }));
     assert.ok(promptContextPairIssue({
       level: "l2", mode: "fresh_invocation", reason: "first_round",

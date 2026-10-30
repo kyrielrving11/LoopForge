@@ -946,7 +946,8 @@ export function parseRoundTransactionSnapshot(
       artifact.contextReason === "first_round" ||
       artifact.contextReason === "next_round" ||
       artifact.contextReason === "recovery_redo" ||
-      artifact.contextReason === "enforcement_retry";
+      artifact.contextReason === "enforcement_retry" ||
+      artifact.contextReason === "rejection_escalation";
     if (
       artifact.schemaVersion !== PROMPT_ARTIFACT_SCHEMA_VERSION ||
       typeof artifact.roundId !== "string" ||
@@ -963,7 +964,7 @@ export function parseRoundTransactionSnapshot(
       !coverageValid
     ) return null;
     // v4.0.4: the SAME legality guard the assembler enforces. An illegal
-    // pair (for example L2 + same_round_retry) is not committed history.
+    // pair (for example a retry reason on attempt 1) is not committed history.
     if (promptContextPairIssue({
       level: artifact.level as "l0" | "l1" | "l2",
       mode: artifact.contextMode as PromptContextMode,

@@ -994,22 +994,24 @@ export interface PromptCoverage {
  *  committed/derived facts it carries; the previous transcript, tool logs and
  *  uncommitted reasoning are NOT part of it. A clean context is not a new
  *  loop and not a workspace reset: the loopId and the current modified
- *  workspace continue. It may describe the SAME logical round (an L2
- *  enforcement retry, or the library-level L1 defensive branch) or the next
- *  logical round after the last commit. Read `contextReason` and `attempt`
+ *  workspace continue. It may describe the SAME logical round (a rejection
+ *  escalation or recovered retry) or the next logical round after the last
+ *  commit. Read `contextReason` and `attempt`
  *  together; a fresh invocation alone does not mean a new round.
  *
- *  `same_round_retry` means IN-CONTEXT REPAIR: the first L0 enforcement retry
- *  of the same logical round. The host continues the original invocation when
- *  it is still alive and injects the rejection notice and Verification Gate
- *  findings; if that invocation is gone it starts a new one from the
- *  self-contained prompt, but the round/attempt semantics do not change. It is
- *  never used for L1/L2 (L2 always uses a clean context).
+ *  `same_round_retry` means IN-CONTEXT REPAIR: a retry below the repeated
+ *  rejection escalation threshold. Prompt density is independent: an L0/L1/L2
+ *  prompt can continue the original invocation when it is still alive. The
+ *  host injects the rejection notice and Verification Gate findings; if the
+ *  invocation is gone it starts a new one from the self-contained prompt,
+ *  without changing round/attempt semantics.
  *
- *  Every L2 prompt is `fresh_invocation`, whatever triggered it (first round,
- *  plan/subtask boundary, goal change, missing state, verification
- *  contradiction, recovery, repeated rejection, forced L2). Only the first
- *  L0 enforcement retry keeps the original context.
+ *  `rejection_escalation` means the same enforcement check has been rejected
+ *  repeatedly. The host starts a new invocation to break a potentially
+ *  unproductive reasoning trajectory, while the same logical round and
+ *  modified workspace continue. The rejected posture is an observation of
+ *  that attempt, not a snapshot of the current workspace; inspect the current
+ *  workspace before acting.
  *
  *  The value is DERIVED by the compiler from compile inputs and committed
  *  facts. It is never submitted by the Agent and never re-derived by the MCP
@@ -1019,14 +1021,14 @@ export type PromptContextMode = "fresh_invocation" | "same_round_retry";
 /** Why the compiler selected the context boundary. It explains the selection;
  *  it does not replace the contextStrategy label (`clean context`,
  *  `in-context repair`, `clean context after restore`, `clean context
- *  repair`). A recovered redo that is itself retried keeps `enforcement_retry`
- *  here (attempt > 1 wins the fixed priority) while the prompt still renders
- *  the Recovery Brief. */
+ *  repair`). Repeated same-check rejection escalation has its own reason,
+ *  including when the current round is a recovered redo with a Recovery Brief. */
 export type PromptContextReason =
   | "first_round"
   | "next_round"
   | "recovery_redo"
-  | "enforcement_retry";
+  | "enforcement_retry"
+  | "rejection_escalation";
 
 /** v4.0.3: how many committed items existed BEFORE any cap/dedupe. It is
  *  derived once by Working Memory and travels through canonical state (and
@@ -1097,7 +1099,7 @@ export interface PromptWorkingMemoryProjection {
  *  `fresh_invocation`. Older versions are a HARD break — a round whose
  *  artifact does not parse is not committed history, and
  *  `legacyTransactionRounds` reports the loss rather than letting it vanish. */
-export const PROMPT_ARTIFACT_SCHEMA_VERSION = 10 as const;
+export const PROMPT_ARTIFACT_SCHEMA_VERSION = 11 as const;
 
 export interface PromptArtifact {
   schemaVersion: typeof PROMPT_ARTIFACT_SCHEMA_VERSION;

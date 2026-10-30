@@ -2448,7 +2448,8 @@
         "first_round",
         "next_round",
         "recovery_redo",
-        "enforcement_retry"
+        "enforcement_retry",
+        "rejection_escalation"
       ]
     },
     "WorkingMemorySourceCounts": {
@@ -2612,7 +2613,7 @@
       "properties": {
         "schemaVersion": {
           "type": "number",
-          "const": 10
+          "const": 11
         },
         "roundId": {
           "type": "string"

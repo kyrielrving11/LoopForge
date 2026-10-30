@@ -151,7 +151,7 @@ export function makeLoopCompileRequest(overrides = {}) {
  *  `fresh_invocation`. Older versions are a HARD break — a round whose
  *  artifact does not parse is not committed history, and
  *  `legacyTransactionRounds` reports the loss rather than letting it vanish. */
-export const PROMPT_ARTIFACT_SCHEMA_VERSION = 10;
+export const PROMPT_ARTIFACT_SCHEMA_VERSION = 11;
 export function makeLoopCompileResponse(overrides = {}) {
     return {
         status: AgentStatus.OK,

@@ -22,17 +22,30 @@ function compile(
   }), context);
 }
 
-describe("derivePromptContextBoundary — fixed priority", () => {
-  it("attempt > 1 is an enforcement retry, even inside a recovery redo", () => {
+describe("derivePromptContextBoundary — explicit context policy", () => {
+  it("a retry below the rejection escalation threshold stays in context", () => {
     assert.deepEqual(
       derivePromptContextBoundary({
         round: 3,
         attempt: 2,
-        level: "l0",
+        consecutiveRejections: 1,
         recoveryBoundary: true,
         hasPreviousCommittedRound: true,
       }),
       { mode: "same_round_retry", reason: "enforcement_retry" },
+    );
+  });
+
+  it("repeated same-check rejection starts clean context regardless of prompt level", () => {
+    assert.deepEqual(
+      derivePromptContextBoundary({
+        round: 3,
+        attempt: 3,
+        consecutiveRejections: 2,
+        recoveryBoundary: false,
+        hasPreviousCommittedRound: true,
+      }),
+      { mode: "fresh_invocation", reason: "rejection_escalation" },
     );
   });
 
@@ -41,7 +54,7 @@ describe("derivePromptContextBoundary — fixed priority", () => {
       derivePromptContextBoundary({
         round: 3,
         attempt: 1,
-        level: "l2",
+        consecutiveRejections: 0,
         recoveryBoundary: true,
         hasPreviousCommittedRound: true,
       }),
@@ -54,7 +67,7 @@ describe("derivePromptContextBoundary — fixed priority", () => {
       derivePromptContextBoundary({
         round: 1,
         attempt: 1,
-        level: "l2",
+        consecutiveRejections: 0,
         recoveryBoundary: false,
         hasPreviousCommittedRound: false,
       }),
@@ -67,7 +80,7 @@ describe("derivePromptContextBoundary — fixed priority", () => {
       derivePromptContextBoundary({
         round: 4,
         attempt: 1,
-        level: "l1",
+        consecutiveRejections: 0,
         recoveryBoundary: false,
         hasPreviousCommittedRound: true,
       }),
@@ -132,7 +145,7 @@ describe("compileLoop — context boundary is an artifact fact", () => {
     assert.deepEqual(memory?.reportRounds, [1]);
   });
 
-  it("a recovery redo retry at L2 starts a fresh invocation", () => {
+  it("a recovery redo retry below the escalation threshold stays in context", () => {
     const loopId = "context-loop";
     const response = compile({
       results: [
@@ -141,17 +154,14 @@ describe("compileLoop — context boundary is an artifact fact", () => {
       ],
     }, { round: 2, attempt: 2, rejection_notice: "fix the finding" });
     assert.equal(response.recompile_level, "l2");
-    assert.equal(response.prompt_artifact?.contextMode, "fresh_invocation");
+    assert.equal(response.prompt_artifact?.contextMode, "same_round_retry");
     assert.equal(response.prompt_artifact?.contextReason, "enforcement_retry");
-    assert.ok(response.prompt.includes("Working Memory (Agent reports are claims"));
-    // The reason field becomes enforcement_retry, but the strategy label and
-    // the Recovery Brief must keep the recovery semantics.
-    assert.match(response.prompt,
-      /Context: clean context repair \+ recovery retry \(fresh_invocation; enforcement_retry; recovery lessons carried\)/);
+    assert.ok(!response.prompt.includes("Working Memory (Agent reports are claims"));
+    assert.match(response.prompt, /Context: in-context repair/);
     assert.match(response.prompt, /Recovery Brief/);
   });
 
-  it("an L2 enforcement retry re-renders committed memory for a fresh invocation", () => {
+  it("rejection escalation starts a fresh invocation and re-renders committed memory", () => {
     const loopId = "context-loop";
     const response = compile({
       results: [committedFeedbackRound(1, {
@@ -166,13 +176,17 @@ describe("compileLoop — context boundary is an artifact fact", () => {
     });
     assert.equal(response.recompile_level, "l2");
     assert.equal(response.prompt_artifact?.contextMode, "fresh_invocation");
-    assert.equal(response.prompt_artifact?.contextReason, "enforcement_retry");
+    assert.equal(response.prompt_artifact?.contextReason, "rejection_escalation");
     assert.match(response.prompt, /COMMITTED_REPORT_TEXT/);
+    assert.match(response.prompt, /not a current workspace snapshot/);
+    assert.match(response.prompt, /Inspect the current workspace before acting/);
     assert.deepEqual(response.prompt_artifact?.workingMemory?.reportRounds, [1]);
+    assert.equal(response.prompt_artifact?.round, 2);
+    assert.equal(response.prompt_artifact?.attempt, 2);
   });
 });
 
-describe("v4.0.4 — every L2 trigger is a clean context", () => {
+describe("prompt level does not choose context boundary", () => {
   const loopId = "l2-clean";
   const cases: Array<[string, () => ReturnType<typeof compile>]> = [
     ["first round", () => compile(null)],
@@ -212,14 +226,6 @@ describe("v4.0.4 — every L2 trigger is a clean context", () => {
         },
       })],
     }, { round: 2 })],
-    ["repeated rejection", () => compile({
-      results: [committedFeedbackRound(1, { loopId })],
-    }, {
-      round: 2,
-      attempt: 2,
-      consecutive_rejections: 2,
-      rejection_notice: "rebuild from committed facts",
-    })],
     ["recovery redo", () => compile({
       results: [
         committedFeedbackRound(1, { loopId }),
@@ -233,9 +239,7 @@ describe("v4.0.4 — every L2 trigger is a clean context", () => {
       const response = run();
       assert.equal(response.recompile_level, "l2", `${name} must select L2`);
       assert.equal(response.prompt_artifact?.contextMode, "fresh_invocation",
-        `${name} must use clean context`);
-      // Repeated rejection legitimately reports reason=enforcement_retry, but
-      // the context strategy is still clean (fresh_invocation).
+        `${name} is a new-round boundary and must use clean context`);
     });
   }
 });
@@ -265,8 +269,8 @@ describe("v4.0.4 — contradiction and retry are opposite strategies", () => {
   });
 });
 
-describe("v4.0.4 — the decoder enforces the same context pairs", () => {
-  it("rejects a committed artifact with L2 + same_round_retry", async () => {
+describe("the decoder enforces the same context pairs", () => {
+  it("accepts L2 with same_round_retry because density and context are independent", async () => {
     const { parseRoundTransactionSnapshot } = await import("../round-transaction.js");
     const { promptArtifact } = await import("./_helpers.js");
     const entry = committedFeedbackRound(1, {
@@ -286,7 +290,7 @@ describe("v4.0.4 — the decoder enforces the same context pairs", () => {
     });
     const snapshot = (entry.loop_lineage as Record<string, unknown>)
       .round_transaction as Record<string, unknown>;
-    assert.equal(parseRoundTransactionSnapshot(snapshot.snapshot), null,
-      "an illegal context pair is not committed history");
+    assert.ok(parseRoundTransactionSnapshot(snapshot.snapshot),
+      "a legal L2 in-context retry remains readable committed history");
   });
 });

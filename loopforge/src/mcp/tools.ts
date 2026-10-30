@@ -738,14 +738,14 @@ const ADVANCE_OUTPUT_SCHEMA: JsonSchema = {
     contextMode: {
       enum: ["fresh_invocation", "same_round_retry"],
       description:
-        "v4.0.4: the context boundary the returned prompt was compiled under. " +
-        "fresh_invocation is clean context (a new Agent invocation; it may be " +
-        "the same logical round on an L2 retry); same_round_retry is " +
-        "in-context repair for the first L0 enforcement retry. Projected from " +
-        "the PromptArtifact.",
+        "The context boundary the returned prompt was compiled under. " +
+        "Prompt density does not determine it: same_round_retry continues the " +
+        "invocation below the repeated same-check rejection threshold; " +
+        "fresh_invocation starts clean context at rejection escalation. " +
+        "Projected from the PromptArtifact.",
     },
     contextReason: {
-      enum: ["first_round", "next_round", "recovery_redo", "enforcement_retry"],
+      enum: ["first_round", "next_round", "recovery_redo", "enforcement_retry", "rejection_escalation"],
       description: "v4.0.2: why the context boundary was selected.",
     },
     agentSuccessClaim: { type: ["boolean", "null"] },

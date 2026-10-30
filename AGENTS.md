@@ -118,19 +118,23 @@ The projection is part of `CanonicalLoopState`; it is not a second history, is
 never persisted as its own store, and never feeds a gate, success, contract
 closure or machine evidence. Full rehydrated state, unbounded round history,
 failed-pattern history and LoopForge-generated phase narratives do not render.
-An L0 same-round retry renders no Working Memory and no Machine Evidence; an L2
-rehydrate retry is a clean-context `fresh_invocation` and may render the previous
-committed posture plus the rejected attempt's transient, clearly `not
-committed` posture. The state file is derived and is never the source of truth.
+An in-context retry renders no Working Memory and no Machine Evidence. A clean
+retry may render the previous committed posture plus the rejected attempt's
+transient, clearly `not committed` posture; this posture describes that attempt,
+not the current workspace. The state file is derived and is never the source of
+truth.
 The current user instruction defines the task.
 
 Every prompt carries a derived context boundary in its artifact and a strategy
-label in its header. `fresh_invocation` is clean context: a new Agent
-invocation, never a workspace reset, used for the first/next round, recovery
-redo, and every L2 (rehydration or retry) — it may describe the same logical
-round. `same_round_retry` is in-context repair for the first L0 enforcement
-retry only. The one prose source is `src/round-guidance.ts`; the skill keeps
-definitions and a pointer, never a second copy of the executable rules.
+label in its header. Prompt density and context boundary are independent.
+`fresh_invocation` is a new Agent invocation, never a workspace reset; it is
+used for round boundaries, recovery redo, or repeated same-check rejection
+escalation, and may describe the same logical round. `same_round_retry` keeps
+the current invocation below that escalation threshold, regardless of prompt
+density. A rejected posture is attempt-time evidence; the Agent checks the
+current workspace before acting. The one prose source is
+`src/round-guidance.ts`; the skill keeps definitions and a pointer, never a
+second copy of the executable rules.
 
 ### 8. `submission-guidance.ts` is the single source of field meaning
 

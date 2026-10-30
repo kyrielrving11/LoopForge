@@ -762,7 +762,8 @@ export function parseRoundTransactionSnapshot(value) {
         const contextReasonValid = artifact.contextReason === "first_round" ||
             artifact.contextReason === "next_round" ||
             artifact.contextReason === "recovery_redo" ||
-            artifact.contextReason === "enforcement_retry";
+            artifact.contextReason === "enforcement_retry" ||
+            artifact.contextReason === "rejection_escalation";
         if (artifact.schemaVersion !== PROMPT_ARTIFACT_SCHEMA_VERSION ||
             typeof artifact.roundId !== "string" ||
             // v4.0.3: the artifact identity is part of the transaction identity.
@@ -778,7 +779,7 @@ export function parseRoundTransactionSnapshot(value) {
             !coverageValid)
             return null;
         // v4.0.4: the SAME legality guard the assembler enforces. An illegal
-        // pair (for example L2 + same_round_retry) is not committed history.
+        // pair (for example a retry reason on attempt 1) is not committed history.
         if (promptContextPairIssue({
             level: artifact.level,
             mode: artifact.contextMode,

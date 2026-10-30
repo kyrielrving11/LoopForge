@@ -178,7 +178,7 @@ export function promptArtifact(input: {
   attempt?: number;
   warnings?: string[];
   contextMode?: "fresh_invocation" | "same_round_retry";
-  contextReason?: "first_round" | "next_round" | "recovery_redo" | "enforcement_retry";
+  contextReason?: "first_round" | "next_round" | "recovery_redo" | "enforcement_retry" | "rejection_escalation";
 }): PromptArtifact {
   return {
     schemaVersion: PROMPT_ARTIFACT_SCHEMA_VERSION,

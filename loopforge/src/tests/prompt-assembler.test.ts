@@ -792,13 +792,13 @@ describe("v4.0.4 — round guidance in the fixed footer", () => {
       renderRoundGuidance("prompt", "same_round_retry")));
   });
 
-  it("fails closed on an illegal context pair instead of correcting it", () => {
-    assert.throws(() => assemblePromptArtifact(input({
+  it("allows L2 density with an in-context retry boundary", () => {
+    assert.doesNotThrow(() => assemblePromptArtifact(input({
       level: "l2",
       attempt: 2,
       contextMode: "same_round_retry",
       contextReason: "enforcement_retry",
-    })), /Illegal prompt context boundary/);
+    })));
   });
 
   it("charges the guidance against the default budget without protected overflow", () => {

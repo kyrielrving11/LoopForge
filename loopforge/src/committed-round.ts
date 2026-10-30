@@ -612,7 +612,8 @@ export function legacyTransactionRounds(entries: unknown[]): LegacyRound[] {
         (artifact.contextReason === "first_round" ||
           artifact.contextReason === "next_round" ||
           artifact.contextReason === "recovery_redo" ||
-          artifact.contextReason === "enforcement_retry") &&
+          artifact.contextReason === "enforcement_retry" ||
+          artifact.contextReason === "rejection_escalation") &&
         typeof artifact.attempt === "number" &&
         typeof artifact.round === "number";
       const contextIssue = validContextFields

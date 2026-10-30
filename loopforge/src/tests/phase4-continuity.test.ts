@@ -148,7 +148,7 @@ describe("v4.0.3 — RetryContext survives resume", () => {
     );
   });
 
-  it("a fresh L2 retry renders the transient, not-committed posture", async () => {
+  it("rejection escalation starts clean context and labels posture as attempt-time", async () => {
     resetPolicy();
     installTestCommandProvider();
     const store = new MemoryLoopStore();
@@ -172,8 +172,11 @@ describe("v4.0.3 — RetryContext survives resume", () => {
     assert.equal(second.enforcementAction, "reject");
     assert.equal(second.level, "l2");
     assert.equal(second.contextMode, "fresh_invocation");
+    assert.equal(second.contextReason, "rejection_escalation");
     assert.match(second.prompt ?? "", /Machine Evidence — rejected attempt \(not committed\)/);
     assert.match(second.prompt ?? "", /not committed history/);
+    assert.match(second.prompt ?? "", /not a current workspace snapshot/);
+    assert.match(second.prompt ?? "", /Inspect the current workspace before acting/);
     assert.equal(
       store.listEntries("retry-l2")
         .filter((entry) => entry.task_type === "feedback").length,

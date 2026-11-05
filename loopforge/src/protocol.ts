@@ -63,8 +63,11 @@ export interface SelfEvaluation {
    *  Feeds: deriveRecurringFlags (the constraint_violation kind) and
    *  computeConstraintRetirement. */
   constraint_violations: string[];
-  /** false ONLY when the entire task is complete. Tells the autonomous
-   *  runner to stop the loop. Not consumed by the compiler. */
+  /** The Agent's logical round-boundary decision: false stops the loop after
+   *  this accepted round; true asks the runner to prepare a successor round.
+   *  A Round Contract scopes that successor's work and acceptance conditions,
+   *  but does not decide whether this round ends. `maxRounds` remains the
+   *  runner's hard stop. */
   should_continue: boolean;
   /** P0: New constraints discovered during this round that were not
    *  known before. Merged into the active constraint set by the compiler.
@@ -154,8 +157,9 @@ export interface SelfEvaluation {
    *  modifier to replace an active contract that is no longer the right
    *  slice. Becomes the ACTIVE contract only once this round commits; it is
    *  then derived at compile time from committed rounds — see
-   *  round-contract.ts. With contract capability, a continuing round must
-   *  leave an active contract for the next round. */
+   *  round-contract.ts. With contract capability, a continuing round that has
+   *  a successor available must leave an active contract for the next round;
+   *  the final configured round has no successor consumer. */
   round_contract?: RoundContractProposal;
 }
 
@@ -562,12 +566,18 @@ export interface SubmissionGuidance {
    *  projection of current facts through `deriveContractRequirement`; it is
    *  not a new fact and owns no state. */
   contract_requirement: {
-    /** If you continue, the next round must have an active contract. */
+    /** If you continue and LoopForge permits a successor round, that round
+     *  must have an active contract when verification capability exists. */
     required_on_continue: boolean;
     /** The active contract is still open: closing it this round AND
      *  continuing requires a successor proposal. */
     successor_required_if_closed: boolean;
-    reason: "no_active_contract" | "active_contract_continues" | "no_contract_capability";
+    reason:
+      | "no_active_contract"
+      | "active_contract_continues"
+      | "active_contract_closed"
+      | "no_contract_capability"
+      | "no_successor_round";
     active_contract_id: string | null;
   };
   subgoals: Array<{ id: string; description: string; status: string }>;
@@ -1551,13 +1561,18 @@ export interface ContractItemProposal {
  *  - the proposal: this object, for the NEXT round;
  *  - the ACTIVE contract: the proposal once its declaring round commits,
  *    governing the round that follows;
- *  - `work_item`: the bounded deliverable that becomes the prompt's
- *    `Current Task` while the contract is active.
+ *  - `work_item`: the bounded deliverable for the slice governed by the
+ *    active contract. It becomes the prompt's `Current Task` only when
+ *    contract verification is available and the invocation has no explicit
+ *    `currentUserInstruction`; otherwise the contract remains a separate
+ *    committed fact and Current Task follows the invocation instruction or
+ *    working objective.
  *  The proposal is never the contract of the round that declared it. */
 export interface RoundContractProposal {
   /** The bounded deliverable this slice produces. Required for NEW
    *  declarations, optional when reading legacy committed history. This is
-   *  the text the next prompt renders as `Current Task` once active. */
+   *  the text the next prompt uses as `Current Task` when contract verification
+   *  is available and no explicit invocation instruction overrides it. */
   work_item?: string;
   /** v3.9.9/v4.0.6: the Agent's declared intended file boundary — an
    *  optional, report-only intent statement. Omission and `[]` both mean "no

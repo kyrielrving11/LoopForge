@@ -147,9 +147,16 @@ reconfigured later does not rewrite that historical observation; only command
 observations are test facts, never an Agent-reported test count. LoopForge does
 not judge whether the deliverable or its tests are semantically appropriate.
 
-With an after-capable command configured, a continuing round must leave an
-ACTIVE contract for the next round: omit `round_contract` to continue the
-current contract, or declare the next slice. A different proposal while the
+With an after-capable command configured, a continuing round that has a
+successor available must leave an ACTIVE contract for the next round: omit
+`round_contract` to continue the current contract, or declare the next slice.
+The Agent decides whether the current logical round ends through
+`should_continue`; a contract scopes the successor round's bounded work and
+acceptance conditions. It does not decide the round boundary. `maxRounds` is
+LoopForge's hard stop.
+The final configured round has no successor consumer, so it may omit the
+proposal even when the Agent reports `should_continue=true`; LoopForge then
+stops at the configured round limit. A different proposal while the
 contract is open is rejected as `contract_premature` unless it carries
 `round_contract.supersedes` targeting the exact active `rc-*` id; a successor
 for a closed contract must change the acceptance items or it is rejected as

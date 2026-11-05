@@ -366,6 +366,7 @@ function contractShapeErrors(store, session, submission, criteria) {
         activeContract: active,
         closure: "open",
         contractCapability: deriveConfiguredCapability(getPolicy()).contractVerificationAvailable,
+        successorRoundAvailable: session.maxRounds === undefined || session.currentRound < session.maxRounds,
     });
     if (requirement.required) {
         errors.push({
@@ -391,6 +392,15 @@ function contractShapeErrors(store, session, submission, criteria) {
                     "unused contract"
                 : "round_contract cannot be submitted with outcome=blocked — a blocked " +
                     "round closes the contract and must not leave an unused successor",
+        });
+    }
+    if (proposalPresent && shouldContinue && !blocked &&
+        session.maxRounds !== undefined && session.currentRound >= session.maxRounds) {
+        errors.push({
+            field: "round_contract",
+            reason: "contract_on_stop",
+            detail: "This is the final configured round and has no successor consumer; " +
+                "remove round_contract and resubmit the same submissionHandle.",
         });
     }
     return errors;

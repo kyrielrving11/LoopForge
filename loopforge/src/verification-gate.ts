@@ -124,9 +124,9 @@ export const CHECK_ROUND_SCOPE_DRIFT = "round_scope_drift";
  *  Error: a different slice is never silently saved and ignored. To replace
  *  the active slice, add `round_contract.supersedes` naming it. */
 export const CHECK_CONTRACT_PREMATURE = "contract_premature";
-/** v4.0.6: A continuing round with contract capability would leave the next
- *  round without an active contract. Error: with after-capable commands, a
- *  continuing round must leave a contract for the next round. */
+/** v4.0.6: A continuing round with contract capability and a successor
+ *  available would leave the next round without an active contract. The final
+ *  configured round has no successor consumer and is exempt. */
 export const CHECK_CONTRACT_REQUIRED = "contract_required";
 /** v4.0.6: A successor proposal repeats the closed contract's ACCEPTANCE ITEMS
  *  verbatim (only work_item/scope changed). Error: a successor must bring
@@ -885,6 +885,7 @@ function checkContractRequired(
   statuses: ContractItemStatusView,
   selfEval: SelfEvaluation,
   contractCapability: boolean,
+  successorRoundAvailable: boolean,
 ): VerificationFlag | null {
   const requirement = deriveContractRequirement({
     shouldContinue: selfEval.should_continue === true,
@@ -893,6 +894,7 @@ function checkContractRequired(
     activeContract,
     closure: statuses.closure,
     contractCapability,
+    successorRoundAvailable,
   });
   if (!requirement.required) return null;
   return makeVerificationFlag({
@@ -1034,6 +1036,7 @@ export function verifySelfEvaluation(
    *  for direct library callers and unit tests; it calls the same derivation
    *  function, so there is still exactly one rule. */
   facts?: RoundFacts,
+  maxRounds: number = Number.POSITIVE_INFINITY,
 ): VerificationResult {
   const flags: VerificationFlag[] = [];
   const filesReportedForGate =
@@ -1118,6 +1121,7 @@ export function verifySelfEvaluation(
       contractStatuses,
       selfEval,
       deriveConfiguredCapability(getPolicy()).contractVerificationAvailable,
+      currentRound < maxRounds,
     ),
     () => checkContractSuccessorUnchanged(
       activeContract, contractStatuses, selfEval),

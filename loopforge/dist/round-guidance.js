@@ -8,14 +8,14 @@
  *
  *  This module is pure: no I/O, no policy, no time, no randomness.
  */
-export const ROUND_BOUNDARY_PRINCIPLE = "A round is one coherent work slice with one before/after evidence " +
-    "boundary, not a file/token/commit count.";
-export const ROUND_BOUNDARY_SIZING = "Keep tightly coupled work together; split when uncertainty or rollback " +
-    "risk makes it unsafe to verify.";
-export const ROUND_BOUNDARY_SUBMISSION = "Submit at a completion, decision point or blocker; only acceptance " +
-    "commits the round, a rejection keeps it (+1 attempt).";
-export const ROUND_BOUNDARY_NON_BOUNDARIES = "Time, a new invocation/session/stage, a re-delivered prompt, checkpoint, " +
-    "restore, status, resume or unpause is not a boundary.";
+export const ROUND_BOUNDARY_PRINCIPLE = "One round is a work slice with before/after evidence, not file/token/commit " +
+    "count.";
+export const ROUND_BOUNDARY_SIZING = "Keep coupled work together; split when unsafe to verify.";
+export const ROUND_BOUNDARY_SUBMISSION = "Agent chooses continuation via should_continue. A Round Contract scopes " +
+    "bounded NEXT-round work and acceptance, not this round's end. Acceptance " +
+    "commits; rejection retries the round (+1); maxRounds stops.";
+export const ROUND_BOUNDARY_NON_BOUNDARIES = "Time, invocation/session/stage changes, redelivery, checkpoints, restores, " +
+    "status, resume and unpause do not end rounds.";
 /** v4.0.5: the ONE routing sentence for a lost in-context retry invocation.
  *  The prompt footer and the short retry guidance read it. LoopForge — not
  *  the Agent — recompiles the same round/attempt in clean context. */

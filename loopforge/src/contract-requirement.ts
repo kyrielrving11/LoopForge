@@ -24,6 +24,7 @@ import type { ActiveContractView } from "./round-contract.js";
 export type ContractRequirementReason =
   | "not_continuing"
   | "blocked"
+  | "no_successor_round"
   | "no_contract_capability"
   | "no_active_contract"
   | "active_contract_continues"
@@ -51,6 +52,9 @@ export interface ContractRequirementInput {
   /** At least one enabled, after-capable evidence command exists. Without it
    *  no contract can ever be machine-verified, so no contract is required. */
   contractCapability: boolean;
+  /** Whether the state machine permits another round after this submission.
+   *  A terminal max-round boundary has no consumer for a proposal. */
+  successorRoundAvailable?: boolean;
 }
 
 export function deriveContractRequirement(
@@ -65,6 +69,9 @@ export function deriveContractRequirement(
   }
   if (!input.contractCapability) {
     return { required: false, reason: "no_contract_capability", activeContractId };
+  }
+  if (input.successorRoundAvailable === false) {
+    return { required: false, reason: "no_successor_round", activeContractId };
   }
   if (!input.activeContract) {
     return input.proposalPresent

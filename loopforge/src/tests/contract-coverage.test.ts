@@ -1,7 +1,7 @@
 /** v4.0.6 — contract coverage through the real submission path.
  *
- *  With an after-capable command, a continuing round must leave an ACTIVE
- *  contract for the next round. These tests drive SessionManager directly
+ *  With an after-capable command, a continuing round with a successor
+ *  available must leave an ACTIVE contract for the next round. These tests drive SessionManager directly
  *  (not the fixture wrappers) so the boundary and the post-evidence gate are
  *  the production rule, and every refusal is asserted to have zero side
  *  effects.
@@ -272,6 +272,30 @@ describe("v4.0.6 — contract coverage", () => {
     assert.ok((blocked.submissionError?.details as {
       contract_errors?: Array<{ reason: string }>;
     }).contract_errors?.some((error) => error.reason === "contract_on_stop"));
+  });
+
+  it("the final configured round rejects an unused successor, then stops without requiring one", async () => {
+    const started = await mgr.create({
+      task: "Task for final configured round",
+      loopId: "coverage-final-round",
+      maxRounds: 1,
+    });
+    const held = started.submissionHandle!;
+    const entriesBefore = store.listEntries("coverage-final-round").length;
+
+    const unusedSuccessor = await mgr.advance(held, "", continuing(contract()));
+    assert.equal(unusedSuccessor.submissionError?.code, "contract_invalid");
+    assert.ok((unusedSuccessor.submissionError?.details as {
+      contract_errors?: Array<{ reason: string }>;
+    }).contract_errors?.some((error) => error.reason === "contract_on_stop"));
+    assert.deepEqual(unusedSuccessor.submissionHandle, held);
+    assert.equal(store.listEntries("coverage-final-round").length, entriesBefore,
+      "the invalid proposal has no durable effects");
+
+    const final = await mgr.advance(held, "", continuing());
+    assert.equal(final.stopReason, "max_rounds");
+    assert.equal(final.prompt, null);
+    assert.equal(final.round, 1);
   });
 
   it("without after-capable commands no contract is required and Current Task falls back", async () => {

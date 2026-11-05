@@ -31,7 +31,7 @@ import {
   promptArtifact, withDefaultContract } from "./_helpers.js";
 import { registerEvidenceProvider } from "../evidence-provider.js";
 import { CompileFailureError } from "../errors.js";
-import { compileLoop } from "../loop-compiler.js";
+import { compileLoop, deriveGoalId } from "../loop-compiler.js";
 import { makeLoopCompileRequest } from "../protocol.js";
 import {
   deriveTransactionId,
@@ -452,11 +452,14 @@ describe("v4.0.5 — current user instruction is invocation input", () => {
       "the instruction is not duplicated when it IS the Current Task");
     assert.match(response.prompt, /### Objective\nOriginal task text/);
     assert.equal(response.compiled?.task, "Original task text");
-    assert.equal(response.goal_id, "instruction-compile:original-task-text");
+    assert.equal(
+      response.goal_id,
+      deriveGoalId("instruction-compile", "Original task text"),
+    );
     assert.equal(response.prompt_artifact?.contextReason, "first_round");
   });
 
-  it("with a contract it renders a protected section beside the contract", () => {
+  it("an explicit instruction drives Current Task while the active contract remains visible", () => {
     resetPolicy();
     installTestCommandProvider();
     const loopId = "instruction-contract";
@@ -476,12 +479,12 @@ describe("v4.0.5 — current user instruction is invocation input", () => {
         task: "Original task text",
       })],
     });
-    assert.match(response.prompt, /\*\*Slice A\*\*/,
-      "the contract remains the Current Task");
     assert.match(response.prompt,
-      /### Current User Instruction\nAlso check the parser edge case/);
-    assert.match(response.prompt,
-      /does not rewrite the Objective, Success Criteria, hard constraints/);
+      /### Current Task\nAlso check the parser edge case/);
+    assert.match(response.prompt, /### Active Round Contract\n[\s\S]*\*\*Slice A\*\*/,
+      "the independently governed active contract stays visible");
+    assert.ok(!response.prompt.includes("### Current User Instruction"),
+      "the explicit instruction is not duplicated when it is Current Task");
     assert.equal(response.compiled?.task, "Original task text");
     assert.equal(response.prompt_artifact?.currentUserInstruction,
       "Also check the parser edge case");
@@ -498,8 +501,8 @@ describe("v4.0.5 — current user instruction is invocation input", () => {
     const context = {
       results: [committedFeedbackRound(1, { loopId, contract })],
     };
-    // The committed acceptance task is "Test task"; an exact match with the
-    // objective is not repeated.
+    // The committed acceptance task is "Test task". An exact match with the
+    // objective remains the Current Task once, without a duplicate section.
     const exact = compileLoop(makeLoopCompileRequest({
       loop_id: loopId, round: 2, task: "Original task text",
       current_user_instruction: "Test task",
@@ -510,8 +513,9 @@ describe("v4.0.5 — current user instruction is invocation input", () => {
       loop_id: loopId, round: 2, task: "Original task text",
       current_user_instruction: "test task",
     }), context);
-    assert.match(cased.prompt,
-      /### Current User Instruction\ntest task/);
+    assert.match(cased.prompt, /### Current Task\ntest task/);
+    assert.ok(!cased.prompt.includes("### Current User Instruction"));
+    assert.match(cased.prompt, /### Active Round Contract\n[\s\S]*\*\*Slice A\*\*/);
   });
 
   it("states not provided explicitly and never infers the old task", () => {

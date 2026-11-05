@@ -32,9 +32,13 @@ each), not a todo list and not a completion checklist.
 ## What a Round Contract is
 
 A Round Contract is the Agent's proposal for a bounded, machine-checkable
-slice. It is not a round, a second plan ledger, or a required field. A proposal
-becomes active only after its declaring round commits, and it activates on the
-next round.
+slice. It is not a round or a second plan ledger, and it is not unconditionally
+required. A proposal becomes active only after its declaring round commits,
+and it activates on the next round. With an enabled after-capable verification
+command, a continuing round that has a successor available must leave an active
+contract for that next round. An open active contract can continue without a
+new proposal; a closed contract needs a successor. A final configured round
+has no successor consumer.
 
 Declare a contract only when:
 
@@ -78,8 +82,11 @@ identity; changing only `scope` or adding `supersedes` does not change it. While
 a contract is open, omitting `round_contract` continues it; you do not need to
 restate it.
 
-With an after-capable command, a continuing round MUST leave an active contract
-for the next round. A closed contract with no successor is `contract_required`;
+With an after-capable command, a continuing round with a successor available
+MUST leave an active contract for the next round. The final configured round
+has no successor consumer, so it does not require a proposal and LoopForge
+stops at the configured round limit. A closed contract with no successor is
+`contract_required`;
 a successor that repeats the closed acceptance items is
 `contract_successor_unchanged`. A different proposal while the active contract
 is open is rejected as `contract_premature` unless it explicitly supersedes the

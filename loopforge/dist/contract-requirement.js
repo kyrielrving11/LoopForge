@@ -28,6 +28,9 @@ export function deriveContractRequirement(input) {
     if (!input.contractCapability) {
         return { required: false, reason: "no_contract_capability", activeContractId };
     }
+    if (input.successorRoundAvailable === false) {
+        return { required: false, reason: "no_successor_round", activeContractId };
+    }
     if (!input.activeContract) {
         return input.proposalPresent
             ? { required: false, reason: "satisfied_by_proposal", activeContractId }

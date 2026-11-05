@@ -315,6 +315,20 @@ export interface CanonicalLoopState {
   capability: ConfiguredCapability;
 }
 
+/**
+ * The active contract is the Current Task only when the runtime has a
+ * machine-verifiable contract capability and this invocation did not provide
+ * an explicit instruction.  The contract remains a separately rendered
+ * committed fact in every other case; this helper keeps prompt and state-file
+ * projections on the same rule as state construction.
+ */
+export function contractDrivesCurrentTask(state: Pick<CanonicalLoopState,
+  "roundContract" | "currentUserInstruction" | "capability">): boolean {
+  return state.roundContract !== undefined &&
+    state.currentUserInstruction === undefined &&
+    state.capability.contractVerificationAvailable;
+}
+
 // unique() imported from token-utils.ts
 
 /** Deterministic JSON serialization used by state and prompt hashes. */
@@ -450,10 +464,12 @@ export function constraintProvenanceLabel(meta: ConstraintMeta | undefined): str
  *
  *  Shared by the state-file and prompt renderers so they cannot drift apart
  *  (module contract above). Presentation only; never feeds enforcement. */
-/** v3.3/v3.4: Render the ACTIVE Round Contract as the Current Task section
- *  body — the single formatting source shared by prompts and the state
- *  file (module contract above). The original objective is NOT here: it
- *  lives in the Objective section. Empty arrays render no line. */
+/** v3.3/v3.4: Render the ACTIVE Round Contract body — the single formatting
+ *  source shared by prompts and the state file (module contract above). When
+ *  contract verification is available and no explicit invocation instruction
+ *  overrides it, this body is the Current Task; otherwise it is rendered as
+ *  the separate Active Round Contract section. The original objective lives
+ *  in the Objective section. Empty arrays render no line. */
 export interface FormattedRoundContract {
   text: string;
   /** IDs this rendering actually emitted (contract id + item ids). */
@@ -535,6 +551,7 @@ const STATE_SECTION_TIER: Record<string, StateTier> = {
   // Current — what the next round must hold in working memory.
   "Loop Objective": "Current",
   "Current Task": "Current",
+  "Active Round Contract": "Current",
   "Current User Instruction": "Current",
   "Success Criteria": "Current",
   "Hard Constraints": "Current",
@@ -657,11 +674,15 @@ function flatStateSections(state: CanonicalLoopState): Array<{ title: string; bo
     "## Loop Objective", "", state.objective, "",
     "## Current Task", "", state.currentTask,
   );
-  // v4.0.5: with an active contract the Current Task is the contract; the
-  // host's invocation instruction renders as its own protected section when
-  // it is not already visible verbatim. Without a contract the instruction IS
-  // the Current Task, so it is never repeated.
-  if (state.roundContract && state.currentUserInstruction &&
+  if (state.roundContract && !contractDrivesCurrentTask(state)) {
+    lines.push(
+      "## Active Round Contract", "",
+      formatRoundContract(state.roundContract, state.contractItemStatuses ?? null),
+    );
+  }
+  // The host's invocation instruction renders as its own section only when
+  // it is not already visible in Current Task or Objective.
+  if (state.currentUserInstruction &&
       state.currentUserInstruction !== state.currentTask.trim() &&
       state.currentUserInstruction !== state.objective.trim()) {
     lines.push(
@@ -961,12 +982,13 @@ export function createCanonicalLoopState(
         .filter(isOpenQuestionId)
     : [];
 
-  // v3.4/v4.0.6: The ACTIVE Round Contract (derived — loop-compiler computes
-  // it from committed rounds) drives the Current Task — the contract IS "what
-  // to do this round"; the working objective stays in the Objective section
-  // above. No active contract → the invocation instruction, else the WORKING
-  // objective (latest committed objective_refinement or the acceptance task).
+  // v4.0.6: The Agent still chooses when a round ends. The ACTIVE Round
+  // Contract (derived from committed rounds) supplies the verifiable work
+  // slice for this invocation when verification capability exists. An
+  // explicit invocation instruction has priority; without contract capability
+  // the Current Task falls back to the working objective.
   const roundContract = derived?.roundFacts?.activeContract ?? null;
+  const capability = deriveConfiguredCapability(getPolicy());
   // v4.0.5: the host's explicit invocation input. Empty/whitespace is "not
   // provided", never a second task. Conditional presence keeps the state hash
   // byte-identical when no instruction was given.
@@ -1000,9 +1022,9 @@ export function createCanonicalLoopState(
     maxRounds: request.max_rounds ?? getPolicy().engine.max_rounds,
     goalId: response.goal_id,
     objective: objective?.objective || request.task,
-    currentTask: roundContract
+    currentTask: currentUserInstruction ?? (roundContract && capability.contractVerificationAvailable
       ? formatRoundContract(roundContract, derived?.roundFacts?.itemStatuses ?? null)
-      : currentUserInstruction ?? objective?.objective ?? request.task,
+      : objective?.objective ?? request.task),
     ...(currentUserInstruction ? { currentUserInstruction } : {}),
     successCriteria,
     hardConstraints,
@@ -1045,6 +1067,6 @@ export function createCanonicalLoopState(
     ...(derived?.roundFacts?.itemStatuses
       ? { contractItemStatuses: derived.roundFacts.itemStatuses }
       : {}),
-    capability: deriveConfiguredCapability(getPolicy()),
+    capability,
   };
 }

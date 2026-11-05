@@ -116,8 +116,12 @@ describe("cognitive-state compiler", () => {
 
   it("derives deterministic goal identity", () => {
     assert.equal(computeGoalTextHash("A  durable task"), computeGoalTextHash("A durable task"));
-    assert.equal(deriveGoalId("loop", "Task"), "loop:task");
+    assert.match(deriveGoalId("loop", "Task"), /^loop:task:[0-9a-f]{12}$/);
     assert.match(deriveGoalId("loop", "Durable Task"), /^loop:/);
+    assert.notEqual(
+      deriveGoalId("loop", "A very long objective with a shared prefix and first suffix"),
+      deriveGoalId("loop", "A very long objective with a shared prefix and second suffix"),
+    );
   });
 
   it("uses L2 first, L1 for normal continuation, and L0 for a proven-empty failed retry", () => {

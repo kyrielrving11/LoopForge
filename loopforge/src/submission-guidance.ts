@@ -360,7 +360,8 @@ const GUIDES: FieldGuide[] = [
     when:
       "When contract coverage requires a next-round contract, or when you want " +
       "to start or replace a slice. With after-capable commands, a continuing " +
-      "round must leave an active contract; omit to continue the current one.",
+      "round with a successor available must leave an active contract; omit to " +
+      "continue the current one. The final configured round has no successor.",
     nature: "proposal",
     decision:
       "The Agent decides the next slice; LoopForge only validates the declaration",
@@ -379,7 +380,8 @@ const GUIDES: FieldGuide[] = [
       "While a contract is open, omit this field to continue it unchanged. To " +
       "replace the active slice, add supersedes { contract_id, reason? } with " +
       "the active rc- id and different acceptance items. If the active " +
-      "contract closes this round and you continue, a successor is REQUIRED. " +
+      "contract closes this round and a successor is available, a successor " +
+      "is REQUIRED. The final configured round has no successor consumer. " +
       "DECLARATION IS STRICT: a missing work_item, an item with no bound " +
       "command, an unknown/disabled command, a malformed reference, an " +
       "unknown field, or a count over the limits returns contract_invalid.",
@@ -707,6 +709,7 @@ export function promptedFieldPaths(facts: GuidanceFacts): string[] {
 
 export interface SelfEvalPromptContext {
   round: number;
+  maxRounds?: number;
   level: "l0" | "l1" | "l2";
   activeContract: ActiveContractView | null;
   itemStatuses?: ContractItemStatusView | null;
@@ -739,6 +742,8 @@ function renderContractGuidance(ctx: SelfEvalPromptContext): string[] {
     activeContract: contract,
     closure: ctx.itemStatuses?.closure ?? "open",
     contractCapability: hasCommand,
+    successorRoundAvailable:
+      ctx.maxRounds === undefined || ctx.round < ctx.maxRounds,
   });
   if (contract) {
     const lines = [
@@ -774,6 +779,11 @@ function renderContractGuidance(ctx: SelfEvalPromptContext): string[] {
         "No enabled after-capable command is configured now, so this contract's",
         "items cannot be machine-verified this round and no successor is required.",
       );
+    } else if (requirement.reason === "no_successor_round") {
+      lines.push(
+        "This is the final configured round. Do not submit a successor " +
+        "round_contract; there is no next round to consume it.",
+      );
     } else if (requirement.reason === "active_contract_closed") {
       lines.push(
         "This contract is already closed. If you continue, a successor",
@@ -791,6 +801,12 @@ function renderContractGuidance(ctx: SelfEvalPromptContext): string[] {
     return [
       "No enabled after-capable evidence command is configured — no contract is possible.",
       "If the OVERALL starting objective genuinely evolved, submit `objective_refinement`.",
+    ];
+  }
+  if (requirement.reason === "no_successor_round") {
+    return [
+      "This is the final configured round. Do not submit `round_contract`;",
+      "there is no successor round to consume a proposal.",
     ];
   }
   const commands = ctx.commands.slice(0, 3).join(", ");
@@ -1008,6 +1024,7 @@ export function renderSelfEvalBlock(ctx: SelfEvalPromptContext): string {
 export interface GuidanceSessionView {
   loopId: string;
   currentRound: number;
+  maxRounds?: number;
   /** The task / current work item, when the caller can observe it. */
   task?: string;
   roundSnapshot?: {
@@ -1107,16 +1124,20 @@ export function deriveSubmissionGuidance(
         activeContract,
         closure: itemStatuses.closure,
         contractCapability: capability.contractVerificationAvailable,
+        successorRoundAvailable:
+          session.maxRounds === undefined || session.currentRound < session.maxRounds,
       });
       return {
         required_on_continue: requirement.required,
         successor_required_if_closed:
-          activeContract !== null && capability.contractVerificationAvailable,
-        reason: !capability.contractVerificationAvailable
-          ? "no_contract_capability" as const
-          : activeContract
-            ? "active_contract_continues" as const
-            : "no_active_contract" as const,
+          activeContract !== null && capability.contractVerificationAvailable &&
+          session.currentRound < (session.maxRounds ?? Number.POSITIVE_INFINITY),
+        reason: requirement.reason === "active_contract_closed" ||
+            requirement.reason === "active_contract_continues" ||
+            requirement.reason === "no_contract_capability" ||
+            requirement.reason === "no_successor_round"
+          ? requirement.reason
+          : "no_active_contract" as const,
         active_contract_id: activeContract?.id ?? null,
       };
     })(),

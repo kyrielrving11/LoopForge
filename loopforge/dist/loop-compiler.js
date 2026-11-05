@@ -36,10 +36,13 @@ export function computeGoalTextHash(text) {
  *  committed objective_refinement, else Operator Acceptance). There is no
  *  caller-supplied goal_id override. */
 export function deriveGoalId(loopId, task) {
-    return `${loopId}:${task.trim().toLowerCase()
+    const slug = task.trim().toLowerCase()
         .replace(/[^a-z0-9\u4e00-\u9fff]+/g, "-")
         .replace(/^-|-$/g, "")
-        .slice(0, 48) || computeGoalTextHash(task)}`;
+        .slice(0, 48);
+    // Keep the readable prefix while making the identity depend on the full
+    // normalized objective; shared prefixes must not collapse distinct goals.
+    return `${loopId}:${slug || "goal"}:${computeGoalTextHash(task)}`;
 }
 export function getPreviousRound(loopId, round, context) {
     const history = buildCommittedHistory(contextEntries(context));
@@ -694,6 +697,7 @@ export function compileLoop(request, context, options = {}, committedHistory) {
         warnings,
         selfEvaluationBlock: buildSelfEvalBlock({
             round: request.round,
+            maxRounds: request.max_rounds ?? policy.engine.max_rounds,
             level: decision.level,
             activeContract,
             itemStatuses: roundFacts.itemStatuses,

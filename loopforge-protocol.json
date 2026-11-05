@@ -1510,7 +1510,19 @@
                 {
                   "type": "string",
                   "enum": [
+                    "active_contract_closed"
+                  ]
+                },
+                {
+                  "type": "string",
+                  "enum": [
                     "no_contract_capability"
+                  ]
+                },
+                {
+                  "type": "string",
+                  "enum": [
+                    "no_successor_round"
                   ]
                 }
               ]
@@ -3147,7 +3159,7 @@
       "required": [
         "items"
       ],
-      "description": "A contract PROPOSAL carried by one evaluation. Three related objects must\r\nnot be conflated:\r\n- the proposal: this object, for the NEXT round;\r\n- the ACTIVE contract: the proposal once its declaring round commits,\r\n  governing the round that follows;\r\n- `work_item`: the bounded deliverable that becomes the prompt's\r\n  `Current Task` while the contract is active.\r\nThe proposal is never the contract of the round that declared it."
+      "description": "A contract PROPOSAL carried by one evaluation. Three related objects must\r\nnot be conflated:\r\n- the proposal: this object, for the NEXT round;\r\n- the ACTIVE contract: the proposal once its declaring round commits,\r\n  governing the round that follows;\r\n- `work_item`: the bounded deliverable for the slice governed by the\r\n  active contract. It becomes the prompt's `Current Task` only when\r\n  contract verification is available and the invocation has no explicit\r\n  `currentUserInstruction`; otherwise the contract remains a separate\r\n  committed fact and Current Task follows the invocation instruction or\r\n  working objective.\r\nThe proposal is never the contract of the round that declared it."
     },
     "ContractSupersede": {
       "type": "object",

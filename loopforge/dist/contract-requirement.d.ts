@@ -19,7 +19,7 @@
  */
 import type { ContractItemStatusView } from "./contract-items.js";
 import type { ActiveContractView } from "./round-contract.js";
-export type ContractRequirementReason = "not_continuing" | "blocked" | "no_contract_capability" | "no_active_contract" | "active_contract_continues" | "active_contract_closed" | "satisfied_by_proposal" | "satisfied_by_successor";
+export type ContractRequirementReason = "not_continuing" | "blocked" | "no_successor_round" | "no_contract_capability" | "no_active_contract" | "active_contract_continues" | "active_contract_closed" | "satisfied_by_proposal" | "satisfied_by_successor";
 export interface ContractRequirement {
     /** The next round must have an active contract when this round commits. */
     required: boolean;
@@ -39,6 +39,9 @@ export interface ContractRequirementInput {
     /** At least one enabled, after-capable evidence command exists. Without it
      *  no contract can ever be machine-verified, so no contract is required. */
     contractCapability: boolean;
+    /** Whether the state machine permits another round after this submission.
+     *  A terminal max-round boundary has no consumer for a proposal. */
+    successorRoundAvailable?: boolean;
 }
 export declare function deriveContractRequirement(input: ContractRequirementInput): ContractRequirement;
 //# sourceMappingURL=contract-requirement.d.ts.map

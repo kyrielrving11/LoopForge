@@ -92,9 +92,9 @@ export const CHECK_ROUND_SCOPE_DRIFT = "round_scope_drift";
  *  Error: a different slice is never silently saved and ignored. To replace
  *  the active slice, add `round_contract.supersedes` naming it. */
 export const CHECK_CONTRACT_PREMATURE = "contract_premature";
-/** v4.0.6: A continuing round with contract capability would leave the next
- *  round without an active contract. Error: with after-capable commands, a
- *  continuing round must leave a contract for the next round. */
+/** v4.0.6: A continuing round with contract capability and a successor
+ *  available would leave the next round without an active contract. The final
+ *  configured round has no successor consumer and is exempt. */
 export const CHECK_CONTRACT_REQUIRED = "contract_required";
 /** v4.0.6: A successor proposal repeats the closed contract's ACCEPTANCE ITEMS
  *  verbatim (only work_item/scope changed). Error: a successor must bring
@@ -722,7 +722,7 @@ function checkContractPremature(activeContract, statuses, selfEval) {
  *  `blocked` rounds are exempt (they close the contract and stop). The rule is
  *  the shared `deriveContractRequirement`, so the submission boundary and the
  *  gate cannot disagree. */
-function checkContractRequired(activeContract, statuses, selfEval, contractCapability) {
+function checkContractRequired(activeContract, statuses, selfEval, contractCapability, successorRoundAvailable) {
     const requirement = deriveContractRequirement({
         shouldContinue: selfEval.should_continue === true,
         blocked: declaresBlocked(selfEval),
@@ -730,6 +730,7 @@ function checkContractRequired(activeContract, statuses, selfEval, contractCapab
         activeContract,
         closure: statuses.closure,
         contractCapability,
+        successorRoundAvailable,
     });
     if (!requirement.required)
         return null;
@@ -861,7 +862,7 @@ filesReported,
  *  the active contract / item statuses a second time. The fallback exists
  *  for direct library callers and unit tests; it calls the same derivation
  *  function, so there is still exactly one rule. */
-facts) {
+facts, maxRounds = Number.POSITIVE_INFINITY) {
     const flags = [];
     const filesReportedForGate = filesReported ?? (selfEval.execution_report != null);
     // v3.4: The ACTIVE contract this round executed under — derived from the
@@ -936,7 +937,7 @@ facts) {
         () => checkRoundScopeDrift(activeContract, evidenceDeltas),
         () => checkContractItemsUnverified(contractStatuses, selfEval.execution_report ?? null),
         () => checkContractPremature(activeContract, contractStatuses, selfEval),
-        () => checkContractRequired(activeContract, contractStatuses, selfEval, deriveConfiguredCapability(getPolicy()).contractVerificationAvailable),
+        () => checkContractRequired(activeContract, contractStatuses, selfEval, deriveConfiguredCapability(getPolicy()).contractVerificationAvailable, currentRound < maxRounds),
         () => checkContractSuccessorUnchanged(activeContract, contractStatuses, selfEval),
         // v3.7.1: opt-in gate-layer blocking (skipped when disabled)
         () => checkUserGateUnresolved(selfEval, gateEntries),

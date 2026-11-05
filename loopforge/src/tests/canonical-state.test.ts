@@ -1,5 +1,6 @@
 /** Tests for canonical-state — state creation and Markdown rendering. */
 import { criterionClaims } from "./_helpers.js";
+import { installTestCommandProvider } from "./_helpers.js";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -10,6 +11,7 @@ import {
   formatRoundContract,
   CANONICAL_STATE_SCHEMA_VERSION,
 } from "../canonical-state.js";
+import { getPolicy, resetPolicy, setPolicyForTest } from "../policy.js";
 import type { ActiveContractView } from "../round-contract.js";
 import type { ContractItemStatusView } from "../contract-items.js";
 import type { RoundFacts } from "../round-facts.js";
@@ -521,18 +523,33 @@ describe("Round Contract state (v3.3 rendering, v3.4 active source)", () => {
       roundFacts: contractFacts(contract),
     });
 
-  it("active contract replaces Current Task and lands in state.roundContract", () => {
+  it("without contract capability the objective remains Current Task and the contract stays visible", () => {
     const state = withActiveContract();
     assert.equal(state.roundContract?.work_item, "Implement auth");
-    assert.ok(state.currentTask.includes("**Implement auth** (rc-aaaaaaaa)"));
-    assert.ok(state.currentTask.includes("- Acceptance conditions:"));
-    assert.ok(state.currentTask.includes("- [`rci-11111111`] login works"));
-    assert.ok(state.currentTask.includes("- Verify via: run-tests"));
-    assert.ok(state.currentTask.includes("- Criteria: cr-auth-login"));
-    assert.ok(state.currentTask.includes("- Declared scope (Agent report; not enforced):"));
-    assert.ok(state.currentTask.includes("  - src/auth"));
-    assert.ok(!state.currentTask.includes("Fix bugs in auth module"),
-      "the original task is NOT the Current Task on a contract round");
+    assert.equal(state.currentTask, "Fix bugs in auth module");
+    const rendered = renderCanonicalStateMarkdown(state);
+    assert.match(rendered, /## Active Round Contract\n\n\*\*Implement auth\*\* \(rc-aaaaaaaa\)/);
+    assert.match(rendered, /- \[`rci-11111111`\] login works/);
+  });
+
+  it("a verifiable active contract drives Current Task", () => {
+    const previousPolicy = structuredClone(getPolicy());
+    try {
+      installTestCommandProvider();
+      const state = withActiveContract();
+      assert.equal(state.roundContract?.work_item, "Implement auth");
+      assert.ok(state.currentTask.includes("**Implement auth** (rc-aaaaaaaa)"));
+      assert.ok(state.currentTask.includes("- Acceptance conditions:"));
+      assert.ok(state.currentTask.includes("- [`rci-11111111`] login works"));
+      assert.ok(state.currentTask.includes("- Verify via: run-tests"));
+      assert.ok(state.currentTask.includes("- Criteria: cr-auth-login"));
+      assert.ok(state.currentTask.includes("- Declared scope (Agent report; not enforced):"));
+      assert.ok(state.currentTask.includes("  - src/auth"));
+      assert.ok(!state.currentTask.includes("Fix bugs in auth module"));
+    } finally {
+      resetPolicy();
+      setPolicyForTest(previousPolicy);
+    }
   });
 
   it("no contract → original task text and no roundContract key (hash-neutral)", () => {

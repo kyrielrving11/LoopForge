@@ -206,6 +206,37 @@ describe("v3.9.1 — submission_guidance", () => {
       active.active_contract?.id,
     );
 
+    const blockedRound = decodeCommittedRound(committedFeedbackRound(2, {
+      loopId: "guidance-loop",
+      outcome: "blocked",
+      blocker: "waiting for operator input",
+      shouldContinue: false,
+      action: "stop",
+    }));
+    assert.ok(blockedRound, "blocked round decodes");
+    // A committed blocked round closes the old contract. The next-round
+    // projection therefore has no active contract; the same shared rule still
+    // requires a proposal when the next round can exist.
+    const afterClosed = deriveSubmissionGuidance(
+      sessionView({ currentRound: 3 }),
+      { rounds: [view!, blockedRound!] },
+    );
+    assert.equal(afterClosed.contract_requirement.required_on_continue, true);
+    assert.equal(afterClosed.contract_requirement.reason, "no_active_contract");
+    assert.equal(afterClosed.contract_requirement.active_contract_id, null);
+    assert.equal(afterClosed.active_contract, null);
+
+    const final = deriveSubmissionGuidance(
+      sessionView({ currentRound: 20, maxRounds: 20 }),
+      { rounds: [] },
+    );
+    assert.deepEqual(final.contract_requirement, {
+      required_on_continue: false,
+      successor_required_if_closed: false,
+      reason: "no_successor_round",
+      active_contract_id: null,
+    });
+
     resetPolicy();
     const noCapability = deriveSubmissionGuidance(sessionView(), { rounds: [] });
     assert.deepEqual(noCapability.contract_requirement, {

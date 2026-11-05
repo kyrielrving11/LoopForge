@@ -56,9 +56,9 @@ export declare const CHECK_ROUND_SCOPE_DRIFT = "round_scope_drift";
  *  Error: a different slice is never silently saved and ignored. To replace
  *  the active slice, add `round_contract.supersedes` naming it. */
 export declare const CHECK_CONTRACT_PREMATURE = "contract_premature";
-/** v4.0.6: A continuing round with contract capability would leave the next
- *  round without an active contract. Error: with after-capable commands, a
- *  continuing round must leave a contract for the next round. */
+/** v4.0.6: A continuing round with contract capability and a successor
+ *  available would leave the next round without an active contract. The final
+ *  configured round has no successor consumer and is exempt. */
 export declare const CHECK_CONTRACT_REQUIRED = "contract_required";
 /** v4.0.6: A successor proposal repeats the closed contract's ACCEPTANCE ITEMS
  *  verbatim (only work_item/scope changed). Error: a successor must bring
@@ -134,5 +134,5 @@ filesReported?: boolean,
  *  the active contract / item statuses a second time. The fallback exists
  *  for direct library callers and unit tests; it calls the same derivation
  *  function, so there is still exactly one rule. */
-facts?: RoundFacts): VerificationResult;
+facts?: RoundFacts, maxRounds?: number): VerificationResult;
 //# sourceMappingURL=verification-gate.d.ts.map

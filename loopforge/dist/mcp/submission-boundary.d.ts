@@ -32,6 +32,7 @@ import type { AdvanceResult } from "./round-lifecycle.js";
 export interface CompileContextSession {
     loopId: string;
     currentRound: number;
+    maxRounds?: number;
     roundSnapshot?: {
         attempt?: number;
         operatorAcceptance?: OperatorAcceptance;

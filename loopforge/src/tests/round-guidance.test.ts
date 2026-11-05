@@ -37,6 +37,9 @@ describe("v4.0.4 — runtime round guidance", () => {
     ]) {
       assert.ok(prompt.includes(sentence), "prompt guidance must use the shared constant");
     }
+    assert.match(ROUND_BOUNDARY_SUBMISSION, /should_continue/);
+    assert.match(ROUND_BOUNDARY_SUBMISSION, /bounded NEXT-round work/);
+    assert.match(ROUND_BOUNDARY_SUBMISSION, /maxRounds stops/);
     // The L0 footer has a hard policy ceiling; keep the fresh body compact.
     assert.ok(prompt.length <= 480,
       `fresh prompt guidance must stay <= 480 chars, got ${prompt.length}`);

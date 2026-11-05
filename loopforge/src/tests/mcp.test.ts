@@ -384,12 +384,13 @@ describe("MCP — multi-round lifecycle", async () => {
     assert.equal(r1.stopReason, undefined);
 
     // Round 2 → stop (maxRounds reached)
-    const r2 = await toolNext(mgr, {
+    const r2 = await TOOL_HANDLERS.loopforge_next(mgr, {
       sessionId,
       submissionHandle: r1.submissionHandle,
       output: agentOutput({ outcome: "partial", shouldContinue: true }),
       evaluation: evalParam({ outcome: "partial", shouldContinue: true }),
     });
+    assert.equal(r2.error, undefined);
     assert.equal(r2.prompt, null);
     assert.equal(r2.stopReason, "max_rounds");
     assert.equal(r2.round, 2);

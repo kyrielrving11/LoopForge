@@ -353,6 +353,7 @@ export class RoundCoordinator {
       // v4.0.3: the one derivation, computed above. Passing it removes the
       // gate's private contract/item/claim derivation.
       roundFacts,
+      maxRounds,
     );
     const verificationFlags = verifyResult.flags;
     const gateContradicted = verifyResult.verdict === "contradicted";

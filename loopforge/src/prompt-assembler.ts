@@ -15,6 +15,7 @@ import type { CanonicalLoopState } from "./canonical-state.js";
 import {
   CURRENT_USER_INSTRUCTION_AUTHORITY,
   CURRENT_USER_INSTRUCTION_NOT_PROVIDED,
+  contractDrivesCurrentTask,
   formatActiveSubGoals,
   formatCriterionRows,
   formatRoundContractWithIds,
@@ -267,6 +268,7 @@ function commonMandatorySections(
   const hard = partition.hard;
   const other = partition.other;
   const criteriaTexts = state.successCriteria;
+  const contractIsCurrentTask = contractDrivesCurrentTask(state);
   const sections: Section[] = [
     {
       id: "objective",
@@ -276,7 +278,7 @@ function commonMandatorySections(
     },
   ];
 
-  if (state.roundContract) {
+  if (state.roundContract && contractIsCurrentTask) {
     const formatted = formatRoundContractWithIds(
       state.roundContract,
       state.contractItemStatuses ?? null,
@@ -296,13 +298,24 @@ function commonMandatorySections(
     });
   }
 
-  // v4.0.5: with an active contract the Current Task is the contract, so the
-  // host's invocation instruction gets its own protected section. It is never
-  // repeated when it is already visible verbatim (no contract) or when it is
-  // the objective. It declares no normative ids; it does not rewrite
-  // governance.
+  if (state.roundContract && !contractIsCurrentTask) {
+    const formatted = formatRoundContractWithIds(
+      state.roundContract,
+      state.contractItemStatuses ?? null,
+    );
+    sections.push({
+      id: "active_contract",
+      text: section("Active Round Contract", formatted.text),
+      mandatory: true,
+      coverageIds: formatted.emittedIds,
+    });
+  }
+
+  // The explicit invocation instruction is the Current Task when present.
+  // It is never repeated when already visible verbatim or when it equals the
+  // objective. It declares no normative ids and does not rewrite governance.
   const instruction = state.currentUserInstruction;
-  if (state.roundContract && instruction &&
+  if (instruction &&
       instruction !== state.currentTask.trim() &&
       instruction !== state.objective.trim()) {
     sections.push({
@@ -642,6 +655,7 @@ const SECTION_PRIORITY: Readonly<Record<string, number>> = {
   // ── protected (every active normative id lives here) ────────────────────
   objective: 0,
   current_task: 1,
+  active_contract: 1,
   // v4.0.5: the host instruction sits immediately after Current Task; a
   // protected fact must outrank every narrative section.
   current_user_instruction: 1,

@@ -43,7 +43,16 @@ Keep these meanings separate:
   enforcement rejection increases the attempt count but creates no round
   history. A payload error is rejected before lifecycle state changes.
 - A **Round Contract** is an Agent proposal for a future machine-checkable
-  slice. It is not a round, a second plan ledger, or a required field.
+  slice. It is not a round or a second plan ledger, and it is not an
+  unconditionally required field. With an enabled after-capable verification
+  command, a continuing round that has a successor available must leave an
+  active contract for that next round. An open active contract can continue
+  without a new proposal; a closed one needs a successor. The final configured
+  round has no successor, and a loop without contract-verification capability
+  does not require one.
+- The Agent chooses the logical round boundary with `should_continue`.
+  A contract scopes the successor round's bounded work and acceptance; it does
+  not decide when the current round ends. `maxRounds` is LoopForge's hard stop.
 - A **workspace checkpoint** is the before-image of a prepared round or an
   explicit mid-round savepoint (`loopforge_checkpoint`). It is recovery
   material, not a round, a commit, or progress. This is different from an

@@ -26,6 +26,7 @@ function requirement(overrides: Partial<Parameters<typeof deriveContractRequirem
     activeContract: null,
     closure: "open",
     contractCapability: true,
+    successorRoundAvailable: true,
     ...overrides,
   });
 }

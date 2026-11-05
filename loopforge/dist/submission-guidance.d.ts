@@ -97,6 +97,7 @@ export declare function isFieldPrompted(path: string, facts: GuidanceFacts): boo
 export declare function promptedFieldPaths(facts: GuidanceFacts): string[];
 export interface SelfEvalPromptContext {
     round: number;
+    maxRounds?: number;
     level: "l0" | "l1" | "l2";
     activeContract: ActiveContractView | null;
     itemStatuses?: ContractItemStatusView | null;
@@ -115,6 +116,7 @@ export declare function renderSelfEvalBlock(ctx: SelfEvalPromptContext): string;
 export interface GuidanceSessionView {
     loopId: string;
     currentRound: number;
+    maxRounds?: number;
     /** The task / current work item, when the caller can observe it. */
     task?: string;
     roundSnapshot?: {

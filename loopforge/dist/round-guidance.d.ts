@@ -10,7 +10,7 @@
  */
 import type { PromptContextMode, PromptContextReason } from "./protocol.js";
 export declare const ROUND_BOUNDARY_PRINCIPLE: string;
-export declare const ROUND_BOUNDARY_SIZING: string;
+export declare const ROUND_BOUNDARY_SIZING = "Keep coupled work together; split when unsafe to verify.";
 export declare const ROUND_BOUNDARY_SUBMISSION: string;
 export declare const ROUND_BOUNDARY_NON_BOUNDARIES: string;
 /** v4.0.5: the ONE routing sentence for a lost in-context retry invocation.

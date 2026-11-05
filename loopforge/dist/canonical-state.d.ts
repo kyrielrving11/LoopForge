@@ -167,6 +167,14 @@ export interface CanonicalLoopState {
      *  changes once, deliberately. */
     capability: ConfiguredCapability;
 }
+/**
+ * The active contract is the Current Task only when the runtime has a
+ * machine-verifiable contract capability and this invocation did not provide
+ * an explicit instruction.  The contract remains a separately rendered
+ * committed fact in every other case; this helper keeps prompt and state-file
+ * projections on the same rule as state construction.
+ */
+export declare function contractDrivesCurrentTask(state: Pick<CanonicalLoopState, "roundContract" | "currentUserInstruction" | "capability">): boolean;
 /** Deterministic JSON serialization used by state and prompt hashes. */
 export declare function stableStringify(value: unknown): string;
 export declare function hashCanonicalState(state: CanonicalLoopState): string;
@@ -185,10 +193,12 @@ export declare function constraintProvenanceLabel(meta: ConstraintMeta | undefin
  *
  *  Shared by the state-file and prompt renderers so they cannot drift apart
  *  (module contract above). Presentation only; never feeds enforcement. */
-/** v3.3/v3.4: Render the ACTIVE Round Contract as the Current Task section
- *  body — the single formatting source shared by prompts and the state
- *  file (module contract above). The original objective is NOT here: it
- *  lives in the Objective section. Empty arrays render no line. */
+/** v3.3/v3.4: Render the ACTIVE Round Contract body — the single formatting
+ *  source shared by prompts and the state file (module contract above). When
+ *  contract verification is available and no explicit invocation instruction
+ *  overrides it, this body is the Current Task; otherwise it is rendered as
+ *  the separate Active Round Contract section. The original objective lives
+ *  in the Objective section. Empty arrays render no line. */
 export interface FormattedRoundContract {
     text: string;
     /** IDs this rendering actually emitted (contract id + item ids). */
